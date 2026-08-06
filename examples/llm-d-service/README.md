@@ -73,13 +73,8 @@ See a real run of all three on one input, with the full `messages` before and af
 ## 3. Prerequisites
 
 - **Go 1.26** and a **C toolchain** (`CGO_ENABLED=1` — the `skeleton` component links tree-sitter via cgo).
-- A sibling **bifrost** checkout next to this repo (the module pins it with a local `replace` to
-  `../bifrost/core`). Directory layout:
-  ```
-  <parent>/
-    context-guru/     ← this repo
-    bifrost/          ← https://github.com/maximhq/bifrost
-  ```
+- Nothing else: **bifrost** is an ordinary published module dependency (`go.mod`), so this repo
+  builds standalone from a plain clone.
 - For the two **LLM** configs only: access to an LLM endpoint (any OpenAI- or Anthropic-compatible
   API, including a gateway) and its credentials.
 

@@ -6,12 +6,11 @@ provider. Swap it in with `EVAL_GATEWAY_IMAGE` — no agent or benchmark changes
 
 ## Build
 
-The module uses a local `replace` to `../bifrost/core`, so build from the parent
-directory that holds both repos:
+The build context is this repo — bifrost is an ordinary published dependency, so no
+sibling checkout is needed:
 
 ```sh
-cd .../context-engineering
-docker build -f lab-context-engineering/Dockerfile -t context-guru-proxy:latest .
+docker build -t context-guru-proxy:latest .
 ```
 
 ## Run under eval-containers
@@ -41,5 +40,3 @@ savings per component; per-task attribution improves once a session id is stampe
 
 - OTel `gen_ai` spans are not yet emitted (eval-containers' otelcol ingests them);
   today savings come from `/stats`.
-- The image build needs the parent-dir context (or `go mod vendor`) until bifrost
-  is pinned to a published version.
