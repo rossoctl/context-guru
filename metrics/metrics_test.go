@@ -91,3 +91,45 @@ func TestMutatedZeroSavingsNotPassthrough(t *testing.T) {
 		t.Fatalf("cacheinject should record a mutation, got %+v", s.Components["cacheinject"])
 	}
 }
+
+// An off-path (deferred) async run forwarded nothing, so its savings must not enter
+// the enforced rollups. They are counted when a later turn REPLAYS the frozen
+// decision on the request path; counting both would double-count every deferred
+// compaction and credit savings to a request that never carried them.
+func TestDeferredRunsAreNotCountedAsEnforced(t *testing.T) {
+	a := NewAggregator()
+	a.Component(components.Report{
+		Component: "extract_llm", Kind: "offload", Mode: components.ModeAsync,
+		Deferred: true, TokensBefore: 1000, TokensAfter: 400, CacheKeys: []string{"k"},
+	})
+	a.Run(components.RunReport{
+		Session: "s", Mode: components.ModeAsync, Deferred: true,
+		TokensBefore: 1000, TokensAfter: 400,
+	})
+
+	s := a.Snapshot()
+	if s.Requests != 0 || s.SavedTokens != 0 || s.TokensBefore != 0 {
+		t.Fatalf("a deferred run was counted as enforced: %+v", s)
+	}
+	if s.AsyncEnforced != 0 || s.SyncEnforced != 0 {
+		t.Fatalf("deferred run counted under an enforced mode: %+v", s)
+	}
+	if len(s.Components) != 0 {
+		t.Fatalf("deferred run reached the enforced per-component map: %v", s.Components)
+	}
+	// Nor may it be mistaken for an observe hypothetical.
+	if s.ObserveRequests != 0 || s.PotentialSavedTokens != 0 {
+		t.Fatalf("deferred run leaked into the hypothetical namespace: %+v", s)
+	}
+
+	// The on-path replay IS what gets counted.
+	a.Run(components.RunReport{Session: "s", Mode: components.ModeAsync, TokensBefore: 1000, TokensAfter: 400})
+	a.RecordRealized(600)
+	s = a.Snapshot()
+	if s.AsyncEnforced != 1 || s.SavedTokens != 600 {
+		t.Fatalf("the on-path replay was not counted: %+v", s)
+	}
+	if s.RealizedSavedTokens != 600 {
+		t.Fatalf("realized savings not attributed: %d", s.RealizedSavedTokens)
+	}
+}

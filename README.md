@@ -170,6 +170,35 @@ are in **[docs/components.md](docs/components.md)** and **[docs/results/componen
 | `smartcrush` | Offload | keeps anchor items of a long JSON array, drops the middle |
 | `summarize` | Offload (LLM) | compresses the middle of the trajectory into one summary (run alone) |
 
+## Operating modes
+
+`sync` (the default) compacts inline and the caller waits. Two other modes trade that off:
+
+| Mode | The request path | Use it when |
+|---|---|---|
+| **`sync`** *(default)* | Compacts inline; the caller waits (~450 ms/req measured on Terminal-Bench). | You want the full saving from turn one. |
+| **`async`** | Forwards immediately, replaying decisions an earlier turn computed; the expensive compaction runs off-path and benefits later turns. | Latency on the request path matters more than saving on turn one. |
+| **`observe`** | Forwards the request **untouched, byte for byte**, and reports what compaction *would* have saved. | You want to evaluate context-guru on your own traffic without enforcing it. |
+
+```yaml
+mode: async
+async:
+  cache_uncompacted_tail: false   # safe default: protect cache-write economics
+```
+
+Two things worth knowing before reaching for `async`: a cache-write costs **11.5x** a
+cache-read, so by default context-guru refuses to place a cache breakpoint on a tail a
+pending compaction is going to replace — caching it and then replacing it is what
+tripled headroom's cache-write on Terminal-Bench and would make `async` strictly worse
+than `sync`. And observe-mode numbers are reported under their own `potential_*` /
+`projected_*` keys that share no name with an enforced metric, so a hypothetical can
+never be read as a realized saving.
+
+`observe` is a genuine differentiator, not a port: headroom has no observe/shadow/
+dry-run mode at all — its `token` and `cache` modes are both enforcing.
+
+Details in [docs/how-to/operating-modes.md](docs/how-to/operating-modes.md).
+
 ## Integrate
 
 | Option | What | Where |
@@ -182,7 +211,8 @@ Details in [docs/integrations.md](docs/integrations.md).
 
 ## Docs
 
-- [docs/design.md](docs/design.md) — architecture: component model, fail-open pipeline, store, session, expand loop, metrics.
+- [docs/design.md](docs/design.md) — architecture: component model, fail-open pipeline, store, session, expand loop, metrics, operating modes.
+- [docs/how-to/operating-modes.md](docs/how-to/operating-modes.md) — sync vs async vs observe: when to use each, async's cache trade-off, how to read observe numbers.
 - [docs/components.md](docs/components.md) — every registered component: how it works, live before→after, lossiness, config, best use.
 - [docs/integrations.md](docs/integrations.md) — proxy gateway vs AuthBridge plugin, with request paths.
 - [docs/setup.md](docs/setup.md) — setup + a concrete SWE-bench run through the eval-containers gateway.

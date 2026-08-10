@@ -281,3 +281,166 @@ func TestTTLConfig(t *testing.T) {
 		t.Fatal("an unsupported ttl must be rejected, not silently accepted")
 	}
 }
+
+// --- Async cache policy (#31) ------------------------------------------------
+
+// With the safe default (cache_uncompacted_tail: false), no breakpoint may land at or
+// beyond the tail a pending async compaction is going to replace. Committing bytes
+// there converts next turn's 0.1x read into a 1.25x write of the same span — 11.5x the
+// cost, which makes async strictly worse than sync.
+func TestNoBreakpointAtOrBeyondUncompactedTail(t *testing.T) {
+	const n, boundary = 30, 22
+	c := ctx()
+	c.Mode = components.ModeAsync
+	c.CacheAware = true
+	c.MaxCachedIdx = boundary - 1
+	c.TailCachePending = true
+	c.NoCacheAtOrAfter = boundary
+	c.StripCallerBreakpoints = true
+
+	idxs, rep := run(t, c, convo(n))
+	if rep.Skipped {
+		t.Fatal("placed nothing at all: the stable prefix must still be written")
+	}
+	for _, i := range idxs {
+		if i >= boundary {
+			t.Fatalf("breakpoint at %d is inside the un-compacted tail (>= %d): %v", i, boundary, idxs)
+		}
+	}
+	if len(idxs) == 0 {
+		t.Fatal("no breakpoint survived; the whole prefix would bill at 1.0x")
+	}
+	// The highest safe index carries it, so the longest possible stable prefix is written.
+	if top := idxs[len(idxs)-1]; top != boundary-1 {
+		t.Fatalf("top breakpoint is %d, want %d (the highest safe index)", top, boundary-1)
+	}
+}
+
+// A boundary of 0 means the whole request is doomed tail. Nothing may be written —
+// there is no stable prefix to protect and a breakpoint anywhere would be rewritten.
+// A session's FIRST turn must still write the prefix. It has no pending compaction (no
+// earlier turn enqueued one) and nothing to protect, so apply never turns the protection
+// on there — a previous version derived the boundary from prevLen=0, blocked every index,
+// and wrote zero breakpoints on precisely the turn whose job is to establish the cache.
+// An earlier test asserted that as correct; it encoded the bug.
+func TestFirstTurnStillWritesThePrefix(t *testing.T) {
+	c := ctx()
+	c.Mode = components.ModeAsync
+	c.CacheAware = true
+	c.MaxCachedIdx = -1 // first turn
+	// apply leaves TailCachePending false here: PendingFrom is 0 (nothing queued).
+
+	idxs, rep := run(t, c, convo(30))
+	if len(idxs) == 0 || rep.Skipped {
+		t.Fatalf("first turn wrote no breakpoint: %v skipped=%v", idxs, rep.Skipped)
+	}
+	if top := idxs[len(idxs)-1]; top != 29 {
+		t.Fatalf("first turn did not anchor the newest message: %v", idxs)
+	}
+}
+
+// The escape hatch (cache_uncompacted_tail: true) restores normal placement, for a
+// backend confirmed not to cache, where the protection costs a slot and buys nothing.
+func TestTailCacheProtectionOffRestoresNormalPlacement(t *testing.T) {
+	msgs := convo(30)
+	base, _ := run(t, ctx(), msgs)
+
+	c := ctx()
+	c.Mode = components.ModeAsync // protection NOT enabled (CacheUncompactedTail: true upstream)
+	off, _ := run(t, c, convo(30))
+
+	if len(off) != len(base) {
+		t.Fatalf("unprotected async placement differs from sync: %v vs %v", off, base)
+	}
+	for i := range off {
+		if off[i] != base[i] {
+			t.Fatalf("unprotected async placement differs from sync: %v vs %v", off, base)
+		}
+	}
+}
+
+// Sync mode must be entirely unaffected: TailCachePending false is the default, so a
+// Ctx that never heard of modes places exactly what it always did.
+func TestSyncPlacementUnaffectedByTheNewFields(t *testing.T) {
+	base, _ := run(t, ctx(), convo(30))
+	c := ctx()
+	c.Mode = components.ModeSync
+	sync, _ := run(t, c, convo(30))
+	if len(base) != len(sync) {
+		t.Fatalf("sync placement changed: %v vs %v", base, sync)
+	}
+}
+
+// A deferred (off-path) async run must not run cacheinject at all: its body is
+// discarded so the breakpoints go nowhere, and its per-turn divergence digests are turn
+// state that would be replayed over a newer turn's if the job's buffer were committed.
+func TestSkippedOnDeferredRun(t *testing.T) {
+	c := ctx()
+	c.Mode = components.ModeAsync
+	c.Deferred = true
+	if (Cacheinject{}).Enabled(c) {
+		t.Fatal("cacheinject ran on a deferred async job; its turn digests would be committed stale")
+	}
+	// Every on-path mode still runs it.
+	for _, m := range []components.Mode{components.ModeSync, components.ModeAsync, components.ModeObserve} {
+		on := ctx()
+		on.Mode = m
+		if !(Cacheinject{}).Enabled(on) {
+			t.Fatalf("cacheinject disabled on the %s request path", m)
+		}
+	}
+}
+
+// The protection must cover breakpoints the CALLER set, not only the ones cacheinject
+// wanted. claude-code marks its own newest message, so an earlier version that pruned
+// only `want` left the doomed tail cache-written — the protection was a silent no-op on
+// the primary workload, and async then paid the rewrite AND lost a slot.
+func TestCallerBreakpointInProtectedTailIsStripped(t *testing.T) {
+	msgs := convo(30)
+	if !mark(&msgs[29], nil) {
+		t.Fatal("could not place the caller's breakpoint")
+	}
+	c := ctx()
+	c.Mode = components.ModeAsync
+	c.CacheAware = true
+	c.MaxCachedIdx = 21
+	c.TailCachePending = true
+	c.NoCacheAtOrAfter = 22
+	c.StripCallerBreakpoints = true
+
+	idxs, _ := run(t, c, msgs)
+	for _, i := range idxs {
+		if i >= 22 {
+			t.Fatalf("breakpoint at %d survived inside the protected tail: %v", i, idxs)
+		}
+	}
+	if len(idxs) == 0 {
+		t.Fatal("stripped everything; the stable prefix must still be written")
+	}
+}
+
+// Without permission to strip, cacheinject must DECLINE rather than report success it
+// did not deliver — and say so, so the host can skip deferring a turn it cannot protect.
+func TestCallerBreakpointDeclinesWhenStrippingIsNotAllowed(t *testing.T) {
+	msgs := convo(30)
+	mark(&msgs[29], nil)
+	c := ctx()
+	c.Mode = components.ModeAsync
+	c.CacheAware = true
+	c.MaxCachedIdx = 21
+	c.TailCachePending = true
+	c.NoCacheAtOrAfter = 22
+	c.StripCallerBreakpoints = false
+
+	idxs, rep := run(t, c, msgs)
+	if !c.TailUnprotected() {
+		t.Fatal("declined the protection without telling the host")
+	}
+	if !rep.Skipped {
+		t.Fatal("declining should report skipped")
+	}
+	// The caller's request is left exactly as it came.
+	if len(idxs) != 1 || idxs[0] != 29 {
+		t.Fatalf("modified the request while declining: %v", idxs)
+	}
+}

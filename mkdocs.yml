@@ -133,6 +133,7 @@ nav:
   - How-to Guides:
       - Use with Claude Code: how-to/use-with-claude-code.md
       - Choose a preset: how-to/choose-a-preset.md
+      - Operating modes (sync/async/observe): how-to/operating-modes.md
       - Run behind a proxy or gateway: integrations.md
       - Integrate as a bifrost plugin: how-to/bifrost-plugin.md
       - Write a custom DSL filter: how-to/custom-dsl-filter.md
@@ -151,6 +152,7 @@ nav:
       - "Results: context-guru": results/context-guru.md
       - "Results: headroom": results/headroom.md
       - "Results: rtk": results/rtk.md
+      - "Results: operating modes": results/operating-modes.md
       - Reproduce the results: results/REPRODUCE.md
   - Reference:
       - Routes & headers: reference/routes.md

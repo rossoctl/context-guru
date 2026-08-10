@@ -19,6 +19,7 @@ package components
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -97,6 +98,39 @@ func (m ModelSpec) For(source string) Model {
 	return m.Static
 }
 
+// Mode is context-guru's operating mode for one request. The host sets it
+// explicitly (proxy Options / config `mode:`); it is NEVER inferred.
+//
+//	ModeSync    — compact inline; the caller waits and the compacted request is
+//	              sent. The default, byte-identical to pre-mode behavior.
+//	ModeAsync   — the request path only replays decisions that are already
+//	              computed and makes no LLM call; the expensive compaction runs
+//	              off-path and benefits SUBSEQUENT turns.
+//	ModeObserve — the pipeline runs on a copy whose output is discarded. The agent
+//	              receives the untouched original; results land in a strictly
+//	              separate (hypothetical) metric namespace.
+type Mode string
+
+// The three operating modes. See Mode.
+const (
+	ModeSync    Mode = "sync"
+	ModeAsync   Mode = "async"
+	ModeObserve Mode = "observe"
+)
+
+// ParseMode validates a configured mode string; empty means sync.
+func ParseMode(s string) (Mode, error) {
+	switch Mode(s) {
+	case "", ModeSync:
+		return ModeSync, nil
+	case ModeAsync:
+		return ModeAsync, nil
+	case ModeObserve:
+		return ModeObserve, nil
+	}
+	return ModeSync, fmt.Errorf("mode must be sync|async|observe, got %q", s)
+}
+
 // Ctx is the per-request runtime handed to every component.
 type Ctx struct {
 	Ctx     context.Context
@@ -123,6 +157,66 @@ type Ctx struct {
 	// -1 = unknown/first turn/cache off ⇒ no tail restriction. Only meaningful when
 	// CacheAware is true.
 	MaxCachedIdx int
+	// Mode is the operating mode this request runs under. ModeSync (the zero value
+	// after the host sets it explicitly) is the default; components that behave
+	// differently off-path read this rather than inferring anything.
+	Mode Mode
+	// Deferred marks a run that happens OFF the request path (the async worker).
+	// Nothing is forwarded from it: it exists to populate the frozen state later
+	// turns replay. Components may spend more time/model calls here.
+	Deferred bool
+	// TailCachePending turns on async mode's cache protection, and NoCacheAtOrAfter is
+	// the lowest message index it covers: content that a compaction which has not landed
+	// yet is expected to REPLACE. A breakpoint there would commit bytes to the provider
+	// cache that we are about to rewrite, converting a 0.1x read into a 1.25x write —
+	// 11.5x more expensive, and strictly worse than never going async at all.
+	//
+	// The protection needs its own bool rather than a sentinel index, because index 0 is
+	// a legitimate value ("no breakpoint anywhere") so no integer is free to mean "off".
+	// A false default also makes the zero-value Ctx unprotected rather than fully
+	// blocked, which is the safe direction here: an unset field costs a missed
+	// optimisation, never a wrong request. (Contrast MaxCachedIdx, whose -1 sentinel
+	// fails the other way — see #25.)
+	TailCachePending bool
+	NoCacheAtOrAfter int
+	// StripCallerBreakpoints permits taking back a cache breakpoint the CALLER set
+	// inside the protected tail. Without it the protection cannot cover an agent that
+	// places its own breakpoints (claude-code does), which made it a no-op on the
+	// primary workload. Removing a directive an agent deliberately placed is a behavior
+	// change we do not own, so it is the host's decision; the host's other option is to
+	// not defer that turn at all.
+	StripCallerBreakpoints bool
+	// tailUnprotected is set by cacheinject when it had to decline the tail protection
+	// (a caller breakpoint sat inside the protected span and stripping was not allowed).
+	// The host reads it to avoid deferring a compaction it cannot protect. Written from
+	// the single pipeline goroutine that owns this Ctx, read after Run returns.
+	tailUnprotected bool
+}
+
+// DeclineTailProtection records that async's tail protection could not be honored on
+// this request. Called by cacheinject; read by the host via TailUnprotected.
+func (c *Ctx) DeclineTailProtection() {
+	if c != nil {
+		c.tailUnprotected = true
+	}
+}
+
+// TailUnprotected reports whether DeclineTailProtection was called during this run.
+func (c *Ctx) TailUnprotected() bool { return c != nil && c.tailUnprotected }
+
+// effMode is Ctx.Mode with the zero value normalized to sync, so a Ctx built by
+// older code (or a test) reports the default rather than an empty mode string.
+func (c *Ctx) effMode() Mode {
+	if c == nil || c.Mode == "" {
+		return ModeSync
+	}
+	return c.Mode
+}
+
+// CacheBlocked reports whether index i must be left without a cache breakpoint
+// because a not-yet-landed compaction is expected to rewrite it.
+func (c *Ctx) CacheBlocked(i int) bool {
+	return c != nil && c.TailCachePending && i >= c.NoCacheAtOrAfter
 }
 
 // TailOnly reports whether a supersession/age-based offloader may mutate the message
@@ -150,6 +244,15 @@ type Report struct {
 	Reverted     bool     // pipeline reverted it (error/panic/never-worse)
 	Irreversible bool     // Offload dropped content on purpose without stashing (marker_mode summary/off)
 	Err          error
+	// Mode is the operating mode the run happened under, stamped by the pipeline
+	// from Ctx.Mode. Emitters MUST branch on it: an observe-mode report is a
+	// HYPOTHETICAL and may never be summed into enforced savings.
+	Mode Mode
+	// Deferred marks a report from an OFF-PATH async run (Ctx.Deferred). Nothing it
+	// produced was forwarded, so its savings must not be counted as enforced — the
+	// tokens are counted when a later turn REPLAYS the frozen decision on the request
+	// path. Counting both would double-count every deferred compaction.
+	Deferred bool
 }
 
 // Saved returns non-negative tokens saved by this component.
@@ -167,6 +270,10 @@ type RunReport struct {
 	TokensAfter  int
 	DurationMs   float64
 	Components   []Report
+	// Mode is the operating mode this run happened under (see Report.Mode).
+	Mode Mode
+	// Deferred marks an OFF-PATH async run (see Report.Deferred).
+	Deferred bool
 }
 
 // Saved returns the net tokens saved across the run.

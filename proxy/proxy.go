@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -28,6 +29,7 @@ import (
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
@@ -79,6 +81,36 @@ type Options struct {
 	// handler always uses the configured pipeline. Supplied by main (which holds
 	// the config + emitter) so proxy stays decoupled from the config package.
 	PipelineFor func(preset string, names []string) (*components.Pipeline, error)
+	// Mode is the operating mode (#31): components.ModeSync (default, and
+	// byte-identical to pre-mode behavior), ModeAsync, or ModeObserve. Empty = sync.
+	// Explicit by design — never inferred from the rest of the configuration.
+	Mode components.Mode
+	// Async tunes async mode. Ignored in the other two.
+	Async AsyncOptions
+}
+
+// AsyncOptions tunes async mode: one option per real decision.
+type AsyncOptions struct {
+	// CacheUncompactedTail lets the not-yet-compacted tail be prompt-cached. Default
+	// false — the safe choice, because a breakpoint written over a tail a pending
+	// compaction then replaces converts a 0.1x cache read into a 1.25x cache write,
+	// 11.5x the cost, making async strictly WORSE than sync. Set true only for a
+	// backend confirmed not to cache, where the protection buys nothing.
+	CacheUncompactedTail bool `yaml:"cache_uncompacted_tail"`
+	// StripCallerBreakpoints lets the tail protection remove a cache breakpoint the
+	// AGENT placed inside the span a pending compaction will replace. Without it the
+	// protection cannot cover an agent that sets its own breakpoints — claude-code does,
+	// so on that workload async declines to defer at all rather than pretend to protect
+	// (counted as async_tail_unprotected_turns). Default false: removing a directive the
+	// agent deliberately placed is a behavior change in someone else's request, so it is
+	// opt-in. Turn it on to actually get async's benefit with claude-code.
+	StripCallerBreakpoints bool `yaml:"strip_caller_breakpoints"`
+	// MaxQueue bounds the off-path job queue; a full queue DROPS (counted) rather than
+	// blocking the request path. 0 = modes.DefaultMaxQueue.
+	MaxQueue int `yaml:"max_queue"`
+	// Workers is the number of drain goroutines. 0 = modes.DefaultWorkers (1), which
+	// keeps one compaction LLM call in flight per process.
+	Workers int `yaml:"workers"`
 }
 
 // upstream binds a provider to its base URL, the canonical provider path to POST
@@ -97,6 +129,26 @@ type Handler struct {
 	agg    *metrics.Aggregator
 	opts   Options
 	client *http.Client
+	// tracker owns the per-session cached-prefix boundary and compaction generation.
+	// Always present (every mode benefits from the race-free boundary; only async uses
+	// the generation).
+	tracker *modes.Tracker
+	// pool runs off-path work. nil in sync mode — there is none.
+	pool *modes.Pool
+	// observeSeq numbers observations so each turn of a session enqueues one job (an
+	// observe run never commits, so its generation never advances and cannot serve as
+	// the dedup key on its own).
+	observeSeq atomic.Uint64
+	// shadow is observe mode's own state store, separate from the live one. Observe must
+	// not write into the live store — a real request would then replay a decision that
+	// was never enforced — but it also cannot simply discard its writes: offloaders
+	// FREEZE a decision and replay it on every later turn, which is where most of the
+	// sustained saving comes from. Throwing that away each turn makes observe see only
+	// the current tail and UNDER-project by ~3x against what sync achieves.
+	//
+	// So observe gets a store of its own: as persistent as the live one, and completely
+	// disjoint from it.
+	shadow store.Store
 }
 
 // New builds the proxy handler. agg may be nil (no /stats rollups).
@@ -105,7 +157,27 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	if c == nil {
 		c = &http.Client{Timeout: 5 * time.Minute}
 	}
-	return &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c}
+	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c, tracker: modes.NewTracker(0)}
+	if h.mode() != components.ModeSync {
+		h.pool = modes.NewPool(opts.Async.MaxQueue, opts.Async.Workers)
+	}
+	if h.mode() == components.ModeObserve {
+		h.shadow = store.NewMemory(store.Options{})
+	}
+	if agg != nil {
+		agg.SetMode(h.mode())
+		if h.pool != nil {
+			agg.SetAsyncStats(func() any { return h.pool.Stats() })
+		}
+	}
+	return h
+}
+
+// Close shuts down the off-path worker pool and waits for its goroutines to exit, so a
+// host that builds and discards handlers (tests, a reload) leaks none. Safe on a
+// sync-mode handler and safe to call twice.
+func (h *Handler) Close() {
+	h.pool.Stop()
 }
 
 // Mux wires the routes: chat proxying + health/stats/expand management.
@@ -361,24 +433,33 @@ func (h *Handler) chat(provider bschemas.ModelProvider, up upstream) http.Handle
 					body = orig
 				}
 			}()
-			applyStart := time.Now()
-			body, _ = apply.BodyFull(
-				r.Context(), h.pipe, h.store, provider, body,
-				r.Header.Get("x-context-guru-session"),
-				bypassed,
-				models, window, h.opts.CacheMode,
-			)
+			var added time.Duration
+			body, added = h.applyMode(&httpReqInfo{
+				ctx:      r.Context(),
+				provider: provider,
+				body:     body,
+				session:  r.Header.Get("x-context-guru-session"),
+				bypassed: bypassed,
+				models:   models,
+				window:   window,
+			})
 			if h.agg != nil && !bypassed {
-				h.agg.RecordAddedLatency(float64(time.Since(applyStart).Microseconds()) / 1000.0)
+				h.agg.RecordAddedLatency(float64(added.Microseconds()) / 1000.0)
 			}
 			// Advertise the expand tool so the model can recover any offloaded content
 			// (closes the reversibility loop h.serve drives). Sticky/idempotent + appended
 			// last to keep the provider prefix cache warm; gated by InjectExpand + store.
-			mode := h.opts.InjectExpand
-			if mode == "" {
-				mode = expand.InjectAuto
+			//
+			// Skipped in observe mode: nothing was offloaded, so there is nothing to
+			// recover, and injecting a tool declaration would MODIFY the request — which
+			// is precisely the one thing observe mode promises never to do.
+			if h.mode() != components.ModeObserve {
+				im := h.opts.InjectExpand
+				if im == "" {
+					im = expand.InjectAuto
+				}
+				body, _ = expand.Inject(string(provider), im, body, h.store.Persists())
 			}
-			body, _ = expand.Inject(string(provider), mode, body, h.store.Persists())
 		}()
 		h.serve(w, r, provider, up, body, bypassed)
 	}

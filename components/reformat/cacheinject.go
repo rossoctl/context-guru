@@ -102,7 +102,14 @@ func (c Cacheinject) ttl() *string {
 
 func (Cacheinject) Name() string { return "cacheinject" }
 
-func (Cacheinject) Enabled(c *components.Ctx) bool { return true }
+// Enabled is true except on an off-path (deferred) async run. Two reasons, and either
+// alone is sufficient: a deferred run's BODY is discarded, so breakpoints it places go
+// nowhere; and it keeps per-turn divergence digests, which are turn state. A deferred
+// job commits some turns after the one it was built from, so committing its digests
+// would replay turn N's digests over turn N+2's and make the next turn compute the
+// wrong divergence point. Only an offloader's frozen decisions are meant to survive a
+// deferred run.
+func (Cacheinject) Enabled(c *components.Ctx) bool { return c == nil || !c.Deferred }
 
 func (ci Cacheinject) Reformat(req *schemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) error {
 	if !cacheAware(req.Provider) || len(req.Input) == 0 {
@@ -138,6 +145,45 @@ func (ci Cacheinject) Reformat(req *schemas.BifrostChatRequest, rep *components.
 	// grows, which is what makes them pre-warmed and therefore readable.
 	for i := lookbackBlocks - 1; i < len(req.Input)-1 && len(want) < maxBreakpoints; i += lookbackBlocks - 1 {
 		want[i] = struct{}{}
+	}
+
+	// Async cache policy (#31). While a compaction is queued but not yet landed, the
+	// tail it is going to REPLACE must not be committed to the provider cache: a
+	// breakpoint at or beyond it turns what would have been a 0.1x read next turn into
+	// a 1.25x write of that same span — 11.5x the cost. That is exactly the failure
+	// that tripled headroom's cache-write on Terminal-Bench.
+	//
+	// This has to cover breakpoints the CALLER set, not just the ones we wanted. An
+	// earlier version only pruned `want`, which made the whole protection a no-op on the
+	// primary workload: claude-code sets its own breakpoint on the newest message, so
+	// the doomed tail was cache-written anyway — async then paid the rewrite AND lost a
+	// slot, strictly worse than sync. Whether we may strip that breakpoint is the
+	// caller's call (StripCallerBreakpoints), because removing one an agent deliberately
+	// placed changes behavior we do not own.
+	if c.TailCachePending {
+		for i := range want {
+			if c.CacheBlocked(i) {
+				delete(want, i)
+			}
+		}
+		for i := range req.Input {
+			if !c.CacheBlocked(i) || !hasBreakpoint(&req.Input[i]) {
+				continue
+			}
+			if !c.StripCallerBreakpoints {
+				// Cannot protect this turn without overriding the caller, so do not
+				// pretend to: leave the request exactly as it came and tell the host,
+				// which then declines to defer (see proxy.applyMode). Reporting success
+				// here is what made the protection a silent no-op before.
+				c.DeclineTailProtection()
+				rep.Skipped = true
+				return nil
+			}
+			unmark(&req.Input[i])
+		}
+		if last := c.NoCacheAtOrAfter - 1; last >= 0 && last < len(req.Input) {
+			want[last] = struct{}{}
+		}
 	}
 
 	applied := 0
@@ -201,6 +247,18 @@ func mark(m *schemas.ChatMessage, ttl *string) bool {
 	}
 	last.CacheControl = &schemas.CacheControl{Type: schemas.CacheControlTypeEphemeral, TTL: ttl}
 	return true
+}
+
+// unmark removes every cache_control directive from a message. Used only by async's
+// tail protection, to take back a breakpoint that sits on content a pending compaction
+// is about to replace.
+func unmark(m *schemas.ChatMessage) {
+	if m.Content == nil {
+		return
+	}
+	for i := range m.Content.ContentBlocks {
+		m.Content.ContentBlocks[i].CacheControl = nil
+	}
 }
 
 func hasBreakpoint(m *schemas.ChatMessage) bool {

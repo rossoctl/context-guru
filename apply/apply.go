@@ -112,7 +112,19 @@ func BodyWithModelWindow(ctx context.Context, pipe *components.Pipeline, st stor
 // cache-awareness when the backend is a prompt-caching provider or the request
 // already carries cache_control breakpoints; "on" forces it; "off" restores the
 // legacy compact-everything behavior (correct for confirmed non-caching backends).
-func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, provider bschemas.ModelProvider, body []byte, explicitSession string, bypass bool, models components.ModelSpec, window int, cacheMode string) (result []byte, changedBody bool) {
+func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, provider bschemas.ModelProvider, body []byte, explicitSession string, bypass bool, models components.ModelSpec, window int, cacheMode string) ([]byte, bool) {
+	r := BodyOpts(ctx, pipe, st, Opts{
+		Provider: provider, Body: body, Session: explicitSession, Bypass: bypass,
+		Models: models, Window: window, CacheMode: cacheMode,
+	})
+	return r.Body, r.Changed
+}
+
+// BodyOpts is the full entry point: everything BodyFull takes plus the operating mode
+// (#31) and the per-session generation snapshot async mode needs. Hosts that support
+// modes call this; BodyFull is the positional shim every other caller keeps using.
+func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o Opts) (res Result) {
+	body, provider, bypass := o.Body, o.Provider, o.Bypass
 	// Top-level fail-open backstop: the per-component recover in pipeline.runOne only
 	// covers component code. A panic anywhere else on the rewrite path (normalize, the
 	// sjson splice, rebuildCountChanged, a marshal) must NOT 500 the client — forward
@@ -120,13 +132,26 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 	// the whole entry point, not just inside components.
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("context-guru: recovered from panic in BodyFull; forwarding original request", "panic", r)
-			result, changedBody = body, false
+			slog.Error("context-guru: recovered from panic in BodyOpts; forwarding original request", "panic", r)
+			res = Result{Body: body}
 		}
 	}()
+	mode := o.Mode
+	if mode == "" {
+		mode = components.ModeSync
+	}
+	models := o.Models
+	// Async, on the REQUEST path: replay only decisions that are already computed. The
+	// expensive part of a compaction is the LLM call, which is the entire reason async
+	// exists, so the inline pass gets no model clients and every NeedsModel component
+	// degrades to its deterministic path or no-ops (that degradation is already a
+	// documented contract). The off-path job (Deferred) gets the clients.
+	if mode == components.ModeAsync && !o.Deferred {
+		models = components.ModelSpec{}
+	}
 	msgsRaw := gjson.GetBytes(body, "messages")
 	if !msgsRaw.Exists() || !msgsRaw.IsArray() {
-		return body, false
+		return Result{Body: body}
 	}
 
 	// Volatile-tail split, before anything else touches the body. This is a
@@ -142,7 +167,7 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 
 	norm, slots := normalize(provider, msgsRaw.Array())
 	if len(norm) == 0 {
-		return body, systemSplit // keep the split even with nothing to compact
+		return Result{Body: body, Changed: systemSplit} // keep the split even with nothing to compact
 	}
 
 	if debugTraffic {
@@ -150,27 +175,80 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 	}
 	chat := &bschemas.BifrostChatRequest{Provider: provider, Input: norm}
 	sys, firstUser := systemAndFirstUser(norm)
-	sessionID := session.Resolve(explicitSession, sys, firstUser)
-	cacheAware := resolveCacheAware(cacheMode, provider, body)
+	sessionID := session.Resolve(o.Session, sys, firstUser)
+	cacheAware := resolveCacheAware(o.CacheMode, provider, body)
+	// Turn accounting is independent of cache mode: the generation counts TURNS, and a
+	// turn happens whether or not the backend caches. Deriving it inside the cache-aware
+	// branch left every generation at 0 with cache_mode: off, which both disabled the
+	// stale guard and collided with 0's use as "nothing pending".
+	if o.Tracker != nil && !o.Deferred {
+		pl, gen := o.Tracker.Turn(sessionID, len(norm))
+		res.PrevLen, res.Generation = pl, gen
+	}
 	maxCachedIdx := -1
 	if cacheAware && !bypass {
 		// Messages present on the previous turn of this session are already committed
 		// to the provider cache; only the new tail is being cache-written this turn.
 		// Restrict supersession/age offloaders to that tail so they never mutate the
 		// cached prefix. Growth-based (dialect-agnostic; needs no cache_control mapping).
-		maxCachedIdx = prevLen(st, sessionID) - 1
-		defer putLen(st, sessionID, len(norm))
+		//
+		// The boundary comes from the Tracker when the host supplies one: it reads the
+		// previous length and records this turn's in ONE locked call, which is what
+		// removes the concurrent-turn race the old read-then-deferred-write had
+		// (#31/#25). Without a tracker (library callers, /compact) the legacy store path
+		// stands — same numbers, same race, no behavior change for them.
+		switch {
+		case o.PrevLen != nil:
+			maxCachedIdx = *o.PrevLen - 1
+		case o.Tracker != nil:
+			maxCachedIdx = res.PrevLen - 1 // recorded above, in one locked call
+		default:
+			maxCachedIdx = prevLen(st, sessionID) - 1
+			defer putLen(st, sessionID, len(norm))
+		}
+	}
+	// Async cache policy: while a compaction for this session is queued but not landed,
+	// the un-compacted tail is about to be REPLACED, so no breakpoint may be committed
+	// at or beyond it (see components.Ctx.NoCacheAtOrAfter). CacheUncompactedTail=true
+	// is the escape hatch for a confirmed non-caching backend, where the protection buys
+	// nothing.
+	//
+	// Three conditions beyond "async", each one a bug found in review:
+	//
+	//   - cacheAware. With cache_mode: off there is no cached prefix to protect and no
+	//     boundary to protect it at, so blocking breakpoints would suppress caching
+	//     forever for nothing (the two knobs interacted backwards).
+	//   - a boundary that exists. On a session's FIRST turn prevLen is 0, so the whole
+	//     request is "tail" and blocking it wrote zero breakpoints — on precisely the
+	//     turn whose job is to write the prefix. There is also nothing to protect yet:
+	//     no compaction is pending, because no earlier turn enqueued one.
+	//   - the tail a pending job will actually replace. The job enqueued by the PREVIOUS
+	//     turn targets that turn's tail, which by now sits at or below the boundary.
+	//     Blocking from the boundary up protected this turn's new messages, which no
+	//     pending job is going to touch — off by one turn, and it protected the wrong
+	//     span. The doomed span starts where the previous turn's own tail started.
+	tailPending, noCacheAt := false, 0
+	if mode == components.ModeAsync && !o.Deferred && !bypass && !o.CacheUncompactedTail &&
+		cacheAware && o.PendingFrom > 0 {
+		tailPending = true
+		noCacheAt = o.PendingFrom
 	}
 	c := &components.Ctx{
-		Ctx:          ctx,
-		Session:      sessionID,
-		Store:        st,
-		Model:        models,
-		Bypass:       bypass,
-		CtxWindow:    window,
-		CacheAware:   cacheAware,
-		MaxCachedIdx: maxCachedIdx,
+		Ctx:                    ctx,
+		Session:                sessionID,
+		Store:                  st,
+		Model:                  models,
+		Bypass:                 bypass,
+		CtxWindow:              o.Window,
+		CacheAware:             cacheAware,
+		MaxCachedIdx:           maxCachedIdx,
+		Mode:                   mode,
+		Deferred:               o.Deferred,
+		TailCachePending:       tailPending,
+		NoCacheAtOrAfter:       noCacheAt,
+		StripCallerBreakpoints: o.StripCallerBreakpoints,
 	}
+	res.Session = sessionID
 
 	// Canonical form of each normalized message BEFORE the pipeline, so a
 	// count-changing component (summarize) can be mapped back to the body.
@@ -179,7 +257,8 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 		normPre[i], _ = json.Marshal(norm[i])
 	}
 
-	pipe.Run(chat, c)
+	res.Run = pipe.Run(chat, c)
+	res.TailUnprotected = c.TailUnprotected()
 
 	// A component changed the message count (summarize restructures the transcript
 	// to [msg0, <summary>, last-K]). Rebuild the messages array preserving each
@@ -188,9 +267,11 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 	if len(chat.Input) != len(norm) {
 		nb, ok := rebuildCountChanged(body, msgsRaw.Array(), normPre, slots, chat.Input)
 		if !ok && systemSplit {
-			return body, true // keep the split even when the rebuild declined
+			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
+			return res
 		}
-		return nb, ok || systemSplit
+		res.Body, res.Changed = nb, ok || systemSplit
+		return res
 	}
 
 	out := body
@@ -208,14 +289,16 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 			}
 			var err error
 			if out, err = sjson.SetBytes(out, s.path, newText); err != nil {
-				return body, false
+				res.Body = body
+				return res
 			}
 			changed = true
 			changes = append(changes, mkChange(s.path, s.preText, newText))
 		default: // wholeMessage
 			post, err := json.Marshal(chat.Input[i])
 			if err != nil {
-				return body, false
+				res.Body = body
+				return res
 			}
 			if bytes.Equal(post, s.pre) {
 				continue // unmodified — keep the original bytes verbatim (I1)
@@ -227,7 +310,8 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 				continue
 			}
 			if out, err = sjson.SetRawBytes(out, s.path, post); err != nil {
-				return body, false
+				res.Body = body
+				return res
 			}
 			changed = true
 			var pm bschemas.ChatMessage
@@ -238,7 +322,8 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 	if changed && dumpPath != "" {
 		dumpChanges(c.Session, changes)
 	}
-	return out, changed
+	res.Body, res.Changed = out, changed
+	return res
 }
 
 // resolveCacheAware decides whether cache-aware compaction is active for this

@@ -29,7 +29,7 @@ func NewPipeline(comps []Component, e Emitter) *Pipeline {
 // report. req is mutated; on any per-component failure that component's changes
 // are rolled back, so the returned request is never worse than the input.
 func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
-	rr := &RunReport{Session: c.Session, TokensBefore: schema.MessagesTokens(req)}
+	rr := &RunReport{Session: c.Session, TokensBefore: schema.MessagesTokens(req), Mode: c.effMode(), Deferred: c != nil && c.Deferred}
 	if c.Bypass {
 		rr.TokensAfter = rr.TokensBefore
 		return rr
@@ -60,7 +60,7 @@ func safeEmit(fn func()) {
 // never-worse guard. It never returns an error — failures are recorded on the
 // Report and the request is reverted.
 func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx) (rep Report) {
-	rep = Report{Component: comp.Name()}
+	rep = Report{Component: comp.Name(), Mode: c.effMode(), Deferred: c != nil && c.Deferred}
 	before := schema.CloneMessages(req.Input)
 	rep.TokensBefore = tokensOf(before)
 	start := clock()

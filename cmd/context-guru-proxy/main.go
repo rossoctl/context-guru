@@ -36,10 +36,18 @@ func main() {
 		anthropic = flag.String("anthropic-upstream", envOr("ANTHROPIC_UPSTREAM", "https://api.anthropic.com"), "Anthropic upstream base URL")
 		bob       = flag.String("bob-upstream", envOr("BOB_UPSTREAM", ""), "Bob (BobShell) backend base URL; enables the Bob gateway routes when set (e.g. https://api.us-east.bob.ibm.com)")
 		storeFlag = flag.String("store", envOr("STORE", ""), "override state store: true|false (default: config store.enabled, else on)")
+		modeFlag  = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | async | observe (overrides the config's mode:)")
 	)
 	flag.Parse()
 
 	cfg, err := loadConfig(*cfgPath, *preset)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	if *modeFlag != "" {
+		cfg.Mode = *modeFlag // flag/env wins over the config file when set
+	}
+	mode, err := cfg.OperatingMode()
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
@@ -67,6 +75,13 @@ func main() {
 		InjectExpand: os.Getenv("INJECT_EXPAND"), // auto (default) | always | never
 		CacheMode:    os.Getenv("CACHE_MODE"),    // auto (default) | on | off — cache-aware compaction
 		Windows:      modelWindows(),             // dynamic context-window resolver (fraction triggers)
+		Mode:         mode,                       // sync (default) | async | observe — explicit, never inferred
+		Async: proxy.AsyncOptions{
+			CacheUncompactedTail:   cfg.Async.CacheUncompactedTail,
+			StripCallerBreakpoints: cfg.Async.StripCallerBreakpoints,
+			MaxQueue:               cfg.Async.MaxQueue,
+			Workers:                cfg.Async.Workers,
+		},
 
 		// Per-request /compact override: swap the pipeline (?preset / header) while
 		// keeping this config's component blocks. nil-safe in the handler.
@@ -86,7 +101,12 @@ func main() {
 		},
 	})
 
-	slog.Info("context-guru-proxy listening", "addr", addr, "pipeline", cfg.Pipeline)
+	defer h.Close() // stop the off-path worker pool cleanly (no-op in sync mode)
+	if mode == components.ModeObserve {
+		slog.Warn("context-guru: OBSERVE MODE — requests are forwarded UNMODIFIED; " +
+			"/stats reports what compaction WOULD have saved under potential_*/projected_* keys")
+	}
+	slog.Info("context-guru-proxy listening", "addr", addr, "pipeline", cfg.Pipeline, "mode", mode)
 	if err := http.ListenAndServe(addr, h.Mux()); err != nil {
 		log.Fatal(err)
 	}

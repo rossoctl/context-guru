@@ -26,6 +26,38 @@ type Config struct {
 	Pipeline   []string             `yaml:"pipeline"`
 	Components map[string]yaml.Node `yaml:"components"`
 	Store      store.Options        `yaml:"store"`
+	// Mode is the operating mode: sync (default) | async | observe. See #31 and
+	// docs/how-to/operating-modes.md. Empty = sync, which is byte-identical to the
+	// behavior before modes existed.
+	Mode string `yaml:"mode"`
+	// Async tunes async mode; ignored in the other two.
+	Async AsyncConfig `yaml:"async"`
+}
+
+// AsyncConfig is the `async:` block. One option per real decision.
+type AsyncConfig struct {
+	// CacheUncompactedTail lets the not-yet-compacted tail be prompt-cached. The
+	// default (false) is the safe one: a breakpoint written over a tail that a pending
+	// compaction then replaces turns a 0.1x cache read into a 1.25x cache write —
+	// 11.5x the cost — which makes async strictly worse than sync. The escape hatch
+	// exists because a backend that genuinely does not cache needs no protection.
+	CacheUncompactedTail bool `yaml:"cache_uncompacted_tail"`
+	// StripCallerBreakpoints lets async's tail protection remove a cache breakpoint the
+	// agent itself placed inside the protected span. Required for the protection to do
+	// anything on an agent that sets its own (claude-code does); without it async
+	// declines to defer on those turns instead of pretending. Default false because it
+	// changes a directive in someone else's request.
+	StripCallerBreakpoints bool `yaml:"strip_caller_breakpoints"`
+	// MaxQueue bounds the off-path job queue (0 = 256). A full queue drops, counted,
+	// and never blocks the request path.
+	MaxQueue int `yaml:"max_queue"`
+	// Workers is the number of drain goroutines (0 = 1).
+	Workers int `yaml:"workers"`
+}
+
+// OperatingMode validates and returns the configured mode.
+func (c *Config) OperatingMode() (components.Mode, error) {
+	return components.ParseMode(c.Mode)
 }
 
 // Load reads and parses a YAML config file (strict: unknown keys are rejected).
@@ -48,6 +80,9 @@ func LoadBytes(b []byte) (*Config, error) {
 	}
 	if err := c.applyPreset(); err != nil {
 		return nil, err
+	}
+	if _, err := c.OperatingMode(); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	return &c, nil
 }

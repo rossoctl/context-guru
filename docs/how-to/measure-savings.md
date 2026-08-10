@@ -16,11 +16,23 @@ The proxy exposes `GET /stats` with in-process savings rollups. Savings are **to
 | `bounces` | how many offloads were re-served (the count behind `wasted_tokens`) |
 | `adjusted_saved` | `saved − wasted` — bounce-adjusted, may be negative |
 | `top_passthrough` | components that ran but never changed a request: dead weight to drop |
+| `mode` | the operating mode these numbers came from: `sync` \| `async` \| `observe` |
+| `sync_enforced` / `async_enforced` | requests whose forwarded body context-guru actually shaped, split by mode. **Both are 0 in observe mode by construction.** |
 
 !!! tip "Reading top_passthrough"
     A component in `top_passthrough` isn't necessarily broken. `cacheinject` always lands there —
     its savings are provider-side KV-cache hits, invisible to content-token counts. But a
     content-offloader that never fires is a candidate to drop from your pipeline.
+
+!!! warning "Enforced vs hypothetical"
+    Everything above is what context-guru **actually did**. In
+    [observe mode](operating-modes.md#observe-measure-without-enforcing) nothing is
+    applied, so every field above reads zero and the numbers appear instead under
+    `potential_*` / `projected_*`, alongside an `observe_notice` banner. The two
+    vocabularies never share a key: a hypothetical cannot be summed into a real saving
+    even by accident. Async additionally reports the full queue tuple (`async_queue`,
+    including `dropped` and `stale_discarded`) and `async_realized_saved_tokens` — the
+    savings a turn got by replaying an earlier turn's deferred work.
 
 ## The Emitter interface
 
