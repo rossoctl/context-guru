@@ -276,11 +276,21 @@ func TestPriceNeverReportsUnknownCostAsFree(t *testing.T) {
 	if e.TokenAccounting != AccountingComplete {
 		t.Errorf("accounting = %q; want complete", e.TokenAccounting)
 	}
+	// Compare with a tolerance, not ==. Price.Cost is a sum of four products, and
+	// Go PERMITS the compiler to contract `x*y + z` into a fused multiply-add (FMA),
+	// which rounds once instead of twice. Whether it does so differs between the two
+	// evaluations here — the test's literal arguments fold differently from the
+	// struct-field loads inside Price — so on arm64 the two mathematically identical
+	// sums land one bit apart (0.00327 vs 0.0032700000000000003) and an exact
+	// comparison fails. amd64 has no FMA contraction for this shape, so CI is green
+	// and the failure only appears on Apple Silicon. The property under test is the
+	// accounting, which a 1-ULP difference does not affect.
+	const eps = 1e-12
 	wantCost := p.Cost(10, 5000, 500, 100)
-	if e.CostUSD != wantCost {
+	if math.Abs(e.CostUSD-wantCost) > eps {
 		t.Errorf("cost = %v; want %v", e.CostUSD, wantCost)
 	}
-	if e.BaselineCostUSD != wantCost+200*p.CacheWrite {
+	if math.Abs(e.BaselineCostUSD-(wantCost+200*p.CacheWrite)) > eps {
 		t.Errorf("baseline = %v; want cost + 200 unique removed tokens at the cache-write rate", e.BaselineCostUSD)
 	}
 	if e.BaselineCostUSD <= e.CostUSD {
