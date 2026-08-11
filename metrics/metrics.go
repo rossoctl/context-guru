@@ -450,6 +450,21 @@ type Snapshot struct {
 	LLMCalls        int64 `json:"llm_calls"`
 	LLMInputTokens  int64 `json:"llm_input_tokens"`
 	LLMOutputTokens int64 `json:"llm_output_tokens"`
+	// LLMTimeouts/LLMErrors make the FAIL-OPEN PATH VISIBLE. A component that
+	// abandons its model call leaves the output verbatim (correct — compaction must
+	// never break the agent's request) but reports nothing, so an arm that quietly
+	// stops compacting under load looks like an arm that got faster. MEASURED on a
+	// KV-pressured on-prem server: llm_calls fell 2,093 -> 255 at equal request
+	// volume while per-request overhead ROSE 55%, and the resulting "42-point
+	// improvement" was the treatment partially switching itself off.
+	//
+	// Read them together with LLMCallTimeoutMs: a non-zero timeout count means the
+	// budget is too small for the server's current load, and this arm's savings are
+	// an UNDERCOUNT rather than a measurement. Filled by the host at serve time
+	// (offload owns the deadline and lives below metrics), same as the Frozen* fields.
+	LLMTimeouts      int64 `json:"llm_timeouts"`
+	LLMErrors        int64 `json:"llm_errors"`
+	LLMCallTimeoutMs int64 `json:"llm_call_timeout_ms"`
 	// Extract is extract_llm's own economics (#28 part F), including NET savings after
 	// its LLM cost — the honest headline for the one component that spends to save.
 	// Purely ADDITIVE: no field above was renamed or removed, so deploy/harbor/*.py

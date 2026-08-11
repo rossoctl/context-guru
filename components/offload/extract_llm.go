@@ -2,11 +2,14 @@ package offload
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -22,11 +25,85 @@ import (
 // debugExtractLLM logs per-request candidate accounting when CONTEXT_GURU_DEBUG is set.
 var debugExtractLLM = os.Getenv("CONTEXT_GURU_DEBUG") != ""
 
-// llmCallTimeout bounds a SINGLE in-request extract model call. Kept tight so a slow
-// or rate-limited compaction model fails open FAST (leave the output verbatim this
-// turn) instead of stalling the agent's request — synchronous compaction is on the
-// hot path, so a long timeout here can push the agent's own request past its deadline.
-const llmCallTimeout = 15 * time.Second
+// llmCallTimeout bounds a SINGLE in-request extract model call. Kept bounded so a slow
+// or rate-limited compaction model fails open (leave the output verbatim this turn)
+// instead of stalling the agent's request — synchronous compaction is on the hot path,
+// so an unbounded wait here could push the agent's own request past its deadline.
+//
+// 15s WAS TOO TIGHT ON A LOADED SELF-HOSTED SERVER, and the failure was invisible.
+// MEASURED on an on-prem vLLM under KV-cache pressure: server-side queue wait alone was
+// p50 17.2s / p95 78.8s, i.e. THE OLD CEILING EXPIRED BEFORE THE MODEL EVEN STARTED on
+// more than half of all calls. Observed over one 50-task SWE-bench arm at equal request
+// volume:
+//
+//	leg                 proxy requests   llm_calls   calls/request   cg_added_ms_avg
+//	low  (idle server)           2,513       2,093            0.83           5,530
+//	high (KV-pressured)          2,387         255            0.11           8,563
+//
+// 8.2x fewer calls at 5% fewer requests, while per-request overhead ROSE 55% — the
+// component was starting calls, blocking, hitting the ceiling, and discarding the work.
+// Because it fails open silently, the arm degraded into a partial no-op that READ AS AN
+// IMPROVEMENT on every dashboard (its "time penalty" shrank 42 points).
+//
+// The constant was a CLIENT-SIDE assumption about server latency. A hosted gateway
+// answers in ~400ms; a shared on-prem GPU under load does not. So it is now configurable
+// and defaults high enough that a *loaded* server still gets an answer:
+//
+//	CONTEXT_GURU_LLM_TIMEOUT=90s   (Go duration; bare integers are seconds)
+//
+// Tuning note: this is a per-call ceiling, not a target. Raising it trades "silently
+// does nothing" for "measurably costs latency" — which is the correct trade, because the
+// cost then SHOWS UP in the numbers instead of hiding. Watch `llm_timeouts` in /stats: a
+// non-zero value means the budget is still too small for the server's current load. The
+// economic gate's own latency brake (slowCallMs, extract_econ.go) is what stops
+// speculative calls when the server is genuinely slow — that is the right layer for it,
+// because it decides BEFORE spending the wall clock rather than after.
+const defaultLLMCallTimeout = 90 * time.Second
+
+// llmCallTimeout is resolved once at process start from the environment.
+var llmCallTimeout = resolveLLMCallTimeout()
+
+func resolveLLMCallTimeout() time.Duration {
+	v := strings.TrimSpace(os.Getenv("CONTEXT_GURU_LLM_TIMEOUT"))
+	if v == "" {
+		return defaultLLMCallTimeout
+	}
+	// Accept a bare number as seconds so "90" works as well as "90s".
+	if n, err := strconv.Atoi(v); err == nil {
+		if n > 0 {
+			return time.Duration(n) * time.Second
+		}
+		return defaultLLMCallTimeout
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	return defaultLLMCallTimeout
+}
+
+// Timeout/error counters. The fail-open path is CORRECT — compaction must never break
+// the agent's request — but it must not be SILENT: an arm that quietly stops compacting
+// looks like an arm that got faster. These are served at /stats (merged by the host, the
+// same layering as FrozenStats) so `llm_calls` collapsing is visible as a timeout count
+// rather than being mistaken for efficiency.
+var (
+	llmTimeouts int64
+	llmErrors   int64
+)
+
+// LLMTimeouts returns the number of extract_llm calls abandoned on the per-call
+// deadline. Non-zero means CONTEXT_GURU_LLM_TIMEOUT is too small for the current
+// server load, and any token-savings number from this arm is an UNDERCOUNT of what
+// the pipeline would have done on an unloaded server.
+func LLMTimeouts() int64 { return atomic.LoadInt64(&llmTimeouts) }
+
+// LLMErrors returns non-timeout failures of extract_llm model calls (transport,
+// HTTP status, unparseable body, or a cancelled parent request).
+func LLMErrors() int64 { return atomic.LoadInt64(&llmErrors) }
+
+// LLMCallTimeout exposes the resolved per-call budget so /stats can report the
+// configuration next to the counters (a timeout count is meaningless without it).
+func LLMCallTimeout() time.Duration { return llmCallTimeout }
 
 // llmConcurrency bounds how many of a request's candidate compactions run at once.
 // Independent per-output calls run concurrently so a turn's parallel tool outputs cost
@@ -490,15 +567,58 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				start := time.Now()
 				res, sum, _ := extract.RunExtractionSummary(ctx, cands[k].content, goal, keepIDs, before, extCfg, model)
 				metrics.RecordExtractionCall(float64(time.Since(start).Milliseconds()))
+				// CLASSIFY THE SILENT FAILURE — and classify it INDEPENDENTLY of whether
+				// a result came back. RunExtractionSummary returns ("", "", "none") for every
+				// failure mode, so timeout / sandbox rejection / "nothing shrank" are
+				// indistinguishable in its return value. Our own ctx is the one reliable
+				// signal: if its deadline expired, THIS call was abandoned.
+				//
+				// Do NOT fold this into an `else` of the success check. In `code` mode the
+				// deterministic strategy runs as a fallback (extract.go:367-368), so a call
+				// whose LLM leg timed out can still return a smaller `res` — and an `else`
+				// would then record nothing. That is exactly the shape of the bug these
+				// counters exist to expose: the arm keeps compacting a little, so no
+				// dashboard looks broken while the expensive path has silently stopped.
+				//
+				// Fail-open behaviour is unchanged either way — this only records.
+				timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+				if ctx.Err() != nil {
+					if timedOut {
+						atomic.AddInt64(&llmTimeouts, 1)
+					} else {
+						atomic.AddInt64(&llmErrors, 1)
+					}
+				}
 				if res != "" && res != cands[k].content {
 					out[k] = outT{res, sum}
 					// Feed the observed ratio so the gate prices future calls on what this
 					// workload actually achieves, not on an assumption.
 					e.ratios.observe(before-schema.TextTokens(res), before)
 					metrics.RecordExtractionSaving(before - schema.TextTokens(res))
-				} else {
+				} else if !timedOut {
 					e.ratios.observe(0, before) // a miss is real evidence: ratio 0
 				}
+				// TIMED OUT WITH NOTHING BACK => DELIBERATELY NOT OBSERVED. A ratio-0
+				// observation means "the model looked at this output and could not shrink
+				// it", which is real evidence about the workload. A deadline means the call
+				// never finished — evidence about SERVER LATENCY, not compressibility — and
+				// feeding it to the tracker makes the gate shut itself permanently on
+				// exactly the deployment where the budget is already too small:
+				//
+				//   minRatioSampleTokens is 1500, so ONE timed-out medium output both ends
+				//   this session's exploration (r.total >= the sample floor => exploring()
+				//   returns false) and starts dragging ratio() down from the 0.12 prior. A
+				//   few more and expectedRemoved falls below call cost for everything, so
+				//   evaluateGate suppresses every call — and the tracker lives on the
+				//   Pipeline for the proxy's LIFETIME, so nothing revises it afterwards.
+				//
+				// That is the self-justifying prior extract_econ.go's exploration budget
+				// exists to prevent, re-entered through the timeout path. MEASURED: 13
+				// timeouts in one 50-task arm at the 90s budget on a KV-pressured TP=1
+				// server, i.e. this is a live regime, not a hypothetical. Skipping the
+				// observation leaves the gate's estimate untouched; the timeouts are still
+				// counted (above) and still brake exploration via slowCallMs, which is the
+				// latency-aware layer that SHOULD react to a slow server.
 			}(k)
 		}
 		wg.Wait()

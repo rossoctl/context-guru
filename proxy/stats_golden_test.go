@@ -35,8 +35,17 @@ var statsGoldenTopLevel = []string{
 	"frozen_repaired",
 	"frozen_tokens",
 	"llm_calls",
+	// llm_call_timeout_ms / llm_errors / llm_timeouts make the compaction model's
+	// fail-open path countable. Without them an arm whose extract_llm kept hitting its
+	// per-call deadline is indistinguishable from an arm with little to compact — it
+	// reads as FASTER, because it silently stopped working. The budget travels with the
+	// counts because a timeout total means nothing without the ceiling it was measured
+	// against. (llmd_smoke's collect.py parses all three into cg_llm_* row fields.)
+	"llm_call_timeout_ms",
+	"llm_errors",
 	"llm_input_tokens",
 	"llm_output_tokens",
+	"llm_timeouts",
 
 	"mode",
 	"observe_hypothetical_requests",
