@@ -3,7 +3,9 @@ package offload
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -15,10 +17,69 @@ import (
 
 func init() { components.Register("summarize", newSummarize) }
 
-// summarizeCallTimeout bounds the single summarizer call. It is higher than
+// defaultSummarizeCallTimeout bounds the single summarizer call. It is higher than
 // extract's ceiling because summarize makes ONE call over a large span, and a
 // big trajectory legitimately takes the model longer to read and compress.
-const summarizeCallTimeout = 150 * time.Second
+//
+// 150s was sized against an IDLE server. MEASURED on a 50-task SWE-bench arm there,
+// this component spent 26,890,609 ms over 1,372 calls — a ~19.6s mean, so 150s was
+// ~7.6x the mean and never binding. Two things make that headroom evaporate under
+// load, and they ADD:
+//
+//   - queue wait, which is what a loaded server actually charges: p50 17.2s / p95
+//     78.8s measured under KV pressure, before the model starts work at all;
+//   - this component's own prefill, which is large by construction — the same arm
+//     sent 78,155,276 input tokens across those 1,372 calls, i.e. ~57k prompt tokens
+//     per call (it summarizes the whole middle of the transcript).
+//
+// So the budget must cover queue + a 57k-token prefill + generation, and only the
+// last of those three is what the idle-server mean measured. 300s is a CEILING, not
+// a target: on an idle server nothing changes, because the call still returns in
+// ~20s.
+//
+// ⚠️ Unlike extract_llm this is bounded ONCE for the whole component, not per call —
+// s.summarize retries up to 3x against THIS SAME ctx (see the loop), so the total is
+// this value, not 3x it. Raising it therefore raises the worst-case stall on ONE
+// agent turn by exactly this much, and that stall is billed against the benchmark's
+// own [agent] timeout_sec.
+//
+//	CONTEXT_GURU_SUMMARIZE_TIMEOUT=300s   (Go duration; bare integers are seconds)
+const defaultSummarizeCallTimeout = 300 * time.Second
+
+// summarizeCallTimeout is resolved once at process start from the environment.
+var summarizeCallTimeout = resolveSummarizeCallTimeout()
+
+func resolveSummarizeCallTimeout() time.Duration {
+	return resolveTimeoutEnv("CONTEXT_GURU_SUMMARIZE_TIMEOUT", defaultSummarizeCallTimeout)
+}
+
+// Timeout/error counters, the summarize counterpart of extract_llm's llmTimeouts /
+// llmErrors and served at /stats beside them.
+//
+// summarize's fail path is LOUDER than extract_llm's — it returns the error, the
+// pipeline reverts the component, and that shows up as a per-component `reverted`
+// count. But `reverted` cannot say WHY, and the two causes call for opposite
+// responses: a blown deadline means the budget is too small for this load (the arm's
+// savings are an undercount), while a model/transport error means the route is wrong
+// (the arm is not measuring summarization at all). Separating them is the difference
+// between "raise the ceiling" and "fix the -nothink route".
+var (
+	summarizeTimeouts int64
+	summarizeErrors   int64
+)
+
+// SummarizeTimeouts returns the number of summarize calls abandoned on the per-request
+// deadline. Non-zero means CONTEXT_GURU_SUMMARIZE_TIMEOUT is too small for the current
+// server load, and this arm compacted less than the method would on an idle server.
+func SummarizeTimeouts() int64 { return atomic.LoadInt64(&summarizeTimeouts) }
+
+// SummarizeErrors returns non-timeout failures of summarize model calls (transport,
+// HTTP status, empty/unparseable body, or a cancelled parent request).
+func SummarizeErrors() int64 { return atomic.LoadInt64(&summarizeErrors) }
+
+// SummarizeCallTimeout exposes the resolved budget so /stats can report the
+// configuration next to the counters (a timeout count is meaningless without it).
+func SummarizeCallTimeout() time.Duration { return summarizeCallTimeout }
 
 // maxTrajectoryChars caps the trajectory text sent to the summarizer so a very
 // large span still fits the model's context window (≈70k tokens, well under a
@@ -129,6 +190,14 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	defer cancel()
 	summary, err := s.summarize(ctx, model, span, conversationGoal(req))
 	if err != nil {
+		// Classify before returning. Our own ctx is the reliable signal: the parent
+		// request may still be healthy while THIS component's budget expired, and the
+		// http client wraps the cause, so errors.Is walks to it.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			atomic.AddInt64(&summarizeTimeouts, 1)
+		} else {
+			atomic.AddInt64(&summarizeErrors, 1)
+		}
 		return nil, err // fail-open: the pipeline reverts this component
 	}
 	if strings.TrimSpace(summary) == "" {
@@ -240,6 +309,12 @@ func (s *Summarize) summarize(ctx context.Context, model components.Model, span 
 		out, err := model.Complete(ctx, prompt)
 		if err != nil {
 			lastErr = err
+			// The three attempts share ONE deadline (the ctx is built by the caller,
+			// outside this loop), so once it has expired every retry fails instantly
+			// and only obscures the cause. Stop and report the deadline.
+			if ctx.Err() != nil {
+				break
+			}
 			continue
 		}
 		return ensureSummaryTags(out), nil

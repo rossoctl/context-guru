@@ -2,13 +2,42 @@ package offload
 
 import (
 	"math"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/schema"
 )
+
+// resolveTimeoutEnv reads a per-call model-timeout budget from the environment,
+// falling back to def when unset or unparseable. A bare number is seconds, so "180"
+// works as well as "180s".
+//
+// Shared by the two NeedsModel components (extract_llm, summarize) because their
+// budgets are the same KIND of knob — a client-side assumption about how long a
+// loaded server takes to answer — and the parse rules must not drift between them:
+// one accepting "180" while the other silently fell back to its default would be
+// invisible in a run and would look like the component not firing.
+func resolveTimeoutEnv(name string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		if n > 0 {
+			return time.Duration(n) * time.Second
+		}
+		return def
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
 
 // resolveBudget converts an absolute token knob + an optional fraction-of-window
 // into an effective token count: the fraction (ceil(frac*window)) wins when set and

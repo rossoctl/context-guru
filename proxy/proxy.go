@@ -1405,6 +1405,12 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.LLMTimeouts = offload.LLMTimeouts()
 	snap.LLMErrors = offload.LLMErrors()
 	snap.LLMCallTimeoutMs = offload.LLMCallTimeout().Milliseconds()
+	// summarize owns a separate budget (one call over a whole span, not one tool
+	// output), so it reports separately — folded together, a summarize-only pipeline
+	// would show llm_timeouts 0 while its own deadline expired on every request.
+	snap.SummarizeTimeouts = offload.SummarizeTimeouts()
+	snap.SummarizeErrors = offload.SummarizeErrors()
+	snap.SummarizeCallTimeoutMs = offload.SummarizeCallTimeout().Milliseconds()
 	// Freeze-replay health, same layering: the counters live with the code that owns
 	// them (offload for the replay path, the store for dropped/repaired decisions).
 	snap.FrozenHits, snap.FrozenMisses = offload.FrozenStats()

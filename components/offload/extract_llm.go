@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,21 +67,7 @@ const defaultLLMCallTimeout = 90 * time.Second
 var llmCallTimeout = resolveLLMCallTimeout()
 
 func resolveLLMCallTimeout() time.Duration {
-	v := strings.TrimSpace(os.Getenv("CONTEXT_GURU_LLM_TIMEOUT"))
-	if v == "" {
-		return defaultLLMCallTimeout
-	}
-	// Accept a bare number as seconds so "90" works as well as "90s".
-	if n, err := strconv.Atoi(v); err == nil {
-		if n > 0 {
-			return time.Duration(n) * time.Second
-		}
-		return defaultLLMCallTimeout
-	}
-	if d, err := time.ParseDuration(v); err == nil && d > 0 {
-		return d
-	}
-	return defaultLLMCallTimeout
+	return resolveTimeoutEnv("CONTEXT_GURU_LLM_TIMEOUT", defaultLLMCallTimeout)
 }
 
 // Timeout/error counters. The fail-open path is CORRECT — compaction must never break

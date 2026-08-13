@@ -557,6 +557,18 @@ type Snapshot struct {
 	LLMTimeouts      int64 `json:"llm_timeouts"`
 	LLMErrors        int64 `json:"llm_errors"`
 	LLMCallTimeoutMs int64 `json:"llm_call_timeout_ms"`
+	// Summarize* are the same three figures for `summarize`, which owns a SEPARATE
+	// budget (its call is one big span, not one tool output, so the two cannot share a
+	// ceiling). Reported separately rather than folded into LLM* above because the
+	// components run in different arms: a summarize-only pipeline would otherwise
+	// report llm_timeouts 0 with its own deadline expiring on every request.
+	//
+	// summarize's failure is already visible as a per-component `reverted`, but that
+	// cannot distinguish "budget too small for this load" (savings are an undercount)
+	// from "the model call is failing" (the arm is not measuring summarization at all).
+	SummarizeTimeouts      int64 `json:"summarize_timeouts"`
+	SummarizeErrors        int64 `json:"summarize_errors"`
+	SummarizeCallTimeoutMs int64 `json:"summarize_call_timeout_ms"`
 	// Extract is extract_llm's own economics (#28 part F), including NET savings after
 	// its LLM cost — the honest headline for the one component that spends to save.
 	// Purely ADDITIVE: no field above was renamed or removed, so deploy/harbor/*.py

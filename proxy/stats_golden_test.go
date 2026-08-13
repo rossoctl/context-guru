@@ -65,6 +65,14 @@ var statsGoldenTopLevel = []string{
 	"sse_streamed",
 	"sse_ttfb_ms_avg",
 	"sse_ttfb_ms_avg_buffered",
+	// summarize_* are the same three figures for `summarize`, which owns a SEPARATE
+	// budget: its call covers the whole middle of the transcript (~57k prompt tokens
+	// measured) rather than one tool output, so the two components cannot share a
+	// ceiling — and a summarize-only pipeline reports llm_timeouts 0 however badly its
+	// own deadline is being hit. (collect.py parses these into cg_summarize_* fields.)
+	"summarize_call_timeout_ms",
+	"summarize_errors",
+	"summarize_timeouts",
 	"sync_enforced",
 	"tokens_after",
 	"tokens_before",
