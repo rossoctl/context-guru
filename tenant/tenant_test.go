@@ -602,6 +602,54 @@ func TestMigrationsApplyInSequenceToAnOlderDatabase(t *testing.T) {
 	}
 }
 
+// The v3 column email_verified_at defaults to 0, so every account that predates it
+// migrates to "unverified" — including the ones in daily use. The upgrade that
+// introduces the column must therefore also stamp the accounts already holding a live
+// token, or a working account sits in the claimable state until someone re-verifies it.
+func TestUpgradeStampsAccountsHoldingALiveToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.db")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(migrations[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	// Two v1 accounts: one with a live token, one whose only token is revoked. Token
+	// hashes are arbitrary bytes here — the plaintext is irrelevant to a backfill.
+	for i, row := range []struct {
+		id, email string
+		revoked   int64
+	}{{"aaa", "live@ibm.com", 0}, {"bbb", "dormant@ibm.com", 1}} {
+		if _, err := db.Exec(`INSERT INTO tenants (id,label,email,created_at) VALUES (?,?,?,?)`,
+			row.id, "laptop", row.email, 1000); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO tenant_tokens
+		  (token_hash,prefix,tenant_id,created_at,revoked_at) VALUES (?,?,?,?,?)`,
+			[]byte{byte(i)}, "pfx", row.id, 1000, row.revoked); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	r, err := Open(path, Options{})
+	if err != nil {
+		t.Fatalf("upgrading a v1 database: %v", err)
+	}
+	defer r.Close()
+	if tn := mustTenant(t, r, "live@ibm.com"); !tn.Verified() {
+		t.Error("an account holding a live token migrated to unverified — it is claimable by /api/register")
+	}
+	if tn := mustTenant(t, r, "dormant@ibm.com"); tn.Verified() {
+		t.Error("an account whose only token is revoked was stamped verified")
+	}
+	assertSchema(t, r)
+}
+
 func TestInMemoryRegistriesAreIsolated(t *testing.T) {
 	a := open(t, Options{})
 	b := open(t, Options{})
@@ -704,6 +752,92 @@ func TestAgentKeyBindResolveUnbind(t *testing.T) {
 	}
 }
 
+// A bound digest belongs to the tenant that bound it. Binding a digest someone else
+// holds must be refused, not silently transferred: with capture_content on, a stolen
+// binding renders the victim's transcripts on the thief's dashboard.
+func TestAgentKeyCannotBeTakenFromAnotherTenant(t *testing.T) {
+	r := open(t, Options{})
+	victim, _, err := r.Register("laptop", "victim@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	thief, _, err := r.Register("laptop", "thief@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "fake-provider-key-for-tests"
+	if err := r.BindAgentKey(victim.ID, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.BindAgentKey(thief.ID, key); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("binding another tenant's key = %v, want ErrForbidden", err)
+	}
+	if n, _ := r.AgentKeyCount(victim.ID); n != 1 {
+		t.Errorf("victim's binding count = %d, want 1", n)
+	}
+	if n, _ := r.AgentKeyCount(thief.ID); n != 0 {
+		t.Errorf("thief's binding count = %d, want 0", n)
+	}
+	if got, err := r.ResolveAgentKey(key); err != nil || got.ID != victim.ID {
+		t.Fatalf("ResolveAgentKey = %v, %v, want the victim", got, err)
+	}
+	// The owner can still hand it over explicitly: unbind, then rebind.
+	if err := r.UnbindAgentKeys(victim.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.BindAgentKey(thief.ID, key); err != nil {
+		t.Fatalf("rebinding a released key: %v", err)
+	}
+}
+
+// A digest is only evidence of holding a key if the key could not simply be guessed.
+func TestAgentKeyRefusesLowEntropyKeys(t *testing.T) {
+	r := open(t, Options{})
+	tn, _, err := r.Register("laptop", "a@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"", "   ", "x", "bogus", "test", "changeme", "sk-",
+		strings.Repeat("z", MinAgentKeyLen-1)} {
+		if err := r.BindAgentKey(tn.ID, key); !errors.Is(err, ErrBadAgentKey) {
+			t.Errorf("BindAgentKey(%d chars) = %v, want ErrBadAgentKey", len(key), err)
+		}
+	}
+	if n, _ := r.AgentKeyCount(tn.ID); n != 0 {
+		t.Errorf("%d guessable keys were bound", n)
+	}
+}
+
+// Binding and unbinding are credential changes, so they leave a trail like every other
+// one. Without it, a stolen or replaced binding is invisible after the fact.
+func TestAgentKeyBindAndUnbindAreAudited(t *testing.T) {
+	r := open(t, Options{})
+	tn, _, err := r.Register("laptop", "a@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.BindAgentKey(tn.ID, "fake-provider-key-for-tests"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := r.Audit(tn.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Field != "agent_key" || entries[0].After != "bound" {
+		t.Fatalf("audit after binding = %+v, want one agent_key/bound row", entries)
+	}
+	if err := r.UnbindAgentKeys(tn.ID); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = r.Audit(tn.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].Field != "agent_key" || entries[0].After != "unbound" {
+		t.Fatalf("audit after unbinding = %+v, want an agent_key/unbound row", entries)
+	}
+}
+
 // A disabled account's bound key must stop working, exactly as its token does.
 func TestAgentKeyRespectsDisabled(t *testing.T) {
 	r := open(t, Options{ManagerEmail: "boss@ibm.com"})
@@ -715,14 +849,15 @@ func TestAgentKeyRespectsDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.BindAgentKey(tn.ID, "k"); err != nil {
+	const key = "fake-provider-key-for-tests"
+	if err := r.BindAgentKey(tn.ID, key); err != nil {
 		t.Fatal(err)
 	}
 	off := true
 	if err := r.Update(mgr, tn.ID, Patch{Disabled: &off}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.ResolveAgentKey("k"); !errors.Is(err, ErrDisabled) {
+	if _, err := r.ResolveAgentKey(key); !errors.Is(err, ErrDisabled) {
 		t.Fatalf("disabled account's agent key = %v, want ErrDisabled", err)
 	}
 }

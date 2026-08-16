@@ -88,6 +88,32 @@ func TestVerifyPasswordAcceptsOnlyTheRightPassword(t *testing.T) {
 	}
 }
 
+// A stored hash carries its own cost parameters, which makes the row an instruction to
+// allocate memory. Unbounded, one poisoned row turns every sign-in attempt against that
+// account into a 1 GiB allocation, so anything far above our own parameters is treated
+// as corrupt rather than obeyed.
+func TestAbsurdArgonParametersAreRejectedNotObeyed(t *testing.T) {
+	good, err := HashPassword(testPass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(good, "$")
+	for _, params := range []string{
+		"m=1048576,t=3,p=2", // 1 GiB
+		"m=65536,t=10,p=2",
+		"m=65536,t=3,p=64",
+	} {
+		parts[3] = params
+		if _, _, _, _, _, err := decodeHash(strings.Join(parts, "$")); !errors.Is(err, ErrBadPassHash) {
+			t.Errorf("decodeHash accepted %s: err = %v", params, err)
+		}
+	}
+	// Our own parameters must still decode, or this rejects every real password.
+	if _, _, _, _, _, err := decodeHash(good); err != nil {
+		t.Errorf("decodeHash rejected our own parameters: %v", err)
+	}
+}
+
 func TestShortPasswordsAreRefused(t *testing.T) {
 	r := accountFixture(t)
 	if _, err := r.RegisterAccount("l", "a@ibm.com", strings.Repeat("x", MinPasswordLen-1)); !errors.Is(err, ErrBadPassword) {
@@ -155,24 +181,18 @@ func TestVerifyRegistrationVerifiesAndMintsTheFirstToken(t *testing.T) {
 	}
 }
 
-// Re-registering an address nobody has proved they own replaces the pending
-// registration. Re-registering a VERIFIED one must not: that would be a password reset
-// by anyone who knows a colleague's address.
-func TestReregisterOnlyClaimsAnUnverifiedAddress(t *testing.T) {
+// Re-registering an address that already has a password is refused, verified or not:
+// the password is the thing a claim would overwrite, so an account that has one is not
+// free to take. Re-registering a VERIFIED one must not work either — that would be a
+// password reset by anyone who knows a colleague's address.
+func TestReregisterRefusesAnAddressThatAlreadyHasAPassword(t *testing.T) {
 	r := accountFixture(t)
 	first, err := r.RegisterAccount("laptop", "a@ibm.com", testPass)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := r.RegisterAccount("desktop", "a@ibm.com", "second-password-x")
-	if err != nil {
-		t.Fatalf("re-registering an unverified address: %v", err)
-	}
-	if again.ID != first.ID {
-		t.Error("re-registering created a second account for one address")
-	}
-	if _, err := r.VerifyLogin("a@ibm.com", testPass); !errors.Is(err, ErrWrongPass) {
-		t.Error("the first password still works after the address was re-claimed")
+	if _, err := r.RegisterAccount("desktop", "a@ibm.com", "second-password-x"); !errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("re-registering an address with a password = %v, want ErrEmailTaken", err)
 	}
 
 	c, _ := r.IssueCode(first.ID, PurposeRegister)
@@ -182,8 +202,62 @@ func TestReregisterOnlyClaimsAnUnverifiedAddress(t *testing.T) {
 	if _, err := r.RegisterAccount("attacker", "a@ibm.com", "third-password-xy"); !errors.Is(err, ErrEmailTaken) {
 		t.Fatalf("a VERIFIED address was re-claimable: %v", err)
 	}
-	if _, err := r.VerifyLogin("a@ibm.com", "second-password-x"); err != nil {
-		t.Errorf("the verified account's password was overwritten: %v", err)
+	if _, err := r.VerifyLogin("a@ibm.com", testPass); err != nil {
+		t.Errorf("the account's original password was overwritten: %v", err)
+	}
+}
+
+// An account that is already IN USE must not be claimable by re-registration, even
+// though it is unverified. Every account created before the email-auth work migrates to
+// email_verified_at = 0 (see migration v3), so "unverified" alone cannot be the gate:
+// an unauthenticated caller who types a colleague's address would otherwise install
+// their own password on a live account and lock the owner out of both doors.
+func TestReregisterCannotClaimAnAccountAlreadyInUse(t *testing.T) {
+	r := accountFixture(t)
+	victim, token, err := r.Register("laptop", "victim@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exactly the state migration v3 leaves a pre-existing account in: a live token,
+	// no password, unverified.
+	if _, err := r.db.Exec(`UPDATE tenants SET email_verified_at = 0 WHERE id = ?`, victim.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.clearCache()
+
+	if _, err := r.RegisterAccount("attacker", "victim@ibm.com", "attacker-chosen-pw"); !errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("an in-use account was claimable by re-registration: err = %v", err)
+	}
+	got, err := r.Get(victim.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HasPassword {
+		t.Error("a password was installed on an account the caller does not own")
+	}
+	if _, err := r.Resolve(token); err != nil {
+		t.Errorf("the victim's token stopped working: %v", err)
+	}
+}
+
+// An account holding no password AND no token has never been usable, so the address is
+// still free to claim.
+func TestReregisterStillClaimsANeverUsableAccount(t *testing.T) {
+	r := accountFixture(t)
+	stub, _, err := r.Register("laptop", "stub@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.db.Exec(`DELETE FROM tenant_tokens WHERE tenant_id = ?`, stub.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.clearCache()
+	again, err := r.RegisterAccount("desktop", "stub@ibm.com", testPass)
+	if err != nil {
+		t.Fatalf("claiming a never-usable account: %v", err)
+	}
+	if again.ID != stub.ID {
+		t.Error("claiming created a second account for one address")
 	}
 }
 
