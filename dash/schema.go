@@ -32,9 +32,15 @@ import (
 
 // schemaVersion is bumped whenever the DDL below changes incompatibly. On a
 // mismatch Open PRESERVES the old file (renamed with its version suffix) and
-// starts a fresh database: a dashboard is a derived view, so discarding history
-// beats refusing to boot, and keeping the file beats deleting a user's data.
-const schemaVersion = 1
+// starts a fresh database: the METRICS are a derived view, so discarding them beats
+// refusing to boot, and keeping the file beats deleting a user's data.
+//
+// That reasoning does NOT extend to the whole file any more. archived_sessions and
+// tenant_spend hold facts nothing can recompute — the cold-storage index and the
+// monthly spend rollup — so Open carries them across from the preserved file (see
+// carryNonDerived in store.go, and the comments on those two tables below). Adding
+// another table that traffic cannot rebuild means adding it to nonDerivedTables.
+const schemaVersion = 5
 
 // ddl is the whole schema. Timestamps are epoch MILLISECONDS everywhere — never
 // a formatted locale string, which cannot be range-queried, sorted portably, or
@@ -51,6 +57,10 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS requests (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
   ts                 INTEGER NOT NULL,          -- epoch ms
+  -- Owning tenant; '' in single-tenant deployments. EVERY dashboard query filters
+  -- on this, forced from the authenticated principal rather than merged from the
+  -- request, so a crafted ?tenant= cannot widen a view.
+  tenant_id          TEXT    NOT NULL DEFAULT '',
   session_id         TEXT    NOT NULL DEFAULT '',
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
@@ -86,6 +96,35 @@ CREATE TABLE IF NOT EXISTS requests (
 CREATE INDEX IF NOT EXISTS idx_requests_ts       ON requests(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_session  ON requests(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_requests_model    ON requests(model, ts);
+-- Tenant-leading indexes: in a hosted deployment every query is tenant-scoped, so
+-- a tenant-leading index is the difference between a seek and a full scan once the
+-- table holds every user's traffic.
+-- archived_sessions is NOT DERIVED: it is the only index of what now lives in cold
+-- storage, so a schema bump carries it across rather than discarding it
+-- (nonDerivedTables in store.go). It is small
+-- (one row per session), permanent, and deliberately local: the dashboard must be
+-- able to show a user their whole history — including the archived part — without
+-- Box being reachable, and only fetch an object when someone actually opens it.
+--
+-- Two paths, not one, because content and metrics leave at different times: a
+-- session's transcripts are the bulk of the bytes and go early, while its numbers
+-- are small and stay queryable locally for much longer.
+CREATE TABLE IF NOT EXISTS archived_sessions (
+  session_id    TEXT PRIMARY KEY,
+  tenant_id     TEXT    NOT NULL DEFAULT '',
+  first_ts      INTEGER NOT NULL DEFAULT 0,
+  last_ts       INTEGER NOT NULL DEFAULT 0,
+  requests      INTEGER NOT NULL DEFAULT 0,
+  content_path  TEXT    NOT NULL DEFAULT '',  -- transcripts only; metrics still local
+  content_bytes INTEGER NOT NULL DEFAULT 0,
+  full_path     TEXT    NOT NULL DEFAULT '',  -- whole session; local rows deleted
+  full_bytes    INTEGER NOT NULL DEFAULT 0,
+  archived_at   INTEGER NOT NULL DEFAULT 0,
+  remote        TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_archived_tenant ON archived_sessions(tenant_id, last_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_tenant   ON requests(tenant_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_tenant_session ON requests(tenant_id, session_id, ts);
 
 -- One row per component per request: the answer to "which components earn their
 -- place". saved_gross is what the component removed THIS turn (re-counted every
@@ -110,6 +149,15 @@ CREATE INDEX IF NOT EXISTS idx_rc_comp    ON request_components(component);
 -- Before/after text of each rewritten message — the diff view's data. Stored
 -- gzip-compressed and size-capped, and skippable entirely (content capture is
 -- opt-out). Redaction happens BEFORE the insert, never on read.
+-- components names WHICH components rewrote this message, comma-separated, IN THE
+-- ORDER THEY TOUCHED IT. A list rather than a single id because several components
+-- routinely rewrite the same message in sequence, and the diff shown is their
+-- cumulative result — one id would have to pick a winner and be wrong. A reverted
+-- component is absent: the pipeline only records surviving changes.
+--
+-- Comma-joined text rather than a join table: component names are short lowercase
+-- identifiers, the list is read only when a human opens one request's diff, and a
+-- second table would be a row per component per message on the write path.
 CREATE TABLE IF NOT EXISTS request_content (
   request_id    INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
   seq           INTEGER NOT NULL,
@@ -117,9 +165,25 @@ CREATE TABLE IF NOT EXISTS request_content (
   before_tokens INTEGER NOT NULL DEFAULT 0,
   after_tokens  INTEGER NOT NULL DEFAULT 0,
   before_gz     BLOB,
-  after_gz      BLOB
+  after_gz      BLOB,
+  components    TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_content_request ON request_content(request_id);
+
+-- Monthly per-tenant spend, incremented as rows are written and NEVER deleted by
+-- retention — nor discarded by a schema bump, which carries it across
+-- (nonDerivedTables in store.go): this table is the only copy of the figure, so
+-- losing it resets every tenant's month-to-date spend to zero.
+-- The one rollup table in this schema (see the package comment), and it
+-- earns its place for a reason that is not performance: a SUM over the requests table
+-- is a spend figure the tenant can RESET by generating enough traffic to evict its own
+-- oldest rows, which turns the monthly cap into a cap on concurrent history.
+CREATE TABLE IF NOT EXISTS tenant_spend (
+  tenant_id TEXT NOT NULL,
+  month     TEXT NOT NULL,             -- 'YYYY-MM', UTC, matching the calendar invoice
+  usd       REAL NOT NULL DEFAULT 0,   -- cost_usd + cg_llm_cost_usd of every row written
+  PRIMARY KEY (tenant_id, month)
+);
 
 -- Ingested benchmark runs (deploy/harbor's summary.json + rows-*.json).
 CREATE TABLE IF NOT EXISTS bench_runs (

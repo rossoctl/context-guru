@@ -11,14 +11,24 @@ import (
 // the client is the gap that makes headroom's request log unusable past a few
 // hundred rows.
 type Filter struct {
-	Since    int64 // epoch ms, inclusive; 0 = unbounded
-	Until    int64 // epoch ms, exclusive; 0 = unbounded
-	Session  string
-	Model    string
-	Provider string
-	Agent    string
-	Preset   string
-	Mode     string
+	Since int64 // epoch ms, inclusive; 0 = unbounded
+	Until int64 // epoch ms, exclusive; 0 = unbounded
+	// Tenant scopes every query to one tenant. In a hosted deployment the API layer
+	// OVERWRITES this from the authenticated principal after parsing the request —
+	// set, never merged — so a crafted ?tenant= cannot widen a view. A manager may
+	// pass one explicitly. TenantAll opts out, and only a manager may reach it.
+	Tenant string
+	// TenantAll disables tenant scoping for a service-wide view. Separate from an
+	// empty Tenant because "" is a legitimate tenant id (every single-tenant row),
+	// so absence could not mean "everything" without making the unscoped case the
+	// default — which is the wrong default for a filter that guards other people's data.
+	TenantAll bool
+	Session   string
+	Model     string
+	Provider  string
+	Agent     string
+	Preset    string
+	Mode      string
 	// Component selects requests on which this component RAN.
 	Component string
 	// Reason selects requests by their uncompressed reason bucket; the sentinel
@@ -38,6 +48,9 @@ func (f Filter) where() (string, []any) {
 	add := func(cond string, v ...any) {
 		conds = append(conds, cond)
 		args = append(args, v...)
+	}
+	if !f.TenantAll {
+		add("r.tenant_id = ?", f.Tenant)
 	}
 	if f.Since > 0 {
 		add("r.ts >= ?", f.Since)
@@ -76,7 +89,7 @@ func (f Filter) where() (string, []any) {
 
 // requestCols is the column list Event rows are scanned from, in one place so the
 // SELECT and the Scan cannot drift.
-const requestCols = `r.id, r.ts, r.session_id, r.model, r.provider, r.agent, r.preset, r.mode, r.route,
+const requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r.agent, r.preset, r.mode, r.route,
 	r.status, r.bypassed, r.cache_aware, r.messages, r.tokens_before, r.tokens_after,
 	r.attempted_tokens, r.frozen_tokens, r.saved_unique, r.fresh_input, r.cache_read,
 	r.cache_write, r.output_tokens, r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd,
@@ -86,7 +99,7 @@ const requestCols = `r.id, r.ts, r.session_id, r.model, r.provider, r.agent, r.p
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
 	var byp, ca int
-	err := rows.Scan(&e.ID, &e.TS, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
+	err := rows.Scan(&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
 		&e.CacheWrite, &e.OutputTokens, &e.CostUSD, &e.BaselineCostUSD, &e.CGLLMCostUSD,
@@ -181,7 +194,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 	if !withContent {
 		return e, nil
 	}
-	trows, err := d.sql.Query(`SELECT path, before_tokens, after_tokens, before_gz, after_gz
+	trows, err := d.sql.Query(`SELECT path, before_tokens, after_tokens, before_gz, after_gz, components
 		FROM request_content WHERE request_id = ? ORDER BY seq`, id)
 	if err != nil {
 		return nil, err
@@ -190,13 +203,59 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 	for trows.Next() {
 		var c ContentRow
 		var bz, az []byte
-		if err := trows.Scan(&c.Path, &c.BeforeTokens, &c.AfterTokens, &bz, &az); err != nil {
+		var comps string
+		if err := trows.Scan(&c.Path, &c.BeforeTokens, &c.AfterTokens, &bz, &az, &comps); err != nil {
 			return nil, err
 		}
 		c.Before, c.After = gunzipText(bz), gunzipText(az)
+		if comps != "" {
+			c.Components = strings.Split(comps, ",")
+		}
 		e.Content = append(e.Content, c)
 	}
 	return e, trows.Err()
+}
+
+// SessionEvents returns one session's requests oldest-first, scoped by f — so a
+// hosted caller can only ever name a session that is theirs, and a session id
+// belonging to somebody else comes back as zero rows rather than as a 403 that
+// confirms it exists.
+//
+// withContent=false skips the transcript blobs entirely, which is what the list
+// views and the metrics-only states want: the content columns are the bulk of the
+// bytes and gunzipping a whole session to render a token count is pure waste.
+func (d *DB) SessionEvents(f Filter, sessionID string, withContent bool) ([]*Event, error) {
+	cond, args := f.where()
+	rows, err := d.sql.Query(`SELECT r.id FROM requests r WHERE `+cond+
+		` AND r.session_id = ? ORDER BY r.ts ASC, r.id ASC`, append(args, sessionID)...)
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]*Event, 0, len(ids))
+	for _, id := range ids {
+		// Reusing Request rather than a bespoke join: it is the tested path that
+		// assembles an Event with its components and content, and a second parallel
+		// query is one that can quietly diverge from what the request view shows.
+		e, err := d.Request(id, withContent)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, nil
 }
 
 // SessionRow is one row of the session list — the view neither reference
@@ -414,12 +473,46 @@ var facetQueries = map[string]string{
 	"reason":   "uncompressed_reason",
 }
 
+// selfBlanked returns f with ONE dimension's own value cleared.
+//
+// A dropdown must not be scoped by its own selection. With agent=bob set, scoping the
+// agent list by the whole filter returns exactly ["bob"], so that dimension becomes a
+// one-way door — the only way to reach another agent is to clear every filter, which is
+// precisely the "I have to press Clear every time" complaint. Every OTHER dimension
+// stays scoped, which is the half that earns its keep: with agent=bob set, the model
+// list should still narrow to the models bob actually used.
+//
+// Tenant and TenantAll are deliberately NOT in the switch. They are not user-facing
+// dimensions, they are the authorization scope the API layer overwrites from the
+// authenticated principal — blanking either here would turn a dropdown into a
+// cross-tenant enumeration, which is the bug this file already fixed once for the
+// component list.
+func selfBlanked(f Filter, dim string) Filter {
+	switch dim {
+	case "model":
+		f.Model = ""
+	case "provider":
+		f.Provider = ""
+	case "agent":
+		f.Agent = ""
+	case "preset":
+		f.Preset = ""
+	case "mode":
+		f.Mode = ""
+	case "reason":
+		f.Reason = ""
+	case "component":
+		f.Component = ""
+	}
+	return f
+}
+
 // Facets returns the distinct values available for each filter dimension, so the
 // UI's dropdowns show only what the data actually contains.
 func (d *DB) Facets(f Filter) (map[string][]string, error) {
-	cond, args := f.where()
 	out := map[string][]string{}
 	for name, col := range facetQueries {
+		cond, args := selfBlanked(f, name).where()
 		rows, err := d.sql.Query(
 			`SELECT DISTINCT r.`+col+` FROM requests r WHERE `+cond+` AND r.`+col+` <> '' ORDER BY 1 LIMIT 200`, args...)
 		if err != nil {
@@ -440,8 +533,14 @@ func (d *DB) Facets(f Filter) (map[string][]string, error) {
 		}
 		out[name] = vals
 	}
-	// Components come from the join table, not a requests column.
-	rows, err := d.sql.Query(`SELECT DISTINCT component FROM request_components ORDER BY 1 LIMIT 200`)
+	// Components come from the join table, not a requests column — so the scoping has
+	// to be written out via the join rather than inherited from the loop above. It was
+	// missing here, which made one tenant's dropdown an enumeration of every component
+	// every OTHER tenant runs.
+	ccond, cargs := selfBlanked(f, "component").where()
+	rows, err := d.sql.Query(`SELECT DISTINCT c.component
+		FROM request_components c JOIN requests r ON r.id = c.request_id
+		WHERE `+ccond+` ORDER BY 1 LIMIT 200`, cargs...)
 	if err != nil {
 		return nil, err
 	}

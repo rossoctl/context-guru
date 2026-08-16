@@ -1,272 +1,731 @@
-/* Design tokens first, hex never inline. headroom had to bolt ~25 light-mode
-   overrides onto hardcoded colours; defining the palette as custom properties on
-   line one means dark mode is a nine-line block instead of a retrofit. */
+/* context-guru dashboard styling.
+ *
+ * One design system, defined once at the top as custom properties. Dark mode
+ * re-declares TOKENS ONLY — never a rule — which is why it is a short block at the
+ * end of this section instead of a parallel stylesheet that drifts.
+ *
+ * Three things this file is deliberate about:
+ *   1. Density. This is an engineer's instrument panel, not a marketing page: the
+ *      spacing scale tops out low, the type scale is tight, and every number is
+ *      tabular so columns of figures line up vertically.
+ *   2. Hierarchy by SIZE AND SURFACE, not by colour. Colour is reserved for series
+ *      identity and for status; a heading is bigger, not blue.
+ *   3. One hairline border per surface, and shadows only on things that genuinely
+ *      float (drawer, tooltip). Stacked shadows on every card is what makes a
+ *      dashboard look soft and unreadable.
+ */
 :root {
   color-scheme: light dark;
 
-  --bg:        #f7f8fa;
-  --bg-raised: #ffffff;
-  --bg-sunken: #eef0f4;
-  --border:    #d7dbe2;
-  --border-soft:#e6e9ef;
-  --fg:        #14181f;
-  --fg-muted:  #5b6472;
-  --fg-faint:  #838c9a;
+  /* ── surfaces & ink ─────────────────────────────────────────────────── */
+  --bg:         #f6f7f9;
+  --bg-raised:  #ffffff;
+  --bg-sunken:  #eceef2;
+  --bg-hover:   #f1f3f7;
+  --border:     #d3d8e0;
+  --border-soft:#e4e7ed;
+  --fg:         #12161d;
+  --fg-muted:   #566072;
+  --fg-faint:   #626b79;
 
-  --accent:      #0f7d78;
-  --accent-soft: #d7efee;
-  --good:        #157f4a;
-  --good-soft:   #d6f0e1;
-  --warn:        #9a6100;
-  --warn-soft:   #fbeed2;
-  --bad:         #b3271f;
-  --bad-soft:    #fadedd;
-  --info:        #245ea8;
-  --info-soft:   #dbe7f8;
+  /* ── status. Reserved: never reused as a chart series. ───────────────── */
+  /* --accent is dark enough to clear 4.5:1 against --accent-soft, not just against
+     white: it is used as TEXT on that tint (pressed toggles, the selected gate tab),
+     and the brighter blue it replaced only reached 3.89:1 there. */
+  --accent:      #175ac8;
+  --accent-soft: #e2ecfd;
+  --good:        #14764a;
+  --good-soft:   #d8f0e3;
+  --warn:        #8a5800;
+  --warn-soft:   #fbeed0;
+  --bad:         #b02a1e;
+  --bad-soft:    #fadedb;
+  --info:        #24568f;
+  --info-soft:   #dde8f8;
 
-  /* Chart series. Sequential-neutral, distinguishable in both themes and for the
-     common colour-vision deficiencies (no red/green-only pairing). */
-  --s1: #0f7d78;
-  --s2: #245ea8;
-  --s3: #9a6100;
-  --s4: #7a4fa3;
-  --s5: #b3271f;
+  /* ── chart series, in FIXED assignment order, never cycled ────────────
+     Validated with the dataviz palette validator (light, categorical):
+     lightness band, chroma floor, adjacent CVD separation, normal-vision
+     separation and contrast vs surface all pass. Do not hand-edit a step
+     without re-running it. */
+  --s1: #3987e5;  /* blue   — the primary/"with context-guru" series */
+  --s2: #d95926;  /* orange — the comparison/baseline series */
+  --s3: #199e70;  /* aqua   — the third measure */
+  --s4: #9457d9;  /* violet — the fourth, rarely needed */
 
-  --radius: 8px;
-  --radius-sm: 5px;
-  --gap: 14px;
-  --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
-  --sans: system-ui, -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
-  --shadow: 0 1px 2px rgb(20 24 31 / 6%), 0 4px 12px rgb(20 24 31 / 5%);
+  /* ── geometry ────────────────────────────────────────────────────────── */
+  --r-sm: 4px;
+  --r:    6px;
+  --r-lg: 10px;
+
+  /* A 4px spacing rhythm. Every margin and pad in this file is one of these. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* ── type. A real scale, so "slightly bigger" is never an option. ─────── */
+  --t-micro: 11px;
+  --t-small: 12px;
+  --t-body:  13px;
+  --t-lead:  14px;
+  --t-h3:    15px;
+  --t-h2:    17px;
+  --t-h1:    21px;
+  --t-num:   26px;
+  --t-hero:  34px;
+
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  --shadow-pop: 0 1px 2px rgb(16 20 27 / 8%), 0 8px 24px rgb(16 20 27 / 10%);
+  --ring: 0 0 0 2px var(--bg-raised), 0 0 0 4px var(--accent);
 }
 
-/* Dark mode: only the tokens change. Applies both to an explicit choice and to a
-   system preference, so the toggle wins in both directions. */
+/* Dark mode. Tokens only. Applies to an explicit choice and to the system
+   preference, so the toggle wins in both directions. The series steps are a
+   SEPARATE validated set against the dark surface, not an automatic lightening —
+   flipping the light steps puts them outside the dark lightness band. */
 @media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { color-scheme: dark; }
   :root:not([data-theme="light"]) {
-    --bg: #0f1216; --bg-raised: #171b21; --bg-sunken: #10141a;
-    --border: #2b323c; --border-soft: #232a33;
-    --fg: #e7eaef; --fg-muted: #a2acba; --fg-faint: #78828f;
-    --accent: #4ecdc7; --accent-soft: #123833;
-    --good: #4bcc8a; --good-soft: #12331f;
-    --warn: #e0a83c; --warn-soft: #33280f;
-    --bad: #f2726a; --bad-soft: #3a1a18;
-    --info: #6fa8f0; --info-soft: #14243c;
-    --s1: #4ecdc7; --s2: #6fa8f0; --s3: #e0a83c; --s4: #b48ae0; --s5: #f2726a;
-    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 18px rgb(0 0 0 / 30%);
+    --bg: #0d1117; --bg-raised: #151b23; --bg-sunken: #10161d; --bg-hover: #1b222c;
+    --border: #2a313c; --border-soft: #21272f;
+    --fg: #e8ebf0; --fg-muted: #9aa4b2; --fg-faint: #8792a1;
+    --accent: #4f96f6; --accent-soft: #14243b;
+    --good: #3fbe7f; --good-soft: #10301f;
+    --warn: #dba43c; --warn-soft: #2f2510;
+    --bad: #ef6f63; --bad-soft: #351815;
+    --info: #6ba3ec; --info-soft: #13223a;
+    --s1: #4a90e2; --s2: #d9703c; --s3: #1ba676; --s4: #9a68d6;
+    --shadow-pop: 0 1px 2px rgb(0 0 0 / 50%), 0 10px 28px rgb(0 0 0 / 40%);
   }
 }
 :root[data-theme="dark"] {
-  --bg: #0f1216; --bg-raised: #171b21; --bg-sunken: #10141a;
-  --border: #2b323c; --border-soft: #232a33;
-  --fg: #e7eaef; --fg-muted: #a2acba; --fg-faint: #78828f;
-  --accent: #4ecdc7; --accent-soft: #123833;
-  --good: #4bcc8a; --good-soft: #12331f;
-  --warn: #e0a83c; --warn-soft: #33280f;
-  --bad: #f2726a; --bad-soft: #3a1a18;
-  --info: #6fa8f0; --info-soft: #14243c;
-  --s1: #4ecdc7; --s2: #6fa8f0; --s3: #e0a83c; --s4: #b48ae0; --s5: #f2726a;
-  --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 18px rgb(0 0 0 / 30%);
+  color-scheme: dark;
+  --bg: #0d1117; --bg-raised: #151b23; --bg-sunken: #10161d; --bg-hover: #1b222c;
+  --border: #2a313c; --border-soft: #21272f;
+  --fg: #e8ebf0; --fg-muted: #9aa4b2; --fg-faint: #8792a1;
+  --accent: #4f96f6; --accent-soft: #14243b;
+  --good: #3fbe7f; --good-soft: #10301f;
+  --warn: #dba43c; --warn-soft: #2f2510;
+  --bad: #ef6f63; --bad-soft: #351815;
+  --info: #6ba3ec; --info-soft: #13223a;
+  --s1: #4a90e2; --s2: #d9703c; --s3: #1ba676; --s4: #9a68d6;
+  --shadow-pop: 0 1px 2px rgb(0 0 0 / 50%), 0 10px 28px rgb(0 0 0 / 40%);
 }
 
+/* ── base ─────────────────────────────────────────────────────────────── */
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {
-  background: var(--bg); color: var(--fg);
-  font: 14px/1.5 var(--sans);
+  background: var(--bg);
+  color: var(--fg);
+  font: var(--t-body)/1.55 var(--sans);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
-h1, h2, h3 { margin: 0 0 6px; font-weight: 600; letter-spacing: -0.01em; }
-h2 { font-size: 15px; }
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.012em; line-height: 1.3; }
+h1 { font-size: var(--t-h1); }
+h2 { font-size: var(--t-h2); }
+h3 { font-size: var(--t-h3); }
+p { margin: 0; }
 a { color: var(--accent); }
-code { font-family: var(--mono); font-size: 0.92em; }
+code, kbd { font-family: var(--mono); font-size: 0.92em; }
+[hidden] { display: none !important; }
 
+/* Focus is never removed, and it is a RING rather than an outline so it reads on a
+   dark surface and on top of a coloured fill. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: var(--r-sm);
+}
 .skip { position: absolute; left: -9999px; }
-.skip:focus { left: 8px; top: 8px; background: var(--bg-raised); padding: 8px; z-index: 100; }
+.skip:focus {
+  left: var(--sp-2); top: var(--sp-2); z-index: 100;
+  background: var(--bg-raised); color: var(--fg);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border); border-radius: var(--r);
+}
 
-/* ── top bar ───────────────────────────────────────────────────────────── */
+/* Shared text utilities. These were used by the account views and never defined,
+   which is why Setup/Settings/Tenants/Archive rendered as unstyled prose. Every one
+   here is emitted by index.html or app.js; three unused ones were deleted. */
+.muted { color: var(--fg-muted); }
+.small { font-size: var(--t-small); }
+.na { color: var(--fg-faint); font-style: italic; }
+/* Screen-reader-only. Used for the action columns' headers: a th with no text is a
+   column with no name, and aria-label on a th is not a name a table walker reports. */
+/* No position:absolute here: inside a horizontally scrolling table an absolutely
+   positioned box escapes its scroll container and widens the whole page. A clipped
+   inline box costs nothing and cannot move. */
+.vh {
+  display: inline-block; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap; margin: -1px; padding: 0; border: 0;
+}
+.warn-text { color: var(--warn); }
+
+/* ── top bar ──────────────────────────────────────────────────────────── */
 .topbar {
-  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
-  padding: 10px 18px; background: var(--bg-raised);
+  display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--bg-raised);
   border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 20;
 }
-.brand { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: -0.02em; }
-.logo { width: 20px; height: 20px; color: var(--accent); }
-.tabs { display: flex; gap: 2px; flex-wrap: wrap; }
+.brand {
+  display: flex; align-items: center; gap: var(--sp-2);
+  font-size: var(--t-lead); font-weight: 640; letter-spacing: -0.02em;
+}
+.logo { width: 18px; height: 18px; color: var(--accent); flex: none; }
+.tabs { display: flex; gap: 1px; flex-wrap: wrap; }
 .tab {
-  background: none; border: 0; padding: 7px 12px; border-radius: var(--radius-sm);
-  color: var(--fg-muted); font: inherit; font-weight: 500; cursor: pointer;
+  background: none; border: 0; border-radius: var(--r-sm);
+  padding: var(--sp-1) var(--sp-3);
+  color: var(--fg-muted); font: inherit; font-size: var(--t-body); font-weight: 500;
+  cursor: pointer; white-space: nowrap;
 }
-.tab:hover { background: var(--bg-sunken); color: var(--fg); }
-.tab[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
-.live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-muted); }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-faint); display: inline-block; }
+.tab:hover { background: var(--bg-hover); color: var(--fg); }
+/* The selected tab is marked by an underline, not a coloured pill: an accent-filled
+   pill in a row of nine reads as a button someone has to press. */
+.tab[aria-selected="true"] {
+  color: var(--fg); font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--accent);
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+}
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--sp-3); }
+.live {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  font-size: var(--t-small); color: var(--fg-muted); font-variant-numeric: tabular-nums;
+}
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-faint); flex: none; }
 .live.on .dot { background: var(--good); box-shadow: 0 0 0 3px var(--good-soft); }
-.live.off .dot { background: var(--bad); }
-button.ghost {
-  background: var(--bg-raised); color: var(--fg-muted); font: inherit;
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 5px 10px; cursor: pointer;
+.live.off .dot { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+.whoami {
+  font-size: var(--t-small); color: var(--fg-muted);
+  max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-button.ghost:hover { color: var(--fg); border-color: var(--fg-faint); }
-button.ghost:disabled { opacity: 0.45; cursor: default; }
 
-/* ── filters ───────────────────────────────────────────────────────────── */
+/* ── buttons ──────────────────────────────────────────────────────────── */
+button.ghost, button.primary, button.subtle {
+  font: inherit; font-size: var(--t-body); cursor: pointer;
+  border-radius: var(--r-sm); white-space: nowrap;
+}
+button.ghost {
+  background: var(--bg-raised); color: var(--fg-muted);
+  border: 1px solid var(--border);
+  padding: var(--sp-1) var(--sp-3);
+}
+button.ghost:hover { color: var(--fg); background: var(--bg-hover); border-color: var(--fg-faint); }
+button.ghost[aria-pressed="true"] {
+  background: var(--accent-soft); color: var(--accent);
+  border-color: var(--accent); font-weight: 600;
+}
+button.ghost:disabled { opacity: 0.4; cursor: default; background: var(--bg-raised); }
+button.ghost:disabled:hover { color: var(--fg-muted); border-color: var(--border); }
+button.ghost.small { padding: 2px var(--sp-2); font-size: var(--t-small); }
+button.primary {
+  background: var(--accent); color: #fff; border: 1px solid transparent;
+  padding: var(--sp-2) var(--sp-4); font-weight: 600;
+}
+button.primary:hover { filter: brightness(1.08); }
+button.subtle {
+  background: none; border: 0; color: var(--accent);
+  padding: 2px var(--sp-1); font-size: var(--t-small); font-weight: 600;
+}
+button.subtle:hover { text-decoration: underline; }
+
+/* ── filters ──────────────────────────────────────────────────────────── */
 .filters {
-  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
-  padding: 10px 18px; background: var(--bg-sunken);
-  border-bottom: 1px solid var(--border-soft);
+  display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center;
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 41px; z-index: 19;
 }
 .filters input, .filters select {
-  background: var(--bg-raised); color: var(--fg); font: inherit;
-  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 8px;
-  max-width: 220px;
+  background: var(--bg-raised); color: var(--fg);
+  font: inherit; font-size: var(--t-small);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: var(--sp-1) var(--sp-2); max-width: 190px;
 }
-.filters input[type="search"] { min-width: 220px; flex: 1 1 220px; }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.filters input[type="search"] { min-width: 200px; flex: 1 1 200px; max-width: 320px; }
+.filters select:hover, .filters input:hover { border-color: var(--fg-faint); }
 
-/* ── layout ────────────────────────────────────────────────────────────── */
-main { padding: var(--gap) 18px 60px; max-width: 1600px; margin: 0 auto; }
-.panel {
-  background: var(--bg-raised); border: 1px solid var(--border-soft);
-  border-radius: var(--radius); padding: 14px 16px; margin-bottom: var(--gap);
-  box-shadow: var(--shadow);
+/* Active-filter chips. Their own row under the controls, full width, so adding one
+   never reflows the dropdowns — and so the set reads as a sentence rather than as more
+   controls. Hidden entirely when nothing is filtered. */
+.chips { flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.chip.removable {
+  cursor: pointer; font-family: var(--sans); font-size: var(--t-small);
+  gap: var(--sp-1); padding: 1px var(--sp-1) 1px var(--sp-2);
+  background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent); font-weight: 600;
 }
-.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); gap: var(--gap); }
+.chip.removable .x { color: var(--fg-muted); font-size: var(--t-micro); padding: 0 2px; }
+.chip.removable:hover { background: var(--bad-soft); border-color: color-mix(in srgb, var(--bad) 40%, transparent); color: var(--bad); }
+.chip.removable:hover .x { color: var(--bad); }
+
+/* ── layout ───────────────────────────────────────────────────────────── */
+main { padding: var(--sp-4) var(--sp-4) var(--sp-6); max-width: 1680px; margin: 0 auto; }
+.panel, .card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  padding: var(--sp-4);
+  margin-bottom: var(--sp-4);
+}
+/* A card head puts the title and its one status/action on the same baseline. This
+   was used by four views and never defined. */
+.card-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--sp-3); flex-wrap: wrap;
+  margin-bottom: var(--sp-2);
+}
+.card-head:not(:first-child) { margin-top: var(--sp-5); }
+.card > .card-head > h2, .panel > h2 { flex: 1 1 auto; }
+
+/* Section rule: a label for a GROUP of panels or tiles. This is the piece that was
+   missing from Overview — twenty equal tiles in one grid have no hierarchy at all. */
+.section {
+  display: flex; align-items: baseline; gap: var(--sp-3);
+  margin: var(--sp-5) 0 var(--sp-2);
+}
+.section:first-child { margin-top: 0; }
+.section h2 { font-size: var(--t-h3); }
+.section .section-note { color: var(--fg-muted); font-size: var(--t-small); }
+
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: var(--sp-4); }
 .grid-2 .panel { margin-bottom: 0; }
-.note { color: var(--fg-muted); font-size: 12.5px; margin: 0 0 10px; max-width: 78ch; }
-.banner { padding: 10px 14px; margin: var(--gap) 18px 0; border-radius: var(--radius); font-size: 13px; }
-.banner.warn { background: var(--warn-soft); color: var(--warn); border: 1px solid currentColor; }
+.note { color: var(--fg-muted); font-size: var(--t-small); margin: var(--sp-1) 0 var(--sp-3); max-width: 82ch; }
+.panel > h2 + .note { margin-top: var(--sp-1); }
 
-/* ── stat tiles ────────────────────────────────────────────────────────── */
-.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); gap: 10px; margin-bottom: var(--gap); }
+.banner {
+  padding: var(--sp-3) var(--sp-4); margin: var(--sp-3) var(--sp-4) 0;
+  border-radius: var(--r); font-size: var(--t-body); line-height: 1.5;
+  border: 1px solid;
+}
+.banner.warn { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.banner.ok   { background: var(--good-soft); color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+.banner.bad  { background: var(--bad-soft);  color: var(--bad);  border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+
+/* ── stat tiles ───────────────────────────────────────────────────────── */
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: var(--sp-2); margin-bottom: var(--sp-2); }
 .tile {
   background: var(--bg-raised); border: 1px solid var(--border-soft);
-  border-radius: var(--radius); padding: 11px 13px; box-shadow: var(--shadow);
+  border-radius: var(--r); padding: var(--sp-3);
+  display: flex; flex-direction: column; gap: 2px;
 }
-.tile .k { color: var(--fg-muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; }
-.tile .v { font-size: 21px; font-weight: 620; font-variant-numeric: tabular-nums; margin-top: 3px; letter-spacing: -0.02em; }
-.tile .s { color: var(--fg-faint); font-size: 11.5px; margin-top: 2px; }
+/* Label above, number below, and the NUMBER is the thing you see. Sentence case:
+   uppercase-with-tracking on twenty labels is a lot of visual noise for no gain. */
+.tile .k { color: var(--fg-muted); font-size: var(--t-small); line-height: 1.35; }
+.tile .v {
+  font-size: var(--t-num); font-weight: 600; letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums; line-height: 1.15;
+}
+.tile .s { color: var(--fg-faint); font-size: var(--t-micro); line-height: 1.4; }
 .tile.good .v { color: var(--good); }
-.tile.bad .v { color: var(--bad); }
+.tile.bad .v  { color: var(--bad); }
 .tile.accent .v { color: var(--accent); }
 
-/* ── bars (denominators, distributions, waterfall) ─────────────────────── */
-.bars { display: grid; gap: 8px; }
-.bar-row { display: grid; grid-template-columns: minmax(150px, 34%) 1fr auto; gap: 10px; align-items: center; }
-.bar-label { font-size: 12.5px; color: var(--fg-muted); }
-.bar-track { background: var(--bg-sunken); border-radius: 99px; height: 12px; overflow: hidden; position: relative; }
-.bar-fill { height: 100%; background: var(--s1); border-radius: 99px; }
+/* The headline row: the three numbers that answer "is this thing working". Bigger,
+   and on their own row above the rest. */
+.tiles.headline { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: var(--sp-3); margin-bottom: var(--sp-3); }
+.tiles.headline .tile { padding: var(--sp-4); }
+.tiles.headline .v { font-size: var(--t-hero); }
+.tiles.headline .k { font-size: var(--t-body); }
+
+/* ── bars (denominators, distributions, waterfall, component savings) ─── */
+.bars { display: grid; gap: var(--sp-2); }
+.bar-row { display: grid; grid-template-columns: minmax(140px, 30%) 1fr auto; gap: var(--sp-3); align-items: center; }
+.bar-label { font-size: var(--t-small); color: var(--fg); }
+.bar-track { background: var(--bg-sunken); border-radius: var(--r-sm); height: 10px; overflow: hidden; }
+/* Rounded on the data end only, square against the baseline: a pill-shaped bar
+   reads as shorter than it is at small values. */
+.bar-fill { height: 100%; background: var(--s1); border-radius: 0 var(--r-sm) var(--r-sm) 0; min-width: 2px; }
 .bar-fill.neg { background: var(--bad); }
-.bar-val { font-variant-numeric: tabular-nums; font-size: 12.5px; font-weight: 600; min-width: 84px; text-align: right; }
-.bar-desc { grid-column: 1 / -1; color: var(--fg-faint); font-size: 11.5px; margin: -3px 0 6px; max-width: 90ch; }
-.na { color: var(--fg-faint); font-style: italic; }
+.bar-val {
+  font-variant-numeric: tabular-nums; font-size: var(--t-small); font-weight: 600;
+  min-width: 92px; text-align: right;
+}
+.bar-desc { grid-column: 1 / -1; color: var(--fg-muted); font-size: var(--t-micro); margin: -2px 0 var(--sp-2); max-width: 92ch; line-height: 1.5; }
 
-/* ── tables ────────────────────────────────────────────────────────────── */
-/* Wide content scrolls INSIDE its own container; the page body must never scroll
-   horizontally. min-width:0 is what actually lets a grid/flex child shrink below
-   its content's intrinsic width — without it the table pushes the panel wider than
-   the viewport and the whole page scrolls sideways on a phone. */
+/* ── tables ───────────────────────────────────────────────────────────── */
+/* Wide content scrolls INSIDE its own container; the page body never scrolls
+   sideways. min-width:0 is what actually lets a grid child shrink below its
+   content's intrinsic width. */
 .tblwrap { overflow-x: auto; max-width: 100%; }
-.panel, .grid-2, .tiles, main { min-width: 0; }
-.panel > * { min-width: 0; }
-.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
-.tbl th, .tbl td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--border-soft); white-space: nowrap; }
-.tbl th { color: var(--fg-muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.03em; position: sticky; top: 0; background: var(--bg-raised); }
+.panel, .card, .grid-2, .tiles, main { min-width: 0; }
+.panel > *, .card > * { min-width: 0; }
+.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-body); }
+.tbl th, .tbl td {
+  text-align: left; padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-soft); white-space: nowrap;
+}
+.tbl th {
+  color: var(--fg-muted); font-weight: 600; font-size: var(--t-micro);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  position: sticky; top: 0; z-index: 1;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
 .tbl td.num, .tbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
-.tbl tbody tr:hover { background: var(--bg-sunken); }
+.tbl tbody tr:hover { background: var(--bg-hover); }
+.tbl tbody tr:last-child td { border-bottom: 0; }
 .tbl tbody tr.click { cursor: pointer; }
-.tbl.compact th, .tbl.compact td { padding: 5px 8px; }
-/* Long session ids / long content must never blow out the layout. */
-.trunc { max-width: 190px; overflow: hidden; text-overflow: ellipsis; display: inline-block; vertical-align: bottom; font-family: var(--mono); font-size: 12px; }
-.pager { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: 12.5px; color: var(--fg-muted); }
+.tbl.compact th, .tbl.compact td { padding: var(--sp-1) var(--sp-2); }
+.trunc {
+  max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
+  display: inline-block; vertical-align: bottom;
+  font-family: var(--mono); font-size: var(--t-small);
+}
+.pager {
+  display: flex; align-items: center; gap: var(--sp-3); margin-top: var(--sp-3);
+  font-size: var(--t-small); color: var(--fg-muted); font-variant-numeric: tabular-nums;
+}
+.row-actions { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
 
-.pill { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px; font-weight: 600; }
-.pill.complete { background: var(--good-soft); color: var(--good); }
+/* Status pills. Always a WORD, never colour alone. */
+.pill {
+  display: inline-block; padding: 1px var(--sp-2); border-radius: var(--r-sm);
+  font-size: var(--t-micro); font-weight: 600; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.pill.complete, .pill.hit { background: var(--good-soft); color: var(--good); }
 .pill.partial  { background: var(--warn-soft); color: var(--warn); }
 .pill.missing  { background: var(--bad-soft); color: var(--bad); }
-.pill.hit        { background: var(--good-soft); color: var(--good); }
 .pill.cold_start { background: var(--info-soft); color: var(--info); }
 .pill.ttl_expiry, .pill.prefix_change, .pill.unknown { background: var(--warn-soft); color: var(--warn); }
-.pill.neutral { background: var(--bg-sunken); color: var(--fg-muted); }
+.pill.neutral { background: var(--bg-sunken); color: var(--fg-muted); border-color: var(--border-soft); }
 
-/* ── charts ────────────────────────────────────────────────────────────── */
-.chart { width: 100%; min-height: 200px; position: relative; }
+/* ── charts ───────────────────────────────────────────────────────────── */
+/* No min-height: the SVG's viewBox is now sized to this element's real width by geom(),
+   so its intrinsic height is already correct and a floor would only letterbox it. The
+   empty state supplies its own height. */
+.chart { width: 100%; position: relative; }
 .chart svg { width: 100%; height: auto; display: block; overflow: visible; }
 .axis { stroke: var(--border); stroke-width: 1; }
 .gridline { stroke: var(--border-soft); stroke-width: 1; }
-.axis-text { fill: var(--fg-faint); font-size: 10px; font-family: var(--sans); }
-.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--fg-muted); margin-top: 6px; }
-.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 5px; vertical-align: -1px; }
+.axis-text { fill: var(--fg-faint); font-size: var(--t-micro); font-family: var(--sans); }
+.mark-label { fill: var(--fg-muted); font-size: var(--t-micro); font-family: var(--sans); font-weight: 600; }
+.legend {
+  display: flex; gap: var(--sp-4); flex-wrap: wrap;
+  font-size: var(--t-small); color: var(--fg-muted); margin-top: var(--sp-2);
+}
+.legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-right: var(--sp-1); vertical-align: -1px; }
 .tooltip {
   position: absolute; pointer-events: none; opacity: 0; transition: opacity .1s;
-  background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 7px 9px; font-size: 12px; box-shadow: var(--shadow); z-index: 30; white-space: pre-line;
-  font-variant-numeric: tabular-nums;
+  background: var(--bg-raised); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--r);
+  padding: var(--sp-2); font-size: var(--t-small); box-shadow: var(--shadow-pop);
+  z-index: 30; white-space: pre-line; font-variant-numeric: tabular-nums;
+  max-width: 260px;
 }
 .tooltip.show { opacity: 1; }
 
-/* ── empty / loading ───────────────────────────────────────────────────── */
-.empty { color: var(--fg-muted); text-align: center; padding: 34px 16px; font-size: 13px; }
-.empty strong { display: block; color: var(--fg); font-size: 14.5px; margin-bottom: 4px; }
-.skel { background: linear-gradient(90deg, var(--bg-sunken) 25%, var(--border-soft) 50%, var(--bg-sunken) 75%);
-  background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: var(--radius-sm); height: 14px; }
-@keyframes shimmer { to { background-position: -200% 0; } }
-@media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
-
-/* ── drawer ────────────────────────────────────────────────────────────── */
-/* `hidden` must actually hide: a `display: flex`/`block` rule overrides the
-   attribute's UA `display: none`, which left the invisible drawer swallowing every
-   click on the page underneath it. Restate it explicitly. */
-[hidden] { display: none !important; }
-.scrim { position: fixed; inset: 0; background: rgb(0 0 0 / 42%); z-index: 40; }
-.drawer {
-  position: fixed; top: 0; right: 0; bottom: 0; width: min(920px, 100%);
-  background: var(--bg); border-left: 1px solid var(--border); z-index: 41;
-  display: flex; flex-direction: column;
+/* ── empty / loading / error ───────────────────────────────────────────── */
+.empty {
+  color: var(--fg-muted); text-align: center;
+  padding: var(--sp-5) var(--sp-4); font-size: var(--t-small); line-height: 1.6;
 }
-.drawer-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-raised); }
-.drawer-head h2 { margin: 0; }
-.drawer-body { overflow-y: auto; padding: 14px 16px 60px; }
-.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px 16px; margin-bottom: 14px; }
-.kv div { font-size: 12.5px; }
+.empty strong { display: block; color: var(--fg); font-size: var(--t-lead); margin-bottom: var(--sp-1); font-weight: 600; }
+.empty .empty-action { margin-top: var(--sp-3); }
+/* An error is an empty state that is not the user's fault, so it is marked as such
+   rather than looking like "no data yet". */
+.empty.error strong { color: var(--bad); }
+.skel {
+  background: linear-gradient(90deg, var(--bg-sunken) 25%, var(--border-soft) 50%, var(--bg-sunken) 75%);
+  background-size: 200% 100%; animation: shimmer 1.2s linear infinite;
+  border-radius: var(--r-sm); height: 12px;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .skel { animation: none; }
+  * { transition-duration: 0.01ms !important; }
+}
+
+/* ── drawer ───────────────────────────────────────────────────────────── */
+.scrim { position: fixed; inset: 0; background: rgb(6 9 14 / 50%); z-index: 40; }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(1080px, 100%);
+  background: var(--bg); border-left: 1px solid var(--border);
+  z-index: 41; display: flex; flex-direction: column; box-shadow: var(--shadow-pop);
+}
+.drawer-head {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border); background: var(--bg-raised);
+}
+.drawer-head h2 { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drawer-body { overflow-y: auto; padding: var(--sp-4) var(--sp-4) var(--sp-6); }
+.drawer-body > h2 { margin: var(--sp-5) 0 var(--sp-2); font-size: var(--t-h3); }
+.drawer-body > h2:first-child { margin-top: 0; }
+
+.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(184px, 1fr)); gap: var(--sp-2) var(--sp-4); margin-bottom: var(--sp-3); }
+.kv > div { font-size: var(--t-small); min-width: 0; }
 .kv .k { color: var(--fg-muted); }
 .kv .v { font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 
-/* ── diff view ─────────────────────────────────────────────────────────── */
-.diff { border: 1px solid var(--border-soft); border-radius: var(--radius); margin-bottom: 12px; overflow: hidden; background: var(--bg-raised); }
-.diff summary { padding: 8px 12px; cursor: pointer; font-size: 12.5px; background: var(--bg-sunken); font-family: var(--mono); }
-/* A collapsed benchmark run: name in the app font, metadata muted beside it. */
+/* ── diff view ────────────────────────────────────────────────────────── */
+.diff {
+  border: 1px solid var(--border-soft); border-radius: var(--r);
+  margin-bottom: var(--sp-3); overflow: hidden; background: var(--bg-raised);
+}
+.diff > summary {
+  padding: var(--sp-2) var(--sp-3); cursor: pointer; font-size: var(--t-small);
+  background: var(--bg-sunken); font-family: var(--mono);
+}
+.diff > summary:hover { background: var(--bg-hover); }
+.diff > summary::marker { color: var(--fg-faint); }
 .panel.diff { padding: 0; }
 .panel.diff > summary { font-family: var(--sans); color: var(--fg-muted); }
-.panel.diff > summary strong { color: var(--fg); font-size: 14px; margin-right: 4px; }
-.diff summary::marker { color: var(--fg-faint); }
-.difftoolbar { display: flex; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--border-soft); align-items: center; font-size: 12px; color: var(--fg-muted); }
-.diffbody { font-family: var(--mono); font-size: 12px; line-height: 1.45; overflow-x: auto; max-height: 460px; overflow-y: auto; }
-.dl { display: grid; grid-template-columns: 46px 46px 1fr; }
-.dl > span { padding: 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.dl .ln { color: var(--fg-faint); text-align: right; user-select: none; background: var(--bg-sunken); font-size: 11px; }
-.dl.add { background: var(--good-soft); }
-.dl.del { background: var(--bad-soft); }
+.panel.diff > summary strong { color: var(--fg); font-size: var(--t-lead); margin-right: var(--sp-1); }
+
+/* The diff toolbar. View mode is a set of toggles with a pressed state, so which
+   view you are in is visible without reading the content. */
+.difftoolbar {
+  display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: var(--t-small); color: var(--fg-muted);
+}
+.difftoolbar .spacer { flex: 1 1 auto; }
+.difftoolbar .tally { font-variant-numeric: tabular-nums; }
+.difftoolbar .tally .add { color: var(--good); font-weight: 600; }
+.difftoolbar .tally .del { color: var(--bad); font-weight: 600; }
+
+.diffbody {
+  font-family: var(--mono); font-size: var(--t-small); line-height: 1.5;
+  overflow-x: auto; max-height: 480px; overflow-y: auto;
+  background: var(--bg-raised);
+}
+.dl { display: grid; grid-template-columns: 44px 44px 1fr; }
+.dl > span { padding: 0 var(--sp-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.dl .ln {
+  color: var(--fg-faint); text-align: right; user-select: none;
+  background: var(--bg-sunken); font-size: var(--t-micro);
+  border-right: 1px solid var(--border-soft);
+}
+/* A left edge bar as well as a tint: the tint alone is the only cue in a forced-colours
+   or printed diff, and +/- is already in the text prefix. */
+.dl.add { background: var(--good-soft); box-shadow: inset 3px 0 0 var(--good); }
+.dl.del { background: var(--bad-soft); box-shadow: inset 3px 0 0 var(--bad); }
 .dl.add .tx::before { content: "+ "; color: var(--good); }
 .dl.del .tx::before { content: "- "; color: var(--bad); }
 .dl.ctx .tx::before { content: "  "; }
 .dl.gap { background: var(--bg-sunken); color: var(--fg-faint); font-style: italic; }
-.side { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border-soft); }
-.side > pre { margin: 0; padding: 8px 10px; background: var(--bg-raised); overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 420px; }
+.dl.gap .tx { font-size: var(--t-micro); }
 
-/* ── small viewport ────────────────────────────────────────────────────── */
-@media (max-width: 720px) {
-  .topbar { gap: 10px; padding: 8px 12px; }
-  .tabs { order: 3; width: 100%; overflow-x: auto; }
-  .filters { padding: 8px 12px; }
-  .filters input, .filters select { max-width: none; flex: 1 1 130px; }
-  main { padding: 10px 12px 50px; }
-  .tiles { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+/* Side by side is ONE grid with one row per line pair, inside ONE scroller.
+   Two <pre> columns cannot stay aligned: these lines wrap, so a 1,961-character
+   deletion is 540px tall beside its 18px replacement even though the line COUNTS
+   match — and two scroll boxes desynchronise as soon as either is scrolled. As grid
+   cells the taller of a pair sets the shared row height and both top-align, so
+   alignment is a property of the layout instead of a computation to keep true. */
+.side-scroll { max-height: 440px; overflow: auto; background: var(--bg-raised); }
+.side {
+  /* Two columns at EVERY width. Stacking them on a narrow screen used to be the graceful
+     option, but with one row per line pair it interleaves before/after cells under two
+     headers that no longer sit above their own content — so instead the columns keep a
+     floor width and the pane scrolls sideways inside itself (the page never does). */
+  display: grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); column-gap: 1px;
+  background: var(--border-soft);
+  font-size: var(--t-small); line-height: 1.5;
+}
+.side > .side-h {
+  position: sticky; top: 0; z-index: 1;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--t-micro); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--fg-muted); background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border-soft);
+}
+/* Side-by-side keeps the same tint as the inline view, applied per line, so the two
+   modes are the same diff shown two ways rather than two different renderings. */
+.side > .sl {
+  margin: 0; padding: 0 var(--sp-2); min-width: 0; min-height: 1.5em;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--bg-raised);
+}
+.side > .sl.add { background: var(--good-soft); }
+.side > .sl.del { background: var(--bad-soft); }
+.side > .sl.pad { background: var(--bg-sunken); color: var(--fg-faint); }
+/* The tint is the only cue in a forced-colours or printed diff, so the sign is in the
+   text too — same reasoning as the inline view above. */
+.side > .sl.add::before { content: "+ "; color: var(--good); }
+.side > .sl.del::before { content: "- "; color: var(--bad); }
+.side > .sl.ctx::before { content: "  "; }
+
+/* One side on its own (the Before / After modes): plain text, its own scroller. */
+.oneside { background: var(--bg-raised); }
+.oneside pre {
+  margin: 0; padding: var(--sp-2) var(--sp-3); max-height: 440px; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: var(--t-small); line-height: 1.5;
+}
+.oneside .sl { display: block; padding: 0 var(--sp-1); }
+.oneside .sl.add { background: var(--good-soft); }
+.oneside .sl.del { background: var(--bad-soft); }
+.oneside .sl.pad { background: var(--bg-sunken); color: var(--fg-faint); }
+
+/* Component attribution chips beside a changed span. */
+.attrib { display: flex; flex-wrap: wrap; gap: var(--sp-1); align-items: center; }
+.chip {
+  display: inline-flex; align-items: center; gap: var(--sp-1);
+  padding: 1px var(--sp-2); border-radius: var(--r-sm);
+  background: var(--bg-sunken); border: 1px solid var(--border-soft);
+  font-family: var(--mono); font-size: var(--t-micro); color: var(--fg);
+}
+.chip i { width: 7px; height: 7px; border-radius: 2px; flex: none; }
+.chip.guess { border-style: dashed; color: var(--fg-muted); }
+
+/* The state strip above a transcript: hot / cold / not captured / not permitted. */
+.state {
+  display: flex; align-items: flex-start; gap: var(--sp-3); flex-wrap: wrap;
+  padding: var(--sp-3); margin-bottom: var(--sp-3);
+  border: 1px solid var(--border); border-radius: var(--r);
+  background: var(--bg-raised); font-size: var(--t-small);
+}
+.state .state-body { flex: 1 1 320px; min-width: 0; }
+.state .state-body strong { display: block; font-size: var(--t-body); margin-bottom: 2px; }
+/* A second paragraph in one of these panels is a separate fact (most often "this request
+   was compacted anyway"), so it gets its own line rather than running on. */
+.state .state-body span { display: block; }
+.state .state-body span + span { margin-top: var(--sp-2); }
+.state.cold { background: var(--info-soft); border-color: color-mix(in srgb, var(--info) 35%, transparent); }
+.state.cold strong { color: var(--info); }
+.state.blocked { background: var(--bg-sunken); }
+.state.failed { background: var(--bad-soft); border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
+.state.failed strong { color: var(--bad); }
+.state code { overflow-wrap: anywhere; }
+
+/* ── gate ─────────────────────────────────────────────────────────────── */
+.gate { display: flex; align-items: center; justify-content: center; min-height: 72vh; padding: var(--sp-5); }
+.gate-card {
+  width: 100%; max-width: 400px;
+  background: var(--bg-raised); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: var(--sp-6);
+}
+.gate-card h1 { margin-bottom: var(--sp-1); }
+.gate-tabs { display: flex; gap: var(--sp-1); margin: var(--sp-5) 0 var(--sp-3); }
+.gate-tab {
+  flex: 1; padding: var(--sp-2); font: inherit; font-size: var(--t-body);
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm);
+  color: var(--fg-muted); cursor: pointer;
+}
+.gate-tab[aria-selected="true"] {
+  background: var(--accent-soft); border-color: var(--accent);
+  color: var(--accent); font-weight: 600;
+}
+/* Nested groups (the invite-code field) inherit the column flow, so a conditional
+   field is not visibly a different shape from an unconditional one. */
+.gate-form, .gate-form > div { display: flex; flex-direction: column; gap: var(--sp-1); }
+.gate-card > .state { margin: var(--sp-3) 0 0; }
+.gate-form label { font-size: var(--t-small); color: var(--fg-muted); margin-top: var(--sp-2); font-weight: 600; }
+.gate-form input {
+  padding: var(--sp-2) var(--sp-3); font: inherit;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--fg);
+}
+.gate-form button.primary { margin-top: var(--sp-4); }
+.gate-error {
+  margin-top: var(--sp-4); padding: var(--sp-2) var(--sp-3); border-radius: var(--r);
+  background: var(--bad-soft); color: var(--bad); font-size: var(--t-small);
+  border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent);
+}
+
+/* ── setup ────────────────────────────────────────────────────────────── */
+.setup-block { margin: var(--sp-4) 0; }
+.setup-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.setup-head h3 { margin: 0; }
+pre.code {
+  margin: var(--sp-2) 0 0; padding: var(--sp-3);
+  background: var(--bg-sunken); border: 1px solid var(--border-soft); border-radius: var(--r);
+  overflow-x: auto;              /* a long host scrolls the block, never the page */
+  font-family: var(--mono); font-size: var(--t-small); line-height: 1.6;
+}
+
+/* ── settings ─────────────────────────────────────────────────────────── */
+.field { margin: var(--sp-5) 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.field > label { font-size: var(--t-small); color: var(--fg-muted); font-weight: 600; }
+.field select, .field textarea {
+  padding: var(--sp-2) var(--sp-3); font: inherit;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--fg);
+  max-width: 520px;
+}
+.field textarea { font-family: var(--mono); font-size: var(--t-small); max-width: none; line-height: 1.6; }
+details.field > summary { font-size: var(--t-small); color: var(--fg-muted); font-weight: 600; cursor: pointer; margin-bottom: var(--sp-2); }
+.hint { margin: 0; font-size: var(--t-small); color: var(--fg-muted); line-height: 1.55; max-width: 82ch; }
+.comp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); gap: var(--sp-1) var(--sp-4); }
+.comp { display: flex; align-items: baseline; gap: var(--sp-2); font-size: var(--t-body); cursor: pointer; flex-wrap: wrap; }
+.comp-name { font-family: var(--mono); }
+.comp-warn { color: var(--fg-muted); font-size: var(--t-micro); flex: 1 0 100%; padding-left: 22px; }
+.actions { display: flex; gap: var(--sp-2); align-items: center; margin-top: var(--sp-3); }
+
+/* Which configuration is in force, and the one button that changes that. Its own class
+   rather than .banner: that one is page-level (page margins, status colours), and this
+   states a fact about the form it sits in, not an alert. */
+.cfg-state {
+  display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; justify-content: space-between;
+  margin: var(--sp-5) 0; padding: var(--sp-3);
+  background: var(--bg-sunken); border: 1px solid var(--border-soft); border-radius: var(--r);
+  font-size: var(--t-small); line-height: 1.55;
+}
+.cfg-state > div { max-width: 82ch; }
+/* A read-only control must look inert, and still be legible: dimming to invisible is
+   how "your configuration is gone" gets read back into a page that says otherwise. */
+.field select:disabled, .field textarea:disabled { color: var(--fg-muted); cursor: not-allowed; }
+.comp input:disabled + .comp-name { color: var(--fg-muted); }
+.comp:has(input:disabled) { cursor: default; }
+
+/* Spend meter. Warns past 90%, because the next thing that happens is refused requests. */
+.spend { margin: 0 0 var(--sp-5); }
+.spend-label { font-size: var(--t-body); margin-bottom: var(--sp-2); font-variant-numeric: tabular-nums; font-weight: 600; }
+.meter { height: 8px; background: var(--bg-sunken); border: 1px solid var(--border-soft); border-radius: var(--r-sm); overflow: hidden; }
+.meter > i { display: block; height: 100%; background: var(--s1); border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+.meter > i.hot { background: var(--warn); }
+
+/* ── shared grid tables (tokens, audit, tenants, archive) ─────────────── */
+table.grid { width: 100%; border-collapse: collapse; font-size: var(--t-body); }
+table.grid th, table.grid td {
+  text-align: left; padding: var(--sp-2) var(--sp-3) var(--sp-2) 0;
+  border-bottom: 1px solid var(--border-soft); vertical-align: top;
+}
+table.grid th {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--fg-muted); font-weight: 600; border-bottom: 1px solid var(--border);
+}
+table.grid tr:last-child td { border-bottom: 0; }
+table.grid tr.revoked { opacity: 0.55; }
+td.clip, code.clip {
+  max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; display: inline-block; vertical-align: bottom;
+}
+.card > div[id$="-list"] { overflow-x: auto; }
+
+/* ── narrower viewports ───────────────────────────────────────────────────
+   The dashboard's real floor is a laptop, so 1100px is where the two-column
+   panel grid gives up and 900px is where the chrome reflows. Below that it
+   stays usable rather than pretty. */
+@media (max-width: 1100px) {
   .grid-2 { grid-template-columns: 1fr; }
-  .side { grid-template-columns: 1fr; }
-  .bar-row { grid-template-columns: 1fr; gap: 3px; }
-  .bar-val { text-align: left; }
+  .tiles { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .tiles.headline { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+}
+@media (max-width: 900px) {
+  .topbar { gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); }
+  .tabs { order: 3; width: 100%; overflow-x: auto; padding-bottom: 2px; }
+  .filters { padding: var(--sp-2) var(--sp-3); position: static; }
+  .filters input, .filters select { max-width: none; flex: 1 1 140px; }
+  main { padding: var(--sp-3) var(--sp-3) var(--sp-5); }
+  .banner { margin: var(--sp-3) var(--sp-3) 0; }
+  .tiles.headline .v { font-size: var(--t-num); }
+}
+@media (max-width: 620px) {
+  .tiles { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
+  .bar-row { grid-template-columns: 1fr; gap: 2px; }
+  .bar-val { text-align: left; min-width: 0; }
+  .dl { grid-template-columns: 30px 1fr; }
+  .dl .ln:nth-child(2) { display: none; }
 }

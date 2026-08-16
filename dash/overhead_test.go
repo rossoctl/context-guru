@@ -56,7 +56,7 @@ func BenchmarkObserve(b *testing.B) {
 	defer r.Close()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r.Observe("session", "model", int64(i))
+		r.Observe("", "session", "model", int64(i))
 	}
 }
 

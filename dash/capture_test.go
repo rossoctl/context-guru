@@ -93,14 +93,14 @@ func TestObserveDetectsColdStartOncePerSessionAndModel(t *testing.T) {
 	}
 	defer r.Close()
 
-	seenSess, seenModel, since := r.Observe("s1", "m1", 1000)
+	seenSess, seenModel, since := r.Observe("", "s1", "m1", 1000)
 	if seenSess || seenModel {
 		t.Error("first request for a session+model must report both unseen (cold start)")
 	}
 	if since != 0 {
 		t.Errorf("since = %d on a first request; want 0", since)
 	}
-	seenSess, seenModel, since = r.Observe("s1", "m1", 4000)
+	seenSess, seenModel, since = r.Observe("", "s1", "m1", 4000)
 	if !seenSess || !seenModel {
 		t.Error("second request must report the session and model as seen")
 	}
@@ -108,7 +108,7 @@ func TestObserveDetectsColdStartOncePerSessionAndModel(t *testing.T) {
 		t.Errorf("since = %d; want 3000", since)
 	}
 	// A NEW session on an already-seen model is still a session cold start.
-	if s, m, _ := r.Observe("s2", "m1", 5000); s || !m {
+	if s, m, _ := r.Observe("", "s2", "m1", 5000); s || !m {
 		t.Errorf("new session on known model: seenSession=%v seenModel=%v; want false,true", s, m)
 	}
 }
@@ -150,24 +150,24 @@ func TestMarkUniqueDedupsByContentKey(t *testing.T) {
 	defer r.Close()
 
 	// First sighting: all of it is new.
-	if got := r.MarkUnique("extract", []string{"k1", "k2"}, 200); got != 200 {
+	if got := r.MarkUnique("", "extract", []string{"k1", "k2"}, 200); got != 200 {
 		t.Errorf("first sighting = %d; want 200", got)
 	}
 	// Same compaction re-sent on the next turn: nothing new.
-	if got := r.MarkUnique("extract", []string{"k1", "k2"}, 200); got != 0 {
+	if got := r.MarkUnique("", "extract", []string{"k1", "k2"}, 200); got != 0 {
 		t.Errorf("re-sent compaction = %d; want 0 (this is what stops gross from lying)", got)
 	}
 	// Half new: proportional attribution.
-	if got := r.MarkUnique("extract", []string{"k2", "k3"}, 200); got != 100 {
+	if got := r.MarkUnique("", "extract", []string{"k2", "k3"}, 200); got != 100 {
 		t.Errorf("half-new = %d; want 100", got)
 	}
 	// Keys are namespaced per component, so two components stashing the same content
 	// each get credit for their own work.
-	if got := r.MarkUnique("dedup", []string{"k1"}, 50); got != 50 {
+	if got := r.MarkUnique("", "dedup", []string{"k1"}, 50); got != 50 {
 		t.Errorf("other component = %d; want 50 (keys must be per-component)", got)
 	}
 	// No keys at all: count the run once (the Aggregator's rule).
-	if got := r.MarkUnique("collapse", nil, 70); got != 70 {
+	if got := r.MarkUnique("", "collapse", nil, 70); got != 70 {
 		t.Errorf("keyless run = %d; want 70", got)
 	}
 }
@@ -440,8 +440,8 @@ func TestConcurrentCaptureIsRaceFree(t *testing.T) {
 			for i := 0; i < 200; i++ {
 				e := mkEvent(int64(1000+i), "sess", "model", 1000, 900)
 				e.Content = []ContentRow{{Path: "messages.1", Before: "before", After: "after"}}
-				r.Observe(e.SessionID, e.Model, e.TS)
-				r.MarkUnique("extract", []string{"k1", "k2"}, 100)
+				r.Observe("", e.SessionID, e.Model, e.TS)
+				r.MarkUnique("", "extract", []string{"k1", "k2"}, 100)
 				r.Record(e)
 				if i%20 == 0 {
 					_ = r.Stats()

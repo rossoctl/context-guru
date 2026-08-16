@@ -173,8 +173,15 @@ func TestAPIConfigIsGatedAndRedacted(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("loopback got %d for /api/config", w.Code)
 	}
-	if body["preset"] != "codesmart" {
-		t.Errorf("preset = %v; want codesmart", body["preset"])
+	// The configuration now sits under "config", beside the "scope"/"description" that
+	// say WHOSE configuration it is — see TestConfigSaysWhoseConfigurationItIs. Gating
+	// and redaction, which is what this test is about, are unchanged.
+	cfg, ok := body["config"].(map[string]any)
+	if !ok {
+		t.Fatalf("no config object in the payload: %v", body)
+	}
+	if cfg["preset"] != "codesmart" {
+		t.Errorf("preset = %v; want codesmart", cfg["preset"])
 	}
 	// Redacted even for a trusted caller — a defence that only applies to untrusted
 	// callers is one misconfiguration from being no defence.
@@ -182,8 +189,8 @@ func TestAPIConfigIsGatedAndRedacted(t *testing.T) {
 	if strings.Contains(raw, "CONFIGLEAK") {
 		t.Errorf("a credential reached a trusted caller: %s", raw)
 	}
-	if body["unknown_field"] != Redacted {
-		t.Errorf("unknown_field = %v; want redacted", body["unknown_field"])
+	if cfg["unknown_field"] != Redacted {
+		t.Errorf("unknown_field = %v; want redacted", cfg["unknown_field"])
 	}
 }
 
@@ -320,7 +327,17 @@ func TestUIHasTestIDsForEveryStatTile(t *testing.T) {
 		"tab-benchmarks", "tab-config", "filter-q", "filter-range", "filter-model",
 		"filter-provider", "filter-agent", "filter-preset", "filter-mode",
 		"filter-component", "filter-reason", "filter-accounting", "filter-clear",
-		"request-row", "diff-mode-git", "diff-mode-side", "drawer-close",
+		"request-row", "diff-mode-git", "diff-mode-side", "diff-mode-orig", "diff-mode-raw",
+		"drawer-close",
+		// The session compaction-diff view: the entry point, its summary, its
+		// per-component roll-up, the all-blocks mode switch, and the two states that
+		// only exist on the cold-storage path.
+		"session-diff", "session-diff-summary", "session-diff-components",
+		"session-diff-modes", "open-session-diff", "fetch-transcript",
+		"state-cold", "state-fetched", "retry-transcript", "open-archive",
+		// The gate's three registration modes: the closed explanation that replaces the
+		// form, and the invite-code field that only appears when a code is checked.
+		"gate-closed", "gate-code", "gate-register", "gate-signin",
 	} {
 		if !strings.Contains(source, `"`+id+`"`) && !strings.Contains(source, "'"+id+"'") {
 			t.Errorf("data-testid %q is not produced by the UI; a check or screenshot depends on it", id)

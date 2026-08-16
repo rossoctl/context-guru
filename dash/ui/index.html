@@ -5,26 +5,34 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>context-guru dashboard</title>
 <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232a78d6'/%3E%3Cpath d='M4 11.5 L7 4.5 L9 4.5 L12 11.5 L10.2 11.5 L9.6 9.9 L6.4 9.9 L5.8 11.5 Z M7 8.5 L9 8.5 L8 5.9 Z' fill='white'/%3E%3C/svg%3E">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
 <header class="topbar">
-  <div class="brand">
+  <h1 class="brand">
     <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18 L10 6 L14 14 L20 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
     <span>context-guru</span>
-  </div>
+  </h1>
   <nav class="tabs" role="tablist" aria-label="Views">
     <button role="tab" class="tab" data-view="overview" data-testid="tab-overview" aria-selected="true">Overview</button>
     <button role="tab" class="tab" data-view="components" data-testid="tab-components">Components</button>
     <button role="tab" class="tab" data-view="sessions" data-testid="tab-sessions">Sessions</button>
     <button role="tab" class="tab" data-view="requests" data-testid="tab-requests">Requests</button>
-    <button role="tab" class="tab" data-view="benchmarks" data-testid="tab-benchmarks">Benchmarks</button>
-    <button role="tab" class="tab" data-view="config" data-testid="tab-config">Config</button>
+    <button role="tab" class="tab" data-view="benchmarks" data-testid="tab-benchmarks" data-manager data-local-ok>Benchmarks</button>
+    <button role="tab" class="tab" data-view="archive" data-testid="tab-archive" data-account hidden>Archive</button>
+    <button role="tab" class="tab" data-view="setup" data-testid="tab-setup" data-account hidden>Setup</button>
+    <button role="tab" class="tab" data-view="settings" data-testid="tab-settings" data-account hidden>Settings</button>
+    <button role="tab" class="tab" data-view="tenants" data-testid="tab-tenants" data-manager hidden>Tenants</button>
+    <button role="tab" class="tab" data-view="config" data-testid="tab-config" data-manager data-local-ok>Config</button>
   </nav>
   <div class="topbar-right">
     <span class="live" data-testid="live-indicator" title="Live event stream"><i class="dot"></i><span id="live-label">connecting…</span></span>
-    <button id="theme" class="ghost" data-testid="theme-toggle" title="Toggle colour theme" aria-label="Toggle colour theme">◐</button>
+    <span id="whoami" class="whoami" data-testid="whoami" hidden></span>
+    <button id="signout" class="ghost" data-testid="signout" hidden>Sign out</button>
+    <!-- Label and aria-label are set by initTheme() to name the CURRENT state. -->
+    <button id="theme" class="ghost small" data-testid="theme-toggle" aria-label="Colour theme">Auto</button>
   </div>
 </header>
 
@@ -59,7 +67,11 @@
     <option value="partial">Estimated (partial)</option>
     <option value="missing">Unmeasured (missing)</option>
   </select>
-  <button id="f-clear" class="ghost" data-testid="filter-clear">Clear</button>
+  <button id="f-clear" class="ghost" data-testid="filter-clear" disabled>Clear</button>
+  <!-- Active filters, one removable chip each. Filled by renderChips(): a filter set by
+       drilling into a session or a tenant has no control up there, and an invisible
+       filter is one only "Clear" can undo. -->
+  <div id="f-active" class="chips" data-testid="filter-chips" role="group" aria-label="Active filters" hidden></div>
 </section>
 
 <div id="capture-warning" class="banner warn" hidden data-testid="capture-warning"></div>
@@ -67,11 +79,59 @@
      below is a projection rather than an achieved saving. Filled by checkCapture(). -->
 <div id="observe-banner" class="banner warn" hidden data-testid="observe-banner" role="status"></div>
 
+<!-- Auth gate. Replaces the whole dashboard when this is a hosted deployment and
+     nobody is signed in; absent entirely on a single-tenant proxy. -->
+<div id="gate" class="gate" role="main" hidden data-testid="gate">
+  <div class="gate-card">
+    <h1>context-guru</h1>
+    <p class="muted" id="gate-intro">Sign in with your context-guru token, or register for one.</p>
+
+    <div class="gate-tabs" role="tablist" aria-label="Sign in or register">
+      <button class="gate-tab" role="tab" id="gate-tab-signin" data-testid="gate-tab-signin" aria-selected="true">Sign in</button>
+      <button class="gate-tab" role="tab" id="gate-tab-register" data-testid="gate-tab-register" aria-selected="false">Register</button>
+    </div>
+
+    <!-- Shown INSTEAD of the register form when self-registration is closed. A form that
+         cannot succeed is worse than a sentence saying who to ask. Filled by applyRegisterMode(). -->
+    <div id="gate-closed" class="state blocked" hidden data-testid="gate-closed"></div>
+
+    <form id="gate-signin" class="gate-form" data-testid="gate-signin">
+      <label for="gate-token">Your token</label>
+      <input id="gate-token" type="password" autocomplete="off" spellcheck="false"
+             placeholder="cg_live_…" data-testid="gate-token">
+      <p class="hint">The same token your agent uses. It is never stored in this browser —
+         signing in exchanges it for a session cookie.</p>
+      <button type="submit" class="primary" data-testid="gate-signin-submit">Sign in</button>
+    </form>
+
+    <form id="gate-register" class="gate-form" hidden data-testid="gate-register">
+      <p class="hint" id="gate-register-hint" hidden></p>
+      <label for="gate-email">Work email</label>
+      <input id="gate-email" type="email" autocomplete="email" data-testid="gate-email">
+      <label for="gate-label">Name this token</label>
+      <input id="gate-label" type="text" placeholder="laptop" value="laptop" data-testid="gate-label">
+      <!-- Shown only in invite mode: a code box on a deployment that checks no code is a
+           field the user cannot know how to fill. Toggled by applyRegisterMode(). -->
+      <div id="gate-invite-field" hidden>
+        <label for="gate-code">Invite code</label>
+        <input id="gate-code" type="password" autocomplete="off" spellcheck="false" data-testid="gate-code">
+        <p class="hint">Issued by whoever runs this deployment.</p>
+      </div>
+      <button type="submit" class="primary" data-testid="gate-register-submit">Create account</button>
+    </form>
+
+    <p id="gate-error" class="gate-error" hidden role="alert" data-testid="gate-error"></p>
+  </div>
+</div>
+
 <main id="main">
 
 <!-- ── Overview ───────────────────────────────────────────────────────────── -->
 <section class="view" id="view-overview">
-  <div class="tiles" id="tiles"></div>
+  <!-- renderTiles() builds the grouped tile grids in here: a headline row of the three
+       numbers that answer "is this working", then one labelled group per subject. Twenty
+       tiles in one flat grid is twenty things of equal importance, i.e. no hierarchy. -->
+  <div id="tiles"></div>
 
   <div class="panel">
     <h2>Savings percentage — four denominators, four questions</h2>
@@ -144,12 +204,18 @@
   </div>
 
   <div class="panel">
-    <h2>Live feed</h2>
-    <p class="note">Summary rows only, streamed over SSE. Content is never pushed to a live
-      client; open a request to inspect it.</p>
-    <div class="tblwrap">
+    <h2>Live feed <span class="section-note">since this page was opened</span></h2>
+    <!-- Says what the row count IS. The feed is fed only by SSE from page load, capped at
+         25, and never seeded from history — so it sat at 24 rows beside a "Requests 26"
+         tile and the two looked like they disagreed about the same window. -->
+    <p class="note">Summary rows only, streamed over SSE, newest first: this table starts
+      empty and fills as requests arrive, up to the last 25. It is not the most recent rows
+      of history, so it does not count up to the tiles above — the Requests tab has the
+      full history. Content is never pushed to a live client; open a request to inspect it.</p>
+    <p class="note" id="live-filter-note" data-testid="live-filter-note" hidden></p>
+    <div class="tblwrap" tabindex="0">
       <table class="tbl compact" data-testid="live-table">
-        <thead><tr><th>Time</th><th>Session</th><th>Model</th><th class="num">Before</th><th class="num">After</th><th class="num">Saved</th><th class="num">CG ms</th><th>Accounting</th></tr></thead>
+        <thead><tr><th>Time</th><th>Session</th><th>Model</th><th class="num">Before</th><th class="num">After</th><th class="num">Saved (gross)</th><th class="num">CG ms</th><th>Accounting</th></tr></thead>
         <tbody id="live-body"></tbody>
       </table>
     </div>
@@ -164,8 +230,8 @@
       distinct compaction once; <strong>gross</strong> re-counts it every turn the agent
       re-sends the transcript, so <strong>overcount</strong> is how inflated the gross figure
       is. <strong>Own latency</strong> is the wall time the component spent on the hot path,
-      and <strong>value</strong> prices its unique savings against that cost.</p>
-    <div class="tblwrap">
+      and the <strong>verdict</strong> weighs those unique savings against that cost.</p>
+    <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="components-table">
         <thead><tr>
           <th>Component</th><th>Kind</th><th class="num">Runs</th><th class="num">Acted</th>
@@ -187,13 +253,19 @@
 <section class="view" id="view-sessions" hidden>
   <div class="panel">
     <h2>Sessions</h2>
-    <div class="tblwrap">
+    <p class="note">A row opens that session's requests. <strong>Diff</strong> opens what
+      compaction did to it: every message context-guru rewrote, before against after, with
+      the component that produced each change. Transcripts that have moved to cold storage
+      are fetched only when you ask. A <strong>&dagger;</strong> on a dollar figure means some of
+      that session's turns carried no usable provider usage data, so the figure covers its
+      priced turns only while the token columns cover every turn.</p>
+    <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="sessions-table">
         <thead><tr>
           <th>Session</th><th>Model</th><th>Agent</th><th>Preset</th>
-          <th class="num">Turns</th><th class="num">Before</th><th class="num">Saved</th>
-          <th class="num">Saved $</th><th class="num">Cache r/w</th><th class="num">Expands</th>
-          <th class="num">CG ms</th><th>Started</th>
+          <th class="num">Turns</th><th class="num">Before</th><th class="num">Saved (gross)</th>
+          <th class="num">Net saved $</th><th class="num">Cache r/w</th><th class="num">Expands</th>
+          <th class="num">CG ms</th><th>Started</th><th><span class="vh">Row actions</span></th>
         </tr></thead>
         <tbody id="sessions-body"></tbody>
       </table>
@@ -206,11 +278,11 @@
 <section class="view" id="view-requests" hidden>
   <div class="panel">
     <h2>Requests</h2>
-    <div class="tblwrap">
+    <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="requests-table">
         <thead><tr>
           <th>ID</th><th>Time</th><th>Session</th><th>Model</th><th>Mode</th>
-          <th class="num">Before</th><th class="num">After</th><th class="num">Saved</th>
+          <th class="num">Before</th><th class="num">After</th><th class="num">Saved (gross)</th>
           <th class="num">Cache r/w</th><th class="num">$</th><th class="num">CG ms</th>
           <th>Cache</th><th>Accounting</th>
         </tr></thead>
@@ -238,6 +310,72 @@
 </section>
 
 <!-- ── Config ─────────────────────────────────────────────────────────────── -->
+<!-- Archive: what has moved to cold storage. The list comes from a LOCAL index, so it
+     renders instantly and works even when the remote is unreachable; only opening one
+     session costs a network round trip. -->
+<section class="view" id="view-archive" hidden>
+  <div class="card">
+    <div class="card-head">
+      <h2>Cold storage</h2>
+      <span class="muted" id="archive-remote" data-testid="archive-remote"></span>
+    </div>
+    <p class="muted small">Sessions here have been moved off local disk. Nothing was deleted:
+      the index below is permanent and local, so your whole history stays listed. Opening a
+      session fetches it back on demand.</p>
+    <div id="archive-list" data-testid="archive-list" tabindex="0"></div>
+  </div>
+</section>
+
+<!-- Setup: the copy-paste block a user needs, with their own token substituted. -->
+<section class="view" id="view-setup" hidden>
+  <div class="card">
+    <div class="card-head"><h2>Point your agent at context-guru</h2></div>
+    <div id="setup-token-banner" class="banner ok" hidden data-testid="setup-token-banner"></div>
+    <p class="muted small">One token, one host. Each agent reads a different environment
+      variable, so set each once and never think about it again. The token below is a
+      placeholder unless you have just minted one — substitute yours.</p>
+    <div id="setup-blocks" data-testid="setup-blocks"></div>
+    <div class="card-head"><h3>If something goes wrong</h3></div>
+    <ul class="muted small">
+      <li>Unset the base URL to bypass context-guru entirely — your agent talks to the
+        gateway directly, exactly as before.</li>
+      <li>Send <code>x-context-guru-bypass: true</code> to keep the metrics but skip
+        compaction, which is the way to A/B a suspicion.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- Settings: the tenant's own configuration and tokens. -->
+<section class="view" id="view-settings" hidden>
+  <div class="card">
+    <div class="card-head"><h2>Compaction</h2><span class="muted" id="settings-saved" data-testid="settings-saved"></span></div>
+    <div id="settings-form" data-testid="settings-form"></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Tokens</h2>
+      <button class="ghost" id="mint-token" data-testid="mint-token">Mint a token</button></div>
+    <p class="muted small">Tokens are stored hashed, so a lost token cannot be recovered —
+      mint a new one and revoke the old. Several can be live at once, which is how you
+      rotate without downtime.</p>
+    <div id="token-list" data-testid="token-list" tabindex="0"></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Recent configuration changes</h2></div>
+    <div id="audit-list" data-testid="audit-list" tabindex="0"></div>
+  </div>
+</section>
+
+<!-- Tenants: the manager's roster. -->
+<section class="view" id="view-tenants" hidden>
+  <div class="card">
+    <div class="card-head"><h2>Tenants</h2><span class="muted" id="tenants-count"></span></div>
+    <p class="muted small">Metrics and configuration for every account. Transcripts are
+      deliberately not here: reading another person's source code is not an
+      administrative need.</p>
+    <div id="tenants-list" data-testid="tenants-list" tabindex="0"></div>
+  </div>
+</section>
+
 <section class="view" id="view-config" hidden>
   <div class="panel">
     <h2>Effective configuration</h2>
@@ -261,6 +399,10 @@
     <button id="drawer-close" class="ghost" data-testid="drawer-close" aria-label="Close">✕</button>
   </div>
   <div id="drawer-body" class="drawer-body" data-testid="drawer-body"></div>
+  <!-- Tab sentinel. The browser's real tab order inside the drawer includes things no
+       selector list predicts (a scrollable .diffbody is a tab stop), so the forward wrap
+       is done by bouncing off an element that is genuinely last. -->
+  <span id="drawer-end" tabindex="0" aria-hidden="true"></span>
 </div>
 <div id="scrim" class="scrim" hidden></div>
 

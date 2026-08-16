@@ -53,8 +53,10 @@ const (
 // token counting, no extra allocation of the transcript) and is then owned
 // entirely by the writer goroutine.
 type Event struct {
-	ID        int64  `json:"id"`
-	TS        int64  `json:"ts"` // epoch ms
+	ID int64 `json:"id"`
+	TS int64 `json:"ts"` // epoch ms
+	// TenantID owns this row; "" in single-tenant deployments.
+	TenantID  string `json:"tenant_id"`
 	SessionID string `json:"session_id"`
 	Model     string `json:"model"`
 	Provider  string `json:"provider"`
@@ -150,6 +152,12 @@ type ContentRow struct {
 	AfterTokens  int    `json:"after_tokens"`
 	Before       string `json:"before,omitempty"`
 	After        string `json:"after,omitempty"`
+	// Components names which components rewrote this message, in the order they touched
+	// it — EXACT attribution for the diff view, so it never has to infer the author from
+	// whether the after-text carries a `<<cg:HASH>>` marker. A reverted component is
+	// absent. Empty on rows written before this field existed, which the UI must read as
+	// "unknown", not as "nothing".
+	Components []string `json:"components,omitempty"`
 }
 
 // FromTrace fills the pipeline-derived half of an Event from an apply.Trace.
@@ -195,7 +203,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	for _, c := range tr.Changes {
 		e.Content = append(e.Content, ContentRow{
 			Path: c.Path, BeforeTokens: c.BeforeTokens, AfterTokens: c.AfterTokens,
-			Before: c.Before, After: c.After,
+			Before: c.Before, After: c.After, Components: c.Components,
 		})
 	}
 	e.UncompressedReason = uncompressedReason(e, tr)

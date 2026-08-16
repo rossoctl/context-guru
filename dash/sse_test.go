@@ -13,8 +13,8 @@ import (
 func TestHubFansOutAndStripsContent(t *testing.T) {
 	h := NewHub()
 	defer h.Close()
-	c1, _ := h.subscribe()
-	c2, _ := h.subscribe()
+	c1, _ := h.subscribe("", true)
+	c2, _ := h.subscribe("", true)
 	if h.Clients() != 2 {
 		t.Fatalf("clients = %d; want 2", h.Clients())
 	}
@@ -49,8 +49,8 @@ func TestHubFansOutAndStripsContent(t *testing.T) {
 func TestHubEvictsHungClient(t *testing.T) {
 	h := NewHub()
 	defer h.Close()
-	hung, _ := h.subscribe()
-	live, _ := h.subscribe()
+	hung, _ := h.subscribe("", true)
+	live, _ := h.subscribe("", true)
 
 	// Overflow the hung client's buffer while draining the live one.
 	drained := 0
@@ -94,14 +94,14 @@ func TestHubBacklogHonorsLastEventID(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		h.Publish(&Event{ID: int64(i)})
 	}
-	got := h.backlogSince(3)
+	got := h.backlogSince(3, &client{all: true})
 	if len(got) != 2 || got[0].ID != 4 || got[1].ID != 5 {
 		t.Fatalf("backlog after id 3 = %v; want ids 4,5", ids(got))
 	}
-	if all := h.backlogSince(0); len(all) != 5 {
+	if all := h.backlogSince(0, &client{all: true}); len(all) != 5 {
 		t.Errorf("backlog from 0 = %d events; want 5", len(all))
 	}
-	if none := h.backlogSince(99); len(none) != 0 {
+	if none := h.backlogSince(99, &client{all: true}); len(none) != 0 {
 		t.Errorf("backlog past the head = %d; want 0", len(none))
 	}
 }
@@ -175,14 +175,14 @@ func TestSSEEndpointStreamsAndBackfills(t *testing.T) {
 
 func TestHubCloseDisconnectsEveryone(t *testing.T) {
 	h := NewHub()
-	c, _ := h.subscribe()
+	c, _ := h.subscribe("", true)
 	h.Close()
 	select {
 	case <-c.closed:
 	case <-time.After(time.Second):
 		t.Error("Close did not disconnect the client")
 	}
-	if _, ok := h.subscribe(); ok {
+	if _, ok := h.subscribe("", true); ok {
 		t.Error("subscribe succeeded after Close")
 	}
 	// Publishing after Close must be a harmless no-op, not a panic.
@@ -213,7 +213,7 @@ func TestHubConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 50; i++ {
-				c, ok := h.subscribe()
+				c, ok := h.subscribe("", true)
 				if !ok {
 					return
 				}
@@ -224,7 +224,7 @@ func TestHubConcurrent(t *testing.T) {
 				}
 				h.unsubscribe(c)
 				_ = h.Clients()
-				_ = h.backlogSince(int64(i))
+				_ = h.backlogSince(int64(i), &client{all: true})
 			}
 		}()
 	}

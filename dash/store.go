@@ -3,6 +3,7 @@ package dash
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -34,8 +35,16 @@ type DB struct {
 // traffic whatever the disk says.
 //
 // On a schema-version mismatch the existing file is renamed aside
-// (<path>.v<old>.bak) and a fresh database is created: the dashboard is a derived
-// view, so discarding history beats refusing to boot, and renaming beats deleting.
+// (<path>.v<old>.bak) and a fresh database is created: the METRICS in it are a
+// derived view, so discarding them beats refusing to boot, and renaming beats
+// deleting.
+//
+// The file is NOT purely derived any more, and that is the part to keep in mind
+// before extending this path: archived_sessions and tenant_spend are the only
+// copies of their facts (the cold-storage index and the monthly spend rollup), so
+// the fresh database CARRIES THEM ACROSS from the renamed file — see
+// carryNonDerived. Anything else added here that cannot be recomputed from traffic
+// has to join that list.
 func Open(path string) (*DB, error) {
 	if path == "" || path == ":memory:" {
 		// A UNIQUE name per Open, not a bare `file::memory:`.
@@ -64,9 +73,93 @@ func Open(path string) (*DB, error) {
 		if rerr := os.Rename(path, aside); rerr != nil {
 			return nil, fmt.Errorf("dash: %w (and could not preserve it: %v)", err, rerr)
 		}
-		return openDSN(dsn(path), path)
+		// Move the write-ahead log with the database it belongs to. Two reasons, both
+		// about the data this whole path exists to keep: a -wal left behind holds
+		// commits the .bak does not (so carrying tenant_spend across would silently
+		// under-count), and a foreign -wal sitting next to the FRESH file is a
+		// recovery hazard nobody would ever diagnose.
+		for _, suffix := range []string{"-wal", "-shm"} {
+			if _, serr := os.Stat(path + suffix); serr == nil {
+				_ = os.Rename(path+suffix, aside+suffix)
+			}
+		}
+		fresh, ferr := openDSN(dsn(path), path)
+		if ferr != nil {
+			return nil, ferr
+		}
+		carryNonDerived(fresh, aside)
+		return fresh, nil
 	}
 	return db, err
+}
+
+// nonDerivedTables are the tables a schema bump must NOT discard, with the columns
+// to carry across. They are the tables whose contents cannot be recomputed from
+// traffic:
+//
+//   - archived_sessions is the ONLY index of what has been migrated to cold
+//     storage. Losing it orphans every archived object — the data is still there and
+//     still costs storage, but nothing can find it, and the Archive view goes empty
+//     while the sessions sit in Box.
+//   - tenant_spend is the monthly spend rollup, which exists precisely so a spend
+//     cap cannot be reset by deleting rows. Losing it resets every tenant's
+//     month-to-date spend to zero.
+//
+// Columns are named rather than SELECT *: an older file whose column ORDER differs
+// must fail loudly instead of writing a session id into a byte count.
+var nonDerivedTables = map[string]string{
+	"archived_sessions": `session_id,tenant_id,first_ts,last_ts,requests,content_path,
+	                      content_bytes,full_path,full_bytes,archived_at,remote`,
+	"tenant_spend": `tenant_id,month,usd`,
+}
+
+// carryNonDerived copies the non-derived tables out of the database renamed aside by
+// Open and into the fresh one. Best-effort BY DESIGN: every failure is logged loudly
+// and boot continues, because refusing to boot over the dashboard is the exact
+// failure this whole path exists to avoid. An old file that is corrupt, unreadable,
+// or simply predates one of these tables all land here.
+//
+// One dedicated connection, because ATTACH is per-connection in SQLite and
+// database/sql hands out a POOLED one — attaching on one connection and inserting on
+// another would look like a missing table.
+func carryNonDerived(fresh *DB, oldPath string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := fresh.sql.Conn(ctx)
+	if err != nil {
+		slog.Error("dash: could not carry the archive index and spend rollup across the schema bump",
+			"preserved_at", oldPath, "err", err)
+		return
+	}
+	defer conn.Close()
+	// Read-only and immutable: this file is history now, and a corrupt one must fail
+	// the ATTACH rather than get repaired in place.
+	if _, err := conn.ExecContext(ctx,
+		`ATTACH DATABASE ? AS old`, "file:"+oldPath+"?mode=ro"); err != nil {
+		slog.Error("dash: could not open the preserved database to carry non-derived tables across; "+
+			"the cold-storage index and month-to-date spend in it are NOT in the new file",
+			"preserved_at", oldPath, "err", err)
+		return
+	}
+	defer func() { _, _ = conn.ExecContext(ctx, `DETACH DATABASE old`) }()
+	for table, cols := range nonDerivedTables {
+		// INSERT OR REPLACE, not INSERT: the fresh database is empty, so this only ever
+		// matters if a future caller runs it twice — and then last-write-wins on the
+		// primary key is the right answer for both tables.
+		if _, err := conn.ExecContext(ctx, `INSERT OR REPLACE INTO main.`+table+
+			` (`+cols+`) SELECT `+cols+` FROM old.`+table); err != nil {
+			// Expected and harmless when the old schema simply predates the table; a
+			// genuine failure looks the same from here, so log both at ERROR and let the
+			// operator read the message.
+			slog.Error("dash: could not carry a non-derived table across the schema bump "+
+				"(harmless if the preserved database predates it)",
+				"table", table, "preserved_at", oldPath, "err", err)
+			continue
+		}
+		var n int64
+		_ = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM main.`+table).Scan(&n)
+		slog.Info("dash: carried a non-derived table across the schema bump", "table", table, "rows", n)
+	}
 }
 
 // dsn builds the driver DSN: WAL for concurrent reads while the writer commits,
@@ -75,8 +168,17 @@ func Open(path string) (*DB, error) {
 // out under a concurrent commit, and foreign keys on for the ON DELETE CASCADEs
 // retention relies on.
 func dsn(path string) string {
+	// auto_vacuum(2) is INCREMENTAL. It matters at hosted scale: the size rule used to
+	// reclaim pages with a full VACUUM, which rewrites the entire file — fine for a
+	// 512 MiB default, a multi-minute stall of the writer goroutine at tens of GB, and
+	// the stall lands exactly when the disk is under pressure and observability is
+	// most wanted. INCREMENTAL lets Prune reclaim a bounded number of pages per pass.
+	//
+	// SQLite can only set auto_vacuum on an EMPTY database, so this takes effect for
+	// files created from here on. An existing file keeps auto_vacuum=NONE and falls
+	// back to the full VACUUM path in Prune, which is what it did before.
 	return "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
-		"&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+		"&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=auto_vacuum(2)"
 }
 
 func openDSN(d, path string) (*DB, error) {
@@ -135,12 +237,12 @@ func (d *DB) insertBatch(evs []*Event) error {
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
 
 	reqStmt, err := tx.Prepare(`INSERT INTO requests(
-		ts, session_id, model, provider, agent, preset, mode, route, status, bypassed, cache_aware,
+		ts, tenant_id, session_id, model, provider, agent, preset, mode, route, status, bypassed, cache_aware,
 		messages, tokens_before, tokens_after, attempted_tokens, frozen_tokens, saved_unique,
 		fresh_input, cache_read, cache_write, output_tokens,
 		cost_usd, baseline_cost_usd, cg_llm_cost_usd, cg_latency_ms, upstream_ms,
 		expands, expand_tokens, reverts, token_accounting, cache_miss_reason, uncompressed_reason
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -153,16 +255,17 @@ func (d *DB) insertBatch(evs []*Event) error {
 	}
 	defer compStmt.Close()
 	contentStmt, err := tx.Prepare(`INSERT INTO request_content(
-		request_id, seq, path, before_tokens, after_tokens, before_gz, after_gz
-	) VALUES (?,?,?,?,?,?,?)`)
+		request_id, seq, path, before_tokens, after_tokens, before_gz, after_gz, components
+	) VALUES (?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
 	defer contentStmt.Close()
 
+	spend := map[spendKey]float64{}
 	for _, e := range evs {
 		res, err := reqStmt.Exec(
-			e.TS, e.SessionID, e.Model, e.Provider, e.Agent, e.Preset, e.Mode, e.Route, e.Status,
+			e.TS, e.TenantID, e.SessionID, e.Model, e.Provider, e.Agent, e.Preset, e.Mode, e.Route, e.Status,
 			boolInt(e.Bypassed), boolInt(e.CacheAware),
 			e.Messages, e.TokensBefore, e.TokensAfter, e.AttemptedTokens, e.FrozenTokens, e.SavedUnique,
 			e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens,
@@ -186,12 +289,31 @@ func (d *DB) insertBatch(evs []*Event) error {
 		}
 		for i, c := range e.Content {
 			if _, err := contentStmt.Exec(id, i, c.Path, c.BeforeTokens, c.AfterTokens,
-				gzipText(c.Before), gzipText(c.After)); err != nil {
+				gzipText(c.Before), gzipText(c.After), strings.Join(c.Components, ",")); err != nil {
 				return err
 			}
 		}
+		spend[spendKey{e.TenantID, monthKey(e.TS)}] += e.CostUSD + e.CGLLMCostUSD
+	}
+	// In the SAME transaction as the rows: a rollup committed separately would either
+	// double-count a retried batch or lose a committed one, and this number gates
+	// spending the organisation's money.
+	for k, usd := range spend {
+		if _, err := tx.Exec(`INSERT INTO tenant_spend(tenant_id,month,usd) VALUES (?,?,?)
+			ON CONFLICT(tenant_id,month) DO UPDATE SET usd = usd + excluded.usd`,
+			k.tenant, k.month, usd); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
+}
+
+// spendKey is one tenant-month bucket of the spend rollup.
+type spendKey struct{ tenant, month string }
+
+// monthKey renders an event timestamp as the UTC calendar month the cap bills against.
+func monthKey(tsMillis int64) string {
+	return time.UnixMilli(tsMillis).UTC().Format("2006-01")
 }
 
 func boolInt(b bool) int {
@@ -277,6 +399,12 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 		if drop < 1 {
 			drop = 1
 		}
+		// Row-granular, deliberately, and this is the ONE rule that is. The byte
+		// budget is a hard cap the operator asked to be honoured, and it has to be
+		// satisfiable even when everything in the database belongs to a single
+		// session — dropping whole sessions there means dropping all of it. The
+		// disk-pressure rule (Recorder.relieveDiskPressure) evicts whole sessions
+		// instead, because it has a floor to stop at and so never needs a last resort.
 		res, err := d.sql.Exec(
 			`DELETE FROM requests WHERE id IN (SELECT id FROM requests ORDER BY ts ASC LIMIT ?)`, drop)
 		if err != nil {
@@ -285,7 +413,7 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 		n, _ := res.RowsAffected()
 		deleted += n
 		// Reclaim the pages so the next sizeBytes reflects the deletion.
-		if _, err := d.sql.Exec(`VACUUM`); err != nil {
+		if err := d.reclaim(); err != nil {
 			return deleted, err
 		}
 	}
@@ -303,5 +431,134 @@ func (d *DB) sizeBytes() (int64, error) {
 	if err := d.sql.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
 		return 0, err
 	}
-	return pages * pageSize, nil
+	total := pages * pageSize
+	// Count the write-ahead log too. It is real disk, it can reach a large fraction
+	// of the main file between checkpoints, and a budget that ignores it silently
+	// under-counts by however much is currently un-checkpointed.
+	if d.path != "" && d.path != ":memory:" {
+		if fi, err := os.Stat(d.path + "-wal"); err == nil {
+			total += fi.Size()
+		}
+	}
+	return total, nil
+}
+
+// reclaim frees deleted pages back to the filesystem. With INCREMENTAL auto-vacuum
+// (every database this build creates) it reclaims a bounded batch; on an older file
+// with auto_vacuum=NONE, incremental_vacuum is a silent no-op, so a full VACUUM is
+// the only thing that shrinks it.
+func (d *DB) reclaim() error {
+	// Checkpoint FIRST. In WAL mode a delete lands in the log, not the main file, so
+	// two things go wrong without this: incremental_vacuum finds no free pages to
+	// release (they are not in the main file yet), and sizeBytes — which counts the
+	// WAL, because it is real disk — reports the deletion as GROWTH. The size loop
+	// then reads its own progress backwards and deletes again.
+	d.checkpoint()
+	var mode int
+	if err := d.sql.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err == nil && mode == 2 {
+		if _, err := d.sql.Exec(`PRAGMA incremental_vacuum(2000)`); err != nil {
+			return err
+		}
+	} else if _, err := d.sql.Exec(`VACUUM`); err != nil {
+		return err
+	}
+	// And again, to truncate the WAL the reclaim itself just wrote.
+	d.checkpoint()
+	return nil
+}
+
+// checkpoint folds the write-ahead log into the main database and truncates it.
+// Best-effort: a busy checkpoint is not a failure, only a deferral.
+func (d *DB) checkpoint() {
+	if d.path == "" || d.path == ":memory:" {
+		return
+	}
+	_, _ = d.sql.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+}
+
+// DropOldestSessions deletes the n least-recently-active SESSIONS and returns how
+// many request rows went with them. Component and content rows follow via
+// ON DELETE CASCADE.
+//
+// Session granularity, not row granularity, and that is the whole point: evicting
+// the oldest individual requests tears conversations in half, so the dashboard shows
+// a session whose first turns have vanished and whose totals no longer add up. A
+// session is the unit a user reasons about, so it is the unit that disappears.
+//
+// "Oldest" is MAX(ts) per session — last activity, not first. A long-running session
+// that is still in use must not be evicted because it started a week ago.
+func (d *DB) DropOldestSessions(n int) (int64, error) {
+	if n <= 0 {
+		return 0, nil
+	}
+	res, err := d.sql.Exec(`DELETE FROM requests WHERE session_id IN (
+		SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?)`, n)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// TenantRowCounts reports how many request rows each tenant holds. The caller
+// compares each against that tenant's own quota, which is why this does not filter:
+// the quota is per tenant now (a manager sets it), so there is no single threshold to
+// push into the query.
+//
+// Fairness before scarcity: without this, the global disk rule lets one heavy user's
+// traffic evict everyone else's history, which is the shared-service failure where the
+// person causing the problem is the last to notice it.
+func (d *DB) TenantRowCounts() (map[string]int64, error) {
+	rows, err := d.sql.Query(`SELECT tenant_id, COUNT(*) c FROM requests
+		WHERE tenant_id <> '' GROUP BY tenant_id ORDER BY c DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var id string
+		var n int64
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
+// tenantRowCount counts one tenant's request rows.
+func (d *DB) tenantRowCount(tenant string) (int64, error) {
+	var n int64
+	err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests WHERE tenant_id = ?`, tenant).Scan(&n)
+	return n, err
+}
+
+// DropOldestSessionsOfTenant trims one tenant back toward its quota, oldest session
+// first, and returns the rows deleted. DESTRUCTIVE, and only correct when there is no
+// cold storage to migrate to — Recorder.trimTenantToQuota picks between the two.
+func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64, error) {
+	var deleted int64
+	// Bounded: each pass drops one session, and a tenant with a pathological number
+	// of tiny sessions must not hold the writer goroutine for an unbounded time.
+	for pass := 0; pass < 64; pass++ {
+		n, err := d.tenantRowCount(tenant)
+		if err != nil {
+			return deleted, err
+		}
+		if n <= targetRows {
+			return deleted, nil
+		}
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE tenant_id = ? AND session_id = (
+			SELECT session_id FROM requests WHERE tenant_id = ?
+			GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT 1)`, tenant, tenant)
+		if err != nil {
+			return deleted, err
+		}
+		got, _ := res.RowsAffected()
+		if got == 0 {
+			return deleted, nil // nothing left to drop; avoid spinning
+		}
+		deleted += got
+	}
+	return deleted, nil
 }

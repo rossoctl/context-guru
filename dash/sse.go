@@ -43,7 +43,16 @@ type client struct {
 	ch     chan *Event
 	closed chan struct{}
 	once   sync.Once
+	// tenant is the only tenant this client may see; all is a manager's
+	// service-wide feed. Filtering happens at FAN-OUT, not in the browser: a live
+	// feed that ships every tenant's session ids and models to every connected
+	// dashboard has already leaked them, whatever the client then chooses to render.
+	tenant string
+	all    bool
 }
+
+// wants reports whether this client should receive an event.
+func (c *client) wants(e *Event) bool { return c.all || e.TenantID == c.tenant }
 
 func (c *client) stop() { c.once.Do(func() { close(c.closed) }) }
 
@@ -76,6 +85,9 @@ func (h *Hub) Publish(e *Event) {
 	}
 	var evict []*client
 	for c := range h.clients {
+		if !c.wants(&sum) {
+			continue
+		}
 		select {
 		case c.ch <- &sum:
 		default:
@@ -109,25 +121,30 @@ func (h *Hub) Close() {
 // backlogSince returns ring events with an id greater than lastID (the
 // Last-Event-ID a reconnecting browser sends), so a reconnect backfills the gap
 // instead of pretending nothing happened while it was away.
-func (h *Hub) backlogSince(lastID int64) []*Event {
+// The ring is shared across clients, so the REPLAY has to be filtered exactly like
+// the live fan-out. Filtering one and not the other is the natural bug here, and it
+// would leak on every dashboard reconnect rather than continuously — which is worse,
+// because it would not show up in a casual test.
+func (h *Hub) backlogSince(lastID int64, c *client) []*Event {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var out []*Event
 	for _, e := range h.ring {
-		if e.ID > lastID {
+		if e.ID > lastID && c.wants(e) {
 			out = append(out, e)
 		}
 	}
 	return out
 }
 
-func (h *Hub) subscribe() (*client, bool) {
+func (h *Hub) subscribe(tenant string, all bool) (*client, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
 		return nil, false
 	}
-	c := &client{ch: make(chan *Event, sseClientBuffer), closed: make(chan struct{})}
+	c := &client{ch: make(chan *Event, sseClientBuffer), closed: make(chan struct{}),
+		tenant: tenant, all: all}
 	h.clients[c] = struct{}{}
 	return c, true
 }
@@ -142,7 +159,14 @@ func (h *Hub) unsubscribe(c *client) {
 // ServeHTTP streams events as SSE. It honors Last-Event-ID (header or the
 // ?last_event_id= query param, for clients that cannot set headers), enforces a
 // per-write timeout, and evicts itself on a stalled write.
+// ServeHTTP serves the service-wide feed. Correct for a single-tenant proxy and
+// for a manager; the hosted dashboard mounts ServeScoped instead.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.ServeScoped(w, r, "", true)
+}
+
+// ServeScoped streams only one tenant's events (or everything, for a manager).
+func (h *Hub) ServeScoped(w http.ResponseWriter, r *http.Request, tenant string, all bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -155,7 +179,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		lastID, _ = strconv.ParseInt(v, 10, 64)
 	}
 
-	c, ok := h.subscribe()
+	c, ok := h.subscribe(tenant, all)
 	if !ok {
 		http.Error(w, "shutting down", http.StatusServiceUnavailable)
 		return
@@ -170,7 +194,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	// Backfill the gap first, in order, so the client's view is continuous.
-	for _, e := range h.backlogSince(lastID) {
+	for _, e := range h.backlogSince(lastID, c) {
 		if !writeEvent(w, flusher, e) {
 			return
 		}

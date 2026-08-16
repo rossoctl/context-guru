@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,59 @@ type Options struct {
 	// BenchDirs are directories scanned for harbor benchmark runs (summary.json +
 	// rows-*.json) at startup and on demand.
 	BenchDirs []string
+
+	// DiskHighWatermark is the fraction of the FILESYSTEM in use at which the
+	// janitor starts evicting the oldest sessions; DiskLowWatermark is where it
+	// stops. 0 uses the defaults (0.90 / 0.85); a negative high watermark disables
+	// the rule.
+	//
+	// Two watermarks, not one. With a single threshold the janitor deletes and
+	// reclaims on every pass forever once the host is full — and the host is usually
+	// full for reasons that have nothing to do with us, so it would grind away
+	// destroying history without ever fixing anything.
+	DiskHighWatermark float64
+	DiskLowWatermark  float64
+	// MinKeepBytes floors how far the disk rule will shrink this database. Below it
+	// the janitor stops and logs: if the filesystem is full because of something
+	// else, deleting our last megabyte does not help anyone and the dashboard going
+	// blank hides the problem instead of showing it.
+	MinKeepBytes int64
+	// MaxRowsPerTenant caps one tenant's retained request rows. Applied BEFORE the
+	// disk rule, so a heavy user is trimmed to its own quota before anyone else's
+	// history is touched. 0 = no per-tenant cap.
+	MaxRowsPerTenant int64
+
+	// Remote is cold storage (Box via rclone). When set, eviction becomes MIGRATION:
+	// a session is uploaded and verified before its local rows are deleted, so
+	// history is bounded by the remote's capacity rather than by this disk. nil
+	// keeps the old behaviour, where eviction means deletion.
+	Remote Remote
+	// RemoteName is the CONFIGURED cold-storage name, set by the host even when the
+	// boot reachability probe failed and Remote was therefore left nil. Without it the
+	// dashboard cannot tell "no cold storage on this deployment" from "cold storage is
+	// configured and currently unreachable" — and it reported the first while listing
+	// archived sessions. Empty falls back to Remote.Describe().
+	RemoteName string
+	// ArchiveContentAfter moves a session's TRANSCRIPTS to cold storage once it has
+	// been idle this long. Transcripts are the overwhelming majority of the bytes and
+	// are read rarely, so moving them early is what keeps the local database small
+	// enough that the disk rule never fires. 0 disables.
+	ArchiveContentAfter time.Duration
+	// ArchiveSessionAfter moves a WHOLE session out once it has been idle this long.
+	// Should be well beyond ArchiveContentAfter: metric rows are small and worth
+	// keeping locally queryable for as long as anyone might browse them. 0 disables.
+	ArchiveSessionAfter time.Duration
+	// ArchiveInterval is how often the archiver runs. 0 = defaultArchiveInterval.
+	ArchiveInterval time.Duration
+	// ArchiveBatch bounds sessions moved per pass, so one catch-up cycle cannot
+	// spend an hour in rclone or exhaust the remote's API quota. 0 = default.
+	ArchiveBatch int
+	// ArchiveRequired refuses to delete a session under disk pressure unless it was
+	// successfully archived first. Safer for data, dangerous for the host: with the
+	// remote down and the disk full, nothing can be reclaimed and the filesystem
+	// fills, which takes down every user's agent. Default false — reclaim and say
+	// loudly what was lost.
+	ArchiveRequired bool
 }
 
 const (
@@ -58,9 +112,16 @@ const (
 	defaultFlushInterval  = 250 * time.Millisecond
 	defaultRetentionAge   = 7 * 24 * time.Hour
 	defaultRetentionBytes = 512 << 20
-	defaultContentCap     = 16 << 10
-	defaultContentPerReq  = 24
-	pruneInterval         = 5 * time.Minute
+	defaultDiskHigh       = 0.90
+	defaultDiskLow        = 0.85
+	defaultMinKeepBytes   = 1 << 30 // 1 GiB
+	defaultArchiveBatch   = 50
+	// Every 15 minutes: this is a background trickle against a rate-limited API, not
+	// something anyone is waiting for.
+	defaultArchiveInterval = 15 * time.Minute
+	defaultContentCap      = 16 << 10
+	defaultContentPerReq   = 24
+	pruneInterval          = 5 * time.Minute
 )
 
 func (o *Options) withDefaults() {
@@ -121,6 +182,15 @@ type Recorder struct {
 	// perComp accumulates unique-savings dedup keys so a per-request unique figure
 	// exists at capture time. Bounded; see markUnique.
 	seenKeys map[string]struct{}
+	// diskProbe overrides the filesystem usage probe. Injected only by tests: the
+	// disk rule is unreachable otherwise, since a test cannot fill a real disk.
+	diskProbe func(dir string) (float64, bool)
+	// remote is cold storage, or nil.
+	remote Remote
+	// tenantQuota reads a tenant's own row quota from the control plane (see
+	// SetTenantQuota). A func rather than a value because a manager can change it at
+	// any time, and a pointer because it is wired after the recorder starts.
+	tenantQuota atomic.Pointer[func(tenantID string) int64]
 }
 
 // NewRecorder opens the store and starts the writer goroutine. It never returns a
@@ -146,10 +216,42 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		lastSeen:  map[string]int64{},
 		seenModel: map[string]bool{},
 		seenKeys:  map[string]struct{}{},
+		remote:    opts.Remote,
 	}
 	r.wg.Add(1)
 	go r.run()
+	// The archiver gets its OWN goroutine. It must never share the writer's, because
+	// an rclone round trip takes seconds and the writer owes the request path a fast
+	// insert — a blocked writer means a full queue means dropped events, which is
+	// observability failing precisely when the system is busy.
+	if r.remote != nil && (opts.ArchiveContentAfter > 0 || opts.ArchiveSessionAfter > 0) {
+		r.wg.Add(1)
+		go r.archiveLoop()
+	}
 	return r, nil
+}
+
+// archiveLoop runs the age-based archival passes until the recorder closes.
+func (r *Recorder) archiveLoop() {
+	defer r.wg.Done()
+	every := r.opts.ArchiveInterval
+	if every <= 0 {
+		every = defaultArchiveInterval
+	}
+	// A context cancelled on shutdown, so an in-flight rclone transfer is abandoned
+	// rather than holding Close open for its full timeout.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { <-r.done; cancel() }()
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-r.done:
+			return
+		case <-t.C:
+			r.archiveIdle(ctx)
+		}
+	}
 }
 
 // DB exposes the store for queries (read-only use by the API).
@@ -307,6 +409,8 @@ func (r *Recorder) run() {
 			} else if n > 0 {
 				slog.Info("dash: pruned old dashboard rows", "requests", n)
 			}
+			r.enforceQuotas()
+			r.relieveDiskPressure()
 		case <-r.done:
 			// Drain whatever is queued so a clean shutdown does not lose the tail.
 			for {
@@ -330,17 +434,23 @@ func (r *Recorder) run() {
 // Observe records the session/model facts needed for cache attribution and
 // returns them. Called on the request path (one map lookup under a short mutex),
 // before Record.
-func (r *Recorder) Observe(session, model string, now int64) (seenSession, seenModel bool, sinceLastMs int64) {
+// tenant namespaces both maps. The session id already carries its tenant (see
+// session.Scoped), but the MODEL name does not: model ids are shared vocabulary, so
+// unscoped, one tenant's first-ever request for a model would be attributed as a
+// warm cache because a DIFFERENT tenant had used it. That is both wrong and a small
+// disclosure — it tells you which models other people are running.
+func (r *Recorder) Observe(tenant, session, model string, now int64) (seenSession, seenModel bool, sinceLastMs int64) {
 	if r == nil {
 		return true, true, 0
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	mk := tenant + "\x00" + model
 	prev, seenSession := r.lastSeen[session]
 	if seenSession {
 		sinceLastMs = now - prev
 	}
-	seenModel = r.seenModel[model]
+	seenModel = r.seenModel[mk]
 	// Bound both maps: a proxy runs for weeks and every distinct session id would
 	// otherwise be retained forever. Sessions are keyed by content hash or client
 	// id, so the working set is small; a reset just re-reports a cold start, which
@@ -353,7 +463,7 @@ func (r *Recorder) Observe(session, model string, now int64) (seenSession, seenM
 		r.seenModel = map[string]bool{}
 	}
 	r.lastSeen[session] = now
-	r.seenModel[model] = true
+	r.seenModel[mk] = true
 	return seenSession, seenModel, sinceLastMs
 }
 
@@ -361,7 +471,11 @@ func (r *Recorder) Observe(session, model string, now int64) (seenSession, seenM
 // the content keys the component stashed — the same rule metrics.Aggregator uses,
 // so the dashboard's unique figure and /stats' agree. Returns saved tokens
 // attributable to content not seen before.
-func (r *Recorder) MarkUnique(component string, keys []string, saved int) int {
+// tenant namespaces the seen-key set, and it must. The keys are CONTENT hashes, so
+// two tenants working on the same repository produce the same ones — unscoped, the
+// second tenant's genuinely new saving is silently attributed as a repeat and
+// reported as zero. Their dashboard would show the tool doing nothing.
+func (r *Recorder) MarkUnique(tenant, component string, keys []string, saved int) int {
 	if r == nil || saved <= 0 {
 		return 0
 	}
@@ -377,7 +491,7 @@ func (r *Recorder) MarkUnique(component string, keys []string, saved int) int {
 	}
 	newKeys := 0
 	for _, k := range keys {
-		ck := component + "\x00" + k
+		ck := tenant + "\x00" + component + "\x00" + k
 		if _, seen := r.seenKeys[ck]; !seen {
 			r.seenKeys[ck] = struct{}{}
 			newKeys++
