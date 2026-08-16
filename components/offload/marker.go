@@ -52,36 +52,6 @@ func effectiveMode(c *components.Ctx, mode markerMode) markerMode {
 	return mode
 }
 
-// mark centralizes the three marker_modes for the spot where an Offload component
-// would write its restoration marker. It returns the token to splice there and
-// the store key to append to the component's cacheKeys (empty in summary/off).
-//
-//	full    -> Store.Put(HASH, original); token = "<<cg:HASH>>"+hint ; key = HASH
-//	summary -> no stash; token = expand.SummaryMarker ; key = "" ; rep.Irreversible
-//	off     -> no stash; token = "" ; key = "" ; rep.Irreversible
-//
-// hint is the component-specific recovery hint (e.g. " [full output: call
-// context_guru_expand]"); it is only emitted in full mode, where expand works.
-//
-// Deprecated: mark stashes eagerly, before the caller knows whether the marker-
-// bearing rewrite is actually smaller than the original. New offloaders should use
-// tryMark + commitMark, which apply a marker-INCLUSIVE never-worse check per message
-// and only stash on a committed win (avoids growing a single message by the marker's
-// ~10-15 tokens, and avoids orphan store entries for rewrites that are then rejected).
-// Retained only for tests; all shipped offloaders use tryMark.
-func mark(c *components.Ctx, rep *components.Report, mode markerMode, original, hint string) (token, key string) {
-	if effectiveMode(c, mode) == markerFull {
-		key = hashKey(original)
-		c.Store.Put(key, []byte(original))
-		return expand.Marker(key) + hint, key
-	}
-	rep.Irreversible = true
-	if mode == markerSummary {
-		return expand.SummaryMarker, ""
-	}
-	return "", "" // off
-}
-
 // markToken computes the marker token and store key for a mode WITHOUT stashing.
 // It returns the effective mode (full degrades to off when the store can't persist).
 // This is the "plan" half of the split that lets a component build its candidate

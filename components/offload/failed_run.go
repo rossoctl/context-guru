@@ -13,9 +13,24 @@ import (
 func init() { components.Register("failed_run", newFailedRun) }
 
 // runMarkers identify a tool output that is a test/build run — the kind that is
-// superseded when the agent re-runs after a fix. Deliberately broad; false
-// positives only cost an expand round-trip, never data (the original is stashed).
-var runMarkers = regexp.MustCompile(`(?i)(\d+ (passed|failed|error)|BUILD (SUCCESS|FAIL)|=+ (FAILURES|test session)|Traceback \(most recent|\bFAILED\b|\bpanic:|\bnpm ERR!)`)
+// superseded when the agent re-runs after a fix.
+//
+// The structurally line-initial markers are ANCHORED to the start of a line (leading
+// indentation allowed). They used to match anywhere in the blob, and a replay over 1,795
+// real SWE-bench requests found that 9 of 81 collapses were misclassifications: a
+// 22,698-byte line-numbered source read of astropy's qdp.py, a sympy source read, an
+// xarray test file and a `git show` diff were each collapsed and LABELLED "superseded by
+// a later failed→re-run", because the phrase `Traceback (most recent` occurred inside the
+// source text and `=+ failures` matched an ordinary `= failures` assignment.
+//
+// The old comment said false positives "only cost an expand round-trip, never data".
+// True, and it undersold the cost: the round-trip lands on the file the agent is mid-patch
+// on, and the label asserts something false about the content. Anchoring kills all four
+// observed shapes for free, because a line-numbered read begins every line with its number.
+//
+// `\d+ (passed|failed|error)` stays UNANCHORED deliberately: pytest pads its summary
+// (`==== 1 failed, 40 passed in 12.31s ====`), so that one is mid-line by construction.
+var runMarkers = regexp.MustCompile(`(?im)(\d+ (passed|failed|error)|^[ \t]*(BUILD (SUCCESS|FAIL)|=+ (FAILURES|test session)|Traceback \(most recent|FAILED\b|panic:|npm ERR!))`)
 
 // failMarkers identify a run that FAILED. Only a failed earlier run is safely
 // "superseded" by a later run (the agent fixed it and moved on); a PASSED/successful
@@ -26,7 +41,9 @@ var runMarkers = regexp.MustCompile(`(?i)(\d+ (passed|failed|error)|BUILD (SUCCE
 // Note: the count must be NON-ZERO ("0 failed" is a PASS, not a failure); the bare
 // pytest "FAILED <path>" token is matched CASE-SENSITIVELY so a lowercase "0 failed"
 // summary doesn't trip it.
-var failMarkers = regexp.MustCompile(`(?i)([1-9]\d* (failed|error(s|ed)?)\b|build fail|=+ failures|traceback \(most recent|\bpanic:|\bnpm err!|\bexit(ed with)? (code )?[1-9])|(?-i:\bFAILED\b)`)
+// Same anchoring rule as runMarkers, for the same measured reason: `traceback (most
+// recent` and `=+ failures` inside a source read must not make a file look like a failure.
+var failMarkers = regexp.MustCompile(`(?im)([1-9]\d* (failed|error(s|ed)?)\b|\bexit(ed with)? (code )?[1-9]|^[ \t]*(build fail|=+ failures|traceback \(most recent|panic:|npm err!)|^[ \t]*(?-i:FAILED)\b)`)
 
 // FailedRun collapses earlier test/build runs that a later run supersedes: only
 // the most recent run-like tool output is kept in full; earlier ones become a
@@ -64,20 +81,28 @@ func (fr *FailedRun) Offload(req *schemas.BifrostChatRequest, rep *components.Re
 			continue
 		}
 		if !schema.Rewritable(m) {
-			continue // non-text blocks would be dropped by a text rewrite
+			rep.Gate("non_text_blocks") // would be dropped by a text rewrite
+			continue
 		}
 		content := schema.MessageText(m)
 		if schema.TextTokens(content) < fr.minTokens {
+			rep.Gate("below_min_tokens")
 			continue
 		}
 		if expand.HasPlaceholder(content) {
-			continue // already offloaded
+			rep.Gate("marker_present") // already offloaded
+			continue
 		}
-		if runMarkers.MatchString(content) {
-			runs = append(runs, i)
+		if !runMarkers.MatchString(content) {
+			rep.Gate("not_run_like")
+			continue
 		}
+		runs = append(runs, i)
 	}
 	if len(runs) < 2 {
+		// The component's whole premise: a LATER run supersedes an earlier one. One run
+		// (or none) in a request means there is nothing to supersede.
+		rep.Gate("fewer_than_two_runs")
 		rep.Skipped = true
 		return nil, nil
 	}
@@ -92,36 +117,48 @@ func (fr *FailedRun) Offload(req *schemas.BifrostChatRequest, rep *components.Re
 		// Reapply a previously-frozen collapse on EVERY turn (cache-stable), regardless
 		// of the tail boundary — the agent re-sends the original, so we must re-collapse
 		// it to the same bytes or it reverts to full and churns the cache.
-		if fk, saved, ok := reapplyFrozen(c, fr.Name(), m); ok {
-			rep.TokensBefore += saved // (report best-effort; pipeline recomputes exact)
+		if fk, _, ok := reapplyFrozen(c, fr.Name(), m); ok {
 			changed++
 			keys = append(keys, fk...)
 			continue
 		}
 		if isKeptVerbatim(c, contentKey(content)) {
-			continue // agent expanded this superseded run; leave it verbatim (no bounce)
+			rep.Gate("kept_verbatim_after_expand")
+			continue
 		}
 		if !failMarkers.MatchString(content) {
-			continue // earlier run succeeded — not superseded, keep it
+			rep.Gate("earlier_run_passed") // not superseded — keep it
+			continue
 		}
 		// A NEW collapse mutates an OLDER message (the superseded run), which on a
 		// prompt-cached agent flips already-cached content full→collapsed and forces a
 		// cache-write of the whole suffix — the dominant +cost we measured (121 such
-		// transitions on SWE-50). On a cached agent the superseded run already bills at
-		// the cheap cache-read rate, so collapsing it doesn't pay: skip NEW collapses
-		// entirely (frozen ones are still reapplied above for stability). With caching
-		// OFF, collapse freely — there the content cut is a direct saving. The one
-		// exception is a freeze this session established and the store then LOST: the
-		// provider already holds the collapsed bytes for this run, so re-deriving them
+		// transitions on SWE-50). So a new collapse is restricted to the UNCACHED TAIL,
+		// per MESSAGE, exactly as mask does it: content the provider has not cached yet
+		// can be collapsed for free, and the freeze below replays the same bytes on later
+		// turns so the representation never flips at depth.
+		//
+		// This gate used to read `if c.CacheAware && ...` — per REQUEST rather than per
+		// message. resolveCacheAware is true by default for Anthropic/Bedrock/Vertex, so
+		// that form declined every new collapse at every depth and the component could
+		// never act at all on the flagship workload; the escape hatch below was
+		// unreachable too, because the only freeze() call is DOWNSTREAM of this gate, so
+		// no first freeze could ever be established for a repair to recover.
+		// TestFailedRunCacheAwareStillCollapsesTheTail is the missing half that catches it.
+		//
+		// The one exception is a freeze this session established and the store then LOST:
+		// the provider already holds the collapsed bytes for this run, so re-deriving them
 		// (deterministic) preserves its cache, while leaving the run verbatim is what
 		// forces the suffix re-write.
-		if c.CacheAware && !repairLostFreeze(c, fr.Name(), content) {
+		if !c.TailOnly(i) && !repairLostFreeze(c, fr.Name(), content) {
+			rep.Gate("cached_prefix")
 			continue
 		}
 		newText, key, eff, ok := tryMark(c, fr.mode, content, " [full output: call "+expand.ToolName+"]",
 			func(tok string) string { return "[superseded by a later failed→re-run] " + tok })
 		if !ok {
-			continue // collapse+marker wouldn't shrink this run; leave it verbatim
+			rep.Gate("marker_no_win") // collapse+marker wouldn't shrink this run
+			continue
 		}
 		commitMark(c, rep, eff, key, content)
 		schema.SetMessageText(m, newText)

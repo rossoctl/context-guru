@@ -18,12 +18,12 @@ func init() { components.Register("toon", newToon) }
 // Object Notation): one header listing the field names once, then one
 // comma-separated row per element. It drops the braces, repeated keys, and
 // quotes that dominate a JSON array's token cost. It's a Reformat (repack in
-// place, nothing stashed): every scalar value is preserved, with one small
-// representational simplification — JSON null renders as an empty cell
-// (indistinguishable from ""). Only arrays whose elements share one key set and
-// hold scalar values are encoded; anything nested, ragged, or non-array is left
-// untouched, and the pipeline's never-worse guard reverts any case that fails to
-// shrink.
+// place, nothing stashed), so it must be LOSSLESS: every scalar value is preserved and
+// stays distinguishable from every other. Arrays are encoded only when the element key
+// sets match, the values are scalars, and no cell would be AMBIGUOUS once its quotes are
+// dropped — a null, or a string that reads back as a number or a bool, makes the whole
+// array non-encodable (see scalarCell). Anything nested, ragged or non-array is left
+// untouched, and the pipeline's never-worse guard reverts any case that fails to shrink.
 //
 //	[{"id":1,"name":"Alice"},{"id":2,"name":"Bob"}]
 //	=>
@@ -57,18 +57,22 @@ func (t *Toon) Reformat(req *schemas.BifrostChatRequest, rep *components.Report,
 			continue
 		}
 		if !schema.Rewritable(*m) {
-			continue // non-text blocks would be dropped by a text rewrite
+			rep.Gate("non_text_blocks") // would be dropped by a text rewrite
+			continue
 		}
 		content := schema.MessageText(*m)
 		if schema.TextTokens(content) < t.minTokens {
+			rep.Gate("below_min_tokens")
 			continue
 		}
 		toon, ok := encodeTOON(content)
 		if !ok {
+			rep.Gate("not_uniform_object_array")
 			continue
 		}
 		if schema.TextTokens(toon) >= schema.TextTokens(content) {
-			continue // already dense / no win
+			rep.Gate("already_dense")
+			continue
 		}
 		schema.SetMessageText(m, toon)
 		acted = true
@@ -130,19 +134,32 @@ func encodeTOON(content string) (string, bool) {
 }
 
 // scalarCell renders one JSON scalar as a TOON cell, quoting CSV-style when the
-// value contains a delimiter. ok=false for objects/arrays (a non-flat value).
-// ponytail: null renders as an empty cell — acceptable for a display-oriented
-// reformat; a strict round-trip is not a goal here.
+// value contains a delimiter. ok=false means "not encodable" — the caller then leaves the
+// whole array untouched.
+//
+// It refuses three cases that would make the encoding LOSSY, because toon is a Reformat
+// and Reformat's contract is a lossless repack: the type carries no stash, no
+// <<cg:HASH>> marker and no expand path, so a value it flattens is unrecoverable.
+//   - null: would render as an empty cell, indistinguishable from a real "".
+//   - a string that reads back as a number ("1", "1.50", "01234"): collapses onto the
+//     number cell, so the reader cannot tell 1 from "1".
+//   - a string that reads back as a bool ("true"): same collapse.
+//
+// Refusing costs only a table we decline to compress; encoding it would silently change
+// what the model is told, which is the one thing a lossless component may not do.
 func scalarCell(v any) (string, bool) {
 	var s string
 	switch x := v.(type) {
 	case nil:
-		s = ""
+		return "", false // ambiguous with a real empty string, and unrecoverable
 	case bool:
 		s = strconv.FormatBool(x)
 	case json.Number:
 		s = x.String()
 	case string:
+		if ambiguousScalarString(x) {
+			return "", false
+		}
 		s = x
 	default:
 		return "", false
@@ -151,4 +168,21 @@ func scalarCell(v any) (string, bool) {
 		s = `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 	}
 	return s, true
+}
+
+// ambiguousScalarString reports whether a string cell would be indistinguishable from a
+// number or boolean cell once the quotes are dropped. Uses the same parsers the JSON
+// decoder would, so the test is "does this round-trip as a different type", not a regex
+// guess. Bare "" is fine: it is only ambiguous with null, which scalarCell already refuses.
+func ambiguousScalarString(s string) bool {
+	if s == "" {
+		return false
+	}
+	if _, err := strconv.ParseFloat(s, 64); err == nil {
+		return true
+	}
+	if _, err := strconv.ParseBool(s); err == nil {
+		return true
+	}
+	return false
 }

@@ -246,11 +246,11 @@ func conversationGoal(req *bschemas.BifrostChatRequest) string {
 		seen[p] = struct{}{}
 		parts = append(parts, p)
 	}
-	g := strings.Join(parts, "\n\n")
-	if len(g) > goalCap {
-		g = g[:goalCap]
-	}
-	return g
+	// clipRunes, not g[:goalCap]: a byte slice can split a multi-byte rune and hand the
+	// model invalid UTF-8 mid-prompt. This never reaches the wire (the goal is prompt-only)
+	// so the blast radius is small, but a mangled goal is a silently worse extraction and
+	// the correct helper is twenty lines up.
+	return clipRunes(strings.Join(parts, "\n\n"), goalCap)
 }
 
 // keywords extracts lowercased content words (>3 chars) as a set — a cheap

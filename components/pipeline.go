@@ -70,7 +70,14 @@ func safeEmit(fn func()) {
 func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx) (rep Report) {
 	rep = Report{Component: comp.Name(), Mode: c.effMode()}
 	before := schema.CloneMessages(req.Input)
-	rep.TokensBefore = tokensOf(before)
+	// baseline is the guard's OWN copy of the pre-run size. rep.TokensBefore is handed to
+	// the component, so a component can write to it — mask and failed_run both did
+	// (`rep.TokensBefore += saved`) — and comparing against the field let a component move
+	// the goalpost and splice a request it had GROWN onto the wire. The never-worse
+	// guarantee is the product's central safety claim, so it may not depend on component
+	// cooperation. See TestNeverWorseGuardIgnoresAComponentInflatingItsOwnBaseline.
+	baseline := tokensOf(before)
+	rep.TokensBefore = baseline
 	start := clock()
 
 	defer func() {
@@ -79,7 +86,8 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 			// Fail open: revert and record. A component panic never breaks the request.
 			req.Input = before
 			rep.Reverted = true
-			rep.TokensAfter = rep.TokensBefore
+			rep.TokensBefore = baseline
+			rep.TokensAfter = baseline
 			rep.Err = fmt.Errorf("panic: %v", r)
 		}
 	}()
@@ -106,24 +114,24 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 	case err != nil:
 		req.Input = before
 		rep.Reverted = true
-		rep.TokensAfter = rep.TokensBefore
+		rep.TokensBefore, rep.TokensAfter = baseline, baseline
 		rep.Err = err
-	case rep.Kind == "offload" && after < rep.TokensBefore && len(rep.CacheKeys) == 0 && !rep.Skipped && !rep.Irreversible:
+	case rep.Kind == "offload" && after < baseline && len(rep.CacheKeys) == 0 && !rep.Skipped && !rep.Irreversible:
 		// An Offload that dropped content without stashing an original is a
 		// contract violation — reversibility would be broken. Revert. (A
 		// deliberate lossy drop under marker_mode summary/off sets rep.Irreversible
 		// and is exempt: it chose no restoration, not forgot it.)
 		req.Input = before
 		rep.Reverted = true
-		rep.TokensAfter = rep.TokensBefore
+		rep.TokensBefore, rep.TokensAfter = baseline, baseline
 		rep.Err = fmt.Errorf("offload dropped content without stashing a cache_key")
-	case after > rep.TokensBefore:
+	case after > baseline:
 		// never-worse: a component must not grow the request.
 		req.Input = before
 		rep.Reverted = true
-		rep.TokensAfter = rep.TokensBefore
+		rep.TokensBefore, rep.TokensAfter = baseline, baseline
 	default:
-		rep.TokensAfter = after
+		rep.TokensBefore, rep.TokensAfter = baseline, after
 		// Only a change that SURVIVED can be discarded by the writeback layer. Recording
 		// it in the revert branches above would charge a rolled-back component for a
 		// discard it never caused.

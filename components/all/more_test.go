@@ -120,6 +120,40 @@ func TestFailedRunCacheAwareTailOnly(t *testing.T) {
 	}
 }
 
+// The other half of TestFailedRunCacheAwareTailOnly, and the half that was missing: a
+// superseded FAILED run in the UNCACHED TAIL must still be collapsed under
+// CacheAware:true. failed_run gated on `c.CacheAware` (per REQUEST) where its sibling
+// mask gates on `!c.TailOnly(i)` (per MESSAGE), so cache-awareness disabled every new
+// collapse at every depth — and since resolveCacheAware is true by default for
+// Anthropic/Bedrock/Vertex, the component could never act at all on the flagship
+// workload. The negative test above passed vacuously for the same reason.
+func TestFailedRunCacheAwareStillCollapsesTheTail(t *testing.T) {
+	run1 := "=== test session starts ===\n" + strings.Repeat("detail line about the failing run\n", 20) + "3 failed, 2 passed in 1.2s\n"
+	run2 := "=== test session starts ===\n" + strings.Repeat("detail line about the passing run\n", 20) + "0 failed, 5 passed in 1.0s\n"
+	req := &schemas.BifrostChatRequest{Input: []schemas.ChatMessage{toolMsg(run1), toolMsg("some unrelated note"), toolMsg(run2)}}
+
+	cfg, err := config.LoadBytes([]byte("pipeline: [failed_run]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipe, err := cfg.Build(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First turn of the session: nothing is committed to the provider cache yet, so every
+	// message is in the mutable tail (MaxCachedIdx = -1).
+	c := &components.Ctx{Ctx: context.Background(), Session: "s", Store: store.NewMemory(store.Options{}),
+		CacheAware: true, MaxCachedIdx: -1}
+	pipe.Run(req, c)
+	if !strings.Contains(schema.MessageText(req.Input[0]), "superseded") {
+		t.Fatalf("cache-aware: a superseded failed run in the UNCACHED TAIL must be collapsed, got: %q",
+			schema.MessageText(req.Input[0]))
+	}
+	if !strings.Contains(schema.MessageText(req.Input[2]), "0 failed") {
+		t.Fatal("latest run must be kept in full")
+	}
+}
+
 func TestCollapseHeadTail(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 30; i++ {

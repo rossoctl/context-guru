@@ -75,6 +75,21 @@ func LoadBytes(b []byte) (*Config, error) {
 	return &c, nil
 }
 
+// Validate reports whether a configuration document is usable, without keeping
+// anything it builds. It is the full check, not just a parse: LoadBytes catches
+// typos, an unknown preset and a bad mode, but only Build catches an unknown
+// component name or a malformed per-component block. A hosted deployment saving a
+// user-supplied config needs the strict answer at write time, so the failure is a
+// 400 on their settings page rather than a surprise on their next agent turn.
+func Validate(b []byte) error {
+	c, err := LoadBytes(b)
+	if err != nil {
+		return err
+	}
+	_, err = c.Build(components.NopEmitter{})
+	return err
+}
+
 // applyPreset fills an empty Pipeline (and, for rich presets, default component
 // configs) from the named preset. Explicit fields in the document always win — they
 // were already decoded, so the preset only supplies what the user left unset.
@@ -155,13 +170,18 @@ var presets = map[string][]string{
 	// recommended defaults (codesmart is the proxy default). Their tuned per-component
 	// settings live in presetConfigs; the name-lists here keep PresetPipeline (used by
 	// /compact?preset=) resolving them.
-	"codesmart": {"format", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "cachesplit"},
+	"codesmart": {"format", "toon", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "cachesplit"},
 	"codesafe":  {"format", "dedup", "failed_run", "cmdfilter", "extract", "collapse", "cachesplit"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
-// per-component settings a bare pipeline name-list cannot express. Kept verbatim from
-// the SWE-bench study (deploy/harbor/swebench.py):
+// per-component settings a bare pipeline name-list cannot express. Derived from the
+// SWE-bench study (deploy/harbor/swebench.py), but NOT identical to it any more — the
+// study's arm predates `toon` and used `cacheinject` where this uses `cachesplit`. The
+// comment used to claim "kept verbatim", which was false and load-bearing: it is what a
+// reader relies on when deciding whether the published numbers describe the shipped
+// default. They describe an ancestor of it. Treat any preset change as a reason to
+// re-measure, not as a documentation edit.
 //   - codesmart (the winning cache-aware config, and the proxy default): the LLM
 //     relevance-trimmer extract_llm routed to the CHEAP model (model.source: config,
 //     nil-when-unset ⇒ it silently no-ops to deterministic — see docs), gated at 3000
@@ -172,7 +192,7 @@ var presets = map[string][]string{
 //
 // Component defaults are left untouched, so general/agent/aggressive are unaffected.
 var presetConfigs = map[string]string{
-	"codesmart": `pipeline: [format, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]
+	"codesmart": `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]
 components:
   extract:
     min_tokens: 400

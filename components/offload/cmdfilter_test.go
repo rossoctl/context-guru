@@ -187,6 +187,40 @@ func TestSizeFloorSkipsSmallOutputs(t *testing.T) {
 	}
 }
 
+// The floor sits at 400 because it was MEASURED there, not inherited from rtk's 500.
+// This is the case that decided it: a real captured pip output that is nothing but the
+// two fixed advisories — 400 <= len < 500, so the old floor refused it while the
+// marker-inclusive never-worse guard accepts it. If someone raises the floor back
+// toward 500 this is the saving that silently disappears, so pin it behaviorally
+// rather than asserting the constant against itself.
+func TestSizeFloorAdmitsTheMeasuredBand(t *testing.T) {
+	const pipNag = "WARNING: Running pip as the 'root' user can result in broken permissions and " +
+		"conflicting behaviour with the system package manager, possibly rendering your system " +
+		"unusable. It is recommended to use a virtual environment instead: " +
+		"https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what " +
+		"you are doing and want to suppress this warning.\n\n" +
+		"[notice] A new release of pip is available: 25.2 -> 26.2.1\n" +
+		"[notice] To update, run: pip install --upgrade pip\n"
+	if len(pipNag) < defaultMinSize || len(pipNag) >= 500 {
+		t.Fatalf("fixture must sit in the 400..499 band the sweep opened up, got %d bytes", len(pipNag))
+	}
+	out, rep := runFilter(t, newFilterComp(t, ""), pipNag)
+	if rep.Skipped || !strings.Contains(out, "pip: install ok") {
+		t.Fatalf("output in the measured band must be filtered at the default floor: %q skipped=%v", out, rep.Skipped)
+	}
+	if !expand.HasPlaceholder(out) {
+		t.Fatalf("the rewrite must stay reversible: %q", out)
+	}
+	// And the floor still refuses the same content when configured back to 500.
+	out500, rep500 := runFilter(t, newFilterComp(t, "min_size: 500\n"), pipNag)
+	if out500 != pipNag || !rep500.Skipped {
+		t.Fatalf("min_size: 500 must still refuse it: %q skipped=%v", out500, rep500.Skipped)
+	}
+	if rep500.Gates["below_min_size"] != 1 {
+		t.Fatalf("the refusal must be attributed to the floor, gates=%v", rep500.Gates)
+	}
+}
+
 func planFixture() string {
 	var b strings.Builder
 	b.WriteString("Acquiring state lock. This may take a few moments...\n")
@@ -326,5 +360,117 @@ func TestMissLedgerKeysAreBoundedAndTextOnly(t *testing.T) {
 		if got := firstLine(ok); got != ok {
 			t.Errorf("real selector altered: %q -> %q", ok, got)
 		}
+	}
+}
+
+// A REAL pip install output, captured verbatim from a Terminal-Bench trial (Claude
+// Agent SDK traffic). It is the top-ranked unmatched shape in the selector-miss ledger
+// for a Python workload — 24 builtin filters covered pytest, npm, poetry, uv, composer,
+// bundler, apt and brew, but not pip itself, the one installer nearly every Python task
+// runs. The three trailing advisory lines are pure noise: the root-user warning and the
+// pip-upgrade notices are fixed text the agent can never act on, while the
+// "Successfully installed" manifest is the result and must survive.
+const capturedPipInstall = "Successfully installed contourpy-1.3.3 cycler-0.12.1 " +
+	"fonttools-4.63.0 kiwisolver-1.5.0 matplotlib-3.10.7 numpy-2.3.4 packaging-25.0 " +
+	"pillow-12.0.0 pyparsing-3.2.5 python-dateutil-2.9.0.post0 six-1.17.0\n" +
+	"WARNING: Running pip as the 'root' user can result in broken permissions and " +
+	"conflicting behaviour with the system package manager. It is recommended to use a " +
+	"virtual environment instead: https://pip.pypa.io/warnings/venv\n" +
+	"\n[notice] A new release of pip is available: 25.2 -> 26.2.1\n" +
+	"[notice] To update, run: pip install --upgrade pip\n"
+
+func TestPipInstallOutputIsFiltered(t *testing.T) {
+	var r dsl.Registry
+	if err := r.Load([]byte(builtinFilters)); err != nil {
+		t.Fatal(err)
+	}
+	filt := r.Match(selectorKey(capturedPipInstall))
+	if filt == nil {
+		t.Fatalf("no builtin filter matches a pip install output; selector was %q",
+			selectorKey(capturedPipInstall))
+	}
+	out, _ := dsl.Apply(filt, capturedPipInstall)
+	if schema.TextTokens(out) >= schema.TextTokens(capturedPipInstall) {
+		t.Errorf("filter %q did not shrink the output: %d -> %d tokens",
+			filt.Name, schema.TextTokens(capturedPipInstall), schema.TextTokens(out))
+	}
+	// The result manifest is the whole point of the output — it must survive.
+	if !strings.Contains(out, "Successfully installed contourpy-1.3.3") {
+		t.Errorf("the install manifest was dropped: %q", out)
+	}
+	// The unactionable advisories must be gone.
+	for _, noise := range []string{"root' user", "[notice]"} {
+		if strings.Contains(out, noise) {
+			t.Errorf("advisory noise %q survived: %q", noise, out)
+		}
+	}
+}
+
+// A REAL pdflatex run, captured verbatim from a Terminal-Bench trial. Second-ranked
+// unmatched shape in the selector-miss ledger (13 occurrences of a ~614-token log).
+// The signal is the Overfull/Underfull warnings and the output summary; the engine
+// banner and the absolute texlive package paths are fixed boilerplate.
+const capturedPdflatex = "/usr/bin/pdflatex\n" +
+	"This is pdfTeX, Version 3.141592653-2.6-1.40.25 (TeX Live 2023/Debian) (preloaded format=pdflatex)\n" +
+	" restricted \\write18 enabled.\nentering extended mode\n(./main.tex\n" +
+	"LaTeX2e <2023-11-01> patch level 1\nL3 programming layer <2024-01-22>\n" +
+	"(/usr/share/texlive/texmf-dist/tex/latex/base/article.cls\n" +
+	"Document Class: article 2023/05/17 v1.4n Standard LaTeX document class\n" +
+	"(/usr/share/texlive/texmf-dist/tex/latex/base/size10.clo))\n" +
+	"(/usr/share/texlive/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def)\n" +
+	"No file main.aux.\n(./input.tex\n" +
+	"Overfull \\hbox (0.10312pt too wide) in paragraph at lines 5--6\n" +
+	"\\OT1/cmr/m/n/10 many cu-ri-ous na-tures to me and also made\n\n" +
+	"[1{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}]\n" +
+	"[5] (./main.aux) )\n(see the transcript file for additional information)" +
+	"</usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>\n" +
+	"Output written on main.pdf (5 pages, 29584 bytes).\n" +
+	"Transcript written on main.log.\n"
+
+func TestPdflatexOutputIsFiltered(t *testing.T) {
+	var r dsl.Registry
+	if err := r.Load([]byte(builtinFilters)); err != nil {
+		t.Fatal(err)
+	}
+	filt := r.Match(selectorKey(capturedPdflatex))
+	if filt == nil {
+		t.Fatalf("no builtin filter matches a pdflatex log; selector was %q",
+			selectorKey(capturedPdflatex))
+	}
+	out, _ := dsl.Apply(filt, capturedPdflatex)
+	if schema.TextTokens(out) >= schema.TextTokens(capturedPdflatex) {
+		t.Errorf("filter %q did not shrink the log: %d -> %d tokens",
+			filt.Name, schema.TextTokens(capturedPdflatex), schema.TextTokens(out))
+	}
+	// The diagnostics and the result are the signal — they must survive verbatim.
+	for _, keep := range []string{
+		"Overfull \\hbox (0.10312pt too wide) in paragraph at lines 5--6",
+		"Output written on main.pdf (5 pages, 29584 bytes).",
+	} {
+		if !strings.Contains(out, keep) {
+			t.Errorf("dropped signal %q from %q", keep, out)
+		}
+	}
+	// Fixed engine/package boilerplate must be gone.
+	for _, noise := range []string{"This is pdfTeX", "texmf-dist/tex/latex/base/article.cls",
+		"Transcript written on", "entering extended mode"} {
+		if strings.Contains(out, noise) {
+			t.Errorf("boilerplate %q survived: %q", noise, out)
+		}
+	}
+
+	// The line budget must not eat the RESULT. A TeX log's most important line sits at
+	// the very end, so a small cap class silently truncates the one line the agent needs
+	// — measured on a real 39-line run under `cap: list`, which dropped the summary.
+	var long strings.Builder
+	long.WriteString("This is pdfTeX, Version 3.141592653 (TeX Live 2023/Debian)\nentering extended mode\n(./main.tex\n")
+	for i := 0; i < 30; i++ {
+		long.WriteString("Overfull \\hbox (1.0pt too wide) in paragraph at lines 1--2\n")
+		long.WriteString("\\OT1/cmr/m/n/10 some hy-phen-ated words here\n")
+	}
+	long.WriteString("Output written on main.pdf (5 pages, 29584 bytes).\nTranscript written on main.log.\n")
+	lout, _ := dsl.Apply(filt, long.String())
+	if !strings.Contains(lout, "Output written on main.pdf") {
+		t.Errorf("the line budget truncated the output summary off a long log:\n%s", lout)
 	}
 }

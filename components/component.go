@@ -264,6 +264,26 @@ type Report struct {
 	// Ctx.Mode. Emitters MUST branch on it: an observe-mode report is a HYPOTHETICAL and
 	// may never be summed into enforced savings.
 	Mode Mode
+	// Gates counts, per named gate, how many CANDIDATES this component turned away — either
+	// declined outright or resolved without a fresh decision (extract_llm's reapplied_*).
+	// "acted: 0" is the one number a diagnosis can't use — it cannot tell a component
+	// with nothing to do from one whose guard is misfiring, which is how eight components
+	// sat at zero on a whole workload without anyone being able to say which case each
+	// was in. Filled by the component via Gate(); rolled up into /stats per component.
+	Gates map[string]int
+}
+
+// Gate records that one candidate was declined by the named gate. Names are the
+// component's own vocabulary (e.g. "min_size", "no_filter_match", "marker_no_win");
+// keep them stable, they are read off /stats.
+func (r *Report) Gate(name string) {
+	if r == nil {
+		return
+	}
+	if r.Gates == nil {
+		r.Gates = map[string]int{}
+	}
+	r.Gates[name]++
 }
 
 // Saved returns non-negative tokens saved by this component.

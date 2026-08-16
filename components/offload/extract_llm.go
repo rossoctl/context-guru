@@ -17,6 +17,7 @@ import (
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/extract"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/schema"
 	"gopkg.in/yaml.v3"
@@ -159,6 +160,97 @@ type ExtractLLM struct {
 	// modelName identifies the extraction model in the global cache key, so switching
 	// models misses rather than serving another model's extraction (#28 C).
 	modelName string
+	// modelMaxInput is the operator's pinned input budget for the extraction model
+	// (0 = derive it, see inputLimit).
+	modelMaxInput int
+}
+
+// Context budget for ONE extraction call.
+//
+// extract_llm sends ONE tool output per call (a per-output prompt, not an assembled
+// conversation), so "the request is too big" here means a single prompt exceeding the
+// EXTRACTION model's window — not too many messages. The prompt builders already bound the
+// body they SHOW the model, but that bound is in characters and lives in internal/extract,
+// so it is no protection against a small-window extraction model (an on-prem 8k/32k
+// deployment, a gateway alias): the call then 400s, which fails open correctly but burns a
+// round-trip and a slot in the request's wall clock every turn.
+const (
+	// cheapExtractOutputTokens mirrors the `max_tokens` the cheap clients send
+	// (cheapmodel.Anthropic/OpenAI default to 2048). Most APIs bound input+output against
+	// the same window — vLLM and friends reject the request outright — so the reply must be
+	// reserved out of the budget rather than assumed free.
+	cheapExtractOutputTokens = 2048
+	// cheapExtractSlack covers the JSON envelope, role framing and provider-side
+	// accounting that never appear in a token count of the text itself.
+	cheapExtractSlack = 512
+	// extractPromptOverheadTokens is the invariant part of the prompt: the ~1463-token
+	// system preamble (measured, see cheapmodel.Anthropic.CompleteSystem) plus the keep-list
+	// and section labels (≤60 short identifiers). Rounded up.
+	extractPromptOverheadTokens = 2000
+	// extractContextMargin marks up the estimate. tokens.Count is a real BPE count, but in
+	// o200k_base — the extraction model may tokenize the same bytes 10-15% heavier
+	// (Anthropic's tokenizer is not published, self-hosted models vary), so a count that is
+	// exact for GPT is only an estimate for anyone else.
+	extractContextMargin = 1.15
+	// extractShownBodyChars mirrors the bound internal/extract puts on the body it SHOWS
+	// the model (maxCodeContentChars: head+tail beyond it, the program still runs over the
+	// full input at runtime). Counting the whole output instead would decline calls on
+	// exactly the very large outputs this component exists for, since their prompt is
+	// bounded. Mirrored rather than imported because it is unexported there; it is a
+	// conservative direction only while it is >= extract's own bound, so raise it in step.
+	extractShownBodyChars = 32000
+	// unknownModelInputLimit is the budget for an extraction model we cannot name. Low
+	// enough to protect a small self-hosted deployment, high enough that it does not gate
+	// realistic candidates (the largest tool output measured on Terminal-Bench was ~2k
+	// tokens). Pin model_max_input_tokens when the real window is smaller.
+	unknownModelInputLimit = 32768
+)
+
+// staticWindows is the last-resort model→window table modelinfo already maintains. Held as
+// a package var because DefaultStatic allocates.
+var staticWindows = modelinfo.DefaultStatic()
+
+// inputLimit resolves the extraction model's input-token budget. Config pin first, then the
+// model's own window as DATA (modelinfo's table), then a conservative default.
+func (e *ExtractLLM) inputLimit(c *components.Ctx) int {
+	if e.modelMaxInput > 0 {
+		return e.modelMaxInput
+	}
+	if e.modelName != "" { // a config-pinned client: we know exactly which model it is
+		if w, ok := staticWindows.Window(c.Ctx, e.modelName); ok {
+			return w
+		}
+		return unknownModelInputLimit
+	}
+	// No pinned model. `source: config` means the host's separate cheap client, whose id we
+	// never see — stay conservative. Otherwise the extraction model IS the proxied model,
+	// and the host already resolved its window onto the Ctx.
+	if e.modelSource != "config" && c.CtxWindow > 0 {
+		return c.CtxWindow
+	}
+	return unknownModelInputLimit
+}
+
+// shownBodyTokens estimates what one tool output costs INSIDE the prompt: the same
+// head+tail sample internal/extract shows the model, tokenized. The full output is not the
+// right number — a 200k-token log still travels as a bounded sample.
+func shownBodyTokens(content string) int {
+	if len(content) > extractShownBodyChars {
+		half := extractShownBodyChars / 2
+		content = content[:half] + content[len(content)-half:]
+	}
+	return schema.TextTokens(content)
+}
+
+// fitsModelContext reports whether one extraction call whose body costs bodyTok can stay
+// inside limit, with the reply and the tokenizer margin reserved.
+//
+// Errs toward declining: over-estimating costs one skipped compaction, visible as the
+// over_model_context gate; under-estimating puts a request on the wire that the upstream
+// may reject, which costs a round-trip and produces nothing.
+func fitsModelContext(bodyTok, overheadTok, limit int) bool {
+	est := int(float64(bodyTok+overheadTok) * extractContextMargin)
+	return est+cheapExtractOutputTokens+cheapExtractSlack <= limit
 }
 
 type extractLLMConfig struct {
@@ -187,6 +279,10 @@ type extractLLMConfig struct {
 	// from real model rates and the cache-awareness of the traffic. Set false to restore
 	// the pre-#28 spend-on-size behavior — needed only to reproduce old benchmark numbers.
 	EconomicGate *bool `yaml:"economic_gate"`
+	// ModelMaxInput pins the EXTRACTION model's input-token budget, for deployments the
+	// static table cannot name (a self-hosted id like `qwen3-coder-30b`, or a gateway alias
+	// that hides the real model). Unset = resolved per model, see (*ExtractLLM).inputLimit.
+	ModelMaxInput int `yaml:"model_max_input_tokens"`
 	// SkipFileReads controls whether line-numbered source-file dumps are left verbatim.
 	// Tri-state: unset = AUTO (skip when the request is prompt-cached, reduce otherwise);
 	// true = always skip; false = always reduce. Rationale (measured, SWE-bench 50):
@@ -248,6 +344,7 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 		minTokensSet: explicit, gate: gate, allowCached: allowCached,
 		pricing:    cheapmodel.PricingFromEnv(),
 		prevTokens: map[string]int{}, modelName: cfg.Model.Model,
+		modelMaxInput: cfg.ModelMaxInput,
 	}, nil
 }
 
@@ -307,6 +404,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	goal := conversationGoal(req)
 	query := keywords(goal)
 	if len(query) == 0 {
+		rep.Gate("no_goal_keywords")
 		rep.Skipped = true
 		return nil, nil
 	}
@@ -351,6 +449,10 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	extCfg.Mode, extCfg.Floor, extCfg.Rewrite = e.strategy, floor, e.rewrite
 
 	keepIDs := extract.HarvestIdentifiers(goal, 40)
+	// Per-call context budget (constant across this request's candidates): the extraction
+	// model's input limit, and the prompt's fixed cost around the tool output itself.
+	inputLimit := e.inputLimit(c)
+	promptOverhead := extractPromptOverheadTokens + schema.TextTokens(goal)
 	tools := toolIndices(req)
 	var keys []string
 	changed := 0
@@ -396,17 +498,20 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	for _, i := range tools {
 		msg := &req.Input[i]
 		if !schema.Rewritable(*msg) {
+			rep.Gate("non_text_blocks")
 			continue
 		}
 		content := schema.MessageText(*msg)
 		if content == "" || expand.HasPlaceholder(content) {
 			dbgPlace++
+			rep.Gate("empty_or_marker_present")
 			continue
 		}
 		id := extract.ContentKey(content)
 		// If the agent recently EXPANDED this content, leave it verbatim (re-compacting it
 		// would just trigger another expand — a loop). The expand handler marks it.
 		if isKeptVerbatim(c, id) {
+			rep.Gate("kept_verbatim_after_expand")
 			continue
 		}
 		// SAME-SESSION replay first. This session already sent these compacted bytes on an
@@ -421,6 +526,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			metrics.RecordExtractionCacheLookup(true)
 			apply(i, content, cached.Projected, cached.Summary)
 			dbgReapply++
+			rep.Gate("reapplied_same_session")
 			continue
 		}
 		// A NEW compaction, on the UNCACHED region only (cache-safe): when cache-aware that
@@ -443,7 +549,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			dbgTail++
 			if sz >= floor {
 				dbgBigTailBlocked++ // a large output we skipped ONLY because it's not in the tail
+				rep.Gate("cached_prefix_above_floor")
 			}
+			rep.Gate("cached_prefix")
 			continue
 		}
 		// CROSS-SESSION reuse (#28 C), deliberately placed AFTER the tail gate — the
@@ -484,21 +592,36 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				putResult(c, id, cached.Projected, cached.Summary)
 				apply(i, content, cached.Projected, cached.Summary)
 				dbgReapply++
+				rep.Gate("reapplied_cross_session")
 				continue
 			}
 		}
 		metrics.RecordExtractionCacheLookup(false)
 		if sz < floor {
 			dbgFloor++
-			continue // only medium/large outputs are worth a model call
+			rep.Gate("below_output_floor") // only medium/large outputs are worth a model call
+			continue
 		}
 		if huge := e.trigger.IsHuge(sz, c.CtxWindow); !c.CacheAware && !fires && !huge {
+			rep.Gate("request_trigger_not_fired")
 			continue
 		}
 		if model == nil {
+			// No client, or the cadence/pressure gate dropped it for this request.
+			rep.Gate("no_model_this_request")
 			continue
 		}
 		if skipFR && looksLikeFileRead(content) {
+			rep.Gate("skip_file_read")
+			continue
+		}
+		// Would this one output's prompt exceed the extraction model's context? Then there is
+		// nothing to shed — the prompt is one tool output, and truncating it would hand the
+		// model a body its program must then run against the FULL input at runtime. Leave the
+		// output verbatim (fail open) rather than spend a round-trip on a request the upstream
+		// may reject. Checked before the economic gate because it is cheaper and absolute.
+		if !fitsModelContext(shownBodyTokens(content), promptOverhead, inputLimit) {
+			rep.Gate("over_model_context")
 			continue
 		}
 		// The economic gate (#28 D). This is the check the component never had: is one
@@ -522,6 +645,10 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				explore, e.allowCached)
 			if !d.allow {
 				metrics.RecordExtractionSuppressed(d.reason)
+				// Just the gate name here: the per-reason breakdown already ships in
+				// /stats via RecordExtractionSuppressed, and a full sentence makes a
+				// poor histogram key.
+				rep.Gate("economic_gate")
 				if debugExtractLLM {
 					slog.Info("cg.debug.extract_llm.gate", "decision", "suppress",
 						"reason", d.reason, "size", sz, "exp_saving_usd", d.expSaving,
@@ -541,6 +668,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			"nInput", len(req.Input))
 	}
 	if e.llmMaxPerReq > 0 && len(cands) > e.llmMaxPerReq {
+		for k := e.llmMaxPerReq; k < len(cands); k++ {
+			rep.Gate("over_per_request_cap")
+		}
 		cands = cands[:e.llmMaxPerReq] // cap model calls per request
 	}
 

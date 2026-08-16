@@ -38,11 +38,29 @@ type cmdfilterConfig struct {
 	MinSize         *int     `yaml:"min_size"`         // byte floor below which filtering isn't worth a marker
 }
 
-// defaultMinSize is rtk's MIN_TEE_SIZE: below it the recovery marker routinely
-// costs more tokens than the filter saves, so we don't bother. The
-// marker-inclusive never-worse check would catch those anyway; this just skips the
-// work (and the stash) instead of doing it and throwing it away.
-const defaultMinSize = 500
+// defaultMinSize is the byte floor below which a filter isn't attempted at all.
+//
+// It is MEASURED, not inherited. The old value was rtk's MIN_TEE_SIZE (500),
+// carried over with the justification that "the never-worse check would reject
+// those rewrites anyway" — which is false. Replaying two captured request streams
+// through /compact (44-request Terminal-Bench, 1795-request SWE-bench) with the
+// floor swept over 500..150:
+//
+//	floor  TB acted/unique  SWE acted/unique  SWE marker_no_win
+//	  500        13 /  391       305 / 1290                 97
+//	  400        36 /  483       389 / 1447                 97
+//	  300        36 /  483       424 / 1467                117
+//	  150        36 /  483       512 / 1481                118
+//
+// 400 takes the whole Terminal-Bench win (nothing below it adds anything there) and
+// most of the SWE-bench one, and it is the last value at which the marker-inclusive
+// never-worse guard rejects NOTHING new — i.e. every rewrite the old floor refused
+// was one the guard accepted. Below 400 the gains flatten while the guard starts
+// declining rewrites, which is where a floor would actually be earning its keep.
+//
+// The floor still exists because it saves the work and the stash for outputs where a
+// win is implausible; it is no longer a stand-in for the guard.
+const defaultMinSize = 400
 
 func newCmdfilter(raw []byte) (components.Component, error) {
 	var cfg cmdfilterConfig
@@ -82,18 +100,23 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 			continue
 		}
 		if !schema.Rewritable(*m) {
-			continue // non-text blocks would be dropped by a text rewrite
+			rep.Gate("non_text_blocks") // would be dropped by a text rewrite
+			continue
 		}
 		content := schema.MessageText(*m)
 		if content == "" {
+			rep.Gate("empty")
 			continue
 		}
 		if skipReduce(c, content) {
-			continue // marker-bearing (a filter rule could drop the marker line and orphan
-			// the stash) or expanded by the agent — leave it verbatim
+			// marker-bearing (a filter rule could drop the marker line and orphan the
+			// stash) or expanded by the agent — leave it verbatim
+			rep.Gate("marker_or_kept_verbatim")
+			continue
 		}
 		if len(content) < f.minSize {
-			continue // below the size floor the marker often costs more than the saving
+			rep.Gate("below_min_size") // marker would often cost more than the saving
+			continue
 		}
 		key := selectorKey(content)
 		filt := f.reg.Match(key)
@@ -108,10 +131,12 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 					fs.FilterMiss(mk)
 				}
 			}
+			rep.Gate("no_filter_match")
 			continue
 		}
 		out, loss := dsl.Apply(filt, content)
 		if out == content {
+			rep.Gate("filter_matched_no_change")
 			continue
 		}
 		// Build the token that goes where the restoration marker would (per
@@ -135,6 +160,7 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 		}
 		before, after := schema.TextTokens(content), schema.TextTokens(newText)
 		if after >= before {
+			rep.Gate("marker_no_win")
 			continue
 		}
 		if mode == markerFull {

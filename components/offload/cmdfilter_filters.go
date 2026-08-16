@@ -494,6 +494,43 @@ filters:
     cap: list
     on_empty: 'apt: install ok'
 
+  # Written FROM THE SELECTOR-MISS LEDGER, not from guesswork: on a Python workload pip
+  # was the top-ranked unmatched output shape while poetry, uv, composer, bundler, apt and
+  # brew were all covered. pip is the one installer nearly every Python task runs, so the
+  # gap was in the set, not in the traffic.
+  #
+  # Only PROVABLY unactionable lines are stripped. The "WARNING:" prefix is deliberately
+  # NOT stripped as a class — "WARNING: The script f2py is installed in '/x/bin' which is
+  # not on PATH" is a real diagnostic the agent must see. Just the two fixed advisories
+  # (root-user venv nag, pip-upgrade notice) go, plus per-package download chatter. The
+  # "Successfully installed"/"Successfully uninstalled" manifest and every error survive.
+  pip-install:
+    description: strip pip download chatter and fixed advisories, keep the install manifest and errors
+    family: pkg
+    priority: 20
+    match: '^(Collecting |Requirement already satisfied: |Installing collected packages: |Successfully installed |Looking in indexes: |WARNING: Running pip as the .root. user)'
+    strip_ansi: true
+    strip_lines_matching:
+      - '^\s*$'
+      - '^Looking in indexes: '
+      - '^Collecting '
+      - '^Requirement already satisfied: '
+      - '^\s+(Downloading|Using cached|Preparing metadata|Building wheel|Created wheel|Stored in directory|Getting requirements|Installing backend)'
+      - '^\s+(Attempting uninstall|Uninstalling )'
+      - '^Installing collected packages: '
+      # The two fixed advisories. Both are constant text with no per-run information.
+      - '^WARNING: Running pip as the .root. user'
+      - '^\s*It is recommended to use a virtual environment instead'
+      - '^\[notice\] A new release of pip is available'
+      - '^\[notice\] To update, run: pip install --upgrade pip'
+    match_output:
+      # An install that only re-confirmed existing requirements has no result to report.
+      - pattern: 'Requirement already satisfied'
+        message: 'pip: requirements already satisfied'
+        unless: 'ERROR|error:|Successfully installed|WARNING: The script|not on PATH'
+    cap: list
+    on_empty: 'pip: install ok'
+
   brew-install:
     description: strip brew download/pour chatter, collapse an already-installed formula
     family: pkg
@@ -512,6 +549,38 @@ filters:
         message: 'ok (already installed)'
         unless: 'Error|error:|failed'
     cap: list
+
+  # Also from the selector-miss ledger. A TeX run's log is mostly fixed engine boilerplate
+  # and absolute package paths out of the distribution tree; the SIGNAL is the
+  # Overfull/Underfull diagnostics, "! ..." errors, missing-file notices and the output
+  # summary. Only ABSOLUTE distribution paths are stripped — relative "(./input.tex" file
+  # markers stay, because they are what attributes the following warnings to a source file.
+  latex:
+    description: strip TeX engine banner and distribution package paths, keep diagnostics and the output summary
+    family: builds
+    priority: 20
+    match: '^(This is (pdfTeX|XeTeX|LuaTeX|e?TeX)|(/\S+/)?(pdf|xe|lua)?latex$|LaTeX2e <|entering extended mode)'
+    strip_ansi: true
+    strip_lines_matching:
+      - '^\s*$'
+      - '^/\S+/(pdf|xe|lua)?latex$'
+      - '^This is (pdfTeX|XeTeX|LuaTeX|e?TeX)'
+      - '^\s*restricted \\write18 enabled\.'
+      - '^entering extended mode'
+      - '^LaTeX2e <'
+      - '^L3 programming layer <'
+      - '^Document Class: '
+      - '^\(/(usr|var)/\S+$'
+      - '^\(/(usr|var)/\S+\)+$'
+      - '^\[\d+\{/\S+\}\]$'
+      - '^\(see the transcript file for additional information\)'
+      - '^Transcript written on '
+    # buildlog (80), not list (20): a TeX log is a verbose transcript whose most
+    # important line — "Output written on ..." / an "! ..." error — sits at the END.
+    # Measured on a real 39-line pdflatex run, the list budget truncated the tail and
+    # took the output summary with it.
+    cap: buildlog
+    on_empty: 'latex: ok'
 
   quarto-render:
     description: strip quarto render progress, collapse a successful render
@@ -806,6 +875,23 @@ tests:
       input: "Preparing to unpack .../libbar_2.0_amd64.deb ...\nUnpacking libbar (2.0) ...\ndpkg: error processing archive libbar_2.0_amd64.deb (--unpack):\n trying to overwrite '/usr/lib/libbar.so', which is also in package libbaz\nSetting up libfoo (1.0) ...\n"
       expected: "dpkg: error processing archive libbar_2.0_amd64.deb (--unpack):\n trying to overwrite '/usr/lib/libbar.so', which is also in package libbaz"
 
+  pip-install:
+    - name: strips collect/download chatter, keeps the manifest
+      input: "Collecting numpy==2.3.4\n  Downloading numpy-2.3.4-cp313.whl (16.6 MB)\nInstalling collected packages: numpy\nSuccessfully installed numpy-2.3.4\n"
+      expected: 'Successfully installed numpy-2.3.4'
+    - name: fixed advisories stripped, manifest kept
+      input: "Successfully installed numpy-2.3.4\nWARNING: Running pip as the 'root' user can result in broken permissions.\n\n[notice] A new release of pip is available: 25.2 -> 26.2.1\n[notice] To update, run: pip install --upgrade pip\n"
+      expected: 'Successfully installed numpy-2.3.4'
+    - name: a real PATH warning is not swallowed
+      input: "Collecting numpy\nSuccessfully installed numpy-2.3.4\nWARNING: The script f2py is installed in '/usr/local/bin' which is not on PATH.\n"
+      expected: "Successfully installed numpy-2.3.4\nWARNING: The script f2py is installed in '/usr/local/bin' which is not on PATH."
+    - name: errors pass through
+      input: "Collecting nosuchpkg\nERROR: Could not find a version that satisfies the requirement nosuchpkg\nERROR: No matching distribution found for nosuchpkg\n"
+      expected: "ERROR: Could not find a version that satisfies the requirement nosuchpkg\nERROR: No matching distribution found for nosuchpkg"
+    - name: already-satisfied install collapses
+      input: "Requirement already satisfied: numpy in /usr/lib/python3/site-packages (2.3.4)\nRequirement already satisfied: six in /usr/lib/python3/site-packages (1.17.0)\n"
+      expected: 'pip: requirements already satisfied'
+
   brew-install:
     - name: already installed collapses
       input: "Warning: jq 1.7.1 is already installed and up-to-date.\nTo reinstall 1.7.1, run:\n  brew reinstall jq\n"
@@ -816,6 +902,20 @@ tests:
     - name: error not swallowed by already installed
       input: "Warning: jq 1.7.1 is already installed and up-to-date.\nError: Could not link jq: permission denied\n"
       expected: "Warning: jq 1.7.1 is already installed and up-to-date.\nError: Could not link jq: permission denied"
+
+  latex:
+    - name: strips engine banner and distribution paths, keeps diagnostics
+      input: "This is pdfTeX, Version 3.141592653 (TeX Live 2023/Debian)\n restricted \\write18 enabled.\nentering extended mode\n(./main.tex\nLaTeX2e <2023-11-01> patch level 1\n(/usr/share/texlive/texmf-dist/tex/latex/base/article.cls\nDocument Class: article 2023/05/17 v1.4n Standard LaTeX document class\n(./input.tex\nOverfull \\hbox (0.10312pt too wide) in paragraph at lines 5--6\nOutput written on main.pdf (5 pages, 29584 bytes).\nTranscript written on main.log.\n"
+      expected: "(./main.tex\n(./input.tex\nOverfull \\hbox (0.10312pt too wide) in paragraph at lines 5--6\nOutput written on main.pdf (5 pages, 29584 bytes)."
+    - name: errors pass through
+      input: "This is pdfTeX, Version 3.141592653 (TeX Live 2023/Debian)\nentering extended mode\n(./main.tex\n! Undefined control sequence.\nl.7 \\bogus\n! Emergency stop.\n"
+      expected: "(./main.tex\n! Undefined control sequence.\nl.7 \\bogus\n! Emergency stop."
+    - name: font map page marker stripped
+      input: "This is pdfTeX, Version 3.141592653 (TeX Live 2023/Debian)\nentering extended mode\n[1{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}]\nOutput written on main.pdf (1 page, 100 bytes).\n"
+      expected: 'Output written on main.pdf (1 page, 100 bytes).'
+    - name: nothing but boilerplate collapses
+      input: "This is pdfTeX, Version 3.141592653 (TeX Live 2023/Debian)\n restricted \\write18 enabled.\nentering extended mode\nTranscript written on main.log.\n"
+      expected: 'latex: ok'
 
   quarto-render:
     - name: success collapses

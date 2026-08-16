@@ -43,26 +43,32 @@ func (f *Format) Reformat(req *schemas.BifrostChatRequest, rep *components.Repor
 			continue
 		}
 		if !schema.Rewritable(*m) {
-			continue // non-text blocks would be dropped by a text rewrite
+			rep.Gate("non_text_blocks") // would be dropped by a text rewrite
+			continue
 		}
 		content := schema.MessageText(*m)
 		trimmed := strings.TrimSpace(content)
 		if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
+			rep.Gate("not_json_shaped")
 			continue
 		}
 		if schema.TextTokens(content) < f.minTokens {
+			rep.Gate("below_min_tokens")
 			continue
 		}
 		var v any
 		if err := json.Unmarshal([]byte(trimmed), &v); err != nil {
-			continue // not valid JSON — leave untouched
+			rep.Gate("json_parse_failed") // not valid JSON — leave untouched
+			continue
 		}
 		compact, err := json.Marshal(v)
 		if err != nil {
+			rep.Gate("json_marshal_failed")
 			continue
 		}
 		if schema.TextTokens(string(compact)) >= schema.TextTokens(content) {
-			continue // already compact / no win
+			rep.Gate("already_compact")
+			continue
 		}
 		schema.SetMessageText(m, string(compact))
 		acted = true

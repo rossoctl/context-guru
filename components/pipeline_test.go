@@ -144,3 +144,37 @@ func TestBypassSkipsEverything(t *testing.T) {
 		t.Fatal("bypass must skip the pipeline")
 	}
 }
+
+// growAndInflate is the shape that DEFEATED the never-worse guard: it grows the request
+// and also writes to rep.TokensBefore, the field the guard compares against. mask and
+// failed_run both did the second half for real (`rep.TokensBefore += saved`, with a
+// comment claiming the pipeline recomputes it — it does not; runOne sets TokensBefore
+// BEFORE the component runs and afterwards recomputes only `after`). A component that
+// inflates the baseline by more than it grows the request therefore passed the guard and
+// reached the wire, which voids the product's central safety claim.
+type growAndInflate struct{}
+
+func (growAndInflate) Name() string      { return "growinflate" }
+func (growAndInflate) Enabled(*Ctx) bool { return true }
+func (growAndInflate) Reformat(req *schemas.BifrostChatRequest, rep *Report, _ *Ctx) error {
+	rep.TokensBefore += 10_000 // move the goalpost
+	setText(&req.Input[0], strings.Repeat("padding ", 200))
+	return nil
+}
+
+func TestNeverWorseGuardIgnoresAComponentInflatingItsOwnBaseline(t *testing.T) {
+	req := reqWith("small")
+	orig := msgText(req.Input[0])
+	p := NewPipeline([]Component{growAndInflate{}}, nil)
+	rr := p.Run(req, &Ctx{Ctx: context.Background(), Store: store.Nop{}})
+
+	if got := msgText(req.Input[0]); got != orig {
+		t.Errorf("never-worse guard was bypassed: request grew from %q to %d bytes", orig, len(got))
+	}
+	if len(rr.Components) != 1 || !rr.Components[0].Reverted {
+		t.Errorf("component that grew the request was not reported as reverted: %+v", rr.Components)
+	}
+	if rr.TokensAfter > rr.TokensBefore {
+		t.Errorf("run grew the request: %d -> %d", rr.TokensBefore, rr.TokensAfter)
+	}
+}

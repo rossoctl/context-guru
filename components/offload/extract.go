@@ -59,23 +59,28 @@ func (e *Extract) Offload(req *bschemas.BifrostChatRequest, rep *components.Repo
 	for _, i := range toolIndices(req) {
 		msg := &req.Input[i]
 		if !schema.Rewritable(*msg) {
-			continue // non-text blocks would be dropped by a text rewrite
+			rep.Gate("non_text_blocks") // would be dropped by a text rewrite
+			continue
 		}
 		content := schema.MessageText(*msg)
 		if content == "" || schema.TextTokens(content) < floor {
+			rep.Gate("below_output_floor")
 			continue
 		}
 		if skipReduce(c, content) {
-			continue // already offloaded, or expanded by the agent — don't re-reduce
+			rep.Gate("marker_or_kept_verbatim") // don't re-reduce
+			continue
 		}
 		projected, ok := collapseObviousNoise(content)
 		if !ok || schema.TextTokens(projected) >= schema.TextTokens(content) {
+			rep.Gate("no_obvious_noise")
 			continue
 		}
 		newText, key, eff, ok2 := tryMark(c, e.mode, content, " [full output: call "+expand.ToolName+"]",
 			func(tok string) string { return projected + "\n" + tok })
 		if !ok2 {
-			continue // projection+marker wouldn't shrink this message; leave it verbatim
+			rep.Gate("marker_no_win") // projection+marker wouldn't shrink this message
+			continue
 		}
 		commitMark(c, rep, eff, key, content)
 		schema.SetMessageText(msg, newText)
