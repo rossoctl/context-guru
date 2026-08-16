@@ -94,13 +94,12 @@ dollar savings diverge so sharply on this workload (see
 
 Both halves matter, and getting either wrong inflates the headline. `saved_tokens` is
 gross: the agent re-sends its transcript every turn, so one compaction is re-counted once
-per remaining turn — a 13.1× overcount on the 63-request window that
-`dash/event.go` documents. Only `saved_unique` is content that genuinely never reached the provider, and
+per remaining turn — a 13.1× overcount on the 63-request window that `dash/event.go`
+documents. Only `saved_unique` is content that genuinely never reached the provider, and
 only that part can be priced as a cache write; the re-sent remainder would have come from
-the provider's cache at 1/11.5 the rate. The dashboard shows the correction factor as
-`overcount_ratio` right beside the dollar figure — an earlier version of this page
-described pricing gross savings as writes, which overstated net savings by ~9× on the
-same data.
+the provider's cache at 1/11.5 the rate. Pricing gross savings as cache writes overstates
+net savings by ~9× on the same data, which is why the dashboard puts `overcount_ratio`
+right beside the dollar figure.
 
 Beneath it, the **honest savings waterfall**: baseline → compaction savings →
 context-guru's own LLM cost → net cost → net savings. If context-guru cost more than it
@@ -312,14 +311,12 @@ content capture ON, median of 40 paired requests against the same fake upstream:
 dashboard-on figure lands within noise of dashboard-off (repeatedly a shade *below* it).
 The channel send itself is ~175 ns (`go test -bench BenchmarkRecord ./dash`).
 
-That second number used to be the only one published, and on its own it was misleading.
-`finish` is called from the handler's `defer`, which runs **before the handler returns** —
-so work placed there is paid by the next request on a keep-alive connection, i.e. by
-every real agent. Content redaction sat there and cost **~53 ms/request**, ~25% of a
-request, while the documented figure was "0.000002%". A benchmark that calls `Record`
-directly cannot see that, so the guard is now an end-to-end handler-latency test with
-content capture on (`TestDashboardAddsNoRequestLatencyWithContentCapture`, budget 5 ms);
-putting redaction back on the request goroutine measures +87 ms and fails it.
+The channel-send figure alone would be misleading, so it is not the guard. `finish` is
+called from the handler's `defer`, which runs **before the handler returns**, so work placed
+there is paid by the next request on a keep-alive connection — by every real agent. The
+guard is therefore an end-to-end handler-latency test with content capture on
+(`TestDashboardAddsNoRequestLatencyWithContentCapture`, budget 5 ms); moving redaction back
+onto the request goroutine measures +87 ms and fails it.
 
 **Redaction happens before the database, never on read.** Headers are blanket-redacted by
 key against a short allowlist; config keys are allowlisted, and an allowlisted key's

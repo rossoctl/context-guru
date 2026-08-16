@@ -10,17 +10,12 @@
 top-level `system` array, which components never see — and lives in `apply/prefixsplit.go`,
 gated on this name being present in the pipeline.
 
-That is deliberate. `cachesplit` and [`cacheinject`](cacheinject.md) were one config entry
-until [#36](https://github.com/rossoctl/context-guru/pull/36), which separated them because
-their evidence is not comparable:
-
-- the **split** is measured — −34.1% cost and 0% → 96.7% cache hit in an isolated A/B;
-- **placement** has never been measured, because until #36 its breakpoints never reached the
-  provider at all.
-
-Splitting the config entry is what keeps disabling placement from silently disabling the
-split too. `apply` still honours `cacheinject` as a gate for the split, so an existing
-pipeline naming only `cacheinject` keeps working.
+`cachesplit` and [`cacheinject`](cacheinject.md) are separate config entries because their
+evidence is not comparable: the **split** is measured (−34.1% cost, and 0% → 96.7% cache hit in an
+isolated A/B), while breakpoint **placement** has never been shown to help. Keeping them apart is
+what stops disabling placement from silently disabling the split too. `apply` still honours
+`cacheinject` as a gate for the split, so an existing pipeline naming only `cacheinject` keeps
+working.
 
 ## What the split does
 

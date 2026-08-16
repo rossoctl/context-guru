@@ -19,22 +19,13 @@ Every structurally line-initial marker — `BUILD SUCCESS/FAIL`, `=+ FAILURES`, 
 its summary line (`==== 1 failed, 40 passed in 12.31s ====`) and that marker is mid-line by
 construction.
 
-They used to match **anywhere** in the blob, and that is a behaviour change worth knowing about if
-you have compared runs across it.
-
-!!! warning "Unanchored markers mislabelled source reads as test runs"
-    A replay over **1,795 real SWE-bench requests** found **9 of 81 collapses** were
-    misclassifications rather than superseded runs: a 22,698-byte line-numbered read of astropy's
-    `qdp.py`, a sympy source read, an xarray test file, and a `git show` diff. Each was collapsed
-    and **labelled "superseded by a later failed→re-run"** — because the phrase
-    `Traceback (most recent` occurred inside the *source text*, and `=+ failures` matched an
-    ordinary `= failures` assignment.
-
-    The old note here said a false positive "costs only an expand round-trip, never data". True,
-    and it undersold the cost: that round-trip lands on the file the agent is mid-patch on, and the
-    label asserts something false about the content. Anchoring removes all four observed shapes for
-    free — a line-numbered read begins every line with its number, so nothing structural can start
-    the line.
+The markers must appear at the **start of a line**. Anchoring matters: a replay over 1,795 real
+SWE-bench requests found 9 of 81 collapses were misclassifications rather than superseded runs — a
+line-numbered source read of astropy's `qdp.py`, a sympy source read, an xarray test file and a
+`git show` diff, each collapsed and labelled "superseded by a later failed→re-run" because
+`Traceback (most recent` occurred inside the source *text*. A line-numbered read begins every line
+with its number, so nothing structural can start the line and all four shapes are excluded for
+free. If you are comparing runs across that change, this is the behaviour that differs.
 
 ## Before → After
 

@@ -41,11 +41,9 @@ after:   [6]{id,name,status}:
 
 ### `cacheinject` — adds a cache breakpoint (opt-in, in no preset)
 A `cache_control` directive is attached to the last content block of a chosen message (no
-model-visible content changes). The v1 policy of always marking the message *before* the newest
-turn was a **+5.5% regression** and is gone; the current policy marks the newest message plus the
-last one still matching the previous turn. This capture predates
-[#36](https://github.com/rossoctl/context-guru/pull/36), so on Claude Code traffic a mark like this
-would have been discarded by the writeback layer rather than reaching the provider:
+model-visible content changes). The policy marks the newest message plus the last one still
+matching the previous turn:
+
 ```json
 {"role":"assistant","content":[{"type":"text",
   "text":"Here is a fairly long answer … worth caching across turns.",
