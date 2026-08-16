@@ -720,3 +720,62 @@ func TestStaticModelWithheldWhenHosted(t *testing.T) {
 		t.Error("hosted mode offered a tenant the server's cheap-model credential")
 	}
 }
+
+// fakeToken assembles a context-guru-shaped token around a marker. Assembled rather
+// than written as a literal so nothing in this repo reads as a real credential.
+func fakeToken(marker string) string {
+	body := marker + strings.Repeat("A", 26-len(marker))
+	return tenant.TokenPrefix + body
+}
+
+// TestScrubTokenCoversEveryValueOfAnAuthHeader closes the gap between scrubToken, which
+// read h.Get(hd) — the FIRST value only — and copyHeaders, which forwards ALL of them.
+// Two Authorization headers, provider key first and our token second, forwarded our
+// token upstream. No well-behaved client sends two, and this box's gateway branch
+// deletes the header anyway; it is fixed because the invariant at TokenHeader says a
+// token "cannot reach an upstream", and an invariant with an exception is not one.
+//
+// The truncated case is the other half: LooksLikeToken requires EXACTLY 34 characters,
+// so a token that lost one was not token-shaped, was not scrubbed, and got published
+// upstream as a caller credential — 33 of 34 characters of a live token.
+func TestScrubTokenCoversEveryValueOfAnAuthHeader(t *testing.T) {
+	tok := fakeToken("CANARY")
+
+	t.Run("second value of a repeated header", func(t *testing.T) {
+		h := http.Header{}
+		h.Add("Authorization", "Bearer sk-caller-own-provider-key-0123456789")
+		h.Add("Authorization", "Bearer "+tok)
+		scrubToken(h)
+		for _, v := range h.Values("Authorization") {
+			if strings.Contains(v, "CANARY") || strings.Contains(v, tenant.TokenPrefix) {
+				t.Errorf("our token survived in a repeated Authorization header: %q (all: %q)",
+					v, h.Values("Authorization"))
+			}
+		}
+	})
+
+	t.Run("truncated token is still scrubbed", func(t *testing.T) {
+		short := tok[:len(tok)-1] // one character lost in transit
+		if tenant.LooksLikeToken(short) {
+			t.Fatal("LooksLikeToken must stay strict: a truncated token has to fail authentication")
+		}
+		for _, hd := range []string{"Authorization", "x-api-key", "x-goog-api-key"} {
+			h := http.Header{}
+			h.Set(hd, short)
+			scrubToken(h)
+			if v := h.Get(hd); v != "" {
+				t.Errorf("%s: a truncated token was forwarded upstream as a caller credential: %q", hd, v)
+			}
+		}
+	})
+
+	t.Run("a caller's own provider key is left alone", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("Authorization", "Bearer sk-caller-own-provider-key-0123456789")
+		h.Set("x-api-key", "sk-ant-caller-own-0123456789")
+		scrubToken(h)
+		if h.Get("Authorization") == "" || h.Get("x-api-key") == "" {
+			t.Errorf("scrubbing ate the caller's own credential, which is the thing we forward: %v", h)
+		}
+	})
+}

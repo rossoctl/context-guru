@@ -42,48 +42,6 @@ func buildSecretFixtures() []string {
 	}
 }
 
-func TestRedactHeadersIsAllowlistOnly(t *testing.T) {
-	got := RedactHeaders(map[string][]string{
-		"Authorization":       {"Bearer " + fakeKey("SUPERSECRETVALUE")},
-		"X-Api-Key":           {fakeKey("ANOTHERSECRET")},
-		"Cookie":              {"session=abc"},
-		"X-Vendor-New-Auth":   {"a-header-nobody-thought-of"},
-		"Proxy-Authorization": {"Basic dXNlcjpwYXNz"},
-		"Content-Type":        {"application/json"},
-		"User-Agent":          {"claude-cli/2.0.0"},
-		"Anthropic-Version":   {"2023-06-01"},
-	})
-	// Allowlisted headers keep their values — they are how you identify the client.
-	if got["content-type"] != "application/json" || got["user-agent"] != "claude-cli/2.0.0" {
-		t.Errorf("allowlisted headers were redacted: %v", got)
-	}
-	// Everything else is redacted BY KEY, including a header this code has never
-	// heard of — which is the whole point of an allowlist over a denylist.
-	for _, k := range []string{"authorization", "x-api-key", "cookie", "x-vendor-new-auth", "proxy-authorization"} {
-		if got[k] != Redacted {
-			t.Errorf("header %q = %q; want %q", k, got[k], Redacted)
-		}
-	}
-	// The key must still be listed, so a viewer can see WHAT was sent.
-	if _, ok := got["authorization"]; !ok {
-		t.Error("redacted headers should still list their key")
-	}
-	flat := strings.Join(mapValues(got), " ")
-	for _, s := range []string{"SUPERSECRETVALUE", "ANOTHERSECRET", "dXNlcjpwYXNz"} {
-		if strings.Contains(flat, s) {
-			t.Errorf("secret substring %q survived header redaction", s)
-		}
-	}
-}
-
-func mapValues(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for _, v := range m {
-		out = append(out, v)
-	}
-	return out
-}
-
 func TestRedactConfigAllowlistsKeys(t *testing.T) {
 	in := map[string]any{
 		"preset":   "codesmart",

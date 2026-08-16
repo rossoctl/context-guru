@@ -228,14 +228,33 @@ func CallerKey(r *http.Request) string {
 // agent that can set no custom header) never leaves the box. The caller's provider
 // credential — anything not shaped like our token — is deliberately left in place:
 // forwarding it is the entire change.
+// It checks EVERY value of each slot rather than h.Get's first one: copyHeaders forwards
+// all of them, so a client that sent Authorization twice — provider key first, our token
+// second — forwarded the token upstream. A slot holding any token-shaped value is deleted
+// whole; a caller who put both in one slot has already given up the second.
 func scrubToken(h http.Header) {
 	h.Del(TokenHeader) // belt and braces; copyHeaders drops x-context-guru-* already
 	for _, hd := range authHeaders {
-		if tenant.LooksLikeToken(headerCredential(h.Get(hd))) {
-			h.Del(hd)
+		for _, v := range h.Values(hd) {
+			if tokenShaped(headerCredential(v)) {
+				h.Del(hd)
+				break
+			}
 		}
 	}
 }
+
+// tokenShaped is the SCRUBBING test, and it is deliberately LOOSER than
+// tenant.LooksLikeToken: the prefix alone, with no length requirement.
+//
+// The asymmetry is the point. LooksLikeToken gates AUTHENTICATION, where strict is
+// correct — a token that lost a character in transit must fail auth. Scrubbing is the
+// opposite decision: a value that merely LOOKS like one of ours has no business going to
+// a provider, and under the strict test a 33-of-34-character token was not token-shaped,
+// so it was forwarded as if it were the caller's own credential — publishing all but one
+// character of a live token to a third party. Being liberal here costs nothing, because no
+// provider credential begins with our prefix.
+func tokenShaped(s string) bool { return strings.HasPrefix(s, tenant.TokenPrefix) }
 
 // statusError carries the HTTP status a resolution failure should produce.
 type statusError struct {

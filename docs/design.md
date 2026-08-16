@@ -422,10 +422,14 @@ carries the resolved session, the `RunReport`, the cache-awareness facts
 same material `CONTEXT_GURU_DUMP` writes to a file. *Refuses:* a parallel accounting path
 that could disagree with the pipeline's own.
 
-**Redaction before the database, never on read.** Headers are blanket-redacted by key
-against a short allowlist (a denylist fails the moment a gateway invents a new auth
-header); config keys are allowlisted, with credential-named keys always withheld, and an
-allowlisted key's *value* is still checked for an embedded `user:password@` credential.
+**Redaction before the database, never on read.** Request **headers are never captured at
+all** — no capture path records one, so there is no header redaction step to describe. (An
+allowlist for it existed with no production caller; it was deleted rather than wired up,
+because dead security code claims a protection that is not there. If headers are ever
+recorded, the allowlist comes back with them: a denylist fails the moment a gateway invents
+a new auth header.) Config keys are allowlisted, with credential-named keys always
+withheld, and an allowlisted key's *value* is still checked for an embedded
+`user:password@` credential.
 
 Captured message **content** is the one surface that cannot be allowlisted — it is
 arbitrary agent output — so it gets pattern scrubbing, and a pattern denylist is

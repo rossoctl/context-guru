@@ -65,11 +65,12 @@ func TestDebugLoggingALiveRequestLeaksNoCredential(t *testing.T) {
 			"api_key", secretByName("openai bearer"), // key name says credential
 			"upstream", secretByName("upstream userinfo"))
 
-		// A whole http.Header handed to one attr. Note what this costs: the auth-header
-		// rule matches to end of LINE, and a printed map is one line, so everything after
-		// the first auth header goes with it. That is the right trade for a careless call
-		// site, and it is why the call sites that MEAN to log headers go through
-		// dash.RedactHeaders, which allowlists by key and keeps the harmless ones.
+		// A whole http.Header handed to one attr. A printed header map is ONE line, and the
+		// auth-header rule matches each auth header's value up to the next field rather than
+		// to the end of the line — so the credentials go and Content-Type survives. What it
+		// does NOT cover is an auth header this codebase has never heard of holding an
+		// opaque value: that is a denylist's structural limit (see internal/redact), not
+		// something this attr shape gets away with.
 		req.Debug("forwarding", "header", hdr, "auth", hdr.Get("Authorization"),
 			"content_type", hdr.Get("Content-Type"))
 		req.Debug("component declined", "component", "extract_llm", "gate", "economic_gate",
@@ -98,6 +99,28 @@ func TestDebugLoggingALiveRequestLeaksNoCredential(t *testing.T) {
 				t.Errorf("json=%v: %q should have survived redaction but did not\n--- output ---\n%s",
 					asJSON, keep, out)
 			}
+		}
+	}
+}
+
+// TestASecretInAnAttributeKeyIsNotEmitted covers the half of scrubAttr that only
+// looked at values. `slog.Info("x", k, v)` takes k from whatever the call site has in
+// hand, and a `for k, v := range someMap` over parsed data puts data in the key slot —
+// so the key is as untrusted as the value. It was emitted verbatim.
+//
+// No call site builds a key from data today; this is a latent trap, and it is cheaper
+// to close than to keep true.
+func TestASecretInAnAttributeKeyIsNotEmitted(t *testing.T) {
+	secret := secretByName("openai bearer")
+	for _, asJSON := range []bool{false, true} {
+		var buf bytes.Buffer
+		lg := slog.New(New(&buf, slog.LevelDebug, asJSON))
+		// The careless shape: a key that came from data.
+		lg.Info("x", secret, "present")
+		lg.Info("y", "api_key="+secret, 1) // and one with a numeric value, which short-circuits
+		if out := buf.String(); strings.Contains(out, secret) ||
+			strings.Contains(out, "9fJk2LmN4pQr6StU8vWx") {
+			t.Errorf("json=%v: a credential in the attribute KEY was emitted verbatim:\n%s", asJSON, out)
 		}
 	}
 }
