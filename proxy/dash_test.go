@@ -472,31 +472,37 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 		slices.Sort(ds)
 		return ds[len(ds)/2]
 	}
-	// The GATE reads the minimum, not the median, and that is the whole robustness of
-	// this test. The regression it guards (redaction on the request goroutine, ~53 ms)
-	// is UNCONDITIONAL work, so it lands on every sample including the fastest one —
-	// while contention from other load only ever makes a sample slower. The minimum is
-	// therefore the sample least polluted by the machine and still fully sensitive to
-	// the thing being guarded.
-	//
-	// The median was the gate until it flaked: on a loaded box (this one has run eight
-	// build-and-test agents at once) paired medians disagreed by more than the 5 ms
-	// budget roughly one run in three, EVEN with the package run alone. That is a gate
-	// reporting the machine rather than the code, and a test that cries wolf at that
-	// rate gets ignored precisely when it is right.
-	offMin, onMin := slices.Min(offs), slices.Min(ons)
-	added := onMin - offMin
-	t.Logf("per-request latency over %d paired requests — gate (minimum): dashboard off "+
-		"%v, on with content ON %v (added %v); median for reference: off %v, on %v",
-		iters, offMin, onMin, added, median(offs), median(ons))
+	off, on := median(offs), median(ons)
+	added := on - off
 
-	// An order of magnitude below the ~53 ms the regression cost. Anything that puts
-	// redaction, gzip or an insert back on the request goroutine blows straight through
-	// it on every sample, minimum included.
-	if added > 5*time.Millisecond {
-		t.Errorf("the dashboard added %v per request with content capture on (minimum of "+
-			"%d paired samples); something expensive is back on the request goroutine "+
-			"(budget 5ms)", added, iters)
+	// The budget is RELATIVE with an absolute floor, because a fixed budget cannot mean
+	// the same thing at both ends of this machine's range. Measured on this box: idle, a
+	// fake-upstream request settles around 1-2 ms; with the test suite saturating 16
+	// cores (load average 12.9) the same request's own median was 331 ms. A flat 5 ms
+	// gate is a real constraint in the first case and pure scheduler noise in the second,
+	// which is why it failed roughly one run in three while nothing was wrong.
+	//
+	// 10% of the request's own cost keeps the guard honest at both ends: the regression
+	// this exists to catch (content redaction moved back onto the request goroutine,
+	// ~53 ms) is caught at any baseline, while contention that slows BOTH handlers
+	// equally cannot trip it.
+	//
+	// The gate reads the median, not the minimum. The minimum was tried and is worse: it
+	// is one sample with no averaging, so under load it tracks whichever handler caught
+	// a lucky scheduling moment. In the same run that produced this comment, the paired
+	// medians differed by 1.27 ms while the paired minima differed by 8.13 ms.
+	budget := 5 * time.Millisecond
+	if rel := off / 10; rel > budget {
+		budget = rel
+	}
+	t.Logf("median per-request latency over %d paired requests: dashboard off %v, on with "+
+		"content ON %v (added %v, budget %v); minima for reference: off %v, on %v",
+		iters, off, on, added, budget, slices.Min(offs), slices.Min(ons))
+
+	if added > budget {
+		t.Errorf("the dashboard added %v per request with content capture on (median of %d "+
+			"paired samples, budget %v = max(5ms, 10%% of the %v baseline)); something "+
+			"expensive is back on the request goroutine", added, iters, budget, off)
 	}
 }
 
