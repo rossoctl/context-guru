@@ -472,19 +472,31 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 		slices.Sort(ds)
 		return ds[len(ds)/2]
 	}
-	off, on := median(offs), median(ons)
+	// The GATE reads the minimum, not the median, and that is the whole robustness of
+	// this test. The regression it guards (redaction on the request goroutine, ~53 ms)
+	// is UNCONDITIONAL work, so it lands on every sample including the fastest one —
+	// while contention from other load only ever makes a sample slower. The minimum is
+	// therefore the sample least polluted by the machine and still fully sensitive to
+	// the thing being guarded.
+	//
+	// The median was the gate until it flaked: on a loaded box (this one has run eight
+	// build-and-test agents at once) paired medians disagreed by more than the 5 ms
+	// budget roughly one run in three, EVEN with the package run alone. That is a gate
+	// reporting the machine rather than the code, and a test that cries wolf at that
+	// rate gets ignored precisely when it is right.
+	offMin, onMin := slices.Min(offs), slices.Min(ons)
+	added := onMin - offMin
+	t.Logf("per-request latency over %d paired requests — gate (minimum): dashboard off "+
+		"%v, on with content ON %v (added %v); median for reference: off %v, on %v",
+		iters, offMin, onMin, added, median(offs), median(ons))
 
-	added := on - off
-	t.Logf("median per-request latency over %d paired requests: dashboard off %v, "+
-		"on with content ON %v (added %v)", iters, off, on, added)
-
-	// The budget is loose in absolute terms (a fake-upstream request still moves by a
-	// millisecond or two under load) but an order of magnitude below the ~53 ms the
-	// regression cost. Anything that puts redaction, gzip or an insert back on the
-	// request goroutine blows straight through it.
+	// An order of magnitude below the ~53 ms the regression cost. Anything that puts
+	// redaction, gzip or an insert back on the request goroutine blows straight through
+	// it on every sample, minimum included.
 	if added > 5*time.Millisecond {
-		t.Errorf("the dashboard added %v per request with content capture on; "+
-			"something expensive is back on the request goroutine (budget 5ms)", added)
+		t.Errorf("the dashboard added %v per request with content capture on (minimum of "+
+			"%d paired samples); something expensive is back on the request goroutine "+
+			"(budget 5ms)", added, iters)
 	}
 }
 
