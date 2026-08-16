@@ -33,6 +33,7 @@ import (
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -72,7 +73,8 @@ type Options struct {
 	// InjectExpand controls advertising the context_guru_expand tool on outgoing
 	// requests so Offload markers are actually recoverable (expand.InjectAuto |
 	// InjectAlways | InjectNever). Empty defaults to auto. auto injects only when the
-	// request already declares tools and the store persists — safe for any agent.
+	// request already declares tools, carries an expandable marker, and the store
+	// persists — safe for any agent.
 	InjectExpand string
 	// CacheMode controls cache-aware compaction ("auto"|"on"|"off"; empty=auto).
 	// auto/on keep offloaders from mutating already-cached content on prompt-caching
@@ -102,6 +104,43 @@ type Options struct {
 	Mode components.Mode
 	// Observe tunes observe mode's off-path measurement. Ignored in sync mode.
 	Observe ObserveOptions
+
+	// Tenants, when non-nil, makes this a HOSTED multi-tenant proxy: every chat
+	// request must carry a token that resolves to a tenant, and that tenant's
+	// configuration — not Options — decides the pipeline, the state store, the
+	// operating mode and which upstream the traffic goes to. nil keeps the
+	// single-tenant behaviour byte-identical to before tenancy existed.
+	Tenants *TenantSource
+	// Upstreams is the operator's allow-list, by name, consulted only in hosted
+	// mode. A tenant selects a NAME; it can never supply a URL.
+	Upstreams map[string]Upstream
+	// Limits bounds what one tenant can consume of the shared box: request rate,
+	// in-flight concurrency, and (process-wide) concurrent compaction-model calls.
+	// Zero values disable each bound. Ignored in single-tenant mode, where there is
+	// nobody to protect anyone from.
+	Limits Limits
+	// Spend reports a tenant's month-to-date cost, for the monthly cap. nil disables
+	// cap enforcement — which is only safe when the upstream credential is not shared.
+	Spend SpendChecker
+	// PresetNames and ComponentNames are what the settings page may offer. Supplied by
+	// the host because the registries live in `config` and `components`, and this
+	// package stays decoupled from both.
+	PresetNames    []string
+	ComponentNames []string
+	// MetricsToken, when set, lets a remote Prometheus scrape /metrics with a bearer
+	// token. Empty means loopback only in hosted mode.
+	MetricsToken string
+	// TenantMetrics supplies per-tenant rollups for /metrics. nil = process-wide
+	// series only.
+	TenantMetrics TenantMetricsSource
+	// Version is reported as a label on cg_build_info.
+	Version string
+	// StatsTrusted reports whether a request may read /stats, which is a
+	// PROCESS-WIDE aggregate across every tenant. In hosted mode this must be
+	// restricted (loopback or a manager); nil means loopback only. Ignored in
+	// single-tenant mode, where /stats stays open as it always was — the benchmark
+	// harnesses in deploy/harbor read it.
+	StatsTrusted func(*http.Request) bool
 }
 
 // ObserveOptions tunes observe mode: one option per real decision.
@@ -152,6 +191,24 @@ type Handler struct {
 	// use is nil-guarded, so the disabled path costs one nil check per request.
 	rec *dash.Recorder
 	api *dash.API
+	// static is the single-tenant Tenancy: the handler's own pipeline, store and
+	// mode presented through the same type the hosted path uses. Built once so the
+	// request path has exactly ONE way to reach a pipeline, rather than a branch at
+	// every use — which is how a hosted deployment would eventually leak the shared
+	// one into a tenant's request.
+	static *Tenancy
+	// limiter enforces Options.Limits. Always non-nil; a zero Limits makes it a no-op.
+	limiter *Limiter
+	// regLim bounds self-registration attempts per client address. Separate from
+	// limiter because its keys are IPs rather than tenant ids, and its bound is a
+	// fixed property of what registration is, not an operator setting.
+	regLim *Limiter
+	// spend memoises month-to-date cost lookups so the cap costs one query a minute
+	// per tenant rather than one per request.
+	spend *spendCache
+	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
+	// series cost a SQL query and Grafana scrapes every few seconds.
+	promCache promCache
 }
 
 // New builds the proxy handler. agg may be nil (no /stats rollups).
@@ -166,6 +223,14 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 		h.pool = modes.NewPool(opts.Observe.MaxQueue, opts.Observe.Workers)
 		h.shadow = store.NewMemory(store.Options{})
 	}
+	// The single-tenant view of this handler's own configuration. In hosted mode it
+	// is never consulted (tenancyFor goes to Options.Tenants); it exists so the
+	// request path has one shape.
+	h.static = &Tenancy{Preset: opts.Preset, Pipe: pipe, Store: st,
+		Shadow: h.shadow, Mode: h.mode()}
+	h.limiter = NewLimiter(opts.Limits)
+	h.regLim = newAnonLimiter(Limits{RequestsPerMinute: registrationsPerMinute})
+	h.spend = newSpendCache(0)
 	if agg != nil {
 		agg.SetMode(h.mode())
 	}
@@ -199,21 +264,35 @@ func (h *Handler) Mux() *http.ServeMux {
 		base:   h.opts.OpenAIUpstream,
 		path:   "/v1/chat/completions",
 		setKey: bearerKey(h.opts.OpenAIKey),
-	}))
+	}, pickOpenAI))
 	m.HandleFunc("POST /anthropic/v1/messages", h.chat(bschemas.Anthropic, upstream{
 		base:   h.opts.AnthropicUpstream,
 		path:   "/v1/messages",
 		setKey: headerKey("x-api-key", h.opts.AnthropicKey),
-	}))
+	}, pickAnthropic))
 	m.HandleFunc("POST /compact", h.compact)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	// A browser asks for /favicon.ico unprompted, and in hosted mode Bob's "/" catch-all
+	// would otherwise answer it with a 401 — putting a red error in the console of every
+	// dashboard user on every page load, which reads as "this thing is broken". Answering
+	// 204 here beats explaining it: this pattern is more specific than "/", so it wins.
+	m.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.WriteHeader(http.StatusNoContent)
+	})
 	m.HandleFunc("GET /stats", h.stats)
+	// Prometheus, for Grafana. Same gate as /stats: it is a service-wide view that
+	// includes per-tenant cost.
+	m.HandleFunc("GET /metrics", h.metricsHandler)
 	m.HandleFunc("GET /expand", h.expand)
 	// The dashboard mounts /dashboard/ (embedded UI) and /api/* (JSON + SSE) only
 	// when enabled, so an unconfigured proxy's route table is byte-identical to before.
 	if h.api != nil {
 		h.api.Mount(m)
 	}
+	// Control plane: registration, sign-in, settings, tokens, the manager's roster.
+	// Mounted after the dashboard so both live under /api/, and only in hosted mode.
+	h.MountControl(m)
 	// Bob (BobShell) gateway. Bob is OpenAI-compatible but calls Bob-specific
 	// paths: its model call is POST /inference/v1/chat/completions (reduced like
 	// any OpenAI chat), and its control-plane calls (/admin/v1/profile,
@@ -221,12 +300,14 @@ func (h *Handler) Mux() *http.ServeMux {
 	// authenticates. The "/" catch-all is less specific than every route above, so
 	// it only receives what nothing else matched. Enabled only when BobUpstream is
 	// set, so default proxy behavior (unknown path => 404) is unchanged.
-	if h.opts.BobUpstream != "" {
+	if h.opts.BobUpstream != "" || h.opts.Tenants != nil {
 		m.HandleFunc("POST /inference/v1/chat/completions", h.chat(bschemas.OpenAI, upstream{
 			base: h.opts.BobUpstream,
 			path: "/inference/v1/chat/completions",
-			// setKey nil: pass Bob's own auth (BOBSHELL key) straight through.
-		}))
+			// setKey nil in single-tenant mode: pass Bob's own auth (BOBSHELL key)
+			// straight through. In hosted mode upstreamFor always injects, because the
+			// client's header holds OUR token, which must not leave the box.
+		}, pickBob))
 		m.HandleFunc("/", h.passthrough(h.opts.BobUpstream))
 	}
 	return m
@@ -239,9 +320,29 @@ func (h *Handler) Mux() *http.ServeMux {
 // here and is proxied verbatim.
 func (h *Handler) passthrough(base string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		up := upstream{base: base}
+		// Hosted mode: authenticate and resolve the tenant's Bob endpoint, then inject
+		// the real credential. Without this, the catch-all would be an open forwarder
+		// AND would send the caller's header — our token — to Bob.
+		if h.opts.Tenants != nil {
+			tn, err := h.tenancyFor(r)
+			if err != nil {
+				failAuth(w, err)
+				return
+			}
+			if up, err = h.upstreamFor(tn, pickBob, upstream{}); err != nil {
+				failAuth(w, err)
+				return
+			}
+		}
+		if up.base == "" {
+			recordRefusal(refuseNoUpstream, "")
+			http.Error(w, "no upstream configured", http.StatusBadGateway)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 		body, _ := io.ReadAll(r.Body)
-		target := base + r.URL.Path
+		target := up.base + r.URL.Path
 		if r.URL.RawQuery != "" {
 			target += "?" + r.URL.RawQuery
 		}
@@ -251,9 +352,19 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 			return
 		}
 		copyHeaders(req.Header, r.Header)
+		if up.setKey != nil {
+			for _, hd := range tokenHeaders {
+				req.Header.Del(hd)
+			}
+			up.setKey(req.Header)
+		}
 		resp, err := h.client.Do(req)
 		if err != nil {
-			http.Error(w, "upstream: "+err.Error(), http.StatusBadGateway)
+			recordRefusal(refuseUpstream, "")
+			// Log the detail, return a fixed string — see the hosted path below for why
+			// err.Error() must not reach the caller (it embeds the upstream URL).
+			slog.Warn("context-guru: upstream call failed", "err", err)
+			http.Error(w, "upstream request failed", http.StatusBadGateway)
 			return
 		}
 		h.stream(w, resp)
@@ -271,6 +382,15 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 // overrides (when Options.PipelineFor is set): ?preset=<name> or header
 // x-context-guru-pipeline: comp1,comp2. Session/bypass honor the usual headers.
 func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
+	// Hosted mode authenticates this endpoint too. It runs the pipeline over a
+	// caller-supplied transcript and can invoke the cheap model, so leaving it open
+	// would be both an unmetered compute endpoint and a way to write into whichever
+	// state store it happened to reach.
+	tn, err := h.tenancyFor(r)
+	if err != nil {
+		failAuth(w, err)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -282,7 +402,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 		provider = bschemas.Anthropic
 	}
 
-	pipe := h.pipe
+	pipe := tn.Pipe
 	if h.opts.PipelineFor != nil {
 		preset := r.URL.Query().Get("preset")
 		var names []string
@@ -328,13 +448,14 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// eval measures a different component than the one that ships. That is the same class of
 	// divergence as the window this handler used to hard-code as unknown, a few lines above —
 	// and it went unnoticed for the same reason, because both are silent.
-	cp := h.newCapture(r, string(provider), "/compact")
+	cp := h.newCapture(r, string(provider), "/compact", tn)
 	cp.noteModel(gjson.GetBytes(body, "model").String())
 	start := time.Now()
-	res := apply.BodyOpts(r.Context(), pipe, h.store, apply.Opts{
+	res := apply.BodyOpts(r.Context(), pipe, tn.Store, apply.Opts{
 		Provider:  provider,
 		Body:      body,
 		Session:   r.Header.Get("x-context-guru-session"),
+		Tenant:    tn.ID,
 		Bypass:    strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true"),
 		Models:    models,
 		Window:    window,
@@ -347,7 +468,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	w.Write(res.Body)
 	// After the response: /compact never calls a provider, so there is no usage to
 	// report and the row is honestly marked partially accounted.
-	cp.finish(Usage{}, false, h.captureContent(), h.contentCap(), h.contentMax())
+	cp.finish(Usage{}, false, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 }
 
 // splitComma splits a comma-separated header value into trimmed, non-empty names.
@@ -437,8 +558,39 @@ func captureRequest(provider string, body []byte) {
 	f.Write(append(rec, '\n'))
 }
 
-func (h *Handler) chat(provider bschemas.ModelProvider, up upstream) http.HandlerFunc {
+// pick* select which of a tenant's upstream names applies to a route. One closure
+// per route beats a dialect enum: the route already knows, and the compiler checks
+// the field name.
+func pickAnthropic(t *Tenancy) string { return t.UpAnthropic }
+func pickOpenAI(t *Tenancy) string    { return t.UpOpenAI }
+func pickBob(t *Tenancy) string       { return t.UpBob }
+
+func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick func(*Tenancy) string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Authenticate FIRST, before reading a body or doing any work. In hosted mode
+		// an unauthenticated caller must not be able to make the proxy buffer 32 MiB.
+		tn, err := h.tenancyFor(r)
+		if err != nil {
+			failAuth(w, err)
+			return
+		}
+		up, err := h.upstreamFor(tn, pick, static)
+		if err != nil {
+			failAuth(w, err)
+			return
+		}
+		// Limits and the spend cap, before the body is read. Refusing a request that
+		// would exceed a bound must not first cost us 32 MiB of buffering.
+		release, err := h.limiter.Acquire(tn.ID)
+		defer release()
+		if err != nil {
+			failAuth(w, err)
+			return
+		}
+		if err := h.checkSpend(tn); err != nil {
+			failAuth(w, err)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -473,9 +625,23 @@ func (h *Handler) chat(provider bschemas.ModelProvider, up upstream) http.Handle
 			}
 		}
 		bypassed := strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
+		// The agent's OWN compaction request rides the same route. Bypass it exactly as the
+		// header does — compacting it destroys content the summary is supposed to carry
+		// verbatim, and the loss is unrecoverable once the summary replaces the transcript
+		// (see isAgentCompaction). Counted as a gate on a `bypass` pseudo-component so
+		// /stats shows components.bypass.gates.agent_compaction — a silent bypass is
+		// indistinguishable from a broken pipeline.
+		if !bypassed && isAgentCompaction(body) {
+			bypassed = true
+			if h.agg != nil {
+				rep := components.Report{Component: "bypass", Skipped: true, Mode: tn.Mode}
+				rep.Gate("agent_compaction")
+				h.agg.Component(rep)
+			}
+		}
 		// Start the dashboard capture (nil when the dashboard is off). It only holds
 		// values the request path already computed; nothing here does I/O.
-		cp := h.newCapture(r, string(provider), up.path)
+		cp := h.newCapture(r, string(provider), up.path, tn)
 		cp.noteModel(gjson.GetBytes(body, "model").String())
 		// Fail open around the whole pre-forward rewrite (pipeline + expand injection): a
 		// panic anywhere here must forward the PRISTINE inbound body, never 500 the client.
@@ -498,6 +664,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, up upstream) http.Handle
 				bypassed: bypassed,
 				models:   models,
 				window:   window,
+				tn:       tn,
 			})
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
@@ -512,17 +679,26 @@ func (h *Handler) chat(provider bschemas.ModelProvider, up upstream) http.Handle
 			// Skipped in observe mode: nothing was offloaded, so there is nothing to
 			// recover, and injecting a tool declaration would MODIFY the request — which is
 			// precisely the one thing observe mode promises never to do.
-			if h.mode() != components.ModeObserve {
+			// Skipped on a bypassed request too: bypass promises a byte-identical forward,
+			// nothing was offloaded on this turn, and on an agent-compaction request an
+			// advertised expand tool is actively harmful — the summarizer may call it, and a
+			// tool_use with no text replayed to the client counts as a FAILED compaction
+			// (three of those and Claude Code disables auto-compact for the session).
+			if tn.Mode != components.ModeObserve && !bypassed {
 				im := h.opts.InjectExpand
 				if im == "" {
 					im = expand.InjectAuto
 				}
-				body, _ = expand.Inject(string(provider), im, body, h.store.Persists())
+				body, _ = expand.Inject(string(provider), im, body, tn.Store.Persists())
 			}
 		}()
-		h.serve(w, r, provider, up, body, bypassed, cp)
+		h.serve(w, r, provider, up, body, bypassed, cp, tn)
 	}
 }
+
+// API exposes the dashboard's HTTP surface so the host can attach an authenticator.
+// nil when the dashboard is off.
+func (h *Handler) API() *dash.API { return h.api }
 
 // maxExpandRounds caps the expand continuation loop (headroom's default).
 const maxExpandRounds = 3
@@ -556,15 +732,17 @@ var errNoUpstream = errors.New("no upstream configured")
 // → /stats sse_streamed / sse_buffered). It previously matched the expand tool
 // description this proxy injects itself, so it was unconditionally true and the
 // zero-added-latency promise above never held for any request (issue #26).
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture) {
-	injectOn := h.opts.InjectExpand != expand.InjectNever
-	// For SSE we must buffer to inspect (a latency cost), so only do it when the request
-	// actually carries expandable markers (offload happened → the model might expand).
-	// Scoped to messages+system on purpose: a whole-body check also matched the expand
-	// tool description we inject ourselves, which made this unconditionally true and
-	// silently buffered EVERY stream. Both the plain and HTML-escaped marker spellings
-	// count — see expand.HasMarkersInMessages.
-	hasMarkers := expand.HasMarkersInMessages(body)
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy) {
+	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
+	// it is advertised on the outgoing request. Those used to be different conditions —
+	// advertised when the request had tools, intercepted (for SSE) when it had markers —
+	// so a marker-free tools-bearing request declared a tool whose use then streamed
+	// straight to a client that has no such tool. Reading the outgoing body rather than
+	// trusting Inject's return value also covers a request that already carried the tool.
+	//
+	// Since injection now requires markers (expand.Inject, InjectAuto), this keeps the
+	// documented fast path: no offload yet → no tool → no buffering, zero added latency.
+	advertised := expand.HasTool(string(provider), body)
 	// SSE accounting is PER CLIENT REQUEST, not per upstream round: one client request
 	// that drives several expand rounds waited for all of them, so timing a single
 	// round would report a healthy TTFB for a client that waited three round-trips.
@@ -586,13 +764,33 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		if h.agg != nil && usageOK {
 			h.agg.RecordUsage(usage.FreshInput, usage.CacheRead, usage.CacheWrite, usage.Output)
 		}
-		cp.finish(usage, usageOK, h.captureContent(), h.contentCap(), h.contentMax())
+		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 	}()
 	for round := 0; ; round++ {
 		upStart := time.Now()
 		resp, err := h.doUpstream(r, up, body)
 		if err != nil {
-			http.Error(w, "upstream: "+err.Error(), http.StatusBadGateway)
+			// LOG it, and record it on the captured row. An upstream failure used to be
+			// invisible in both places: the caller got a 502 and the operator got nothing
+			// — no log line, and a dashboard row with status 0 that reads as "unknown"
+			// rather than "the upstream refused". On a shared service that is the
+			// difference between debugging a report and disbelieving it.
+			slog.Warn("context-guru: upstream call failed", "tenant", tn.ID,
+				"route", up.path, "upstream", up.base, "round", round, "err", err)
+			cp.noteUpstream(float64(time.Since(upStart).Microseconds())/1000.0,
+				http.StatusBadGateway)
+			// And count it: this path does not go through failAuth, so without this the
+			// only 502s on the dashboard would be our own misconfiguration.
+			recordRefusal(refuseUpstream, tn.ID)
+			// The client gets a fixed string, NOT err.Error(). http.Client returns a
+			// *url.Error, which stringifies as `Post "<the full upstream URL>": ...` —
+			// so echoing it hands every caller the operator's upstream address, and if
+			// that URL ever carries userinfo, the credential with it. checkBaseURL
+			// rejects userinfo for hosted upstreams, but the single-tenant
+			// --anthropic-upstream/--openai-upstream flags are not validated, so this
+			// is the one place that would publish it. The detail is in the log line
+			// directly above, where the operator can see it and the caller cannot.
+			http.Error(w, "upstream request failed", http.StatusBadGateway)
 			return
 		}
 		upMs := float64(time.Since(upStart).Microseconds()) / 1000.0
@@ -601,10 +799,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			h.agg.RecordUpstreamLatency(upMs, bypassed)
 		}
 		isSSE := strings.Contains(resp.Header.Get("Content-Type"), "event-stream")
-		// Inspect for a lone expand call when injection is on and we haven't hit the round
-		// cap. JSON responses are already buffered (inspect freely); SSE responses are only
-		// buffered+inspected when markers are present (else stream through, no added latency).
-		checkExpand := injectOn && round < maxExpandRounds && (!isSSE || hasMarkers)
+		// Inspect for a lone expand call when the tool is actually advertised and we haven't
+		// hit the round cap. Nothing else can produce a call to it, so this is both the
+		// necessary and the sufficient condition — and for SSE it is what decides whether we
+		// pay the buffering cost.
+		checkExpand := advertised && round < maxExpandRounds
 		if !checkExpand {
 			// sseBuffered is sticky: if an earlier round was buffered the client already
 			// lost its stream, so this request counts as buffered however it ends.
@@ -654,15 +853,17 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		resolved := map[string]string{}
 		got := 0
 		for _, c := range calls {
-			if orig, ok := expand.Resolve(h.store, c.HashID); ok {
+			if orig, ok := expand.Resolve(tn.Store, c.HashID); ok {
 				resolved[c.CallID] = orig
 				got++
 				// The agent needed this content back — don't re-compact it on later turns
 				// (that would loop it straight back into another expand). Keep it verbatim.
-				offload.MarkKeptVerbatim(h.store, orig)
+				offload.MarkKeptVerbatim(tn.Store, orig)
+				back := schema.TextTokens(orig)
 				if h.agg != nil {
-					h.agg.RecordExpand(schema.TextTokens(orig)) // bounce: offload had to come back
+					h.agg.RecordExpand(back) // bounce: offload had to come back
 				}
+				cp.noteExpand(back) // and on the dashboard row, or SavedAdjusted over-reports
 			} else {
 				resolved[c.CallID] = "[expand: original for id " + c.HashID + " is no longer available]"
 			}
@@ -697,9 +898,14 @@ func (h *Handler) doUpstream(r *http.Request, up upstream, body []byte) (*http.R
 	}
 	copyHeaders(req.Header, r.Header)
 	if up.setKey != nil {
-		// Gateway mode: drop the client's placeholder auth, inject the real key.
-		req.Header.Del("Authorization")
-		req.Header.Del("x-api-key")
+		// Gateway mode: drop the client's placeholder auth, inject the real key. Every
+		// slot the tenant resolver reads a token from is dropped, not just the two
+		// providers use — a slot we accept a credential in is a slot that must never
+		// reach an upstream, and in a hosted deployment that credential is the token
+		// WE minted.
+		for _, hd := range tokenHeaders {
+			req.Header.Del(hd)
+		}
 		up.setKey(req.Header)
 	}
 	return h.client.Do(req)
@@ -758,6 +964,28 @@ func msSince(start, at time.Time) float64 {
 func (h *Handler) captureContent() bool {
 	return h.rec != nil && h.rec.Opts().CaptureContent
 }
+
+// captureContentFor decides whether THIS request's transcript text may be stored.
+// Two independent gates, both of which must pass.
+//
+// The operator's flag is the first: content capture writes agent output — source
+// code, tool results — through a best-effort denylist redactor whose own review
+// found credential shapes passing through, which is why it is opt-in at all.
+//
+// The tenant's consent is the second, and it exists only in hosted mode. On a
+// shared service the operator enabling a feature is not the same act as a user
+// agreeing to have their transcripts retained, so one flag cannot stand for both.
+// Single-tenant, there is no second party to consent, so the operator's flag is
+// the whole decision — unchanged from before tenancy existed.
+func (h *Handler) captureContentFor(tn *Tenancy) bool {
+	if !h.captureContent() {
+		return false
+	}
+	if h.opts.Tenants == nil {
+		return true
+	}
+	return tn != nil && tn.CaptureContent
+}
 func (h *Handler) contentCap() int {
 	if h.rec == nil {
 		return 0
@@ -771,7 +999,17 @@ func (h *Handler) contentMax() int {
 	return h.rec.Opts().ContentMaxPerRequest
 }
 
-func (h *Handler) stats(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
+	// /stats is a PROCESS-WIDE aggregate over every tenant. Single-tenant it stays
+	// open exactly as it was — deploy/harbor/*.py reads it, and a proxy showing its
+	// own numbers is the point of the tool. Hosted, it is one tenant's traffic mixed
+	// with everyone else's, so it needs a gate; loopback is the default because the
+	// benchmark harnesses run on the same box as the proxy.
+	if h.opts.Tenants != nil && !h.statsTrusted(r) {
+		failAuth(w, statusError{http.StatusForbidden,
+			"/stats is a service-wide aggregate; use the dashboard for your own traffic"})
+		return
+	}
 	if h.agg == nil {
 		w.Write([]byte("{}"))
 		return
@@ -793,10 +1031,13 @@ func (h *Handler) stats(w http.ResponseWriter, _ *http.Request) {
 	// Freeze-replay health, same layering: the counters live with the code that owns
 	// them (offload for the replay path, the store for dropped/repaired decisions).
 	snap.FrozenHits, snap.FrozenMisses = offload.FrozenStats()
-	if fl, ok := h.store.(*store.Memory); ok {
+	if fl, ok := h.store.(*store.Memory); ok { // process store; hosted per-tenant stores report via the dashboard
 		snap.FrozenDropped, snap.FrozenRepaired = fl.FrozenLossStats()
 		snap.FrozenFlips = snap.FrozenDropped - snap.FrozenRepaired
 	}
+	// Cached-prefix restarts after an agent compaction. Same layering as the pool counters
+	// below: the counter lives in `modes`, so the host merges it here.
+	snap.CompactionResets = modes.CompactionResets()
 	// Off-path pool counters, same layering: the pool lives in `modes`, so `metrics` cannot
 	// read it and the host merges it here. Without this the observe-mode docs describe a
 	// `dropped` counter no consumer can reach — the pool tracked it correctly and nothing
@@ -848,6 +1089,16 @@ const (
 // expand resolves a stashed original by id — the HTTP side of reversibility (the
 // model-callable tool loop is a separate concern, added with response handling).
 func (h *Handler) expand(w http.ResponseWriter, r *http.Request) {
+	// Hosted mode: the tenancy decides WHICH store is searched, which is the outer
+	// half of the ownership check below. Session scoping alone was enough when one
+	// store served one deployment; with a store per tenant, resolving against the
+	// caller's own store means a guessed id cannot even name a stash belonging to
+	// someone else.
+	tn, err := h.tenancyFor(r)
+	if err != nil {
+		failAuth(w, err)
+		return
+	}
 	id := r.URL.Query().Get("id")
 	// Scope retrieval to the caller's session: a stash is keyed by a global content
 	// hash, so without this check any client reaching the proxy could fetch another
@@ -855,15 +1106,23 @@ func (h *Handler) expand(w http.ResponseWriter, r *http.Request) {
 	// The session comes from the same x-context-guru-session header used on chat requests
 	// (or ?session=). The model-driven expand loop needs no such check — it only ever sees
 	// markers minted from its own request.
-	session := r.Header.Get("x-context-guru-session")
-	if session == "" {
-		session = r.URL.Query().Get("session")
+	sess := r.Header.Get("x-context-guru-session")
+	if sess == "" {
+		sess = r.URL.Query().Get("session")
 	}
-	if !offload.OwnsKey(h.store, session, id) {
+	// Through session.Scoped, exactly like the chat path: owner keys are recorded
+	// under the TENANT-SCOPED session, so comparing the raw header against them
+	// missed every time and this endpoint 404'd for every hosted tenant. Scoped()
+	// also sanitises the header (see its comment), and an empty id stays empty here
+	// so OwnsKey keeps rejecting it rather than matching the empty-content hash.
+	if sess != "" {
+		sess = session.Scoped(tn.ID, sess, "", "")
+	}
+	if !offload.OwnsKey(tn.Store, sess, id) {
 		http.Error(w, "expired, unknown, or not owned by this session", http.StatusNotFound)
 		return
 	}
-	orig, ok := expand.Resolve(h.store, id)
+	orig, ok := expand.Resolve(tn.Store, id)
 	if !ok {
 		http.Error(w, "expired or unknown id", http.StatusNotFound)
 		return

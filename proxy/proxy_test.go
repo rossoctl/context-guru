@@ -40,6 +40,23 @@ func openAIBody(msgs ...map[string]any) []byte {
 	return b
 }
 
+// expandableBody is a realistic post-offload request: the client declares its own tools
+// AND the transcript carries a <<cg:HASH>> marker. Both are required before the proxy
+// advertises context_guru_expand (expand.Inject under InjectAuto), and the proxy inspects
+// responses for a call to that tool exactly when it advertised it — so a body without
+// them cannot produce an expand round, in a test or in production.
+func expandableBody(hash string) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"model": "gpt-x",
+		"tools": []any{map[string]any{"type": "function", "function": map[string]any{"name": "read_file"}}},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "go"},
+			map[string]any{"role": "tool", "tool_call_id": "a", "content": "earlier output <<cg:" + hash + ">>"},
+		},
+	})
+	return b
+}
+
 func TestProxyReducesThenForwards(t *testing.T) {
 	var got []byte
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -286,7 +303,7 @@ func TestExpandToolLoop(t *testing.T) {
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
-	body := openAIBody(map[string]any{"role": "user", "content": "go"})
+	body := expandableBody("HASH")
 	resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
@@ -303,8 +320,8 @@ func TestExpandToolLoop(t *testing.T) {
 	if !strings.Contains(string(secondBody), "THE ORIGINAL CONTENT") {
 		t.Fatalf("continuation must carry the resolved original, got %s", secondBody)
 	}
-	if gjson.GetBytes(secondBody, "messages.#").Int() != 3 {
-		t.Fatalf("continuation should append assistant + tool turns: %s", secondBody)
+	if gjson.GetBytes(secondBody, "messages.#").Int() != 4 {
+		t.Fatalf("continuation should append assistant + tool turns to the 2 original ones: %s", secondBody)
 	}
 }
 
@@ -405,7 +422,7 @@ func TestExpandPartialResolutionWellFormed(t *testing.T) {
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
-	body := openAIBody(map[string]any{"role": "user", "content": "go"})
+	body := expandableBody("GOOD")
 	resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
@@ -415,10 +432,12 @@ func TestExpandPartialResolutionWellFormed(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("expected a continuation round, got %d upstream calls", calls)
 	}
-	// One tool message per tool_call_id (both call_1 and call_2), or the provider errors.
+	// One tool message per EXPAND tool_call_id (both call_1 and call_2), or the provider
+	// errors. Counted by call id: the request already carried an unrelated tool turn (the
+	// one holding the marker), which is not a result for this round.
 	var toolCalls int
 	gjson.GetBytes(secondBody, "messages").ForEach(func(_, m gjson.Result) bool {
-		if m.Get("role").String() == "tool" {
+		if m.Get("role").String() == "tool" && strings.HasPrefix(m.Get("tool_call_id").String(), "call_") {
 			toolCalls++
 		}
 		return true

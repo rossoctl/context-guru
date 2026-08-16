@@ -90,6 +90,7 @@ func dashHandler(t *testing.T, up string, opts dash.Options) (*Handler, *dash.Re
 	t.Cleanup(func() { rec.Close() })
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{
 		AnthropicUpstream: up,
+		OpenAIUpstream:    up, // some dashboard tests drive the OpenAI dialect
 		Preset:            cfg.Preset,
 		Dashboard:         rec,
 		Prices:            fixedPricer{},

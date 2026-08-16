@@ -1,0 +1,574 @@
+package proxy
+
+import (
+	"crypto/subtle"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/internal/cheapmodel"
+)
+
+// Prometheus exposition at /metrics, for Grafana.
+//
+// Hand-written rather than pulling in prometheus/client_golang. The text format is a
+// handful of lines per series, everything here is already computed by the Aggregator
+// and the dashboard's store, and the client library would bring a dependency tree plus
+// its own registry, collectors and histogram machinery to serialise numbers we already
+// have. If native histograms or exemplars are ever wanted, that is the moment to take
+// the dependency — not before.
+//
+// Two families of series:
+//
+//   - cg_* process-wide, straight off metrics.Aggregator, the same numbers /stats
+//     reports. Cheap: one snapshot, no I/O. In-memory, so they start at 0 with the
+//     process and cover every tenant — see procCaveat, which says so in the HELP text of
+//     every one of them, because these numbers sit beside the dashboard's in Grafana and
+//     legitimately disagree with them.
+//   - cg_tenant_* per tenant, from the dashboard database. These cost a SQL query, so
+//     they are cached for a scrape interval — Grafana will scrape every 15s and a query
+//     per scrape per tenant would make observability the load.
+
+// promCacheTTL bounds how stale per-tenant series may be. Just under a typical 15s
+// scrape so consecutive scrapes do not serve one cached copy twice.
+const promCacheTTL = 10 * time.Second
+
+// Refusals: every way a request can be turned away before it reaches an upstream.
+//
+// These exist because without them a tenant that is rate-limited or over its budget
+// sees failures while the operator's dashboard shows a perfectly healthy service — and
+// because a rejection count is the only thing that tells "this tenant is quiet" apart
+// from "this tenant is blocked".
+//
+// The reason is a CLOSED set of constants, never a status line or an error string. A
+// label taken from an error message would let a caller mint series at will, and
+// tenant × reason is the one place cardinality here could run away.
+type refusalReason string
+
+const (
+	refuseRateLimit   refusalReason = "rate_limit"     // 429, per-tenant requests/minute
+	refuseConcurrency refusalReason = "concurrency"    // 429, per-tenant in-flight cap
+	refuseSpendCap    refusalReason = "spend_cap"      // 402, monthly cap reached
+	refuseAuth        refusalReason = "auth"           // 401, missing/unknown token
+	refuseForbidden   refusalReason = "forbidden"      // 403, disabled account or a gated view
+	refuseNoUpstream  refusalReason = "no_upstream"    // 502, nothing configured for the route
+	refuseUpstream    refusalReason = "upstream_error" // 502, the upstream call itself failed
+)
+
+// refusalReasons is the exposition order, and the reason every series is present with a
+// value of 0 rather than absent: a Grafana rate() over a family that only appears once
+// something breaks renders "No data", which reads as healthy.
+var refusalReasons = []refusalReason{refuseRateLimit, refuseConcurrency, refuseSpendCap,
+	refuseAuth, refuseForbidden, refuseNoUpstream, refuseUpstream}
+
+// refusalTotals is the process-wide count per reason. Built once and never written
+// again, so an increment on the request path is one map read and one atomic add — no
+// lock, and it works in single-tenant mode where there is no tenant to label.
+var refusalTotals = func() map[refusalReason]*atomic.Int64 {
+	m := make(map[refusalReason]*atomic.Int64, len(refusalReasons))
+	for _, r := range refusalReasons {
+		m[r] = new(atomic.Int64)
+	}
+	return m
+}()
+
+type refusalKey struct {
+	tenant string
+	reason refusalReason
+}
+
+// refusalByTenant breaks the same counts down per tenant. A sync.Map rather than a
+// mutex-guarded map because this is the request path and the steady state is a Load of
+// an existing key; the value is an atomic, so two concurrent refusals never contend.
+var (
+	refusalByTenant sync.Map // refusalKey -> *atomic.Int64
+	refusalKeyCount atomic.Int64
+)
+
+// maxRefusalKeys bounds the per-tenant breakdown. The tenant set is already bounded by
+// the registry, so this is a backstop, not the primary bound — but a metrics map that
+// grows with traffic is the kind of thing that only shows up as a memory leak in
+// production, and the process-wide totals keep counting after the cap is hit.
+const maxRefusalKeys = 2048
+
+// recordRefusal counts one refused request.
+//
+// tenantID must be a registry tenant id or "". Empty means process-wide only, which is
+// the right answer twice over: in single-tenant mode there is no tenant, and a caller
+// that failed to authenticate has no identity we are willing to turn into a label.
+func recordRefusal(reason refusalReason, tenantID string) {
+	if c := refusalTotals[reason]; c != nil {
+		c.Add(1)
+	}
+	if tenantID == "" {
+		return
+	}
+	k := refusalKey{tenant: tenantID, reason: reason}
+	if c, ok := refusalByTenant.Load(k); ok {
+		c.(*atomic.Int64).Add(1)
+		return
+	}
+	if refusalKeyCount.Load() >= maxRefusalKeys {
+		return
+	}
+	c, loaded := refusalByTenant.LoadOrStore(k, new(atomic.Int64))
+	if !loaded {
+		refusalKeyCount.Add(1)
+	}
+	c.(*atomic.Int64).Add(1)
+}
+
+// refusalSnapshot reads both families for one scrape.
+func refusalSnapshot() (map[refusalReason]int64, map[string]map[refusalReason]int64) {
+	totals := make(map[refusalReason]int64, len(refusalReasons))
+	for r, c := range refusalTotals {
+		totals[r] = c.Load()
+	}
+	byTenant := map[string]map[refusalReason]int64{}
+	refusalByTenant.Range(func(k, v any) bool {
+		key := k.(refusalKey)
+		if byTenant[key.tenant] == nil {
+			byTenant[key.tenant] = map[refusalReason]int64{}
+		}
+		byTenant[key.tenant][key.reason] = v.(*atomic.Int64).Load()
+		return true
+	})
+	return totals, byTenant
+}
+
+// TenantMetricsSource supplies per-tenant rollups for the exporter.
+type TenantMetricsSource interface {
+	// TenantMetrics returns one row per tenant that has traffic in the window.
+	TenantMetrics(since int64) ([]TenantMetricRow, error)
+}
+
+// TenantMetricRow is one tenant's rollup. Deliberately flat: every field becomes one
+// Prometheus series, and a nested shape would just have to be flattened here anyway.
+type TenantMetricRow struct {
+	TenantID      string
+	Label         string
+	Requests      int64
+	TokensBefore  int64
+	TokensAfter   int64
+	SavedUnique   int64
+	CacheRead     int64
+	CacheWrite    int64
+	FreshInput    int64
+	OutputTokens  int64
+	CostUSD       float64
+	BaselineUSD   float64
+	CGLLMCostUSD  float64
+	CGLatencyMs   float64
+	UpstreamMs    float64
+	Sessions      int64
+	ArchivedCount int64
+	ArchivedBytes int64
+}
+
+type promCache struct {
+	mu   sync.Mutex
+	at   time.Time
+	body string
+}
+
+// metricsHandler serves the Prometheus endpoint.
+//
+// Gated exactly like /stats, and for the same reason: this is a service-wide view
+// across every tenant, including per-tenant cost. Loopback is allowed by default
+// because Prometheus normally runs beside the proxy; a remote scraper needs
+// METRICS_TOKEN.
+func (h *Handler) metricsHandler(w http.ResponseWriter, r *http.Request) {
+	if !h.metricsAllowed(r) {
+		failAuth(w, statusError{http.StatusForbidden,
+			"/metrics is a service-wide view; scrape it from loopback or set METRICS_TOKEN"})
+		return
+	}
+	h.promCache.mu.Lock()
+	defer h.promCache.mu.Unlock()
+	if time.Since(h.promCache.at) < promCacheTTL && h.promCache.body != "" {
+		writeMetrics(w, h.promCache.body)
+		return
+	}
+	body := h.renderMetrics()
+	h.promCache.at, h.promCache.body = time.Now(), body
+	writeMetrics(w, body)
+}
+
+func writeMetrics(w http.ResponseWriter, body string) {
+	// version=0.0.4 is the classic text exposition format; naming it explicitly stops
+	// a scraper guessing.
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = w.Write([]byte(body))
+}
+
+// metricsAllowed gates the endpoint. A bearer token is accepted so Prometheus can
+// scrape from another host; loopback needs none, which keeps the common
+// same-box deployment configuration-free.
+func (h *Handler) metricsAllowed(r *http.Request) bool {
+	if tok := h.opts.MetricsToken; tok != "" {
+		// Constant time: a byte-by-byte == leaks the shared secret's prefix to a
+		// scraper that can time its own requests.
+		if subtle.ConstantTimeCompare([]byte(TokenFromRequest(r)), []byte(tok)) == 1 {
+			return true
+		}
+	}
+	// In single-tenant mode there is no cross-tenant data to protect, so the endpoint
+	// is as open as /stats has always been.
+	if h.opts.Tenants == nil {
+		return true
+	}
+	return h.statsTrusted(r)
+}
+
+// promLine writes one sample. Labels are pre-escaped by the caller's use of
+// escapeLabel; the value uses %g so integers stay integral and floats keep precision.
+func promLine(b *strings.Builder, name, labels string, v float64) {
+	if labels == "" {
+		fmt.Fprintf(b, "%s %g\n", name, v)
+		return
+	}
+	fmt.Fprintf(b, "%s{%s} %g\n", name, labels, v)
+}
+
+func promHeader(b *strings.Builder, name, help, typ string) {
+	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s %s\n", name, help, name, typ)
+}
+
+// procCaveat is appended to the HELP of every series read from the in-process
+// Aggregator, which is all of the cg_* family below.
+//
+// It exists because these numbers sit next to the dashboard's in Grafana and disagree
+// with it — observed live: /metrics said 24 requests / 28,644 tokens-before while the
+// dashboard said 26 / 28,656 — for two reasons that are both correct behaviour and
+// neither of which was written down anywhere the reader would look. The aggregator is
+// memory: it starts at zero when the process starts, while the dashboard reads the
+// persistent database and keeps history across restarts. And it is process-wide across
+// every tenant, while the dashboard is scoped to one. HELP text is the fix because it
+// travels with the metric into every scraper, explorer and panel tooltip.
+//
+// The series are NOT re-sourced from the store: their meaning is "what this process did",
+// /stats reports the same snapshot, deploy/harbor/*.py reads /stats, and the persistent
+// per-tenant view already exists as cg_tenant_*.
+const procCaveat = " Counted in THIS PROCESS since it started and summed over every " +
+	"tenant: it restarts from 0 with the process (a rate() handles that) and it will not " +
+	"equal the dashboard's figure for the same window, which is database-backed and " +
+	"tenant-scoped. Use the cg_tenant_* series for the persistent, per-tenant numbers."
+
+// promHeaderProc writes a header for an in-process series, caveat attached.
+func promHeaderProc(b *strings.Builder, name, help, typ string) {
+	promHeader(b, name, help+procCaveat, typ)
+}
+
+// escapeLabel escapes a label value per the exposition format. Tenant labels are
+// hex ids and operator-supplied labels, so this is belt and braces — but a stray
+// newline in a label value would corrupt every series after it.
+func escapeLabel(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	return s
+}
+
+func (h *Handler) renderMetrics() string {
+	var b strings.Builder
+	b.Grow(8 << 10)
+
+	// --- process-wide -------------------------------------------------------
+	if h.agg != nil {
+		s := h.agg.Snapshot()
+
+		promHeaderProc(&b, "cg_requests_total", "Requests processed by context-guru.", "counter")
+		promLine(&b, "cg_requests_total", "", float64(s.Requests))
+
+		promHeaderProc(&b, "cg_tokens_before_total", "Content tokens seen before compaction.", "counter")
+		promLine(&b, "cg_tokens_before_total", "", float64(s.TokensBefore))
+		promHeaderProc(&b, "cg_tokens_after_total", "Content tokens after compaction.", "counter")
+		promLine(&b, "cg_tokens_after_total", "", float64(s.TokensAfter))
+		promHeaderProc(&b, "cg_saved_tokens_total",
+			"Tokens removed, counted gross (the same compaction re-counted on every turn the agent re-sends its transcript).", "counter")
+		promLine(&b, "cg_saved_tokens_total", "", float64(s.SavedTokens))
+		// The aggregate unique figure is the sum of the per-component ones: the Snapshot
+		// carries unique savings per component, and summing here keeps one definition of
+		// "unique" rather than inventing a second that could drift from /stats.
+		var uniqueTotal int64
+		for _, c := range s.Components {
+			uniqueTotal += c.SavedUnique
+		}
+		promHeaderProc(&b, "cg_saved_tokens_unique_total",
+			"Tokens removed, deduplicated by content — the honest figure. The gross counter over-counts by ~13x on agent traffic, because an agent re-sends its whole transcript every turn.", "counter")
+		promLine(&b, "cg_saved_tokens_unique_total", "", float64(uniqueTotal))
+		promHeaderProc(&b, "cg_savings_ratio", "Fraction of content tokens removed.", "gauge")
+		promLine(&b, "cg_savings_ratio", "", s.SavingsPct/100)
+
+		promHeaderProc(&b, "cg_billed_tokens_total", "Provider-billed tokens by tier.", "counter")
+		promLine(&b, "cg_billed_tokens_total", `tier="fresh_input"`, float64(s.FreshInputTokens))
+		promLine(&b, "cg_billed_tokens_total", `tier="cache_read"`, float64(s.CacheReadTokens))
+		promLine(&b, "cg_billed_tokens_total", `tier="cache_write"`, float64(s.CacheWriteTokens))
+		promLine(&b, "cg_billed_tokens_total", `tier="output"`, float64(s.OutputTokens))
+
+		// Cache hit rate is THE number to alert on: compaction that breaks the provider
+		// prefix cache costs more than the tokens it saves, and this is where that shows
+		// up first.
+		if hit := s.CacheReadTokens + s.FreshInputTokens; hit > 0 {
+			promHeaderProc(&b, "cg_cache_hit_ratio",
+				"Cache-read tokens over cache-read plus fresh input. A fall here is the first sign compaction is churning the provider's prefix cache.", "gauge")
+			promLine(&b, "cg_cache_hit_ratio", "", float64(s.CacheReadTokens)/float64(hit))
+		}
+
+		promHeaderProc(&b, "cg_added_latency_ms", "Mean latency context-guru itself adds per request.", "gauge")
+		promLine(&b, "cg_added_latency_ms", "", s.AddedLatencyMsAvg)
+		promHeaderProc(&b, "cg_upstream_latency_ms", "Mean upstream latency.", "gauge")
+		promLine(&b, "cg_upstream_latency_ms", "", s.UpstreamMsAvg)
+
+		promHeaderProc(&b, "cg_expand_bounces_total",
+			"Times the model had to call context_guru_expand to recover offloaded content. Rising means compaction is hiding things the agent still needs.", "counter")
+		promLine(&b, "cg_expand_bounces_total", "", float64(s.Bounces))
+		promHeaderProc(&b, "cg_wasted_tokens_total", "Tokens spent recovering offloaded content.", "counter")
+		promLine(&b, "cg_wasted_tokens_total", "", float64(s.WastedTokens))
+
+		promHeaderProc(&b, "cg_frozen_decisions_total", "Freeze-replay outcomes for compaction decisions.", "counter")
+		promLine(&b, "cg_frozen_decisions_total", `outcome="hit"`, float64(s.FrozenHits))
+		promLine(&b, "cg_frozen_decisions_total", `outcome="miss"`, float64(s.FrozenMisses))
+		promLine(&b, "cg_frozen_decisions_total", `outcome="dropped"`, float64(s.FrozenDropped))
+		promLine(&b, "cg_frozen_decisions_total", `outcome="repaired"`, float64(s.FrozenRepaired))
+
+		promHeaderProc(&b, "cg_sse_streams_total", "Responses by streaming path.", "counter")
+		promLine(&b, "cg_sse_streams_total", `path="streamed"`, float64(s.SSEStreamed))
+		promLine(&b, "cg_sse_streams_total", `path="buffered"`, float64(s.SSEBuffered))
+		promHeaderProc(&b, "cg_sse_ttfb_ms", "Mean time to first byte on streamed responses.", "gauge")
+		promLine(&b, "cg_sse_ttfb_ms", "", s.SSETTFBMsAvg)
+
+		// Per component: which parts of the pipeline are earning their place.
+		promHeaderProc(&b, "cg_component_runs_total", "Component invocations by outcome.", "counter")
+		names := make([]string, 0, len(s.Components))
+		for name := range s.Components {
+			names = append(names, name)
+		}
+		sort.Strings(names) // stable output; a scrape diff should not reorder every line
+		for _, name := range names {
+			c := s.Components[name]
+			l := `component="` + escapeLabel(name) + `"`
+			promLine(&b, "cg_component_runs_total", l+`,outcome="ran"`, float64(c.Runs))
+			promLine(&b, "cg_component_runs_total", l+`,outcome="acted"`, float64(c.Acted))
+			promLine(&b, "cg_component_runs_total", l+`,outcome="reverted"`, float64(c.Reverted))
+		}
+		promHeaderProc(&b, "cg_component_saved_tokens_unique_total",
+			"Tokens each component removed, deduplicated by content.", "counter")
+		for _, name := range names {
+			promLine(&b, "cg_component_saved_tokens_unique_total",
+				`component="`+escapeLabel(name)+`"`, float64(s.Components[name].SavedUnique))
+		}
+		promHeaderProc(&b, "cg_component_duration_ms_total", "Cumulative time in each component.", "counter")
+		for _, name := range names {
+			promLine(&b, "cg_component_duration_ms_total",
+				`component="`+escapeLabel(name)+`"`, s.Components[name].DurationMs)
+		}
+	}
+
+	// --- refusals -----------------------------------------------------------
+	//
+	// Outside the h.agg guard: a refused request never reaches the aggregator, and these
+	// counters are exactly what is wanted on a proxy with no /stats rollups at all.
+	refusals, refusalsByTenant := refusalSnapshot()
+	promHeader(&b, "cg_refused_requests_total",
+		"Requests refused before an upstream was called, by reason. Any sustained rate here is somebody's agent failing: rate_limit and concurrency are both 429 but have different fixes (raise the rate, raise the in-flight cap), spend_cap is 402 and needs a bigger budget, auth/forbidden mean a bad or disabled token, no_upstream is our own misconfiguration and upstream_error is the provider.", "counter")
+	for _, r := range refusalReasons {
+		promLine(&b, "cg_refused_requests_total", `reason="`+string(r)+`"`, float64(refusals[r]))
+	}
+	if len(refusalsByTenant) > 0 {
+		// Labels come from the registry, like every other per-tenant series, and for the
+		// same reason: {{label}} in a legend is unreadable when it is blank. The EMAIL is
+		// deliberately absent here too — see tenantLabels.
+		byID := map[string]string{}
+		if reg := h.registry(); reg != nil {
+			if all, err := reg.List(); err == nil {
+				for _, t := range all {
+					byID[t.ID] = t.Label
+				}
+			}
+		}
+		ids := make([]string, 0, len(refusalsByTenant))
+		for id := range refusalsByTenant {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		promHeader(&b, "cg_tenant_refused_requests_total",
+			"Requests refused per tenant, by reason. This is the one series that tells a quiet tenant apart from a blocked one. Only reasons that have fired are present, so the family is bounded by tenants actually being refused.", "counter")
+		for _, id := range ids {
+			l := `tenant="` + escapeLabel(id) + `",label="` + escapeLabel(byID[id]) + `"`
+			for _, r := range refusalReasons {
+				if n := refusalsByTenant[id][r]; n > 0 {
+					promLine(&b, "cg_tenant_refused_requests_total",
+						l+`,reason="`+string(r)+`"`, float64(n))
+				}
+			}
+		}
+	}
+
+	// context-guru's own compaction-model spend. Separate from the agent's cost because
+	// conflating them makes it impossible to see whether the tool pays for itself.
+	calls, in, out := cheapmodel.Usage()
+	promHeader(&b, "cg_llm_calls_total", "Calls context-guru made to its own compaction model.", "counter")
+	promLine(&b, "cg_llm_calls_total", "", float64(calls))
+	promHeader(&b, "cg_llm_tokens_total", "Tokens context-guru spent on its own compaction model.", "counter")
+	promLine(&b, "cg_llm_tokens_total", `direction="input"`, float64(in))
+	promLine(&b, "cg_llm_tokens_total", `direction="output"`, float64(out))
+	promHeader(&b, "cg_llm_failures_total", "Compaction-model calls that timed out or errored.", "counter")
+	promLine(&b, "cg_llm_failures_total", `kind="timeout"`, float64(offload.LLMTimeouts()))
+	promLine(&b, "cg_llm_failures_total", `kind="error"`, float64(offload.LLMErrors()))
+
+	// --- dashboard / storage health ----------------------------------------
+	if h.rec != nil {
+		st := h.rec.Stats()
+		promHeader(&b, "cg_dash_events_total", "Dashboard capture events by disposition.", "counter")
+		promLine(&b, "cg_dash_events_total", `disposition="captured"`, float64(st.Captured))
+		promLine(&b, "cg_dash_events_total", `disposition="written"`, float64(st.Written))
+		// Dropped events mean the capture queue filled — observability degrading under
+		// load, which is exactly when it is most wanted. Worth an alert.
+		promLine(&b, "cg_dash_events_total", `disposition="dropped"`, float64(st.Dropped))
+		promHeader(&b, "cg_dash_db_bytes", "Size of the local dashboard database, write-ahead log included.", "gauge")
+		promLine(&b, "cg_dash_db_bytes", "", float64(h.rec.DBSizeBytes()))
+		promHeader(&b, "cg_dash_disk_used_ratio",
+			"Fraction of the filesystem holding the dashboard database that is in use. Crossing the high watermark triggers session eviction.", "gauge")
+		if frac, ok := h.rec.DiskUsedFraction(); ok {
+			promLine(&b, "cg_dash_disk_used_ratio", "", frac)
+		}
+		promHeader(&b, "cg_archive_sessions_total", "Sessions moved to cold storage.", "counter")
+		promLine(&b, "cg_archive_sessions_total", "", float64(h.rec.ArchivedSessionCount()))
+		promHeader(&b, "cg_archive_bytes_total", "Bytes stored in cold storage.", "counter")
+		promLine(&b, "cg_archive_bytes_total", "", float64(h.rec.ArchivedBytes()))
+		promHeader(&b, "cg_archive_configured", "1 when cold storage is configured and reachable.", "gauge")
+		// RemoteReachable, not RemoteName: the name is now reported for a CONFIGURED
+		// remote even when the boot probe failed (so the dashboard can distinguish "not
+		// configured" from "unreachable"), and this gauge documents both conditions.
+		configured := 0.0
+		if h.rec.RemoteReachable() {
+			configured = 1
+		}
+		promLine(&b, "cg_archive_configured", "", configured)
+	}
+
+	// --- per tenant ---------------------------------------------------------
+	if h.opts.TenantMetrics != nil {
+		// Month to date, matching the window the spend cap uses, so a Grafana panel and
+		// the cap can never disagree about how much someone has spent.
+		now := time.Now().UTC()
+		since := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+		rows, err := h.opts.TenantMetrics.TenantMetrics(since)
+		// The label lives in the control database; the request rows only carry the id.
+		// Without this merge every per-tenant series is label="", and a Grafana legend of
+		// {{label}} renders a column of blanks — the panels work but nobody can read them.
+		if reg := h.registry(); reg != nil && err == nil {
+			if all, lerr := reg.List(); lerr == nil {
+				byID := make(map[string]string, len(all))
+				for _, t := range all {
+					byID[t.ID] = t.Label
+				}
+				for i := range rows {
+					if rows[i].Label == "" {
+						rows[i].Label = byID[rows[i].TenantID]
+					}
+				}
+			}
+		}
+		if err != nil {
+			// Never swallow this. A metric family that silently disappears is the worst
+			// kind of monitoring failure: the Grafana panel goes blank, which reads as
+			// "no traffic" rather than "the query is broken", and nobody investigates a
+			// quiet dashboard.
+			slog.Warn("context-guru: per-tenant metrics query failed; those series are absent from this scrape",
+				"err", err)
+		}
+		if err == nil {
+			promHeader(&b, "cg_tenant_requests_total", "Requests this calendar month, per tenant.", "counter")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_requests_total", tenantLabels(t), float64(t.Requests))
+			}
+			promHeader(&b, "cg_tenant_cost_usd", "Provider spend this calendar month, per tenant.", "gauge")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_cost_usd", tenantLabels(t), t.CostUSD)
+			}
+			promHeader(&b, "cg_tenant_baseline_cost_usd",
+				"What this tenant's traffic would have cost without compaction. Subtract cg_tenant_cost_usd for the saving.", "gauge")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_baseline_cost_usd", tenantLabels(t), t.BaselineUSD)
+			}
+			promHeader(&b, "cg_tenant_cg_llm_cost_usd",
+				"What context-guru's own compaction model cost this tenant. Compare against the saving to see whether it paid for itself.", "gauge")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_cg_llm_cost_usd", tenantLabels(t), t.CGLLMCostUSD)
+			}
+			promHeader(&b, "cg_tenant_tokens_total", "Content tokens per tenant, before and after compaction.", "counter")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_tokens_total", tenantLabels(t)+`,stage="before"`, float64(t.TokensBefore))
+				promLine(&b, "cg_tenant_tokens_total", tenantLabels(t)+`,stage="after"`, float64(t.TokensAfter))
+			}
+			promHeader(&b, "cg_tenant_saved_tokens_unique_total", "Tokens removed per tenant, deduplicated.", "counter")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_saved_tokens_unique_total", tenantLabels(t), float64(t.SavedUnique))
+			}
+			promHeader(&b, "cg_tenant_billed_tokens_total", "Provider-billed tokens per tenant by tier.", "counter")
+			for _, t := range rows {
+				l := tenantLabels(t)
+				promLine(&b, "cg_tenant_billed_tokens_total", l+`,tier="cache_read"`, float64(t.CacheRead))
+				promLine(&b, "cg_tenant_billed_tokens_total", l+`,tier="cache_write"`, float64(t.CacheWrite))
+				promLine(&b, "cg_tenant_billed_tokens_total", l+`,tier="fresh_input"`, float64(t.FreshInput))
+				promLine(&b, "cg_tenant_billed_tokens_total", l+`,tier="output"`, float64(t.OutputTokens))
+			}
+			promHeader(&b, "cg_tenant_sessions", "Distinct sessions this calendar month, per tenant.", "gauge")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_sessions", tenantLabels(t), float64(t.Sessions))
+			}
+			promHeader(&b, "cg_tenant_added_latency_ms", "Mean latency context-guru added, per tenant.", "gauge")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_added_latency_ms", tenantLabels(t), t.CGLatencyMs)
+			}
+			promHeader(&b, "cg_tenant_archived_sessions", "Sessions in cold storage, per tenant.", "gauge")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_archived_sessions", tenantLabels(t), float64(t.ArchivedCount))
+			}
+			promHeader(&b, "cg_tenant_archived_bytes", "Bytes in cold storage, per tenant.", "gauge")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_archived_bytes", tenantLabels(t), float64(t.ArchivedBytes))
+			}
+		}
+	}
+
+	// Spend caps, so a Grafana panel can show headroom rather than only consumption.
+	if reg := h.registry(); reg != nil {
+		if all, err := reg.List(); err == nil {
+			promHeader(&b, "cg_tenant_monthly_cap_usd", "Configured monthly spend cap per tenant (0 = uncapped).", "gauge")
+			for _, t := range all {
+				promLine(&b, "cg_tenant_monthly_cap_usd",
+					`tenant="`+escapeLabel(t.ID)+`",label="`+escapeLabel(t.Label)+`"`, t.MonthlyCapUSD)
+			}
+			promHeader(&b, "cg_tenant_disabled", "1 when a tenant is disabled.", "gauge")
+			for _, t := range all {
+				v := 0.0
+				if t.Disabled {
+					v = 1
+				}
+				promLine(&b, "cg_tenant_disabled",
+					`tenant="`+escapeLabel(t.ID)+`",label="`+escapeLabel(t.Label)+`"`, v)
+			}
+		}
+	}
+
+	promHeader(&b, "cg_build_info", "Always 1; carries the build as labels.", "gauge")
+	promLine(&b, "cg_build_info", `version="`+escapeLabel(h.opts.Version)+`"`, 1)
+	return b.String()
+}
+
+// tenantLabels renders the identity labels every per-tenant series carries. The label
+// is included alongside the id so a Grafana panel is readable without a join, and the
+// EMAIL is deliberately absent: metrics are typically the least access-controlled
+// surface in an organisation, and personal data does not belong in a scrape target.
+func tenantLabels(t TenantMetricRow) string {
+	return `tenant="` + escapeLabel(t.TenantID) + `",label="` + escapeLabel(t.Label) + `"`
+}
