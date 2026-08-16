@@ -940,3 +940,115 @@ table.grid tr.revoked { opacity: 0.55; }
   .whoami { max-width: 18ch; }
   .gate-card { padding: var(--sp-5) var(--sp-4); }
 }
+
+/* ── feedback ─────────────────────────────────────────────────────────────
+ * The form and the manager's aggregate. No new colours: a chosen star wears
+ * --accent (the same token as a pressed toggle — a filled star IS a selected
+ * control), the mean bars reuse --s1 like every other magnitude in this file,
+ * and the promoter/passive/detractor split wears the reserved STATUS colours
+ * because that split is a judgement about a state, not a series. */
+/* The explanatory copy in this view is prose, so it gets a measure. 82ch is the same
+   cap .hint uses; without it a 1400px card renders a 200-character line. */
+#view-feedback p.muted.small { max-width: 82ch; }
+#feedback-form { margin-top: var(--sp-4); }
+
+.stars-field {
+  border: 0; border-top: 1px solid var(--border-soft);
+  margin: 0; padding: var(--sp-4) 0 var(--sp-3);
+  display: flex; flex-direction: column; gap: var(--sp-2);
+}
+.stars-field:first-child { border-top: 0; padding-top: 0; }
+.stars-field > legend { padding: 0; font-size: var(--t-h3); font-weight: 600; }
+.stars-line { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+
+/* The radio is the state; the star label is the paint. The input stays in the
+   accessibility tree and keeps its keyboard behaviour — it is moved out of sight,
+   never display:none, which would remove it from the tab order and from the
+   radiogroup entirely. */
+.stars { display: flex; gap: var(--sp-1); }
+.star-input {
+  position: absolute; width: 1px; height: 1px; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.star {
+  color: var(--border); cursor: pointer; display: inline-flex;
+  /* 28px glyph + 8px on every side = a 44x44 target. A star small enough to look
+     elegant is too small to hit on a trackpad, let alone a touch screen. */
+  padding: var(--sp-2); border-radius: var(--r-sm);
+  transition: color 120ms ease, transform 120ms ease;
+}
+.star-icon { width: 28px; height: 28px; display: block; }
+.star:hover { color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.star.on { color: var(--accent); }
+.star:active { transform: scale(0.94); }
+/* The focus ring lands on the LABEL, because the input it belongs to is out of sight.
+   Never removed: this is the only way a keyboard user can see where they are. */
+.star-input:focus-visible + .star { outline: 2px solid var(--accent); outline-offset: 1px; }
+.stars-read {
+  font-size: var(--t-small); color: var(--fg-muted); font-weight: 600;
+  min-width: 14ch; /* reserved, so choosing a rating does not shift the row */
+}
+.field-error {
+  margin: 0; font-size: var(--t-small); color: var(--bad); font-weight: 600; line-height: 1.5;
+}
+.hint.short { color: var(--warn); font-weight: 600; }
+#feedback-form .field { margin: var(--sp-4) 0 0; }
+#feedback-form textarea { font-family: inherit; font-size: var(--t-body); max-width: 82ch; }
+
+/* Mean out of five: a bar for the shape, the number beside it for the value. Never
+   the bar alone — a 4.35 and a 4.51 are the same bar. */
+.mean-cell { display: flex; align-items: center; gap: var(--sp-2); min-width: 150px; }
+.mean-cell .bar-track { flex: 1 1 90px; }
+.mean-val { font-variant-numeric: tabular-nums; font-weight: 600; font-size: var(--t-small); }
+
+/* Five ordered buckets of ONE measure, so one hue. 2px of surface between columns:
+   adjacent fills with no gap read as a single mark. */
+.dist { display: flex; align-items: flex-end; gap: 2px; height: 26px; }
+.dist-col { width: 7px; height: 100%; display: flex; align-items: flex-end; }
+.dist-col i { display: block; width: 100%; background: var(--s1); border-radius: 2px 2px 0 0; }
+
+/* NPS. Three states, three status colours, and every one of them also a word. */
+.nps-head { display: flex; align-items: baseline; gap: var(--sp-2); margin-bottom: var(--sp-2); }
+.nps-score { font-size: var(--t-num); font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.025em; }
+.nps-bar { display: flex; gap: 2px; height: 14px; }
+.nps-seg { border-radius: 2px; min-width: 3px; }
+.nps-seg.good { background: var(--good); }
+.nps-seg.warn { background: var(--warn); }
+.nps-seg.bad  { background: var(--bad); }
+.nps-legend {
+  display: flex; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-2);
+  font-size: var(--t-small); color: var(--fg-muted);
+}
+.nps-legend .sw { width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-right: var(--sp-1); }
+.nps-legend .sw.good { background: var(--good); }
+.nps-legend .sw.warn { background: var(--warn); }
+.nps-legend .sw.bad  { background: var(--bad); }
+
+/* One submission. Attacker-controlled prose, so it wraps and breaks rather than
+   stretching the page: overflow-wrap on a 400-character unbroken "word" is what stops
+   one answer from adding a horizontal scrollbar to the whole card. */
+.answer {
+  border-top: 1px solid var(--border-soft); padding: var(--sp-3) 0;
+}
+.answer:first-child { border-top: 0; padding-top: 0; }
+.answer-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-2); }
+.score-chips { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-4); margin: var(--sp-2) 0; }
+.score-chip { display: inline-flex; align-items: baseline; gap: var(--sp-2); font-size: var(--t-small); }
+.score-dim { color: var(--fg-muted); }
+.star-read { white-space: nowrap; letter-spacing: 0.5px; }
+.star-read .on { color: var(--accent); }
+.star-read .off { color: var(--border); }
+.answer-block { margin-top: var(--sp-2); }
+.answer-block h4 {
+  margin: 0 0 2px; font-size: var(--t-micro); font-weight: 600; color: var(--fg-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.answer-block p {
+  margin: 0; font-size: var(--t-body); line-height: 1.6; max-width: 82ch;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .star { transition: none; }
+  .star:active { transform: none; }
+}

@@ -25,6 +25,7 @@
     <button role="tab" class="tab" data-view="archive" data-testid="tab-archive" data-account hidden>Archive</button>
     <button role="tab" class="tab" data-view="setup" data-testid="tab-setup" data-account hidden>Setup</button>
     <button role="tab" class="tab" data-view="settings" data-testid="tab-settings" data-account hidden>Settings</button>
+    <button role="tab" class="tab" data-view="feedback" data-testid="tab-feedback" data-account hidden>Feedback</button>
     <button role="tab" class="tab" data-view="tenants" data-testid="tab-tenants" data-manager hidden>Tenants</button>
     <button role="tab" class="tab" data-view="config" data-testid="tab-config" data-manager data-local-ok>Config</button>
   </nav>
@@ -464,6 +465,58 @@
   <div class="card">
     <div class="card-head"><h2>Recent configuration changes</h2></div>
     <div id="audit-list" data-testid="audit-list" tabindex="0"></div>
+  </div>
+</section>
+
+<!-- Feedback: one form for everybody, and the aggregate for the manager only.
+     Both live in the same view because they are the same subject; the three manager
+     cards carry data-manager, so a plain account sees the form and nothing else. The
+     form itself is built in JS (feedbackFields), because which agents it asks about
+     depends on the traffic this account has actually sent. -->
+<section class="view" id="view-feedback" hidden>
+  <div class="card">
+    <div class="card-head"><h2>How is context-guru working for you?</h2></div>
+    <p class="muted small">Every answer goes straight to whoever runs this deployment,
+      by email and in the dashboard. Ratings are one to five stars; the written answer is
+      the part that actually changes what gets built, so it is required and has to say
+      something. Nobody but the manager can read any of it.</p>
+    <form id="feedback-form" data-testid="feedback-form" novalidate></form>
+  </div>
+
+  <div class="card" id="feedback-stats" data-manager hidden>
+    <div class="card-head"><h2>Feedback statistics</h2>
+      <span class="muted" id="feedback-count" data-testid="feedback-count"></span></div>
+    <div id="feedback-tiles"></div>
+    <div class="card-head"><h3>Every question: mean and spread</h3></div>
+    <p class="muted small">The mean is out of five and the spread is beside it, because a
+      3.0 made of threes and a 3.0 made of ones and fives are different problems.</p>
+    <div class="tblwrap" tabindex="0">
+      <table class="tbl" data-testid="feedback-dims">
+        <thead><tr>
+          <th>Question</th><th>Mean of 5</th><th>Spread</th>
+          <th class="num">1★</th><th class="num">2★</th><th class="num">3★</th>
+          <th class="num">4★</th><th class="num">5★</th><th class="num">Answers</th>
+        </tr></thead>
+        <tbody id="feedback-dims-body"></tbody>
+      </table>
+    </div>
+    <div class="card-head"><h3>Would they recommend it</h3></div>
+    <p class="muted small">Read as an NPS: five stars promotes, four is passive, three or
+      fewer detracts. The score is promoters minus detractors as a percentage, so it runs
+      from &minus;100 to +100.</p>
+    <div id="feedback-nps" data-testid="feedback-nps"></div>
+    <div class="card-head"><h3>Overall rating over time</h3></div>
+    <p class="muted small">Mean overall stars per UTC day, so two people reading this see
+      the same buckets.</p>
+    <div id="chart-feedback" class="chart" data-testid="chart-feedback"></div>
+  </div>
+
+  <div class="card" id="feedback-answers-card" data-manager hidden>
+    <div class="card-head"><h2>Every answer</h2></div>
+    <p class="muted small">Newest first, with who wrote it and when. A submission marked
+      <em>not emailed</em> is stored here but never reached the mail relay — the row is
+      the record, the email is a copy.</p>
+    <div id="feedback-answers" data-testid="feedback-answers"></div>
   </div>
 </section>
 

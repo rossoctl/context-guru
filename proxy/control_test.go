@@ -163,7 +163,8 @@ func TestControlWritesRequireTheCookieNotAToken(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("a proxy token was accepted for an account write: %d", w.Code)
 	}
-	for _, p := range []string{"/api/me", "/api/me/audit", "/api/options", "/api/tenants"} {
+	for _, p := range []string{"/api/me", "/api/me/audit", "/api/options", "/api/tenants",
+		"/api/feedback"} {
 		w, _ := f.do(t, "GET", p, "", nil)
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("%s without a cookie = %d, want 401", p, w.Code)
@@ -341,7 +342,8 @@ func TestControlPlaneAbsentInSingleTenantMode(t *testing.T) {
 	h := New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil, Options{})
 	defer h.Close()
 	mux := h.Mux()
-	for _, p := range []string{"/api/register", "/api/login", "/api/me", "/api/tenants"} {
+	for _, p := range []string{"/api/register", "/api/login", "/api/me", "/api/tenants",
+		"/api/feedback"} {
 		r := httptest.NewRequest("GET", p, nil)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, r)

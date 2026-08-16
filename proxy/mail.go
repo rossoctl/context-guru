@@ -96,10 +96,15 @@ entered, and it stops working shortly.
 }
 
 // sendMail delivers one message the way this deployment is configured: the dev sink when
-// one is set and no relay is, otherwise SMTP. One dispatcher, so a message that is not a
-// code (mailRegisterNotice) cannot end up travelling by a different route than a code
-// does.
+// one is set and no relay is, otherwise SMTP. One dispatcher for every kind of message
+// this service sends, so a message that is not a verification code (a register notice, a
+// feedback copy) cannot travel by a different route than a code does, nor ship with its
+// own idea of what "unconfigured" means.
 func sendMail(to, subject, body string) error {
+	// Both header slots are cleaned HERE, above the fork, so the dev sink's file and the
+	// relay's DATA stream get the same sanitised text — a sink that recorded a forged
+	// header would be a log a reader could be misled by.
+	to, subject = headerSafe(to), headerSafe(subject)
 	if sink := devSink(); sink != "" && os.Getenv(envSMTPHost) == "" {
 		return writeDevSink(sink, to, subject, body)
 	}
@@ -108,6 +113,25 @@ func sendMail(to, subject, body string) error {
 		return errNoMailPath
 	}
 	return smtpSend(host, to, subject, body)
+}
+
+// headerSafe strips everything that could end a header line.
+//
+// This is the one guard against header injection, and it lives HERE — in the shared
+// message builder — rather than in each caller: a CR or LF in a subject or a recipient
+// closes that header and starts another, so a single newline in attacker-supplied text
+// can add a Bcc:, or end the headers and forge a body. Feedback is free text written by
+// a user and put straight in a subject line, so this is not hypothetical.
+//
+// Tab and every other C0 control go too: they are not useful in a header and some
+// relays fold on them.
+func headerSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // writeDevSink puts the mail where a developer can read it. "log" goes to slog at
@@ -194,6 +218,9 @@ func smtpSend(host, to, subject, body string) error {
 			return errors.New("smtp: authentication rejected by the relay")
 		}
 	}
+	// Sanitised before the envelope, not only before the headers: an embedded CR/LF in a
+	// recipient is an SMTP command injection as well as a header one.
+	from, to, subject = headerSafe(from), headerSafe(to), headerSafe(subject)
 	if err := c.Mail(from); err != nil {
 		return fmt.Errorf("smtp MAIL FROM: %w", err)
 	}
