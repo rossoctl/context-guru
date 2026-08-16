@@ -12,10 +12,13 @@
 //
 // Second, we hold no user's provider credential. A user authenticates with a token
 // WE mint; the upstream key belongs to the server and is read from the environment
-// at request time. So the only secret in this database is the sha256 of a token,
-// and the only thing ever displayed is its 8-character prefix. There is no code
-// path that can print a token, because after Register/MintToken return, the process
-// no longer has one.
+// at request time. So the secrets in this database are only ever DERIVED: the sha256
+// of a token, the sha256 of a session cookie, an argon2id hash of a dashboard
+// password (see password.go), and the sha256 of a 5-minute email code. None of the
+// four can be replayed as the thing it was derived from, and the only value ever
+// displayed is a token's 8-character prefix. There is no code path that can print a
+// token or a password, because after Register/MintToken/RegisterAccount return, the
+// process no longer holds one.
 package tenant
 
 import (
@@ -105,7 +108,19 @@ type Tenant struct {
 	Disabled   bool
 	CreatedAt  time.Time
 	LastSeenAt time.Time
+	// VerifiedAt is when this account proved it owns its email address, by entering
+	// a code we mailed there. Zero means unverified: the account exists but holds no
+	// token and cannot sign in.
+	VerifiedAt time.Time
+	// HasPassword reports whether a dashboard password is set. The HASH itself is
+	// deliberately NOT a field on this struct — it is loaded only inside
+	// VerifyLogin, so there is no path by which a caller that renders a Tenant can
+	// render a password hash.
+	HasPassword bool
 }
+
+// Verified reports whether this account's email address has been confirmed.
+func (t *Tenant) Verified() bool { return t != nil && !t.VerifiedAt.IsZero() }
 
 // IsManager reports whether this tenant may read and write other tenants.
 func (t *Tenant) IsManager() bool { return t != nil && t.Role == RoleManager }
@@ -229,13 +244,45 @@ func (r *Registry) Close() error { return r.db.Close() }
 // time the plaintext token exists outside the caller's machine: it is not stored,
 // logged, or recoverable. Show it once.
 func (r *Registry) Register(label, email string) (*Tenant, string, error) {
+	t, err := r.newTenant(label, email)
+	if err != nil {
+		return nil, "", err
+	}
+	plain, hash, prefix, err := mintToken()
+	if err != nil {
+		return nil, "", err
+	}
+	tx, err := r.db.Begin()
+	if err != nil {
+		return nil, "", err
+	}
+	defer tx.Rollback()
+	if err := insertTenant(tx, t, ""); err != nil {
+		return nil, "", err
+	}
+	if _, err := tx.Exec(`INSERT INTO tenant_tokens
+	  (token_hash,prefix,tenant_id,label,created_at,last_used_at,revoked_at)
+	  VALUES (?,?,?,?,?,0,0)`, hash, prefix, t.ID, t.Label, t.CreatedAt.UnixMilli()); err != nil {
+		return nil, "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, "", err
+	}
+	return t, plain, nil
+}
+
+// newTenant validates the inputs and builds the row a new account starts from. It
+// touches no database, so both Register (token-first, the original single-step flow)
+// and RegisterAccount (email-verified, no token until the code is entered) get
+// byte-identical defaults instead of two lists that drift.
+func (r *Registry) newTenant(label, email string) (*Tenant, error) {
 	label = strings.TrimSpace(label)
 	if !validLabel(label) {
-		return nil, "", ErrBadLabel
+		return nil, ErrBadLabel
 	}
 	email, err := r.checkEmail(email)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	role := RoleUser
 	if r.opts.ManagerEmail != "" && strings.EqualFold(email, strings.TrimSpace(r.opts.ManagerEmail)) {
@@ -269,36 +316,30 @@ func (r *Registry) Register(label, email string) (*Tenant, string, error) {
 		MonthlyCapUSD:  r.opts.DefaultMonthlyCapUSD,
 		CreatedAt:      now,
 	}
-	plain, hash, prefix, err := mintToken()
-	if err != nil {
-		return nil, "", err
-	}
-	tx, err := r.db.Begin()
-	if err != nil {
-		return nil, "", err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO tenants
+	return t, nil
+}
+
+// execer is what *sql.DB and *sql.Tx have in common, so insertTenant works inside a
+// transaction (Register, which also writes a token) and outside one (RegisterAccount).
+type execer interface {
+	Exec(string, ...any) (sql.Result, error)
+}
+
+// insertTenant writes a new account row. passwordHash may be "" for the token-only
+// flow; it is a PHC-encoded argon2id string, never a password.
+func insertTenant(q execer, t *Tenant, passwordHash string) error {
+	_, err := q.Exec(`INSERT INTO tenants
 	  (id,label,email,role,config_yaml,up_anthropic,up_openai,up_bob,
-	   capture_content,monthly_cap_usd,max_rows,disabled,created_at,last_seen_at)
-	  VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,0)`,
+	   capture_content,monthly_cap_usd,max_rows,disabled,created_at,last_seen_at,
+	   password_hash,email_verified_at)
+	  VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,0,?,0)`,
 		t.ID, t.Label, t.Email, string(t.Role), t.ConfigYAML,
 		t.UpAnthropic, t.UpOpenAI, t.UpBob, boolInt(t.CaptureContent),
-		t.MonthlyCapUSD, now.UnixMilli()); err != nil {
-		if isUniqueViolation(err) {
-			return nil, "", ErrEmailTaken
-		}
-		return nil, "", err
+		t.MonthlyCapUSD, t.CreatedAt.UnixMilli(), passwordHash)
+	if isUniqueViolation(err) {
+		return ErrEmailTaken
 	}
-	if _, err := tx.Exec(`INSERT INTO tenant_tokens
-	  (token_hash,prefix,tenant_id,label,created_at,last_used_at,revoked_at)
-	  VALUES (?,?,?,?,?,0,0)`, hash, prefix, t.ID, label, now.UnixMilli()); err != nil {
-		return nil, "", err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, "", err
-	}
-	return t, plain, nil
+	return err
 }
 
 // MintToken issues an additional token for a tenant, so a machine can be added or
@@ -770,6 +811,43 @@ var migrations = []string{
 	   after         TEXT    NOT NULL DEFAULT ''
 	 );
 	 CREATE INDEX idx_audit_target ON tenant_config_audit(target_tenant, ts DESC);`,
+
+	// v2: real accounts. Email + password for the DASHBOARD, with an emailed
+	// one-time code as a second factor, and one row per signed-in machine.
+	//
+	// Additive only — every column has a DEFAULT, so an existing tenant migrates to
+	// "no password yet, email not verified" and keeps signing in with a proxy token
+	// until they set one. Nothing is dropped or rewritten.
+	`ALTER TABLE tenants ADD COLUMN password_hash     TEXT    NOT NULL DEFAULT '';
+	 ALTER TABLE tenants ADD COLUMN email_verified_at INTEGER NOT NULL DEFAULT 0;
+
+	 -- One signed-in machine per row. A user is expected to have several at once
+	 -- (laptop, desktop, phone), so these columns exist to make the list
+	 -- RECOGNISABLE: you cannot decide which session to revoke from a hash.
+	 ALTER TABLE dash_sessions ADD COLUMN label        TEXT    NOT NULL DEFAULT '';
+	 ALTER TABLE dash_sessions ADD COLUMN user_agent   TEXT    NOT NULL DEFAULT '';
+	 ALTER TABLE dash_sessions ADD COLUMN ip           TEXT    NOT NULL DEFAULT '';
+	 ALTER TABLE dash_sessions ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0;
+
+	 -- Pending email codes. The PRIMARY KEY is (tenant_id,purpose), which makes "one
+	 -- live code per flow" a schema property rather than a convention: INSERT OR
+	 -- REPLACE cannot leave two valid codes behind.
+	 --
+	 -- code_hash is sha256(purpose:code) — deliberately NOT a memory-hard hash, unlike
+	 -- a password. A 6-digit code has 10^6 preimages, so no KDF makes a leaked row
+	 -- safe; what makes this acceptable is that the row lives 5 minutes, is destroyed
+	 -- on use or on the 5th wrong guess, and for a login is worthless without the
+	 -- password. It is hashed rather than stored plain so a backup of this file is not
+	 -- a live second factor.
+	 CREATE TABLE email_codes (
+	   tenant_id  TEXT    NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+	   purpose    TEXT    NOT NULL,
+	   code_hash  BLOB    NOT NULL,
+	   attempts   INTEGER NOT NULL DEFAULT 0,
+	   created_at INTEGER NOT NULL,
+	   expires_at INTEGER NOT NULL,
+	   PRIMARY KEY (tenant_id, purpose)
+	 );`,
 }
 
 func migrate(db *sql.DB) error {
@@ -804,8 +882,12 @@ func migrate(db *sql.DB) error {
 
 // --- small helpers ----------------------------------------------------------
 
+// tenantCols is appended to, never reordered: scanTenant reads it positionally, and
+// the v2 account columns are LAST so a change to the older list stays a one-line diff.
+// password_hash is deliberately absent — see Tenant.HasPassword.
 const tenantCols = `t.id,t.label,t.email,t.role,t.config_yaml,t.up_anthropic,t.up_openai,
-	t.up_bob,t.capture_content,t.monthly_cap_usd,t.max_rows,t.disabled,t.created_at,t.last_seen_at`
+	t.up_bob,t.capture_content,t.monthly_cap_usd,t.max_rows,t.disabled,t.created_at,t.last_seen_at,
+	t.email_verified_at,t.password_hash <> ''`
 
 // scanner is what *sql.Row and *sql.Rows have in common.
 type scanner interface{ Scan(...any) error }
@@ -813,11 +895,11 @@ type scanner interface{ Scan(...any) error }
 func scanTenant(s scanner) (*Tenant, error) {
 	var t Tenant
 	var role string
-	var capture, disabled int
-	var created, seen int64
+	var capture, disabled, haspw int
+	var created, seen, verified int64
 	if err := s.Scan(&t.ID, &t.Label, &t.Email, &role, &t.ConfigYAML, &t.UpAnthropic,
 		&t.UpOpenAI, &t.UpBob, &capture, &t.MonthlyCapUSD, &t.MaxRows, &disabled,
-		&created, &seen); err != nil {
+		&created, &seen, &verified, &haspw); err != nil {
 		return nil, err
 	}
 	t.Role = Role(role)
@@ -825,6 +907,8 @@ func scanTenant(s scanner) (*Tenant, error) {
 	t.Disabled = disabled != 0
 	t.CreatedAt = msTime(created)
 	t.LastSeenAt = msTime(seen)
+	t.VerifiedAt = msTime(verified)
+	t.HasPassword = haspw != 0
 	return &t, nil
 }
 

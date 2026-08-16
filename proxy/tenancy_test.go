@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -43,6 +44,11 @@ func newHostedFixture(t *testing.T, upstreamName, dialect string) *hostedFixture
 	t.Cleanup(f.upstream.Close)
 
 	t.Setenv("TEST_UPSTREAM_KEY", "real-upstream-secret")
+	// Registration now mails a code, so every hosted fixture needs somewhere for that
+	// mail to land. A file sink in this test's own temp dir, never the log: signUp reads
+	// the code back out of it, which means these tests exercise the real mail code path
+	// rather than a test-only shortcut into the registry.
+	t.Setenv(envMailDevSink, filepath.Join(t.TempDir(), "mail.txt"))
 	reg, err := tenant.Open("", tenant.Options{
 		ManagerEmail: "boss@ibm.com",
 		// Every dialect points at the one fixture upstream, so a route's dialect —

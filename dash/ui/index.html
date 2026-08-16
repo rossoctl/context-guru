@@ -84,7 +84,7 @@
 <div id="gate" class="gate" role="main" hidden data-testid="gate">
   <div class="gate-card">
     <h1>context-guru</h1>
-    <p class="muted" id="gate-intro">Sign in with your context-guru token, or register for one.</p>
+    <p class="muted" id="gate-intro">Sign in with your email and password, or register an account.</p>
 
     <div class="gate-tabs" role="tablist" aria-label="Sign in or register">
       <button class="gate-tab" role="tab" id="gate-tab-signin" data-testid="gate-tab-signin" aria-selected="true">Sign in</button>
@@ -96,19 +96,33 @@
     <div id="gate-closed" class="state blocked" hidden data-testid="gate-closed"></div>
 
     <form id="gate-signin" class="gate-form" data-testid="gate-signin">
-      <label for="gate-token">Your token</label>
-      <input id="gate-token" type="password" autocomplete="off" spellcheck="false"
-             placeholder="cg_live_…" data-testid="gate-token">
-      <p class="hint">The same token your agent uses. It is never stored in this browser —
-         signing in exchanges it for a session cookie.</p>
-      <button type="submit" class="primary" data-testid="gate-signin-submit">Sign in</button>
+      <label for="gate-signin-email">Work email</label>
+      <input id="gate-signin-email" type="email" autocomplete="email" data-testid="gate-signin-email">
+      <label for="gate-password">Password</label>
+      <input id="gate-password" type="password" autocomplete="current-password" data-testid="gate-password">
+      <p class="hint">We email a 6-digit code to finish signing in.</p>
+      <button type="submit" class="primary" data-testid="gate-signin-submit">Continue</button>
+      <!-- The token box stays for accounts created before passwords existed: they have
+           nothing else to sign in with. An account WITH a password is refused here. -->
+      <details id="gate-token-fallback">
+        <summary class="hint">Sign in with a token instead</summary>
+        <label for="gate-token">Your token</label>
+        <input id="gate-token" type="password" autocomplete="off" spellcheck="false"
+               placeholder="cg_live_…" data-testid="gate-token">
+        <p class="hint">Only for an account that has no password yet.</p>
+      </details>
     </form>
 
     <form id="gate-register" class="gate-form" hidden data-testid="gate-register">
       <p class="hint" id="gate-register-hint" hidden></p>
       <label for="gate-email">Work email</label>
       <input id="gate-email" type="email" autocomplete="email" data-testid="gate-email">
-      <label for="gate-label">Name this token</label>
+      <label for="gate-new-password">Password</label>
+      <input id="gate-new-password" type="password" autocomplete="new-password"
+             minlength="12" data-testid="gate-new-password">
+      <p class="hint">At least 12 characters. Length is what makes a password strong, so
+         there are no symbol rules.</p>
+      <label for="gate-label">Name this machine</label>
       <input id="gate-label" type="text" placeholder="laptop" value="laptop" data-testid="gate-label">
       <!-- Shown only in invite mode: a code box on a deployment that checks no code is a
            field the user cannot know how to fill. Toggled by applyRegisterMode(). -->
@@ -118,6 +132,19 @@
         <p class="hint">Issued by whoever runs this deployment.</p>
       </div>
       <button type="submit" class="primary" data-testid="gate-register-submit">Create account</button>
+    </form>
+
+    <!-- Phase two of BOTH flows. The countdown runs against the ABSOLUTE expiry the
+         server returned rather than a timer this page started, so a slow mail delivery
+         shows a true number instead of five minutes from page render. -->
+    <form id="gate-verify" class="gate-form" hidden data-testid="gate-verify">
+      <p class="hint" id="gate-verify-intro"></p>
+      <label for="gate-verify-code">6-digit code</label>
+      <input id="gate-verify-code" type="text" inputmode="numeric" autocomplete="one-time-code"
+             pattern="[0-9]{6}" maxlength="6" spellcheck="false" data-testid="gate-verify-code">
+      <p class="hint" id="gate-verify-timer" aria-live="polite" data-testid="gate-verify-timer"></p>
+      <button type="submit" class="primary" data-testid="gate-verify-submit">Verify</button>
+      <button type="button" class="ghost small" id="gate-verify-cancel" data-testid="gate-verify-cancel">Start over</button>
     </form>
 
     <p id="gate-error" class="gate-error" hidden role="alert" data-testid="gate-error"></p>
@@ -358,6 +385,12 @@
       mint a new one and revoke the old. Several can be live at once, which is how you
       rotate without downtime.</p>
     <div id="token-list" data-testid="token-list" tabindex="0"></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Signed-in machines</h2></div>
+    <p class="muted small">You can be signed in on several machines at once. Revoking one
+      signs that browser out and leaves the others alone — use it if you lose a laptop.</p>
+    <div id="session-list" data-testid="session-list" tabindex="0"></div>
   </div>
   <div class="card">
     <div class="card-head"><h2>Recent configuration changes</h2></div>

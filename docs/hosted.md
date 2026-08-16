@@ -266,56 +266,119 @@ originated server-side and reached the client unbuffered.
     if you want `tls-smoke.sh` to test against the root rather than falling back to the
     system trust store — it says which one it used.
 
-### 3. Choose how accounts are created
+### 3. Configure the email path
 
-**Self-registration is off by default, and a new deployment will look broken until you
-pick a mode** — the first user's `Register` gets a `403` saying to ask the operator.
-That is deliberate: an account is a spending credential against *your* upstream key, so
-N accounts are N × the monthly cap of your money.
+**Nothing about accounts works until this is set.** Registration mails a 6-digit code to
+prove the address is real, and signing in mails one as a second factor. With no mail path
+`POST /api/register` answers `503` naming the missing variable, and the startup banner
+warns. That is deliberate: a registration whose code went nowhere is worse than one that
+refuses.
+
+All of it is read from the environment *per send*, so pointing at a different relay needs
+no restart.
+
+| Variable | Meaning |
+|---|---|
+| `CG_SMTP_HOST` | Relay hostname. **Required.** Empty means no mail path. |
+| `CG_SMTP_PORT` | Default `25`. |
+| `CG_SMTP_FROM` | Envelope and `From:` address. Default `context-guru@<hostname>`. |
+| `CG_SMTP_HELO` | EHLO name. Default the local hostname. |
+| `CG_SMTP_USER` / `CG_SMTP_PASSWORD` | SMTP AUTH, if the relay wants it. Usually empty inside a corporate network, where the relay authorises by source IP. Read at send time, never stored. |
+| `CG_SMTP_INSECURE=1` | Skip STARTTLS certificate verification. For a relay with an internal-CA or mismatched certificate **only**. |
+| `CG_MAIL_DEV_SINK` | Development escape hatch — see the warning below. |
+
+STARTTLS is used whenever the relay advertises it, and a failure to negotiate **aborts the
+send** rather than continuing in the clear: a code that travels plaintext because a
+certificate expired is exactly the silent downgrade that makes "we use TLS" untrue.
+
+On the IBM internal network `na.relay.ibm.com:25` accepts mail from this host, advertises
+STARTTLS, verifies against the public trust store, and needs no AUTH:
+
+```
+Environment=CG_SMTP_HOST=na.relay.ibm.com
+Environment=CG_SMTP_FROM=context-guru@<this-host>.fyre.ibm.com
+```
+
+Egress on **465 and 587 is blocked** from this network; only 25 to the internal relay is
+open. Do not configure a public provider — it will time out.
+
+!!! danger "`CG_MAIL_DEV_SINK` must never be set on a real deployment"
+    `CG_MAIL_DEV_SINK=log` writes the six digits to the **server log** at INFO, so anyone
+    who can read the log can complete anyone's sign-in. Any other value is treated as a
+    file path, appended to with mode `0600`. It applies only when `CG_SMTP_HOST` is empty,
+    and every send through it logs a warning saying what it just did. It exists so a
+    deployment with no relay can still create its first account.
+
+### 4. Choose how accounts are created
+
+**Self-registration is open by default**: anyone whose address passes `--register-domains`
+can create an account, once they enter the code mailed to it. Two things make that safe
+enough to be the default — the address is now *proven* rather than claimed, and an account
+no longer spends the operator's money (each user forwards their own provider key).
 
 `CG_REGISTER` is read per request, so switching modes needs no restart.
 
 | `CG_REGISTER` | `POST /api/register` |
 |---|---|
-| unset / `closed` | **Default.** Refused with `403`. You create accounts. |
-| `invite` | Requires an exact `code` in the request body, compared against `CG_REGISTER_CODE`. With no code configured it refuses rather than falling through to open. |
-| `open` | Self-service, capped at 3 attempts per minute per client address. |
+| unset / `open` | **Default.** Self-service, capped at 3 attempts per minute per client address, plus mandatory email verification. |
+| `invite` | Additionally requires an exact `code` in the request body, compared against `CG_REGISTER_CODE` in constant time. With no code configured it refuses rather than falling through to open. |
+| `closed` | Refused with `403`. Nothing can create an account — see the bootstrap note below. |
 
 Anything the resolver does not recognise — a typo, `Open`, `" open"` — normalises to
-**closed**. This is the one place the project's fail-open rule does not apply: minting
-identity is auth, and auth fails closed. The startup banner and `/api/whoami` both report
-the mode through the same resolver the gate uses, so a log line cannot disagree with what
-is enforced.
+**open**, the default, like every other setting in this project. `closed` and `invite` are
+the deliberate departures, so a typo cannot silently disable accounts. The startup banner
+and `/api/whoami` both report the mode through the same resolver the gate uses, so a log
+line cannot disagree with what is enforced.
 
-#### Bootstrapping the first account
+#### The sign-in flow
+
+Two phases, and phase one issues **no cookie** — knowing a password is never by itself a
+signed-in browser.
+
+| Step | Route | Result |
+|---|---|---|
+| Register | `POST /api/register` `{email, password}` | account created **unverified**, no token, code mailed. The reply carries `code_expires_at` so the UI can count down against the server's clock. |
+| Confirm | `POST /api/verify` `{email, code}` | verified, first `cg_live_` token returned **once**, session opened. |
+| Sign in | `POST /api/login` `{email, password}` | password checked, fresh code mailed. |
+| Second factor | `POST /api/verify` `{email, code}` | session opened. |
+
+`/api/verify` decides which flow it is from the pending code's own *purpose*, never from
+anything the client says — otherwise a login code could be spent on the branch that mints
+a token.
+
+- **Codes** are 6 digits, valid **5 minutes**, one-time, and stored only as a hash. A new
+  code replaces the pending one rather than adding to it.
+- **Passwords** are stored as **argon2id** — 64 MiB, 3 passes, 2 lanes, a fresh 16-byte
+  random salt per account — in PHC string format, so the parameters can be raised later
+  without invalidating a single existing password. Minimum 12 characters, no composition
+  rules: length is what buys entropy.
+- **Brute force.** A code tolerates **5 wrong guesses**, after which it is destroyed rather
+  than merely refused. On top of that, password attempts are capped at 5/minute and code
+  submissions at 10/minute, charged against **both** the email address and the client
+  address — either bucket alone is trivially sidestepped (per-email only lets one host
+  grind every account; per-IP only lets a botnet grind one account). Deliberately a rolling
+  window rather than a sticky "locked for 30 minutes", which anyone could aim at a
+  colleague by typing their address.
+- **Proxy tokens are unchanged**, and are still how agents authenticate to the proxy. They
+  are a separate credential: a token cannot sign in to the dashboard once the account has a
+  password, and a dashboard session cannot send traffic. An account created before
+  passwords existed still signs in with its token, because it has nothing else.
+- **Several machines at once** is the expected state. Each session records a label,
+  User-Agent, address, and last-seen time; Settings → *Signed-in machines* lists them and
+  revokes them one at a time (`GET`/`DELETE /api/me/sessions/{id}`).
+
+#### Bootstrapping when you start `closed`
 
 !!! warning "`POST /api/register` is the only route that creates an account"
     There is no manager-side create. A manager can reissue a token for a tenant that
     **already exists**, set a cap, or disable an account — but cannot bring one into
-    being. So a fresh control database on the default `closed` has **no path to a first
-    account at all**, and the deployment looks broken rather than locked.
+    being. So a control database on `closed` has **no path to a first account at all**.
 
-The bootstrap is to open `invite` briefly, register the manager, and close it again:
-
-```sh
-# 1. An invite code, and a mode to use it in. Both are read per request.
-sudo systemctl edit context-guru      # in the drop-in editor:
-                                      #   Environment=CG_REGISTER=invite
-                                      #   Environment=CG_REGISTER_CODE=<a one-time string>
-sudo systemctl restart context-guru
-
-# 2. Register at /dashboard/ with the email that MANAGER_EMAIL names (matched
-#    case-insensitively) and that invite code. That account is the manager, and the
-#    token is shown ONCE.
-
-# 3. Close it again. No restart needed — CG_REGISTER is re-read per request.
-sudo systemctl edit context-guru      # Environment=CG_REGISTER=closed
-sudo systemctl daemon-reload && sudo systemctl restart context-guru
-```
-
-`MANAGER_EMAIL` has to be set *before* step 2: the role is assigned at registration by
-comparing the address, which is how the first manager exists at all without an
-interactive bootstrap step to forget and then work around.
+`MANAGER_EMAIL` has to be set *before* the manager registers: the role is assigned at
+registration by comparing the address, which is how the first manager exists at all without
+an interactive bootstrap step to forget and then work around. If you have set
+`CG_REGISTER=closed`, open `invite` briefly, register, and close it again — no restart
+needed, the variable is re-read per request.
 
 #### How the `open` limit is keyed
 
@@ -341,15 +404,15 @@ defends.
 **exact-domain-or-subdomain** match on the part after the `@` (`ibm.com` and
 `x.ibm.com` pass; `notibm.com` does not).
 
-**What these modes do not do.** The domain is checked; the *address* is not. There is no
-mail path on this deployment, so there is no email verification to be had — anyone who can
-guess a valid address in an allowed domain satisfies the check. So `open` mode's real
-exposure is (however many accounts somebody bothers to create) × (the per-tenant monthly
-cap) of the operator's money, and the rate limit only slows a single source. An invite code
-is a shared secret with no per-use accounting: once it leaks it is `open` until you rotate
-it. A port anything else can reach wants `invite` and a modest cap.
+**What these modes do not do.** The address is now proven — a code has to arrive in that
+mailbox — but reachability is not entitlement. Anyone with a real mailbox in an allowed
+domain can register, and can register more than once with more than one address; the rate
+limit only slows a single source. What that costs is now rows on disk
+(`--dashboard-max-rows-per-tenant`) rather than the operator's money. An invite code is a
+shared secret with no per-use accounting: once it leaks it is `open` until you rotate it. A
+port the whole internet can reach wants `invite`.
 
-### 4. Cold storage on Box
+### 5. Cold storage on Box
 
 ```
 deploy/service/box-setup.sh check     # what is installed and configured

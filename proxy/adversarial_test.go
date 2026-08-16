@@ -14,13 +14,17 @@ import (
 // Before this, the banner read CG_REGISTER raw: "Open" enforced as OPEN while the log
 // said self-registration was off.
 //
-// The same table pins fail-closed for everything that is not exactly open/invite.
-func TestRegisterModeNormalisesAndFailsClosed(t *testing.T) {
+// The same table pins the DEFAULT: anything that is not recognisably invite or closed
+// resolves to open. `closed` and `invite` are the deliberate departures from the
+// default, so a typo in one of those must not silently disable accounts — and a typo
+// cannot silently ENABLE them either, because open is what an unset variable means.
+func TestRegisterModeNormalisesAndDefaultsToOpen(t *testing.T) {
 	for raw, want := range map[string]string{
 		"open": "open", "Open": "open", "OPEN": "open", " open ": "open",
 		"invite": "invite", "Invite": "invite",
-		"closed": "closed", "": "closed", "1": "closed", "true": "closed",
-		"opne": "closed", "open-ish": "closed", "yes": "closed",
+		"closed": "closed", "Closed": "closed", " closed ": "closed",
+		"": "open", "1": "open", "true": "open",
+		"opne": "open", "open-ish": "open", "yes": "open",
 	} {
 		t.Setenv(envRegisterMode, raw)
 		if got := RegisterMode(); got != want {
@@ -32,7 +36,7 @@ func TestRegisterModeNormalisesAndFailsClosed(t *testing.T) {
 // And the enforcement agrees with that resolution: a mode the banner reports as open
 // must actually register, and one it reports as closed must actually refuse.
 func TestRegistrationEnforcementMatchesReportedMode(t *testing.T) {
-	for i, raw := range []string{"OPEN", " open", "Open", "1", "true", "opne", ""} {
+	for i, raw := range []string{"OPEN", " open", "Open", "1", "true", "opne", "", "closed", "CLOSED"} {
 		t.Setenv(envRegisterMode, raw)
 		f := newHostedFixture(t, "up", "openai")
 		mode := RegisterMode()
