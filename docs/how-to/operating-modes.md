@@ -1,165 +1,122 @@
-# Operating modes: sync and observe
+# Sync & observe
 
-context-guru runs in one of two modes. `sync` is the default and reproduces the behavior
-that existed before modes did, byte for byte.
-
-```yaml
-mode: sync            # sync | observe
-observe:
-  max_queue: 256
-  workers: 1
-```
-
-Or `--mode` / `MODE=` on the proxy binary, which wins over the config file.
-
-The mode is always explicit. Nothing infers it from the rest of your configuration,
-because the two modes make materially different promises about your requests and a guess
-about which one you wanted is not a thing you should have to debug.
+context-guru runs in one of two modes. `sync` compacts your requests; `observe` measures
+what compaction *would* have done without touching anything.
 
 ## Which one do I want
 
 | You want | Mode | It costs |
 |---|---|---|
-| Savings, and can absorb compaction latency on the request path | `sync` | request latency (~450 ms with the LLM trimmer on; near-zero on an all-deterministic pipeline), plus any `extract_llm` spend |
-| To find out what context-guru *would* save, without it touching anything | `observe` | CPU and any `extract_llm` spend — **no request latency, no request modification** |
+| Savings now | `sync` (default) | request latency — near zero on an all-deterministic pipeline, ~450 ms with the LLM trimmer on — plus any `extract_llm` spend |
+| To find out what context-guru would save on your traffic, risk-free | `observe` | CPU and any `extract_llm` spend. **No request latency, no request modification.** |
 
-**`observe` is how you try a configuration.** It measures what a pipeline *would* have
-saved on your real traffic while every request goes to the provider byte-for-byte
-untouched, so evaluating a config costs you no risk to a running agent and no A/B against
-history. Start there, read the `potential_*` numbers, then switch the same config to
-`sync`. There is a third mode designed but [not shipped](#an-async-mode-is-designed-but-not-shipped).
+**Start in `observe`.** It is how you evaluate a configuration: every request reaches the
+provider byte for byte untouched while a copy runs off-path to record what compaction would
+have achieved. Read the `potential_*` numbers, then switch the same config to `sync`.
 
-## sync — compact inline
+## Steps
 
-The request path runs the pipeline and forwards its output. The caller waits.
+1. Set the mode. Either in the config file:
 
-That wait is real: measured on Terminal-Bench, **~450 ms per request** in the
-configuration where the LLM-based trimmer runs, almost all of it that model call.
+    ```yaml
+    mode: observe          # sync | observe
+    observe:
+      max_queue: 256
+      workers: 1
+    ```
 
-## observe — measure without enforcing
+    or on the proxy binary, which wins over the file:
 
-The agent receives its request **untouched, byte for byte**. The request path does not run
-the pipeline at all, and does not inject the expand tool either — injecting a tool
-declaration would modify the request, which is the one thing this mode promises never to
-do. A copy of the request runs off-path against observe's own state store, disjoint from
-the live one, purely to record what compaction *would* have achieved.
+    ```sh
+    context-guru-proxy --preset codesmart --mode observe
+    ```
 
-Byte-identity is therefore **structural**, not a property of careful copying: there is no
-code path in observe mode that could alter a forwarded body, because the pipeline never
-sees it. A test asserts it anyway.
+2. Run your agent against the proxy as usual.
 
-This is the answer to "will context-guru help *my* traffic" that does not require
-enforcing it in production and comparing against history. Neither reference implementation
-offers it — headroom has no observe/shadow/dry-run mode at all; its `token` and `cache`
-modes are both enforcing, and its only control arm is a 10% output-shaper holdout.
+3. Read the projection:
 
-### How to read observe numbers
+    ```sh
+    curl -s localhost:4000/stats | jq '{observe_notice, actual_baseline_tokens,
+      projected_optimized_tokens, potential_saved_tokens, potential_savings_pct}'
+    ```
 
-Observe-mode numbers live under their own keys and **never share a key with an enforced
-metric**:
+4. Happy with the projection? Restart with `--mode sync` and the same config.
+
+The mode is always explicit — nothing infers it from the rest of your configuration — and
+it is reported in `/stats` so a consumer never has to guess which regime produced a number.
+Mode is per process, not per request.
+
+## Reading observe numbers
+
+Hypotheticals live under their own keys and never share a key with an enforced metric:
 
 | Key | Means |
 |---|---|
 | `observe_notice` | The banner. Present whenever hypotheticals are reported. |
 | `observe_hypothetical_requests` | Requests observed. |
-| `actual_baseline_tokens` | What the agent really sent. Actual, not hypothetical. |
+| `actual_baseline_tokens` | What the agent really sent. |
 | `projected_optimized_tokens` | What it would have sent under this pipeline. |
-| `potential_saved_tokens` | The difference. |
-| `potential_savings_pct` | The difference as a percentage. |
+| `potential_saved_tokens` / `potential_savings_pct` | The difference, absolute and relative. |
 | `potential_components` | Per-component hypothetical contributions. |
-| `potential_overhead_ms_avg` | What compaction *would* have added per request — measured off-path, so it is what `sync` would cost you, not what `observe` costs you. |
+| `potential_overhead_ms_avg` | What compaction *would* have added per request — so, what `sync` would cost you. |
 
-In observe mode every enforced **savings** aggregate is zero by construction:
-`requests`, `tokens_before`, `tokens_after`, `saved_tokens`, `sync_enforced` and the
-`components` map. That zero is the machine-readable form of "context-guru did not modify
-any request".
+Every enforced savings aggregate reads zero in observe mode by construction: `requests`,
+`tokens_before`, `tokens_after`, `saved_tokens`, `sync_enforced` and the `components` map.
+That zero is the machine-readable form of "context-guru did not modify any request".
 
-Two enforced-namespace fields are deliberately **not** zero, because they are real
-measurements rather than hypotheticals:
+Two enforced fields stay real, because they are measurements rather than hypotheticals:
+`cg_added_ms_avg` (the actual added latency on the enforced path — ~0, which is the point)
+and `llm_calls` / `llm_input_tokens` / `llm_output_tokens` (context-guru's own model spend,
+labelled by `observe_llm_notice` as the cost of measuring rather than of enforcing).
 
-- `cg_added_ms_avg` — the actual latency added to the enforced path, which in observe mode
-  is ~0 precisely because that path does no pipeline work. Zeroing it would hide the
-  mode's headline result.
-- `llm_calls` / `llm_input_tokens` / `llm_output_tokens` — context-guru's own model spend.
-  Observe measures off-path, and that measuring costs real money. The spend is not
-  hypothetical, so it stays where cost tooling already reads it, labelled by
-  `observe_llm_notice` as the cost of measuring rather than of enforcing.
-
-A mislabelled hypothetical is worse than no number at all, because it silently inflates a
-savings claim. The separation is therefore structural — two physically separate
-accumulators with disjoint serialized names — and a test asserts that no enforced savings
-aggregate can reach an observe result.
-
-### Why observe's numbers should match sync's
-
-The projection is measured under the **same** conditions an enforcing mode would run
-under, because that agreement is what validates the mode. Two things are required and
-neither is obvious:
-
-- **The same cached-prefix boundary.** Observe shares the per-session boundary the
-  enforced path uses. Without it, cache-awareness never gates anything, every message in
-  the transcript looks compactable, and the projection overstates savings by exactly the
-  amount cache-awareness costs — measured at 9.5% projected against 0.8% actually
-  achieved on the same SWE-bench tasks.
-- **State that accumulates across turns.** Offloaders *freeze* a decision and replay it on
-  every later turn, which is where most of the sustained saving comes from. So observe
-  keeps a store of its own — as persistent as the live one, and completely disjoint from
-  it. Discarding its state each turn instead makes it see only the current tail and
-  **under**-project by ~3x.
-
-The live store stays pristine either way: observe never writes a byte into it, or a later
-real request could replay a decision that was never enforced — a request modification
-arriving by the back door. Both properties are asserted by tests.
-
-### What observe cannot tell you
+<details markdown="1">
+<summary>What observe cannot tell you</summary>
 
 - **Cache effects are projected, not measured.** The forwarded request is the agent's own,
-  so the provider's real cache behavior is the *baseline's*, not the compacted one's.
-  `potential_saved_tokens` is a content-token figure; the cache consequence of actually
-  enforcing is not measured here.
-- **Reversibility is not exercised.** Nothing was offloaded, so no expand bounce can
-  happen and `wasted_tokens` stays at zero. Under `sync`, some savings do come back as
-  bounces. Treat observe's projection as an **upper bound** on content savings.
-- **Measuring is not free.** If your pipeline includes `extract_llm`, observe mode spends
-  cheap-model tokens (see `observe_llm_notice`). It costs money and CPU — just not request
+  so the provider's real cache behaviour is the *baseline's*. `potential_saved_tokens` is a
+  content-token figure; the cache consequence of actually enforcing is not measured here.
+- **Reversibility is not exercised.** Nothing was offloaded, so no expand bounce can happen
+  and `wasted_tokens` stays zero. Under `sync` some savings do come back as bounces. Treat
+  the projection as an **upper bound** on content savings.
+- **Measuring is not free.** A pipeline with `extract_llm` in it spends cheap-model tokens in
+  observe mode too (see `observe_llm_notice`). It costs money and CPU — just not request
   latency.
 
-### Reading the off-path queue counters
+</details>
 
-Observations run on a bounded, owned worker pool rather than a goroutine per request:
+<details markdown="1">
+<summary>Troubleshooting</summary>
 
-- a full queue **drops** and counts it, never blocks the request path — the request has
-  already been forwarded, so a drop costs a measurement, not correctness;
-- enqueue dedups by key, with the pending slot claimed before the job is observable in the
-  queue, so dedup is atomic against a concurrent enqueue;
-- jobs run under the pool's own context, not the request's (which is cancelled the moment
-  the response is written);
-- a panicking observation is contained and counted in `errors`; the worker survives.
+**Observe projects far more than sync delivers.** Check that the projection is running with
+the cached-prefix boundary — observe shares the per-session boundary the enforced path uses.
+Without it every message looks compactable and the projection overstates savings by exactly
+what cache-awareness costs (measured: 9.5% projected against 0.8% achieved on the same
+tasks).
 
-`dropped` is the counter that says *we silently gave up a measurement*, and it is surfaced
-deliberately — headroom's dashboard shows only `queued`, which hides exactly that.
+**Observe projects far less than sync delivers.** Most sustained saving comes from frozen
+decisions replayed on later turns, so observe keeps a persistent store of its own. Discard
+that state each turn and it sees only the current tail and under-projects by roughly 3×.
 
-## Switching modes
+**`dropped` is climbing in the observe counters.** Observations run on a bounded worker pool;
+a full queue drops the measurement rather than blocking the request path, which has already
+been forwarded. Raise `observe.max_queue` or `observe.workers`. A drop costs a measurement,
+never correctness.
 
-Mode is per-process, not per-request: it decides what happens to every request the proxy
-handles, and the mode is reported in `/stats` so a consumer never has to guess which
-regime produced a number.
+**Did observe leak into my live state?** It cannot: observe never writes a byte into the
+live store, and a test asserts it. Its store is disjoint from the enforced one.
 
-Session state (frozen decisions, stashes) carries across a restart only as far as the
-store does — in-memory by default, so a restart starts cold in either mode.
+**State did not survive a restart.** Frozen decisions and stashes live only as long as the
+store does — in memory by default, so a restart starts cold in either mode.
+
+</details>
 
 ## An async mode is designed but not shipped
 
-A third mode — deferring compaction off the request path so subsequent turns use the
-result — is implemented and reviewed on a separate branch ([#35][pr35]), and deliberately
-held back. Its measured benefit came almost entirely from deferring the LLM-based trimmer,
-which no longer runs on prompt-caching backends, so on the primary workload there is
-nothing expensive left to defer. It also has to decline on agents that set their own cache
-breakpoints, which claude-code does.
+Deferring compaction off the request path is implemented on a separate branch
+([#35](https://github.com/rossoctl/context-guru/pull/35)) and deliberately held back: its
+benefit came almost entirely from deferring the LLM trimmer, which no longer runs on
+prompt-caching backends, and it has to decline on agents that set their own cache
+breakpoints — which Claude Code does.
 
-It is held rather than discarded because the hard parts — per-session compaction
-generations, a bounded worker pool, and a cache policy that refuses to write a breakpoint
-onto a span it is about to replace — survived a hostile review intact. What it needs is a
-paired benchmark arm establishing a benefit, not more code.
-
-[pr35]: https://github.com/rossoctl/context-guru/pull/35
+See also: [Measure savings](measure-savings.md) · [Config & environment](../reference/config.md) ·
+[Observe-mode results](../results/observe-mode.md)

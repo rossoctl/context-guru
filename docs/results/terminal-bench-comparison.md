@@ -4,13 +4,13 @@
 through the harness. This is the second benchmark of the study; the [SWE-bench Verified
 four-way](comparison.md) is the first.
 
-!!! tip "A fifth arm was added on 2026-08-10"
-    The [merged-system section](#the-merged-system-a-fifth-arm-2026-08-10) below re-measures
-    context-guru after 15 PRs of cache/filter/observe work. Headline: **65 of 89 solved — the most
-    of any arm** — and **$94.95, the first arm to beat baseline on the raw total**. Cache-write is
-    back to baseline parity (1.86% vs the previous arm's 2.86%), own-LLM cost is **$0**, and the
-    typical task is **−7.7%** — read the median rather than the −15.4% clean-set aggregate, which
-    one task dominates. The original four-arm study is unchanged below it.
+**A fifth arm was added on 2026-08-10.**
+The [merged-system section](#the-merged-system-a-fifth-arm-2026-08-10) below re-measures
+context-guru after 15 PRs of cache/filter/observe work. Headline: **65 of 89 solved — the most
+of any arm** — and **$94.95, the first arm to beat baseline on the raw total**. Cache-write is
+back to baseline parity (1.86% vs the previous arm's 2.86%), own-LLM cost is **$0**, and the
+typical task is **−7.7%** — read the median rather than the −15.4% clean-set aggregate, which
+one task dominates. The original four-arm study is unchanged below it.
 
 The four original arms:
 
@@ -26,46 +26,46 @@ adds the tool's own compaction-LLM cost (context-guru's haiku calls). All 89 tas
 scored outcome; timeouts (agent exceeded its wall-clock budget) count as reward-0 failures.
 See [REPRODUCE.md](REPRODUCE.md) and the [baseline page](terminal-bench-baseline.md).
 
-!!! danger "Read the 89-task cost figures with this correction"
-    **Six baseline trials are degenerate.** On these tasks the baseline aborted almost
-    immediately while the compaction arms did the real work, so the per-task cost delta
-    measures *the baseline not doing the job*, not the cost of compaction:
+**Six baseline trials are degenerate, so the 89-task cost figures need a correction.**
+On these tasks the baseline aborted almost
+immediately while the compaction arms did the real work, so the per-task cost delta
+measures *the baseline not doing the job*, not the cost of compaction:
 
-    | task | baseline | context-guru |
-    |---|--:|--:|
-    | `mteb-leaderboard` | $0.08 (4 steps) | $6.05 (147 steps) |
-    | `polyglot-rust-c` | $0.08 (3 steps) | $2.81 (50 steps) |
-    | `extract-moves-from-video` | $0.02 (2 steps) | $2.69 (112 steps) |
-    | `regex-chess` · `write-compressor` · `code-from-image` | 4–6 steps each | comparable |
+| task | baseline | context-guru |
+|---|--:|--:|
+| `mteb-leaderboard` | $0.08 (4 steps) | $6.05 (147 steps) |
+| `polyglot-rust-c` | $0.08 (3 steps) | $2.81 (50 steps) |
+| `extract-moves-from-video` | $0.02 (2 steps) | $2.69 (112 steps) |
+| `regex-chess` · `write-compressor` · `code-from-image` | 4–6 steps each | comparable |
 
-    Those three rows alone are **$11.5 of apparent regression**. Recomputed over the
-    **83 clean tasks** (same cache-aware model, context-guru's own haiku cost included):
+Those three rows alone are **$11.5 of apparent regression**. Recomputed over the
+**83 clean tasks** (same cache-aware model, context-guru's own haiku cost included):
 
-    | | baseline | context-guru | delta |
-    |---|--:|--:|--:|
-    | billed model cost | $100.17 | $87.47 | **−12.7%** |
-    | + context-guru's LLM cost | — | $90.34 | **−9.8%** |
-    | solved | 54 | **56** | +2 |
-    | total steps | 3,160 | **2,899** | **−8.3%** |
+| | baseline | context-guru | delta |
+|---|--:|--:|--:|
+| billed model cost | $100.17 | $87.47 | **−12.7%** |
+| + context-guru's LLM cost | — | $90.34 | **−9.8%** |
+| solved | 54 | **56** | +2 |
+| total steps | 3,160 | **2,899** | **−8.3%** |
 
-    So on the clean set context-guru is **cheaper, solves more, and takes fewer steps** —
-    the same direction as its SWE-bench result, not the reversal the 89-task total implies.
-    headroom recomputes to ≈**−16%** and rtk remains a genuine regression (≈**+6%**).
+So on the clean set context-guru is **cheaper, solves more, and takes fewer steps** —
+the same direction as its SWE-bench result, not the reversal the 89-task total implies.
+headroom recomputes to ≈**−16%** and rtk remains a genuine regression (≈**+6%**).
 
-    The tables below are the raw 89-task figures, kept as measured. They will be
-    regenerated once the six baselines are re-run at low concurrency; that re-run is
-    tracked as follow-up work. See [improvement-plan.md](improvement-plan.md) §1.
+The tables below are the raw 89-task figures, kept as measured. They will be
+regenerated once the six baselines are re-run at low concurrency; that re-run is
+tracked as follow-up work. See [improvement-plan.md](improvement-plan.md) §1.
 
-!!! warning "Two caveats that shape how to read this"
-    **1. Single trial per task (`n-attempts=1`).** Unlike the SWE study (2 trials), each task
-    ran once per arm. **Solve-rate deltas carry real run-to-run noise** — the per-task flip
-    churn below (e.g. context-guru +10/−8) shows the net reward differences are mostly within
-    that noise. The **cost, cache, and step aggregates are robust** (sums over 89 tasks), and
-    are where the real signal is.
-    **2. Budget policy.** Framework arms ran at a flat **4× wall-clock budget**; the baseline
-    used 1.5× for most tasks and 4× for the long-horizon set. This is fair: every task a
-    framework "gained" over baseline was one the baseline *completed and got wrong* at 1.5×
-    (more time would not have changed it), not a baseline timeout.
+**Two caveats shape how to read this.**
+**1. Single trial per task (`n-attempts=1`).** Unlike the SWE study (2 trials), each task
+ran once per arm. **Solve-rate deltas carry real run-to-run noise** — the per-task flip
+churn below (e.g. context-guru +10/−8) shows the net reward differences are mostly within
+that noise. The **cost, cache, and step aggregates are robust** (sums over 89 tasks), and
+are where the real signal is.
+**2. Budget policy.** Framework arms ran at a flat **4× wall-clock budget**; the baseline
+used 1.5× for most tasks and 4× for the long-horizon set. This is fair: every task a
+framework "gained" over baseline was one the baseline *completed and got wrong* at 1.5×
+(more time would not have changed it), not a baseline timeout.
 
 ## The merged system — a fifth arm (2026-08-10)
 
@@ -120,21 +120,21 @@ the raw total is the harder bar: six degenerate baseline trials flatter the base
 | context-guru added latency | — | 449.8 ms | **38.5 ms** |
 | **total billed** | **$98.70** | $86.34 | **$83.52 (−15.4%)** |
 
-!!! warning "Read the median, not the aggregate"
-    **−15.4% is single-task sensitive.** `path-tracing` alone contributes about half of it:
-    dropping that one task gives **−8.3%**, and an independent re-derivation with a stricter
-    degenerate rule (76 clean tasks) gave **−13.7% → −2.8%** on the same exclusion.
+**Read the median, not the aggregate.**
+**−15.4% is single-task sensitive.** `path-tracing` alone contributes about half of it:
+dropping that one task gives **−8.3%**, and an independent re-derivation with a stricter
+degenerate rule (76 clean tasks) gave **−13.7% → −2.8%** on the same exclusion.
 
-    The **median per-task ratio is −7.7%**, with **49/82 tasks cheaper**. That is the figure to
-    quote for "what this does to a normal task"; the aggregate answers the different question
-    "what would the whole benchmark have cost". Both are reported because they differ by half.
+The **median per-task ratio is −7.7%**, with **49/82 tasks cheaper**. That is the figure to
+quote for "what this does to a normal task"; the aggregate answers the different question
+"what would the whole benchmark have cost". Both are reported because they differ by half.
 
-    Reward is **+11 / −3 = net +8** at a single trial per task, so the churn matters more than
-    the net. All three losses were read from their verifier output and are **capability
-    failures, not information loss**: an HTTP 404, a wrong-cased flag
-    (`gcod3_iz_ch4llenging` vs `gc0d3_iz_ch4LLenGiNg`), and a rejected non-fast-forward push.
-    Two of the three used *fewer* steps than baseline, which argues against the
-    "compaction hid something, agent redid work" mechanism.
+Reward is **+11 / −3 = net +8** at a single trial per task, so the churn matters more than
+the net. All three losses were read from their verifier output and are **capability
+failures, not information loss**: an HTTP 404, a wrong-cased flag
+(`gcod3_iz_ch4llenging` vs `gc0d3_iz_ch4LLenGiNg`), and a rejected non-fast-forward push.
+Two of the three used *fewer* steps than baseline, which argues against the
+"compaction hid something, agent redid work" mechanism.
 
 ### The one result that needs no caveat
 

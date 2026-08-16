@@ -45,38 +45,28 @@ than hoped for.
 Below `min_size` bytes (default **400**) `cmdfilter` doesn't filter at all — below it a win is
 implausible enough that it isn't worth the work or the stash.
 
-!!! info "The floor is measured, and it is NOT a shortcut for the never-worse guard"
-    The floor used to be 500 — rtk's `MIN_TEE_SIZE`, carried over unmeasured on the grounds that
-    "the never-worse check would reject those rewrites anyway". That claim was **false**, and the
-    real number is 0: sweeping the floor over two captured request streams replayed through
-    `/compact` (44-request Terminal-Bench, 1795-request SWE-bench), going 500 → 400 added rewrites
-    that the marker-inclusive never-worse guard rejected **none** of. Only the floor was refusing
-    them.
+The floor is a measured value, not an inherited constant. Sweeping it over two captured request
+streams replayed through `/compact` (44-request Terminal-Bench, 1795-request SWE-bench):
 
-    | floor | TB acted / unique tokens | SWE acted / unique tokens | SWE `marker_no_win` |
-    |------:|-------------------------:|--------------------------:|--------------------:|
-    | 500 (old) | 13 / 391 | 305 / 1,290 | 97 |
-    | **400 (shipped)** | **36 / 483** | **389 / 1,447** | **97** |
-    | 300 | 36 / 483 | 424 / 1,467 | 117 |
-    | 250 | 36 / 483 | 424 / 1,467 | 118 |
-    | 200 | 36 / 483 | 512 / 1,481 | 118 |
-    | 150 | 36 / 483 | 512 / 1,481 | 118 |
+| floor | TB acted / unique tokens | SWE acted / unique tokens | SWE `marker_no_win` |
+|------:|-------------------------:|--------------------------:|--------------------:|
+| 500 | 13 / 391 | 305 / 1,290 | 97 |
+| **400 (shipped)** | **36 / 483** | **389 / 1,447** | **97** |
+| 300 | 36 / 483 | 424 / 1,467 | 117 |
+| 250 | 36 / 483 | 424 / 1,467 | 118 |
+| 200 | 36 / 483 | 512 / 1,481 | 118 |
+| 150 | 36 / 483 | 512 / 1,481 | 118 |
 
-    400 is where the evidence stops paying: it takes the *entire* Terminal-Bench win (nothing below
-    400 adds anything there) and 82% of the SWE-bench one, and it is the last value at which the
-    guard rejects nothing new. Below 400 the unique saving flattens while `marker_no_win` starts
-    climbing — that is the floor finally doing work the guard would do anyway, at the cost of
-    filtering ever-smaller outputs where a ~12-token marker is a larger share of the content. On
-    both streams every newly-admitted rewrite was reviewed by hand for information loss (they were
-    package-manager download chatter, pip's two fixed advisories, and a pytest banner whose
-    pass/fail verdict survived), and `wasted_tokens` and expand bounces stayed at **0**.
+400 is where the evidence stops paying: it takes the entire Terminal-Bench win and 82% of the
+SWE-bench one, and it is the last value at which the never-worse guard rejects nothing new. Below
+400 the unique saving flattens while `marker_no_win` climbs — the floor and the guard start
+refusing the same rewrites, on ever-smaller outputs where a ~12-token marker is a larger share of
+the content.
 
-    Tuning it yourself: watch `components.cmdfilter.gates.below_min_size` against
-    `gates.marker_no_win` in `/stats`. Turning the floor down is only free while `marker_no_win`
-    stays flat; once it rises, the floor and the guard are refusing the same rewrites and the floor
-    is the cheaper of the two. Note that per-component `saved_tokens` is cumulative — the same
-    compaction is re-counted every turn the agent re-sends its transcript — so judge a floor change
-    on `saved_tokens_unique`, as the table above does.
+**Tuning it yourself:** watch `components.cmdfilter.gates.below_min_size` against
+`gates.marker_no_win` in `/stats`. Turning the floor down is only free while `marker_no_win` stays
+flat. Judge the change on `saved_tokens_unique`, not `saved_tokens` — the latter re-counts the
+same compaction every turn the agent re-sends its transcript.
 
 ## The shipped filter set
 
@@ -135,9 +125,8 @@ inert. But the honest reading is that a filter set's value is decided by the wor
 size, and the prediction about which filters would matter was wrong. The
 `cmdfilter_selector_misses` ledger exists so that stays measurable rather than assumed.
 
-!!! note "One benchmark, one dump"
-    The 73% / zero-fire split is Terminal-Bench tool output. A repo full of Terraform would
-    invert it. Read the ledger on *your* traffic before pruning a filter.
+That 73% / zero-fire split is Terminal-Bench tool output; a repo full of Terraform would invert
+it. Read the ledger on *your* traffic before pruning a filter.
 
 ### A cautionary note on strip rules
 

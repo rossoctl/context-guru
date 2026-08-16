@@ -75,18 +75,9 @@ definitions makes the whole set tunable from one map.
   there is cheaper than pulling the whole blob back
 - **Whole** — non-contiguous or whole-blob loss → the hint points at the expand tool
 
-!!! note "Loss-typing fixes"
-    Three bugs made a real loss invisible or misleading. All fixed:
-
-    - **`truncate_lines_at` never recorded loss.** It ran before `loss` was initialized, so an
-      intra-line cut reported `None` and `cmdfilter` emitted no recovery hint for a real loss. An
-      intra-line cut is non-contiguous by nature (every long line loses its own tail), so it now
-      types as **Whole**.
-    - **`truncate_lines_at` cut silently.** A mid-line cut with no marker reads as corrupted output
-      to a model. It now appends `...`, sized to fit *inside* the cap so the line never grows.
-    - **The recovery hint collapsed `Tail` and `Whole`.** Both got the same "call
-      `context_guru_expand`" text, making a cheap partial recovery look like an expensive one. They
-      are now distinct.
+An intra-line cut from `truncate_lines_at` types as **Whole**, since every long line loses its own
+tail and the loss is non-contiguous by nature. It also appends `...`, sized to fit inside the cap so
+the line never grows — a mid-line cut with no marker reads as corrupted output to a model.
 
 ## Load-time guardrails
 

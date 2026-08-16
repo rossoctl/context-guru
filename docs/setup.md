@@ -114,3 +114,25 @@ Run the same task twice — once with the component in the pipeline, once with
 
 > Credentials note: `sweep.py` reads the litellm base + token from `~/.claude/settings.json`
 > (`env.ANTHROPIC_BASE_URL` / `env.ANTHROPIC_AUTH_TOKEN`).
+
+<details markdown="1">
+<summary>Troubleshooting</summary>
+
+**The proxy exits with `components: unknown component "skeleton"`.** Build with the
+`cg_skeleton` tag, as in the build command above — `make build` does not pass it.
+
+**The base service refuses to start over missing OpenAI credentials.** It marks them required
+even on an Anthropic-only run; set `OPENAI_API_KEY=unused` and
+`OPENAI_API_BASE=http://unused.invalid/v1`.
+
+**Every task fails with a connection error.** Inside a task container `127.0.0.1` is the
+container, not the gateway. Check the address the runner was given.
+
+**`/stats` shows requests but no savings.** Either the pipeline is `off`, or the outputs are
+below the components' `min_tokens` gates. Check `components.<name>.gates` to see which guard
+declined — [Measure savings](how-to/measure-savings.md) explains the histogram.
+
+**A sweep re-runs cells I already have.** It resumes from `sweep-results.csv`; a cell is
+skipped only when its row is already there.
+
+</details>

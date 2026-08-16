@@ -245,44 +245,45 @@ model can decide whether an expand is worth a turn instead of bouncing blindly.
 
 ### C. Cross-turn dedup — ~~the biggest untapped token lever~~ **REFUTED by measurement**
 
-!!! failure "C1 was wrong. The re-send factor is real; the interpretation was not."
-    **`xdedup` is unbuildable, and would be harmful if built.** Measured on the raw request
-    captures (1,325 requests / 51 sessions across `capture-tb`, `capture-swe`, `capture-swebench`
-    — *not* the change-log dumps, which only record messages a component already acted on and so
-    cannot answer this question):
+**C1 was wrong. The re-send factor is real; the interpretation was not.**
+**`xdedup` is unbuildable, and would be harmful if built.** Measured on the raw request
+captures (1,325 requests / 51 sessions across `capture-tb`, `capture-swe`, `capture-swebench`
+— *not* the change-log dumps, which only record messages a component already acted on and so
+cannot answer this question):
 
-    - **232 of 232** re-sent large outputs live at exactly **one stable message index** for their
-      entire session. Independently re-checked: of **77** distinct >4 KB tool outputs tracked per
-      session, **0 ever appeared at a second index**.
-    - **1124/1124 = 100%** of consecutive turn pairs have the entire previous turn as a
-      byte-identical prefix (comparing *content*, ignoring `cache_control` annotations).
-    - **Zero** compaction/rewind events on swebench — the message count never shrank.
+- **232 of 232** re-sent large outputs live at exactly **one stable message index** for their
+  entire session. Independently re-checked: of **77** distinct >4 KB tool outputs tracked per
+  session, **0 ever appeared at a second index**.
+- **1124/1124 = 100%** of consecutive turn pairs have the entire previous turn as a
+  byte-identical prefix (comparing *content*, ignoring `cache_control` annotations).
+- **Zero** compaction/rewind events on swebench — the message count never shrank.
 
-    So a "re-read" is not a re-read. **The agent appends.** Turn N's copy of a file sits at the
-    index it has always occupied, inside the byte-identical cached prefix, billing at the
-    **cache-read** rate. The load-bearing claim — "content genuinely re-sent as new bytes" — is
-    false.
+So a "re-read" is not a re-read. **The agent appends.** Turn N's copy of a file sits at the
+index it has always occupied, inside the byte-identical cached prefix, billing at the
+**cache-read** rate. The load-bearing claim — "content genuinely re-sent as new bytes" — is
+false.
 
-    `xdedup` could only act where the first copy is absent *and* the repeat is in the mutable tail.
-    Across 1,325 requests that intersection is **empty**: 5,314 re-send events (5.46M tokens) sit in
-    the cached prefix, where `TailOnly` correctly refuses — and rewriting them is precisely the
-    full → referenced flip that converts cache-reads into cache-writes at **11.5×**. The genuinely
-    duplicated cases are already caught by `dedup` (23 acts on the TB run, **0 tokens missed** above
-    the size gate). Implemented with its guards intact, the component is a permanent no-op.
+`xdedup` could only act where the first copy is absent *and* the repeat is in the mutable tail.
+Across 1,325 requests that intersection is **empty**: 5,314 re-send events (5.46M tokens) sit in
+the cached prefix, where `TailOnly` correctly refuses — and rewriting them is precisely the
+full → referenced flip that converts cache-reads into cache-writes at **11.5×**. The genuinely
+duplicated cases are already caught by `dedup` (23 acts on the TB run, **0 tokens missed** above
+the size gate). Implemented with its guards intact, the component is a permanent no-op.
 
-    **Where the token mass actually is:** those 5.46M tokens are real but **already cheap**. The
-    lever is not removing them, it is keeping the prefix stable so they *stay* cache-reads — which
-    is `cacheinject`'s territory, and consistent with cross-session prefix repair measuring ≈−14%
-    while placement tuning measured ≈0%. See the finding that `cacheinject`'s breakpoints never
-    reach the wire at all (46 applied, 0 forwarded).
+**Where the token mass actually is:** those 5.46M tokens are real but **already cheap**. The
+lever is not removing them, it is keeping the prefix stable so they *stay* cache-reads. The
+measured cross-session lever there is the volatile-tail split (`cachesplit`); breakpoint
+*placement* tuning measured ≈0%, and a proposed cross-session "prefix repair" for Claude Code's
+billing header was later refuted — cross-session reuse already worked, so there was nothing to
+repair.
 
-    **One caveat left open:** `capture-tb` showed 19 turns where the message count shrank.
-    Compaction is the one regime that could make cross-turn dedup viable, since it removes the first
-    copy while later re-reads land in the tail. Even there 0 actionable cases were measured, but the
-    premise is worth re-testing if aggressive compaction is enabled.
+**One caveat left open:** `capture-tb` showed 19 turns where the message count shrank.
+Compaction is the one regime that could make cross-turn dedup viable, since it removes the first
+copy while later re-reads land in the tail. Even there 0 actionable cases were measured, but the
+premise is worth re-testing if aggressive compaction is enabled.
 
-    Tracked as [#27](https://github.com/rossoctl/context-guru/issues/27), closed as
-    measurement-refuted. C2 and C3 below are unaffected and still stand.
+Tracked as [#27](https://github.com/rossoctl/context-guru/issues/27), closed as
+measurement-refuted. C2 and C3 below are unaffected and still stand.
 
 **C2. Recurrence-aware floor.** Track `seenCount[hash]`; effective floor `= floor / max(1,seenCount)`.
 A 298-token output re-sent 40× is worth 12k tokens but is invisible to the 3000-token floor today —
@@ -359,53 +360,52 @@ ratio (which overcounts 22–42×).
 
 ### F. Hygiene / methodology
 
-!!! danger "F-1. The rule this whole document was written the hard way to learn"
-    **An aggregate moving in the predicted direction is not evidence that the predicted mechanism
-    operated.** Verify the mechanism fired *before* believing the outcome.
+**F-1. An aggregate moving in the predicted direction is not evidence that the predicted
+mechanism operated.** Verify the mechanism fired *before* believing the outcome.
 
-    **Eight** premises in this effort were wrong, and nearly all failed the same way — a derived
-    artifact was trusted over the raw request stream, or an outcome was credited to a mechanism
-    nobody checked had run:
+**Eight** premises in this effort were wrong, and nearly all failed the same way — a derived
+artifact was trusted over the raw request stream, or an outcome was credited to a mechanism
+nobody checked had run:
 
-    | premise | what was believed | what was true |
-    |---|---|---|
-    | §C1 `xdedup` | a 39.8× re-send factor meant tokens re-sent as new bytes | 232/232 large outputs sit at **one stable index**; the agent *appends*. Those tokens are cached-prefix reads, already cheap. Component would have had **zero** legal opportunity to act |
-    | §B2 expand tool | "never registered on the streaming path", 4.8M tokens stranded | tool IS registered, loop IS armed, a live agent restored 3,372 tokens. 4.8M was a **cumulative re-count**; unique is 234k (21× smaller). Real bug was a latency tautology |
-    | `prefixpin` | early messages mutate in place, worth ~31% of input cost | **0 mutations in ~6,500 comparisons** on claude-code. The 52% churn first measured was concurrent sessions sharing a first message, diffed against each other |
-    | §31 async cache-write | −45%/−39% cache-write proved the tail-protection worked | the protection **only stripped context-guru's own breakpoints**, never the agent's — so it did nothing on the primary workload. Lower cache-write came from writing *fewer breakpoints*, not from protecting the tail |
-    | §A5 `cacheinject` "provably inert" | placement has no headroom; the component does nothing | it applied **46 breakpoints and forwarded 0** — the writeback layer discarded every one. Inert for a reason nobody had checked. Two benchmark studies concluded things about placement while measuring a suppressed component |
-    | §A5 follow-on: placement is *harmful* | +61.9% cache-write/step once the marks reached the wire | **0 of 106 marks land above** the agent's own breakpoint, so the proposed mechanism (shortening the readable prefix) is ruled out. `acted=0` in that arm is a *tautology* of the arm's design, not proof the delta was placement |
-    | `cachesplit` on Terminal-Bench | the volatile-tail split carries a −34.1% win | TB runs the Agent **SDK**, which never appends the git/env snapshot the CLI does. All 73 captured TB requests: 3 system blocks, **zero** volatile-tail markers. **Zero legal opportunity** — the same shape as `xdedup` |
-    | the split on Bedrock Converse | `Changed: true`, `cachesplit` active in `/stats` | `cachePoint` is its own array entry *after* the block, so the split inserts the volatile half **before** it and the breakpoint still covers the churn. It reports success and achieves nothing |
+| premise | what was believed | what was true |
+|---|---|---|
+| §C1 `xdedup` | a 39.8× re-send factor meant tokens re-sent as new bytes | 232/232 large outputs sit at **one stable index**; the agent *appends*. Those tokens are cached-prefix reads, already cheap. Component would have had **zero** legal opportunity to act |
+| §B2 expand tool | "never registered on the streaming path", 4.8M tokens stranded | tool IS registered, loop IS armed, a live agent restored 3,372 tokens. 4.8M was a **cumulative re-count**; unique is 234k (21× smaller). Real bug was a latency tautology |
+| `prefixpin` | early messages mutate in place, worth ~31% of input cost | **0 mutations in ~6,500 comparisons** on claude-code. The 52% churn first measured was concurrent sessions sharing a first message, diffed against each other |
+| §31 async cache-write | −45%/−39% cache-write proved the tail-protection worked | the protection **only stripped context-guru's own breakpoints**, never the agent's — so it did nothing on the primary workload. Lower cache-write came from writing *fewer breakpoints*, not from protecting the tail |
+| §A5 `cacheinject` "provably inert" | placement has no headroom; the component does nothing | it applied **46 breakpoints and forwarded 0** — the writeback layer discarded every one. Inert for a reason nobody had checked. Two benchmark studies concluded things about placement while measuring a suppressed component |
+| §A5 follow-on: placement is *harmful* | +61.9% cache-write/step once the marks reached the wire | **0 of 106 marks land above** the agent's own breakpoint, so the proposed mechanism (shortening the readable prefix) is ruled out. `acted=0` in that arm is a *tautology* of the arm's design, not proof the delta was placement |
+| `cachesplit` on Terminal-Bench | the volatile-tail split carries a −34.1% win | TB runs the Agent **SDK**, which never appends the git/env snapshot the CLI does. All 73 captured TB requests: 3 system blocks, **zero** volatile-tail markers. **Zero legal opportunity** — the same shape as `xdedup` |
+| the split on Bedrock Converse | `Changed: true`, `cachesplit` active in `/stats` | `cachePoint` is its own array entry *after* the block, so the split inserts the volatile half **before** it and the breakpoint still covers the churn. It reports success and achieves nothing |
 
-    Most of these produced a number that pointed the *right* way for the *wrong* reason, which is
-    why they survived review. Two were mine as orchestrator, both from accepting a number without
-    checking the mechanism — and one of those was an *unfavourable* number, which is the tell that
-    the bias is not optimism but incuriosity. **Skepticism applied only to good news is not
-    skepticism.** The countermeasures, in order of value:
+Most of these produced a number that pointed the *right* way for the *wrong* reason, which is
+why they survived review. Two were mine as orchestrator, both from accepting a number without
+checking the mechanism — and one of those was an *unfavourable* number, which is the tell that
+the bias is not optimism but incuriosity. **Skepticism applied only to good news is not
+skepticism.** The countermeasures, in order of value:
 
-    1. **Group request lineages by append-only prefix match**, never by a hash of `messages[0]` — a
-       benchmark harness runs concurrent sessions whose first message is byte-identical.
-    2. **Distinguish cumulative from unique on every token figure.** The overcount is 8–42×, so a
-       cumulative number is off by an order of magnitude, not a rounding error.
-    3. **Instrument "did this component act?" separately from "did the metric improve?"** and require
-       both before claiming a mechanism. `acted=0` beside a favourable delta is the tell.
-    4. **A trial where the baseline aborts is not a measurement** — exclude it, don't average it. Six
-       such trials inverted the sign of the entire TB cost conclusion (§1a).
-    5. **Read the raw wire bytes.** The change-log dumps only record messages a component *already
-       acted on*, so they structurally cannot answer "was this ever sent?"
-    6. **A component reporting that it acted is not evidence it acted usefully.** `Changed: true` and
-       a non-zero `acted` counter both survive a mechanism that achieves nothing — see the Converse
-       split. Assert the *effect* (did the breakpoint stop covering the churn?), not the activity.
-    7. **Check that a favourable metric had the opportunity to be caused by your change.** Three
-       arms credited components that could not fire on that workload at all. Before attributing, ask
-       what counter would be non-zero if the mechanism ran, and confirm it is.
-    8. **Verify the verifier.** Two "defects" in this effort were bugs in the checking script (a
-       regex scraping the wrong table column; a stale binary one commit behind). A check that
-       over-matches manufactures exactly the findings that waste a review cycle.
-    9. **A sum over heterogeneous tasks can be one task.** An interim TB delta read −40.2%; a single
-       trial carried half of it, and dropping that one task gave −19.2%. Report the **median
-       per-task ratio** and a **leave-one-out** on the top contributors beside any aggregate.
+1. **Group request lineages by append-only prefix match**, never by a hash of `messages[0]` — a
+   benchmark harness runs concurrent sessions whose first message is byte-identical.
+2. **Distinguish cumulative from unique on every token figure.** The overcount is 8–42×, so a
+   cumulative number is off by an order of magnitude, not a rounding error.
+3. **Instrument "did this component act?" separately from "did the metric improve?"** and require
+   both before claiming a mechanism. `acted=0` beside a favourable delta is the tell.
+4. **A trial where the baseline aborts is not a measurement** — exclude it, don't average it. Six
+   such trials inverted the sign of the entire TB cost conclusion (§1a).
+5. **Read the raw wire bytes.** The change-log dumps only record messages a component *already
+   acted on*, so they structurally cannot answer "was this ever sent?"
+6. **A component reporting that it acted is not evidence it acted usefully.** `Changed: true` and
+   a non-zero `acted` counter both survive a mechanism that achieves nothing — see the Converse
+   split. Assert the *effect* (did the breakpoint stop covering the churn?), not the activity.
+7. **Check that a favourable metric had the opportunity to be caused by your change.** Three
+   arms credited components that could not fire on that workload at all. Before attributing, ask
+   what counter would be non-zero if the mechanism ran, and confirm it is.
+8. **Verify the verifier.** Two "defects" in this effort were bugs in the checking script (a
+   regex scraping the wrong table column; a stale binary one commit behind). A check that
+   over-matches manufactures exactly the findings that waste a review cycle.
+9. **A sum over heterogeneous tasks can be one task.** An interim TB delta read −40.2%; a single
+   trial carried half of it, and dropping that one task gave −19.2%. Report the **median
+   per-task ratio** and a **leave-one-out** on the top contributors beside any aggregate.
 
 - **F0. Re-run the 6 degenerate TB baselines** and regenerate the comparison/baseline docs (§1a).
 - **F1. Report `saved_tokens_unique` and cache-aware $, never raw cumulative byte ratio** (overcounts

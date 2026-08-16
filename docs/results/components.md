@@ -21,18 +21,9 @@ All numbers are from the matched 50-task run (see [comparison.md](comparison.md)
 
 ## context-guru — pipeline `[format, dedup, failed_run, cmdfilter, extract_llm, extract, cacheinject]`
 
-!!! note "This is the pipeline as this run used it — `codesmart` has moved on twice since"
-    Two differences from the shipped preset today, both left as-is above because the heading
-    records what the run actually executed:
-
-    - it ends in `cacheinject`, where `codesmart` now ends in **`cachesplit`** — breakpoint
-      placement was removed from every preset in
-      [#36](https://github.com/rossoctl/context-guru/pull/36);
-    - it has no `toon`, which `codesmart` now runs second.
-
-    Current composition:
-    `[format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]` — see
-    [Presets](../reference/presets.md).
+The heading records the pipeline this run executed. Today's `codesmart` is
+`[format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]` — it gained
+`toon` and swapped `cacheinject` for `cachesplit`. See [Presets](../reference/presets.md).
 
 Two type-enforced kinds: **Reformat** (lossless repack, no stash) and **Offload**
 (lossy-but-reversible: leaves a `<<cg:HASH>>` marker + stashes the original, recoverable
@@ -75,15 +66,11 @@ keep failures.
 > failures + warnings kept verbatim.
 Run: 3 acts.
 
-!!! note "The filter set has since tripled"
-    This run had **3** filters matched on the output's *first* line only.
-    [#42](https://github.com/rossoctl/context-guru/pull/42) took it to **24** filters, rewrote every
-    selector to match output shape over six leading lines, and added the per-family `/stats` ledger;
-    `pip-install` and `latex` have since brought the shipped set to **26**.
-    The 3-act figure is not a ceiling for the current set — but nor is 26 filters a promise of 8×
-    the savings: on the Terminal-Bench dump the four filters *predicted* to matter (`pulumi`,
-    `terraform-plan`, `xcodebuild`, `gradle`) fired zero times, and `apt` + `gcc` carried ~73% of
-    the savings instead. Re-measure rather than extrapolate.
+This run had **3** filters, matched on the output's first line only; the shipped set is now
+**26**, matched over six leading lines. Do not extrapolate 8× the savings from that: on the
+Terminal-Bench dump the four filters predicted to matter (`pulumi`, `terraform-plan`,
+`xcodebuild`, `gradle`) fired zero times, and `apt` + `gcc` carried ~73% of the savings
+instead. Re-measure rather than extrapolate.
 
 ### 5. `extract_llm` (Offload — the relevance-aware LLM pass)
 A cheap **haiku**-class model writes a sandboxed **Starlark program** that trims *one*
@@ -128,19 +115,10 @@ Run: **245 acts, 34,293 cumulative / ~2.9k unique tok**, ~0.6 s total (near-zero
 Stamps an ephemeral `cache_control` breakpoint on the prefix boundary so the provider KV
 cache hits across turns. No content change.
 
-!!! danger "This row measured a suppressed component"
-    On the run behind this page, `cacheinject`'s breakpoints **never reached the wire** —
-    46 applied at the component level, 0 in the output body across 40 captured requests
-    ([#32](https://github.com/rossoctl/context-guru/issues/32)). Its only possible targets
-    are assistant turns carrying `tool_use`, which bifrost cannot round-trip, so the
-    writeback layer discarded every mark.
-
-    So the **97.8% cache-hit rate is not attributable to this component.** That rate is
-    claude-code's own breakpoints, which it sets on every request and which the proxy
-    forwarded untouched. Fixed in [#36](https://github.com/rossoctl/context-guru/pull/36); a
-    re-run must re-measure this row rather than carry the number forward. In the meantime
-    placement has been removed from every preset, so a fresh `codesmart` run has no
-    `cacheinject` row at all — it has a `cachesplit` one.
+On this run `cacheinject`'s breakpoints never reached the wire, so the **97.8% cache-hit rate
+is not attributable to this component** — that rate is claude-code's own breakpoints, which
+the proxy forwarded untouched. Placement has since been removed from every preset, so a fresh
+`codesmart` run has a `cachesplit` row here instead.
 
 ---
 

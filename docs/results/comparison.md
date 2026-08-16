@@ -20,13 +20,9 @@ Cache-aware billed **input** cost = fresh $2/M · cache-read $0.20/M · cache-wr
 recomputed from each trial's own token tiers; output billed at $10/M. **Total** adds the
 tool's own compaction-LLM cost.
 
-!!! warning "context-guru's arm here is an ancestor of today's `codesmart`"
-    No figure on this page has been adjusted, but the pipeline that produced them differs
-    from the shipped default in three ways — no `toon`, `cacheinject` instead of
-    `cachesplit`, and `failed_run` contributing nothing because of a since-fixed gating bug.
-    The comparison against headroom and rtk stands as an apples-to-apples record of what ran;
-    a claim about the *current* default needs a re-measurement. Details:
-    [Benchmarks](../RESULTS.md) and [REPRODUCE.md](REPRODUCE.md).
+These figures record what ran, and the comparison against headroom and rtk is
+apples-to-apples. The shipped `codesmart` pipeline has changed since, so a claim about
+today's default needs a re-measurement — see [Benchmarks](../RESULTS.md).
 
 ## Headline
 

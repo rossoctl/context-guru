@@ -451,7 +451,7 @@ of gateway, and the same token works in all three.
 
     After setting the variables, confirm your own dashboard's request count moves. If it
     stays at zero, read
-    [Use with Claude Code](how-to/use-with-claude-code.md#the-one-liner) — it has the
+    [Use with Claude Code](how-to/use-with-claude-code.md#steps) — it has the
     two-command diagnosis and both fixes.
 
 **Escape hatches**, worth knowing before you need them: unset the base URL to bypass

@@ -18,28 +18,10 @@ SWE-bench Verified** — evaluated live, end-to-end, with the **claude-code** ag
 | added latency / req | — | 117 ms | 63 ms | **0 ms** |
 | tool LLM cost | $0 | $0.31 | $0 | $0 |
 
-!!! warning "The measured arm is an ANCESTOR of today's `codesmart` — three differences"
-    Every figure on this page stands as recorded, and none of them has been adjusted. But
-    the `codesmart` this run executed is not the `codesmart` the proxy ships now, and a cost
-    claim about the *current* default cannot rest on these numbers without a re-measurement.
-    What changed since:
-
-    1. **No `toon`.** It was added to `codesmart` after this run.
-    2. **`cacheinject`, not `cachesplit`.** Breakpoint placement was still in the pipeline;
-       it was removed from every preset in
-       [#36](https://github.com/rossoctl/context-guru/pull/36) and replaced by the
-       volatile-tail split.
-    3. **`failed_run` contributed nothing at all.** It was listed in the pipeline but gated
-       per *request* on cache-awareness, which is true by default on Anthropic/Bedrock/Vertex
-       — so on this workload it declined every collapse at every depth, and its escape hatch
-       was unreachable. The per-component breakdown on the
-       [arm page](results/context-guru.md) shows it absent, which is that bug rather than an
-       absence of pytest output. It is fixed now, so `failed_run` will act on
-       SWE-bench-shaped traffic for the first time.
-
-    Scope: this concerns the **SWE-bench** arms specifically. `failed_run` cannot act on
-    Terminal-Bench at all — it gates out with `fewer_than_two_runs` on 100% of requests
-    there — so the Terminal-Bench numbers are unaffected by (3).
+These numbers record the SWE-bench run exactly as it happened. The shipped `codesmart`
+pipeline has changed since — `toon` was added, `cachesplit` replaced `cacheinject`, and a
+gating bug that kept `failed_run` inert was fixed — so a claim about today's default needs
+a fresh run. See [Reproduce the results](results/REPRODUCE.md).
 
 <!-- Static bars: same figures as the table above, one measure each, drawn in CSS.
      Bar widths are proportional to the value, zero-anchored, against the largest
