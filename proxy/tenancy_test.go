@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -776,6 +777,134 @@ func TestScrubTokenCoversEveryValueOfAnAuthHeader(t *testing.T) {
 		scrubToken(h)
 		if h.Get("Authorization") == "" || h.Get("x-api-key") == "" {
 			t.Errorf("scrubbing ate the caller's own credential, which is the thing we forward: %v", h)
+		}
+	})
+}
+
+// TestOneShotTenantsCannotEvictAMidSessionTenant is a COST attack, not a disclosure.
+// Registration is open to a whole /8, the tenancy cache held max entries with pure
+// recency, and a tenant's Store is where its frozen compaction decisions live — so
+// max+1 throwaway accounts sending ONE request each evicted every real tenant's frozen
+// state, and each victim's next turn re-wrote its whole cached prefix at ~11.5x the read
+// price. Attacker cost: max+1 registrations and one request.
+//
+// The victim here is identified by its Store: a rebuilt tenancy gets a fresh one, so
+// Store identity is exactly "did this tenant keep its compaction state".
+func TestOneShotTenantsCannotEvictAMidSessionTenant(t *testing.T) {
+	f := newHostedFixture(t, "up", "openai")
+	const max = 4
+	src := NewTenantSource(f.reg, nil, func(doc []byte, e components.Emitter) (BuiltConfig, error) {
+		return BuiltConfig{Pipe: components.NewPipeline(nil, e),
+			Store: store.NewMemory(store.Options{})}, nil
+	}, max)
+
+	victim, _ := f.register(t, "victim@ibm.com")
+	if _, err := src.ForTenant(victim); err != nil { // first turn: builds
+		t.Fatal(err)
+	}
+	warm, err := src.ForTenant(victim) // second turn: mid-session from here on
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Enough one-shot accounts to fill the cache several times over.
+	for i := 0; i < max*3; i++ {
+		tn, _ := f.register(t, fmt.Sprintf("throwaway%d@ibm.com", i))
+		if _, err := src.ForTenant(tn); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := src.ForTenant(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Store != warm.Store {
+		t.Error("one-shot tenants evicted a mid-session tenant's compaction state; " +
+			"its next turn re-writes the whole cached prefix")
+	}
+	// The bound is the reason the cache exists: protecting an entry must not grow it.
+	src.mu.Lock()
+	n := src.cache.ll.Len()
+	src.mu.Unlock()
+	if n > max {
+		t.Errorf("cache holds %d tenancies, over the cap of %d", n, max)
+	}
+
+	// And when EVERY entry is mid-session, the cap still wins — a protected entry is
+	// last in line, not unevictable. (The eviction is logged as the operator-facing case.)
+	var stores []store.Store
+	for i := 0; i < max+1; i++ {
+		tn, _ := f.register(t, fmt.Sprintf("active%d@ibm.com", i))
+		if _, err := src.ForTenant(tn); err != nil {
+			t.Fatal(err)
+		}
+		tc, err := src.ForTenant(tn) // second turn: marks it returning
+		if err != nil {
+			t.Fatal(err)
+		}
+		stores = append(stores, tc.Store)
+	}
+	src.mu.Lock()
+	n = src.cache.ll.Len()
+	src.mu.Unlock()
+	if n > max {
+		t.Errorf("cache holds %d tenancies with every entry protected, over the cap of %d", n, max)
+	}
+	if len(stores) != max+1 {
+		t.Fatalf("fixture built %d tenants, want %d", len(stores), max+1)
+	}
+}
+
+// TestUnsetKeyEnvRefusesInsteadOfForwardingAPlaceholder separates the two states that
+// used to be the same nil injector.
+//
+// No key_env at all is CALLER-PAYS and must keep working — it is the hosted default.
+// A key_env that is NAMED with nothing behind it is our misconfiguration: gateway-mode
+// callers hold a placeholder, which is a non-empty string, so it sailed past the "no
+// credential" check and got forwarded to a third party. The operator then debugged a
+// provider 401 instead of reading a 502 that names the upstream. This is the exact state
+// a half-finished edit of the live config leaves behind.
+func TestUnsetKeyEnvRefusesInsteadOfForwardingAPlaceholder(t *testing.T) {
+	const placeholder = "sk-PLACEHOLDER-not-a-real-key"
+
+	t.Run("named but unset is a 502 naming the upstream", func(t *testing.T) {
+		f := newHostedFixture(t, "up", "openai") // KeyEnv: TEST_UPSTREAM_KEY
+		t.Setenv("TEST_UPSTREAM_KEY", "")        // the half-finished edit
+		_, tok := f.register(t, "a@ibm.com")
+		w := f.postCaller("/openai/v1/chat/completions", tok, placeholder, "")
+		if w.Code != http.StatusBadGateway {
+			t.Errorf("unset key_env = %d, want 502; body %s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), `upstream \"up\"`) &&
+			!strings.Contains(w.Body.String(), `upstream "up"`) {
+			t.Errorf("the 502 does not name the upstream, so the operator cannot act on it: %s", w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "TEST_UPSTREAM_KEY") {
+			t.Errorf("the response named our environment variable: %s", w.Body.String())
+		}
+		f.mu.Lock()
+		n := len(f.seen)
+		f.mu.Unlock()
+		if n != 0 {
+			t.Errorf("the placeholder credential reached the upstream anyway (%d requests)", n)
+		}
+	})
+
+	t.Run("no key_env at all is still caller-pays", func(t *testing.T) {
+		f := newHostedFixtureNoKey(t, "up", "openai")
+		_, tok := f.register(t, "b@ibm.com")
+		w := f.postCaller("/openai/v1/chat/completions", tok, "sk-caller-own-key-0123456789", "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("caller-pays = %d, want 200; body %s", w.Code, w.Body.String())
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if len(f.seen) != 1 {
+			t.Fatalf("upstream saw %d requests, want 1", len(f.seen))
+		}
+		if got := f.seen[0].Header.Get("Authorization"); !strings.Contains(got, "sk-caller-own-key") {
+			t.Errorf("caller's own credential did not reach the upstream: %q", got)
 		}
 	})
 }

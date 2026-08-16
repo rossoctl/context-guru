@@ -46,6 +46,12 @@ type lru[V any] struct {
 	ll      *list.List // front = most recently used; values are *lruEntry[V]
 	index   map[string]*list.Element
 	onEvict func(string, V)
+	// keep, when set, reports that an entry is EXPENSIVE to drop, and moves it to the
+	// back of the queue of candidates rather than pinning it: the bound still holds. Set
+	// it when recency alone picks the wrong victim — see TenantSource, where one request
+	// from each of max+1 throwaway accounts otherwise evicts every real tenant's frozen
+	// compaction state at ~11.5x the read price on their next turn.
+	keep func(V) bool
 }
 
 type lruEntry[V any] struct {
@@ -78,14 +84,39 @@ func (c *lru[V]) put(k string, v V) {
 	}
 	c.index[k] = c.ll.PushFront(&lruEntry[V]{k: k, v: v})
 	for c.ll.Len() > c.max {
-		back := c.ll.Back()
-		e := back.Value.(*lruEntry[V])
-		c.ll.Remove(back)
+		el := c.victim()
+		e := el.Value.(*lruEntry[V])
+		c.ll.Remove(el)
 		delete(c.index, e.k)
 		if c.onEvict != nil {
 			c.onEvict(e.k, e.v)
 		}
 	}
+}
+
+// victim picks the entry to drop: the least-recently-used one that `keep` does not
+// protect, or — when every candidate is protected — the least-recently-used one outright,
+// because bounding memory is what the cache is for. onEvict is called either way, so a
+// caller that cares which case it was can tell from the value it is handed.
+//
+// The front is never a victim. It is the entry put() just inserted, and dropping it would
+// starve every newcomer for as long as the cache stays full of protected entries — which
+// is the opposite failure, and the harder one to see.
+//
+// ponytail: O(n) walk under the caller's lock, n = max (256 tenancies), and only on an
+// insert that overflows. A cache large enough for that to matter wants a second list of
+// unprotected keys, not a cleverer scan.
+func (c *lru[V]) victim() *list.Element {
+	back := c.ll.Back()
+	if c.keep == nil {
+		return back
+	}
+	for el := back; el != nil && el != c.ll.Front(); el = el.Prev() {
+		if !c.keep(el.Value.(*lruEntry[V]).v) {
+			return el
+		}
+	}
+	return back
 }
 
 func (c *lru[V]) remove(k string) {
@@ -141,27 +172,35 @@ type Upstream struct {
 //
 // The key is read from the environment at CALL time, so rotating a credential does
 // not need a restart, and no copy of it is held in a long-lived struct.
-func (u Upstream) setKey() func(http.Header) {
+//
+// A nil injector and a nil error mean CALLER-PAYS. "key_env named but unset" is a
+// different thing and returns errKeyEnvUnset instead: the two used to be the same nil,
+// and the caller could only test "no injector", so a half-finished config edit fell
+// through to forwarding whatever the caller sent — which in gateway mode is a
+// PLACEHOLDER, non-empty, and therefore not caught by the "no credential" check either.
+// The operator then debugs a provider 401 instead of reading their own misconfiguration.
+func (u Upstream) setKey() (func(http.Header), error) {
 	if u.KeyEnv == "" {
-		return nil
+		return nil, nil // the default: the caller's own credential is forwarded
 	}
 	key := os.Getenv(u.KeyEnv)
 	if key == "" {
-		// Named a variable that is not set. Forward the caller's own credential rather
-		// than nothing at all; the request then succeeds or is refused by the upstream,
-		// which is strictly better than refusing every request over an operator typo.
-		slog.Warn("context-guru: upstream names an unset key_env; forwarding the caller's own credential",
-			"key_env", u.KeyEnv)
-		return nil
+		return nil, errKeyEnvUnset
 	}
 	if h := u.Header; h != "" && !strings.EqualFold(h, "Authorization") {
-		return func(hd http.Header) { hd.Set(h, key) }
+		return func(hd http.Header) { hd.Set(h, key) }, nil
 	}
 	if u.Dialect == "anthropic" {
-		return func(hd http.Header) { hd.Set("x-api-key", key) }
+		return func(hd http.Header) { hd.Set("x-api-key", key) }, nil
 	}
-	return func(hd http.Header) { hd.Set("Authorization", "Bearer "+key) }
+	return func(hd http.Header) { hd.Set("Authorization", "Bearer "+key) }, nil
 }
+
+// errKeyEnvUnset says the operator asked for a server-held key and the environment does
+// not have one. Deliberately NOT a fall-through to caller-pays: an upstream configured
+// for gateway mode has callers holding placeholders, and forwarding a placeholder
+// publishes it to a third party and returns someone else's 401.
+var errKeyEnvUnset = errors.New("upstream key_env names an unset environment variable")
 
 // TokenHeader is where a caller presents its context-guru token. A DEDICATED header,
 // because the Authorization / x-api-key slot now carries the caller's OWN provider
@@ -335,6 +374,18 @@ type TenantSource struct {
 type cached struct {
 	config string // the config document this tenancy was built from
 	t      *Tenancy
+	// returning records that this tenant came BACK — a second request against the same
+	// configuration, which is the first moment its frozen decisions have anything to
+	// compound onto. It is what the LRU protects (see lru.keep): a self-registered
+	// account that sends one request and never returns must not be able to evict a
+	// tenant that is mid-session, which is what pure recency allowed with max+1 accounts.
+	//
+	// ponytail: "came back once" is a cheap proxy for "holds valuable frozen state", and
+	// its ceiling is that two requests per throwaway account defeat it — twice the
+	// attacker cost, not a wall. The next rung is asking the Store how many frozen
+	// entries it holds, which is only worth adding if this shows up in the eviction
+	// counters as more than idle churn.
+	returning bool
 }
 
 // DefaultMaxTenancies bounds how many tenants hold live pipelines and stores at
@@ -352,13 +403,28 @@ func NewTenantSource(reg *tenant.Registry, e components.Emitter, b ConfigBuilder
 	if e == nil {
 		e = components.NopEmitter{}
 	}
-	return &TenantSource{reg: reg, emitter: e, builder: b, max: maxTenancies,
+	s := &TenantSource{reg: reg, emitter: e, builder: b, max: maxTenancies,
 		cache: newLRU[*cached](maxTenancies, func(id string, c *cached) {
 			// Worth a log line, not a silent drop: this tenant's next turn re-writes its
 			// cached prefix, which shows up as a cost spike with no other explanation.
+			//
+			// Which of the two evictions it was decides who acts on it, so they are separate
+			// lines. Dropping an account that came once and left is the cache working.
+			// Dropping a tenant that is mid-session means every entry is mid-session and the
+			// cap is now the binding constraint — an operator decision, not churn.
+			if c.returning {
+				slog.Warn("context-guru: evicted a RETURNING tenant's compaction state — every cached "+
+					"tenant is active, so max_tenancies is the binding constraint; raise it",
+					"tenant", id, "max_tenancies", maxTenancies)
+				return
+			}
 			slog.Warn("context-guru: evicting an idle tenant's compaction state (cache cold on its next turn)",
 				"tenant", id, "max_tenancies", maxTenancies)
 		})}
+	// Recency alone picks the wrong victim here: registration is open, so max+1 accounts
+	// sending one request each would evict every mid-session tenant's frozen decisions.
+	s.cache.keep = func(c *cached) bool { return c.returning }
+	return s
 }
 
 // Resolve authenticates a request and returns its tenancy.
@@ -413,6 +479,9 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 		// key includes the document. Rebuilding drops this tenant's frozen decisions,
 		// which is the honest cost of changing your own pipeline mid-session.
 		if c.config == cfgDoc {
+			// The tenant came back: this entry now protects real compounding state, not just
+			// a build. See cached.returning and lru.keep.
+			c.returning = true
 			// Fields that do not affect the pipeline are refreshed without a rebuild —
 			// but on a COPY, published by swapping the pointer. Writing through the
 			// cached *Tenancy would race every unlocked reader on the request path
@@ -496,6 +565,8 @@ func (s *TenantSource) build(t *tenant.Tenant, cfgDoc string) (*Tenancy, error) 
 // Credentials: an upstream with no key_env forwards the CALLER's own provider key,
 // which is the hosted default. That makes a caller with no key of their own an
 // explicit 401 — never a silent fallback onto whatever key the box happens to hold.
+// An upstream that NAMES a key_env with nothing behind it is a misconfiguration, not
+// caller-pays, and gets a 502 that names it (see setKey).
 func (h *Handler) upstreamFor(r *http.Request, tn *Tenancy, pick func(*Tenancy) string, static upstream) (upstream, error) {
 	if h.opts.Tenants == nil {
 		return static, nil
@@ -510,7 +581,16 @@ func (h *Handler) upstreamFor(r *http.Request, tn *Tenancy, pick func(*Tenancy) 
 			"tenant", tn.ID, "upstream", name)
 		return upstream{}, errNoUpstreamFor
 	}
-	set := u.setKey()
+	set, err := u.setKey()
+	if errors.Is(err, errKeyEnvUnset) {
+		// The fault is ours, so say so: 502 naming the upstream, and the env var only in
+		// the log — the caller has no business learning our variable names.
+		slog.Error("context-guru: upstream names an unset key_env; refusing rather than forwarding "+
+			"the caller's credential, which in gateway mode is a placeholder",
+			"tenant", tn.ID, "upstream", name, "key_env", u.KeyEnv)
+		return upstream{}, statusError{http.StatusBadGateway,
+			fmt.Sprintf("upstream %q has no credential configured", name)}
+	}
 	if set == nil && CallerKey(r) == "" {
 		return upstream{}, errNoProviderKey
 	}
