@@ -313,7 +313,7 @@ Because the silent-override failure looks identical to success, the honest test 
     ```
 
     Then use the `--settings` form above. Full diagnosis and both fixes:
-    [Use with Claude Code](../how-to/use-with-claude-code.md#the-one-liner).
+    [Use with Claude Code](../how-to/use-with-claude-code.md#steps).
 
 === "Bob"
 
