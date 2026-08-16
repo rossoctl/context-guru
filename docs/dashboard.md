@@ -294,7 +294,7 @@ flowchart LR
   Q --> W[writer goroutine<br/>batched tx]
   W --> DB[(SQLite<br/>requests · components · content)]
   W --> H[SSE hub]
-  DB --> API[/api/*]
+  DB --> API["/api/*"]
   H --> API
   API --> UI[embedded UI]
 ```

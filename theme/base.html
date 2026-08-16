@@ -1,0 +1,139 @@
+{#-
+  Page skeleton shared by every template in this theme: <head>, the sticky top
+  nav, the search overlay, the footer, and the script tags. `main.html` (docs
+  pages) and `home.html` (the landing page) fill in {% block body %}.
+
+  Design system: dark-first CSS custom properties in css/style.css, with a light
+  override on `html[data-theme="light"]`. The inline script below applies the
+  saved choice *before paint* so a light-mode visitor never sees a dark flash.
+-#}
+{%- set page_title = page.title ~ " — " ~ config.site_name if page and page.title and not page.is_homepage else config.site_name -%}
+{%- set page_desc = page.meta.description if page and page.meta.description else config.site_description -%}
+<!DOCTYPE html>
+<html lang="{{ config.theme.locale }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <meta name="description" content="{{ page_desc | striptags | trim }}">
+  {%- if page and page.canonical_url %}
+  <link rel="canonical" href="{{ page.canonical_url }}">
+  {%- endif %}
+  <meta property="og:type" content="{{ 'website' if page and page.is_homepage else 'article' }}">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ page_title }}">
+  <meta property="og:description" content="{{ page_desc | striptags | trim }}">
+  {%- if page and page.canonical_url %}
+  <meta property="og:url" content="{{ page.canonical_url }}">
+  {%- endif %}
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="{{ page_title }}">
+  <meta name="twitter:description" content="{{ page_desc | striptags | trim }}">
+  {%- if config.theme.favicon %}
+  <link rel="icon" href="{{ config.theme.favicon | url }}">
+  {%- endif %}
+  {#- Dark-first: default dark, honour an explicit saved choice. Applied pre-paint
+      (no flash of the wrong theme) and adds `.js` so the JS-gated scroll reveal
+      only hides content when there is JS to un-hide it. -#}
+  <script>(function(){try{document.documentElement.setAttribute('data-theme',localStorage.getItem('cg-theme')||'dark');}catch(e){document.documentElement.setAttribute('data-theme','dark');}document.documentElement.classList.add('js');})();</script>
+  <link rel="stylesheet" href="{{ 'css/style.css' | url }}">
+  <link rel="stylesheet" href="{{ 'css/pygments.css' | url }}">
+  {%- for path in config.extra_css %}
+  <link rel="stylesheet" href="{{ path | url }}">
+  {%- endfor %}
+</head>
+<body>
+
+<a class="skip-link" href="#content">Skip to content</a>
+
+{%- if config.theme.announce %}
+<div class="announce">
+  <div class="announce-inner">
+    <span class="announce-dot" aria-hidden="true"></span>
+    <span>{{ config.theme.announce }} <a href="{{ 'RESULTS/' | url }}">See the numbers</a></span>
+  </div>
+</div>
+{%- endif %}
+
+<nav class="nav" aria-label="Main">
+  <div class="nav-inner">
+    <a class="nav-brand" href="{{ nav.homepage.url | url if nav.homepage else base_url }}">
+      {%- if config.theme.logo %}
+      <img src="{{ config.theme.logo | url }}" alt="" class="nav-brand-logo" aria-hidden="true">
+      {%- endif %}
+      <span class="wordmark">context<span class="wordmark-dot">·</span>guru</span>
+    </a>
+
+    <div class="nav-links" id="nav-links">
+      {%- for item in nav %}
+        {%- if not item.is_homepage %}
+      <a href="{{ item.url | url if item.url else (item.children[0].url | url) }}"{% if item.active %} class="active" aria-current="page"{% endif %}>{{ item.title }}</a>
+        {%- endif %}
+      {%- endfor %}
+    </div>
+
+    <div class="nav-tools">
+      <button class="nav-icon-btn" type="button" id="search-open" aria-label="Search the docs" title="Search  /">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+      </button>
+      {%- if config.repo_url %}
+      <a class="gh" href="{{ config.repo_url }}">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-2.91-.89-2.91-2.82 0-.62.22-1.18.58-1.62-.05-.15-.25-.75.06-1.55 0 0 .61-.19 2 .75a5.3 5.3 0 0 1 1.4-.19c.48 0 .96.06 1.4.19 1.39-.95 2-.75 2-.75.31.8.11 1.4.06 1.55.36.44.58.99.58 1.62 0 1.94-1.14 2.62-2.92 2.82.3.26.56.76.56 1.54 0 1.11-.01 2.02-.01 2.3 0 .21.15.46.55.38A7.99 7.99 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>
+        <span class="gh-label">GitHub</span>
+      </a>
+      {%- endif %}
+      <button class="nav-icon-btn theme-toggle" type="button" aria-label="Switch to light theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+      </button>
+      <button class="nav-icon-btn nav-burger" type="button" id="nav-burger" aria-label="Open navigation" aria-expanded="false" aria-controls="nav-links">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
+      </button>
+    </div>
+  </div>
+</nav>
+
+{% block body %}{% endblock %}
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div>{{ config.copyright }}</div>
+    <div class="footer-links">
+      <a href="{{ config.repo_url }}">Source</a>
+      <a href="https://pkg.go.dev/github.com/rossoctl/context-guru">Go reference</a>
+      <a href="{{ 'community/' | url }}">Community</a>
+    </div>
+  </div>
+</footer>
+
+{#- Search overlay. Rendered inert; js/site.js fetches search/search_index.json
+    on first open, so a visitor who never searches pays nothing for it. -#}
+<div class="search-overlay" id="search-overlay" hidden>
+  <div class="search-panel" role="dialog" aria-modal="true" aria-label="Search the docs">
+    <div class="search-field">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+      <input type="search" id="search-input" placeholder="Search the documentation…" autocomplete="off" spellcheck="false" aria-label="Search query">
+      <button class="search-close" type="button" id="search-close" aria-label="Close search">Esc</button>
+    </div>
+    <div class="search-results" id="search-results" role="listbox" aria-label="Search results"></div>
+  </div>
+</div>
+
+<script>window.CG_BASE = {{ base_url | tojson }};</script>
+<script src="{{ 'js/site.js' | url }}"></script>
+{%- if page and '"mermaid"' in page.content %}
+{#- Mermaid is loaded only on the pages that actually contain a diagram, and is
+    themed from the same CSS custom properties as the rest of the page. It is the
+    one asset this site does not serve itself: the bundle is 3.5 MB, too heavy to
+    vendor into the repo for 20 diagrams. -#}
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  window.cgMermaid = mermaid;
+  window.cgRenderMermaid();
+</script>
+{%- endif %}
+{%- for path in config.extra_javascript %}
+<script src="{{ path | url }}"></script>
+{%- endfor %}
+</body>
+</html>

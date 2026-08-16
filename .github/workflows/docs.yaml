@@ -1,6 +1,6 @@
 name: Docs
 
-# Build the Material for MkDocs site and publish to GitHub Pages.
+# Build the MkDocs site (hand-written theme in `theme/`) and publish to GitHub Pages.
 # Fully decoupled from ci.yaml — no Go, CGO, or bifrost checkout needed.
 
 on:
@@ -8,7 +8,7 @@ on:
     branches: [main]
     paths:
       - docs/**
-      - overrides/**
+      - theme/**
       - examples/**
       - mkdocs.yml
       - requirements-docs.txt
@@ -16,7 +16,7 @@ on:
   pull_request:
     paths:
       - docs/**
-      - overrides/**
+      - theme/**
       - examples/**
       - mkdocs.yml
       - requirements-docs.txt

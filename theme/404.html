@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block body %}
+<main class="page-narrow doc" id="content">
+  <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span> 404</p>
+  <h1>That page isn't here</h1>
+  <p class="lead">
+    The link is stale or the page moved. The nav above still works, and search
+    (press <kbd>/</kbd>) covers every page on the site.
+  </p>
+  <div class="card-grid">
+    <a class="card" href="{{ base_url }}/">
+      <div class="card-title">Home</div>
+      <p class="card-desc">What context-guru does and what it measured.</p>
+    </a>
+    <a class="card" href="{{ 'get-started/quickstart-proxy/' | url }}">
+      <div class="card-title">Quickstart</div>
+      <p class="card-desc">Build it, run it, point an agent at it.</p>
+    </a>
+    <a class="card" href="{{ 'components/' | url }}">
+      <div class="card-title">Components</div>
+      <p class="card-desc">Every compaction step, what it drops, and whether it is reversible.</p>
+    </a>
+  </div>
+</main>
+{% endblock %}

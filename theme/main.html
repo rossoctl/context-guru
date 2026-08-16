@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{# `with context` so the recursive macro can use the `url` filter, which reads
+   `page` and `base_url` out of the template context to build relative links. #}
+{% import "partials/nav-tree.html" as navtree with context %}
+
+{#-
+  Documentation page: sidebar (the active section's subtree) · content · TOC.
+  `hide: [navigation]` / `hide: [toc]` in a page's front matter drops either rail,
+  and a page that lives at the top level of the nav (Dashboard, Hosted service)
+  has no section to show, so it gets the narrower two-column layout instead.
+-#}
+
+{%- set hide = page.meta.hide | default([], true) -%}
+{%- set ns = namespace(section=none) -%}
+{%- for item in nav %}
+  {%- if item.active and item.children %}{% set ns.section = item %}{% endif %}
+{%- endfor -%}
+{%- set show_side = ns.section and 'navigation' not in hide -%}
+{%- set show_toc = page.toc and page.toc.items and 'toc' not in hide -%}
+
+{% block body %}
+<div class="doc-shell{{ ' has-side' if show_side }}{{ ' has-toc' if show_toc }}">
+
+  {%- if show_side %}
+  <aside class="side" id="side" aria-label="{{ ns.section.title }}">
+    <p class="side-title">{{ ns.section.title }}</p>
+    {{ navtree.tree(ns.section.children, 1) }}
+  </aside>
+  {%- endif %}
+
+  <main class="doc" id="content">
+    {%- if page.ancestors %}
+    <nav class="crumbs" aria-label="Breadcrumb">
+      {%- for a in page.ancestors | reverse %}<span>{{ a.title }}</span><span class="crumb-sep" aria-hidden="true">/</span>{% endfor %}
+      <span class="crumb-here">{{ page.title }}</span>
+    </nav>
+    {%- endif %}
+
+    {{ page.content }}
+
+    <div class="doc-foot">
+      {%- if page.edit_url %}
+      <a class="edit-link" href="{{ page.edit_url }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4v16h16v-7"></path><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z"></path></svg>
+        Edit this page
+      </a>
+      {%- endif %}
+    </div>
+
+    <nav class="pager" aria-label="Adjacent pages">
+      {%- if page.previous_page %}
+      <a class="pager-link pager-prev" href="{{ page.previous_page.url | url }}">
+        <span class="pager-dir">← Previous</span>
+        <span class="pager-title">{{ page.previous_page.title }}</span>
+      </a>
+      {%- else %}<span></span>{% endif %}
+      {%- if page.next_page %}
+      <a class="pager-link pager-next" href="{{ page.next_page.url | url }}">
+        <span class="pager-dir">Next →</span>
+        <span class="pager-title">{{ page.next_page.title }}</span>
+      </a>
+      {%- endif %}
+    </nav>
+  </main>
+
+  {%- if show_toc %}
+  <aside class="toc" aria-label="On this page">
+    <p class="toc-title">On this page</p>
+    {%- for item in page.toc %}
+    <a href="{{ item.url }}">{{ item.title }}</a>
+    {%- for child in item.children %}
+    <a class="toc-l3" href="{{ child.url }}">{{ child.title }}</a>
+    {%- endfor %}
+    {%- endfor %}
+  </aside>
+  {%- endif %}
+
+</div>
+{% endblock %}
