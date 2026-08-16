@@ -14,6 +14,9 @@ Usage: replay.py <capture.jsonl> [--configs off mask extract ...]
 import argparse, json, subprocess, sys, time, urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cgenv  # base URLs and credentials for both the hosted and the local deployment
+
 CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
 BIN = "/tmp/cg-runs/cg-proxy-d1"
 PORT = 4020
@@ -33,11 +36,6 @@ PIPE = {
 }
 
 
-def creds():
-    e = json.load(open(Path("~/.claude/settings.json").expanduser()))["env"]
-    return e["ANTHROPIC_BASE_URL"], e["ANTHROPIC_AUTH_TOKEN"]
-
-
 def get(url):
     with urllib.request.urlopen(url, timeout=5) as r:
         return json.load(r)
@@ -50,7 +48,7 @@ def post(url, body_bytes):
 
 
 def start_proxy(config, base, token):
-    subprocess.run("pkill -x cg-proxy-d1", shell=True); time.sleep(1)
+    subprocess.run(f"pkill -x {Path(BIN).name}", shell=True); time.sleep(1)
     import os
     env = dict(os.environ, ANTHROPIC_UPSTREAM=base, ANTHROPIC_API_KEY=token,
                OPENAI_UPSTREAM=base, OPENAI_API_KEY=token, LISTEN_ADDR=f":{PORT}",
@@ -94,7 +92,7 @@ def main():
     ap.add_argument("capture")
     ap.add_argument("--configs", nargs="*", default=DET_CONFIGS)
     a = ap.parse_args()
-    base, token = creds()
+    base, token = cgenv.gateway()
     recs = [json.loads(l) for l in open(a.capture) if l.strip()]
     print(f"replaying {len(recs)} captured requests through {len(a.configs)} configs\n")
     print(f"{'config':<12} {'saved%':>7} {'before':>9} {'after':>9} {'reqs_mut':>8} {'fmt_ok':>7}  per-component(saved_tokens)")
@@ -132,7 +130,7 @@ def main():
               f"{'':>8} {fmt_ok}/{len(recs):<5}  {pc}", flush=True)
         if fmt_bad:
             print(f"             FORMAT ISSUES ({len(fmt_bad)}): {fmt_bad[:3]}", flush=True)
-    subprocess.run("pkill -x cg-proxy-d1", shell=True)
+    subprocess.run(f"pkill -x {Path(BIN).name}", shell=True)
     Path("/tmp/cg-runs/replay-results.json").write_text(json.dumps(rows, indent=1))
     print("\nwrote /tmp/cg-runs/replay-results.json")
 

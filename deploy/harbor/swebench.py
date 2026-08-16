@@ -22,6 +22,9 @@ Usage: swebench.py --tasks /tmp/cg-runs/swe3.txt --configs off general --jobs-ro
 import argparse, glob, json, os, socket, subprocess, sys, time, urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cgenv  # base URLs and credentials for both the hosted and the local deployment
+
 CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
 HB = Path("/home/vpcuser/projects/context-engineering/harbor")
 BIN = "/tmp/cg-runs/cg-proxy-d1"
@@ -43,11 +46,6 @@ if not os.environ.get("CG_LAN"):
 PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 MODEL = "aws/claude-sonnet-5"
 CHEAP_MODEL = "aws/claude-haiku-4-5"  # fast/cheap model for CG's own compaction LLM (extract_llm)
-
-
-def creds():
-    e = json.load(open(Path("~/.claude/settings.json").expanduser()))["env"]
-    return e["ANTHROPIC_BASE_URL"], e["ANTHROPIC_AUTH_TOKEN"]
 
 
 def price(model):
@@ -89,9 +87,9 @@ def require_free_port():
 
 def stop_proxy():
     for _ in range(3):
-        subprocess.run("pkill -x cg-proxy-d1", shell=True)
+        subprocess.run(f"pkill -x {Path(BIN).name}", shell=True)
         time.sleep(1)
-        r = subprocess.run("pgrep -x cg-proxy-d1", shell=True, capture_output=True)
+        r = subprocess.run(f"pgrep -x {Path(BIN).name}", shell=True, capture_output=True)
         if not r.stdout.strip():
             return
     time.sleep(2)  # let the port fully release (avoids bind race on restart)
@@ -201,8 +199,14 @@ def run_harbor(tasks, jobs_dir, n, setup_mult, build_mult, agent_mult):
     inc = " ".join(f"-i {t}" for t in tasks)
     home = os.path.expanduser("~")
     abs_path = f"{home}/.local/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    cmd = (f"cd {HB} && ANTHROPIC_BASE_URL='{proxy_url}' ANTHROPIC_API_KEY='sk-proxy' "
-           f"ANTHROPIC_AUTH_TOKEN='sk-proxy' PATH='{abs_path}' HOME='{home}' "
+    # The agent's credentials. Hosted: its own gateway key in the auth slots and the
+    # tenant token in x-context-guru-token. Local: the sk-proxy placeholder, because a
+    # single-tenant proxy injects its own upstream key. Both arrive as ${VAR} templates
+    # that harbor expands from the environment below, so neither value is written to
+    # this command line, to the run log, or to the jobs-dir run config.
+    overlay, ae_auth = cgenv.agent_auth()
+    cmd = (f"cd {HB} && ANTHROPIC_BASE_URL='{proxy_url}' ANTHROPIC_API_KEY=\"${{CG_AGENT_KEY}}\" "
+           f"ANTHROPIC_AUTH_TOKEN=\"${{CG_AGENT_KEY}}\" PATH='{abs_path}' HOME='{home}' "
            f"{home}/.local/bin/uv run harbor run -y -d swebench-verified@1.0 -a claude-code -m '{MODEL}' "
            f"--env docker {inc} -n {n} --jobs-dir '{jobs_dir}' "
            # --no-delete keeps each task's image after the trial so it is NOT re-pulled
@@ -211,10 +215,11 @@ def run_harbor(tasks, jobs_dir, n, setup_mult, build_mult, agent_mult):
            f"--no-delete "
            f"--agent-setup-timeout-multiplier {setup_mult} --environment-build-timeout-multiplier {build_mult} "
            f"--agent-timeout-multiplier {agent_mult} --max-retries 2 "
-           f"--ae ANTHROPIC_BASE_URL='{proxy_url}' --ae ANTHROPIC_API_KEY='sk-proxy' --ae ANTHROPIC_AUTH_TOKEN='sk-proxy'")
+           f"--ae ANTHROPIC_BASE_URL='{proxy_url}' {ae_auth}")
     log = f"/tmp/cg-runs/run-swebench-{Path(jobs_dir).name}.log"
     with open(log, "w") as f:
-        subprocess.run(["sg", "docker", "-c", cmd], stdout=f, stderr=f)
+        subprocess.run(["sg", "docker", "-c", cmd], stdout=f, stderr=f,
+                       env=dict(os.environ, **overlay))
     return log
 
 
@@ -305,7 +310,7 @@ def main():
     ap.add_argument("--dump-configs", nargs="*", default=["general"], help="configs that DUMP before→after change logs")
     a = ap.parse_args()
     require_free_port()  # before any container is built or token spent
-    base, token = creds()
+    base, token = cgenv.gateway()
     pr = price(MODEL)
     cpr = price(CHEAP_MODEL)  # CG's OWN compaction LLM is the CHEAP model — price it at ITS rate
     tasks = [t.strip() for t in open(a.tasks) if t.strip()]

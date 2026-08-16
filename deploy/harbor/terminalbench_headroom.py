@@ -24,6 +24,9 @@ Usage:
 import argparse, glob, json, os, re, subprocess, sys, time, urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cgenv  # base URLs and credentials for both the hosted and the local deployment
+
 HD = Path("/home/vpcuser/projects/context-engineering/headroom")
 HB = Path("/home/vpcuser/projects/context-engineering/harbor")
 HEADROOM_BIN = os.path.expanduser("~/.local/bin/headroom")
@@ -61,11 +64,6 @@ CONFIGS = {
     "hd-ccr":   (["--mode", "cache", "--code-aware"], {}),  # CCR on (breaks streaming); reference only
     "hdoff":    (["--no-optimize"], {}),
 }
-
-
-def creds():
-    e = json.load(open(Path("~/.claude/settings.json").expanduser()))["env"]
-    return e["ANTHROPIC_BASE_URL"], e["ANTHROPIC_AUTH_TOKEN"]
 
 
 def price(model):
@@ -161,16 +159,23 @@ def run_harbor(tasks, jobs_dir, n, setup_mult, build_mult, agent_mult, max_retri
     inc = " ".join(f"-i {t}" for t in tasks)
     home = os.path.expanduser("~")
     abs_path = f"{home}/.local/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    cmd = (f"cd {HB} && ANTHROPIC_BASE_URL='{proxy_url}' ANTHROPIC_API_KEY='sk-proxy' "
-           f"ANTHROPIC_AUTH_TOKEN='sk-proxy' PATH='{abs_path}' HOME='{home}' "
+    # The agent's credentials. Hosted: its own gateway key in the auth slots and the
+    # tenant token in x-context-guru-token. Local: the sk-proxy placeholder, because a
+    # single-tenant proxy injects its own upstream key. Both arrive as ${VAR} templates
+    # that harbor expands from the environment below, so neither value is written to
+    # this command line, to the run log, or to the jobs-dir run config.
+    overlay, ae_auth = cgenv.agent_auth()
+    cmd = (f"cd {HB} && ANTHROPIC_BASE_URL='{proxy_url}' ANTHROPIC_API_KEY=\"${{CG_AGENT_KEY}}\" "
+           f"ANTHROPIC_AUTH_TOKEN=\"${{CG_AGENT_KEY}}\" PATH='{abs_path}' HOME='{home}' "
            f"{home}/.local/bin/uv run harbor run -y -d terminal-bench@2.0 -a claude-code -m '{MODEL}' "
            f"--env docker {inc} -n {n} --jobs-dir '{jobs_dir}' --no-delete "
            f"--agent-setup-timeout-multiplier {setup_mult} --environment-build-timeout-multiplier {build_mult} "
            f"--agent-timeout-multiplier {agent_mult} --max-retries {max_retries} "
-           f"--ae ANTHROPIC_BASE_URL='{proxy_url}' --ae ANTHROPIC_API_KEY='sk-proxy' --ae ANTHROPIC_AUTH_TOKEN='sk-proxy'")
+           f"--ae ANTHROPIC_BASE_URL='{proxy_url}' {ae_auth}")
     log = f"/tmp/tb-runs/run-{Path(jobs_dir).name}.log"
     with open(log, "w") as f:
-        subprocess.run(["sg", "docker", "-c", cmd], stdout=f, stderr=f)
+        subprocess.run(["sg", "docker", "-c", cmd], stdout=f, stderr=f,
+                       env=dict(os.environ, **overlay))
     return log
 
 
@@ -356,7 +361,7 @@ def main():
     ap.add_argument("--agent-mult", type=float, default=4.0)  # TB: 4x flat budget (matches baseline's long-horizon budget)
     ap.add_argument("--max-retries", type=int, default=4)
     a = ap.parse_args()
-    base, token = creds()
+    base, token = cgenv.gateway()
     pr = price(MODEL)
     tasks = [t.strip() for t in open(a.tasks) if t.strip()]
     Path(a.jobs_root).mkdir(parents=True, exist_ok=True)

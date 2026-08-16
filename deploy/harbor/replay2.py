@@ -20,6 +20,9 @@ Usage: replay2.py <capture.jsonl> [--configs off mask ...] [--model aws/claude-s
 import argparse, json, os, subprocess, sys, time, urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cgenv  # base URLs and credentials for both the hosted and the local deployment
+
 CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
 BIN = "/tmp/cg-runs/cg-proxy-rp"
 PORT = 4021
@@ -30,11 +33,6 @@ DET_CONFIGS = ["off", "format", "toon", "cacheinject", "dedup", "failed_run",
                "phi_evict", "general", "agent", "balanced"]
 PIPE = {"off": None, "agent": ("preset", "agent"), "balanced": ("preset", "balanced"),
         "general": ("preset", "general"), "coding": ("preset", "coding"), "mcp": ("preset", "mcp")}
-
-
-def creds():
-    e = json.load(open(Path("~/.claude/settings.json").expanduser()))["env"]
-    return e["ANTHROPIC_BASE_URL"], e["ANTHROPIC_AUTH_TOKEN"]
 
 
 def get(url):
@@ -129,7 +127,7 @@ def main():
     ap.add_argument("--diffs", type=int, default=4, help="save N before/after diffs per config")
     ap.add_argument("--out", default="/tmp/cg-runs/replay2-results.json")
     a = ap.parse_args()
-    base, token = creds()
+    base, token = cgenv.gateway()
     in_p, out_p, cache_p = price_for(a.model)
     recs = [json.loads(l) for l in open(a.capture) if l.strip()]
     tag = Path(a.capture).stem

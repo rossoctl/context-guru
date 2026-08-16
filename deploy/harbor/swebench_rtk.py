@@ -30,6 +30,9 @@ Usage:
 import argparse, glob, json, os, subprocess, sys, time, urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cgenv  # base URLs and credentials for both the hosted and the local deployment
+
 CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
 HB = Path("/home/vpcuser/projects/context-engineering/harbor")
 BIN = "/tmp/cg-runs/cg-proxy-d1"          # context-guru proxy (off = passthrough)
@@ -49,11 +52,6 @@ PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_price
 MODEL = "aws/claude-sonnet-5"
 
 
-def creds():
-    e = json.load(open(Path("~/.claude/settings.json").expanduser()))["env"]
-    return e["ANTHROPIC_BASE_URL"], e["ANTHROPIC_AUTH_TOKEN"]
-
-
 def price(model):
     fb = (2e-6, 1e-5, 2e-7, 2.5e-6)  # in, out, cache_read, cache_write
     try:
@@ -70,9 +68,9 @@ def price(model):
 
 def stop_proxy():
     for _ in range(3):
-        subprocess.run("pkill -x cg-proxy-d1", shell=True)
+        subprocess.run(f"pkill -x {Path(BIN).name}", shell=True)
         time.sleep(1)
-        r = subprocess.run("pgrep -x cg-proxy-d1", shell=True, capture_output=True)
+        r = subprocess.run(f"pgrep -x {Path(BIN).name}", shell=True, capture_output=True)
         if not r.stdout.strip():
             return
     time.sleep(2)
@@ -103,16 +101,23 @@ def run_harbor(tasks, jobs_dir, n, setup_mult, build_mult, agent_mult):
     home = os.path.expanduser("~")
     abs_path = f"{home}/.local/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     # RTK_BIN_HOST tells the claude-code-rtk agent where the host rtk binary is.
-    cmd = (f"cd {HB} && ANTHROPIC_BASE_URL='{proxy_url}' ANTHROPIC_API_KEY='sk-proxy' "
-           f"ANTHROPIC_AUTH_TOKEN='sk-proxy' RTK_BIN_HOST='{RTK_BIN}' PATH='{abs_path}' HOME='{home}' "
+    # The agent's credentials. Hosted: its own gateway key in the auth slots and the
+    # tenant token in x-context-guru-token. Local: the sk-proxy placeholder, because a
+    # single-tenant proxy injects its own upstream key. Both arrive as ${VAR} templates
+    # that harbor expands from the environment below, so neither value is written to
+    # this command line, to the run log, or to the jobs-dir run config.
+    overlay, ae_auth = cgenv.agent_auth()
+    cmd = (f"cd {HB} && ANTHROPIC_BASE_URL='{proxy_url}' ANTHROPIC_API_KEY=\"${{CG_AGENT_KEY}}\" "
+           f"ANTHROPIC_AUTH_TOKEN=\"${{CG_AGENT_KEY}}\" RTK_BIN_HOST='{RTK_BIN}' PATH='{abs_path}' HOME='{home}' "
            f"{home}/.local/bin/uv run harbor run -y -d swebench-verified@1.0 -a claude-code-rtk -m '{MODEL}' "
            f"--env docker {inc} -n {n} --jobs-dir '{jobs_dir}' --no-delete "
            f"--agent-setup-timeout-multiplier {setup_mult} --environment-build-timeout-multiplier {build_mult} "
            f"--agent-timeout-multiplier {agent_mult} --max-retries 2 "
-           f"--ae ANTHROPIC_BASE_URL='{proxy_url}' --ae ANTHROPIC_API_KEY='sk-proxy' --ae ANTHROPIC_AUTH_TOKEN='sk-proxy'")
+           f"--ae ANTHROPIC_BASE_URL='{proxy_url}' {ae_auth}")
     log = f"/tmp/rtk-runs/run-{Path(jobs_dir).name}.log"
     with open(log, "w") as f:
-        subprocess.run(["sg", "docker", "-c", cmd], stdout=f, stderr=f)
+        subprocess.run(["sg", "docker", "-c", cmd], stdout=f, stderr=f,
+                       env=dict(os.environ, **overlay))
     return log
 
 
@@ -227,7 +232,7 @@ def main():
     ap.add_argument("--build-mult", type=float, default=4.0)
     ap.add_argument("--agent-mult", type=float, default=1.5)
     a = ap.parse_args()
-    base, token = creds()
+    base, token = cgenv.gateway()
     pr = price(MODEL)
     tasks = [t.strip() for t in open(a.tasks) if t.strip()]
     Path(a.jobs_root).mkdir(parents=True, exist_ok=True)

@@ -20,6 +20,9 @@ Usage:
 import argparse, csv, json, os, re, shutil, signal, socket, subprocess, sys, time, urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cgenv  # base URLs and credentials for both the hosted and the local deployment
+
 CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
 HARBOR = Path("/home/vpcuser/projects/context-engineering/harbor")
 BIN = "/tmp/cg-runs/cg-proxy-d1"          # stable snapshot; override with --bin
@@ -50,9 +53,6 @@ FIELDS = ["benchmark", "task", "config", "reward", "wall_s", "gw_requests",
           "gw_before", "gw_after", "gw_saved", "gw_pct", "per_component", "note"]
 
 
-def creds():
-    e = json.load(open(os.path.expanduser("~/.claude/settings.json")))["env"]
-    return e["ANTHROPIC_BASE_URL"], e["ANTHROPIC_AUTH_TOKEN"]
 
 
 def host_ip():
@@ -69,7 +69,7 @@ def stats(port):
 
 def start_proxy(config, base, token, dump):
     """(Re)start the proxy for a config; returns the Popen. Fresh process => fresh /stats."""
-    subprocess.run("pkill -x context-guru-proxy", shell=True); time.sleep(1.0)
+    subprocess.run(f"pkill -x {Path(BIN).name}", shell=True); time.sleep(1.0)
     spec = CONFIGS[config]
     env = dict(os.environ,
                ANTHROPIC_UPSTREAM=base, ANTHROPIC_API_KEY=token,
@@ -121,16 +121,20 @@ def run_cell(benchmark, task_glob, config, base, token, timeout):
     before = stats(PORT)
     jobs_dir = RUNS / f"jobs-{benchmark.replace('@','_').replace('/','_')}-{config}"
     sel = f"-i '{task_glob}'" if task_glob else "-l 1"
-    cmd = (f"ANTHROPIC_BASE_URL='{proxy_url}' ANTHROPIC_API_KEY='sk-proxy' "
-           f"ANTHROPIC_AUTH_TOKEN='sk-proxy' PATH='{os.environ['PATH']}:{os.path.expanduser('~/.local/bin')}' "
+    # Credentials via ${VAR} templates the shell and harbor expand, so nothing lands in
+    # argv or in the jobs dir. See cgenv.agent_auth().
+    overlay, ae_auth = cgenv.agent_auth()
+    cmd = (f"ANTHROPIC_BASE_URL='{proxy_url}' ANTHROPIC_API_KEY=\"${{CG_AGENT_KEY}}\" "
+           f"ANTHROPIC_AUTH_TOKEN=\"${{CG_AGENT_KEY}}\" PATH='{os.environ['PATH']}:{os.path.expanduser('~/.local/bin')}' "
            f"uv run harbor run -d {benchmark} -a claude-code -m {MODEL} -n 1 {sel} "
            f"--jobs-dir '{jobs_dir}' --force-build "
-           f"--ae ANTHROPIC_BASE_URL='{proxy_url}' --ae ANTHROPIC_API_KEY='sk-proxy'")
+           f"--ae ANTHROPIC_BASE_URL='{proxy_url}' {ae_auth}")
     t0 = time.time()
     note = "ok"
     try:
         r = subprocess.run(["sg", "docker", "-c", cmd], cwd=str(HARBOR),
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout,
+                           env=dict(os.environ, **overlay))
         if r.returncode != 0:
             note = "run-rc=%d:%s" % (r.returncode, (r.stderr or r.stdout)[-160:].replace("\n", " "))
     except subprocess.TimeoutExpired:
@@ -184,7 +188,7 @@ def main():
     ap.add_argument("--bin", default=BIN)
     a = ap.parse_args()
     BIN = a.bin
-    base, token = creds()
+    base, token = cgenv.gateway()
     cells = []
     if a.matrix:
         for bench, tasks, configs in MATRICES[a.matrix]:
@@ -205,7 +209,7 @@ def main():
         row = run_cell(bench, task, config, base, token, a.timeout)
         append(row)
         print(f"  -> reward={row['reward']} saved%={row['gw_pct']} req={row['gw_requests']} note={row['note']}", flush=True)
-    subprocess.run("pkill -x context-guru-proxy", shell=True)
+    subprocess.run(f"pkill -x {Path(BIN).name}", shell=True)
     print("done", flush=True)
 
 
