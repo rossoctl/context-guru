@@ -139,6 +139,11 @@ const state = {
   sessOffset: 0,
   live: [],
   overview: null,
+  // dim is which dimension the Usage breakdown groups by. Not a FILTER — it selects a
+  // view of the same filtered window, so it is deliberately outside state.filter and
+  // outside the URL: it narrows nothing, and a chip for it would claim it did.
+  // ponytail: not URL-persisted; put it in the query string if sharing a breakdown link matters.
+  dim: 'model',
   // What the drawer is showing, and part of the URL: {req: id} | {diff: session} | null.
   drawer: null,
   // ac aborts every fetch belonging to the PREVIOUS filter state. Without it a slow
@@ -406,6 +411,60 @@ function barRows(host, rows, opts = {}) {
     if (r.desc) wrap.appendChild(el('div', { class: 'bar-desc', text: r.desc }));
   }
   host.appendChild(wrap);
+}
+
+/**
+ * SERIES_SPENT / SERIES_SAVED are the two categorical slots of the spent-against-saved
+ * comparison, taken from the design system's fixed series order (--s1 first, --s3 third)
+ * rather than picked by eye. Validated as a pair against both the light and the dark chart
+ * surface: lightness band, chroma floor, deuteranopia separation (ΔE 19.6 light / 17.5
+ * dark) and 3:1 contrast all pass.
+ *
+ * Blue against green is the one pair tritanopia struggles with (ΔE ~4), which is why every
+ * bar below is DIRECTLY LABELLED with its own value and the legend is always present:
+ * identity never rests on the hue alone.
+ */
+const SERIES_SPENT = SERIES[0];
+const SERIES_SAVED = SERIES[2];
+
+/**
+ * pairedBars(host, rows) draws two bars per row against ONE shared scale.
+ *
+ * One scale, deliberately: both figures are dollars, and a second axis scaled to fit the
+ * smaller series would make a day that saved a tenth of what it spent look like a day that
+ * broke even. Both bars carry their own value as text, so the chart reads correctly with
+ * the colours ignored entirely.
+ *
+ * rows: [{label, a, b, aDisplay, bDisplay, note, unknown}]
+ *   a/b       the two magnitudes (a = spent, b = saved), signed
+ *   unknown   true when the group has no priced rows — drawn as no bars and the word
+ *             "unknown", never as a zero, which would read as "this cost nothing"
+ */
+function pairedBars(host, rows, opts = {}) {
+  clear(host);
+  if (!rows.length) { emptyState(host, opts.empty || 'Nothing to show yet', opts.emptyDetail || ''); return; }
+  const max = Math.max(...rows.flatMap((r) => [Math.abs(r.a || 0), Math.abs(r.b || 0)]), Number.MIN_VALUE);
+  const wrap = el('div', { class: 'bars' });
+  const bar = (v, color) => el('div', { class: 'bar-track' }, el('div', {
+    class: 'bar-fill' + (v < 0 ? ' neg' : ''),
+    style: 'width:' + Math.min(100, (Math.abs(v) / max) * 100) + '%' + (v >= 0 ? ';background:' + color : ''),
+  }));
+  for (const r of rows) {
+    wrap.appendChild(el('div', { class: 'bar-row' },
+      el('div', { class: 'bar-label', text: r.label },
+        r.note ? el('span', { class: 'bar-sub', text: r.note }) : null),
+      r.unknown ? el('div', { class: 'bar-track' }) : el('div', { class: 'bar-pair' },
+        bar(r.a || 0, SERIES_SPENT), bar(r.b || 0, SERIES_SAVED)),
+      el('div', { class: 'bar-val' + (r.unknown ? ' na' : '') },
+        el('div', { text: r.unknown ? 'unknown' : r.aDisplay }),
+        r.unknown ? null : el('div', { class: 'bar-val-b', text: r.bDisplay }))));
+  }
+  host.appendChild(wrap);
+  // A legend for two series is not optional: the swatch is what ties the second, thinner
+  // bar in each row to the word "saved".
+  host.appendChild(el('div', { class: 'legend' },
+    el('span', {}, el('i', { style: 'background:' + SERIES_SPENT }), opts.aLabel || 'Spent'),
+    el('span', {}, el('i', { style: 'background:' + SERIES_SAVED }), opts.bLabel || 'Saved')));
 }
 
 // ── overview ───────────────────────────────────────────────────────────────
@@ -696,6 +755,95 @@ function verdict(c) {
   }
   if (c.act_rate < 0.02) return ['rarely fires', 'partial'];
   return ['earning its place', 'complete'];
+}
+
+/** DAY_MS is dash.DayMs: per-day bars are the shared time series at a day-wide bucket. */
+const DAY_MS = 86400000;
+
+/** Labels for the breakdown dimensions the server offers. Unknown keys fall back to the
+ *  raw name, so a dimension added server-side appears in the picker without a UI change. */
+const DIM_LABELS = {
+  model: 'model', provider: 'provider', agent: 'agent', preset: 'preset', mode: 'mode',
+  reasoning_effort: 'reasoning effort', thinking_mode: 'thinking mode',
+  stop_reason: 'stop reason', tool_choice: 'tool choice',
+  cache_miss_reason: 'cache outcome', cache_breakpoints: 'cache_control breakpoints',
+  stream: 'streaming',
+};
+
+async function loadUsage() {
+  const dayHost = $('#chart-daily');
+  const breakHost = $('#chart-breakdown');
+  const body = clear($('#breakdown-body'));
+  loadingRows(body, 8);
+  try {
+    // Per-day bars need no endpoint of their own: the series is bucketed in SQL from the
+    // raw timestamp, so a day-wide bucket is a query parameter.
+    const [{ buckets }, bd] = await Promise.all([
+      api('series', { bucket: DAY_MS }),
+      api('breakdown', { dim: state.dim }),
+    ]);
+    pairedBars(dayHost, (buckets || []).map((b) => ({
+      label: new Date(b.ts).toISOString().slice(0, 10),
+      note: num(b.requests) + ' requests · ' + compact(b.tokens_before) + ' → ' + compact(b.tokens_after) + ' tokens',
+      a: b.cost_usd + b.cg_llm_cost_usd,
+      b: b.saved_usd,
+      aDisplay: usd(b.cost_usd + b.cg_llm_cost_usd),
+      bDisplay: usd(b.saved_usd),
+      unknown: b.baseline_cost_usd === 0 && b.cost_usd === 0,
+    })), {
+      empty: 'No days in this window',
+      emptyDetail: 'Send traffic through the proxy, or widen the time range.',
+    });
+
+    syncDimPicker(bd.dimensions || []);
+    $('#breakdown-key-head').textContent = DIM_LABELS[bd.dim] || bd.dim;
+    const groups = bd.groups || [];
+    clear(body);
+    if (!groups.length) {
+      tableMessage(body, 8, 'Nothing to break down', 'No requests match the current filters.');
+      emptyState(breakHost, 'Nothing to break down', 'No requests match the current filters.');
+      return;
+    }
+    pairedBars(breakHost, groups.map((g) => ({
+      label: g.key || '(not set)',
+      note: num(g.requests) + ' requests',
+      a: g.spent_usd,
+      b: g.saved_usd,
+      aDisplay: usd(g.spent_usd),
+      bDisplay: usd(g.saved_usd),
+      // Every row unpriced means the money figures for this bar are unknown, not zero.
+      unknown: g.incomplete_rows >= g.requests,
+    })));
+    for (const g of groups) {
+      const unpriced = g.incomplete_rows >= g.requests;
+      body.appendChild(el('tr', {},
+        el('td', { text: g.key || '(not set)' }),
+        el('td', { class: 'num', text: num(g.requests) }),
+        el('td', { class: 'num', text: compact(g.tokens_before) }),
+        el('td', { class: 'num', text: compact(g.tokens_after) }),
+        el('td', { class: 'num', text: compact(g.saved_unique) }),
+        el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.spent_usd) }),
+        el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.saved_usd) }),
+        el('td', { class: 'num', text: num(g.incomplete_rows) })));
+    }
+  } catch (err) {
+    if (aborted(err)) return;
+    clear(body);
+    tableMessage(body, 8, 'Could not load the breakdown', err.message);
+    emptyState(breakHost, 'Could not load the breakdown', err.message, { error: true });
+    emptyState(dayHost, 'Could not load daily usage', err.message, { error: true });
+  }
+}
+
+/** syncDimPicker fills the dimension picker from what the SERVER says it can group by,
+ *  so the options can never name a dimension the query would reject. */
+function syncDimPicker(dims) {
+  const sel = $('#f-dim');
+  if (sel.options.length !== dims.length) {
+    clear(sel);
+    for (const d of dims) sel.appendChild(el('option', { value: d }, DIM_LABELS[d] || d));
+  }
+  sel.value = state.dim;
 }
 
 async function loadComponents() {
@@ -1272,6 +1420,38 @@ async function openRequest(id, fromURL) {
       kv('Cache attribution', e.cache_miss_reason || '—'),
       kv('Token accounting', e.token_accounting),
       kv('Compaction outcome', e.uncompressed_reason || 'compacted')));
+
+    // The request's own metadata: what the client ASKED for. Separate from the block
+    // above, which is what happened to it.
+    //
+    // `set(v)` prints an absent value as an em dash and a zero as a zero. That matters
+    // most for temperature: the API sends null for "not set" and 0 for "be
+    // deterministic", and collapsing the two would misreport every deterministic request.
+    const set = (v, fmt) => (v === null || v === undefined || v === '' ? '—' : (fmt ? fmt(v) : String(v)));
+    body.appendChild(el('h2', { text: 'What the request asked for' }));
+    body.appendChild(el('div', { class: 'kv', 'data-testid': 'detail-meta' },
+      kv('Reasoning effort', set(e.reasoning_effort)),
+      kv('Thinking', e.thinking_mode
+        ? e.thinking_mode + (e.thinking_budget ? ' (' + compact(e.thinking_budget) + ' token budget)' : '')
+        : '—'),
+      kv('Temperature', set(e.temperature)),
+      kv('top_p', set(e.top_p)),
+      kv('max_tokens', e.max_tokens ? num(e.max_tokens) : '—'),
+      kv('Streaming', e.stream ? 'yes' : 'no'),
+      kv('Tool choice', set(e.tool_choice)),
+      kv('Tools declared', num(e.tools)),
+      kv('System blocks', num(e.system_blocks)),
+      // Placement, not just a count: tools and system render ahead of messages, so a
+      // breakpoint's location decides how much of the prefix it protects.
+      kv('cache_control breakpoints',
+        num(e.cache_bp_system + e.cache_bp_tools + e.cache_bp_messages + e.cache_bp_blocks) + ' of 4 · '
+        + 'system ' + num(e.cache_bp_system) + ' · tools ' + num(e.cache_bp_tools)
+        + ' · messages ' + num(e.cache_bp_messages) + ' · blocks ' + num(e.cache_bp_blocks)),
+      kv('Stop reason', set(e.stop_reason)),
+      // The two ids a log query is built from, side by side with the numbers they
+      // explain: a request row has to be joinable to the lines it emitted.
+      kv('Tenant id', e.tenant_id || '— (single-tenant)'),
+      kv('Session id (for logs)', e.session_id || '—')));
 
     body.appendChild(el('h2', { text: 'Components, in the order they ran' }));
     if (!e.components || !e.components.length) {
@@ -1990,7 +2170,7 @@ async function checkCapture() {
 
 // ── views + filters ────────────────────────────────────────────────────────
 const loaders = {
-  overview: loadOverview, components: loadComponents, sessions: loadSessions,
+  overview: loadOverview, usage: loadUsage, components: loadComponents, sessions: loadSessions,
   requests: loadRequests, benchmarks: loadBenchmarks, config: loadConfig,
 };
 
@@ -2015,11 +2195,15 @@ const DIMS = [
   ['component', 'component', '#f-component'],
   ['reason', 'outcome', '#f-reason'],
   ['accounting', 'accounting', '#f-accounting'],
+  ['effort', 'effort', '#f-effort'],
+  ['thinking', 'thinking', '#f-thinking'],
+  ['stop_reason', 'stop reason', '#f-stop_reason'],
   ['session', 'session', null],
   ['tenant', 'tenant', null],
 ];
 /** The facet dimensions the server can enumerate; the rest are fixed option lists. */
-const FACET_DIMS = ['model', 'provider', 'agent', 'preset', 'mode', 'component'];
+const FACET_DIMS = ['model', 'provider', 'agent', 'preset', 'mode', 'component',
+  'effort', 'thinking', 'stop_reason'];
 
 /** activeFilters lists the set filters as [key, label, value], time range included. */
 function activeFilters() {
@@ -2388,6 +2572,7 @@ function init() {
     $(ctl).addEventListener('change', (ev) => setFilter(key, ev.currentTarget.value));
   }
   $('#f-range').addEventListener('change', (ev) => setRange(ev.currentTarget.value));
+  $('#f-dim').addEventListener('change', (ev) => { state.dim = ev.currentTarget.value; loadUsage(); });
   // Debounced, and Enter commits immediately rather than waiting out the delay. The
   // pending timer is dropped on submit so the same query is not sent twice.
   let deb;

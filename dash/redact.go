@@ -62,6 +62,35 @@ func RedactHeaders(h map[string][]string) map[string]string {
 	return out
 }
 
+// metaEnumShape is the shape every stored request-metadata enum has to fit: a short
+// identifier. `high`, `adaptive`, `end_turn`, `tool_calls` and `model_context_window_
+// exceeded` all fit; a credential does not, because credentials are long and carry
+// characters this does not admit.
+//
+// An allowlist of the values we know would be tighter still, and it is the wrong trade
+// here: a provider that ships a new effort level or a new stop reason would have every
+// row of it recorded as «redacted», which reads as "we caught a secret" — a dashboard
+// lying about its own data. A shape check keeps an unrecognized-but-harmless value
+// visible while still refusing anything credential-sized.
+var metaEnumShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.:-]{0,31}$`)
+
+// metaEnum sanitizes one client-supplied metadata enum before it is inserted.
+//
+// Two gates, and both matter. RedactContent catches the credential SHAPES (sk-…, ghp_…,
+// AKIA…, a JWT) that would otherwise fit inside the length bound, and the shape check
+// then refuses everything else that is not a plain short identifier. Values are dropped
+// wholesale rather than partially scrubbed because a partial value in an aggregated
+// column is worse than none: it would open its own GROUP BY bucket.
+func metaEnum(s string) string {
+	if s == "" {
+		return ""
+	}
+	if RedactContent(s, 0) != s || !metaEnumShape.MatchString(s) {
+		return Redacted
+	}
+	return s
+}
+
 // configAllowlist names the effective-config keys the /api/config view may
 // render. Everything else in the resolved configuration is withheld, because a
 // component's config block is free-form YAML and could carry an endpoint

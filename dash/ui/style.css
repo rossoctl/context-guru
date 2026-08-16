@@ -352,6 +352,12 @@ main { padding: var(--sp-4) var(--sp-4) var(--sp-6); max-width: 1680px; margin: 
   min-width: 92px; text-align: right;
 }
 .bar-desc { grid-column: 1 / -1; color: var(--fg-muted); font-size: var(--t-micro); margin: -2px 0 var(--sp-2); max-width: 92ch; line-height: 1.5; }
+/* Two bars, one row, one scale (pairedBars). The 2px gap is the surface showing between
+   the two fills — adjacent marks need a visible gap or they read as one stacked bar. */
+.bar-pair { display: grid; gap: 2px; }
+.bar-pair .bar-track { height: 8px; }
+.bar-val-b { color: var(--fg-muted); font-weight: 500; }
+.bar-sub { display: block; color: var(--fg-faint); font-size: var(--t-micro); font-weight: 400; }
 
 /* ── tables ───────────────────────────────────────────────────────────── */
 /* Wide content scrolls INSIDE its own container; the page body never scrolls
