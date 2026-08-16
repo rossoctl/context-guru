@@ -1146,13 +1146,17 @@ func (h *Handler) ctlBindAgentKey(w http.ResponseWriter, r *http.Request) {
 		// account. Binding it used to transfer it silently, which handed the new binder the
 		// other account's traffic — so the refusal has to say who can undo it.
 		//
-		// A "this key is too short to bind" error (tenant.ErrBadAgentKey, with the minimum
-		// length beside it) belongs in this switch too, and cannot be referenced yet: the
-		// value does not exist at this branch's base commit. It arrives with the tenant/
-		// binding fix, as one more `case errors.Is(err, tenant.ErrBadAgentKey)` returning
-		// 400 and saying plainly that the key is a real key but shorter than we will bind —
-		// not that it is malformed.
+		// ErrBadAgentKey is the length floor, and the message must not imply the key is
+		// malformed: a short key can be perfectly valid at its provider and merely too
+		// short for us to accept as an IDENTITY, because identity here is the key's
+		// digest — so a guessable key is a guessable account.
 		switch {
+		case errors.Is(err, tenant.ErrBadAgentKey):
+			ctlErr(w, http.StatusBadRequest, fmt.Sprintf("that provider key is shorter than %d "+
+				"characters; context-guru identifies this agent by the digest of its key, so a "+
+				"short key would be guessable. Use a longer key, or send the "+
+				"x-context-guru-token header from an agent that can set one",
+				tenant.MinAgentKeyLen))
 		case errors.Is(err, tenant.ErrForbidden):
 			ctlErr(w, http.StatusForbidden, "that provider key is already bound to another "+
 				"account; its owner has to unbind it first")
