@@ -17,6 +17,7 @@
   </h1>
   <nav class="tabs" role="tablist" aria-label="Views">
     <button role="tab" class="tab" data-view="overview" data-testid="tab-overview" aria-selected="true">Overview</button>
+    <button role="tab" class="tab" data-view="usage" data-testid="tab-usage">Usage</button>
     <button role="tab" class="tab" data-view="components" data-testid="tab-components">Components</button>
     <button role="tab" class="tab" data-view="sessions" data-testid="tab-sessions">Sessions</button>
     <button role="tab" class="tab" data-view="requests" data-testid="tab-requests">Requests</button>
@@ -61,6 +62,12 @@
     <option value="reverted">Not: reverted</option>
     <option value="no_messages">Not: no messages</option>
   </select>
+  <!-- Request-metadata filters. Enumerated from the data (see facetQueries), so the
+       options are what this deployment's traffic actually carried rather than a guess at
+       one provider's vocabulary. -->
+  <select id="f-effort" data-testid="filter-effort" aria-label="Reasoning effort"><option value="">Any effort</option></select>
+  <select id="f-thinking" data-testid="filter-thinking" aria-label="Thinking mode"><option value="">Any thinking</option></select>
+  <select id="f-stop_reason" data-testid="filter-stop-reason" aria-label="Stop reason"><option value="">Any stop reason</option></select>
   <select id="f-accounting" data-testid="filter-accounting" aria-label="Token accounting">
     <option value="">Any accounting</option>
     <option value="complete">Exact (complete)</option>
@@ -217,6 +224,42 @@
       <table class="tbl compact" data-testid="live-table">
         <thead><tr><th>Time</th><th>Session</th><th>Model</th><th class="num">Before</th><th class="num">After</th><th class="num">Saved (gross)</th><th class="num">CG ms</th><th>Accounting</th></tr></thead>
         <tbody id="live-body"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ── Usage ─────────────────────────────────────────────────────────────────
+     Spent against saved, three ways of cutting it: by day, and by any one dimension of
+     the request — including the metadata the request itself carried. Both panels read the
+     filter bar above, so the time range is the range selected there. -->
+<section class="view" id="view-usage" hidden>
+  <div class="panel">
+    <h2>Per day: spent against saved</h2>
+    <p class="note"><strong>Spent</strong> is what was billed plus context-guru's own model
+      spend. <strong>Saved</strong> is the baseline counterfactual minus that — negative
+      means context-guru cost more than it saved that day, which this will show rather than
+      hide. Days are UTC, so two people reading this see the same bars. Use the time range
+      in the filter bar to change the window.</p>
+    <div id="chart-daily" class="chart" data-testid="chart-daily"></div>
+  </div>
+  <div class="panel">
+    <h2>Spent against saved, by <select id="f-dim" data-testid="filter-dim" aria-label="Breakdown dimension"></select></h2>
+    <p class="note">The same two figures grouped by one dimension of the request. Model
+      answers "where does the money go"; <strong>reasoning effort</strong>, <strong>thinking
+      mode</strong> and <strong>cache breakpoints</strong> answer whether the knobs the agent
+      sets correlate with what it costs — breakpoint placement being the question this whole
+      project exists to answer. A bar whose accounting is incomplete is labelled as
+      <em>unknown</em>, never drawn as zero.</p>
+    <div id="chart-breakdown" class="chart" data-testid="chart-breakdown"></div>
+    <div class="tblwrap" tabindex="0">
+      <table class="tbl" data-testid="breakdown-table">
+        <thead><tr>
+          <th id="breakdown-key-head">Value</th><th class="num">Requests</th><th class="num">Tokens before</th>
+          <th class="num">Tokens after</th><th class="num">Saved (unique)</th>
+          <th class="num">Spent</th><th class="num">Saved</th><th class="num">Unpriced rows</th>
+        </tr></thead>
+        <tbody id="breakdown-body"></tbody>
       </table>
     </div>
   </div>

@@ -3,6 +3,7 @@ package dash
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -36,6 +37,11 @@ type Filter struct {
 	Reason string
 	// Accounting selects by token_accounting (complete|partial|missing).
 	Accounting string
+	// Effort, Thinking and StopReason select on captured request metadata — the
+	// drill-down from a breakdown chart into the rows behind one of its bars.
+	Effort     string
+	Thinking   string
+	StopReason string
 	// Q is a free-text match against session id and model.
 	Q string
 }
@@ -62,6 +68,8 @@ func (f Filter) where() (string, []any) {
 		"r.session_id": f.Session, "r.model": f.Model, "r.provider": f.Provider,
 		"r.agent": f.Agent, "r.preset": f.Preset, "r.mode": f.Mode,
 		"r.token_accounting": f.Accounting,
+		"r.reasoning_effort": f.Effort, "r.thinking_mode": f.Thinking,
+		"r.stop_reason": f.StopReason,
 	} {
 		if v != "" {
 			add(col+" = ?", v)
@@ -94,18 +102,33 @@ const requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider,
 	r.attempted_tokens, r.frozen_tokens, r.saved_unique, r.fresh_input, r.cache_read,
 	r.cache_write, r.output_tokens, r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd,
 	r.cg_latency_ms, r.upstream_ms, r.expands, r.expand_tokens, r.reverts,
-	r.token_accounting, r.cache_miss_reason, r.uncompressed_reason`
+	r.token_accounting, r.cache_miss_reason, r.uncompressed_reason,
+	r.reasoning_effort, r.thinking_mode, r.thinking_budget, r.temperature, r.top_p,
+	r.max_tokens, r.stream, r.tool_choice, r.tools, r.system_blocks,
+	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
-	var byp, ca int
+	var byp, ca, stream int
+	var temp, topP sql.NullFloat64
 	err := rows.Scan(&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
 		&e.CacheWrite, &e.OutputTokens, &e.CostUSD, &e.BaselineCostUSD, &e.CGLLMCostUSD,
 		&e.CGLatencyMs, &e.UpstreamMs, &e.Expands, &e.ExpandTokens, &e.Reverts,
-		&e.TokenAccounting, &e.CacheMissReason, &e.UncompressedReason)
-	e.Bypassed, e.CacheAware = byp != 0, ca != 0
+		&e.TokenAccounting, &e.CacheMissReason, &e.UncompressedReason,
+		&e.ReasoningEffort, &e.ThinkingMode, &e.ThinkingBudget, &temp, &topP,
+		&e.MaxTokens, &stream, &e.ToolChoice, &e.Tools, &e.SystemBlocks,
+		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason)
+	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
+	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one
+	// that set nothing must not read the same on the row.
+	if temp.Valid {
+		e.Temperature = &temp.Float64
+	}
+	if topP.Valid {
+		e.TopP = &topP.Float64
+	}
 	return &e, err
 }
 
@@ -419,12 +442,28 @@ type Bucket struct {
 	CostUSD         float64 `json:"cost_usd"`
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
-	CGLatencyMs     float64 `json:"cg_latency_ms_avg"`
-	UpstreamMs      float64 `json:"upstream_ms_avg"`
-	Expands         int64   `json:"expands"`
-	ExpandTokens    int64   `json:"expand_tokens"`
-	Misses          int64   `json:"cache_misses"`
+	// SavedUSD is baseline − actual − our own spend: the "saved" half of a spent-vs-saved
+	// bar, derived here so every caller subtracts the same three terms. Nothing new is
+	// stored for it.
+	SavedUSD     float64 `json:"saved_usd"`
+	CGLatencyMs  float64 `json:"cg_latency_ms_avg"`
+	UpstreamMs   float64 `json:"upstream_ms_avg"`
+	Expands      int64   `json:"expands"`
+	ExpandTokens int64   `json:"expand_tokens"`
+	Misses       int64   `json:"cache_misses"`
 }
+
+// DayMs is one day of buckets. Per-DAY usage bars are Series with this bucket — the
+// bucketing is done in SQL from the raw ts (see the package comment), so a day-wide
+// bucket needs no new query, no rollup table and no migration, and the "selectable time
+// range" is the Since/Until the filter already carries.
+//
+// Buckets are UTC days, matching the tenant_spend month key, rather than the viewer's
+// local day. That is a deliberate limitation and not a rounding error: a local-day
+// bucket would make the same row land in different bars for two people reading the same
+// dashboard.
+// ponytail: UTC days; take an offset parameter here if per-viewer local days ever matter.
+const DayMs int64 = 24 * 60 * 60 * 1000
 
 // Series buckets the filtered window into fixed-width buckets of bucketMs.
 func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
@@ -458,19 +497,132 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		}
 		b.CGLatencyMs, b.UpstreamMs = cgAvg.Float64, upAvg.Float64
 		b.Saved = b.TokensBefore - b.TokensAfter
+		b.SavedUSD = b.BaselineCostUSD - b.CostUSD - b.CGLLMCostUSD
 		out = append(out, &b)
+	}
+	return out, rows.Err()
+}
+
+// GroupRow is one bar of a breakdown: everything a spent-vs-saved comparison needs for
+// one value of one dimension.
+type GroupRow struct {
+	// Key is the dimension's value. "" means the request did not carry it (no effort set,
+	// no stop reason reported) and the UI must label it as unset rather than hide it —
+	// "most of my traffic sets no effort at all" is a finding, not a gap.
+	Key             string  `json:"key"`
+	Requests        int64   `json:"requests"`
+	Sessions        int64   `json:"sessions"`
+	TokensBefore    int64   `json:"tokens_before"`
+	TokensAfter     int64   `json:"tokens_after"`
+	Saved           int64   `json:"saved"`
+	SavedUnique     int64   `json:"saved_unique"`
+	FreshInput      int64   `json:"fresh_input"`
+	CacheRead       int64   `json:"cache_read"`
+	CacheWrite      int64   `json:"cache_write"`
+	OutputTokens    int64   `json:"output_tokens"`
+	CostUSD         float64 `json:"cost_usd"`
+	BaselineCostUSD float64 `json:"baseline_cost_usd"`
+	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
+	// SpentUSD is what was actually paid (billed + our own spend); SavedUSD is baseline
+	// minus that. The pair is the "spent vs saved" comparison, per group.
+	SpentUSD float64 `json:"spent_usd"`
+	SavedUSD float64 `json:"saved_usd"`
+	// Incomplete counts rows whose accounting is not `complete`, i.e. rows whose cost
+	// contribution is unknown rather than zero. A bar with Requests>0 and
+	// Incomplete==Requests is a bar whose money figures mean nothing, and the UI has to
+	// say so instead of drawing a zero.
+	Incomplete int64 `json:"incomplete_rows"`
+}
+
+// breakdownDims are the dimensions a breakdown may group by, mapped to the SQL that
+// produces the key. An ALLOWLIST, and that is the whole point: the dimension arrives in a
+// query parameter and is interpolated into the statement, so anything not on this map is
+// refused rather than escaped.
+//
+// The numeric dimensions are cast to TEXT so one row type serves every dimension —
+// `cache_breakpoints` is the count of breakpoints on the request, which is the placement
+// question this project exists to answer, asked in dollars.
+var breakdownDims = map[string]string{
+	"model":             "r.model",
+	"provider":          "r.provider",
+	"agent":             "r.agent",
+	"preset":            "r.preset",
+	"mode":              "r.mode",
+	"reasoning_effort":  "r.reasoning_effort",
+	"thinking_mode":     "r.thinking_mode",
+	"stop_reason":       "r.stop_reason",
+	"tool_choice":       "r.tool_choice",
+	"cache_miss_reason": "r.cache_miss_reason",
+	"cache_breakpoints": "CAST(r.cache_bp_system + r.cache_bp_tools + r.cache_bp_messages + r.cache_bp_blocks AS TEXT)",
+	"stream":            "CASE WHEN r.stream <> 0 THEN 'stream' ELSE 'unary' END",
+}
+
+// BreakdownDims lists the valid dimensions, sorted, for the API's error message and the
+// UI's dimension picker.
+func BreakdownDims() []string {
+	out := make([]string, 0, len(breakdownDims))
+	for k := range breakdownDims {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Breakdown aggregates the filtered window by one dimension: requests, tokens, and
+// SPENT VS SAVED for each value. One query rather than one per dimension — per-model
+// cost, cost by reasoning effort, and cost by cache_control breakpoint count are the same
+// GROUP BY over the same columns, and three near-identical functions is three places for
+// the savings arithmetic to drift.
+//
+// An unknown dimension is an error rather than a silent fallback: a caller that
+// mistypes the dimension must not be handed a chart of some other dimension's numbers.
+func (d *DB) Breakdown(f Filter, dim string) ([]*GroupRow, error) {
+	expr, ok := breakdownDims[dim]
+	if !ok {
+		return nil, fmt.Errorf("dash: unknown breakdown dimension %q", dim)
+	}
+	cond, args := f.where()
+	q := `SELECT ` + expr + ` AS k, COUNT(*), COUNT(DISTINCT r.session_id),
+		COALESCE(SUM(r.tokens_before),0), COALESCE(SUM(r.tokens_after),0), COALESCE(SUM(r.saved_unique),0),
+		COALESCE(SUM(r.fresh_input),0), COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
+		COALESCE(SUM(r.output_tokens),0),
+		COALESCE(SUM(r.cost_usd),0), COALESCE(SUM(r.baseline_cost_usd),0), COALESCE(SUM(r.cg_llm_cost_usd),0),
+		COALESCE(SUM(CASE WHEN r.token_accounting <> 'complete' THEN 1 ELSE 0 END),0)
+		FROM requests r WHERE ` + cond + `
+		GROUP BY k ORDER BY SUM(r.cost_usd) DESC, COUNT(*) DESC, k LIMIT 200`
+	rows, err := d.sql.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*GroupRow{}
+	for rows.Next() {
+		var g GroupRow
+		if err := rows.Scan(&g.Key, &g.Requests, &g.Sessions,
+			&g.TokensBefore, &g.TokensAfter, &g.SavedUnique,
+			&g.FreshInput, &g.CacheRead, &g.CacheWrite, &g.OutputTokens,
+			&g.CostUSD, &g.BaselineCostUSD, &g.CGLLMCostUSD, &g.Incomplete); err != nil {
+			return nil, err
+		}
+		g.Saved = g.TokensBefore - g.TokensAfter
+		g.SpentUSD = g.CostUSD + g.CGLLMCostUSD
+		g.SavedUSD = g.BaselineCostUSD - g.SpentUSD
+		out = append(out, &g)
 	}
 	return out, rows.Err()
 }
 
 // facetQueries are the distinct-value lists that populate the filter dropdowns.
 var facetQueries = map[string]string{
-	"model":    "model",
-	"provider": "provider",
-	"agent":    "agent",
-	"preset":   "preset",
-	"mode":     "mode",
-	"reason":   "uncompressed_reason",
+	"model":       "model",
+	"provider":    "provider",
+	"agent":       "agent",
+	"preset":      "preset",
+	"mode":        "mode",
+	"reason":      "uncompressed_reason",
+	"effort":      "reasoning_effort",
+	"thinking":    "thinking_mode",
+	"stop_reason": "stop_reason",
 }
 
 // selfBlanked returns f with ONE dimension's own value cleared.
@@ -503,6 +655,12 @@ func selfBlanked(f Filter, dim string) Filter {
 		f.Reason = ""
 	case "component":
 		f.Component = ""
+	case "effort":
+		f.Effort = ""
+	case "thinking":
+		f.Thinking = ""
+	case "stop_reason":
+		f.StopReason = ""
 	}
 	return f
 }

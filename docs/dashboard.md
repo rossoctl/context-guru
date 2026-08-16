@@ -352,7 +352,7 @@ already requires), in WAL mode.
 
 | Table | Holds |
 |---|---|
-| `requests` | one row per proxied request: identity, all four token tiers, costs, latencies, attribution |
+| `requests` | one row per proxied request: identity, all four token tiers, costs, latencies, attribution, and the request's own **metadata** — reasoning effort, thinking mode and budget, sampling parameters (nullable, so "unset" stays distinct from `0`), `max_tokens`, streaming, `tool_choice`, tool and system-block counts, `cache_control` breakpoints **by location**, and the provider's stop reason. Every client-supplied text field among them passes through the redactor's shape check **before** the insert, like all other captured input |
 | `request_components` | one row per component per request — the "which components earn their place" data |
 | `request_content` | before/after text, gzip-compressed and size-capped; skippable entirely |
 | `archived_sessions` | the cold-storage index — one small row per archived session, local and permanent, so the session list works while the remote is unreachable |

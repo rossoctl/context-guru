@@ -95,6 +95,9 @@ type Event struct {
 	CacheMissReason    string `json:"cache_miss_reason"`
 	UncompressedReason string `json:"uncompressed_reason"`
 
+	// Meta is the request's own knobs, embedded so the JSON stays flat.
+	Meta
+
 	Components []CompRow    `json:"components,omitempty"`
 	Content    []ContentRow `json:"content,omitempty"`
 
@@ -102,6 +105,82 @@ type Event struct {
 	// consumed by the writer goroutine; not persisted (a knob, not a fact about the
 	// request).
 	ContentCap int `json:"-"`
+}
+
+// Meta is the request's own metadata — the knobs the CLIENT chose, plus the stop
+// reason the provider answered with. Captured because they are the levers that explain
+// a cost: reasoning effort and thinking budget buy output tokens, and where the
+// cache_control breakpoints sit decides how much of the prefix was billed as a read
+// rather than a write, which is the whole subject of this project.
+//
+// Real columns rather than a JSON blob, deliberately. Every field here is either
+// GROUPED BY in an aggregate (effort, thinking mode, stop reason, tool_choice, the
+// breakpoint counts) or a scalar rendered on the request row; a JSON column would put
+// json_extract() in the middle of every one of those queries and give the free-text tail
+// somewhere to hide from the redactor. There is no long tail to justify one.
+//
+// Anthropic and OpenAI spell the same knobs differently; capture normalizes them (see
+// proxy.metaFromBody) so one column means one thing across dialects.
+type Meta struct {
+	// ReasoningEffort is Anthropic's `output_config.effort` or OpenAI's
+	// `reasoning_effort` — low|medium|high|xhigh|max, "" when unset. NOT a synonym for
+	// thinking: on current Anthropic models effort is the depth control and
+	// thinking.budget_tokens is the removed predecessor, so both are recorded.
+	ReasoningEffort string `json:"reasoning_effort"`
+	// ThinkingMode is Anthropic `thinking.type` — adaptive|enabled|disabled, "" absent.
+	ThinkingMode string `json:"thinking_mode"`
+	// ThinkingBudget is `thinking.budget_tokens` (pre-4.6 models only; 0 = unset).
+	ThinkingBudget int `json:"thinking_budget"`
+	// Temperature and TopP are POINTERS, and the column is NULLABLE, because "the client
+	// did not set it" and "the client set it to 0" are different facts and 0 is a
+	// legitimate value for both. A sentinel would make a deterministic request
+	// indistinguishable from an unspecified one.
+	Temperature *float64 `json:"temperature"`
+	TopP        *float64 `json:"top_p"`
+	// MaxTokens is the client's output cap (`max_tokens`, or OpenAI's
+	// `max_completion_tokens`); 0 = unset.
+	MaxTokens int  `json:"max_tokens"`
+	Stream    bool `json:"stream"`
+	// ToolChoice is the normalized forcing mode: auto|any|none|required|tool for the
+	// object form, or the bare string OpenAI sends. The forced tool's NAME is
+	// deliberately not stored — it is unbounded client text with no aggregate use.
+	ToolChoice string `json:"tool_choice"`
+	// Tools is how many tools the request declared; SystemBlocks how many blocks the
+	// top-level `system` array carried (1 for a bare string).
+	Tools        int `json:"tools"`
+	SystemBlocks int `json:"system_blocks"`
+	// The prompt-cache breakpoints ON ARRIVAL, by location: `tools` and `system` render
+	// ahead of `messages`, so location decides how much prefix a breakpoint protects.
+	// Zero on a request the pipeline never inspected (observe mode), like every other
+	// pipeline-derived field on such a row.
+	CacheBPSystem   int `json:"cache_bp_system"`
+	CacheBPTools    int `json:"cache_bp_tools"`
+	CacheBPMessages int `json:"cache_bp_messages"`
+	CacheBPBlocks   int `json:"cache_bp_blocks"`
+	// StopReason is the provider's own terminal reason, normalized across dialects:
+	// Anthropic `stop_reason` (end_turn|max_tokens|tool_use|stop_sequence|pause_turn|
+	// refusal|model_context_window_exceeded) or OpenAI `choices.0.finish_reason`
+	// (stop|length|tool_calls|content_filter). "" when the response carried none.
+	StopReason string `json:"stop_reason"`
+}
+
+// CacheBreakpoints is the total the provider's cap of four applies to.
+func (m Meta) CacheBreakpoints() int {
+	return m.CacheBPSystem + m.CacheBPTools + m.CacheBPMessages + m.CacheBPBlocks
+}
+
+// redact sanitizes the free-text metadata fields. Every one of them is a value the
+// CLIENT chose, so each is attacker-influenced and none may reach the database
+// unchecked — a request carrying `"reasoning_effort": "<a real api key>"` would
+// otherwise write that key to disk, and to the SSE feed, forever.
+//
+// The numeric and boolean fields need no check: they were parsed as numbers, so they
+// cannot carry a string at all.
+func (m *Meta) redact() {
+	m.ReasoningEffort = metaEnum(m.ReasoningEffort)
+	m.ThinkingMode = metaEnum(m.ThinkingMode)
+	m.ToolChoice = metaEnum(m.ToolChoice)
+	m.StopReason = metaEnum(m.StopReason)
 }
 
 // Redact scrubs credential shapes from captured content and applies the size cap. The
@@ -116,6 +195,7 @@ type Event struct {
 //
 // Idempotent, so a double call cannot corrupt a row.
 func (e *Event) Redact() {
+	e.Meta.redact()
 	for i := range e.Content {
 		e.Content[i].Before = RedactContent(e.Content[i].Before, e.ContentCap)
 		e.Content[i].After = RedactContent(e.Content[i].After, e.ContentCap)
@@ -169,6 +249,14 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.Messages = tr.Messages
 	e.AttemptedTokens = tr.AttemptedTokens
 	e.FrozenTokens = tr.FrozenTokens
+	// Breakpoint placement comes from the pipeline's own count, which it makes anyway to
+	// respect the provider's cap — so recording it costs nothing on the request path. In
+	// observe mode the trace is the zero value by design (nothing ran on the enforced
+	// path), so these read zero exactly like every other trace-derived field on such a row.
+	e.CacheBPSystem = tr.Breakpoints.System
+	e.CacheBPTools = tr.Breakpoints.Tools
+	e.CacheBPMessages = tr.Breakpoints.Messages
+	e.CacheBPBlocks = tr.Breakpoints.Blocks
 	if tr.Bypassed {
 		e.Mode = ModeBypass
 	} else if e.Mode == "" {

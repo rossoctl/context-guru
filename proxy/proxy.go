@@ -643,6 +643,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// values the request path already computed; nothing here does I/O.
 		cp := h.newCapture(r, string(provider), up.path, tn)
 		cp.noteModel(gjson.GetBytes(body, "model").String())
+		// The request's own metadata (effort, thinking, sampling, tool_choice, shape),
+		// read from the PRISTINE body in one pass before the pipeline touches it.
+		cp.noteMeta(metaFromBody(body))
 		// Fail open around the whole pre-forward rewrite (pipeline + expand injection): a
 		// panic anywhere here must forward the PRISTINE inbound body, never 500 the client.
 		// apply.BodyFull has its own recover; this backstops expand.Inject and anything else.
@@ -816,6 +819,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			}
 			if ok {
 				usage, usageOK = u, true
+			} else {
+				// No billed tiers, but the response may still have said WHY it stopped. The
+				// two facts are independent (see Usage.StopReason), and dropping the reason
+				// here would blank stop_reason for exactly the rows already marked partial.
+				usage.StopReason = u.StopReason
 			}
 			return
 		}
@@ -828,6 +836,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		if u, ok := responseUsage(resp.Header.Get("Content-Type"), respBody); ok {
 			usage, usageOK = u, true
+		} else {
+			usage.StopReason = u.StopReason // same reasoning as the stream path above
 		}
 
 		// Reconstruct the message the loop reasons over. For SSE, aggregate the events;

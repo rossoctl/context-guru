@@ -101,3 +101,31 @@ func TestBreachIsOursOnly(t *testing.T) {
 		t.Fatalf("we added a breakpoint over the cap (%d -> %d); that must be reported", inbound, out)
 	}
 }
+
+// The dashboard records breakpoints BY LOCATION, not just the total, because `tools` and
+// `system` render ahead of `messages` in the provider's cache hash — so where a breakpoint
+// sits decides how much of the prefix it protects. A single total cannot tell a
+// well-placed request from a badly-placed one with the same count.
+func TestCountBreakpointsSplitsByLocation(t *testing.T) {
+	body := []byte(`{
+		"system":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}},{"type":"text","text":"b"}],
+		"tools":[{"name":"x","cache_control":{"type":"ephemeral"}}],
+		"messages":[
+			{"role":"user","cache_control":{"type":"ephemeral"},"content":[{"type":"text","text":"hi"}]},
+			{"role":"user","content":[{"type":"text","text":"yo","cache_control":{"type":"ephemeral"}}]}]}`)
+	got := CountBreakpoints(body)
+	want := Breakpoints{System: 1, Tools: 1, Messages: 1, Blocks: 1}
+	if got != want {
+		t.Fatalf("CountBreakpoints = %+v, want %+v", got, want)
+	}
+	// The total is what the provider's cap of four applies to, so it must not drift from
+	// the split the dashboard shows beside it.
+	if got.Total() != 4 || wireBreakpoints(body) != got.Total() {
+		t.Fatalf("total = %d / wireBreakpoints = %d, want both 4", got.Total(), wireBreakpoints(body))
+	}
+	// A tool output that merely mentions the field is not a breakpoint.
+	textual := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"set cache_control on it"}]}]}`)
+	if b := CountBreakpoints(textual); b.Total() != 0 {
+		t.Errorf("prose mentioning cache_control counted as %+v, want zero", b)
+	}
+}

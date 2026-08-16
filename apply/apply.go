@@ -106,6 +106,10 @@ type Trace struct {
 	AttemptedTokens int
 	// FrozenTokens is TokensBefore−AttemptedTokens: the cost of cache safety.
 	FrozenTokens int
+	// Breakpoints is where this request's prompt-cache breakpoints sat ON ARRIVAL,
+	// split by location. Observational, and free: the pipeline already counts them to
+	// respect the provider's cap of four.
+	Breakpoints Breakpoints
 	// Run is the pipeline's aggregate report (nil when the pipeline never ran).
 	Run *components.RunReport
 	// Changes lists each rewritten message's before/after text (clipped).
@@ -301,6 +305,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			defer putLen(st, sessionID, len(norm))
 		}
 	}
+	// Counted ONCE and used twice: the pipeline needs the total to respect the
+	// provider's cap, and the dashboard records the per-location split. Two calls would
+	// be two scans of the body on the request path for one fact.
+	bps := CountBreakpoints(body)
 	c := &components.Ctx{
 		Ctx:          ctx,
 		Session:      sessionID,
@@ -313,10 +321,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// Every breakpoint already on the wire — including the ones no component can
 		// see (`system`, `tools`, and the marks our own normalize drops). The
 		// provider's cap of four counts them all (issue #32, defect 2).
-		ExistingBreakpoints: wireBreakpoints(body),
+		ExistingBreakpoints: bps.Total(),
 		Mode:                mode,
 	}
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
+	tr.Breakpoints = bps
 	// The eligible (attempted) denominator: what age/supersession offloaders were
 	// allowed to touch. Everything before MaxCachedIdx is frozen for cache safety —
 	// the cost of that mechanism, reported next to its benefit.

@@ -199,6 +199,7 @@ func (a *API) routes() []route {
 		{"GET /api/sessions", scopeTenant, a.sessions},
 		{"GET /api/sessions/{session}/transcript", scopeTenant, a.sessionTranscript},
 		{"GET /api/components", scopeTenant, a.components},
+		{"GET /api/breakdown", scopeTenant, a.breakdown},
 		{"GET /api/facets", scopeTenant, a.facets},
 		{"GET /api/config", scopeManager, a.config},
 		{"GET /api/benchmarks", scopeManager, a.benchmarks},
@@ -555,6 +556,9 @@ func filterFrom(r *http.Request) Filter {
 		Component:  q.Get("component"),
 		Reason:     q.Get("reason"),
 		Accounting: q.Get("accounting"),
+		Effort:     q.Get("effort"),
+		Thinking:   q.Get("thinking"),
+		StopReason: q.Get("stop_reason"),
 		Q:          q.Get("q"),
 	}
 	f.Since = atoi64(q.Get("since"))
@@ -722,6 +726,43 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"components": rows})
+}
+
+// breakdown serves spent-vs-saved and usage aggregated by ONE dimension — per model, per
+// reasoning effort, per cache_control breakpoint count, per stop reason. One endpoint
+// rather than one per dimension: the caller names the dimension and gets the same row
+// shape back, so a new chart is a new query string rather than a new route.
+//
+// Scoped exactly like every other data route: the tenant on the filter is OVERWRITTEN
+// from the authenticated principal inside a.scope, so `?tenant=` cannot widen it and no
+// principal means no rows.
+func (a *API) breakdown(w http.ResponseWriter, r *http.Request) {
+	f, _, ok := a.scope(r)
+	if !ok {
+		unauthorized(w)
+		return
+	}
+	dim := r.URL.Query().Get("dim")
+	if dim == "" {
+		dim = "model"
+	}
+	rows, err := a.rec.DB().Breakdown(f, dim)
+	if err != nil {
+		// A bad dimension is the CALLER's error, not a server fault, and the answer names
+		// the dimensions that do exist rather than making the UI guess.
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{
+		"dim":        dim,
+		"dimensions": BreakdownDims(),
+		"groups":     rows,
+		"description": "Requests, tokens and spent-vs-saved for each value of one dimension. " +
+			"spent_usd is what was billed plus context-guru's own model spend; saved_usd is the " +
+			"baseline counterfactual minus that. incomplete_rows counts rows the provider gave " +
+			"us no usage for — where it equals requests, the money figures for that bar are " +
+			"unknown rather than zero.",
+	})
 }
 
 func (a *API) facets(w http.ResponseWriter, r *http.Request) {
