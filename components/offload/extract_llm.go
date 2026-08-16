@@ -3,7 +3,6 @@ package offload
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"regexp"
 	"strconv"
@@ -28,9 +27,7 @@ import (
 // than on its own env var: this is per-candidate accounting, which is what DEBUG means,
 // and one switch for "tell me everything" beats one per component. CONTEXT_GURU_DEBUG=1
 // still turns it on — internal/logging reads it as CG_LOG_LEVEL=debug.
-func debugExtractLLM(c *components.Ctx) bool {
-	return logging.From(c.Ctx).Enabled(c.Ctx, slog.LevelDebug)
-}
+func debugExtractLLM(c *components.Ctx) bool { return logging.Debugging(c.Ctx) }
 
 // llmCallTimeout bounds a SINGLE in-request extract model call. Kept bounded so a slow
 // or rate-limited compaction model fails open (leave the output verbatim this turn)

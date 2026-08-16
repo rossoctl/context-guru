@@ -268,7 +268,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// the whole entry point, not just inside components.
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("context-guru: recovered from panic in BodyOpts; forwarding original request", "panic", r)
+			// From(ctx), not the default logger: a panic is the line you most want attributed
+			// to a tenant, and this runs before the session-bearing logger below exists.
+			logging.From(ctx).Error("context-guru: recovered from panic in BodyOpts; "+
+				"forwarding original request", "panic", r)
 			res = Result{Body: body}
 		}
 	}()
@@ -391,7 +394,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// is only knowable here, after explicitSession + session.Scoped have run, which is
 	// exactly why the logger travels in the context instead of being passed in whole.
 	lg := logging.From(ctx).With("session", sessionID)
-	debug := lg.Enabled(ctx, slog.LevelDebug)
+	debug := logging.Debugging(ctx)
 	if debug {
 		// The cached-prefix boundary decision, which is the single most common reason a
 		// component "did nothing" on a request that obviously had something to compact:
