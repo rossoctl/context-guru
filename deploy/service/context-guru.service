@@ -47,8 +47,21 @@ Environment=REGISTER_DOMAINS=ibm.com
 # it becomes the manager, and until one exists nobody can administer other tenants.
 Environment=MANAGER_EMAIL=
 # Content capture writes agent output (source code, tool results) to disk behind a
-# best-effort redactor. Leave false; tenants who want the diff view opt in per
-# account, and this flag is the operator's half of that decision.
+# best-effort redactor (a pattern denylist, so not provable). This is the OPERATOR's
+# switch, and it is the one that starts closed: the per-tenant switch behind it is
+# created ON, because registration sets capture_content=true so a new account's diff
+# view works on its first request. So `true` here does not mean "tenants who asked for
+# it get it" — it means every account that has not cleared its own consent on Settings
+# starts having its message content stored.
+#
+# Enable it when the diff view is the point of the deployment: showing people what was
+# rewritten is what makes the savings inspectable rather than a number to take on faith.
+# Enable it knowing it is source code on this disk, readable by that tenant (a manager
+# sees metrics, never transcripts), and that turning it back off is not retroactive.
+# `false` here overrides every account's consent and is the one-line kill switch.
+#
+# Shipped false deliberately. A drop-in can override it, and `systemctl show
+# context-guru -p Environment` is the effective value — this line is not.
 Environment=DASHBOARD_CONTENT=false
 
 # Logging. Every line goes to the journal either way (`journalctl -u context-guru`);

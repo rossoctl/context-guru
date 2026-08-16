@@ -127,7 +127,7 @@ The [dashboard](../dashboard.md) is **off by default**. Enabling it adds `/dashb
 | `--dashboard-db` / `DASHBOARD_DB` | `./context-guru-dashboard.db` | SQLite path. `:memory:` keeps history in RAM only (the no-persistence mode). An unwritable path falls back to in-memory with a warning rather than failing to start. |
 | `--dashboard-retention` / `DASHBOARD_RETENTION` | `168h` (7 days) | Drop rows older than this. `0` disables the age rule. |
 | `--dashboard-max-bytes` / `DASHBOARD_MAX_BYTES` | `536870912` (512 MiB) | Cap the database size, dropping the oldest requests first. `0` disables the size rule. |
-| `--dashboard-content` / `DASHBOARD_CONTENT` | `false` | Capture before/after message text for the diff view. **Opt-in**: it stores arbitrary agent output on disk, scrubbed of known credential shapes and size-capped **before** storage — but content cannot be allowlisted the way headers and config keys are, so the safe default is off. |
+| `--dashboard-content` / `DASHBOARD_CONTENT` | `false` | Capture before/after message text for the diff view. It stores arbitrary agent output on disk, scrubbed of known credential shapes and size-capped **before** storage — but content cannot be allowlisted the way headers and config keys are, so the safe default is off. In hosted mode this is only the **operator's** half of the decision: a tenant is registered with its own `capture_content` already **on**, so this flag is what keeps a new account's transcripts off disk. |
 | `--dashboard-content-cap` / `DASHBOARD_CONTENT_CAP` | `16384` | Maximum bytes stored per captured before/after blob. |
 | `--dashboard-queue` / `DASHBOARD_QUEUE` | `4096` | Capture-channel depth. A full channel **drops** events (counted, and shown in the UI) rather than delaying a request. |
 | `--dashboard-trusted-cidrs` / `DASHBOARD_TRUSTED_CIDRS` | — | Comma-separated CIDRs allowed to view per-request **content** and the effective config. Loopback always is; aggregates are open to everyone. |
@@ -173,7 +173,7 @@ without it, except the disk and cold-storage rules, which apply to any dashboard
 | `--tenant-rpm` / `TENANT_RPM` | `0` (unlimited) | Requests per minute, per tenant. |
 | `--tenant-concurrent` / `TENANT_CONCURRENT` | `0` (unlimited) | In-flight requests, per tenant. |
 | `--metrics-token` / `METRICS_TOKEN` | — | Bearer token letting a remote Prometheus scrape `/metrics`. Loopback never needs one; `/metrics` carries per-tenant cost. |
-| `--dashboard-max-rows-per-tenant` / `DASHBOARD_MAX_ROWS_PER_TENANT` | `0` (no cap) | Server-wide cap on one tenant's retained request rows, trimmed **before** the disk rule so a heavy user cannot evict everyone else. A per-tenant value a manager sets overrides it. |
+| `--dashboard-max-rows-per-tenant` / `DASHBOARD_MAX_ROWS_PER_TENANT` | `100000` | Server-wide cap on one tenant's retained request rows. The janitor runs **quota first**, then the age and byte rules, then the disk rule — so a heavy user is trimmed to its own quota before anyone else's history is touched. Set `0` and one tenant can fill the database, after which the byte rule deletes the oldest rows in the whole table: the offender keeps its recent history and the quiet tenants lose theirs. A per-tenant value a manager sets overrides it. |
 
 ### Cold storage (Box via rclone)
 
@@ -238,3 +238,10 @@ before writing a captured request to disk.
 | `CONTEXT_GURU_DEBUG=1` | Legacy alias for `CG_LOG_LEVEL=debug`. Turns on the per-tool-output and per-candidate DEBUG lines it always did, now at DEBUG rather than INFO. |
 | `CONTEXT_GURU_DUMP=<file>` | Appends a before → after JSON record per rewritten message. The [dashboard](../dashboard.md) captures the same material into a queryable store with a diff view. |
 | `CONTEXT_GURU_CAPTURE=<file>` | Appends each pristine inbound request as one JSONL record, for offline replay through `/compact`. |
+
+!!! warning "Both are refused in hosted mode"
+    With `--upstreams` set, either variable makes the process **exit at startup**, naming
+    the one it found. Both append to a single process-wide file with no tenant column and
+    without running the redactor, so on a shared instance they are a plaintext transcript of
+    every tenant's source code, written whether or not that tenant consented to capture.
+    Unset it, or drop `--upstreams` to run single-tenant.

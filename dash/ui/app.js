@@ -3142,7 +3142,10 @@ function loadSettings() {
       whyBlock('Why an agent needs one',
         'For agents that cannot send a custom header (Bob/BobShell): the proxy recognises ' +
         'them by the sha256 of the provider key they already send. Only the digest is ' +
-        'stored. Bind one with the curl line on the Setup tab.'),
+        'stored. Bind one with the curl line on the Setup tab. Keys under 20 characters ' +
+        'are refused — the digest is the identity, so a short key would be a guessable ' +
+        'account. A key already bound to another account is refused too, never moved: ' +
+        'its owner unbinds it first.'),
       t.agent_keys > 0
         ? el('button', {
           class: 'ghost small', 'data-testid': 'agent-keys-clear',
