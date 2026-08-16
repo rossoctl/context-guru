@@ -2413,6 +2413,9 @@ function urlFor() {
   // `session` is already a filter dimension and they are not the same thing.
   if (state.drawer && state.drawer.req) p.set('req', String(state.drawer.req));
   if (state.drawer && state.drawer.diff) p.set('diff', state.drawer.diff);
+  // The manager's account editor is state too: "the account I mean" is a thing managers
+  // send each other, and Back must close the panel rather than undo a filter change.
+  if (state.drawer && state.drawer.acct) p.set('acct', state.drawer.acct);
   const q = p.toString();
   return location.pathname + '#' + state.view + (q ? '?' + q : '');
 }
@@ -2429,9 +2432,10 @@ function parseURL() {
   for (const [k] of DIMS) if (p.get(k)) filter[k] = p.get(k);
   const req = Number(p.get('req')) || 0;
   const diff = p.get('diff') || '';
+  const acct = p.get('acct') || '';
   return {
     view: view || 'overview', filter, range: Number(p.get('range')) || 0,
-    drawer: req ? { req } : diff ? { diff } : null,
+    drawer: req ? { req } : diff ? { diff } : acct ? { acct } : null,
   };
 }
 /** applyURL makes the page match the address bar. Used on load, on Back/Forward, and
@@ -2456,9 +2460,11 @@ function applyURL() {
 function syncDrawer(prev) {
   const want = state.drawer;
   if (!want) { if (!$('#drawer').hidden) dismissDrawer(); return; }
-  const same = !!prev && prev.req === want.req && prev.diff === want.diff;
+  const same = !!prev && prev.req === want.req && prev.diff === want.diff
+    && prev.acct === want.acct;
   if (same && !$('#drawer').hidden) return;
   if (want.req) openRequest(want.req, true);
+  else if (want.acct) openTenantEditor(want.acct, true);
   else openSessionDiff(want.diff, false, true);
 }
 
@@ -2853,9 +2859,7 @@ const verify = { email: '', expires: 0, tick: null };
 function showVerify(email, expires, intro) {
   verify.email = email;
   verify.expires = expires || 0;
-  $('#gate-signin').hidden = true;
-  $('#gate-register').hidden = true;
-  $('#gate-closed').hidden = true;
+  hideGateForms();
   // The sign-in/register pair goes away for phase two: that choice is already made, and
   // leaving "Register" marked selected above a code box invited clicking it and losing the
   // code. "Start over" is the way back, and it restores them.
@@ -2887,11 +2891,139 @@ function cancelVerify() {
   if (verify.tick) { clearInterval(verify.tick); verify.tick = null; }
   verify.email = '';
   $('#gate-verify').hidden = true;
+  $('#gate-reset').hidden = true;
+  $('#gate-reset-verify').hidden = true;
   $('.gate-tabs').hidden = false;
   const onRegister = $('#gate-tab-register').getAttribute('aria-selected') === 'true';
   $('#gate-signin').hidden = onRegister;
   $('#gate-register').hidden = !onRegister;
   if (onRegister) applyRegisterMode();
+}
+
+// ── password reset (the gate) ──────────────────────────────────────────────
+//
+// The flow for someone who cannot sign in, which is why it is on the gate and not behind
+// it. Two steps: ask for a code, then spend it together with the new password. One step
+// would mean holding a spent code while the user thinks of a password.
+//
+// The server answers phase one identically whether or not the address has an account, so
+// this UI must promise only that a code was sent IF there was somewhere to send it. Saying
+// "check your inbox" is true either way; saying "we found your account" would not be.
+
+const reset = { email: '', expires: 0, tick: null };
+
+/** hideGateForms hides every form the gate can show. One place, because two forms visible
+ *  at once is the bug that appears when a fifth form is added to four ad-hoc toggles. */
+function hideGateForms() {
+  for (const id of ['#gate-signin', '#gate-register', '#gate-verify', '#gate-closed',
+    '#gate-reset', '#gate-reset-verify']) {
+    const n = $(id);
+    if (n) n.hidden = true;
+  }
+}
+
+/** gateNotice shows a non-error status on the gate — "your password is set, now sign in".
+ *  Separate from gateError because a success rendered in the error box reads as a failure. */
+function gateNotice(msg) {
+  const n = $('#gate-notice');
+  n.textContent = msg || '';
+  n.hidden = !msg;
+}
+
+function showResetRequest() {
+  cancelVerify();
+  cancelReset();
+  gateError('');
+  gateNotice('');
+  hideGateForms();
+  $('.gate-tabs').hidden = true;
+  $('#gate-reset').hidden = false;
+  $('#gate-reset-email').value = $('#gate-signin-email').value.trim();
+  $('#gate-reset-email').focus();
+}
+
+/** showResetVerify counts down against the server's absolute expiry, like the sign-in code
+ *  form — never a five-minute timer this page started. */
+function showResetVerify(email, expires) {
+  reset.email = email;
+  reset.expires = expires || 0;
+  hideGateForms();
+  $('.gate-tabs').hidden = true;
+  $('#gate-reset-verify').hidden = false;
+  $('#gate-reset-intro').textContent = 'If ' + email + ' has an account, a 6-digit code is '
+    + 'on its way there. Enter it with the password you want.';
+  $('#gate-reset-code').value = '';
+  $('#gate-reset-password').value = '';
+  $('#gate-reset-code').focus();
+  if (reset.tick) clearInterval(reset.tick);
+  const paint = () => {
+    const left = Math.max(0, Math.round((reset.expires - Date.now()) / 1000));
+    const timer = $('#gate-reset-timer');
+    if (!reset.expires) { timer.textContent = ''; return; }
+    timer.textContent = left > 0
+      ? 'The code expires in ' + Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0')
+      : 'That code has expired — start over to get a new one.';
+    timer.className = left <= 0 ? 'hint gone' : left <= 60 ? 'hint soon' : 'hint';
+    if (left <= 0 && reset.tick) { clearInterval(reset.tick); reset.tick = null; }
+  };
+  paint();
+  reset.tick = setInterval(paint, 1000);
+}
+
+/** cancelReset abandons a pending reset and returns the gate to the sign-in form. */
+function cancelReset(silent) {
+  if (reset.tick) { clearInterval(reset.tick); reset.tick = null; }
+  reset.email = '';
+  if (silent) return;
+  hideGateForms();
+  $('.gate-tabs').hidden = false;
+  $('#gate-signin').hidden = false;
+  $('#gate-tab-signin').setAttribute('aria-selected', 'true');
+  $('#gate-tab-register').setAttribute('aria-selected', 'false');
+}
+
+function initReset() {
+  $('#gate-forgot').addEventListener('click', showResetRequest);
+  $('#gate-reset-cancel').addEventListener('click', () => { gateError(''); cancelReset(); });
+  $('#gate-reset-verify-cancel').addEventListener('click', () => { gateError(''); showResetRequest(); });
+
+  $('#gate-reset').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    gateError('');
+    const email = $('#gate-reset-email').value.trim();
+    try {
+      const out = await ctl('/api/password-reset', {
+        method: 'POST', body: JSON.stringify({ email }),
+      });
+      showResetVerify(out.email || email, out.code_expires_at);
+    } catch (e) { gateError(e.message); }
+  });
+
+  $('#gate-reset-verify').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    gateError('');
+    try {
+      await ctl('/api/password-reset/verify', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: reset.email,
+          code: $('#gate-reset-code').value.trim(),
+          new_password: $('#gate-reset-password').value,
+        }),
+      });
+      // The password leaves the DOM the moment it has been spent.
+      $('#gate-reset-password').value = '';
+      cancelReset();
+      // Deliberately NOT signed in: a reset proves the address, and signing in still wants
+      // the password plus a fresh emailed code. One code must not buy two factors.
+      gateNotice('Your password is set. Sign in with it — we will email a code as usual.');
+      $('#gate-signin-email').value = reset.email || $('#gate-reset-email').value.trim();
+      $('#gate-password').focus();
+    } catch (e) {
+      $('#gate-reset-password').value = '';
+      gateError(e.message);
+    }
+  });
 }
 
 function showGate(show) {
@@ -3271,8 +3403,75 @@ function loadSettings() {
   });
 
   loadTokens();
+  loadPassword();
   loadMachines();
   loadAudit();
+}
+
+/**
+ * The password card. Two shapes, because two different things are true:
+ *
+ *   has_password  — a change form, and the CURRENT password is required. A stolen session
+ *                   cookie must not be enough to take the account over and lock its owner
+ *                   out of a credential they still know.
+ *   no password   — an account older than passwords. There is nothing to check a new one
+ *                   against, so the honest answer is the emailed reset, not a form with an
+ *                   "old password" box it cannot fill.
+ */
+function loadPassword() {
+  const host = clear($('#password-form'));
+  const t = account.tenant;
+  if (!t) return;
+  const status = $('#password-status');
+  status.textContent = '';
+  if (!t.has_password) {
+    emptyState(host, 'No password on this account',
+      'It was created before passwords existed and signs in with a token. Use “Forgot your '
+      + 'password?” on the sign-in page to set one by email — that proves the address, '
+      + 'which is the only thing there is to prove here.');
+    return;
+  }
+  const old = el('input', {
+    type: 'password', id: 'pw-old', autocomplete: 'current-password', 'data-testid': 'pw-old',
+  });
+  const next = el('input', {
+    type: 'password', id: 'pw-new', autocomplete: 'new-password', minlength: '12',
+    'data-testid': 'pw-new',
+  });
+  const err = el('p', { class: 'hint warn-text', role: 'alert', 'data-testid': 'pw-error' });
+  host.appendChild(el('div', { class: 'field' },
+    el('label', { for: 'pw-old' }, 'Current password'), old));
+  host.appendChild(el('div', { class: 'field' },
+    el('label', { for: 'pw-new' }, 'New password'), next,
+    el('p', { class: 'hint' }, 'At least 12 characters. Your other signed-in machines are '
+      + 'signed out; this browser stays in.')));
+  host.appendChild(err);
+  host.appendChild(el('div', { class: 'actions' },
+    el('button', {
+      class: 'primary', 'data-testid': 'pw-save',
+      onclick: async () => {
+        err.textContent = '';
+        status.textContent = 'saving…';
+        try {
+          const out = await ctl('/api/me/password', {
+            method: 'POST',
+            body: JSON.stringify({ old_password: old.value, new_password: next.value }),
+          });
+          status.textContent = 'changed';
+          err.className = 'hint ok';
+          err.textContent = out.note || '';
+          loadMachines(); // the other machines are gone; the list must say so
+        } catch (e) {
+          status.textContent = '';
+          err.className = 'hint warn-text';
+          err.textContent = e.message;
+        } finally {
+          // Neither value stays in the DOM after being spent, whatever happened.
+          old.value = '';
+          next.value = '';
+        }
+      },
+    }, 'Change password')));
 }
 
 /**
@@ -3493,14 +3692,24 @@ async function loadTenants() {
     }
     const tbl = el('table', { class: 'grid' },
       el('thead', {}, el('tr', {},
-        el('th', {}, 'Account'), el('th', {}, 'Role'), el('th', {}, 'Spend'),
+        el('th', {}, 'Account'), el('th', {}, 'Role'), el('th', {}, 'Variant'), el('th', {}, 'Spend'),
         el('th', {}, 'Last seen'), el('th', {}, 'Transcripts'), el('th', {}, 'Configuration'),
         el('th', {}, el('span', { class: 'vh' }, 'Row actions')))));
     const body = el('tbody');
     for (const t of rows) {
       body.appendChild(el('tr', { class: t.disabled ? 'revoked' : '' },
-        el('td', {}, el('div', {}, t.email), el('div', { class: 'muted small' }, t.label)),
+        el('td', {}, el('div', {}, t.email),
+          el('div', { class: 'muted small' }, t.label),
+          // Why an account is off, printed where the manager will read it — the same
+          // sentence its owner is shown when their agent is refused.
+          t.disabled
+            ? el('div', { class: 'small warn-text' },
+              t.disabled_reason ? 'disabled: ' + t.disabled_reason : 'disabled (no reason recorded)')
+            : null),
         el('td', {}, t.role),
+        el('td', {}, t.variant
+          ? el('span', { class: 'ab-name' }, t.variant)
+          : el('span', { class: 'muted' }, '—')),
         el('td', {}, usd(t.spent_usd)),
         el('td', {}, t.last_seen_at ? when(t.last_seen_at) : el('span', { class: 'muted' }, 'never')),
         // The EFFECTIVE answer to "are this account's transcripts being kept", which is
@@ -3511,31 +3720,19 @@ async function loadTenants() {
         el('td', {},
           el('code', { class: 'clip' }, (t.effective_config_yaml || '').split('\n')[0] || '—'),
           t.config_inherited ? el('div', { class: 'muted small' }, 'server default') : null),
+        // Two buttons, not five. Everything that CHANGES this account — its configuration,
+        // its variant, disable, a reissued token, a reset, purge, delete — is in the editor,
+        // where the account's own facts are on screen next to the control. A row of small
+        // ghost buttons that each act on a different account by id is how the wrong row
+        // gets clicked.
         el('td', {}, el('div', { class: 'row-actions' },
           el('button', {
             class: 'ghost small', onclick: () => showTenantMetrics(t.id),
           }, 'Metrics'),
           el('button', {
-            class: 'ghost small', 'data-testid': 'toggle-' + t.id,
-            onclick: async () => {
-              const msg = t.disabled
-                ? `Re-enable ${t.email}?`
-                : `Disable ${t.email}? Their agents stop working immediately and they are signed out.`;
-              if (!confirm(msg)) return;
-              try { await ctl('/api/tenants/' + t.id, { method: 'PATCH', body: JSON.stringify({ disabled: !t.disabled }) }); loadTenants(); } catch (e) { alert(e.message); }
-            },
-          }, t.disabled ? 'Enable' : 'Disable'),
-          el('button', {
-            class: 'ghost small',
-            onclick: async () => {
-              if (!confirm(`Mint a replacement token for ${t.email}? Hand it over on a channel you trust.`)) return;
-              try {
-                const out = await ctl('/api/tenants/' + t.id + '/tokens', { method: 'POST', body: JSON.stringify({ label: 'reissued' }) });
-                // Shown once, so it goes in a place the manager must acknowledge.
-                prompt('Copy this token now — it cannot be recovered:', out.token);
-              } catch (e) { alert(e.message); }
-            },
-          }, 'Reissue token')))));
+            class: 'ghost small', 'data-testid': 'manage-' + t.id,
+            onclick: () => openTenantEditor(t.id),
+          }, 'Manage')))));
     }
     tbl.appendChild(body);
     host.appendChild(tbl);
@@ -3543,6 +3740,9 @@ async function loadTenants() {
     clear(host);
     errorState(host, 'Could not list tenants', e);
   }
+  // The A/B card lives in this view, above the roster: a variant is assigned here, so the
+  // comparison belongs next to the assignment rather than behind another tab.
+  loadVariants();
 }
 
 /** Jump to this tenant's traffic. Managers get ?tenant= on every read route, so the
@@ -3552,6 +3752,419 @@ function showTenantMetrics(id) {
   // fetch the current view with the new scope and then immediately fetch Overview.
   setFilter('tenant', id, { quiet: true });
   go('overview');
+}
+
+// ── the account editor (manager) ───────────────────────────────────────────
+//
+// One panel per account, opened from the roster and linkable (#tenants?acct=<id>), because
+// "the account I mean" is a thing managers send each other. It reuses the request drawer:
+// same focus trap, same Escape, same Back-closes-it behaviour — a second panel would need
+// all of that again and would get some of it wrong.
+//
+// Everything that mutates an account is in here rather than in its row, so the facts and
+// the controls are on screen together. The alternative — a row of small buttons that each
+// act on a different account by id — is how the wrong row gets clicked.
+
+/** openTenantEditor shows one account. fromURL suppresses the history push. */
+async function openTenantEditor(id, fromURL) {
+  if (!fromURL) { state.drawer = { acct: id }; syncURL(false); }
+  const body = openDrawer('Account', null);
+  loadingState(body, 4);
+  let rows = [];
+  try {
+    rows = (await ctl('/api/tenants')).tenants || [];
+  } catch (e) { errorState(body, 'Could not read the roster', e); return; }
+  const t = rows.find((x) => x.id === id);
+  if (!t) {
+    emptyState(clear(body), 'No such account', 'It may have just been deleted.');
+    return;
+  }
+  await loadOptions(); // the upstream allow-list, so the selects offer only what is accepted
+  renderTenantEditor(clear(body), t);
+}
+
+/** reloadTenantEditor repaints the panel and the roster behind it after a change, so the
+ *  two can never disagree about what was just saved. */
+function reloadTenantEditor(id) {
+  loadTenants();
+  openTenantEditor(id, true);
+}
+
+function renderTenantEditor(host, t) {
+  $('#drawer-title').textContent = t.email;
+  const status = el('span', { class: 'muted small', 'data-testid': 'acct-status' });
+  const say = (msg, bad) => {
+    status.textContent = msg || '';
+    status.className = 'small ' + (bad ? 'warn-text' : 'muted');
+  };
+
+  // What this account IS, before anything about changing it — the same fact band the
+  // request drawer uses.
+  host.appendChild(el('div', { class: 'kv-band' },
+    el('div', { class: 'kv' },
+      kv('Role', t.role),
+      kv('Variant', t.variant || 'none'),
+      kv('Month to date', usd(t.spent_usd)),
+      kv('Last seen', t.last_seen_at ? when(t.last_seen_at) : 'never'),
+      kv('Registered', when(t.created_at)),
+      kv('Provider keys bound', num(t.agent_keys)),
+      kv('Row quota', t.max_rows ? num(t.max_rows) : 'server default'),
+      kv('Password', t.has_password ? 'set' : 'never set'),
+      kv('Status', t.disabled ? 'disabled' : 'active'))));
+
+  // Stated as a boundary rather than left as a missing feature: a manager reading this
+  // panel is exactly the person who would otherwise go looking for the diff view.
+  host.appendChild(el('div', { class: 'state blocked' },
+    el('div', { class: 'state-body' },
+      el('strong', { text: 'You cannot read this account’s transcripts' }),
+      el('span', {
+        text: 'Metrics and configuration for everyone, transcript text for nobody but its '
+          + 'owner. You can purge or delete what they captured; you cannot open it.',
+      }))));
+
+  const fields = el('div');
+  host.appendChild(fields);
+
+  const label = textField(fields, 'acct-label', 'Machine label', t.label);
+  const variant = textField(fields, 'acct-variant', 'A/B variant', t.variant,
+    'A label only — it changes nothing about their pipeline. Letters, digits, dot, dash '
+    + 'or underscore. Empty means not in a test.');
+  const role = el('select', { id: 'acct-role', 'data-testid': 'acct-role' },
+    el('option', { value: 'user' }, 'user'),
+    el('option', { value: 'manager' }, 'manager — can administer every account'));
+  role.value = t.role;
+  fields.appendChild(el('div', { class: 'field' },
+    el('label', { for: 'acct-role' }, 'Role'), role));
+
+  const rowsCap = el('input', {
+    type: 'number', min: '0', step: '1000', id: 'acct-rows', 'data-testid': 'acct-rows',
+  });
+  rowsCap.value = String(t.max_rows || 0);
+  fields.appendChild(el('div', { class: 'field' },
+    el('label', { for: 'acct-rows' }, 'Retained request rows'), rowsCap,
+    el('p', { class: 'hint' }, '0 follows the server default. Over the cap their oldest '
+      + 'sessions are archived or dropped — theirs, not everyone’s.')));
+
+  const ups = (account.options && account.options.upstreams) || [];
+  const upSel = {};
+  for (const [key, text] of [['up_anthropic', 'Anthropic-dialect upstream'],
+    ['up_openai', 'OpenAI-dialect upstream'], ['up_bob', 'Bob upstream']]) {
+    const sel = el('select', { id: 'acct-' + key, 'data-testid': 'acct-' + key },
+      el('option', { value: '' }, '— none —'),
+      ...ups.map((u) => el('option', { value: u.name }, u.name + ' (' + u.dialect + ')')));
+    sel.value = t[key] || '';
+    upSel[key] = sel;
+    fields.appendChild(el('div', { class: 'field' }, el('label', { for: 'acct-' + key }, text), sel));
+  }
+
+  const cap = el('input', { type: 'checkbox', id: 'acct-capture', 'data-testid': 'acct-capture' });
+  cap.checked = !!t.capture_content;
+  fields.appendChild(el('div', { class: 'field' },
+    el('label', { class: 'comp', for: 'acct-capture' }, cap,
+      el('span', { class: 'comp-name' }, 'Store their transcripts')),
+    el('p', { class: 'hint' }, 'Their consent, which you can withdraw but never read '
+      + 'through. Turning it off stops new capture; it deletes nothing.')));
+
+  // Whether the configuration is theirs or the server default is the first thing to say,
+  // because saving a tracking account's form must not silently freeze a copy of today's
+  // default onto it — the same trap the user's own settings page avoids.
+  const effective = t.effective_config_yaml || '';
+  const inherited = !!t.config_inherited;
+  fields.appendChild(el('div', { class: 'cfg-state' },
+    el('div', {}, inherited
+      ? el('span', {}, el('strong', {}, 'Following the server default.'),
+        ' Saving this form leaves that alone unless you edit the YAML below.')
+      : el('span', {}, el('strong', {}, 'Has its own configuration.'),
+        ' Changes to the server default do not reach them.'))));
+  const yaml = el('textarea', {
+    id: 'acct-yaml', rows: 12, spellcheck: 'false', 'data-testid': 'acct-yaml',
+    'aria-label': 'Their full configuration, YAML',
+  });
+  yaml.value = effective;
+  fields.appendChild(el('details', { class: 'field' },
+    el('summary', {}, 'Full configuration (YAML)'), yaml,
+    el('p', { class: 'hint' }, 'Pipeline, per-component settings and mode. Validated on '
+      + 'save by the same loader the proxy builds with, so a typo is a refusal naming the '
+      + 'key rather than a surprise at request time. Saving rebuilds their pipeline, which '
+      + 'discards their frozen compaction decisions — their next turn will not be cache-warm.')));
+
+  fields.appendChild(el('div', { class: 'actions' },
+    el('button', {
+      class: 'primary', 'data-testid': 'acct-save',
+      onclick: async () => {
+        say('saving…');
+        const patch = {
+          label: label.value.trim(),
+          variant: variant.value.trim(),
+          role: role.value,
+          max_rows: Number(rowsCap.value) || 0,
+          capture_content: cap.checked,
+          up_anthropic: upSel.up_anthropic.value,
+          up_openai: upSel.up_openai.value,
+          up_bob: upSel.up_bob.value,
+        };
+        // Omitted while it is inherited AND untouched: sending it would store a copy of
+        // today's default and quietly end their tracking of it.
+        if (!inherited || yaml.value.trim() !== effective.trim()) patch.config_yaml = yaml.value;
+        try {
+          await ctl('/api/tenants/' + t.id, { method: 'PATCH', body: JSON.stringify(patch) });
+          reloadTenantEditor(t.id);
+        } catch (e) { say('not saved: ' + e.message, true); }
+      },
+    }, 'Save'),
+    status));
+
+  // Availability and recovery. Disabling asks for a reason because the reason is what the
+  // account's owner is shown when their agent is refused — without it, "disabled" is
+  // indistinguishable from the proxy being broken.
+  host.appendChild(el('h2', {}, 'Availability'));
+  const reason = el('input', {
+    type: 'text', id: 'acct-reason', maxlength: '200', 'data-testid': 'acct-reason',
+    placeholder: 'e.g. paused pending the finance review',
+  });
+  reason.value = t.disabled_reason || '';
+  if (!t.disabled) {
+    host.appendChild(el('div', { class: 'field' },
+      el('label', { for: 'acct-reason' }, 'Reason (shown to them)'), reason,
+      el('p', { class: 'hint' }, 'Returned in the 403 their agent receives and in the '
+        + 'refusal at sign-in. They are who reads this; write it for them.')));
+  }
+  host.appendChild(el('div', { class: 'actions' },
+    el('button', {
+      class: 'ghost', 'data-testid': 'acct-toggle',
+      onclick: async () => {
+        const patch = t.disabled
+          ? { disabled: false }
+          : { disabled: true, disabled_reason: reason.value.trim() };
+        if (!t.disabled && !confirm('Disable ' + t.email + '? Their agents stop immediately '
+          + 'and they are signed out of the dashboard.')) return;
+        try {
+          await ctl('/api/tenants/' + t.id, { method: 'PATCH', body: JSON.stringify(patch) });
+          reloadTenantEditor(t.id);
+        } catch (e) { say(e.message, true); }
+      },
+    }, t.disabled ? 'Enable' : 'Disable'),
+    el('button', {
+      class: 'ghost', 'data-testid': 'acct-reset',
+      onclick: async () => {
+        if (!confirm('Email ' + t.email + ' a password reset code?\n\nYou will not see the '
+          + 'code and cannot set their password. Their current password keeps working '
+          + 'until they finish.')) return;
+        try {
+          const out = await ctl('/api/tenants/' + t.id + '/password-reset', { method: 'POST' });
+          say(out.note || 'reset code mailed');
+        } catch (e) { say(e.message, true); }
+      },
+    }, 'Email a password reset'),
+    el('button', {
+      class: 'ghost',
+      onclick: async () => {
+        if (!confirm('Mint a replacement token for ' + t.email + '? Hand it over on a '
+          + 'channel you trust; it is shown once.')) return;
+        try {
+          const out = await ctl('/api/tenants/' + t.id + '/tokens',
+            { method: 'POST', body: JSON.stringify({ label: 'reissued' }) });
+          prompt('Copy this token now — it cannot be recovered:', out.token);
+        } catch (e) { say(e.message, true); }
+      },
+    }, 'Reissue token')));
+
+  host.appendChild(dangerZone(t, say));
+}
+
+/** kv renders one label/value pair of the drawer's fact band. */
+function kv(k, v) {
+  return el('div', {}, el('div', { class: 'k' }, k), el('div', { class: 'v' }, String(v)));
+}
+
+/** textField appends a labelled text input and returns it. */
+function textField(host, id, labelText, value, hint) {
+  const input = el('input', { type: 'text', id, 'data-testid': id });
+  input.value = value || '';
+  host.appendChild(el('div', { class: 'field' },
+    el('label', { for: id }, labelText), input,
+    hint ? el('p', { class: 'hint' }, hint) : null));
+  return input;
+}
+
+/**
+ * dangerZone builds the purge and delete controls.
+ *
+ * Both are irreversible and both act on somebody else's data BY ID, so the mistake worth
+ * engineering against is acting on the wrong account. The buttons are therefore inert until
+ * that account's own address has been typed into the box beside them — the server demands
+ * the same string, so this is the visible half of a check that is enforced anyway.
+ *
+ * Folded away behind a summary, and never a bare one-click button.
+ */
+function dangerZone(t, say) {
+  const confirmBox = el('input', {
+    type: 'text', id: 'acct-confirm', 'data-testid': 'acct-confirm',
+    autocomplete: 'off', spellcheck: 'false', placeholder: t.email,
+  });
+  const purge = el('button', { class: 'ghost small', disabled: true, 'data-testid': 'acct-purge' },
+    'Purge their stored data');
+  const del = el('button', { class: 'destructive small', disabled: true, 'data-testid': 'acct-delete' },
+    'Delete this account and its data');
+  const matches = () => confirmBox.value.trim().toLowerCase() === t.email.toLowerCase();
+  const sync = () => { purge.disabled = !matches(); del.disabled = !matches(); };
+  confirmBox.addEventListener('input', sync);
+
+  // What it removed, reported afterwards: a destructive action that answers "ok" tells the
+  // person who pressed it nothing about whether it did anything.
+  const report = el('p', { class: 'hint', 'data-testid': 'acct-purge-report' });
+  const run = async (path, method, verb) => {
+    if (!matches()) return;
+    if (!confirm(verb + '.\n\nThis cannot be undone. Continue?')) return;
+    say('working…');
+    try {
+      const out = await ctl(path, {
+        method, body: JSON.stringify({ confirm: confirmBox.value.trim() }),
+      });
+      const p = out.purged || {};
+      say('');
+      report.className = 'hint ok';
+      report.textContent = out.status + ': ' + num(p.requests) + ' requests, '
+        + num(p.components) + ' component rows, ' + num(p.content) + ' stored transcripts, '
+        + num(p.archives) + ' archived sessions (' + num(p.objects)
+        + ' objects deleted from cold storage).';
+      loadTenants();
+      if (method === 'DELETE') {
+        // The account is gone, so the panel describing it must not stay open showing a form
+        // whose every button would now 404.
+        setTimeout(() => { dismissDrawer(); state.drawer = null; syncURL(true); }, 1500);
+      } else {
+        confirmBox.value = '';
+        sync();
+      }
+    } catch (e) {
+      say('');
+      report.className = 'hint warn-text';
+      report.textContent = e.message;
+    }
+  };
+  purge.addEventListener('click', () => run('/api/tenants/' + t.id + '/purge', 'POST',
+    'Purge every stored request, component row and transcript for ' + t.email
+    + ', including its archives in cold storage. The account itself keeps working'));
+  del.addEventListener('click', () => run('/api/tenants/' + t.id, 'DELETE',
+    'Delete ' + t.email + ': the account, its tokens, its sessions and all of its stored '
+    + 'data in both databases and in cold storage'));
+
+  return el('details', { class: 'danger', 'data-testid': 'acct-danger' },
+    el('summary', {}, 'Danger zone'),
+    el('p', { class: 'hint' },
+      'Purge clears their history and leaves the account working. Delete removes the '
+      + 'account too. Both reach the metrics database and cold storage, and neither can be '
+      + 'undone — the audit record of having done it is all that is kept.'),
+    el('div', { class: 'field' },
+      el('label', { for: 'acct-confirm' }, 'Type ' + t.email + ' to enable these'),
+      confirmBox),
+    el('div', { class: 'danger-act' }, purge, del),
+    report);
+}
+
+// ── A/B variants (manager) ─────────────────────────────────────────────────
+//
+// A variant is a name a manager put on a set of accounts; this panel groups the metrics
+// that already exist by it. There is deliberately no significance test and no winner
+// highlighting: assignment is not random and the workloads are not comparable, so a test
+// statistic here would look like evidence without being any.
+//
+// A TABLE rather than a chart, on purpose. This is a handful of groups across eight
+// measures whose DENOMINATORS have to sit beside the figures — a table's job. A bar chart
+// of "spend per variant" would be precisely the misleading artefact the note above it warns
+// about: two bars, no sample size, no confounds.
+
+async function loadVariants() {
+  const host = clear($('#ab-list'));
+  const caveatHost = clear($('#ab-caveats'));
+  loadingState(host, 2);
+  const range = Number($('#ab-range').value) || 0;
+  const q = range > 0 ? '?since=' + (Date.now() - range) : '';
+  let out;
+  try {
+    out = await ctl('/api/variants' + q);
+  } catch (e) { clear(host); errorState(host, 'Could not compare variants', e); return; }
+  const rows = out.variants || [];
+  clear(host);
+  if (!rows.some((v) => v.variant)) {
+    emptyState(host, 'No variants assigned yet',
+      'Open an account from the roster below and give it a variant name. Two names over two '
+      + 'groups is an A/B test; accounts with no name are grouped as unassigned.');
+    return;
+  }
+  const tbl = el('table', { class: 'grid' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Variant'), el('th', {}, 'Accounts'), el('th', {}, 'Requests'),
+      el('th', {}, 'Tokens in → out'), el('th', {}, 'Saved'), el('th', {}, 'Spent'),
+      el('th', {}, 'Spent / request'), el('th', {}, 'Saved (est.)'),
+      el('th', {}, 'Unpriced'))));
+  const body = el('tbody');
+  for (const v of rows) {
+    const perReq = v.requests > 0 ? v.spent_usd / v.requests : null;
+    const savedPct = v.tokens_before > 0 ? (100 * v.saved) / v.tokens_before : null;
+    body.appendChild(el('tr', {},
+      el('td', {},
+        v.variant ? el('span', { class: 'ab-name' }, v.variant)
+          : el('span', { class: 'muted' }, 'unassigned'),
+        // Several configurations inside one variant means it is not one treatment. Said on
+        // the row, because it invalidates that row's comparison specifically.
+        (v.configs || []).length > 1
+          ? el('span', { class: 'denom warn-text' }, (v.configs || []).length + ' different configs')
+          : null),
+      el('td', {}, num(v.tenants),
+        el('span', { class: 'denom' }, num(v.reporting) + ' with traffic')),
+      el('td', {}, num(v.requests),
+        el('span', { class: 'denom' }, num(v.sessions) + (v.sessions === 1 ? ' session' : ' sessions'))),
+      el('td', {}, compact(v.tokens_before) + ' → ' + compact(v.tokens_after)),
+      el('td', {}, compact(v.saved),
+        el('span', { class: 'denom' }, savedPct === null ? 'no traffic' : pct(savedPct) + ' of input')),
+      el('td', {}, usd(v.spent_usd)),
+      // The only normalisation offered, and the one this project has already been misled
+      // by: it says nothing about cost per TASK, because a variant that needs more turns
+      // can be cheaper per request and dearer per job.
+      el('td', {}, perReq === null ? '—' : usd(perReq),
+        el('span', { class: 'denom' }, 'not per task')),
+      el('td', {}, usd(v.saved_usd),
+        el('span', { class: 'denom' }, 'counterfactual')),
+      // Rows the provider priced for nobody. Where this approaches the request count, the
+      // money columns on this row are unknown rather than small.
+      el('td', {}, num(v.incomplete_rows),
+        v.requests > 0 && v.incomplete_rows >= v.requests
+          ? el('span', { class: 'denom warn-text' }, 'money unknown')
+          : null)));
+    // Which component did the work, folded across the variant's accounts — the row that
+    // turns "arm B is cheaper" into something anyone can act on.
+    const comps = v.components || [];
+    if (comps.length) {
+      const inner = el('table', { class: 'grid' },
+        el('thead', {}, el('tr', {}, el('th', {}, 'Component'), el('th', {}, 'Ran'),
+          el('th', {}, 'Acted'), el('th', {}, 'Reverted'), el('th', {}, 'Saved'))));
+      const ibody = el('tbody');
+      for (const c of comps.slice(0, 20)) {
+        ibody.appendChild(el('tr', {},
+          el('td', {}, el('code', {}, c.component)),
+          el('td', {}, num(c.runs)),
+          el('td', {}, num(c.acted) + ' (' + pct(100 * (c.act_rate || 0)) + ')'),
+          el('td', {}, c.reverted ? el('span', { class: 'warn-text' }, num(c.reverted)) : '0'),
+          el('td', {}, compact(c.saved_unique))));
+      }
+      inner.appendChild(ibody);
+      body.appendChild(el('tr', {}, el('td', { colspan: '9' },
+        el('details', {}, el('summary', { class: 'hint' },
+          'Components in ' + (v.variant || 'unassigned')), inner))));
+    }
+  }
+  tbl.appendChild(body);
+  host.appendChild(tbl);
+
+  // The full caveat list comes from the server rather than being written twice: the API
+  // decides what this comparison cannot show, and a second copy in the page would drift.
+  const list = el('ul');
+  for (const c of out.caveats || []) list.appendChild(el('li', {}, c));
+  caveatHost.appendChild(el('details', { class: 'why' },
+    el('summary', {}, 'What this comparison cannot tell you'),
+    el('p', { class: 'hint' }, out.description || ''), list));
 }
 
 // ── archive ────────────────────────────────────────────────────────────────
@@ -3620,15 +4233,19 @@ Object.assign(loaders, {
 function initAccounts() {
   $('#gate-tab-signin').addEventListener('click', () => {
     cancelVerify(); // switching tabs abandons a pending code rather than hiding it
-    $('#gate-signin').hidden = false; $('#gate-register').hidden = true;
-    $('#gate-closed').hidden = true;
+    cancelReset(true);
+    hideGateForms();
+    $('#gate-signin').hidden = false;
     $('#gate-tab-signin').setAttribute('aria-selected', 'true');
     $('#gate-tab-register').setAttribute('aria-selected', 'false');
     gateError('');
+    gateNotice('');
   });
   $('#gate-tab-register').addEventListener('click', () => {
     cancelVerify();
-    $('#gate-signin').hidden = true;
+    cancelReset(true);
+    hideGateForms();
+    gateNotice('');
     $('#gate-tab-signin').setAttribute('aria-selected', 'false');
     $('#gate-tab-register').setAttribute('aria-selected', 'true');
     // The form appears only if this deployment would accept it; applyRegisterMode puts
@@ -3721,6 +4338,11 @@ function initAccounts() {
     showGate(true);
     applyAccount();
   });
+
+  initReset();
+  // The A/B window is local to that card: the Tenants view hides the global filter bar
+  // (it is not a traffic view), so the comparison carries its own range.
+  $('#ab-range').addEventListener('change', loadVariants);
 
   $('#mint-token').addEventListener('click', async () => {
     const label = prompt('Name this token (e.g. laptop, ci):', 'new-token');

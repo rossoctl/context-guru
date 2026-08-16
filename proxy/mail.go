@@ -79,8 +79,16 @@ func devSink() string { return strings.TrimSpace(os.Getenv(envMailDevSink)) }
 func sendCode(to string, purpose tenant.CodePurpose, c tenant.Code) error {
 	subject := "Your context-guru verification code"
 	what := "finish signing in"
-	if purpose == tenant.PurposeRegister {
+	switch purpose {
+	case tenant.PurposeRegister:
 		what = "confirm this address and finish creating your context-guru account"
+	case tenant.PurposeReset:
+		// A distinct subject, not just different body text. This is the one code that arrives
+		// unprompted — a manager can start a reset, and so can anyone who types your address
+		// into the sign-in page — so the recipient has to be able to tell at a glance that
+		// something is being done to their password rather than to their session.
+		subject = "Your context-guru password reset code"
+		what = "set a new password on your context-guru account"
 	}
 	body := fmt.Sprintf(`Your context-guru verification code is:
 

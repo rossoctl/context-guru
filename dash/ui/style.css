@@ -1052,3 +1052,51 @@ table.grid tr.revoked { opacity: 0.55; }
   .star { transition: none; }
   .star:active { transform: none; }
 }
+/* ── manager console (account editor, danger zone, A/B) ───────────────── */
+/* Text inputs inside a .field were unstyled: only select and textarea were listed, so
+   the account editor's boxes would have been the browser default next to styled ones. */
+.field input[type=text], .field input[type=number], .field input[type=password],
+.field input[type=email] {
+  padding: var(--sp-2) var(--sp-3); font: inherit; max-width: 520px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--fg);
+}
+/* The two irreversible actions, folded away and visibly not part of the form above it.
+   Red on the summary, not on the whole box: a permanently alarming panel is one people
+   stop reading. */
+details.danger {
+  margin-top: var(--sp-5); padding: var(--sp-3);
+  border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent);
+  border-radius: var(--r); background: var(--bad-soft);
+}
+details.danger > summary { cursor: pointer; font-weight: 600; color: var(--bad); font-size: var(--t-small); }
+details.danger .hint { color: var(--fg); }
+details.danger .field { margin: var(--sp-4) 0 0; }
+/* A destructive button is inert until the account's address has been typed back. Styled
+   as disabled rather than hidden, so the requirement is visible before it is met. */
+.danger-act { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; margin-top: var(--sp-2); }
+/* Its own full declaration, not a modifier: the shared button rule above lists
+   .ghost/.primary/.subtle by name, so a fourth class inherits no font, padding or radius
+   from it and would render as a browser-default button.
+   Text is --bg in both themes, which is the light end against light-mode's dark red
+   (#b02a1e) and the dark end against dark-mode's light red (#ef6f63) — the contrast is
+   deliberate in each, not an automatic flip. */
+button.destructive {
+  font: inherit; font-size: var(--t-body); cursor: pointer; white-space: nowrap;
+  padding: var(--sp-1) var(--sp-3); border-radius: var(--r-sm);
+  background: var(--bad); color: var(--bg); border: 1px solid transparent; font-weight: 600;
+}
+button.destructive.small { padding: 2px var(--sp-2); font-size: var(--t-small); }
+button.destructive:hover:not(:disabled) { filter: brightness(1.08); }
+button.destructive:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+.hint.ok { color: var(--good); }
+/* Per-variant numbers are tabular so two arms can be compared down a column. */
+#ab-list table.grid td { font-variant-numeric: tabular-nums; }
+#ab-list .ab-name { font-family: var(--mono); font-weight: 600; }
+/* The denominator that keeps a figure honest, printed under it rather than in a tooltip
+   nobody hovers. */
+.denom { display: block; color: var(--fg-faint); font-size: var(--t-micro); line-height: 1.4; }
+/* The account editor's YAML box lives in the drawer, whose narrower column left a
+   textarea at its intrinsic `cols` width — a 12-row config document in a 20-column box.
+   Stretch it, and cap the controls the same way the settings page does. */
+#drawer-body .field textarea { width: 100%; }
+#drawer-body .field input[type=text], #drawer-body .field input[type=number] { width: 100%; }

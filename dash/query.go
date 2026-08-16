@@ -553,6 +553,12 @@ type GroupRow struct {
 // about traffic nobody inspected. Bypassed rows are NOT affected — apply counts
 // breakpoints before it checks bypass, so their zero is a real zero.
 var breakdownDims = map[string]string{
+	// tenant is the dimension a MANAGER groups by, and it is what makes an A/B comparison
+	// possible without a second column: a variant is a set of tenants, so per-tenant rows
+	// fold into per-variant rows by summing (see the /api/variants rollup in proxy). Safe
+	// for everyone else by construction — a.scope overwrites Filter.Tenant from the
+	// principal, so a plain user grouping by tenant gets exactly one group: their own.
+	"tenant":            "r.tenant_id",
 	"model":             "r.model",
 	"provider":          "r.provider",
 	"agent":             "r.agent",
