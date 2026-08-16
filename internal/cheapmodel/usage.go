@@ -1,6 +1,7 @@
 package cheapmodel
 
 import (
+	"context"
 	"os"
 	"strconv"
 	"sync/atomic"
@@ -27,15 +28,78 @@ var (
 	llmCacheRead    atomic.Int64
 )
 
-// recordUsageCache adds one call's token usage to the process totals, split by cache
-// tier. inTok is FRESH (uncached) input on both backends — see openai.go for why that
-// needs normalizing there.
-func recordUsageCache(inTok, outTok, cacheWrite, cacheRead int) {
+// Sink accumulates the cheap-model usage of ONE scope — in the proxy, one request. The
+// totals above are a per-PROCESS fact and stay that way (/stats and the benchmark read
+// them); a per-request bill cannot be derived from them by subtraction, because on a
+// multi-tenant proxy any other tenant's call landing inside the subtraction window is
+// billed to whoever happens to be in flight. That was the cg_llm_cost_usd defect: it
+// propagated into tenant_spend and month-to-date spend, and let a tenant infer other
+// tenants' compaction activity from its own rows.
+//
+// Carried on the CONTEXT rather than as a components.Ctx field, because the context is
+// what already reaches every model call: apply builds components.Ctx from it, components
+// derive their timeouts from it, and internal/extract sees only a context.Context. One
+// plumbing point, and no call path can silently miss it.
+type Sink struct {
+	calls      atomic.Int64
+	in, out    atomic.Int64
+	cacheWrite atomic.Int64
+	cacheRead  atomic.Int64
+}
+
+// Totals returns this scope's usage so far, at the same shape as Usage().
+func (s *Sink) Totals() (calls, inTokens, outTokens int64) {
+	if s == nil {
+		return 0, 0, 0
+	}
+	return s.calls.Load(), s.in.Load(), s.out.Load()
+}
+
+// CacheTotals returns this scope's cache-tier tokens (write, read).
+func (s *Sink) CacheTotals() (cacheWrite, cacheRead int64) {
+	if s == nil {
+		return 0, 0
+	}
+	return s.cacheWrite.Load(), s.cacheRead.Load()
+}
+
+type sinkKey struct{}
+
+// WithSink scopes cheap-model accounting for everything done under ctx to s. A call made
+// under a context with no sink still counts toward the process totals — nothing is lost,
+// it is simply not attributable to one request.
+func WithSink(ctx context.Context, s *Sink) context.Context {
+	if s == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, sinkKey{}, s)
+}
+
+// SinkFrom returns the sink scoping ctx, or nil.
+func SinkFrom(ctx context.Context) *Sink {
+	if ctx == nil {
+		return nil
+	}
+	s, _ := ctx.Value(sinkKey{}).(*Sink)
+	return s
+}
+
+// recordUsageCache adds one call's token usage to the process totals and to the calling
+// scope's sink, split by cache tier. inTok is FRESH (uncached) input on both backends —
+// see openai.go for why that needs normalizing there.
+func recordUsageCache(ctx context.Context, inTok, outTok, cacheWrite, cacheRead int) {
 	llmCalls.Add(1)
 	llmInputTokens.Add(int64(inTok))
 	llmOutputTokens.Add(int64(outTok))
 	llmCacheWrite.Add(int64(cacheWrite))
 	llmCacheRead.Add(int64(cacheRead))
+	if s := SinkFrom(ctx); s != nil {
+		s.calls.Add(1)
+		s.in.Add(int64(inTok))
+		s.out.Add(int64(outTok))
+		s.cacheWrite.Add(int64(cacheWrite))
+		s.cacheRead.Add(int64(cacheRead))
+	}
 }
 
 // Usage returns the cumulative cheap-model usage (calls, input tokens, output

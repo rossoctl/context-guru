@@ -90,8 +90,9 @@ func main() {
 			"hosted mode: comma-separated email domains allowed to self-register. Applies only "+
 				"when CG_REGISTER=open or invite; registration is CLOSED unless CG_REGISTER "+
 				"says otherwise (invite also needs CG_REGISTER_CODE). Matching is exact-domain "+
-				"or a subdomain of it, but the address itself is UNVERIFIED — nobody proves "+
-				"they own it")
+				"or a subdomain of it, and the address is PROVEN by a mailed verification "+
+				"code — but reachability is not entitlement: anyone with a mailbox in these "+
+				"domains may self-register")
 		maxTenancies = flag.Int("max-tenancies", envInt("MAX_TENANCIES", proxy.DefaultMaxTenancies),
 			"hosted mode: how many tenants keep live pipelines and compaction state in memory; "+
 				"evicting a tenant costs it one cold cache on its next turn")
@@ -104,8 +105,20 @@ func main() {
 			"stop evicting once usage falls to this fraction; the gap from --dashboard-disk-high is what stops the janitor grinding when the host is full for other reasons")
 		dashMinKeep = flag.Int64("dashboard-min-keep-bytes", int64(envInt("DASHBOARD_MIN_KEEP_BYTES", 1<<30)),
 			"never shrink the dashboard database below this under disk pressure; below it the pressure is not ours to relieve")
-		dashMaxRowsPerTenant = flag.Int64("dashboard-max-rows-per-tenant", int64(envInt("DASHBOARD_MAX_ROWS_PER_TENANT", 0)),
-			"hosted mode: cap one tenant's retained request rows, trimmed before the disk rule so a heavy user cannot evict everyone else (0 = no cap)")
+		// A NON-ZERO default, because a fairness rule that has to be switched on is not
+		// a fairness rule: with 0 the janitor's quota pass returns immediately and the
+		// only thing bounding the database is the global byte rule, which deletes the
+		// OLDEST rows in the whole table — so the tenant filling the disk keeps its
+		// history and everyone else loses theirs.
+		//
+		// 100k rows is above any plausible legitimate week (the retention window is 7
+		// days; that is ~14k requests/day sustained, an order of magnitude above a heavy
+		// agent user) and ~10% of the 512 MiB byte budget for metric-only rows, so
+		// several heavy tenants coexist before the byte rule has anything to do. A
+		// manager can still raise or lower it per tenant.
+		dashMaxRowsPerTenant = flag.Int64("dashboard-max-rows-per-tenant",
+			int64(envInt("DASHBOARD_MAX_ROWS_PER_TENANT", 100_000)),
+			"hosted mode: cap one tenant's retained request rows, trimmed BEFORE the age, byte and disk rules so a heavy user cannot evict everyone else (0 = no cap)")
 
 		// Cold storage (Box via rclone). When set, eviction becomes MIGRATION: a
 		// session is uploaded and verified before its local rows are deleted, so
@@ -293,6 +306,28 @@ func main() {
 	var upstreams map[string]proxy.Upstream
 	var reg *tenant.Registry
 	if *upstreamsPath != "" {
+		// The single-tenant capture hooks are REFUSED here, before anything opens a
+		// database or a socket.
+		//
+		// Both are read once at package init (proxy.capturePath, apply.dumpPath) and
+		// append to one process-wide file: no tenant column, pristine bodies, and on a
+		// path the redactor never runs. So in hosted mode they are a shared plaintext
+		// transcript of every tenant's source code, written regardless of whether any
+		// tenant consented to content capture — the one thing per-tenant consent exists
+		// to control.
+		//
+		// Fatal rather than a warning, deliberately: the leak begins with the first
+		// request, nothing downstream can undo it, and a WARN in the journal is read
+		// after the fact. The rule has to survive one careless `Environment=` line.
+		for _, v := range []string{"CONTEXT_GURU_DUMP", "CONTEXT_GURU_CAPTURE"} {
+			if os.Getenv(v) != "" {
+				log.Fatalf("%s is set and --upstreams selects HOSTED multi-tenant mode: "+
+					"that hook appends EVERY tenant's request bodies to one shared file, "+
+					"unredacted and with no tenant attribution, bypassing per-tenant "+
+					"content-capture consent. Unset %s, or drop --upstreams to run "+
+					"single-tenant, where the hook only sees your own traffic.", v, v)
+			}
+		}
 		list, err := config.LoadUpstreams(*upstreamsPath)
 		if err != nil {
 			// Deliberately fatal. A hosted proxy with an unusable allow-list would

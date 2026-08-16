@@ -455,7 +455,9 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	cp := h.newCapture(r, string(provider), "/compact", tn)
 	cp.noteModel(gjson.GetBytes(body, "model").String())
 	start := time.Now()
-	res := apply.BodyOpts(r.Context(), pipe, tn.Store, apply.Opts{
+	// cp.llmCtx: our own compaction-model spend under this context is charged to THIS
+	// request's row, not to whichever tenant is in flight when the call returns.
+	res := apply.BodyOpts(cp.llmCtx(r.Context()), pipe, tn.Store, apply.Opts{
 		Provider:  provider,
 		Body:      body,
 		Session:   r.Header.Get("x-context-guru-session"),
@@ -689,7 +691,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			}()
 			var added time.Duration
 			body, added, tr = h.applyMode(&reqInfo{
-				ctx:      r.Context(),
+				// cp.llmCtx: context-guru's OWN compaction-model spend under this context
+				// is charged to this request's row, and to no other tenant's.
+				ctx:      cp.llmCtx(r.Context()),
 				provider: provider,
 				body:     body,
 				session:  r.Header.Get("x-context-guru-session"),

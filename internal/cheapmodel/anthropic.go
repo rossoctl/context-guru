@@ -107,7 +107,7 @@ func (a Anthropic) CompleteSystem(ctx context.Context, system, prompt string) (s
 	}
 	// track CG component LLM cost, split by cache tier so /stats can show whether the
 	// preamble breakpoint actually caches (read>0) or is silently ignored (read==0).
-	recordUsageCache(out.Usage.InputTokens, out.Usage.OutputTokens,
+	recordUsageCache(ctx, out.Usage.InputTokens, out.Usage.OutputTokens,
 		out.Usage.CacheCreationTok, out.Usage.CacheReadTok)
 	// Return the first content block that carries text. A leading non-text block
 	// (e.g. "thinking") has an empty Text, so we skip it rather than returning "".
