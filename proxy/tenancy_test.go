@@ -640,18 +640,18 @@ func TestAgentKeyIdentifiesTenantOnlyAfterBinding(t *testing.T) {
 	f := newHostedFixtureNoKey(t, "up", "bob")
 	tn, _ := f.register(t, "a@ibm.com")
 
-	w := f.postCaller("/inference/v1/chat/completions", "", "bob-own-key", "")
+	w := f.postCaller("/inference/v1/chat/completions", "", "bob-own-fake-key-for-tests", "")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unbound provider key = %d, want 401", w.Code)
 	}
-	if err := f.reg.BindAgentKey(tn.ID, "bob-own-key"); err != nil {
+	if err := f.reg.BindAgentKey(tn.ID, "bob-own-fake-key-for-tests"); err != nil {
 		t.Fatal(err)
 	}
-	w = f.postCaller("/inference/v1/chat/completions", "", "bob-own-key", "")
+	w = f.postCaller("/inference/v1/chat/completions", "", "bob-own-fake-key-for-tests", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("bound provider key = %d %s", w.Code, w.Body)
 	}
-	got, err := f.h.opts.Tenants.Resolve(withToken("", "bob-own-key"))
+	got, err := f.h.opts.Tenants.Resolve(withToken("", "bob-own-fake-key-for-tests"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -659,7 +659,7 @@ func TestAgentKeyIdentifiesTenantOnlyAfterBinding(t *testing.T) {
 		t.Errorf("agent key resolved to %s, want %s", got.ID, tn.ID)
 	}
 	// And the key itself still went upstream: recognising it must not consume it.
-	if v := f.lastUpstream(t).Header.Get("Authorization"); v != "Bearer bob-own-key" {
+	if v := f.lastUpstream(t).Header.Get("Authorization"); v != "Bearer bob-own-fake-key-for-tests" {
 		t.Errorf("upstream Authorization = %q", v)
 	}
 }
