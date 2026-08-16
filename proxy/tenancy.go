@@ -220,13 +220,21 @@ const TokenHeader = "x-context-guru-token"
 // scrubToken).
 var authHeaders = []string{"Authorization", "x-api-key", "x-goog-api-key"}
 
-// headerCredential pulls a bearer-ish value out of one header. Splitting on fields
-// rather than trimming a prefix so that a lone "Bearer" yields nothing at all,
-// instead of the word "Bearer" being sent off to be looked up.
+// headerCredential pulls the credential out of one auth header: either a bare value,
+// or a `<scheme> <value>` pair. Splitting on fields rather than trimming a prefix so
+// that a lone "Bearer" yields nothing at all, instead of the word "Bearer" being sent
+// off to be looked up.
+//
+// The scheme is deliberately NOT checked against a list. It used to require "Bearer",
+// and BobShell sends `Authorization: Apikey <key>` — so its key was invisible to
+// CallerKey, every Bob request was refused 401 "no context-guru token" no matter what
+// the tenant had bound, and scrubToken could not have removed one of our own tokens
+// from that slot either. Anything that is not our token is forwarded unchanged, scheme
+// included, so accepting the pair only affects whether we can RECOGNISE it.
 func headerCredential(v string) string {
 	f := strings.Fields(v)
 	switch {
-	case len(f) == 2 && strings.EqualFold(f[0], "bearer"):
+	case len(f) == 2:
 		return f[1]
 	case len(f) == 1 && !strings.EqualFold(f[0], "bearer"):
 		return f[0]
