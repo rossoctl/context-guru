@@ -110,14 +110,6 @@ func (c *capture) noteMeta(m dash.Meta) {
 //	           tool_choice (a bare string, or {function:{name}}), reasoning_effort,
 //	           and no top-level system at all — it is a role=system message
 //
-// `output_config.effort` accepts both the level string and the {"type": "<level>"} object
-// form, which is why it is asked for twice.
-var metaPaths = [...]string{
-	"max_tokens", "max_completion_tokens", "temperature", "top_p", "stream",
-	"reasoning_effort", "output_config.effort", "output_config.effort.type",
-	"thinking.type", "thinking.budget_tokens", "tool_choice", "tools.#",
-}
-
 // metaFromBody reads the request's metadata off the raw body in ONE structural pass.
 //
 // One pass, and it is measured rather than assumed. This runs on the request goroutine, so
