@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -230,5 +232,94 @@ func TestRefusalPerTenantSeriesAreBounded(t *testing.T) {
 	d := measure(func() { recordRefusal(refuseAuth, "one-more") })
 	if d.totals[refuseAuth] != 1 {
 		t.Error("the process-wide total stopped counting once the per-tenant cap was hit")
+	}
+}
+
+// A refusal has to be findable by tenant, and the one refusal a USER can fix needs its
+// own series.
+//
+// errNoProviderKey means "your account is fine, but you sent no provider credential of
+// your own". It was invisible twice over: the cg.refused line carried NO tenant, because
+// chat attached the per-request logger only after resolving the upstream and refuse()
+// reads its logger out of the request context — with the tenant sitting in hand three
+// lines above. And the count landed in reason="auth" together with every unknown token.
+// That is the refusal a deployment sees from every user who has not yet added their own
+// key, so both blind spots hide exactly the population that needs contacting.
+func TestNoProviderKeyRefusalIsAttributedAndCounted(t *testing.T) {
+	// No server-held key on the upstream, so the caller's own credential is required.
+	f := newHostedFixtureNoKey(t, "up", "openai")
+	tn, tok := f.register(t, "user@ibm.com")
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	d := measure(func() {
+		if w := f.postCaller("/openai/v1/chat/completions", tok, "", ""); w.Code != http.StatusUnauthorized {
+			t.Fatalf("a tenant with no provider key of its own = %d, want 401", w.Code)
+		}
+	})
+
+	var line string
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(l, "cg.refused") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("nothing logged a cg.refused line:\n%s", logs.String())
+	}
+	if !strings.Contains(line, "tenant="+tn.ID) {
+		t.Errorf("the refusal is not findable by tenant: %s", line)
+	}
+
+	// Its own reason, with the tenant on it — which is what turns "N users broke" into
+	// "these users broke" — and counted EXACTLY once: the SLO panel divides an unlabelled
+	// sum of this family by refusals + requests, so a request counted under two reasons
+	// would inflate the error-rate SLI (see failAuthAs).
+	if got := d.totals[refuseAuth]; got != 0 {
+		t.Errorf(`the same refusal also moved reason="auth" by %d; it must be counted once`, got)
+	}
+	if got := d.totals[refuseNoProviderKey]; got != 1 {
+		t.Errorf(`cg_refused_requests_total{reason="no_provider_key"} moved by %d, want 1`, got)
+	}
+	if got := d.byTenant[tn.ID][refuseNoProviderKey]; got != 1 {
+		t.Errorf("the per-tenant no_provider_key series moved by %d, want 1", got)
+	}
+	body := f.h.renderMetrics()
+	for _, want := range []string{
+		`cg_refused_requests_total{reason="no_provider_key"}`,
+		`cg_tenant_refused_requests_total{tenant="` + tn.ID + `",label="laptop",reason="no_provider_key"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics is missing %q", want)
+		}
+	}
+}
+
+// failAuthAs must answer byte-for-byte as failAuth does. It exists only to count a
+// different reason (see refuseRoute), and a refusal that starts replying differently on
+// one route than on the others is a bug an agent surfaces to a user as gibberish.
+//
+// This is the guard on a deliberate duplication: failAuth lives in tenancy.go, which
+// another agent owns this cycle, so the reason-specific variant sits in proxy.go until it
+// can collapse into failAuth's switch.
+func TestFailAuthAsMatchesFailAuth(t *testing.T) {
+	for _, err := range []error{errNoProviderKey, errNoToken, errTenantOff, errNoUpstreamFor} {
+		a, b := httptest.NewRecorder(), httptest.NewRecorder()
+		failAuth(a, err)
+		failAuthAs(b, err, refuseAuth, "")
+		if a.Code != b.Code {
+			t.Errorf("%v: status %d vs %d", err, a.Code, b.Code)
+		}
+		if a.Body.String() != b.Body.String() {
+			t.Errorf("%v: body %q vs %q", err, a.Body, b.Body)
+		}
+		for _, h := range []string{"Content-Type", "WWW-Authenticate"} {
+			if a.Header().Get(h) != b.Header().Get(h) {
+				t.Errorf("%v: %s %q vs %q", err, h, a.Header().Get(h), b.Header().Get(h))
+			}
+		}
 	}
 }

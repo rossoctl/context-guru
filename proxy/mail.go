@@ -92,6 +92,14 @@ If you did not ask for this, you can ignore it: nothing happens until the code i
 entered, and it stops working shortly.
 `, c.Plain, what, c.ExpiresAt.Format(time.RFC1123), int(tenant.CodeTTL/time.Minute))
 
+	return sendMail(to, subject, body)
+}
+
+// sendMail delivers one message the way this deployment is configured: the dev sink when
+// one is set and no relay is, otherwise SMTP. One dispatcher, so a message that is not a
+// code (mailRegisterNotice) cannot end up travelling by a different route than a code
+// does.
+func sendMail(to, subject, body string) error {
 	if sink := devSink(); sink != "" && os.Getenv(envSMTPHost) == "" {
 		return writeDevSink(sink, to, subject, body)
 	}

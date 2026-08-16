@@ -58,13 +58,26 @@ const (
 	refuseForbidden   refusalReason = "forbidden"      // 403, disabled account or a gated view
 	refuseNoUpstream  refusalReason = "no_upstream"    // 502, nothing configured for the route
 	refuseUpstream    refusalReason = "upstream_error" // 502, the upstream call itself failed
+	// refuseNoProviderKey is 401 too, and it is the one 401 that is not an authentication
+	// failure at all: the account is known and enabled, and what is missing is the
+	// caller's OWN provider credential (see errNoProviderKey and refuseRoute). It gets its
+	// own series because it is the only refusal in this list the USER can fix, because it
+	// becomes the dominant one as soon as a deployment stops injecting a server-held key,
+	// and because it is the only one recorded with a tenant on a 401 — so the operator can
+	// name the accounts to contact instead of counting them.
+	//
+	// It PARTITIONS `auth` rather than refining it: a request refused for a missing provider
+	// credential is counted here and NOT under auth (see failAuthAs). That is deliberate —
+	// the SLO dashboard divides an UNLABELLED sum of this family by refusals + requests, so a
+	// request counted under two reasons would inflate the error-rate SLI by one.
+	refuseNoProviderKey refusalReason = "no_provider_key"
 )
 
 // refusalReasons is the exposition order, and the reason every series is present with a
 // value of 0 rather than absent: a Grafana rate() over a family that only appears once
 // something breaks renders "No data", which reads as healthy.
 var refusalReasons = []refusalReason{refuseRateLimit, refuseConcurrency,
-	refuseAuth, refuseForbidden, refuseNoUpstream, refuseUpstream}
+	refuseAuth, refuseNoProviderKey, refuseForbidden, refuseNoUpstream, refuseUpstream}
 
 // refusalTotals is the process-wide count per reason. Built once and never written
 // again, so an increment on the request path is one map read and one atomic add — no
@@ -379,7 +392,7 @@ func (h *Handler) renderMetrics() string {
 	// counters are exactly what is wanted on a proxy with no /stats rollups at all.
 	refusals, refusalsByTenant := refusalSnapshot()
 	promHeader(&b, "cg_refused_requests_total",
-		"Requests refused before an upstream was called, by reason. Any sustained rate here is somebody's agent failing: rate_limit and concurrency are both 429 but have different fixes (raise the rate, raise the in-flight cap), auth/forbidden mean a bad or disabled token, no_upstream is our own misconfiguration and upstream_error is the provider.", "counter")
+		"Requests refused before an upstream was called, by reason. Any sustained rate here is somebody's agent failing: rate_limit and concurrency are both 429 but have different fixes (raise the rate, raise the in-flight cap), auth/forbidden mean a bad or disabled token, no_provider_key means the account is fine but sent no provider credential of its own — split out of auth because it is the only refusal here the USER fixes, and the one a credential migration has to be able to count, no_upstream is our own misconfiguration and upstream_error is the provider.", "counter")
 	for _, r := range refusalReasons {
 		promLine(&b, "cg_refused_requests_total", `reason="`+string(r)+`"`, float64(refusals[r]))
 	}
