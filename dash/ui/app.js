@@ -392,7 +392,15 @@ function lineChart(host, series, opts = {}) {
     el('span', {}, el('i', { style: 'background:' + s.color }), s.name))));
 }
 
-/** barRows(host, rows) — rows: [{label, value, display, max, negative, desc}] */
+/**
+ * barRows(host, rows) — rows: [{label, value, display, max, desc, formula, color, available}]
+ *
+ * `formula` stays in the layout; `desc` folds into a disclosure. That split is the point:
+ * five bars each carrying three lines of prose put fifteen lines of documentation between
+ * the reader and the next number — but two ratios that differ ONLY in their divisor must
+ * never look like the same measurement, so the arithmetic stays on screen and only the
+ * explanation becomes opt-in.
+ */
 function barRows(host, rows, opts = {}) {
   clear(host);
   if (!rows.length) { emptyState(host, 'Nothing to show yet', opts.emptyDetail || ''); return; }
@@ -407,10 +415,25 @@ function barRows(host, rows, opts = {}) {
         style: 'width:' + width + '%' + (r.color ? ';background:' + r.color : ''),
       })),
       el('div', { class: 'bar-val' + (r.available === false ? ' na' : ''), text: r.display }));
+    if (r.formula) row.appendChild(el('div', { class: 'bar-formula', text: r.formula }));
     wrap.appendChild(row);
-    if (r.desc) wrap.appendChild(el('div', { class: 'bar-desc', text: r.desc }));
+    if (r.desc) wrap.appendChild(whyBlock('', r.desc, r.descSummary || opts.descSummary || ('Why: ' + r.label)));
   }
   host.appendChild(wrap);
+}
+
+/**
+ * whyBlock is the single disclosure used everywhere a long explanation used to sit
+ * permanently in the layout. Native <details>: focusable and keyboard-operable for free,
+ * no JS, and collapsed by default so the prose costs nothing until it is wanted.
+ *
+ * An empty `summary` draws the glyph-only form (see .bars > details.why), which needs
+ * `label` to carry the accessible name a visible word would otherwise have provided.
+ */
+function whyBlock(summary, text, label) {
+  return el('details', { class: 'why' },
+    el('summary', { text: summary, 'aria-label': label || null, title: label || null }),
+    el('p', { text: text }));
 }
 
 /**
@@ -496,52 +519,56 @@ function renderTiles(o) {
   // save money, did it save tokens, and over how much traffic. Everything else is the
   // evidence for those three, so it sits below them in labelled groups rather than
   // beside them at the same weight.
+  // A tile's sub-line is kept only where it carries a FACT the label cannot: a formula, a
+  // second number, or the distinguisher between two tiles that would otherwise read the
+  // same ("gross" vs "unique"). Anything that only restated the label is gone — "Tokens
+  // before / content tokens in" was a caption explaining a caption.
   host.appendChild(tileGroup(null, null, [
     tile('saved-usd', 'Net dollars saved', costKnown ? usd(o.net_saved_usd) : 'unknown',
-      'baseline − actual − our own spend', costKnown ? (o.net_saved_usd < 0 ? 'bad' : 'good') : ''),
+      'baseline − actual − our spend', costKnown ? (o.net_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-unique', 'Tokens saved (unique)', compact(o.saved_unique),
-      'each compaction counted once', 'accent'),
+      'each compaction once', 'accent'),
     tile('requests', 'Requests', num(o.requests), num(o.sessions) + ' sessions'),
   ], 'headline'));
 
-  host.appendChild(tileGroup('Content tokens', 'what the pipeline removed, three ways of counting it', [
-    tile('tokens-before', 'Tokens before', compact(o.tokens_before), 'content tokens in'),
-    tile('tokens-after', 'Tokens after', compact(o.tokens_after), 'content tokens out'),
+  host.appendChild(tileGroup('Content tokens', 'three ways to count the same removal', [
+    tile('tokens-before', 'Tokens before', compact(o.tokens_before)),
+    tile('tokens-after', 'Tokens after', compact(o.tokens_after)),
     tile('saved-gross', 'Saved (gross)', compact(o.saved_gross), 'recounts re-sent history'),
     // The label has to name the UNIQUE calculation, which dominates this figure, and not
     // only the restore subtraction, which is usually zero: sitting between "Saved (gross)
     // 17k" and "Overcount 1.7×", "Saved (net of restores)" invited reading it as
     // gross-minus-restores and made a 10k number look like an arithmetic error.
-    tile('saved-adjusted', 'Saved (unique, less restores)', compact(o.saved_adjusted),
-      'unique − ' + compact(o.expand_tokens) + ' restored back', o.saved_adjusted < 0 ? 'bad' : ''),
+    tile('saved-adjusted', 'Saved (unique − restores)', compact(o.saved_adjusted),
+      compact(o.expand_tokens) + ' asked back', o.saved_adjusted < 0 ? 'bad' : ''),
     tile('overcount', 'Overcount ratio', o.overcount_ratio ? o.overcount_ratio.toFixed(1) + '×' : '—',
       'gross ÷ unique'),
   ]));
 
   host.appendChild(tileGroup('Cost', costKnown ? 'billed, and the counterfactual' : 'no priced requests in this window', [
     tile('cost-baseline', 'Baseline cost', costKnown ? usd(o.baseline_cost_usd) : 'unknown',
-      costKnown ? 'without context-guru' : 'needs all four token tiers'),
+      costKnown ? 'without context-guru' : 'needs all four tiers'),
     tile('cost-actual', 'Actual cost', costKnown ? usd(o.cost_usd) : 'unknown',
-      costKnown ? 'as billed' : 'needs all four token tiers'),
-    tile('cost-cg', "context-guru's own LLM", costKnown ? usd(o.cg_llm_cost_usd) : 'unknown',
-      'our components’ model spend'),
+      costKnown ? 'as billed' : 'needs all four tiers'),
+    tile('cost-cg', 'Our own LLM cost', costKnown ? usd(o.cg_llm_cost_usd) : 'unknown',
+      'extract_llm, summarize'),
   ]));
 
   host.appendChild(tileGroup('Billed tokens', 'the four tiers the provider charges on', [
-    tile('cache-read', 'Cache reads', compact(o.cache_read), 'billed at the read rate'),
+    tile('cache-read', 'Cache reads', compact(o.cache_read)),
     tile('cache-write', 'Cache writes', compact(o.cache_write), '~11.5× a read'),
-    tile('fresh-input', 'Fresh input', compact(o.fresh_input), 'uncached new tokens'),
-    tile('output', 'Output tokens', compact(o.output_tokens), 'completions'),
+    tile('fresh-input', 'Fresh input', compact(o.fresh_input)),
+    tile('output', 'Output tokens', compact(o.output_tokens)),
   ]));
 
-  host.appendChild(tileGroup('Latency and safety', 'what compaction cost to get', [
+  host.appendChild(tileGroup('Latency and safety', 'the price of compaction', [
     tile('cg-latency', 'context-guru latency', ms(o.cg_latency_ms_avg), 'p95 ' + ms(o.cg_latency_ms_p95)),
     tile('upstream-latency', 'Upstream latency', ms(o.upstream_ms_avg), 'p95 ' + ms(o.upstream_ms_p95)),
     tile('expands', 'Restorations', num(o.expands),
       pct(o.expand_rate * 100) + ' of requests · ' + compact(o.expand_tokens) + ' tok',
       o.expands > 0 ? 'bad' : ''),
-    tile('reverts', 'Reverts', num(o.reverts), 'never-worse guard fired'),
-    tile('passthroughs', 'Not compacted', num(o.passthroughs), 'see reason buckets below'),
+    tile('reverts', 'Reverts', num(o.reverts), 'never-worse guard'),
+    tile('passthroughs', 'Not compacted', num(o.passthroughs)),
   ]));
 }
 
@@ -552,7 +579,13 @@ function renderDenominators(o) {
     max: 100,
     display: d.available ? pct(d.percent, 2) : 'n/a',
     available: d.available,
-    desc: d.description + (d.available ? `  (${compact(d.numerator)} ÷ ${compact(d.denominator)} tokens)` : ''),
+    // The divisor is what makes these four bars four different measurements, so it is the
+    // half that stays visible. The prose folds.
+    formula: d.available
+      ? `${compact(d.numerator)} ÷ ${compact(d.denominator)} tokens`
+      : 'inputs unavailable in this window',
+    desc: d.description,
+    descSummary: 'Why this denominator',
   })), { emptyDetail: 'No requests match the filter.' });
 }
 
@@ -574,7 +607,7 @@ function renderWaterfall(o) {
         class: 'bar-fill', style: `width:${(Math.abs(s.delta_usd) / max) * 100}%;background:${color}`,
       })),
       el('div', { class: 'bar-val', text: (s.delta_usd < 0 ? '−' : s.total ? '' : '+') + usd(Math.abs(s.delta_usd)) })));
-    wrap.appendChild(el('div', { class: 'bar-desc', text: s.description }));
+    wrap.appendChild(whyBlock('', s.description, 'Why: ' + s.label));
   }
   host.appendChild(wrap);
 }
@@ -601,10 +634,11 @@ function renderSafety(o) {
   // the one row that is a genuine PENALTY rather than a price gets the status colour.
   barRows($('#safety'), [
     { label: 'Frozen for cache safety', value: s.frozen_tokens || 0, display: compact(s.frozen_tokens) + ' tok',
+      formula: 'bought ' + compact(o.cache_read) + ' cheap cache reads',
       desc: 'Compaction we deliberately did NOT do on the already-cached prefix. The benefit ' +
             'is the ' + compact(o.cache_read) + ' cache-read tokens that stayed cheap; the cost is this.' },
     { label: 'Restored after offload', value: s.restored_tokens || 0, display: compact(s.restored_tokens) + ' tok',
-      color: 'var(--bad)',
+      color: 'var(--bad)', formula: 'paid for twice',
       desc: 'Content we removed and the model asked back for — a premature offload, paid for twice.' },
     { label: 'Reverted component runs', value: s.reverted_runs || 0, display: num(s.reverted_runs) + ' runs',
       desc: 'The never-worse guard rolling a component back. Safety working, and its cost is the ' +
@@ -612,7 +646,8 @@ function renderSafety(o) {
     { label: "context-guru's own latency", value: s.cg_latency_ms_total || 0, display: dur(s.cg_latency_ms_total),
       desc: 'Total wall time context-guru itself added across the window.' },
     { label: "context-guru's own LLM spend", value: (s.cg_llm_cost_usd || 0) * 1000, display: usd(s.cg_llm_cost_usd),
-      desc: 'Paid out of the savings above.' },
+      formula: 'paid out of the savings above',
+      desc: "context-guru's own model calls (extract_llm, summarize), paid out of the savings above." },
   ]);
 }
 
@@ -624,8 +659,7 @@ function renderLive() {
   const active = activeFilters();
   note.hidden = !active.length;
   if (active.length) {
-    note.textContent = 'Not filtered: this feed shows every request captured, including ones ' +
-      'outside ' + describeFilters() + '. Everything else on this page is filtered.';
+    note.textContent = 'Not filtered — shows traffic outside ' + describeFilters() + ' too.';
   }
   if (!state.live.length) {
     tableMessage(body, 8, 'Waiting for traffic',
@@ -882,7 +916,10 @@ async function loadComponents() {
     const top = components.filter((c) => c.saved_unique > 0).slice(0, 12);
     barRows($('#chart-comp'), top.map((c) => ({
       label: c.component, value: c.saved_unique, display: compact(c.saved_unique) + ' tok',
-      desc: `${num(c.runs)} runs, acted on ${pct(c.act_rate * 100, 1)}, own latency ${dur(c.duration_ms_total)}, ` +
+      // Figures, not prose, so they go in the always-visible slot rather than behind a
+      // disclosure: eight collapsed glyphs would each hide four numbers and cost a line to
+      // do it.
+      formula: `${num(c.runs)} runs · acted ${pct(c.act_rate * 100, 1)} · own latency ${dur(c.duration_ms_total)} · ` +
             `overcount ${c.overcount_ratio ? c.overcount_ratio.toFixed(1) + '×' : 'n/a'}`,
     })), { emptyDetail: 'No component saved any content tokens in this window.' });
   } catch (err) {
@@ -1277,6 +1314,32 @@ function attributionChips(c, components) {
 
 function kv(k, v) { return el('div', {}, el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v })); }
 
+/** kvNode is kv() for a value that is a NODE rather than a string (the breakpoint chips). */
+function kvNode(k, node) { return el('div', {}, el('div', { class: 'k', text: k }), el('div', { class: 'v' }, node)); }
+
+/**
+ * kvUnset prints a value the client never set as the WORD "unset", styled as absent.
+ *
+ * The distinction is the whole reason temperature and top_p are nullable columns:
+ * `temperature: 0` means "be deterministic" and a missing temperature means "you choose".
+ * An em dash was already honest, but italic "unset" cannot be misread as a dash-shaped
+ * zero — and it never renders 0 for an absent value, which is the invariant.
+ */
+function kvMaybe(k, v, fmt) {
+  if (v === null || v === undefined || v === '') {
+    return el('div', {}, el('div', { class: 'k', text: k }),
+      el('div', { class: 'v unset', text: 'unset' }));
+  }
+  return kv(k, fmt ? fmt(v) : String(v));
+}
+
+/** kvBand groups a set of pairs under a caption. */
+function kvBand(title, testid, ...pairs) {
+  return el('div', { class: 'kv-band' },
+    el('h3', { text: title }),
+    el('div', { class: 'kv', 'data-testid': testid }, ...pairs.flat().filter(Boolean)));
+}
+
 /**
  * diffBlock builds one collapsible before/after block for a rewritten message: the
  * summary line, the view-mode toolbar, the attribution chips and the diff itself.
@@ -1394,7 +1457,12 @@ async function openRequest(id, fromURL) {
       content_archived: archived, capture_blocked_by: blockedBy } = await res.json();
     clear(body);
 
-    body.appendChild(el('div', { class: 'kv', 'data-testid': 'detail-summary' },
+    // Four captioned bands rather than twenty-four pairs in one grid. Same data, same
+    // testid on the first band (the checks and the docs screenshots read it), but "what
+    // this request was" / "what it moved" / "what it cost" are three questions and the flat
+    // wall answered them in one undifferentiated scan.
+    const priced = e.token_accounting === 'complete';
+    body.appendChild(kvBand('Request', 'detail-summary',
       kv('Session', e.session_id || '—'),
       kv('When', when(e.ts)),
       kv('Model', e.model || '—'),
@@ -1403,55 +1471,65 @@ async function openRequest(id, fromURL) {
       kv('Preset', e.preset || '—'),
       kv('Mode', modeLabel(e.mode)),
       kv('Upstream status', e.status || '—'),
-      kv('Messages', num(e.messages)),
-      kv('Tokens before → after', compact(e.tokens_before) + ' → ' + compact(e.tokens_after)),
+      kv('Messages', num(e.messages))));
+
+    body.appendChild(kvBand('Tokens', 'detail-tokens',
+      kv('Before → after', compact(e.tokens_before) + ' → ' + compact(e.tokens_after)),
       kv('Saved (gross / unique)', compact(e.tokens_before - e.tokens_after) + ' / ' + compact(e.saved_unique)),
       kv('Attempted (eligible)', compact(e.attempted_tokens)),
       kv('Frozen for cache safety', compact(e.frozen_tokens)),
       kv('Fresh / read / write / out',
         [e.fresh_input, e.cache_read, e.cache_write, e.output_tokens].map(compact).join(' / ')),
-      kv('Cost (actual / baseline)', e.token_accounting === 'complete'
-        ? usd(e.cost_usd) + ' / ' + usd(e.baseline_cost_usd) : 'not priced'),
-      kv("context-guru's own LLM", e.token_accounting === 'complete' ? usd(e.cg_llm_cost_usd) : '—'),
+      kv('Token accounting', e.token_accounting)));
+
+    body.appendChild(kvBand('Cost and latency', 'detail-cost',
+      kv('Cost (actual / baseline)', priced ? usd(e.cost_usd) + ' / ' + usd(e.baseline_cost_usd) : 'not priced'),
+      kv('Our own LLM cost', priced ? usd(e.cg_llm_cost_usd) : '—'),
       kv('context-guru latency', ms(e.cg_latency_ms)),
       kv('Upstream latency', ms(e.upstream_ms)),
       kv('Restorations', num(e.expands) + ' (' + compact(e.expand_tokens) + ' tok)'),
       kv('Reverts', num(e.reverts)),
       kv('Cache attribution', e.cache_miss_reason || '—'),
-      kv('Token accounting', e.token_accounting),
       kv('Compaction outcome', e.uncompressed_reason || 'compacted')));
 
-    // The request's own metadata: what the client ASKED for. Separate from the block
-    // above, which is what happened to it.
-    //
-    // `set(v)` prints an absent value as an em dash and a zero as a zero. That matters
-    // most for temperature: the API sends null for "not set" and 0 for "be
-    // deterministic", and collapsing the two would misreport every deterministic request.
-    const set = (v, fmt) => (v === null || v === undefined || v === '' ? '—' : (fmt ? fmt(v) : String(v)));
+    // The request's own metadata: what the client ASKED for. Separate from the bands above,
+    // which are what happened to it. kvMaybe() prints an absent value as "unset" and a zero
+    // as 0 — the API sends null for "not set" and 0 for "be deterministic", and collapsing
+    // the two would misreport every deterministic request.
     body.appendChild(el('h2', { text: 'What the request asked for' }));
     body.appendChild(el('div', { class: 'kv', 'data-testid': 'detail-meta' },
-      kv('Reasoning effort', set(e.reasoning_effort)),
+      kvMaybe('Reasoning effort', e.reasoning_effort),
       kv('Thinking', e.thinking_mode
         ? e.thinking_mode + (e.thinking_budget ? ' (' + compact(e.thinking_budget) + ' token budget)' : '')
-        : '—'),
-      kv('Temperature', set(e.temperature)),
-      kv('top_p', set(e.top_p)),
-      kv('max_tokens', e.max_tokens ? num(e.max_tokens) : '—'),
+        : 'unset'),
+      kvMaybe('Temperature', e.temperature),
+      kvMaybe('top_p', e.top_p),
+      kvMaybe('max_tokens', e.max_tokens || null, num),
       kv('Streaming', e.stream ? 'yes' : 'no'),
-      kv('Tool choice', set(e.tool_choice)),
+      kvMaybe('Tool choice', e.tool_choice),
       kv('Tools declared', num(e.tools)),
       kv('System blocks', num(e.system_blocks)),
-      // Placement, not just a count: tools and system render ahead of messages, so a
-      // breakpoint's location decides how much of the prefix it protects.
-      kv('cache_control breakpoints',
-        num(e.cache_bp_system + e.cache_bp_tools + e.cache_bp_messages + e.cache_bp_blocks) + ' of 4 · '
-        + 'system ' + num(e.cache_bp_system) + ' · tools ' + num(e.cache_bp_tools)
-        + ' · messages ' + num(e.cache_bp_messages) + ' · blocks ' + num(e.cache_bp_blocks)),
-      kv('Stop reason', set(e.stop_reason)),
-      // The two ids a log query is built from, side by side with the numbers they
-      // explain: a request row has to be joinable to the lines it emitted.
-      kv('Tenant id', e.tenant_id || '— (single-tenant)'),
-      kv('Session id (for logs)', e.session_id || '—')));
+      kvMaybe('Stop reason', e.stop_reason)));
+
+    // Placement, not just a count: tools and system render ahead of messages, so a
+    // breakpoint's LOCATION decides how much of the prefix it protects. Four labelled slots
+    // rather than one run-on string that wrapped mid-clause and read as a sentence.
+    const bpTotal = e.cache_bp_system + e.cache_bp_tools + e.cache_bp_messages + e.cache_bp_blocks;
+    body.appendChild(el('div', { class: 'kv' },
+      // Full width: four labelled slots do not fit a 184px grid cell, and wrapped over
+      // three lines they stopped reading as four separate measurements.
+      el('div', { class: 'kv-wide' },
+        el('div', { class: 'k', text: 'cache_control breakpoints · ' + num(bpTotal) + ' of the provider’s 4' }),
+        el('div', { class: 'v' }, el('div', { class: 'bp', 'data-testid': 'detail-breakpoints' },
+          el('span', { class: e.cache_bp_system ? 'on' : '' }, 'system ', el('b', { text: num(e.cache_bp_system) })),
+          el('span', { class: e.cache_bp_tools ? 'on' : '' }, 'tools ', el('b', { text: num(e.cache_bp_tools) })),
+          el('span', { class: e.cache_bp_messages ? 'on' : '' }, 'messages ', el('b', { text: num(e.cache_bp_messages) })),
+          el('span', { class: e.cache_bp_blocks ? 'on' : '' }, 'blocks ', el('b', { text: num(e.cache_bp_blocks) }))))),
+      kv('Tenant id', e.tenant_id || '— (single-tenant)')));
+
+    // The log lines this request emitted. Text, not a link: Grafana binds loopback on the
+    // box (see renderLogsHelp).
+    if (e.session_id) body.appendChild(logQueryBlock(e.session_id, e.tenant_id));
 
     body.appendChild(el('h2', { text: 'Components, in the order they ran' }));
     if (!e.components || !e.components.length) {
@@ -2094,17 +2172,18 @@ function renderTree(v, key) {
 async function loadConfig() {
   const host = clear($('#config-body'));
   loadingState(host, 3);
+  renderLogsHelp();
   try {
     // The payload is {scope, config, description} — the same envelope /api/capture uses.
     // Rendering the envelope as the tree printed "scope: server" and "description: …" as
     // if they were configuration keys, and buried the config a level down.
     const cfg = await api('config');
     clear(host);
+    // The caveat that matters stays in the layout; the server's full explanation folds.
     host.appendChild(el('p', { class: 'note', 'data-testid': 'config-scope', text:
-      'Scope: ' + (cfg.scope || 'server') + ' — this is the configuration THIS PROXY is ' +
-      'running, which is not necessarily what compacted your traffic: on a hosted ' +
-      'deployment each account may run its own pipeline (see Settings). ' +
-      (cfg.description || '') }));
+      'Scope: ' + (cfg.scope || 'server') + ' — what this PROXY runs, not necessarily what ' +
+      'compacted your traffic.' }));
+    if (cfg.description) host.appendChild(whyBlock('Why those can differ', cfg.description));
     host.appendChild(renderTree(cfg.config || cfg));
   } catch (err) {
     if (aborted(err)) return;
@@ -2127,7 +2206,14 @@ async function loadConfig() {
       kv('Queue', c.queued + ' / ' + c.queue_cap), kv('SSE clients', num(c.sse_clients)),
       kv('Database', c.db_path || '(in memory — history is lost on restart)'),
       kv('Database size', compact(c.db_bytes) + ' B')));
-    chost.appendChild(el('p', { class: 'note', text: description }));
+    // A non-zero drop count is the one thing worth saying out loud here, because it means
+    // every number on the Overview under-reports. The definitions fold.
+    if (c.dropped > 0) {
+      chost.appendChild(el('p', { class: 'note warn-text', text:
+        num(c.dropped) + ' events dropped — every figure on this dashboard under-reports by ' +
+        'that much. Raise the queue size or lower the traffic before drawing conclusions.' }));
+    }
+    if (description) chost.appendChild(whyBlock('What these counters mean', description));
   } catch (err) {
     errorState(chost, 'Could not load capture health', err);
   }
@@ -2232,9 +2318,17 @@ function go(view, push = true) {
   state.view = view;
   for (const t of $$('.tab')) t.setAttribute('aria-selected', String(t.dataset.view === view));
   for (const s of $$('.view')) s.hidden = s.id !== 'view-' + view;
+  // A filter bar over a view with nothing to filter is thirteen controls inviting clicks
+  // that change nothing — and on Settings it sat directly above a form, so the two read as
+  // one set of inputs. These four views read no filter at all (see refresh).
+  $('.filters').hidden = UNFILTERED_VIEWS.has(view);
   syncURL(!push);
   refresh();
 }
+
+/** The views whose data is not scoped by the filter bar: account configuration, the tenant
+ *  roster, cold storage and the process-wide configuration. */
+const UNFILTERED_VIEWS = new Set(['setup', 'settings', 'tenants', 'archive', 'config']);
 
 /**
  * setFilter is the ONE way a filter changes, wherever the change comes from: a
@@ -2376,6 +2470,7 @@ function renderChips() {
   const host = clear($('#f-active'));
   const active = activeFilters();
   host.hidden = !active.length;
+  syncMoreCount(active);
   // Clear is the convenience, never the necessity: it says how many it will remove and
   // is disabled when there is nothing to remove, rather than sitting there implying the
   // list might be filtered when it is not.
@@ -2407,6 +2502,26 @@ function renderChips() {
   }
 }
 let chipFocus = null;
+
+/** MORE_FILTERS is which dimensions live behind the "More filters" disclosure. */
+const MORE_FILTERS = new Set(['reason', 'component', 'effort', 'thinking', 'stop_reason', 'accounting']);
+
+/**
+ * syncMoreCount badges the disclosure with how many of the filters inside it are set, and
+ * opens it when one is.
+ *
+ * A collapsed control holding a value is a hidden filter, which is the exact bug the chip
+ * row exists to prevent — so the count is the second guard: the summary itself says
+ * something in there is narrowing the page, whether or not the reader looks at the chips.
+ */
+function syncMoreCount(active) {
+  const badge = $('#f-more-count');
+  if (!badge) return;
+  const n = active.filter(([k]) => MORE_FILTERS.has(k)).length;
+  badge.textContent = n ? String(n) : '';
+  badge.hidden = !n;
+  if (n) $('#f-more').open = true;
+}
 
 /**
  * renderNoMatch explains an empty list instead of just being empty, and offers the one
@@ -2737,18 +2852,26 @@ function showVerify(email, expires, intro) {
   $('#gate-signin').hidden = true;
   $('#gate-register').hidden = true;
   $('#gate-closed').hidden = true;
+  // The sign-in/register pair goes away for phase two: that choice is already made, and
+  // leaving "Register" marked selected above a code box invited clicking it and losing the
+  // code. "Start over" is the way back, and it restores them.
+  $('.gate-tabs').hidden = true;
   $('#gate-verify').hidden = false;
   $('#gate-verify-intro').textContent = intro;
   $('#gate-verify-code').value = '';
   $('#gate-verify-code').focus();
   if (verify.tick) clearInterval(verify.tick);
   const paint = () => {
+    // The remaining time is still (server expiry − now), never a countdown this page
+    // started: a code that took forty seconds to arrive must show the time it really has.
+    // Only the STYLING is derived from it — amber under a minute, red once gone.
     const left = Math.max(0, Math.round((verify.expires - Date.now()) / 1000));
     const timer = $('#gate-verify-timer');
-    if (!verify.expires) { timer.textContent = ''; return; }
+    if (!verify.expires) { timer.textContent = ''; timer.className = ''; return; }
     timer.textContent = left > 0
       ? `Expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`
       : 'That code has expired — start over to get a new one.';
+    timer.className = left <= 0 ? 'hint gone' : left <= 60 ? 'hint soon' : 'hint';
     if (left <= 0 && verify.tick) { clearInterval(verify.tick); verify.tick = null; }
   };
   paint();
@@ -2760,6 +2883,7 @@ function cancelVerify() {
   if (verify.tick) { clearInterval(verify.tick); verify.tick = null; }
   verify.email = '';
   $('#gate-verify').hidden = true;
+  $('.gate-tabs').hidden = false;
   const onRegister = $('#gate-tab-register').getAttribute('aria-selected') === 'true';
   $('#gate-signin').hidden = onRegister;
   $('#gate-register').hidden = !onRegister;
@@ -2893,6 +3017,57 @@ function copyButton(text) {
   }, 'copy');
 }
 
+// ── logs: Grafana over an SSH tunnel ───────────────────────────────────────
+//
+// Grafana and Loki bind LOOPBACK on the box, deliberately — the public path serves the
+// proxy and this dashboard, nothing else. So the affordance here is copyable TEXT and
+// never a hyperlink: an <a href> to 127.0.0.1:3000 is dead for every reader who has not
+// already opened a tunnel, and a dead link is worse than instructions. Nothing is
+// embedded either: an iframe would mean loosening a CSP that is worth more than the
+// convenience.
+//
+// The address is written WITHOUT a scheme, on purpose as well as for brevity: the offline
+// guarantee is enforced by a test that greps every served asset for URL schemes, and an
+// asset that must reference no external origin should not start carrying URLs at all.
+const GRAFANA_HOSTPORT = '127.0.0.1:3000';
+const GRAFANA_LOGS_PATH = '/d/context-guru-logs/context-guru-logs';
+
+/** copyBlock is a titled, copyable code block. Nothing new: it reuses the Setup tab's
+ *  copy button and its <pre class="code">. */
+function copyBlock(title, lines, testid) {
+  const text = lines.join('\n');
+  return el('div', { class: 'copyblock' },
+    el('div', { class: 'setup-head' },
+      el('h3', { text: title }),
+      copyButton(text)),
+    el('pre', { class: 'code', 'data-testid': testid }, text));
+}
+
+/** renderLogsHelp fills the Config tab's Logs panel: the tunnel, the address, and one
+ *  LogQL query to paste into it. */
+function renderLogsHelp() {
+  const host = $('#logs-help');
+  if (!host) return;
+  clear(host);
+  host.appendChild(copyBlock('1 · Open the tunnel from your machine',
+    ['ssh -L 3000:' + GRAFANA_HOSTPORT + ' ' + (location.hostname || '<the host>')], 'logs-tunnel'));
+  host.appendChild(copyBlock('2 · Open this address in a browser',
+    [GRAFANA_HOSTPORT + GRAFANA_LOGS_PATH], 'logs-address'));
+  host.appendChild(copyBlock('3 · Or query Loki directly, in Explore',
+    ['{job="context-guru"} | json | level=~"WARN|ERROR"'], 'logs-query'));
+  host.appendChild(el('p', { class: 'note', text:
+    'Grafana and Loki bind loopback on the box, so this is text rather than a link — a ' +
+    'link would be dead until the tunnel is up.' }));
+}
+
+/** logQueryBlock is the drawer's version: the LogQL that selects THIS session's lines. */
+function logQueryBlock(session, tenant) {
+  const sel = '{job="context-guru"' + (tenant ? ', tenant="' + tenant + '"' : '') + '}';
+  return el('div', {},
+    copyBlock('Logs for this session (Grafana → Explore → Loki)',
+      [sel + ' | json | session="' + session + '"'], 'logs-session-query'));
+}
+
 function loadSetup() {
   const host = clear($('#setup-blocks'));
   const base = account.baseURL || location.origin;
@@ -2951,9 +3126,7 @@ function loadSettings() {
     // your traffic runs on YOUR provider credential, so there is nothing to cap.
     host.appendChild(el('div', { class: 'spend' },
       el('div', { class: 'spend-label' }, `Spend this month: ${usd(t.spent_usd)}`),
-      el('p', { class: 'hint' },
-        'Billed to your own provider account: the proxy forwards the key your agent ' +
-        'sends and holds none of its own.')));
+      el('p', { class: 'hint' }, 'Billed to your own provider account, not to us.')));
 
     // Agent keys. Only relevant to agents that cannot send x-context-guru-token.
     host.appendChild(el('div', { class: 'field' },
@@ -2962,10 +3135,10 @@ function loadSettings() {
         t.agent_keys > 0
           ? `${t.agent_keys} provider key${t.agent_keys === 1 ? '' : 's'} bound to this account.`
           : 'None bound.'),
-      el('p', { class: 'hint' },
-        'For agents that cannot send a custom header (Bob/BobShell): the proxy ' +
-        'recognises them by the sha256 of the provider key they already send. Only ' +
-        'the digest is stored. Bind one with the curl line on the Setup tab.'),
+      whyBlock('Why an agent needs one',
+        'For agents that cannot send a custom header (Bob/BobShell): the proxy recognises ' +
+        'them by the sha256 of the provider key they already send. Only the digest is ' +
+        'stored. Bind one with the curl line on the Setup tab.'),
       t.agent_keys > 0
         ? el('button', {
           class: 'ghost small', 'data-testid': 'agent-keys-clear',
@@ -3017,8 +3190,7 @@ function loadSettings() {
     host.appendChild(el('div', { class: 'field' },
       el('label', { for: 'set-mode' }, 'Mode'), modeSel,
       el('p', { class: 'hint' },
-        'observe forwards every request byte-for-byte and only records what compaction ' +
-        'would have saved. The safe way to try a configuration.')));
+        'observe is the safe way to try a configuration: nothing is rewritten.')));
 
     // Upstreams, one per dialect, from the operator's allow-list.
     const ups = (opts && opts.upstreams) || [];
@@ -3049,11 +3221,11 @@ function loadSettings() {
     }
     host.appendChild(el('div', { class: 'field' },
       el('label', {}, 'Pipeline components'), grid,
-      el('p', { class: 'hint' },
-        'These toggles decide what runs; the ORDER is the one in your configuration, ' +
-        'which this list keeps. A newly enabled component is appended at the end — move ' +
-        'it in the YAML below if it belongs earlier. Saving rebuilds your pipeline and ' +
-        'discards frozen compaction decisions, so the next turn will not be cache-warm.')));
+      el('p', { class: 'hint' }, 'What runs. Run order comes from the YAML below.'),
+      whyBlock('What saving changes',
+        'A newly enabled component is appended at the end of the pipeline — move it in the ' +
+        'YAML below if it belongs earlier. Saving rebuilds your pipeline and discards frozen ' +
+        'compaction decisions, so the next turn will not be cache-warm.')));
 
     // Content capture consent.
     const cap = el('input', {
@@ -3064,9 +3236,11 @@ function loadSettings() {
       el('label', { class: 'comp', for: 'set-capture' }, cap,
         el('span', { class: 'comp-name' }, 'Store my transcripts for the diff view')),
       el('p', { class: 'hint warn-text' },
-        'Off by default. This writes your agent output — source code, tool results — to ' +
-        'disk behind a best-effort redactor whose own review found 11 of 22 realistic ' +
-        'credential shapes passing through it. Only you can read them; a manager cannot.')));
+        'Writes your agent output to disk. The redactor is best-effort, not a guarantee.'),
+      whyBlock('What "best-effort" means here',
+        'Source code and tool results are stored behind a redactor whose own review found ' +
+        '11 of 22 realistic credential shapes passing through it. Only you can read them; ' +
+        'a manager cannot. Off by default.')));
 
     // Raw YAML, for anything the toggles do not cover.
     const ta = el('textarea', {
@@ -3090,18 +3264,26 @@ function loadSettings() {
   });
 
   loadTokens();
-  loadSessions();
+  loadMachines();
   loadAudit();
 }
 
-/** The machines this account is signed in on, each revocable on its own. */
-async function loadSessions() {
+/**
+ * The machines this account is signed in on, each revocable on its own.
+ *
+ * Named loadMachines, not loadSessions: there was already a top-level loadSessions (the
+ * Sessions TAB), and two function declarations with one name means the later one wins for
+ * every caller — so `loaders.sessions` and both pager buttons were calling this, painting
+ * "Could not list your sessions" into the Settings card and leaving the Sessions table on
+ * its loading skeleton forever.
+ */
+async function loadMachines() {
   const host = clear($('#session-list'));
   let rows = [];
   try {
     rows = (await ctl('/api/me/sessions')).sessions || [];
   } catch (e) { errorState(host, 'Could not list your sessions', e); return; }
-  if (!rows.length) { emptyState(host, 'No sessions', 'Nothing is signed in.'); return; }
+  if (!rows.length) { emptyState(host, 'Not signed in anywhere', 'This browser is the only session.'); return; }
   const tbl = el('table', { class: 'grid' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Machine'), el('th', {}, 'Browser'), el('th', {}, 'Address'),
@@ -3126,7 +3308,7 @@ async function loadSessions() {
           try {
             await ctl('/api/me/sessions/' + s.id, { method: 'DELETE' });
             if (s.current) { location.reload(); return; }
-            loadSessions();
+            loadMachines();
           } catch (e) { alert(e.message); }
         },
       }, s.current ? 'Sign out here' : 'Revoke'))));
