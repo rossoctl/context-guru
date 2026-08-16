@@ -409,13 +409,7 @@ func (r *Recorder) run() {
 		case <-flush.C:
 			write()
 		case <-prune.C:
-			if n, err := r.db.Prune(time.Now(), r.opts.RetentionAge, r.opts.RetentionBytes); err != nil {
-				slog.Warn("dash: retention prune failed", "err", err)
-			} else if n > 0 {
-				slog.Info("dash: pruned old dashboard rows", "requests", n)
-			}
-			r.enforceQuotas()
-			r.relieveDiskPressure()
+			r.janitorPass()
 		case <-r.done:
 			// Drain whatever is queued so a clean shutdown does not lose the tail.
 			for {

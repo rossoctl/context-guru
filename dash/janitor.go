@@ -12,17 +12,45 @@ import (
 //
 // Three rules run in order on every janitor pass, and the order is the design:
 //
-//  1. Per-tenant row quota — FAIRNESS first. One heavy user must be trimmed to its
-//     own quota before anyone else's history is considered, otherwise the person
-//     causing the pressure is the one whose data survives.
-//  2. Age (in DB.Prune) — a bound nobody has to think about.
+//  1. Per-tenant row quota — FAIRNESS first, and it reclaims the pages it frees so
+//     the rules below measure the database the offender no longer owns. One heavy
+//     user must be trimmed to its own quota before anyone else's history is
+//     considered, otherwise the person causing the pressure is the one whose data
+//     survives: rules 2 and 3 have no tenant column, and the quiet tenant's rows are
+//     the oldest ones they select.
+//  2. Age, then bytes (both in DB.Prune) — a bound nobody has to think about, and a
+//     hard cap on this database the operator asked to be honoured.
 //  3. Filesystem pressure — the backstop, measured against the WHOLE filesystem
 //     rather than our own bytes, because on a shared box most of the usage is
 //     somebody else's and a self-referential budget cannot see the host filling up.
 //
+// The order is enforced in one place, janitorPass. It is also load-bearing rather than
+// decorative: it used to read 2, 1, 3, which meant a tenant with 20x everyone else's
+// traffic pushed the database over its byte budget and the byte rule then deleted the
+// QUIET tenants' history while the offender kept its recent rows.
+//
 // Everything evicts whole SESSIONS, oldest last-activity first. A session is the
 // unit a user reasons about; evicting individual requests leaves conversations with
 // missing turns and totals that do not add up.
+
+// janitorPass runs one round of all three rules, in order. Called from the capture
+// writer's timer (dash/capture.go) — the same goroutine that owns the inserts, so no
+// rule ever races a write.
+func (r *Recorder) janitorPass() {
+	// Quota FIRST, which is the order the comment above has always described and the
+	// order the code did not have. DB.Prune's byte rule has no tenant column: it
+	// deletes the oldest rows in the whole table, so run after a heavy tenant has
+	// filled the database it evicts the QUIET tenants' history (theirs is the oldest)
+	// and leaves the offender's recent rows in place. Trimming the offender to its own
+	// quota first usually leaves nothing for the byte rule to do at all.
+	r.enforceQuotas()
+	if n, err := r.db.Prune(time.Now(), r.opts.RetentionAge, r.opts.RetentionBytes); err != nil {
+		slog.Warn("dash: retention prune failed", "err", err)
+	} else if n > 0 {
+		slog.Info("dash: pruned old dashboard rows", "requests", n)
+	}
+	r.relieveDiskPressure()
+}
 
 // diskWatermarks resolves the configured watermarks, applying defaults and
 // rejecting a nonsensical pair rather than acting on it.
@@ -89,6 +117,19 @@ func (r *Recorder) enforceQuotas() {
 		slog.Warn("dash: tenant quota check failed", "err", err)
 		return
 	}
+	// Free the pages this pass releases before the byte rule measures the file. A
+	// delete leaves the pages allocated, so without this the byte rule sees the size
+	// the offender caused, decides the database is still over budget, and evicts the
+	// oldest rows in the table anyway — which is the very thing running the quota
+	// first is meant to prevent.
+	freed := int64(0)
+	defer func() {
+		if freed > 0 {
+			if err := r.db.reclaim(); err != nil {
+				slog.Warn("dash: reclaiming pages after a quota trim failed", "err", err)
+			}
+		}
+	}()
 	for id, rows := range counts {
 		quota := r.quotaFor(id)
 		if quota <= 0 || rows <= quota {
@@ -103,6 +144,7 @@ func (r *Recorder) enforceQuotas() {
 			slog.Warn("dash: tenant quota trim failed", "tenant", id, "err", err)
 			continue
 		}
+		freed += n
 		if n > 0 {
 			slog.Info("dash: trimmed a tenant to its row quota",
 				"tenant", id, "was_rows", rows, "quota", quota, "requests_evicted", n)
