@@ -200,8 +200,9 @@ the first cannot say who has to act:
 | `content_captured` | The **effective** decision for the tenant whose rows these are — the operator's service-wide gate **and** that tenant's own consent, read fresh per request. It is no longer the process flag. |
 | `capture_blocked_by` | `"operator"`, `"tenant"`, or `""` when nothing is blocking. `""` also for a manager looking at the whole service, who is not a party whose consent there is to report. |
 
-The consequence worth knowing before you debug an empty panel: **capture needs both gates, so
-a tenant who has opted in still gets nothing until the operator sets `--dashboard-content` /
+The consequence worth knowing before you debug an empty panel: **capture needs both gates, and
+only the operator's is off by default — so a tenant whose own switch is on (the registration
+default) still gets nothing until the operator sets `--dashboard-content` /
 `DASHBOARD_CONTENT`.** That state reads `content_captured: false` with
 `capture_blocked_by: "operator"`, and the UI says so instead of pointing at a setting the
 reader has already switched on — which is the bug the field was added to fix. In
@@ -331,8 +332,11 @@ output. It gets pattern scrubbing, and a pattern denylist is structurally always
 reality: a review of 22 realistic credential shapes found 11 passing through, the worst
 being `Authorization: Bearer <token>`, where the pattern matched the scheme and left the
 token in the diff view. Those are fixed and pinned by a table-driven test — but 22/22
-passing does not prove completeness, which is why **content capture is opt-in**
-(`--dashboard-content`, default off) rather than opt-out.
+passing does not prove completeness, which is why the capture is gated. Two switches, and
+they default differently: the **operator's** `--dashboard-content` is process-wide and
+defaults **off**, while the **per-tenant** switch behind it is created **on** (a hosted
+account is registered with `capture_content: true`). So it is the operator's gate, not the
+tenant's, that keeps a new account's source code off disk.
 
 **Percentages at read time, cost at write time.** Every ratio is derived when queried, so
 a filter change needs no rebuild; every cost is computed when the row is written, so
@@ -353,7 +357,7 @@ already requires), in WAL mode.
 | `request_components` | one row per component per request — the "which components earn their place" data |
 | `request_content` | before/after text, gzip-compressed and size-capped; skippable entirely |
 | `archived_sessions` | the cold-storage index — one small row per archived session, local and permanent, so the session list works while the remote is unreachable |
-| `tenant_spend` | the month-to-date spend rollup the per-tenant cap is enforced against; retention and archiving never touch it, so archiving inside the calendar month cannot make the cap under-count |
+| `tenant_spend` | the month-to-date spend rollup Settings and the manager's roster display; retention and archiving never touch it, so evicting request rows inside the calendar month cannot make the figure under-count. Reported only — each account bills its own provider credential, so there is nothing to cap |
 | `bench_runs` / `bench_tasks` | ingested harness runs and their per-task rows |
 
 Timestamps are **epoch milliseconds** everywhere. A formatted locale string cannot be
@@ -401,17 +405,20 @@ answer should not be asked with an error.
 | Tab | Adds |
 |---|---|
 | **Setup** | The copy-paste base-URL/token blocks, with this deployment's real base URL. |
-| **Settings** | Mode, upstream per dialect, component toggles, transcript-capture consent, spend against cap, tokens. |
+| **Settings** | Mode, upstream per dialect, component toggles, transcript-capture consent, month-to-date spend (reported, never capped), bound agent keys, tokens. |
 | **Archive** | What has moved to cold storage, from the local index; opening one fetches it back read-only. |
-| **Tenants** | Manager only: every account with spend against cap, set a cap, disable, reissue a token. |
+| **Tenants** | Manager only: every account with its month-to-date spend, effective configuration and transcript state; read its metrics, disable it, reissue a lost token. No cap to set — each account bills its own provider credential. |
 
 Two access rules differ from the local case, and both are enforced server-side:
 
-- **Transcript capture needs two independent yeses.** The operator's `--dashboard-content`
-  *and* the tenant's own consent, per tenant, **off by default**. The honest reason is the
-  one above: the redactor is a best-effort denylist, and a review of 22 realistic credential
-  shapes found **11 passing through it**. 22-of-22 now passing does not prove completeness,
-  so this is consent, not a feature flag.
+- **Transcript capture needs both gates, and only one of them is off by default.** The
+  operator's `--dashboard-content` is process-wide and defaults **off**; the per-tenant
+  switch behind it is created **on** — a hosted account is registered with
+  `capture_content: true`. So opening the operator gate starts capturing every account that
+  has not turned its own switch off, and the operator gate is the one holding the line. The
+  honest reason it matters is the one above: the redactor is a best-effort denylist, and a
+  review of 22 realistic credential shapes found **11 passing through it**. 22-of-22 now
+  passing does not prove completeness.
 - **A manager sees everyone's metrics and nobody's transcripts.** Reading another user's
   source code is not an administrative need, and the consent they gave was for their own
   view. The archive route applies the same rule, so it is not a way around it.

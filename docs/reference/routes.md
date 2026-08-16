@@ -265,9 +265,10 @@ content capture, and they answer different questions:
 | `content_captured` | The **effective** decision for the tenant whose rows these are: the operator's service-wide gate **and** that tenant's own consent, both read per request. It is not the process flag. |
 | `capture_blocked_by` | `"operator"` \| `"tenant"` \| `""` — which party's gate is the closed one, so a message can name someone who can actually act. `""` when nothing is blocking, and `""` for a manager viewing the whole service, who is not a party whose consent there is to report. |
 
-Capture therefore needs **both** yeses, and the consequence bites in exactly one direction:
-**a tenant who opts in still gets nothing until the operator sets `--dashboard-content` /
-`DASHBOARD_CONTENT`.** In that state `content_captured` is `false` and
+Capture therefore needs **both** yeses, and only the operator's is off by default — a hosted
+account is registered with its own `capture_content` already on. So the consequence bites in
+exactly one direction: **a tenant whose own switch is on still gets nothing until the operator
+sets `--dashboard-content` / `DASHBOARD_CONTENT`.** In that state `content_captured` is `false` and
 `capture_blocked_by` is `"operator"` — which is the whole point of the field, because the
 dashboard used to read the process flag and tell such a user to switch on a setting they had
 already switched on. In single-tenant mode there is no second gate, so the operator flag is
@@ -328,11 +329,11 @@ See [Hosted service](../hosted.md).
 | `POST /api/login` · `POST /api/logout` | Exchange a token for a session cookie, and drop it. |
 | `GET /api/me` · `PUT /api/me` | The caller's own account and configuration. |
 | `POST /api/me/tokens` · `DELETE /api/me/tokens/{prefix}` | Mint and revoke the caller's own tokens. |
-| `POST /api/me/agent-key` · `DELETE /api/me/agent-key` | Bind (and unbind) the **sha256** of the caller's own provider key, so an agent that can send no `x-context-guru-token` header is still identified. The key is sent in `Authorization` / `x-api-key` — the same slot the agent uses — and is hashed on arrival: never stored, echoed or logged. `DELETE` drops all of them, because a digest is not displayable and "which one" is not answerable. |
+| `POST /api/me/agent-key` · `DELETE /api/me/agent-key` | Bind (and unbind) the **sha256** of the caller's own provider key, so an agent that can send no `x-context-guru-token` header is still identified. The key is sent in `Authorization` / `x-api-key` — the same slot the agent uses — and is hashed on arrival: never stored, echoed or logged. Two refusals, both the caller's to fix: a key under **20 characters** is a `400`, because identity here *is* the digest and a guessable key is a guessable account; a digest already bound to **another** account is a `403` and is never moved, because binding a digest someone else had bound used to transfer their traffic — and, with `capture_content` on, their captured transcripts — to whoever bound it. A real transfer is the owner's `DELETE` followed by a fresh bind. `DELETE` drops all of the caller's, because a digest is not displayable and "which one" is not answerable. |
 | `GET /api/me/audit` | The caller's configuration-change history. |
 | `GET /api/options` | Which upstreams the operator allows, and which presets and components are registered — so the settings page cannot offer something the server would reject. Names no base URL and no credential env var. |
 | `GET /api/tenants` | Manager only: the roster. |
-| `PATCH /api/tenants/{id}` | Manager only: cap, disable, row quota. |
+| `PATCH /api/tenants/{id}` | Manager only: `role`, `max_rows` (the row quota) and `disabled`, plus the same configuration fields a tenant may set on itself. There is **no spend cap** to set — each account bills its own provider credential. |
 | `POST /api/tenants/{id}/tokens` | Manager only: reissue a token for a tenant that **already exists**. There is no manager-side create. |
 
 ### The tenant view's configuration fields

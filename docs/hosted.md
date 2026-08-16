@@ -527,6 +527,18 @@ curl -sS -XPOST https://cg.<host>/api/me/agent-key \
 | OpenAI-dialect tools | `x-context-guru-token` header, however your tool sets extra headers | Same slot rule; `OPENAI_API_KEY` stays yours. |
 | Bob (BobShell) | `sha256(BOBSHELL_API_KEY)`, bound once via `POST /api/me/agent-key` | Bob's client builds `Content-Type`, `User-Agent`, `Authorization`, `x-instance-id` and `x-team-id` itself and exposes no hook for another header; its `headers` setting applies to MCP servers only. So it is recognised by the credential it already sends. |
 
+**Binding a key: two refusals.** A key under 20 characters is refused `400` — identity here
+*is* the key's digest, so a guessable key would be a guessable account. A digest already
+bound to another account is refused `403` and never moved: binding a digest someone else had
+bound used to transfer their traffic, and with `capture_content` on their captured
+transcripts, to whoever bound it. Its owner unbinds first, then the new holder binds.
+
+The length floor applies at **bind time only**, and that matters when upgrading an install
+that already has bindings. A stored row holds a digest and no length, and the plaintext is
+gone — so a short key bound before the floor existed keeps identifying its account, and
+nothing can find it or check it. Unbinding is the only way to clear one, and it cannot then
+be bound again. On a database with no bindings yet the case does not arise.
+
 Agent *family* (claude-code / bob / codex / …) is read from the `User-Agent`, which none
 of this touches.
 
@@ -921,15 +933,24 @@ the very first request after a restart is recorded as `partial` and unpriced.
 
 ## Privacy
 
-- **Transcript capture is off by default and needs two independent yeses**: the
-  operator's `--dashboard-content` and the tenant's own consent. The redactor is a
+- **Transcript capture needs both gates, and only the operator's one is off by default.**
+  `--dashboard-content` / `DASHBOARD_CONTENT` is process-wide and ships `false` (the
+  shipped drop-in sets it explicitly). The per-tenant switch behind it is created **on** —
+  registration writes `capture_content: true` — so the operator's gate is the thing keeping
+  a new account's source code off disk, and opening it starts capturing every account that
+  has not turned its own switch off. A tenant can turn theirs off on Settings at any time,
+  and it is not retroactive in either direction. The redactor in front of the write is a
   best-effort denylist — a review of 22 realistic credential shapes found 11 passing
-  through it — so this is consent, not a feature flag.
+  through it — so read this as a decision about real source code landing on disk.
 - **A manager sees everyone's metrics and nobody's transcripts.** Reading another
   user's source code is not an administrative need, and the consent they gave was for
   their own view.
-- **`CONTEXT_GURU_DUMP` and `CONTEXT_GURU_CAPTURE` write pristine request bodies to
-  one file with no tenant separation.** Do not set them on a hosted instance.
+- **Hosted mode refuses to start with `CONTEXT_GURU_DUMP` or `CONTEXT_GURU_CAPTURE` set.**
+  Either one appends every tenant's pristine request bodies to a single process-wide file:
+  unredacted, with no tenant column, on a path the redactor never runs. That bypasses both
+  per-tenant capture consent and the scrubber, so the boot fails naming the variable rather
+  than warning. Unset it, or drop `--upstreams` to run single-tenant, where the hook only
+  sees your own traffic.
 - Session keys are namespaced by tenant. Without that, two people running the same
   agent against the same repository hash to the same session id and would share one
   sticky offload set and one cached-prefix boundary — a cross-tenant collision

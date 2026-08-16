@@ -436,10 +436,14 @@ arbitrary agent output — so it gets pattern scrubbing, and a pattern denylist 
 structurally always behind reality: a review of 22 realistic credential shapes found 11
 passing through, including `Authorization: Bearer <token>`, where the pattern matched the
 scheme and left the token. The patterns are fixed and the shapes are now a table-driven
-test, but the honest conclusion is that this mechanism cannot be *proved* complete, so
-content capture is **opt-in** (`--dashboard-content`, default off) rather than opt-out.
+test, but the honest conclusion is that this mechanism cannot be *proved* complete, so the
+capture is gated — by two switches that default differently, and both belong in the same
+sentence. The **operator** gate `--dashboard-content` is process-wide and defaults off.
+The **per-tenant** switch behind it defaults on: a hosted account is registered with
+`capture_content: true`, so once an operator opens their gate, a new tenant's transcripts
+are written until that tenant turns their own switch off on Settings.
 *Refuses:* a secret on disk, a redact-on-read filter one forgotten code path from leaking
-it, and a default that writes arbitrary transcripts to disk behind a denylist.
+it, and a claim of "off by default" that names only one of the two switches.
 
 **Percentages at read time, cost at write time.** Ratios are derived per query, so a
 filter change needs no rebuild. Costs are computed when the row is written, so history does
