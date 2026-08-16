@@ -38,11 +38,12 @@ type capture struct {
 	expands   int
 	expandTok int
 	trace     apply.Trace
-	// llmCallsAtStart / llmCostAtStart snapshot context-guru's own cheap-model usage
-	// before the pipeline runs, so this request is charged only its own share of it.
-	llmInAtStart  int64
-	llmOutAtStart int64
-	unique        map[string]int
+	// llm is THIS request's own cheap-model usage, accumulated by the compaction
+	// clients running under the request's context (see llmCtx). It replaces a delta of
+	// the process-global counters, which charged a row for whatever any OTHER tenant
+	// spent while the row's request happened to be in flight.
+	llm    *cheapmodel.Sink
+	unique map[string]int
 	// tenant owns this row. It has to be here rather than read at finish time
 	// because the unique-savings attribution during noteTrace already needs it, and
 	// that runs on the request path.
@@ -57,7 +58,6 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 	if h.rec == nil {
 		return nil
 	}
-	_, in, out := cheapmodel.Usage()
 	// The preset comes from the TENANCY, not from Options: in a hosted deployment
 	// the configuration in effect is the tenant's, and labelling every row with the
 	// server default would make the dashboard's preset comparison a lie.
@@ -65,9 +65,23 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		rec: h.rec, pricer: h.opts.Prices, preset: tn.Preset, tenant: tn.ID,
 		route: route, provider: provider,
 		agent: r.UserAgent(), start: time.Now(),
-		llmInAtStart: in, llmOutAtStart: out,
+		llm:    &cheapmodel.Sink{},
 		unique: map[string]int{},
 	}
+}
+
+// llmCtx scopes context-guru's own cheap-model accounting to THIS request. Every
+// compaction call made under the returned context — the pipeline's, and internal/extract's
+// underneath it — lands on this row and on no other. Wrap the context once, where it
+// enters the pipeline; the process totals /stats reports are unaffected.
+//
+// Nil-safe: with the dashboard off there is nothing to attribute and the context is
+// returned unchanged.
+func (c *capture) llmCtx(ctx context.Context) context.Context {
+	if c == nil {
+		return ctx
+	}
+	return cheapmodel.WithSink(ctx, c.llm)
 }
 
 // noteTrace records the pipeline's outcome and computes each component's
@@ -258,12 +272,16 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 
-	// context-guru's own model spend attributable to THIS request: the delta of the
-	// process-wide cheap-model counters across the request. Priced with the same
-	// model rates; a cheap model configured to a different id is close enough here
-	// that over-reporting our own cost is the safe direction.
-	_, inNow, outNow := cheapmodel.Usage()
-	cgIn, cgOut := inNow-c.llmInAtStart, outNow-c.llmOutAtStart
+	// context-guru's own model spend attributable to THIS request: what this request's
+	// OWN sink recorded, never a delta of the process-wide counters. The delta was
+	// wrong by construction on a multi-tenant proxy — any other tenant's compaction
+	// call inside the window landed on this row, and from here in tenant_spend, the
+	// tenant's month-to-date figure and cg_tenant_cg_llm_cost_usd. It also let a tenant
+	// infer other tenants' compaction activity from its own rows.
+	//
+	// Priced with the same model rates; a cheap model configured to a different id is
+	// close enough here that over-reporting our own cost is the safe direction.
+	_, cgIn, cgOut := c.llm.Totals()
 
 	var price modelinfo.Price
 	priced := false
