@@ -203,6 +203,7 @@ $ curl -s http://127.0.0.1:4000/metrics | grep '^cg_refused_requests_total'
 cg_refused_requests_total{reason="rate_limit"} 3
 cg_refused_requests_total{reason="concurrency"} 0
 cg_refused_requests_total{reason="auth"} 2
+cg_refused_requests_total{reason="no_provider_key"} 0
 cg_refused_requests_total{reason="forbidden"} 0
 cg_refused_requests_total{reason="no_upstream"} 0
 cg_refused_requests_total{reason="upstream_error"} 0
