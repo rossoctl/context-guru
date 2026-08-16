@@ -83,6 +83,13 @@ Environment=ARCHIVE_BWLIMIT=8M
 # backstop for a Box outage that lasts long enough to matter.
 Environment=DASHBOARD_DISK_HIGH=0.90
 Environment=DASHBOARD_DISK_LOW=0.85
+# FAIRNESS, and the rule that runs first: one tenant is trimmed to its own row cap
+# before the age, byte and disk rules consider anybody else's history. Without it the
+# only bound is the byte rule, which deletes the oldest rows in the whole table — so a
+# single heavy user evicts everyone else and keeps its own. Set explicitly here (it
+# matches the binary's default) because this file is what an operator reads and tunes;
+# a manager can override it per tenant in the control plane.
+Environment=DASHBOARD_MAX_ROWS_PER_TENANT=100000
 
 Restart=always
 RestartSec=2
