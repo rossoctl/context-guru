@@ -1,0 +1,28 @@
+# logrotate for the JSON log sink the proxy writes for promtail.
+#
+#   sudo install -m0644 deploy/grafana/context-guru.logrotate \
+#        /etc/logrotate.d/context-guru
+#
+# `copytruncate` rather than `create`, and that is the load-bearing choice: the proxy
+# holds this file open for the life of the process and has no SIGHUP reopen path (it
+# does not need one — the journal is the primary sink and this is a copy). With
+# `create`, rotation would rename the file, the proxy would keep writing to the
+# now-unlinked inode, and the live log would silently stop growing. copytruncate
+# copies and then truncates in place, so the same fd keeps working, and promtail
+# handles the truncation by resetting its position for that file.
+#
+# The cost of copytruncate is a race window: lines written between the copy and the
+# truncate are lost. They are lost from the FILE only — the journal still has them —
+# so the trade is a few possibly-missing lines in Loki against a log that stops
+# working, and that is not a close call.
+/var/log/context-guru/*.jsonl {
+    daily
+    rotate 7
+    maxsize 512M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su cg cg
+}

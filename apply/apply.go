@@ -65,7 +65,7 @@ func dumpToolOutputs(lg *slog.Logger, norm []bschemas.ChatMessage) {
 		}
 		lg.Debug("cg.toolout", "tokens", schema.TextTokens(t), "lines", strings.Count(t, "\n")+1, "head", head)
 	}
-	lg.Debug("cg.request", "tool_outputs", tools, "total_tool_tokens", schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: norm}))
+	lg.Debug("cg.toolouts", "tool_outputs", tools, "total_tool_tokens", schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: norm}))
 }
 
 // logDecisions writes one DEBUG line per component saying what it DECIDED and on

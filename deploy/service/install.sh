@@ -7,9 +7,11 @@
 #   sudo ./install.sh start       preflight, then enable --now
 #   sudo ./install.sh nginx       install the TLS front end (needs nginx present)
 #   sudo ./install.sh status      what is running, and where to look if it is not
-#   sudo ./install.sh grafana     Prometheus + Grafana over /metrics, loopback only
-#   sudo ./install.sh grafana-status    containers, scrape health, provisioned dashboards
-#   sudo ./install.sh grafana-remove    drop the containers, keep the metrics history
+#   sudo ./install.sh grafana     the observability stack, loopback only:
+#                                 Prometheus + Grafana over /metrics, and
+#                                 Loki + promtail over the JSON log sink
+#   sudo ./install.sh grafana-status    containers, scrape health, log ingest, dashboards
+#   sudo ./install.sh grafana-remove    drop the containers, keep the metrics and logs
 #
 # It deliberately does NOT start the service until preflight passes. A unit with
 # Restart=always and a missing prerequisite is a crash loop that respawns every two
@@ -421,6 +423,15 @@ OBS_STATE="$STATE/observability"
 PROM_IMAGE="${PROM_IMAGE:-docker.io/prom/prometheus:v3.2.1}"
 GRAFANA_IMAGE="${GRAFANA_IMAGE:-docker.io/grafana/grafana:11.6.0}"
 PROM_RETENTION="${PROM_RETENTION:-90d}"
+# Loki holds the LOGS; Prometheus holds the numbers. Both are read through the same
+# Grafana, which is the whole reason Loki won over the alternatives — see
+# deploy/grafana/README.md, "Why Loki".
+LOKI_IMAGE="${LOKI_IMAGE:-docker.io/grafana/loki:3.4.2}"
+PROMTAIL_IMAGE="${PROMTAIL_IMAGE:-docker.io/grafana/promtail:3.4.2}"
+# Where the proxy writes its JSON log sink (CG_LOG_FILE in the unit) and promtail
+# tails it from. Same path inside the promtail container, so promtail.yml needs no
+# templating.
+LOG_DIR="${LOG_DIR:-/var/log/context-guru}"
 
 # oci_runtime picks whichever of podman/docker is present. Both accept every flag used
 # below, so the rest of this section does not care which one it got.
@@ -453,6 +464,8 @@ cmd_grafana() {
   # install -m0644, not cp: root's umask leaves cp output 0640, and a container that cannot
   # read its own config crash-loops on "permission denied" with nothing else to go on.
   install -m0644 "$REPO_DIR/deploy/grafana/prometheus-scrape.yml" "$OBS_ETC/prometheus.yml"
+  install -m0644 "$REPO_DIR/deploy/grafana/loki.yml" "$OBS_ETC/loki.yml"
+  install -m0644 "$REPO_DIR/deploy/grafana/promtail.yml" "$OBS_ETC/promtail.yml"
   install -m0644 "$REPO_DIR"/deploy/grafana/provisioning/datasources/*.yml \
     "$OBS_ETC/grafana/provisioning/datasources/"
   install -m0644 "$REPO_DIR"/deploy/grafana/provisioning/dashboards/*.yml \
@@ -465,7 +478,24 @@ cmd_grafana() {
   # The images run as fixed unprivileged uids and neither will chown its own volume.
   install -d -m0755 -o 65534 -g 65534 "$OBS_STATE/prometheus"
   install -d -m0755 -o 472 -g 0 "$OBS_STATE/grafana"
-  ok "$OBS_STATE/{prometheus,grafana}"
+  # Loki and promtail both run as uid 10001 in their images and neither chowns its volume.
+  install -d -m0755 -o 10001 -g 10001 "$OBS_STATE/loki" "$OBS_STATE/promtail"
+  ok "$OBS_STATE/{prometheus,grafana,loki,promtail}"
+
+  # The log directory. systemd's LogsDirectory= creates it when the service starts, but
+  # promtail must be able to open it whether or not the service has run yet — and a
+  # promtail that cannot see its target says nothing at all about why.
+  say "Log sink"
+  if [ -d "$LOG_DIR" ]; then
+    ok "$LOG_DIR exists ($(ls "$LOG_DIR" 2>/dev/null | wc -l) file(s))"
+  else
+    install -d -m0750 -o "$SVC_USER" -g "$SVC_USER" "$LOG_DIR" 2>/dev/null \
+      && ok "created $LOG_DIR" \
+      || warn "could not create $LOG_DIR (is the $SVC_USER user installed?); \
+promtail will find nothing until the service starts"
+  fi
+  install -m0644 "$REPO_DIR/deploy/grafana/context-guru.logrotate" /etc/logrotate.d/context-guru
+  ok "/etc/logrotate.d/context-guru (daily, 7 kept, copytruncate)"
 
   say "Prometheus"
   $oci rm -f cg-prometheus >/dev/null 2>&1 || true
@@ -480,6 +510,28 @@ cmd_grafana() {
     --storage.tsdb.retention.time="$PROM_RETENTION" \
     --web.listen-address=127.0.0.1:9090 >/dev/null
   ok "cg-prometheus on 127.0.0.1:9090, retention $PROM_RETENTION"
+
+  say "Loki"
+  $oci rm -f cg-loki >/dev/null 2>&1 || true
+  # Loopback only, same reasoning as the other two: log lines carry tenant ids, routes
+  # and upstream hosts. loki.yml pins http_listen_address, which host networking would
+  # otherwise leave on every interface.
+  $oci run -d --name cg-loki --network=host --restart=unless-stopped \
+    -v "$OBS_ETC/loki.yml:/etc/loki/local-config.yaml:ro,Z" \
+    -v "$OBS_STATE/loki:/loki:Z" \
+    "$LOKI_IMAGE" -config.file=/etc/loki/local-config.yaml >/dev/null
+  ok "cg-loki on 127.0.0.1:3100, retention 30d"
+
+  say "promtail"
+  $oci rm -f cg-promtail >/dev/null 2>&1 || true
+  # The log directory read-only, and its own state directory writable for the positions
+  # file — without which a restarted promtail re-ships the whole log.
+  $oci run -d --name cg-promtail --network=host --restart=unless-stopped \
+    -v "$OBS_ETC/promtail.yml:/etc/promtail/config.yml:ro,Z" \
+    -v "$OBS_STATE/promtail:/var/lib/promtail:Z" \
+    -v "$LOG_DIR:/var/log/context-guru:ro,Z" \
+    "$PROMTAIL_IMAGE" -config.file=/etc/promtail/config.yml >/dev/null
+  ok "cg-promtail tailing $LOG_DIR/*.jsonl -> Loki"
 
   say "Grafana"
   # A password is only needed the FIRST time — after that it lives in Grafana's own
@@ -514,7 +566,8 @@ cmd_grafana() {
   say "Next"
   echo "  sudo $0 grafana-status          # scrape health + provisioned dashboards"
   echo "  ssh -L 3000:127.0.0.1:3000 $(hostname -f 2>/dev/null || hostname)"
-  echo "  then: http://127.0.0.1:3000/d/context-guru/context-guru"
+  echo "  then: http://127.0.0.1:3000/d/context-guru/context-guru        # the numbers"
+  echo "        http://127.0.0.1:3000/d/context-guru-logs/context-guru-logs   # the logs"
 }
 
 cmd_grafana_status() {
@@ -522,6 +575,7 @@ cmd_grafana_status() {
   oci=$(oci_runtime) || { no "no container runtime"; exit 1; }
   say "Containers"
   $oci ps -a --filter name=cg-prometheus --filter name=cg-grafana \
+    --filter name=cg-loki --filter name=cg-promtail \
     --format '{{.Names}}  {{.Status}}' 2>&1 | sed 's/^/  /' || true
 
   say "Prometheus scrape target"
@@ -545,6 +599,41 @@ r=json.load(sys.stdin)["data"]["result"]
 print("  cg_requests_total = %s" % r[0]["value"][1] if r else "  EMPTY — target up but the exposition changed")' 2>/dev/null; then
     no "query failed"
   fi
+
+  say "Loki"
+  # `ready` is the one that matters: Loki answers /metrics while its ingester is still
+  # coming up, so a health check that only tests the port reports green for a minute
+  # during which every push is rejected.
+  if curl -sf --max-time 5 http://127.0.0.1:3100/ready 2>/dev/null | grep -q ready; then
+    ok "ready on 127.0.0.1:3100"
+  else
+    no "not ready on 127.0.0.1:3100: $(curl -s --max-time 5 http://127.0.0.1:3100/ready 2>/dev/null | head -1)"
+  fi
+
+  say "Log ingest"
+  # The failure this catches, and the reason it is not just "is promtail running": the
+  # container can be perfectly healthy while the log directory it mounted is empty
+  # (CG_LOG_FILE unset in the unit), and then Grafana shows an empty logs dashboard with
+  # no error anywhere. So check the FILE, then check that Loki actually has the lines.
+  if compgen -G "$LOG_DIR/*.jsonl" >/dev/null; then
+    ok "$(ls "$LOG_DIR"/*.jsonl | wc -l) file(s) in $LOG_DIR ($(du -sh "$LOG_DIR" 2>/dev/null | cut -f1))"
+  else
+    no "nothing in $LOG_DIR — is CG_LOG_FILE set in the unit? (systemctl show -p Environment context-guru)"
+  fi
+  if ! curl -sfG --max-time 10 http://127.0.0.1:3100/loki/api/v1/query \
+      --data-urlencode 'query=sum(count_over_time({job="context-guru"}[10m]))' 2>/dev/null \
+      | python3 -c 'import json,sys
+r=json.load(sys.stdin)["data"]["result"]
+n=r[0]["value"][1] if r else "0"
+print("  lines ingested in the last 10 minutes: %s" % n)
+print("  EMPTY — promtail is not shipping. `docker logs cg-promtail`") if n in ("0","") else None' 2>/dev/null; then
+    no "Loki query failed"
+  fi
+  echo "  tenants Loki has seen:"
+  curl -sf --max-time 5 'http://127.0.0.1:3100/loki/api/v1/label/tenant/values' 2>/dev/null \
+    | python3 -c 'import json,sys
+v=json.load(sys.stdin).get("data") or []
+print("    " + (", ".join(v) if v else "none yet"))' 2>/dev/null || echo "    (query failed)"
 
   say "Grafana"
   if curl -sf --max-time 5 http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
@@ -570,10 +659,10 @@ cmd_grafana_remove() {
   need_root
   local oci
   oci=$(oci_runtime) || { no "no container runtime"; exit 1; }
-  $oci rm -f cg-prometheus cg-grafana >/dev/null 2>&1 || true
-  ok "removed cg-prometheus and cg-grafana"
-  warn "kept $OBS_STATE — the metrics history and Grafana's database. Delete it by hand if"
-  warn "you actually want the history gone."
+  $oci rm -f cg-prometheus cg-grafana cg-loki cg-promtail >/dev/null 2>&1 || true
+  ok "removed cg-prometheus, cg-grafana, cg-loki and cg-promtail"
+  warn "kept $OBS_STATE — the metrics history, the log store and Grafana's database, and"
+  warn "kept $LOG_DIR. Delete them by hand if you actually want the history gone."
 }
 
 cmd_status() {

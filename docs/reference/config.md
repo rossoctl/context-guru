@@ -206,10 +206,36 @@ shared box is mostly filled by other things.
 | `--dashboard-disk-low` / `DASHBOARD_DISK_LOW` | `0.85` | Stop evicting once usage falls to this. The gap from the high watermark is what stops the janitor grinding when the host is full for other reasons. |
 | `--dashboard-min-keep-bytes` / `DASHBOARD_MIN_KEEP_BYTES` | `1073741824` (1 GiB) | Never shrink the dashboard database below this under disk pressure — below it the pressure is not ours to relieve, and a blank dashboard would hide the real problem. |
 
+## Logging
+
+Levels mean the same thing everywhere: **ERROR** we failed, **WARN** we degraded but kept
+serving (fell open, reverted, refused, evicted), **INFO** the request lifecycle — one line
+per request — plus startup facts, **DEBUG** per-component decisions: which gate declined a
+component and on what numbers.
+
+| Env | Default | Effect |
+|---|---|---|
+| `CG_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. `debug` is about 8x the volume of `info` (measured: 337 lines against 40 on the same agent traffic, 8-component pipeline); it is the level to investigate at, not to leave on. |
+| `CG_LOG_FORMAT` | `text`, or `json` when `CG_LOG_FILE` is set | `text` for a human, `json` for a log shipper. |
+| `CG_LOG_FILE` | unset | Also write every record as JSON to this file, for promtail/Loki. **This is the only thing that lets logs leave the box**, and even then only once promtail exists — the proxy never talks to Loki itself. |
+| `CG_LOG_PLAIN` | unset | Opt out: a plain `log/slog` text handler on stderr, no file sink. Also **disables credential scrubbing**, which is what "use the standard logger instead" means. |
+
+Every line of one request's lifecycle carries the tenant id — never its token — and, from
+the point the session is resolved, the session id. See
+[deploy/grafana/README.md](https://github.com/rossoctl/context-guru/blob/main/deploy/grafana/README.md)
+for the Loki setup, the LogQL recipes, and the exact command to turn DEBUG on for a
+deployed service.
+
+Credentials are scrubbed on the way **out**, in the handler, rather than at each call site:
+a rule that every caller must remember holds only until someone who has not read it adds a
+line. Attribute values (including those baked in by `Logger.With`), attribute keys that
+*name* a credential, and the message itself all go through the same patterns `dash` uses
+before writing a captured request to disk.
+
 ## Diagnostics
 
 | Env | Effect |
 |---|---|
-| `CONTEXT_GURU_DEBUG=1` | Logs each tool output's token count + first line. |
+| `CONTEXT_GURU_DEBUG=1` | Legacy alias for `CG_LOG_LEVEL=debug`. Turns on the per-tool-output and per-candidate DEBUG lines it always did, now at DEBUG rather than INFO. |
 | `CONTEXT_GURU_DUMP=<file>` | Appends a before → after JSON record per rewritten message. The [dashboard](../dashboard.md) captures the same material into a queryable store with a diff view. |
 | `CONTEXT_GURU_CAPTURE=<file>` | Appends each pristine inbound request as one JSONL record, for offline replay through `/compact`. |

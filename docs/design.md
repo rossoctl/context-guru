@@ -166,7 +166,9 @@ cap — an already-over-cap request is forwarded untouched and is not ours to re
 If a component changes the message *count* (none of the v1 set does), the slot map no longer
 aligns, so `apply` forwards the original untouched.
 
-Diagnostics: `CONTEXT_GURU_DEBUG=1` logs each tool output's token count + first line;
+Diagnostics: `CG_LOG_LEVEL=debug` (or the legacy `CONTEXT_GURU_DEBUG=1`) logs every
+component's decision — verdict, token delta, and the gate that declined it — plus each tool
+output's token count and first line;
 `CONTEXT_GURU_DUMP=<file>` appends a before→after JSON record per rewritten message.
 
 ## Reversibility: marker + expand loop

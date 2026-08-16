@@ -1,0 +1,673 @@
+{
+  "__comment": [
+    "context-guru LOG dashboard. Provisioned from deploy/grafana/ \u2014 see the README there.",
+    "",
+    "It answers one question the metrics dashboards cannot: WHY did this request do that.",
+    "The service dashboard tells you a component saved nothing; this one tells you which",
+    "gate declined it, on what numbers, for which tenant and session.",
+    "",
+    "Tenant and Level are Loki labels. Session and Component are NOT \u2014 they are read out",
+    "of the JSON line at query time, because a label per session would mint a Loki stream",
+    "per agent conversation. See deploy/grafana/promtail.yml.",
+    "",
+    "Most of this dashboard needs DEBUG. Turn it on for a hosted deployment with:",
+    "  sudoedit /etc/systemd/system/context-guru.service.d/20-local.conf",
+    "    Environment=CG_LOG_LEVEL=debug",
+    "  sudo systemctl daemon-reload && sudo systemctl restart context-guru",
+    "",
+    "Colour follows the service dashboard's rule: the traffic light means ACT ON THIS",
+    "(errors, warnings), our own magnitudes are pinned blue and carry no verdict, and",
+    "series whose set is not known when this file is written (levels, refusal reasons,",
+    "verdicts, tenants) use palette-classic-by-name so a hue stays with its name when",
+    "another series is filtered out."
+  ],
+  "uid": "context-guru-logs",
+  "title": "context-guru logs",
+  "tags": [
+    "context-guru",
+    "logs"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "label": "Tenant",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "cg-loki"
+        },
+        "query": {
+          "label": "tenant",
+          "refId": "LokiVariableQueryEditor-VariableQuery",
+          "stream": "{job=\"context-guru\"}",
+          "type": 1
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "sort": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "description": "A Loki label. Single-tenant deployments log an empty tenant, which All still matches."
+      },
+      {
+        "name": "level",
+        "label": "Level",
+        "type": "custom",
+        "query": "DEBUG,INFO,WARN,ERROR",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [],
+        "description": "A Loki label. DEBUG lines only exist when the proxy was started with CG_LOG_LEVEL=debug."
+      },
+      {
+        "name": "session",
+        "label": "Session",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "description": "Substring of the session id in the JSON line, matched anywhere in it. In hosted mode the id apply resolved is TENANT-SCOPED (`<tenant>:<agent session>`), so pasting the agent's own session id finds it without knowing the prefix."
+      },
+      {
+        "name": "component",
+        "label": "Component",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "description": "Regex over the component name on a decision line, e.g. extract_llm or mask. Anchored, so `extract` matches extract but not extract_llm; use `extract.*` for both."
+      },
+      {
+        "name": "search",
+        "label": "Search",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "description": "Literal substring anywhere in the line. Empty matches everything."
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Lines",
+      "description": "Log lines matching the current filters over the selected range. Zero with traffic flowing means promtail is not shipping \u2014 check `install.sh loki-status`.",
+      "datasource": {
+        "type": "loki",
+        "uid": "cg-loki"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "cg-loki"
+          },
+          "expr": "sum(count_over_time({job=\"context-guru\", tenant=~\"$tenant\", level=~\"$level\"} | json | session=~\".*$session.*\" [$__range]))",
+          "editorMode": "code",
+          "queryType": "instant",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3987e5"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Requests",
+      "description": "One `cg.request` line is emitted per proxied request, whichever way it ended. Compare against cg_requests_total on the service dashboard: a gap means log lines are being lost, not requests.",
+      "datasource": {
+        "type": "loki",
+        "uid": "cg-loki"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "cg-loki"
+          },
+          "expr": "sum(count_over_time({job=\"context-guru\", tenant=~\"$tenant\", level=~\"$level\"} |= \"cg.request\" | json | msg=\"cg.request\", session=~\".*$session.*\" [$__range]))",
+          "editorMode": "code",
+          "queryType": "instant",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3987e5"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Warnings",
+      "description": "WARN means we degraded but kept serving: a refusal, a reverted component, an evicted tenant, an upstream retry. A handful is normal; a rate that tracks your request rate is not.",
+      "datasource": {
+        "type": "loki",
+        "uid": "cg-loki"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "cg-loki"
+          },
+          "expr": "sum(count_over_time({job=\"context-guru\", tenant=~\"$tenant\", level=\"WARN\"}[$__range]))",
+          "editorMode": "code",
+          "queryType": "instant",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#199e70",
+                "value": null
+              },
+              {
+                "color": "#c98500",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds",
+            "fixedColor": "#3987e5"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Errors",
+      "description": "ERROR means we failed, or did something that is a bug in this program. Any non-zero value here is worth reading the lines below for \u2014 start by setting Level to ERROR.",
+      "datasource": {
+        "type": "loki",
+        "uid": "cg-loki"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "cg-loki"
+          },
+          "expr": "sum(count_over_time({job=\"context-guru\", tenant=~\"$tenant\", level=\"ERROR\"}[$__range]))",
+          "editorMode": "code",
+          "queryType": "instant",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#199e70",
+                "value": null
+              },
+              {
+                "color": "#e66767",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds",
+            "fixedColor": "#3987e5"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Lines per minute, by level",
+      "description": "The shape of the log itself. A DEBUG line that appears when you set CG_LOG_LEVEL=debug and nowhere else is working as intended; a step change in WARN is the thing to chase.",
+      "datasource": {
+        "type": "loki",
+        "uid": "cg-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "cg-loki"
+          },
+          "expr": "sum by (level) (count_over_time({job=\"context-guru\", tenant=~\"$tenant\", level=~\"$level\"} [1m]))",
+          "editorMode": "code",
+          "queryType": "range",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{level}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic-by-name"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Refusals per minute, by reason",
+      "description": "Every deliberate turn-away: rate limit, concurrency, spend cap, unknown token, disabled account, no upstream. The reason string is the same one the caller received and the same category cg_refused_requests_total counts, so this and the SLO dashboard agree.",
+      "datasource": {
+        "type": "loki",
+        "uid": "cg-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "cg-loki"
+          },
+          "expr": "sum by (reason) (count_over_time({job=\"context-guru\", tenant=~\"$tenant\"} | json | msg=\"cg.refused\" [1m]))",
+          "editorMode": "code",
+          "queryType": "range",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic-by-name"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Component verdicts per minute",
+      "description": "What the pipeline DECIDED, from the DEBUG lines: acted, declined (ran and chose not to), no_change, reverted (an error, a panic, or the never-worse guard). A component pinned at `declined` is either correctly idle or misfiring \u2014 the gates table beside this says which. Needs CG_LOG_LEVEL=debug.",
+      "datasource": {
+        "type": "loki",
+        "uid": "cg-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "cg-loki"
+          },
+          "expr": "sum by (verdict) (count_over_time({job=\"context-guru\", tenant=~\"$tenant\"} | json | msg=\"cg.component\" | component=~\"$component\" [1m]))",
+          "editorMode": "code",
+          "queryType": "range",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{verdict}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic-by-name"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Which gate declined candidates",
+      "description": "Per component, the gate histogram off the DEBUG decision lines \u2014 the same Report.Gates map /stats sums into components.<name>.gates, so this cannot disagree with the metric. This is the answer to 'the component did nothing and I do not know why': the gate name says which guard turned the candidates away and the count says how many. Needs CG_LOG_LEVEL=debug.",
+      "datasource": {
+        "type": "loki",
+        "uid": "cg-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "cg-loki"
+          },
+          "expr": "sum by (component, gates) (count_over_time({job=\"context-guru\", tenant=~\"$tenant\"} | json | msg=\"cg.component\" | component=~\"$component\" | gates!=\"\" [$__range]))",
+          "editorMode": "code",
+          "queryType": "instant",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value": "requests"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "requests",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "type": "logs",
+      "title": "Logs",
+      "description": "The lines themselves, newest first. Tenant and Level are Loki LABELS (cheap to filter). Session, Component and Search are read out of the JSON at query time, which is why they are free-text: a session label would mint one Loki stream per agent conversation and eventually take the index down. Click a line, then the `session` link, to pull up every line of that conversation.",
+      "datasource": {
+        "type": "loki",
+        "uid": "cg-loki"
+      },
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "cg-loki"
+          },
+          "expr": "{job=\"context-guru\", tenant=~\"$tenant\", level=~\"$level\"} |= \"$search\" | json | session=~\".*$session.*\" | component=~\"$component\"",
+          "editorMode": "code",
+          "queryType": "range",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": true,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    }
+  ]
+}

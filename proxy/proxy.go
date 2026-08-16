@@ -588,7 +588,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// It goes in the CONTEXT because apply and the components already receive one and
 		// nothing else would have to change; the session is added below, once apply has
 		// resolved it (it is derived from the body, so it is not knowable yet).
-		lg := slog.Default().With("tenant", tn.ID, "route", up.path, "provider", string(provider))
+		lg := slog.Default().With("tenant", tenantLabel(tn.ID), "route", up.path,
+			"provider", string(provider))
 		r = r.WithContext(logging.With(r.Context(), lg))
 		// Limits and the spend cap, before the body is read. Refusing a request that
 		// would exceed a bound must not first cost us 32 MiB of buffering.
@@ -715,6 +716,18 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 	}
 }
 
+// tenantLabel is the tenant id as a log label. Single-tenant deployments have no
+// tenant id at all, and an empty label is DROPPED by promtail — which would leave the
+// logs dashboard's tenant selector empty for every local proxy, i.e. for most users.
+// "local" says the true thing (there is one tenant, it is this deployment) and makes
+// the same dashboard work in both modes.
+func tenantLabel(id string) string {
+	if id == "" {
+		return "local"
+	}
+	return id
+}
+
 // lifecycleLogger returns the request logger with this request's pipeline outcome
 // attached: the resolved session (so every line of this request correlates, including
 // the ones apply wrote), and the token accounting.
@@ -804,7 +817,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// THE one line per request. In a defer so every terminal path emits it exactly
 		// once — stream-through, buffered replay, the round-cap exit, an upstream failure
 		// (which also logged its own WARN with the reason).
-		lg.Info("cg.request", "status", status, "total_ms", msSince(reqStart, time.Time{}),
+		// serve_ms, not total_ms: reqStart is taken here, AFTER the pipeline ran, so this
+		// is the forward-and-respond half. cg_ms above is the other half, and keeping them
+		// separate is the point — one is the upstream's latency and one is ours.
+		lg.Info("cg.request", "status", status, "serve_ms", msSince(reqStart, time.Time{}),
 			"upstream_rounds", rounds, "expands", expanded, "sse", sse, "sse_buffered", sseBuffered,
 			"fresh_input", usage.FreshInput, "cache_read", usage.CacheRead,
 			"cache_write", usage.CacheWrite, "output", usage.Output, "usage_reported", usageOK)

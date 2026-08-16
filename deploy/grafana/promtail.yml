@@ -1,0 +1,57 @@
+# promtail: tail context-guru's JSON log file and push it to Loki.
+#
+# Why a file and a tailer rather than the proxy pushing to Loki itself: a log
+# shipper inside the process being debugged loses precisely the logs you need when
+# that process is the thing going wrong, and it would add batching, retries and a
+# backlog to the request path. The proxy writes a line and forgets it
+# (CG_LOG_FILE); promtail owns delivery and remembers its position across restarts.
+#
+# LABELS ARE A DELIBERATELY SHORT LIST. Every distinct label-value combination is a
+# separate stream in Loki, so labels must be low-cardinality: `level` (four values),
+# `tenant` (bounded by the registry). NOT `session` and NOT `component` — a session
+# label would mint a stream per agent conversation and eventually take the index
+# down. Those are queried out of the JSON at read time instead:
+#
+#   {job="context-guru", tenant="t-abc"} | json | session="s-123"
+#
+# which is what the provisioned dashboard's session and component fields do.
+server:
+  http_listen_address: 127.0.0.1
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  # Survives a restart, so a bounced promtail does not re-ship the whole file (which
+  # would be deduplicated by Loki only if the timestamps and labels matched exactly).
+  filename: /var/lib/promtail/positions.yaml
+
+clients:
+  - url: http://127.0.0.1:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: context-guru
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: context-guru
+          service: context-guru
+          __path__: /var/log/context-guru/*.jsonl
+    pipeline_stages:
+      # slog's JSON handler writes flat keys, so one json stage gets everything we
+      # promote. The rest of the record stays in the line, where LogQL's own `| json`
+      # can reach it at query time.
+      - json:
+          expressions:
+            level: level
+            tenant: tenant
+            ts: time
+      - labels:
+          level:
+          tenant:
+      # Use the PROXY's timestamp, not the moment promtail read the line. Without this
+      # a promtail restart re-stamps a backlog as "now" and the whole window collapses
+      # onto one instant in the log panel.
+      - timestamp:
+          source: ts
+          format: RFC3339Nano
