@@ -65,6 +65,34 @@ func TestCloneMessagesIndependent(t *testing.T) {
 	}
 }
 
+// TestCloneMessagesIndependentWhenJSONFails: the JSON round-trip DOES fail in practice —
+// bifrost's ChatMessageContent.MarshalJSON errors when a message carries both string and
+// block content, which a component can produce. The clone used to return the input slice
+// itself on that path, so the snapshot ALIASED the live messages: a component mutating in
+// place also mutated the snapshot, and the pipeline's revert (error/panic/never-worse)
+// became a no-op. Isolation must hold on the error path too.
+func TestCloneMessagesIndependentWhenJSONFails(t *testing.T) {
+	orig := []bschemas.ChatMessage{{
+		Role: bschemas.ChatMessageRoleTool,
+		Content: &bschemas.ChatMessageContent{
+			ContentStr:    strp("x"),
+			ContentBlocks: []bschemas.ChatContentBlock{{Type: bschemas.ChatContentBlockTypeText, Text: strp("x")}},
+		},
+	}}
+	clone := CloneMessages(orig)
+	if len(clone) != 1 {
+		t.Fatalf("clone lost messages: %+v", clone)
+	}
+	*clone[0].Content.ContentStr = "mutated"
+	clone[0].Content.ContentBlocks[0].Text = strp("mutated")
+	if got := *orig[0].Content.ContentStr; got != "x" {
+		t.Errorf("clone aliases the original's content string (got %q) — revert would be a no-op", got)
+	}
+	if got := *orig[0].Content.ContentBlocks[0].Text; got != "x" {
+		t.Errorf("clone aliases the original's content blocks (got %q)", got)
+	}
+}
+
 func TestBlockTextNonText(t *testing.T) {
 	if BlockText(bschemas.ChatContentBlock{Type: bschemas.ChatContentBlockTypeImage}) != "" {
 		t.Fatal("a non-text (image) block has no text")

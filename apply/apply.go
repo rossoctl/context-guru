@@ -30,6 +30,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
@@ -147,6 +148,41 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 	return r.Body, r.Changed
 }
 
+// metaSessionKeys are the request-body fields carrying the agent's OWN session id,
+// in precedence order behind the header: `metadata.user_id` is Claude Code's (a JSON
+// object string, unwrapped by session.ExplicitID) and `metadata.taskId` is Bob
+// Shell's (a bare randomUUID, re-rolled only by /clear). Both survive the agent's
+// context compaction, which the derived sha256(system+firstUser) does not — see
+// session.ExplicitID for what breaks without them. A request carrying both resolves
+// to user_id, by this order.
+var metaSessionKeys = [...]string{"metadata.user_id", "metadata.taskId"}
+
+// explicitSession resolves the explicit session id for one request: the header wins,
+// then each metaSessionKeys field in order, then "" (Scoped's derived-hash fallback).
+func explicitSession(header string, body []byte) string {
+	cands := make([]string, 0, 1+len(metaSessionKeys))
+	cands = append(cands, header)
+	return session.ExplicitID(append(cands, metaSessionIDs(body)...)...)
+}
+
+// metaSessionIDs reads those fields off the raw body.
+//
+// gjson scans, so this costs no second unmarshal of the body on the request path — the
+// same reason every other body-level read here (messages, wireBreakpoints) uses it. The
+// type check is the whole robustness story: a `metadata` that is absent, null, a scalar
+// or an array yields a non-existent result, and a value that is a number, object or
+// array is not gjson.String — all of which yield "" and fall back to the derived hash
+// rather than stringifying into a key like `map[]`.
+func metaSessionIDs(body []byte) []string {
+	out := make([]string, 0, len(metaSessionKeys))
+	for _, k := range metaSessionKeys {
+		if r := gjson.GetBytes(body, k); r.Type == gjson.String {
+			out = append(out, r.Str)
+		}
+	}
+	return out
+}
+
 // BodyOpts is the full entry point: everything BodyFull takes plus the operating mode
 // (#31), the per-session boundary tracker, and the observational Trace the dashboard's
 // capture path reads. Hosts that support modes call this; BodyFull is the positional
@@ -211,8 +247,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		dumpToolOutputs(norm)
 	}
 	chat := &bschemas.BifrostChatRequest{Provider: provider, Input: norm}
-	sys, firstUser := systemAndFirstUser(norm)
-	sessionID := session.Resolve(o.Session, sys, firstUser)
+	sys, firstUser := schema.SessionHead(norm)
+	sessionID := session.Scoped(o.Tenant, explicitSession(o.Session, body), sys, firstUser)
 	cacheAware := resolveCacheAware(o.CacheMode, provider, body)
 	maxCachedIdx := -1
 	if cacheAware && !bypass {
@@ -226,10 +262,42 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// two concurrent turns of one session raced on it — see the modes package comment.
 		// Callers without a tracker (library users, /compact) keep the legacy path: same
 		// numbers, same race, no behavior change for them.
+		//
+		// Both paths route the boundary through modes.Boundary, so a compaction (the
+		// transcript SHRANK under a now-stable session id) restarts the prefix instead of
+		// declaring the whole new, shorter transcript already-cached and freezing the rest
+		// of the session. The store path needed it too: putLen writes len(norm)
+		// unconditionally, so it self-healed on the FOLLOWING turn but still froze the
+		// post-compaction one.
 		if o.Tracker != nil {
 			maxCachedIdx = o.Tracker.Turn(sessionID, len(norm)) - 1
 		} else {
-			maxCachedIdx = prevLen(st, sessionID) - 1
+			maxCachedIdx = modes.Boundary(prevLen(st, sessionID), len(norm)) - 1
+			defer putLen(st, sessionID, len(norm))
+		}
+	} else if cacheAware && bypass {
+		// A bypassed turn still has to RECORD its length, even though it reads no
+		// boundary and rewrites nothing.
+		//
+		// The provider caches whatever we forward, and a bypassed request is forwarded in
+		// full — so those messages are committed to the cache exactly as a compacted
+		// turn's would be. Skipping the record leaves the boundary at the last
+		// non-bypassed turn's length, and the NEXT turn then treats the messages the
+		// bypass passed through as mutable tail and rewrites them, diverging from the
+		// prefix the provider just cached and forcing a full cache-write of the suffix.
+		//
+		// So the cost of a bypass is not confined to the bypassed request, which is what
+		// the anti-latching argument in proxy/agentcompaction.go used to claim. It lands
+		// on the following turn, and it is a cache-write rather than lost savings. That
+		// matters because a false-positive bypass is reachable: the detector's phrase is
+		// quoted verbatim in this repo's own docs/how-to/agent-compaction.md, so an agent
+		// that reads that page gets it into a trailing tool_result.
+		//
+		// Recording is safe in both directions. On a genuine agent compaction the next
+		// turn is shorter, so modes.Boundary resets anyway and this record is discarded.
+		if o.Tracker != nil {
+			o.Tracker.Turn(sessionID, len(norm))
+		} else {
 			defer putLen(st, sessionID, len(norm))
 		}
 	}
@@ -289,6 +357,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// if no component changes a message.
 	changed := systemSplit
 	var changes []Change
+	// Exact attribution for the diff view: which components rewrote each message, in
+	// order. Built once from the run report the pipeline already produced.
+	touched := touchedBy(rr)
 	// Per-message count of changes this writeback threw away, attributed back to the
 	// components that made them once the loop is done.
 	discarded := map[int]int{}
@@ -306,7 +377,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				return res
 			}
 			changed = true
-			changes = append(changes, mkChange(s.path, s.preText, newText))
+			changes = append(changes, mkChange(s.path, s.preText, newText, touched[i]))
 		default: // wholeMessage
 			post, err := json.Marshal(chat.Input[i])
 			if err != nil {
@@ -341,7 +412,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			changed = true
 			var pm bschemas.ChatMessage
 			_ = json.Unmarshal(s.pre, &pm)
-			changes = append(changes, mkChange(s.path, schema.MessageText(pm), schema.MessageText(chat.Input[i])))
+			changes = append(changes,
+				mkChange(s.path, schema.MessageText(pm), schema.MessageText(chat.Input[i]), touched[i]))
 		}
 	}
 	pipe.RecordDiscards(rr, discarded)
@@ -471,13 +543,43 @@ type Change struct {
 	AfterTokens  int    `json:"after_tokens"`
 	Before       string `json:"before"`
 	After        string `json:"after"`
+	// Components names which components rewrote this message, IN THE ORDER THEY
+	// TOUCHED IT. A LIST, not a single id, and that is not a hedge: several components
+	// routinely rewrite the same message in sequence (a reformatter then an offloader),
+	// and the before/after pair here is their cumulative result — a single field would
+	// have to name a winner and would be wrong for every other toucher.
+	//
+	// A REVERTED component is absent. The pipeline only records indices for a run that
+	// survived its guards (see components.runOne), so a component rolled back by an
+	// error, a panic, or the never-worse rule is never credited with the change.
+	Components []string `json:"components,omitempty"`
 }
 
-func mkChange(path, before, after string) Change {
+func mkChange(path, before, after string, comps []string) Change {
 	return Change{
 		Path: path, BeforeTokens: schema.TextTokens(before), AfterTokens: schema.TextTokens(after),
-		Before: clip(before, 4000), After: clip(after, 4000),
+		Before: clip(before, 4000), After: clip(after, 4000), Components: comps,
 	}
+}
+
+// touchedBy inverts the run report into "normalized message index -> the components
+// that changed it, in pipeline order". Report.ChangedIdx is already computed by the
+// pipeline for the discard attribution, so this costs one pass over indices that
+// already exist — no extra comparison of message text on the hot path.
+func touchedBy(rr *components.RunReport) map[int][]string {
+	if rr == nil {
+		return nil
+	}
+	var out map[int][]string
+	for _, rep := range rr.Components {
+		for _, i := range rep.ChangedIdx {
+			if out == nil {
+				out = map[int][]string{}
+			}
+			out[i] = append(out[i], rep.Component)
+		}
+	}
+	return out
 }
 
 func clip(s string, n int) string {
@@ -532,18 +634,31 @@ func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bsch
 				if blk.Get("type").String() != "tool_result" {
 					continue
 				}
-				content := blk.Get("content")
-				if content.Type != gjson.String {
-					continue // array/structured tool_result content — skip (never lose non-text)
+				add := func(text, path string) {
+					handled = true
+					norm = append(norm, toolMessage(text, blk.Get("tool_use_id").String()))
+					slots = append(slots, slot{kind: anthropicToolText, path: path, preText: text})
 				}
-				handled = true
-				text := content.String()
-				norm = append(norm, toolMessage(text, blk.Get("tool_use_id").String()))
-				slots = append(slots, slot{
-					kind:    anthropicToolText,
-					path:    "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".content",
-					preText: text,
-				})
+				base := "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".content"
+				content := blk.Get("content")
+				if content.Type == gjson.String {
+					add(content.String(), base)
+					continue
+				}
+				// The Messages API also permits an ARRAY of content blocks, and many clients
+				// emit that shape. Extract each TEXT block as its own synthetic tool message
+				// with a write-back slot one level deeper — otherwise the whole message fell
+				// to the whole-message slot, which bifrost cannot model, and 100% of that
+				// request's tool output was silently uncompactable. Non-text blocks (images,
+				// …) are skipped and left in the body untouched: never lose one.
+				if content.IsArray() {
+					for k, cb := range content.Array() {
+						if cb.Get("type").String() != "text" || cb.Get("text").Type != gjson.String {
+							continue
+						}
+						add(cb.Get("text").String(), base+"."+strconv.Itoa(k)+".text")
+					}
+				}
 			}
 			if handled {
 				continue // this user message contributed its tool_result blocks; body carries the rest
@@ -599,9 +714,26 @@ func jsonEqual(a, b []byte) bool {
 // (byte-lossless); genuinely new messages (the summary) are marshaled fresh.
 // Fail-open (returns body,false) if any survivor can't be mapped to the body.
 func rebuildCountChanged(body []byte, orig []gjson.Result, normPre [][]byte, slots []slot, out []bschemas.ChatMessage) ([]byte, bool) {
+	// The rebuild emits ONLY slot-mapped messages, so a body message normalize skipped
+	// (unparseable — it has no slot) would be silently DELETED from the forwarded
+	// request. Deleting a message is an ALTERED request, not a fail-open one, so decline
+	// the rebuild entirely and let the caller forward the original.
+	covered := map[int]bool{}
+	for _, s := range slots {
+		if bi, ok := bodyIndexOf(s.path); ok {
+			covered[bi] = true
+		}
+	}
+	if len(covered) != len(orig) {
+		return body, false
+	}
 	used := make([]bool, len(normPre))
 	var parts [][]byte
-	lastBodyIdx := -1
+	// emitted guards against emitting one body message TWICE: several normalized
+	// messages can share a body index (an Anthropic user message with several
+	// tool_result blocks), and a count-changing component may leave them
+	// non-contiguous — which duplicated the raw message, and with it its tool_use_id.
+	emitted := map[int]bool{}
 	for i := range out {
 		mb, err := json.Marshal(out[i])
 		if err != nil {
@@ -616,7 +748,6 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, normPre [][]byte, slo
 		}
 		if matched < 0 {
 			parts = append(parts, mb) // new message (e.g. the summary) — fresh, lossless (plain text)
-			lastBodyIdx = -1
 			continue
 		}
 		used[matched] = true
@@ -624,11 +755,11 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, normPre [][]byte, slo
 		if !ok || bi < 0 || bi >= len(orig) {
 			return body, false
 		}
-		if bi == lastBodyIdx {
+		if emitted[bi] {
 			continue // several normalized messages share one body message — emit it once
 		}
+		emitted[bi] = true
 		parts = append(parts, []byte(orig[bi].Raw))
-		lastBodyIdx = bi
 	}
 	var buf bytes.Buffer
 	buf.WriteByte('[')
@@ -654,19 +785,4 @@ func bodyIndexOf(path string) (int, bool) {
 	}
 	i, err := strconv.Atoi(s)
 	return i, err == nil
-}
-
-func systemAndFirstUser(msgs []bschemas.ChatMessage) (sys, firstUser string) {
-	for _, m := range msgs {
-		t := schema.MessageText(m)
-		switch m.Role {
-		case bschemas.ChatMessageRoleSystem:
-			sys += t
-		case bschemas.ChatMessageRoleUser:
-			if firstUser == "" {
-				firstUser = t
-			}
-		}
-	}
-	return sys, firstUser
 }

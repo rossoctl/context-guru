@@ -12,6 +12,7 @@ package schema
 
 import (
 	"encoding/json"
+	"log/slog"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -52,11 +53,30 @@ func CloneMessages(in []schemas.ChatMessage) []schemas.ChatMessage {
 	}
 	b, err := json.Marshal(in)
 	if err != nil {
-		return in
+		return fallbackClone(in, err)
 	}
 	var out []schemas.ChatMessage
 	if err := json.Unmarshal(b, &out); err != nil {
-		return in
+		return fallbackClone(in, err)
+	}
+	return out
+}
+
+// fallbackClone copies without JSON when the round-trip fails. Returning `in` (as this
+// used to) handed the caller an ALIAS of the live slice: a component mutating a message
+// in place mutated the snapshot too, so restoring it on error/panic/never-worse was a
+// no-op and pipeline isolation was silently off for that component. The failure is
+// reachable — bifrost's ChatMessageContent.MarshalJSON errors when a message carries
+// both string and block content, which a component can produce.
+//
+// Nil would be louder, but the pipeline's revert paths assign this value straight back
+// to req.Input, so nil would wipe the transcript. A real deep copy keeps isolation
+// working and stays fail-open; the log line is the loud part.
+func fallbackClone(in []schemas.ChatMessage, err error) []schemas.ChatMessage {
+	slog.Warn("context-guru: message clone fell back to a non-JSON deep copy", "err", err)
+	out := make([]schemas.ChatMessage, len(in))
+	for i := range in {
+		out[i] = schemas.DeepCopyChatMessage(in[i])
 	}
 	return out
 }
@@ -113,4 +133,37 @@ func Rewritable(m schemas.ChatMessage) bool {
 		}
 	}
 	return true
+}
+
+// SessionHead returns the two strings the derived session key is hashed from: the
+// conversation's HEAD system text and its first user message.
+//
+// "Head" is load-bearing. The obvious reading — concatenate every system-role
+// message — is what this replaced, and it is wrong for the Claude Agent SDK: that
+// host APPENDS a fresh system-role message on every turn carrying its remaining-
+// budget reminder (`<system-reminder><total_tokens>N tokens left</total_tokens>`),
+// so the concatenation changed on every single request and each turn of one
+// conversation derived a DIFFERENT key. Dedup memory, the extract_llm result cache
+// and frozen offload decisions are all scoped to that key, so none of them ever
+// accumulated past one turn.
+//
+// A conversation only ever grows at the TAIL, so its head is the one part that is
+// immutable by construction. Taking the first system-role message (plus the first
+// user message, already head-only) is therefore stable across turns without asking
+// the host for anything. Later system-role messages are deliberately ignored: they
+// are per-turn host injections, never conversation identity.
+func SessionHead(msgs []schemas.ChatMessage) (sys, firstUser string) {
+	for _, m := range msgs {
+		switch m.Role {
+		case schemas.ChatMessageRoleSystem:
+			if sys == "" {
+				sys = MessageText(m)
+			}
+		case schemas.ChatMessageRoleUser:
+			if firstUser == "" {
+				firstUser = MessageText(m)
+			}
+		}
+	}
+	return sys, firstUser
 }

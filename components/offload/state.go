@@ -20,6 +20,28 @@ import (
 // (KV-cache friendly) — re-deriving a different summary/extraction each turn is
 // both costly and cache-hostile.
 
+// Nothing in this file is namespaced by a "compaction epoch", and that is a decision, not
+// an omission. When the AGENT compacts its own transcript the session id deliberately
+// stays put (one conversation, one session in the dashboard) and only the cached-prefix
+// boundary restarts — see modes.Boundary. Everything here survives, because none of it
+// encodes a claim about a message POSITION:
+//
+//   - resultKey / frozenKey are keyed by a CONTENT hash. "This content reduces to these
+//     bytes" is as true after a compaction as before, and replaying it is what keeps the
+//     bytes the provider already cached stable. Resetting them would re-derive — for
+//     extract_llm, a fresh sampled model call that may emit DIFFERENT bytes, so the reset
+//     would spend money to cause the cache-write it was supposed to avoid.
+//   - sumKey holds CoveredCount, which IS an index — but it is guarded by CoveredHash, so
+//     tryReuse already declines when the covered span changed, and its boundary > end
+//     check already declines when the transcript got shorter than the checkpoint. A
+//     compaction moves both, so the checkpoint self-invalidates and the next turn
+//     summarizes fresh. An explicit reset would be a second mechanism for an outcome the
+//     hash already produces.
+//   - seenKey / keptKey / ownerKey are session-independent or observational by design.
+//
+// Keeping them is also what keeps PRE-compaction content readable: the expand markers that
+// survive into the agent's summary resolve through the same content-hash keys.
+
 // resultKey namespaces a per-content reduced output (extract) by session.
 func resultKey(session, id string) string { return store.ResultPrefix + session + ":" + id }
 

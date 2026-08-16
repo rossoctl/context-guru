@@ -222,8 +222,54 @@ type compStat struct {
 	// provider fields). Nonzero means the component ran, mutated, and had no effect on
 	// the wire — which for two whole benchmark studies looked exactly like a working
 	// Reformat (issue #32).
-	Discarded int64               `json:"discarded_changes"`
-	seenKeys  map[string]struct{} // content keys already counted toward SavedUnique (not serialized)
+	Discarded int64 `json:"discarded_changes"`
+	// Gates is the rejection histogram: gate name -> candidates declined by it, summed
+	// over every run. It is what turns "acted: 0" into a diagnosis — whether the
+	// component saw no candidates, or saw them and a specific guard refused.
+	Gates    map[string]int64    `json:"gates,omitempty"`
+	seenKeys map[string]struct{} // content keys already counted toward SavedUnique (not serialized)
+	// pending* hold the saving credited by this component's most recent fresh report,
+	// so a discard follow-up can REVERSE it (see reverseDiscarded). Not serialized.
+	pendingSaved   int64
+	pendingUnique  int64
+	pendingChanged int64 // messages that report changed, for a proportional reversal
+}
+
+// forSnapshot returns a copy of this rollup that is safe to hand outside the
+// aggregator's lock: the derived ratio filled in, the working set dropped, and the gate
+// histogram DEEP-copied.
+//
+// It exists as one method rather than inline in each snapshot loop because it previously
+// was inline, in two loops, and only one of them copied Gates — so `/stats` handed out
+// the live observe histogram and raced the observe worker pool writing into it. The
+// enforced rollup was correct and the hypothetical one was not, which is the failure mode
+// duplicated copy logic always produces: the second copy drifts from the first, silently.
+func (cs compStat) forSnapshot() compStat {
+	if cs.SavedUnique > 0 {
+		cs.OvercountRatio = float64(cs.Saved) / float64(cs.SavedUnique)
+	}
+	cs.seenKeys = nil // never serialize the working set
+	if len(cs.Gates) > 0 {
+		g := make(map[string]int64, len(cs.Gates))
+		for k, v := range cs.Gates {
+			g[k] = v
+		}
+		cs.Gates = g
+	}
+	return cs
+}
+
+// addGates merges one report's gate histogram into the rollup.
+func (cs *compStat) addGates(g map[string]int) {
+	if len(g) == 0 {
+		return
+	}
+	if cs.Gates == nil {
+		cs.Gates = make(map[string]int64, len(g))
+	}
+	for k, v := range g {
+		cs.Gates[k] += int64(v)
+	}
 }
 
 // NewAggregator returns an empty aggregator.
@@ -251,10 +297,14 @@ func (a *Aggregator) Component(r components.Report) {
 	// Runs would double per request.
 	if r.Discarded > 0 {
 		cs.Discarded += int64(r.Discarded)
+		a.reverseDiscarded(cs, int64(r.Discarded))
 		return
 	}
 	cs.Runs++
+	cs.addGates(r.Gates)
 	cs.Saved += int64(r.Saved())
+	cs.pendingSaved, cs.pendingChanged = int64(r.Saved()), int64(len(r.ChangedIdx))
+	uniqueBefore := cs.SavedUnique
 	cs.DurationMs += r.DurationMs // per-component latency cost on the hot path
 	// Unique savings: dedup by the content-derived CacheKeys so the same compaction,
 	// re-sent verbatim on later turns, is not re-counted. Attribute this run's saved
@@ -279,6 +329,7 @@ func (a *Aggregator) Component(r components.Report) {
 			}
 		}
 	}
+	cs.pendingUnique = cs.SavedUnique - uniqueBefore
 	if r.Reverted {
 		cs.Reverted++
 	}
@@ -292,6 +343,40 @@ func (a *Aggregator) Component(r components.Report) {
 
 // observeComp accumulates one observe-mode component report into the hypothetical
 // namespace. Caller holds the lock.
+// reverseDiscarded un-credits the saving of a change the WRITEBACK layer threw away.
+// The discard is only known after the component has already reported, so the fresh
+// report's saving is on the books by now; without this, a component whose rewrite never
+// reached the wire still published its tokens as saved (issue #32 — the Discarded
+// counter was wired for visibility only, so the number it existed to question stayed
+// uncorrected). The wire is byte-identical to the input in that case, so the honest
+// figure is zero.
+//
+// n is the number of DISCARDED messages charged to this component; pendingChanged is how
+// many it changed. Reverse proportionally when only some were discarded. The pending
+// amounts are then zeroed, so several messages discarded in one request (RecordDiscards
+// sums them into ONE report per component, but a second report cannot be ruled out)
+// never subtract twice.
+//
+// ponytail: the reversal uses the component's LAST fresh report, because the discard
+// report carries only a count. Under concurrent requests that can be a different
+// request's report of the same size — the rollup is a sum, so the total stays honest.
+// Carrying the discarded token count on the Report (components/) would make it exact.
+func (a *Aggregator) reverseDiscarded(cs *compStat, n int64) {
+	share := func(v int64) int64 {
+		if cs.pendingChanged > n && n > 0 {
+			return v * n / cs.pendingChanged
+		}
+		return v
+	}
+	saved, unique := share(cs.pendingSaved), share(cs.pendingUnique)
+	cs.Saved -= saved
+	cs.SavedUnique -= unique
+	// The headline saving is before−after over run reports, and it counted this rewrite
+	// too. Add the discarded tokens back to `after`: they are still on the wire.
+	a.after += saved
+	cs.pendingSaved, cs.pendingUnique, cs.pendingChanged = 0, 0, 0
+}
+
 func (a *Aggregator) observeComp(r components.Report) {
 	if a.potentialComp == nil {
 		a.potentialComp = map[string]*compStat{}
@@ -302,6 +387,7 @@ func (a *Aggregator) observeComp(r components.Report) {
 		a.potentialComp[r.Component] = cs
 	}
 	cs.Runs++
+	cs.addGates(r.Gates)
 	cs.Saved += int64(r.Saved())
 	cs.DurationMs += r.DurationMs
 	if saved := int64(r.Saved()); saved > 0 && !r.Reverted && !r.Skipped {
@@ -505,6 +591,17 @@ type Snapshot struct {
 	FrozenDropped  int64 `json:"frozen_dropped"`
 	FrozenRepaired int64 `json:"frozen_repaired"`
 	FrozenFlips    int64 `json:"frozen_flips"`
+	// CompactionResets counts turns whose cached-prefix boundary restarted because the
+	// AGENT compacted its own transcript (it shrank under a stable session id). The
+	// session id deliberately survives that compaction so one conversation is one
+	// session in the dashboard — which means the boundary is the only thing left that can
+	// notice, and if it does not, every message of every later turn is treated as already
+	// cached and no component can act for the rest of the session. So this is the counter
+	// that says "these sessions restarted their prefix N times"; a long run with real
+	// auto-compaction should be non-zero, and a run where it stays 0 while savings fall
+	// off a cliff mid-session is the regression it exists to expose. Filled by the host at
+	// serve time (the counter lives in `modes`, which metrics cannot import).
+	CompactionResets int64 `json:"compaction_resets"`
 	// cmdfilter attribution: which command FAMILIES pay off (builds/tests/iac/pkg/net),
 	// which individual filters fire, and which output shapes matched no filter (the
 	// backlog of filters worth writing). Additive fields — nothing above is renamed.
@@ -620,12 +717,9 @@ func (a *Aggregator) Snapshot() Snapshot {
 		if v.Discarded > 0 {
 			discarded = append(discarded, k)
 		}
-		cs := *v
-		if cs.SavedUnique > 0 {
-			cs.OvercountRatio = float64(cs.Saved) / float64(cs.SavedUnique)
-		}
-		cs.seenKeys = nil // don't serialize the working set
-		comps[k] = cs
+		// forSnapshot, not an inline copy: the snapshot outlives this lock and is
+		// marshalled by the caller, so any live map handed out races the next Component().
+		comps[k] = v.forSnapshot()
 		// Dead weight = ran but never changed the request at all (always skipped
 		// or reverted). A component that mutated but saved no content tokens (e.g.
 		// cacheinject adds provider cache_control) is NOT passthrough.
@@ -703,12 +797,7 @@ func (a *Aggregator) Snapshot() Snapshot {
 		if len(a.potentialComp) > 0 {
 			pc := make(map[string]compStat, len(a.potentialComp))
 			for k, v := range a.potentialComp {
-				cs := *v
-				if cs.SavedUnique > 0 {
-					cs.OvercountRatio = float64(cs.Saved) / float64(cs.SavedUnique)
-				}
-				cs.seenKeys = nil
-				pc[k] = cs
+				pc[k] = v.forSnapshot()
 			}
 			snap.PotentialComponents = pc
 		}

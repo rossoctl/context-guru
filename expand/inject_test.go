@@ -21,7 +21,7 @@ func toolNames(t *testing.T, body []byte, provider string) []string {
 }
 
 func TestInjectOpenAIAddsToolLast(t *testing.T) {
-	body := []byte(`{"model":"m","tools":[{"type":"function","function":{"name":"read_file"}}],"messages":[]}`)
+	body := []byte(`{"model":"m","tools":[{"type":"function","function":{"name":"read_file"}}],"messages":[{"role":"user","content":"out: <<cg:k1>>"}]}`)
 	out, injected := Inject("openai", InjectAuto, body, true)
 	if !injected {
 		t.Fatal("expected injection when tools present + store persists")
@@ -33,7 +33,7 @@ func TestInjectOpenAIAddsToolLast(t *testing.T) {
 }
 
 func TestInjectAnthropicAddsToolLast(t *testing.T) {
-	body := []byte(`{"model":"m","tools":[{"name":"bash","input_schema":{}}],"messages":[]}`)
+	body := []byte(`{"model":"m","tools":[{"name":"bash","input_schema":{}}],"messages":[{"role":"user","content":"out: <<cg:k1>>"}]}`)
 	out, injected := Inject("anthropic", InjectAuto, body, true)
 	if !injected {
 		t.Fatal("expected injection")
@@ -45,7 +45,7 @@ func TestInjectAnthropicAddsToolLast(t *testing.T) {
 }
 
 func TestInjectIdempotent(t *testing.T) {
-	body := []byte(`{"tools":[{"type":"function","function":{"name":"x"}}]}`)
+	body := []byte(`{"tools":[{"type":"function","function":{"name":"x"}}],"messages":[{"role":"user","content":"out: <<cg:k1>>"}]}`)
 	once, _ := Inject("openai", InjectAuto, body, true)
 	twice, injected := Inject("openai", InjectAuto, once, true)
 	if injected {
@@ -58,7 +58,7 @@ func TestInjectIdempotent(t *testing.T) {
 
 func TestInjectDeterministicBytes(t *testing.T) {
 	// Byte-stable across calls (prefix-cache stability).
-	base := []byte(`{"tools":[{"type":"function","function":{"name":"a"}}]}`)
+	base := []byte(`{"tools":[{"type":"function","function":{"name":"a"}}],"messages":[{"role":"user","content":"out: <<cg:k1>>"}]}`)
 	a, _ := Inject("openai", InjectAuto, base, true)
 	b, _ := Inject("openai", InjectAuto, base, true)
 	if !bytes.Equal(a, b) {
@@ -90,7 +90,7 @@ func TestInjectAlwaysCreatesToolsArray(t *testing.T) {
 }
 
 func TestInjectNeverAndNoStore(t *testing.T) {
-	body := []byte(`{"tools":[{"type":"function","function":{"name":"x"}}]}`)
+	body := []byte(`{"tools":[{"type":"function","function":{"name":"x"}}],"messages":[{"role":"user","content":"out: <<cg:k1>>"}]}`)
 	if _, in := Inject("openai", InjectNever, body, true); in {
 		t.Fatal("never must not inject")
 	}
@@ -102,21 +102,59 @@ func TestInjectNeverAndNoStore(t *testing.T) {
 func TestInjectRespectsForcingToolChoice(t *testing.T) {
 	// OpenAI required, and a specific forced function, and none: all skip.
 	for _, tc := range []string{`"required"`, `"none"`, `{"type":"function","function":{"name":"x"}}`} {
-		body := []byte(`{"tools":[{"type":"function","function":{"name":"x"}}],"tool_choice":` + tc + `}`)
+		body := []byte(`{"tools":[{"type":"function","function":{"name":"x"}}],"messages":[{"role":"user","content":"<<cg:k1>>"}],"tool_choice":` + tc + `}`)
 		if _, in := Inject("openai", InjectAuto, body, true); in {
 			t.Fatalf("must skip injection under forcing tool_choice %s", tc)
 		}
 	}
 	// auto is fine.
-	body := []byte(`{"tools":[{"type":"function","function":{"name":"x"}}],"tool_choice":"auto"}`)
+	body := []byte(`{"tools":[{"type":"function","function":{"name":"x"}}],"messages":[{"role":"user","content":"<<cg:k1>>"}],"tool_choice":"auto"}`)
 	if _, in := Inject("openai", InjectAuto, body, true); !in {
 		t.Fatal("tool_choice auto should allow injection")
 	}
 	// Anthropic {"type":"any"} is forcing; {"type":"auto"} is fine.
-	if _, in := Inject("anthropic", InjectAuto, []byte(`{"tools":[{"name":"x"}],"tool_choice":{"type":"any"}}`), true); in {
+	if _, in := Inject("anthropic", InjectAuto, []byte(`{"tools":[{"name":"x"}],"messages":[{"role":"user","content":"<<cg:k1>>"}],"tool_choice":{"type":"any"}}`), true); in {
 		t.Fatal("anthropic tool_choice any must skip")
 	}
-	if _, in := Inject("anthropic", InjectAuto, []byte(`{"tools":[{"name":"x"}],"tool_choice":{"type":"auto"}}`), true); !in {
+	if _, in := Inject("anthropic", InjectAuto, []byte(`{"tools":[{"name":"x"}],"messages":[{"role":"user","content":"<<cg:k1>>"}],"tool_choice":{"type":"auto"}}`), true); !in {
 		t.Fatal("anthropic tool_choice auto should allow injection")
+	}
+}
+
+// TestInjectAutoRequiresMarkers: under "auto" the tool is advertised only when the
+// request actually carries something expandable. Advertising it on a marker-free request
+// invites a call that can resolve nothing — and the host then has to hand the model's raw
+// tool_use back to a client that has no such tool, which for an agent's own compaction
+// request reads as a failed compaction (three in a row and Claude Code disables
+// auto-compact for the session).
+func TestInjectAutoRequiresMarkers(t *testing.T) {
+	tools := `"tools":[{"type":"function","function":{"name":"read_file"}}]`
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"no markers", `{` + tools + `,"messages":[{"role":"user","content":"plain turn"}]}`, false},
+		{"plain marker", `{` + tools + `,"messages":[{"role":"user","content":"out <<cg:k1>>"}]}`, true},
+		// The spelling markers actually arrive in: encoding/json HTML-escapes "<".
+		{"escaped marker", `{` + tools + `,"messages":[{"role":"user","content":"out \u003c\u003ccg:k1\u003e\u003e"}]}`, true},
+		{"summary sentinel", `{` + tools + `,"messages":[{"role":"user","content":"out ⟪cg⟫"}]}`, true},
+		{"marker in system only", `{` + tools + `,"system":"prior: <<cg:k1>>","messages":[{"role":"user","content":"go"}]}`, true},
+		{"marker but no tools", `{"messages":[{"role":"user","content":"out <<cg:k1>>"}]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, injected := Inject("openai", InjectAuto, []byte(tc.body), true)
+			if injected != tc.want {
+				t.Fatalf("Inject injected=%v, want %v", injected, tc.want)
+			}
+			// The ADVERTISE condition and what a host can OBSERVE on the wire must agree:
+			// a host decides whether to intercept expand calls by reading the outgoing
+			// body, so HasTool must report exactly what Inject did.
+			if HasTool("openai", out) != tc.want {
+				t.Fatalf("HasTool=%v disagrees with injected=%v; a host would either declare "+
+					"a tool it does not intercept or buffer for a tool that is not there: %s",
+					HasTool("openai", out), injected, out)
+			}
+		})
 	}
 }

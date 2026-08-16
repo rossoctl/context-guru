@@ -25,6 +25,7 @@ var statsGoldenTopLevel = []string{
 	"cache_read_tokens",
 	"cache_write_tokens",
 	"cg_added_ms_avg",
+	"compaction_resets",
 	"components",
 	"extract",
 	"fresh_input_tokens",

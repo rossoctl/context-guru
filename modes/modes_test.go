@@ -20,13 +20,65 @@ func TestTurnReturnsPreviousLength(t *testing.T) {
 	if pl := tr.Turn("s", 9); pl != 5 {
 		t.Fatalf("second turn: got %d, want 5", pl)
 	}
-	// A shorter turn must not shrink the boundary: content the provider already cached
-	// would otherwise fall back into the mutable tail.
-	if pl := tr.Turn("s", 3); pl != 9 {
-		t.Fatalf("shorter turn moved the boundary: got %d, want 9", pl)
+	// A shorter turn is the agent's own compaction: the boundary restarts at 0 and the
+	// NEW, shorter transcript becomes the prefix later turns are measured against.
+	if pl := tr.Turn("s", 3); pl != 0 {
+		t.Fatalf("compaction did not restart the boundary: got %d, want 0", pl)
 	}
-	if pl := tr.Turn("s", 12); pl != 9 {
-		t.Fatalf("boundary not preserved: got %d, want 9", pl)
+	if pl := tr.Turn("s", 12); pl != 3 {
+		t.Fatalf("boundary not rebased on the post-compaction prefix: got %d, want 3", pl)
+	}
+}
+
+// TestBoundaryRule is the whole detection rule in one table: it GROWS on an append-only
+// stream (the original invariant, which is what a normal agent turn looks like) and RESETS
+// on any shrink, counting the reset. The cases it deliberately does not distinguish —
+// a rewind, a retry, a truncated resend, two conversations colliding on one id — are
+// listed as resets on purpose: see Boundary for why "any shrink" beats a threshold.
+func TestBoundaryRule(t *testing.T) {
+	tests := []struct {
+		name      string
+		prev, n   int
+		want      int
+		wantReset bool
+	}{
+		{"first turn", 0, 5, 0, false},
+		{"append-only growth", 5, 9, 5, false},
+		{"same length (retry of the same turn)", 9, 9, 9, false},
+		{"compaction 50 -> 5", 50, 5, 0, true},
+		{"partial compaction 50 -> 40 (a fraction threshold would miss this)", 50, 40, 0, true},
+		{"one-message shrink (rewind; reset on purpose, fail-open)", 9, 8, 0, true},
+		{"shrink to nothing", 9, 0, 0, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := CompactionResets()
+			if got := Boundary(tc.prev, tc.n); got != tc.want {
+				t.Errorf("Boundary(%d, %d) = %d, want %d", tc.prev, tc.n, got, tc.want)
+			}
+			if got := CompactionResets() - before; (got != 0) != tc.wantReset {
+				t.Errorf("reset delta = %d, wantReset %v", got, tc.wantReset)
+			}
+		})
+	}
+}
+
+// TestTurnCountsCompactionResets: the reset has to be COUNTABLE through the tracker too,
+// because that is the path the proxy takes and /stats is the only place an operator can
+// see "this session restarted its prefix".
+func TestTurnCountsCompactionResets(t *testing.T) {
+	tr := NewTracker(0)
+	before := CompactionResets()
+	tr.Turn("s", 50)
+	tr.Turn("s", 60) // growth: no reset
+	if got := CompactionResets() - before; got != 0 {
+		t.Fatalf("append-only turns reported %d compaction resets, want 0", got)
+	}
+	tr.Turn("s", 5) // compaction
+	tr.Turn("s", 7) // growth again
+	tr.Turn("s", 2) // second compaction
+	if got := CompactionResets() - before; got != 2 {
+		t.Fatalf("compaction resets = %d, want 2", got)
 	}
 }
 
@@ -42,8 +94,14 @@ func TestSessionsAreIsolated(t *testing.T) {
 // previous implementation read prevLen from the store and wrote it back in a `defer`, so
 // two concurrent turns of one session could both read the same value and the second's
 // write-back could land first, leaving a boundary describing neither turn. Every observed
-// value must be a length some turn really carried, and the final boundary the largest.
+// value must be a length some turn really carried (or 0, the compaction reset).
 // Run under -race.
+//
+// It no longer asserts that the final boundary is the LARGEST length seen: with the
+// compaction reset, a concurrent turn that lands out of order looks like a shrink and
+// rebases the boundary on its own length. That is deliberate and fail-open (lost savings
+// for a turn, never a wrong rewrite) — see Boundary. What must still hold is that the
+// state is never torn: the boundary always equals some real turn length.
 func TestConcurrentTurnsDoNotCorruptState(t *testing.T) {
 	tr := NewTracker(0)
 	const n = 64
@@ -64,8 +122,9 @@ func TestConcurrentTurnsDoNotCorruptState(t *testing.T) {
 			t.Fatalf("turn %d observed an impossible prevLen %d", i, pl)
 		}
 	}
-	if pl := tr.Turn("s", 0); pl != n {
-		t.Fatalf("final boundary is %d, want %d (a concurrent write was lost)", pl, n)
+	// The recorded boundary must be a length some turn really carried, i.e. in [1, n].
+	if pl := tr.Turn("s", n+1); pl < 1 || pl > n {
+		t.Fatalf("final boundary is %d, want a real turn length in [1, %d]", pl, n)
 	}
 }
 

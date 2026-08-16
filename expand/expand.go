@@ -113,29 +113,6 @@ func Resolve(s store.Store, key string) (string, bool) {
 	return string(b), true
 }
 
-// ToolDef returns the expand tool definition shaped for the given provider
-// dialect. OpenAI/Anthropic differ (parameters vs input_schema); the returned
-// map is ready to append to the request's tools array.
-func ToolDef(provider string) map[string]any {
-	params := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"id": map[string]any{"type": "string", "description": "The HASH from a <<cg:HASH>> marker to retrieve in full."},
-		},
-		"required": []string{"id"},
-	}
-	desc := "Retrieve the full original content that was compressed and replaced by a <<cg:HASH>> marker."
-	switch provider {
-	case "anthropic":
-		return map[string]any{"name": ToolName, "description": desc, "input_schema": params}
-	default: // openai and compatibles
-		return map[string]any{
-			"type":     "function",
-			"function": map[string]any{"name": ToolName, "description": desc, "parameters": params},
-		}
-	}
-}
-
 // toolDesc / the JSON schema for the expand tool's one argument. Kept as typed
 // structs (not map[string]any) so the serialized bytes have a FIXED key order —
 // injecting the same tool on every turn produces byte-identical `tools` entries,

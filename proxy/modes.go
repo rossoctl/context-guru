@@ -30,7 +30,7 @@ import (
 // off-path projection here would credit a hypothetical saving to a request that was
 // forwarded untouched — the exact confusion the potential_* namespace exists to prevent.
 func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
-	mode := h.mode()
+	mode := r.tn.Mode
 	start := time.Now()
 
 	// Observe: the enforced path does nothing at all. Not "runs and discards" — it never
@@ -41,8 +41,8 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 		return r.body, time.Since(start), apply.Trace{}
 	}
 
-	res := apply.BodyOpts(r.ctx, h.pipe, h.store, apply.Opts{
-		Provider: r.provider, Body: r.body, Session: r.session, Bypass: r.bypassed,
+	res := apply.BodyOpts(r.ctx, r.tn.Pipe, r.tn.Store, apply.Opts{
+		Provider: r.provider, Body: r.body, Session: r.session, Tenant: r.tn.ID, Bypass: r.bypassed,
 		Models: r.models, Window: r.window, CacheMode: h.opts.CacheMode,
 		Mode: mode, Tracker: h.tracker,
 	})
@@ -64,6 +64,12 @@ type reqInfo struct {
 	bypassed bool
 	models   components.ModelSpec
 	window   int
+	// tn is the authenticated caller's tenancy: its pipeline, its state store, its
+	// mode. Carried here rather than read off the Handler because in a hosted
+	// deployment there is no such thing as "the" pipeline — and because this bundle
+	// is already the thing an off-path observation copies, so the store an
+	// observation writes to cannot drift from the tenant it belongs to.
+	tn *Tenancy
 }
 
 func (h *Handler) mode() components.Mode {
@@ -92,8 +98,8 @@ func (h *Handler) observe(r *reqInfo) {
 	key := "observe:" + strconv.FormatUint(h.observeSeq.Add(1), 10)
 
 	h.pool.Enqueue(key, func(ctx context.Context) {
-		apply.BodyOpts(ctx, h.pipe, h.shadow, apply.Opts{
-			Provider: info.provider, Body: info.body, Session: info.session,
+		apply.BodyOpts(ctx, info.tn.Pipe, info.tn.Shadow, apply.Opts{
+			Provider: info.provider, Body: info.body, Session: info.session, Tenant: info.tn.ID,
 			Models: info.models, Window: info.window, CacheMode: h.opts.CacheMode,
 			Mode: components.ModeObserve,
 			// The Tracker, so the projection is measured under the SAME cached-prefix
@@ -103,8 +109,14 @@ func (h *Handler) observe(r *reqInfo) {
 			// sync actually achieves. Measured on SWE-bench: 9.5% projected against 0.8%
 			// enforced, because 50 extract_llm candidates passed the gate instead of 5.
 			//
-			// Safe off-path despite jobs finishing out of order: the boundary only ever
-			// grows, so a late job for a shorter turn cannot move it backwards.
+			// Out-of-order jobs no longer leave the boundary untouched: since the
+			// compaction reset (modes.Boundary) a late job carrying a SHORTER turn reads
+			// as a compaction, rebases the boundary on its own length, and bumps
+			// compaction_resets. That errs toward a LOWER boundary — a bigger tail, so a
+			// projection that over- rather than under-states what sync would achieve —
+			// and it cannot touch an enforced request, because observe mode's enforced
+			// path never calls BodyOpts at all. Read compaction_resets in observe mode as
+			// "resets plus off-path reordering", not as a compaction count.
 			Tracker: h.tracker,
 			// h.shadow, not the live store: see Handler.shadow. The live store must stay
 			// clean (a real request must never replay a decision that was never enforced),
