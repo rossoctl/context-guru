@@ -1,0 +1,29 @@
+# Grafana data source for the Loki that holds context-guru's logs.
+#
+# Same rules as prometheus.yml next door: the uid is PINNED because the shipped logs
+# dashboard references it, and changing it here presents as an empty dashboard with no
+# error — the least debuggable failure Grafana has.
+
+apiVersion: 1
+
+datasources:
+  - name: context-guru-loki
+    uid: cg-loki
+    type: loki
+    access: proxy
+    url: http://127.0.0.1:3100
+    isDefault: false
+    jsonData:
+      # Loki holds 30 days (see loki.yml); telling Grafana so keeps the time picker's
+      # wider ranges from querying a window that cannot answer.
+      maxLines: 2000
+      derivedFields:
+        # One click from any line to every line of that agent conversation. `session` is
+        # a JSON field rather than a label (deliberately — see promtail.yml on
+        # cardinality), so this regex reads it out of the line body and the link runs a
+        # query against this same Loki. That is the investigation this whole setup exists
+        # for: user reports something, you have one line, you want the other forty.
+        - name: session
+          matcherRegex: '"session":"([^"]+)"'
+          datasourceUid: cg-loki
+          url: '{job="context-guru"} | json | session="${__value.raw}"'

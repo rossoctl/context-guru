@@ -92,6 +92,10 @@ func (r *Recorder) enforceQuotas() {
 	for id, rows := range counts {
 		quota := r.quotaFor(id)
 		if quota <= 0 || rows <= quota {
+			// Per tenant, so a "why was I trimmed / why was I not" question has an answer
+			// with both numbers in it. DEBUG: it is one line per tenant per pass.
+			slog.Debug("dash: tenant is within its row quota", "tenant", id,
+				"rows", rows, "quota", quota)
 			continue
 		}
 		n, err := r.trimTenantToQuota(id, quota)
@@ -159,6 +163,12 @@ func (r *Recorder) relieveDiskPressure() {
 
 	used, ok := r.probeDisk(dir)
 	if !ok || used < high {
+		// The commonest janitor question is "why did it not evict anything?", and this
+		// silent return is nearly always the answer. Say so, with the numbers that decided
+		// it — including probed=false, which means the statfs failed and the rule is not
+		// running at all rather than deciding there is room.
+		slog.Debug("dash: disk pass took no action", "probed", ok,
+			"used_frac", used, "high", high, "low", low, "dir", dir)
 		return
 	}
 	floor := r.minKeepBytes()

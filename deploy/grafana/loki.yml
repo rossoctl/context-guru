@@ -1,0 +1,60 @@
+# Loki, single binary, local filesystem. This is the whole log store: no object
+# store, no ring beyond one member, no auth tenancy (Loki's own multi-tenancy is
+# off — context-guru's tenant is a LABEL, see promtail.yml, because one Grafana
+# operator reads every tenant's logs and X-Scope-OrgID would make that harder,
+# not safer).
+#
+# Loopback only, exactly like Prometheus and Grafana on this box: log lines carry
+# tenant ids, request routes and upstream hosts, and none of that belongs on a
+# shared box's LAN interface. Reach Grafana over `ssh -L 3000:127.0.0.1:3000`.
+auth_enabled: false
+
+server:
+  http_listen_address: 127.0.0.1
+  http_listen_port: 3100
+  grpc_listen_address: 127.0.0.1
+  grpc_listen_port: 9096
+  # Loki at info logs a line per flushed chunk. The point of this container is to
+  # hold OUR logs, not to produce its own.
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # 30 days, deliberately shorter than Prometheus's 90: a log line is bigger than a
+  # sample and its value decays faster. Enforced by the compactor below — a
+  # retention_period with no compactor retention is a comment, not a policy.
+  retention_period: 720h
+  # A proxy that was down and came back replays its file from the last position, and
+  # those lines are older than the default 1-week reject window would allow. Rejecting
+  # them would silently lose exactly the window somebody is investigating.
+  reject_old_samples: false
+  volume_enabled: true
+
+compactor:
+  working_directory: /loki/compactor
+  delete_request_store: filesystem
+  retention_enabled: true
+
+analytics:
+  reporting_enabled: false
