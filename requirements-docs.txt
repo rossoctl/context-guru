@@ -11,3 +11,10 @@
 # bump would break the published site silently.
 mkdocs>=1.6,<2
 pymdown-extensions>=10.7,<11
+# Explicit, not incidental. Pygments is an *optional* dependency of
+# pymdown-extensions — it used to arrive via mkdocs-material. Without it
+# `pymdownx.highlight` silently degrades to plain `<pre><code>` and every code
+# block on the site ships uncoloured, which a passing `mkdocs build --strict`
+# will not tell you. theme/css/pygments.css is generated from its `github-dark`
+# style, so the major version is pinned alongside it.
+pygments>=2.17,<3

@@ -663,8 +663,11 @@ details.done > summary { color: var(--success-ink); }
 .tabbed-content { width: 100%; }
 .tabbed-block { display: none; padding-top: 1rem; }
 .tabbed-block > :last-child { margin-bottom: 0; }
-/* nth-child pairing: input N checked → label N highlighted, block N shown. */
-.tabbed-set > input:checked + .tabbed-labels > label:first-child,
+/* nth-child pairing: input N checked → label N highlighted, block N shown.
+   Every selector pins BOTH the input's index and the label's. A rule like
+   `input:checked + .tabbed-labels > label:first-child` looks harmless, but the
+   *last* input is always the element immediately before .tabbed-labels, so
+   selecting the final tab would light up the first label too. */
 .tabbed-set > input:nth-child(1):checked ~ .tabbed-labels > label:nth-child(1),
 .tabbed-set > input:nth-child(2):checked ~ .tabbed-labels > label:nth-child(2),
 .tabbed-set > input:nth-child(3):checked ~ .tabbed-labels > label:nth-child(3),

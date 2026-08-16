@@ -92,7 +92,7 @@ nav:
   - Concepts:
       - Architecture: design.md
       - Reversibility & recovery: how-to/recover-context.md
-      - Agent compaction (Claude Code & Bob): how-to/agent-compaction.md
+      - When your agent compacts: how-to/agent-compaction.md
       - Measuring savings: how-to/measure-savings.md
   - Components:
       - Overview: components.md
