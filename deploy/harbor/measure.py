@@ -11,6 +11,9 @@ Usage: measure.py [--config codesmart] [--label iterN]
 import argparse, json, os, subprocess, time, urllib.request, signal, hashlib, importlib.util
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cgenv  # base URLs and credentials for both the hosted and the local deployment
+
 CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
 BIN = "/tmp/cg-runs/cg-proxy-d1"
 PORT = 4066
@@ -21,11 +24,6 @@ IN_RATE, CREAD, CWRITE = 2e-6, 0.2e-6, 2.5e-6
 
 spec = importlib.util.spec_from_file_location("swb", str(CG / "deploy/harbor/swebench.py"))
 swb = importlib.util.module_from_spec(spec); spec.loader.exec_module(swb)
-
-
-def creds():
-    e = json.load(open(os.path.expanduser("~/.claude/settings.json")))["env"]
-    return e["ANTHROPIC_BASE_URL"], e["ANTHROPIC_AUTH_TOKEN"]
 
 
 def content_text(body):
@@ -105,7 +103,7 @@ def main():
     a = ap.parse_args()
     global CACHE
     CACHE = a.cache
-    base, token = creds()
+    base, token = cgenv.gateway()
     p = start(a.config, base, token)
     t0 = time.time()
     # baseline (as-sent) and config (rewritten) cost per capture, and replay for /stats

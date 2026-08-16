@@ -22,6 +22,9 @@ Usage: cachecost.py <capture.jsonl> --config codesmart [--port 4021] [--limit N]
 import argparse, json, subprocess, time, urllib.request, os, hashlib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cgenv  # base URLs and credentials for both the hosted and the local deployment
+
 CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
 BIN = "/tmp/cg-runs/cg-proxy-rp"
 IN_RATE, CREAD, CWRITE = 2e-6, 0.2e-6, 2.5e-6  # $/token: input, cache-read, cache-write
@@ -30,11 +33,6 @@ IN_RATE, CREAD, CWRITE = 2e-6, 0.2e-6, 2.5e-6  # $/token: input, cache-read, cac
 import importlib.util
 spec = importlib.util.spec_from_file_location("swb", str(CG / "deploy/harbor/swebench.py"))
 swb = importlib.util.module_from_spec(spec); spec.loader.exec_module(swb)
-
-
-def creds():
-    e = json.load(open(os.path.expanduser("~/.claude/settings.json")))["env"]
-    return e["ANTHROPIC_BASE_URL"], e["ANTHROPIC_AUTH_TOKEN"]
 
 
 def content_text(body):
@@ -127,7 +125,7 @@ def main():
     ap.add_argument("capture"); ap.add_argument("--config", default="codesmart")
     ap.add_argument("--port", type=int, default=4021); ap.add_argument("--limit", type=int, default=0)
     a = ap.parse_args()
-    base, token = creds()
+    base, token = cgenv.gateway()
     recs = [json.loads(l) for l in open(a.capture) if l.strip()]
     if a.limit: recs = recs[:a.limit]
     convs = group(recs, conv_key)
