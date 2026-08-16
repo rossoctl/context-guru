@@ -440,8 +440,12 @@ test, but the honest conclusion is that this mechanism cannot be *proved* comple
 capture is gated — by two switches that default differently, and both belong in the same
 sentence. The **operator** gate `--dashboard-content` is process-wide and defaults off.
 The **per-tenant** switch behind it defaults on: a hosted account is registered with
-`capture_content: true`, so once an operator opens their gate, a new tenant's transcripts
-are written until that tenant turns their own switch off on Settings.
+`capture_content: true`, so once an operator opens theirs, a new tenant's transcripts are
+written from that tenant's first request. Either switch alone stops the writes: the tenant
+clears their consent on Settings, the operator sets `DASHBOARD_CONTENT=false` for everyone.
+Which of the two a deployment leaves open is a property of that deployment, which is why the
+effective decision is reported per request (`content_captured`, `capture_blocked_by`) instead
+of inferred from a default.
 *Refuses:* a secret on disk, a redact-on-read filter one forgotten code path from leaking
 it, and a claim of "off by default" that names only one of the two switches.
 

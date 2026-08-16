@@ -411,12 +411,17 @@ answer should not be asked with an error.
 
 Two access rules differ from the local case, and both are enforced server-side:
 
-- **Transcript capture needs both gates, and only one of them is off by default.** The
+- **Transcript capture has two independent switches, and they default differently.** The
   operator's `--dashboard-content` is process-wide and defaults **off**; the per-tenant
   switch behind it is created **on** — a hosted account is registered with
-  `capture_content: true`. So opening the operator gate starts capturing every account that
-  has not turned its own switch off, and the operator gate is the one holding the line. The
-  honest reason it matters is the one above: the redactor is a best-effort denylist, and a
+  `capture_content: true`. Either one alone stops the writes, so on a stock install the
+  operator's switch is the one holding the line, and opening it starts capturing every account
+  that has not turned its own switch off. A tenant clears their consent on **Settings**; an
+  operator sets `DASHBOARD_CONTENT=false` for everyone. Whether the operator switch is open on
+  a given deployment is a fact about that deployment rather than about this default, so check
+  it rather than inferring it from the shipped `false` — `capture_blocked_by` answers it per
+  request, from the reader's own side.
+  The honest reason it matters is the one above: the redactor is a best-effort denylist, and a
   review of 22 realistic credential shapes found **11 passing through it**. 22-of-22 now
   passing does not prove completeness.
 - **A manager sees everyone's metrics and nobody's transcripts.** Reading another user's

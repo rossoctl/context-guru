@@ -18,6 +18,7 @@ your agent ──▶ https://contextguru.vpc.cloud9.ibm.com ──▶ the model 
 | Credential | one service-issued token, `cg_live_` + 26 characters |
 | Your provider key | **stays yours** — your agent keeps sending it, and the proxy forwards it upstream unchanged |
 | Cost control | none needed: every account's traffic is billed to that account's own provider credential |
+| Transcript capture | your account consents **on registration** — [what that means, and the off switch](#three-things-worth-knowing-before-you-rely-on-it) |
 | Default pipeline | `[format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]`, `mode: sync` |
 
 The default pipeline is **fully deterministic** — no cheap-model calls anywhere in it. That
@@ -336,7 +337,26 @@ a full agent turn means the traffic never arrived, whatever your shell says.
 | **502** | No upstream configured for that route, or the provider failed. The operator's problem. |
 | connection refused on `http://` | You used port 80. There deliberately isn't one — see the warning at the top of this page. |
 
-## Two things worth knowing before you rely on it
+## Three things worth knowing before you rely on it
+
+**Your account consents to transcript capture the moment it is created.** Two independent
+switches decide whether your message content is stored, and only one of them starts closed:
+the operator's service-wide switch, and your account's own consent — which registration turns
+**on** for you. So if the operator has capture enabled, then from your very first request the
+before/after text of your messages — agent output, tool results, source code — is written to
+the service's database, scrubbed of known credential shapes and capped at 16 KB per message.
+It is what makes the diff view work, and only your own account can read yours: a manager sees
+everyone's metrics and nobody's transcripts. The scrubber is a pattern denylist, so treat this
+as storage you have agreed to, not a guarantee.
+
+**Check which state you are in, and turn it off if you do not want it.** Open a request in the
+dashboard: `content_captured` is the effective answer for your account, and
+`capture_blocked_by` names whichever switch is closed (`"operator"`, `"tenant"`, or `""` when
+nothing is blocking and your content *is* being stored). To turn it off for yourself, clear the
+transcript-capture consent on the **Settings** tab — metrics and savings keep working, you lose
+the diff view. An operator turns it off for everyone with `DASHBOARD_CONTENT=false`. Either
+switch alone stops the writes, neither is retroactive in either direction, and a proxy you run
+yourself from this repository ships with the operator's switch **off**.
 
 **It fails open.** Any component error or panic reverts that component only, and the
 original request is always forwarded as a valid fallback. Compaction going wrong costs you

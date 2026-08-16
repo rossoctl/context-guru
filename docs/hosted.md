@@ -533,11 +533,18 @@ bound to another account is refused `403` and never moved: binding a digest some
 bound used to transfer their traffic, and with `capture_content` on their captured
 transcripts, to whoever bound it. Its owner unbinds first, then the new holder binds.
 
-The length floor applies at **bind time only**, and that matters when upgrading an install
-that already has bindings. A stored row holds a digest and no length, and the plaintext is
-gone — so a short key bound before the floor existed keeps identifying its account, and
-nothing can find it or check it. Unbinding is the only way to clear one, and it cannot then
-be bound again. On a database with no bindings yet the case does not arise.
+**The floor is enforced on bind and deliberately not on resolve**, which matters when
+upgrading an install that already holds bindings. A stored row is a digest with no length
+attached and no plaintext behind it, so a short key bound before the floor existed cannot be
+audited — nothing can find it or measure it — and it keeps identifying its account. Enforcing
+the floor at resolve time instead would be worse than leaving it: the check would have to run
+against every arriving key, and the first short one would stop identifying an account that had
+been working, breaking a tenant's agent to fix a weakness in *their* choice of key with no
+warning and no way for them to see why. So the asymmetry is the intended trade — new bindings
+are held to the floor, existing ones keep working. The one-way consequence is worth knowing
+before you reach for it: unbinding is the only way to clear such a row, and once cleared the
+same short key cannot be bound again, because a fresh bind now hits the `400`. On a database
+with no bindings yet, none of this arises.
 
 Agent *family* (claude-code / bob / codex / …) is read from the `User-Agent`, which none
 of this touches.
@@ -933,15 +940,24 @@ the very first request after a restart is recorded as `partial` and unpriced.
 
 ## Privacy
 
-- **Transcript capture needs both gates, and only the operator's one is off by default.**
-  `--dashboard-content` / `DASHBOARD_CONTENT` is process-wide and ships `false` (the
-  shipped drop-in sets it explicitly). The per-tenant switch behind it is created **on** —
-  registration writes `capture_content: true` — so the operator's gate is the thing keeping
-  a new account's source code off disk, and opening it starts capturing every account that
-  has not turned its own switch off. A tenant can turn theirs off on Settings at any time,
-  and it is not retroactive in either direction. The redactor in front of the write is a
-  best-effort denylist — a review of 22 realistic credential shapes found 11 passing
-  through it — so read this as a decision about real source code landing on disk.
+- **Transcript capture has two independent switches, and they default differently.**
+  `--dashboard-content` / `DASHBOARD_CONTENT` is process-wide and this repository ships it
+  `false`. The per-tenant switch behind it is created **on** — registration writes
+  `capture_content: true`. Either one alone stops the writes, so on a stock install the
+  operator's switch is what keeps a new account's source code off disk, and opening it starts
+  capturing every account that has not turned its own switch off.
+- **Whether *your* instance captures content is a fact about its environment, not about the
+  shipped default — so read it, do not assume it.** A drop-in overrides the unit, so
+  `DASHBOARD_CONTENT` in `context-guru.service` is not the effective value:
+  `systemctl show context-guru -p Environment` is. Do this before answering a user who asks
+  whether their source code is stored, because with the per-tenant switch defaulting on, an
+  enabled operator switch means a new account's message content — agent output, tool results,
+  source code — is captured from its first request. Both off switches belong in the same
+  breath as the answer: a tenant clears their own consent on **Settings**, an operator sets
+  `DASHBOARD_CONTENT=false` for everyone. Neither is retroactive in either direction. The
+  redactor in front of the write is a best-effort denylist — a review of 22 realistic
+  credential shapes found 11 passing through it — so this is a decision about real source
+  code landing on disk.
 - **A manager sees everyone's metrics and nobody's transcripts.** Reading another
   user's source code is not an administrative need, and the consent they gave was for
   their own view.

@@ -366,9 +366,19 @@ ever recorded), and a guess that hits would delete a configuration somebody chos
 
 | Header | Effect |
 |---|---|
+| `x-context-guru-token: cg_live_…` | **Hosted mode:** identifies the calling account. Read from this header first; an auth slot is accepted as a fallback, but only for a value shaped like one of our tokens (`cg_live_` + 26 characters), so a provider key is never looked up as a token. Prefer the header — the auth slot has to stay free for the caller's own provider credential, and it cannot hold both. |
 | `x-context-guru-session: <id>` | Sets the session key explicitly. Otherwise a stable content hash (`sha256(system + firstUser)`) keys the session. |
 | `x-context-guru-bypass: true` | Skips the pipeline entirely for this request (tokens unchanged). |
 | `x-context-guru-pipeline: <a,b,c>` | Runs exactly these components, in order, for this request. |
+
+Every `x-context-guru-*` header is stripped before the request is forwarded, so none of them
+can reach an upstream — which is what makes the token safe to carry in one.
+
+The auth slots (`Authorization`, `x-api-key`, `x-goog-api-key`) are **not** ours: they carry the
+caller's own provider key and are forwarded unchanged, unless the operator configured a
+server-held key for that upstream or the slot turned out to hold one of our tokens, which is
+scrubbed. A request with no provider credential of its own is refused **401** and is never
+served on the operator's credential.
 
 See [Config & environment](config.md) for flags and env vars, and
 [Presets](presets.md) for the built-in pipelines.
