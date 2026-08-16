@@ -445,7 +445,7 @@
       "id": 6,
       "type": "timeseries",
       "title": "Refusals per minute, by reason",
-      "description": "Every deliberate turn-away: rate limit, concurrency, spend cap, unknown token, disabled account, no upstream. The reason string is the same one the caller received and the same category cg_refused_requests_total counts, so this and the SLO dashboard agree.",
+      "description": "Every deliberate turn-away: rate limit, concurrency, unknown or disabled token, no upstream, upstream error. There is no spend cap — every tenant bills its own credential, so nothing is ever refused over money. The reason string is the same one the caller received and the same category cg_refused_requests_total counts, so this and the SLO dashboard agree.",
       "datasource": {
         "type": "loki",
         "uid": "cg-loki"
@@ -508,7 +508,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Component verdicts per minute",
-      "description": "What the pipeline DECIDED, from the DEBUG lines: acted, declined (ran and chose not to), no_change, reverted (an error, a panic, or the never-worse guard). A component pinned at `declined` is either correctly idle or misfiring \u2014 the gates table beside this says which. Needs CG_LOG_LEVEL=debug.",
+      "description": "What the pipeline DECIDED, from the DEBUG lines: acted, declined (ran and chose not to), no_change, reverted (an error, a panic, or the never-worse guard). A component pinned at `declined` is either correctly idle or misfiring \u2014 the gates table beside this says which. Split by `mode`, because an observe-mode series is a PROJECTION of what enforcing would have decided, off-path, on a request that was forwarded untouched \u2014 summing it together with the enforced ones is the confusion the potential_* namespace exists to prevent. Needs CG_LOG_LEVEL=debug.",
       "datasource": {
         "type": "loki",
         "uid": "cg-loki"
@@ -526,12 +526,12 @@
             "type": "loki",
             "uid": "cg-loki"
           },
-          "expr": "sum by (verdict) (count_over_time({job=\"context-guru\", tenant=~\"$tenant\"} | json | msg=\"cg.component\" | component=~\"$component\" [1m]))",
+          "expr": "sum by (verdict, mode) (count_over_time({job=\"context-guru\", tenant=~\"$tenant\"} | json | msg=\"cg.component\" | component=~\"$component\" [1m]))",
           "editorMode": "code",
           "queryType": "range",
           "instant": false,
           "range": true,
-          "legendFormat": "{{verdict}}"
+          "legendFormat": "{{verdict}} ({{mode}})"
         }
       ],
       "fieldConfig": {
@@ -571,7 +571,7 @@
       "id": 8,
       "type": "table",
       "title": "Which gate declined candidates",
-      "description": "Per component, the gate histogram off the DEBUG decision lines \u2014 the same Report.Gates map /stats sums into components.<name>.gates, so this cannot disagree with the metric. This is the answer to 'the component did nothing and I do not know why': the gate name says which guard turned the candidates away and the count says how many. Needs CG_LOG_LEVEL=debug.",
+      "description": "Per component, the gate histogram off the DEBUG decision lines \u2014 the same Report.Gates map /stats sums into components.<name>.gates, so this cannot disagree with the metric. This is the answer to 'the component did nothing and I do not know why': the gate name says which guard turned the candidates away and the count says how many. `mode` is a column for the same reason the verdict graph splits on it: an observe row was never enforced. Needs CG_LOG_LEVEL=debug.",
       "datasource": {
         "type": "loki",
         "uid": "cg-loki"
@@ -589,7 +589,7 @@
             "type": "loki",
             "uid": "cg-loki"
           },
-          "expr": "sum by (component, gates) (count_over_time({job=\"context-guru\", tenant=~\"$tenant\"} | json | msg=\"cg.component\" | component=~\"$component\" | gates!=\"\" [$__range]))",
+          "expr": "sum by (component, gates, mode) (count_over_time({job=\"context-guru\", tenant=~\"$tenant\"} | json | msg=\"cg.component\" | component=~\"$component\" | gates!=\"\" [$__range]))",
           "editorMode": "code",
           "queryType": "instant",
           "instant": true,

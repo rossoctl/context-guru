@@ -300,6 +300,15 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	if mode == "" {
 		mode = components.ModeSync
 	}
+	// Every line from here on carries the mode — the per-component decisions, the run
+	// summary, whatever a component logs, and the panic recovery above (its closure reads
+	// this same ctx variable, so the reassignment reaches it). One stamp on the logger
+	// rather than an attr per call site: an observe-mode run is a PROJECTION of what
+	// enforcing WOULD have saved, and a panel summing `saved` across the two without a way
+	// to tell them apart is exactly the confusion the potential_* namespace exists to
+	// prevent, reproduced in the logs. cg.cache_boundary used to pass mode as an attr of
+	// its own; it does not any more, because that would now render the key twice.
+	ctx = logging.With(ctx, logging.From(ctx).With("mode", string(mode)))
 	models := o.Models
 	msgsRaw := gjson.GetBytes(body, "messages")
 	if !msgsRaw.Exists() || !msgsRaw.IsArray() {
@@ -437,7 +446,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		lg.Debug("cg.cache_boundary", "cache_aware", cacheAware, "max_cached_idx", maxCachedIdx,
 			"messages", len(norm), "attempted_tokens", tr.AttemptedTokens,
 			"existing_breakpoints", c.ExistingBreakpoints, "system_split", systemSplit,
-			"bypassed", bypass, "mode", string(mode), "ctx_window", o.Window,
+			"bypassed", bypass, "ctx_window", o.Window,
 			"cache_mode", o.CacheMode, "tracked", o.Tracker != nil)
 		dumpToolOutputs(lg, norm)
 	}
