@@ -342,19 +342,29 @@ func main() {
 		// The mode comes from proxy.RegisterMode(), NOT from reading CG_REGISTER here:
 		// the control plane trims and lower-cases the value, so a banner that switched on
 		// the raw string reported "off" for CG_REGISTER=Open while registration was open.
+		// Whether a code can be DELIVERED is a boot-time fact worth reporting: registration
+		// and password sign-in cannot complete without it, and an operator should learn
+		// that here rather than from the first user's bug report.
+		if ok, how := proxy.MailConfigured(); !ok {
+			slog.Warn("context-guru: no email path configured (" + how + "); verification " +
+				"codes cannot be delivered, so NOBODY can create an account or sign in " +
+				"with a password")
+		} else {
+			slog.Info("context-guru: verification email path", "via", how)
+		}
 		switch mode := proxy.RegisterMode(); mode {
 		case "open":
 			if *registerDomains == "" {
 				slog.Warn("context-guru: CG_REGISTER=open with no --register-domains; anyone " +
-					"who can reach this port may create an account that spends the operator's " +
-					"upstream key")
+					"who can receive mail at any address may create an account here")
 			} else {
 				// The match itself is sound (exact domain or a subdomain of it, so
-				// notibm.com does not match ibm.com). What is weak is that NOBODY PROVES
-				// they own the address: there is no mail path, so the domain is a claim.
-				// Naming the wrong weakness would send an operator to fix the matching.
-				slog.Warn("context-guru: CG_REGISTER=open; the email domain is UNVERIFIED "+
-					"(no ownership proof), so exposure is (accounts created) x (monthly cap)",
+				// notibm.com does not match ibm.com), and the address is now PROVEN by a
+				// mailed code rather than merely claimed — which is what the old warning
+				// here said was missing. What remains is that reachability is not
+				// entitlement: anyone with a mailbox in the domain may register.
+				slog.Info("context-guru: CG_REGISTER=open with verified email addresses; "+
+					"anyone with a mailbox in these domains may self-register",
 					"domains", *registerDomains)
 			}
 		case "invite":

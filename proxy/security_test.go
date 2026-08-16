@@ -116,7 +116,7 @@ func TestLimiterBoundEvictsOneKeyNotAll(t *testing.T) {
 // registerVia posts a registration from a given client address.
 func registerVia(t *testing.T, f *hostedFixture, email, code, remote string) int {
 	t.Helper()
-	body := `{"email":"` + email + `","label":"l"`
+	body := `{"email":"` + email + `","label":"l","password":"` + testPassword + `"`
 	if code != "" {
 		body += `,"code":"` + code + `"`
 	}
@@ -131,19 +131,20 @@ func registerVia(t *testing.T, f *hostedFixture, email, code, remote string) int
 	return w.Code
 }
 
-// An account is a spending credential against the operator's key, so minting one is
-// off unless the operator turned it on. Default-closed is the fix: before it, any
-// caller that could reach the port could create unlimited accounts.
-func TestRegistrationClosedByDefault(t *testing.T) {
-	t.Setenv(envRegisterMode, "") // unset restores after the test; empty is the closed default
+// Self-registration is OPEN by default: a colleague signing themselves up is the point
+// of a hosted service, and an account no longer spends the operator's money (users
+// forward their own provider key) nor exists without a code mailed to a real address.
+// `closed` remains available for a public port or a maintenance window, and this pins
+// that it actually refuses.
+func TestRegistrationOpenByDefaultAndClosableByTheOperator(t *testing.T) {
+	t.Setenv(envRegisterMode, "") // unset restores after the test; empty is the open default
 	f := newHostedFixture(t, "up", "openai")
-	if code := registerVia(t, f, "a@ibm.com", "", ""); code != http.StatusForbidden {
-		t.Fatalf("register with no CG_REGISTER = %d, want 403", code)
-	}
-	// Nothing was created, so the same email is still free once registration is opened.
-	t.Setenv(envRegisterMode, "open")
 	if code := registerVia(t, f, "a@ibm.com", "", ""); code != http.StatusCreated {
-		t.Fatalf("register in open mode = %d, want 201", code)
+		t.Fatalf("register with no CG_REGISTER = %d, want 201", code)
+	}
+	t.Setenv(envRegisterMode, "closed")
+	if code := registerVia(t, f, "b@ibm.com", "", ""); code != http.StatusForbidden {
+		t.Fatalf("register with CG_REGISTER=closed = %d, want 403", code)
 	}
 }
 

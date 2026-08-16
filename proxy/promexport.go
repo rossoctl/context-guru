@@ -458,8 +458,8 @@ func (h *Handler) renderMetrics() string {
 
 	// --- per tenant ---------------------------------------------------------
 	if h.opts.TenantMetrics != nil {
-		// Month to date, matching the window the spend cap uses, so a Grafana panel and
-		// the cap can never disagree about how much someone has spent.
+		// Month to date, matching the window the settings page reports, so a Grafana
+		// panel and a tenant's own view can never disagree about what they have spent.
 		now := time.Now().UTC()
 		since := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).UnixMilli()
 		rows, err := h.opts.TenantMetrics.TenantMetrics(since)

@@ -2162,7 +2162,7 @@
     "y": 60
    },
    "panels": [],
-   "description": "Rate-limit (429) and spend-cap (402) REJECTIONS are not on this row because the proxy exports no counter for them \u2014 proxy/limits.go and proxy/spendgate.go return the status without recording it. Cap headroom and disabled accounts below are the closest available proxy."
+   "description": "Rate-limit (429) REJECTIONS are not on this row because the proxy exports no counter for them \u2014 proxy/limits.go returns the status without recording it. Disabled accounts below are the closest available proxy."
   },
   {
    "id": 31,

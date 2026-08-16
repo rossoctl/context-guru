@@ -2,7 +2,9 @@ package tenant
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -504,6 +506,99 @@ func TestMigrateRefusesNewerDatabase(t *testing.T) {
 	r.Close()
 	if _, err := Open(path, Options{}); err == nil {
 		t.Fatal("opened a database written by a newer build")
+	}
+}
+
+// wantSchema is every table and column the migrations are supposed to produce,
+// across all of them. Two features landed a migration each calling itself "v2"; this
+// is the test that would have caught one of them silently replacing the other.
+var wantSchema = map[string][]string{
+	"tenants": {"id", "label", "email", "role", "config_yaml", "up_anthropic",
+		"up_openai", "up_bob", "capture_content", "max_rows", "disabled", "created_at",
+		"last_seen_at", "password_hash", "email_verified_at"},
+	"tenant_tokens":       {"token_hash", "prefix", "tenant_id", "label", "created_at", "last_used_at", "revoked_at"},
+	"dash_sessions":       {"id", "tenant_id", "created_at", "expires_at", "label", "user_agent", "ip", "last_seen_at"},
+	"tenant_config_audit": {"ts", "actor_tenant", "target_tenant", "field", "before", "after"},
+	"tenant_agent_keys":   {"key_hash", "tenant_id", "created_at", "last_used_at"},
+	"email_codes":         {"tenant_id", "purpose", "code_hash", "attempts", "created_at", "expires_at"},
+}
+
+func assertSchema(t *testing.T, r *Registry) {
+	t.Helper()
+	var got int
+	if err := r.db.QueryRow(`PRAGMA user_version`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != len(migrations) {
+		t.Errorf("user_version = %d, want %d (one per migration)", got, len(migrations))
+	}
+	for table, cols := range wantSchema {
+		rows, err := r.db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		have := map[string]bool{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatal(err)
+			}
+			have[name] = true
+		}
+		rows.Close()
+		if len(have) == 0 {
+			t.Errorf("table %s does not exist", table)
+			continue
+		}
+		for _, c := range cols {
+			if !have[c] {
+				t.Errorf("%s.%s missing", table, c)
+			}
+		}
+	}
+	// tenantCols has to line up with what scanTenant reads, and a mismatch there
+	// compiles fine and returns the wrong field. One real read proves the alignment.
+	if _, _, err := r.Register("laptop", "schema@ibm.com"); err != nil {
+		t.Fatalf("Register on a freshly migrated database: %v", err)
+	}
+	tn, err := r.ByEmail("schema@ibm.com")
+	if err != nil || tn.Label != "laptop" || tn.Role != RoleUser || !tn.CaptureContent {
+		t.Fatalf("scanTenant read %+v, %v — tenantCols and scanTenant disagree", tn, err)
+	}
+}
+
+func TestFreshDatabaseHasEveryTableAndColumn(t *testing.T) {
+	r := open(t, Options{})
+	assertSchema(t, r)
+}
+
+// Every migration must also apply IN SEQUENCE to a database that stopped at an
+// earlier version, not just to an empty one.
+func TestMigrationsApplyInSequenceToAnOlderDatabase(t *testing.T) {
+	for stop := 1; stop < len(migrations); stop++ {
+		t.Run(fmt.Sprintf("from_v%d", stop), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "control.db")
+			db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < stop; i++ {
+				if _, err := db.Exec(migrations[i]); err != nil {
+					t.Fatalf("migration %d: %v", i+1, err)
+				}
+			}
+			if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, stop)); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+
+			r, err := Open(path, Options{})
+			if err != nil {
+				t.Fatalf("upgrading a v%d database: %v", stop, err)
+			}
+			defer r.Close()
+			assertSchema(t, r)
+		})
 	}
 }
 

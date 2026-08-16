@@ -34,9 +34,11 @@ model budget, and puts near-zero latency on your agent turn.
 ## 1. Register
 
 Open **<https://contextguru.vpc.cloud9.ibm.com/dashboard/>**, register with your IBM email
-address and a label for the token.
+address, a password of at least 12 characters, and a label for the token. We mail a 6-digit
+code to that address; entering it within 5 minutes is what creates the account. Signing in
+later is that same password plus a fresh mailed code.
 
-The token is shown **once**. The server keeps only `sha256(token)` and its first 8
+The token is shown **once**, after the code. The server keeps only `sha256(token)` and its first 8
 characters (for display and revocation), so there is no code path that can print it back to
 you and a lost token has to be reissued, not recovered. Copy it somewhere safe now.
 
@@ -44,7 +46,7 @@ you and a lost token has to be reissued, not recovered. Copy it somewhere safe n
     Self-registration has three modes, and the operator picks one. A `403` means it is
     `closed` (ask the operator to reissue you an account) or `invite` (ask for the invite
     code and enter it in the form). See
-    [Choose how accounts are created](../hosted.md#3-choose-how-accounts-are-created).
+    [Choose how accounts are created](../hosted.md#4-choose-how-accounts-are-created).
 
 ## 2. Make sure your machine trusts the certificate
 

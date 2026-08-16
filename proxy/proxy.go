@@ -206,6 +206,13 @@ type Handler struct {
 	// limiter because its keys are IPs rather than tenant ids, and its bound is a
 	// fixed property of what registration is, not an operator setting.
 	regLim *Limiter
+	// pwLim and codeLim bound sign-in attempts: password checks and emailed-code
+	// submissions. Anonymous like regLim (their keys are an email or a client address,
+	// never a tenant id) and separate from each other because their budgets differ —
+	// see passwordAttemptsPerMinute and codeAttemptsPerMinute. Without these the
+	// 6-digit code is not a second factor and the argon2 verify is an amplifier.
+	pwLim   *Limiter
+	codeLim *Limiter
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
 	promCache promCache
@@ -230,6 +237,8 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 		Shadow: h.shadow, Mode: h.mode()}
 	h.limiter = NewLimiter(opts.Limits)
 	h.regLim = newAnonLimiter(Limits{RequestsPerMinute: registrationsPerMinute})
+	h.pwLim = newAnonLimiter(Limits{RequestsPerMinute: passwordAttemptsPerMinute})
+	h.codeLim = newAnonLimiter(Limits{RequestsPerMinute: codeAttemptsPerMinute})
 	if agg != nil {
 		agg.SetMode(h.mode())
 	}

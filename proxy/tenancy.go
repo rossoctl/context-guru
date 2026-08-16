@@ -96,7 +96,7 @@ func (c *lru[V]) remove(k string) {
 
 // Tenancy is everything the request path needs to know about the authenticated
 // caller. Built once per request (cached per tenant), and NEVER mutated after it is
-// published — readers on the request path (spendgate, captureContentFor, newCapture,
+// published — readers on the request path (captureContentFor, newCapture,
 // upstreamFor) take no lock, so a refresh publishes a new pointer instead of writing
 // through the old one. See tenancy().
 type Tenancy struct {
@@ -549,9 +549,9 @@ func (h *Handler) tenancyFor(r *http.Request) (*Tenancy, error) {
 func failAuth(w http.ResponseWriter, err error) {
 	code, msg := statusOf(err)
 	// Count the refusal. Every auth and upstream-resolution failure funnels through
-	// here, so this is the one place that sees them all — and 402/429 are deliberately
-	// NOT counted here, because the limit that decided them counted them already (see
-	// limits.go, spendgate.go) and only there is it known which limit it was.
+	// here, so this is the one place that sees them all — and 429 is deliberately NOT
+	// counted here, because the limiter that decided it counted it already (see
+	// limits.go) and only there is it known which limit it was.
 	switch code {
 	case http.StatusUnauthorized:
 		recordRefusal(refuseAuth, "")
