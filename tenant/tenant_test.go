@@ -256,11 +256,10 @@ func TestUpdatePrivilegeBoundaries(t *testing.T) {
 	if err := r.Update(a, b.ID, Patch{ConfigYAML: &cfg}); !errors.Is(err, ErrForbidden) {
 		t.Errorf("cross-tenant edit: got %v, want ErrForbidden", err)
 	}
-	// Nor their own role, cap, quota, or disabled flag.
-	mgrRole, cap2, rows, off := RoleManager, 1e9, int64(1<<40), false
+	// Nor their own role, quota, or disabled flag.
+	mgrRole, rows, off := RoleManager, int64(1<<40), false
 	for name, p := range map[string]Patch{
 		"role":     {Role: &mgrRole},
-		"cap":      {MonthlyCapUSD: &cap2},
 		"max_rows": {MaxRows: &rows},
 		"disabled": {Disabled: &off},
 	} {
@@ -269,11 +268,11 @@ func TestUpdatePrivilegeBoundaries(t *testing.T) {
 		}
 	}
 	// A manager may do all of it.
-	if err := r.Update(mgr, a.ID, Patch{Role: &mgrRole, MonthlyCapUSD: &cap2}); err != nil {
+	if err := r.Update(mgr, a.ID, Patch{Role: &mgrRole, MaxRows: &rows}); err != nil {
 		t.Fatalf("manager update: %v", err)
 	}
 	got, _ := r.Get(a.ID)
-	if !got.IsManager() || got.MonthlyCapUSD != cap2 {
+	if !got.IsManager() || got.MaxRows != rows {
 		t.Errorf("manager update did not apply: %+v", got)
 	}
 	if err := r.Update(nil, a.ID, Patch{ConfigYAML: &cfg}); !errors.Is(err, ErrForbidden) {
@@ -561,4 +560,74 @@ func mustTenant(t *testing.T, r *Registry, email string) *Tenant {
 		t.Fatalf("ByEmail(%q): %v", email, err)
 	}
 	return tn
+}
+
+// Agent keys: bound by digest, resolvable, never stored in plaintext. This is the path
+// for an agent that can set no header of our choosing (Bob).
+func TestAgentKeyBindResolveUnbind(t *testing.T) {
+	r := open(t, Options{ManagerEmail: "boss@ibm.com"})
+	tn, _, err := r.Register("laptop", "a@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "caller-provider-key-value"
+	if _, err := r.ResolveAgentKey(key); !errors.Is(err, ErrNoAgentKey) {
+		t.Fatalf("unbound key resolved: %v", err)
+	}
+	if err := r.BindAgentKey(tn.ID, key); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.ResolveAgentKey(key)
+	if err != nil || got.ID != tn.ID {
+		t.Fatalf("ResolveAgentKey = %v, %v", got, err)
+	}
+	if n, err := r.AgentKeyCount(tn.ID); err != nil || n != 1 {
+		t.Fatalf("AgentKeyCount = %d, %v", n, err)
+	}
+	// Binding twice is idempotent, not a second row.
+	if err := r.BindAgentKey(tn.ID, key); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := r.AgentKeyCount(tn.ID); n != 1 {
+		t.Errorf("re-binding created %d rows", n)
+	}
+	// The plaintext must not be in the database anywhere.
+	var hits int
+	if err := r.db.QueryRow(
+		`SELECT COUNT(*) FROM tenant_agent_keys WHERE CAST(key_hash AS TEXT) LIKE ?`,
+		"%"+key+"%").Scan(&hits); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 0 {
+		t.Error("the provider key was stored in plaintext")
+	}
+	if err := r.UnbindAgentKeys(tn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ResolveAgentKey(key); !errors.Is(err, ErrNoAgentKey) {
+		t.Fatalf("key still resolved after unbinding: %v", err)
+	}
+}
+
+// A disabled account's bound key must stop working, exactly as its token does.
+func TestAgentKeyRespectsDisabled(t *testing.T) {
+	r := open(t, Options{ManagerEmail: "boss@ibm.com"})
+	mgr, _, err := r.Register("m", "boss@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tn, _, err := r.Register("laptop", "a@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.BindAgentKey(tn.ID, "k"); err != nil {
+		t.Fatal(err)
+	}
+	off := true
+	if err := r.Update(mgr, tn.ID, Patch{Disabled: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ResolveAgentKey("k"); !errors.Is(err, ErrDisabled) {
+		t.Fatalf("disabled account's agent key = %v, want ErrDisabled", err)
+	}
 }

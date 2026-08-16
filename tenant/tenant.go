@@ -11,11 +11,13 @@
 // the dashboard file, and the retention janitor never touches them.
 //
 // Second, we hold no user's provider credential. A user authenticates with a token
-// WE mint; the upstream key belongs to the server and is read from the environment
-// at request time. So the only secret in this database is the sha256 of a token,
-// and the only thing ever displayed is its 8-character prefix. There is no code
-// path that can print a token, because after Register/MintToken return, the process
-// no longer has one.
+// WE mint and forwards their OWN provider key to the upstream; that key is read from
+// the request and never stored. So the only secrets in this database are sha256
+// digests — of a token, and (for agents that cannot set a custom header) of a
+// provider key — and the only thing ever displayed is a token's 8-character prefix.
+// There is no code path that can print either, because after Register/MintToken
+// return the process no longer holds a token, and BindAgentKey hashes its argument
+// before anything else.
 package tenant
 
 import (
@@ -93,10 +95,6 @@ type Tenant struct {
 	// Off by default and per-tenant by design: the redactor is a best-effort
 	// denylist, so this is consent, not a switch.
 	CaptureContent bool
-	// MonthlyCapUSD bounds spend against the shared server upstream key. Required,
-	// not optional: with one org credential behind the proxy, an unbounded tenant
-	// spends everybody's budget.
-	MonthlyCapUSD float64
 	// MaxRows caps this tenant's retained request rows so one heavy user cannot
 	// evict everyone else's history. 0 = the server default
 	// (--dashboard-max-rows-per-tenant). Enforced by the dashboard janitor, which reads
@@ -148,8 +146,6 @@ type Options struct {
 	DefaultUpAnthropic string
 	DefaultUpOpenAI    string
 	DefaultUpBob       string
-	// DefaultMonthlyCapUSD is the starting spend cap. 0 = DefaultCapUSD.
-	DefaultMonthlyCapUSD float64
 	// CacheTTL bounds how long a resolved token is trusted from memory. Mutations
 	// through this registry clear the cache immediately, so the TTL only bounds
 	// staleness from an EXTERNAL edit of the database. 0 = DefaultCacheTTL.
@@ -159,12 +155,9 @@ type Options struct {
 	Validate func([]byte) error
 }
 
-// Defaults. The cache TTL is deliberately short: it exists to keep a token lookup
+// DefaultCacheTTL is deliberately short: it exists to keep a token lookup
 // off the writer's path under agent-rate traffic, not to be a session store.
-const (
-	DefaultCacheTTL = 30 * time.Second
-	DefaultCapUSD   = 50.0
-)
+const DefaultCacheTTL = 30 * time.Second
 
 // Registry is the control-plane store. Safe for concurrent use.
 type Registry struct {
@@ -189,9 +182,6 @@ func Open(path string, o Options) (*Registry, error) {
 	}
 	if o.CacheTTL == 0 {
 		o.CacheTTL = DefaultCacheTTL
-	}
-	if o.DefaultMonthlyCapUSD == 0 {
-		o.DefaultMonthlyCapUSD = DefaultCapUSD
 	}
 	dsn := memDSN()
 	if path != "" {
@@ -266,7 +256,6 @@ func (r *Registry) Register(label, email string) (*Tenant, string, error) {
 		// acceptable here: content is visible ONLY to the tenant that produced it — a
 		// manager sees everyone's metrics and nobody's transcripts.
 		CaptureContent: true,
-		MonthlyCapUSD:  r.opts.DefaultMonthlyCapUSD,
 		CreatedAt:      now,
 	}
 	plain, hash, prefix, err := mintToken()
@@ -280,11 +269,11 @@ func (r *Registry) Register(label, email string) (*Tenant, string, error) {
 	defer tx.Rollback()
 	if _, err := tx.Exec(`INSERT INTO tenants
 	  (id,label,email,role,config_yaml,up_anthropic,up_openai,up_bob,
-	   capture_content,monthly_cap_usd,max_rows,disabled,created_at,last_seen_at)
-	  VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,0)`,
+	   capture_content,max_rows,disabled,created_at,last_seen_at)
+	  VALUES (?,?,?,?,?,?,?,?,?,0,0,?,0)`,
 		t.ID, t.Label, t.Email, string(t.Role), t.ConfigYAML,
 		t.UpAnthropic, t.UpOpenAI, t.UpBob, boolInt(t.CaptureContent),
-		t.MonthlyCapUSD, now.UnixMilli()); err != nil {
+		now.UnixMilli()); err != nil {
 		if isUniqueViolation(err) {
 			return nil, "", ErrEmailTaken
 		}
@@ -468,15 +457,14 @@ type Patch struct {
 	UpOpenAI       *string
 	UpBob          *string
 	CaptureContent *bool
-	MonthlyCapUSD  *float64
 	MaxRows        *int64
 	Disabled       *bool
 }
 
 // Update applies a patch to a tenant, recording each changed field in the audit
 // log. actor must be the target tenant or a manager; only a manager may change
-// role, spend cap, row quota, or disabled state — the fields a user would
-// otherwise raise on themselves.
+// role, row quota, or disabled state — the fields a user would otherwise raise on
+// themselves.
 func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 	if actor == nil {
 		return ErrForbidden
@@ -484,7 +472,7 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 	if actor.ID != targetID && !actor.IsManager() {
 		return ErrForbidden
 	}
-	privileged := p.Role != nil || p.MonthlyCapUSD != nil || p.MaxRows != nil || p.Disabled != nil
+	privileged := p.Role != nil || p.MaxRows != nil || p.Disabled != nil
 	if privileged && !actor.IsManager() {
 		return ErrForbidden
 	}
@@ -541,14 +529,6 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 		set("capture_content", boolStr(cur.CaptureContent), boolStr(next.CaptureContent),
 			next.CaptureContent != cur.CaptureContent)
 	}
-	if v := p.MonthlyCapUSD; v != nil {
-		if *v < 0 {
-			return fmt.Errorf("tenant: monthly cap must not be negative")
-		}
-		next.MonthlyCapUSD = *v
-		set("monthly_cap_usd", fmt.Sprint(cur.MonthlyCapUSD), fmt.Sprint(next.MonthlyCapUSD),
-			next.MonthlyCapUSD != cur.MonthlyCapUSD)
-	}
 	if v := p.MaxRows; v != nil {
 		if *v < 0 {
 			return fmt.Errorf("tenant: max rows must not be negative")
@@ -570,9 +550,9 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`UPDATE tenants SET label=?,role=?,config_yaml=?,up_anthropic=?,
-	  up_openai=?,up_bob=?,capture_content=?,monthly_cap_usd=?,max_rows=?,disabled=? WHERE id=?`,
+	  up_openai=?,up_bob=?,capture_content=?,max_rows=?,disabled=? WHERE id=?`,
 		next.Label, string(next.Role), next.ConfigYAML, next.UpAnthropic, next.UpOpenAI,
-		next.UpBob, boolInt(next.CaptureContent), next.MonthlyCapUSD, next.MaxRows,
+		next.UpBob, boolInt(next.CaptureContent), next.MaxRows,
 		boolInt(next.Disabled), targetID); err != nil {
 		return err
 	}
@@ -680,10 +660,111 @@ func (r *Registry) checkEmail(email string) (string, error) {
 	return "", ErrEmailDomain
 }
 
+// --- agent keys -------------------------------------------------------------
+
+// ErrNoAgentKey is returned when a provider key's digest is bound to no tenant.
+var ErrNoAgentKey = errors.New("tenant: provider key is not bound to any account")
+
+// agentKeyHash is the ONLY thing this package ever does with a provider key:
+// digest it and drop it. Nothing below this line holds the plaintext.
+func agentKeyHash(key string) []byte {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
+	return sum[:]
+}
+
+// BindAgentKey records that a provider key belongs to a tenant, by digest, so an
+// agent that can only send that key is still identified. Idempotent, and re-binding
+// a key moves it to the calling tenant — which is safe precisely because holding the
+// key is what proves the claim.
+func (r *Registry) BindAgentKey(tenantID, key string) error {
+	if strings.TrimSpace(key) == "" {
+		return ErrUnknownToken
+	}
+	if _, err := r.Get(tenantID); err != nil {
+		return err
+	}
+	_, err := r.db.Exec(`INSERT INTO tenant_agent_keys (key_hash,tenant_id,created_at)
+	  VALUES (?,?,?) ON CONFLICT(key_hash) DO UPDATE SET tenant_id = excluded.tenant_id`,
+		agentKeyHash(key), tenantID, time.Now().UnixMilli())
+	if err == nil {
+		r.clearCache()
+	}
+	return err
+}
+
+// UnbindAgentKeys drops every agent key bound to a tenant. There is no per-key
+// variant: the digests are not displayable, so "which one" is not a question the
+// user can answer.
+func (r *Registry) UnbindAgentKeys(tenantID string) error {
+	if _, err := r.db.Exec(`DELETE FROM tenant_agent_keys WHERE tenant_id = ?`, tenantID); err != nil {
+		return err
+	}
+	r.clearCache()
+	return nil
+}
+
+// AgentKeyCount reports how many keys a tenant has bound, for the settings page.
+func (r *Registry) AgentKeyCount(tenantID string) (int, error) {
+	var n int
+	err := r.db.QueryRow(`SELECT COUNT(*) FROM tenant_agent_keys WHERE tenant_id = ?`,
+		tenantID).Scan(&n)
+	return n, err
+}
+
+// ResolveAgentKey maps a caller's own provider key to the tenant that bound it. Same
+// caching and last-used bookkeeping as Resolve, and the same closed failure: an
+// unbound key is not a new tenant.
+func (r *Registry) ResolveAgentKey(key string) (*Tenant, error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, ErrNoAgentKey
+	}
+	hash := agentKeyHash(key)
+	// Namespaced so a digest can never be confused with a token digest, even though
+	// the two are computed over different inputs.
+	ck := "ak:" + hex.EncodeToString(hash)
+
+	r.mu.RLock()
+	e, ok := r.cache[ck]
+	r.mu.RUnlock()
+	if ok && time.Now().Before(e.exp) {
+		if e.t.Disabled {
+			return nil, ErrDisabled
+		}
+		return e.t, nil
+	}
+
+	t, err := scanTenant(r.db.QueryRow(`SELECT `+tenantCols+` FROM tenants t
+	  JOIN tenant_agent_keys k ON k.tenant_id = t.id WHERE k.key_hash = ?`, hash))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNoAgentKey
+	}
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	_, _ = r.db.Exec(`UPDATE tenant_agent_keys SET last_used_at = ? WHERE key_hash = ?`,
+		now.UnixMilli(), hash)
+	_, _ = r.db.Exec(`UPDATE tenants SET last_seen_at = ? WHERE id = ?`, now.UnixMilli(), t.ID)
+
+	r.mu.Lock()
+	r.cache[ck] = cacheEntry{t: t, exp: now.Add(r.opts.CacheTTL)}
+	r.mu.Unlock()
+
+	if t.Disabled {
+		return nil, ErrDisabled
+	}
+	return t, nil
+}
+
 // --- tokens -----------------------------------------------------------------
 
+// TokenPrefix is how a context-guru token is recognised on sight. Exported because
+// the proxy now accepts the caller's OWN provider key in the Authorization slot, so
+// it has to be able to tell our token apart from a credential it must forward.
+const TokenPrefix = "cg_live_"
+
 const (
-	tokenPrefix = "cg_live_"
+	tokenPrefix = TokenPrefix
 	// 16 random bytes as unpadded base32 = 26 characters, 128 bits of entropy.
 	tokenBody = 26
 	tokenLen  = len(tokenPrefix) + tokenBody
@@ -692,6 +773,14 @@ const (
 )
 
 var tokenEnc = base32.StdEncoding.WithPadding(base32.NoPadding)
+
+// LooksLikeToken reports whether s is shaped like one of our tokens. It says nothing
+// about whether the token exists — only that it is ours rather than a provider
+// credential, which is the distinction the proxy needs before deciding what to
+// forward.
+func LooksLikeToken(s string) bool {
+	return strings.HasPrefix(s, TokenPrefix) && len(s) == tokenLen
+}
 
 // mintToken returns the plaintext token, its sha256, and its public prefix.
 func mintToken() (plain string, hash []byte, prefix string, err error) {
@@ -734,7 +823,6 @@ var migrations = []string{
 	   up_openai       TEXT    NOT NULL DEFAULT '',
 	   up_bob          TEXT    NOT NULL DEFAULT '',
 	   capture_content INTEGER NOT NULL DEFAULT 0,
-	   monthly_cap_usd REAL    NOT NULL DEFAULT 0,
 	   max_rows        INTEGER NOT NULL DEFAULT 0,
 	   disabled        INTEGER NOT NULL DEFAULT 0,
 	   created_at      INTEGER NOT NULL,
@@ -770,6 +858,21 @@ var migrations = []string{
 	   after         TEXT    NOT NULL DEFAULT ''
 	 );
 	 CREATE INDEX idx_audit_target ON tenant_config_audit(target_tenant, ts DESC);`,
+	// Agent keys. Some agents (Bob/BobShell) can set no request header we do not
+	// already occupy: their client builds Authorization, User-Agent, x-instance-id and
+	// x-team-id itself and offers no hook for another one. Such an agent can still be
+	// identified by the credential it DOES send â its own provider key â so a tenant
+	// binds the sha256 of that key once and their traffic resolves by it thereafter.
+	//
+	// key_hash only. The key itself is never inserted, selected, or logged, so this
+	// table is exactly as replayable as tenant_tokens: not at all.
+	`CREATE TABLE tenant_agent_keys (
+	   key_hash     BLOB    PRIMARY KEY,
+	   tenant_id    TEXT    NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+	   created_at   INTEGER NOT NULL,
+	   last_used_at INTEGER NOT NULL DEFAULT 0
+	 );
+	 CREATE INDEX idx_agent_keys_tenant ON tenant_agent_keys(tenant_id);`,
 }
 
 func migrate(db *sql.DB) error {
@@ -805,7 +908,7 @@ func migrate(db *sql.DB) error {
 // --- small helpers ----------------------------------------------------------
 
 const tenantCols = `t.id,t.label,t.email,t.role,t.config_yaml,t.up_anthropic,t.up_openai,
-	t.up_bob,t.capture_content,t.monthly_cap_usd,t.max_rows,t.disabled,t.created_at,t.last_seen_at`
+	t.up_bob,t.capture_content,t.max_rows,t.disabled,t.created_at,t.last_seen_at`
 
 // scanner is what *sql.Row and *sql.Rows have in common.
 type scanner interface{ Scan(...any) error }
@@ -816,7 +919,7 @@ func scanTenant(s scanner) (*Tenant, error) {
 	var capture, disabled int
 	var created, seen int64
 	if err := s.Scan(&t.ID, &t.Label, &t.Email, &role, &t.ConfigYAML, &t.UpAnthropic,
-		&t.UpOpenAI, &t.UpBob, &capture, &t.MonthlyCapUSD, &t.MaxRows, &disabled,
+		&t.UpOpenAI, &t.UpBob, &capture, &t.MaxRows, &disabled,
 		&created, &seen); err != nil {
 		return nil, err
 	}

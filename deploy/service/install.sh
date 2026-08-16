@@ -137,15 +137,14 @@ cmd_install() {
   ok "daemon-reload done"
 
   say "Next"
-  echo "  1. Put each upstream's key in $CREDS/ (one file per upstream, named after"
-  echo "     the allow-list entry — e.g. $CREDS/ibm-litellm):"
-  echo "       printf %s \"\$KEY\" | sudo tee $CREDS/ibm-litellm >/dev/null"
-  echo "       sudo chmod 0400 $CREDS/*"
-  echo "  2. Edit $ETC/upstreams.yaml (real hosts, key_env matching the file names)."
-  echo "  3. Set MANAGER_EMAIL in $DROPIN/20-local.conf (NOT in the unit — the unit is"
+  echo "  1. Edit $ETC/upstreams.yaml (real hosts). No key_env: each caller's own"
+  echo "     provider key is forwarded, so no credential file is needed."
+  echo "  2. Set MANAGER_EMAIL in $DROPIN/20-local.conf (NOT in the unit — the unit is"
   echo "     replaced on every install; the drop-in never is)."
-  echo "  4. sudo $0 install   # re-run, to regenerate the credential drop-in"
-  echo "  5. sudo $0 start"
+  echo "  3. sudo $0 start"
+  echo
+  echo "  Gateway deployments ONLY (agents hold a placeholder key): add key_env: NAME to"
+  echo "  an entry, put the key in $CREDS/<name>, chmod 0400, and re-run install."
 }
 
 # write_credential_dropin generates one LoadCredential line per file in the credentials
@@ -174,7 +173,7 @@ write_credential_dropin() {
   local count
   count=$(grep -c '^LoadCredential=' "$out" || true)
   if [ "$count" = 0 ]; then
-    warn "no upstream credentials in $CREDS — the proxy will refuse to start"
+    ok "no server-held upstream credentials — callers' own provider keys are forwarded"
   else
     ok "credential drop-in written ($count upstream$([ "$count" = 1 ] || echo s))"
   fi
@@ -216,7 +215,6 @@ Environment=LISTEN_ADDR=127.0.0.1:4000
 # Per-tenant limits on the shared box. 0 disables a bound.
 Environment=TENANT_RPM=120
 Environment=TENANT_CONCURRENT=16
-Environment=TENANT_MONTHLY_CAP_USD=50
 
 # Uncomment to let a Prometheus on another host scrape /metrics (loopback needs nothing).
 #Environment=METRICS_TOKEN=
@@ -262,8 +260,8 @@ cmd_preflight() {
   fi
 
   # Every key_env the allow-list names must have a matching credential file, or the
-  # proxy refuses to boot (by design: with no key to inject it would forward the
-  # caller's own token to a third party).
+  # proxy refuses to boot. Naming none is the normal case — the caller's own provider
+  # key is forwarded — so this loop usually finds nothing to check.
   local missing=0
   while read -r env; do
     [ -n "$env" ] || continue
@@ -286,7 +284,7 @@ cmd_preflight() {
   done < <(grep -oE 'key_env:[[:space:]]*[A-Z0-9_]+' "$ETC/upstreams.yaml" 2>/dev/null | awk '{print $2}' | sort -u)
   [ "$missing" = 0 ] || bad=1
 
-  if [ -f "$DROPIN/10-credentials.conf" ] && grep -q '^LoadCredential=' "$DROPIN/10-credentials.conf"; then
+  if [ -f "$DROPIN/10-credentials.conf" ]; then
     ok "credential drop-in present"
   else
     no "no credential drop-in — run: sudo $0 install"

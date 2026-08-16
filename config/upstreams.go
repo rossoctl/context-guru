@@ -18,8 +18,13 @@ type Upstream struct {
 	Name    string `yaml:"name"`
 	Dialect string `yaml:"dialect"` // anthropic | openai | bob
 	BaseURL string `yaml:"base_url"`
-	// KeyEnv names the environment variable holding this upstream's credential. The
-	// key itself is never in this file, never in the database, and never in a
+	// KeyEnv optionally names an environment variable holding a SERVER-HELD
+	// credential for this upstream. Leave it empty — the default — and the caller's
+	// own provider key is forwarded instead, so each user's traffic is billed to their
+	// own account. Set it only for a gateway deployment where the agent holds a
+	// placeholder key (eval containers, local single-tenant).
+	//
+	// The key itself is never in this file, never in the database, and never in a
 	// tenant's configuration — it is read from the environment at request time, so a
 	// leaked config or a database dump contains no usable secret.
 	KeyEnv string `yaml:"key_env"`
@@ -41,11 +46,11 @@ type upstreamsFile struct {
 
 // LoadUpstreams reads and validates the server's upstream allow-list.
 //
-// Validation is strict and happens at BOOT, not at first request, and it includes
-// checking that each named credential is actually present in the environment. The
-// failure it prevents is specific and bad: with no key to inject, the proxy would
-// forward the client's own header — which in a hosted deployment is the token WE
-// minted, sent to a third party. Refusing to start is the only safe response.
+// Validation is strict and happens at BOOT, not at first request. key_env is
+// OPTIONAL: an upstream without one forwards the caller's own provider credential,
+// which is the hosted default. When one IS named it must be present in the
+// environment, because a gateway deployment that silently lost its key would forward
+// a placeholder and fail every request in a way nobody can read.
 func LoadUpstreams(path string) ([]Upstream, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -84,13 +89,10 @@ func LoadUpstreams(path string) ([]Upstream, error) {
 		if err := checkBaseURL(u.Name, u.BaseURL); err != nil {
 			return nil, err
 		}
-		if u.KeyEnv == "" {
-			return nil, fmt.Errorf("upstreams: %q has no key_env; a hosted proxy must "+
-				"inject its own credential, never forward the client's", u.Name)
-		}
-		if os.Getenv(u.KeyEnv) == "" {
+		if u.KeyEnv != "" && os.Getenv(u.KeyEnv) == "" {
 			return nil, fmt.Errorf("upstreams: %q names key_env %s, which is unset — "+
-				"refusing to start rather than forward a client token upstream", u.Name, u.KeyEnv)
+				"either export it or remove key_env to forward the caller's own credential",
+				u.Name, u.KeyEnv)
 		}
 	}
 	return f.Upstreams, nil

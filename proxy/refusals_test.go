@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // The refusal counters, which exist because every way a request could be turned away
@@ -98,19 +97,6 @@ func TestRefusalCountersMoveOncePerPath(t *testing.T) {
 		t.Errorf("per-tenant concurrency moved by %d, want 1", got)
 	}
 
-	// The spend cap.
-	d = measure(func() {
-		h := &Handler{spend: newSpendCache(time.Minute)}
-		h.opts.Spend = spendFunc(func(string) (float64, error) { return 5, nil })
-		if err := h.checkSpend(&Tenancy{ID: "t-cap", MonthlyCapUSD: 1}); err == nil {
-			t.Fatal("over the cap was allowed")
-		}
-	})
-	d.wantTotals(t, map[refusalReason]int64{refuseSpendCap: 1})
-	if got := d.byTenant["t-cap"][refuseSpendCap]; got != 1 {
-		t.Errorf("per-tenant spend_cap moved by %d, want 1", got)
-	}
-
 	// Auth, disabled account, and a route with no upstream — all through failAuth.
 	for _, tc := range []struct {
 		err  error
@@ -131,9 +117,9 @@ func TestRefusalCountersMoveOncePerPath(t *testing.T) {
 	}
 }
 
-// The trap this whole design is arranged around: the 429 and 402 paths count at the
-// limit that decided them and then fall through to failAuth, which writes the status.
-// If failAuth also counted, every refusal would be counted twice.
+// The trap this whole design is arranged around: the 429 path counts at the limit that
+// decided it and then falls through to failAuth, which writes the status. If failAuth
+// also counted, every refusal would be counted twice.
 func TestRefusalNotCountedTwiceWhenWritten(t *testing.T) {
 	d := measure(func() {
 		l := NewLimiter(Limits{RequestsPerMinute: 1})
@@ -144,13 +130,6 @@ func TestRefusalNotCountedTwiceWhenWritten(t *testing.T) {
 		failAuth(httptest.NewRecorder(), err) // the real chat() sequence
 	})
 	d.wantTotals(t, map[refusalReason]int64{refuseRateLimit: 1})
-
-	d = measure(func() {
-		h := &Handler{spend: newSpendCache(time.Minute)}
-		h.opts.Spend = spendFunc(func(string) (float64, error) { return 5, nil })
-		failAuth(httptest.NewRecorder(), h.checkSpend(&Tenancy{ID: "t-twice", MonthlyCapUSD: 1}))
-	})
-	d.wantTotals(t, map[refusalReason]int64{refuseSpendCap: 1})
 }
 
 // The registration limiter keys on CLIENT IP. Its refusals are real and must be counted,
@@ -197,7 +176,6 @@ func TestRefusalExportedOnMetrics(t *testing.T) {
 		"# TYPE cg_refused_requests_total counter",
 		`cg_refused_requests_total{reason="rate_limit"}`,
 		`cg_refused_requests_total{reason="concurrency"}`,
-		`cg_refused_requests_total{reason="spend_cap"}`,
 		`cg_refused_requests_total{reason="auth"}`,
 		`cg_refused_requests_total{reason="forbidden"}`,
 		`cg_refused_requests_total{reason="no_upstream"}`,

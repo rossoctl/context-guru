@@ -11,7 +11,7 @@
   "colourblind-safe on Grafana's dark surface: worst all-pairs CVD deltaE 9.4, normal-vision",
   "#c98500 and #e66767 are the warning and critical status steps and are used ONLY for status.",
   "",
-  "ONE RULE for stat and gauge colour: the traffic light (#199e70 / #c98500 / #e66767) means ACT ON THIS \u2014 the panel has a threshold an operator should respond to (availability, added latency, filesystem, buffered streams, tenants at cap, up/down). Our own magnitudes carry no verdict and are pinned #3987e5 blue: build, request rate, tokens removed, sessions archived, a positive saving, and every bargauge of a raw amount. So green on this dashboard always means a threshold was met that someone might otherwise have had to act on, never merely 'this number is large'.",
+  "ONE RULE for stat and gauge colour: the traffic light (#199e70 / #c98500 / #e66767) means ACT ON THIS \u2014 the panel has a threshold an operator should respond to (availability, added latency, filesystem, buffered streams, up/down). Our own magnitudes carry no verdict and are pinned #3987e5 blue: build, request rate, tokens removed, sessions archived, a positive saving, and every bargauge of a raw amount. So green on this dashboard always means a threshold was met that someone might otherwise have had to act on, never merely 'this number is large'.",
   "status, never as a fourth series colour, with the one documented exception of the billed",
   "token tiers where 'output' needs a fourth hue.",
   "",
@@ -1404,78 +1404,6 @@
    "panels": []
   },
   {
-   "id": 21,
-   "type": "gauge",
-   "title": "Spend against cap, this month",
-   "description": "Each bar is one account's month-to-date spend as a share of its cap. At 100% the proxy refuses that tenant with a 402, so 80%+ is the warning. Uncapped tenants are absent by design \u2014 they have no bar to fill.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 6,
-    "w": 12,
-    "x": 0,
-    "y": 39
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "100 * cg_tenant_cost_usd{label=~\"$tenant\"} / (cg_tenant_monthly_cap_usd > 0)",
-     "editorMode": "code",
-     "legendFormat": "{{label}}",
-     "instant": true,
-     "range": false
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "percent",
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "#3987e5",
-        "value": null
-       },
-       {
-        "color": "#c98500",
-        "value": 80
-       },
-       {
-        "color": "#e66767",
-        "value": 100
-       }
-      ]
-     },
-     "min": 0,
-     "decimals": 0,
-     "max": 100
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "fields": "",
-     "values": false
-    },
-    "showThresholdLabels": false,
-    "showThresholdMarkers": true,
-    "minVizWidth": 75,
-    "minVizHeight": 75,
-    "sizing": "auto",
-    "orientation": "auto"
-   }
-  },
-  {
    "id": 22,
    "type": "timeseries",
    "title": "Requests per tenant",
@@ -2646,70 +2574,6 @@
    }
   },
   {
-   "id": 36,
-   "type": "stat",
-   "title": "Tenants at 80% of cap",
-   "description": "Accounts about to be cut off at their monthly spend cap. Each one becomes a 402 for that tenant when it reaches 100%.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 20,
-    "y": 69
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "count(cg_tenant_cost_usd / (cg_tenant_monthly_cap_usd > 0) >= 0.8) or vector(0)",
-     "editorMode": "code",
-     "legendFormat": "near cap",
-     "instant": true,
-     "range": false
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "#199e70",
-        "value": null
-       },
-       {
-        "color": "#c98500",
-        "value": 1
-       }
-      ]
-     },
-     "decimals": 0
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "fields": "",
-     "values": false
-    },
-    "textMode": "value",
-    "colorMode": "value",
-    "graphMode": "none",
-    "justifyMode": "auto"
-   }
-  },
-  {
    "id": 37,
    "type": "timeseries",
    "title": "Expand bounces over time",
@@ -2918,7 +2782,7 @@
    "id": 39,
    "type": "timeseries",
    "title": "Requests refused, by reason",
-   "description": "Requests turned away before an upstream was called. ANY sustained bar is somebody's agent failing right now. rate_limit and concurrency are both 429 with different fixes (raise TENANT_RPM, raise the in-flight cap), spend_cap is a 402 that needs a bigger budget, auth/forbidden is a bad or disabled token, no_upstream is our own misconfiguration and upstream_error is the provider.",
+   "description": "Requests turned away before an upstream was called. ANY sustained bar is somebody's agent failing right now. rate_limit and concurrency are both 429 with different fixes (raise TENANT_RPM, raise the in-flight cap), auth/forbidden is a bad or disabled token, no_upstream is our own misconfiguration and upstream_error is the provider.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"

@@ -40,11 +40,13 @@ import (
 )
 
 // Options configures upstreams and credential injection. Each upstream is a base
-// URL the matching route forwards to (the incoming path is appended). When a key
-// is set it replaces the client's auth on forward — this is the eval-containers
-// gateway model, where the agent holds only a placeholder key and the real
-// provider key lives in the gateway env. Leave keys empty to pass the incoming
-// auth through unchanged (local/dev use).
+// URL the matching route forwards to (the incoming path is appended).
+//
+// Credentials: by DEFAULT the caller's own auth header is forwarded unchanged, so
+// each user's traffic is billed to their own provider account. Setting a key here
+// replaces it — the eval-containers gateway model, where the agent holds only a
+// placeholder and the real provider key lives in the gateway env. That is an explicit
+// single-tenant/local fallback, never the hosted default.
 type Options struct {
 	OpenAIUpstream    string // e.g. https://api.openai.com
 	AnthropicUpstream string
@@ -54,8 +56,8 @@ type Options struct {
 	// /admin/v1/profile, /inference/v1/model/info, …) is proxied through verbatim
 	// so the CLI boots and authenticates. Point Bob's CUSTOM_BASE_URL at this proxy.
 	BobUpstream  string // e.g. https://api.us-east.bob.ibm.com
-	OpenAIKey    string // injected as Authorization: Bearer <key>
-	AnthropicKey string // injected as x-api-key: <key>
+	OpenAIKey    string // when set, REPLACES the caller's Authorization: Bearer
+	AnthropicKey string // when set, REPLACES the caller's x-api-key
 	// ForceModel, when set, overwrites the request's "model" field. eval-containers
 	// uses this to pin every call to EVAL_MODEL regardless of what the agent asked for.
 	ForceModel string
@@ -119,8 +121,9 @@ type Options struct {
 	// Zero values disable each bound. Ignored in single-tenant mode, where there is
 	// nobody to protect anyone from.
 	Limits Limits
-	// Spend reports a tenant's month-to-date cost, for the monthly cap. nil disables
-	// cap enforcement — which is only safe when the upstream credential is not shared.
+	// Spend reports a tenant's month-to-date cost, for DISPLAY on the settings page.
+	// nil = no figure shown. There is no cap: every tenant spends their own provider
+	// credential, so there is no shared budget to guard.
 	Spend SpendChecker
 	// PresetNames and ComponentNames are what the settings page may offer. Supplied by
 	// the host because the registries live in `config` and `components`, and this
@@ -203,9 +206,6 @@ type Handler struct {
 	// limiter because its keys are IPs rather than tenant ids, and its bound is a
 	// fixed property of what registration is, not an operator setting.
 	regLim *Limiter
-	// spend memoises month-to-date cost lookups so the cap costs one query a minute
-	// per tenant rather than one per request.
-	spend *spendCache
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
 	promCache promCache
@@ -230,7 +230,6 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 		Shadow: h.shadow, Mode: h.mode()}
 	h.limiter = NewLimiter(opts.Limits)
 	h.regLim = newAnonLimiter(Limits{RequestsPerMinute: registrationsPerMinute})
-	h.spend = newSpendCache(0)
 	if agg != nil {
 		agg.SetMode(h.mode())
 	}
@@ -330,7 +329,7 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 				failAuth(w, err)
 				return
 			}
-			if up, err = h.upstreamFor(tn, pickBob, upstream{}); err != nil {
+			if up, err = h.upstreamFor(r, tn, pickBob, upstream{}); err != nil {
 				failAuth(w, err)
 				return
 			}
@@ -352,12 +351,7 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 			return
 		}
 		copyHeaders(req.Header, r.Header)
-		if up.setKey != nil {
-			for _, hd := range tokenHeaders {
-				req.Header.Del(hd)
-			}
-			up.setKey(req.Header)
-		}
+		setUpstreamAuth(req.Header, up)
 		resp, err := h.client.Do(req)
 		if err != nil {
 			recordRefusal(refuseUpstream, "")
@@ -419,7 +413,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 
 	// No upstream here, so there is no "incoming" model; only the static
 	// "config"-source client (and any endpoint pinned in a component's model: block).
-	models := components.ModelSpec{Static: h.opts.CheapModel}
+	models := components.ModelSpec{Static: h.staticModel()}
 	// Honor the same cache-aware behavior as the live chat path so /compact (used by
 	// offline replay/eval) reflects production. ?cache=on|off|auto overrides for A/B.
 	cacheMode := h.opts.CacheMode
@@ -497,10 +491,17 @@ func headerKey(name, key string) func(http.Header) {
 }
 
 // incomingModel builds an LLM client that reuses the proxied request's own model
-// and the route's upstream + credential, so a NeedsModel component can call the
-// same backend the request targets. Prefers the gateway's injected key (gateway
-// mode); falls back to the client's own auth header (pass-through). Returns nil
-// when no upstream/model/key is resolvable, and the component degrades.
+// and the route's upstream, so a NeedsModel component can call the same backend the
+// request targets.
+//
+// It uses the CALLER's credential. A component that calls an LLM spends money, and
+// spending it on a server-held key would bill one account for every user's
+// compaction — the same defect this whole path exists to remove. The server key is
+// used only when the operator configured one (single-tenant gateway mode, where the
+// caller holds a placeholder).
+//
+// FAIL OPEN: no credential, no upstream or no model name returns nil, and the
+// component degrades to its deterministic path. It never errors the request.
 func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, body []byte, r *http.Request) components.Model {
 	if up.base == "" {
 		return nil
@@ -509,23 +510,19 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 	if model == "" {
 		return nil
 	}
+	key := CallerKey(r)
 	switch provider {
 	case bschemas.Anthropic:
-		key := h.opts.AnthropicKey
 		if key == "" {
-			key = r.Header.Get("x-api-key")
-		}
-		if key == "" {
-			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			key = h.opts.AnthropicKey
 		}
 		if key == "" {
 			return nil
 		}
 		return cheapmodel.Anthropic{BaseURL: up.base, Model: model, APIKey: key, Client: h.client}
 	case bschemas.OpenAI:
-		key := h.opts.OpenAIKey
 		if key == "" {
-			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			key = h.opts.OpenAIKey
 		}
 		if key == "" {
 			return nil
@@ -533,6 +530,17 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		return cheapmodel.OpenAI{BaseURL: up.base, Model: model, APIKey: key, Client: h.client}
 	}
 	return nil
+}
+
+// staticModel is the "config"-source cheap-model client — nil in hosted mode. It
+// authenticates with a SERVER credential (CHEAP_MODEL_KEY), so offering it to a
+// tenant's pipeline would bill that server account for their compaction. Components
+// that find no model degrade (fail open); they never error.
+func (h *Handler) staticModel() components.Model {
+	if h.opts.Tenants != nil {
+		return nil
+	}
+	return h.opts.CheapModel
 }
 
 // capturePath, when set (CONTEXT_GURU_CAPTURE), names a JSONL file the proxy
@@ -574,20 +582,16 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			failAuth(w, err)
 			return
 		}
-		up, err := h.upstreamFor(tn, pick, static)
+		up, err := h.upstreamFor(r, tn, pick, static)
 		if err != nil {
 			failAuth(w, err)
 			return
 		}
-		// Limits and the spend cap, before the body is read. Refusing a request that
-		// would exceed a bound must not first cost us 32 MiB of buffering.
+		// Limits, before the body is read. Refusing a request that would exceed a bound
+		// must not first cost us 32 MiB of buffering.
 		release, err := h.limiter.Acquire(tn.ID)
 		defer release()
 		if err != nil {
-			failAuth(w, err)
-			return
-		}
-		if err := h.checkSpend(tn); err != nil {
 			failAuth(w, err)
 			return
 		}
@@ -614,7 +618,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// model) and the static "config" cheap model.
 		models := components.ModelSpec{
 			Incoming: h.incomingModel(provider, up, body, r),
-			Static:   h.opts.CheapModel,
+			Static:   h.staticModel(),
 		}
 		// Resolve the model's context window (dynamic, cached) so fraction-based
 		// triggers scale with the model; 0 when unknown (absolutes apply).
@@ -897,18 +901,29 @@ func (h *Handler) doUpstream(r *http.Request, up upstream, body []byte) (*http.R
 		return nil, err
 	}
 	copyHeaders(req.Header, r.Header)
-	if up.setKey != nil {
-		// Gateway mode: drop the client's placeholder auth, inject the real key. Every
-		// slot the tenant resolver reads a token from is dropped, not just the two
-		// providers use — a slot we accept a credential in is a slot that must never
-		// reach an upstream, and in a hosted deployment that credential is the token
-		// WE minted.
-		for _, hd := range tokenHeaders {
-			req.Header.Del(hd)
-		}
-		up.setKey(req.Header)
-	}
+	setUpstreamAuth(req.Header, up)
 	return h.client.Do(req)
+}
+
+// setUpstreamAuth decides what credential leaves the box, and it is the ONE place
+// that decides it.
+//
+// Default (no server-held key): the caller's own provider credential goes upstream
+// untouched — their key, their bill. Only our own token is scrubbed out of the auth
+// slots, because a token is not a provider credential and must never leave.
+//
+// Gateway mode (a server key IS configured): every auth slot is dropped and the
+// server key injected, because the caller holds only a placeholder.
+func setUpstreamAuth(dst http.Header, up upstream) {
+	if up.setKey == nil {
+		scrubToken(dst)
+		return
+	}
+	for _, hd := range authHeaders {
+		dst.Del(hd)
+	}
+	dst.Del(TokenHeader)
+	up.setKey(dst)
 }
 
 // stream copies an upstream response through with flushing (SSE-friendly), while
