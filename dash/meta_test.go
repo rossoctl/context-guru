@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -304,4 +305,38 @@ func TestDailySeriesBuckets(t *testing.T) {
 func near(got, want float64) bool {
 	d := got - want
 	return d < 1e-9 && d > -1e-9
+}
+
+// The UI reads every metadata field as a TOP-LEVEL key, which holds only because Meta is
+// embedded anonymously. Adding a `json:"meta"` tag to that field would nest all fifteen and
+// silently blank them in the request drawer — with no compile error and nothing else
+// failing. Hence this.
+//
+// It pins the null too: an unset sampling parameter has to serialize as `null`, not `0`, or
+// the distinction the nullable column exists for dies at the JSON boundary.
+func TestEventJSONFlattensMetaAndKeepsNull(t *testing.T) {
+	f := 0.7
+	b, err := json.Marshal(&Event{Meta: Meta{
+		ReasoningEffort: "high", Temperature: &f, CacheBPSystem: 2, StopReason: "end_turn",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{
+		`"reasoning_effort":"high"`, `"temperature":0.7`, `"cache_bp_system":2`, `"stop_reason":"end_turn"`,
+	} {
+		if !strings.Contains(string(b), k) {
+			t.Errorf("missing %s in %s", k, b)
+		}
+	}
+	if strings.Contains(string(b), `"Meta"`) {
+		t.Fatalf("Meta serialized nested rather than flat, which blanks it in the UI: %s", b)
+	}
+	unset, err := json.Marshal(&Event{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unset), `"temperature":null`) {
+		t.Errorf("an unset temperature serialized as something other than null: %s", unset)
+	}
 }
