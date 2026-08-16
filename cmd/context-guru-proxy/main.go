@@ -30,6 +30,7 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/proxy"
@@ -147,6 +148,12 @@ func main() {
 	)
 	flag.Parse()
 
+	// Logging first, before anything can want to log. Level, format and sink come from
+	// the environment (CG_LOG_LEVEL / CG_LOG_FORMAT / CG_LOG_FILE / CG_LOG_PLAIN) rather
+	// than flags, because the two places that set them are a systemd drop-in and a shell,
+	// and both already speak environment. See internal/logging.
+	sink := logging.Setup()
+
 	cfg, err := loadConfig(*cfgPath, *preset)
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -163,7 +170,17 @@ func main() {
 	}
 
 	agg := metrics.NewAggregator()
-	emitter := metrics.Tee{agg, metrics.Slog{L: slog.Default()}}
+	// metrics.Slog is deliberately NOT wired in here any more. It emitted one line per
+	// component plus one per run, at INFO, with no tenant and no session on any of them —
+	// so a busy proxy buried its own request lifecycle, and none of it could be correlated
+	// to a user. apply now logs the same material at DEBUG with tenant and session
+	// attached, and with the gate histogram that says WHY a component declined. The type
+	// stays exported for a library host that wants the GenAI-semconv vocabulary.
+	//
+	// Still a Tee of one: Tee is what satisfies components.FilterStatsSink for the
+	// pipeline's own type assertion, so collapsing it to the bare aggregator would
+	// quietly drop cmdfilter's per-family ledger.
+	emitter := metrics.Tee{agg}
 	pipe, err := cfg.Build(emitter)
 	if err != nil {
 		log.Fatalf("build pipeline: %v", err)
@@ -455,7 +472,10 @@ func main() {
 		slog.Warn("context-guru: OBSERVE MODE — requests are forwarded UNMODIFIED; " +
 			"/stats reports what compaction WOULD have saved under potential_*/projected_* keys")
 	}
-	slog.Info("context-guru-proxy listening", "addr", addr, "pipeline", cfg.Pipeline, "mode", mode)
+	// The sink last, so it is the line just above the traffic: "where are the logs and
+	// what level am I getting" is the first question when something looks quiet.
+	slog.Info("context-guru-proxy listening", "addr", addr, "pipeline", cfg.Pipeline,
+		"mode", mode, "logs", sink)
 
 	srv := &http.Server{
 		Addr:    addr,

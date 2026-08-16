@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rossoctl/context-guru/internal/redact"
 )
 
 // knownSecrets are the shapes a credential actually takes in the traffic this proxy
@@ -189,12 +191,12 @@ func TestSecretishKeyIsAnchoredNotSubstring(t *testing.T) {
 		"marker_mode", "monkey", "keyboard_layout", "strategy", "pipeline",
 	}
 	for _, k := range secret {
-		if !secretishKey.MatchString(k) {
+		if !redact.IsSecretKey(k) {
 			t.Errorf("key %q is a credential name but was NOT matched; it would be stored", k)
 		}
 	}
 	for _, k := range notSecret {
-		if secretishKey.MatchString(k) {
+		if redact.IsSecretKey(k) {
 			t.Errorf("key %q was matched as a credential; the config view loses a real setting", k)
 		}
 	}

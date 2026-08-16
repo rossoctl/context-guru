@@ -29,6 +29,7 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
@@ -327,11 +328,11 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 		if h.opts.Tenants != nil {
 			tn, err := h.tenancyFor(r)
 			if err != nil {
-				failAuth(w, err)
+				h.refuse(w, r, err)
 				return
 			}
 			if up, err = h.upstreamFor(tn, pickBob, upstream{}); err != nil {
-				failAuth(w, err)
+				h.refuse(w, r, err)
 				return
 			}
 		}
@@ -388,7 +389,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// state store it happened to reach.
 	tn, err := h.tenancyFor(r)
 	if err != nil {
-		failAuth(w, err)
+		h.refuse(w, r, err)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
@@ -571,24 +572,34 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// an unauthenticated caller must not be able to make the proxy buffer 32 MiB.
 		tn, err := h.tenancyFor(r)
 		if err != nil {
-			failAuth(w, err)
+			h.refuse(w, r, err)
 			return
 		}
 		up, err := h.upstreamFor(tn, pick, static)
 		if err != nil {
-			failAuth(w, err)
+			h.refuse(w, r, err)
 			return
 		}
+		// The per-request logger. Every line this request produces — here, inside the
+		// pipeline, inside a component — carries the same tenant, so one LogQL selector
+		// is the whole investigation. The tenant ID only: the token it was resolved from
+		// never appears in a log line, and the scrubber would replace it if it did.
+		//
+		// It goes in the CONTEXT because apply and the components already receive one and
+		// nothing else would have to change; the session is added below, once apply has
+		// resolved it (it is derived from the body, so it is not knowable yet).
+		lg := slog.Default().With("tenant", tn.ID, "route", up.path, "provider", string(provider))
+		r = r.WithContext(logging.With(r.Context(), lg))
 		// Limits and the spend cap, before the body is read. Refusing a request that
 		// would exceed a bound must not first cost us 32 MiB of buffering.
 		release, err := h.limiter.Acquire(tn.ID)
 		defer release()
 		if err != nil {
-			failAuth(w, err)
+			h.refuse(w, r, err)
 			return
 		}
 		if err := h.checkSpend(tn); err != nil {
-			failAuth(w, err)
+			h.refuse(w, r, err)
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
@@ -638,6 +649,10 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				rep.Gate("agent_compaction")
 				h.agg.Component(rep)
 			}
+			// The gate name here is the SAME string /stats reports as
+			// components.bypass.gates.agent_compaction, so the log line and the metric
+			// cannot disagree about what happened.
+			lg.Debug("cg.bypass", "gate", "agent_compaction")
 		}
 		// Start the dashboard capture (nil when the dashboard is off). It only holds
 		// values the request path already computed; nothing here does I/O.
@@ -647,15 +662,15 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// panic anywhere here must forward the PRISTINE inbound body, never 500 the client.
 		// apply.BodyFull has its own recover; this backstops expand.Inject and anything else.
 		orig := body
+		var tr apply.Trace // hoisted: the lifecycle log line below reads it
 		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
-					slog.Error("context-guru: recovered from panic before forward; sending original", "panic", rec)
+					lg.Error("context-guru: recovered from panic before forward; sending original", "panic", rec)
 					body = orig
 				}
 			}()
 			var added time.Duration
-			var tr apply.Trace
 			body, added, tr = h.applyMode(&reqInfo{
 				ctx:      r.Context(),
 				provider: provider,
@@ -692,8 +707,25 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				body, _ = expand.Inject(string(provider), im, body, tn.Store.Persists())
 			}
 		}()
-		h.serve(w, r, provider, up, body, bypassed, cp, tn)
+		// Load the request's one INFO line with everything the pipeline decided. serve
+		// emits it in a defer once the response is finished, so a request produces exactly
+		// one lifecycle line whichever way it ends — and the attrs are built here, once,
+		// rather than on the response path.
+		h.serve(w, r, provider, up, body, bypassed, cp, tn, lifecycleLogger(lg, tr, bypassed))
 	}
+}
+
+// lifecycleLogger returns the request logger with this request's pipeline outcome
+// attached: the resolved session (so every line of this request correlates, including
+// the ones apply wrote), and the token accounting.
+func lifecycleLogger(lg *slog.Logger, tr apply.Trace, bypassed bool) *slog.Logger {
+	lg = lg.With("session", tr.Session, "messages", tr.Messages, "bypassed", bypassed,
+		"cache_aware", tr.CacheAware, "frozen_tokens", tr.FrozenTokens)
+	if tr.Run != nil {
+		lg = lg.With("tokens_before", tr.Run.TokensBefore, "tokens_after", tr.Run.TokensAfter,
+			"saved", tr.Run.Saved(), "cg_ms", tr.Run.DurationMs)
+	}
+	return lg
 }
 
 // API exposes the dashboard's HTTP surface so the host can attach an authenticator.
@@ -732,7 +764,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // → /stats sse_streamed / sse_buffered). It previously matched the expand tool
 // description this proxy injects itself, so it was unconditionally true and the
 // zero-added-latency promise above never held for any request (issue #26).
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy, lg *slog.Logger) {
 	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
 	// it is advertised on the outgoing request. Those used to be different conditions —
 	// advertised when the request had tools, intercepted (for SSE) when it had markers —
@@ -757,6 +789,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// can never delay or fail a request.
 	var usage Usage
 	var usageOK bool
+	// status/rounds/expanded exist for the lifecycle log line: the upstream status is
+	// the one fact about a request an operator asks for first, and until now it reached
+	// the dashboard row and nothing else.
+	status, rounds, expanded := 0, 0, 0
 	defer func() {
 		if sse && h.agg != nil {
 			h.agg.RecordSSE(msSince(reqStart, sseFirstByte), sseBuffered)
@@ -765,8 +801,16 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			h.agg.RecordUsage(usage.FreshInput, usage.CacheRead, usage.CacheWrite, usage.Output)
 		}
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
+		// THE one line per request. In a defer so every terminal path emits it exactly
+		// once — stream-through, buffered replay, the round-cap exit, an upstream failure
+		// (which also logged its own WARN with the reason).
+		lg.Info("cg.request", "status", status, "total_ms", msSince(reqStart, time.Time{}),
+			"upstream_rounds", rounds, "expands", expanded, "sse", sse, "sse_buffered", sseBuffered,
+			"fresh_input", usage.FreshInput, "cache_read", usage.CacheRead,
+			"cache_write", usage.CacheWrite, "output", usage.Output, "usage_reported", usageOK)
 	}()
 	for round := 0; ; round++ {
+		rounds = round + 1
 		upStart := time.Now()
 		resp, err := h.doUpstream(r, up, body)
 		if err != nil {
@@ -775,8 +819,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// — no log line, and a dashboard row with status 0 that reads as "unknown"
 			// rather than "the upstream refused". On a shared service that is the
 			// difference between debugging a report and disbelieving it.
-			slog.Warn("context-guru: upstream call failed", "tenant", tn.ID,
-				"route", up.path, "upstream", up.base, "round", round, "err", err)
+			lg.Warn("context-guru: upstream call failed", "upstream", up.base,
+				"round", round, "err", err)
+			status = http.StatusBadGateway
 			cp.noteUpstream(float64(time.Since(upStart).Microseconds())/1000.0,
 				http.StatusBadGateway)
 			// And count it: this path does not go through failAuth, so without this the
@@ -794,11 +839,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			return
 		}
 		upMs := float64(time.Since(upStart).Microseconds()) / 1000.0
+		status = resp.StatusCode
 		cp.noteUpstream(upMs, resp.StatusCode)
 		if h.agg != nil {
 			h.agg.RecordUpstreamLatency(upMs, bypassed)
 		}
 		isSSE := strings.Contains(resp.Header.Get("Content-Type"), "event-stream")
+		lg.Debug("cg.upstream", "round", round, "status", resp.StatusCode,
+			"upstream_ms", upMs, "sse", isSSE, "expand_advertised", advertised)
 		// Inspect for a lone expand call when the tool is actually advertised and we haven't
 		// hit the round cap. Nothing else can produce a call to it, so this is both the
 		// necessary and the sufficient condition — and for SSE it is what decides whether we
@@ -825,6 +873,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// Buffered: the client sees nothing until the whole stream has arrived, so its
 			// first byte lands no earlier than the write on whichever path we return from.
 			sse, sseBuffered, sseFirstByte = true, true, time.Time{}
+			// The one decision on this path that costs a user something they can feel — a
+			// stream stopped being a stream — so it says WHY: the expand tool is advertised
+			// on the outgoing request, so a lone expand call has to be intercepted.
+			lg.Debug("cg.sse_buffered", "round", round, "reason", "expand_tool_advertised",
+				"bytes", len(respBody))
 		}
 		if u, ok := responseUsage(resp.Header.Get("Content-Type"), respBody); ok {
 			usage, usageOK = u, true
@@ -868,6 +921,13 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				resolved[c.CallID] = "[expand: original for id " + c.HashID + " is no longer available]"
 			}
 		}
+		expanded += got
+		// The reversibility loop is the hardest thing here to diagnose after the fact:
+		// a model calls expand, an id has aged out of the store, and the symptom is a
+		// confused agent rather than an error. So log what it asked for against what came
+		// back — `unresolved > 0` is the tell.
+		lg.Debug("cg.expand", "round", round, "calls", len(calls),
+			"resolved", got, "unresolved", len(calls)-got)
 		next, ok := expand.Continuation(string(provider), body, msg, resolved)
 		if got == 0 || !ok {
 			writeRaw(w, resp, respBody) // nothing recovered; return the model's own call
@@ -1096,7 +1156,7 @@ func (h *Handler) expand(w http.ResponseWriter, r *http.Request) {
 	// someone else.
 	tn, err := h.tenancyFor(r)
 	if err != nil {
-		failAuth(w, err)
+		h.refuse(w, r, err)
 		return
 	}
 	id := r.URL.Query().Get("id")
