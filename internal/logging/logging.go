@@ -1,7 +1,8 @@
 // Package logging is context-guru's logging plumbing: the level/format/sink
 // decision, the credential scrubber that sits in front of every handler, and the
-// per-request logger that carries tenant and session onto every line of one
-// request's lifecycle.
+// per-request logger that carries tenant and session onto the lines of one
+// request's lifecycle — including the ones written after the response, off the
+// request path (see With, and the boundary named there).
 //
 // It is deliberately small, and deliberately built on log/slog with no logging
 // dependency added. Three shapes have to work:
@@ -188,6 +189,24 @@ func scrubAttr(_ []string, a slog.Attr) slog.Attr {
 // because the request path already threads a context everywhere and the pipeline's
 // components receive one — adding a logger parameter to every signature between the
 // HTTP handler and a component is the churn this avoids.
+//
+// "The request's lifecycle" outlives the *http.Request: observe mode's pipeline run
+// happens on a worker pool AFTER the response is written, under a context that is
+// deliberately not the request's (the request's is already cancelled). Work that
+// crosses that boundary must lift the logger out with From and re-attach it with
+// With on the far side — a plain value that is safe to outlive the request, since
+// only cancellation belongs to the context it came from. apply also stamps `mode`,
+// so an observe projection is never mistaken for, or summed with, an enforced run.
+//
+// Three classes of line are NOT request-scoped and carry no tenant, by nature
+// rather than by omission:
+//
+//   - anything logged before authentication resolves one — an unknown or revoked
+//     token has no tenant to attribute the refusal to;
+//   - startup and configuration lines, which describe the process;
+//   - a resource's own lines about itself: the off-path pool's "queue full" and its
+//     last-resort panic recovery name the job whose key names the tenant, not the
+//     tenant as a field, because the pool holds jobs rather than requests.
 type ctxKey struct{}
 
 // With returns a context carrying l, for From to find downstream.
