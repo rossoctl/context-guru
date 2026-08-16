@@ -568,7 +568,7 @@ func TestBindAgentKeyMapsRegistryErrorsToUserStatuses(t *testing.T) {
 func TestFailedProxyAuthIsThrottledPerClientAddress(t *testing.T) {
 	f := newHostedFixtureNoKey(t, "up", "bob")
 	tn, _ := f.register(t, "a@ibm.com")
-	if err := f.reg.BindAgentKey(tn.ID, "bob-own-key"); err != nil {
+	if err := f.reg.BindAgentKey(tn.ID, "bob-own-fake-key-for-tests"); err != nil {
 		t.Fatal(err)
 	}
 	try := func(key, remote string) int {
@@ -597,7 +597,7 @@ func TestFailedProxyAuthIsThrottledPerClientAddress(t *testing.T) {
 
 	// The charge is on FAILURE, so a legitimate bound key from the very same address is
 	// unaffected — otherwise the control would be a way to lock a colleague out.
-	if code := try("bob-own-key", guesser); code != http.StatusOK {
+	if code := try("bob-own-fake-key-for-tests", guesser); code != http.StatusOK {
 		t.Errorf("a bound key from a throttled address = %d, want 200", code)
 	}
 	// And the bucket is per address, not global: nobody else's guessing spends someone
