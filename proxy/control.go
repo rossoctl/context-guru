@@ -49,6 +49,8 @@ func (h *Handler) MountControl(m *http.ServeMux) {
 	m.HandleFunc("PUT /api/me", h.ctlUpdateMe)
 	m.HandleFunc("POST /api/me/tokens", h.ctlMintToken)
 	m.HandleFunc("DELETE /api/me/tokens/{prefix}", h.ctlRevokeToken)
+	m.HandleFunc("POST /api/me/agent-key", h.ctlBindAgentKey)
+	m.HandleFunc("DELETE /api/me/agent-key", h.ctlUnbindAgentKeys)
 	m.HandleFunc("GET /api/me/audit", h.ctlAudit)
 	m.HandleFunc("GET /api/options", h.ctlOptions)
 	m.HandleFunc("GET /api/tenants", h.ctlTenants)
@@ -189,12 +191,14 @@ type tenantView struct {
 	UpOpenAI            string  `json:"up_openai"`
 	UpBob               string  `json:"up_bob"`
 	CaptureContent      bool    `json:"capture_content"`
-	MonthlyCapUSD       float64 `json:"monthly_cap_usd"`
 	MaxRows             int64   `json:"max_rows"`
 	Disabled            bool    `json:"disabled"`
 	CreatedAt           int64   `json:"created_at"`
 	LastSeenAt          int64   `json:"last_seen_at"`
 	SpentUSD            float64 `json:"spent_usd"`
+	// AgentKeys is how many provider keys this account has bound (a COUNT, never a
+	// digest): the settings page needs to say "bound" or "not bound", nothing more.
+	AgentKeys int `json:"agent_keys"`
 }
 
 func (h *Handler) view(t *tenant.Tenant) tenantView {
@@ -204,9 +208,12 @@ func (h *Handler) view(t *tenant.Tenant) tenantView {
 		EffectiveConfigYAML: h.registry().Config(t),
 		ConfigInherited:     t.TracksDefault(),
 		UpAnthropic:         t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
-		CaptureContent: t.CaptureContent, MonthlyCapUSD: t.MonthlyCapUSD,
-		MaxRows: t.MaxRows, Disabled: t.Disabled,
+		CaptureContent: t.CaptureContent,
+		MaxRows:        t.MaxRows, Disabled: t.Disabled,
 		CreatedAt: msOrZero(t.CreatedAt), LastSeenAt: msOrZero(t.LastSeenAt),
+	}
+	if n, err := h.registry().AgentKeyCount(t.ID); err == nil {
+		v.AgentKeys = n
 	}
 	if h.opts.Spend != nil {
 		// Best-effort: the settings page showing no spend is a cosmetic problem, and
@@ -642,6 +649,51 @@ func (h *Handler) ctlRevokeToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
+// ctlBindAgentKey binds the sha256 of the caller's own provider key to their account,
+// so an agent that can set no custom header (Bob/BobShell: its client builds every
+// header itself) is still identified by the credential it does send.
+//
+// The key arrives in an AUTH HEADER, not the body — it is the same slot the agent
+// itself uses, so the value can be piped straight from the environment
+// (-H "Authorization: Bearer $BOBSHELL_API_KEY") instead of being pasted somewhere it
+// gets logged. It is hashed by the registry and never stored, echoed, or logged.
+func (h *Handler) ctlBindAgentKey(w http.ResponseWriter, r *http.Request) {
+	t, err := h.webPrincipal(r)
+	if err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	key := CallerKey(r)
+	if key == "" {
+		ctlErr(w, http.StatusBadRequest,
+			"send the provider key you want bound in Authorization or x-api-key")
+		return
+	}
+	if err := h.registry().BindAgentKey(t.ID, key); err != nil {
+		ctlErr(w, http.StatusInternalServerError, "could not bind the key")
+		return
+	}
+	n, _ := h.registry().AgentKeyCount(t.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "bound", "agent_keys": n})
+}
+
+// ctlUnbindAgentKeys drops every key bound to the account. All of them, because the
+// digests are not displayable and "which one" is not a question the user can answer.
+func (h *Handler) ctlUnbindAgentKeys(w http.ResponseWriter, r *http.Request) {
+	t, err := h.webPrincipal(r)
+	if err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	if err := h.registry().UnbindAgentKeys(t.ID); err != nil {
+		ctlErr(w, http.StatusInternalServerError, "could not unbind")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "unbound", "agent_keys": 0})
+}
+
 func (h *Handler) ctlAudit(w http.ResponseWriter, r *http.Request) {
 	t, err := h.webPrincipal(r)
 	if err != nil {
@@ -735,16 +787,15 @@ func (h *Handler) ctlPatchTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Label          *string  `json:"label"`
-		Role           *string  `json:"role"`
-		ConfigYAML     *string  `json:"config_yaml"`
-		UpAnthropic    *string  `json:"up_anthropic"`
-		UpOpenAI       *string  `json:"up_openai"`
-		UpBob          *string  `json:"up_bob"`
-		CaptureContent *bool    `json:"capture_content"`
-		MonthlyCapUSD  *float64 `json:"monthly_cap_usd"`
-		MaxRows        *int64   `json:"max_rows"`
-		Disabled       *bool    `json:"disabled"`
+		Label          *string `json:"label"`
+		Role           *string `json:"role"`
+		ConfigYAML     *string `json:"config_yaml"`
+		UpAnthropic    *string `json:"up_anthropic"`
+		UpOpenAI       *string `json:"up_openai"`
+		UpBob          *string `json:"up_bob"`
+		CaptureContent *bool   `json:"capture_content"`
+		MaxRows        *int64  `json:"max_rows"`
+		Disabled       *bool   `json:"disabled"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
 		ctlErr(w, http.StatusBadRequest, "malformed request: "+err.Error())
@@ -752,8 +803,8 @@ func (h *Handler) ctlPatchTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	patch := tenant.Patch{Label: in.Label, ConfigYAML: in.ConfigYAML,
 		UpAnthropic: in.UpAnthropic, UpOpenAI: in.UpOpenAI, UpBob: in.UpBob,
-		CaptureContent: in.CaptureContent, MonthlyCapUSD: in.MonthlyCapUSD,
-		MaxRows: in.MaxRows, Disabled: in.Disabled}
+		CaptureContent: in.CaptureContent,
+		MaxRows:        in.MaxRows, Disabled: in.Disabled}
 	if in.Role != nil {
 		role := tenant.Role(*in.Role)
 		patch.Role = &role
@@ -769,12 +820,6 @@ func (h *Handler) ctlPatchTenant(w http.ResponseWriter, r *http.Request) {
 			ctlErr(w, http.StatusBadRequest, err.Error())
 		}
 		return
-	}
-	// A raised cap must take effect now, not after the spend cache expires — otherwise
-	// a manager helps someone and they stay blocked for another minute with no
-	// explanation.
-	if in.MonthlyCapUSD != nil {
-		h.InvalidateSpend(target)
 	}
 	updated, err := h.registry().Get(target)
 	if err != nil {

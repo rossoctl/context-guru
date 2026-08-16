@@ -2613,17 +2613,26 @@ const AGENTS = [
   {
     name: 'Claude Code',
     path: '/anthropic',
+    // The auth slot keeps YOUR OWN Anthropic key — it is forwarded upstream, so your
+    // traffic is billed to your account. The context-guru token rides its own header.
     lines: (base, tok) => [
       `export ANTHROPIC_BASE_URL=${base}/anthropic`,
-      `export ANTHROPIC_AUTH_TOKEN=${tok}`,
+      `export ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: ${tok}"`,
+      '# ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) stays your own provider key',
     ],
   },
   {
     name: 'Bob (BobShell)',
     path: '/',
+    // Bob's client builds every request header itself and offers no hook for another
+    // one, so it cannot carry the token. Instead it is recognised by the sha256 of the
+    // key it already sends — bound once, below, and never stored in plaintext.
     lines: (base, tok) => [
       `export CUSTOM_BASE_URL=${base}`,
-      `export BOBSHELL_API_KEY=${tok}`,
+      '# BOBSHELL_API_KEY stays your own key. Bob cannot send a custom header, so',
+      '# bind it to this account once (hashed; the key is never stored):',
+      `curl -sS -XPOST ${base}/api/me/agent-key \\`,
+      '  -H "Authorization: Bearer $BOBSHELL_API_KEY" -b "cg_dash=<your dashboard cookie>"',
     ],
   },
   {
@@ -2631,7 +2640,8 @@ const AGENTS = [
     path: '/openai/v1',
     lines: (base, tok) => [
       `export OPENAI_BASE_URL=${base}/openai/v1`,
-      `export OPENAI_API_KEY=${tok}`,
+      '# OPENAI_API_KEY stays your own provider key; send the token as a header:',
+      `#   x-context-guru-token: ${tok}`,
     ],
   },
 ];
@@ -2708,17 +2718,35 @@ function loadSettings() {
     const effective = t.effective_config_yaml || t.config_yaml || '';
     const { active, all } = componentPickers(effective, opts);
 
-    // Spend, first: it is the thing that stops traffic, so it belongs above the knobs.
-    if (t.monthly_cap_usd > 0) {
-      const frac = Math.min(1, (t.spent_usd || 0) / t.monthly_cap_usd);
-      host.appendChild(el('div', { class: 'spend' },
-        el('div', { class: 'spend-label' },
-          `Spend this month: ${usd(t.spent_usd)} of ${usd(t.monthly_cap_usd)}`),
-        el('div', { class: 'meter' },
-          el('i', { style: `width:${(frac * 100).toFixed(1)}%`, class: frac > 0.9 ? 'hot' : '' })),
-        el('p', { class: 'hint' },
-          'Requests are refused once the cap is reached. A manager can raise it.')));
-    }
+    // Spend, first: it is what a shared box gets asked about most. Reported only —
+    // your traffic runs on YOUR provider credential, so there is nothing to cap.
+    host.appendChild(el('div', { class: 'spend' },
+      el('div', { class: 'spend-label' }, `Spend this month: ${usd(t.spent_usd)}`),
+      el('p', { class: 'hint' },
+        'Billed to your own provider account: the proxy forwards the key your agent ' +
+        'sends and holds none of its own.')));
+
+    // Agent keys. Only relevant to agents that cannot send x-context-guru-token.
+    host.appendChild(el('div', { class: 'field' },
+      el('label', {}, 'Bound agent keys'),
+      el('div', { 'data-testid': 'agent-keys' },
+        t.agent_keys > 0
+          ? `${t.agent_keys} provider key${t.agent_keys === 1 ? '' : 's'} bound to this account.`
+          : 'None bound.'),
+      el('p', { class: 'hint' },
+        'For agents that cannot send a custom header (Bob/BobShell): the proxy ' +
+        'recognises them by the sha256 of the provider key they already send. Only ' +
+        'the digest is stored. Bind one with the curl line on the Setup tab.'),
+      t.agent_keys > 0
+        ? el('button', {
+          class: 'ghost small', 'data-testid': 'agent-keys-clear',
+          onclick: async () => {
+            if (!confirm('Unbind every provider key? Agents that rely on key ' +
+              'recognition stop being identified until you bind again.')) return;
+            try { await ctl('/api/me/agent-key', { method: 'DELETE' }); await probeAccount(); loadSettings(); } catch (e) { alert(e.message); }
+          },
+        }, 'Unbind all')
+        : null));
 
     // Which configuration is in force, and how to change that.
     host.appendChild(inherited
@@ -3005,17 +3033,15 @@ async function loadTenants() {
     }
     const tbl = el('table', { class: 'grid' },
       el('thead', {}, el('tr', {},
-        el('th', {}, 'Account'), el('th', {}, 'Role'), el('th', {}, 'Spend / cap'),
+        el('th', {}, 'Account'), el('th', {}, 'Role'), el('th', {}, 'Spend'),
         el('th', {}, 'Last seen'), el('th', {}, 'Transcripts'), el('th', {}, 'Configuration'),
         el('th', {}, el('span', { class: 'vh' }, 'Row actions')))));
     const body = el('tbody');
     for (const t of rows) {
-      const over = t.monthly_cap_usd > 0 && t.spent_usd >= t.monthly_cap_usd;
       body.appendChild(el('tr', { class: t.disabled ? 'revoked' : '' },
         el('td', {}, el('div', {}, t.email), el('div', { class: 'muted small' }, t.label)),
         el('td', {}, t.role),
-        el('td', { class: over ? 'warn-text' : '' },
-          t.monthly_cap_usd > 0 ? `${usd(t.spent_usd)} / ${usd(t.monthly_cap_usd)}` : usd(t.spent_usd)),
+        el('td', {}, usd(t.spent_usd)),
         el('td', {}, t.last_seen_at ? when(t.last_seen_at) : el('span', { class: 'muted' }, 'never')),
         // The EFFECTIVE answer to "are this account's transcripts being kept", which is
         // the AND of both gates — never the account's flag on its own.
@@ -3029,16 +3055,6 @@ async function loadTenants() {
           el('button', {
             class: 'ghost small', onclick: () => showTenantMetrics(t.id),
           }, 'Metrics'),
-          el('button', {
-            class: 'ghost small', 'data-testid': 'cap-' + t.id,
-            onclick: async () => {
-              const v = prompt(`Monthly cap in USD for ${t.email} (0 = uncapped):`, String(t.monthly_cap_usd));
-              if (v === null) return;
-              const n = Number(v);
-              if (!Number.isFinite(n) || n < 0) { alert('Not a valid amount.'); return; }
-              try { await ctl('/api/tenants/' + t.id, { method: 'PATCH', body: JSON.stringify({ monthly_cap_usd: n }) }); loadTenants(); } catch (e) { alert(e.message); }
-            },
-          }, 'Set cap'),
           el('button', {
             class: 'ghost small', 'data-testid': 'toggle-' + t.id,
             onclick: async () => {

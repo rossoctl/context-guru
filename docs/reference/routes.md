@@ -325,6 +325,7 @@ See [Hosted service](../hosted.md).
 | `POST /api/login` · `POST /api/logout` | Exchange a token for a session cookie, and drop it. |
 | `GET /api/me` · `PUT /api/me` | The caller's own account and configuration. |
 | `POST /api/me/tokens` · `DELETE /api/me/tokens/{prefix}` | Mint and revoke the caller's own tokens. |
+| `POST /api/me/agent-key` · `DELETE /api/me/agent-key` | Bind (and unbind) the **sha256** of the caller's own provider key, so an agent that can send no `x-context-guru-token` header is still identified. The key is sent in `Authorization` / `x-api-key` — the same slot the agent uses — and is hashed on arrival: never stored, echoed or logged. `DELETE` drops all of them, because a digest is not displayable and "which one" is not answerable. |
 | `GET /api/me/audit` | The caller's configuration-change history. |
 | `GET /api/options` | Which upstreams the operator allows, and which presets and components are registered — so the settings page cannot offer something the server would reject. Names no base URL and no credential env var. |
 | `GET /api/tenants` | Manager only: the roster. |

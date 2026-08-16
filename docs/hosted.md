@@ -28,7 +28,7 @@ harnesses in `deploy/harbor/` are unaffected.
 | Who may call the proxy | anyone who can reach the port | a valid `cg_live_…` token |
 | Pipeline | `--config` / `--preset`, one for the process | the caller's own from the control database, or the [server default they track](#tenants-track-the-default-they-are-not-stamped-with-a-copy-of-it) |
 | Compaction state store | one, shared | one per tenant |
-| Upstream + credential | fixed at boot from flags/env | the tenant's chosen name from the allow-list; the operator's key injected |
+| Upstream + credential | fixed at boot from flags/env | the tenant's chosen name from the allow-list; **the caller's own provider key forwarded** |
 | Dashboard data | everything | scoped to the caller; managers may widen |
 | `/stats` | open | loopback or a manager (it is a service-wide aggregate) |
 | Transcript capture | operator's flag | operator's flag **and** the tenant's consent |
@@ -42,17 +42,27 @@ characters, and nothing else. After `Register` returns, the process no longer ha
 plaintext — so there is no code path that can print one, and a dump of the control
 database cannot be replayed against the proxy. Show it once, at registration.
 
-**Upstream provider keys.** These belong to the operator, never to a user. The
-allow-list names the *environment variable* each key lives in; the value is read at
-request time. It is not in the YAML, not in the control database, and not in a
-tenant's configuration.
+**Provider keys belong to the caller.** Your agent sends its own key in
+`Authorization` / `x-api-key` / `x-goog-api-key`, and the proxy **forwards it
+unchanged** — your traffic, your provider account, your invoice. The service holds no
+provider credential of its own and stores none: the key is read off the request and
+dropped.
 
-A user never hands us their own provider key, and we never ask for one.
+That is why identity moved to a header of its own. `x-context-guru-token` carries the
+`cg_live_…` token, and `copyHeaders` strips every `x-context-guru-*` header before
+forwarding, so a token cannot leave the box by construction. A token presented in an
+auth slot instead is still accepted (some tools have nowhere else to put it) and is
+scrubbed out on the way — recognisable because only *our* tokens are shaped
+`cg_live_` + 26 characters, which no provider key is.
 
-The proxy strips `Authorization`, `x-api-key` and `x-goog-api-key` before forwarding
-and injects the operator's credential instead. Every slot the tenant resolver accepts
-a token from is a slot that is dropped on the way out — `proxy.tokenHeaders` is the
-single list both behaviours read.
+A caller with no credential of their own gets a **401**. It never falls back to
+whatever key the box happens to hold: that fallback is the defect this design removes.
+
+**Server-held keys are an explicit opt-in, not the default.** An allow-list entry may
+name a `key_env`, and then that variable's value replaces the caller's auth on
+forward. That is for a gateway deployment where the agent holds only a placeholder —
+eval containers, a local single-tenant proxy. Omit `key_env` (the hosted default) and
+the caller's own credential goes through.
 
 ## Operator setup
 
@@ -65,7 +75,7 @@ Everything below was derived from the scripts in `deploy/service/`, which are th
 | Building the binary | Go 1.26 and a C toolchain (`CGO_ENABLED=1`) — or an already-installed `/usr/local/bin/context-guru-proxy`, which `install` keeps if there is no fresh build |
 | Installing | root, and systemd. The scripts are written for **RHEL 9** (`dnf`, and nginx 1.20's config dialect) |
 | The TLS front end | `nginx`, plus a certificate and key at `/etc/context-guru/tls/{fullchain,privkey}.pem` |
-| Each upstream | one API key, and a host to send it to |
+| Each upstream | a host to send it to. A key only if you want the server to hold one — the default forwards each caller’s own |
 | Cold storage (optional) | `rclone`, and a browser somewhere for the one OAuth step |
 | Grafana (optional) | `podman` or `docker` |
 
@@ -107,20 +117,15 @@ make build
 # 2. Create the account, directories, binary, units and drop-ins.
 sudo deploy/service/install.sh install
 
-# 3. One credential file per upstream, named after its allow-list entry.
-printf %s "$UPSTREAM_KEY" | sudo tee /etc/context-guru/credentials/ibm-litellm >/dev/null
-sudo chmod 0400 /etc/context-guru/credentials/*
-
-# 4. Real hosts, and key_env names matching the files from step 3.
+# 3. Real hosts. No key_env, so each caller's own provider key is forwarded and no
+#    credential file is needed. (Gateway deployments only: add key_env: NAME, put the
+#    key in /etc/context-guru/credentials/<name>, chmod 0400, and re-run install.)
 sudoedit /etc/context-guru/upstreams.yaml
 
-# 5. Site settings — MANAGER_EMAIL above all. This file, NOT the unit.
+# 4. Site settings — MANAGER_EMAIL above all. This file, NOT the unit.
 sudoedit /etc/systemd/system/context-guru.service.d/20-local.conf
 
-# 6. Re-run install so the credential drop-in is regenerated from step 3.
-sudo deploy/service/install.sh install
-
-# 7. Preflight, then start.
+# 5. Preflight, then start.
 sudo deploy/service/install.sh start
 ```
 
@@ -146,14 +151,15 @@ unauthenticated forwarder to anything this host's network can reach. The example
 `REPLACE-WITH-…` placeholder hosts and `preflight` fails while they are still there —
 starting with them means every request 502s.
 
-**One credential file per upstream, delivered by `LoadCredential`.** Each allow-list
-entry names the environment variable its key lives in; the value lives in
+**Server-held keys, when you want them, arrive by `LoadCredential`.** The default needs
+none — the caller's own provider key is forwarded — but an allow-list entry may name a
+`key_env`, and then the value lives in
 `/etc/context-guru/credentials/<entry>` (root-owned, `0700` directory, `0400` files) and
 systemd hands it to the process as a credential rather than an `Environment=` line —
 which `systemctl show` would print to anyone who can read the unit. `install` **generates**
 `10-credentials.conf` from whatever is actually in that directory, because a hand-written
 `LoadCredential` naming a file that does not exist fails the whole unit with an error that
-does not say which file. So adding an upstream is: drop the key in, re-run `install`.
+does not say which file. So adding a server key is: drop it in, re-run `install`.
 Both spellings of a name work (`ibm-litellm` and `ibm_litellm`), and preflight accepts
 either.
 
@@ -270,8 +276,8 @@ originated server-side and reached the client unbuffered.
 
 **Self-registration is off by default, and a new deployment will look broken until you
 pick a mode** — the first user's `Register` gets a `403` saying to ask the operator.
-That is deliberate: an account is a spending credential against *your* upstream key, so
-N accounts are N × the monthly cap of your money.
+That is deliberate: an account can read its own transcripts and run compaction on your
+box, and there is no email verification behind it (see below).
 
 `CG_REGISTER` is read per request, so switching modes needs no restart.
 
@@ -291,8 +297,8 @@ is enforced.
 
 !!! warning "`POST /api/register` is the only route that creates an account"
     There is no manager-side create. A manager can reissue a token for a tenant that
-    **already exists**, set a cap, or disable an account — but cannot bring one into
-    being. So a fresh control database on the default `closed` has **no path to a first
+    **already exists**, set its row quota, or disable an account — but cannot bring one
+    into being. So a fresh control database on the default `closed` has **no path to a first
     account at all**, and the deployment looks broken rather than locked.
 
 The bootstrap is to open `invite` briefly, register the manager, and close it again:
@@ -343,11 +349,11 @@ defends.
 
 **What these modes do not do.** The domain is checked; the *address* is not. There is no
 mail path on this deployment, so there is no email verification to be had — anyone who can
-guess a valid address in an allowed domain satisfies the check. So `open` mode's real
-exposure is (however many accounts somebody bothers to create) × (the per-tenant monthly
-cap) of the operator's money, and the rate limit only slows a single source. An invite code
-is a shared secret with no per-use accounting: once it leaks it is `open` until you rotate
-it. A port anything else can reach wants `invite` and a modest cap.
+guess a valid address in an allowed domain satisfies the check. `open` mode's exposure is no
+longer *your money* — every account spends its own provider credential — but it is still
+accounts on your box, consuming its CPU and its row quota. An invite code is a shared secret
+with no per-use accounting: once it leaks it is `open` until you rotate it. A port anything
+else can reach wants `invite`.
 
 ### 4. Cold storage on Box
 
@@ -399,17 +405,16 @@ way in is through the TLS front end.
 
 **Registration policy.** `REGISTER_DOMAINS=ibm.com` in the shipped drop-in is what makes
 `open` mode tolerable there: an attacker needs an address in a domain you control. With no
-domain restriction, `open` means anyone who can reach the port can mint a spending credential
-against your upstream key, and the only brake is 3 attempts/minute per client address. There
+domain restriction, `open` means anyone who can reach the port can mint an account on your
+box, and the only brake is 3 attempts/minute per client address. There
 is **no mail path and therefore no email verification** — the domain is checked, the address
 is not. A publicly reachable deployment wants `invite` with a code you rotate, or `closed`
 with accounts you create yourself.
 
-**Spend caps.** The IBM default is $50/tenant/month against a shared internal gateway credential.
-Your exposure is (accounts that exist) × (their caps), so set `TENANT_MONTHLY_CAP_USD` to a
-number you would be willing to lose before you open registration, not after. A cap can only
-bind if requests can be priced — with `MODEL_INFO=off` every row costs $0.00 and no cap ever
-fires; the process warns about that combination at startup.
+**No spend caps, and none needed.** Every tenant's traffic is billed to the credential
+that tenant's agent sends, so there is no shared budget to guard. Month-to-date cost is
+still computed and shown, per tenant, on Settings and in the manager's roster — it needs
+`MODEL_INFO` on to be non-zero, because an unpriced row costs $0.00.
 
 Two things that are *not* IBM-specific and should not be relaxed: cold storage on Box is one
 rclone remote name away from being any other remote, and `/metrics` plus Grafana binding
@@ -422,26 +427,41 @@ loopback-only is about cross-tenant spend data, not about IBM.
     version of this section: register, trust the CA, point one agent at it, and turn it on and
     off per session.
 
-One token, one host. Each agent has its own environment variable, so a user sets each
-once and never thinks about it again.
+**Keep your own provider key where it already is.** The proxy forwards it, so your
+traffic is billed to you. What you add is a base URL and the context-guru token, and the
+token goes in `x-context-guru-token` — never in the slot your key occupies.
 
 ```bash
-# Claude Code
+# Claude Code — your own key stays in ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN)
 export ANTHROPIC_BASE_URL=https://cg.<host>/anthropic
-export ANTHROPIC_AUTH_TOKEN=cg_live_xxxxxxxx
+export ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: cg_live_xxxxxxxx"
 
-# Bob
-export CUSTOM_BASE_URL=https://cg.<host>
-export BOBSHELL_API_KEY=cg_live_xxxxxxxx
-
-# OpenAI-dialect tools
+# OpenAI-dialect tools — your own key stays in OPENAI_API_KEY; send the header
+#   x-context-guru-token: cg_live_xxxxxxxx
 export OPENAI_BASE_URL=https://cg.<host>/openai/v1
-export OPENAI_API_KEY=cg_live_xxxxxxxx
+
+# Bob — its client sets every header itself and cannot carry ours, so bind the key
+# it already sends (stored as sha256 only, never in plaintext). One-time, from the
+# Setup tab, with your dashboard cookie:
+export CUSTOM_BASE_URL=https://cg.<host>
+curl -sS -XPOST https://cg.<host>/api/me/agent-key \
+  -H "Authorization: Bearer $BOBSHELL_API_KEY" -b "cg_dash=<your dashboard cookie>"
 ```
+
+### How each agent identifies itself
+
+| Agent | Mechanism | Why |
+|---|---|---|
+| Claude Code | `ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: …"` (or the same pair in `~/.claude/settings.json` `env`) | Documented `Name: Value`, newline-separated for several. Leaves `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` free for your own key. |
+| OpenAI-dialect tools | `x-context-guru-token` header, however your tool sets extra headers | Same slot rule; `OPENAI_API_KEY` stays yours. |
+| Bob (BobShell) | `sha256(BOBSHELL_API_KEY)`, bound once via `POST /api/me/agent-key` | Bob's client builds `Content-Type`, `User-Agent`, `Authorization`, `x-instance-id` and `x-team-id` itself and exposes no hook for another header; its `headers` setting applies to MCP servers only. So it is recognised by the credential it already sends. |
+
+Agent *family* (claude-code / bob / codex / …) is read from the `User-Agent`, which none
+of this touches.
 
 The path carries the dialect; the tenant's configuration carries which upstream each
 dialect goes to. So switching between Claude Code and Bob needs no per-agent choice
-of gateway, and the same token works in all three.
+of gateway, and the same token works in all of them.
 
 !!! warning "Verify the traffic actually arrives — an `export` is not proof"
     For Claude Code, an `env` block in `~/.claude/settings.json` **overrides the variable
@@ -528,8 +548,9 @@ alone, deliberately.
 
 A tenant can enable `extract_llm` on their settings page. It is a real tradeoff, not
 a free upgrade — measured at +117 ms per request, up to ~945 ms when file reads are
-frequent — and it bills to the shared credential, so it counts against that tenant's
-spend cap.
+frequent — and its model calls go out on **that tenant's own credential**, the same one
+the request carries. With no caller credential available the component skips (fail
+open); it never borrows the server's.
 
 ## Storage
 
@@ -777,10 +798,10 @@ thing to keep in step with the server.
 | View | What it does |
 |---|---|
 | Sign in / Register | Registration takes an email, a token label, and an invite code if the deployment is in `invite` mode; it returns the token **once**. It also signs you in, so registration flows straight to Setup with the token already substituted into the snippets. On a `closed` deployment the attempt is refused — see [step 3](#3-choose-how-accounts-are-created). Signing in later exchanges the token for a session cookie — the token is never stored in the browser. |
-| Setup | The three copy-paste blocks, with your own token and this deployment's real base URL (derived from the request, so it is correct behind nginx and on loopback alike). |
-| Settings | Mode, upstream per dialect, component toggles, content-capture consent, raw YAML, spend against cap, token management, and your own configuration-change history. Read-only while you are [tracking the server default](#tenants-track-the-default-they-are-not-stamped-with-a-copy-of-it), with **Customise** to take ownership. |
+| Setup | The three copy-paste blocks, with your own token and this deployment's real base URL (derived from the request, so it is correct behind nginx and on loopback alike). Your provider key stays where it already is; the blocks only add the base URL and the `x-context-guru-token` header — or, for Bob, the one-time key-binding curl. |
+| Settings | Mode, upstream per dialect, component toggles, content-capture consent, raw YAML, month-to-date spend, bound agent keys, token management, and your own configuration-change history. Read-only while you are [tracking the server default](#tenants-track-the-default-they-are-not-stamped-with-a-copy-of-it), with **Customise** to take ownership. |
 | Archive | What has moved to cold storage, from the local index. Opening one fetches it back read-only. |
-| Tenants | Manager only: every account with spend against cap, set a cap, disable an account, reissue a lost token. |
+| Tenants | Manager only: every account with its month-to-date spend, disable an account, reissue a lost token. |
 
 ![Setup immediately after registering: a green banner reads "Your new token is filled in
 below. It is shown once and cannot be recovered — copy it somewhere safe now", above
@@ -788,15 +809,15 @@ copy-paste export blocks for Claude Code, Bob and OpenAI-dialect tools carrying 
 deployment's base URL and the freshly minted token (redacted
 here).](img/hosted/01-register.png)
 
-![The Settings page: spend this month, $86.42 of a $200.00 cap, drawn as a meter above the
+![The Settings page: spend this month, $86.42, reported above the
 knobs; a mode selector set to "sync — compaction is applied"; one upstream dropdown per
 dialect, populated from the operator's allow-list; a grid of pipeline-component
 checkboxes with extract_llm carrying its own latency-and-billing warning; and the
 transcript-capture consent box.](img/hosted/02-settings.png)
 
 ![The manager-only Tenants view: six placeholder accounts, each with its role,
-month-to-date spend against its cap, when it was last seen, the first line of its
-configuration, and per-row Metrics, Set cap, Disable and Reissue token buttons. The
+month-to-date spend, when it was last seen, the first line of its
+configuration, and per-row Metrics, Disable and Reissue token buttons. The
 disabled account is greyed out with its actions
 inert.](img/hosted/03-tenants.png)
 
@@ -817,20 +838,15 @@ The page keeps its strict same-origin CSP, no npm, no bundler and no CDN. `style
 | Requests per minute, per tenant | `--tenant-rpm` | 0 (unlimited) |
 | In-flight requests, per tenant | `--tenant-concurrent` | 0 (unlimited) |
 | Concurrent compaction-model calls, process-wide | `--cheap-model-concurrent` | 4 |
-| Monthly spend, per tenant | `--tenant-monthly-cap-usd` | $50 |
 
 The compaction-model bound is process-wide rather than per tenant on purpose: the point
 is to stop one tenant's `extract_llm` traffic from making everyone else's agents wait on
 a shared, rate-limited backend.
 
-Over the spend cap returns **402**, not 429: retrying will not help until a manager
-raises the cap or the month turns over, and saying so precisely is the difference
-between a bug report and a budget request.
-
-**A cap can only bind if requests can be priced.** With `MODEL_INFO=off` every row costs
-$0.00, month-to-date spend is always zero, and no cap ever fires — main warns at startup
-if you configure that combination. Note also that prices load asynchronously on first
-use, so the very first request after a restart is recorded as `partial` and unpriced.
+**There is no spend cap.** Each tenant's traffic is billed to the credential their own
+agent sends, so there is nothing shared to ration. Cost is still recorded and displayed;
+it needs `MODEL_INFO` on to be non-zero, and prices load asynchronously on first use, so
+the very first request after a restart is recorded as `partial` and unpriced.
 
 ## Privacy
 

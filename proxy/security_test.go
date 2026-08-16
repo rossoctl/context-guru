@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// A published *Tenancy must be immutable: the request path reads MonthlyCapUSD,
+// A published *Tenancy must be immutable: the request path reads Label,
 // CaptureContent, Preset and the Up* names with NO lock, so refreshing them in place
 // on the cache-hit path is a data race — one agent with two turns in flight is
 // enough. Run with -race; before the fix this fails, after it the refresh publishes a
@@ -28,7 +28,7 @@ func TestPublishedTenancyIsNotMutated(t *testing.T) {
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
-	// The unlocked readers, as the request path has them (spendgate, captureContentFor,
+	// The unlocked readers, as the request path has them (captureContentFor,
 	// newCapture, upstreamFor).
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
@@ -39,7 +39,6 @@ func TestPublishedTenancyIsNotMutated(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					_ = first.MonthlyCapUSD + 1
 					_ = first.CaptureContent
 					_ = first.Label + first.Preset + first.UpOpenAI + first.UpAnthropic + first.UpBob
 					_ = first.Manager
@@ -51,15 +50,14 @@ func TestPublishedTenancyIsNotMutated(t *testing.T) {
 	// never races on the tenant row itself.
 	for i := 0; i < 300; i++ {
 		c := *tn
-		c.Label = "laptop-" + string(rune('a'+i%26))
-		c.MonthlyCapUSD = float64(i)
+		c.Label = "laptop-" + strconv.Itoa(i)
 		c.CaptureContent = i%2 == 0
 		got, err := src.ForTenant(&c)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.MonthlyCapUSD != float64(i) {
-			t.Fatalf("refresh did not take effect: cap = %v, want %v", got.MonthlyCapUSD, float64(i))
+		if got.Label != c.Label {
+			t.Fatalf("refresh did not take effect: label = %q, want %q", got.Label, c.Label)
 		}
 	}
 	close(stop)
@@ -76,8 +74,8 @@ func TestPublishedTenancyIsNotMutated(t *testing.T) {
 	}
 }
 
-// Bounding the limiter's map must not throw away every OTHER key's rate window and
-// cached spend. Before the fix, entry 10001 replaced the whole map with itself.
+// Bounding the limiter's map must not throw away every OTHER key's rate window.
+// Before the fix, entry 10001 replaced the whole map with itself.
 func TestLimiterBoundEvictsOneKeyNotAll(t *testing.T) {
 	l := NewLimiter(Limits{RequestsPerMinute: 1})
 	minuteAtStart := time.Now().Truncate(time.Minute)
@@ -111,29 +109,6 @@ func TestLimiterBoundEvictsOneKeyNotAll(t *testing.T) {
 		}
 	}
 
-	c := newSpendCache(time.Minute)
-	load := func(string) (float64, error) { return 1, nil }
-	for i := 0; i < maxLimiterKeys+1; i++ {
-		if _, err := c.get("t"+strconv.Itoa(i), load); err != nil {
-			t.Fatal(err)
-		}
-	}
-	c.mu.Lock()
-	n = c.values.ll.Len()
-	c.mu.Unlock()
-	if n != maxLimiterKeys {
-		t.Fatalf("spend cache holds %d entries, want the bound of %d", n, maxLimiterKeys)
-	}
-	calls := 0
-	counted := func(string) (float64, error) { calls++; return 1, nil }
-	for i := maxLimiterKeys - 100; i < maxLimiterKeys; i++ {
-		if _, err := c.get("t"+strconv.Itoa(i), counted); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if calls != 0 {
-		t.Fatalf("%d recently cached spend values were discarded by the bound", calls)
-	}
 }
 
 // --- registration gating (F2) ------------------------------------------------

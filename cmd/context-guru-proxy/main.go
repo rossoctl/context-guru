@@ -26,6 +26,7 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
@@ -93,8 +94,6 @@ func main() {
 		maxTenancies = flag.Int("max-tenancies", envInt("MAX_TENANCIES", proxy.DefaultMaxTenancies),
 			"hosted mode: how many tenants keep live pipelines and compaction state in memory; "+
 				"evicting a tenant costs it one cold cache on its next turn")
-		tenantCapUSD = flag.Float64("tenant-monthly-cap-usd", float64(envInt("TENANT_MONTHLY_CAP_USD", 50)),
-			"hosted mode: default monthly spend cap per tenant against the shared upstream credential")
 
 		// Disk-pressure eviction. The byte budget above bounds THIS database; these
 		// bound the FILESYSTEM, which on a shared box is mostly filled by other things.
@@ -291,12 +290,11 @@ func main() {
 		}
 		defAnthropic, defOpenAI, defBob := defaultUpstreams(list)
 		reg, err = tenant.Open(*controlDB, tenant.Options{
-			ManagerEmail:         *managerEmail,
-			EmailDomains:         splitComma(*registerDomains),
-			DefaultUpAnthropic:   defAnthropic,
-			DefaultUpOpenAI:      defOpenAI,
-			DefaultUpBob:         defBob,
-			DefaultMonthlyCapUSD: *tenantCapUSD,
+			ManagerEmail:       *managerEmail,
+			EmailDomains:       splitComma(*registerDomains),
+			DefaultUpAnthropic: defAnthropic,
+			DefaultUpOpenAI:    defOpenAI,
+			DefaultUpBob:       defBob,
 			// Reject a bad configuration when a user SAVES it, so the failure is a 400
 			// on their settings page instead of a silent pass-through on their next turn.
 			Validate: config.Validate,
@@ -318,13 +316,12 @@ func main() {
 			}
 			return t.MaxRows
 		})
-		// A cap can only bind if requests can be priced. Without a price map every row
-		// costs $0.00, month-to-date spend is always zero, and the cap silently never
-		// fires — which looks exactly like a generous budget until the invoice arrives.
-		if *tenantCapUSD > 0 && strings.EqualFold(os.Getenv("MODEL_INFO"), "off") {
-			slog.Warn("context-guru: per-tenant spend caps are configured but MODEL_INFO=off, " +
-				"so requests cannot be priced and NO CAP WILL EVER FIRE")
-		}
+		// A tenant's own configuration must never be able to spend the server's ambient
+		// provider credential: a `model:` block that names a model but no api_key would
+		// otherwise fall back to this process's ANTHROPIC_API_KEY / OPENAI_API_KEY. In
+		// hosted mode that is exactly the billing defect this deployment removes, so the
+		// fallback is switched off and such a block simply has no client (fail open).
+		offload.AllowEnvModelKey = false
 		slog.Info("context-guru: HOSTED multi-tenant mode",
 			"control_db", *controlDB, "upstreams", len(upstreams),
 			"register_domains", *registerDomains, "manager", *managerEmail != "")

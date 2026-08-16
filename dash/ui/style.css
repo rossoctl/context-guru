@@ -679,12 +679,9 @@ details.field > summary { font-size: var(--t-small); color: var(--fg-muted); fon
 .comp input:disabled + .comp-name { color: var(--fg-muted); }
 .comp:has(input:disabled) { cursor: default; }
 
-/* Spend meter. Warns past 90%, because the next thing that happens is refused requests. */
+/* Month-to-date spend. Reported, not capped: the traffic runs on the caller's own key. */
 .spend { margin: 0 0 var(--sp-5); }
 .spend-label { font-size: var(--t-body); margin-bottom: var(--sp-2); font-variant-numeric: tabular-nums; font-weight: 600; }
-.meter { height: 8px; background: var(--bg-sunken); border: 1px solid var(--border-soft); border-radius: var(--r-sm); overflow: hidden; }
-.meter > i { display: block; height: 100%; background: var(--s1); border-radius: 0 var(--r-sm) var(--r-sm) 0; }
-.meter > i.hot { background: var(--warn); }
 
 /* ── shared grid tables (tokens, audit, tenants, archive) ─────────────── */
 table.grid { width: 100%; border-collapse: collapse; font-size: var(--t-body); }

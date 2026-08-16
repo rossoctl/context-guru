@@ -152,7 +152,6 @@ reads as healthy:
 $ curl -s http://127.0.0.1:4000/metrics | grep '^cg_refused_requests_total'
 cg_refused_requests_total{reason="rate_limit"} 3
 cg_refused_requests_total{reason="concurrency"} 0
-cg_refused_requests_total{reason="spend_cap"} 1
 cg_refused_requests_total{reason="auth"} 2
 cg_refused_requests_total{reason="forbidden"} 0
 cg_refused_requests_total{reason="no_upstream"} 0
@@ -274,9 +273,9 @@ Prometheus, add `instance` to the panels you want split — every series already
 | Is it up and healthy? | scrape reachability, running build, request rate, compaction rate, added latency |
 | Am I saving tokens and money? | actual against baseline spend, token counts before/after, billed tiers, what compaction itself cost |
 | Which components earn their place? | tokens removed, hit rate and time spent, per component — a component at 0% hit rate is dead weight |
-| Who is using it? | spend against cap, request rate and a per-tenant table |
+| Who is using it? | month-to-date spend, request rate and a per-tenant table |
 | Is storage healthy? | local database against cold storage, filesystem headroom, archive reachability, dropped captures |
-| Is anything failing? | refusals by reason and by tenant, compaction-model failures, cache-write churn, wasted tokens, expand bounces, buffered streams, disabled tenants, tenants near their cap |
+| Is anything failing? | refusals by reason and by tenant, compaction-model failures, cache-write churn, wasted tokens, expand bounces, buffered streams, disabled tenants |
 
 **`context-guru-slo`** — availability, the latency the service is actually responsible for,
 whether the observability path itself is lossy, and the **HTTP error-rate SLI**: refused
@@ -303,7 +302,7 @@ actual" gets lied to after a filter.
 **Stat and gauge panels follow one rule, and a new panel must pick a side.** The traffic
 light (`#199e70` / `#c98500` / `#e66767`) means **act on this**: the panel carries a
 threshold an operator should respond to — availability, added latency, filesystem in use,
-buffered streams, capture loss, tenants at their cap, up/down. Our own **magnitudes carry no
+buffered streams, capture loss, up/down. Our own **magnitudes carry no
 verdict** and are pinned `#3987e5` blue: build, request rate, tokens removed, sessions
 archived, a positive saving, tokens removed per component. So green here always means "a
 threshold was met that someone might otherwise have had to act on", never merely "this
@@ -346,7 +345,7 @@ light to mean "act on this" — which on those panels is what a non-zero bar mea
 
 - **Refusals are counted, but not every 4xx is a refusal.** `cg_refused_requests_total`
   covers the ways the proxy deliberately turns a request away — 429 rate limit, 429
-  concurrency, 402 spend cap, 401/403 auth, 502 (no upstream configured, or the upstream
+  concurrency, 401/403 auth, 502 (no upstream configured, or the upstream
   call failed). It does NOT count a malformed body (400) or an oversized one (413), and it
   does not cover the control-plane endpoints under `/api/`, which write their status
   directly rather than through `failAuth`. So the error-rate SLI is a *proxy-path* error

@@ -158,16 +158,16 @@ func TestSelfEscalationIsRefusedOverHTTP(t *testing.T) {
 	jar := w.Result().Cookies()
 	me := f.mustMe(t, jar)
 
-	// PUT /api/me has no cap or role field at all, so the strict decoder rejects the
+	// PUT /api/me has no quota or role field at all, so the strict decoder rejects the
 	// attempt outright rather than silently ignoring it.
-	w, _ = f.do(t, "PUT", "/api/me", `{"monthly_cap_usd":999999}`, jar)
+	w, _ = f.do(t, "PUT", "/api/me", `{"max_rows":999999}`, jar)
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("self cap raise via /api/me = %d, want 400", w.Code)
+		t.Errorf("self quota raise via /api/me = %d, want 400", w.Code)
 	}
 	// And the manager route refuses a non-manager.
-	w, _ = f.do(t, "PATCH", "/api/tenants/"+me, `{"monthly_cap_usd":999999}`, jar)
+	w, _ = f.do(t, "PATCH", "/api/tenants/"+me, `{"max_rows":999999}`, jar)
 	if w.Code != http.StatusForbidden {
-		t.Errorf("self cap raise via the manager route = %d, want 403", w.Code)
+		t.Errorf("self quota raise via the manager route = %d, want 403", w.Code)
 	}
 	w, _ = f.do(t, "PATCH", "/api/tenants/"+me, `{"role":"manager"}`, jar)
 	if w.Code != http.StatusForbidden {
@@ -198,12 +198,12 @@ func TestManagerCanAdministerAndAuditRecordsIt(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("manager roster = %d", w.Code)
 	}
-	w, out := f.do(t, "PATCH", "/api/tenants/"+target, `{"monthly_cap_usd":12.5,"disabled":true}`, mgrJar)
+	w, out := f.do(t, "PATCH", "/api/tenants/"+target, `{"max_rows":1250,"disabled":true}`, mgrJar)
 	if w.Code != http.StatusOK {
 		t.Fatalf("manager patch = %d %s", w.Code, w.Body)
 	}
 	tn, _ := out["tenant"].(map[string]any)
-	if tn["monthly_cap_usd"] != 12.5 || tn["disabled"] != true {
+	if tn["max_rows"] != 1250.0 || tn["disabled"] != true {
 		t.Errorf("patch did not apply: %v", tn)
 	}
 	// Disabling must also end the browser session, or a disabled user keeps reading

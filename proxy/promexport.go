@@ -54,7 +54,6 @@ type refusalReason string
 const (
 	refuseRateLimit   refusalReason = "rate_limit"     // 429, per-tenant requests/minute
 	refuseConcurrency refusalReason = "concurrency"    // 429, per-tenant in-flight cap
-	refuseSpendCap    refusalReason = "spend_cap"      // 402, monthly cap reached
 	refuseAuth        refusalReason = "auth"           // 401, missing/unknown token
 	refuseForbidden   refusalReason = "forbidden"      // 403, disabled account or a gated view
 	refuseNoUpstream  refusalReason = "no_upstream"    // 502, nothing configured for the route
@@ -64,7 +63,7 @@ const (
 // refusalReasons is the exposition order, and the reason every series is present with a
 // value of 0 rather than absent: a Grafana rate() over a family that only appears once
 // something breaks renders "No data", which reads as healthy.
-var refusalReasons = []refusalReason{refuseRateLimit, refuseConcurrency, refuseSpendCap,
+var refusalReasons = []refusalReason{refuseRateLimit, refuseConcurrency,
 	refuseAuth, refuseForbidden, refuseNoUpstream, refuseUpstream}
 
 // refusalTotals is the process-wide count per reason. Built once and never written
@@ -214,7 +213,10 @@ func (h *Handler) metricsAllowed(r *http.Request) bool {
 	if tok := h.opts.MetricsToken; tok != "" {
 		// Constant time: a byte-by-byte == leaks the shared secret's prefix to a
 		// scraper that can time its own requests.
-		if subtle.ConstantTimeCompare([]byte(TokenFromRequest(r)), []byte(tok)) == 1 {
+		// Read the auth slot directly rather than through TokenFromRequest: the scrape
+		// credential is the OPERATOR's shared secret, not a cg_live_ tenant token, so it
+		// would not survive that function's shape check.
+		if subtle.ConstantTimeCompare([]byte(headerCredential(r.Header.Get("Authorization"))), []byte(tok)) == 1 {
 			return true
 		}
 	}
@@ -377,7 +379,7 @@ func (h *Handler) renderMetrics() string {
 	// counters are exactly what is wanted on a proxy with no /stats rollups at all.
 	refusals, refusalsByTenant := refusalSnapshot()
 	promHeader(&b, "cg_refused_requests_total",
-		"Requests refused before an upstream was called, by reason. Any sustained rate here is somebody's agent failing: rate_limit and concurrency are both 429 but have different fixes (raise the rate, raise the in-flight cap), spend_cap is 402 and needs a bigger budget, auth/forbidden mean a bad or disabled token, no_upstream is our own misconfiguration and upstream_error is the provider.", "counter")
+		"Requests refused before an upstream was called, by reason. Any sustained rate here is somebody's agent failing: rate_limit and concurrency are both 429 but have different fixes (raise the rate, raise the in-flight cap), auth/forbidden mean a bad or disabled token, no_upstream is our own misconfiguration and upstream_error is the provider.", "counter")
 	for _, r := range refusalReasons {
 		promLine(&b, "cg_refused_requests_total", `reason="`+string(r)+`"`, float64(refusals[r]))
 	}
@@ -540,14 +542,8 @@ func (h *Handler) renderMetrics() string {
 		}
 	}
 
-	// Spend caps, so a Grafana panel can show headroom rather than only consumption.
 	if reg := h.registry(); reg != nil {
 		if all, err := reg.List(); err == nil {
-			promHeader(&b, "cg_tenant_monthly_cap_usd", "Configured monthly spend cap per tenant (0 = uncapped).", "gauge")
-			for _, t := range all {
-				promLine(&b, "cg_tenant_monthly_cap_usd",
-					`tenant="`+escapeLabel(t.ID)+`",label="`+escapeLabel(t.Label)+`"`, t.MonthlyCapUSD)
-			}
 			promHeader(&b, "cg_tenant_disabled", "1 when a tenant is disabled.", "gauge")
 			for _, t := range all {
 				v := 0.0
