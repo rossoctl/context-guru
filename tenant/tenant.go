@@ -52,7 +52,36 @@ var (
 	ErrBadEmail     = errors.New("tenant: malformed email")
 	ErrBadLabel     = errors.New("tenant: label must be 1-64 printable characters")
 	ErrForbidden    = errors.New("tenant: not permitted")
+	ErrBadVariant   = errors.New(
+		"tenant: variant must be 1-32 characters of letters, digits, '.', '_' or '-'")
+	ErrBadReason = errors.New("tenant: reason must be at most 200 printable characters")
 )
+
+// DisabledError is ErrDisabled carrying the manager's REASON, so the refusal an agent
+// receives can say why. It unwraps to ErrDisabled, so every existing
+// errors.Is(err, ErrDisabled) branch keeps working unchanged — the reason is additive.
+//
+// The reason is written by a manager and read by the account's owner. It is bounded and
+// printable on write (validReason) precisely because it ends up in an HTTP body.
+type DisabledError struct{ Reason string }
+
+func (e *DisabledError) Error() string {
+	if e.Reason == "" {
+		return ErrDisabled.Error()
+	}
+	return ErrDisabled.Error() + ": " + e.Reason
+}
+
+func (e *DisabledError) Unwrap() error { return ErrDisabled }
+
+// disabledErr is the refusal for a disabled account: the bare sentinel when no reason was
+// recorded, so nothing changes for the accounts that have none.
+func disabledErr(t *Tenant) error {
+	if t == nil || t.DisabledReason == "" {
+		return ErrDisabled
+	}
+	return &DisabledError{Reason: t.DisabledReason}
+}
 
 // Role decides what a token may see beyond its own rows. Exactly two, because a
 // permission matrix nobody asked for is the classic thing to regret.
@@ -102,10 +131,22 @@ type Tenant struct {
 	// evict everyone else's history. 0 = the server default
 	// (--dashboard-max-rows-per-tenant). Enforced by the dashboard janitor, which reads
 	// it through dash.Recorder.SetTenantQuota — wired in cmd/context-guru-proxy.
-	MaxRows    int64
-	Disabled   bool
-	CreatedAt  time.Time
-	LastSeenAt time.Time
+	MaxRows int64
+	// Variant is the A/B group a manager put this account in, or "" for none. It is a
+	// LABEL and nothing else: it selects no configuration and changes no behaviour, so
+	// assigning it can never break someone's agent. What it buys is the ability to group
+	// the metrics that already exist by the group a manager assigned — see the /api/variants
+	// rollup, which is honest about the fact that a manager's assignment is not a
+	// randomised trial.
+	Variant string
+	// DisabledReason is the manager's note on why this account is off, shown to its
+	// owner in the 403 their agent receives and in the refusal at sign-in. Without it
+	// "disabled" is undiagnosable from the outside: the person whose agent stopped has
+	// no way to learn whether it was deliberate.
+	DisabledReason string
+	Disabled       bool
+	CreatedAt      time.Time
+	LastSeenAt     time.Time
 	// VerifiedAt is when this account proved it owns its email address, by entering
 	// a code we mailed there. Zero means unverified: the account exists but holds no
 	// token and cannot sign in.
@@ -414,7 +455,7 @@ func (r *Registry) Resolve(token string) (*Tenant, error) {
 	r.mu.RUnlock()
 	if ok && time.Now().Before(e.exp) {
 		if e.t.Disabled {
-			return nil, ErrDisabled
+			return nil, disabledErr(e.t)
 		}
 		return e.t, nil
 	}
@@ -434,7 +475,7 @@ func (r *Registry) Resolve(token string) (*Tenant, error) {
 	r.mu.Unlock()
 
 	if t.Disabled {
-		return nil, ErrDisabled
+		return nil, disabledErr(t)
 	}
 	return t, nil
 }
@@ -500,6 +541,11 @@ type Patch struct {
 	CaptureContent *bool
 	MaxRows        *int64
 	Disabled       *bool
+	// Variant and DisabledReason are manager-only, like Role/MaxRows/Disabled: one is
+	// how an A/B group is assigned and the other is a note the account's owner reads,
+	// and neither is a thing a user should be able to write about themselves.
+	Variant        *string
+	DisabledReason *string
 }
 
 // Update applies a patch to a tenant, recording each changed field in the audit
@@ -513,7 +559,8 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 	if actor.ID != targetID && !actor.IsManager() {
 		return ErrForbidden
 	}
-	privileged := p.Role != nil || p.MaxRows != nil || p.Disabled != nil
+	privileged := p.Role != nil || p.MaxRows != nil || p.Disabled != nil ||
+		p.Variant != nil || p.DisabledReason != nil
 	if privileged && !actor.IsManager() {
 		return ErrForbidden
 	}
@@ -526,6 +573,12 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 	}
 	if p.Role != nil && *p.Role != RoleUser && *p.Role != RoleManager {
 		return fmt.Errorf("tenant: unknown role %q", *p.Role)
+	}
+	if p.Variant != nil && !validVariant(strings.TrimSpace(*p.Variant)) {
+		return ErrBadVariant
+	}
+	if p.DisabledReason != nil && !validReason(*p.DisabledReason) {
+		return ErrBadReason
 	}
 	if p.ConfigYAML != nil && r.opts.Validate != nil && strings.TrimSpace(*p.ConfigYAML) != "" {
 		if err := r.opts.Validate([]byte(*p.ConfigYAML)); err != nil {
@@ -577,9 +630,25 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 		next.MaxRows = *v
 		set("max_rows", fmt.Sprint(cur.MaxRows), fmt.Sprint(next.MaxRows), next.MaxRows != cur.MaxRows)
 	}
+	if v := p.Variant; v != nil {
+		next.Variant = strings.TrimSpace(*v)
+		set("variant", cur.Variant, next.Variant, next.Variant != cur.Variant)
+	}
+	if v := p.DisabledReason; v != nil {
+		next.DisabledReason = strings.TrimSpace(*v)
+		set("disabled_reason", cur.DisabledReason, next.DisabledReason,
+			next.DisabledReason != cur.DisabledReason)
+	}
 	if v := p.Disabled; v != nil {
 		next.Disabled = *v
 		set("disabled", boolStr(cur.Disabled), boolStr(next.Disabled), next.Disabled != cur.Disabled)
+		// Re-enabling clears the reason, unless this same patch supplied one. A stale
+		// "suspected credential leak" on a live account is worse than no note at all: the
+		// next manager to read the roster acts on it.
+		if !*v && p.DisabledReason == nil && next.DisabledReason != "" {
+			next.DisabledReason = ""
+			set("disabled_reason", cur.DisabledReason, "", true)
+		}
 	}
 	if len(changes) == 0 {
 		return nil
@@ -591,10 +660,11 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`UPDATE tenants SET label=?,role=?,config_yaml=?,up_anthropic=?,
-	  up_openai=?,up_bob=?,capture_content=?,max_rows=?,disabled=? WHERE id=?`,
+	  up_openai=?,up_bob=?,capture_content=?,max_rows=?,disabled=?,
+	  variant=?,disabled_reason=? WHERE id=?`,
 		next.Label, string(next.Role), next.ConfigYAML, next.UpAnthropic, next.UpOpenAI,
 		next.UpBob, boolInt(next.CaptureContent), next.MaxRows,
-		boolInt(next.Disabled), targetID); err != nil {
+		boolInt(next.Disabled), next.Variant, next.DisabledReason, targetID); err != nil {
 		return err
 	}
 	now := time.Now().UnixMilli()
@@ -624,6 +694,59 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 	return nil
 }
 
+// Delete removes an account and every control-plane row that hangs off it: its tokens,
+// its browser sessions, its bound agent keys and any pending email code, all by
+// ON DELETE CASCADE.
+//
+// It does NOT touch the metrics database. That is a SEPARATE file (dash's request store),
+// so no foreign key reaches it and deleting this row would otherwise leave a tenant's
+// requests, component rows, captured transcripts and archived objects behind, owned by an
+// id no account answers to. The caller purges those first — see proxy's ctlDeleteTenant,
+// which runs dash.Recorder.PurgeTenant before this and once more after it.
+//
+// Manager only, and never the actor's own account. Self-deletion is refused because the
+// manager routes are the only way to make another manager: a deployment whose last
+// manager deleted themselves has no way back except editing the database by hand.
+//
+// The audit row is written in the SAME transaction, before the delete. tenant_config_audit
+// deliberately has no foreign key on target_tenant, so the trail outlives the account it
+// describes — which is the whole point of auditing a deletion.
+func (r *Registry) Delete(actor *Tenant, targetID string) error {
+	if actor == nil || !actor.IsManager() {
+		return ErrForbidden
+	}
+	if actor.ID == targetID {
+		return ErrForbidden
+	}
+	t, err := r.Get(targetID)
+	if err != nil {
+		return err
+	}
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO tenant_config_audit
+	  (ts,actor_tenant,target_tenant,field,before,after) VALUES (?,?,?,?,?,?)`,
+		time.Now().UnixMilli(), actor.ID, targetID, "account", t.Email, "deleted"); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM tenants WHERE id = ?`, targetID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Now, not in 30 seconds: a deleted account's cached token must stop resolving.
+	r.clearCache()
+	return nil
+}
+
 // AuditEntry is one recorded configuration change.
 type AuditEntry struct {
 	At            time.Time
@@ -632,14 +755,26 @@ type AuditEntry struct {
 	Before, After string
 }
 
+// AuditWrite records an action that is not a field diff — a manager-initiated password
+// reset, a storage purge, a password change — so the trail answers "who did this to my
+// account" for those too, and not only for configuration edits.
+//
+// Exported because the actions are performed at the HTTP layer over several packages'
+// worth of state (the metrics database, the mailer), so there is no single registry method
+// they could be recorded inside. It writes to the same table Update does, which is what
+// makes /api/me/audit one list rather than three.
+func (r *Registry) AuditWrite(actorID, targetID, field, before, after string) error {
+	_, err := r.db.Exec(`INSERT INTO tenant_config_audit
+	  (ts,actor_tenant,target_tenant,field,before,after) VALUES (?,?,?,?,?,?)`,
+		time.Now().UnixMilli(), actorID, targetID, field, before, after)
+	return err
+}
+
 // auditSelf records a change a tenant made to its own account, for the cases outside
 // Update's field-by-field diff (agent-key bindings). Actor and target are the same
 // tenant: these endpoints are self-service only.
 func (r *Registry) auditSelf(tenantID, field, before, after string) error {
-	_, err := r.db.Exec(`INSERT INTO tenant_config_audit
-	  (ts,actor_tenant,target_tenant,field,before,after) VALUES (?,?,?,?,?,?)`,
-		time.Now().UnixMilli(), tenantID, tenantID, field, before, after)
-	return err
+	return r.AuditWrite(tenantID, tenantID, field, before, after)
 }
 
 // Audit returns the most recent changes to a tenant, newest first. A shared
@@ -811,7 +946,7 @@ func (r *Registry) ResolveAgentKey(key string) (*Tenant, error) {
 	r.mu.RUnlock()
 	if ok && time.Now().Before(e.exp) {
 		if e.t.Disabled {
-			return nil, ErrDisabled
+			return nil, disabledErr(e.t)
 		}
 		return e.t, nil
 	}
@@ -834,7 +969,7 @@ func (r *Registry) ResolveAgentKey(key string) (*Tenant, error) {
 	r.mu.Unlock()
 
 	if t.Disabled {
-		return nil, ErrDisabled
+		return nil, disabledErr(t)
 	}
 	return t, nil
 }
@@ -1013,6 +1148,16 @@ var migrations = []string{
 	// v4: the backfill on its own, for a database that already reached v3 (dev and
 	// staging installs of the email-auth build) and so will never re-run it above.
 	stampInUseAccounts,
+
+	// v5: manager control. Two columns, both additive with defaults, so an existing
+	// account migrates to "no variant, no reason" and nothing changes for it.
+	//
+	// variant is an A/B GROUP LABEL. Deliberately not a foreign key into a variants
+	// table: a variant has no properties of its own — the configuration lives on the
+	// tenant row, where it already did — so a second table would hold nothing but a
+	// name, and a name is what this column is.
+	`ALTER TABLE tenants ADD COLUMN variant         TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE tenants ADD COLUMN disabled_reason TEXT NOT NULL DEFAULT '';`,
 }
 
 func migrate(db *sql.DB) error {
@@ -1052,7 +1197,7 @@ func migrate(db *sql.DB) error {
 // password_hash is deliberately absent — see Tenant.HasPassword.
 const tenantCols = `t.id,t.label,t.email,t.role,t.config_yaml,t.up_anthropic,t.up_openai,
 	t.up_bob,t.capture_content,t.max_rows,t.disabled,t.created_at,t.last_seen_at,
-	t.email_verified_at,t.password_hash <> ''`
+	t.email_verified_at,t.password_hash <> '',t.variant,t.disabled_reason`
 
 // scanner is what *sql.Row and *sql.Rows have in common.
 type scanner interface{ Scan(...any) error }
@@ -1064,7 +1209,7 @@ func scanTenant(s scanner) (*Tenant, error) {
 	var created, seen, verified int64
 	if err := s.Scan(&t.ID, &t.Label, &t.Email, &role, &t.ConfigYAML, &t.UpAnthropic,
 		&t.UpOpenAI, &t.UpBob, &capture, &t.MaxRows, &disabled,
-		&created, &seen, &verified, &haspw); err != nil {
+		&created, &seen, &verified, &haspw, &t.Variant, &t.DisabledReason); err != nil {
 		return nil, err
 	}
 	t.Role = Role(role)
@@ -1090,6 +1235,40 @@ func newID() string {
 // lines, and in the audit trail.
 func validLabel(s string) bool {
 	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// validVariant reports whether s may name an A/B group. Stricter than validLabel
+// because a variant name is a GROUPING KEY as well as display text — it ends up as a
+// chart legend, a query parameter and an audit value — and an allow-list is the way to
+// keep all three uses safe at once. Empty is valid: it means "no variant".
+func validVariant(s string) bool {
+	if len(s) > 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.' || c == '_' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validReason bounds a manager's note. It is shown to the account's owner, so it is
+// bounded and printable rather than free-form: this string travels into a 403 body.
+func validReason(s string) bool {
+	if len(s) > 200 {
 		return false
 	}
 	for _, r := range s {

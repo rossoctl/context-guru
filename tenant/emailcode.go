@@ -49,6 +49,12 @@ type CodePurpose string
 const (
 	PurposeRegister CodePurpose = "register"
 	PurposeLogin    CodePurpose = "login"
+	// PurposeReset is a password reset. A third purpose rather than a reuse of the login
+	// code, and the separation is the security property: the purpose is mixed into the
+	// hash, so a login code cannot be spent at the reset endpoint and a reset code cannot
+	// be spent as a second factor. Which purpose is in play is decided by the ROUTE that
+	// spends it, never by a field the client sends.
+	PurposeReset CodePurpose = "reset"
 )
 
 // Errors callers branch on. ErrBadCode and ErrCodeExpired are deliberately different

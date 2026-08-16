@@ -122,6 +122,10 @@
       <input id="gate-password" type="password" autocomplete="current-password" data-testid="gate-password">
       <p class="hint">We email a 6-digit code to finish signing in.</p>
       <button type="submit" class="primary" data-testid="gate-signin-submit">Continue</button>
+      <!-- Self-service recovery. Its absence is what made an earlier lockout unrecoverable:
+           with no reset, an account that could not sign in had nothing to try, and nobody
+           could help without becoming able to read its transcripts. -->
+      <button type="button" class="ghost small" id="gate-forgot" data-testid="gate-forgot">Forgot your password?</button>
       <!-- The token box stays for accounts created before passwords existed: they have
            nothing else to sign in with. An account WITH a password is refused here. -->
       <details id="gate-token-fallback">
@@ -166,7 +170,37 @@
       <button type="button" class="ghost small" id="gate-verify-cancel" data-testid="gate-verify-cancel">Start over</button>
     </form>
 
+    <!-- Password reset, phase one: ask for a code. The reply is identical whether or not
+         the address has an account, so this form promises only that a code was sent IF
+         there is one to send. -->
+    <form id="gate-reset" class="gate-form" hidden data-testid="gate-reset">
+      <p class="hint">We email a code to the address on the account. Nobody — including
+        whoever runs this deployment — can see it or set your password for you.</p>
+      <label for="gate-reset-email">Work email</label>
+      <input id="gate-reset-email" type="email" autocomplete="email" data-testid="gate-reset-email">
+      <button type="submit" class="primary" data-testid="gate-reset-submit">Email me a code</button>
+      <button type="button" class="ghost small" id="gate-reset-cancel" data-testid="gate-reset-cancel">Back to sign in</button>
+    </form>
+
+    <!-- Phase two: the code plus the new password, in one step. Two steps would mean
+         holding a spent code while the user thinks of a password. -->
+    <form id="gate-reset-verify" class="gate-form" hidden data-testid="gate-reset-verify">
+      <p class="hint" id="gate-reset-intro"></p>
+      <label for="gate-reset-code">6-digit code</label>
+      <input id="gate-reset-code" type="text" inputmode="numeric" autocomplete="one-time-code"
+             pattern="[0-9]{6}" maxlength="6" spellcheck="false" data-testid="gate-reset-code">
+      <label for="gate-reset-password">New password</label>
+      <input id="gate-reset-password" type="password" autocomplete="new-password"
+             minlength="12" data-testid="gate-reset-password">
+      <p class="hint">At least 12 characters. Every signed-in machine on the account is
+        signed out.</p>
+      <p class="hint" id="gate-reset-timer" aria-live="polite" data-testid="gate-reset-timer"></p>
+      <button type="submit" class="primary" data-testid="gate-reset-verify-submit">Set my password</button>
+      <button type="button" class="ghost small" id="gate-reset-verify-cancel">Start over</button>
+    </form>
+
     <p id="gate-error" class="gate-error" hidden role="alert" data-testid="gate-error"></p>
+    <p id="gate-notice" class="hint ok" hidden role="status" data-testid="gate-notice"></p>
   </div>
 </div>
 
@@ -457,6 +491,12 @@
     <div id="token-list" data-testid="token-list" tabindex="0"></div>
   </div>
   <div class="card">
+    <div class="card-head"><h2>Password</h2><span class="muted" id="password-status" data-testid="password-status"></span></div>
+    <p class="muted small">Your current password is required: a stolen session cookie must
+      not be enough to take the account over.</p>
+    <div id="password-form" data-testid="password-form"></div>
+  </div>
+  <div class="card">
     <div class="card-head"><h2>Signed-in machines</h2></div>
     <p class="muted small">Revoking one signs that browser out and leaves the others alone.</p>
     <div id="session-list" data-testid="session-list" tabindex="0"></div>
@@ -469,6 +509,27 @@
 
 <!-- Tenants: the manager's roster. -->
 <section class="view" id="view-tenants" hidden>
+  <div class="card">
+    <div class="card-head"><h2>A/B variants</h2>
+      <select id="ab-range" data-testid="ab-range" aria-label="Comparison window">
+        <option value="0">All time</option>
+        <option value="86400000">Last 24h</option>
+        <option value="604800000" selected>Last 7 days</option>
+        <option value="2592000000">Last 30 days</option>
+      </select></div>
+    <!-- The confounds are on screen, not behind the disclosure. A cost delta with nothing
+         next to it saying "not randomised" is the number that gets quoted in a meeting. -->
+    <div class="state blocked" data-testid="ab-honesty">
+      <div class="state-body">
+        <strong>Directional, not causal</strong>
+        <span>A manager chose who is in each variant and their workloads differ, so a
+          difference here may be a difference between the people. Read the denominators
+          next to every figure, and see the caveats below before quoting anything.</span>
+      </div>
+    </div>
+    <div id="ab-list" data-testid="ab-list" tabindex="0"></div>
+    <div id="ab-caveats"></div>
+  </div>
   <div class="card">
     <div class="card-head"><h2>Tenants</h2><span class="muted" id="tenants-count"></span></div>
     <p class="muted small">Metrics and configuration for every account. Transcripts are

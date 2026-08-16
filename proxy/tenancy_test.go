@@ -43,6 +43,14 @@ func newHostedFixtureNoKey(t *testing.T, upstreamName, dialect string) *hostedFi
 }
 
 func newHostedFixtureKey(t *testing.T, upstreamName, dialect, keyEnv string) *hostedFixture {
+	return newHostedFixtureOpts(t, upstreamName, dialect, keyEnv, nil)
+}
+
+// newHostedFixtureOpts is newHostedFixtureKey with a hook to adjust Options before the
+// handler is built — for the tests that need a dashboard recorder wired in (manager_test.go).
+// A hook rather than a second copy of this function: everything else about the fixture has
+// to stay identical, or a test proves something about a proxy nobody ships.
+func newHostedFixtureOpts(t *testing.T, upstreamName, dialect, keyEnv string, tweak func(*Options)) *hostedFixture {
 	t.Helper()
 	f := &hostedFixture{}
 	f.upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,13 +94,17 @@ func newHostedFixtureKey(t *testing.T, upstreamName, dialect, keyEnv string) *ho
 			Store: store.NewMemory(store.Options{}), Preset: "test"}, nil
 	}
 	src := NewTenantSource(reg, nil, build, 0)
-	f.h = New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil, Options{
+	opts := Options{
 		Tenants: src,
 		Upstreams: map[string]Upstream{upstreamName: {
 			Dialect: dialect, BaseURL: f.upstream.URL, KeyEnv: keyEnv,
 		}},
 		BobUpstream: f.upstream.URL,
-	})
+	}
+	if tweak != nil {
+		tweak(&opts)
+	}
+	f.h = New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil, opts)
 	t.Cleanup(f.h.Close)
 	f.mux = f.h.Mux()
 	return f

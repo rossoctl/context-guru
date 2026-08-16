@@ -331,9 +331,15 @@ See [Hosted service](../hosted.md).
 | `POST /api/me/agent-key` · `DELETE /api/me/agent-key` | Bind (and unbind) the **sha256** of the caller's own provider key, so an agent that can send no `x-context-guru-token` header is still identified. The key is sent in `Authorization` / `x-api-key` — the same slot the agent uses — and is hashed on arrival: never stored, echoed or logged. `DELETE` drops all of them, because a digest is not displayable and "which one" is not answerable. |
 | `GET /api/me/audit` | The caller's configuration-change history. |
 | `GET /api/options` | Which upstreams the operator allows, and which presets and components are registered — so the settings page cannot offer something the server would reject. Names no base URL and no credential env var. |
+| `POST /api/me/password` | Change the caller's own password. The **current** one is required — a stolen session cookie must not convert into permanent ownership of the account — and every *other* signed-in machine is signed out. |
+| `POST /api/password-reset` · `POST /api/password-reset/verify` | Self-service recovery, unauthenticated by necessity: the person who needs it cannot sign in. Phase one mails a code and answers **identically** whether or not the address has an account; phase two spends the code together with the new password. The code's purpose is fixed by the route, so a login code cannot be spent here and a reset code is not a second factor. |
 | `GET /api/tenants` | Manager only: the roster. |
-| `PATCH /api/tenants/{id}` | Manager only: cap, disable, row quota. |
+| `PATCH /api/tenants/{id}` | Manager only: the whole account — label, role, variant, quota, upstreams, capture consent, `disabled` + `disabled_reason`, and `config_yaml`, which is validated by the same strict loader the proxy builds with (a typo is a `400` naming the key, and nothing is partially applied). |
 | `POST /api/tenants/{id}/tokens` | Manager only: reissue a token for a tenant that **already exists**. There is no manager-side create. |
+| `POST /api/tenants/{id}/password-reset` | Manager only: mail that account a reset code. The manager **cannot see the code and cannot set the password** — a manager who could set one could sign in as the user and read their transcripts. The account's current password keeps working until its owner finishes. |
+| `POST /api/tenants/{id}/purge` | Manager only, **irreversible**: erase that tenant's requests, component rows, stored transcripts, monthly spend rollup and archived objects. The account keeps working. Requires `{"confirm": "<their email or id>"}` and writes an audit row. |
+| `DELETE /api/tenants/{id}` | Manager only, **irreversible**: the purge above, then the account — tokens, sessions, agent keys and pending codes go with it by cascade. Same confirmation; the audit row outlives the account. A manager cannot delete themselves. |
+| `GET /api/variants` | Manager only: per-variant rollup of the metrics that already exist, folded from each account's own aggregates, plus the `caveats` that say what the comparison cannot show. Accepts `since`/`until`. |
 
 ### The tenant view's configuration fields
 
