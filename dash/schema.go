@@ -203,8 +203,10 @@ CREATE INDEX IF NOT EXISTS idx_content_request ON request_content(request_id);
 -- losing it resets every tenant's month-to-date spend to zero.
 -- The one rollup table in this schema (see the package comment), and it
 -- earns its place for a reason that is not performance: a SUM over the requests table
--- is a spend figure the tenant can RESET by generating enough traffic to evict its own
--- oldest rows, which turns the monthly cap into a cap on concurrent history.
+-- silently SHRINKS as retention evicts history, so a tenant that generates enough
+-- traffic to evict its own oldest rows would watch its month-to-date spend fall. The
+-- figure is reported, never enforced — there is no spend cap — and a reported number
+-- that goes down while money goes up is the kind of number nobody trusts again.
 CREATE TABLE IF NOT EXISTS tenant_spend (
   tenant_id TEXT NOT NULL,
   month     TEXT NOT NULL,             -- 'YYYY-MM', UTC, matching the calendar invoice

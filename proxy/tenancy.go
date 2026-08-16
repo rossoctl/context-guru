@@ -551,9 +551,9 @@ func (h *Handler) tenancyFor(r *http.Request) (*Tenancy, error) {
 // getting 429s" and the graph agree.
 //
 // WARN rather than ERROR: a refusal is the service working as configured — a rate
-// limit, a spend cap, an unknown token — not a fault of ours. It is also the class of
-// event that gets reported as "context-guru is broken", which is why it has to be
-// findable by tenant.
+// limit, a concurrency cap, an unknown token — not a fault of ours. It is also the
+// class of event that gets reported as "context-guru is broken", which is why it has
+// to be findable by tenant. Never money: there is no spend cap to refuse over.
 func (h *Handler) refuse(w http.ResponseWriter, r *http.Request, err error) {
 	code, msg := statusOf(err)
 	logging.From(r.Context()).Warn("cg.refused", "status", code, "reason", msg,
