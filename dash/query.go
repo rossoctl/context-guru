@@ -542,6 +542,16 @@ type GroupRow struct {
 // The numeric dimensions are cast to TEXT so one row type serves every dimension —
 // `cache_breakpoints` is the count of breakpoints on the request, which is the placement
 // question this project exists to answer, asked in dollars.
+//
+// That count is made BY THE PIPELINE, so on an observe-mode row it was never made: the
+// enforced path runs no pipeline, the four columns read zero like every other
+// trace-derived field, and casting them would key the row as a counted "0" — the same bar
+// as a request that genuinely arrived without a breakpoint. Keyed as "" instead, which
+// GroupRow.Key documents the UI as labelling unset. It matters more here than for an
+// obviously-empty field: a proxy running wholly in observe mode would otherwise draw one
+// full-height "0" bar and read as the finding "none of my traffic sets a breakpoint",
+// about traffic nobody inspected. Bypassed rows are NOT affected — apply counts
+// breakpoints before it checks bypass, so their zero is a real zero.
 var breakdownDims = map[string]string{
 	"model":             "r.model",
 	"provider":          "r.provider",
@@ -553,8 +563,9 @@ var breakdownDims = map[string]string{
 	"stop_reason":       "r.stop_reason",
 	"tool_choice":       "r.tool_choice",
 	"cache_miss_reason": "r.cache_miss_reason",
-	"cache_breakpoints": "CAST(r.cache_bp_system + r.cache_bp_tools + r.cache_bp_messages + r.cache_bp_blocks AS TEXT)",
-	"stream":            "CASE WHEN r.stream <> 0 THEN 'stream' ELSE 'unary' END",
+	"cache_breakpoints": "CASE WHEN r.mode = '" + ModeObserve + "' THEN '' ELSE " +
+		"CAST(r.cache_bp_system + r.cache_bp_tools + r.cache_bp_messages + r.cache_bp_blocks AS TEXT) END",
+	"stream": "CASE WHEN r.stream <> 0 THEN 'stream' ELSE 'unary' END",
 }
 
 // BreakdownDims lists the valid dimensions, sorted, for the API's error message and the
