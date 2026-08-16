@@ -64,21 +64,26 @@ const minSplitTokens = 1024
 // cache_control onto the stable half so the provider's hash stops covering the
 // volatile part. Text is unchanged in concatenation, so the model sees exactly the
 // same prompt. Fails open: any parse problem returns the input untouched.
-func splitVolatileTail(body []byte, provider bschemas.ModelProvider) ([]byte, bool) {
+//
+// It also reports how the rewrite moved the rest of the body: everything at or after
+// byte `shiftAt` in the INPUT sits `shift` bytes later in the output. sjson replaces the
+// `system` value in place (prefix + new value + suffix), so that is the whole of it — and
+// the writeback needs it to keep using the byte offsets it already has for each message
+// instead of re-parsing the body to find them again. shift is 0 when nothing split.
+func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte, split bool, shiftAt, shift int) {
 	if !explicitBreakpointProvider(provider) {
-		return body, false
+		return body, false, 0, 0
 	}
 	sys := gjson.GetBytes(body, "system")
 	if !sys.Exists() || !sys.IsArray() {
-		return body, false // a string system prompt carries no block to split
+		return body, false, 0, 0 // a string system prompt carries no block to split
 	}
 	blocks := sys.Array()
 	if len(blocks) == 0 {
-		return body, false
+		return body, false, 0, 0
 	}
 
-	out := make([]json.RawMessage, 0, len(blocks)+1)
-	split := false
+	sysOut := make([]json.RawMessage, 0, len(blocks)+1)
 	for _, b := range blocks {
 		txt := b.Get("text").String()
 		at := -1
@@ -92,7 +97,7 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) ([]byte, bo
 		// Require both halves to be non-trivial: a split that leaves a ~0-token
 		// stable half buys nothing and burns one of the four breakpoint slots.
 		if at <= 0 || at/4 < minSplitTokens || at >= len(txt) {
-			out = append(out, json.RawMessage(b.Raw))
+			sysOut = append(sysOut, json.RawMessage(b.Raw))
 			continue
 		}
 
@@ -102,7 +107,7 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) ([]byte, bo
 		// break the losslessness guarantee in a way no existing test would catch.
 		var orig map[string]any
 		if json.Unmarshal([]byte(b.Raw), &orig) != nil {
-			out = append(out, json.RawMessage(b.Raw))
+			sysOut = append(sysOut, json.RawMessage(b.Raw))
 			continue
 		}
 		stable := make(map[string]any, len(orig))
@@ -125,26 +130,28 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) ([]byte, bo
 		sb, err1 := json.Marshal(stable)
 		vb, err2 := json.Marshal(volatile)
 		if err1 != nil || err2 != nil {
-			out = append(out, json.RawMessage(b.Raw))
+			sysOut = append(sysOut, json.RawMessage(b.Raw))
 			continue
 		}
-		out = append(out, sb, vb)
+		sysOut = append(sysOut, sb, vb)
 		split = true
 	}
 	if !split {
-		return body, false
+		return body, false, 0, 0
 	}
-	enc, err := json.Marshal(out)
+	enc, err := json.Marshal(sysOut)
 	if err != nil {
-		return body, false
+		return body, false, 0, 0
 	}
 	next, err := sjson.SetRawBytes(body, "system", enc)
 	if err != nil {
-		return body, false
+		return body, false, 0, 0
 	}
 	slog.Debug("context-guru: split volatile tail out of a system block",
 		"provider", provider)
-	return next, true
+	// sjson spliced the new value over [sys.Index, sys.Index+len(sys.Raw)); every byte
+	// after that range moved by the length difference.
+	return next, true, sys.Index + len(sys.Raw), len(next) - len(body)
 }
 
 // explicitBreakpointProvider reports whether this backend honours Anthropic-style

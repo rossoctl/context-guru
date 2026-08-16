@@ -72,24 +72,29 @@ func metadataOnlyWrites(pre, post []byte) (writes []metaWrite, ok bool) {
 	return writes, true
 }
 
-// applyMetaWrites sets each metadata key on the raw body at msgPath. It refuses
-// (ok=false, body untouched) if the raw message's block layout does not match what
+// applyMetaWrites sets each metadata key on ONE raw message's bytes. It refuses
+// (ok=false, msg untouched) if the raw message's block layout does not match what
 // the writes assume, so a shape the normalizer and the raw body disagree about can
 // never be written to the wrong block.
-func applyMetaWrites(body []byte, msgPath string, nBlocks int, writes []metaWrite) ([]byte, bool) {
-	blocks := gjson.GetBytes(body, msgPath+".content")
+//
+// It takes the message rather than the whole body because metaWrite.path is already
+// message-relative and every gjson/sjson call here would otherwise re-scan and re-copy
+// the entire request per write. The result is identical either way: sjson's splice is
+// local (prefix + edited subtree + suffix), so the caller splices the message back at
+// its own byte span — see spliceMessages.
+func applyMetaWrites(msg []byte, nBlocks int, writes []metaWrite) ([]byte, bool) {
+	blocks := gjson.GetBytes(msg, "content")
 	if !blocks.IsArray() || len(blocks.Array()) != nBlocks {
-		return body, false
+		return msg, false
 	}
-	out := body
+	out := msg
 	for _, w := range writes {
-		full := msgPath + "." + w.path
-		if gjson.GetBytes(out, full).Exists() {
-			return body, false // caller already set it — never overwrite
+		if gjson.GetBytes(out, w.path).Exists() {
+			return msg, false // caller already set it — never overwrite
 		}
-		next, err := sjson.SetRawBytes(out, full, []byte(w.raw))
+		next, err := sjson.SetRawBytes(out, w.path, []byte(w.raw))
 		if err != nil {
-			return body, false
+			return msg, false
 		}
 		out = next
 	}

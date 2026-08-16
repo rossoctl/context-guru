@@ -14,6 +14,13 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// splitTail drops the byte-shift bookkeeping splitVolatileTail reports for the
+// writeback's benefit; these tests are about the split itself.
+func splitTail(body []byte, p bschemas.ModelProvider) ([]byte, bool) {
+	out, split, _, _ := splitVolatileTail(body, p)
+	return out, split
+}
+
 func jsonStr(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
@@ -48,7 +55,7 @@ func textBlock(text string, cc bool) map[string]any {
 // the stable half.
 func TestSplitsGitTailOffStableBody(t *testing.T) {
 	full, stable, volatile := blockWithGitTail(6000)
-	got, split := splitVolatileTail(sysBody(textBlock(full, true)), bschemas.Anthropic)
+	got, split := splitTail(sysBody(textBlock(full, true)), bschemas.Anthropic)
 	if !split {
 		t.Fatal("did not split a block with a git snapshot tail")
 	}
@@ -77,7 +84,7 @@ func TestSplitsGitTailOffStableBody(t *testing.T) {
 func TestSplitIsConcatenationIdentical(t *testing.T) {
 	full, _, _ := blockWithGitTail(6000)
 	in := sysBody(textBlock("preamble", false), textBlock(full, true))
-	got, split := splitVolatileTail(in, bschemas.Anthropic)
+	got, split := splitTail(in, bschemas.Anthropic)
 	if !split {
 		t.Fatal("did not split")
 	}
@@ -102,14 +109,14 @@ func TestSplitOnlyOnExplicitBreakpointProviders(t *testing.T) {
 		bschemas.OpenAI, bschemas.Azure, bschemas.Gemini,
 		bschemas.ModelProvider("local-llama"),
 	} {
-		if _, split := splitVolatileTail(in, p); split {
+		if _, split := splitTail(in, p); split {
 			t.Fatalf("%s: split fired where breakpoints are not explicit", p)
 		}
 	}
 	for _, p := range []bschemas.ModelProvider{
 		bschemas.Anthropic, bschemas.Bedrock, bschemas.Vertex,
 	} {
-		if _, split := splitVolatileTail(in, p); !split {
+		if _, split := splitTail(in, p); !split {
 			t.Fatalf("%s: split did not fire", p)
 		}
 	}
@@ -119,13 +126,13 @@ func TestSplitOnlyOnExplicitBreakpointProviders(t *testing.T) {
 // be left exactly as it is.
 func TestInertWithoutAVolatileTail(t *testing.T) {
 	big := strings.Repeat("stable instruction line.\n", 3000)
-	if _, split := splitVolatileTail(sysBody(textBlock(big, true)), bschemas.Anthropic); split {
+	if _, split := splitTail(sysBody(textBlock(big, true)), bschemas.Anthropic); split {
 		t.Fatal("split a block with no volatile marker")
 	}
 	// Below minSplitTokens on the stable half: the marker is present but the stable
 	// part is tiny, so there is nothing worth caching separately.
 	small := "Current branch: main\nRecent commits:\nabc fix\n"
-	if _, split := splitVolatileTail(sysBody(textBlock(small, true)), bschemas.Anthropic); split {
+	if _, split := splitTail(sysBody(textBlock(small, true)), bschemas.Anthropic); split {
 		t.Fatal("split a block whose stable half is below the minimum")
 	}
 }
@@ -138,7 +145,7 @@ func TestInertOnDegenerateBodies(t *testing.T) {
 		[]byte(`{"system":[],"messages":[]}`),
 		[]byte(`{"messages":[]}`),
 	} {
-		got, split := splitVolatileTail(b, bschemas.Anthropic)
+		got, split := splitTail(b, bschemas.Anthropic)
 		if split || string(got) != string(b) {
 			t.Fatalf("mutated a degenerate body: %s", b)
 		}
@@ -149,7 +156,7 @@ func TestInertOnDegenerateBodies(t *testing.T) {
 // caps them at four.
 func TestSplitsAtMostOneBlock(t *testing.T) {
 	full, _, _ := blockWithGitTail(6000)
-	got, split := splitVolatileTail(
+	got, split := splitTail(
 		sysBody(textBlock(full, true), textBlock(full, true)), bschemas.Anthropic)
 	if !split {
 		t.Fatal("did not split")
@@ -294,7 +301,7 @@ func TestNonTextBlocksSurvive(t *testing.T) {
 	img := map[string]any{"type": "image", "source": map[string]any{
 		"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
 	in := sysBody(img, textBlock(full, true))
-	got, split := splitVolatileTail(in, bschemas.Anthropic)
+	got, split := splitTail(in, bschemas.Anthropic)
 	if !split {
 		t.Fatal("did not split the text block")
 	}
@@ -319,7 +326,7 @@ func TestUnknownFieldsNotDropped(t *testing.T) {
 	blk := textBlock(full, true)
 	blk["citations"] = []map[string]any{{"type": "char_location", "start_char_index": 3}}
 	in := sysBody(blk)
-	got, split := splitVolatileTail(in, bschemas.Anthropic)
+	got, split := splitTail(in, bschemas.Anthropic)
 	if !split {
 		// Acceptable: declining to split preserves the field.
 		if gjson.GetBytes(got, "system.0.citations").Exists() {
@@ -345,7 +352,7 @@ func TestSplitDoesNotDuplicateBedrockCachePoint(t *testing.T) {
 	in := sysBody(block)
 
 	before := wireBreakpoints(in)
-	got, split := splitVolatileTail(in, bschemas.Bedrock)
+	got, split := splitTail(in, bschemas.Bedrock)
 	if !split {
 		t.Fatal("expected the git-tail block to split")
 	}

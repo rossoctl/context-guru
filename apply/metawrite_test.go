@@ -33,15 +33,15 @@ func TestMetadataOnlyWritesRejectsNonMetadataChanges(t *testing.T) {
 // applyMetaWrites must refuse when the raw body's block layout disagrees with what
 // the writes assume, so a key can never land on the wrong block.
 func TestApplyMetaWritesRefusesOnShapeMismatch(t *testing.T) {
-	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t"}]}]}`)
+	msg := []byte(`{"role":"assistant","content":[{"type":"tool_use","id":"t"}]}`)
 	w := []metaWrite{{path: "content.1.cache_control", raw: `{"type":"ephemeral"}`}}
-	if _, ok := applyMetaWrites(body, "messages.0", 2, w); ok {
+	if _, ok := applyMetaWrites(msg, 2, w); ok {
 		t.Fatal("expected a refusal: the raw message has 1 block, the writes assume 2")
 	}
 	// Never overwrite a breakpoint the caller already set.
-	set := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`)
+	set := []byte(`{"role":"assistant","content":[{"type":"tool_use","cache_control":{"type":"ephemeral","ttl":"1h"}}]}`)
 	w = []metaWrite{{path: "content.0.cache_control", raw: `{"type":"ephemeral"}`}}
-	if _, ok := applyMetaWrites(set, "messages.0", 1, w); ok {
+	if _, ok := applyMetaWrites(set, 1, w); ok {
 		t.Fatal("expected a refusal: the caller's own cache_control must not be overwritten")
 	}
 }
