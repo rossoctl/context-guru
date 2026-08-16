@@ -21,7 +21,19 @@ cache-aware token/cost metrics.
 - **Model gateway creds** in `~/.claude/settings.json` under `env`
   (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`) — the IBM LiteLLM gateway exposing
   `aws/claude-sonnet-5` (agent) and `aws/claude-haiku-4-5` (context-guru's cheap
-  compaction model).
+  compaction model). `CG_GATEWAY_BASE` / `CG_GATEWAY_KEY` override both, and are how to
+  run without that file.
+
+    The harnesses **refuse to start** if either value names a context-guru route or a
+    `cg_live_` token: a benchmark proxy pointed at another context-guru would report
+    savings measured over traffic that was already compacted once. If you have routed
+    your own Claude Code through the service, set `CG_GATEWAY_*` to the real gateway.
+
+- **Only for the hosted (multi-tenant) proxy**: `CG_TOKEN` with your tenant token and
+  `CG_PROXY_URL` naming the already-running proxy. There the pipeline comes from your
+  tenant's own configuration rather than from `--configs`, which then only labels the
+  run. With `CG_TOKEN` unset the harness starts its own single-tenant proxy and behaves
+  exactly as it always did.
 
 ### Docker Hub authentication (required — avoids the 429 pull-quota wall)
 
