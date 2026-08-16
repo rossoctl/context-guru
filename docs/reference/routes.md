@@ -334,6 +334,8 @@ See [Hosted service](../hosted.md).
 | `GET /api/tenants` | Manager only: the roster. |
 | `PATCH /api/tenants/{id}` | Manager only: cap, disable, row quota. |
 | `POST /api/tenants/{id}/tokens` | Manager only: reissue a token for a tenant that **already exists**. There is no manager-side create. |
+| `POST /api/feedback` | One feedback submission from the signed-in account: 1–5 stars per question plus a comment of **at least 50 characters of real text**, enforced here and not only in the form (whitespace is collapsed before counting, so 50 spaces is not 50 characters). The tenant is taken from the cookie, never from the body. `422` names the rule that was broken. Stored in the **control** database, then mailed to the manager off the request path — a slow or unconfigured relay cannot fail or delay a submission, and `mailed_at = 0` records a notification that never got out. |
+| `GET /api/feedback` | **Manager only** — including the aggregate. Returns every submission, per-question mean and 1–5 distribution, the NPS split on the recommend question, and the daily trend. A plain account gets `403` for every form of this, its own rows included: "you said 2, the average is 4.4" is a disclosure about other people's answers. A manager may narrow with `?tenant=<id>`. |
 
 ### The tenant view's configuration fields
 

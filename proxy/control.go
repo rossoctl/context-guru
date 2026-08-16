@@ -61,6 +61,10 @@ func (h *Handler) MountControl(m *http.ServeMux) {
 	m.HandleFunc("GET /api/tenants", h.ctlTenants)
 	m.HandleFunc("PATCH /api/tenants/{id}", h.ctlPatchTenant)
 	m.HandleFunc("POST /api/tenants/{id}/tokens", h.ctlManagerMintToken)
+	// Feedback (feedback.go). POST is any signed-in account's own; GET is manager-only,
+	// including the aggregate — a user cannot read anyone's feedback, their own included.
+	m.HandleFunc("POST /api/feedback", h.ctlSubmitFeedback)
+	m.HandleFunc("GET /api/feedback", h.ctlFeedback)
 }
 
 // registry is the control-plane store, or nil in single-tenant mode.

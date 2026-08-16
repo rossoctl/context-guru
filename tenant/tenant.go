@@ -951,6 +951,43 @@ var migrations = []string{
 	   expires_at INTEGER NOT NULL,
 	   PRIMARY KEY (tenant_id, purpose)
 	 );`,
+
+	// v4: user feedback. Stars plus mandatory prose, in the CONTROL database rather
+	// than the dashboard's, because dash renames its file aside and rebuilds on a
+	// schemaVersion bump and somebody's written answer is not derivable from anything.
+	//
+	// Purely additive: two new tables, nothing altered, so an existing deployment
+	// migrates by gaining an empty feedback list. (If another migration lands first on
+	// merge, this simply becomes v5 — the version is the index, and nothing here
+	// depends on the number.)
+	//
+	// tenant_id is deliberately NOT a foreign key with ON DELETE CASCADE, unlike every
+	// other table here. Feedback is a historical record of what somebody said, not part
+	// of an account's live state: it must outlive the account, so email and label are
+	// copied in at write time and the id is kept only as a join hint.
+	`CREATE TABLE feedback (
+	   id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	   tenant_id  TEXT    NOT NULL,
+	   email      TEXT    NOT NULL DEFAULT '',
+	   label      TEXT    NOT NULL DEFAULT '',
+	   created_at INTEGER NOT NULL,
+	   wanted     TEXT    NOT NULL DEFAULT '',
+	   comment    TEXT    NOT NULL,
+	   -- 0 = the manager's copy never reached a relay. Storing comes first and mailing
+	   -- second, so this column is how a dead relay is visible rather than silent.
+	   mailed_at  INTEGER NOT NULL DEFAULT 0
+	 );
+	 CREATE INDEX idx_feedback_created ON feedback(created_at DESC);
+	 CREATE INDEX idx_feedback_tenant ON feedback(tenant_id);
+	 -- One row per star rating. A table rather than a column per question: the
+	 -- per-agent questions depend on which agents an account actually uses, so the set
+	 -- is not fixed at schema time and a new question must not need an ALTER.
+	 CREATE TABLE feedback_scores (
+	   feedback_id INTEGER NOT NULL REFERENCES feedback(id) ON DELETE CASCADE,
+	   dimension   TEXT    NOT NULL,
+	   score       INTEGER NOT NULL,
+	   PRIMARY KEY (feedback_id, dimension)
+	 );`,
 }
 
 func migrate(db *sql.DB) error {
