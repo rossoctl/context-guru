@@ -318,9 +318,9 @@ guard is therefore an end-to-end handler-latency test with content capture on
 (`TestDashboardAddsNoRequestLatencyWithContentCapture`, budget 5 ms); moving redaction back
 onto the request goroutine measures +87 ms and fails it.
 
-**Redaction happens before the database, never on read.** Headers are blanket-redacted by
-key against a short allowlist; config keys are allowlisted, and an allowlisted key's
-*value* is still checked for an embedded `user:password@` credential; captured content is
+**Redaction happens before the database, never on read.** Request headers are never
+captured at all, so nothing redacts them; config keys are allowlisted, and an allowlisted
+key's *value* is still checked for an embedded `user:password@` credential; captured content is
 scrubbed of credential-shaped strings and size-capped. All of it runs on the writer
 goroutine, immediately before the INSERT — off the request path, but still before anything
 touches disk. A secret that reaches disk is a secret forever, and a redact-on-read filter

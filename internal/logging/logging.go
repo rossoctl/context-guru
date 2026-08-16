@@ -162,6 +162,12 @@ func (s scrubber) WithGroup(n string) slog.Handler       { return scrubber{s.h.W
 // cannot carry a credential, and this runs on every attribute of every record, so
 // the cheap cases must stay cheap.
 func scrubAttr(_ []string, a slog.Attr) slog.Attr {
+	// The KEY is as untrusted as the value: `for k, v := range someParsedMap` puts data
+	// in the key slot, and a key was previously emitted verbatim. Both halves go, because
+	// a key holding a credential tells the reader nothing worth keeping.
+	if redact.Content(a.Key, 0) != a.Key {
+		return slog.String(redact.Redacted, redact.Redacted)
+	}
 	if redact.IsSecretKey(a.Key) {
 		return slog.String(a.Key, redact.Redacted)
 	}

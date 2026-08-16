@@ -13,13 +13,15 @@ import (
 // redact-on-read filter is one forgotten code path away from leaking it. So
 // nothing sensitive is ever stored, and the API has no redaction step at all.
 //
-// Two mechanisms, matching gateway's (correct) choice of default:
+// Two surfaces, one mechanism each:
 //
-//   - Headers: blanket-redact by KEY. Every header is dropped unless it is on a
-//     short allowlist of headers known to be non-secret. A denylist of "the auth
-//     headers we thought of" fails the moment a gateway invents a new one.
 //   - Config: allowlist the KEYS we render. context-guru's effective config is
 //     structured and finite, so naming the safe keys is tractable and safe.
+//   - Request HEADERS are not a surface at all: no capture path records them. There is
+//     no header allowlist here on purpose — one used to exist with no production caller,
+//     which read as a live protection and was not. If headers ever DO reach the recorder,
+//     the allowlist has to come back with it (git history has the previous one); the
+//     denylist alternative fails the moment a gateway invents a new auth header.
 //
 // Content (transcript before/after text) cannot be allowlisted — it is arbitrary
 // agent output — so it gets pattern-based scrubbing of the shapes that are
@@ -39,41 +41,6 @@ const Redacted = redact.Redacted
 // and caps its length. cap<=0 means no cap. The cap is applied AFTER scrubbing so
 // a secret near the end cannot survive by being truncated into place.
 func RedactContent(s string, cap int) string { return redact.Content(s, cap) }
-
-// headerAllowlist is the set of request headers safe to store verbatim. Anything
-// not listed here is redacted by key, value unseen.
-var headerAllowlist = map[string]bool{
-	"content-type":                true,
-	"content-length":              true,
-	"user-agent":                  true,
-	"accept":                      true,
-	"accept-encoding":             true,
-	"anthropic-version":           true,
-	"anthropic-beta":              true,
-	"x-stainless-lang":            true,
-	"x-stainless-os":              true,
-	"x-stainless-arch":            true,
-	"x-stainless-package-version": true,
-	"x-stainless-runtime":         true,
-	"x-stainless-runtime-version": true,
-	"x-app":                       true,
-}
-
-// RedactHeaders returns a storable copy of a request's headers: allowlisted keys
-// keep their value, every other key is present (so you can see WHAT was sent)
-// with its value replaced.
-func RedactHeaders(h map[string][]string) map[string]string {
-	out := make(map[string]string, len(h))
-	for k, vs := range h {
-		lk := strings.ToLower(k)
-		if headerAllowlist[lk] && len(vs) > 0 {
-			out[lk] = vs[0]
-			continue
-		}
-		out[lk] = Redacted
-	}
-	return out
-}
 
 // metaEnumShape is the shape every stored request-metadata enum has to fit: a short
 // identifier. `high`, `adaptive`, `end_turn`, `tool_calls` and `model_context_window_
