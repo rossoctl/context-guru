@@ -26,8 +26,20 @@ The gateway (`start`) reads:
 - `OPENAI_API_BASE` / `ANTHROPIC_API_BASE` — optional upstream overrides.
 - `CONTEXT_GURU_PRESET` (default `balanced`) — which pipeline preset to run.
 
+Three ways to pick a pipeline, in precedence order — the first non-empty one wins:
+
+1. `CONTEXT_GURU_CONFIG_YAML` — a full config document, written to `/tmp/cg-config.yaml`
+   and passed as `--config`. The only form that can pin per-component settings (e.g.
+   `extract_llm`'s `strategy` and `model.source`), which is what a sweep needs.
+2. `CONTEXT_GURU_PIPELINE` — a bare comma-separated component list, expanded to
+   `pipeline: [...]`. An **empty** value falls through rather than forcing a passthrough,
+   so an always-present-but-blank compose variable does not silently disable compaction.
+3. `CONTEXT_GURU_PRESET` — a named preset. Use `off` for the passthrough baseline.
+
 Endpoints on `:4000`: `/openai/v1/chat/completions`, `/anthropic/v1/messages`,
-plus `/healthz`, `/stats` (savings rollups), `/expand?id=` (recover offloaded content).
+`/compact` (stateless — pipeline in, rewritten body out, no upstream call), plus
+`/healthz`, `/stats` (savings rollups), `/metrics` (the same counters as Prometheus text)
+and `/expand?id=` (recover offloaded content).
 
 ## Measuring the effect
 

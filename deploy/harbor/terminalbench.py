@@ -24,14 +24,30 @@ Usage:
   python3 deploy/harbor/terminalbench.py --tasks /tmp/tb-runs/tb89.txt --configs off \
      --jobs-root /tmp/tb-runs/tb89 --n 2
 """
-import argparse, glob, json, os, subprocess, sys, time, urllib.request
+import argparse, glob, json, os, socket, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
 HB = Path("/home/vpcuser/projects/context-engineering/harbor")
 BIN = "/tmp/cg-runs/cg-proxy-d1"
-PORT = 4000
-LAN = "9.47.170.83"
+# The benchmark proxy's port. Overridable because 4000 is NO LONGER FREE on a box that
+# also runs the hosted service (deploy/service/), which binds 127.0.0.1:4000
+# permanently. When that clashed, the benchmark proxy died with "bind: address already
+# in use", every container got "API Error: Connection refused", and the summary reported
+# `solved: 0, exceptions: 3` — which reads as "the model failed" rather than "the proxy
+# never started". Three tasks burned ~20 minutes producing a number that meant nothing.
+# Hence both the override and the hard preflight in require_free_port().
+PORT = int(os.environ.get("CG_BENCH_PORT") or 4000)
+# The address containers reach this host on. Set CG_LAN to this box's LAN IP;
+# 127.0.0.1 only works when the agent runs on the host network. Warn loudly on the
+# default: a container that cannot reach the proxy fails EVERY task, and a run of all
+# failures reads as "the preset is bad" rather than "nothing could connect".
+LAN = os.environ.get("CG_LAN") or "127.0.0.1"
+if not os.environ.get("CG_LAN"):
+    print(f"WARNING: CG_LAN is unset, using {LAN}. Containers on a bridge network "
+          "cannot reach the proxy there and every task will fail. Set CG_LAN to this "
+          "host's LAN IP (`hostname -I`) unless the agent runs with --network host.",
+          file=sys.stderr)
 DATASET = "terminal-bench@2.0"  # <-- the only benchmark-specific difference vs swebench.py
 PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 MODEL = "aws/claude-sonnet-5"
@@ -76,7 +92,7 @@ CUSTOM_CONFIGS = {
     # proxy_tokens_before == proxy_tokens_after in the summary.
     "cacheonly": "pipeline: [cacheinject]\n",
     "codesmart": (
-        "pipeline: [format, dedup, failed_run, cmdfilter, extract_llm, extract, cacheinject]\n"
+        "pipeline: [format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]\n"
         "components:\n"
         "  extract:\n"
         "    min_tokens: 400\n"
@@ -90,7 +106,66 @@ CUSTOM_CONFIGS = {
         "    llm_every_n_requests: 1\n"
         "    llm_max_per_request: 4\n"
     ),
+    # codesmart with extract_llm FORCED ON. Terminal-bench runs claude-code, which is a
+    # caching backend, and extract_llm hard-declines there by default — see
+    # components/offload/extract_econ.go: the component measured net-negative on every
+    # caching workload tested (break-even ~30,500 tokens per output against a
+    # largest-observed 2,053), so the default is a shipping decision, not a threshold.
+    #
+    # That means no amount of trigger tuning makes the component fire on this benchmark:
+    # in the `codesmart` arm above it records runs>0 and acted=0 with the gate reason
+    # `cached_prefix`. This arm exists so the claim is MEASURED on terminal-bench rather
+    # than inherited from another workload's numbers. Compare it against `codesmart` on
+    # cost and cache-write, not on saved_tokens alone — the whole question is whether the
+    # tokens it removes are worth the cache rewrite that removing them forces.
+    "codesmart_llm": (
+        "pipeline: [format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]\n"
+        "components:\n"
+        "  extract:\n"
+        "    min_tokens: 400\n"
+        "  extract_llm:\n"
+        "    strategy: code\n"
+        "    model:\n"
+        "      source: config\n"
+        "    min_tokens: 3000\n"
+        "    allow_on_caching_backend: true\n"
+        "    trigger:\n"
+        "      min_request_tokens: 3000\n"
+        "    llm_every_n_requests: 1\n"
+        "    llm_max_per_request: 4\n"
+    ),
 }
+
+
+def require_free_port():
+    """Refuse to start a run whose proxy cannot bind.
+
+    Checked once, up front, because the alternative is what actually happened: the proxy
+    failed to bind, and the run continued for 20 minutes recording exception rows that
+    were indistinguishable from model failures. A benchmark that reports a number when
+    its own instrument is not running is worse than one that refuses to start.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("", PORT))
+            return
+        except OSError as e:
+            holder = ""
+            try:
+                out = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True).stdout
+                holder = next((l.strip() for l in out.splitlines()
+                               if f":{PORT} " in l or l.rstrip().endswith(f":{PORT}")), "")
+            except Exception:
+                pass
+            sys.exit(
+                f"FATAL: cannot bind port {PORT} for the benchmark proxy ({e}).\n"
+                f"  holder: {holder or 'unknown'}\n"
+                "  On a box that also runs the hosted service, 4000 is permanently taken.\n"
+                f"  Re-run with a free port, e.g.:  CG_BENCH_PORT=4010 {' '.join(sys.argv)}\n"
+                "  Refusing to continue: without the proxy every task fails with\n"
+                "  'Connection refused' and the summary would report it as solved=0."
+            )
 
 
 def start_proxy(preset, base, token, capture=None, dump=None):
@@ -239,6 +314,8 @@ def main():
     ap.add_argument("--capture-config", default=None, help="which config also captures the stream for replay")
     ap.add_argument("--dump-configs", nargs="*", default=[], help="configs that DUMP before→after change logs")
     a = ap.parse_args()
+    # Before any container is built or any token is spent.
+    require_free_port()
     base, token = creds()
     pr = price(MODEL)
     cpr = price(CHEAP_MODEL)

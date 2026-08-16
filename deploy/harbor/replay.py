@@ -26,6 +26,10 @@ DET_CONFIGS = ["off", "format", "toon", "cacheinject", "dedup", "failed_run",
 PIPE = {
     "off": None, "agent": ("preset", "agent"), "balanced": ("preset", "balanced"),
     "general": ("preset", "general"), "coding": ("preset", "coding"), "mcp": ("preset", "mcp"),
+    # The shipped defaults. They need the preset path, not a bare pipeline name-list:
+    # their tuned per-component blocks live in config.presetConfigs, so replaying
+    # `pipeline: [codesmart]` would fail to resolve a component and measure nothing.
+    "codesmart": ("preset", "codesmart"), "codesafe": ("preset", "codesafe"),
 }
 
 

@@ -1,0 +1,14 @@
+# Tells Grafana where to find the shipped dashboard JSON.
+
+apiVersion: 1
+
+providers:
+  - name: context-guru
+    orgId: 1
+    folder: context-guru
+    type: file
+    # allowUiUpdates false keeps the file the source of truth: a dashboard edited in the
+    # browser and then overwritten on the next deploy is a confusing way to lose work.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards/context-guru

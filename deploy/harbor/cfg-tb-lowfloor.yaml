@@ -1,0 +1,60 @@
+# EXPERIMENT config — Terminal-Bench, extract_llm with floors moved onto the measured
+# output distribution. NOT a shipped preset, and deliberately not a change to
+# `codesmart`: codesmart's numbers are the SWE-bench study's and are load-bearing in
+# docs/results/**, where 0% of requests cleared the same floors and a per-call cost of
+# ~$0.0166 per 1k unique tokens was measured. Retuning it on Terminal-Bench evidence
+# would spend money there for nothing. Pass this with --config instead.
+#
+# Why these numbers — 860 tool outputs observed on a 2-task Terminal-Bench smoke
+# (cg.debug.toolout): p50 144, p75 287, p90 981, p95 1189, max 2775 tokens.
+#
+#   floor  outputs >= floor   share of tool-token mass
+#     400        87 (10.1%)              59.4%
+#     800        87 (10.1%)              59.4%
+#    1000        67 ( 7.8%)              51.8%
+#    3000         0 ( 0.0%)               0.0%   <- codesmart's shipped floor
+#
+# There is a GAP in the distribution between ~400 and ~980, so 400 and 800 select the
+# identical 87 outputs. 800 is therefore the same measurement at a strictly higher
+# floor: same 59.4% of the mass, no extra marginal candidates on a workload whose
+# distribution differs. The shipped 3000 sits above the maximum — inert, not underwater.
+pipeline: [format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]
+components:
+  extract:
+    min_tokens: 400
+  extract_llm:
+    strategy: code
+    model:
+      source: config
+    # Per-output floor, from the table above.
+    min_tokens: 800
+    trigger:
+      # Every observed request was >= 1597 tokens (min 1597, p50 7631), so 1500 admits
+      # every turn of a real trial while still refusing a trivially small request.
+      min_request_tokens: 1500
+    # The floor is only ONE of three gates, and it is not even the binding one here.
+    # The two below are refusals by design, and with either left at its default this
+    # component cannot fire on Terminal-Bench no matter how low the floor goes:
+    #
+    #   allow_on_caching_backend (default false) disables extraction outright on
+    #   prompt-caching traffic. Terminal-Bench is 97% cache reads, so this alone
+    #   accounts for the 0 calls.
+    #
+    #   economic_gate (default true) prices each call and needs ~30,500 tokens in one
+    #   output to break even on caching traffic; the largest output observed was 2,775.
+    #
+    # Both are opened here so the experiment MEASURES the economics rather than
+    # inheriting their conclusion. That is the point of the arm, not a recommendation:
+    # the project's own numbers predict this loses money, and the run exists to check.
+    allow_on_caching_backend: true
+    economic_gate: false
+    # AUTO leaves line-numbered file dumps verbatim when the request is cached — which
+    # is where most of the mass above lives, so AUTO would empty the candidate set again.
+    skip_file_reads: false
+    # Cost/latency bound. every_n=1 x max_per_request=3, on a ~30-60 request trial pair,
+    # is at most ~90-180 cheap-model calls; at <=3k in / <=1k out per call on
+    # claude-haiku-4-5 that is <= ~$1.5 and the blocking wall time stays bounded by 3
+    # sequential extractions per turn. The earlier study's $3.26 / 26min blocking case
+    # came from an unbounded max_per_request.
+    llm_every_n_requests: 1
+    llm_max_per_request: 3

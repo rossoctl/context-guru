@@ -79,18 +79,7 @@ func (p *Plugin) resolveSession(ctx *bschemas.BifrostContext, chat *bschemas.Bif
 			explicit = s
 		}
 	}
-	var sys, firstUser string
-	for _, m := range chat.Input {
-		text := schema.MessageText(m)
-		switch m.Role {
-		case bschemas.ChatMessageRoleSystem:
-			sys += text
-		case bschemas.ChatMessageRoleUser:
-			if firstUser == "" {
-				firstUser = text
-			}
-		}
-	}
+	sys, firstUser := schema.SessionHead(chat.Input)
 	return session.Resolve(explicit, sys, firstUser)
 }
 

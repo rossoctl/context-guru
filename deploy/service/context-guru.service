@@ -1,0 +1,109 @@
+# context-guru hosted service.
+#
+#   install -m0644 context-guru.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now context-guru
+#
+# Binds LOOPBACK ONLY. nginx terminates TLS and proxies to it (see nginx.conf) —
+# every user's token crosses the network on every request, so plain HTTP on the LAN
+# is not an option for a service holding other people's credentials.
+
+[Unit]
+Description=context-guru hosted LLM context-compaction proxy
+Documentation=https://github.com/rossoctl/context-guru
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cg
+Group=cg
+
+# Upstream credentials.
+#
+# LoadCredential keeps them out of the unit file and out of `systemctl show` — unlike
+# Environment=, which prints the value to anyone who can read the unit.
+#
+# One LoadCredential line per upstream is required, and they live in a GENERATED drop-in
+# (context-guru.service.d/10-credentials.conf) rather than here: a hardcoded line for a
+# credential file that does not exist makes the whole unit fail to start with a message
+# that does not say which file it wanted. deploy/service/install.sh writes the drop-in
+# from whatever is actually in /etc/context-guru/credentials/, so adding an upstream is
+# "drop the key in, re-run the installer".
+
+# The wrapper turns each credential file into UPSTREAM_<FILENAME>_KEY (the name the
+# allow-list's key_env refers to) and then execs the proxy. It is a SCRIPT rather than an
+# inline `sh -c` because systemd expands $VAR in ExecStart itself, so an inline loop's
+# own shell variables get substituted away before sh sees them.
+ExecStart=/usr/local/bin/context-guru-start
+
+# Non-secret configuration. Everything secret comes from LoadCredential above.
+Environment=LISTEN_ADDR=127.0.0.1:4000
+Environment=UPSTREAMS=/etc/context-guru/upstreams.yaml
+Environment=CONTROL_DB=/var/lib/context-guru/cg-control.db
+Environment=DASHBOARD=true
+Environment=DASHBOARD_DB=/var/lib/context-guru/cg.db
+Environment=REGISTER_DOMAINS=ibm.com
+# Set this to the manager's address before first start: the account registered with
+# it becomes the manager, and until one exists nobody can administer other tenants.
+Environment=MANAGER_EMAIL=
+# Content capture writes agent output (source code, tool results) to disk behind a
+# best-effort redactor. Leave false; tenants who want the diff view opt in per
+# account, and this flag is the operator's half of that decision.
+Environment=DASHBOARD_CONTENT=false
+
+# Cold storage on IBM Box, via rclone as a subprocess — nothing is mounted. With this
+# set, eviction becomes MIGRATION: a session is uploaded and verified before its local
+# rows are deleted, so retention is bounded by Box rather than by this filesystem.
+# Run deploy/service/box-setup.sh first; it writes the rclone config with the token.
+Environment=ARCHIVE_REMOTE=box:context-guru
+Environment=RCLONE_CONFIG=/var/lib/context-guru/rclone.conf
+# Transcripts are the bulk of the bytes and are read rarely, so they go early; metric
+# rows are small and stay locally queryable for a month.
+Environment=ARCHIVE_CONTENT_AFTER=24h
+Environment=ARCHIVE_SESSION_AFTER=720h
+# Cap rclone's upload rate: this box is also serving everybody's agent traffic, and
+# rclone will otherwise use every bit of upload bandwidth it can get.
+Environment=ARCHIVE_BWLIMIT=8M
+# With cold storage healthy the disk rule should never fire. Left enabled as the
+# backstop for a Box outage that lasts long enough to matter.
+Environment=DASHBOARD_DISK_HIGH=0.90
+Environment=DASHBOARD_DISK_LOW=0.85
+
+Restart=always
+RestartSec=2
+# The whole point of Restart=always here: if this process is down, every user's
+# agent is down. Failing fast and coming back beats staying dead.
+
+# Filesystem and privilege confinement.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/context-guru
+StateDirectory=context-guru
+StateDirectoryMode=0700
+UMask=0077
+
+# Resource bounds. The proxy buffers request bodies (32 MiB cap each) and holds a
+# pipeline plus compaction state per active tenant, so memory scales with concurrent
+# users; this is a backstop against a runaway, not a tuning target.
+# rclone runs as a child process: it needs the state directory (its config lives
+# there) and PrivateTmp for its own temporary files, both already granted above.
+LimitNOFILE=65536
+MemoryMax=8G
+TasksMax=4096
+
+[Install]
+WantedBy=multi-user.target

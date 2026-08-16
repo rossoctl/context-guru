@@ -1,0 +1,21 @@
+# Nightly backup of the context-guru control database to Box.
+#
+#   install -m0644 context-guru-backup.{service,timer} /etc/systemd/system/
+#   install -m0755 context-guru-backup.sh /usr/local/bin/
+#   systemctl daemon-reload && systemctl enable --now context-guru-backup.timer
+
+[Unit]
+Description=Nightly backup of the context-guru control database to Box
+Requires=context-guru-backup.service
+
+[Timer]
+# 03:17 rather than 03:00: every cron-like job in the world fires on the hour, and
+# Box rate-limits per account.
+OnCalendar=*-*-* 03:17:00
+# Run on next boot if the machine was off when it was due — a missed backup that
+# silently never happens is the failure mode this exists to avoid.
+Persistent=true
+AccuracySec=5m
+
+[Install]
+WantedBy=timers.target

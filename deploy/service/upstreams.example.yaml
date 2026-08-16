@@ -1,0 +1,42 @@
+# context-guru hosted mode: the operator's upstream allow-list.
+#
+# Passing --upstreams <this file> is what switches the proxy from a single-tenant
+# dev tool into a hosted service. From then on every request needs a context-guru
+# token, and each tenant's own configuration decides its pipeline.
+#
+# A tenant chooses an upstream by NAME, from this file. It can never supply a URL:
+# that would make the proxy an unauthenticated forwarder to anything this host's
+# network can reach.
+#
+# No credential appears here. Each entry names the ENVIRONMENT VARIABLE its key
+# lives in, read at request time. The proxy refuses to start if any named variable
+# is unset — with no key to inject it would forward the caller's own header, which
+# in hosted mode is the token we minted.
+#
+# The first entry of each dialect is the default a newly registered tenant gets, so
+# the common case needs no choices at registration.
+
+upstreams:
+  # Claude Code and anything else speaking the Anthropic dialect.
+  #   ANTHROPIC_BASE_URL=https://cg.<host>/anthropic
+  - name: ibm-litellm
+    dialect: anthropic
+    base_url: https://REPLACE-WITH-IBM-GATEWAY-HOST
+    key_env: UPSTREAM_IBM_LITELLM_KEY
+
+  # The same gateway over its OpenAI-dialect route, for Codex, tau2-bench, etc.
+  #   OPENAI_BASE_URL=https://cg.<host>/openai/v1
+  - name: ibm-litellm-openai
+    dialect: openai
+    base_url: https://REPLACE-WITH-IBM-GATEWAY-HOST
+    key_env: UPSTREAM_IBM_LITELLM_KEY
+
+  # IBM Bob Shell. Bob's model call and its control-plane paths both route here.
+  #   CUSTOM_BASE_URL=https://cg.<host>
+  # `header` is only needed when the upstream wants the key somewhere other than
+  # this dialect's default (Authorization: Bearer for openai/bob, x-api-key for
+  # anthropic).
+  - name: bob-us-east
+    dialect: bob
+    base_url: https://api.us-east.bob.ibm.com
+    key_env: UPSTREAM_BOB_US_EAST_KEY

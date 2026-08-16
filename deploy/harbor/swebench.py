@@ -19,14 +19,27 @@ even if the agent's internal pricing differs.
 
 Usage: swebench.py --tasks /tmp/cg-runs/swe3.txt --configs off general --jobs-root /tmp/cg-runs/swebench --n 3
 """
-import argparse, glob, json, os, subprocess, sys, time, urllib.request
+import argparse, glob, json, os, socket, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
 HB = Path("/home/vpcuser/projects/context-engineering/harbor")
 BIN = "/tmp/cg-runs/cg-proxy-d1"
-PORT = 4000
-LAN = "9.47.170.83"
+# Overridable: 4000 is NOT free on a box that also runs the hosted service
+# (deploy/service/ binds 127.0.0.1:4000 permanently). A clash killed the benchmark proxy
+# with "bind: address already in use", gave every container "Connection refused", and was
+# reported as solved=0 — indistinguishable from a model failure. See require_free_port().
+PORT = int(os.environ.get("CG_BENCH_PORT") or 4000)
+# The address containers reach this host on. Set CG_LAN to this box's LAN IP;
+# 127.0.0.1 only works when the agent runs on the host network. Warn loudly on the
+# default: a container that cannot reach the proxy fails EVERY task, and a run of all
+# failures reads as "the preset is bad" rather than "nothing could connect".
+LAN = os.environ.get("CG_LAN") or "127.0.0.1"
+if not os.environ.get("CG_LAN"):
+    print(f"WARNING: CG_LAN is unset, using {LAN}. Containers on a bridge network "
+          "cannot reach the proxy there and every task will fail. Set CG_LAN to this "
+          "host's LAN IP (`hostname -I`) unless the agent runs with --network host.",
+          file=sys.stderr)
 PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 MODEL = "aws/claude-sonnet-5"
 CHEAP_MODEL = "aws/claude-haiku-4-5"  # fast/cheap model for CG's own compaction LLM (extract_llm)
@@ -49,6 +62,29 @@ def price(model):
     except Exception as e:
         print(f"[price] {e}; fallback", file=sys.stderr)
     return fb
+
+
+def require_free_port():
+    """Refuse to start a run whose proxy cannot bind, rather than reporting solved=0."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("", PORT))
+            return
+        except OSError as e:
+            holder = ""
+            try:
+                out = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True).stdout
+                holder = next((l.strip() for l in out.splitlines() if f":{PORT} " in l), "")
+            except Exception:
+                pass
+            sys.exit(
+                f"FATAL: cannot bind port {PORT} for the benchmark proxy ({e}).\n"
+                f"  holder: {holder or 'unknown'}\n"
+                f"  Re-run with a free port, e.g.:  CG_BENCH_PORT=4010 {' '.join(sys.argv)}\n"
+                "  Refusing to continue: every task would fail with 'Connection refused'\n"
+                "  and the summary would report it as solved=0."
+            )
 
 
 def stop_proxy():
@@ -77,7 +113,7 @@ CUSTOM_CONFIGS = {
         # deterministic extract then strips ANSI/noise on the smaller outputs the LLM left
         # untouched. (When extract ran first it marked outputs so extract_llm skipped them
         # via HasPlaceholder → the LLM never fired.)
-        "pipeline: [format, dedup, failed_run, cmdfilter, extract_llm, extract, cacheinject]\n"
+        "pipeline: [format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]\n"
         "components:\n"
         "  extract:\n"
         "    min_tokens: 400\n"  # deterministic, zero-latency: catches obvious noise every step
@@ -116,7 +152,7 @@ CUSTOM_CONFIGS = {
     "cacheonly": "pipeline: [cacheinject]\n",
     # conservative deterministic-only (no LLM, no mask): safe control
     "codesafe": (
-        "pipeline: [format, dedup, failed_run, cmdfilter, extract, collapse, cacheinject]\n"
+        "pipeline: [format, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]\n"
         "components:\n"
         "  collapse:\n"
         "    max_tokens: 3000\n"
@@ -268,6 +304,7 @@ def main():
     ap.add_argument("--capture-config", default="off", help="which config also captures the stream for replay")
     ap.add_argument("--dump-configs", nargs="*", default=["general"], help="configs that DUMP before→after change logs")
     a = ap.parse_args()
+    require_free_port()  # before any container is built or token spent
     base, token = creds()
     pr = price(MODEL)
     cpr = price(CHEAP_MODEL)  # CG's OWN compaction LLM is the CHEAP model — price it at ITS rate

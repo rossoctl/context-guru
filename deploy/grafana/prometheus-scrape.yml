@@ -1,0 +1,30 @@
+# Prometheus scrape config for context-guru.
+#
+# Merge the job below into your prometheus.yml. The proxy serves /metrics in the classic
+# text exposition format with no client library involved — see proxy/promexport.go for
+# why that dependency was not worth taking for a few dozen series.
+#
+# The endpoint is a SERVICE-WIDE view: it carries per-tenant cost. Loopback needs no
+# credential (Prometheus normally runs beside the proxy); anything else needs the bearer
+# token from METRICS_TOKEN.
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # Same box as the proxy — the usual case, and the one that needs no secret.
+  - job_name: context-guru
+    static_configs:
+      - targets: ['127.0.0.1:4000']
+        labels:
+          service: context-guru
+
+  # Scraping across the network. Uncomment, and put METRICS_TOKEN in the file below
+  # rather than inline, so the token is not in your Prometheus config in plaintext.
+  # - job_name: context-guru-remote
+  #   scheme: https
+  #   authorization:
+  #     type: Bearer
+  #     credentials_file: /etc/prometheus/context-guru.token
+  #   static_configs:
+  #     - targets: ['cg.example.ibm.com:443']

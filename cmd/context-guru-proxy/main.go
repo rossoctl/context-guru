@@ -10,14 +10,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rossoctl/context-guru/components"
@@ -29,6 +33,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/proxy"
+	"github.com/rossoctl/context-guru/tenant"
 )
 
 func main() {
@@ -68,6 +73,75 @@ func main() {
 			"capture channel depth; a full channel DROPS events (counted, and shown in the UI) rather than delaying a request")
 		dashCIDRs = flag.String("dashboard-trusted-cidrs", envOr("DASHBOARD_TRUSTED_CIDRS", ""),
 			"comma-separated CIDRs allowed to view per-request CONTENT and the effective config (loopback always is; aggregates are open)")
+		// Hosted (multi-tenant) mode. Off by default: without --upstreams this binary
+		// behaves exactly as it always has, which keeps every existing deployment and
+		// every benchmark harness working unchanged.
+		upstreamsPath = flag.String("upstreams", envOr("UPSTREAMS", ""),
+			"path to the upstream allow-list YAML; SET THIS TO ENABLE HOSTED MULTI-TENANT MODE "+
+				"(every request then needs a context-guru token, and each tenant's own config applies)")
+		controlDB = flag.String("control-db", envOr("CONTROL_DB", "./context-guru-control.db"),
+			"hosted mode: path to the control database (tenants, tokens, per-tenant config). "+
+				"Kept separate from the dashboard DB, which is a derived view that may be rebuilt or pruned")
+		managerEmail = flag.String("manager-email", envOr("MANAGER_EMAIL", ""),
+			"hosted mode: the email that becomes the manager account on registration (sees and edits every tenant)")
+		registerDomains = flag.String("register-domains", envOr("REGISTER_DOMAINS", ""),
+			"hosted mode: comma-separated email domains allowed to self-register. Applies only "+
+				"when CG_REGISTER=open or invite; registration is CLOSED unless CG_REGISTER "+
+				"says otherwise (invite also needs CG_REGISTER_CODE). Matching is exact-domain "+
+				"or a subdomain of it, but the address itself is UNVERIFIED — nobody proves "+
+				"they own it")
+		maxTenancies = flag.Int("max-tenancies", envInt("MAX_TENANCIES", proxy.DefaultMaxTenancies),
+			"hosted mode: how many tenants keep live pipelines and compaction state in memory; "+
+				"evicting a tenant costs it one cold cache on its next turn")
+		tenantCapUSD = flag.Float64("tenant-monthly-cap-usd", float64(envInt("TENANT_MONTHLY_CAP_USD", 50)),
+			"hosted mode: default monthly spend cap per tenant against the shared upstream credential")
+
+		// Disk-pressure eviction. The byte budget above bounds THIS database; these
+		// bound the FILESYSTEM, which on a shared box is mostly filled by other things.
+		dashDiskHigh = flag.Float64("dashboard-disk-high", envFloat("DASHBOARD_DISK_HIGH", 0.90),
+			"evict the oldest SESSIONS while this fraction of the filesystem is in use (negative = disable)")
+		dashDiskLow = flag.Float64("dashboard-disk-low", envFloat("DASHBOARD_DISK_LOW", 0.85),
+			"stop evicting once usage falls to this fraction; the gap from --dashboard-disk-high is what stops the janitor grinding when the host is full for other reasons")
+		dashMinKeep = flag.Int64("dashboard-min-keep-bytes", int64(envInt("DASHBOARD_MIN_KEEP_BYTES", 1<<30)),
+			"never shrink the dashboard database below this under disk pressure; below it the pressure is not ours to relieve")
+		dashMaxRowsPerTenant = flag.Int64("dashboard-max-rows-per-tenant", int64(envInt("DASHBOARD_MAX_ROWS_PER_TENANT", 0)),
+			"hosted mode: cap one tenant's retained request rows, trimmed before the disk rule so a heavy user cannot evict everyone else (0 = no cap)")
+
+		// Cold storage (Box via rclone). When set, eviction becomes MIGRATION: a
+		// session is uploaded and verified before its local rows are deleted, so
+		// retention is bounded by Box rather than by this filesystem. rclone is driven
+		// as a subprocess and nothing is mounted — see dash/remote.go for why a FUSE
+		// mount is the wrong home for a SQLite database.
+		archiveRemote = flag.String("archive-remote", envOr("ARCHIVE_REMOTE", ""),
+			"rclone remote path for cold storage, e.g. box:context-guru. SET THIS to make eviction archive instead of delete")
+		rclonePath = flag.String("rclone", envOr("RCLONE", "rclone"), "path to the rclone binary")
+		rcloneConf = flag.String("rclone-config", envOr("RCLONE_CONFIG", ""),
+			"rclone config file holding the remote's OAuth token; set it explicitly for a service (under systemd $HOME is not the shell's)")
+		rcloneBW = flag.String("archive-bwlimit", envOr("ARCHIVE_BWLIMIT", ""),
+			"rclone --bwlimit for archiving (e.g. 8M); empty = unlimited, which will use all the upload bandwidth this box has")
+		archiveContentAfter = flag.Duration("archive-content-after", envDuration("ARCHIVE_CONTENT_AFTER", 24*time.Hour),
+			"move a session's TRANSCRIPTS to cold storage once idle this long (0 = never). This is where the bytes are")
+		archiveSessionAfter = flag.Duration("archive-session-after", envDuration("ARCHIVE_SESSION_AFTER", 30*24*time.Hour),
+			"move a WHOLE session to cold storage once idle this long (0 = never)")
+		archiveInterval = flag.Duration("archive-interval", envDuration("ARCHIVE_INTERVAL", 15*time.Minute),
+			"how often the archiver runs")
+		archiveBatch = flag.Int("archive-batch", envInt("ARCHIVE_BATCH", 50),
+			"maximum sessions archived per pass, so one catch-up cycle cannot exhaust the remote's API quota")
+		archiveRequired = flag.Bool("archive-required", envBool("ARCHIVE_REQUIRED", false),
+			"under disk pressure, refuse to delete a session that could not be archived. Safer for data; lets the filesystem fill if the remote is down, which takes every user's agent with it")
+
+		// Prometheus, for Grafana. Loopback needs no token; a scraper on another host
+		// does, because /metrics carries per-tenant cost.
+		metricsToken = flag.String("metrics-token", envOr("METRICS_TOKEN", ""),
+			"bearer token allowing a remote Prometheus to scrape /metrics (loopback never needs one)")
+		// Per-tenant limits on the shared box.
+		rpm = flag.Int("tenant-rpm", envInt("TENANT_RPM", 0),
+			"hosted mode: max requests per minute per tenant (0 = unlimited)")
+		tenantConcurrent = flag.Int("tenant-concurrent", envInt("TENANT_CONCURRENT", 0),
+			"hosted mode: max in-flight requests per tenant (0 = unlimited)")
+		cheapConcurrent = flag.Int("cheap-model-concurrent", envInt("CHEAP_MODEL_CONCURRENT", 4),
+			"process-wide cap on concurrent compaction-model calls, so one tenant's extract_llm cannot stall everyone's agents (0 = unlimited)")
+
 		dashBench = flag.String("dashboard-bench-dirs", envOr("DASHBOARD_BENCH_DIRS", ""),
 			"comma-separated directories of benchmark runs (each with summary.json + rows-*.json) to ingest")
 	)
@@ -97,6 +171,30 @@ func main() {
 
 	windows := modelWindows()
 
+	// Cold storage, verified at boot: a remote that cannot be reached should be a log
+	// line now, not a stream of "archiving failed" hours later with no hint that the
+	// remote was never configured properly in the first place.
+	var remote dash.Remote
+	if *archiveRemote != "" {
+		rc := &dash.Rclone{Bin: *rclonePath, Base: *archiveRemote,
+			ConfigPath: *rcloneConf, BWLimit: *rcloneBW}
+		if err := rc.Check(context.Background()); err != nil {
+			// Not fatal. Cold storage being unreachable must not stop the proxy from
+			// serving traffic — the same reasoning that makes the dashboard fall back to
+			// memory rather than refusing to boot.
+			slog.Error("context-guru: cold storage is not reachable; archiving is DISABLED "+
+				"and eviction will delete instead of migrate", "remote", *archiveRemote, "err", err)
+		} else {
+			remote = rc
+			slog.Info("context-guru: cold storage ready", "remote", *archiveRemote,
+				"content_after", *archiveContentAfter, "session_after", *archiveSessionAfter)
+			// No spend warning here any more: month-to-date spend comes from the
+			// tenant_spend rollup (dash/spend.go), which retention and archiving never
+			// touch, so archiving sessions inside the calendar month no longer makes the
+			// cap under-count.
+		}
+	}
+
 	var rec *dash.Recorder
 	if *dashOn {
 		opts := dash.Options{
@@ -108,6 +206,22 @@ func main() {
 			QueueSize:      *dashQueue,
 			TrustedCIDRs:   splitComma(*dashCIDRs),
 			BenchDirs:      splitComma(*dashBench),
+
+			DiskHighWatermark: *dashDiskHigh,
+			DiskLowWatermark:  *dashDiskLow,
+			MinKeepBytes:      *dashMinKeep,
+			MaxRowsPerTenant:  *dashMaxRowsPerTenant,
+
+			Remote: remote,
+			// The CONFIGURED name, whether or not the probe above succeeded: `remote` is
+			// nil when cold storage is unreachable, and the dashboard must still be able
+			// to say "configured but unreachable" instead of "not configured".
+			RemoteName:          *archiveRemote,
+			ArchiveContentAfter: *archiveContentAfter,
+			ArchiveSessionAfter: *archiveSessionAfter,
+			ArchiveInterval:     *archiveInterval,
+			ArchiveBatch:        *archiveBatch,
+			ArchiveRequired:     *archiveRequired,
 			// The REAL mode, not a hardcoded "active". In observe mode nothing context-guru
 			// computed was ever enforced, so the dashboard must say so unmissably rather than
 			// present projections as achieved savings.
@@ -130,12 +244,157 @@ func main() {
 		defer rec.Close()
 		if runs, tasks := rec.DB().IngestBenchRoots(opts.BenchDirs); runs > 0 {
 			slog.Info("dashboard: ingested benchmark runs", "runs", runs, "tasks", tasks)
+		} else if len(opts.BenchDirs) > 0 {
+			// Asked to ingest and found nothing. Say so: ingestion runs ONCE at startup,
+			// so a silent zero means the Benchmarks tab stays empty forever with no clue
+			// why, and the most likely cause is invisible from inside the process.
+			//
+			// That cause is PrivateTmp. The shipped unit sets PrivateTmp=true, so the
+			// service gets its OWN empty /tmp — a directory that plainly exists in the
+			// operator's shell is simply not there for this process. Pointing
+			// DASHBOARD_BENCH_DIRS at /tmp/<anything> therefore looks correct, changes
+			// nothing, and reports nothing. Naming the path we actually looked at is what
+			// makes that diagnosable in one glance at the log.
+			hint := ""
+			for _, d := range opts.BenchDirs {
+				if strings.HasPrefix(filepath.Clean(d), "/tmp/") {
+					hint = "a /tmp path is NOT visible to this process when the unit sets " +
+						"PrivateTmp=true; copy the run directory somewhere readable " +
+						"(e.g. under the state dir) and point DASHBOARD_BENCH_DIRS there"
+					break
+				}
+			}
+			slog.Warn("dashboard: no benchmark runs ingested; the Benchmarks tab will be empty",
+				"dirs", strings.Join(opts.BenchDirs, ","), "hint", hint)
 		}
 		slog.Info("dashboard enabled", "url", "http://"+addr+"/dashboard/", "db", rec.DB().Path(),
 			"content_capture", *dashContent)
 	}
 
+	// Hosted mode. Everything below is nil/empty unless --upstreams was given, and the
+	// proxy checks exactly one field (Options.Tenants) to decide which world it is in.
+	var tenants *proxy.TenantSource
+	var upstreams map[string]proxy.Upstream
+	var reg *tenant.Registry
+	if *upstreamsPath != "" {
+		list, err := config.LoadUpstreams(*upstreamsPath)
+		if err != nil {
+			// Deliberately fatal. A hosted proxy with an unusable allow-list would
+			// either refuse every request or, worse, forward a client's token to a
+			// third party for want of a key to inject.
+			log.Fatalf("upstreams: %v", err)
+		}
+		upstreams = make(map[string]proxy.Upstream, len(list))
+		for _, u := range list {
+			upstreams[u.Name] = proxy.Upstream{Dialect: u.Dialect, BaseURL: u.BaseURL,
+				KeyEnv: u.KeyEnv, Header: u.Header}
+		}
+		defAnthropic, defOpenAI, defBob := defaultUpstreams(list)
+		reg, err = tenant.Open(*controlDB, tenant.Options{
+			ManagerEmail:         *managerEmail,
+			EmailDomains:         splitComma(*registerDomains),
+			DefaultUpAnthropic:   defAnthropic,
+			DefaultUpOpenAI:      defOpenAI,
+			DefaultUpBob:         defBob,
+			DefaultMonthlyCapUSD: *tenantCapUSD,
+			// Reject a bad configuration when a user SAVES it, so the failure is a 400
+			// on their settings page instead of a silent pass-through on their next turn.
+			Validate: config.Validate,
+		})
+		if err != nil {
+			log.Fatalf("control database: %v", err)
+		}
+		defer reg.Close()
+		tenants = proxy.NewTenantSource(reg, emitter, buildTenantConfig, *maxTenancies)
+		// Make the per-tenant row quota a manager can set actually bind. Wired here
+		// rather than in dash.Options because the recorder starts before the control
+		// database opens, and because the value has to be read fresh — a manager can
+		// change it at any time. 0 (or an unknown tenant) falls back to the server-wide
+		// --dashboard-max-rows-per-tenant.
+		rec.SetTenantQuota(func(id string) int64 {
+			t, err := reg.Get(id)
+			if err != nil {
+				return 0
+			}
+			return t.MaxRows
+		})
+		// A cap can only bind if requests can be priced. Without a price map every row
+		// costs $0.00, month-to-date spend is always zero, and the cap silently never
+		// fires — which looks exactly like a generous budget until the invoice arrives.
+		if *tenantCapUSD > 0 && strings.EqualFold(os.Getenv("MODEL_INFO"), "off") {
+			slog.Warn("context-guru: per-tenant spend caps are configured but MODEL_INFO=off, " +
+				"so requests cannot be priced and NO CAP WILL EVER FIRE")
+		}
+		slog.Info("context-guru: HOSTED multi-tenant mode",
+			"control_db", *controlDB, "upstreams", len(upstreams),
+			"register_domains", *registerDomains, "manager", *managerEmail != "")
+		if *managerEmail == "" {
+			slog.Warn("context-guru: no --manager-email set; no account will be able to " +
+				"administer other tenants until one is configured")
+		}
+		// Registration mode lives in the environment (CG_REGISTER) and is re-read by the
+		// control plane on every request, so an operator can open or close registration
+		// without a restart. That means this log reports what the mode is NOW, not a value
+		// pinned for the process lifetime — which is also why it is not a flag.
+		//
+		// The warning is mode-dependent on purpose. It used to fire on an empty
+		// --register-domains alone, which after registration became closed-by-default was
+		// worse than no warning: it told the operator anyone could create an account at a
+		// moment when nobody could.
+		//
+		// The mode comes from proxy.RegisterMode(), NOT from reading CG_REGISTER here:
+		// the control plane trims and lower-cases the value, so a banner that switched on
+		// the raw string reported "off" for CG_REGISTER=Open while registration was open.
+		switch mode := proxy.RegisterMode(); mode {
+		case "open":
+			if *registerDomains == "" {
+				slog.Warn("context-guru: CG_REGISTER=open with no --register-domains; anyone " +
+					"who can reach this port may create an account that spends the operator's " +
+					"upstream key")
+			} else {
+				// The match itself is sound (exact domain or a subdomain of it, so
+				// notibm.com does not match ibm.com). What is weak is that NOBODY PROVES
+				// they own the address: there is no mail path, so the domain is a claim.
+				// Naming the wrong weakness would send an operator to fix the matching.
+				slog.Warn("context-guru: CG_REGISTER=open; the email domain is UNVERIFIED "+
+					"(no ownership proof), so exposure is (accounts created) x (monthly cap)",
+					"domains", *registerDomains)
+			}
+		case "invite":
+			if os.Getenv("CG_REGISTER_CODE") == "" {
+				slog.Warn("context-guru: CG_REGISTER=invite but CG_REGISTER_CODE is empty; " +
+					"registration will refuse EVERYONE until a code is set")
+			}
+		default:
+			// Deliberately says how to BOOTSTRAP: /api/register is the only route that
+			// creates an account (a manager can reissue tokens for tenants that exist, but
+			// cannot create one), so a fresh control database with registration closed has
+			// no path to a first account at all. An operator who is told only "it is off"
+			// discovers that the hard way.
+			slog.Info("context-guru: self-registration is off (CG_REGISTER=" + mode +
+				"); /api/register is the only way an account is created, so bootstrap the " +
+				"first one with CG_REGISTER=invite plus CG_REGISTER_CODE (matching " +
+				"--manager-email), then close it again")
+		}
+	}
+
 	h := proxy.New(pipe, cfg.NewStore(), agg, proxy.Options{
+		Tenants:      tenants,   // nil => single-tenant, unchanged behaviour
+		Upstreams:    upstreams, // the allow-list; a tenant picks a name, never a URL
+		MetricsToken: *metricsToken,
+		// Both come from the dashboard's store, so both are nil when the dashboard is
+		// off — with no request rows there is nothing to price a cap against and nothing
+		// to roll up per tenant.
+		Spend:          spendChecker(rec),
+		TenantMetrics:  tenantMetrics(rec),
+		Version:        buildinfo.Version,
+		PresetNames:    config.PresetNames(),
+		ComponentNames: components.Names(),
+		Limits: proxy.Limits{
+			RequestsPerMinute:    *rpm,
+			Concurrent:           *tenantConcurrent,
+			CheapModelConcurrent: *cheapConcurrent,
+		},
 		OpenAIUpstream:    *openai,
 		AnthropicUpstream: *anthropic,
 		BobUpstream:       *bob, // enables the Bob gateway routes when set (BOB_UPSTREAM)
@@ -175,15 +434,183 @@ func main() {
 		},
 	})
 
+	// One identity resolver for both halves of the dashboard: the read routes (dash)
+	// and the write routes (control plane) must never disagree about who the caller is.
+	if tenants != nil && rec != nil {
+		h.API().SetAuth(h.DashAuth())
+		h.API().SetWhoami(h.DashWhoami())
+		// The per-tenant half of the capture decision, read fresh because a tenant can
+		// toggle its consent at any time. Without it the dashboard reported the
+		// process-global flag to every tenant: "captured" to accounts that never
+		// consented, and "not captured, go and enable it" when the operator's gate was
+		// the one that was off. Mirrors proxy's own captureContentFor.
+		h.API().SetTenantCapture(func(id string) bool {
+			t, err := reg.Get(id)
+			return err == nil && t.CaptureContent
+		})
+	}
+
 	defer h.Close() // stop the off-path worker pool cleanly (no-op in sync mode)
 	if mode == components.ModeObserve {
 		slog.Warn("context-guru: OBSERVE MODE — requests are forwarded UNMODIFIED; " +
 			"/stats reports what compaction WOULD have saved under potential_*/projected_* keys")
 	}
 	slog.Info("context-guru-proxy listening", "addr", addr, "pipeline", cfg.Pipeline, "mode", mode)
-	if err := http.ListenAndServe(addr, h.Mux()); err != nil {
+
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: h.Mux(),
+		// ReadHeaderTimeout is the one that matters for a service on a network: without
+		// it, a client that opens a connection and never finishes its headers holds a
+		// goroutine and a file descriptor indefinitely.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// NO WriteTimeout, and no ReadTimeout, deliberately. Both are absolute deadlines
+		// on the whole request, and this proxy has two kinds of traffic that legitimately
+		// outlive any fixed budget: an SSE stream that stays open for hours, and an agent
+		// turn on a large transcript. A WriteTimeout here would sever the dashboard's live
+		// feed and truncate long completions mid-stream — which would look like
+		// context-guru corrupting responses. Per-write deadlines are applied where they
+		// belong instead, via http.ResponseController in dash/sse.go.
+	}
+
+	armShutdown(srv, rec)
+
+	// Graceful shutdown, so the dashboard's writer goroutine flushes its batch and any
+	// in-flight archive upload is not abandoned halfway. Without this, a restart loses
+	// the last few hundred milliseconds of captured requests every time.
+	idle := make(chan struct{})
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		s := <-sig
+		slog.Info("context-guru: shutting down", "signal", s.String())
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			slog.Warn("context-guru: graceful shutdown did not finish in time", "err", err)
+		}
+		close(idle)
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+	<-idle
+	// The deferred Close calls (recorder, registry) run after this, which is what
+	// actually flushes the capture batch and closes the databases cleanly.
+}
+
+// armShutdown makes graceful shutdown able to finish while the dashboard's live
+// feed is connected.
+//
+// http.Server.Shutdown closes the listeners and then WAITS for every in-flight
+// request to return. An SSE stream never returns on its own — that is the point of
+// it — so a single open /api/events connection held Shutdown for its whole deadline
+// (measured: 15 ms with no viewer, 25 s with one), which is 25 s of downtime on
+// every restart and 25 s in which an in-flight archive upload is neither finished
+// nor cancelled. The hook runs as shutdown begins, after the listeners are closed,
+// so the ordering is: stop accepting, disconnect the streams, drain the rest — and
+// only then do the deferred Close calls flush the capture batch and close the
+// databases.
+func armShutdown(srv *http.Server, rec *dash.Recorder) {
+	if rec == nil {
+		return
+	}
+	srv.RegisterOnShutdown(rec.Hub().Close)
+}
+
+// buildTenantConfig expands one tenant's configuration document into a runnable
+// pipeline and its own state store. Handed to the proxy as a function so that
+// package stays decoupled from `config`, exactly as PipelineFor already is.
+//
+// The store is built per tenant, not shared: it holds the FROZEN compaction
+// decisions that make savings compound turn over turn, and a shared LRU means one
+// busy tenant evicts another's, which re-writes that tenant's whole cached prefix
+// at roughly 11.5x the read price.
+// spendChecker adapts the recorder to the spend interface, returning nil (cap
+// disabled) when there is no dashboard — the month-to-date figure lives in the
+// dashboard's rows, so without it there is nothing to enforce against.
+func spendChecker(rec *dash.Recorder) proxy.SpendChecker {
+	if rec == nil {
+		return nil
+	}
+	return rec.DB()
+}
+
+// tenantMetrics adapts the recorder's per-tenant rollup for the Prometheus exporter.
+// The two row types are structurally identical but declared in different packages
+// (dash must not import proxy), so this converts.
+func tenantMetrics(rec *dash.Recorder) proxy.TenantMetricsSource {
+	if rec == nil {
+		return nil
+	}
+	return tenantMetricsAdapter{rec}
+}
+
+type tenantMetricsAdapter struct{ rec *dash.Recorder }
+
+func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRow, error) {
+	rows, err := a.rec.DB().TenantMetrics(since)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]proxy.TenantMetricRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, proxy.TenantMetricRow{
+			TenantID: r.TenantID, Label: r.Label, Requests: r.Requests,
+			TokensBefore: r.TokensBefore, TokensAfter: r.TokensAfter,
+			SavedUnique: r.SavedUnique, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite,
+			FreshInput: r.FreshInput, OutputTokens: r.OutputTokens,
+			CostUSD: r.CostUSD, BaselineUSD: r.BaselineUSD, CGLLMCostUSD: r.CGLLMCostUSD,
+			CGLatencyMs: r.CGLatencyMs, UpstreamMs: r.UpstreamMs, Sessions: r.Sessions,
+			ArchivedCount: r.ArchivedCount, ArchivedBytes: r.ArchivedBytes,
+		})
+	}
+	return out, nil
+}
+
+func buildTenantConfig(doc []byte, e components.Emitter) (proxy.BuiltConfig, error) {
+	cfg, err := config.LoadBytes(doc)
+	if err != nil {
+		return proxy.BuiltConfig{}, err
+	}
+	mode, err := cfg.OperatingMode()
+	if err != nil {
+		return proxy.BuiltConfig{}, err
+	}
+	pipe, err := cfg.Build(e)
+	if err != nil {
+		return proxy.BuiltConfig{}, err
+	}
+	preset := cfg.Preset
+	if preset == "" {
+		preset = "custom" // an explicit pipeline list; labelled so the dashboard can group it
+	}
+	return proxy.BuiltConfig{Pipe: pipe, Store: cfg.NewStore(), Mode: mode, Preset: preset}, nil
+}
+
+// defaultUpstreams picks the first entry of each dialect as the default a newly
+// registered tenant starts on, so registration needs no choices and the common case
+// (one gateway, one Bob region) needs no configuration at all.
+func defaultUpstreams(list []config.Upstream) (anthropic, openai, bob string) {
+	for _, u := range list {
+		switch u.Dialect {
+		case config.DialectAnthropic:
+			if anthropic == "" {
+				anthropic = u.Name
+			}
+		case config.DialectOpenAI:
+			if openai == "" {
+				openai = u.Name
+			}
+		case config.DialectBob:
+			if bob == "" {
+				bob = u.Name
+			}
+		}
+	}
+	return
 }
 
 func loadConfig(path, preset string) (*config.Config, error) {
@@ -254,6 +681,13 @@ func envBool(key string, def bool) bool {
 }
 
 // envInt reads an integer environment variable, falling back on anything unparseable.
+func envFloat(key string, def float64) float64 {
+	if v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(key)), 64); err == nil {
+		return v
+	}
+	return def
+}
+
 func envInt(key string, def int) int {
 	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key))); err == nil {
 		return v

@@ -1,0 +1,31 @@
+# Backs up the context-guru control database to Box. Triggered by the matching timer.
+
+[Unit]
+Description=Back up the context-guru control database to Box
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=cg
+Group=cg
+
+Environment=CONTROL_DB=/var/lib/context-guru/cg-control.db
+Environment=ARCHIVE_REMOTE=box:context-guru
+Environment=RCLONE_CONFIG=/var/lib/context-guru/rclone.conf
+Environment=KEEP_DAYS=30
+
+ExecStart=/usr/local/bin/context-guru-backup.sh
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/context-guru
+UMask=0077
+# The snapshot is compressed in memory and streamed to rclone, but sqlite3 .backup
+# writes a temporary file first, so give it somewhere to go.
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

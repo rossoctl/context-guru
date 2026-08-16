@@ -28,7 +28,16 @@ HD = Path("/home/vpcuser/projects/context-engineering/headroom")
 HB = Path("/home/vpcuser/projects/context-engineering/harbor")
 HEADROOM_BIN = os.path.expanduser("~/.local/bin/headroom")
 PORT = 4010
-LAN = "9.47.170.83"
+# The address containers reach this host on. Set CG_LAN to this box's LAN IP;
+# 127.0.0.1 only works when the agent runs on the host network. Warn loudly on the
+# default: a container that cannot reach the proxy fails EVERY task, and a run of all
+# failures reads as "the preset is bad" rather than "nothing could connect".
+LAN = os.environ.get("CG_LAN") or "127.0.0.1"
+if not os.environ.get("CG_LAN"):
+    print(f"WARNING: CG_LAN is unset, using {LAN}. Containers on a bridge network "
+          "cannot reach the proxy there and every task will fail. Set CG_LAN to this "
+          "host's LAN IP (`hostname -I`) unless the agent runs with --network host.",
+          file=sys.stderr)
 PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 MODEL = "aws/claude-sonnet-5"
 

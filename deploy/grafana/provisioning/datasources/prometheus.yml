@@ -1,0 +1,20 @@
+# Grafana data source for the Prometheus that scrapes context-guru.
+#
+#   cp -r deploy/grafana/provisioning/* /etc/grafana/provisioning/
+#   systemctl restart grafana-server
+#
+# uid is pinned because the shipped dashboard references it. Change it here and the
+# dashboard's panels lose their data source — which presents as an empty dashboard with
+# no error, the least debuggable failure Grafana has.
+
+apiVersion: 1
+
+datasources:
+  - name: context-guru-prometheus
+    uid: cg-prom
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:9090
+    isDefault: false
+    jsonData:
+      timeInterval: 15s

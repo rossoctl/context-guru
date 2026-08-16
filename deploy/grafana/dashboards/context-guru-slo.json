@@ -1,0 +1,956 @@
+{
+ "__comment": [
+  "context-guru service SLO. Small on purpose: every panel is backed by a series that",
+  "actually exists in proxy/promexport.go, plus Prometheus's own `up`.",
+  "",
+  "The bottom row is the HTTP error-rate SLI, over cg_refused_requests_total. Its",
+  "denominator is refused + processed, because a refused request never reaches the",
+  "aggregator and so is absent from cg_requests_total."
+ ],
+ "uid": "context-guru-slo",
+ "title": "context-guru service SLO",
+ "tags": [
+  "context-guru",
+  "slo"
+ ],
+ "timezone": "browser",
+ "editable": false,
+ "graphTooltip": 1,
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "1m",
+ "time": {
+  "from": "now-24h",
+  "to": "now"
+ },
+ "annotations": {
+  "list": []
+ },
+ "templating": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "row",
+   "title": "Availability",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "panels": []
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Availability, 30 days",
+   "description": "Fraction of scrapes where the proxy answered. Below 99.9% over 30 days is roughly 43 minutes of outage \u2014 the point where a monthly target is already spent. Reads a flattering 100% until Prometheus has actually retained 30 days of history.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 0,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "avg_over_time(up{job=\"context-guru\"}[30d])",
+     "editorMode": "code",
+     "legendFormat": "30d",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#e66767",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 0.99
+       },
+       {
+        "color": "#199e70",
+        "value": 0.999
+       }
+      ]
+     },
+     "decimals": 3,
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "Availability, 24 hours",
+   "description": "The same measure over a day, so a fresh outage shows before the 30-day figure moves. Below 100% means it was down today.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 6,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "avg_over_time(up{job=\"context-guru\"}[24h])",
+     "editorMode": "code",
+     "legendFormat": "24h",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#e66767",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 0.99
+       },
+       {
+        "color": "#199e70",
+        "value": 0.999
+       }
+      ]
+     },
+     "decimals": 3,
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 4,
+   "type": "timeseries",
+   "title": "Uptime",
+   "description": "Hourly availability. Any dip below the top of the axis is an hour with failed scrapes in it.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 12,
+    "x": 12,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "avg_over_time(up{job=\"context-guru\"}[1h])",
+     "editorMode": "code",
+     "legendFormat": "available"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "pointSize": 8,
+      "spanNulls": true,
+      "axisSoftMin": 0,
+      "axisGridShow": true,
+      "axisBorderShow": false,
+      "lineInterpolation": "linear",
+      "gradientMode": "none",
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "text",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#3987e5"
+     },
+     "decimals": 2,
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": false,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "single",
+     "sort": "none"
+    }
+   }
+  },
+  {
+   "id": 5,
+   "type": "row",
+   "title": "Latency the service is responsible for",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 7
+   },
+   "panels": []
+  },
+  {
+   "id": 6,
+   "type": "stat",
+   "title": "Added latency",
+   "description": "Mean overhead context-guru adds. The service is only responsible for this one \u2014 above 200ms it is visible in an agent turn, above 800ms it is a complaint.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 0,
+    "y": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "cg_added_latency_ms",
+     "editorMode": "code",
+     "legendFormat": "added"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 200
+       },
+       {
+        "color": "#e66767",
+        "value": 800
+       }
+      ]
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 7,
+   "type": "stat",
+   "title": "Streaming preserved",
+   "description": "Share of responses delivered as a live stream. Falling means more clients waited for a full buffer before their first byte.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 6,
+    "y": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum(cg_sse_streams_total{path=\"streamed\"}) / clamp_min(sum(cg_sse_streams_total), 1)",
+     "editorMode": "code",
+     "legendFormat": "streamed",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#e66767",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 0.8
+       },
+       {
+        "color": "#199e70",
+        "value": 0.95
+       }
+      ]
+     },
+     "decimals": 0,
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "Added latency over time",
+   "description": "Bad is a step change after a deploy, or a slow climb as the pipeline grows. Upstream latency is deliberately NOT on this axis \u2014 it is two to three orders of magnitude larger and would flatten this line to zero.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 12,
+    "x": 12,
+    "y": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "cg_added_latency_ms",
+     "editorMode": "code",
+     "legendFormat": "context-guru"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "pointSize": 8,
+      "spanNulls": true,
+      "axisSoftMin": 0,
+      "axisGridShow": true,
+      "axisBorderShow": false,
+      "lineInterpolation": "linear",
+      "gradientMode": "none",
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "text",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#d95926"
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": false,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "single",
+     "sort": "none"
+    }
+   }
+  },
+  {
+   "id": 9,
+   "type": "row",
+   "title": "Correctness of the observability path itself",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 14
+   },
+   "panels": []
+  },
+  {
+   "id": 10,
+   "type": "stat",
+   "title": "Capture loss",
+   "description": "Dropped capture events over captured. Non-zero means the dashboard's own history has holes, so every other number here is measured on partial data.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 0,
+    "y": 15
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum(cg_dash_events_total{disposition=\"dropped\"}) / clamp_min(sum(cg_dash_events_total{disposition=\"captured\"}), 1)",
+     "editorMode": "code",
+     "legendFormat": "loss",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 0.001
+       },
+       {
+        "color": "#e66767",
+        "value": 0.01
+       }
+      ]
+     },
+     "decimals": 2,
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 11,
+   "type": "stat",
+   "title": "Compaction-model failure rate",
+   "description": "Timeouts and errors over calls. Above a few percent the compactor is partially switched off and the savings figures are an undercount.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 6,
+    "y": 15
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum(cg_llm_failures_total) / clamp_min(sum(cg_llm_calls_total), 1)",
+     "editorMode": "code",
+     "legendFormat": "failures",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 0.01
+       },
+       {
+        "color": "#e66767",
+        "value": 0.05
+       }
+      ]
+     },
+     "decimals": 2,
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 12,
+   "type": "timeseries",
+   "title": "Time to first byte, streamed responses",
+   "description": "Mean TTFB on responses that streamed through. A climb here is felt as the agent 'thinking' before it types.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 12,
+    "x": 12,
+    "y": 15
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "cg_sse_ttfb_ms",
+     "editorMode": "code",
+     "legendFormat": "ttfb"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "pointSize": 8,
+      "spanNulls": true,
+      "axisSoftMin": 0,
+      "axisGridShow": true,
+      "axisBorderShow": false,
+      "lineInterpolation": "linear",
+      "gradientMode": "none",
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "text",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#3987e5"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": false,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "single",
+     "sort": "none"
+    }
+   }
+  },
+  {
+   "id": 13,
+   "type": "row",
+   "title": "Requests refused",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 21
+   },
+   "panels": []
+  },
+  {
+   "id": 14,
+   "type": "stat",
+   "title": "Refusal rate, 24 hours",
+   "description": "Refused requests over all requests (refused plus processed \u2014 a refused request never reaches the aggregator, so it is not in cg_requests_total). This is the error-rate SLI: above 1% somebody's agent is failing repeatedly, above 5% treat it as an outage for whoever is being refused. Break it down by reason on the panel to the right.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 0,
+    "y": 22
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum(increase(cg_refused_requests_total[24h])) / clamp_min(sum(increase(cg_refused_requests_total[24h])) + sum(increase(cg_requests_total[24h])), 1)",
+     "editorMode": "code",
+     "legendFormat": "refused",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 0.01
+       },
+       {
+        "color": "#e66767",
+        "value": 0.05
+       }
+      ]
+     },
+     "decimals": 2,
+     "min": 0,
+     "max": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 15,
+   "type": "stat",
+   "title": "Requests refused, 24 hours",
+   "description": "How many requests were turned away in the last day \u2014 our own magnitude, no verdict: read it against the rate to its left. Zero with a non-zero rate means the window has almost no traffic.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 6,
+    "y": 22
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum(increase(cg_refused_requests_total[24h]))",
+     "editorMode": "code",
+     "legendFormat": "refused",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#3987e5",
+        "value": null
+       }
+      ]
+     },
+     "decimals": 0,
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 16,
+   "type": "timeseries",
+   "title": "Refusals by reason",
+   "description": "The same SLI, split by why. Which bar is tall decides who fixes it: rate_limit/concurrency are our limits (429), spend_cap is a budget (402), auth/forbidden is the caller's token, no_upstream is our configuration and upstream_error is the provider. Flat at zero is healthy.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 12,
+    "x": 12,
+    "y": 22
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum by (reason) (increase(cg_refused_requests_total[5m]))",
+     "editorMode": "code",
+     "legendFormat": "{{reason}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "bars",
+      "lineWidth": 1,
+      "fillOpacity": 70,
+      "showPoints": "never",
+      "pointSize": 8,
+      "spanNulls": true,
+      "axisSoftMin": 0,
+      "axisGridShow": true,
+      "axisBorderShow": false,
+      "lineInterpolation": "linear",
+      "gradientMode": "none",
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "axisSoftMax": 1
+     },
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "text",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "palette-classic-by-name"
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "none"
+    }
+   }
+  }
+ ]
+}
