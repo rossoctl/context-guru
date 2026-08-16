@@ -42,11 +42,16 @@ func (p *Pipeline) Run(req *schemas.BifrostChatRequest, c *Ctx) *RunReport {
 		rr.TokensAfter = rr.TokensBefore
 		return rr
 	}
+	// ONE snapshot for the whole run, kept in step with req.Input as components land
+	// (see runOne). Cloning the entire transcript per component was ~20% of the rewrite
+	// path's CPU on real 600 KB Claude Code requests, and all but a handful of its
+	// messages were re-cloned unchanged six times over.
+	snap := schema.CloneMessages(req.Input)
 	for _, comp := range p.comps {
 		if !comp.Enabled(c) {
 			continue
 		}
-		rep := p.runOne(comp, req, c)
+		rep := p.runOne(comp, req, c, &snap)
 		rr.Components = append(rr.Components, rep)
 		rr.DurationMs += rep.DurationMs
 		safeEmit(func() { p.emitter.Component(rep) })
@@ -67,9 +72,18 @@ func safeEmit(fn func()) {
 // runOne executes a single component with snapshot/restore isolation and the
 // never-worse guard. It never returns an error — failures are recorded on the
 // Report and the request is reverted.
-func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx) (rep Report) {
+// snap is the run's live snapshot: on entry it holds an independent deep copy of
+// req.Input, and runOne leaves it holding one of req.Input on exit (re-cloning only
+// what changed, or the lot after a revert or a count change).
+func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ctx, snap *[]schemas.ChatMessage) (rep Report) {
 	rep = Report{Component: comp.Name(), Mode: c.effMode()}
-	before := schema.CloneMessages(req.Input)
+	before := *snap
+	// revert installs the snapshot and re-establishes an independent one, because
+	// req.Input now aliases the copy we were holding.
+	revert := func() {
+		req.Input = before
+		*snap = schema.CloneMessages(before)
+	}
 	// baseline is the guard's OWN copy of the pre-run size. rep.TokensBefore is handed to
 	// the component, so a component can write to it — mask and failed_run both did
 	// (`rep.TokensBefore += saved`) — and comparing against the field let a component move
@@ -84,7 +98,7 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		rep.DurationMs = float64(clock().Sub(start).Microseconds()) / 1000.0
 		if r := recover(); r != nil {
 			// Fail open: revert and record. A component panic never breaks the request.
-			req.Input = before
+			revert()
 			rep.Reverted = true
 			rep.TokensBefore = baseline
 			rep.TokensAfter = baseline
@@ -112,7 +126,7 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 	after := tokensOf(req.Input)
 	switch {
 	case err != nil:
-		req.Input = before
+		revert()
 		rep.Reverted = true
 		rep.TokensBefore, rep.TokensAfter = baseline, baseline
 		rep.Err = err
@@ -121,13 +135,13 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		// contract violation — reversibility would be broken. Revert. (A
 		// deliberate lossy drop under marker_mode summary/off sets rep.Irreversible
 		// and is exempt: it chose no restoration, not forgot it.)
-		req.Input = before
+		revert()
 		rep.Reverted = true
 		rep.TokensBefore, rep.TokensAfter = baseline, baseline
 		rep.Err = fmt.Errorf("offload dropped content without stashing a cache_key")
 	case after > baseline:
 		// never-worse: a component must not grow the request.
-		req.Input = before
+		revert()
 		rep.Reverted = true
 		rep.TokensBefore, rep.TokensAfter = baseline, baseline
 	default:
@@ -136,8 +150,27 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		// it in the revert branches above would charge a rolled-back component for a
 		// discard it never caused.
 		rep.ChangedIdx = changedIdx(before, req.Input)
+		resync(snap, req.Input, rep.ChangedIdx)
 	}
 	return rep
+}
+
+// resync brings the run's snapshot back in step with a component's surviving output,
+// re-cloning only the messages that changed. A changed COUNT (summarize) is the one case
+// the index list cannot express — changedIdx returns nil for it, exactly as it does for
+// "nothing changed" — so the length decides, and only that case re-clones the lot.
+//
+// Every snapshot entry stays exactly ONE clone of some live message — a message touched
+// by several components is re-cloned from that component's own output each time — so
+// this is as faithful as the per-component full clone it replaces, not a clone of a clone.
+func resync(snap *[]schemas.ChatMessage, live []schemas.ChatMessage, changed []int) {
+	if len(*snap) != len(live) {
+		*snap = schema.CloneMessages(live)
+		return
+	}
+	for _, i := range changed {
+		(*snap)[i] = schema.CloneMessages(live[i : i+1])[0]
+	}
 }
 
 func tokensOf(msgs []schemas.ChatMessage) int {

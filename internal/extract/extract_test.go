@@ -62,3 +62,15 @@ func TestHarvestIdentifiers(t *testing.T) {
 		t.Fatalf("expected paths/symbols harvested, got %v", ids)
 	}
 }
+
+// ContentKey is memoized by (len, hash); a memo that ignored the content itself would
+// hand same-length bodies the same key — and with it the same stashed original.
+func TestContentKeyMemoDistinguishesSameLengthContent(t *testing.T) {
+	a, b := ContentKey("tool output AAAA"), ContentKey("tool output BBBB")
+	if a == b {
+		t.Fatalf("same-length distinct content shares a key: %q", a)
+	}
+	if again := ContentKey("tool output AAAA"); again != a {
+		t.Fatalf("memoized call disagrees with the fresh one: %q vs %q", again, a)
+	}
+}

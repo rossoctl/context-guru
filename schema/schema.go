@@ -72,13 +72,61 @@ func CloneMessages(in []schemas.ChatMessage) []schemas.ChatMessage {
 // Nil would be louder, but the pipeline's revert paths assign this value straight back
 // to req.Input, so nil would wipe the transcript. A real deep copy keeps isolation
 // working and stays fail-open; the log line is the loud part.
+//
+// bifrost's deepCopyChatContentBlock (core@v1.7.0/schemas/utils.go) copies only
+// Type/Text/Refusal/ImageURLStruct/InputAudio/File — it silently drops the three
+// non-OpenAI block fields ChatContentBlock also carries: CacheControl, Citations and
+// CachePoint. Losing cache_control here would DELETE a prompt-cache breakpoint on
+// revert, i.e. exactly what cachesplit/cacheinject exist to put on the wire, and a
+// missed breakpoint costs a full cache write at ~12.5x the cache-read price. So we
+// restore them after the bifrost copy.
 func fallbackClone(in []schemas.ChatMessage, err error) []schemas.ChatMessage {
 	slog.Warn("context-guru: message clone fell back to a non-JSON deep copy", "err", err)
 	out := make([]schemas.ChatMessage, len(in))
 	for i := range in {
 		out[i] = schemas.DeepCopyChatMessage(in[i])
+		if in[i].Content == nil || out[i].Content == nil {
+			continue
+		}
+		src, dst := in[i].Content.ContentBlocks, out[i].Content.ContentBlocks
+		for j := range dst {
+			if j >= len(src) {
+				break
+			}
+			copyBlockCacheFields(&dst[j], src[j])
+		}
 	}
 	return out
+}
+
+// copyBlockCacheFields deep-copies the cache/citation fields bifrost's block copier
+// omits. Pointer values are cloned, not shared, so mutating the clone's breakpoint
+// cannot reach back into the snapshot (and vice versa).
+func copyBlockCacheFields(dst *schemas.ChatContentBlock, src schemas.ChatContentBlock) {
+	if src.CacheControl != nil {
+		cc := *src.CacheControl
+		cc.TTL = clonep(src.CacheControl.TTL)
+		cc.Scope = clonep(src.CacheControl.Scope)
+		dst.CacheControl = &cc
+	}
+	if src.Citations != nil {
+		c := *src.Citations
+		c.Enabled = clonep(src.Citations.Enabled)
+		dst.Citations = &c
+	}
+	if src.CachePoint != nil {
+		cp := *src.CachePoint
+		cp.TTL = clonep(src.CachePoint.TTL)
+		dst.CachePoint = &cp
+	}
+}
+
+func clonep[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 // BlockText returns the text payload of a content block, or "" if the block

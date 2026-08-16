@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/maphash"
 	"regexp"
 	"sort"
 	"strconv"
@@ -72,11 +73,61 @@ var wsRe = regexp.MustCompile(`\s+`)
 
 // ContentKey is a stable, marker- and whitespace-insensitive key for a body, so the
 // same output re-sent on a later turn hits the extraction cache.
+//
+// Memoized by a fast hash of the input, like internal/tokens.Count and for the same
+// reason: every offloader asks skipReduce about every candidate, so one request
+// normalizes and sha256s the SAME tool output three or four times over — two regexp
+// rewrites of a 50 KB body each time. Bounded the same way (cleared wholesale past cap).
 func ContentKey(text string) string {
-	s := wsRe.ReplaceAllString(cgMarkerRe.ReplaceAllString(text, ""), " ")
-	s = strings.TrimSpace(s)
+	ck := ckKey{n: len(text), h: ckHash(text)}
+	ckMu.Lock()
+	k, ok := ckMap[ck]
+	ckMu.Unlock()
+	if ok {
+		return k
+	}
+	s := text
+	if strings.Contains(s, markerOpen) {
+		s = cgMarkerRe.ReplaceAllString(s, "")
+	}
+	s = strings.TrimSpace(wsRe.ReplaceAllString(s, " "))
 	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])[:24]
+	k = hex.EncodeToString(sum[:])[:24]
+	ckMu.Lock()
+	if len(ckMap) >= ckCacheCap {
+		ckMap = make(map[ckKey]string, 1024)
+	}
+	ckMap[ck] = k
+	ckMu.Unlock()
+	return k
+}
+
+// markerOpen is the marker's fixed prefix: no marker can be present without it, so a
+// plain substring check decides whether the regexp rewrite is needed at all.
+const markerOpen = "<<cg:"
+
+const ckCacheCap = 20_000
+
+// ckKey pairs the hash with the content LENGTH. A 64-bit collision is already
+// vanishingly unlikely, but unlike a mis-memoized token count a wrong ContentKey means a
+// wrong stashed original on expand, so the cheapest available second opinion is worth an
+// int compare: colliding contents must now also be the same size.
+type ckKey struct {
+	n int
+	h uint64
+}
+
+var (
+	ckMu   sync.Mutex
+	ckSeed = maphash.MakeSeed()
+	ckMap  = make(map[ckKey]string, 1024)
+)
+
+func ckHash(text string) uint64 {
+	var h maphash.Hash
+	h.SetSeed(ckSeed)
+	h.WriteString(text)
+	return h.Sum64()
 }
 
 // ResultKey is the GLOBAL cache key for a derived extraction result. Unlike a

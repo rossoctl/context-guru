@@ -145,12 +145,24 @@ const (
 
 // slot records how one normalized message writes back to the raw body.
 type slot struct {
-	kind     slotKind
-	path     string // sjson path: "messages.<i>" (whole) or "messages.<i>.content.<b>.content" (tool text)
-	pre      []byte // wholeMessage: canonical marshal of the original message
-	preText  string // anthropicToolText: original tool-output text (change detection)
-	lossless bool   // wholeMessage: does bifrost round-trip this message without dropping fields
+	kind    slotKind
+	path    string // sjson path: "messages.<i>" (whole) or "messages.<i>.content.<b>.content" (tool text)
+	pre     []byte // canonical marshal of the original (normalized) message
+	preText string // anthropicToolText: original tool-output text (change detection)
+	// raw is the BODY message's original bytes — for a tool-text slot, the whole user
+	// message the tool_result block lives in, so several slots can share one raw.
+	//
+	// Two readers. The lossless check (jsonEqual: two unmarshals into `any` plus a
+	// DeepEqual) only matters for a message a component actually CHANGED — a handful per
+	// request — so it is computed on demand rather than for all ~70 messages up front,
+	// where it cost ~12% of the rewrite path. And the writeback edits these bytes rather
+	// than the whole body, so it needs no second parse to find them.
+	raw string
 }
+
+// lossless reports whether bifrost round-trips this message without dropping fields,
+// i.e. whether our re-marshal is safe to splice over the original bytes.
+func (s slot) lossless() bool { return jsonEqual([]byte(s.raw), s.pre) }
 
 // Trace is the per-request record of what BodyFull actually did: the resolved
 // session, the pipeline's own run report (per-component accounting), the
@@ -219,14 +231,14 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 	return r.Body, r.Changed
 }
 
-// metaSessionKeys are the request-body fields carrying the agent's OWN session id,
+// metaSessionKeys are the `metadata` fields carrying the agent's OWN session id,
 // in precedence order behind the header: `metadata.user_id` is Claude Code's (a JSON
 // object string, unwrapped by session.ExplicitID) and `metadata.taskId` is Bob
 // Shell's (a bare randomUUID, re-rolled only by /clear). Both survive the agent's
 // context compaction, which the derived sha256(system+firstUser) does not — see
 // session.ExplicitID for what breaks without them. A request carrying both resolves
 // to user_id, by this order.
-var metaSessionKeys = [...]string{"metadata.user_id", "metadata.taskId"}
+var metaSessionKeys = [...]string{"user_id", "taskId"}
 
 // explicitSession resolves the explicit session id for one request: the header wins,
 // then each metaSessionKeys field in order, then "" (Scoped's derived-hash fallback).
@@ -244,10 +256,15 @@ func explicitSession(header string, body []byte) string {
 // or an array yields a non-existent result, and a value that is a number, object or
 // array is not gjson.String — all of which yield "" and fall back to the derived hash
 // rather than stringifying into a key like `map[]`.
+//
+// `metadata` is fetched ONCE and both fields read off it, rather than a full-body query
+// per field: a gjson scan is cheap but not free, and on a real 600 KB request `metadata`
+// sits behind `messages`, so each query walked the whole transcript to reach it.
 func metaSessionIDs(body []byte) []string {
+	md := gjson.GetBytes(body, "metadata")
 	out := make([]string, 0, len(metaSessionKeys))
 	for _, k := range metaSessionKeys {
-		if r := gjson.GetBytes(body, k); r.Type == gjson.String {
+		if r := md.Get(k); r.Type == gjson.String {
 			out = append(out, r.Str)
 		}
 	}
@@ -307,11 +324,19 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// unproven component" into a real cost regression. It stays opt-in rather than
 	// unconditional so `off` remains a true passthrough control for A/B runs.
 	systemSplit := false
+	// shiftAt/shift carry the split's effect on the rest of the body's byte offsets, so
+	// the writeback can reuse the offsets in msgs (taken from the PRE-split body) rather
+	// than re-parse the whole messages array to find each message again — that parse
+	// measured ~3x the cost of the whole-body copy it was meant to save.
+	shiftAt, shift := 0, 0
 	if !bypass && pipe != nil && (pipe.Has("cachesplit") || pipe.Has("cacheinject")) {
-		body, systemSplit = splitVolatileTail(body, provider)
+		body, systemSplit, shiftAt, shift = splitVolatileTail(body, provider)
 	}
 
-	norm, slots := normalize(provider, msgsRaw.Array())
+	// Parsed ONCE and shared: normalize, the count-changed rebuild and the writeback
+	// splice all want the same array, and each Array() call re-walks the whole request.
+	msgs := msgsRaw.Array()
+	norm, slots := normalize(provider, msgs)
 	if len(norm) == 0 {
 		res.Body, res.Changed = body, systemSplit // keep the split even with nothing to compact
 		return res
@@ -417,12 +442,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		dumpToolOutputs(lg, norm)
 	}
 
-	// Canonical form of each normalized message BEFORE the pipeline, so a
-	// count-changing component (summarize) can be mapped back to the body.
-	normPre := make([][]byte, len(norm))
-	for i := range norm {
-		normPre[i], _ = json.Marshal(norm[i])
-	}
+	// The canonical form of each normalized message BEFORE the pipeline — which a
+	// count-changing component (summarize) needs to map survivors back to the body — is
+	// already in slot.pre, filled by normalize. Marshalling every message a second time
+	// here was pure duplicate work on every request, for a path only summarize takes.
 
 	rr := pipe.Run(chat, c)
 	tr.Run = rr
@@ -441,7 +464,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// retained message's ORIGINAL raw bytes (byte-lossless, incl. Anthropic
 	// tool_result) and marshaling only genuinely new messages (the summary).
 	if len(chat.Input) != len(norm) {
-		nb, ok := rebuildCountChanged(body, msgsRaw.Array(), normPre, slots, chat.Input)
+		nb, ok := rebuildCountChanged(body, msgs, slots, chat.Input)
 		if !ok && systemSplit {
 			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
 			return res
@@ -450,10 +473,16 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		return res
 	}
 
-	out := body
 	// The tail split already rewrote `body`, so the result must be forwarded even
 	// if no component changes a message.
 	changed := systemSplit
+	// Each changed message's new bytes, keyed by its index in the body's messages array,
+	// spliced into the body in ONE pass after the loop (spliceMessages). The loop used to
+	// sjson.SetBytes into the whole body per changed message, which copies the entire
+	// request every time: 30 rewritten tool outputs on a 600 KB body meant ~18 MB of
+	// copying to produce one 600 KB result. Editing each message's own bytes and splicing
+	// once is O(body) instead of O(k*body), and byte-identical — sjson's splice is local.
+	edits := map[int][]byte{}
 	var changes []Change
 	// Exact attribution for the diff view: which components rewrote each message, in
 	// order. Built once from the run report the pipeline already produced.
@@ -461,6 +490,21 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Per-message count of changes this writeback threw away, attributed back to the
 	// components that made them once the loop is done.
 	discarded := map[int]int{}
+	// The message's bytes as edited so far, and the rest of the slot path relative to it.
+	// Resolved only for a message that actually CHANGED: several slots can share one body
+	// message (an Anthropic user message with several tool_result blocks), and applying
+	// their writes in order to the accumulating bytes is what the sequential whole-body
+	// writes did. Doing this per changed message rather than per message matters — the
+	// loop runs over all ~70, of which one or two change.
+	editOf := func(path, raw string) (bi int, rel string, cur []byte, ok bool) {
+		if bi, rel, ok = splitSlotPath(path); !ok {
+			return 0, "", nil, false
+		}
+		if cur = edits[bi]; cur == nil {
+			cur = []byte(raw)
+		}
+		return bi, rel, cur, true
+	}
 	for i := range chat.Input {
 		s := slots[i]
 		switch s.kind {
@@ -469,11 +513,17 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			if newText == s.preText {
 				continue
 			}
-			var err error
-			if out, err = sjson.SetBytes(out, s.path, newText); err != nil {
+			bi, rel, cur, ok := editOf(s.path, s.raw)
+			if !ok {
 				res.Body = body
 				return res
 			}
+			nb, err := sjson.SetBytes(cur, rel, newText)
+			if err != nil {
+				res.Body = body
+				return res
+			}
+			edits[bi] = nb
 			changed = true
 			changes = append(changes, mkChange(s.path, s.preText, newText, touched[i]))
 		default: // wholeMessage
@@ -485,15 +535,20 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			if bytes.Equal(post, s.pre) {
 				continue // unmodified — keep the original bytes verbatim (I1)
 			}
-			if !s.lossless {
+			bi, _, cur, ok := editOf(s.path, s.raw)
+			if !ok {
+				res.Body = body
+				return res
+			}
+			if !s.lossless() {
 				// bifrost can't round-trip this message; splicing our re-marshal would
 				// drop provider fields it doesn't model. But if the ONLY change is added
 				// `cache_control` — metadata, not content — write those keys at their exact
 				// paths on the original raw bytes: nothing else is read or rewritten, so no
 				// provider field can be dropped. See metawrite.go (issue #32).
 				if w, ok := metadataOnlyWrites(s.pre, post); ok {
-					if nb, ok := applyMetaWrites(out, s.path, len(chat.Input[i].Content.ContentBlocks), w); ok {
-						out = nb
+					if nb, ok := applyMetaWrites(cur, len(chat.Input[i].Content.ContentBlocks), w); ok {
+						edits[bi] = nb
 						changed = true
 						continue
 					}
@@ -503,10 +558,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				discarded[i]++
 				continue
 			}
-			if out, err = sjson.SetRawBytes(out, s.path, post); err != nil {
-				res.Body = body
-				return res
-			}
+			// The whole message value is replaced, so the edit IS the new bytes — the
+			// sjson.SetRawBytes(body, "messages.<i>", post) this replaces did exactly
+			// that splice, at the cost of copying the whole body.
+			edits[bi] = post
 			changed = true
 			var pm bschemas.ChatMessage
 			_ = json.Unmarshal(s.pre, &pm)
@@ -526,6 +581,18 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// per-component `discarded_changes` counter, which /stats already exports.
 		lg.Debug("cg.writeback_discarded", "messages", len(discarded))
 	}
+	// One splice for every edited message, over the post-split body. Fail-open: if the
+	// body's own bytes do not confirm a message's span, forward the request unchanged
+	// rather than splice at a guessed offset.
+	out := body
+	if len(edits) > 0 {
+		nb, ok := spliceMessages(body, msgs, edits, shiftAt, shift)
+		if !ok {
+			res.Body = body
+			return res
+		}
+		out = nb
+	}
 	tr.Changes = changes
 	if changed && dumpPath != "" {
 		dumpChanges(c.Session, changes)
@@ -534,9 +601,15 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// over the cap is the client's to fix — we forward it as-is (fail open), and an ERROR
 	// blaming context-guru for it would be a false alarm. So compare against the inbound
 	// count and only shout when we added to an over-cap total.
-	if n := wireBreakpoints(out); n > maxWireBreakpoints && n > c.ExistingBreakpoints {
-		lg.Error("context-guru: cache breakpoint count exceeds the provider cap",
-			"breakpoints", n, "inbound", c.ExistingBreakpoints, "cap", maxWireBreakpoints)
+	// Recounted only when something was actually rewritten: an untouched body still
+	// carries exactly the inbound count, and `n > inbound` is then false by construction —
+	// so the check is unchanged and the second full count is skipped.
+	if changed {
+		if n := wireBreakpoints(out); n > maxWireBreakpoints && n > c.ExistingBreakpoints {
+			// lg already carries the session, so this line does not repeat it.
+			lg.Error("context-guru: cache breakpoint count exceeds the provider cap",
+				"breakpoints", n, "inbound", c.ExistingBreakpoints, "cap", maxWireBreakpoints)
+		}
 	}
 	res.Body, res.Changed = out, changed
 	return res
@@ -735,17 +808,30 @@ func dumpChanges(session string, changes []Change) {
 func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bschemas.ChatMessage, slots []slot) {
 	for i, m := range arr {
 		if provider == bschemas.Anthropic &&
-			m.Get("role").String() == string(bschemas.ChatMessageRoleUser) &&
-			m.Get("content").IsArray() {
+			m.Get("role").String() == string(bschemas.ChatMessageRoleUser) {
+			// Fetched once, not twice (IsArray, then Array): every Get re-scans the whole
+			// message, and these messages carry the real tool_result payloads (tens of KB).
+			blocks := m.Get("content")
 			handled := false
-			for b, blk := range m.Get("content").Array() {
+			// IsArray stays a guard, not just a shape hint: Array() on a bare object
+			// would yield that object as element 0 and mint a `content.0.content`
+			// write-back path the body has no such index for.
+			blks := []gjson.Result(nil)
+			if blocks.IsArray() {
+				blks = blocks.Array()
+			}
+			for b, blk := range blks {
 				if blk.Get("type").String() != "tool_result" {
 					continue
 				}
 				add := func(text, path string) {
 					handled = true
-					norm = append(norm, toolMessage(text, blk.Get("tool_use_id").String()))
-					slots = append(slots, slot{kind: anthropicToolText, path: path, preText: text})
+					tm := toolMessage(text, blk.Get("tool_use_id").String())
+					pre, _ := json.Marshal(tm)
+					norm = append(norm, tm)
+					slots = append(slots, slot{
+						kind: anthropicToolText, path: path, preText: text, pre: pre, raw: m.Raw,
+					})
 				}
 				base := "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".content"
 				content := blk.Get("content")
@@ -772,19 +858,26 @@ func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bsch
 				continue // this user message contributed its tool_result blocks; body carries the rest
 			}
 		}
-		// Default: whole-message slot. Unmarshal via bifrost and record whether that
-		// round-trips losslessly.
+		// Default: whole-message slot. Unmarshal via bifrost, keeping the raw bytes for
+		// the (lazy) lossless check.
+		//
+		// UnmarshalJSON is called DIRECTLY rather than through encoding/json.Unmarshal:
+		// bifrost's ChatMessage implements json.Unmarshaler, so encoding/json's only
+		// contribution is a full checkValid re-scan of bytes gjson has already parsed —
+		// ~40% of the unmarshal cost, and a third of it on the biggest messages in the
+		// request. A malformed message still fails (sonic reports it) and is still left in
+		// the body untouched.
 		var cm bschemas.ChatMessage
-		if err := json.Unmarshal([]byte(m.Raw), &cm); err != nil {
+		if err := cm.UnmarshalJSON([]byte(m.Raw)); err != nil {
 			continue // unparseable message — leave it in the body untouched
 		}
 		preMarshal, _ := json.Marshal(cm)
 		norm = append(norm, cm)
 		slots = append(slots, slot{
-			kind:     wholeMessage,
-			path:     "messages." + strconv.Itoa(i),
-			pre:      preMarshal,
-			lossless: jsonEqual([]byte(m.Raw), preMarshal),
+			kind: wholeMessage,
+			path: "messages." + strconv.Itoa(i),
+			pre:  preMarshal,
+			raw:  m.Raw,
 		})
 	}
 	return norm, slots
@@ -821,21 +914,21 @@ func jsonEqual(a, b []byte) bool {
 // normalized message (a survivor) is emitted as its ORIGINAL body raw bytes
 // (byte-lossless); genuinely new messages (the summary) are marshaled fresh.
 // Fail-open (returns body,false) if any survivor can't be mapped to the body.
-func rebuildCountChanged(body []byte, orig []gjson.Result, normPre [][]byte, slots []slot, out []bschemas.ChatMessage) ([]byte, bool) {
+func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []bschemas.ChatMessage) ([]byte, bool) {
 	// The rebuild emits ONLY slot-mapped messages, so a body message normalize skipped
 	// (unparseable — it has no slot) would be silently DELETED from the forwarded
 	// request. Deleting a message is an ALTERED request, not a fail-open one, so decline
 	// the rebuild entirely and let the caller forward the original.
 	covered := map[int]bool{}
 	for _, s := range slots {
-		if bi, ok := bodyIndexOf(s.path); ok {
+		if bi, _, ok := splitSlotPath(s.path); ok {
 			covered[bi] = true
 		}
 	}
 	if len(covered) != len(orig) {
 		return body, false
 	}
-	used := make([]bool, len(normPre))
+	used := make([]bool, len(slots))
 	var parts [][]byte
 	// emitted guards against emitting one body message TWICE: several normalized
 	// messages can share a body index (an Anthropic user message with several
@@ -848,8 +941,8 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, normPre [][]byte, slo
 			return body, false
 		}
 		matched := -1
-		for k := range normPre {
-			if !used[k] && bytes.Equal(mb, normPre[k]) {
+		for k := range slots {
+			if !used[k] && bytes.Equal(mb, slots[k].pre) {
 				matched = k
 				break
 			}
@@ -859,7 +952,7 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, normPre [][]byte, slo
 			continue
 		}
 		used[matched] = true
-		bi, ok := bodyIndexOf(slots[matched].path)
+		bi, _, ok := splitSlotPath(slots[matched].path)
 		if !ok || bi < 0 || bi >= len(orig) {
 			return body, false
 		}
@@ -885,12 +978,66 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, normPre [][]byte, slo
 	return res, true
 }
 
-// bodyIndexOf extracts the leading messages.<i> index from a slot path.
-func bodyIndexOf(path string) (int, bool) {
-	s := strings.TrimPrefix(path, "messages.")
+// splitSlotPath splits a slot path into the body message index and the remainder of
+// the path RELATIVE to that message: "messages.3.content.2.content" -> 3,
+// "content.2.content". A whole-message slot has an empty remainder.
+func splitSlotPath(path string) (idx int, rel string, ok bool) {
+	s, found := strings.CutPrefix(path, "messages.")
+	if !found {
+		return 0, "", false
+	}
 	if dot := strings.IndexByte(s, '.'); dot >= 0 {
-		s = s[:dot]
+		s, rel = s[:dot], s[dot+1:]
 	}
 	i, err := strconv.Atoi(s)
-	return i, err == nil
+	if err != nil {
+		return 0, "", false
+	}
+	return i, rel, true
+}
+
+// spliceMessages rebuilds body with each edited message's bytes swapped in at that
+// message's exact byte span, in a single pass.
+//
+// This replaces one sjson.SetBytes over the WHOLE body per changed message. That was
+// O(k * body): sjson allocates and copies the entire request for every write, so 30
+// rewritten tool outputs on a 600 KB body copied ~18 MB to produce one 600 KB result.
+//
+// The output is byte-identical to those sequential writes, not merely equivalent JSON,
+// because sjson's splice is purely local: appendRawPaths (sjson@v1.2.5) emits
+// json[:res.Index], then recurses into that subtree's own Raw, then appends
+// json[res.Index+len(res.Raw):]. Editing a message's bytes and putting them back at the
+// message's span therefore produces the same bytes as editing at "messages.<i>.<rest>"
+// on the whole body. Everything outside the edited spans — key order, whitespace, every
+// untouched message — is copied verbatim, which is what invariant I1 (unmodified
+// messages keep their original bytes) requires.
+//
+// gjson documents Index as "index of raw value in original json, zero means index
+// unknown", and it is relative to whatever json the Result was parsed from. So the span
+// is never trusted on its word: the body's own bytes at that span must equal the
+// message's Raw, or we decline (ok=false) and the caller forwards the original request.
+func spliceMessages(body []byte, msgs []gjson.Result, edits map[int][]byte, shiftAt, shift int) ([]byte, bool) {
+	idx := slices.Sorted(maps.Keys(edits))
+	out := make([]byte, 0, len(body))
+	prev := 0
+	for _, i := range idx {
+		if i < 0 || i >= len(msgs) {
+			return nil, false
+		}
+		m := msgs[i]
+		start := m.Index
+		if start >= shiftAt {
+			start += shift // the volatile-tail split moved this message
+		}
+		end := start + len(m.Raw)
+		// start <= prev also rejects an unset (0) Index and any overlap, so the spans are
+		// strictly increasing and disjoint — the messages array is walked once.
+		if start <= prev || end > len(body) || string(body[start:end]) != m.Raw {
+			return nil, false
+		}
+		out = append(out, body[prev:start]...)
+		out = append(out, edits[i]...)
+		prev = end
+	}
+	return append(out, body[prev:]...), true
 }

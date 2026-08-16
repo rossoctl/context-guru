@@ -3,6 +3,7 @@ package apply_test
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -87,6 +88,106 @@ func TestRebuildDoesNotDuplicateABodyMessage(t *testing.T) {
 	if n := gjson.GetBytes(out, "messages.#").Int(); n != 2 {
 		t.Fatalf("expected 2 messages after the reorder, got %d: %s", n, out)
 	}
+}
+
+// TestSpliceRewritesEveryMessageAtItsOwnSpan: the writeback edits each changed message's
+// own bytes and splices them all back in ONE pass, using the byte offsets gjson already
+// produced for the PRE-split body plus the shift the volatile-tail split reports.
+//
+// That shift is the sharp edge. splitVolatileTail rewrites the top-level `system` value
+// before the writeback runs, which moves every following byte — so a request that BOTH
+// splits and rewrites tool outputs is the case where a wrong offset shows up. The splice
+// verifies each span against the body's own bytes and declines if they disagree, so a
+// wrong shift means NO rewrite reaches the wire at all (fail-open, never corruption) and
+// this test fails on the assertions below.
+//
+// Several rewrites in one request also exercise the accumulation: the old writeback ran
+// one sjson.SetBytes over the WHOLE body per changed message.
+func TestSpliceRewritesEveryMessageAtItsOwnSpan(t *testing.T) {
+	cfg := pipe(t, "pipeline: [cachesplit, dedup]\n")
+	p, _ := cfg.Build(nil)
+
+	// A system block big enough, with a volatile git tail, so cachesplit's split fires and
+	// shifts every message offset that follows it.
+	stable := strings.Repeat("stable instruction line.\n", 400)
+	sys := []any{map[string]any{
+		"type": "text", "text": stable + "\nRecent commits:\ndeadbeef fix a thing\n",
+		"cache_control": map[string]any{"type": "ephemeral"},
+	}}
+
+	// Four identical tool outputs: dedup rewrites the three repeats, so one request
+	// carries several edits across several body messages.
+	big := strings.Repeat("a verbose repeated tool output line\n", 60)
+	msgs := []any{map[string]any{"role": "user", "content": "go"}}
+	for i := 0; i < 4; i++ {
+		msgs = append(msgs, map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "tool_result", "tool_use_id": "tu_" + strconv.Itoa(i), "content": big},
+		}})
+	}
+	msgs = append(msgs, map[string]any{"role": "user", "content": "the final question"})
+
+	// Key ORDER is the point: `system` must precede `messages` so the split's rewrite of
+	// the system value moves every message offset. json.Marshal of a map sorts keys
+	// ("messages" < "model" < "system") and would put messages FIRST, where the split
+	// shifts nothing and this test would pass with the shift hard-coded to zero. Real
+	// Claude Code bodies happen to order it that way too, which is exactly why the
+	// captured-traffic goldens cannot cover this path.
+	sysEnc, err := json.Marshal(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgsEnc, err := json.Marshal(msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"model":"claude-x","system":` + string(sysEnc) +
+		`,"messages":` + string(msgsEnc) + `}`)
+
+	out, changed := apply.Body(context.Background(), p, store.NewMemory(store.Options{}),
+		bschemas.Anthropic, body, "", false)
+	if !changed {
+		t.Fatal("expected the split and the dedup rewrites to be forwarded")
+	}
+	if !gjson.ValidBytes(out) {
+		t.Fatalf("the splice produced invalid JSON: %s", firstBytes(out))
+	}
+	// The split happened, i.e. the offsets the splice used really were shifted.
+	if n := len(gjson.GetBytes(out, "system").Array()); n != 2 {
+		t.Fatalf("volatile-tail split did not fire (%d system blocks); this test needs it "+
+			"to exercise the shifted offsets", n)
+	}
+	// Every repeat was rewritten at its OWN block, and each kept its own tool_use_id —
+	// a misplaced splice would land a marker on the wrong message or corrupt the id.
+	for i := 1; i <= 4; i++ {
+		got := gjson.GetBytes(out, "messages."+strconv.Itoa(i)+".content.0.content").String()
+		id := gjson.GetBytes(out, "messages."+strconv.Itoa(i)+".content.0.tool_use_id").String()
+		if id != "tu_"+strconv.Itoa(i-1) {
+			t.Errorf("messages.%d: tool_use_id=%q, want tu_%d", i, id, i-1)
+		}
+		if i == 1 {
+			if got != big { // the first occurrence is the one dedup keeps
+				t.Errorf("messages.1: first occurrence must stay verbatim, got %d bytes", len(got))
+			}
+			continue
+		}
+		if !strings.Contains(got, "<<cg:") {
+			t.Errorf("messages.%d: repeat was not rewritten: %q", i, firstBytes([]byte(got)))
+		}
+	}
+	// Untouched messages keep their original bytes (invariant I1) — the splice copies
+	// everything outside an edited span verbatim.
+	for _, path := range []string{"messages.0", "messages.5", "model"} {
+		if a, b := gjson.GetBytes(out, path).Raw, gjson.GetBytes(body, path).Raw; a != b {
+			t.Errorf("%s changed: old=%s new=%s", path, b, a)
+		}
+	}
+}
+
+func firstBytes(b []byte) string {
+	if len(b) > 200 {
+		return string(b[:200]) + "..."
+	}
+	return string(b)
 }
 
 // TestArrayShapedToolResultIsCompacted: the Anthropic Messages API permits a
