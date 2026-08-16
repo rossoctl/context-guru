@@ -8,8 +8,6 @@ SWE-bench Verified** — evaluated live, end-to-end, with the **claude-code** ag
 
 50 tasks, all of which scored under all **four** arms (zero infrastructure exceptions).
 
-![headline](img/benchmark/headline.png)
-
 | dimension | baseline | **context-guru** | headroom | rtk |
 |---|--:|--:|--:|--:|
 | reward (solved / 50) | 43 | **44** | 40 | 43 |
@@ -20,8 +18,95 @@ SWE-bench Verified** — evaluated live, end-to-end, with the **claude-code** ag
 | added latency / req | — | 117 ms | 63 ms | **0 ms** |
 | tool LLM cost | $0 | $0.31 | $0 | $0 |
 
-<div class="cg-chart-box"><canvas data-cg-chart="billed-cost"></canvas></div>
-<div class="cg-chart-box"><canvas data-cg-chart="cache-read"></canvas></div>
+!!! warning "The measured arm is an ANCESTOR of today's `codesmart` — three differences"
+    Every figure on this page stands as recorded, and none of them has been adjusted. But
+    the `codesmart` this run executed is not the `codesmart` the proxy ships now, and a cost
+    claim about the *current* default cannot rest on these numbers without a re-measurement.
+    What changed since:
+
+    1. **No `toon`.** It was added to `codesmart` after this run.
+    2. **`cacheinject`, not `cachesplit`.** Breakpoint placement was still in the pipeline;
+       it was removed from every preset in
+       [#36](https://github.com/rossoctl/context-guru/pull/36) and replaced by the
+       volatile-tail split.
+    3. **`failed_run` contributed nothing at all.** It was listed in the pipeline but gated
+       per *request* on cache-awareness, which is true by default on Anthropic/Bedrock/Vertex
+       — so on this workload it declined every collapse at every depth, and its escape hatch
+       was unreachable. The per-component breakdown on the
+       [arm page](results/context-guru.md) shows it absent, which is that bug rather than an
+       absence of pytest output. It is fixed now, so `failed_run` will act on
+       SWE-bench-shaped traffic for the first time.
+
+    Scope: this concerns the **SWE-bench** arms specifically. `failed_run` cannot act on
+    Terminal-Bench at all — it gates out with `fewer_than_two_runs` on 100% of requests
+    there — so the Terminal-Bench numbers are unaffected by (3).
+
+<!-- Static bars: same figures as the table above, one measure each, drawn in CSS.
+     Bar widths are proportional to the value, zero-anchored, against the largest
+     arm. No chart library and no JS, so they render identically offline. Update
+     both the value and the --cg-w percentage together if a number changes. -->
+<figure>
+  <div class="cg-bars">
+    <div class="cg-bars__row">
+      <span class="cg-bars__label">baseline</span>
+      <span class="cg-bars__track"><span class="cg-bars__fill" style="--cg-w:100%"></span></span>
+      <span class="cg-bars__value">$31.98</span>
+    </div>
+    <div class="cg-bars__row cg-bars__row--me">
+      <span class="cg-bars__label">context-guru</span>
+      <span class="cg-bars__track"><span class="cg-bars__fill" style="--cg-w:86.8%"></span></span>
+      <span class="cg-bars__value">$27.77</span>
+    </div>
+    <div class="cg-bars__row">
+      <span class="cg-bars__label">headroom</span>
+      <span class="cg-bars__track"><span class="cg-bars__fill" style="--cg-w:94.7%"></span></span>
+      <span class="cg-bars__value">$30.30</span>
+    </div>
+    <div class="cg-bars__row">
+      <span class="cg-bars__label">rtk</span>
+      <span class="cg-bars__track"><span class="cg-bars__fill" style="--cg-w:91.0%"></span></span>
+      <span class="cg-bars__value">$29.09</span>
+    </div>
+  </div>
+  <figcaption>Total billed cost over the matched 50 tasks — lower is better.</figcaption>
+</figure>
+
+<figure>
+  <div class="cg-bars">
+    <div class="cg-bars__row">
+      <span class="cg-bars__label">baseline</span>
+      <span class="cg-bars__track"><span class="cg-bars__fill" style="--cg-w:100%"></span></span>
+      <span class="cg-bars__value">102.8M</span>
+    </div>
+    <div class="cg-bars__row cg-bars__row--me">
+      <span class="cg-bars__label">context-guru</span>
+      <span class="cg-bars__track"><span class="cg-bars__fill" style="--cg-w:82.2%"></span></span>
+      <span class="cg-bars__value">84.5M</span>
+    </div>
+    <div class="cg-bars__row">
+      <span class="cg-bars__label">headroom</span>
+      <span class="cg-bars__track"><span class="cg-bars__fill" style="--cg-w:93.8%"></span></span>
+      <span class="cg-bars__value">96.4M</span>
+    </div>
+    <div class="cg-bars__row">
+      <span class="cg-bars__label">rtk</span>
+      <span class="cg-bars__track"><span class="cg-bars__fill" style="--cg-w:89.2%"></span></span>
+      <span class="cg-bars__value">91.7M</span>
+    </div>
+  </div>
+  <figcaption>Cache-read tokens over the matched 50 tasks — the dominant cost term on a
+  ~98%-cached agent, and where the saving actually comes from.</figcaption>
+</figure>
+
+<!-- Markdown image syntax inside the figure, not a raw <img>: MkDocs only rewrites
+     relative paths it finds in Markdown, and only those are checked by
+     `validation.unrecognized_links`. A raw src= here resolves against /RESULTS/ and
+     404s silently. -->
+<figure markdown="1">
+![Six panels comparing baseline, context-guru, headroom and rtk on reward, billed cost, mean agent steps, cache-read tokens, cache-write tokens and added latency per request.](img/benchmark/headline.png)
+<figcaption>All six measures at once, four arms each. Every value in this figure is
+  also in the table above.</figcaption>
+</figure>
 
 **context-guru wins on cost, cache usage, steps, and reward.** It is cheaper despite
 removing less *raw* content per request because it **freezes each compaction and re-applies

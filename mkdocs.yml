@@ -24,25 +24,30 @@ theme:
         name: Switch to light mode
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: teal
-      accent: teal
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: teal
-      accent: teal
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Switch to system preference
-  font:
-    text: Inter
-    code: JetBrains Mono
+  # `font: false` suppresses Material's <link> to fonts.googleapis.com. Setting
+  # `text:`/`code:` here would put a stylesheet and a woff2 fetch from Google on
+  # every page load of a static site — a third-party request per visitor, and a
+  # blank first paint anywhere that host is unreachable. Inter and JetBrains Mono
+  # are still asked for first in docs/stylesheets/extra.css, from the local system,
+  # ahead of the platform stack.
+  font: false
   features:
     - navigation.tabs
     - navigation.tabs.sticky
     - navigation.sections
+    - navigation.tracking
     - navigation.top
     - navigation.footer
     - navigation.indexes
@@ -51,9 +56,11 @@ theme:
     - toc.follow
     - search.suggest
     - search.highlight
+    - search.share
     - content.code.copy
     - content.code.annotate
     - content.tabs.link
+    - content.tooltips
     - content.action.edit
 
 markdown_extensions:
@@ -66,8 +73,8 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
-  - pymdownx.arithmatex:
-      generic: true
+      permalink_title: Link to this section
+      toc_depth: 3
   - pymdownx.details
   - pymdownx.highlight:
       anchor_linenums: true
@@ -87,14 +94,19 @@ markdown_extensions:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
+# No CDN and no JS of our own: one stylesheet on top of the theme, so the site
+# builds and serves identically on GitHub Pages and from a local `mkdocs serve`.
+# Material's own bundle is served from the site itself; the one request it can make
+# to another host is unpkg.com for mermaid, and only on a page that has a diagram.
 extra_css:
   - stylesheets/extra.css
 
-extra_javascript:
-  - javascripts/mathjax.js
-  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
-  - https://cdn.jsdelivr.net/npm/chart.js@4
-  - javascripts/charts.js
+# Fail the build on a link that points at nothing, not just on a bad config.
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
 
 extra:
   social:
@@ -103,18 +115,28 @@ extra:
     - icon: fontawesome/brands/golang
       link: https://pkg.go.dev/github.com/rossoctl/context-guru
 
+# Nav mirrors how people arrive: evaluate it (Get started) → understand it
+# (Concepts) → look a component up (Components) → run it a particular way
+# (Modes, Dashboard, Hosted) → check the claims (Results) → wire it in
+# (Integrations). Every page under docs/ appears exactly once.
 nav:
   - Home: index.md
-  - Get Started:
-      - Technical Overview: get-started/overview.md
-      - "Quickstart: Proxy": get-started/quickstart-proxy.md
-      - "Quickstart: Compaction service": get-started/quickstart-compaction.md
-      - Setup & evaluation: setup.md
+  - Get started:
+      - Technical overview: get-started/overview.md
+      - Connect to the IBM service: get-started/connect-ibm-service.md
+      - "Quickstart: proxy": get-started/quickstart-proxy.md
+      - "Quickstart: compaction service": get-started/quickstart-compaction.md
+      - Use with Claude Code: how-to/use-with-claude-code.md
+      - Build & evaluate locally: setup.md
   - Concepts:
-      - Architecture (deep dive): design.md
-      - Dashboard: dashboard.md
+      - Architecture: design.md
+      - Reversibility & recovery: how-to/recover-context.md
+      - Agent compaction (Claude Code & Bob): how-to/agent-compaction.md
+      - Measuring savings: how-to/measure-savings.md
   - Components:
       - Overview: components.md
+      - Choose a preset: how-to/choose-a-preset.md
+      - Preset reference: reference/presets.md
       - Reformat:
           - format: components/format.md
           - toon: components/toon.md
@@ -131,39 +153,39 @@ nav:
           - smartcrush: components/smartcrush.md
           - mask: components/mask.md
           - summarize: components/summarize.md
-      - The DSL filter engine: components/dsl.md
-  - How-to Guides:
-      - Use with Claude Code: how-to/use-with-claude-code.md
-      - Choose a preset: how-to/choose-a-preset.md
-      - Operating modes (sync/observe): how-to/operating-modes.md
-      - Run behind a proxy or gateway: integrations.md
-      - Integrate as a bifrost plugin: how-to/bifrost-plugin.md
-      - Write a custom DSL filter: how-to/custom-dsl-filter.md
-      - Recover offloaded context: how-to/recover-context.md
-      - Measure savings: how-to/measure-savings.md
-  - Examples:
-      - Live component captures: examples/live-captures.md
-      - llm-d compaction service: examples/llm-d-service.md
-      - Before → After showcase: examples/before-after.md
-  - Benchmarks:
-      - Overview: RESULTS.md
-      - vs headroom & rtk (summary): results/vs-competitors.md
-      - Full comparison (vs headroom & rtk): results/comparison.md
-      - Component internals & examples: results/components.md
-      - "Results: baseline": results/baseline.md
-      - "Results: context-guru": results/context-guru.md
-      - "Results: headroom": results/headroom.md
-      - "Results: rtk": results/rtk.md
-      - "Results: observe mode": results/observe-mode.md
-      - "Terminal-Bench 2.0: four-way comparison": results/terminal-bench-comparison.md
-      - "Terminal-Bench: baseline": results/terminal-bench-baseline.md
-      - "Terminal-Bench: context-guru": results/terminal-bench-context-guru.md
-      - "Terminal-Bench: headroom": results/terminal-bench-headroom.md
-      - "Terminal-Bench: rtk": results/terminal-bench-rtk.md
-      - Improvement plan (from both benchmarks): results/improvement-plan.md
-      - Reproduce the results: results/REPRODUCE.md
-  - Reference:
+      - The DSL filter engine:
+          - Filter language: components/dsl.md
+          - Write a custom filter: how-to/custom-dsl-filter.md
+      - Seen in practice:
+          - Live component captures: examples/live-captures.md
+          - Before → after transcripts: examples/before-after.md
+  - Modes:
+      - Sync & observe: how-to/operating-modes.md
       - Routes & headers: reference/routes.md
       - Config & environment: reference/config.md
-      - Presets: reference/presets.md
-  - Community: community.md
+  - Dashboard: dashboard.md
+  - Hosted service: hosted.md
+  - Results:
+      - Overview: RESULTS.md
+      - Where the money went: results/vs-competitors.md
+      - Full comparison: results/comparison.md
+      - Component internals & examples: results/components.md
+      - Reproduce the results: results/REPRODUCE.md
+      - Improvement plan: results/improvement-plan.md
+      - "SWE-bench Verified: per-arm detail":
+          - baseline: results/baseline.md
+          - context-guru: results/context-guru.md
+          - headroom: results/headroom.md
+          - rtk: results/rtk.md
+          - observe mode: results/observe-mode.md
+      - "Terminal-Bench 2.0":
+          - Four-way comparison: results/terminal-bench-comparison.md
+          - baseline: results/terminal-bench-baseline.md
+          - context-guru: results/terminal-bench-context-guru.md
+          - headroom: results/terminal-bench-headroom.md
+          - rtk: results/terminal-bench-rtk.md
+  - Integrations:
+      - Host adapters: integrations.md
+      - bifrost plugin: how-to/bifrost-plugin.md
+      - llm-d compaction service: examples/llm-d-service.md
+      - Contributing & community: community.md

@@ -320,12 +320,42 @@ Lossy but reversible — the original is stashed and recovered via `context_guru
 | `min_tokens` | *derived* | Output floor. **Unset = derived from context pressure** (no tuning). Set explicitly to pin it (folds into `trigger.min_output_tokens`). |
 | `strategy` | `code` | `code` \| `single` \| `rlm` \| `auto` (`rlm` maps to `code`). |
 | `model.source` | `incoming` | `incoming` (proxied model+key) or `config` (cheap model via `CHEAP_MODEL*`). |
+| `model_max_input_tokens` | *derived* | The extraction model's input budget (see [Context guard](#context-guard)). Pin it for a model whose id nothing can resolve. |
 | `trigger` | *derived* | Explicit gate: `min_output_tokens`, `min_request_tokens`, `min_messages`. Setting any pins the trigger. |
 | `llm_every_n_requests` | — | Fire the LLM path at most once per N requests per session. |
 | `llm_max_per_request` | 0 | Cap LLM calls per firing request (0 = unlimited). |
 | `rewrite` | `true` | `false` forces the verified deletion-only (subsequence) guarantee. |
 | `skip_file_reads` | auto | Skip line-numbered source dumps when cached; `true`/`false` to force. |
 | `marker_mode` | `full` | How the recovery marker is emitted: `full` \| `summary` \| `off`. |
+
+### Context guard
+
+Every call sends **one tool output** in its own prompt, so the size risk here is a single
+prompt exceeding the *extraction* model's window — not a conversation that grew too long
+(nothing older is ever dropped, and user messages are never touched: only `tool`-role
+messages are candidates). Before each call the component checks that
+
+```
+(shown body + prompt overhead) × 1.15  +  2048 (reply) + 512  ≤  input limit
+```
+
+fits, where the *shown body* is the bounded head+tail the prompt actually carries (a 200k-token
+log still travels as a ~8k-token sample), `× 1.15` covers the extraction model tokenizing the
+same bytes more heavily than our own `o200k_base` counter, and `2048` is the `max_tokens` the
+cheap clients send — most APIs bound input+output against the same window.
+
+The **input limit** is resolved as data, never a constant: `model_max_input_tokens` if pinned →
+the window of the config-pinned model from `internal/modelinfo`'s table → the host-resolved
+window of the proxied model when `model.source: incoming` → otherwise a conservative
+**32768**. `model.source: config` hides the cheap model's id from the component, so it takes
+the conservative default; pin `model_max_input_tokens` if its real window is smaller (or
+larger, to stop the guard from declining calls it could make).
+
+A candidate that cannot fit is **left verbatim** — no truncation, no dropped messages, no
+request on the wire — and the refusal is counted as
+`components.extract_llm.gates.over_model_context` at `/stats`. A non-zero count on a
+workload that should be compacting means the extraction model's window (or the pin) is too
+small for the outputs being seen.
 
 Extraction-model pricing for the gate comes from `CHEAP_MODEL_PRICE_IN`, `_OUT`,
 `_CACHE_WRITE`, `_CACHE_READ` (dollars per MTok; defaults are `claude-haiku-4-5` list rates).

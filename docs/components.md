@@ -17,7 +17,7 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | `dedup` | Offload | later byte-identical tool outputs | via expand | repeated identical outputs | `min_tokens` (100) |
 | `collapse` | Offload | middle of an oversized output | via expand | any large tool output (fallback) | `max_tokens` (2000), `head_lines` (20), `tail_lines` (20) |
 | `failed_run` | Offload | earlier superseded test/build runs | via expand | ≥2 run-like outputs | `min_tokens` (100) |
-| `cmdfilter` | Offload | lines per declarative DSL filter | via expand | output matching a filter | `filters` ([]), `disable_builtins` (false) |
+| `cmdfilter` | Offload | lines per declarative DSL filter | via expand | output matching a filter | `filters` ([]), `disable_builtins` (false), `min_size` (400) |
 | `extract` | Offload | obvious noise (repeated lines/blocks, blank runs, progress bars) | via expand | any large output | `min_tokens` (300), `trigger` |
 | `extract_llm` | Offload (LLM) | query-irrelevant content via an LLM-written sandboxed filter | via expand | large output in a large request | `strategy` (code), `model.source`, `trigger`, `rewrite`, `skip_file_reads` |
 | `smartcrush` | Offload | middle items of a JSON array | via expand | JSON-array tool output | `min_items` (5), `min_tokens` (200), `keep_first` (3), `keep_last` (2) |
@@ -25,7 +25,7 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | `summarize` | Offload (LLM) | the middle of the transcript → one summary | via expand | long trajectories | `summary_level` (regular), `keep_last` (3), `min_tokens` (500), `resummarize_tokens` (6000), `model.source`, `trigger` |
 
 Presets (`config/config.go`), verbatim: **`codesmart`** (the proxy default)
-`[format, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]` · **`codesafe`**
+`[format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]` · **`codesafe`**
 `[format, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]` (deterministic-only) ·
 `off` `[]` · `safe` `[format, cachesplit]` · `balanced`
 `[format, dedup, failed_run, cmdfilter, cachesplit]` · `aggressive`
@@ -52,8 +52,8 @@ Absolutes (`min_request_tokens`, etc.) still win; when the window is unknown, fr
 absolutes apply (backward compatible). This lets one config generalize across models/benchmarks.
 
 **Reversibility in practice.** The `context_guru_expand` tool is advertised on outgoing requests
-(`INJECT_EXPAND=auto|always|never`, default `auto` = only when the request already declares tools and the
-store persists), so Offload markers are genuinely recoverable — not just described in marker text. Every
+(`INJECT_EXPAND=auto|always|never`, default `auto` = only when the request already declares
+tools, carries a `<<cg:HASH>>` marker, and the store persists), so Offload markers are genuinely recoverable — not just described in marker text. Every
 offloader also applies a **marker-inclusive** never-worse check per message, so a rewrite never grows a
 message by the marker's tokens.
 
@@ -75,7 +75,8 @@ actually smaller.
 ### `format`
 Re-encodes a pretty-printed JSON tool output as compact JSON — same value, fewer whitespace
 tokens. Only acts on tool messages whose trimmed text starts with `{`/`[`, is valid JSON, is
-≥ `min_tokens`, and gets smaller. v1 is json-compact only (a TOON encoder is planned).
+≥ `min_tokens`, and gets smaller. It is json-compact only; re-encoding a uniform array as
+TOON is [`toon`](#toon)'s job, a separate component, and both can run in one pipeline.
 
 ```
 before:  { "id": 1,           after:  {"id":1,"name":"ada","tags":["x","y"]}
@@ -169,6 +170,10 @@ before:  func Add(a, b int) int {          after:  func Add(a, b int) int { … 
   ruby, php, c#, kotlin, swift, scala. **Shines:** the `coding` preset — the agent reads big
   source files but mostly needs the shape. **Inert:** no fenced blocks, unfenced file reads,
   unknown language, skeleton not smaller than the body.
+- **Build tag.** The only cgo component, so it is gated behind `cg_skeleton` to keep the default
+  build pure-Go. Without the tag it is **not registered**, and a pipeline naming it fails to
+  build rather than running without it — so the `coding` preset needs a `cg_skeleton` binary.
+  See [skeleton](components/skeleton.md).
 
 ### `dedup`
 Replaces a tool output byte-identical to an earlier one in the same request with a short pointer +
@@ -216,7 +221,7 @@ after:   [superseded by a later run] <<cg:7d1c…>> [full output: …]   [run 2]
 Shrinks tool output with **declarative DSL filters** (see below). Matches a filter on the output's
 first **six** non-empty lines (the selector), applies its 8-stage pipeline, stashes the original, and
 appends a recovery hint only when the filter was actually lossy — typed by *what* was lost. Ships
-**24** filters across 5 families (`builds` 10, `pkg` 7, `iac` 3, `net` 3, `tests` 1) — see
+**26** filters across 5 families (`builds` 11, `pkg` 8, `iac` 3, `net` 3, `tests` 1) — see
 [cmdfilter](components/cmdfilter.md).
 
 ```
@@ -225,8 +230,8 @@ after:   <failures + summary, passing noise stripped, ≤80 lines> <<cg:…>> [f
 ```
 
 - **Config:** `filters` (inline filter YAML docs, added with no recompile), `disable_builtins`,
-  `marker_mode`, `min_size` (500-byte floor — below it the marker routinely costs more than the
-  filter saves). `Enabled` only when ≥1 filter is loaded. **Shines:** noisy but structured
+  `marker_mode`, `min_size` (400-byte floor — a **measured** value, not rtk's inherited 500; see
+  [cmdfilter](components/cmdfilter.md#size-floor)). `Enabled` only when ≥1 filter is loaded. **Shines:** noisy but structured
   command/log output (test runners, package managers, build tools). **Inert:** output whose selector
   matches no filter (logged in `cmdfilter_selector_misses`), output under `min_size`, or where
   filtering doesn't shrink it.

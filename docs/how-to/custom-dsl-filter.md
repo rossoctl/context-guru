@@ -135,16 +135,18 @@ components:
             strip_lines_matching: ["^\\s*$", " PASSED", "^\\.+$"]
             max_lines: 80
             on_empty: "pytest: all passed"
-    disable_builtins: false   # keep the 24 shipped filters too
-    min_size: 500             # byte floor: below it the marker costs more than the saving
+    disable_builtins: false   # keep the 26 shipped filters too
+    min_size: 400             # byte floor: below it the marker costs more than the saving
 ```
 
 - `cmdfilter` is `Enabled` only when ≥1 filter is loaded.
-- It ships [24 filters](../components/cmdfilter.md#the-shipped-filter-set); set
+- It ships [26 filters](../components/cmdfilter.md#the-shipped-filter-set); set
   `disable_builtins: true` to run only your own.
 - The output's first **six** non-empty lines are the selector each filter's `match` is tested
   against, in descending `priority` then name order.
-- Outputs smaller than `min_size` (default 500 bytes) are skipped entirely.
+- Outputs smaller than `min_size` (default **400** bytes) are skipped entirely. The floor is a
+  measured value, not rtk's inherited 500 — see
+  [the size floor](../components/cmdfilter.md#size-floor) for the sweep behind it.
 
 !!! tip
     Filtering that doesn't shrink the output, or output whose first line matches no filter, is a

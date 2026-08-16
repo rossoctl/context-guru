@@ -16,8 +16,19 @@ type Opts struct {
 	Body     []byte
 	// Session is the host-supplied session id ("" => content hash).
 	Session string
-	Bypass  bool
-	Models  components.ModelSpec
+	// Tenant namespaces the session id in a hosted, multi-tenant deployment. Empty
+	// in single-tenant use, which leaves session keys byte-identical to before this
+	// field existed.
+	//
+	// It has to exist because the fallback session id is a content hash of the system
+	// prompt plus the first user message. Two people running the same agent on the
+	// same repository produce the SAME hash — so without a namespace they would share
+	// one session key, and therefore one sticky offload set and one cached-prefix
+	// boundary. That is a cross-tenant state collision arrived at by nobody doing
+	// anything wrong.
+	Tenant string
+	Bypass bool
+	Models components.ModelSpec
 	// Window is the model's resolved context window (max input tokens; 0 = unknown).
 	Window int
 	// CacheMode is "auto" (default) | "on" | "off" — see resolveCacheAware.

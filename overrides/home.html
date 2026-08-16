@@ -1,152 +1,238 @@
 {% extends "main.html" %}
 
-<!-- adk.dev-style marketing homepage. All landing content lives here; index.md
-     only sets `template: home.html`. The normal article/footer nav is suppressed. -->
+{#
+  Landing page. All of its content lives here; docs/index.md only selects this
+  template. The fold has one job: answer *what this does*, *what it measured*,
+  and *how to run it* without a scroll. Everything below the fold is mechanism
+  and routing. Every number is copied from docs/RESULTS.md — if a number moves
+  there, it moves here.
+#}
 
 {% block tabs %}
   {{ super() }}
 
-  <section class="cg-hero">
-    <div class="cg-hero__inner">
-      <img src="{{ 'img/context-guru.png' | url }}" alt="context-guru logo" class="cg-hero__logo" />
-      <span class="cg-hero__eyebrow">Context engineering for LLM agents</span>
-      <h1>Shrink agent context.<br>Don&rsquo;t touch the agent.</h1>
-      <p class="cg-hero__lede">
-        A provider-agnostic Go core that cuts the tokens every request carries &mdash;
-        losslessly, or lossy-but-reversibly &mdash; as an HTTP proxy or an in-process
-        plugin. Same request in, a smaller request of the exact same shape out.
-      </p>
-      <div class="cg-cta">
-        <a class="cg-btn cg-btn--primary" href="{{ 'get-started/quickstart-proxy/' | url }}">Start building &rarr;</a>
-        <a class="cg-btn cg-btn--ghost" href="https://github.com/rossoctl/context-guru">View on GitHub</a>
+  <div class="cg-home">
+
+    <section class="cg-fold">
+      <div>
+        <p class="cg-eyebrow">Context engineering for LLM agents</p>
+        <h1>Cut the tokens every request carries. Leave the agent alone.</h1>
+        <p class="cg-lede">
+          A Go core that rewrites the bulky parts of a chat request &mdash; tool outputs,
+          repeated file reads, dead command logs &mdash; and returns a smaller request of
+          the exact same shape. Losslessly, or lossily with the original stashed behind a
+          <code>&lt;&lt;cg:HASH&gt;&gt;</code> marker the model can expand on demand.
+        </p>
+
+        <div class="cg-actions">
+          <a class="cg-btn cg-btn--primary" href="{{ 'get-started/quickstart-proxy/' | url }}">Quickstart</a>
+          <a class="cg-btn cg-btn--quiet" href="{{ 'get-started/overview/' | url }}">Technical overview</a>
+          <a class="cg-btn cg-btn--quiet" href="https://github.com/rossoctl/context-guru">Source</a>
+        </div>
+
+        <p class="cg-meta">
+          Apache-2.0 &middot; one Go binary &middot; the OpenAI and Anthropic dialects on
+          one port &middot; <strong>fail open, never worse, reversible</strong>
+        </p>
       </div>
-      <div class="cg-star-wrap">
-        <a class="cg-btn cg-btn--star" href="https://github.com/rossoctl/context-guru" target="_blank" rel="noopener">
-          &#9733; Star on GitHub
+
+      <div class="cg-run">
+        <h2>Run it in 60 seconds</h2>
+        <ol>
+          <li>
+            <p>Build it. Needs Go 1.26 and a C toolchain &mdash; the tokenizer uses cgo.</p>
+<pre>make build</pre>
+          </li>
+          <li>
+            <p>Start it. One port serves both the Anthropic and OpenAI dialects.</p>
+<pre>./bin/context-guru-proxy --preset general
+<span class="cg-comment"># listening on :4000</span></pre>
+          </li>
+          <li>
+            <p>Point the agent at it. Nothing else about the agent changes.</p>
+<pre>ANTHROPIC_BASE_URL=http://localhost:4000/anthropic
+OPENAI_BASE_URL=http://localhost:4000/openai/v1</pre>
+          </li>
+        </ol>
+        <p class="cg-run__foot">
+          Then <code>curl -s localhost:4000/stats | jq</code> for the token-weighted savings
+          rollup, or open <code>/dashboard/</code>.
+          <a href="{{ 'how-to/use-with-claude-code/' | url }}">Claude Code setup &rarr;</a>
+        </p>
+      </div>
+    </section>
+
+    <section class="cg-measured">
+      <div class="cg-figures">
+          <div class="cg-figure">
+            <div class="cg-figure__value">&minus;13.2%</div>
+            <div class="cg-figure__label">billed cost</div>
+            <p class="cg-figure__against">$27.77 vs $31.98 baseline. The cheapest of four arms.</p>
+          </div>
+          <div class="cg-figure">
+            <div class="cg-figure__value">&minus;17.8%</div>
+            <div class="cg-figure__label">cache-read tokens</div>
+            <p class="cg-figure__against">84.5M vs 102.8M. The dominant cost term on a cached agent.</p>
+          </div>
+          <div class="cg-figure cg-figure--reward">
+            <div class="cg-figure__value">44/50</div>
+            <div class="cg-figure__label">tasks solved</div>
+            <p class="cg-figure__against">Baseline 43, headroom 40, rtk 43. Cheapest <em>and</em> highest reward.</p>
+          </div>
+          <div class="cg-figure cg-figure--caution">
+            <div class="cg-figure__value">117&thinsp;ms</div>
+            <div class="cg-figure__label">added latency / request</div>
+            <p class="cg-figure__against">What the compaction costs you. rtk adds 0&thinsp;ms but only filters Bash.</p>
+          </div>
+        </div>
+
+        <p class="cg-note">
+          SWE-bench Verified, run live end to end with the <strong>claude-code</strong> agent on
+          <code>aws/claude-sonnet-5</code>: 50 tasks that scored under all four arms
+          (no compaction, context-guru, headroom, rtk). Cache-<strong>write</strong> stays
+          within 1% of baseline in every arm &mdash; none of them busts the prefix cache.
+          <a href="{{ 'RESULTS/' | url }}">Method, decomposition and caveats &rarr;</a>
+        </p>
+    </section>
+
+    <section class="cg-band">
+      <h2>What happens to a request</h2>
+      <p class="cg-sub">
+        The pipeline sees the parsed <code>messages</code> array on bifrost's
+        provider-agnostic schema, not a text blob, so it edits structure rather than
+        guessing at string boundaries.
+      </p>
+      <ol class="cg-flow">
+        <li>
+          <h3>Normalize</h3>
+          <p>
+            The body is parsed and tool outputs are normalized to one shape &mdash; an
+            Anthropic <code>tool_result</code> block and an OpenAI <code>role:"tool"</code>
+            message look identical to every component from here on.
+          </p>
+        </li>
+        <li>
+          <h3>Run the pipeline</h3>
+          <p>
+            Components run in configured order. <strong>Reformat</strong> ones re-encode
+            content losslessly; <strong>Offload</strong> ones drop bytes, stash the original
+            in the store, and leave a recoverable marker in its place.
+          </p>
+        </li>
+        <li>
+          <h3>Splice and forward</h3>
+          <p>
+            Only the changed spans are spliced back into the original bytes, so
+            untouched fields survive verbatim and the upstream sees a request of the same
+            shape it would have got anyway.
+          </p>
+        </li>
+      </ol>
+      <p class="cg-note">
+        <strong>Three properties hold for every component, on every request.</strong>
+        <em>Fail open</em> &mdash; an error or a panic reverts that one component and the
+        original request is still forwarded. <em>Never worse</em> &mdash; a component that
+        grows the request is reverted, and cost is measured on message content, so you
+        never pay to compact. <em>Reversible</em> &mdash; every lossy drop is recoverable
+        via the <code>context_guru_expand</code> tool or <code>GET /expand</code>.
+        <a href="{{ 'design/' | url }}">Architecture &rarr;</a>
+      </p>
+    </section>
+
+    <section class="cg-band">
+      <h2>Fourteen components, stacked by config</h2>
+      <p class="cg-sub">
+        Four lossless reformatters and ten reversible offloaders. Presets bundle the
+        combinations that were measured: <code>general</code> for everyday agent traffic,
+        <code>agent</code> for long sessions, <code>codesafe</code> for
+        deterministic-only pipelines, <code>mcp</code> for tool-heavy JSON. In the two
+        agent presets <code>mask</code> is the biggest single lever &mdash; ~27% of
+        content tokens, with no measured reward loss.
+      </p>
+      <div class="cg-routes">
+        <a class="cg-route" href="{{ 'components/' | url }}">
+          <strong>Component reference</strong>
+          <span>What each one drops, when it fires, its defaults, and whether it is recoverable.</span>
+        </a>
+        <a class="cg-route" href="{{ 'how-to/choose-a-preset/' | url }}">
+          <strong>Choose a preset</strong>
+          <span>Which pipeline for coding agents, MCP traffic, or long-running sessions.</span>
+        </a>
+        <a class="cg-route" href="{{ 'examples/before-after/' | url }}">
+          <strong>Before &rarr; after transcripts</strong>
+          <span>Real captures: what the model saw before, and what it saw after.</span>
         </a>
       </div>
-      <div class="cg-guarantees">
-        <span class="cg-pill">Fail open, always</span>
-        <span class="cg-pill">Never worse</span>
-        <span class="cg-pill">Reversible</span>
-      </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="cg-section">
-    <h2>Run it in one line</h2>
-    <p class="cg-section__sub cg-section__sub--large">Point any agent at the proxy &mdash; one port serves both dialects.</p>
-    <div class="highlight" style="max-width:42rem;margin:0 auto;border-radius:10px;">
-<pre style="border-radius:10px;font-size:1rem;line-height:1.65;"><code>context-guru-proxy --preset general            <span style="opacity:.6"># recommended; or --config cg.yaml</span>
+    <section class="cg-band">
+      <h2>See what it did</h2>
+      <p class="cg-sub">
+        The proxy serves its own dashboard at <code>/dashboard/</code>: savings against four
+        denominators, per-component economics, per-session and per-request diffs of exactly
+        what was rewritten, and the cost of the safety mechanisms themselves.
+      </p>
 
-ANTHROPIC_BASE_URL=http://localhost:4000/anthropic
-OPENAI_BASE_URL=http://localhost:4000/openai/v1</code></pre>
-    </div>
-  </section>
+      <!-- SCREENSHOT PLACEHOLDER — replace this whole div with:
+           <img src="{{ 'img/dashboard/00-hero-overview.png' | url }}"
+                alt="The context-guru dashboard overview: savings, cost curve and per-component table">
+           Expected file: docs/img/dashboard/00-hero-overview.png
+           Wanted: the redesigned dashboard Overview, light theme, ~1600x1000,
+           populated with a real session (not the empty state). -->
+      <p class="cg-shot-todo">
+        <strong>Screenshot placeholder &mdash; dashboard overview</strong>
+        Drop the redesigned Overview page in at
+        <code>docs/img/dashboard/00-hero-overview.png</code> (light theme, ~1600&times;1000,
+        real session data) and replace this block with the image.
+      </p>
 
-  <section class="cg-section">
-    <h2>What it does</h2>
-    <div class="cg-cards">
-      <div class="cg-card">
-        <div class="cg-card__icon">🛟</div>
-        <h3>Fail open, always</h3>
-        <p>Any component error or panic reverts <em>that component only</em>. The original request is always a valid fallback.</p>
+      <div class="cg-routes">
+        <a class="cg-route" href="{{ 'dashboard/' | url }}">
+          <strong>Dashboard</strong>
+          <span>Every panel, the honest-metrics rules behind it, and its API.</span>
+        </a>
+        <a class="cg-route" href="{{ 'how-to/operating-modes/' | url }}">
+          <strong>Observe mode</strong>
+          <span>Measure what compaction <em>would</em> have saved without changing a single request.</span>
+        </a>
+        <a class="cg-route" href="{{ 'how-to/measure-savings/' | url }}">
+          <strong>Measure savings</strong>
+          <span>What <code>/stats</code> counts, and the denominator each number uses.</span>
+        </a>
       </div>
-      <div class="cg-card">
-        <div class="cg-card__icon">⚖️</div>
-        <h3>Never worse</h3>
-        <p>A component that grows the request is reverted. Token cost is measured on message content, so you never pay to compact.</p>
-      </div>
-      <div class="cg-card">
-        <div class="cg-card__icon">↩️</div>
-        <h3>Reversible</h3>
-        <p>Every lossy drop leaves a <code>&lt;&lt;cg:HASH&gt;&gt;</code> marker and stashes the original &mdash; recoverable on demand.</p>
-      </div>
-      <div class="cg-card">
-        <div class="cg-card__icon">🔌</div>
-        <h3>Three ways to run</h3>
-        <p>Proxy / gateway, in-process AuthBridge plugin, or a bifrost <code>LLMPlugin</code> &mdash; one core, unchanged.</p>
-      </div>
-      <div class="cg-card">
-        <div class="cg-card__icon">🧩</div>
-        <h3>13 stackable components</h3>
-        <p>Lossless reformatters and reversible offloaders, ordered by config. Presets for coding, MCP, and long agent sessions.</p>
-      </div>
-      <div class="cg-card">
-        <div class="cg-card__icon">📉</div>
-        <h3>Measured, not hand-wavy</h3>
-        <p>Benchmarked live on SWE-bench Verified with Claude Code against a baseline, the headroom proxy, and the rtk shell filter: the cheapest arm <em>and</em> the highest reward of the four &mdash; 13% cheaper than no compaction.</p>
-      </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="cg-section">
-    <h2>Before &rarr; After</h2>
-    <p class="cg-section__sub">The <code>summarize</code> config on the sample 11-message transcript &mdash; same shape, far fewer tokens.</p>
-    <div class="cg-demo">
-      <div class="cg-demo__panel">
-        <h4>Before</h4>
-        <div class="cg-demo__big">11 msgs</div>
-        <div>2,667 bytes</div>
+    <section class="cg-band">
+      <h2>Where to go next</h2>
+      <div class="cg-routes">
+        <a class="cg-route" href="{{ 'get-started/quickstart-proxy/' | url }}">
+          <strong>Quickstart: proxy</strong>
+          <span>Build, run, point an agent at it, read the savings. Start here.</span>
+        </a>
+        <a class="cg-route" href="{{ 'get-started/quickstart-compaction/' | url }}">
+          <strong>Quickstart: compaction service</strong>
+          <span>Run it as a compaction endpoint instead of a request-path proxy.</span>
+        </a>
+        <a class="cg-route" href="{{ 'results/vs-competitors/' | url }}">
+          <strong>Where the money went</strong>
+          <span>Why a whole-request proxy beat a stream compressor and a shell filter.</span>
+        </a>
+        <a class="cg-route" href="{{ 'integrations/' | url }}">
+          <strong>Host adapters</strong>
+          <span>Proxy, in-process plugin, or a bifrost <code>LLMPlugin</code> &mdash; one core.</span>
+        </a>
+        <a class="cg-route" href="{{ 'hosted/' | url }}">
+          <strong>Hosted service</strong>
+          <span>One instance, many users: tokens, per-tenant config, cold storage.</span>
+        </a>
+        <a class="cg-route" href="{{ 'results/REPRODUCE/' | url }}">
+          <strong>Reproduce the results</strong>
+          <span>Install and re-run all four benchmark arms yourself.</span>
+        </a>
       </div>
-      <div class="cg-demo__arrow">&rarr;</div>
-      <div class="cg-demo__panel">
-        <h4>After</h4>
-        <div class="cg-demo__big">4 msgs</div>
-        <div>1,298 bytes</div>
-      </div>
-    </div>
-    <p style="text-align:center;margin-top:1rem;">
-      <a class="cg-btn cg-btn--ghost" href="{{ 'examples/before-after/' | url }}">See all three configs &rarr;</a>
-    </p>
-  </section>
+    </section>
 
-  <section class="cg-section">
-    <h2>The numbers</h2>
-    <p class="cg-section__sub">SWE-bench Verified &middot; Claude Code agent &middot; <code>aws/claude-sonnet-5</code> &middot; live, all 50 tasks scored under all four arms.</p>
-
-    <p class="cg-bottomline">
-      On a ~98%-cached coding agent, <strong>context-guru is the cheapest arm and
-      solves the most tasks</strong> &mdash; it cuts billed cost <strong>13%</strong> vs
-      no compaction, more than the headroom proxy (5%) and the rtk shell filter (9%),
-      while never busting the cache.
-    </p>
-
-    <div class="cg-stats">
-      <div class="cg-stat">
-        <div class="cg-stat__num">&minus;13.2%</div>
-        <div class="cg-stat__label">billed cost vs baseline</div>
-        <div class="cg-stat__sub">the cheapest arm &middot; headroom only &minus;5.3%</div>
-      </div>
-      <div class="cg-stat">
-        <div class="cg-stat__num">88%</div>
-        <div class="cg-stat__label">tasks solved &mdash; the highest</div>
-        <div class="cg-stat__sub">baseline 86% &middot; headroom 80%</div>
-      </div>
-      <div class="cg-stat">
-        <div class="cg-stat__num">&minus;17.8%</div>
-        <div class="cg-stat__label">cache-read tokens vs baseline</div>
-        <div class="cg-stat__sub">the dominant cost term &middot; headroom &minus;6.3%</div>
-      </div>
-      <div class="cg-stat">
-        <div class="cg-stat__num">&minus;14%</div>
-        <div class="cg-stat__label">agent steps vs baseline</div>
-        <div class="cg-stat__sub">fewer round-trips &middot; headroom &minus;3%</div>
-      </div>
-    </div>
-
-    <p class="cg-stats__foot">
-      Cache-<strong>write</strong> stays within <strong>1%</strong> of baseline across all
-      four arms &mdash; none of them busts the cache. The efficiency surprise is
-      <strong>rtk</strong>, a deterministic shell-level Bash-output filter: 2nd-cheapest
-      (&minus;9%), reward-neutral, at <strong>0&nbsp;ms</strong> request latency and $0 tool
-      cost &mdash; it beats the headroom proxy on both cost and reward.
-    </p>
-
-    <p style="text-align:center;margin-top:1.5rem;">
-      <a class="cg-btn cg-btn--primary" href="{{ 'RESULTS/' | url }}">Explore the benchmarks &rarr;</a>
-    </p>
-  </section>
+  </div>
 {% endblock %}
 
 {% block content %}{% endblock %}

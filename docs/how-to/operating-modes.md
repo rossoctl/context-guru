@@ -18,10 +18,16 @@ about which one you wanted is not a thing you should have to debug.
 
 ## Which one do I want
 
-| You want | Mode |
-|---|---|
-| Savings, and can absorb compaction latency on the request path | `sync` |
-| To find out what context-guru *would* save, without it touching anything | `observe` |
+| You want | Mode | It costs |
+|---|---|---|
+| Savings, and can absorb compaction latency on the request path | `sync` | request latency (~450 ms with the LLM trimmer on; near-zero on an all-deterministic pipeline), plus any `extract_llm` spend |
+| To find out what context-guru *would* save, without it touching anything | `observe` | CPU and any `extract_llm` spend — **no request latency, no request modification** |
+
+**`observe` is how you try a configuration.** It measures what a pipeline *would* have
+saved on your real traffic while every request goes to the provider byte-for-byte
+untouched, so evaluating a config costs you no risk to a running agent and no A/B against
+history. Start there, read the `potential_*` numbers, then switch the same config to
+`sync`. There is a third mode designed but [not shipped](#an-async-mode-is-designed-but-not-shipped).
 
 ## sync — compact inline
 

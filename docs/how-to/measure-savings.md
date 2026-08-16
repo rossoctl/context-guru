@@ -115,8 +115,14 @@ The request drawer shows every rewritten message as a Git-style diff (plus side-
 and after-only views), ordered biggest-saving first. This is the check that a savings
 number cannot give you: *did it remove the right thing?*
 
-Content capture is on by default, redacted and size-capped before storage, and visible
-from loopback or a trusted CIDR only. Disable it with `--dashboard-content=false`.
+Content capture is **off by default** — enable it with `--dashboard-content` (or
+`DASHBOARD_CONTENT=true`). It is the one path that writes arbitrary agent output to disk, and
+arbitrary output cannot be allowlisted the way headers and config keys are: it gets pattern
+scrubbing and a size cap before storage, and a pattern denylist is structurally always one
+unseen credential shape behind reality. So the safe default is off and the operator turns it
+on for their own transcripts. Once captured, content is visible from loopback or a
+`--dashboard-trusted-cidrs` entry only; on a hosted instance the tenant's own consent is
+needed as well.
 
 ## A real session end to end
 
@@ -156,9 +162,24 @@ reproduction path silently.
 | `top_discarded` | components whose changes the **writeback layer threw away** — they mutated but never reached the wire. Always worth investigating. |
 | `saved_tokens_unique` / `overcount_ratio` | distinct compactions, and how many times each was re-counted. Prefer the unique figure: the agent re-sends history verbatim every turn, so the cumulative `saved_tokens` is inflated. |
 | `components.<name>.saved_tokens_unique` / `.overcount_ratio` | The same split, per component |
+| `components.<name>.gates` | **Rejection histogram**: gate name → candidates that gate declined. This is how you tell a component with nothing to do from one whose guard is misfiring — `acted: 0` alone cannot. |
 | `cg_added_ms_avg` / `upstream_ms_avg` / `upstream_ms_avg_bypassed` | Latency, split by whether the request bypassed us |
 | `mode` | the operating mode these numbers came from: `sync` \| `observe` |
 | `sync_enforced` | requests whose forwarded body context-guru actually shaped. **0 in observe mode by construction.** |
+
+!!! tip "Reading `gates` — why a component acted zero times"
+    `acted: 0` is not a diagnosis. `components.<name>.gates` names the guard that turned each
+    candidate away, so the three cases are distinguishable from the payload alone:
+
+    - **No legal opportunity.** The semantic gate took everything — `format: {not_json_shaped: 471}`
+      (no JSON tool outputs exist), `dedup: {no_earlier_identical_output: 234}` (no duplicates
+      within a request), `failed_run: {fewer_than_two_runs: 44}` (nothing to supersede).
+    - **Correctly declining.** A guard fired on purpose: `marker_no_win` (the reversibility marker
+      would cost more than the rewrite saves), `cached_prefix` (cache safety froze the message),
+      `economic_gate:*` (an LLM call would lose money on this output).
+    - **A gap worth closing.** `cmdfilter: {no_filter_match: N}` means the outputs were read fine
+      and no filter matched them — cross-check `cmdfilter_selector_misses`, which ranks the shapes
+      and tells you which filter to write next.
 
 !!! tip "Reading top_passthrough"
     A component in `top_passthrough` isn't necessarily broken. `cachesplit` always lands there —

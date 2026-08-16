@@ -42,13 +42,45 @@ than hoped for.
 
 ### Size floor
 
-Below `min_size` bytes (default **500**, rtk's `MIN_TEE_SIZE`) `cmdfilter` doesn't filter at all —
-the recovery marker routinely costs more tokens than the saving. The marker-inclusive never-worse
-check would reject those rewrites anyway; the floor skips the work and the stash instead.
+Below `min_size` bytes (default **400**) `cmdfilter` doesn't filter at all — below it a win is
+implausible enough that it isn't worth the work or the stash.
+
+!!! info "The floor is measured, and it is NOT a shortcut for the never-worse guard"
+    The floor used to be 500 — rtk's `MIN_TEE_SIZE`, carried over unmeasured on the grounds that
+    "the never-worse check would reject those rewrites anyway". That claim was **false**, and the
+    real number is 0: sweeping the floor over two captured request streams replayed through
+    `/compact` (44-request Terminal-Bench, 1795-request SWE-bench), going 500 → 400 added rewrites
+    that the marker-inclusive never-worse guard rejected **none** of. Only the floor was refusing
+    them.
+
+    | floor | TB acted / unique tokens | SWE acted / unique tokens | SWE `marker_no_win` |
+    |------:|-------------------------:|--------------------------:|--------------------:|
+    | 500 (old) | 13 / 391 | 305 / 1,290 | 97 |
+    | **400 (shipped)** | **36 / 483** | **389 / 1,447** | **97** |
+    | 300 | 36 / 483 | 424 / 1,467 | 117 |
+    | 250 | 36 / 483 | 424 / 1,467 | 118 |
+    | 200 | 36 / 483 | 512 / 1,481 | 118 |
+    | 150 | 36 / 483 | 512 / 1,481 | 118 |
+
+    400 is where the evidence stops paying: it takes the *entire* Terminal-Bench win (nothing below
+    400 adds anything there) and 82% of the SWE-bench one, and it is the last value at which the
+    guard rejects nothing new. Below 400 the unique saving flattens while `marker_no_win` starts
+    climbing — that is the floor finally doing work the guard would do anyway, at the cost of
+    filtering ever-smaller outputs where a ~12-token marker is a larger share of the content. On
+    both streams every newly-admitted rewrite was reviewed by hand for information loss (they were
+    package-manager download chatter, pip's two fixed advisories, and a pytest banner whose
+    pass/fail verdict survived), and `wasted_tokens` and expand bounces stayed at **0**.
+
+    Tuning it yourself: watch `components.cmdfilter.gates.below_min_size` against
+    `gates.marker_no_win` in `/stats`. Turning the floor down is only free while `marker_no_win`
+    stays flat; once it rises, the floor and the guard are refusing the same rewrites and the floor
+    is the cheaper of the two. Note that per-component `saved_tokens` is cumulative — the same
+    compaction is re-counted every turn the agent re-sends its transcript — so judge a floor change
+    on `saved_tokens_unique`, as the table above does.
 
 ## The shipped filter set
 
-24 filters. Compression is measured on each filter's own fixtures (its inline tests), summed:
+26 filters. Compression is measured on each filter's own fixtures (its inline tests), summed:
 
 | filter | family | preserves | drops | saved |
 |---|---|---|---|--:|
@@ -72,9 +104,11 @@ check would reject those rewrites anyway; the floor skips the work and the stash
 | `bundle-install` | pkg | installs, conflicts; collapses a complete bundle | `Using <gem>` lines, metadata fetch | 81% |
 | `poetry-install` | pkg | lock writes, solver errors; collapses an up-to-date lock | download/install lines, virtualenv chatter | 70% |
 | `composer-install` | pkg | lock writes, warnings; collapses a no-op install | download/install lines | 75% |
+| `pip-install` | pkg | the install manifest, real warnings (PATH, scripts), errors | `Collecting`/`Downloading`/`Requirement already satisfied` chatter, the root-user nag, pip-upgrade notices | 64% |
 | `uv-sync` | pkg | the installed-package list; collapses an audited-only sync | download/cache lines | 51% |
 | `apt` | pkg | `E:`/`W:`/`N:` lines, dpkg errors, prompts | `Setting up`/`Unpacking`/`Get:`/trigger boilerplate | 76% |
 | `brew-install` | pkg | the install summary; collapses an already-installed formula | download/pour/progress lines | 59% |
+| `latex` | builds | `Overfull`/`Underfull` diagnostics, `!` errors, output summary | TeX engine banner, absolute distribution package paths, font-map page markers, transcript notice | 72% |
 | `quarto-render` | builds | errors, warnings; collapses a successful render | per-file processing and pandoc lines | 54% |
 
 `terraform-plan` and `make` additionally assert a **≥60% floor** on a realistic large fixture
@@ -185,9 +219,9 @@ Filters select a budget by **signal density** (`cap: errors`) rather than each h
 
 ## What is deliberately NOT ported
 
-rtk ships 63 DSL filters and ~50 native Rust ones. 22 are ported (plus 2 written from measurement).
-The rest is excluded on
-purpose:
+rtk ships 63 DSL filters and ~50 native Rust ones. 26 ship here — the table above is the
+authoritative list, and `apt` plus `gcc`'s widened selector came from measurement rather than
+from a port. The rest is excluded on purpose:
 
 - **The ~24 `truncate_lines_at`-only filters** (`df`, `ps`, `du`, `jq`, `jira`, `markdownlint`,
   `yamllint`, `stat`, `gcloud`, `helm`, `iptables`, `skopeo`, `yadm`, `hadolint`, …). Their whole
@@ -248,7 +282,7 @@ a whole-blob loss points at the expand tool. See [the DSL engine](dsl.md#lossine
 | `filters` | `[]` | Inline filter YAML docs, added with no recompile. |
 | `disable_builtins` | `false` | Disable the shipped filter set and run only your own. |
 | `marker_mode` | `full` | `full` (stash + resolvable marker) / `summary` / `off`. |
-| `min_size` | `500` | Byte floor; smaller outputs are left alone. |
+| `min_size` | `400` | Byte floor; smaller outputs are left alone. See [the size floor](#size-floor). |
 
 ## When it shines
 

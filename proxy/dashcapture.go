@@ -42,17 +42,24 @@ type capture struct {
 	llmInAtStart  int64
 	llmOutAtStart int64
 	unique        map[string]int
+	// tenant owns this row. It has to be here rather than read at finish time
+	// because the unique-savings attribution during noteTrace already needs it, and
+	// that runs on the request path.
+	tenant string
 }
 
 // newCapture starts a capture for one request, or returns nil when the dashboard
 // is off — every call site is nil-safe, so the disabled path costs one nil check.
-func (h *Handler) newCapture(r *http.Request, provider, route string) *capture {
+func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenancy) *capture {
 	if h.rec == nil {
 		return nil
 	}
 	_, in, out := cheapmodel.Usage()
+	// The preset comes from the TENANCY, not from Options: in a hosted deployment
+	// the configuration in effect is the tenant's, and labelling every row with the
+	// server default would make the dashboard's preset comparison a lie.
 	return &capture{
-		rec: h.rec, pricer: h.opts.Prices, preset: h.opts.Preset,
+		rec: h.rec, pricer: h.opts.Prices, preset: tn.Preset, tenant: tn.ID,
 		route: route, provider: provider,
 		agent: r.UserAgent(), start: time.Now(),
 		llmInAtStart: in, llmOutAtStart: out,
@@ -73,7 +80,7 @@ func (c *capture) noteTrace(tr apply.Trace) {
 	}
 	for _, rep := range tr.Run.Components {
 		if saved := rep.Saved(); saved > 0 && !rep.Reverted && !rep.Skipped {
-			c.unique[rep.Component] = c.rec.MarkUnique(rep.Component, rep.CacheKeys, saved)
+			c.unique[rep.Component] = c.rec.MarkUnique(c.tenant, rep.Component, rep.CacheKeys, saved)
 		}
 	}
 }
@@ -110,6 +117,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	e := &dash.Event{
 		TS:       c.start.UnixMilli(),
+		TenantID: c.tenant,
 		Model:    c.model,
 		Provider: c.provider,
 		Route:    c.route,
@@ -141,7 +149,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 
 	// Cache attribution, with a cold start treated as the non-failure it is.
-	seenSession, seenModel, sinceMs := c.rec.Observe(e.SessionID, e.Model, e.TS)
+	seenSession, seenModel, sinceMs := c.rec.Observe(e.TenantID, e.SessionID, e.Model, e.TS)
 	// Anthropic's prompt cache has a 5-minute TTL; a gap wider than that explains a
 	// miss without blaming a prefix change (TTL wins ties).
 	e.AttributeCache(seenSession, seenModel, sinceMs, 5*60*1000, e.CacheWrite > 0)

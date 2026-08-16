@@ -28,6 +28,35 @@ names the caveats before you commit.
 Every preset below is exactly the list in [`config/config.go`](../design.md#config-registry);
 per-component behavior is in [Components](../components.md).
 
+### `codesmart` — `[format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]`
+**The shipped default** (`--preset codesmart`), and the SWE-bench study's winning cache-aware
+config. Lossless repack first (`format`, `toon`), then the cheap structural offloaders
+(`dedup`, `failed_run`, `cmdfilter`), then the cheap-model relevance trimmer with the free
+deterministic `extract` behind it, and `cachesplit` last.
+
+It is the one preset that ships **tuned per-component settings** rather than a bare name-list
+(`presetConfigs` in `config/config.go`), carried verbatim from the study: `extract`'s floor at
+`min_tokens: 400`, and `extract_llm` on `strategy: code`, `model.source: config`,
+`min_tokens: 3000` with a matching `trigger.min_request_tokens: 3000`, and at most 4 calls per
+request. Those thresholds are why most turns make no model call at all.
+
+- **Fits:** most agents. Pick something else only for a reason listed below.
+- **Caveat:** `extract_llm` needs a cheap model (`CHEAP_MODEL*`); with none configured it
+  silently no-ops and the deterministic `extract` beside it does the cheap pass. That is a
+  degradation, not an error, so it will not announce itself.
+- **Caveat:** on a **prompt-caching** backend `extract_llm` declines to run at all unless
+  `allow_on_caching_backend: true` — measured net-negative there. The preset still lists it; on
+  caching traffic it makes zero calls and costs nothing.
+
+### `codesafe` — `[format, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]`
+`codesmart` with the LLM pass removed and a blind `collapse` (pinned to `max_tokens: 3000`) as
+the last-resort fallback in its place. **Deterministic-only, zero model calls by policy.**
+
+- **Fits:** when an LLM on the hot path is not acceptable — a shared box, an air-gapped
+  deployment, or a benchmark arm that must be reproducible byte for byte.
+- **Caveat:** `collapse` is content-agnostic. It keeps a head/tail window and stashes the
+  middle, so it always leaves *something* recoverable, but it has no idea what mattered.
+
 ### `off` — `[]`
 No components. Passthrough. Use it as the A/B control when you measure savings — the baseline in
 [Benchmarks](../RESULTS.md) is this preset.
@@ -54,7 +83,7 @@ runs (`failed_run`), and DSL command-log filtering (`cmdfilter`).
   there, and delivered 6% against `general`'s 31% in the Terminal-Bench replay. Use `codesmart`
   (the actual default), `agent` or `general` for that.
 - **Caveat:** `cmdfilter` only fires when ≥1 filter is loaded and the output's selector matches
-  one. It ships **24** filters covering test runners, build tools, package managers, IaC plans and
+  one. It ships **26** filters covering test runners, build tools, package managers, IaC plans and
   verbose network clients; author more with a [custom DSL filter](custom-dsl-filter.md).
 
 ### `aggressive` — `[format, dedup, failed_run, cmdfilter, smartcrush, extract, extract_llm, cachesplit]`
@@ -71,6 +100,9 @@ Swaps in `skeleton`, which tree-sitter-parses fenced code blocks and replaces fu
 `{ … }`, keeping signatures/imports/types.
 
 - **Fits:** a coding agent that reads large source files but mostly needs the shape.
+- **Caveat:** **this preset needs a `cg_skeleton` build.** `skeleton` is the only cgo component,
+  so without the tag it is not registered and the pipeline fails to build — the proxy exits with
+  `components: unknown component "skeleton"`. `make build` does not pass the tag.
 - **Caveat:** `skeleton` is inert on unfenced file reads, unknown languages, or when the skeleton
   isn't smaller than the body.
 

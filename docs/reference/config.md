@@ -63,7 +63,7 @@ pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
 components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }
   smartcrush: { min_items: 5, keep_first: 3, keep_last: 2 }
-  cmdfilter:  { min_size: 500 }
+  cmdfilter:  { min_size: 400 }   # the default; measured, see components/cmdfilter.md
 store: { ttl_seconds: 10000, max_entries: 1000 }
 mode: sync                          # sync | observe
 ```
@@ -81,10 +81,11 @@ for every component's config block.
 | `LISTEN_ADDR` | `:4000` | Listen address. |
 | `--openai-upstream` / `OPENAI_UPSTREAM` | `https://api.openai.com` | OpenAI upstream base. |
 | `--anthropic-upstream` / `ANTHROPIC_UPSTREAM` | `https://api.anthropic.com` | Anthropic upstream base. |
+| `--bob-upstream` / `BOB_UPSTREAM` | — | Bob (BobShell) backend base. Setting it mounts the [Bob gateway routes](routes.md#bob-bobshell-gateway-routes); unset, an unknown path 404s as before. |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | — | Real key injected on forward (gateway mode); empty = pass client auth through. |
 | `CHEAP_MODEL` (+ `CHEAP_MODEL_BASE` / `_KEY` / `_AUTH` / `_PROVIDER`) | — | Dedicated cheap model for the LLM components (`extract_llm`, `summarize`) — the `model.source: config` client. Without it they no-op. |
 | `FORCE_MODEL` | — | Overwrite the request `model` (eval-containers uses `EVAL_MODEL`). |
-| `INJECT_EXPAND` | `auto` | Whether the `context_guru_expand` tool is advertised: `auto` (only when the request already declares tools and the store persists) \| `always` \| `never`. |
+| `INJECT_EXPAND` | `auto` | Whether the `context_guru_expand` tool is advertised: `auto` (only when the request already declares tools, carries a `<<cg:HASH>>` marker, and the store persists) \| `always` \| `never`. |
 | `CACHE_MODE` | `auto` | Cache-aware compaction: `auto` (on when the agent sets its own breakpoints) \| `on` \| `off`. |
 | `MODEL_INFO_URL` / `MODEL_INFO` | LiteLLM map | Source for context-window sizes (used by the fractional triggers). `MODEL_INFO=off` disables the lookup; fractions are then ignored and absolutes apply. |
 | `--store` / `STORE` | on | Enable/disable the state store; `--store=false` disables offload reversibility. Wins over the file's `store:` block. |
@@ -105,6 +106,11 @@ Defaults are `claude-haiku-4-5` list rates; override them to match your contract
 | `CHEAP_MODEL_PRICE_CACHE_READ` | `0.10` | Cache-read price per MTok (0.1× input). |
 
 An unparseable or absent value silently keeps the default — pricing must never fail a request.
+
+| Env | Default | Purpose |
+|---|---|---|
+| `CONTEXT_GURU_LLM_TIMEOUT` | `90s` | Per-call deadline for a compaction-model call. Accepts a Go duration or a bare number of seconds. An abandoned call leaves the output verbatim, so **watch `llm_timeouts` in `/stats`**: a non-zero count means that run's savings are an undercount rather than a measurement. |
+| `--cheap-model-concurrent` / `CHEAP_MODEL_CONCURRENT` | `4` | Process-wide cap on concurrent compaction-model calls, so one tenant's `extract_llm` cannot stall everyone's agents. `0` = unlimited. |
 
 !!! note "`extract_llm` is off by default on caching backends"
     Independently of pricing, the component declines to run on prompt-caching traffic unless
@@ -146,6 +152,59 @@ DASHBOARD_MAX_BYTES=2147483648 \
 DASHBOARD_TRUSTED_CIDRS=10.0.0.0/8,192.168.0.0/16 \
 context-guru-proxy --preset codesmart
 ```
+
+## Hosted mode, cold storage, and disk pressure
+
+Every one of these has an environment alias, which is how the
+[systemd deployment](../hosted.md#2-install-the-service) sets them — the shipped unit is
+replaced on every install, so site settings live in a drop-in as `Environment=` lines
+rather than as flags. Hosted mode is off unless `--upstreams` is set; the rest are inert
+without it, except the disk and cold-storage rules, which apply to any dashboard.
+
+| Flag / env | Default | Purpose |
+|---|---|---|
+| `--upstreams` / `UPSTREAMS` | — | Path to the upstream allow-list YAML. **Setting it enables hosted multi-tenant mode.** The loader refuses to start if any named `key_env` is unset. |
+| `--control-db` / `CONTROL_DB` | `./context-guru-control.db` | Tenants, tokens, per-tenant config. Kept separate from the dashboard DB, which is a derived view that may be rebuilt or pruned. |
+| `--manager-email` / `MANAGER_EMAIL` | — | The email that becomes the manager account **at registration**, matched case-insensitively. Must be set *before* the first account registers. |
+| `--register-domains` / `REGISTER_DOMAINS` | — | Comma-separated email domains allowed to self-register (exact-domain or a subdomain of it). Applies only when `CG_REGISTER` is `open` or `invite`; the address itself is **unverified**. |
+| `CG_REGISTER` | `closed` | Registration mode: `closed` \| `invite` \| `open`. Re-read **per request**, so switching needs no restart. Anything unrecognised normalises to `closed`. |
+| `CG_REGISTER_CODE` | — | The invite code `invite` mode compares against. Empty in `invite` mode refuses everyone rather than falling through to open. |
+| `--max-tenancies` / `MAX_TENANCIES` | `256` | How many tenants keep live pipelines and compaction state in memory. Evicting one costs it a cold cache on its next turn. |
+| `--tenant-monthly-cap-usd` / `TENANT_MONTHLY_CAP_USD` | `50` | Default monthly spend cap per tenant against the shared credential. Over it returns **402**, not 429. |
+| `--tenant-rpm` / `TENANT_RPM` | `0` (unlimited) | Requests per minute, per tenant. |
+| `--tenant-concurrent` / `TENANT_CONCURRENT` | `0` (unlimited) | In-flight requests, per tenant. |
+| `--metrics-token` / `METRICS_TOKEN` | — | Bearer token letting a remote Prometheus scrape `/metrics`. Loopback never needs one; `/metrics` carries per-tenant cost. |
+| `--dashboard-max-rows-per-tenant` / `DASHBOARD_MAX_ROWS_PER_TENANT` | `0` (no cap) | Server-wide cap on one tenant's retained request rows, trimmed **before** the disk rule so a heavy user cannot evict everyone else. A per-tenant value a manager sets overrides it. |
+
+### Cold storage (Box via rclone)
+
+Setting `--archive-remote` is what makes eviction **migrate** instead of delete: a session
+is uploaded and its size verified before its local rows go. The remote is probed at boot,
+and an unreachable one logs an error and disables archiving rather than refusing to serve
+traffic. See [Eviction is migration, not deletion](../hosted.md#eviction-is-migration-not-deletion).
+
+| Flag / env | Default | Purpose |
+|---|---|---|
+| `--archive-remote` / `ARCHIVE_REMOTE` | — | rclone remote path, e.g. `box:context-guru`. **Unset, eviction deletes.** |
+| `--rclone` / `RCLONE` | `rclone` | Path to the rclone binary. |
+| `--rclone-config` / `RCLONE_CONFIG` | — | The rclone config file holding the remote's OAuth token. Set it explicitly for a service: under systemd `$HOME` is not the shell's. |
+| `--archive-bwlimit` / `ARCHIVE_BWLIMIT` | — | rclone `--bwlimit` for archiving (e.g. `8M`). Empty = unlimited, which will use all the upload bandwidth the box has. Note `--bwlimit` is **bytes** per second while speed tests report bits. |
+| `--archive-content-after` / `ARCHIVE_CONTENT_AFTER` | `24h` | Move a session's **transcripts** to cold storage once idle this long. This is where the bytes are. `0` = never. |
+| `--archive-session-after` / `ARCHIVE_SESSION_AFTER` | `720h` (30 days) | Move a **whole** session once idle this long. `0` = never. |
+| `--archive-interval` / `ARCHIVE_INTERVAL` | `15m` | How often the archiver runs. It runs on its own goroutine, never the writer's. |
+| `--archive-batch` / `ARCHIVE_BATCH` | `50` | Maximum sessions archived per pass, so one catch-up cycle cannot exhaust the remote's API quota. |
+| `--archive-required` / `ARCHIVE_REQUIRED` | `false` | Under disk pressure, refuse to delete a session that could not be archived. Safer for data; lets the filesystem fill if the remote is down, which takes every user's agent with it. Pick it deliberately. |
+
+### Disk-pressure eviction
+
+`--dashboard-max-bytes` bounds *this database*; these bound the **filesystem**, which on a
+shared box is mostly filled by other things.
+
+| Flag / env | Default | Purpose |
+|---|---|---|
+| `--dashboard-disk-high` / `DASHBOARD_DISK_HIGH` | `0.90` | Evict the oldest **sessions** while this fraction of the filesystem is in use. Negative = disable. |
+| `--dashboard-disk-low` / `DASHBOARD_DISK_LOW` | `0.85` | Stop evicting once usage falls to this. The gap from the high watermark is what stops the janitor grinding when the host is full for other reasons. |
+| `--dashboard-min-keep-bytes` / `DASHBOARD_MIN_KEEP_BYTES` | `1073741824` (1 GiB) | Never shrink the dashboard database below this under disk pressure — below it the pressure is not ours to relieve, and a blank dashboard would hide the real problem. |
 
 ## Diagnostics
 

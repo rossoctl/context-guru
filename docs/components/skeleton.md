@@ -3,6 +3,18 @@
 !!! info "Offload — lossy, reversible"
     Replaces function/method/constructor bodies in fenced code blocks with a placeholder, keeping signatures; stashes the whole original.
 
+!!! warning "The one component behind a build tag"
+    `skeleton` is the only cgo component (tree-sitter), so it is gated behind
+    `cg_skeleton` to keep the default build — and the AuthBridge plugin that embeds this
+    module — pure-Go and static. Build it in with
+    `CGO_ENABLED=1 go build -tags cg_skeleton ./cmd/context-guru-proxy`; `make build` does
+    not pass the tag.
+
+    Without the tag it is **not registered**, so a config or preset naming it fails at
+    pipeline build with `components: unknown component "skeleton"` rather than running
+    without it. The [`coding` preset](../reference/presets.md) therefore needs a
+    `cg_skeleton` binary.
+
 ## How it works
 
 `skeleton` parses fenced ` ```lang ` code blocks with tree-sitter and replaces

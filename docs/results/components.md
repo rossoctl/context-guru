@@ -21,11 +21,18 @@ All numbers are from the matched 50-task run (see [comparison.md](comparison.md)
 
 ## context-guru — pipeline `[format, dedup, failed_run, cmdfilter, extract_llm, extract, cacheinject]`
 
-!!! note "This is the pipeline as this run used it"
-    `codesmart` now ends in **`cachesplit`**, not `cacheinject` — breakpoint placement was removed
-    from every preset in [#36](https://github.com/rossoctl/context-guru/pull/36). The name is left
-    as-is here because it is what the run actually ran. See
-    [Presets](../reference/presets.md) for the current compositions.
+!!! note "This is the pipeline as this run used it — `codesmart` has moved on twice since"
+    Two differences from the shipped preset today, both left as-is above because the heading
+    records what the run actually executed:
+
+    - it ends in `cacheinject`, where `codesmart` now ends in **`cachesplit`** — breakpoint
+      placement was removed from every preset in
+      [#36](https://github.com/rossoctl/context-guru/pull/36);
+    - it has no `toon`, which `codesmart` now runs second.
+
+    Current composition:
+    `[format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]` — see
+    [Presets](../reference/presets.md).
 
 Two type-enforced kinds: **Reformat** (lossless repack, no stash) and **Offload**
 (lossy-but-reversible: leaves a `<<cg:HASH>>` marker + stashes the original, recoverable
@@ -71,8 +78,9 @@ Run: 3 acts.
 !!! note "The filter set has since tripled"
     This run had **3** filters matched on the output's *first* line only.
     [#42](https://github.com/rossoctl/context-guru/pull/42) took it to **24** filters, rewrote every
-    selector to match output shape over six leading lines, and added the per-family `/stats` ledger.
-    The 3-act figure is not a ceiling for the current set — but nor is 24 filters a promise of 8×
+    selector to match output shape over six leading lines, and added the per-family `/stats` ledger;
+    `pip-install` and `latex` have since brought the shipped set to **26**.
+    The 3-act figure is not a ceiling for the current set — but nor is 26 filters a promise of 8×
     the savings: on the Terminal-Bench dump the four filters *predicted* to matter (`pulumi`,
     `terraform-plan`, `xcodebuild`, `gradle`) fired zero times, and `apt` + `gcc` carried ~73% of
     the savings instead. Re-measure rather than extrapolate.

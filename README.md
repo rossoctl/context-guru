@@ -92,8 +92,11 @@ CGO_ENABLED=1 go build -tags cg_skeleton -o bin/context-guru-proxy ./cmd/context
 ```
 
 The `cg_skeleton` build tag pulls in tree-sitter (via cgo) so the `skeleton` component can parse code.
-It is **optional** — omit the tag and the tree-sitter dependency for a pure-Go build; the `skeleton`
-component is simply inert without it, everything else works. Or build the gateway image
+It is **optional** — omit the tag and the tree-sitter dependency for a pure-Go build; everything else
+works. Note that without the tag `skeleton` is not *inert*, it is **not registered**: a config or
+preset naming it fails at pipeline build with `components: unknown component "skeleton"` and the
+proxy exits rather than starting without it. So the `coding` preset needs a `cg_skeleton` binary,
+and `make build` does not pass the tag. Or build the gateway image
 (see [docs/setup.md](docs/setup.md)):
 
 ```sh
@@ -126,7 +129,7 @@ curl -s localhost:4000/anthropic/v1/messages \
 ```
 
 Presets: **`codesmart`** (the default — the SWE-bench-winning cache-aware config
-`[format, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]`), **`codesafe`** (the same
+`[format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]`), **`codesafe`** (the same
 minus the LLM pass — deterministic-only `[format, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]`,
 zero model calls by policy), plus `general`, `agent`, `aggressive`, `coding`, `mcp`, `balanced`, `safe`,
 `summarize`, `off`.
@@ -145,8 +148,10 @@ See [docs/components.md](docs/components.md) and [docs/reference/presets.md](doc
 | `CHEAP_MODEL` (+ `CHEAP_MODEL_*`) | — | dedicated cheap model for the LLM components (`extract_llm`, `summarize`) |
 | `FORCE_MODEL` | — | overwrite the request `model` (eval-containers `EVAL_MODEL`) |
 
-Routes: `POST /openai/v1/chat/completions`, `POST /anthropic/v1/messages`, `GET /healthz`,
-`GET /stats` (savings rollups), `GET /expand?id=` (recover an offloaded original), and — with
+Routes: `POST /openai/v1/chat/completions`, `POST /anthropic/v1/messages`,
+`POST /compact` (stateless — pipeline in, rewritten body out, no upstream call), `GET /healthz`,
+`GET /stats` (savings rollups), `GET /metrics` (the same counters as Prometheus text),
+`GET /expand?id=` (recover an offloaded original), and — with
 `--dashboard` — `GET /dashboard/` plus `/api/*`. Per-request: header
 `x-context-guru-session` sets the session key; `x-context-guru-bypass: true` skips the pipeline.
 

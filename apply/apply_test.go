@@ -182,10 +182,12 @@ func TestAnthropicToolResultOffloaded(t *testing.T) {
 	}
 }
 
-// TestAnthropicStructuredToolResultUntouched proves we never rewrite a
-// tool_result whose content is a structured array (we can't losslessly project
-// it to a string), so no data is dropped.
-func TestAnthropicStructuredToolResultUntouched(t *testing.T) {
+// TestAnthropicStructuredToolResultKeepsNonTextBlocks: a tool_result whose content is a
+// structured array has its TEXT blocks compacted in place (each at its own
+// content.<k>.text path) — skipping the whole array made 100% of such a request's tool
+// output silently uncompactable. Non-text blocks (images) are never touched, so no data
+// is dropped.
+func TestAnthropicStructuredToolResultKeepsNonTextBlocks(t *testing.T) {
 	cfg := pipe(t, "pipeline: [collapse]\ncomponents:\n  collapse: {max_tokens: 5, head_lines: 1, tail_lines: 1}\n")
 	p, _ := cfg.Build(nil)
 	st := store.NewMemory(store.Options{})
@@ -203,11 +205,14 @@ func TestAnthropicStructuredToolResultUntouched(t *testing.T) {
 		},
 	})
 	out, changed := apply.Body(context.Background(), p, st, bschemas.Anthropic, body, "", false)
-	if changed {
-		t.Fatal("structured tool_result content must not be rewritten")
+	if !changed {
+		t.Fatal("the text block inside the structured tool_result should have been collapsed")
+	}
+	if s := gjson.GetBytes(out, "messages.1.content.0.content.0.text").String(); !strings.Contains(s, "<<cg:") {
+		t.Fatalf("text block not collapsed: %q", s)
 	}
 	if gjson.GetBytes(out, "messages.1.content.0.content.1.source.data").String() != "AAAA" {
-		t.Fatalf("structured tool_result content was corrupted: %s", out)
+		t.Fatalf("the non-text block was corrupted: %s", out)
 	}
 }
 

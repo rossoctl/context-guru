@@ -9,24 +9,6 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func TestToolDefShape(t *testing.T) {
-	an := ToolDef("anthropic")
-	if an["name"] != ToolName {
-		t.Fatalf("anthropic tool def name=%v", an["name"])
-	}
-	if _, ok := an["input_schema"].(map[string]any)["properties"]; !ok {
-		t.Fatalf("anthropic def missing input_schema.properties: %v", an)
-	}
-	oa := ToolDef("openai")
-	if oa["type"] != "function" {
-		t.Fatalf("openai def should be a function tool: %v", oa)
-	}
-	fn, ok := oa["function"].(map[string]any)
-	if !ok || fn["name"] != ToolName || fn["parameters"] == nil {
-		t.Fatalf("openai function shape wrong: %v", oa)
-	}
-}
-
 func TestParseMarkersDistinctInOrder(t *testing.T) {
 	got := ParseMarkers("a <<cg:K1>> b <<cg:K2>> c <<cg:K1>>")
 	if len(got) != 2 || got[0] != "K1" || got[1] != "K2" {

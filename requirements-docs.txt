@@ -1,4 +1,10 @@
-# Documentation site — Material for MkDocs (same generator as adk.dev).
-# Build: pip install -r requirements-docs.txt && mkdocs serve
-mkdocs-material>=9.5
-pymdown-extensions>=10.7
+# Documentation site — Material for MkDocs.
+# Build: pip install -r requirements-docs.txt && mkdocs build --strict
+#
+# Upper bounds are deliberate. docs/stylesheets/extra.css and overrides/ style
+# theme internals (.md-banner__inner, .tabbed-*, .filename, .md-clipboard), and
+# MkDocs 2.0 is announced as removing the plugin and theming systems outright —
+# an unpinned major bump would break the published site silently.
+mkdocs>=1.6,<2
+mkdocs-material>=9.5,<10
+pymdown-extensions>=10.7,<11

@@ -1,0 +1,279 @@
+{
+ "conv_a_turn1": {
+  "messages": [
+   {
+    "content": [
+     {
+      "text": "[scrubbed 306 chars of prompt text]",
+      "type": "text"
+     },
+     {
+      "text": "[scrubbed 216 chars of prompt text]",
+      "type": "text"
+     }
+    ],
+    "role": "user"
+   },
+   {
+    "content": [
+     {
+      "cache_control": {
+       "type": "ephemeral"
+      },
+      "text": "[scrubbed 6302 chars of prompt text]\n<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>",
+      "type": "text"
+     }
+    ],
+    "role": "system"
+   }
+  ]
+ },
+ "conv_a_turn2": {
+  "messages": [
+   {
+    "content": [
+     {
+      "text": "[scrubbed 306 chars of prompt text]",
+      "type": "text"
+     },
+     {
+      "text": "[scrubbed 216 chars of prompt text]",
+      "type": "text"
+     }
+    ],
+    "role": "user"
+   },
+   {
+    "content": "[scrubbed 6302 chars of prompt text]\n<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>",
+    "role": "system"
+   },
+   {
+    "content": [
+     {
+      "signature": "EsQECnIIEBABGAIqQEhBKyfRBGOtyWblCOA+qqpEAfSwCyS5f1oPXCBJKgBkUegMn4ZQDQKKFozNiZnowt0KKIT/P5ah1sxz8bEUkyAyDmNsYXVkZS1zYWZmcm9uOABCCHRoaW5raW5nWgw3NzIwMDY2NDI4NDcSDBMHaPcxN7eZxGVqCxoMSjjrHcb+FAH5eltAIjCePa85y1ddVllx2XJibkJeJTCZuIT+hyPo6U2tVEjLfVvLo3eDnBcr6An6/OYh8Qoq/wIX3t5x3Iiqq4Ud3XieVeVGusyX1wzOlQALUDgCBBS9K0SnwSuclHNsOAGLPLvJkbU/wMx0EiLyZbqE+1RRNZpO2k+3KFREj0xeJ62ksewHRL4N4ywanTxoyBjP3H/h9Zw0+yTt+wJV3KZSKkmuRUsv2nQ1rn9h0lmJlHCuKmKW5Wbfg5yYdlQNnURbObst/tQGLzBp6KDvQYjqyVW7HFcHG9S6HRZeoQpmTUTIxYzGPxLoVWuVHvwEVb1x6QEK4PZsE+LJ1kIquNMKHvnorx1Bpkb3RV7wqXiYGFMQ12Pg+wc6huDaMUYCg07ERo9rN/9Y7cmTC4udP8TZRDtoEPYcBq0F3iHn/cpVhLCoLYwRj4+P5TKcqc4QwJigeqbgieXsLawwkKGjE2kHNS4nqQxwMuz66/qYpqNPdK2L1vYMvCcQAly/vjvs4PJpGBK3IkObATRiL+94MUiNoULLt7NmgqDZu9Akty/zyEzdTFaPrEMU3qbNVDbuI5nwpcSKmRgB",
+      "thinking": "",
+      "type": "thinking"
+     },
+     {
+      "id": "toolu_bdrk_01FZ4RPkW6ZGRmpUqcy6VQRM",
+      "input": {
+       "scrubbed": true
+      },
+      "name": "Bash",
+      "type": "tool_use"
+     }
+    ],
+    "role": "assistant"
+   },
+   {
+    "content": [
+     {
+      "content": "[scrubbed 177 chars of prompt text]",
+      "is_error": false,
+      "tool_use_id": "toolu_bdrk_01FZ4RPkW6ZGRmpUqcy6VQRM",
+      "type": "tool_result"
+     }
+    ],
+    "role": "user"
+   },
+   {
+    "content": [
+     {
+      "cache_control": {
+       "type": "ephemeral"
+      },
+      "text": "[scrubbed 0 chars of prompt text]\n<system-reminder>\n<total_tokens>14961559 tokens left</total_tokens>\n</system-reminder>",
+      "type": "text"
+     }
+    ],
+    "role": "system"
+   }
+  ]
+ },
+ "conv_a_turn3": {
+  "messages": [
+   {
+    "content": [
+     {
+      "text": "[scrubbed 306 chars of prompt text]",
+      "type": "text"
+     },
+     {
+      "text": "[scrubbed 216 chars of prompt text]",
+      "type": "text"
+     }
+    ],
+    "role": "user"
+   },
+   {
+    "content": "[scrubbed 6302 chars of prompt text]\n<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>",
+    "role": "system"
+   },
+   {
+    "content": [
+     {
+      "signature": "EsQECnIIEBABGAIqQEhBKyfRBGOtyWblCOA+qqpEAfSwCyS5f1oPXCBJKgBkUegMn4ZQDQKKFozNiZnowt0KKIT/P5ah1sxz8bEUkyAyDmNsYXVkZS1zYWZmcm9uOABCCHRoaW5raW5nWgw3NzIwMDY2NDI4NDcSDBMHaPcxN7eZxGVqCxoMSjjrHcb+FAH5eltAIjCePa85y1ddVllx2XJibkJeJTCZuIT+hyPo6U2tVEjLfVvLo3eDnBcr6An6/OYh8Qoq/wIX3t5x3Iiqq4Ud3XieVeVGusyX1wzOlQALUDgCBBS9K0SnwSuclHNsOAGLPLvJkbU/wMx0EiLyZbqE+1RRNZpO2k+3KFREj0xeJ62ksewHRL4N4ywanTxoyBjP3H/h9Zw0+yTt+wJV3KZSKkmuRUsv2nQ1rn9h0lmJlHCuKmKW5Wbfg5yYdlQNnURbObst/tQGLzBp6KDvQYjqyVW7HFcHG9S6HRZeoQpmTUTIxYzGPxLoVWuVHvwEVb1x6QEK4PZsE+LJ1kIquNMKHvnorx1Bpkb3RV7wqXiYGFMQ12Pg+wc6huDaMUYCg07ERo9rN/9Y7cmTC4udP8TZRDtoEPYcBq0F3iHn/cpVhLCoLYwRj4+P5TKcqc4QwJigeqbgieXsLawwkKGjE2kHNS4nqQxwMuz66/qYpqNPdK2L1vYMvCcQAly/vjvs4PJpGBK3IkObATRiL+94MUiNoULLt7NmgqDZu9Akty/zyEzdTFaPrEMU3qbNVDbuI5nwpcSKmRgB",
+      "thinking": "",
+      "type": "thinking"
+     },
+     {
+      "id": "toolu_bdrk_01FZ4RPkW6ZGRmpUqcy6VQRM",
+      "input": {
+       "scrubbed": true
+      },
+      "name": "Bash",
+      "type": "tool_use"
+     }
+    ],
+    "role": "assistant"
+   },
+   {
+    "content": [
+     {
+      "content": "[scrubbed 177 chars of prompt text]",
+      "is_error": false,
+      "tool_use_id": "toolu_bdrk_01FZ4RPkW6ZGRmpUqcy6VQRM",
+      "type": "tool_result"
+     }
+    ],
+    "role": "user"
+   },
+   {
+    "content": "[scrubbed 0 chars of prompt text]\n<system-reminder>\n<total_tokens>14961559 tokens left</total_tokens>\n</system-reminder>",
+    "role": "system"
+   },
+   {
+    "content": [
+     {
+      "signature": "EqkCCnIIEBABGAIqQPlbYpBknHlU5O/GsHnehfQFPzGFuCsVzANAi6Au3OIyPW2msVt+J9nsxjs5Jr+SDtzXDxBagORYd+fx/uRisEUyDmNsYXVkZS1zYWZmcm9uOABCCHRoaW5raW5nWgw3NzIwMDY2NDI4NDcSDFDMh0OERXredXMkahoMFqwIqFTr11G1UfpBIjC1Xmkxw+ATJWVX/iTNtQDjZONTziddY2ug/Dz11oaric26LXztZVW95sGrXS3ealEqZUuporFa8JpFrX+jWePp/mVDP0yZIq3h8WfCkkuZ/qYmtROF5jSaqQtwOVa/lQT+US43yW8jXtSOPEZGTf1l1a0iSYhoV+ZRaA9fiAG0pGgYbcJenIM77LSNZb3RyCwT9iSeavmuGAE=",
+      "thinking": "",
+      "type": "thinking"
+     },
+     {
+      "id": "toolu_bdrk_01MvndY7Gz9yiaJt8E1i8AaU",
+      "input": {
+       "scrubbed": true
+      },
+      "name": "Bash",
+      "type": "tool_use"
+     }
+    ],
+    "role": "assistant"
+   },
+   {
+    "content": [
+     {
+      "content": "[scrubbed 824 chars of prompt text]",
+      "is_error": false,
+      "tool_use_id": "toolu_bdrk_01MvndY7Gz9yiaJt8E1i8AaU",
+      "type": "tool_result"
+     }
+    ],
+    "role": "user"
+   },
+   {
+    "content": [
+     {
+      "cache_control": {
+       "type": "ephemeral"
+      },
+      "text": "[scrubbed 0 chars of prompt text]\n<system-reminder>\n<total_tokens>14961305 tokens left</total_tokens>\n</system-reminder>",
+      "type": "text"
+     }
+    ],
+    "role": "system"
+   }
+  ]
+ },
+ "conv_b_turn1": {
+  "messages": [
+   {
+    "content": [
+     {
+      "text": "[scrubbed 306 chars of prompt text]",
+      "type": "text"
+     },
+     {
+      "text": "[scrubbed 366 chars of prompt text]",
+      "type": "text"
+     }
+    ],
+    "role": "user"
+   },
+   {
+    "content": [
+     {
+      "cache_control": {
+       "type": "ephemeral"
+      },
+      "text": "[scrubbed 6302 chars of prompt text]\n<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>",
+      "type": "text"
+     }
+    ],
+    "role": "system"
+   }
+  ]
+ },
+ "conv_b_turn2": {
+  "messages": [
+   {
+    "content": [
+     {
+      "text": "[scrubbed 306 chars of prompt text]",
+      "type": "text"
+     },
+     {
+      "text": "[scrubbed 366 chars of prompt text]",
+      "type": "text"
+     }
+    ],
+    "role": "user"
+   },
+   {
+    "content": "[scrubbed 6302 chars of prompt text]\n<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>",
+    "role": "system"
+   },
+   {
+    "content": [
+     {
+      "signature": "EvMBCnIIEBABGAIqQEbOOrV2I+tqtdh5xNItLvjxBgChACaRRuR9AoyUK5nLOgoRBN+fzcvo2PQyvuKrJ2i6YXLZaea0aY/AiqAOUFMyDmNsYXVkZS1zYWZmcm9uOABCCHRoaW5raW5nWgw3NzIwMDY2NDI4NDcSDGzVs7H6zwTCCk0QzhoMDd6za0tbtzIk5huXIjCcrX8ZH0PnC/CvrXIE9CPgJHOBXUf44Pe5YNO7/JsNESUfosfwKkmfO81eTZn+p/wqLzDuan11XKxhEum252tqmPC7mseMxn/p+G8rnIM0Axjo0Jqne3KzUF27oT3d4N2iGAE=",
+      "thinking": "",
+      "type": "thinking"
+     },
+     {
+      "id": "toolu_bdrk_015b6TZzB9pMALGnuzRt7apk",
+      "input": {
+       "scrubbed": true
+      },
+      "name": "Bash",
+      "type": "tool_use"
+     }
+    ],
+    "role": "assistant"
+   },
+   {
+    "content": [
+     {
+      "content": "[scrubbed 11827 chars of prompt text]",
+      "is_error": false,
+      "tool_use_id": "toolu_bdrk_015b6TZzB9pMALGnuzRt7apk",
+      "type": "tool_result"
+     }
+    ],
+    "role": "user"
+   },
+   {
+    "content": [
+     {
+      "cache_control": {
+       "type": "ephemeral"
+      },
+      "text": "[scrubbed 0 chars of prompt text]\n<system-reminder>\n<total_tokens>14961573 tokens left</total_tokens>\n</system-reminder>",
+      "type": "text"
+     }
+    ],
+    "role": "system"
+   }
+  ]
+ }
+}

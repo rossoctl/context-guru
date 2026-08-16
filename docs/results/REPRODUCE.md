@@ -53,7 +53,7 @@ CGO_ENABLED=1 go test -tags cg_skeleton ./...      # all green
 
 The harness [`deploy/harbor/swebench.py`](https://github.com/rossoctl/context-guru/blob/main/deploy/harbor/swebench.py) starts the
 proxy per config (`off` = transparent passthrough baseline; `codesmart` = the tuned
-cache-aware config), points Harbor at it (`ANTHROPIC_BASE_URL=http://<LAN-IP>:4000/anthropic`),
+cache-aware config), points Harbor at it (`ANTHROPIC_BASE_URL=http://$CG_LAN:4000/anthropic`),
 runs the tasks, and writes `summary.json` + `rows-*.json`.
 
 ```
@@ -67,11 +67,52 @@ nohup python3 -u deploy/harbor/swebench.py \
 ```
 
 Notes / gotchas learned the hard way:
+- **Set `CG_LAN` to this box's LAN address before launching.** Every harness reads it from
+  the environment and falls back to `127.0.0.1` with a warning — and `127.0.0.1` inside a
+  task container is the container, not the proxy, so every task fails. That warning is the
+  first line to check when a whole run comes back empty.
 - The login shell has **`errexit`**: a leading `pkill` that matches nothing returns 1 and
   aborts the whole launch. Launch with a bare `nohup python3 -u <abs-path> … &` (no
   leading `pkill`/`cd`, no trailing `sleep`).
 - `codesmart` uses `CACHE_MODE=auto` (cache-aware on a prompt-caching agent) and
   `CHEAP_MODEL=aws/claude-haiku-4-5` for its own compaction calls.
+
+!!! warning "The published arm is an ANCESTOR of today's `codesmart` — a re-run will differ"
+    The harness embeds its own `codesmart` document rather than resolving the preset from
+    `config/config.go`. That document has since been brought back into step with the shipped
+    preset, so running the command above today reproduces the *current* `codesmart`
+    (`[format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]`) — not
+    the configuration behind the recorded figures. Three differences, all confirmed in code:
+
+    1. **No `toon`.** It was added to `codesmart` after the run.
+    2. **`cacheinject`, not `cachesplit`.** Breakpoint placement was removed from every
+       preset in [#36](https://github.com/rossoctl/context-guru/pull/36).
+    3. **`failed_run` was a permanent no-op on this workload.** It gated per *request* on
+       cache-awareness — true by default for Anthropic/Bedrock/Vertex — where its sibling
+       `mask` gates per message, and its escape hatch was unreachable because the only
+       `freeze()` call sat downstream of the gate. So it declined every collapse at every
+       depth, which is why it removed zero tokens on
+       [the arm page](context-guru.md). Fixed since, so it will now act on
+       SWE-bench-shaped (pytest-heavy) traffic for the first time.
+
+    Read a difference in a re-run as a change in the treatment, not as run-to-run noise, and
+    re-measure before any cost claim leans on the current pipeline. **No published number has
+    been adjusted** — these notes annotate what configuration produced them. Scope: (3) is
+    SWE-bench-specific; on Terminal-Bench `failed_run` gates out with `fewer_than_two_runs`
+    on 100% of requests, so it could not have contributed there either way.
+
+    **The `codesafe` arm has the same gap, and it has now been closed the same way.** That arm
+    ended in `cacheinject` where the shipped `codesafe` preset ends in `cachesplit`, so a
+    re-run today reproduces the *current* preset
+    (`[format, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]`) and not the
+    configuration behind any recorded `codesafe` figure. Read that difference as a change in
+    the treatment, exactly as above; **no published number has been adjusted.**
+
+    The drift guard in `deploy/harbor/pipeline_drift_test.go` now checks **every preset a
+    harness names an arm after**, not just `codesmart` — which is how this one was found, one
+    arm down in the same file. Arms that deliberately run a non-preset pipeline — `cacheonly`,
+    which runs `[cacheinject]` alone to isolate the cache lever — are exempt by construction:
+    they are not preset names, so nothing resolves them.
 
 ## 4. Run headroom
 

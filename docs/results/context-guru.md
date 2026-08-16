@@ -12,6 +12,22 @@ Context-guru proxy savings: **1.09%** content; own LLM cost $0.3071; added laten
 
 Per-component tokens removed (cumulative): `extract_llm` 129,966, `extract` 34,293, `dedup` 1,120, `cmdfilter` 6
 
+!!! warning "This arm is an ancestor of today's `codesmart`, and `failed_run` was inert"
+    The figures above stand as recorded. Three differences from the shipped preset, all
+    confirmed in code, and a cost claim about the current default needs a fresh run:
+
+    - **no `toon`** (added to `codesmart` after this run);
+    - **`cacheinject`, not `cachesplit`** — breakpoint placement was removed from every
+      preset in [#36](https://github.com/rossoctl/context-guru/pull/36);
+    - **`failed_run` removed zero tokens**, which is why it is missing from the per-component
+      line above. It was not that the tasks lacked repeated pytest runs: the component gated
+      per *request* on cache-awareness (true by default on Anthropic/Bedrock/Vertex) where
+      its sibling `mask` gates per message, so it declined every collapse at every depth, and
+      its repair path was unreachable because the only freeze sat downstream of the gate.
+      Fixed since; it will begin acting on traffic shaped like this.
+
+    See [REPRODUCE.md](REPRODUCE.md) for what a re-run today would actually execute.
+
 ## Per-task
 
 | task | reward | steps | cache_read | cache_write | billed cost |

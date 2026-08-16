@@ -54,6 +54,20 @@ itself (`GET /api/stats` → `denominators[].description`):
 The new-input ratio is guarded: with no provider usage data the denominator would be
 `saved` alone and the ratio would read ~100%. It reports **n/a** instead.
 
+!!! warning "Read the label on the tile: **Saved (gross)** is not what you saved"
+    This is the single most misreadable pair of numbers in the UI, and the gap between
+    them is not small — **13.1×** on a real 63-request window, *on the same data*.
+
+    An agent re-sends its whole transcript every turn, so one compaction is counted again
+    on every remaining turn. **Saved (gross)** is that cumulative figure — useful for "how
+    much re-sent bulk did we keep out of every turn", useless as a savings claim.
+    **Saved (unique)** is content that genuinely never reached the provider, and it is the
+    only half that can be priced as a cache write.
+
+    The tile's own subtitle says *recounts re-sent history*, and `overcount_ratio`
+    (`gross ÷ unique`) sits beside the dollar figure so the inflation is visible rather
+    than inferred. Cite the unique figure, or cite gross **with** its ratio.
+
 #### The cost of our own safety mechanisms
 
 Reported next to their benefit, because a compaction proxy that shows only tokens
@@ -80,8 +94,8 @@ dollar savings diverge so sharply on this workload (see
 
 Both halves matter, and getting either wrong inflates the headline. `saved_tokens` is
 gross: the agent re-sends its transcript every turn, so one compaction is re-counted once
-per remaining turn — a 4.7× overcount on the 63-request replay above, and 13.1× on a
-longer one. Only `saved_unique` is content that genuinely never reached the provider, and
+per remaining turn — a 13.1× overcount on the 63-request window that
+`dash/event.go` documents. Only `saved_unique` is content that genuinely never reached the provider, and
 only that part can be priced as a cache write; the re-sent remainder would have come from
 the provider's cache at 1/11.5 the rate. The dashboard shows the correction factor as
 `overcount_ratio` right beside the dollar figure — an earlier version of this page
@@ -131,6 +145,79 @@ Git-style hunks with line numbers and collapsed unchanged runs, plus side-by-sid
 after-only views. Both reference implementations carry this data and neither renders it.
 
 ![Side-by-side diff](img/dashboard/10-diff-side-by-side.jpg)
+
+#### Four views of one diff
+
+Every rewritten message gets a toolbar with four modes — **Before**, **After**, **Inline
+diff** (the default) and **Side by side** — and they are four renderings of *one* LCS
+result, not four renderers. Sharing the diff output is what keeps the line tints and the
+line numbers agreeing between modes. The elided-run markers (`… N unchanged lines …`)
+appear in the single-side views too: dropping them made "Before" claim to be the whole
+original text while quietly omitting every unchanged run, putting two lines side by side
+that are two hundred apart in the real message.
+
+The same block renders in the request drawer and in the whole-session view, so the two
+cannot drift into showing the same data two different ways. The session view is **not** a
+reconstructed transcript: what is captured is the messages context-guru *rewrote*, not the
+conversation around them, so it shows those spans in order and its heading says exactly
+that. Stitching a "session before compaction" out of them would be a fabrication wherever
+nothing was touched.
+
+#### Nine states, because "empty" is nine different facts
+
+A diff panel with nothing in it is the most misread thing in the UI, so the state is
+explicit and named. `GET /api/sessions/{session}/transcript` reports one of:
+
+| State | Means | Can the reader act on it? |
+|---|---|---|
+| `hot` | Content is local and is in this response. | — |
+| `cold` | Archived. Metrics are local and complete; the text is in cold storage. | Yes — press the button. |
+| `fetched` | Pulled back out of cold storage on this request. | — |
+| `nothing_changed` | Capture is on and context-guru rewrote nothing here. | No — this is a real answer. |
+| `not_captured` | Capture is off, so there is nothing to show. | Sometimes — see [who has to act](#capture-needs-two-yeses-and-capture_blocked_by-says-whose-is-missing) below. |
+| `not_permitted` | Someone else's transcript, or an untrusted address. | No — not theirs to change. |
+| `never_archived` | Asked cold storage for it; it was never uploaded. | No. |
+| `unreachable` | Cold storage is down. **The data is safe** — try later. | Yes — retry. |
+| `unknown_session` | No such session for this caller. Served with **HTTP 404 and a JSON body** carrying this state, not a bare 404. | No. |
+
+`never_archived` and `unreachable` are kept apart on purpose (`404` against `503` on the
+API): conflating "this was never archived" with "the remote is down" makes an outage look
+like data loss.
+
+`unknown_session` carries a state like every other answer so a client has **one** branch on
+`state` rather than a state machine plus a special case for one status code. It is
+**deliberately the same answer** whether the session never existed or belongs to another
+tenant: a distinguishable 404 would confirm other people's session ids to anyone willing to
+enumerate them.
+
+#### Capture needs two yeses, and `capture_blocked_by` says whose is missing
+
+`not_captured` means "there is nothing stored", not "you forgot to switch something on". Both
+the request view and the transcript view report two fields, and the second one exists because
+the first cannot say who has to act:
+
+| Field | Meaning |
+|---|---|
+| `content_captured` | The **effective** decision for the tenant whose rows these are — the operator's service-wide gate **and** that tenant's own consent, read fresh per request. It is no longer the process flag. |
+| `capture_blocked_by` | `"operator"`, `"tenant"`, or `""` when nothing is blocking. `""` also for a manager looking at the whole service, who is not a party whose consent there is to report. |
+
+The consequence worth knowing before you debug an empty panel: **capture needs both gates, so
+a tenant who has opted in still gets nothing until the operator sets `--dashboard-content` /
+`DASHBOARD_CONTENT`.** That state reads `content_captured: false` with
+`capture_blocked_by: "operator"`, and the UI says so instead of pointing at a setting the
+reader has already switched on — which is the bug the field was added to fix. In
+single-tenant mode there is no second gate, so the operator flag is the whole decision.
+
+#### Cold storage is never touched on page load
+
+The transcript route is lazy, and that is why it exists as its own route. Without
+`?fetch=1` it reads the local database only and reports `cold`; the network happens on
+`?fetch=1` and nowhere else — that is, only when a human pressed the button. Otherwise a
+session list of 100 rows would fire 100 rclone round trips to render.
+
+Fetching is **read-only**: it does not reinsert the rows. Dragging an archived session back
+into the hot tier would re-trigger the eviction that put it there, turning "let me look at
+last month" into a write-amplification loop.
 
 ### Benchmarks
 
@@ -268,6 +355,8 @@ already requires), in WAL mode.
 | `requests` | one row per proxied request: identity, all four token tiers, costs, latencies, attribution |
 | `request_components` | one row per component per request — the "which components earn their place" data |
 | `request_content` | before/after text, gzip-compressed and size-capped; skippable entirely |
+| `archived_sessions` | the cold-storage index — one small row per archived session, local and permanent, so the session list works while the remote is unreachable |
+| `tenant_spend` | the month-to-date spend rollup the per-tenant cap is enforced against; retention and archiving never touch it, so archiving inside the calendar month cannot make the cap under-count |
 | `bench_runs` / `bench_tasks` | ingested harness runs and their per-task rows |
 
 Timestamps are **epoch milliseconds** everywhere. A formatted locale string cannot be
@@ -299,6 +388,48 @@ Aggregates are deliberately open: a proxy bound to `0.0.0.0` should still show i
 numbers, and the point of this tool is observability. Content is gated because a
 transcript can carry a user's source code. There is **no** "disable observability in
 production" switch — for a tool whose value *is* observability, that would be backwards.
+
+### On a hosted instance
+
+The same UI, with a sign-in gate in front of it and four extra tabs. It decides which world
+it is in by calling `GET /api/whoami`, which answers **200 in every case** — including "not
+signed in" — and returns the account, its tokens and the registration mode in the same
+round trip, so the probe and the first data fetch are one request. Detected rather than
+compiled in, because a build flag is one more thing to keep in step with the server.
+
+It used to probe by calling `/api/me` and reading its `401`, which worked and also put a red
+error in the console of every user on every first load. A question with a legitimate negative
+answer should not be asked with an error.
+
+| Tab | Adds |
+|---|---|
+| **Setup** | The copy-paste base-URL/token blocks, with this deployment's real base URL. |
+| **Settings** | Mode, upstream per dialect, component toggles, transcript-capture consent, spend against cap, tokens. |
+| **Archive** | What has moved to cold storage, from the local index; opening one fetches it back read-only. |
+| **Tenants** | Manager only: every account with spend against cap, set a cap, disable, reissue a token. |
+
+Two access rules differ from the local case, and both are enforced server-side:
+
+- **Transcript capture needs two independent yeses.** The operator's `--dashboard-content`
+  *and* the tenant's own consent, per tenant, **off by default**. The honest reason is the
+  one above: the redactor is a best-effort denylist, and a review of 22 realistic credential
+  shapes found **11 passing through it**. 22-of-22 now passing does not prove completeness,
+  so this is consent, not a feature flag.
+- **A manager sees everyone's metrics and nobody's transcripts.** Reading another user's
+  source code is not an administrative need, and the consent they gave was for their own
+  view. The archive route applies the same rule, so it is not a way around it.
+- **Three surfaces become manager-only**, because they are not anybody's tenant data:
+  the server's effective configuration (`/api/config`, which
+  [says so in its own payload](reference/routes.md#the-config-route-serves-the-servers-configuration-not-yours)
+  — a tenant's own config comes from the control plane instead), the ingested benchmark runs (`/api/benchmarks` and its task
+  rows — the operator's eval history, and `?refresh=1` writes), and the capture pipeline's
+  counters. `/api/capture` still answers a tenant, with the one field that is genuinely
+  about them: the deployment's operating **mode**, because in observe mode nothing was
+  enforced and their dashboard has to say so. The scoping decision is data in the mounted
+  route table, and a test walks it and asserts every route's declared scope — which is how
+  three unauthenticated routes shipped before it existed.
+
+See [Hosted service](hosted.md) for the rest.
 
 ## Configuration
 

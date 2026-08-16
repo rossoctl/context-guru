@@ -1,291 +1,916 @@
-/* context-guru docs — brand accent + adk.dev-style marketing homepage. */
+/* ==========================================================================
+   context-guru documentation theme.
+
+   Extends Material for MkDocs; it does not fight it. Everything here is either
+   (a) a token override Material already reads, or (b) a `cg-` prefixed class
+   used by overrides/home.html and a handful of figures. No JS of our own, and
+   nothing loaded from another host — see the `font: false` note in mkdocs.yml.
+
+   Light and dark are both authored: every colour token is declared for the
+   default scheme and re-declared for `slate`, never derived by inversion.
+   ========================================================================== */
+
+/* --- 1. Tokens ----------------------------------------------------------- */
 
 :root {
-  --md-primary-fg-color: #009688;
-  --md-primary-fg-color--light: #4db6ac;
-  --md-primary-fg-color--dark: #00695c;
-  --md-accent-fg-color: #00bfa5;
-  --cg-hero-grad: radial-gradient(
-      1200px 600px at 15% -10%,
-      rgba(0, 150, 136, 0.18),
-      transparent 60%
-    ),
-    radial-gradient(900px 500px at 95% 0%, rgba(0, 191, 165, 0.14), transparent 55%);
+  /* Chrome. A deep navy header keeps the saturated blue for data and links,
+     where it carries meaning, instead of spending it on a bar at the top. */
+  --md-primary-fg-color: #16283f;
+  --md-primary-fg-color--light: #2c4a6e;
+  --md-primary-fg-color--dark: #0d1a2b;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: #ffffffc0;
+  --md-accent-fg-color: #1b62b8;
+
+  /* Data palette. Validated for CVD separation and 3:1 against both surfaces;
+     used for charts and for the one accent each figure is allowed. */
+  --cg-blue: #3987e5;
+  --cg-orange: #d95926;
+  --cg-aqua: #199e70;
+
+  --cg-link: #1a5fb4;
+  --cg-rule: #e3e7ec;
+  --cg-surface: #f6f8fa;
+  --cg-surface-2: #eef2f6;
+  --cg-ink-mute: #55606d;
+
+  /* Type scale — 1.25 ratio off a 16px base, capped so a page of h2/h3 still
+     reads as a document rather than a poster. */
+  --cg-t-xs: 0.75rem;
+  --cg-t-sm: 0.8125rem;
+  --cg-t-cap: 0.6875rem;
+  --cg-t-body: 1rem;
+  --cg-t-lead: 1.125rem;
+  --cg-t-h3: 1.1875rem;
+  --cg-t-h2: 1.5rem;
+  --cg-t-h1: 2.125rem;
+  --cg-t-display: 2.375rem;
+  --cg-t-figure: 1.9rem;
+
+  /* Spacing rhythm — one 8px scale, used for every vertical gap below. */
+  --cg-1: 0.25rem;
+  --cg-2: 0.5rem;
+  --cg-3: 0.75rem;
+  --cg-4: 1rem;
+  --cg-6: 1.5rem;
+  --cg-8: 2rem;
+  --cg-12: 3rem;
+
+  --cg-radius: 8px;
+  --cg-radius-sm: 5px;
+
+  /* Fonts, asked for locally and never fetched — `font: false` in mkdocs.yml keeps
+     Google Fonts off the page. Material composes these into
+     --md-text-font-family with its own platform fallbacks appended, so a reader
+     without Inter installed gets their system UI face rather than Times. */
+  --md-text-font: "Inter";
+  --md-code-font: "JetBrains Mono";
 }
 
 [data-md-color-scheme="slate"] {
-  --cg-hero-grad: radial-gradient(
-      1200px 600px at 15% -10%,
-      rgba(0, 150, 136, 0.28),
-      transparent 60%
-    ),
-    radial-gradient(900px 500px at 95% 0%, rgba(0, 191, 165, 0.18), transparent 55%);
+  --md-primary-fg-color: #101c2b;
+  --md-primary-fg-color--light: #24405f;
+  --md-primary-fg-color--dark: #0a121c;
+  --md-accent-fg-color: #7cb0ee;
+
+  --md-default-bg-color: #12161c;
+  --md-default-bg-color--light: #12161cb3;
+
+  --cg-link: #8cbaf0;
+  --cg-rule: #262d37;
+  --cg-surface: #171d25;
+  --cg-surface-2: #1d242e;
+  --cg-ink-mute: #9aa6b4;
 }
 
-/* ---- Hero ---- */
-.cg-hero {
-  background: var(--cg-hero-grad);
-  padding: 4.5rem 1rem 3rem;
-  text-align: center;
+/* --- 2. Base typography and rhythm -------------------------------------- */
+
+.md-typeset {
+  font-size: var(--cg-t-body);
+  line-height: 1.72;
+  letter-spacing: -0.003em;
 }
-.cg-hero__inner {
-  max-width: 52rem;
-  margin: 0 auto;
+
+.md-typeset p,
+.md-typeset ul,
+.md-typeset ol,
+.md-typeset dl {
+  margin-block: 0 var(--cg-4);
 }
-.cg-hero__logo {
-  width: 320px;
-  height: auto;
-  object-fit: contain;
-  margin-bottom: 1.75rem;
-  display: block;
-  margin-left: auto;
-  margin-right: auto;
+
+.md-typeset li > p:last-child {
+  margin-bottom: var(--cg-2);
 }
-.cg-hero__eyebrow {
-  display: inline-block;
-  font-size: 0.72rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  font-weight: 700;
-  color: var(--md-primary-fg-color);
-  border: 1px solid var(--md-primary-fg-color--light);
-  border-radius: 999px;
-  padding: 0.25rem 0.8rem;
-  margin-bottom: 1.25rem;
+
+.md-typeset h1 {
+  font-size: var(--cg-t-h1);
+  line-height: 1.15;
+  font-weight: 660;
+  letter-spacing: -0.022em;
+  color: var(--md-default-fg-color);
+  margin-bottom: var(--cg-6);
 }
-.cg-hero h1 {
-  font-size: 2.9rem;
-  line-height: 1.08;
-  font-weight: 800;
-  margin: 0 0 1rem;
-  letter-spacing: -0.02em;
+
+/* h2 opens a new part of the page, so it gets a hairline and real air above.
+   That rule is the whole "section" affordance — no boxes, no background. */
+.md-typeset h2 {
+  font-size: var(--cg-t-h2);
+  line-height: 1.25;
+  font-weight: 620;
+  letter-spacing: -0.014em;
+  margin-top: var(--cg-12);
+  padding-top: var(--cg-4);
+  border-top: 1px solid var(--cg-rule);
 }
-.cg-hero p.cg-hero__lede {
-  font-size: 1.12rem;
+
+.md-typeset h1 + h2 {
+  margin-top: var(--cg-6);
+}
+
+.md-typeset h3 {
+  font-size: var(--cg-t-h3);
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  margin-top: var(--cg-8);
+}
+
+.md-typeset h4 {
+  font-size: var(--cg-t-body);
+  font-weight: 660;
+  margin-top: var(--cg-6);
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset h5 {
+  font-size: var(--cg-t-sm);
+  letter-spacing: 0.02em;
+  text-transform: none;
+  font-weight: 660;
+}
+
+/* The first paragraph after the page title is the page's answer. */
+.md-typeset h1 + p {
+  font-size: var(--cg-t-lead);
+  line-height: 1.62;
   color: var(--md-default-fg-color--light);
-  max-width: 42rem;
-  margin: 0 auto 2rem;
 }
-.cg-cta {
+
+.md-typeset hr {
+  border-bottom-color: var(--cg-rule);
+  margin-block: var(--cg-8);
+}
+
+/* Keyboard focus. Everything below styles `:focus-visible` alongside `:hover`, which
+   on its own leaves the browser's `outline: auto` as the only focus affordance — 1px
+   of near-black on a mid-blue button, and identical to hover on a route card. One
+   explicit ring instead, offset so it lands on the page background rather than the
+   fill it surrounds. */
+.cg-btn:focus-visible,
+.cg-route:focus-visible {
+  outline: 2px solid var(--md-accent-fg-color);
+  outline-offset: 2px;
+}
+
+/* Material's palette toggle puts focus on a visually-hidden radio and ships no ring
+   for the label that is actually on screen, so the light/dark switch is invisible to
+   a keyboard. Ring the label. */
+.md-option:focus-visible + .md-header__button {
+  outline: 2px solid var(--md-primary-bg-color);
+  outline-offset: 2px;
+}
+
+/* --- 3. Links and inline code ------------------------------------------- */
+
+.md-typeset a {
+  color: var(--cg-link);
+  text-decoration-color: color-mix(in srgb, var(--cg-link) 35%, transparent);
+  text-underline-offset: 0.18em;
+}
+.md-typeset a:hover,
+.md-typeset a:focus-visible {
+  color: var(--md-accent-fg-color);
+  text-decoration: underline;
+  text-decoration-color: currentcolor;
+}
+
+/* Code sits on the lighter surface, not --cg-surface-2. On the darker one, four of
+   Material's light-scheme Pygments tokens (comment, punctuation, name-tag, string
+   escape) land at 4.38–4.48:1 — just under AA for body-size text. */
+.md-typeset code {
+  font-size: 0.86em;
+  padding: 0.12em 0.36em;
+  border-radius: var(--cg-radius-sm);
+  background: var(--cg-surface);
+  border: 1px solid var(--cg-rule);
+  word-break: normal;
+}
+.md-typeset a code {
+  color: inherit;
+  background: color-mix(in srgb, var(--cg-link) 10%, var(--cg-surface));
+}
+.md-typeset h1 code,
+.md-typeset h2 code,
+.md-typeset h3 code {
+  font-size: 0.88em;
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+/* --- 4. Code blocks ----------------------------------------------------- */
+
+/* A reserved 1.75rem band across the top of every block holds the language
+   label (left) and the copy button (right), so neither can ever land on top of
+   the first line of code. */
+.md-typeset div[class*="language-"] {
+  position: relative;
+  border: 1px solid var(--cg-rule);
+  border-radius: var(--cg-radius);
+  overflow: hidden;
+  margin-block: var(--cg-4) var(--cg-6);
+}
+
+.md-typeset div[class*="language-"] > pre {
+  margin: 0;
+}
+.md-typeset div[class*="language-"] > pre > code {
+  padding-top: 2rem;
+  font-size: 0.79rem;
+  line-height: 1.62;
+}
+
+.md-typeset div[class*="language-"]::before {
+  content: "code";
+  position: absolute;
+  inset-inline-start: 0.85rem;
+  inset-block-start: 0.45rem;
+  z-index: 2;
+  font-family: var(--md-code-font-family, monospace);
+  font-size: var(--cg-t-cap);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--cg-ink-mute);
+  pointer-events: none;
+}
+
+/* The languages this repo actually uses. An unlisted one falls back to "code". */
+.md-typeset div.language-sh::before { content: "shell"; }
+.md-typeset div.language-bash::before { content: "bash"; }
+.md-typeset div.language-console::before { content: "console"; }
+.md-typeset div.language-go::before { content: "go"; }
+.md-typeset div.language-yaml::before { content: "yaml"; }
+.md-typeset div.language-json::before { content: "json"; }
+.md-typeset div.language-text::before { content: "output"; }
+.md-typeset div.language-diff::before { content: "diff"; }
+.md-typeset div.language-python::before { content: "python"; }
+.md-typeset div.language-http::before { content: "http"; }
+.md-typeset div.language-dockerfile::before { content: "dockerfile"; }
+.md-typeset div.language-toml::before { content: "toml"; }
+.md-typeset div.language-ini::before { content: "ini"; }
+.md-typeset div.language-sql::before { content: "sql"; }
+.md-typeset div.language-js::before { content: "javascript"; }
+.md-typeset div.language-ts::before { content: "typescript"; }
+
+.md-typeset .md-clipboard {
+  top: 0.3rem;
+  right: 0.3rem;
+  color: var(--cg-ink-mute);
+}
+.md-typeset .md-clipboard:hover,
+.md-typeset .md-clipboard:focus-visible {
+  color: var(--md-accent-fg-color);
+}
+
+/* A named block (```sh title="…") shows its title instead of a language tag. */
+.md-typeset div[class*="language-"] > .filename {
+  font-size: var(--cg-t-sm);
+  border-bottom: 1px solid var(--cg-rule);
+  background: var(--cg-surface);
+}
+.md-typeset div[class*="language-"]:has(> .filename)::before {
+  content: none;
+}
+.md-typeset div[class*="language-"]:has(> .filename) > pre > code {
+  padding-top: 0.7rem;
+}
+
+/* Tabbed variants: quiet until selected, then a 2px underline. Used wherever a
+   snippet differs per agent or per build method. */
+.md-typeset .tabbed-set > input:checked + label {
+  color: var(--md-default-fg-color);
+  border-color: var(--cg-blue);
+}
+.md-typeset .tabbed-labels > label {
+  font-size: var(--cg-t-sm);
+  font-weight: 600;
+  letter-spacing: 0.005em;
+  padding-bottom: var(--cg-2);
+}
+.md-typeset .tabbed-labels > label > [href]:first-child {
+  color: inherit;
+}
+.md-typeset .tabbed-set {
+  margin-block: var(--cg-4) var(--cg-6);
+}
+.md-typeset .tabbed-block > div[class*="language-"]:first-child {
+  margin-top: var(--cg-2);
+}
+
+/* --- 5. Tables ---------------------------------------------------------- */
+
+.md-typeset table:not([class]) {
+  border: 1px solid var(--cg-rule);
+  border-radius: var(--cg-radius);
+  font-size: var(--cg-t-sm);
+  line-height: 1.55;
+}
+.md-typeset table:not([class]) th {
+  background: var(--cg-surface);
+  font-weight: 660;
+  font-size: var(--cg-t-xs);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--cg-ink-mute);
+  white-space: nowrap;
+}
+.md-typeset table:not([class]) td,
+.md-typeset table:not([class]) th {
+  padding: 0.55rem 0.8rem;
+  border-top: 1px solid var(--cg-rule);
+}
+.md-typeset table:not([class]) tr:first-child th {
+  border-top: none;
+}
+/* Numbers align on their digits; that is what makes a results table readable. */
+.md-typeset table:not([class]) td[align="right"],
+.md-typeset table:not([class]) th[align="right"] {
+  font-variant-numeric: tabular-nums;
+}
+.md-typeset table:not([class]) tbody tr:hover {
+  background: var(--cg-surface);
+}
+
+/* --- 6. Admonitions, quotes, keys --------------------------------------- */
+
+.md-typeset .admonition,
+.md-typeset details {
+  border-radius: var(--cg-radius);
+  border-width: 1px;
+  border-left-width: 3px;
+  box-shadow: none;
+  font-size: 0.9375rem;
+}
+.md-typeset .admonition-title,
+.md-typeset summary {
+  font-weight: 650;
+  letter-spacing: -0.005em;
+}
+.md-typeset blockquote {
+  border-left: 3px solid var(--cg-rule);
+  color: var(--md-default-fg-color--light);
+}
+
+/* --- 7. Chrome: header, tabs, sidebars, footer -------------------------- */
+
+.md-header {
+  box-shadow: none;
+  border-bottom: 1px solid transparent;
+}
+.md-header--shadow {
+  box-shadow: 0 1px 0 0 var(--cg-rule);
+}
+.md-header__title {
+  font-weight: 620;
+  letter-spacing: -0.01em;
+}
+.md-tabs {
+  border-bottom: 1px solid color-mix(in srgb, #ffffff 12%, transparent);
+}
+.md-tabs__link {
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  opacity: 0.78;
+}
+.md-tabs__link--active,
+.md-tabs__link:hover {
+  opacity: 1;
+}
+
+.md-nav {
+  font-size: 0.72rem;
+}
+.md-nav__title {
+  font-size: var(--cg-t-xs);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--cg-ink-mute);
+}
+/* The active page must be obvious in both schemes; slate's default sits too
+   close to the surface to read. */
+.md-nav__item .md-nav__link--active,
+.md-nav__item .md-nav__link--active code {
+  font-weight: 650;
+  color: var(--cg-link);
+}
+/* Section labels in the left nav read as labels, not as clickable rows. */
+.md-nav--secondary .md-nav__title {
+  box-shadow: none;
+  border-bottom: 1px solid var(--cg-rule);
+}
+.md-sidebar--secondary .md-nav__link {
+  padding-block: 0.15rem;
+}
+
+.md-footer-meta {
+  font-size: var(--cg-t-sm);
+}
+.md-search__form {
+  border-radius: var(--cg-radius-sm);
+}
+
+/* Grow the content column a little: results tables are wide. */
+@media screen and (min-width: 76.25em) {
+  .md-grid {
+    max-width: 68rem;
+  }
+}
+
+/* --- 8. Figures and screenshot placeholders ---------------------------- */
+
+.md-typeset figure {
+  margin-block: var(--cg-6);
+}
+.md-typeset figcaption {
+  font-size: var(--cg-t-sm);
+  color: var(--cg-ink-mute);
+  max-width: 44rem;
+  margin-inline: auto;
+}
+/* Screenshots carry a frame so a light UI shot does not bleed into the page. */
+.md-typeset img[src*="/dashboard/"],
+.md-typeset img[src*="/hosted/"],
+.md-typeset img[src*="/benchmark/"] {
+  border: 1px solid var(--cg-rule);
+  border-radius: var(--cg-radius);
+  background: var(--cg-surface);
+}
+
+/* Placeholder for a screenshot a later pass will drop in. Visible on purpose:
+   an empty slot in the docs should look unfinished, not look intentional. */
+.cg-shot-todo {
+  display: block;
+  border: 1px dashed color-mix(in srgb, var(--cg-orange) 55%, var(--cg-rule));
+  border-radius: var(--cg-radius);
+  background: color-mix(in srgb, var(--cg-orange) 5%, transparent);
+  padding: var(--cg-6) var(--cg-4);
+  text-align: center;
+  font-size: var(--cg-t-sm);
+  color: var(--cg-ink-mute);
+  margin-block: var(--cg-6);
+}
+.cg-shot-todo strong {
+  display: block;
+  color: var(--md-default-fg-color);
+  margin-bottom: var(--cg-1);
+}
+.cg-shot-todo code {
+  font-size: 0.95em;
+}
+
+/* --- 9. Bar figures (static, no chart library) ------------------------- */
+
+/* One measure, four arms: a horizontal bar per row, value labelled at the tip,
+   context-guru in blue and the comparison arms in neutral ink. Single series,
+   so no legend — the caption names what is plotted. The numbers also stay in
+   the table above every figure, so nothing is gated behind the graphic. */
+/* Material shrink-wraps <figure>, which would make each bar figure only as wide
+   as its own caption. Bars need the full column so the tracks are comparable. */
+.md-typeset figure:has(> .cg-bars) {
+  display: block;
+  width: 100%;
+  text-align: left;
+}
+.md-typeset figure:has(> .cg-bars) > figcaption {
+  margin-inline: 0;
+  font-style: normal;
+}
+
+.cg-bars {
+  display: grid;
+  grid-template-columns: max-content 1fr max-content;
+  align-items: center;
+  gap: var(--cg-2) var(--cg-3);
+  margin-block: var(--cg-4);
+}
+.cg-bars__label {
+  font-size: var(--cg-t-sm);
+  color: var(--md-default-fg-color--light);
+  white-space: nowrap;
+}
+.cg-bars__row--me .cg-bars__label,
+.cg-bars__row--me .cg-bars__value {
+  color: var(--md-default-fg-color);
+  font-weight: 650;
+}
+.cg-bars__track {
+  height: 18px;
+  background: var(--cg-surface-2);
+  border-radius: 2px 4px 4px 2px;
+  overflow: hidden;
+}
+.cg-bars__fill {
+  display: block;
+  height: 100%;
+  width: var(--cg-w, 0%);
+  background: color-mix(in srgb, var(--cg-ink-mute) 42%, transparent);
+  border-radius: 2px 4px 4px 2px;
+}
+.cg-bars__row--me .cg-bars__fill {
+  background: var(--cg-blue);
+}
+.cg-bars__value {
+  font-family: var(--md-code-font-family, monospace);
+  font-size: var(--cg-t-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--md-default-fg-color--light);
+  white-space: nowrap;
+}
+/* Rows are display:contents so label/track/value share the parent grid and all
+   the tracks line up on one x-origin. */
+.cg-bars__row {
+  display: contents;
+}
+
+/* --- 10. Landing page (overrides/home.html) ---------------------------- */
+
+.cg-home {
+  max-width: 68rem;
+  margin-inline: auto;
+  padding-inline: var(--cg-4);
+}
+
+/* A grid child defaults to min-width:auto, so one long unbroken line inside a
+   <pre> would widen the whole page. Every grid on this page opts out. */
+.cg-fold > *,
+.cg-figures > *,
+.cg-flow > *,
+.cg-routes > * {
+  min-width: 0;
+}
+
+/* The fold: the claim on the left, the 60-second run on the right. Both are
+   above the scroll on a laptop; neither is decoration. */
+.cg-fold {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: var(--cg-8);
+  align-items: start;
+  padding-block: var(--cg-8);
+}
+@media screen and (max-width: 62em) {
+  .cg-fold {
+    grid-template-columns: 1fr;
+    gap: var(--cg-8);
+    padding-block: var(--cg-8);
+  }
+}
+
+.cg-eyebrow {
+  font-size: var(--cg-t-cap);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--cg-ink-mute);
+  margin: 0 0 var(--cg-3);
+}
+.cg-fold h1 {
+  font-size: var(--cg-t-display);
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  font-weight: 680;
+  margin: 0 0 var(--cg-4);
+  color: var(--md-default-fg-color);
+  /* Let the browser even out the line lengths instead of hard-coding a <br>
+     that only looks right at one viewport width. */
+  text-wrap: balance;
+}
+@media screen and (max-width: 50em) {
+  .cg-fold h1 {
+    font-size: 2rem;
+  }
+}
+.cg-lede {
+  font-size: var(--cg-t-lead);
+  line-height: 1.6;
+  color: var(--md-default-fg-color--light);
+  margin: 0 0 var(--cg-6);
+  max-width: 34rem;
+}
+.cg-lede code {
+  font-size: 0.85em;
+}
+
+.cg-actions {
   display: flex;
-  gap: 0.75rem;
-  justify-content: center;
   flex-wrap: wrap;
-  margin-bottom: 2.5rem;
+  gap: var(--cg-3);
+  margin-bottom: var(--cg-6);
 }
 .cg-btn {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.7rem 1.4rem;
-  border-radius: 8px;
-  font-weight: 700;
-  font-size: 0.9rem;
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
-}
-.cg-btn:hover {
-  transform: translateY(-1px);
+  min-height: 44px;
+  padding: 0 1.15rem;
+  border-radius: var(--cg-radius-sm);
+  font-size: 0.875rem;
+  font-weight: 640;
+  border: 1px solid transparent;
+  transition: background-color 120ms ease, border-color 120ms ease;
 }
 .cg-btn--primary {
-  background: var(--md-primary-fg-color);
-  color: #fff !important;
-  box-shadow: 0 6px 20px rgba(0, 150, 136, 0.35);
+  background: var(--cg-link);
+  color: #fff;
 }
-.cg-btn--ghost {
-  border: 1px solid var(--md-default-fg-color--lighter);
-  color: var(--md-default-fg-color) !important;
+.cg-btn--primary:hover,
+.cg-btn--primary:focus-visible {
+  background: color-mix(in srgb, var(--cg-link) 85%, #000);
+  color: #fff;
 }
-.cg-star-wrap {
-  display: flex;
-  justify-content: center;
-  margin-bottom: 1.75rem;
+[data-md-color-scheme="slate"] .cg-btn--primary {
+  background: var(--cg-blue);
+  color: #0c1219;
 }
-.cg-btn--star {
-  background: #f0ad4e;
-  color: #1a1a1a !important;
-  font-size: 1.25rem;
-  font-weight: 800;
-  padding: 0.85rem 2.2rem;
-  border-radius: 10px;
-  box-shadow: 0 6px 22px rgba(240, 173, 78, 0.4);
-  letter-spacing: 0.01em;
+[data-md-color-scheme="slate"] .cg-btn--primary:hover {
+  background: color-mix(in srgb, var(--cg-blue) 85%, #fff);
+  color: #0c1219;
 }
-.cg-btn--star:hover {
-  background: #e09938;
-  box-shadow: 0 8px 28px rgba(240, 173, 78, 0.55);
-}
-
-/* ---- Guarantee pills ---- */
-.cg-guarantees {
-  display: flex;
-  gap: 0.6rem;
-  justify-content: center;
-  flex-wrap: wrap;
-}
-.cg-pill {
-  font-size: 0.82rem;
-  font-weight: 600;
-  padding: 0.35rem 0.9rem;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--md-primary-fg-color) 12%, transparent);
-  color: var(--md-primary-fg-color--dark);
-}
-[data-md-color-scheme="slate"] .cg-pill {
-  color: var(--md-primary-fg-color--light);
-}
-
-/* ---- Section shell ---- */
-.cg-section {
-  max-width: 60rem;
-  margin: 0 auto;
-  padding: 2.75rem 1rem;
-}
-.cg-section h2 {
-  text-align: center;
-  font-weight: 800;
-  letter-spacing: -0.01em;
-}
-.cg-section__sub {
-  text-align: center;
-  color: var(--md-default-fg-color--light);
-  font-size: 1.02rem;
-  line-height: 1.5;
-  margin: -0.5rem auto 2rem;
-  max-width: 44rem;
-}
-.cg-section__sub--large {
-  font-size: 1.25rem;
-  font-weight: 600;
+.cg-btn--quiet {
+  border-color: var(--cg-rule);
   color: var(--md-default-fg-color);
+  background: var(--md-default-bg-color);
+}
+.cg-btn--quiet:hover,
+.cg-btn--quiet:focus-visible {
+  border-color: var(--md-accent-fg-color);
+  color: var(--md-accent-fg-color);
 }
 
-/* ---- Feature cards ---- */
-.cg-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-  gap: 1rem;
-}
-.cg-card {
-  border: 1px solid var(--md-default-fg-color--lightest);
-  border-radius: 12px;
-  padding: 1.3rem;
-  background: var(--md-default-bg-color);
-  transition: border-color 0.15s ease, transform 0.15s ease;
-}
-.cg-card:hover {
-  border-color: var(--md-primary-fg-color--light);
-  transform: translateY(-2px);
-}
-.cg-card__icon {
-  font-size: 1.6rem;
-  line-height: 1;
-}
-.cg-card h3 {
-  margin: 0.6rem 0 0.35rem;
-  font-size: 1.02rem;
-}
-.cg-card p {
+.cg-meta {
+  font-size: var(--cg-t-sm);
+  color: var(--cg-ink-mute);
   margin: 0;
-  font-size: 0.95rem;
-  line-height: 1.5;
-  color: var(--md-default-fg-color--light);
 }
-
-/* ---- Before/after demo ---- */
-.cg-demo {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  gap: 1rem;
-  align-items: center;
-}
-@media (max-width: 44rem) {
-  .cg-demo {
-    grid-template-columns: 1fr;
-  }
-  .cg-demo__arrow {
-    transform: rotate(90deg);
-  }
-}
-.cg-demo__panel {
-  border: 1px solid var(--md-default-fg-color--lightest);
-  border-radius: 10px;
-  padding: 1rem 1.1rem;
-}
-.cg-demo__panel h4 {
-  margin: 0 0 0.4rem;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--md-default-fg-color--light);
-}
-.cg-demo__big {
-  font-size: 1.9rem;
-  font-weight: 800;
-}
-.cg-demo__arrow {
-  font-size: 1.6rem;
-  color: var(--md-primary-fg-color);
-  text-align: center;
-}
-
-/* ---- Bottom-line conclusion ---- */
-.cg-bottomline {
-  max-width: 46rem;
-  margin: 0 auto 2rem;
-  text-align: center;
-  font-size: 1.2rem;
-  line-height: 1.55;
+.cg-meta strong {
   color: var(--md-default-fg-color);
-}
-.cg-bottomline strong {
-  color: var(--md-primary-fg-color--dark);
-}
-[data-md-color-scheme="slate"] .cg-bottomline strong {
-  color: var(--md-primary-fg-color--light);
+  font-weight: 640;
 }
 
-/* ---- Stat strip ---- */
-.cg-stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
-  gap: 1.1rem;
-  text-align: center;
+/* The run-it panel. A numbered list, because three ordered steps is what it is. */
+.cg-run {
+  border: 1px solid var(--cg-rule);
+  border-radius: var(--cg-radius);
+  background: var(--cg-surface);
+  padding: var(--cg-6);
 }
-.cg-stat {
-  border: 1px solid var(--md-default-fg-color--lightest);
-  border-radius: 12px;
-  padding: 1.4rem 1rem 1.2rem;
+.cg-run h2 {
+  font-size: var(--cg-t-body);
+  font-weight: 660;
+  margin: 0 0 var(--cg-4);
+  letter-spacing: -0.005em;
+}
+.cg-run ol {
+  list-style: none;
+  counter-reset: cg-step;
+  margin: 0;
+  padding: 0;
+}
+.cg-run li {
+  counter-increment: cg-step;
+  position: relative;
+  padding-left: 1.9rem;
+  margin-bottom: var(--cg-4);
+}
+.cg-run li:last-child {
+  margin-bottom: 0;
+}
+.cg-run li::before {
+  content: counter(cg-step);
+  position: absolute;
+  left: 0;
+  top: 0.05rem;
+  width: 1.3rem;
+  height: 1.3rem;
+  border-radius: 50%;
+  border: 1px solid var(--cg-rule);
+  background: var(--md-default-bg-color);
+  color: var(--cg-ink-mute);
+  font-size: var(--cg-t-xs);
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+.cg-run p {
+  margin: 0 0 var(--cg-2);
+  font-size: 0.9375rem;
+  color: var(--md-default-fg-color--light);
+}
+.cg-run pre {
+  margin: 0;
+  padding: var(--cg-3);
+  border: 1px solid var(--cg-rule);
+  border-radius: var(--cg-radius-sm);
+  background: var(--md-default-bg-color);
+  overflow-x: auto;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  font-family: var(--md-code-font-family, monospace);
+}
+.cg-run .cg-comment {
+  color: var(--cg-ink-mute);
+}
+.cg-run__foot {
+  margin: var(--cg-4) 0 0;
+  font-size: var(--cg-t-sm);
+  color: var(--cg-ink-mute);
+}
+
+/* Section shell on the landing page. Same hairline rule as an h2 in prose. */
+.cg-band {
+  padding-block: var(--cg-12);
+  border-top: 1px solid var(--cg-rule);
+}
+.cg-band > h2 {
+  font-size: var(--cg-t-h2);
+  font-weight: 640;
+  letter-spacing: -0.015em;
+  margin: 0 0 var(--cg-2);
+}
+.cg-band > .cg-sub {
+  font-size: 0.9375rem;
+  color: var(--cg-ink-mute);
+  margin: 0 0 var(--cg-8);
+  max-width: 46rem;
+  line-height: 1.6;
+}
+.cg-band > .cg-sub:last-child {
+  margin-bottom: 0;
+}
+
+/* Measured figures: a full-width strip directly under the fold, so the claim,
+   the run steps and the evidence all land on the first screen. */
+.cg-measured {
+  padding-bottom: var(--cg-12);
+}
+
+/* Measured figures. Four tiles, one measure each, delta and its comparison. */
+.cg-figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12.5rem, 1fr));
+  gap: var(--cg-4);
+}
+/* A 2px top rule keyed to what the tile measures: cost and tokens blue, reward
+   aqua, a caveat orange. */
+.cg-figure {
+  border: 1px solid var(--cg-rule);
+  border-top: 2px solid var(--cg-blue);
+  border-radius: var(--cg-radius);
+  padding: var(--cg-4);
   background: var(--md-default-bg-color);
 }
-.cg-stat__num {
-  font-size: 2.7rem;
-  font-weight: 800;
+.cg-figure__value {
+  font-size: var(--cg-t-figure);
+  font-weight: 660;
   line-height: 1;
-  color: var(--md-primary-fg-color);
-}
-.cg-stat__label {
-  font-size: 1rem;
-  font-weight: 700;
-  margin-top: 0.55rem;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
   color: var(--md-default-fg-color);
 }
-.cg-stat__sub {
-  font-size: 0.86rem;
-  margin-top: 0.3rem;
+.cg-figure__label {
+  font-size: 0.875rem;
+  font-weight: 620;
+  margin-top: var(--cg-3);
+  color: var(--md-default-fg-color);
+}
+.cg-figure__against {
+  font-size: var(--cg-t-sm);
+  color: var(--cg-ink-mute);
+  margin-top: var(--cg-1);
+  line-height: 1.5;
+}
+.cg-figure--reward {
+  border-top-color: var(--cg-aqua);
+}
+.cg-figure--caution {
+  border-top-color: var(--cg-orange);
+}
+
+.cg-note {
+  font-size: var(--cg-t-sm);
+  color: var(--cg-ink-mute);
+  margin: var(--cg-6) 0 0;
+  line-height: 1.6;
+  max-width: 52rem;
+}
+
+/* Mechanism: three fixed steps of the request path, then what is guaranteed. */
+.cg-flow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--cg-4);
+  counter-reset: cg-flow;
+}
+.cg-flow > li {
+  list-style: none;
+  counter-increment: cg-flow;
+  border-left: 2px solid var(--cg-rule);
+  padding-left: var(--cg-4);
+}
+.cg-flow > li > h3 {
+  font-size: 0.9375rem;
+  font-weight: 660;
+  margin: 0 0 var(--cg-2);
+}
+.cg-flow > li > h3::before {
+  content: counter(cg-flow) " · ";
+  color: var(--cg-blue);
+  font-variant-numeric: tabular-nums;
+}
+.cg-flow > li > p {
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 1.6;
   color: var(--md-default-fg-color--light);
 }
-.cg-stats__foot {
-  max-width: 46rem;
-  margin: 1.75rem auto 0;
-  text-align: center;
-  font-size: 0.98rem;
+.cg-flow code {
+  font-size: 0.86em;
+  padding: 0.1em 0.32em;
+  border-radius: var(--cg-radius-sm);
+  background: var(--cg-surface);
+}
+
+/* Route grid — where to go next, by what you came here to do. */
+.cg-routes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr));
+  gap: var(--cg-4);
+}
+.cg-route {
+  display: block;
+  border: 1px solid var(--cg-rule);
+  border-radius: var(--cg-radius);
+  padding: var(--cg-4);
+  background: var(--md-default-bg-color);
+  color: inherit;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+.cg-route:hover,
+.cg-route:focus-visible {
+  border-color: var(--cg-blue);
+  background: var(--cg-surface);
+}
+.cg-route strong {
+  display: block;
+  font-size: 0.9375rem;
+  font-weight: 650;
+  color: var(--cg-link);
+  margin-bottom: var(--cg-1);
+}
+[data-md-color-scheme="slate"] .cg-route strong {
+  color: var(--cg-blue);
+}
+.cg-route span {
+  font-size: var(--cg-t-sm);
   line-height: 1.55;
   color: var(--md-default-fg-color--light);
 }
 
-/* Charts need an explicit box (Chart.js maintainAspectRatio:false). */
-.cg-chart-box {
-  position: relative;
-  height: 26rem;
-  margin: 1.5rem 0;
+/* Announcement bar: one quiet line that must not eat the fold. */
+.md-banner__inner {
+  font-size: var(--cg-t-sm);
+  line-height: 1.5;
+  margin-block: 0.45rem;
+}
+.md-banner a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentcolor 40%, transparent);
+}
+
+/* --- 11. Motion and print ---------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  .cg-shot-todo {
+    border-style: solid;
+  }
 }

@@ -21,9 +21,17 @@ so there is nothing to check out beside this repo — build straight from the re
     CGO_ENABLED=1 go build -tags cg_skeleton -o bin/context-guru-proxy ./cmd/context-guru-proxy
     ```
 
-    The `cg_skeleton` tag is optional — it enables the tree-sitter–backed `skeleton`
-    component. Drop it (and the cgo tree-sitter dependency) for a pure-Go build; every
-    other component is unaffected and `skeleton` is simply inert.
+    The `cg_skeleton` tag is optional — it enables the tree-sitter–backed
+    [`skeleton`](../components/skeleton.md) component. Drop it (and the cgo tree-sitter
+    dependency) for a pure-Go build; every other component is unaffected.
+
+    !!! warning "Without the tag, `skeleton` is not *inert* — it is not registered"
+        A config or preset naming it then fails at pipeline build with
+        `components: unknown component "skeleton"`, and the proxy exits rather than
+        starting without it. That is deliberate — a silently-missing component would be
+        worse — but it means the **`coding` preset needs a `cg_skeleton` build**, as does
+        any pipeline listing `skeleton`. `make build` does **not** pass the tag; use the
+        `go build` line above for a coding-agent binary.
 
 === "make"
 

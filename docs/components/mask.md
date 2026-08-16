@@ -12,8 +12,11 @@ to the content-based offloaders.
 ## Before → After
 
 ```
-after (older):  [older tool output masked] <<cg:…>> [full output: call context_guru_expand]
+after (older):  [older tool output masked; starts: 700 701 def __rmul__(self, m): 702 …] <<cg:…>> [full output: call context_guru_expand]
 ```
+
+The head-peek comes from `keep_head_chars` (default 96); with `keep_head_chars: 0` the marker
+is the bare `[older tool output masked]`.
 
 ## Lossiness
 
@@ -26,6 +29,8 @@ Lossy but reversible — masked outputs are stashed and recovered via `context_g
 |---|---|---|
 | `keep_recent` | 3 | Newest tool outputs kept verbatim. |
 | `min_tokens` | 100 | Only mask older outputs at least this large. |
+| `keep_head_chars` | 96 | Characters of the hidden output left inside the marker as a one-line head-peek, so the model knows *what* was masked without a blind `expand` round trip — evidence showed a bare marker on a masked source-file read forces needless expands. Set `0` for the opaque marker (≈2pp more savings). |
+| `marker_mode` | `full` | `full` (stash + resolvable marker) / `summary` / `off`. |
 
 ## When it shines
 

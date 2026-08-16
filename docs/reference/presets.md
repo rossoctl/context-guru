@@ -7,17 +7,26 @@ taken exactly from the `presets` map in `config/config.go`.
 
 | Preset | Ordered pipeline | When to use |
 |---|---|---|
-| `codesmart` | `format` → `dedup` → `failed_run` → `cmdfilter` → `extract_llm` → `extract` → `cachesplit` | **The default.** The SWE-bench-winning cache-aware config: structural offloaders + a cheap-model relevance-trimmer (`extract_llm`, routed to `CHEAP_MODEL`, gated so most turns make no model call) + deterministic `extract`. `extract_llm` no-ops (→ deterministic) when no cheap model is configured. |
+| `codesmart` | `format` → `toon` → `dedup` → `failed_run` → `cmdfilter` → `extract_llm` → `extract` → `cachesplit` | **The default.** The SWE-bench-winning cache-aware config: structural offloaders + a cheap-model relevance-trimmer (`extract_llm`, routed to `CHEAP_MODEL`, gated so most turns make no model call) + deterministic `extract`. `extract_llm` no-ops (→ deterministic) when no cheap model is configured. `toon` runs early and losslessly, and costs nothing on traffic that has no tabular JSON to re-encode. |
 | `codesafe` | `format` → `dedup` → `failed_run` → `cmdfilter` → `extract` → `collapse` → `cachesplit` | `codesmart` minus the LLM pass — **deterministic-only, zero model calls by policy**. The safe control / the choice when you don't want an LLM on the hot path. |
 | `off` | *(empty)* | Passthrough — no components. The baseline / A-B control. |
 | `safe` | `format` → `cachesplit` | Lossless only: repack JSON compactly and split the volatile system tail so the shared prefix stays cacheable. Zero risk of dropping content. |
 | `balanced` | `format` → `dedup` → `failed_run` → `cmdfilter` → `cachesplit` | Lossless repack + conservative offloads (dedupe, drop superseded/failed runs, filter command noise) + the cache split. **Not recommended for agentic traffic** — it omits `mask`, the biggest lever there. |
 | `aggressive` | `format` → `dedup` → `failed_run` → `cmdfilter` → `smartcrush` → `extract` → `extract_llm` → `cachesplit` | `balanced` plus `smartcrush` (crush long homogeneous arrays), deterministic `extract` (noise collapse), and `extract_llm` (cheap-model relevance trim) for deeper savings. |
-| `coding` | `format` → `skeleton` → `cmdfilter` → `cachesplit` | Coding agents: `skeleton` reduces big source-file reads to their structure via tree-sitter. |
+| `coding` | `format` → `skeleton` → `cmdfilter` → `cachesplit` | Coding agents: `skeleton` reduces big source-file reads to their structure via tree-sitter. **Needs a `cg_skeleton` build** — see below. |
 | `mcp` | `format` → `smartcrush` → `cachesplit` | Tool/MCP servers returning long homogeneous JSON arrays (list endpoints, search hits). |
 | `agent` | `format` → `dedup` → `failed_run` → `mask` → `extract` → `extract_llm` → `cachesplit` | Long agentic sessions (e.g. Claude Code on SWE-bench) where re-sent tool outputs dominate cost. `mask` is the biggest lever — ~27% content-token savings with no task-reward loss (see [Benchmarks](../RESULTS.md)). |
 | `general` | `format` → `toon` → `dedup` → `failed_run` → `cmdfilter` → `mask` → `extract` → `extract_llm` → `collapse` → `cachesplit` | The recommended all-round pipeline: the reward-neutral levers of `agent` plus the situational shrinkers (`toon` / `cmdfilter` / `collapse`) that cost nothing when they don't fire. |
 | `summarize` | `summarize` | Long trajectories where the transcript itself is the cost. **Runs alone** — it restructures the whole transcript (changes the message count), so no other component's in-place edits race the rebuild. |
+
+!!! warning "`coding` will not start on a default build"
+    [`skeleton`](../components/skeleton.md) is the only component behind a build tag
+    (`cg_skeleton`, because it is the only cgo one). Without the tag it is not registered,
+    so `--preset coding` fails at pipeline build with
+    `components: unknown component "skeleton"` and the proxy exits. `make build` does not
+    pass the tag; build with
+    `CGO_ENABLED=1 go build -tags cg_skeleton ./cmd/context-guru-proxy`. Every other preset
+    runs on a default build.
 
 !!! tip "Order matters"
     Components run in pipeline order: lossless repack first, then offloads
