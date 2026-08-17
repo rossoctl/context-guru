@@ -76,7 +76,7 @@ docker compose \
 - **Pipeline selection**: `CONTEXT_GURU_PIPELINE` (comma-separated names) wins if non-empty, else
   `CONTEXT_GURU_PRESET`. Use `CONTEXT_GURU_PRESET=off` for the baseline (empty pipeline = passthrough).
 - Optional: `CONTEXT_GURU_DUMP=/output/cg-dump.jsonl` writes a before→after record per rewritten
-  message to the shared output volume; `CONTEXT_GURU_DEBUG=1` logs tool-output token counts.
+  message to the shared output volume; `CG_LOG_LEVEL=debug` logs every component's decision and the gate that declined it.
 
 ### 2. Where results land
 

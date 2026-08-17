@@ -208,6 +208,7 @@ table above is unchanged and every path below returns 404.
 | `GET /api/archive` | The local, permanent cold-storage index (`limit`). Also reports `remote` (the **configured** destination name, `""` when none) and `reachable` as separate fields, so "not configured" and "configured but down right now" cannot be rendered as the same thing. |
 | `GET /api/archive/{session}` | Fetches one session back out of cold storage. The only route that does a network round trip, and **read-only** — it does not reinsert the rows. `404` for "never archived", `503` for "the remote is down". |
 | `GET /api/components` | Per-component economics: runs, acted, reverted, unique/gross savings, `overcount_ratio`, total and mean own-latency, errors. |
+| `GET /api/breakdown?dim=<name>` | Requests, tokens and **spent vs saved** grouped by one dimension: `model`, `provider`, `agent`, `preset`, `mode`, `reasoning_effort`, `thinking_mode`, `stop_reason`, `tool_choice`, `cache_miss_reason`, `cache_breakpoints`, `stream`. `spent_usd` is billed cost plus context-guru's own model spend; `saved_usd` is the baseline counterfactual minus that. `incomplete_rows` counts rows the provider reported no usage for, so a group with no priced rows renders as **unknown** rather than as zero. The dimension is an **allowlist**: an unknown one is a `400` naming the valid set, never a chart of some other dimension's numbers. Defaults to `model`. Per-**day** usage bars need no route of their own — they are `/api/series?bucket=86400000`, since bucketing happens in SQL at query time. |
 | `GET /api/facets` | The distinct values present for each filter dimension, so a UI shows only what the data contains. |
 | `GET /api/config` | **This proxy process's** effective (resolved, key-allowlisted) configuration, wrapped in a scope envelope — see [below](#the-config-route-serves-the-servers-configuration-not-yours). Access-gated; **manager-only** in hosted mode. |
 | `GET /api/benchmarks` | Ingested harness runs with per-arm aggregates. `?refresh=1` re-scans the configured run directories. **Manager-only** in hosted mode — the runs are the operator's own eval history, and `?refresh=1` walks the filesystem and inserts rows. |
@@ -275,7 +276,8 @@ the entire decision and `capture_blocked_by` is `"operator"` or `""`.
 ### Filter parameters
 
 Accepted by `/api/stats`, `/api/series`, `/api/requests`, `/api/sessions`,
-`/api/components` and `/api/facets`. All filtering happens in SQL, server-side.
+`/api/components`, `/api/breakdown` and `/api/facets`. All filtering happens in SQL,
+server-side.
 
 | Parameter | Matches |
 |---|---|
@@ -284,6 +286,7 @@ Accepted by `/api/stats`, `/api/series`, `/api/requests`, `/api/sessions`,
 | `component` | Requests on which that component ran. |
 | `reason` | The uncompressed-reason bucket (`bypassed`, `below_trigger`, `cache_frozen`, `found_nothing`, `reverted`, `no_messages`), or `compacted` for requests we did compact. |
 | `accounting` | `complete` \| `partial` \| `missing`. |
+| `effort` · `thinking` · `stop_reason` | Captured request metadata: the reasoning effort (`low`…`max`) and thinking mode (`adaptive` \| `enabled` \| `disabled`) the client asked for, and the provider's terminal stop reason. Exact match; the drill-down from a `/api/breakdown` bar into the rows behind it. |
 | `q` | Free-text match against session id, model and agent. |
 | `limit` · `before` · `offset` | Page size; keyset cursor (`/api/requests`); offset (`/api/sessions`). |
 

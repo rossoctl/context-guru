@@ -2,6 +2,7 @@ package apply
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -118,7 +119,25 @@ var breakpointPaths = []string{
 	"messages.#.content.#.cachePoint",
 }
 
-// wireBreakpoints counts every breakpoint the provider will see in this request.
+// Breakpoints is where a request's prompt-cache breakpoints actually sit, split by
+// the location the provider hashes them at. The split is what makes the count
+// diagnosable rather than merely a number: `tools` and `system` render AHEAD of
+// `messages`, so a breakpoint's location decides how much of the prefix it protects,
+// and a dashboard that reports only a total cannot tell a well-placed request from a
+// badly-placed one with the same count.
+type Breakpoints struct {
+	System   int // system.#.cache_control / .cachePoint
+	Tools    int // tools.#.cache_control / .cachePoint
+	Messages int // messages.#.cache_control (message level)
+	Blocks   int // messages.#.content.#.cache_control / .cachePoint (content-block level)
+}
+
+// Total is the figure the provider's cap of four applies to.
+func (b Breakpoints) Total() int { return b.System + b.Tools + b.Messages + b.Blocks }
+
+// CountBreakpoints counts every breakpoint the provider will see in this request, by
+// location. Structural (gjson path queries) for the same reason hasCacheBreakpoint is:
+// a tool output whose text merely contains the string "cache_control" must not count.
 //
 // A component cannot count these for itself. `system` and `tools` never reach it at
 // all, and the `tool_result` blocks this package normalizes into synthetic role=tool
@@ -126,23 +145,35 @@ var breakpointPaths = []string{
 // traffic all three of the agent's own breakpoints were invisible to it (2 in
 // `system`, 1 on a `tool_result` block), and it computed 3 free slots when 1 was free:
 // 6 on the wire, and a 400 (issue #32).
-func wireBreakpoints(body []byte) int {
-	n := 0
+func CountBreakpoints(body []byte) Breakpoints {
+	var b Breakpoints
 	for _, p := range breakpointPaths {
+		into := &b.Blocks
+		switch {
+		case strings.HasPrefix(p, "system."):
+			into = &b.System
+		case strings.HasPrefix(p, "tools."):
+			into = &b.Tools
+		case p == "messages.#.cache_control":
+			into = &b.Messages
+		}
 		gjson.GetBytes(body, p).ForEach(func(_, v gjson.Result) bool {
 			// nested arrays (content-of-messages) surface as arrays here; recurse one level
 			if v.IsArray() {
 				v.ForEach(func(_, vv gjson.Result) bool {
 					if vv.IsObject() {
-						n++
+						*into++
 					}
 					return true
 				})
 			} else if v.IsObject() {
-				n++
+				*into++
 			}
 			return true
 		})
 	}
-	return n
+	return b
 }
+
+// wireBreakpoints is the total, which is what the provider's cap applies to.
+func wireBreakpoints(body []byte) int { return CountBreakpoints(body).Total() }

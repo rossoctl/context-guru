@@ -22,14 +22,17 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
@@ -38,12 +41,14 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// debugTraffic, when CONTEXT_GURU_DEBUG is set, logs each inbound tool output's
-// token count + first line so we can analyze why components did/didn't fire on
-// real agent traffic. Diagnostic only.
-var debugTraffic = os.Getenv("CONTEXT_GURU_DEBUG") != ""
-
-func dumpToolOutputs(norm []bschemas.ChatMessage) {
+// dumpToolOutputs logs each inbound tool output's token count + first line so we can
+// analyze why components did or didn't fire on real agent traffic.
+//
+// This used to log at INFO behind its own CONTEXT_GURU_DEBUG env var. It is a
+// per-tool-output diagnostic, which is the definition of DEBUG, and every caller is
+// now gated on the level instead — CONTEXT_GURU_DEBUG=1 still works, it just means
+// CG_LOG_LEVEL=debug (see internal/logging).
+func dumpToolOutputs(lg *slog.Logger, norm []bschemas.ChatMessage) {
 	tools := 0
 	for _, m := range norm {
 		if m.Role != bschemas.ChatMessageRoleTool {
@@ -58,9 +63,71 @@ func dumpToolOutputs(norm []bschemas.ChatMessage) {
 		if len(head) > 160 {
 			head = head[:160]
 		}
-		slog.Info("cg.debug.toolout", "tokens", schema.TextTokens(t), "lines", strings.Count(t, "\n")+1, "head", head)
+		lg.Debug("cg.toolout", "tokens", schema.TextTokens(t), "lines", strings.Count(t, "\n")+1, "head", head)
 	}
-	slog.Info("cg.debug.request", "tool_outputs", tools, "total_tool_tokens", schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: norm}))
+	lg.Debug("cg.toolouts", "tool_outputs", tools, "total_tool_tokens", schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: norm}))
+}
+
+// logDecisions writes one DEBUG line per component saying what it DECIDED and on
+// what numbers — which is the whole reason this exists. "acted: 0" is the one number
+// a diagnosis cannot use: it cannot tell a component with nothing to do from one
+// whose guard is misfiring. So each line carries the verdict, the token delta, and
+// the gates that turned candidates away.
+//
+// The gate names and counts here are read straight off the SAME Report.Gates map the
+// /stats gate histogram (components.<name>.gates) is summed from, so a log line and
+// the metric can never disagree — they are one source.
+//
+// Gates are rendered as one `name=n name=n` STRING rather than one attr per gate on
+// purpose: an attribute key is checked against the credential-name denylist, so a
+// future gate called `no_auth` or `bad_token` would have its count silently replaced
+// by «redacted». As a value it is scrubbed as content, where a short integer after
+// `=` matches nothing.
+func logDecisions(lg *slog.Logger, rr *components.RunReport) {
+	for _, rep := range rr.Components {
+		verdict := "acted"
+		switch {
+		case rep.Reverted:
+			verdict = "reverted" // error, panic, or the never-worse guard
+		case rep.Skipped:
+			verdict = "declined" // ran, chose not to act
+		case rep.Saved() == 0:
+			verdict = "no_change"
+		}
+		attrs := []any{
+			"component", rep.Component, "kind", rep.Kind, "verdict", verdict,
+			"tokens_before", rep.TokensBefore, "tokens_after", rep.TokensAfter,
+			"saved", rep.Saved(), "duration_ms", rep.DurationMs,
+			"changed_msgs", len(rep.ChangedIdx), "stashed", len(rep.CacheKeys),
+		}
+		if len(rep.Gates) > 0 {
+			attrs = append(attrs, "gates", formatGates(rep.Gates))
+		}
+		if rep.Irreversible {
+			attrs = append(attrs, "irreversible", true)
+		}
+		if rep.Err != nil {
+			attrs = append(attrs, "err", rep.Err)
+		}
+		lg.Debug("cg.component", attrs...)
+	}
+	lg.Debug("cg.run", "components", len(rr.Components), "tokens_before", rr.TokensBefore,
+		"tokens_after", rr.TokensAfter, "saved", rr.Saved(), "duration_ms", rr.DurationMs)
+}
+
+// formatGates renders a gate histogram as `name=n name=n`, sorted so two runs of the
+// same traffic produce comparable lines.
+func formatGates(g map[string]int) string {
+	var b strings.Builder
+	for i, name := range slices.Sorted(maps.Keys(g)) {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(name)
+		b.WriteByte('=')
+		b.WriteString(strconv.Itoa(g[name]))
+	}
+	return b.String()
 }
 
 // slotKind is how a normalized message maps back to the raw body.
@@ -106,6 +173,10 @@ type Trace struct {
 	AttemptedTokens int
 	// FrozenTokens is TokensBefore−AttemptedTokens: the cost of cache safety.
 	FrozenTokens int
+	// Breakpoints is where this request's prompt-cache breakpoints sat ON ARRIVAL,
+	// split by location. Observational, and free: the pipeline already counts them to
+	// respect the provider's cap of four.
+	Breakpoints Breakpoints
 	// Run is the pipeline's aggregate report (nil when the pipeline never ran).
 	Run *components.RunReport
 	// Changes lists each rewritten message's before/after text (clipped).
@@ -201,7 +272,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// the whole entry point, not just inside components.
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("context-guru: recovered from panic in BodyOpts; forwarding original request", "panic", r)
+			// From(ctx), not the default logger: a panic is the line you most want attributed
+			// to a tenant, and this runs before the session-bearing logger below exists.
+			logging.From(ctx).Error("context-guru: recovered from panic in BodyOpts; "+
+				"forwarding original request", "panic", r)
 			res = Result{Body: body}
 		}
 	}()
@@ -243,9 +317,6 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		return res
 	}
 
-	if debugTraffic {
-		dumpToolOutputs(norm)
-	}
 	chat := &bschemas.BifrostChatRequest{Provider: provider, Input: norm}
 	sys, firstUser := schema.SessionHead(norm)
 	sessionID := session.Scoped(o.Tenant, explicitSession(o.Session, body), sys, firstUser)
@@ -301,6 +372,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			defer putLen(st, sessionID, len(norm))
 		}
 	}
+	// Counted ONCE and used twice: the pipeline needs the total to respect the
+	// provider's cap, and the dashboard records the per-location split. Two calls would
+	// be two scans of the body on the request path for one fact.
+	bps := CountBreakpoints(body)
 	c := &components.Ctx{
 		Ctx:          ctx,
 		Session:      sessionID,
@@ -313,14 +388,34 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// Every breakpoint already on the wire — including the ones no component can
 		// see (`system`, `tools`, and the marks our own normalize drops). The
 		// provider's cap of four counts them all (issue #32, defect 2).
-		ExistingBreakpoints: wireBreakpoints(body),
+		ExistingBreakpoints: bps.Total(),
 		Mode:                mode,
 	}
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
+	tr.Breakpoints = bps
 	// The eligible (attempted) denominator: what age/supersession offloaders were
 	// allowed to touch. Everything before MaxCachedIdx is frozen for cache safety —
 	// the cost of that mechanism, reported next to its benefit.
 	tr.AttemptedTokens = attemptedTokens(norm, c)
+
+	// From here on, everything this request logs carries the RESOLVED session. The
+	// caller (the proxy) already put tenant and route on the context logger; the session
+	// is only knowable here, after explicitSession + session.Scoped have run, which is
+	// exactly why the logger travels in the context instead of being passed in whole.
+	lg := logging.From(ctx).With("session", sessionID)
+	debug := logging.Debugging(ctx)
+	if debug {
+		// The cached-prefix boundary decision, which is the single most common reason a
+		// component "did nothing" on a request that obviously had something to compact:
+		// everything at or below max_cached_idx is frozen, and frozen_tokens is what that
+		// cost. Without this line the only visible symptom is a small saving.
+		lg.Debug("cg.cache_boundary", "cache_aware", cacheAware, "max_cached_idx", maxCachedIdx,
+			"messages", len(norm), "attempted_tokens", tr.AttemptedTokens,
+			"existing_breakpoints", c.ExistingBreakpoints, "system_split", systemSplit,
+			"bypassed", bypass, "mode", string(mode), "ctx_window", o.Window,
+			"cache_mode", o.CacheMode, "tracked", o.Tracker != nil)
+		dumpToolOutputs(lg, norm)
+	}
 
 	// Canonical form of each normalized message BEFORE the pipeline, so a
 	// count-changing component (summarize) can be mapped back to the body.
@@ -331,6 +426,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 
 	rr := pipe.Run(chat, c)
 	tr.Run = rr
+	if debug && rr != nil {
+		logDecisions(lg, rr)
+	}
 	if rr != nil {
 		tr.FrozenTokens = rr.TokensBefore - tr.AttemptedTokens
 		if tr.FrozenTokens < 0 {
@@ -417,6 +515,17 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 	}
 	pipe.RecordDiscards(rr, discarded)
+	if debug && len(discarded) > 0 {
+		// The component worked and the request went out unchanged anyway, because bifrost
+		// cannot round-trip that message and splicing our re-marshal would drop provider
+		// fields. This is the issue-#32 class of silent misfire.
+		//
+		// DEBUG rather than WARN even though it IS a degradation: it is a property of the
+		// provider's message shape, so on some upstreams it fires on every request, and a
+		// warning on every request is a warning nobody reads. The alerting path is the
+		// per-component `discarded_changes` counter, which /stats already exports.
+		lg.Debug("cg.writeback_discarded", "messages", len(discarded))
+	}
 	tr.Changes = changes
 	if changed && dumpPath != "" {
 		dumpChanges(c.Session, changes)
@@ -426,9 +535,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// blaming context-guru for it would be a false alarm. So compare against the inbound
 	// count and only shout when we added to an over-cap total.
 	if n := wireBreakpoints(out); n > maxWireBreakpoints && n > c.ExistingBreakpoints {
-		slog.Error("context-guru: cache breakpoint count exceeds the provider cap",
-			"breakpoints", n, "inbound", c.ExistingBreakpoints,
-			"cap", maxWireBreakpoints, "session", c.Session)
+		lg.Error("context-guru: cache breakpoint count exceeds the provider cap",
+			"breakpoints", n, "inbound", c.ExistingBreakpoints, "cap", maxWireBreakpoints)
 	}
 	res.Body, res.Changed = out, changed
 	return res

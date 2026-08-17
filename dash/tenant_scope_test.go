@@ -152,6 +152,13 @@ func TestAPIIgnoresCraftedTenantParam(t *testing.T) {
 		"/api/requests?tenant=*",
 		"/api/sessions?tenant=tenant-b",
 		"/api/stats?tenant=*",
+		// An aggregate is the easiest place for this to go wrong unnoticed: the answer is
+		// a handful of summed numbers, so a widened scope reads as slightly larger totals
+		// rather than as somebody else's session ids. The dimension is a query parameter
+		// here too, and `model` puts the other tenant's model name straight in the keys.
+		"/api/breakdown?dim=model&tenant=tenant-b",
+		"/api/breakdown?dim=model&tenant=*",
+		"/api/series?bucket=86400000&tenant=*",
 	} {
 		code, body := f.get(t, path)
 		if code != http.StatusOK {

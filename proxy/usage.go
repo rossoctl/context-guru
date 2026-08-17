@@ -14,6 +14,16 @@ type Usage struct {
 	CacheRead  int64
 	CacheWrite int64
 	Output     int64
+	// StopReason is the provider's terminal reason for this response, normalized across
+	// dialects (see responseStopReason). It rides on Usage because it comes off the same
+	// buffered/sniffed response bytes and reaches the dashboard by the same path — a
+	// second out-of-band channel for one string would be a second thing to keep in sync.
+	//
+	// It is filled even when the token tiers are absent, because the two facts are
+	// independent: an OpenAI response without `stream_options` reports no usage at all and
+	// still reports finish_reason, and "we could not price this, and it stopped because it
+	// hit max_tokens" is exactly the pair worth having.
+	StopReason string
 }
 
 // parseUsage extracts the four billed token tiers from a buffered response body,
@@ -103,15 +113,72 @@ func parseSSEUsage(raw []byte) (Usage, bool) {
 	return out, found
 }
 
-// responseUsage picks the right parser for a response's content type.
+// responseUsage picks the right parser for a response's content type. The returned
+// Usage carries the stop reason whatever `ok` says — see Usage.StopReason.
 func responseUsage(contentType string, body []byte) (Usage, bool) {
 	if len(body) == 0 {
 		return Usage{}, false
 	}
-	if strings.Contains(contentType, "event-stream") {
-		return parseSSEUsage(body)
+	sse := strings.Contains(contentType, "event-stream")
+	var u Usage
+	var ok bool
+	if sse {
+		u, ok = parseSSEUsage(body)
+	} else {
+		u, ok = parseUsage(body)
 	}
-	return parseUsage(body)
+	u.StopReason = responseStopReason(sse, body)
+	return u, ok
+}
+
+// stopReasonPaths are where a terminal reason lives, per dialect and per transport:
+//
+//	Anthropic  stop_reason              (non-streaming)
+//	           delta.stop_reason        (message_delta, the streamed terminal event)
+//	OpenAI     choices.0.finish_reason  (both; the streamed final chunk carries it too)
+//
+// The values are the providers' own vocabulary and are recorded verbatim rather than
+// mapped onto one another: `end_turn` and `stop` mean the same thing, but flattening them
+// would quietly assert that `pause_turn`, `refusal` and `content_filter` have equivalents
+// on the other side, and they do not.
+var stopReasonPaths = [...]string{"stop_reason", "delta.stop_reason", "choices.0.finish_reason"}
+
+// responseStopReason reads the terminal reason off a response body. For SSE the events
+// are scanned newest-first: the terminal reason is in the LAST event that carries one, and
+// an earlier chunk's `finish_reason: null` must not win.
+//
+// Whatever this returns is still client-influenced text by the time it reaches the
+// database (an upstream is configurable, so its response is not trusted input), so it is
+// re-checked by dash.metaEnum before the insert.
+func responseStopReason(sse bool, body []byte) string {
+	if !sse {
+		return firstStopReason(string(body))
+	}
+	lines := strings.Split(string(body), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		if s := firstStopReason(payload); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// firstStopReason returns the first non-empty stop reason among the known paths.
+func firstStopReason(payload string) string {
+	for _, p := range stopReasonPaths {
+		if r := gjson.Get(payload, p); r.Type == gjson.String && r.Str != "" {
+			return r.Str
+		}
+	}
+	return ""
 }
 
 // sniffMax bounds each half of the sniffer's window. Usage blocks are a few

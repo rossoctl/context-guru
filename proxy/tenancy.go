@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 )
@@ -541,6 +542,23 @@ func (h *Handler) tenancyFor(r *http.Request) (*Tenancy, error) {
 		return h.static, nil
 	}
 	return h.opts.Tenants.Resolve(r)
+}
+
+// refuse logs a refusal and then writes it. Every deliberate turn-away on the
+// request path funnels through failAuth, so wrapping it is how one log line covers
+// all of them — and the reason it prints is the same string the caller receives and
+// the same event /metrics counts in cg_refused_requests_total, so a report of "I keep
+// getting 429s" and the graph agree.
+//
+// WARN rather than ERROR: a refusal is the service working as configured — a rate
+// limit, a spend cap, an unknown token — not a fault of ours. It is also the class of
+// event that gets reported as "context-guru is broken", which is why it has to be
+// findable by tenant.
+func (h *Handler) refuse(w http.ResponseWriter, r *http.Request, err error) {
+	code, msg := statusOf(err)
+	logging.From(r.Context()).Warn("cg.refused", "status", code, "reason", msg,
+		"path", r.URL.Path, "client", clientIP(r))
+	failAuth(w, err)
 }
 
 // failAuth writes a resolution failure. The body names the failure but never

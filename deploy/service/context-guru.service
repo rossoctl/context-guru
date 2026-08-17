@@ -51,6 +51,21 @@ Environment=MANAGER_EMAIL=
 # account, and this flag is the operator's half of that decision.
 Environment=DASHBOARD_CONTENT=false
 
+# Logging. Every line goes to the journal either way (`journalctl -u context-guru`);
+# CG_LOG_FILE adds the same records as JSON in a file so promtail can tail them into
+# Loki. Nothing leaves this box until promtail exists — see `install.sh grafana`.
+# Delete this line and the JSON copy stops; the journal is unaffected.
+Environment=CG_LOG_FILE=/var/log/context-guru/proxy.jsonl
+# DEBUG is per-component decisions: which gate declined a component and on what
+# numbers. It is the level to run when investigating, not the level to leave on — it
+# is about 8x the line count (measured: 337 lines against 40 on the same traffic). Turn it on WITHOUT editing this file, which the
+# installer replaces on every run:
+#
+#   sudoedit /etc/systemd/system/context-guru.service.d/20-local.conf
+#     Environment=CG_LOG_LEVEL=debug
+#   sudo systemctl daemon-reload && sudo systemctl restart context-guru
+Environment=CG_LOG_LEVEL=info
+
 # Cold storage on IBM Box, via rclone as a subprocess — nothing is mounted. With this
 # set, eviction becomes MIGRATION: a session is uploaded and verified before its local
 # rows are deleted, so retention is bounded by Box rather than by this filesystem.
@@ -94,6 +109,12 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 ReadWritePaths=/var/lib/context-guru
 StateDirectory=context-guru
 StateDirectoryMode=0700
+# The JSON log sink. ProtectSystem=strict makes /var read-only, so this is how the
+# service gets a writable log directory — systemd creates it, chowns it to cg, and
+# adds it to the writable set. Hand-creating /var/log/context-guru instead leaves a
+# unit that starts and then cannot open its own log file.
+LogsDirectory=context-guru
+LogsDirectoryMode=0750
 UMask=0077
 
 # Resource bounds. The proxy buffers request bodies (32 MiB cap each) and holds a

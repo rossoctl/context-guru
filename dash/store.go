@@ -241,8 +241,12 @@ func (d *DB) insertBatch(evs []*Event) error {
 		messages, tokens_before, tokens_after, attempted_tokens, frozen_tokens, saved_unique,
 		fresh_input, cache_read, cache_write, output_tokens,
 		cost_usd, baseline_cost_usd, cg_llm_cost_usd, cg_latency_ms, upstream_ms,
-		expands, expand_tokens, reverts, token_accounting, cache_miss_reason, uncompressed_reason
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		expands, expand_tokens, reverts, token_accounting, cache_miss_reason, uncompressed_reason,
+		reasoning_effort, thinking_mode, thinking_budget, temperature, top_p, max_tokens, stream,
+		tool_choice, tools, system_blocks,
+		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -271,6 +275,9 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens,
 			e.CostUSD, e.BaselineCostUSD, e.CGLLMCostUSD, e.CGLatencyMs, e.UpstreamMs,
 			e.Expands, e.ExpandTokens, e.Reverts, e.TokenAccounting, e.CacheMissReason, e.UncompressedReason,
+			e.ReasoningEffort, e.ThinkingMode, e.ThinkingBudget, e.Temperature, e.TopP, e.MaxTokens,
+			boolInt(e.Stream), e.ToolChoice, e.Tools, e.SystemBlocks,
+			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.StopReason,
 		)
 		if err != nil {
 			return err

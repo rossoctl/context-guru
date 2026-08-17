@@ -50,6 +50,12 @@ func (t Tee) FilterMiss(selector string) {
 }
 
 // Slog logs each component and run in the GenAI semantic-convention vocabulary.
+//
+// At DEBUG, not INFO. These are per-component records — several per request — so at
+// INFO they buried the one line per request that describes the request, which is that
+// level's whole job. The proxy no longer wires this emitter at all: apply logs the same
+// decisions with the tenant, the session and the gate histogram attached (see
+// apply.logDecisions). It stays exported for a library host that wants this vocabulary.
 type Slog struct{ L *slog.Logger }
 
 func (s Slog) logger() *slog.Logger {
@@ -60,7 +66,7 @@ func (s Slog) logger() *slog.Logger {
 }
 
 func (s Slog) Component(r components.Report) {
-	s.logger().Info("context_engineering.component",
+	s.logger().Debug("context_engineering.component",
 		"context_engineering.component", r.Component,
 		"context_engineering.kind", r.Kind,
 		"context_engineering.tokens.before", r.TokensBefore,
@@ -73,7 +79,7 @@ func (s Slog) Component(r components.Report) {
 }
 
 func (s Slog) Run(r components.RunReport) {
-	s.logger().Info("context_engineering.run",
+	s.logger().Debug("context_engineering.run",
 		"context_engineering.session", r.Session,
 		"context_engineering.tokens.before", r.TokensBefore,
 		"context_engineering.tokens.after", r.TokensAfter,

@@ -3,7 +3,6 @@ package offload
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"regexp"
 	"strconv"
@@ -17,14 +16,18 @@ import (
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/extract"
+	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/schema"
 	"gopkg.in/yaml.v3"
 )
 
-// debugExtractLLM logs per-request candidate accounting when CONTEXT_GURU_DEBUG is set.
-var debugExtractLLM = os.Getenv("CONTEXT_GURU_DEBUG") != ""
+// debugExtractLLM logs per-request candidate accounting. Gated on the LOG LEVEL rather
+// than on its own env var: this is per-candidate accounting, which is what DEBUG means,
+// and one switch for "tell me everything" beats one per component. CONTEXT_GURU_DEBUG=1
+// still turns it on — internal/logging reads it as CG_LOG_LEVEL=debug.
+func debugExtractLLM(c *components.Ctx) bool { return logging.Debugging(c.Ctx) }
 
 // llmCallTimeout bounds a SINGLE in-request extract model call. Kept bounded so a slow
 // or rate-limited compaction model fails open (leave the output verbatim this turn)
@@ -400,6 +403,9 @@ func looksLikeFileRead(content string) bool {
 }
 
 func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
+	// Resolved once: the candidate loop below tests it per tool output, and it is a
+	// handler call rather than a field read.
+	dbg := debugExtractLLM(c)
 	fires := e.trigger.Fires(req, c.CtxWindow)
 	goal := conversationGoal(req)
 	query := keywords(goal)
@@ -649,8 +655,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				// /stats via RecordExtractionSuppressed, and a full sentence makes a
 				// poor histogram key.
 				rep.Gate("economic_gate")
-				if debugExtractLLM {
-					slog.Info("cg.debug.extract_llm.gate", "decision", "suppress",
+				if dbg {
+					logging.From(c.Ctx).Debug("cg.extract_llm.gate", "decision", "suppress",
 						"reason", d.reason, "size", sz, "exp_saving_usd", d.expSaving,
 						"exp_cost_usd", d.expCost, "cacheAware", c.CacheAware)
 				}
@@ -660,8 +666,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		}
 		cands = append(cands, cand{i, content, id})
 	}
-	if debugExtractLLM && len(tools) > 0 {
-		slog.Info("cg.debug.extract_llm", "tools", len(tools), "cands", len(cands),
+	if dbg && len(tools) > 0 {
+		logging.From(c.Ctx).Debug("cg.extract_llm", "tools", len(tools), "cands", len(cands),
 			"reapplied", dbgReapply, "skip_placeholder", dbgPlace, "skip_tail", dbgTail,
 			"skip_floor", dbgFloor, "max_output_tokens", dbgMaxSz, "big_but_not_tail", dbgBigTailBlocked,
 			"cacheAware", c.CacheAware, "maxCachedIdx", c.MaxCachedIdx, "floor", floor,
