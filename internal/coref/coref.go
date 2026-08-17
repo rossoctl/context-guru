@@ -128,11 +128,27 @@ type Message struct {
 // Class is the verdict for one tool output.
 type Class string
 
-// The three verdicts. Cutting Unreferenced needs no reference model beyond "nobody
+// The four verdicts. Cutting Unreferenced needs no reference model beyond "nobody
 // ever used this"; cutting Closed is the large, early cut that needs the thresholds.
 const (
-	// Unreferenced — no later turn exactly reuses anything this output introduced.
-	// The safest cut on Tier 1, and blind to Tier 2 (a value that was transformed
+	// Opaque — this output introduced NO identifier the index can track, so there is no
+	// evidence either way and the only honest verdict is no opinion. Never cut.
+	//
+	// This is not a corner case, and collapsing it into Unreferenced was a real defect:
+	// the two look identical in the arithmetic (refs == 0) and mean opposite things.
+	// "Introduced 200 identifiers, nobody touched one" is evidence of deadness;
+	// "introduced nothing I can see" is absence of evidence. A tool returning records of
+	// human-readable values — `[{"name":"david","id":123,"address":"foobarbaz"}]` — yields
+	// no distinctive tokens at all, because short lowercase words and 3-digit numbers are
+	// exactly what the precision rules in distinctive exclude. Classified as Unreferenced,
+	// that output is cut by the DEFAULT config while the agent still needs the address.
+	//
+	// So the blind spot is now a class rather than a silent vote for deletion, and the
+	// asymmetry is deliberate: an opaque output costs tokens, a wrongly cut one costs an
+	// expand round-trip plus a cache-write and can cost the task.
+	Opaque Class = "opaque"
+	// Unreferenced — the output introduced identifiers and no later turn reused any of
+	// them. The safest cut on Tier 1, and blind to Tier 2 (a value that was transformed
 	// before being restated leaves no exact match). Never read this as "unused".
 	Unreferenced Class = "unreferenced"
 	// Closed — referenced a small number of times, and not for a long time. Whatever
@@ -168,14 +184,38 @@ type Record struct {
 	// UsedFrac is the share of the novel identifiers the model actually carried
 	// forward. A low value on a referenced output is the "took one value, does not need
 	// the rest" pattern, measured rather than assumed.
+	//
+	// It is NOT sufficient on its own to justify a cut, and the reason is worth stating
+	// where it will be read. A low UsedFrac is ambiguous: it can mean the model took the
+	// value it needed and the remainder is chaff, or it can mean the model took an ANCHOR
+	// (a name, an id) precisely in order to point at a payload it never copied. Given
+	// `[{"name":"david","id":123,"address":"foobarbaz"}, ...]` and a model that says "I
+	// need to remember david 123 address", the reference is real, the payload is not in
+	// the model's turn, and cutting the output loses the address.
 	UsedFrac float64
+	// LaterTurns is how many model turns follow this output — its OPPORTUNITY to be
+	// referenced. Near the tail this approaches zero, and an output that has not had a
+	// chance to be used must not be scored as unused. See Classify's minLater.
+	LaterTurns int
 }
 
 // Classify applies the open/closed predicate. closedDist is the recency floor (a last
 // reference NEWER than this many messages ago keeps the output open); openReps is the
 // repetition ceiling (referenced at least this many times keeps it open regardless of
 // age, because a span referenced repeatedly is a hot span that happens to be old).
-func Classify(r Record, closedDist, openReps int) Class {
+//
+// minLater is the opportunity floor: an output with fewer than this many model turns
+// after it is reported Open regardless of everything else, because it has not yet HAD a
+// chance to be referenced. Without it the newest outputs classify as Unreferenced purely
+// for being new, and a batched pass would preferentially cut the most recent context —
+// the worst possible choice, and the reason mask carries keep_recent. 0 disables.
+func Classify(r Record, closedDist, openReps, minLater int) Class {
+	if r.Novel == 0 {
+		return Opaque // no evidence either way; see Opaque
+	}
+	if minLater > 0 && r.LaterTurns < minLater {
+		return Open // too new to have been referenced yet — absence of opportunity
+	}
 	if r.Refs == 0 {
 		return Unreferenced
 	}
@@ -308,9 +348,15 @@ func index(msgs []Message, minOutputTokens int, tok func(string) int, priorGuard
 			used := map[string]struct{}{}
 			last := -1
 			for j := i + 1; j < n; j++ {
-				if len(refTokens[j]) == 0 {
+				// A later MODEL turn, judged by whether it has a model-authored surface at all
+				// — not by whether that surface happens to contain trackable identifiers. The
+				// distinction matters twice: it is the definition coref.py uses (so the two
+				// must agree), and a turn with no identifiers is still an opportunity that was
+				// declined rather than an opportunity that never existed.
+				if len(msgs[j].Texts) == 0 {
 					continue
 				}
+				rec.LaterTurns++
 				hit := false
 				for t := range novel {
 					if _, ok := refTokens[j][t]; ok {

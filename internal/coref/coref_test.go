@@ -84,6 +84,9 @@ const (
 	testClosedDist = 12
 	testOpenReps   = 3
 	testMinOutput  = 300
+	// The fixture's outputs sit near the tail of a short transcript, so the opportunity
+	// floor is disabled for the ground-truth cases; it has its own test below.
+	testMinLater = 0
 )
 
 func classifyFixture(t *testing.T, guard bool) map[string]Class {
@@ -91,7 +94,7 @@ func classifyFixture(t *testing.T, guard bool) map[string]Class {
 	recs := index(fixture(), testMinOutput, nil, guard)
 	got := map[string]Class{}
 	for _, r := range recs {
-		got[r.ID] = Classify(r, testClosedDist, testOpenReps)
+		got[r.ID] = Classify(r, testClosedDist, testOpenReps, testMinLater)
 	}
 	return got
 }
@@ -131,7 +134,7 @@ func TestEchoGuardChangesCuttableMass(t *testing.T) {
 	mass := func(guard bool) (cuttable, total int) {
 		for _, r := range index(fixture(), testMinOutput, nil, guard) {
 			total += r.SizeTokens
-			if c := Classify(r, testClosedDist, testOpenReps); c != Open {
+			if c := Classify(r, testClosedDist, testOpenReps, testMinLater); c != Open {
 				cuttable += r.SizeTokens
 			}
 		}
@@ -202,13 +205,14 @@ func TestClassifyBoundaries(t *testing.T) {
 		rec  Record
 		want Class
 	}{
-		{"never referenced", Record{Refs: 0, RefAge: -1}, Unreferenced},
-		{"referenced exactly at the recency floor is closed", Record{Refs: 1, RefAge: 12}, Closed},
-		{"one message newer than the floor is open", Record{Refs: 1, RefAge: 11}, Open},
-		{"repetition keeps it open however old", Record{Refs: 3, RefAge: 9999}, Open},
-		{"just under the repetition ceiling, and old", Record{Refs: 2, RefAge: 9999}, Closed},
+		{"no trackable identifiers is opaque, not unreferenced", Record{Novel: 0, Refs: 0, RefAge: -1}, Opaque},
+		{"never referenced", Record{Novel: 20, Refs: 0, RefAge: -1, LaterTurns: 99}, Unreferenced},
+		{"referenced exactly at the recency floor is closed", Record{Novel: 20, Refs: 1, RefAge: 12, LaterTurns: 99}, Closed},
+		{"one message newer than the floor is open", Record{Novel: 20, Refs: 1, RefAge: 11, LaterTurns: 99}, Open},
+		{"repetition keeps it open however old", Record{Novel: 20, Refs: 3, RefAge: 9999, LaterTurns: 99}, Open},
+		{"just under the repetition ceiling, and old", Record{Novel: 20, Refs: 2, RefAge: 9999, LaterTurns: 99}, Closed},
 	} {
-		if got := Classify(tc.rec, testClosedDist, testOpenReps); got != tc.want {
+		if got := Classify(tc.rec, testClosedDist, testOpenReps, testMinLater); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
 	}
@@ -334,5 +338,66 @@ func TestIndexHandlesEmptyAndNil(t *testing.T) {
 	}
 	if recs := Index([]Message{{}, {Results: []Result{{ID: "x", Text: ""}}}}, 0, nil); len(recs) != 1 {
 		t.Errorf("an empty output should still record (at the zero floor), got %v", recs)
+	}
+}
+
+// An output whose values the tokenizer cannot see must come back `opaque`, never
+// `unreferenced`. Both have refs == 0 and they mean opposite things: "introduced 200
+// identifiers, nobody touched one" is evidence of deadness, "introduced nothing I can see"
+// is absence of evidence. Collapsing them made the DEFAULT config cut a record set the
+// agent had explicitly said it still needed.
+//
+// Raised in review on PR #80 with exactly this shape: the agent references an ANCHOR
+// (`david`, `123`) in order to point at a payload (`foobarbaz`) it never copied.
+func TestRecordsOfPlainValuesAreOpaqueNotUnreferenced(t *testing.T) {
+	people := strings.Repeat(
+		`[{"name":"david","id":123,"address":"foobarbaz"},{"name":"osher","id":235,"address":"banana"}]`, 60)
+	msgs := []Message{
+		{Texts: []string{"look up the people directory"}},
+		{Texts: []string{"Querying.", "query_people {}"}},
+		{Results: []Result{{ID: "t1", Text: people}}},
+		{Texts: []string{"I need to remember david 123 address."}},
+	}
+	for i := 0; i < 20; i++ {
+		msgs = append(msgs, Message{Texts: []string{fmt.Sprintf("unrelated step %d", i)}})
+	}
+	recs := index(msgs, testMinOutput, nil, true)
+	if len(recs) != 1 {
+		t.Fatalf("expected one record, got %d", len(recs))
+	}
+	if recs[0].Novel != 0 {
+		t.Fatalf("fixture assumption broken: Novel = %d, expected the tokenizer to see nothing "+
+			"in short lowercase words and 3-digit numbers", recs[0].Novel)
+	}
+	if got := Classify(recs[0], testClosedDist, testOpenReps, testMinLater); got != Opaque {
+		t.Errorf("classified %q, want %q — an output the index cannot see into must not be "+
+			"a silent vote to delete", got, Opaque)
+	}
+}
+
+// An output near the tail has had no chance to be referenced, so scoring it as unused would
+// make a batched pass preferentially cut the most RECENT context. This is why mask carries
+// keep_recent, and coref needs the same idea expressed in turns.
+func TestOpportunityFloorProtectsRecentOutputs(t *testing.T) {
+	body := filler("recent", 240)
+	msgs := []Message{
+		{Texts: []string{"start"}},
+		{Texts: []string{"Reading.", "Read {\"path\":\"x\"}"}},
+		{Results: []Result{{ID: "fresh", Text: body}}},
+		{Texts: []string{"ok"}}, // exactly one later model turn
+	}
+	recs := index(msgs, testMinOutput, nil, true)
+	if len(recs) != 1 || recs[0].Novel == 0 {
+		t.Fatalf("fixture assumption broken: %+v", recs)
+	}
+	if recs[0].LaterTurns != 1 {
+		t.Errorf("LaterTurns = %d, want 1", recs[0].LaterTurns)
+	}
+	if got := Classify(recs[0], testClosedDist, testOpenReps, 0); got != Unreferenced {
+		t.Errorf("with the floor disabled: got %q, want %q", got, Unreferenced)
+	}
+	if got := Classify(recs[0], testClosedDist, testOpenReps, 8); got != Open {
+		t.Errorf("with the floor at 8: got %q, want %q — one later turn is not an "+
+			"opportunity to be referenced", got, Open)
 	}
 }

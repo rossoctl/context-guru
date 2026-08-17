@@ -45,6 +45,7 @@ type Coref struct {
 	minTokens       int
 	closedDist      int
 	openReps        int
+	minLaterTurns   int
 	cutUnreferenced bool
 	cutClosed       bool
 	rewriteBudget   int
@@ -63,6 +64,9 @@ type corefConfig struct {
 	// coref.py's, and are placeholders until it runs on captured traffic.
 	ClosedDist int `yaml:"closed_dist"`
 	OpenReps   int `yaml:"open_reps"`
+	// MinLaterTurns is the opportunity floor: an output with fewer model turns after it
+	// than this is never cut, because it has not yet had a chance to be referenced.
+	MinLaterTurns *int `yaml:"min_later_turns"`
 	// CutUnreferenced / CutClosed select the cut set (see Coref).
 	CutUnreferenced *bool `yaml:"cut_unreferenced"`
 	CutClosed       *bool `yaml:"cut_closed"`
@@ -93,6 +97,7 @@ func newCoref(raw []byte) (components.Component, error) {
 		minTokens:       cfg.MinTokens,
 		closedDist:      cfg.ClosedDist,
 		openReps:        cfg.OpenReps,
+		minLaterTurns:   8,
 		cutUnreferenced: true,
 		cutClosed:       false,
 		rewriteBudget:   3,
@@ -100,6 +105,9 @@ func newCoref(raw []byte) (components.Component, error) {
 		breakEven:       true,
 		keepHeadChars:   96,
 		mode:            parseMarkerMode(cfg.MarkerMode),
+	}
+	if cfg.MinLaterTurns != nil {
+		cf.minLaterTurns = *cfg.MinLaterTurns
 	}
 	if cfg.CutUnreferenced != nil {
 		cf.cutUnreferenced = *cfg.CutUnreferenced
@@ -158,7 +166,7 @@ func (cf *Coref) Offload(req *bschemas.BifrostChatRequest, rep *components.Repor
 	classes := map[int]coref.Class{}
 	if fires {
 		for _, r := range coref.Index(flattenForCoref(req), cf.trigger.OutputFloor(c.CtxWindow, cf.minTokens), schema.TextTokens) {
-			classes[r.Idx] = coref.Classify(r, cf.closedDist, cf.openReps)
+			classes[r.Idx] = coref.Classify(r, cf.closedDist, cf.openReps, cf.minLaterTurns)
 		}
 	}
 

@@ -96,9 +96,15 @@ func corefFor(t *testing.T, extraYAML string) *Coref {
 	t.Helper()
 	// The batch floor is the gate under test in exactly one case, so default it out of the
 	// way here rather than repeating it — and never define it twice (yaml rejects that).
+	// Defaults that would otherwise dominate every case: the batch floor, and the
+	// opportunity floor (the fixture is a short transcript whose cut candidate sits at the
+	// tail). Each is the gate under test in exactly one place, so a default is only added
+	// when the case does not set it — yaml rejects a duplicated key.
 	base := "min_tokens: 20\n"
-	if !strings.Contains(extraYAML, "min_batch_frac") {
-		base += "min_batch_frac: 0\n"
+	for k, v := range map[string]string{"min_batch_frac": "0", "min_later_turns": "0"} {
+		if !strings.Contains(extraYAML, k) {
+			base += k + ": " + v + "\n"
+		}
 	}
 	comp, err := newCoref([]byte(base + extraYAML))
 	if err != nil {
@@ -453,5 +459,51 @@ func TestCorefEmptyRequestIsANoOp(t *testing.T) {
 	keys, err := cf.Offload(req, &rep, corefCtx(store.NewMemory(store.Options{})))
 	if err != nil || len(keys) != 0 || !rep.Skipped {
 		t.Errorf("empty request: keys=%v skipped=%v err=%v", keys, rep.Skipped, err)
+	}
+}
+
+// The opportunity floor, at the component level: an output too new to have been referenced
+// must survive the pass. Without it a batched cut would preferentially remove the most
+// RECENT context, since recency and "no references yet" are the same thing at the tail.
+func TestCorefOpportunityFloorProtectsTheTail(t *testing.T) {
+	cf := corefFor(t, "min_later_turns: 8\n")
+	req := corefReq()
+	var rep components.Report
+	if _, err := cf.Offload(req, &rep, corefCtx(store.NewMemory(store.Options{}))); err != nil {
+		t.Fatal(err)
+	}
+	if got := schema.MessageText(req.Input[corefCutIdx]); !strings.Contains(got, corefNovelUnused) {
+		t.Fatal("cut a tail output that had had no chance to be referenced")
+	}
+	if rep.Gates["class_open"] == 0 {
+		t.Errorf("expected the tail output to be declined as open; gates=%v", rep.Gates)
+	}
+}
+
+// An output whose values the index cannot see (records of plain names/ids) must never be
+// cut by the DEFAULT config. Raised in review on PR #80.
+func TestCorefNeverCutsOpaqueOutputs(t *testing.T) {
+	people := strings.Repeat(
+		`[{"name":"david","id":123,"address":"foobarbaz"},{"name":"osher","id":235,"address":"banana"}]`, 60)
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+		corefUser("look up the people directory"),
+		corefAsst("Querying.", "query_people", `{}`),
+		corefTool("p1", people),
+		corefAsst("I need to remember david 123 address.", "Bash", `{"cmd":"true"}`),
+	}}
+	for k := 0; k < 20; k++ {
+		req.Input = append(req.Input, corefAsst(fmt.Sprintf("step %d", k), "Bash", `{"cmd":"true"}`))
+	}
+	cf := corefFor(t, "")
+	var rep components.Report
+	if _, err := cf.Offload(req, &rep, corefCtx(store.NewMemory(store.Options{}))); err != nil {
+		t.Fatal(err)
+	}
+	if got := schema.MessageText(req.Input[2]); !strings.Contains(got, "foobarbaz") {
+		t.Fatal("cut an output the index has no evidence about; the agent had just said it " +
+			"needs david's address, and the payload was never copied into a model turn")
+	}
+	if rep.Gates["class_opaque"] == 0 {
+		t.Errorf("expected the candidate to be declined as opaque; gates=%v", rep.Gates)
 	}
 }

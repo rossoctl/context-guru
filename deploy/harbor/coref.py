@@ -36,6 +36,7 @@ That gap is reported as `derived-value evidence`, never folded into `unreference
 Usage:
   coref.py <capture.jsonl> [more.jsonl ...] [key=value ...]
 
+  min_later=8      an output with fewer model turns after it is never cut (no opportunity yet)
   closed_dist=12   a reference is "closed" once its last reference is this many messages AGO
                    (measured from the head of the transcript, not from the output)
   open_reps=3      ...unless referenced at least this many times (then it stays "open")
@@ -197,9 +198,11 @@ def analyze_session(msgs, min_output):
             novel = res_tokens[i][tid] - prior[i] - siblings - common - ref_tokens[i]
             hits = []  # (message index, how many novel tokens that turn reused)
             used = set()
+            later = 0
             for j in range(i + 1, len(msgs)):
                 if not msgs[j]["texts"]:
                     continue
+                later += 1  # a model turn that COULD have referenced this output
                 inter = novel & ref_tokens[j]
                 if inter:
                     hits.append(j)
@@ -217,15 +220,33 @@ def analyze_session(msgs, min_output):
                 # separate signal: a long lag means the output stayed live for many turns.
                 "consume_lag": (hits[-1] - i) if hits else None,
                 "used_frac": (len(used) / len(novel)) if novel else 0.0,
+                # later_turns is the OPPORTUNITY to be referenced; near the tail it goes to
+                # zero and an output that never had a chance must not be scored as unused.
+                "later_turns": later,
             })
     return recs
 
 
-def classify(r, closed_dist, open_reps):
-    """UNREFERENCED — no later exact use (safest cut on Tier 1, blind to Tier 2).
-    OPEN       — referenced recently, or repeatedly: still load-bearing, keep.
-    CLOSED     — referenced once/twice and not for a long time; whatever the model took
-                 survives in the assistant turn that took it. The large-cut candidate."""
+def classify(r, closed_dist, open_reps, min_later=8):
+    """OPAQUE       — the output introduced NO trackable identifier, so there is no evidence
+                      either way. Absence of evidence, not evidence of deadness: a tool
+                      returning records of human-readable values
+                      ([{"name":"david","id":123,"address":"foobarbaz"}]) yields no
+                      distinctive tokens at all, because short lowercase words and 3-digit
+                      numbers are what the precision rules in distinctive() exclude. Folded
+                      into `unreferenced` it is a silent vote to delete. Never cut.
+    UNREFERENCED — introduced identifiers, and no later exact use (safest cut on Tier 1,
+                   blind to Tier 2).
+    OPEN         — referenced recently or repeatedly (still load-bearing), OR too new to
+                   have had the chance: an output with fewer than min_later model turns
+                   after it has no opportunity to be referenced, and scoring it as unused
+                   would preferentially cut the most RECENT context.
+    CLOSED       — referenced once/twice and not for a long time; whatever the model took
+                   survives in the assistant turn that took it. The large-cut candidate."""
+    if r["novel"] == 0:
+        return "opaque"
+    if min_later > 0 and r["later_turns"] < min_later:
+        return "open"
     if r["refs"] == 0:
         return "unreferenced"
     if r["refs"] >= open_reps or r["ref_age"] < closed_dist:
@@ -282,6 +303,7 @@ def main():
     closed_dist = int(opt.get("closed_dist", 12))
     open_reps = int(opt.get("open_reps", 3))
     min_output = int(opt.get("min_output", 300))
+    min_later = int(opt.get("min_later", 8))
     window = int(opt.get("window", 200000))
     fire_frac = float(opt.get("fire_frac", 0.6))
     if not files:
@@ -332,10 +354,13 @@ def main():
 
             cut_idx, cut_tok = [], 0
             for r in recs_s:
-                b = classify(r, closed_dist, open_reps)
+                b = classify(r, closed_dist, open_reps, min_later)
                 mass[b] += r["size"]
                 count[b] += 1
-                if b == "unreferenced":
+                # `open` now also covers "too new to have been referenced yet", which has no
+                # last reference at all — so bucket on whether a reference EXISTS, not on the
+                # verdict, or the histogram indexes None.
+                if r["ref_age"] is None:
                     dist_hist["never"] += r["size"]
                     reps_hist["0"] += r["size"]
                 else:
@@ -371,11 +396,12 @@ def main():
               if peaks else f"sessions {len(by_conv)}  requests {len(recs)}")
         print("\n  bucket        outputs      tokens   share   verdict")
         verdict = {
+            "opaque":       "introduced no trackable identifier -> NO EVIDENCE, never cut",
             "unreferenced": "no later exact use -> free deterministic cut (Tier-1 blind spot applies)",
             "closed":       "value taken, survives in an assistant turn -> large-cut candidate",
             "open":         "recent or repeated -> KEEP",
         }
-        for b in ("unreferenced", "closed", "open"):
+        for b in ("opaque", "unreferenced", "closed", "open"):
             print(f"  {b:13s} {count[b]:7,} {mass[b]:11,}  {100*mass[b]//total:4d}%   {verdict[b]}")
 
         print(f"\n  last reference, messages AGO (recency from the head — the A/B axis)"
@@ -425,7 +451,7 @@ def main():
                         rs.sort(key=lambda r: len(r["body"].get("messages", [])))
                         top = rs[-1]
                         for r in analyze_session(normalize(top["body"], top.get("provider", "anthropic")), min_output):
-                            if classify(r, d, reps) == "closed":
+                            if classify(r, d, reps, min_later) == "closed":
                                 s += r["size"]
                     row += f"{100*s//total:7d}%"
                 print(row)
