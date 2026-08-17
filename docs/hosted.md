@@ -363,7 +363,7 @@ a token.
   code replaces the pending one rather than adding to it.
 - **Passwords** are stored as **argon2id** — 64 MiB, 3 passes, 2 lanes, a fresh 16-byte
   random salt per account — in PHC string format, so the parameters can be raised later
-  without invalidating a single existing password. Minimum 12 characters, no composition
+  without invalidating a single existing password. Minimum 8 characters, no composition
   rules: length is what buys entropy.
 - **Brute force.** A code tolerates **5 wrong guesses**, after which it is destroyed rather
   than merely refused. On top of that, password attempts are capped at 5/minute and code
@@ -527,6 +527,25 @@ curl -sS -XPOST https://cg.<host>/api/me/agent-key \
 | OpenAI-dialect tools | `x-context-guru-token` header, however your tool sets extra headers | Same slot rule; `OPENAI_API_KEY` stays yours. |
 | Bob (BobShell) | `sha256(BOBSHELL_API_KEY)`, bound once via `POST /api/me/agent-key` | Bob's client builds `Content-Type`, `User-Agent`, `Authorization`, `x-instance-id` and `x-team-id` itself and exposes no hook for another header; its `headers` setting applies to MCP servers only. So it is recognised by the credential it already sends. |
 
+**Binding a key: two refusals.** A key under 20 characters is refused `400` — identity here
+*is* the key's digest, so a guessable key would be a guessable account. A digest already
+bound to another account is refused `403` and never moved: binding a digest someone else had
+bound used to transfer their traffic, and with `capture_content` on their captured
+transcripts, to whoever bound it. Its owner unbinds first, then the new holder binds.
+
+**The floor is enforced on bind and deliberately not on resolve**, which matters when
+upgrading an install that already holds bindings. A stored row is a digest with no length
+attached and no plaintext behind it, so a short key bound before the floor existed cannot be
+audited — nothing can find it or measure it — and it keeps identifying its account. Enforcing
+the floor at resolve time instead would be worse than leaving it: the check would have to run
+against every arriving key, and the first short one would stop identifying an account that had
+been working, breaking a tenant's agent to fix a weakness in *their* choice of key with no
+warning and no way for them to see why. So the asymmetry is the intended trade — new bindings
+are held to the floor, existing ones keep working. The one-way consequence is worth knowing
+before you reach for it: unbinding is the only way to clear such a row, and once cleared the
+same short key cannot be bound again, because a fresh bind now hits the `400`. On a database
+with no bindings yet, none of this arises.
+
 Agent *family* (claude-code / bob / codex / …) is read from the `User-Agent`, which none
 of this touches.
 
@@ -622,6 +641,128 @@ a free upgrade — measured at +117 ms per request, up to ~945 ms when file read
 frequent — and its model calls go out on **that tenant's own credential**, the same one
 the request carries. With no caller credential available the component skips (fail
 open); it never borrows the server's.
+
+## Managing users
+
+A manager sees every account's metrics and configuration, and no account's transcripts.
+That split is the whole shape of this section: everything below is available to a manager,
+and reading somebody's captured source code is not.
+
+The Tenants tab is the console. Per account it offers the full configuration (pipeline,
+per-component settings, mode, upstreams, row quota, capture consent, role), an A/B variant
+label, disable/enable with a reason, a reissued token, a password reset it cannot complete,
+and — behind a disclosure — purge and delete.
+
+### Editing somebody else's configuration
+
+`PATCH /api/tenants/{id}` writes the same fields a tenant can write for themselves, plus
+the manager-only ones (`role`, `max_rows`, `disabled`, `disabled_reason`, `variant`).
+`config_yaml` goes through the **same strict loader the proxy builds with**, so a typo is a
+`400` naming the offending key rather than a surprise at request time, and a rejected
+document leaves the stored one untouched.
+
+Two behaviours to know:
+
+- **Saving the form does not end an account's tracking of the server default.** While
+  `config_inherited` is true the editor omits `config_yaml` unless the YAML was actually
+  edited — otherwise every save would freeze a copy of today's default onto an account that
+  had asked to follow it.
+- **Saving rebuilds that tenant's pipeline**, which discards their frozen compaction
+  decisions. Their next turn is not cache-warm. That cost is real and it is theirs, so it is
+  stated on the form.
+
+Config resolution still fails **open**: an account whose stored document somehow does not
+build is forwarded uncompacted (logged loudly), never refused.
+
+### A/B testing
+
+A **variant** is a name a manager puts on a set of accounts. It selects nothing and changes
+nothing on the request path — the configuration each account runs is still the one on its own
+row — so assigning one can never break an agent. What it buys is a dimension to group by:
+`GET /api/variants` folds each account's existing aggregates into one row per variant, with
+the per-component acted/reverted/saved breakdown underneath.
+
+The smallest thing that works, deliberately. There is **no variant column on the metrics
+table**: adding one would mean a schema bump, and in this project that renames the whole
+metrics database aside and starts fresh — a label a manager can change at any time has no
+business costing anyone their history. The fold is a sum of sums.
+
+!!! warning "What the comparison cannot show, and why there is no p-value"
+    The panel reports **directional** figures with their denominators, and refuses to go
+    further. There is no significance test because the inputs do not support one:
+
+    - **Assignment is not randomised.** A manager chose who is in each variant, so a
+      difference may be a difference between the *people*.
+    - **Workloads are not held constant** — agent, model, task mix, and how much anyone
+      worked this week.
+    - **Per-request cost is not per-task cost.** An earlier study in this repo was misled
+      exactly here: two arms with the same reward differed in **step count**, so the arm with
+      cheaper requests spent more overall. Nothing in the dashboard can see task outcomes.
+    - **`incomplete_rows`** counts requests the provider gave no usage for. Where that
+      approaches the request count, that row's money figures are *unknown*, not low.
+    - **`saved_usd` is a counterfactual** — what the same traffic was priced at uncompacted,
+      minus what it actually cost including context-guru's own model spend.
+    - **The variant is read as it is today** and applied to the whole window, so moving an
+      account between variants retro-labels its past traffic. The audit log records when that
+      happened; the panel cannot.
+
+    Every one of those is served with the data (`caveats` in the payload) rather than kept in
+    this document, so the numbers and their limits cannot be quoted apart.
+
+### Disable, with a reason
+
+`disabled` refuses that account everywhere: `403` on the request path, `403` at sign-in, and
+its dashboard sessions are ended. `disabled_reason` is the manager's note, and it is
+**returned to the account's owner** in both refusals — without it, "disabled" is
+indistinguishable from the proxy being broken to the person whose work just stopped.
+Re-enabling clears the note, because a stale reason on a live account is the next thing
+somebody acts on.
+
+### Purge and delete, across both databases
+
+The control database and the metrics database are **separate files with no foreign key
+between them**, so deleting an account row does not touch that tenant's traffic. Both
+operations therefore run in a deliberate order:
+
+| Step | Purge | Delete |
+|---|---|---|
+| 1. Cold-storage objects for their archived sessions | deleted | deleted |
+| 2. `archived_sessions` index rows | deleted, **only for objects that actually went** | same |
+| 3. `request_content`, `request_components`, `requests`, `tenant_spend` | deleted | same |
+| 4. The account row, its tokens, sessions, agent keys, pending codes | **kept** | deleted (cascade) |
+| 5. A second sweep of the metrics database | — | yes |
+
+Why in that order:
+
+- **Objects before the index.** `archived_sessions` is the only record of what is in the
+  bucket, so removing it first would orphan the objects permanently — still costing storage,
+  no longer findable. An index row whose object could not be deleted is **kept**, and the
+  call answers `502` with the paths, so a retry can find them.
+- **Data before the account.** A failure is then a `502` with the account intact and the
+  operation retryable. Deleting the account first would leave rows owned by an id nothing
+  answers to: invisible in every view and unreachable by any retry.
+- **The second sweep** exists because capture is asynchronous (a 250 ms flush). A request in
+  flight during step 3 can land moments later; after step 4 nothing can authenticate as that
+  tenant, so that pass is final.
+- Child rows are deleted **explicitly** as well as by `ON DELETE CASCADE`, because whether
+  orphans are left should not depend on a per-connection pragma.
+
+Both require the tenant's **email or id typed back** (`{"confirm": "…"}`); the UI keeps the
+buttons inert until it matches, and both write an audit row. The audit trail of a deletion
+**outlives the account** — `tenant_config_audit` deliberately has no foreign key on its
+target.
+
+### Passwords: what a manager can and cannot do
+
+| Action | Who | Effect |
+|---|---|---|
+| `POST /api/me/password` | the account's owner | Requires the **current** password even though the caller holds a session, because a stolen cookie must not become permanent ownership. Signs out every *other* machine. |
+| `POST /api/password-reset` → `/verify` | anyone with the mailbox | Self-service recovery. Phase one answers identically for an unknown address; phase two spends the code plus the new password and ends every session. Opens **no** session: signing in still wants the password and a fresh code. |
+| `POST /api/tenants/{id}/password-reset` | a manager | Mails **that account** a code. The manager never sees it and cannot set a password; the old password keeps working until its owner finishes. Audited. |
+
+A manager who could set a password could sign in as that user and read their transcripts,
+which is the one boundary this service promises its users. So the recovery path a manager
+gets is "start it", never "do it".
 
 ## Storage
 
@@ -770,9 +911,17 @@ commands:
 ```sh
 sudo deploy/service/install.sh grafana          # both containers, config, dashboards
 sudo deploy/service/install.sh grafana-status   # scrape health + provisioning errors
+# then, signed in as a MANAGER at /dashboard/:
+#   https://<the host>/grafana/d/context-guru/context-guru
+# or without the front end:
 ssh -L 3000:127.0.0.1:3000 <the host>
-# then http://127.0.0.1:3000/d/context-guru/context-guru
+# then http://127.0.0.1:3000/grafana/d/context-guru/context-guru
 ```
+
+The front end publishes Grafana at `/grafana/` behind an nginx `auth_request` that only a
+context-guru **manager**'s browser session satisfies — Grafana never sees a request that
+fails it, not even to show its login page. Its own login is the second door.
+Prometheus (9090) and Loki (3100) are not published at all.
 
 Containers rather than packages because Prometheus is in no RHEL 9 repository, so the
 alternative is a packaged Grafana beside a tarball Prometheus with two unrelated sets of
@@ -921,15 +1070,36 @@ the very first request after a restart is recorded as `partial` and unpriced.
 
 ## Privacy
 
-- **Transcript capture is off by default and needs two independent yeses**: the
-  operator's `--dashboard-content` and the tenant's own consent. The redactor is a
-  best-effort denylist — a review of 22 realistic credential shapes found 11 passing
-  through it — so this is consent, not a feature flag.
+- **Transcript capture has two independent switches, and they default differently.**
+  `--dashboard-content` / `DASHBOARD_CONTENT` is process-wide and this repository ships it
+  `false`. The per-tenant switch behind it is created **on** — registration writes
+  `capture_content: true`. Either one alone stops the writes, so on a stock install the
+  operator's switch is what keeps a new account's source code off disk, and opening it starts
+  capturing every account that has not turned its own switch off.
+- **Whether *your* instance captures content is a fact about its environment, not about the
+  shipped default — so read it, do not assume it.** A drop-in overrides the unit, so
+  `DASHBOARD_CONTENT` in `context-guru.service` is not the effective value:
+  `systemctl show context-guru -p Environment` is. Do this before answering a user who asks
+  whether their source code is stored, because with the per-tenant switch defaulting on, an
+  enabled operator switch means a new account's message content — agent output, tool results,
+  source code — is captured from its first request. Both off switches belong in the same
+  breath as the answer: a tenant clears their own consent on **Settings**, an operator sets
+  `DASHBOARD_CONTENT=false` for everyone. Neither is retroactive in either direction. The
+  redactor in front of the write is a best-effort denylist — a review of 22 realistic
+  credential shapes found 11 passing through it — so this is a decision about real source
+  code landing on disk.
 - **A manager sees everyone's metrics and nobody's transcripts.** Reading another
   user's source code is not an administrative need, and the consent they gave was for
-  their own view.
-- **`CONTEXT_GURU_DUMP` and `CONTEXT_GURU_CAPTURE` write pristine request bodies to
-  one file with no tenant separation.** Do not set them on a hosted instance.
+  their own view. A manager may *withdraw* that consent, *purge* what it produced and
+  *delete* the account, and may start a password reset — but cannot set a password, which
+  is what would otherwise let them sign in as a user and read it all anyway. See
+  [Managing users](#managing-users).
+- **Hosted mode refuses to start with `CONTEXT_GURU_DUMP` or `CONTEXT_GURU_CAPTURE` set.**
+  Either one appends every tenant's pristine request bodies to a single process-wide file:
+  unredacted, with no tenant column, on a path the redactor never runs. That bypasses both
+  per-tenant capture consent and the scrubber, so the boot fails naming the variable rather
+  than warning. Unset it, or drop `--upstreams` to run single-tenant, where the hook only
+  sees your own traffic.
 - Session keys are namespaced by tenant. Without that, two people running the same
   agent against the same repository hash to the same session id and would share one
   sticky offload set and one cached-prefix boundary — a cross-tenant collision

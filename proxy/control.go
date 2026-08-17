@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,29 +41,120 @@ const (
 	maxControlBody = 256 << 10
 )
 
+// ctlScope is the authentication decision a control-plane route has made.
+//
+// It exists for the same reason dash's scopeClass does, and for a reason this file
+// specifically needed: a review found the control plane had NO table-driven scope test
+// while the dashboard's routes did, so a manager route added without its
+// `if !t.IsManager()` line would have shipped silently. The class is now DATA — gate
+// enforces it before the handler runs, and TestEveryControlRouteEnforcesItsScope walks
+// this same table.
+type ctlScope int
+
+const (
+	// ctlPublic is reachable with no session: registration, sign-in, and the
+	// password-reset flow, which by definition is for someone who cannot sign in.
+	ctlPublic ctlScope = iota
+	// ctlTenant needs a browser session and acts on the caller's own account.
+	ctlTenant
+	// ctlManager additionally needs the manager role.
+	ctlManager
+)
+
+// ctlRoute is one mounted control-plane endpoint plus its scope.
+type ctlRoute struct {
+	pattern string
+	scope   ctlScope
+	h       http.HandlerFunc
+}
+
+// ctlRoutes is the single mounted route table, read by MountControl and by the scope test.
+func (h *Handler) ctlRoutes() []ctlRoute {
+	return []ctlRoute{
+		{"POST /api/register", ctlPublic, h.ctlRegister},
+		{"POST /api/login", ctlPublic, h.ctlLogin},
+		{"POST /api/verify", ctlPublic, h.ctlVerify},
+		{"POST /api/logout", ctlPublic, h.ctlLogout},
+		{"GET /api/me/sessions", ctlTenant, h.ctlSessions},
+		{"DELETE /api/me/sessions/{id}", ctlTenant, h.ctlRevokeSession},
+		{"GET /api/me", ctlTenant, h.ctlMe},
+		{"PUT /api/me", ctlTenant, h.ctlUpdateMe},
+		{"POST /api/me/tokens", ctlTenant, h.ctlMintToken},
+		{"DELETE /api/me/tokens/{prefix}", ctlTenant, h.ctlRevokeToken},
+		{"POST /api/me/agent-key", ctlTenant, h.ctlBindAgentKey},
+		{"DELETE /api/me/agent-key", ctlTenant, h.ctlUnbindAgentKeys},
+		{"GET /api/me/audit", ctlTenant, h.ctlAudit},
+		{"GET /api/options", ctlTenant, h.ctlOptions},
+		{"GET /api/tenants", ctlManager, h.ctlTenants},
+		{"PATCH /api/tenants/{id}", ctlManager, h.ctlPatchTenant},
+		{"POST /api/tenants/{id}/tokens", ctlManager, h.ctlManagerMintToken},
+		// Feedback (feedback.go). Submitting is any signed-in account's own; reading is
+		// manager-only INCLUDING the aggregate — "you said 2, the average is 4.4" is a
+		// disclosure about other people's answers, so a user reads none of it.
+		{"POST /api/feedback", ctlTenant, h.ctlSubmitFeedback},
+		{"GET /api/feedback", ctlManager, h.ctlFeedback},
+		// Manager control: everything below this line. See the section at the end of this
+		// file.
+		{"POST /api/me/password", ctlTenant, h.ctlChangePassword},
+		{"POST /api/password-reset", ctlPublic, h.ctlRequestReset},
+		{"POST /api/password-reset/verify", ctlPublic, h.ctlCompleteReset},
+		{"POST /api/tenants/{id}/password-reset", ctlManager, h.ctlManagerReset},
+		{"POST /api/tenants/{id}/purge", ctlManager, h.ctlPurgeTenant},
+		{"DELETE /api/tenants/{id}", ctlManager, h.ctlDeleteTenant},
+		{"GET /api/variants", ctlManager, h.ctlVariants},
+		// nginx's auth_request target for /grafana/. Grafana has no notion of our accounts,
+		// so the front end asks this before it proxies: 204 lets the request through, and
+		// gate's 401/403 is what nginx turns into a refusal. Cookie only, like every route
+		// in this table — a proxy token cannot open the dashboards.
+		{"GET /api/authz/grafana", ctlManager, ctlNoContent},
+	}
+}
+
+// ctlNoContent is an authorization answer with nothing to say. The whole decision is its
+// route's declared scope, enforced by gate before this runs, and a body would only
+// describe what is behind the gate to somebody who did not get through it.
+func ctlNoContent(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }
+
 // MountControl registers the control-plane routes. Called only in hosted mode; without
 // a tenant registry there are no accounts to manage.
 func (h *Handler) MountControl(m *http.ServeMux) {
 	if h.opts.Tenants == nil {
 		return
 	}
-	m.HandleFunc("POST /api/register", h.ctlRegister)
-	m.HandleFunc("POST /api/login", h.ctlLogin)
-	m.HandleFunc("POST /api/verify", h.ctlVerify)
-	m.HandleFunc("POST /api/logout", h.ctlLogout)
-	m.HandleFunc("GET /api/me/sessions", h.ctlSessions)
-	m.HandleFunc("DELETE /api/me/sessions/{id}", h.ctlRevokeSession)
-	m.HandleFunc("GET /api/me", h.ctlMe)
-	m.HandleFunc("PUT /api/me", h.ctlUpdateMe)
-	m.HandleFunc("POST /api/me/tokens", h.ctlMintToken)
-	m.HandleFunc("DELETE /api/me/tokens/{prefix}", h.ctlRevokeToken)
-	m.HandleFunc("POST /api/me/agent-key", h.ctlBindAgentKey)
-	m.HandleFunc("DELETE /api/me/agent-key", h.ctlUnbindAgentKeys)
-	m.HandleFunc("GET /api/me/audit", h.ctlAudit)
-	m.HandleFunc("GET /api/options", h.ctlOptions)
-	m.HandleFunc("GET /api/tenants", h.ctlTenants)
-	m.HandleFunc("PATCH /api/tenants/{id}", h.ctlPatchTenant)
-	m.HandleFunc("POST /api/tenants/{id}/tokens", h.ctlManagerMintToken)
+	for _, rt := range h.ctlRoutes() {
+		m.HandleFunc(rt.pattern, h.gate(rt.scope, rt.h))
+	}
+}
+
+// gate refuses a request that does not meet its route's declared scope, before the
+// handler runs.
+//
+// The handlers still resolve the principal themselves — they need the tenant, for the
+// audit trail and to act on. That is deliberate duplication rather than an oversight: the
+// gate makes a route's class ENFORCED by the table rather than by whether whoever wrote
+// the handler remembered, and a handler's own check keeps it correct if it is ever called
+// from somewhere else. The cost is one extra cookie lookup per control-plane call, which
+// is not a hot path.
+func (h *Handler) gate(scope ctlScope, next http.HandlerFunc) http.HandlerFunc {
+	if scope == ctlPublic {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		t, err := h.webPrincipal(r)
+		if err != nil {
+			code, msg := statusOf(err)
+			ctlErr(w, code, msg)
+			return
+		}
+		// The role, and ONLY the role. A crafted ?tenant= cannot reach this decision:
+		// nothing here reads the query string, and the routes that act on another account
+		// take its id from the PATH, which the registry then checks against the actor.
+		if scope == ctlManager && !t.IsManager() {
+			ctlErr(w, http.StatusForbidden, "manager only")
+			return
+		}
+		next(w, r)
+	}
 }
 
 // registry is the control-plane store, or nil in single-tenant mode.
@@ -129,7 +223,9 @@ func (h *Handler) webPrincipal(r *http.Request) (*tenant.Tenant, error) {
 	t, err := reg.WebSession(c.Value)
 	if err != nil {
 		if errors.Is(err, tenant.ErrDisabled) {
-			return nil, errTenantOff
+			// Carrying the manager's reason: a user who was disabled mid-session finds out
+			// here first, and "disabled" with no why is a support ticket.
+			return nil, tenantOff(err)
 		}
 		return nil, errNoToken
 	}
@@ -245,17 +341,27 @@ type tenantView struct {
 	// Registry.Config — the same resolver the proxy uses, not a second guess at it.
 	// ConfigInherited says which of the two it came from, so the UI can show a
 	// tracking tenant their real pipeline without claiming they chose it.
-	EffectiveConfigYAML string  `json:"effective_config_yaml"`
-	ConfigInherited     bool    `json:"config_inherited"`
-	UpAnthropic         string  `json:"up_anthropic"`
-	UpOpenAI            string  `json:"up_openai"`
-	UpBob               string  `json:"up_bob"`
-	CaptureContent      bool    `json:"capture_content"`
-	MaxRows             int64   `json:"max_rows"`
-	Disabled            bool    `json:"disabled"`
-	CreatedAt           int64   `json:"created_at"`
-	LastSeenAt          int64   `json:"last_seen_at"`
-	SpentUSD            float64 `json:"spent_usd"`
+	EffectiveConfigYAML string `json:"effective_config_yaml"`
+	ConfigInherited     bool   `json:"config_inherited"`
+	UpAnthropic         string `json:"up_anthropic"`
+	UpOpenAI            string `json:"up_openai"`
+	UpBob               string `json:"up_bob"`
+	CaptureContent      bool   `json:"capture_content"`
+	MaxRows             int64  `json:"max_rows"`
+	Disabled            bool   `json:"disabled"`
+	// DisabledReason is the manager's note, shown to the account's owner as well as to a
+	// manager — it is written to be read by the person whose agent stopped.
+	DisabledReason string `json:"disabled_reason"`
+	// Variant is the A/B group this account is in, "" for none.
+	Variant string `json:"variant"`
+	// HasPassword tells the settings page whether to ask for the CURRENT password. An
+	// account that predates passwords has none to check, so it has to go through the
+	// emailed reset instead — and a form demanding an old password it cannot have is a
+	// dead end. The hash itself is never on this struct or in this payload.
+	HasPassword bool    `json:"has_password"`
+	CreatedAt   int64   `json:"created_at"`
+	LastSeenAt  int64   `json:"last_seen_at"`
+	SpentUSD    float64 `json:"spent_usd"`
 	// AgentKeys is how many provider keys this account has bound (a COUNT, never a
 	// digest): the settings page needs to say "bound" or "not bound", nothing more.
 	AgentKeys int `json:"agent_keys"`
@@ -270,6 +376,7 @@ func (h *Handler) view(t *tenant.Tenant) tenantView {
 		UpAnthropic:         t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
 		CaptureContent: t.CaptureContent,
 		MaxRows:        t.MaxRows, Disabled: t.Disabled,
+		DisabledReason: t.DisabledReason, Variant: t.Variant, HasPassword: t.HasPassword,
 		CreatedAt: msOrZero(t.CreatedAt), LastSeenAt: msOrZero(t.LastSeenAt),
 	}
 	if n, err := h.registry().AgentKeyCount(t.ID); err == nil {
@@ -712,7 +819,7 @@ func (h *Handler) ctlLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, tenant.ErrDisabled):
-			ctlErr(w, http.StatusForbidden, "this account is disabled")
+			ctlErr(w, http.StatusForbidden, disabledMsg(err))
 		case errors.Is(err, tenant.ErrNotVerified):
 			// Correct password on an unverified account: re-send the REGISTRATION code
 			// rather than telling them to start over. Safe to do here and nowhere else —
@@ -746,7 +853,7 @@ func (h *Handler) loginWithToken(w http.ResponseWriter, r *http.Request, token s
 	t, err := h.registry().Resolve(token)
 	if err != nil {
 		if errors.Is(err, tenant.ErrDisabled) {
-			ctlErr(w, http.StatusForbidden, "this account is disabled")
+			ctlErr(w, http.StatusForbidden, disabledMsg(err))
 			return
 		}
 		// One message for both "no such token" and "revoked", so this endpoint cannot
@@ -822,7 +929,7 @@ func (h *Handler) ctlVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if t.Disabled {
-		ctlErr(w, http.StatusForbidden, "this account is disabled")
+		ctlErr(w, http.StatusForbidden, disabledMsg(&tenant.DisabledError{Reason: t.DisabledReason}))
 		return
 	}
 	h.signIn(w, r, t)
@@ -1289,6 +1396,10 @@ func (h *Handler) ctlPatchTenant(w http.ResponseWriter, r *http.Request) {
 		CaptureContent *bool   `json:"capture_content"`
 		MaxRows        *int64  `json:"max_rows"`
 		Disabled       *bool   `json:"disabled"`
+		// The A/B group, and the note the account's owner reads when they are shut off.
+		// Both manager-only in the registry, like role and quota.
+		Variant        *string `json:"variant"`
+		DisabledReason *string `json:"disabled_reason"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
 		readErr(w, err)
@@ -1305,7 +1416,8 @@ func (h *Handler) ctlPatchTenant(w http.ResponseWriter, r *http.Request) {
 	patch := tenant.Patch{Label: in.Label, ConfigYAML: in.ConfigYAML,
 		UpAnthropic: in.UpAnthropic, UpOpenAI: in.UpOpenAI, UpBob: in.UpBob,
 		CaptureContent: in.CaptureContent,
-		MaxRows:        in.MaxRows, Disabled: in.Disabled}
+		MaxRows:        in.MaxRows, Disabled: in.Disabled,
+		Variant: in.Variant, DisabledReason: in.DisabledReason}
 	if in.Role != nil {
 		role := tenant.Role(*in.Role)
 		patch.Role = &role
@@ -1366,4 +1478,649 @@ func (h *Handler) ctlManagerMintToken(w http.ResponseWriter, r *http.Request) {
 		"token":   plain,
 		"warning": "Shown once. Hand it to the user over a channel you trust.",
 	})
+}
+
+// --- manager control -------------------------------------------------------
+//
+// A manager can already read everyone's metrics and edit everyone's configuration
+// (ctlTenants, ctlPatchTenant). This section adds the rest of what "full control of all
+// users" means, and the boundary it does NOT cross.
+//
+// What a manager gets: every account's configuration, an A/B grouping over the metrics
+// that already exist, disable/enable with a reason the user can read, storage purge,
+// account deletion across both databases and cold storage, and the ability to START a
+// password reset.
+//
+// What a manager never gets: a tenant's captured transcript text (dash's request and
+// archive routes strip Content for anyone who is not the row's owner), and a tenant's
+// password. The reset route mails the OWNER a code and returns nothing — a manager who
+// could set a password could read that account's transcripts by signing in as them, which
+// is the boundary this whole design exists to keep.
+
+// disabledMsg renders the sign-in refusal for a disabled account, with the manager's
+// reason when there is one. Shares tenantOff's wording so an agent's 403 and a browser's
+// refusal say the same thing.
+func disabledMsg(err error) string {
+	var de *tenant.DisabledError
+	if errors.As(err, &de) && de.Reason != "" {
+		return "this account is disabled: " + de.Reason
+	}
+	return "this account is disabled"
+}
+
+// ctlChangePassword changes the caller's OWN password. The current one is required — see
+// tenant.ChangePassword for why a live session is not enough.
+func (h *Handler) ctlChangePassword(w http.ResponseWriter, r *http.Request) {
+	t, err := h.webPrincipal(r)
+	if err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	var in struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := readJSON(w, r, &in); err != nil {
+		readErr(w, err)
+		return
+	}
+	// Bounded like every other route that runs argon2: this one verifies the old password,
+	// so unbounded it is both a 64 MiB-per-attempt amplifier and an offline-strength guess
+	// oracle for anyone holding a stolen cookie.
+	if err := h.spendAuthAttempt(h.pwLim, t.Email, r); err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	// The caller's own cookie is kept signed in; every other machine is signed out.
+	var cur string
+	if c, cErr := r.Cookie(dashCookie); cErr == nil {
+		cur = c.Value
+	}
+	switch err := h.registry().ChangePassword(t.ID, cur, in.OldPassword, in.NewPassword); {
+	case err == nil:
+	case errors.Is(err, tenant.ErrWrongPass):
+		ctlErr(w, http.StatusUnauthorized, "that is not your current password")
+		return
+	case errors.Is(err, tenant.ErrNoPassword):
+		// An account from before passwords existed. There is nothing to check the old value
+		// against, so point at the flow that proves the ADDRESS instead of the one that
+		// proves a password they never set.
+		ctlErr(w, http.StatusBadRequest, "this account has no password yet — use "+
+			"\"Forgot your password\" on the sign-in page to set one by email")
+		return
+	case errors.Is(err, tenant.ErrBadPassword):
+		ctlErr(w, http.StatusBadRequest, fmt.Sprintf(
+			"choose a password of at least %d characters", tenant.MinPasswordLen))
+		return
+	default:
+		ctlErr(w, http.StatusInternalServerError, "could not change the password")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "changed",
+		"note":   "Your other signed-in machines have been signed out.",
+	})
+}
+
+// ctlRequestReset starts the emailed password reset. Unauthenticated by necessity: the
+// person who needs it is the person who cannot sign in, and the absence of any
+// self-service recovery is what made an earlier lockout bug unrecoverable.
+//
+// The reply is IDENTICAL whether or not the address has an account — same status, same
+// fields, same expiry (computed rather than read, exactly as ctlRegister's taken-address
+// branch does) — because this endpoint is otherwise a directory of who works here.
+//
+// RESIDUAL RISK, stated plainly: an existing address makes an SMTP round trip and an
+// unknown one does not, so the two differ in LATENCY. Closing that would mean either
+// sending a pointless message to every address typed here or faking a delay, and both are
+// worse than documenting it. The rate limit bounds how many samples an attacker gets.
+func (h *Handler) ctlRequestReset(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Email string `json:"email"`
+	}
+	if err := readJSON(w, r, &in); err != nil {
+		readErr(w, err)
+		return
+	}
+	email := normalEmail(in.Email)
+	if err := h.spendAuthAttempt(h.codeLim, email, r); err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	// Mailed only for an account that exists, has proved this address, and is not disabled.
+	// A disabled account is deliberately excluded: recovering a password it cannot sign in
+	// with achieves nothing, and mailing its owner a code would read as reinstatement.
+	if t, err := h.registry().ByEmail(email); err == nil && t.Verified() && !t.Disabled {
+		if _, mErr := h.mailCode(t, tenant.PurposeReset); mErr != nil {
+			// Swallowed on purpose: surfacing it here would answer differently for an address
+			// that exists, which is the oracle this handler is shaped to avoid. mailFailed has
+			// already logged it at WARN with the relay's own message.
+			_ = mErr
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"next":            "reset",
+		"email":           email,
+		"code_expires_at": msOrZero(time.Now().Add(tenant.CodeTTL)),
+		"code_valid_secs": int(tenant.CodeTTL.Seconds()),
+	})
+}
+
+// ctlCompleteReset spends a reset code and installs the new password.
+//
+// The PURPOSE is fixed by this route rather than named by the client, which is what keeps
+// the three code flows separate: a login code cannot be spent here and a reset code cannot
+// be spent at /api/verify, because the purpose is mixed into the hash.
+//
+// It opens no session. Whoever completes a reset then signs in normally, which puts the
+// password and a fresh emailed code back in front of the account — a reset that also
+// signed you in would make one code worth two factors.
+func (h *Handler) ctlCompleteReset(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Email       string `json:"email"`
+		Code        string `json:"code"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := readJSON(w, r, &in); err != nil {
+		readErr(w, err)
+		return
+	}
+	email := normalEmail(in.Email)
+	if err := h.spendAuthAttempt(h.codeLim, email, r); err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	t, err := h.registry().ByEmail(email)
+	if err != nil {
+		// Same answer as a wrong code: whether an address has a pending reset is not
+		// something this endpoint should confirm.
+		ctlErr(w, http.StatusUnauthorized, "that code is not valid")
+		return
+	}
+	switch err := h.registry().ResetPassword(t.ID, strings.TrimSpace(in.Code), in.NewPassword); {
+	case err == nil:
+	case errors.Is(err, tenant.ErrBadPassword):
+		// Reported BEFORE the code is spent (see tenant.ResetPassword), so a too-short
+		// password does not cost the user their one code.
+		ctlErr(w, http.StatusBadRequest, fmt.Sprintf(
+			"choose a password of at least %d characters", tenant.MinPasswordLen))
+		return
+	default:
+		writeCodeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "changed",
+		"next":   "signin",
+		"note":   "Every signed-in machine on this account has been signed out.",
+	})
+}
+
+// ctlManagerReset starts a reset FOR someone else. The manager learns nothing and sets
+// nothing: the code goes to the account's own address, and only its owner can finish.
+//
+// This is the recovery path a manager actually needs — "I cannot sign in" — without
+// becoming the ability to sign in AS a user, which would hand a manager that account's
+// transcripts and defeat the one boundary this service promises its users.
+func (h *Handler) ctlManagerReset(w http.ResponseWriter, r *http.Request) {
+	actor, err := h.webPrincipal(r)
+	if err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	if !actor.IsManager() {
+		ctlErr(w, http.StatusForbidden, "manager only")
+		return
+	}
+	// No body to read, so readJSON's cross-site guard does not cover it: check directly.
+	if err := checkOrigin(r); err != nil {
+		readErr(w, err)
+		return
+	}
+	target, err := h.registry().Get(r.PathValue("id"))
+	if err != nil {
+		ctlErr(w, http.StatusNotFound, "no such tenant")
+		return
+	}
+	if !target.Verified() {
+		ctlErr(w, http.StatusBadRequest, "that account has never confirmed its email address, "+
+			"so there is nowhere to send a reset — it can register again, or you can reissue its token")
+		return
+	}
+	if _, err := h.mailCode(target, tenant.PurposeReset); err != nil {
+		// A manager gets the real failure. There is no oracle to protect here: they can
+		// already list every account.
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	// On the record, with who started it. Not because the code is sensitive — it is not
+	// ours to see either — but because "who caused my password to be reset" has to be
+	// answerable.
+	if err := h.registry().AuditWrite(actor.ID, target.ID, "password_reset", "", "code mailed"); err != nil {
+		slog.Warn("context-guru: could not record a manager-initiated password reset",
+			"target", target.ID, "err", err)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "mailed",
+		"email":  target.Email,
+		"note": "A reset code has been sent to that address. You cannot see it and cannot " +
+			"set their password — only they can finish this.",
+	})
+}
+
+// purgeTimeout bounds a purge. Generous: it may delete a few hundred objects from cold
+// storage, each an rclone subprocess.
+const purgeTimeout = 5 * time.Minute
+
+// confirmed reports whether the manager typed this account's identity back.
+//
+// Deliberately not a checkbox. Both of these are irreversible and both are aimed BY ID at
+// somebody else's data, so the one mistake worth engineering against is acting on the
+// wrong row — and typing the address back is the check that catches it. Either the email
+// or the id is accepted: the id is what the API deals in, the address is what a human
+// recognises.
+func confirmed(in string, t *tenant.Tenant) bool {
+	in = strings.TrimSpace(in)
+	return in != "" && (strings.EqualFold(in, t.Email) || in == t.ID)
+}
+
+// purgeBody is the confirmation both destructive routes require.
+type purgeBody struct {
+	Confirm string `json:"confirm"`
+}
+
+// ctlPurgeTenant erases a tenant's observability data and LEAVES THE ACCOUNT WORKING:
+// their tokens, agent-key bindings, sessions and configuration are untouched, so their
+// next request is captured as usual. This is the "clean their storage" case — a tenant who
+// captured transcripts they should not have, or one whose history is filling the disk.
+func (h *Handler) ctlPurgeTenant(w http.ResponseWriter, r *http.Request) {
+	actor, target, ok := h.destructiveTarget(w, r)
+	if !ok {
+		return
+	}
+	res, err := h.purgeTenantData(target.ID)
+	if err != nil {
+		// 502 rather than 500 when cold storage is what failed: the local rows are gone or
+		// still there as reported, and the part that did not work is a remote system.
+		ctlErr(w, http.StatusBadGateway, "purge incomplete: "+err.Error())
+		return
+	}
+	if err := h.registry().AuditWrite(actor.ID, target.ID, "storage_purged", "",
+		fmt.Sprintf("%d requests, %d components, %d transcripts, %d archives",
+			res.Requests, res.Components, res.Content, res.Archives)); err != nil {
+		slog.Warn("context-guru: could not record a storage purge", "target", target.ID, "err", err)
+	}
+	slog.Warn("context-guru: manager purged a tenant's stored data",
+		"actor", actor.ID, "tenant", target.ID, "requests", res.Requests,
+		"archives", res.Archives, "objects", res.Objects)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "purged", "email": target.Email, "purged": res,
+		"note": "The account is untouched and still works. Its next request is captured as usual.",
+	})
+}
+
+// ctlDeleteTenant removes an account AND its data, from both databases and cold storage.
+//
+// The order is the design, and it is not the obvious one:
+//
+//  1. Purge the metrics database and cold storage FIRST. A failure here is a 502 with the
+//     account still intact, which is retryable. Deleting the account first would leave
+//     rows owned by an id that no longer answers to anybody — invisible in every view,
+//     unreachable by any retry, and still on disk.
+//  2. Delete the account row. Tokens, sessions, agent keys and pending codes go with it
+//     by ON DELETE CASCADE.
+//  3. Purge AGAIN. Capture is asynchronous (a 250 ms flush), so a request that was in
+//     flight during step 1 can land between the two. After step 2 nothing can
+//     authenticate as this tenant, so this pass is final — which is what makes "no
+//     orphans" a property rather than a hope.
+func (h *Handler) ctlDeleteTenant(w http.ResponseWriter, r *http.Request) {
+	actor, target, ok := h.destructiveTarget(w, r)
+	if !ok {
+		return
+	}
+	// Refused before anything is deleted. The registry refuses it too — this is the copy
+	// that keeps the data intact, since the purge runs first.
+	if actor.ID == target.ID {
+		ctlErr(w, http.StatusForbidden, "a manager cannot delete their own account: "+
+			"the manager routes are the only way to appoint another one")
+		return
+	}
+	res, err := h.purgeTenantData(target.ID)
+	if err != nil {
+		ctlErr(w, http.StatusBadGateway, "nothing was deleted: their stored data could not be "+
+			"removed first, and deleting the account would have orphaned it — "+err.Error())
+		return
+	}
+	if err := h.registry().Delete(actor, target.ID); err != nil {
+		switch {
+		case errors.Is(err, tenant.ErrForbidden):
+			ctlErr(w, http.StatusForbidden, "manager only")
+		case errors.Is(err, tenant.ErrNotFound):
+			ctlErr(w, http.StatusNotFound, "no such tenant")
+		default:
+			ctlErr(w, http.StatusInternalServerError,
+				"their stored data was purged, but the account could not be deleted: "+err.Error())
+		}
+		return
+	}
+	// The in-memory tenancy holds this account's pipeline and state store; nothing can
+	// authenticate as them now, so it is dead weight keyed by a live id.
+	h.opts.Tenants.Forget(target.ID)
+	// Step 3: the tail. Best-effort by construction — the account is already gone, so
+	// there is nothing left to fail back to.
+	if tail, tErr := h.purgeTenantData(target.ID); tErr != nil {
+		slog.Warn("context-guru: a deleted tenant's in-flight rows could not be swept",
+			"tenant", target.ID, "err", tErr)
+	} else if tail.Removed() {
+		slog.Info("context-guru: swept rows captured while a tenant was being deleted",
+			"tenant", target.ID, "requests", tail.Requests)
+		res.Requests += tail.Requests
+		res.Components += tail.Components
+		res.Content += tail.Content
+	}
+	slog.Warn("context-guru: manager deleted a tenant and their data",
+		"actor", actor.ID, "tenant", target.ID, "requests", res.Requests, "objects", res.Objects)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "deleted", "email": target.Email, "purged": res,
+		"note": "The account, its tokens, its sessions and its stored data are gone. " +
+			"The audit trail of this deletion is kept.",
+	})
+}
+
+// destructiveTarget resolves the manager, the target account and the typed confirmation
+// for the two irreversible routes. One place, so purge and delete cannot disagree about
+// what counts as confirmation.
+func (h *Handler) destructiveTarget(w http.ResponseWriter, r *http.Request) (*tenant.Tenant, *tenant.Tenant, bool) {
+	actor, err := h.webPrincipal(r)
+	if err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return nil, nil, false
+	}
+	if !actor.IsManager() {
+		ctlErr(w, http.StatusForbidden, "manager only")
+		return nil, nil, false
+	}
+	var in purgeBody
+	if err := readJSON(w, r, &in); err != nil {
+		readErr(w, err)
+		return nil, nil, false
+	}
+	target, err := h.registry().Get(r.PathValue("id"))
+	if err != nil {
+		ctlErr(w, http.StatusNotFound, "no such tenant")
+		return nil, nil, false
+	}
+	if !confirmed(in.Confirm, target) {
+		ctlErr(w, http.StatusBadRequest,
+			"this cannot be undone: send confirm with that account's email address to proceed")
+		return nil, nil, false
+	}
+	return actor, target, true
+}
+
+// purgeTenantData runs the dashboard-side purge under its own deadline.
+//
+// The context is deliberately NOT the request's. A manager whose browser gives up
+// mid-purge must not leave half a tenant's data behind — this is a destructive operation
+// that has to run to completion once it has started, and its result is reported afterwards
+// either way.
+func (h *Handler) purgeTenantData(tenantID string) (dash.PurgeResult, error) {
+	if h.rec == nil {
+		// No dashboard on this deployment: there is no stored traffic to purge, which is a
+		// complete success rather than a failure.
+		return dash.PurgeResult{}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), purgeTimeout)
+	defer cancel()
+	return h.rec.PurgeTenant(ctx, tenantID)
+}
+
+// --- A/B variants ----------------------------------------------------------
+//
+// A variant is a NAME a manager puts on a set of accounts. It selects nothing and changes
+// nothing on the request path: the configuration each account runs is the one on its own
+// row, exactly as before. What the name buys is a way to group the metrics that already
+// exist — so "give half the team the new pipeline and see what it did" becomes a label
+// plus a GROUP BY rather than a new subsystem.
+//
+// Deliberately NOT built: a stats engine. No p-values, no confidence intervals, no
+// significance test. The reason is in abCaveats — the assignment is not random, the
+// workloads are not comparable, and a test statistic computed over those inputs would give
+// a number that looks like evidence and is not. This project has already been misled once
+// by comparing arms whose STEP COUNTS differed; the panel therefore always reports its
+// denominators and says what it cannot show.
+
+// abCaveats is what the comparison cannot tell you. Served with the data, not buried in a
+// doc, because a cost delta with no confounds named is worse than no cost delta: it gets
+// quoted.
+var abCaveats = []string{
+	"Assignment is not randomised. A manager chose who is in each variant, so any " +
+		"difference may be a difference between the PEOPLE rather than the configurations.",
+	"Workloads are not held constant. Variants differ in agent, model, task mix and how " +
+		"much anyone worked this week — compare the request and session counts before " +
+		"reading anything into the money.",
+	"Per-request cost is not per-task cost. An earlier study in this repo was misled " +
+		"exactly here: two arms with the same reward differed in STEP COUNT, so the arm " +
+		"with cheaper requests spent more overall. Nothing on this panel can see task " +
+		"outcomes.",
+	"incomplete_rows are requests the provider gave us no usage for. Where that number " +
+		"approaches the request count, the money figures for that variant are unknown " +
+		"rather than low.",
+	"saved_usd is a counterfactual: what the same traffic was priced at uncompacted, minus " +
+		"what it actually cost including context-guru's own model spend. It is an estimate " +
+		"of a request that was never sent.",
+	"One variant can hold several different configurations. The configs list says how many " +
+		"— if it is more than one, the variant is not a single treatment.",
+}
+
+// abComponent is one component's economics inside a variant: the answer to WHICH change
+// did it, which the totals cannot give.
+type abComponent struct {
+	Component   string  `json:"component"`
+	Runs        int64   `json:"runs"`
+	Acted       int64   `json:"acted"`
+	Reverted    int64   `json:"reverted"`
+	SavedUnique int64   `json:"saved_unique"`
+	ActRate     float64 `json:"act_rate"`
+}
+
+// abVariant is one row of the comparison.
+type abVariant struct {
+	// Variant is the assigned name; "" is the unassigned group, which is included on
+	// purpose — how much traffic is OUTSIDE the experiment is part of reading it.
+	Variant string `json:"variant"`
+	// Tenants and Emails describe who is in it. A manager may see this; it is account
+	// metadata, not traffic content.
+	Tenants int      `json:"tenants"`
+	Emails  []string `json:"emails"`
+	// Configs is the DISTINCT effective configurations in this variant. More than one
+	// means the variant is not one treatment — see abCaveats.
+	Configs []string `json:"configs"`
+	// Reporting is how many of those accounts have any traffic in the window at all. A
+	// variant of six accounts where one produced every request is not six samples.
+	Reporting       int64   `json:"reporting"`
+	Requests        int64   `json:"requests"`
+	Sessions        int64   `json:"sessions"`
+	TokensBefore    int64   `json:"tokens_before"`
+	TokensAfter     int64   `json:"tokens_after"`
+	Saved           int64   `json:"saved"`
+	SavedUnique     int64   `json:"saved_unique"`
+	FreshInput      int64   `json:"fresh_input"`
+	CacheRead       int64   `json:"cache_read"`
+	CacheWrite      int64   `json:"cache_write"`
+	OutputTokens    int64   `json:"output_tokens"`
+	SpentUSD        float64 `json:"spent_usd"`
+	SavedUSD        float64 `json:"saved_usd"`
+	BaselineCostUSD float64 `json:"baseline_cost_usd"`
+	Incomplete      int64   `json:"incomplete_rows"`
+	// Components is per-component acted/reverted/saved, folded across this variant's
+	// accounts.
+	Components []abComponent `json:"components"`
+}
+
+// ctlVariants serves the A/B comparison: one row per variant, folded from the per-tenant
+// aggregates the dashboard already computes.
+//
+// Folding is a SUM of sums, which is why there is no new storage and no new schema behind
+// this. A variant is a set of tenants; dash groups by tenant (breakdown dim "tenant"); the
+// rows add up. The alternative — stamping the variant onto every captured request — would
+// have meant a metrics schema bump, which in this project renames the whole database aside
+// and starts fresh. A label a manager can change at any time has no business costing
+// anybody their history.
+//
+// Honest limitation of folding rather than storing: the variant is read as it is TODAY and
+// applied to the whole window, so moving an account between variants retro-labels its past
+// traffic. The audit log records when that happened; this panel cannot.
+func (h *Handler) ctlVariants(w http.ResponseWriter, r *http.Request) {
+	actor, err := h.webPrincipal(r)
+	if err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	if !actor.IsManager() {
+		ctlErr(w, http.StatusForbidden, "manager only")
+		return
+	}
+	if h.rec == nil {
+		ctlErr(w, http.StatusServiceUnavailable,
+			"the dashboard is not enabled on this deployment, so there are no metrics to compare")
+		return
+	}
+	all, err := h.registry().List()
+	if err != nil {
+		ctlErr(w, http.StatusInternalServerError, "could not list tenants")
+		return
+	}
+	// The same window the dashboard's filter bar is on, so the panel and the charts above
+	// it agree. Unparseable is 0, which means unbounded — a filter is a view.
+	since, until := atoi64(r.URL.Query().Get("since")), atoi64(r.URL.Query().Get("until"))
+	window := dash.Filter{TenantAll: true, Since: since, Until: until}
+
+	// One query for every account's totals. TenantAll is correct and checked: this handler
+	// is manager-only, and Breakdown returns aggregates — never transcript content.
+	groups, err := h.rec.DB().Breakdown(window, "tenant")
+	if err != nil {
+		ctlErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	byTenant := make(map[string]*dash.GroupRow, len(groups))
+	for _, g := range groups {
+		byTenant[g.Key] = g
+	}
+
+	// Ordered by first appearance of each variant in the roster (newest account first),
+	// with the unassigned group last: it is context, not a contender.
+	rows := map[string]*abVariant{}
+	var order []string
+	for _, t := range all {
+		v, ok := rows[t.Variant]
+		if !ok {
+			v = &abVariant{Variant: t.Variant}
+			rows[t.Variant] = v
+			order = append(order, t.Variant)
+		}
+		v.Tenants++
+		v.Emails = append(v.Emails, t.Email)
+		if cfg := h.registry().Config(t); cfg != "" && !hasString(v.Configs, cfg) {
+			v.Configs = append(v.Configs, cfg)
+		}
+		if g := byTenant[t.ID]; g != nil {
+			v.Reporting++
+			v.Requests += g.Requests
+			v.Sessions += g.Sessions
+			v.TokensBefore += g.TokensBefore
+			v.TokensAfter += g.TokensAfter
+			v.Saved += g.Saved
+			v.SavedUnique += g.SavedUnique
+			v.FreshInput += g.FreshInput
+			v.CacheRead += g.CacheRead
+			v.CacheWrite += g.CacheWrite
+			v.OutputTokens += g.OutputTokens
+			v.SpentUSD += g.SpentUSD
+			v.SavedUSD += g.SavedUSD
+			v.BaselineCostUSD += g.BaselineCostUSD
+			v.Incomplete += g.Incomplete
+		}
+		// Per-component rows are only available per tenant, so they are folded one account
+		// at a time.
+		//
+		// ponytail: one query per ACCOUNT, which is fine for an internal deployment's
+		// roster and would not be for thousands. The next rung is a variant column on the
+		// requests table, and that costs a metrics schema bump — not worth it until this
+		// endpoint is measurably slow.
+		comps, cErr := h.rec.DB().Components(dash.Filter{Tenant: t.ID, Since: since, Until: until})
+		if cErr != nil {
+			continue // a missing component breakdown must not lose the totals above
+		}
+		foldComponents(v, comps)
+	}
+	out := make([]*abVariant, 0, len(order))
+	for _, name := range order {
+		if name == "" {
+			continue
+		}
+		out = append(out, rows[name])
+	}
+	if unassigned, ok := rows[""]; ok {
+		out = append(out, unassigned)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"variants": out,
+		"caveats":  abCaveats,
+		"description": "Per-variant totals, folded from each account's own aggregates over the " +
+			"selected window. A variant is a label a manager assigned, NOT a randomised arm: " +
+			"read the caveats before quoting a difference. There is deliberately no " +
+			"significance test here — the inputs do not support one.",
+	})
+}
+
+// foldComponents adds one account's component rows into a variant's, keeping the list
+// sorted by unique savings so the component that did the work is first.
+func foldComponents(v *abVariant, comps []*dash.ComponentRow) {
+	for _, c := range comps {
+		var dst *abComponent
+		for i := range v.Components {
+			if v.Components[i].Component == c.Component {
+				dst = &v.Components[i]
+				break
+			}
+		}
+		if dst == nil {
+			v.Components = append(v.Components, abComponent{Component: c.Component})
+			dst = &v.Components[len(v.Components)-1]
+		}
+		dst.Runs += c.Runs
+		dst.Acted += c.Acted
+		dst.Reverted += c.Reverted
+		dst.SavedUnique += c.SavedUnique
+		if dst.Runs > 0 {
+			dst.ActRate = float64(dst.Acted) / float64(dst.Runs)
+		}
+	}
+	sort.SliceStable(v.Components, func(i, j int) bool {
+		return v.Components[i].SavedUnique > v.Components[j].SavedUnique
+	})
+}
+
+func hasString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// atoi64 parses an epoch-millisecond query parameter, 0 for anything unparseable.
+func atoi64(s string) int64 {
+	n, _ := strconv.ParseInt(s, 10, 64)
+	return n
 }

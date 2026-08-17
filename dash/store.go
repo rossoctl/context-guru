@@ -57,7 +57,14 @@ func Open(path string) (*DB, error) {
 		// back to :memory: silently merged their history, and :memory: tests leaked rows
 		// into each other (the flakiest possible failure). A per-instance name keeps the
 		// pooling behaviour and removes the collision.
-		return openDSN(fmt.Sprintf("file:dashmem%d?mode=memory&cache=shared", memSeq.Add(1)), "")
+		// foreign_keys(1) here as well as in dsn(): the ON DELETE CASCADE from requests to
+		// request_components / request_content is how retention, eviction and a tenant purge
+		// avoid leaving orphan rows, and the pragma is PER CONNECTION. Without it every
+		// in-memory database in this package — which is every test — quietly kept its child
+		// rows while the file-backed deployment deleted them, so the tests could not see the
+		// bug they were meant to catch.
+		return openDSN(fmt.Sprintf("file:dashmem%d?mode=memory&cache=shared&_pragma=foreign_keys(1)",
+			memSeq.Add(1)), "")
 	}
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {

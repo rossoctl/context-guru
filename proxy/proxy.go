@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -375,6 +376,10 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 		}
 		copyHeaders(req.Header, r.Header)
 		setUpstreamAuth(req.Header, up)
+		if isBobProfile(r) {
+			// We have to read this one response, so do not let it arrive compressed.
+			req.Header.Del("Accept-Encoding")
+		}
 		resp, err := h.client.Do(req)
 		if err != nil {
 			recordRefusal(refuseUpstream, "")
@@ -384,8 +389,81 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 			http.Error(w, "upstream request failed", http.StatusBadGateway)
 			return
 		}
+		if isBobProfile(r) && h.forwardBobProfile(w, resp) {
+			return
+		}
 		h.stream(w, resp)
 	}
+}
+
+// bobProfilePath is the profile route Bob's CLI calls before anything else, and the
+// one response the catch-all does not forward verbatim. See forwardBobProfile.
+const bobProfilePath = "/admin/v1/profile"
+
+func isBobProfile(r *http.Request) bool {
+	return r.Method == http.MethodGet && strings.EqualFold(r.URL.Path, bobProfilePath)
+}
+
+// forwardBobProfile forwards Bob's profile with the per-instance REGION fields removed,
+// and reports whether it answered the request.
+//
+// Bob's client does not keep the base URL it was configured with. Having fetched the
+// profile, `Pc.resolveBaseUrl` (bobshell 1.0.6) replaces the HOSTNAME of that URL with
+// `api.<region_domain>` from the profile — keeping the scheme and, fatally, the PORT.
+// Pointed at a context-guru instance on 127.0.0.1:4111, its very next call goes to
+// http://api.us-east.bob.ibm.com:4111, where nothing listens: observed live as
+// "Request failed after 6 attempts: fetch failed", with not one model request ever
+// reaching the proxy while the profile call itself succeeded — the confusing shape,
+// because the proxy looks half-working and its log is empty.
+//
+// The rewrite is skipped when the instance carries no region (`hasRegion` false), so
+// dropping those two fields is all it takes for the client to keep talking to the
+// endpoint its operator configured. Nothing else in the document is touched, and a
+// body we cannot parse is passed through unchanged rather than mangled.
+func (h *Handler) forwardBobProfile(w http.ResponseWriter, resp *http.Response) bool {
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBytes))
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	out, ok := stripProfileRegion(body)
+	if !ok {
+		out = body
+	}
+	copyHeaders(w.Header(), resp.Header)
+	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
+	w.WriteHeader(resp.StatusCode)
+	w.Write(out)
+	return true
+}
+
+// stripProfileRegion removes region/region_domain from every instance in a Bob profile
+// document, reporting false when the body is not one (then it must be forwarded as-is).
+func stripProfileRegion(b []byte) ([]byte, bool) {
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return nil, false
+	}
+	insts, ok := doc["instances"].([]any)
+	if !ok {
+		return nil, false
+	}
+	for _, it := range insts {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		delete(m, "region")
+		delete(m, "region_domain")
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // compact runs the pipeline over the request body's messages and returns the

@@ -209,7 +209,7 @@ func (r *Registry) WebSession(cookie string) (*Tenant, error) {
 		return nil, err
 	}
 	if t.Disabled {
-		return nil, ErrDisabled
+		return nil, disabledErr(t)
 	}
 	// Stamp "last seen", THROTTLED to once a minute per session by the WHERE clause.
 	// This runs on every authenticated dashboard request, and the session list is only
@@ -239,6 +239,22 @@ func (r *Registry) EndWebSession(cookie string) error {
 // still read their history until the cookie lapsed.
 func (r *Registry) EndAllWebSessions(tenantID string) error {
 	_, err := r.db.Exec(`DELETE FROM dash_sessions WHERE tenant_id = ?`, tenantID)
+	return err
+}
+
+// EndOtherWebSessions signs a tenant out everywhere EXCEPT the browser making the
+// request — the "sign out my other machines" half of a password change.
+//
+// keep is the caller's own cookie value, hashed here rather than passed in as a digest,
+// so no caller has to know how a session id is derived. An empty keep ends all of them,
+// which is the same thing EndAllWebSessions does.
+func (r *Registry) EndOtherWebSessions(tenantID, keep string) error {
+	if keep == "" {
+		return r.EndAllWebSessions(tenantID)
+	}
+	sum := sha256.Sum256([]byte(keep))
+	_, err := r.db.Exec(`DELETE FROM dash_sessions WHERE tenant_id = ? AND id <> ?`,
+		tenantID, sum[:])
 	return err
 }
 

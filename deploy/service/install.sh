@@ -193,7 +193,12 @@ write_local_dropin() {
   install -d -m0755 "$DROPIN"
   local out="$DROPIN/20-local.conf"
   if [ -f "$out" ]; then
-    ok "site config $out (left alone)"
+    # CONTENTS left alone; the mode is not content. An install predating the 0600 below
+    # left this file 0644 with METRICS_TOKEN documented in it, and only a re-run can
+    # correct that — skipping the chmod here would mean the fix never reaches the boxes
+    # that actually have the problem.
+    chmod 0600 "$out"
+    ok "site config $out (left alone, mode 0600)"
     return
   fi
   cat > "$out" <<'LOCAL'
@@ -221,7 +226,12 @@ Environment=TENANT_CONCURRENT=16
 # Uncomment to let a Prometheus on another host scrape /metrics (loopback needs nothing).
 #Environment=METRICS_TOKEN=
 LOCAL
-  chmod 0644 "$out"
+  # 0600, not 0644: this file is where METRICS_TOKEN goes, and that token reads a
+  # service-wide view carrying every tenant's month-to-date cost. systemd reads drop-ins as
+  # root, so nothing needs the group or other bits. The sibling drop-ins stay 0644 because
+  # they hold no secrets — 10-credentials.conf names credential FILES, and those are 0640
+  # root-only themselves.
+  chmod 0600 "$out"
   warn "created $out — set MANAGER_EMAIL in it, then: systemctl daemon-reload"
 }
 
@@ -349,8 +359,30 @@ cmd_nginx() {
     exit 1
   fi
   install -d -m0755 /etc/nginx/conf.d
-  install -m0644 "$SVC_DIR/nginx.conf" /etc/nginx/conf.d/context-guru.conf
-  ok "installed /etc/nginx/conf.d/context-guru.conf"
+  # Validate BEFORE committing to the live file, and put the old one back if the new one does
+  # not pass. A straight `install` over the live conf with `nginx -t` only further down
+  # leaves a broken file in place on failure: nginx keeps serving the old config from memory,
+  # so nothing looks wrong until the next reload or reboot takes the whole front end down —
+  # and by then the file that worked is gone. `nginx -t` reads the on-disk tree, so the swap
+  # has to happen first; the rollback is what makes that safe.
+  #
+  # Backups go to /etc/nginx/backups, NOT conf.d: nginx includes conf.d/*.conf, and a backup
+  # name that ever matches that glob defines the whole server block twice and nginx refuses
+  # to start.
+  local live=/etc/nginx/conf.d/context-guru.conf prev=""
+  if [ -f "$live" ]; then
+    install -d -m0755 /etc/nginx/backups
+    prev="/etc/nginx/backups/context-guru.conf.$(date +%Y%m%d-%H%M%S)"
+    cp -a "$live" "$prev"
+  fi
+  install -m0644 "$SVC_DIR/nginx.conf" "$live"
+  if ! nginx -t >/dev/null 2>&1; then
+    no "the new nginx config does not pass nginx -t — the live config is left as it was:"
+    nginx -t 2>&1 | sed 's/^/    /'
+    if [ -n "$prev" ]; then cp -a "$prev" "$live"; else rm -f "$live"; fi
+    exit 1
+  fi
+  ok "installed /etc/nginx/conf.d/context-guru.conf${prev:+ (previous kept at $prev)}"
   if [ ! -f "$ETC/tls/fullchain.pem" ] || [ ! -f "$ETC/tls/privkey.pem" ]; then
     no "no TLS certificate at $ETC/tls/{fullchain,privkey}.pem — nginx will not start"
     echo "    Put the real certificate there, or for a first test:"
@@ -415,12 +447,18 @@ cmd_nginx() {
 #
 # Both bind LOOPBACK ONLY. /metrics is a service-wide view carrying every tenant's spend,
 # and Grafana's session cookie is as good as the admin password — neither belongs on a
-# shared box's LAN interface. Reach them with `ssh -L 3000:127.0.0.1:3000`.
+# shared box's LAN interface. Reach them with `ssh -L 3000:127.0.0.1:3000`, or through the
+# nginx front end's /grafana/, which is gated to context-guru MANAGERS by auth_request (see
+# deploy/service/nginx.conf). Prometheus and Loki are not published at all.
 OBS_ETC="$ETC/observability"
 OBS_STATE="$STATE/observability"
 PROM_IMAGE="${PROM_IMAGE:-docker.io/prom/prometheus:v3.2.1}"
 GRAFANA_IMAGE="${GRAFANA_IMAGE:-docker.io/grafana/grafana:11.6.0}"
 PROM_RETENTION="${PROM_RETENTION:-90d}"
+# The public URL Grafana is reached at, which is the nginx front end's /grafana/ — not the
+# loopback port. Grafana generates its redirects and asset URLs from this, so it has to be
+# the address the BROWSER used. Override it if the front end answers to another name.
+GRAFANA_ROOT_URL="${GRAFANA_ROOT_URL:-https://$(hostname -f 2>/dev/null || hostname)/grafana/}"
 # Loki holds the LOGS; Prometheus holds the numbers. Both are read through the same
 # Grafana, which is the whole reason Loki won over the alternatives — see
 # deploy/grafana/README.md, "Why Loki".
@@ -534,26 +572,54 @@ promtail will find nothing until the service starts"
   say "Grafana"
   # A password is only needed the FIRST time — after that it lives in Grafana's own
   # database, and re-running the installer must not demand a secret it does not need.
-  local pw_args=() generated=""
-  if [ -n "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
-    pw_args=(-e "GF_SECURITY_ADMIN_PASSWORD=$GRAFANA_ADMIN_PASSWORD")
-  elif [ ! -f "$OBS_STATE/grafana/grafana.db" ]; then
+  local generated="" pw="${GRAFANA_ADMIN_PASSWORD:-}"
+  if [ -z "$pw" ] && [ ! -f "$OBS_STATE/grafana/grafana.db" ]; then
     generated=$(head -c 18 /dev/urandom | base64 | tr -d '/+=')
-    pw_args=(-e "GF_SECURITY_ADMIN_PASSWORD=$generated")
+    pw="$generated"
   fi
+
+  # Every setting goes through an env-FILE rather than -e flags, and that is about the one
+  # secret among them. `docker run -e GF_SECURITY_ADMIN_PASSWORD=…` puts the password in
+  # this process's argv, i.e. /proc/<pid>/cmdline, which is world-readable: any local user
+  # running `ps auxww` during the install reads Grafana's admin password, and Grafana's
+  # admin sees every tenant's spend. The file is 0600 root-owned, lives on the /run tmpfs
+  # so the value never reaches a disk, and is removed as soon as the container exists —
+  # the runtime has copied the variables into the container's own config by then.
+  local envfile
+  envfile=$(mktemp /run/cg-grafana-env.XXXXXX)
+  chmod 0600 "$envfile"
+  {
+    echo "GF_SERVER_HTTP_ADDR=127.0.0.1"
+    echo "GF_SERVER_HTTP_PORT=3000"
+    # Sub-path support, for the manager-gated /grafana/ on the nginx front end. Grafana
+    # builds its own redirects and asset URLs from ROOT_URL, so without BOTH of these every
+    # asset 404s and the login redirect escapes the sub-path. Harmless when nothing is
+    # proxying: the loopback port then serves the same UI under /grafana/.
+    echo "GF_SERVER_ROOT_URL=$GRAFANA_ROOT_URL"
+    echo "GF_SERVER_SERVE_FROM_SUB_PATH=true"
+    # Off, deliberately. /grafana/ is reachable from the network now, and the manager gate
+    # in front of it is what decides who gets in; Grafana's own login is the second door.
+    echo "GF_AUTH_ANONYMOUS_ENABLED=false"
+    echo "GF_ANALYTICS_REPORTING_ENABLED=false"
+    if [ -n "$pw" ]; then echo "GF_SECURITY_ADMIN_PASSWORD=$pw"; fi
+  } > "$envfile"
+
   $oci rm -f cg-grafana >/dev/null 2>&1 || true
   # The dashboards mount INSIDE the data volume: the provider yml points at
   # /var/lib/grafana/dashboards/context-guru, and nested binds resolve outermost-first, so
   # a read-only dashboard directory survives inside the writable data directory.
-  $oci run -d --name cg-grafana --network=host --restart=unless-stopped \
-    -e GF_SERVER_HTTP_ADDR=127.0.0.1 -e GF_SERVER_HTTP_PORT=3000 \
-    -e GF_AUTH_ANONYMOUS_ENABLED=false -e GF_ANALYTICS_REPORTING_ENABLED=false \
-    "${pw_args[@]}" \
+  if ! $oci run -d --name cg-grafana --network=host --restart=unless-stopped \
+    --env-file "$envfile" \
     -v "$OBS_ETC/grafana/provisioning:/etc/grafana/provisioning:ro,Z" \
     -v "$OBS_ETC/grafana/dashboards:/var/lib/grafana/dashboards/context-guru:ro,Z" \
     -v "$OBS_STATE/grafana:/var/lib/grafana:Z" \
-    "$GRAFANA_IMAGE" >/dev/null
-  ok "cg-grafana on 127.0.0.1:3000"
+    "$GRAFANA_IMAGE" >/dev/null; then
+    rm -f "$envfile"
+    no "cg-grafana failed to start — see: $oci logs cg-grafana"
+    exit 1
+  fi
+  rm -f "$envfile"
+  ok "cg-grafana on 127.0.0.1:3000, root_url $GRAFANA_ROOT_URL"
   if [ -n "$generated" ]; then
     warn "generated the admin password below. It is NOT written anywhere — save it now:"
     printf '\n      admin / %s\n\n' "$generated"
@@ -563,9 +629,11 @@ promtail will find nothing until the service starts"
 
   say "Next"
   echo "  sudo $0 grafana-status          # scrape health + provisioned dashboards"
-  echo "  ssh -L 3000:127.0.0.1:3000 $(hostname -f 2>/dev/null || hostname)"
-  echo "  then: http://127.0.0.1:3000/d/context-guru/context-guru        # the numbers"
-  echo "        http://127.0.0.1:3000/d/context-guru-logs/context-guru-logs   # the logs"
+  echo "  ${GRAFANA_ROOT_URL}d/context-guru/context-guru        # the numbers (manager only)"
+  echo "  ${GRAFANA_ROOT_URL}d/context-guru-logs/context-guru-logs   # the logs"
+  echo "  install.sh nginx publishes those; until then, or to bypass the gate:"
+  echo "    ssh -L 3000:127.0.0.1:3000 $(hostname -f 2>/dev/null || hostname)"
+  echo "    http://127.0.0.1:3000/grafana/d/context-guru/context-guru"
 }
 
 cmd_grafana_status() {
@@ -634,8 +702,11 @@ v=json.load(sys.stdin).get("data") or []
 print("    " + (", ".join(v) if v else "none yet"))' 2>/dev/null || echo "    (query failed)"
 
   say "Grafana"
-  if curl -sf --max-time 5 http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
-    ok "answering on 127.0.0.1:3000"
+  # /grafana/api/health, not /api/health: SERVE_FROM_SUB_PATH moves the whole application
+  # and the bare path answers 301, which `curl -sf` reports as a failure — a healthy
+  # Grafana would read as down.
+  if curl -sf --max-time 5 http://127.0.0.1:3000/grafana/api/health >/dev/null 2>&1; then
+    ok "answering on 127.0.0.1:3000/grafana/"
     # /api/search needs credentials; the provisioning log does not, and it is the thing
     # that actually goes wrong (a dashboard JSON that fails to parse is logged, not shown).
     if $oci logs cg-grafana 2>&1 | grep -iE 'provisioning.*(error|fail)' \
@@ -647,9 +718,9 @@ print("    " + (", ".join(v) if v else "none yet"))' 2>/dev/null || echo "    (q
       ok "no dashboard provisioning errors in the log"
     fi
     echo "  dashboards (needs the admin password):"
-    echo "    curl -s -u admin:PASSWORD 'http://127.0.0.1:3000/api/search?type=dash-db'"
+    echo "    curl -s -u admin:PASSWORD 'http://127.0.0.1:3000/grafana/api/search?type=dash-db'"
   else
-    no "Grafana is not answering on 127.0.0.1:3000"
+    no "Grafana is not answering on 127.0.0.1:3000/grafana/"
   fi
 }
 

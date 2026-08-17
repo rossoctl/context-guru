@@ -115,7 +115,7 @@ func (r *Registry) VerifyLogin(email, password string) (*Tenant, error) {
 		return nil, err
 	}
 	if t.Disabled {
-		return nil, ErrDisabled
+		return nil, disabledErr(t)
 	}
 	if !t.Verified() {
 		return nil, ErrNotVerified
@@ -139,8 +139,10 @@ var decoyHash = func() string {
 	return h
 }()
 
-// SetPassword replaces an account's password. Used by the change-password path and by
-// a verified user who registered before passwords existed.
+// SetPassword replaces an account's password. Both callers are in this file:
+// ChangePassword (the signed-in user, old password required) and ResetPassword (the
+// emailed-code recovery flow). It is deliberately NOT exported behaviour a manager can
+// reach — see ResetPassword.
 func (r *Registry) SetPassword(tenantID, password string) error {
 	hash, err := HashPassword(password)
 	if err != nil {
@@ -155,6 +157,77 @@ func (r *Registry) SetPassword(tenantID, password string) error {
 	}
 	r.clearCache()
 	return nil
+}
+
+// ChangePassword replaces a signed-in user's password, checking the OLD one first.
+//
+// The old password is required even though the caller already holds a session cookie,
+// and that is not ceremony: a stolen cookie is the exact thing a password change would
+// otherwise convert into permanent ownership of the account, locking the real owner out
+// of a credential they still know.
+//
+// It ends every OTHER browser session on success and leaves the caller's own alone. A
+// password change is the moment a user acts on "someone else may be in here", so the
+// other sessions have to go; signing the person out of the tab they just used to do it
+// would make the feature feel broken.
+func (r *Registry) ChangePassword(tenantID, currentCookie, old, next string) error {
+	var hash string
+	if err := r.db.QueryRow(`SELECT password_hash FROM tenants WHERE id = ?`,
+		tenantID).Scan(&hash); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if hash == "" {
+		// An account created before passwords existed. It has nothing to check the old
+		// value against, so this is not the route for it: the emailed-code reset is, which
+		// proves the address instead.
+		return ErrNoPassword
+	}
+	if !VerifyPassword(hash, old) {
+		return ErrWrongPass
+	}
+	// Rejected BEFORE anything is written, so a too-short new password leaves the old one
+	// working rather than half-applying.
+	if err := r.SetPassword(tenantID, next); err != nil {
+		return err
+	}
+	// On the record. A password change is exactly the event whose absence from the trail
+	// makes an account takeover undetectable afterwards.
+	if err := r.auditSelf(tenantID, "password", "", "changed"); err != nil {
+		return err
+	}
+	return r.EndOtherWebSessions(tenantID, currentCookie)
+}
+
+// ResetPassword completes the emailed-code recovery flow: it spends a PurposeReset code
+// and installs the new password.
+//
+// One function rather than VerifyCode + SetPassword at the HTTP layer, for the same
+// reason VerifyRegistration is one function: a handler that spent the code and then
+// failed to write the password would burn the user's only code and leave them exactly
+// where they started, and its retry would need a fresh one.
+//
+// Every session goes, including the caller's — there is no session at this point anyway
+// (this flow is reached by someone who cannot sign in), and whoever else was in the
+// account is precisely who a recovery is meant to evict.
+func (r *Registry) ResetPassword(tenantID, code, next string) error {
+	// The password is validated FIRST, so a user who types a 6-character new password does
+	// not spend their code learning that. HashPassword is the only rule there is.
+	if _, err := HashPassword(next); err != nil {
+		return err
+	}
+	if err := r.VerifyCode(tenantID, PurposeReset, code); err != nil {
+		return err
+	}
+	if err := r.SetPassword(tenantID, next); err != nil {
+		return err
+	}
+	if err := r.auditSelf(tenantID, "password", "", "reset by email"); err != nil {
+		return err
+	}
+	return r.EndAllWebSessions(tenantID)
 }
 
 // VerifyRegistration completes a registration: it consumes the mailed code, marks the

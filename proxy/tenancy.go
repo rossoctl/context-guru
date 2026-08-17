@@ -220,13 +220,21 @@ const TokenHeader = "x-context-guru-token"
 // scrubToken).
 var authHeaders = []string{"Authorization", "x-api-key", "x-goog-api-key"}
 
-// headerCredential pulls a bearer-ish value out of one header. Splitting on fields
-// rather than trimming a prefix so that a lone "Bearer" yields nothing at all,
-// instead of the word "Bearer" being sent off to be looked up.
+// headerCredential pulls the credential out of one auth header: either a bare value,
+// or a `<scheme> <value>` pair. Splitting on fields rather than trimming a prefix so
+// that a lone "Bearer" yields nothing at all, instead of the word "Bearer" being sent
+// off to be looked up.
+//
+// The scheme is deliberately NOT checked against a list. It used to require "Bearer",
+// and BobShell sends `Authorization: Apikey <key>` — so its key was invisible to
+// CallerKey, every Bob request was refused 401 "no context-guru token" no matter what
+// the tenant had bound, and scrubToken could not have removed one of our own tokens
+// from that slot either. Anything that is not our token is forwarded unchanged, scheme
+// included, so accepting the pair only affects whether we can RECOGNISE it.
 func headerCredential(v string) string {
 	f := strings.Fields(v)
 	switch {
-	case len(f) == 2 && strings.EqualFold(f[0], "bearer"):
+	case len(f) == 2:
 		return f[1]
 	case len(f) == 1 && !strings.EqualFold(f[0], "bearer"):
 		return f[0]
@@ -326,6 +334,25 @@ var (
 	errNoProviderKey = statusError{http.StatusUnauthorized,
 		"no provider credential; send your own API key in Authorization or x-api-key"}
 )
+
+// tenantOff is the 403 for a disabled account, carrying the manager's reason when one was
+// recorded.
+//
+// Why the reason travels this far: "disabled" used to be undiagnosable from outside. An
+// agent got a bare 403, the dashboard refused the sign-in that would have explained it,
+// and the person whose work had stopped could not tell a deliberate suspension from a bug
+// in the proxy. The manager writes the note; the account's owner is who reads it.
+//
+// Falls back to the unchanged constant when there is no reason, so accounts disabled
+// before this existed answer exactly as they did.
+func tenantOff(err error) StatusError {
+	var de *tenant.DisabledError
+	if errors.As(err, &de) && de.Reason != "" {
+		return statusError{http.StatusForbidden,
+			"this context-guru account is disabled: " + de.Reason}
+	}
+	return errTenantOff
+}
 
 // statusOf maps a resolution error to its HTTP status, defaulting to 401 rather
 // than 500: every error out of the auth path is an auth failure unless it says
@@ -438,7 +465,7 @@ func (s *TenantSource) Resolve(r *http.Request) (*Tenancy, error) {
 		t, err := s.reg.Resolve(tok)
 		switch {
 		case errors.Is(err, tenant.ErrDisabled):
-			return nil, errTenantOff
+			return nil, tenantOff(err)
 		case err != nil:
 			return nil, errBadToken
 		}
@@ -451,11 +478,25 @@ func (s *TenantSource) Resolve(r *http.Request) (*Tenancy, error) {
 	t, err := s.reg.ResolveAgentKey(key)
 	switch {
 	case errors.Is(err, tenant.ErrDisabled):
-		return nil, errTenantOff
+		return nil, tenantOff(err)
 	case err != nil:
 		return nil, errUnboundKey
 	}
 	return s.tenancy(t)
+}
+
+// Forget drops a tenant's cached pipeline and state store. Called when an account is
+// DELETED: their tokens are gone, so nothing can authenticate as them again, but this
+// cache is keyed by tenant id and holds a live Store — every offloaded original and frozen
+// compaction decision that account accumulated. Without this it sits in memory until 255
+// other tenants push it out, and a re-registered id would inherit it.
+func (s *TenantSource) Forget(tenantID string) {
+	if s == nil || tenantID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cache.remove(tenantID)
 }
 
 // ForTenant returns the tenancy for an already-authenticated tenant, for callers
@@ -465,7 +506,7 @@ func (s *TenantSource) ForTenant(t *tenant.Tenant) (*Tenancy, error) {
 		return nil, errNoToken
 	}
 	if t.Disabled {
-		return nil, errTenantOff
+		return nil, tenantOff(&tenant.DisabledError{Reason: t.DisabledReason})
 	}
 	return s.tenancy(t)
 }

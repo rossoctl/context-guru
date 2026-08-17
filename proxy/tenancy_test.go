@@ -43,6 +43,14 @@ func newHostedFixtureNoKey(t *testing.T, upstreamName, dialect string) *hostedFi
 }
 
 func newHostedFixtureKey(t *testing.T, upstreamName, dialect, keyEnv string) *hostedFixture {
+	return newHostedFixtureOpts(t, upstreamName, dialect, keyEnv, nil)
+}
+
+// newHostedFixtureOpts is newHostedFixtureKey with a hook to adjust Options before the
+// handler is built — for the tests that need a dashboard recorder wired in (manager_test.go).
+// A hook rather than a second copy of this function: everything else about the fixture has
+// to stay identical, or a test proves something about a proxy nobody ships.
+func newHostedFixtureOpts(t *testing.T, upstreamName, dialect, keyEnv string, tweak func(*Options)) *hostedFixture {
 	t.Helper()
 	f := &hostedFixture{}
 	f.upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,13 +94,17 @@ func newHostedFixtureKey(t *testing.T, upstreamName, dialect, keyEnv string) *ho
 			Store: store.NewMemory(store.Options{}), Preset: "test"}, nil
 	}
 	src := NewTenantSource(reg, nil, build, 0)
-	f.h = New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil, Options{
+	opts := Options{
 		Tenants: src,
 		Upstreams: map[string]Upstream{upstreamName: {
 			Dialect: dialect, BaseURL: f.upstream.URL, KeyEnv: keyEnv,
 		}},
 		BobUpstream: f.upstream.URL,
-	})
+	}
+	if tweak != nil {
+		tweak(&opts)
+	}
+	f.h = New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil, opts)
 	t.Cleanup(f.h.Close)
 	f.mux = f.h.Mux()
 	return f
@@ -486,6 +498,84 @@ func TestCallerKeyIgnoresOurToken(t *testing.T) {
 		r.Header.Set(slot, "Bearer "+tok)
 		if got := CallerKey(r); got != "" {
 			t.Errorf("%s: CallerKey returned our own token %q", slot, got)
+		}
+	}
+}
+
+// Bob (BobShell 1.0.6) sends `Authorization: Apikey <key>`, not Bearer — observed live
+// against a header-dumping upstream. Requiring "Bearer" made its key invisible, so every
+// Bob request was refused 401 "no context-guru token" however the tenant had bound it,
+// and one of our tokens in that slot would not have been scrubbed before forwarding.
+func TestCallerKeyReadsAnyAuthScheme(t *testing.T) {
+	tok := tenant.TokenPrefix + strings.Repeat("C", 26)
+	for _, scheme := range []string{"Apikey", "ApiKey", "Token", "Bearer"} {
+		r := httptest.NewRequest(http.MethodGet, "/admin/v1/profile", nil)
+		r.Header.Set("Authorization", scheme+" caller-own-key")
+		if got := CallerKey(r); got != "caller-own-key" {
+			t.Errorf("scheme %q: CallerKey = %q, want the key", scheme, got)
+		}
+		r = httptest.NewRequest(http.MethodGet, "/admin/v1/profile", nil)
+		r.Header.Set("Authorization", scheme+" "+tok)
+		if got := TokenFromRequest(r); got != tok {
+			t.Errorf("scheme %q: TokenFromRequest = %q, want our token", scheme, got)
+		}
+		if got := CallerKey(r); got != "" {
+			t.Errorf("scheme %q: CallerKey returned our own token %q", scheme, got)
+		}
+		scrubToken(r.Header)
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("scheme %q: token survived scrubbing: %q", scheme, got)
+		}
+	}
+}
+
+// Bob's client rebuilds its base URL from the profile's region_domain, keeping our
+// PORT and swapping our host — so a proxied session dies with "fetch failed" and no
+// request in the log. Dropping the region fields is what keeps it pointed at us; every
+// other field has to survive, because instance_id is what its next call is keyed on.
+func TestStripProfileRegion(t *testing.T) {
+	in := []byte(`{"user_id":"u@ibm.com","instances":[` +
+		`{"instance_id":"i1","region":"us-east","region_domain":"us-east.bob.ibm.com","plan_id":"p"},` +
+		`{"instance_id":"i2"}]}`)
+	out, ok := stripProfileRegion(in)
+	if !ok {
+		t.Fatal("stripProfileRegion refused a profile document")
+	}
+	if s := string(out); strings.Contains(s, "region") {
+		t.Errorf("region survived: %s", s)
+	}
+	var doc struct {
+		UserID    string `json:"user_id"`
+		Instances []struct {
+			ID     string `json:"instance_id"`
+			PlanID string `json:"plan_id"`
+		} `json:"instances"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("rewritten profile does not parse: %v", err)
+	}
+	if doc.UserID != "u@ibm.com" || len(doc.Instances) != 2 ||
+		doc.Instances[0].ID != "i1" || doc.Instances[0].PlanID != "p" || doc.Instances[1].ID != "i2" {
+		t.Errorf("rewrite lost a field: %s", out)
+	}
+	// Anything we cannot recognise is forwarded untouched rather than mangled.
+	for _, bad := range []string{"not json", `{"instances":"nope"}`, `[]`} {
+		if _, ok := stripProfileRegion([]byte(bad)); ok {
+			t.Errorf("stripProfileRegion accepted %q", bad)
+		}
+	}
+	// Only the profile GET is rewritten; the model route and everything else is verbatim.
+	for _, c := range []struct {
+		method, path string
+		want         bool
+	}{
+		{http.MethodGet, "/admin/v1/profile", true},
+		{http.MethodPost, "/admin/v1/profile", false},
+		{http.MethodGet, "/inference/v1/model/info", false},
+	} {
+		r := httptest.NewRequest(c.method, c.path, nil)
+		if got := isBobProfile(r); got != c.want {
+			t.Errorf("isBobProfile(%s %s) = %v", c.method, c.path, got)
 		}
 	}
 }
