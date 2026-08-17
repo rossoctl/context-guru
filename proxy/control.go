@@ -1510,11 +1510,13 @@ func (h *Handler) ctlManagerMintToken(w http.ResponseWriter, r *http.Request) {
 // account deletion across both databases and cold storage, and the ability to START a
 // password reset.
 //
-// What a manager never gets: a tenant's captured transcript text (dash's request and
-// archive routes strip Content for anyone who is not the row's owner), and a tenant's
-// password. The reset route mails the OWNER a code and returns nothing — a manager who
-// could set a password could read that account's transcripts by signing in as them, which
-// is the boundary this whole design exists to keep.
+// A manager also reads any account's captured transcript text through dash's request,
+// transcript and archive routes — an explicit owner decision. Everyone else still sees
+// only their own.
+//
+// What a manager never gets: a tenant's password. The reset route mails the OWNER a code
+// and returns nothing, so the account's own credential is never in a manager's hands and
+// a manager can never act AS that user against an upstream.
 
 // disabledMsg renders the sign-in refusal for a disabled account, with the manager's
 // reason when there is one. Shares tenantOff's wording so an agent's 403 and a browser's
@@ -1683,8 +1685,8 @@ func (h *Handler) ctlCompleteReset(w http.ResponseWriter, r *http.Request) {
 // nothing: the code goes to the account's own address, and only its owner can finish.
 //
 // This is the recovery path a manager actually needs — "I cannot sign in" — without
-// becoming the ability to sign in AS a user, which would hand a manager that account's
-// transcripts and defeat the one boundary this service promises its users.
+// becoming the ability to sign in AS a user — spending on their credential and acting in
+// their name, which is the boundary this service still promises its users.
 func (h *Handler) ctlManagerReset(w http.ResponseWriter, r *http.Request) {
 	actor, err := h.webPrincipal(r)
 	if err != nil {

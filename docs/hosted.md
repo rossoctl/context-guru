@@ -651,9 +651,12 @@ open); it never borrows the server's.
 
 ## Managing users
 
-A manager sees every account's metrics and configuration, and no account's transcripts.
-That split is the whole shape of this section: everything below is available to a manager,
-and reading somebody's captured source code is not.
+A manager sees every account's metrics, configuration and transcripts. Pointing the
+dashboard's account selector at a tenant gives a manager that tenant's own request drawer
+and compaction-diff view, over whatever that tenant consented to capture.
+
+The one thing a manager never gets is a tenant's password — see
+[Passwords](#passwords-what-a-manager-can-and-cannot-do).
 
 The Tenants tab is the console. Per account it offers the full configuration (pipeline,
 per-component settings, mode, upstreams, row quota, capture consent, role), an A/B variant
@@ -780,9 +783,10 @@ target.
 | `POST /api/password-reset` → `/verify` | anyone with the mailbox | Self-service recovery. Phase one answers identically for an unknown address; phase two spends the code plus the new password and ends every session. Opens **no** session: signing in still wants the password and a fresh code. |
 | `POST /api/tenants/{id}/password-reset` | a manager | Mails **that account** a code. The manager never sees it and cannot set a password; the old password keeps working until its owner finishes. Audited. |
 
-A manager who could set a password could sign in as that user and read their transcripts,
-which is the one boundary this service promises its users. So the recovery path a manager
-gets is "start it", never "do it".
+A manager who could set a password could sign in AS that user — sending requests on their
+credential, reading their mail-bound recovery, acting in their name. That is the boundary
+this service still promises, so the recovery path a manager gets is "start it", never
+"do it".
 
 ## Storage
 
@@ -1109,11 +1113,13 @@ the very first request after a restart is recorded as `partial` and unpriced.
   redactor in front of the write is a best-effort denylist — a review of 22 realistic
   credential shapes found 11 passing through it — so this is a decision about real source
   code landing on disk.
-- **A manager sees everyone's metrics and nobody's transcripts.** Reading another
-  user's source code is not an administrative need, and the consent they gave was for
-  their own view. A manager may *withdraw* that consent, *purge* what it produced and
-  *delete* the account, and may start a password reset — but cannot set a password, which
-  is what would otherwise let them sign in as a user and read it all anyway. See
+- **A manager sees everyone's metrics *and* everyone's transcripts.** An explicit owner
+  decision: whoever runs the service can open any account's request drawer and compaction
+  diff via the account selector, over whatever that account consented to capture. Tell
+  users, because it is what their consent now means; the Settings consent screen says it
+  too. A manager may also *withdraw* that consent, *purge* what it produced and *delete*
+  the account, and may start a password reset — but still cannot set a password, so a
+  manager cannot act as a user against an upstream. See
   [Managing users](#managing-users).
 - **Hosted mode refuses to start with `CONTEXT_GURU_DUMP` or `CONTEXT_GURU_CAPTURE` set.**
   Either one appends every tenant's pristine request bodies to a single process-wide file:

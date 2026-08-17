@@ -344,9 +344,9 @@ func (r *Registry) newTenant(label, email string) (*Tenant, error) {
 		// of known credential shapes and size-capped first, but that scrubbing is a
 		// pattern denylist, and a review of 22 realistic credential shapes found 11 got
 		// through. The operator gate (--dashboard-content) still has to be on as well, and
-		// a tenant can turn this off on their settings page at any time. What makes it
-		// acceptable here: content is visible ONLY to the tenant that produced it — a
-		// manager sees everyone's metrics and nobody's transcripts.
+		// a tenant can turn this off on their settings page at any time. Who can read it:
+		// the tenant that produced it and the service manager — the consent screen says so
+		// at the point of consent, because a default-on switch has to name its audience.
 		CaptureContent: true,
 		CreatedAt:      now,
 	}

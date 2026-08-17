@@ -217,27 +217,61 @@ func TestManagerEditsAnyTenantsFullConfiguration(t *testing.T) {
 	}
 }
 
-// The boundary that must not move: a manager reads everyone's metrics and nobody's
-// transcripts. Checked through the REAL control-plane authenticator rather than a stub, and
-// on every surface a manager can reach — including the new A/B rollup.
-func TestManagerCannotReadAnotherTenantsTranscripts(t *testing.T) {
+// NEW RULE, replacing "a manager reads nobody's transcripts": a manager reads any account's
+// request diffs and session transcripts, and nobody else reads anyone's but their own.
+// Checked through the REAL control-plane authenticator rather than a stub.
+func TestManagerReadsAnotherTenantsTranscripts(t *testing.T) {
 	f := newMgrFixture(t)
 	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
 	_, userID := f.signUpJar(t, "a@ibm.com")
+	otherJar, _ := f.signUpJar(t, "b@ibm.com")
 	const secret = "SECRET-SOURCE-CODE-OF-A"
 	id := f.record(t, userID, "sess-a", &dash.Event{
 		Model: "m", TokensBefore: 100, TokensAfter: 60,
 		Content: []dash.ContentRow{{Path: "0", Before: secret, After: "x"}},
 	})
+	reqPath := "/api/requests/" + strconv.FormatInt(id, 10)
 
 	for _, path := range []string{
-		"/api/requests/" + strconv.FormatInt(id, 10),
-		"/api/requests?tenant=" + userID,
-		"/api/requests?tenant=*",
+		reqPath,
 		"/api/sessions/sess-a/transcript?tenant=" + userID,
 		"/api/sessions/sess-a/transcript?tenant=*",
-		"/api/tenants",
-		"/api/variants",
+	} {
+		w, _ := f.do(t, "GET", path, "", mgrJar)
+		if w.Code != http.StatusOK {
+			t.Errorf("%s for a manager = %d %s", path, w.Code, w.Body)
+			continue
+		}
+		if !strings.Contains(w.Body.String(), secret) {
+			t.Errorf("a manager could not read another tenant's transcript via %s", path)
+		}
+	}
+	// The transcript route reports the content as present, so the manager's drawer renders
+	// the diff instead of an explanation of why it is empty.
+	w, out := f.do(t, "GET", "/api/sessions/sess-a/transcript?tenant="+userID, "", mgrJar)
+	if w.Code != http.StatusOK || out["state"] != dash.TranscriptHot {
+		t.Errorf("manager transcript state = %v (%d), want %q", out["state"], w.Code, dash.TranscriptHot)
+	}
+	// Only the manager branch widened. Another plain account gets nothing for the same
+	// request id or session, and is refused rather than shown an empty diff.
+	for _, path := range []string{
+		reqPath,
+		"/api/sessions/sess-a/transcript?tenant=" + userID,
+		"/api/sessions/sess-a/transcript?tenant=*",
+	} {
+		w, _ := f.do(t, "GET", path, "", otherJar)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s for another plain account = %d, want 404: %s", path, w.Code, w.Body)
+		}
+		if strings.Contains(w.Body.String(), secret) {
+			t.Errorf("a plain account read someone else's transcript via %s", path)
+		}
+	}
+	// The list and rollup surfaces stay metrics-only for everyone: they carry no content
+	// column at all, and a manager who wants the text opens one request.
+	for _, path := range []string{
+		"/api/requests?tenant=" + userID, "/api/requests?tenant=*",
+		"/api/tenants", "/api/variants",
 	} {
 		w, _ := f.do(t, "GET", path, "", mgrJar)
 		if w.Code != http.StatusOK {
@@ -245,18 +279,9 @@ func TestManagerCannotReadAnotherTenantsTranscripts(t *testing.T) {
 			continue
 		}
 		if strings.Contains(w.Body.String(), secret) {
-			t.Errorf("a manager read another tenant's transcript via %s", path)
+			t.Errorf("%s grew a content field:\n%s", path, w.Body)
 		}
 	}
-	// And the transcript route says WHY it is empty, so this stays a deliberate refusal
-	// rather than looking like a tenant with nothing captured.
-	w, out := f.do(t, "GET", "/api/sessions/sess-a/transcript?tenant="+userID, "", mgrJar)
-	if w.Code != http.StatusOK || out["state"] != dash.TranscriptNotPermitted {
-		t.Errorf("manager transcript state = %v (%d), want %q", out["state"], w.Code, dash.TranscriptNotPermitted)
-	}
-	// The owner still sees their own.
-	// (Their jar comes from the same signUp; re-reading through the user proves the
-	// refusal above is about the MANAGER, not about a broken capture.)
 }
 
 // Deleting a tenant has to clear BOTH databases. The control database cascades; the metrics
@@ -492,8 +517,9 @@ func TestPasswordChangeReplacesTheOldPassword(t *testing.T) {
 
 // A manager may START a reset and nothing more: they cannot learn the password, cannot set
 // one, and the account keeps working until its owner finishes. A manager who could set a
-// password could sign in as that user and read their transcripts, which is the one boundary
-// this service promises.
+// password could sign in AS that user and act in their name, which is the boundary this
+// service still promises — a manager READING transcripts is now allowed, impersonating an
+// account is not.
 func TestManagerResetNeitherSetsNorRevealsAPassword(t *testing.T) {
 	f := newMgrFixture(t)
 	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")

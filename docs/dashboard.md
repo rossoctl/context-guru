@@ -174,7 +174,7 @@ explicit and named. `GET /api/sessions/{session}/transcript` reports one of:
 | `fetched` | Pulled back out of cold storage on this request. | — |
 | `nothing_changed` | Capture is on and context-guru rewrote nothing here. | No — this is a real answer. |
 | `not_captured` | Capture is off, so there is nothing to show. | Sometimes — see [who has to act](#capture-needs-two-yeses-and-capture_blocked_by-says-whose-is-missing) below. |
-| `not_permitted` | Someone else's transcript, or an untrusted address. | No — not theirs to change. |
+| `not_permitted` | An untrusted address on a single-tenant proxy. | No — not theirs to change. |
 | `never_archived` | Asked cold storage for it; it was never uploaded. | No. |
 | `unreachable` | Cold storage is down. **The data is safe** — try later. | Yes — retry. |
 | `unknown_session` | No such session for this caller. Served with **HTTP 404 and a JSON body** carrying this state, not a bare 404. | No. |
@@ -424,9 +424,10 @@ Two access rules differ from the local case, and both are enforced server-side:
   The honest reason it matters is the one above: the redactor is a best-effort denylist, and a
   review of 22 realistic credential shapes found **11 passing through it**. 22-of-22 now
   passing does not prove completeness.
-- **A manager sees everyone's metrics and nobody's transcripts.** Reading another user's
-  source code is not an administrative need, and the consent they gave was for their own
-  view. The archive route applies the same rule, so it is not a way around it.
+- **A manager sees everyone's metrics and everyone's transcripts.** An explicit owner
+  decision: the account selector points the ordinary request drawer and diff view at any
+  account. The archive route applies the same rule, so hot and cold cannot disagree.
+  Everyone else still reads only their own, whatever they put in `?tenant=`.
 - **Three surfaces become manager-only**, because they are not anybody's tenant data:
   the server's effective configuration (`/api/config`, which
   [says so in its own payload](reference/routes.md#the-config-route-serves-the-servers-configuration-not-yours)

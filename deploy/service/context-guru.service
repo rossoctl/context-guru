@@ -56,8 +56,8 @@ Environment=MANAGER_EMAIL=
 #
 # Enable it when the diff view is the point of the deployment: showing people what was
 # rewritten is what makes the savings inspectable rather than a number to take on faith.
-# Enable it knowing it is source code on this disk, readable by that tenant (a manager
-# sees metrics, never transcripts), and that turning it back off is not retroactive.
+# Enable it knowing it is source code on this disk, readable by that tenant AND by the
+# service manager, and that turning it back off is not retroactive.
 # `false` here overrides every account's consent and is the one-line kill switch.
 #
 # Shipped false deliberately. A drop-in can override it, and `systemctl show
