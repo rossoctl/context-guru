@@ -35,66 +35,62 @@ var (
 	ErrFeedbackLong  = fmt.Errorf("tenant: that text is longer than %d characters", MaxFeedbackChars)
 	ErrFeedbackScore = errors.New("tenant: every rating must be a whole number of stars from 1 to 5")
 	ErrFeedbackDim   = errors.New("tenant: unknown rating")
+	ErrFeedbackAgent = errors.New("tenant: say which agent this is about")
 )
 
-// FeedbackDimensions is the fixed set of star questions, in the order the form and
-// the manager's view both present them. It is the ONE list: the handler validates
-// against it, Summarize orders by it, and a key that is not in it (and is not an
-// agent, below) is refused rather than silently stored and never read.
+// Labelled is a key plus the words a human reads for it. The label lives HERE, with the
+// key, because the form, the manager's table and the manager's email all need it: a copy
+// in the browser and another in the mail body is three chances to ask one question three
+// different ways.
+type Labelled struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
+// FeedbackQuestions is the fixed set of star questions, in the order the form and the
+// manager's view both present them. It is the ONE list: the handler validates against
+// it, Summarize orders by it, and a key that is not in it is refused rather than
+// silently stored and never read.
 //
-// Why these eight and not more: each one is a decision someone could act on. The
-// owner asked for "a general feel" (overall), whether the agent still behaves
-// (as_good_as_before), the components, latency, observability, ease of use, and a
-// recommendation — and the per-agent question is asked once per agent the account has
-// actually sent traffic for, because asking a Claude Code user to rate Bob produces a
-// number that means nothing.
-var FeedbackDimensions = []string{
-	"overall",           // general satisfaction, the headline
-	"as_good_as_before", // does the agent still do its job as well as it did — or better
-	"agent",             // per-agent behaviour; stored as "agent:<name>", see AgentDimension
-	"components",        // the compaction components: do they remove the right things
-	"latency",           // added latency on the hot path
-	"observability",     // is the dashboard actually useful
-	"ease",              // how easy it was to set up and to use
-	"recommend",         // likelihood to recommend, the NPS question
+// All seven are mandatory and all seven are asked about ONE agent, named by the
+// selector — the same questions either way, so two agents' answers are comparable.
+var FeedbackQuestions = []Labelled{
+	{"overall", "Overall experience"},
+	{"performance", "How has Context Guru affected your agent's performance?"},
+	{"compaction", "How well does compaction preserve useful information?"},
+	{"latency", "In terms of latency — was it not noticeable?"},
+	{"dashboard", "How useful is the dashboard?"},
+	{"ease", "How easy was setup and day-to-day use?"},
+	{"recommend", "How likely are you to recommend Context Guru to a colleague?"},
 }
 
-// requiredDimensions is every fixed question. "agent" is not one of them: it is a
-// PREFIX, and which agents to ask about depends on the account's own traffic.
-func requiredDimensions() []string {
-	out := make([]string, 0, len(FeedbackDimensions)-1)
-	for _, d := range FeedbackDimensions {
-		if d != "agent" {
-			out = append(out, d)
-		}
-	}
-	return out
+// FeedbackAgents is what the selector offers. Two values, closed: the answer is a
+// grouping key in every aggregate and a line in an email, so a third one is refused
+// rather than stored as a group nobody asked about.
+var FeedbackAgents = []Labelled{
+	{"claude-code", "Claude Code"},
+	{"bob", "Bob"},
 }
 
-// AgentDimension is how a per-agent rating is keyed: "agent:claude-code".
-const AgentDimension = "agent:"
-
-// validDimension reports whether a submitted key is one we store. Agent names come
-// from the caller's own request rows, so they are constrained to the shape dash
-// records rather than accepted as free text — a dimension key is a column value in
-// every aggregate and every email.
-func validDimension(key string) bool {
-	for _, d := range requiredDimensions() {
-		if key == d {
-			return true
+// label finds the human wording for a key, or returns the key when there is none.
+func label(in []Labelled, key string) string {
+	for _, l := range in {
+		if l.Key == key {
+			return l.Label
 		}
 	}
-	name, ok := strings.CutPrefix(key, AgentDimension)
-	if !ok || name == "" || len(name) > 32 {
-		return false
-	}
-	for _, r := range name {
-		if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' && r != '.' && r != '_' {
-			return false
-		}
-	}
-	return true
+	return key
 }
+
+// QuestionLabel is the words for one star question, for anything rendering a stored row.
+func QuestionLabel(key string) string { return label(FeedbackQuestions, key) }
+
+// AgentLabel is the words for a stored agent value.
+func AgentLabel(key string) string { return label(FeedbackAgents, key) }
+
+func validDimension(key string) bool { return QuestionLabel(key) != key }
+
+func validAgent(key string) bool { return AgentLabel(key) != key }
 
 // Feedback is one submission.
 type Feedback struct {
@@ -105,11 +101,11 @@ type Feedback struct {
 	Email     string
 	Label     string
 	CreatedAt time.Time
+	// Agent is which agent the answers are about, one of FeedbackAgents. Stored with the
+	// submission so the manager's aggregate can be read per agent.
+	Agent string
 	// Scores maps a dimension to 1..5 stars.
 	Scores map[string]int
-	// Wanted is "what would you like added" — optional, because a user with nothing to
-	// ask for should not have to invent something to get past the form.
-	Wanted string
 	// Comment is the mandatory prose.
 	Comment string
 	// MailedAt is when the manager's copy was accepted by the relay; zero means it was
@@ -131,17 +127,18 @@ func meaningfulLen(s string) int {
 // The tenant comes from the authenticated principal, never from the request body:
 // this is the only writer, so there is no path by which a submission can be attributed
 // to somebody else.
-func (r *Registry) AddFeedback(t *Tenant, scores map[string]int, wanted, comment string) (*Feedback, error) {
+func (r *Registry) AddFeedback(t *Tenant, agent string, scores map[string]int, comment string) (*Feedback, error) {
 	if t == nil {
 		return nil, ErrForbidden
+	}
+	if !validAgent(agent) {
+		return nil, fmt.Errorf("%w (not %q)", ErrFeedbackAgent, agent)
 	}
 	if meaningfulLen(comment) < MinFeedbackChars {
 		return nil, ErrFeedbackText
 	}
-	for _, s := range []string{comment, wanted} {
-		if len([]rune(s)) > MaxFeedbackChars {
-			return nil, ErrFeedbackLong
-		}
+	if len([]rune(comment)) > MaxFeedbackChars {
+		return nil, ErrFeedbackLong
 	}
 	for key, v := range scores {
 		if !validDimension(key) {
@@ -151,16 +148,16 @@ func (r *Registry) AddFeedback(t *Tenant, scores map[string]int, wanted, comment
 			return nil, fmt.Errorf("%w (%s = %d)", ErrFeedbackScore, key, v)
 		}
 	}
-	for _, d := range requiredDimensions() {
-		if _, ok := scores[d]; !ok {
-			return nil, fmt.Errorf("%w: %s has no rating", ErrFeedbackScore, d)
+	for _, q := range FeedbackQuestions {
+		if _, ok := scores[q.Key]; !ok {
+			return nil, fmt.Errorf("%w: %s has no rating", ErrFeedbackScore, q.Key)
 		}
 	}
 
 	fb := &Feedback{
 		TenantID: t.ID, Email: t.Email, Label: t.Label,
-		CreatedAt: time.Now(), Scores: scores,
-		Wanted: strings.TrimSpace(wanted), Comment: strings.TrimSpace(comment),
+		CreatedAt: time.Now(), Agent: agent, Scores: scores,
+		Comment: strings.TrimSpace(comment),
 	}
 	tx, err := r.db.Begin()
 	if err != nil {
@@ -168,9 +165,9 @@ func (r *Registry) AddFeedback(t *Tenant, scores map[string]int, wanted, comment
 	}
 	defer tx.Rollback()
 	res, err := tx.Exec(`INSERT INTO feedback
-	  (tenant_id,email,label,created_at,wanted,comment,mailed_at)
+	  (tenant_id,email,label,created_at,agent,comment,mailed_at)
 	  VALUES (?,?,?,?,?,?,0)`,
-		fb.TenantID, fb.Email, fb.Label, fb.CreatedAt.UnixMilli(), fb.Wanted, fb.Comment)
+		fb.TenantID, fb.Email, fb.Label, fb.CreatedAt.UnixMilli(), fb.Agent, fb.Comment)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +192,7 @@ func (r *Registry) FeedbackList(tenantID string, limit int) ([]*Feedback, error)
 	if limit <= 0 || limit > 5000 {
 		limit = 1000
 	}
-	q := `SELECT id,tenant_id,email,label,created_at,wanted,comment,mailed_at FROM feedback`
+	q := `SELECT id,tenant_id,email,label,created_at,agent,comment,mailed_at FROM feedback`
 	args := []any{}
 	if tenantID != "" {
 		q += ` WHERE tenant_id = ?`
@@ -214,7 +211,7 @@ func (r *Registry) FeedbackList(tenantID string, limit int) ([]*Feedback, error)
 		fb := &Feedback{Scores: map[string]int{}}
 		var created, mailed int64
 		if err := rows.Scan(&fb.ID, &fb.TenantID, &fb.Email, &fb.Label, &created,
-			&fb.Wanted, &fb.Comment, &mailed); err != nil {
+			&fb.Agent, &fb.Comment, &mailed); err != nil {
 			return nil, err
 		}
 		fb.CreatedAt = msTime(created)
@@ -315,13 +312,35 @@ type FeedbackSummary struct {
 	// Unmailed counts submissions whose notification never got out, so a broken relay
 	// is visible in the UI instead of only in the log.
 	Unmailed int `json:"unmailed"`
+	// ByAgent is this same arithmetic over the submissions about one agent, keyed by
+	// FeedbackAgents key. The same shape rather than a narrower one because the question
+	// a manager asks of the whole set — mean, spread, NPS — is the question they ask of
+	// Claude Code alone. Empty in the nested values: one level is the breakdown.
+	ByAgent map[string]*FeedbackSummary `json:"by_agent,omitempty"`
 }
 
-// Summarize computes the aggregate from the submissions themselves.
+// Summarize computes the aggregate from the submissions themselves, plus the same
+// arithmetic per agent — which is the point of asking which agent it was about.
 //
 // In Go rather than in SQL or in the browser: it is arithmetic somebody will act on, so
 // it belongs somewhere a test can seed five rows and assert the mean.
 func Summarize(fs []*Feedback) FeedbackSummary {
+	sum := summarize(fs)
+	groups := map[string][]*Feedback{}
+	for _, fb := range fs {
+		groups[fb.Agent] = append(groups[fb.Agent], fb)
+	}
+	if len(groups) > 0 {
+		sum.ByAgent = make(map[string]*FeedbackSummary, len(groups))
+	}
+	for agent, g := range groups {
+		s := summarize(g)
+		sum.ByAgent[agent] = &s
+	}
+	return sum
+}
+
+func summarize(fs []*Feedback) FeedbackSummary {
 	sum := FeedbackSummary{N: len(fs), Dimensions: []DimStat{}, Trend: []DayPoint{}}
 	stats := map[string]*DimStat{}
 	days := map[int64]*DayPoint{}
@@ -370,21 +389,12 @@ func Summarize(fs []*Feedback) FeedbackSummary {
 	if sum.NPS.N > 0 {
 		sum.NPS.Score = (float64(sum.NPS.Promoters) - float64(sum.NPS.Detractors)) / float64(sum.NPS.N) * 100
 	}
-	// Fixed questions in their declared order, then the agents alphabetically: a list
-	// that reorders itself as the numbers move cannot be scanned twice.
-	for _, d := range requiredDimensions() {
-		if s := stats[d]; s != nil {
+	// Declared order, not map order: a list that reorders itself as the numbers move
+	// cannot be scanned twice.
+	for _, q := range FeedbackQuestions {
+		if s := stats[q.Key]; s != nil {
 			sum.Dimensions = append(sum.Dimensions, *s)
-			delete(stats, d)
 		}
-	}
-	rest := make([]string, 0, len(stats))
-	for d := range stats {
-		rest = append(rest, d)
-	}
-	sort.Strings(rest)
-	for _, d := range rest {
-		sum.Dimensions = append(sum.Dimensions, *stats[d])
 	}
 	for _, p := range days {
 		p.Mean /= float64(p.N)

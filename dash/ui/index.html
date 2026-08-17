@@ -509,17 +509,15 @@
 </section>
 
 <!-- Feedback: one form for everybody, and the aggregate for the manager only.
-     Both live in the same view because they are the same subject; the three manager
-     cards carry data-manager, so a plain account sees the form and nothing else. The
-     form itself is built in JS (feedbackFields), because which agents it asks about
-     depends on the traffic this account has actually sent. -->
+     Both live in the same view because they are the same subject; the manager cards
+     carry data-manager, so a plain account sees the form and nothing else. The form
+     itself is built in JS (buildFeedbackForm) from the questions the server serves, so
+     there is one copy of the keys and one copy of the wording. -->
 <section class="view" id="view-feedback" hidden>
   <div class="card">
     <div class="card-head"><h2>How is context-guru working for you?</h2></div>
-    <p class="muted small">Every answer goes straight to whoever runs this deployment,
-      by email and in the dashboard. Ratings are one to five stars; the written answer is
-      the part that actually changes what gets built, so it is required and has to say
-      something. Nobody but the manager can read any of it.</p>
+    <p class="muted small">Answers go to whoever runs this deployment. Nobody else can
+      read them.</p>
     <form id="feedback-form" data-testid="feedback-form" novalidate></form>
   </div>
 
@@ -527,6 +525,18 @@
     <div class="card-head"><h2>Feedback statistics</h2>
       <span class="muted" id="feedback-count" data-testid="feedback-count"></span></div>
     <div id="feedback-tiles"></div>
+    <div class="card-head"><h3>By agent</h3></div>
+    <p class="muted small">The headline numbers per agent, so the two do not average each
+      other away.</p>
+    <div class="tblwrap" tabindex="0">
+      <table class="tbl" data-testid="feedback-agents">
+        <thead><tr>
+          <th>Agent</th><th class="num">Submissions</th><th>Mean overall</th>
+          <th class="num">NPS</th>
+        </tr></thead>
+        <tbody id="feedback-agents-body"></tbody>
+      </table>
+    </div>
     <div class="card-head"><h3>Every question: mean and spread</h3></div>
     <p class="muted small">The mean is out of five and the spread is beside it, because a
       3.0 made of threes and a 3.0 made of ones and fives are different problems.</p>

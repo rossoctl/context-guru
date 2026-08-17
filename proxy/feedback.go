@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -35,8 +34,8 @@ func (h *Handler) ctlSubmitFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
+		Agent   string         `json:"agent"`
 		Scores  map[string]int `json:"scores"`
-		Wanted  string         `json:"wanted"`
 		Comment string         `json:"comment"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
@@ -45,7 +44,7 @@ func (h *Handler) ctlSubmitFeedback(w http.ResponseWriter, r *http.Request) {
 	}
 	// t, from the cookie — the body carries no tenant field and could not be believed if
 	// it did.
-	fb, err := h.registry().AddFeedback(t, in.Scores, in.Wanted, in.Comment)
+	fb, err := h.registry().AddFeedback(t, in.Agent, in.Scores, in.Comment)
 	if err != nil {
 		switch {
 		case isFeedbackRejection(err):
@@ -75,7 +74,7 @@ func (h *Handler) ctlSubmitFeedback(w http.ResponseWriter, r *http.Request) {
 // against a 500 they cannot.
 func isFeedbackRejection(err error) bool {
 	for _, t := range []error{tenant.ErrFeedbackText, tenant.ErrFeedbackLong,
-		tenant.ErrFeedbackScore, tenant.ErrFeedbackDim} {
+		tenant.ErrFeedbackScore, tenant.ErrFeedbackDim, tenant.ErrFeedbackAgent} {
 		if errors.Is(err, t) {
 			return true
 		}
@@ -111,16 +110,18 @@ func (h *Handler) ctlFeedback(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"id": fb.ID, "tenant": fb.TenantID, "email": fb.Email, "label": fb.Label,
 			"created_at": msOrZero(fb.CreatedAt), "scores": fb.Scores,
-			"wanted": fb.Wanted, "comment": fb.Comment,
+			"agent": fb.Agent, "comment": fb.Comment,
 			"mailed_at": msOrZero(fb.MailedAt),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"summary":     tenant.Summarize(all),
 		"submissions": out,
-		// The star questions, in the order both the form and this view present them, so
-		// the UI has one ordering rather than a hand-kept copy of this list.
-		"dimensions": tenant.FeedbackDimensions,
+		// The star questions and the agents, keys and wording both, in the order the form
+		// and this view present them — so the UI has one ordering and one set of words
+		// rather than a hand-kept copy of either.
+		"questions": tenant.FeedbackQuestions,
+		"agents":    tenant.FeedbackAgents,
 	})
 }
 
@@ -171,13 +172,14 @@ func (h *Handler) deliverFeedback(fb *tenant.Feedback, to string) {
 // feedbackSubject names the submitter and the headline score.
 //
 // Every interpolated value is either a validated email (no whitespace — see
-// checkEmail) or an integer, and sendMail strips control characters from the whole
-// line regardless. The free text is deliberately NOT here: a subject built from
+// checkEmail), an integer, or a label from tenant.FeedbackAgents — a closed list of
+// literals, not the submitted string — and sendMail strips control characters from the
+// whole line regardless. The free text is deliberately NOT here: a subject built from
 // attacker-supplied prose is the header-injection primitive, and it is also just a bad
 // subject line.
 func feedbackSubject(fb *tenant.Feedback) string {
-	return fmt.Sprintf("context-guru feedback: %d/5 overall from %s",
-		fb.Scores["overall"], fb.Email)
+	return fmt.Sprintf("context-guru feedback: %d/5 overall on %s from %s",
+		fb.Scores["overall"], tenant.AgentLabel(fb.Agent), fb.Email)
 }
 
 // feedbackBody renders the mail. Plain text, one score per line, prose last.
@@ -187,18 +189,14 @@ func feedbackSubject(fb *tenant.Feedback) string {
 // no way for a body to break out into the command stream.
 func feedbackBody(fb *tenant.Feedback) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "New context-guru feedback\n\nFrom:  %s (%s)\nWhen:  %s\n\nRatings, 1-5 stars:\n",
-		fb.Email, fb.Label, fb.CreatedAt.Format(time.RFC1123))
-	keys := make([]string, 0, len(fb.Scores))
-	for k := range fb.Scores {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		fmt.Fprintf(&b, "  %-22s %d\n", k, fb.Scores[k])
-	}
-	if fb.Wanted != "" {
-		fmt.Fprintf(&b, "\nWhat they want added:\n%s\n", indent(fb.Wanted))
+	fmt.Fprintf(&b, "New context-guru feedback\n\nFrom:  %s (%s)\nAgent: %s\nWhen:  %s\n\nRatings, 1-5 stars:\n",
+		fb.Email, fb.Label, tenant.AgentLabel(fb.Agent), fb.CreatedAt.Format(time.RFC1123))
+	// The questions in the order they were asked, worded as they were asked: a mail that
+	// says "compaction 2" makes the manager go and read the form to find out what was rated.
+	for _, q := range tenant.FeedbackQuestions {
+		if v, ok := fb.Scores[q.Key]; ok {
+			fmt.Fprintf(&b, "  %d/5  %s\n", v, q.Label)
+		}
 	}
 	fmt.Fprintf(&b, "\nComment:\n%s\n", indent(fb.Comment))
 	fmt.Fprintf(&b, "\n--\nStored as feedback #%d; the dashboard's Feedback tab has the "+

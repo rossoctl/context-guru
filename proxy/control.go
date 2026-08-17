@@ -1096,6 +1096,11 @@ func (h *Handler) ctlMe(w http.ResponseWriter, r *http.Request) {
 		// configured, so it is right behind nginx, right on loopback, and right if the
 		// hostname changes — one fewer thing to keep in step with reality.
 		"base_url": externalBase(r),
+		// The feedback form's questions and its agent selector, keys and wording both.
+		// Served here because a plain account gets 403 from GET /api/feedback, and the form
+		// must not carry a second copy of a list Go validates against.
+		"feedback_questions": tenant.FeedbackQuestions,
+		"feedback_agents":    tenant.FeedbackAgents,
 	})
 }
 

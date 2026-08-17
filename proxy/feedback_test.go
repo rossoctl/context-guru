@@ -16,17 +16,10 @@ import (
 // past the fifty-character minimum.
 func validFeedback(t *testing.T, overall int, comment string) string {
 	t.Helper()
-	scores := map[string]int{}
-	for _, d := range tenant.FeedbackDimensions {
-		if d == "agent" {
-			continue
-		}
-		scores[d] = 4
-	}
+	scores := scoreMap()
 	scores["overall"] = overall
-	scores[tenant.AgentDimension+"claude-code"] = 5
 	b, err := json.Marshal(map[string]any{
-		"scores": scores, "wanted": "a per-repository view", "comment": comment,
+		"agent": "claude-code", "scores": scores, "comment": comment,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -73,13 +66,15 @@ func TestFeedbackIsStoredAndMailedToTheManager(t *testing.T) {
 	if !strings.Contains(sink, "To: boss@ibm.com") {
 		t.Errorf("feedback was not addressed to the manager:\n%s", sink)
 	}
-	if !strings.Contains(sink, "Subject: context-guru feedback: 5/5 overall from a@ibm.com") {
+	if !strings.Contains(sink, "Subject: context-guru feedback: 5/5 overall on Claude Code from a@ibm.com") {
 		t.Errorf("subject line is wrong:\n%s", sink)
 	}
+	// The mail names the agent and asks the questions in words, not in dimension keys.
 	for _, want := range []string{
-		fmt.Sprintf("%-22s %d", "overall", 5),
-		fmt.Sprintf("%-22s %d", tenant.AgentDimension+"claude-code", 5),
-		"a per-repository view", "the highest compliment",
+		"Agent: Claude Code",
+		fmt.Sprintf("%d/5  %s", 5, tenant.QuestionLabel("overall")),
+		fmt.Sprintf("%d/5  %s", 4, tenant.QuestionLabel("compaction")),
+		"the highest compliment",
 	} {
 		if !strings.Contains(sink, want) {
 			t.Errorf("the mail is missing %q:\n%s", want, sink)
@@ -130,8 +125,8 @@ func TestFeedbackRejectsShortAndBlankText(t *testing.T) {
 	}
 	// A rating outside 1..5, and a question nobody asked, are refused the same way.
 	for _, body := range []string{
-		`{"scores":{"overall":9},"comment":"` + longComment + `"}`,
-		`{"scores":{"whatever":3},"comment":"` + longComment + `"}`,
+		`{"agent":"bob","scores":{"overall":9},"comment":"` + longComment + `"}`,
+		`{"agent":"bob","scores":{"whatever":3},"comment":"` + longComment + `"}`,
 	} {
 		if w, _ := f.do(t, "POST", "/api/feedback", body, jar); w.Code != http.StatusUnprocessableEntity {
 			t.Errorf("%s = %d, want 422", body, w.Code)
@@ -140,6 +135,131 @@ func TestFeedbackRejectsShortAndBlankText(t *testing.T) {
 	// Nothing was stored by any of the above.
 	if all, err := f.reg.FeedbackList("", 0); err != nil || len(all) != 0 {
 		t.Fatalf("rejected submissions were stored: %+v %v", all, err)
+	}
+}
+
+// The 49/50 boundary itself, over HTTP, because that is where the rule is quoted back.
+func TestFeedbackCommentBoundaryOverHTTP(t *testing.T) {
+	f := ctlFixture(t)
+	w, _ := f.signUp(t, "a@ibm.com", "laptop")
+	jar := w.Result().Cookies()
+
+	if w, _ := f.do(t, "POST", "/api/feedback",
+		validFeedback(t, 4, strings.Repeat("x", 49)), jar); w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("49 characters = %d, want 422", w.Code)
+	}
+	// 50 collapsed characters carried by 17 words plus their spaces: whitespace between
+	// words counts, runs of it collapse, so both sides of the wire count the same 50.
+	if w, _ := f.do(t, "POST", "/api/feedback",
+		validFeedback(t, 4, strings.Repeat("ab ", 17)), jar); w.Code != http.StatusCreated {
+		t.Errorf("50 characters = %d, want 201 (%s)", w.Code, w.Body)
+	}
+	if all, err := f.reg.FeedbackList("", 0); err != nil || len(all) != 1 {
+		t.Fatalf("stored %d rows, want only the accepted one: %v", len(all), err)
+	}
+}
+
+// The agent selector is the server's rule too: mandatory, and one of exactly two values.
+// A third is refused rather than stored as a group the aggregate then reports.
+func TestFeedbackAgentSelectorIsEnforced(t *testing.T) {
+	f := ctlFixture(t)
+	w, _ := f.signUp(t, "a@ibm.com", "laptop")
+	jar := w.Result().Cookies()
+
+	for _, agent := range []string{"", "cursor", "Bob", "claude-code<script>"} {
+		body, err := json.Marshal(map[string]any{
+			"agent": agent, "scores": scoreMap(), "comment": longComment,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, out := f.do(t, "POST", "/api/feedback", string(body), jar)
+		if w.Code != http.StatusUnprocessableEntity {
+			t.Errorf("agent %q = %d, want 422 (%s)", agent, w.Code, w.Body)
+			continue
+		}
+		if msg, _ := out["error"].(string); !strings.Contains(msg, "agent") {
+			t.Errorf("agent %q: the error does not name the rule: %q", agent, msg)
+		}
+	}
+	if all, err := f.reg.FeedbackList("", 0); err != nil || len(all) != 0 {
+		t.Fatalf("a submission with an unknown agent was stored: %+v %v", all, err)
+	}
+	// A star question the form no longer asks is refused the same way.
+	body := `{"agent":"bob","scores":{"as_good_as_before":4},"comment":"` + longComment + `"}`
+	if w, _ := f.do(t, "POST", "/api/feedback", body, jar); w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("a retired question = %d, want 422", w.Code)
+	}
+}
+
+// The breakdown the selector exists for, end to end: two agents, read apart.
+func TestManagerSeesTheAgentBreakdown(t *testing.T) {
+	f := ctlFixture(t)
+	w, _ := f.signUp(t, "boss@ibm.com", "laptop")
+	mgrJar := w.Result().Cookies()
+	w, _ = f.signUp(t, "a@ibm.com", "laptop")
+	userJar := w.Result().Cookies()
+
+	// Claude Code: overall 5 and 3, so mean 4. Bob: overall 1.
+	for _, post := range []struct {
+		agent   string
+		overall int
+	}{{"claude-code", 5}, {"claude-code", 3}, {"bob", 1}} {
+		scores := scoreMap()
+		scores["overall"] = post.overall
+		body, err := json.Marshal(map[string]any{
+			"agent": post.agent, "scores": scores, "comment": longComment,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w, _ := f.do(t, "POST", "/api/feedback", string(body), userJar); w.Code != http.StatusCreated {
+			t.Fatalf("submit for %s = %d %s", post.agent, w.Code, w.Body)
+		}
+	}
+
+	w, out := f.do(t, "GET", "/api/feedback", "", mgrJar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("manager read = %d %s", w.Code, w.Body)
+	}
+	sum, _ := out["summary"].(map[string]any)
+	by, _ := sum["by_agent"].(map[string]any)
+	if len(by) != 2 {
+		t.Fatalf("by_agent = %v, want the two agents", by)
+	}
+	for agent, wantMean := range map[string]float64{"claude-code": 4, "bob": 1} {
+		g, _ := by[agent].(map[string]any)
+		if g == nil {
+			t.Fatalf("no breakdown for %s in %v", agent, by)
+		}
+		dims, _ := g["dimensions"].([]any)
+		first, _ := dims[0].(map[string]any)
+		if first["dimension"] != "overall" {
+			t.Fatalf("%s: dimensions do not lead with overall: %v", agent, dims)
+		}
+		if m, _ := first["mean"].(float64); m != wantMean {
+			t.Errorf("%s: mean overall = %v, want %v", agent, first["mean"], wantMean)
+		}
+	}
+	// And every answer says which agent it was about.
+	subs, _ := out["submissions"].([]any)
+	agents := map[string]int{}
+	for _, s := range subs {
+		row, _ := s.(map[string]any)
+		a, _ := row["agent"].(string)
+		agents[a]++
+	}
+	if agents["claude-code"] != 2 || agents["bob"] != 1 {
+		t.Errorf("the answers do not carry their agent: %v", agents)
+	}
+	// The wording travels with the data, so the UI keeps no second copy of it.
+	qs, _ := out["questions"].([]any)
+	if len(qs) != len(tenant.FeedbackQuestions) {
+		t.Errorf("questions = %v, want %d", qs, len(tenant.FeedbackQuestions))
+	}
+	if first, _ := qs[0].(map[string]any); first["key"] != "overall" ||
+		first["label"] != tenant.QuestionLabel("overall") {
+		t.Errorf("the served questions carry no wording: %v", qs[0])
 	}
 }
 
@@ -296,8 +416,8 @@ func TestFeedbackMailCannotInjectHeaders(t *testing.T) {
 	nasty := "Everything works well enough for daily use, thanks for building it.\r\n" +
 		"Bcc: attacker@evil.test\r\nSubject: you have won a prize\r\n\r\nregards"
 	body, err := json.Marshal(map[string]any{
+		"agent":   "bob",
 		"scores":  scoreMap(),
-		"wanted":  "more charts\r\nBcc: second@evil.test",
 		"comment": nasty,
 	})
 	if err != nil {
@@ -341,10 +461,8 @@ func TestFeedbackMailCannotInjectHeaders(t *testing.T) {
 // scoreMap is a complete valid rating set, for tests that build their own body.
 func scoreMap() map[string]int {
 	m := map[string]int{}
-	for _, d := range tenant.FeedbackDimensions {
-		if d != "agent" {
-			m[d] = 4
-		}
+	for _, q := range tenant.FeedbackQuestions {
+		m[q.Key] = 4
 	}
 	return m
 }

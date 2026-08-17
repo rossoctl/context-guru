@@ -1194,6 +1194,21 @@ var migrations = []string{
 	// name, and a name is what this column is.
 	`ALTER TABLE tenants ADD COLUMN variant         TEXT NOT NULL DEFAULT '';
 	 ALTER TABLE tenants ADD COLUMN disabled_reason TEXT NOT NULL DEFAULT '';`,
+
+	// v7: the feedback form's new shape. One agent per submission, chosen from a
+	// selector, and the optional "what would you like added" folded into the single
+	// mandatory comment.
+	//
+	// A real forward migration, in place: this database is never renamed aside, so a
+	// retired column is DROP COLUMN and not a rebuild. wanted carries no index and no
+	// constraint, which is what makes that legal here.
+	//
+	// Existing rows keep their comment and gain agent = '' — an answer written before
+	// anybody was asked which agent it was about, which is exactly what it is. Their old
+	// dimension keys are left alone: Summarize reports the questions it knows, so a
+	// retired key is absent from the aggregate rather than misfiled into it.
+	`ALTER TABLE feedback DROP COLUMN wanted;
+	 ALTER TABLE feedback ADD COLUMN agent TEXT NOT NULL DEFAULT '';`,
 }
 
 func migrate(db *sql.DB) error {
