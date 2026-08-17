@@ -75,6 +75,15 @@ type corefConfig struct {
 	RewriteBudget *int `yaml:"rewrite_budget"`
 	// MinBatchFrac is the batching constraint: the pass must cut at least this fraction
 	// of the request before it is worth a rewrite.
+	//
+	// The default was 0.15, derived from the illustrative arithmetic in the proposal's §4
+	// and never checked against how much mass is actually available. Measured, Tier-1
+	// matching finds a mean 4.4% of the request (`unreferenced`) or 9.6% (`+closed`) on real
+	// long sessions — so 0.15 admitted ONE of nineteen sessions past the agent's compaction
+	// threshold, and zero at the shipped cut set. A gate no traffic can clear is not a
+	// conservative default, it is an off switch that looks like a threshold. 0.05 admits
+	// 16/19; the honest position is that the right value is an experimental result and this
+	// is a starting point, not a claim.
 	MinBatchFrac *float64 `yaml:"min_batch_frac"`
 	// BreakEven applies the S*T > 11.5*W inequality with an estimated T. Ignored when
 	// the context window is unknown, like every other fraction-based threshold here.
@@ -101,7 +110,7 @@ func newCoref(raw []byte) (components.Component, error) {
 		cutUnreferenced: true,
 		cutClosed:       false,
 		rewriteBudget:   3,
-		minBatchFrac:    0.15,
+		minBatchFrac:    0.05,
 		breakEven:       true,
 		keepHeadChars:   96,
 		mode:            parseMarkerMode(cfg.MarkerMode),

@@ -128,7 +128,7 @@ transcript needs `T` > 276 turns. Three consequences, and they *are* the design:
 | Term | Means |
 |---|---|
 | **batching** | One rewrite must serve **every** cut in the pass, so `S` is the sum of all of them. That's what makes break-even reachable (60k of a 150k transcript needs `T` > 23). Hence a rare, threshold-triggered pass — never a per-output, per-turn decision. |
-| **`min_batch_frac`** | The operational form of that: the pass must cut at least this fraction of the request (default 0.15) or it declines and leaves the request byte-identical. |
+| **`min_batch_frac`** | The operational form of that: the pass must cut at least this fraction of the request (default 0.05) or it declines and leaves the request byte-identical. It is a **proxy** for the real question and a poor one — see the deferral note in §7. |
 | **`rewrite_budget`** | Prefix-rewrite passes allowed per session (default 3). `coref` is the only component that spends cache-writes **on purpose**, so the spend is capped and reported. |
 | **step reduction** | The real prize. `corr(Δsteps, Δcost) = +0.95`; unique token removal is ~0.02% of the bill. The objective is **steps and reward, not bytes**. |
 | **deferring agent compaction** | Claude Code compacts itself at ~167k on a 200k model. Staying under that avoids a full-transcript summarization — a large cache event *and* a quality loss. Plausibly the biggest win. |

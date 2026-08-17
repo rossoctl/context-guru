@@ -22,7 +22,7 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | `extract_llm` | Offload (LLM) | query-irrelevant content via an LLM-written sandboxed filter | via expand | large output in a large request | `strategy` (code), `model.source`, `trigger`, `rewrite`, `skip_file_reads` |
 | `smartcrush` | Offload | middle items of a JSON array | via expand | JSON-array tool output | `min_items` (5), `min_tokens` (200), `keep_first` (3), `keep_last` (2) |
 | `mask` | Offload | older tool outputs (age-based) | via expand | more than `keep_recent` outputs | `keep_recent` (3), `min_tokens` (100), `keep_head_chars` (96) |
-| `coref` | Offload | tool outputs no later turn referred back to (co-reference-based) | via expand | a threshold crossing, once per budgeted pass; **opt-in, in no preset** — [measured; yield is workload-dependent](results/coref-density.md) | `min_tokens` (300), `cut_closed` (false), `min_later_turns` (8), `min_batch_frac` (0.15), `rewrite_budget` (3), `trigger` |
+| `coref` | Offload | tool outputs no later turn referred back to (co-reference-based) | via expand | a threshold crossing, once per budgeted pass; **opt-in, in no preset** — [measured; yield is workload-dependent](results/coref-density.md) | `min_tokens` (300), `cut_closed` (false), `min_later_turns` (8), `min_batch_frac` (0.05), `rewrite_budget` (3), `trigger` |
 | `summarize` | Offload (LLM) | the middle of the transcript → one summary | via expand | long trajectories | `summary_level` (regular), `keep_last` (3), `min_tokens` (500), `resummarize_tokens` (6000), `model.source`, `trigger` |
 
 Presets (`config/config.go`), verbatim: **`codesmart`** (the proxy default)
@@ -330,7 +330,7 @@ after:  [tool output compacted: no later turn referred back to it; starts: 0 tre
 ```
 
 - **Config:** `min_tokens` (300), `cut_unreferenced` (true), `cut_closed` (**false**), `closed_dist` (12),
-  `open_reps` (3), `min_later_turns` (8), `min_batch_frac` (0.15), `rewrite_budget` (3), `break_even`
+  `open_reps` (3), `min_later_turns` (8), `min_batch_frac` (0.05), `rewrite_budget` (3), `break_even`
   (true), `keep_head_chars` (96), `trigger`. **Shines:** long sessions with a lot of survey-and-discard traffic (listings, wide
   searches, exploratory reads never returned to) — complementary to `mask`, which drops the *old* where
   this drops the *never-used*, and an old-but-hot span is the case `mask` gets wrong. **Inert:** below the
