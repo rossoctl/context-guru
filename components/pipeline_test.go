@@ -178,3 +178,34 @@ func TestNeverWorseGuardIgnoresAComponentInflatingItsOwnBaseline(t *testing.T) {
 		t.Errorf("run grew the request: %d -> %d", rr.TokensBefore, rr.TokensAfter)
 	}
 }
+
+// The run keeps ONE snapshot and re-syncs it as components land (see runOne/resync)
+// instead of deep-cloning the whole transcript per component. These two tests are what
+// make that safe: the snapshot must never end up ALIASING req.Input, and it must track
+// changes that survived.
+
+// TestRevertedComponentDoesNotLeakIntoTheNextRevert: after a revert, req.Input holds the
+// copy the pipeline was carrying, so the next component's in-place write would corrupt
+// the snapshot and its revert would keep the change (the request would GROW).
+func TestRevertedComponentDoesNotLeakIntoTheNextRevert(t *testing.T) {
+	req := reqWith("small")
+	rr := NewPipeline([]Component{grow{}, grow{}, boom{}}, nil).Run(req, testCtx())
+	if got := msgText(req.Input[0]); got != "small" {
+		t.Fatalf("revert after revert must restore the original; got %d bytes", len(got))
+	}
+	for i := range rr.Components {
+		if !rr.Components[i].Reverted {
+			t.Errorf("component %d not reported reverted: %+v", i, rr.Components[i])
+		}
+	}
+}
+
+// TestRevertAfterASurvivingChangeKeepsThatChange: the snapshot must track what survived,
+// or a later revert rolls the request back past a component that succeeded.
+func TestRevertAfterASurvivingChangeKeepsThatChange(t *testing.T) {
+	req := reqWith("hello      world   foo")
+	NewPipeline([]Component{shrink{}, grow{}}, nil).Run(req, testCtx())
+	if got := msgText(req.Input[0]); got != "hello world foo" {
+		t.Fatalf("revert discarded the earlier surviving change: %q", got)
+	}
+}

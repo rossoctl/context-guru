@@ -93,6 +93,68 @@ func TestCloneMessagesIndependentWhenJSONFails(t *testing.T) {
 	}
 }
 
+// TestFallbackCloneKeepsCacheFields: bifrost's DeepCopyChatMessage drops
+// CacheControl/Citations/CachePoint from content blocks, so the fallback clone path used
+// to hand back a snapshot with no prompt-cache breakpoints. Reverting a component then
+// DELETED breakpoints the request arrived with — the never-worse invariant violated on
+// the path that only runs when something already went wrong.
+func TestFallbackCloneKeepsCacheFields(t *testing.T) {
+	ttl, scope, enabled := "1h", "global", true
+	orig := []bschemas.ChatMessage{{
+		Role: bschemas.ChatMessageRoleUser,
+		Content: &bschemas.ChatMessageContent{
+			// Both set => ChatMessageContent.MarshalJSON errors => fallbackClone path.
+			ContentStr: strp("x"),
+			ContentBlocks: []bschemas.ChatContentBlock{{
+				Type:         bschemas.ChatContentBlockTypeText,
+				Text:         strp("cached prefix"),
+				CacheControl: &bschemas.CacheControl{Type: bschemas.CacheControlTypeEphemeral, TTL: &ttl, Scope: &scope},
+				Citations:    &bschemas.Citations{Enabled: &enabled},
+				CachePoint:   &bschemas.CachePoint{Type: "default", TTL: &ttl},
+			}},
+		},
+	}}
+	snap := CloneMessages(orig)
+	if len(snap) != 1 || snap[0].Content == nil || len(snap[0].Content.ContentBlocks) != 1 {
+		t.Fatalf("fallback clone lost structure: %+v", snap)
+	}
+
+	// A component mutates the live message in place and strips the breakpoint...
+	live := orig[0].Content.ContentBlocks
+	live[0].Text = strp("rewritten")
+	live[0].CacheControl = nil
+	live[0].Citations = nil
+	live[0].CachePoint = nil
+
+	// ...the pipeline reverts by assigning the snapshot back.
+	got := snap[0].Content.ContentBlocks[0]
+	if got.CacheControl == nil {
+		t.Fatal("revert dropped cache_control: a prompt-cache breakpoint is gone from the wire")
+	}
+	if got.CacheControl.Type != bschemas.CacheControlTypeEphemeral {
+		t.Errorf("cache_control type = %q want ephemeral", got.CacheControl.Type)
+	}
+	if got.CacheControl.TTL == nil || *got.CacheControl.TTL != "1h" {
+		t.Errorf("cache_control ttl = %v want 1h", got.CacheControl.TTL)
+	}
+	if got.CacheControl.Scope == nil || *got.CacheControl.Scope != "global" {
+		t.Errorf("cache_control scope = %v want global", got.CacheControl.Scope)
+	}
+	if got.Citations == nil || got.Citations.Enabled == nil || !*got.Citations.Enabled {
+		t.Errorf("revert dropped citations: %+v", got.Citations)
+	}
+	if got.CachePoint == nil || got.CachePoint.Type != "default" || got.CachePoint.TTL == nil || *got.CachePoint.TTL != "1h" {
+		t.Errorf("revert dropped cachePoint: %+v", got.CachePoint)
+	}
+
+	// The snapshot's pointers must not alias the live ones either: mutating the clone
+	// must not reach the original (and the original's TTL string is still "1h").
+	*got.CacheControl.TTL = "5m"
+	if ttl != "1h" {
+		t.Error("clone shares the original's cache_control TTL pointer")
+	}
+}
+
 func TestBlockTextNonText(t *testing.T) {
 	if BlockText(bschemas.ChatContentBlock{Type: bschemas.ChatContentBlockTypeImage}) != "" {
 		t.Fatal("a non-text (image) block has no text")
