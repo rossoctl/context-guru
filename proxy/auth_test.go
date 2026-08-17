@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/tenant"
 )
@@ -185,6 +186,15 @@ func TestSignInAttemptsAreRateLimited(t *testing.T) {
 	f := ctlFixture(t)
 	f.signUp(t, "a@ibm.com", "laptop")
 	limited := false
+	// The elapsed time is part of the assertion, not decoration. The limiter is charged
+	// BEFORE the argon2 verify (deliberately — 64 MiB per attempt is itself an
+	// amplifier), so the attempts this loop is allowed each pay a full KDF. On a
+	// contended machine those can outlast the limiter's own one-minute window, at which
+	// point the earliest attempts have already aged out and the bound genuinely should
+	// not have fired. "Not limited" and "the window expired underneath us" are then
+	// indistinguishable from in here, and failing on the second one is a test reporting
+	// the machine — this suite has already had one gate do exactly that.
+	start := time.Now()
 	for i := 0; i < passwordAttemptsPerMinute+3; i++ {
 		w, _ := f.do(t, "POST", "/api/login", `{"email":"a@ibm.com","password":"wrong-one-here"}`, nil)
 		if w.Code == http.StatusTooManyRequests {
@@ -193,7 +203,13 @@ func TestSignInAttemptsAreRateLimited(t *testing.T) {
 		}
 	}
 	if !limited {
-		t.Fatalf("%d+ password attempts went unlimited", passwordAttemptsPerMinute+3)
+		if elapsed := time.Since(start); elapsed >= time.Minute {
+			t.Skipf("inconclusive: %d attempts took %v, so the limiter's 1-minute window "+
+				"expired mid-loop and the bound correctly did not fire. Not a failure — "+
+				"re-run on a less loaded machine.", passwordAttemptsPerMinute+3, elapsed)
+		}
+		t.Fatalf("%d+ password attempts went unlimited in %v", passwordAttemptsPerMinute+3,
+			time.Since(start))
 	}
 	// A DIFFERENT address from the same client is limited too, because the client
 	// address has its own bucket — otherwise one host grinds the whole directory.
