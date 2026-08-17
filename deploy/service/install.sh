@@ -448,8 +448,9 @@ cmd_nginx() {
 # Both bind LOOPBACK ONLY. /metrics is a service-wide view carrying every tenant's spend,
 # and Grafana's session cookie is as good as the admin password — neither belongs on a
 # shared box's LAN interface. Reach them with `ssh -L 3000:127.0.0.1:3000`, or through the
-# nginx front end's /grafana/, which is gated to context-guru MANAGERS by auth_request (see
-# deploy/service/nginx.conf). Prometheus and Loki are not published at all.
+# nginx front end's /grafana/, which is gated to context-guru MANAGERS by auth_request and
+# signs them in from that same gate (see deploy/service/nginx.conf). Prometheus and Loki are
+# not published at all.
 OBS_ETC="$ETC/observability"
 OBS_STATE="$STATE/observability"
 PROM_IMAGE="${PROM_IMAGE:-docker.io/prom/prometheus:v3.2.1}"
@@ -570,12 +571,20 @@ promtail will find nothing until the service starts"
   ok "cg-promtail tailing $LOG_DIR/*.jsonl -> Loki"
 
   say "Grafana"
-  # A password is only needed the FIRST time — after that it lives in Grafana's own
-  # database, and re-running the installer must not demand a secret it does not need.
-  local generated="" pw="${GRAFANA_ADMIN_PASSWORD:-}"
+  # NOBODY NEEDS A GRAFANA PASSWORD HERE. A manager reaches /grafana/ through the gate and
+  # is signed in by it (auth-proxy, below), so the built-in `admin` account is break-glass
+  # only — for the day the proxy is down and you are on the loopback port.
+  #
+  # It still must not be left at Grafana's default `admin`, which is what an unset
+  # GF_SECURITY_ADMIN_PASSWORD means on a first install. So a first install seeds it with a
+  # random value that is NEVER printed and never written anywhere: unguessable, and unknown
+  # even to us, which is the correct state for a credential no workflow uses. Whoever wants
+  # break-glass sets their own afterwards — see deploy/grafana/README.md, "The admin
+  # password". GRAFANA_ADMIN_PASSWORD in the environment still wins if you want to choose it
+  # now. After the first install nothing is set at all: it lives in Grafana's database.
+  local pw="${GRAFANA_ADMIN_PASSWORD:-}"
   if [ -z "$pw" ] && [ ! -f "$OBS_STATE/grafana/grafana.db" ]; then
-    generated=$(head -c 18 /dev/urandom | base64 | tr -d '/+=')
-    pw="$generated"
+    pw=$(head -c 32 /dev/urandom | base64 | tr -d '/+=')
   fi
 
   # Every setting goes through an env-FILE rather than -e flags, and that is about the one
@@ -598,9 +607,34 @@ promtail will find nothing until the service starts"
     echo "GF_SERVER_ROOT_URL=$GRAFANA_ROOT_URL"
     echo "GF_SERVER_SERVE_FROM_SUB_PATH=true"
     # Off, deliberately. /grafana/ is reachable from the network now, and the manager gate
-    # in front of it is what decides who gets in; Grafana's own login is the second door.
+    # in front of it is what decides who gets in.
     echo "GF_AUTH_ANONYMOUS_ENABLED=false"
     echo "GF_ANALYTICS_REPORTING_ENABLED=false"
+    # SINGLE SIGN-ON, from the gate that is already there. nginx's auth_request asks the
+    # proxy who this is and copies the answer into X-Cg-Grafana-User; Grafana's auth-proxy
+    # trusts that header, creates the account on first visit and signs the manager in. One
+    # login, one notion of who an administrator is, and no second password to lose.
+    #
+    # The header is an authentication, so the whitelist is the control that makes it safe on
+    # this side: only the loopback peer — i.e. this nginx — may present it. Anything else
+    # that reaches port 3000 gets Grafana's login form instead. nginx's own three controls
+    # are in deploy/service/nginx.conf; both halves are required.
+    echo "GF_AUTH_PROXY_ENABLED=true"
+    echo "GF_AUTH_PROXY_HEADER_NAME=X-Cg-Grafana-User"
+    echo "GF_AUTH_PROXY_HEADER_PROPERTY=email"
+    echo "GF_AUTH_PROXY_AUTO_SIGN_UP=true"
+    echo "GF_AUTH_PROXY_WHITELIST=127.0.0.1,::1"
+    # No Grafana session cookie: every request re-presents the header and is re-authorized
+    # by the gate. A cookie would outlive the gate's decision, so a manager who is disabled
+    # in context-guru would keep their Grafana session until it expired.
+    echo "GF_AUTH_PROXY_ENABLE_LOGIN_TOKEN=false"
+    # Admin, because the gate already decided. Everyone who can reach Grafana at all is a
+    # context-guru MANAGER — the same role that can read every tenant's spend on the
+    # dashboard — so a Viewer role here would only mean a manager cannot use Explore on
+    # numbers they are already entitled to. Signing up through Grafana itself stays off:
+    # accounts come from the gate, or not at all.
+    echo "GF_USERS_AUTO_ASSIGN_ORG_ROLE=Admin"
+    echo "GF_USERS_ALLOW_SIGN_UP=false"
     if [ -n "$pw" ]; then echo "GF_SECURITY_ADMIN_PASSWORD=$pw"; fi
   } > "$envfile"
 
@@ -620,11 +654,11 @@ promtail will find nothing until the service starts"
   fi
   rm -f "$envfile"
   ok "cg-grafana on 127.0.0.1:3000, root_url $GRAFANA_ROOT_URL"
-  if [ -n "$generated" ]; then
-    warn "generated the admin password below. It is NOT written anywhere — save it now:"
-    printf '\n      admin / %s\n\n' "$generated"
-    warn "lost it, or rotating it? There is no recovery, only a reset — see"
-    warn "  deploy/grafana/README.md, 'Rotating the admin password'"
+  ok "managers sign in through the gate (auth-proxy on X-Cg-Grafana-User), as Admin"
+  if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ] && [ -n "$pw" ]; then
+    warn "the built-in 'admin' account was seeded with a random password that was NOT saved."
+    warn "Nothing needs it; if you want break-glass on the loopback port, choose one:"
+    warn "  deploy/grafana/README.md, 'The admin password'"
   fi
 
   say "Next"
@@ -717,8 +751,12 @@ print("    " + (", ".join(v) if v else "none yet"))' 2>/dev/null || echo "    (q
     else
       ok "no dashboard provisioning errors in the log"
     fi
-    echo "  dashboards (needs the admin password):"
-    echo "    curl -s -u admin:PASSWORD 'http://127.0.0.1:3000/grafana/api/search?type=dash-db'"
+    # /api/search needs an identity, and the auth-proxy header is the one this deployment
+    # actually uses — the same header nginx sends. Use an address that is ALREADY a manager:
+    # auto_sign_up would otherwise create a Grafana account for a typo.
+    echo "  dashboards:"
+    echo "    curl -s -H 'X-Cg-Grafana-User: <a manager email>' \\"
+    echo "      'http://127.0.0.1:3000/grafana/api/search?type=dash-db'"
   else
     no "Grafana is not answering on 127.0.0.1:3000/grafana/"
   fi
