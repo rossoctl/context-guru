@@ -815,6 +815,45 @@ func TestAgentKeyIdentifiesTenantOnlyAfterBinding(t *testing.T) {
 	}
 }
 
+// A key is BOUND from one scheme and USED from another, so the two must reduce to the
+// same identity.
+//
+// Nothing in the product picks the scheme: the person binding sends `Bearer <key>` —
+// that is what the Settings field and the documented curl line produce — while Bob's own
+// client sends `Apikey <key>`, built inside its auth strategy with no hook to change it.
+// The identity is the digest of the credential, so if the scheme word survived into the
+// hash then binding would appear to succeed and every subsequent Bob request would still
+// be 401, with both sides looking correct in isolation. Pinned here because the two
+// halves live in different processes and only this equality connects them.
+func TestBoundKeyIsRecognisedWhateverSchemeCarriesIt(t *testing.T) {
+	const key = "bob-own-fake-key-for-tests"
+	f := newHostedFixtureNoKey(t, "up", "bob")
+	tn, _ := f.register(t, "a@ibm.com")
+	// Bound from the credential as the BINDER's request carries it: Bearer.
+	bind := httptest.NewRequest(http.MethodPost, "/api/me/agent-key", nil)
+	bind.Header.Set("Authorization", "Bearer "+key)
+	if got := CallerKey(bind); got != key {
+		t.Fatalf("CallerKey of a Bearer line = %q, want the bare key", got)
+	}
+	if err := f.reg.BindAgentKey(tn.ID, CallerKey(bind)); err != nil {
+		t.Fatal(err)
+	}
+	// Used as BOB's request carries it. Its own casing too: it writes "apikey" and the
+	// header value is not case-normalised anywhere.
+	for _, scheme := range []string{"Apikey", "apikey", "Bearer", "bearer"} {
+		r := httptest.NewRequest(http.MethodPost, "/inference/v1/chat/completions", nil)
+		r.Header.Set("Authorization", scheme+" "+key)
+		got, err := f.h.opts.Tenants.Resolve(r)
+		if err != nil {
+			t.Errorf("Resolve with %q scheme: %v", scheme, err)
+			continue
+		}
+		if got.ID != tn.ID {
+			t.Errorf("%q scheme resolved to %s, want %s", scheme, got.ID, tn.ID)
+		}
+	}
+}
+
 // The explicit per-upstream server key remains supported — that is the eval-containers
 // gateway and the local single-tenant fallback — and when it is set the caller's slot
 // is replaced rather than forwarded.

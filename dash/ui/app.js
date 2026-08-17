@@ -3125,13 +3125,19 @@ const AGENTS = [
     path: '/',
     // Bob's client builds every request header itself and offers no hook for another
     // one, so it cannot carry the token. Instead it is recognised by the sha256 of the
-    // key it already sends — bound once, below, and never stored in plaintext.
+    // key it already sends — bound once on the Settings tab, never stored in plaintext.
+    //
+    // The variable name is version-dependent, and getting it wrong is silent: Bob simply
+    // talks to its default gateway and nothing appears here. bobshell 2.x reads
+    // BOB_GATEWAY_URL (checked against the 2.0.1 bundle, where CUSTOM_BASE_URL does not
+    // appear at all); the older build read CUSTOM_BASE_URL. Both are listed, because a
+    // spare export costs nothing and a missing one costs an afternoon.
     lines: (base, tok) => [
-      `export CUSTOM_BASE_URL=${base}`,
-      '# BOBSHELL_API_KEY stays your own key. Bob cannot send a custom header, so',
-      '# bind it to this account once (hashed; the key is never stored):',
-      `curl -sS -XPOST ${base}/api/me/agent-key \\`,
-      '  -H "Authorization: Bearer $BOBSHELL_API_KEY" -b "cg_dash=<your dashboard cookie>"',
+      `export BOB_GATEWAY_URL=${base}    # bobshell 2.x — check with: bob --version`,
+      `export CUSTOM_BASE_URL=${base}    # older builds read this one instead`,
+      '# Your Bob key stays your own (BOB_API_KEY; BOBSHELL_API_KEY still works).',
+      '# Bob can send no header of ours, so bind that key once on the Settings tab:',
+      '#   Settings → Bound agent keys → paste the key → Bind this key',
     ],
   },
   {
@@ -3328,8 +3334,21 @@ function loadSettings() {
       el('p', { class: 'hint' }, 'Billed to your own provider account, not to us.')));
 
     // Agent keys. Only relevant to agents that cannot send x-context-guru-token.
+    //
+    // The paste field exists because the alternative was a curl line carrying the
+    // cg_dash cookie, and every part of that went wrong in practice: the cookie is not
+    // displayed anywhere, so it meant a devtools detour, and the natural guess — pasting
+    // the cg_live_ token into the cookie — fails with "no context-guru token", which
+    // names a header this route does not even read. The browser already holds the
+    // cookie. So the key is pasted HERE and sent in the Authorization slot by the same
+    // fetch, which is the only step the person could not do for themselves.
+    const keyIn = el('input', {
+      type: 'password', id: 'agent-key', autocomplete: 'off', spellcheck: 'false',
+      placeholder: 'paste your Bob API key', 'data-testid': 'agent-key-input',
+    });
+    const keyMsg = el('p', { class: 'hint', role: 'status', 'data-testid': 'agent-key-status' });
     host.appendChild(el('div', { class: 'field' },
-      el('label', {}, 'Bound agent keys'),
+      el('label', { for: 'agent-key' }, 'Bound agent keys'),
       el('div', { 'data-testid': 'agent-keys' },
         t.agent_keys > 0
           ? `${t.agent_keys} provider key${t.agent_keys === 1 ? '' : 's'} bound to this account.`
@@ -3337,10 +3356,35 @@ function loadSettings() {
       whyBlock('Why an agent needs one',
         'For agents that cannot send a custom header (Bob/BobShell): the proxy recognises ' +
         'them by the sha256 of the provider key they already send. Only the digest is ' +
-        'stored. Bind one with the curl line on the Setup tab. Keys under 20 characters ' +
+        'stored — never the key, and it is not sent on anywhere. Keys under 20 characters ' +
         'are refused — the digest is the identity, so a short key would be a guessable ' +
         'account. A key already bound to another account is refused too, never moved: ' +
         'its owner unbinds it first.'),
+      keyIn,
+      el('div', { class: 'actions' }, el('button', {
+        class: 'primary small', 'data-testid': 'agent-key-bind',
+        onclick: async () => {
+          const key = keyIn.value.trim();
+          keyMsg.className = 'hint';
+          if (!key) { keyMsg.textContent = 'Paste the key your agent sends first.'; return; }
+          keyMsg.textContent = 'binding…';
+          try {
+            await ctl('/api/me/agent-key', {
+              method: 'POST', headers: { authorization: `Bearer ${key}` },
+            });
+            // Cleared on success, so the key does not sit in a form field afterwards.
+            keyIn.value = '';
+            keyMsg.className = 'hint ok';
+            keyMsg.textContent = 'Bound. Your agent is recognised by this key from now on.';
+            await probeAccount();
+            loadSettings();
+          } catch (e) {
+            keyMsg.className = 'hint warn-text';
+            keyMsg.textContent = e.message;
+          }
+        },
+      }, 'Bind this key')),
+      keyMsg,
       t.agent_keys > 0
         ? el('button', {
           class: 'ghost small', 'data-testid': 'agent-keys-clear',

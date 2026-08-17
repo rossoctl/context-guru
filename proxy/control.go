@@ -231,14 +231,16 @@ func (h *Handler) DashAuth() dash.Authenticator {
 // into a CI environment could also read that account's transcripts and rewrite its
 // settings — a token is for spending money on inference, not for administering an
 // account.
+// Every refusal here is errNoSession rather than errNoToken: see that variable for why
+// naming the agent header on a cookie-authenticated route actively misdirects.
 func (h *Handler) webPrincipal(r *http.Request) (*tenant.Tenant, error) {
 	reg := h.registry()
 	if reg == nil {
-		return nil, errNoToken
+		return nil, errNoSession
 	}
 	c, err := r.Cookie(dashCookie)
 	if err != nil || c.Value == "" {
-		return nil, errNoToken
+		return nil, errNoSession
 	}
 	t, err := reg.WebSession(c.Value)
 	if err != nil {
@@ -247,7 +249,7 @@ func (h *Handler) webPrincipal(r *http.Request) (*tenant.Tenant, error) {
 			// here first, and "disabled" with no why is a support ticket.
 			return nil, tenantOff(err)
 		}
-		return nil, errNoToken
+		return nil, errNoSession
 	}
 	return t, nil
 }

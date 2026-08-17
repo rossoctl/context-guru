@@ -323,7 +323,16 @@ type StatusError interface {
 var (
 	errNoToken = statusError{http.StatusUnauthorized,
 		"no context-guru token; send it in " + TokenHeader + " (see /dashboard/ to register)"}
-	errBadToken   = statusError{http.StatusUnauthorized, "unknown or revoked context-guru token"}
+	errBadToken = statusError{http.StatusUnauthorized, "unknown or revoked context-guru token"}
+	// errNoSession is the CONTROL PLANE's 401, kept separate from errNoToken because the
+	// two are fixed differently. Those routes authenticate with the browser session cookie
+	// and never read the agent header at all, so answering "send it in
+	// x-context-guru-token" sent people off to add a header that changes nothing — and
+	// then to guess that the token IS the cookie, which fails with this same message and
+	// reads as the token being wrong. Name the credential the route actually wants.
+	errNoSession = statusError{http.StatusUnauthorized,
+		"not signed in: this route authenticates with your dashboard session, not the agent " +
+			"token; sign in at /dashboard/ (a cg_live_ token is not a cg_dash cookie)"}
 	errTenantOff  = statusError{http.StatusForbidden, "this context-guru account is disabled"}
 	errUnboundKey = statusError{http.StatusUnauthorized,
 		"no " + TokenHeader + " header, and this provider key is not bound to an account; " +

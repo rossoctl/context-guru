@@ -186,18 +186,28 @@ they are still shell variables:
 #   x-context-guru-token: cg_live_YOUR_TOKEN_HERE
 export OPENAI_BASE_URL=https://contextguru.vpc.cloud9.ibm.com/openai/v1
 
-# Bob — BOBSHELL_API_KEY stays your key, and Bob can send no header of ours, so bind
-# that key to your account once (sha256 only; the key itself is never stored)
-export CUSTOM_BASE_URL=https://contextguru.vpc.cloud9.ibm.com
-export NODE_EXTRA_CA_CERTS=/etc/pki/tls/certs/ca-bundle.crt   # step 2 — Bob is Node
-curl -sS -XPOST https://contextguru.vpc.cloud9.ibm.com/api/me/agent-key \
-  -H "Authorization: Bearer $BOBSHELL_API_KEY" -b "cg_dash=<your dashboard cookie>"
+# Bob — your Bob key stays your own, and Bob can send no header of ours, so bind
+# that key to your account once on the Settings tab (sha256 only; never stored)
+export BOB_GATEWAY_URL=https://contextguru.vpc.cloud9.ibm.com   # bobshell 2.x
+export CUSTOM_BASE_URL=https://contextguru.vpc.cloud9.ibm.com   # older builds
+export NODE_EXTRA_CA_CERTS=/etc/pki/tls/certs/ca-bundle.crt     # step 2 — Bob is Node
 ```
 
-Bob needs **both** of its two lines. Skip the CA variable and it dies with `fetch failed`
-before it reaches us; skip the bind and it gets a 401 that says so. It may also need
-`BOBSHELL_DEFAULT_AUTH_TYPE=custom` for it to use `BOBSHELL_API_KEY` at all — see
-[Host adapters](../integrations.md#use-it-with-an-agent-bob-bobshell).
+**Which base-URL variable is version-dependent, and guessing wrong is silent** — Bob
+just talks to its own default gateway and nothing shows up in your dashboard. Check with
+`bob --version`: the 2.x bundle reads `BOB_GATEWAY_URL` and contains no reference to
+`CUSTOM_BASE_URL` at all; older builds read `CUSTOM_BASE_URL`. Exporting both is harmless.
+
+Then bind the key, **in the dashboard** — Settings → *Bound agent keys* → paste the key
+your Bob sends (`BOB_API_KEY`, or the older `BOBSHELL_API_KEY`) → **Bind this key**. Only
+its sha256 is kept. Rebind whenever you rotate the key. There is no need to copy a cookie
+into a `curl` line: your browser is already signed in, which is the whole reason the field
+is there.
+
+Bob's key must be a **real Bob credential**, because the service forwards it upstream
+unchanged — you are billed by IBM, not by us. And it must be an **API key, not SSO**: the
+identity here is the digest of a stable credential, and an SSO bearer token is reissued on
+every login, so it would need rebinding each time.
 
 The token is read from `x-context-guru-token` first. It is still accepted in
 `Authorization`, `x-api-key` or `x-goog-api-key` for tools that have nowhere else to put
@@ -237,18 +247,22 @@ sent `POST /v1/messages` to the URL named there, and the exported variable alone
 ### Bob
 
 ```sh
+BOB_GATEWAY_URL=https://contextguru.vpc.cloud9.ibm.com \
 CUSTOM_BASE_URL=https://contextguru.vpc.cloud9.ibm.com \
 NODE_EXTRA_CA_CERTS=/etc/pki/tls/certs/ca-bundle.crt \
   bob "your task"
 ```
 
-Bob keeps its own `BOBSHELL_API_KEY`. Because it can carry no header of ours, it is
-identified by the sha256 of that key — bind it once with the `curl` above, and rebind
-whenever you rotate the key.
+Bob keeps its own key. Because it can carry no header of ours, it is identified by the
+sha256 of that key — bind it once on the Settings tab, and rebind whenever you rotate it.
 
-`NODE_EXTRA_CA_CERTS` is not optional and not covered by a system-wide CA install: Bob is
-a Node program, and Node reads only its own bundled CA list. Without it the session ends
-in `Request failed after 6 attempts: fetch failed` — see [step 2](#2-make-sure-your-machine-trusts-the-certificate).
+`NODE_EXTRA_CA_CERTS` is needed because Bob is a Node program and Node reads its own CA
+list rather than the system store; without it the session ends in `Request failed after 6
+attempts: fetch failed` — see [step 2](#2-make-sure-your-machine-trusts-the-certificate).
+Recent Bob **on recent Node** no longer needs it: bobshell 2.0.1 merges the system store
+via `tls.getCACertificates`, which exists from Node v22.15, and prints `unable to auto
+setup system certificates` when it does not. Setting it anyway costs nothing and covers
+both cases.
 
 Bob's base URL is the **host**; Bob appends its own `/inference/…` and `/admin/…` paths, and
 the proxy passes its control-plane calls through verbatim so the CLI still boots.
@@ -258,8 +272,9 @@ the proxy passes its control-plane calls through verbatim so the CLI still boots
 ```sh
 cg-on()  { export ANTHROPIC_BASE_URL=https://contextguru.vpc.cloud9.ibm.com/anthropic \
                   ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: $CG_TOKEN" \
+                  BOB_GATEWAY_URL=https://contextguru.vpc.cloud9.ibm.com \
                   CUSTOM_BASE_URL=https://contextguru.vpc.cloud9.ibm.com; }
-cg-off() { unset ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS CUSTOM_BASE_URL; }
+cg-off() { unset ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS BOB_GATEWAY_URL CUSTOM_BASE_URL; }
 ```
 
 Keep `CG_TOKEN` in your own secret store, not in `.bashrc`. These are a convenience over
@@ -273,7 +288,7 @@ a machine whose `settings.json` sets `ANTHROPIC_BASE_URL`.
 env -u ANTHROPIC_BASE_URL -u ANTHROPIC_CUSTOM_HEADERS claude
 
 # Bob — back to its own endpoint.
-env -u CUSTOM_BASE_URL bob "your task"
+env -u BOB_GATEWAY_URL -u CUSTOM_BASE_URL bob "your task"
 ```
 
 `env -u` only removes an *environment* variable. If Claude Code is routed through the
@@ -407,7 +422,9 @@ a full agent turn means the traffic never arrived, whatever your shell says.
 | **502** | No upstream configured for that route, or the provider failed. The operator's problem. |
 | connection refused on `http://` | You used port 80. There deliberately isn't one — see the warning at the top of this page. |
 | **`fetch failed`** (Bob, or any Node agent), and **nothing in the service's log** | Node does not trust the IBM root CA. The request never left your machine, which is why there is nothing to see on our side. Set `NODE_EXTRA_CA_CERTS` — [step 2](#2-make-sure-your-machine-trusts-the-certificate). A passing `curl` does **not** rule this out. |
-| **401 "this provider key is not bound to an account"** (Bob) | Expected until you bind. Bob can send no header of ours, so it is identified by the sha256 of its `BOBSHELL_API_KEY` — run the `POST /api/me/agent-key` call in [step 3](#3-point-claude-code-at-it). |
+| **401 "this provider key is not bound to an account"** (Bob) | Expected until you bind. Bob can send no header of ours, so it is identified by the sha256 of its own API key: Settings → *Bound agent keys* → paste it → **Bind this key**. Rebind after you rotate the key. |
+| **Bob works, but nothing appears in your dashboard** | Your Bob never reached us — the base-URL variable is version-dependent. bobshell 2.x reads `BOB_GATEWAY_URL`; older builds read `CUSTOM_BASE_URL`. Export both, then check `bob --version`. |
+| **"no context-guru token; send it in x-context-guru-token"** from `/api/me/…` | That route authenticates with your **browser session**, not the token — the message names the agent header because the same wording serves the proxy routes. Use the dashboard instead of `curl`; a `cg_live_` token in a `cg_dash` cookie is not a session and fails exactly this way. |
 
 ## Three things worth knowing before you rely on it
 

@@ -106,11 +106,18 @@ BOB_UPSTREAM=https://api.us-east.bob.ibm.com \
 Then point Bob at the proxy and let it use its own key:
 
 ```sh
+BOB_GATEWAY_URL=http://localhost:4000 \
 CUSTOM_BASE_URL=http://localhost:4000/v1 \
-BOBSHELL_DEFAULT_AUTH_TYPE=custom \
-BOBSHELL_API_KEY=<your bob key> \
+BOB_API_KEY=<your bob key> \
   bob --yolo "your task"
 ```
+
+The base-URL and key variables both moved between Bob releases, and a stale name fails
+**silently** — Bob simply uses its own default gateway. The 2.x bundle reads
+`BOB_GATEWAY_URL` and `BOB_API_KEY` (it aliases `BOBSHELL_API_KEY` onto the latter, and
+errors if both are set to different values); it contains no `CUSTOM_BASE_URL` or
+`BOBSHELL_DEFAULT_AUTH_TYPE` at all. Older builds read the `CUSTOM_*` / `BOBSHELL_*` set.
+Setting both costs nothing; check yours with `bob --version`.
 
 How the gateway routes Bob's traffic:
 

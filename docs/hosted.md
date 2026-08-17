@@ -512,11 +512,9 @@ export ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: cg_live_xxxxxxxx"
 export OPENAI_BASE_URL=https://cg.<host>/openai/v1
 
 # Bob — its client sets every header itself and cannot carry ours, so bind the key
-# it already sends (stored as sha256 only, never in plaintext). One-time, from the
-# Setup tab, with your dashboard cookie:
-export CUSTOM_BASE_URL=https://cg.<host>
-curl -sS -XPOST https://cg.<host>/api/me/agent-key \
-  -H "Authorization: Bearer $BOBSHELL_API_KEY" -b "cg_dash=<your dashboard cookie>"
+# it already sends, once, on the Settings tab: Bound agent keys → paste → Bind.
+# Stored as sha256 only, never in plaintext.
+export BOB_GATEWAY_URL=https://cg.<host>   # bobshell 2.x; older builds: CUSTOM_BASE_URL
 ```
 
 ### How each agent identifies itself
@@ -525,7 +523,7 @@ curl -sS -XPOST https://cg.<host>/api/me/agent-key \
 |---|---|---|
 | Claude Code | `ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: …"` (or the same pair in `~/.claude/settings.json` `env`) | Documented `Name: Value`, newline-separated for several. Leaves `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` free for your own key. |
 | OpenAI-dialect tools | `x-context-guru-token` header, however your tool sets extra headers | Same slot rule; `OPENAI_API_KEY` stays yours. |
-| Bob (BobShell) | `sha256(BOBSHELL_API_KEY)`, bound once via `POST /api/me/agent-key` | Bob's client builds `Content-Type`, `User-Agent`, `Authorization`, `x-instance-id` and `x-team-id` itself and exposes no hook for another header; its `headers` setting applies to MCP servers only. So it is recognised by the credential it already sends. |
+| Bob (BobShell) | `sha256` of its own API key (`BOB_API_KEY`, or the legacy `BOBSHELL_API_KEY` it aliases), bound once from Settings → *Bound agent keys* — `POST /api/me/agent-key` under the hood. An **API key, not SSO**: an SSO bearer is reissued each login, so its digest is not an identity. | Bob's client builds `Content-Type`, `User-Agent`, `Authorization`, `x-instance-id` and `x-team-id` itself and exposes no hook for another header; its `headers` setting applies to MCP servers only. So it is recognised by the credential it already sends. |
 
 **Binding a key: two refusals.** A key under 20 characters is refused `400` — identity here
 *is* the key's digest, so a guessable key would be a guessable account. A digest already
