@@ -31,7 +31,7 @@ import (
 
 // Errors callers branch on.
 var (
-	ErrBadPassword = errors.New("tenant: password must be at least 12 characters")
+	ErrBadPassword = errors.New("tenant: password must be at least 8 characters")
 	ErrNoPassword  = errors.New("tenant: account has no password set")
 	ErrWrongPass   = errors.New("tenant: wrong email or password")
 	ErrNotVerified = errors.New("tenant: email not verified")
@@ -74,7 +74,7 @@ const (
 	// MinPasswordLen is the only password rule. Length is the property that
 	// actually buys entropy; composition rules ("one symbol!") push users to
 	// Password1! and buy nothing, so there are none.
-	MinPasswordLen = 12
+	MinPasswordLen = 8
 	// maxPasswordLen bounds what we will hash. argon2's cost does not grow with
 	// input length, so this is only about not accepting a megabyte-long field.
 	maxPasswordLen = 256
