@@ -710,6 +710,133 @@ func TestUserCannotSetManagerOnlyFields(t *testing.T) {
 	}
 }
 
+// The compaction configuration is the manager's, per user. A user's own PUT /api/me is
+// refused for config_yaml and for nothing else: the fields they legitimately own — their
+// machine label, their upstreams, their capture consent — still save in the same request
+// shape the settings page sends.
+func TestUserCannotSetTheirOwnCompaction(t *testing.T) {
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	userJar, userID := f.signUpJar(t, "a@ibm.com")
+
+	// A manager parks a configuration on them first, so the refusal below is provably a
+	// refusal to CHANGE something rather than a refusal to write to an empty field.
+	const managed = "pipeline: [format]\nmode: observe\n"
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+userID,
+		mustJSON(t, map[string]any{"config_yaml": managed}), mgrJar); w.Code != http.StatusOK {
+		t.Fatalf("manager could not set the config: %d %s", w.Code, w.Body)
+	}
+	// And it is audited, with the manager as the actor — this is the path that replaces
+	// the user's own editing, so "who changed my pipeline" has to have an answer.
+	entries, err := f.reg.Audit(userID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var audited bool
+	for _, e := range entries {
+		if e.Field == "config_yaml" && e.Actor != userID && e.After == managed {
+			audited = true
+		}
+	}
+	if !audited {
+		t.Errorf("the manager's config edit was not audited: %+v", entries)
+	}
+
+	w, out := f.do(t, "PUT", "/api/me", `{"config_yaml":"pipeline: [dedup]\n"}`, userJar)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("user PUT /api/me config_yaml = %d, want 403: %s", w.Code, w.Body)
+	}
+	if msg, _ := out["error"].(string); !strings.Contains(msg, "manager") {
+		t.Errorf("the refusal does not say who sets it: %q", msg)
+	}
+	after, err := f.reg.Get(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ConfigYAML != managed {
+		t.Errorf("the refused write changed the stored config: %q", after.ConfigYAML)
+	}
+
+	// What is theirs still saves.
+	if w, _ := f.do(t, "PUT", "/api/me",
+		`{"label":"desktop","capture_content":true,"up_anthropic":"up"}`, userJar); w.Code != http.StatusOK {
+		t.Fatalf("user PUT /api/me own fields = %d, want 200: %s", w.Code, w.Body)
+	}
+	if after, _ = f.reg.Get(userID); !after.CaptureContent || after.Label != "desktop" {
+		t.Errorf("the user's own fields did not save: %+v", after)
+	}
+
+	// A manager's own settings page is unchanged.
+	if w, _ := f.do(t, "PUT", "/api/me", `{"config_yaml":"mode: observe\n"}`, mgrJar); w.Code != http.StatusOK {
+		t.Fatalf("manager PUT /api/me config_yaml = %d, want 200: %s", w.Code, w.Body)
+	}
+}
+
+// Promotion through the dashboard, end to end: the role reaches the registry, is audited,
+// and the promoted account's very next request carries manager scope.
+func TestPromotingAUserGrantsManagerScope(t *testing.T) {
+	f := newMgrFixture(t)
+	mgrJar, mgrID := f.signUpJar(t, "boss@ibm.com")
+	userJar, userID := f.signUpJar(t, "a@ibm.com")
+
+	if w, _ := f.do(t, "GET", "/api/tenants", "", userJar); w.Code != http.StatusForbidden {
+		t.Fatalf("a plain user reached the roster: %d", w.Code)
+	}
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+userID, `{"role":"manager"}`, mgrJar); w.Code != http.StatusOK {
+		t.Fatalf("promotion = %d %s", w.Code, w.Body)
+	}
+	if w, _ := f.do(t, "GET", "/api/tenants", "", userJar); w.Code != http.StatusOK {
+		t.Fatalf("the promoted account still has no manager scope: %d %s", w.Code, w.Body)
+	}
+	entries, err := f.reg.Audit(userID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, e := range entries {
+		if e.Field == "role" && e.Actor == mgrID && e.Before == "user" && e.After == "manager" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the promotion was not audited: %+v", entries)
+	}
+	// And back down, which is only allowed because the promoter is still a manager.
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+userID, `{"role":"user"}`, mgrJar); w.Code != http.StatusOK {
+		t.Fatalf("demotion of a second manager = %d %s", w.Code, w.Body)
+	}
+}
+
+// The lockout guard: the LAST manager may not be demoted or disabled, because only a
+// manager can hand the role out again and the dashboard is the only place it happens.
+func TestLastManagerCannotBeDemotedOrDisabled(t *testing.T) {
+	f := newMgrFixture(t)
+	mgrJar, mgrID := f.signUpJar(t, "boss@ibm.com")
+	f.signUpJar(t, "a@ibm.com")
+
+	for _, body := range []string{`{"role":"user"}`, `{"disabled":true,"disabled_reason":"oops"}`} {
+		w, out := f.do(t, "PATCH", "/api/tenants/"+mgrID, body, mgrJar)
+		if w.Code == http.StatusOK {
+			t.Fatalf("PATCH self %s was allowed; the deployment has no manager left", body)
+		}
+		if msg, _ := out["error"].(string); !strings.Contains(msg, "last manager") {
+			t.Errorf("the refusal does not explain itself: %q", msg)
+		}
+	}
+	if still, err := f.reg.Get(mgrID); err != nil || !still.IsManager() || still.Disabled {
+		t.Fatalf("the last manager was changed anyway: %+v %v", still, err)
+	}
+
+	// With a second manager in place, both are allowed again.
+	_, otherID := f.signUpJar(t, "b@ibm.com")
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+otherID, `{"role":"manager"}`, mgrJar); w.Code != http.StatusOK {
+		t.Fatalf("promotion = %d %s", w.Code, w.Body)
+	}
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+mgrID, `{"role":"user"}`, mgrJar); w.Code != http.StatusOK {
+		t.Fatalf("demotion with a spare manager = %d %s", w.Code, w.Body)
+	}
+}
+
 func mustJSON(t *testing.T, v any) string {
 	t.Helper()
 	b, err := json.Marshal(v)

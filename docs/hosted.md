@@ -609,6 +609,13 @@ for the exact shapes:
 one. It is also the only field a settings save writes back, so a round trip through the form
 cannot silently turn tracking into a frozen copy of today's default.
 
+**Who may change it.** The compaction configuration — pipeline, mode, per-component
+settings — belongs to the **manager**, per account, and is edited from the Tenants tab.
+A plain account's Settings page shows its own upstreams, capture consent, spend and tokens,
+and says *Your manager sets the compaction*; `PUT /api/me` answers **403** to a `config_yaml`
+from a non-manager, so hiding the grid is not the only thing stopping it. The states below
+are what the manager sees, on their own page and in each account's editor.
+
 **What Settings shows in each state.** The controls always render the *effective* document,
 because drawing the empty stored one would read as "my configuration is gone":
 
@@ -655,8 +662,10 @@ and — behind a disclosure — purge and delete.
 
 ### Editing somebody else's configuration
 
-`PATCH /api/tenants/{id}` writes the same fields a tenant can write for themselves, plus
-the manager-only ones (`role`, `max_rows`, `disabled`, `disabled_reason`, `variant`).
+`PATCH /api/tenants/{id}` writes the fields a tenant can write for themselves (`label`,
+upstreams, `capture_content`), plus the manager-only ones (`config_yaml`, `role`, `max_rows`,
+`disabled`, `disabled_reason`, `variant`). This is the **only** way a compaction
+configuration changes for somebody who is not a manager.
 `config_yaml` goes through the **same strict loader the proxy builds with**, so a typo is a
 `400` naming the offending key rather than a surprise at request time, and a rejected
 document leaves the stored one untouched.
@@ -673,6 +682,17 @@ Two behaviours to know:
 
 Config resolution still fails **open**: an account whose stored document somehow does not
 build is forwarded uncompacted (logged loudly), never refused.
+
+### Roles, and the door that must not close
+
+`role` on the same PATCH promotes a user to manager or demotes them; the change is audited
+with the actor. The promoted account has manager scope on its **next request** — the registry
+cache is cleared on every write, so nothing has to be re-signed-in.
+
+The **last manager cannot be demoted or disabled** — a `400` whose message says so:
+only a manager can hand the role out, so the dashboard would have nobody left who can, and
+the database would be the only way back. Promote a second manager first. Disabled managers do
+not count as a way back — they cannot sign in.
 
 ### A/B testing
 
@@ -1019,8 +1039,9 @@ thing to keep in step with the server.
 |---|---|
 | Sign in / Register | Registration takes an email, a password, a token label, and an invite code if the deployment is in `invite` mode; entering the [mailed 6-digit code](#the-sign-in-flow) verifies the address, returns the token **once**, and signs you in — so registration flows straight to Setup with the token already substituted into the snippets. On a `closed` deployment the attempt is refused — see [step 4](#4-choose-how-accounts-are-created). Signing in later is password + a fresh mailed code, and an account created before passwords existed can still sign in with its token. Either way the browser only ever holds the session cookie. |
 | Setup | The three copy-paste blocks, with your own token and this deployment's real base URL (derived from the request, so it is correct behind nginx and on loopback alike). Your provider key stays where it already is; the blocks only add the base URL and the `x-context-guru-token` header — or, for Bob, the one-time key-binding curl. |
-| Settings | Mode, upstream per dialect, component toggles, content-capture consent, raw YAML, month-to-date spend, bound agent keys, token management, signed-in machines, and your own configuration-change history. Read-only while you are [tracking the server default](#tenants-track-the-default-they-are-not-stamped-with-a-copy-of-it), with **Customise** to take ownership. |
+| Settings | Upstream per dialect, content-capture consent, month-to-date spend, bound agent keys, token management, signed-in machines, and your own configuration-change history. Mode, component toggles and raw YAML are the **manager's**, per account; a plain account is told so and asks them. For a manager, they are read-only while [tracking the server default](#tenants-track-the-default-they-are-not-stamped-with-a-copy-of-it), with **Customise** to take ownership. |
 | Archive | What has moved to cold storage, from the local index. Opening one fetches it back read-only. |
+| Components | Manager only on a hosted deployment, since the pipeline it exists to tune is the manager's. Still there on a single-tenant proxy, where the operator is the only user of their own box. |
 | Tenants | Manager only: every account with its month-to-date spend, disable an account, reissue a lost token. |
 
 ![Setup immediately after registering: a green banner reads "Your new token is filled in

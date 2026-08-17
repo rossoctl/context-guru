@@ -1166,6 +1166,20 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 		ctlErr(w, code, msg)
 		return
 	}
+	// The compaction configuration is the MANAGER's field, set on the user's behalf
+	// through PATCH /api/tenants/{id}. Field by field, what is left is what a user owns:
+	// label names their own machine, the upstream selects pick among names the operator
+	// already allow-listed and carry the user's own credential, and capture_content is
+	// their privacy decision about their own transcripts — a manager cannot read those, so
+	// consenting to store them cannot be a manager's call to make. config_yaml is the only
+	// one of them that decides what runs on the traffic.
+	//
+	// Enforced here and not only by hiding the grid in the dashboard: a hidden control is
+	// not a permission, and this route is one curl away.
+	if in.ConfigYAML != nil && !t.IsManager() {
+		ctlErr(w, http.StatusForbidden, "a manager sets the compaction configuration")
+		return
+	}
 	patch := tenant.Patch{Label: in.Label, ConfigYAML: in.ConfigYAML,
 		UpAnthropic: in.UpAnthropic, UpOpenAI: in.UpOpenAI, UpBob: in.UpBob,
 		CaptureContent: in.CaptureContent}
