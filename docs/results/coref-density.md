@@ -2,7 +2,9 @@
 
 The measurement pass [`coref-compaction.md` §7](../proposals/coref-compaction.md) says must run before
 the `coref` component is calibrated. It has now run, on **three corpora** — and the headline is that they
-disagree by a factor of three, which is itself the most useful result.
+disagree by roughly 4x, which is itself the most useful result. These numbers are the SECOND
+version: review of PR #80 found a defect that inflated the first set badly, and
+[what review changed](#what-review-changed) records both the defect and the delta.
 
 All of it cost **zero API dollars**: the runs already happened and left their logs on disk.
 
@@ -34,45 +36,36 @@ python3 deploy/harbor/coref.py /tmp/uh.jsonl window=32000 fire_frac=0.6 sweep=1
 
 ## The headline: reference density is a property of the workload
 
+Measured with the `opaque` class and the opportunity floor both in force (see
+[what review changed](#what-review-changed) — the first version of these numbers was materially wrong):
+
 | | Claude Code | UltraHorizon | LOCA-bench |
 |---|---|---|---|
-| `unreferenced` — nothing later used it | **23%** | **78%** | **95%** |
-| `closed` — value taken, survives above | 15% | 8% | 0% |
-| `open` — recent or repeated → keep | 60% | 13% | 4% |
-| cuttable at shipped thresholds | 38% | 86% | 95% |
+| `opaque` — introduced nothing trackable, **no evidence** | 8% | 20% | **40%** |
+| `unreferenced` — introduced identifiers, nothing used them | **13%** | **51%** | **22%** |
+| `closed` — value taken, survives above | 15% | 6% | 0% |
+| `open` — recent, repeated, or too new to judge | 62% | 21% | 36% |
+| **cut at the shipped default** (`unreferenced` only) | **13%** | **51%** | **22%** |
 
-Interactive work on a coherent codebase keeps returning to the same files, symbols and errors, so 60% of
-its tool-output mass is still load-bearing. Benchmark tasks survey, extract an answer, and move on — so
-**three to four times as much of their mass is never referenced again**. `coref`'s value is not a single
-number; it is workload-dependent, and it is much larger on benchmark traffic than on the traffic I
-measured first.
+Interactive work on a coherent codebase keeps returning to the same files, symbols and errors, so 62% of
+its tool-output mass is still load-bearing. UltraHorizon's game-exploration traffic surveys, verifies, and
+moves on, so half its mass is provably dead. `coref`'s value is not a single number; it is
+workload-dependent, and it differs by ~4× across three corpora.
 
-### The bias in that, quantified rather than waved away
-
-An output near the end of a transcript has no later turns that *could* reference it, so short sessions
-inflate `unreferenced` for free. LOCA sessions average ~18 turns, so this had to be bounded. Restricting
-to outputs with at least N later model turns:
-
-| min later model turns | Claude Code | UltraHorizon | LOCA-bench |
-|---|---|---|---|
-| ≥ 0 (all) | 23% | 78% | 95% |
-| ≥ 5 | 23% | 77% | 91% |
-| ≥ 10 | 22% | 76% | 80% |
-| ≥ 20 | **21%** | **70%** | **70%** |
-
-So LOCA's 95% is substantially tail bias — its honest range is 70–95% depending on how much opportunity
-you demand. UltraHorizon (78% → 70%) and Claude Code (23% → 21%) are robust. **The ordering survives
-every cut: at a common ≥20-later-turns bar, benchmark traffic has ~3.3× the unreferenced mass of
-interactive traffic.** That is the finding.
+LOCA is the interesting case and the reason the `opaque` class exists: its raw `unreferenced` share looked
+like **95%**, and 40 points of that was mass the index cannot see into at all (11 outputs averaging 22k
+tokens — bulk record and spreadsheet dumps of human-readable values), with most of the remainder outputs
+too near the tail to have been referenced yet. The honest free cut there is 22%, not 95%.
 
 ### And LOCA behaves exactly as §8 predicted
 
 §8 argued LOCA would be a **Tier-2/3 stress test** rather than a showcase for exact matching, because its
-BigQuery/Sheets/Excel envs *aggregate and compute over* tool results, so references arrive transformed
-past the point where a substring match can see them. What an exact matcher reports on LOCA is 95%
-unreferenced and **0% closed — not one output in 166 was referenced once or twice and then left alone.**
-References there are either immediate-and-repeated (the 4% `open`) or invisible. That is the predicted
-signature, and it is the strongest reason not to read `unreferenced` as "unused" on that corpus.
+BigQuery/Sheets/Excel envs *aggregate and compute over* tool results, so references arrive transformed past
+the point where a substring match can see them. The signature is unmistakable: **0% closed — not one
+output in 166 was referenced once or twice and then left alone** — alongside the largest `opaque` share of
+any corpus at 40%. References there are either immediate-and-repeated (the `open` 36%) or invisible to an
+exact matcher. That is the predicted result, and it is the strongest reason never to read `unreferenced`
+as "unused" on that corpus.
 
 ## What §7's other questions came back with
 
@@ -93,39 +86,80 @@ it by 18:
 | 6 | 28% | 27% | 26% | 25% | 23% |
 
 The corroborating figure: **44% of all Claude Code tool-output mass was last referenced 40+ messages
-ago**, and yet 60% of mass is `open`. Most referenced mass is *old and still hot*. A policy separating
+ago**, and yet 62% of mass is `open`. Most referenced mass is *old and still hot*. A policy separating
 case A from case B by distance — the original framing — would confidently cut repeatedly-referenced
 content believing it was taking the safe early cut. §3's reframe from distance to open-vs-closed is not a
 refinement; it is the difference between the policy working and not. **`closed_dist` is not worth tuning;
 `open_reps` is the dial.**
 
-**Break-even is workload-dependent too, and better on benchmarks:**
+**Break-even is workload-dependent too, and it is worse than the first pass claimed** — necessarily, since
+`opaque` and tail-protected outputs left the cut set and `S` shrank:
 
 | | Claude Code | UltraHorizon | LOCA-bench |
 |---|---|---|---|
-| median cut `S` | 16,432 tok | 15,479 tok | 51,022 tok |
-| median rewritten suffix `W` | 159,183 tok | 26,044 tok | 51,532 tok |
-| turns `T` needed | **95** | **17** | **14** |
-| sessions whose observed `T` cleared it | 15/30 | 7/10 | 4/9 |
+| median cut `S` | 10,539 tok | 14,164 tok | 21,234 tok |
+| median rewritten suffix `W` | 157,189 tok | 26,044 tok | 49,611 tok |
+| turns `T` needed | **138** | **23** | **34** |
+| sessions whose observed `T` cleared it | **9/30** | **4/8** | **2/6** |
 
-§4's arithmetic holds everywhere, but the margin differs sharply. On a 180k interactive transcript a
-batched cut is ~10% of the request against a huge rewritten suffix, so it needs 95 more turns. On
-benchmark traffic the cut is a large share of a small transcript, so it needs 14–17 — and most sessions
-have that. Batching moves break-even from unreachable (T > 276 for a single early cut) to *comfortable on
-benchmarks* and *marginal on long interactive sessions*.
+§4's arithmetic holds everywhere, and the margin is thin everywhere: **roughly a third of sessions repay
+the cache-write on tokens**, and on long interactive transcripts the median session would need 138 more
+turns. Batching moves break-even from impossible (T > 276 for a single early cut) to *merely unlikely* on
+tokens alone. This is the third decision rule in §7 firing: **`coref` must be justified on step reduction
+and on deferring the agent's own compaction, and evaluated that way.** `corr(Δsteps, Δcost) = +0.95` says
+tokens were never the interesting axis; these numbers say it is not even a supporting one.
 
 Window choice matters here and is easy to get wrong: measured against a 200k window, UltraHorizon shows
-0/10 sessions clearing break-even — but its peak request is 30k, so `fire_frac × window` is never reached
+**0** sessions clearing break-even — but its peak request is 30k, so `fire_frac × window` is never reached
 and `T` collapses to zero by construction. At a 32k window (matching what those runs actually held) it is
-7/10. A break-even figure is meaningless without a window the traffic actually used.
+4/8. A break-even figure is meaningless without a window the traffic actually used.
 
-## Two methodological results
+## What review changed
+
+Review of PR #80 raised a counter-example that turned out to invalidate the first version of every number
+above. It is worth recording in full, because the defect was invisible in the arithmetic.
+
+**The counter-example.** A tool output returns records; the model's next turn references one:
+
+```jsonc
+[{"name": "david", "id": 123, "address": "foobarbaz"},
+ {"name": "osher", "id": 235, "address": "banana"}]
+// model: "I need to remember david 123 address."
+```
+
+The reference is real, but the value needed — `foobarbaz` — was never copied into a model turn. The model
+referenced an **anchor** in order to point at a payload it did not restate. So §3's "any reference is a
+surviving copy" is too strong, and `closed` cannot rest on "referenced once, long ago" alone.
+
+**The worse defect it exposed.** Run through the actual index, that output yields **zero** trackable
+tokens: `david`, `123`, `foobarbaz` are short lowercase words and a 3-digit number, precisely what the
+precision rules below exclude. With no novel tokens there are no references, so it scored `unreferenced` —
+**the class the default configuration cuts.** Two states satisfy `refs == 0` and they are opposites:
+
+| state | meaning |
+|---|---|
+| introduced 200 identifiers, nobody touched one | evidence of deadness → safe cut |
+| introduced nothing the index can see | **no evidence** → no opinion |
+
+`opaque` is now its own class and is never cut, and an **opportunity floor** (`min_later_turns`) stops an
+output too near the tail from being scored as unused. The delta on the same corpora:
+
+| | Claude Code | UltraHorizon | LOCA-bench |
+|---|---|---|---|
+| `unreferenced` as first reported | 23% | 78% | 95% |
+| `unreferenced` after the fix | **13%** | **51%** | **22%** |
+| of which reclassified `opaque` | 8% | 20% | **40%** |
+| sessions clearing break-even | 15/30 → **9/30** | 7/10 → **4/8** | 4/9 → **2/6** |
+
+The first version would have deleted 40% of LOCA's tool-output mass on no evidence at all, under the
+default config. Both the class and the floor are now tested on both sides of the implementation.
+
+## Two further methodological results
 
 ### 1. The identifier/prose rule decided the answer
 
-The first run of this measurement reported **71%** of Claude Code mass as referenced and 28% as cuttable.
-The corrected run reports 60% and 38%. Nothing about the corpus changed — only the rule deciding whether a
-token is an identifier or an English word. The original rule accepted any token of 10+ characters, any
+An earlier run of this measurement reported **71%** of Claude Code mass as referenced. Nothing about the
+corpus changed — only the rule deciding whether a token is an identifier or an English word. The original rule accepted any token of 10+ characters, any
 token containing punctuation anywhere, and any bare number of 3+ digits, and its top
 reference-producing "identifiers" were:
 
@@ -189,7 +223,8 @@ rate as the precision inner loop, and only then the scored benchmarks.
 - **Not the eval-box corpus** (see the warning above) — the single largest caveat.
 - **Small n, and one author's traffic.** 31 + 10 + 9 sessions; the Claude Code corpus is mostly one
   project. No seeds, no variance estimates. Every figure is a point estimate of unknown spread.
-- **Tail bias is bounded, not eliminated** — see the ≥N table; LOCA's headline is the most affected.
+- **Tail bias is now guarded, not merely bounded** — `min_later_turns` (default 8) treats an output with
+  too few later model turns as `open`. Before that guard existed, LOCA's headline was the most affected.
 - **Session boundaries are reconstructed.** Claude Code transcripts are cut at 180k tokens to approximate
   compaction boundaries the transcript does not record; UltraHorizon runs are cut where the harness's own
   context wipe drops the message count. Measuring across a boundary the model cannot see across would

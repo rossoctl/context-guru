@@ -22,7 +22,7 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | `extract_llm` | Offload (LLM) | query-irrelevant content via an LLM-written sandboxed filter | via expand | large output in a large request | `strategy` (code), `model.source`, `trigger`, `rewrite`, `skip_file_reads` |
 | `smartcrush` | Offload | middle items of a JSON array | via expand | JSON-array tool output | `min_items` (5), `min_tokens` (200), `keep_first` (3), `keep_last` (2) |
 | `mask` | Offload | older tool outputs (age-based) | via expand | more than `keep_recent` outputs | `keep_recent` (3), `min_tokens` (100), `keep_head_chars` (96) |
-| `coref` | Offload | tool outputs no later turn referred back to (co-reference-based) | via expand | a threshold crossing, once per budgeted pass; **opt-in, in no preset** — [measured; yield is workload-dependent](results/coref-density.md) | `min_tokens` (300), `cut_closed` (false), `min_batch_frac` (0.15), `rewrite_budget` (3), `trigger` |
+| `coref` | Offload | tool outputs no later turn referred back to (co-reference-based) | via expand | a threshold crossing, once per budgeted pass; **opt-in, in no preset** — [measured; yield is workload-dependent](results/coref-density.md) | `min_tokens` (300), `cut_closed` (false), `min_later_turns` (8), `min_batch_frac` (0.15), `rewrite_budget` (3), `trigger` |
 | `summarize` | Offload (LLM) | the middle of the transcript → one summary | via expand | long trajectories | `summary_level` (regular), `keep_last` (3), `min_tokens` (500), `resummarize_tokens` (6000), `model.source`, `trigger` |
 
 Presets (`config/config.go`), verbatim: **`codesmart`** (the proxy default)
@@ -330,8 +330,8 @@ after:  [tool output compacted: no later turn referred back to it; starts: 0 tre
 ```
 
 - **Config:** `min_tokens` (300), `cut_unreferenced` (true), `cut_closed` (**false**), `closed_dist` (12),
-  `open_reps` (3), `min_batch_frac` (0.15), `rewrite_budget` (3), `break_even` (true), `keep_head_chars`
-  (96), `trigger`. **Shines:** long sessions with a lot of survey-and-discard traffic (listings, wide
+  `open_reps` (3), `min_later_turns` (8), `min_batch_frac` (0.15), `rewrite_budget` (3), `break_even`
+  (true), `keep_head_chars` (96), `trigger`. **Shines:** long sessions with a lot of survey-and-discard traffic (listings, wide
   searches, exploratory reads never returned to) — complementary to `mask`, which drops the *old* where
   this drops the *never-used*, and an old-but-hot span is the case `mask` gets wrong. **Inert:** below the
   trigger, everything referenced, batch below `min_batch_frac`, budget spent, or break-even unmet.
@@ -341,9 +341,10 @@ after:  [tool output compacted: no later turn referred back to it; starts: 0 tre
   never re-derived; unlike `mask` it must not use `repairLostFreeze`, because a history-dependent
   decision re-derived at depth can emit different bytes).
 - **Opt-in and in no preset.** The measurement pass has run, but on Claude Code workstation transcripts
-  rather than the eval-box captures — [unreferenced mass runs 21% on interactive traffic
-  and ~70% on benchmark traffic, and recency is measured to be nearly inert while reference count does all
-  the work](results/coref-density.md).
+  rather than the eval-box captures — [unreferenced mass runs 13% on interactive traffic,
+  51% on UltraHorizon and 22% on LOCA-bench; recency is measured to be nearly inert while reference count
+  does all the work; and an output the index cannot see into is `opaque` — never cut — which is 40% of
+  LOCA's mass](results/coref-density.md).
   So `cut_unreferenced` (default on) is justified, while `cut_closed` — the large case-A cut — stays off
   until those thresholds are re-measured on the right corpus.
 

@@ -1,0 +1,132 @@
+# `coref` implementation status
+
+What exists in the tree, what is deliberately inert, and what has to happen next. Split out of
+[the proposal](coref-compaction.md), which is the design argument and should stay readable as one —
+this is the part that goes stale with every commit.
+
+**Related:** [the proposal](coref-compaction.md) · [component reference](../components/coref.md) ·
+[cheat sheet](../reference/coref-glossary.md) · [measured density](../results/coref-density.md)
+
+
+Two pieces exist, and the split between them is the point: the **mechanism** is a matter of getting the
+definition of a reference right, which a known-answer fixture can settle; the **thresholds** are a
+matter of what real traffic looks like, which only §7's pass can settle. So the first is built and the
+second is not, and the component is configured to be inert on anything that depends on the second.
+
+**Built.**
+
+- [`internal/coref`](https://github.com/rossoctl/context-guru/blob/main/internal/coref/coref.go) — the Tier-1 index: identifier
+  tokenizer, novel-token (echo) exclusion, boilerplate exclusion, sibling exclusion, reference count,
+  recency from the head, consume lag, used-fraction, and the open/closed/unreferenced predicate. No
+  bifrost, no components, no tokenizer dependency, so it is a pure function of a flattened message list
+  — deliberately, because it must stay interchangeable with `coref.py`'s definition. The Go fixture is
+  the twin of `coref_fixture.py` down to the four known answers **and the negative control**: with the
+  echo guard disabled the `src/config.py` read flips out of `unreferenced` and measured cuttable mass
+  falls, and the test fails if it does *not* flip — the control is asserted, not just run once.
+- [`components/offload/coref.go`](https://github.com/rossoctl/context-guru/blob/main/components/offload/coref.go) — the Offload
+  component, with each of §5's constraints as a tested behaviour rather than a comment: latched
+  decisions replayed byte-for-byte even when fresh evidence would reclassify the span (constraint 1,
+  and `repairLostFreeze` deliberately not consulted), keep→cut only (2), prefix mutation on purpose
+  under a per-session `rewrite_budget` (3), `freeze`/`reapplyFrozen` wired from the start (4),
+  `<<cg:HASH>>` + stash + kept-verbatim (5), and side-effect-free planning so a batch that fails a gate
+  leaves the request byte-identical (6).
+- §4's arithmetic as an actual gate, not a note: `min_batch_frac` for batching, and `break_even`
+  applying `S × T > 11.5 × W` with `T` estimated from the transcript's observed growth rate and `W`
+  bounded to the *cached* span (content past the cache boundary would be written this turn regardless).
+  The counter-intuitive consequence from §6 is what the test pins: at the window edge `T ≈ 0` and the
+  pass correctly declines.
+
+**Deliberately not built, and why the "measure first" rule in §7 is not being broken.** §7 says nothing
+should be built before the substrate is measured. What that rule protects against is *calibrating* a
+component against numbers nobody has — so the implementation is scoped to the part that has no
+calibration in it. `cut_unreferenced` needs no threshold: "no later turn used anything this output
+introduced" is a fact about the transcript. `cut_closed` needs two (`closed_dist`, `open_reps`), which
+are precisely what §7 produces, so it defaults to **off** and the shipped values are placeholders
+carried over from `coref.py`'s defaults for comparability, not recommendations. `coref` is in **no
+preset** for the same reason.
+
+Also not built: the Tier-2 LLM escalation ([open questions](coref-compaction.md#9-open-questions)), and the incremental per-session reference index. The
+index is currently recomputed per firing turn — acceptable because the trigger makes firings rare, but
+it is the latency question in the proposal's [open questions](coref-compaction.md#9-open-questions) and it is unmeasured.
+
+**Measured, on three corpora.** The pass has run — on **Claude Code transcripts, UltraHorizon runs and
+LOCA-bench trajectories**, none of which is the eval-box capture set (unreachable). Full write-up and
+caveats: [co-reference density](../results/coref-density.md).
+
+The single most useful result is that the three corpora **disagree by a factor of three**, so
+`unreferenced` mass is a property of the workload rather than a constant:
+
+| | Claude Code (interactive) | UltraHorizon | LOCA-bench |
+|---|---|---|---|
+| `unreferenced` | 23% | 78% | 95% |
+| `closed` | 15% | 8% | **0%** |
+| `open` | 60% | 13% | 4% |
+| …restricted to outputs with ≥20 later turns | 21% | 70% | 70% |
+
+Interactive work on a coherent codebase keeps returning to the same files and errors; benchmark tasks
+survey, extract, and move on. The last row bounds the obvious bias (an output near the end has no later
+turns that *could* reference it) and the ordering survives it: **benchmark traffic carries ~3.3× the
+unreferenced mass of interactive traffic.** LOCA's 0% `closed` is also §8's own prediction landing — it
+argued LOCA would be a Tier-2/3 stress test where references arrive transformed past what a substring
+match can see, and an exact matcher finds not one output in 166 that was referenced once or twice and
+then left alone.
+
+Four things it settles, and one it overturns:
+
+- **`cut_unreferenced` is justified as the default** — 21% of mass on interactive traffic and ~70% on
+  benchmark traffic, with no calibrated threshold and no model call. Decision rule one from §7 is
+  answered yes on every corpus.
+- **A reference consumes a median 18.7% of what its output introduced** (11.5% on UltraHorizon).
+  Hypothesis A — "took one value, does not need the rest" — is confirmed rather than assumed.
+- **Tier-2 leakage measures ~2% of model turns.** Unpacking that, because it is a proxy and not a
+  direct measurement: Tier 2 is a reference that arrived *transformed* (the model summed the rows or
+  converted the units), so by definition no substring match can find it. What can be counted instead is
+  a **symptom** — a model turn that states a numeric value appearing nowhere in any earlier message. If
+  the model says "3 seconds" and `3` is nowhere upstream, it computed that number from something, and
+  that something was almost certainly a tool output. On the interactive corpus 2% of turns look like
+  that, which says the deterministic ceiling is not badly compromised and a zero-LLM first version is
+  viable.
+
+  Two caveats, both important. It is a *lower* bound: only numeric transformations leave this trace, so
+  reworded prose references are invisible to it. And tightening the identifier rules (see the results
+  write-up) also blinded the proxy — bare numbers now need 5+ digits, and most computed values are
+  small — so its **0% on LOCA means "none among tokens the tokenizer still accepts", not "none"**. On a
+  corpus with 0% `closed` and 40% `opaque`, the honest reading is that Tier-2 references there are
+  common and simply unmeasured. Measuring them properly needs its own detector.
+- **Break-even is workload-dependent, and better on benchmarks than on long interactive sessions**:
+  median required `T` is 95 turns for Claude Code (15/30 sessions clear it) against 17 for UltraHorizon
+  (7/10) and 14 for LOCA (4/9) — the cut is a far larger share of a smaller transcript. §4's arithmetic
+  holds everywhere; batching moves break-even from unreachable to *comfortable on benchmarks* and
+  *marginal on long interactive sessions*, so decision rule three still applies and steps plus deferred
+  agent-compaction remain the load-bearing justification. One trap: a break-even figure measured against
+  a window the traffic never used is a construction, not a result — UltraHorizon reads 0/10 at a 200k
+  window purely because its peak request is 30k and the trigger never fires.
+- **Overturned: distance is not merely a lossy proxy, it is nearly inert.** Sweeping `closed_dist` over a
+  10× range moves closed mass by 2–3 points; sweeping `open_reps` from 2 to 6 moves it by 18. And 44% of
+  all mass was last referenced 40+ messages ago while 60% is `open` — most referenced mass is old *and
+  still hot*. A distance-based A/B split would confidently cut repeatedly-referenced content. §3's
+  reframe is load-bearing, `open_reps` is the only dial worth tuning, and `closed_dist` should be left
+  alone.
+
+One methodological result deserves promoting out of the write-up, because it nearly invalidated the
+measurement: **the identifier/prose rule decided the answer.** An earlier tokenizer accepted any 10+
+character token, so `description`, `transparency`, `efficiency` and `conditions` scored as references and
+referenced mass came out at 71% instead of 60%. A manufactured reference makes an output look
+load-bearing, so that class of bug fails by **silently declining to compact** — invisible to any metric
+that counts only what the component did. Every false positive is now a regression case in
+`internal/coref/coref_test.go`, and the residual (lowercase hyphenated compounds, indistinguishable from
+real names like `context-guru`) is bounded at ~6 points of *under*-reporting rather than argued away.
+
+**What has to happen next**, in order:
+
+1. Re-run `coref.py` over `capture-tb` / `capture-swe` / `capture-swebench` on the eval box. The spread
+   above is the reason: with `unreferenced` ranging 21-70% by workload, the only corpus that can size the
+   win for the shipped presets is the one the acceptance criteria are written against.
+2. Then, and only on that corpus, flip `cut_closed` on. `open_reps: 3` is the conservative setting;
+   `closed_dist` is inert and should stay at its default.
+3. `observe` mode on real traffic to read `expand` rate — the precision inner loop from §4 — before any
+   scored benchmark run.
+4. Only then §8's benchmarks, with the multi-seed and don't-stop-at-first-significance guards.
+
+Until step 1, the component's `closed`-cut defaults remain placeholders with a measured basis on the
+wrong corpus, which is why they are off rather than on.

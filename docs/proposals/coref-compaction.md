@@ -3,7 +3,7 @@
 **Status:** mechanism implemented and tested; the §7 measurement pass has **run on three corpora**
 (Claude Code, UltraHorizon, LOCA-bench) — [results](../results/coref-density.md) — but not yet on the
 eval-box captures the acceptance criteria are written against. The `coref` component ships **opt-in, in no preset**,
-with the calibrated (`closed`) cut **off by default**. See [§9](#9-implementation-status).
+with the calibrated (`closed`) cut **off by default**. See [implementation status](coref-implementation.md).
 **Headline numbers:** unreferenced tool-output mass is **21% on interactive traffic and ~70% on
 benchmark traffic** (a 3.3x workload difference, not a constant), a reference consumes a median
 18.7% of what its output introduced, and — the result that most affects the design — **recency is
@@ -37,26 +37,50 @@ Every LLM component gets its relevance signal from `conversationGoal`
 (the task), plus the most recent assistant and user turns (current intent). Tool outputs are
 deliberately excluded — they are the mass being reduced, not the goal.
 
-That signal is **forward-looking and position-free**. It answers "what is the agent trying to
-do", never "which earlier span does this turn point back at". Co-reference is therefore not a
-tuning change to an existing input; it is a new input, and it is the only input that can
-justify dropping a *large*, *early* span rather than projecting a recent one.
+That signal is **forward-looking and position-free**, and both halves matter:
 
-The deterministic projector (`internal/extract/deterministic.go`) has the adjacent primitives
-already — an "important key" spine (`id`, `status`, `state`, `name`, `error`, `reason`, `date`,
-`time`) and rune-aligned windowing — and `internal/extract/contain.go` verifies that an
-extraction is *contained in* its original. Point containment the other way (is this span of the
-tool result contained in a **later** message?) and you have the beginning of a reference index.
+- *Forward-looking* — it describes the destination ("fix the failing auth test"), not the history.
+- *Position-free* — it is one blob of text. Nothing in it says which message an output was, or
+  which earlier output a later turn leaned on.
+
+Concretely. Suppose turn 4 read `src/auth.py`, turn 5 said "the bug is `TOKEN_GRACE_SECONDS`",
+and thirty turns later the agent is editing tests. Asked "is the turn-4 output still needed?",
+`conversationGoal` can only answer "well, the task is still about auth" — which is true of every
+output in the session and therefore decides nothing. What actually settles it is that the one
+value the agent ever took out of that output (`TOKEN_GRACE_SECONDS`) is sitting in turn 5, and
+turn 5 is not going anywhere. That is a *positional, backward-looking* fact, and today's signal
+cannot represent it at all.
+
+Co-reference is therefore not a tuning change to an existing input; it is a new input, and it is
+the only input that can justify dropping a *large*, *early* span rather than projecting a recent one.
+
+The good news is that the repo already contains most of the machinery, pointed the other way.
+Two existing pieces, and what each contributes:
+
+- **`internal/extract/deterministic.go`** keeps a list of "important keys" (`id`, `status`,
+  `state`, `name`, `error`, `reason`, `date`, `time`) used to decide which leaves of a JSON blob
+  are worth keeping when shrinking it. That list is already an answer to *"which parts of an
+  output is a model likely to carry forward?"* — the same question a reference detector asks.
+- **`internal/extract/contain.go`** checks that a shrunken output is a *subset of* its original —
+  a guard that the shrinker did not invent text.
+
+The second is the reusable idea, run backwards. Today it asks *"is this compacted text contained
+in the original output?"*. Invert the direction and ask *"is this span of the original output
+contained in a **later message**?"* and the same containment test becomes a reference detector.
+Same primitive, opposite direction: today it validates a rewrite, inverted it measures reuse.
+
+That is the beginning of a reference index — beginning, because §2 shows raw containment is
+badly wrong on its own.
 
 ## 2. What a reference is, in three tiers
 
 Ordered by how deterministically it can be detected:
 
-| Tier | Signal | Detectable |
-|---|---|---|
-| **1** | `tool_use_id` ↔ `tool_result` pairing; and **literal carry-over** — a span introduced by tool result *i* reappearing verbatim in a later `tool_use` argument or assistant text (paths, symbols, line numbers, IDs, hashes, error strings) | exact, zero LLM |
-| **2** | **transformed** carry-over — the agent summed the rows, converted units, reworded the finding. No substring match exists | no; this is the deterministic ceiling |
-| **3** | **semantic** — "as I noted earlier", "per the schema", a plan step that depends on an observation without naming it | LLM only |
+| Tier | Signal | Example | Detectable |
+|---|---|---|---|
+| **1** | `tool_use_id` ↔ `tool_result` pairing; and **literal carry-over** — a span introduced by tool result *i* reappearing verbatim in a later `tool_use` argument or assistant text (paths, symbols, line numbers, IDs, hashes, error strings) | output: `TOKEN_GRACE_SECONDS = 0` → later turn: `Edit(old="TOKEN_GRACE_SECONDS = 0")`. The string is *identical*, so a substring test finds it. | exact, zero LLM |
+| **2** | **transformed** carry-over — the agent summed the rows, converted units, reworded the finding. No substring match exists | output: `[{"ms": 1200}, {"ms": 1800}]` → later turn: *"total latency is 3 seconds"*. `3` appears nowhere in the output; it was computed. Same for `1200ms` → `1.2s`, or `ETIMEDOUT` → *"the request timed out"*. | no; this is the deterministic ceiling |
+| **3** | **semantic** — "as I noted earlier", "per the schema", a plan step that depends on an observation without naming it | output: a directory listing → later turn: *"as I saw earlier, the tests live beside the source"*. The reference is unmistakable to a reader and carries **no shared token at all**. | LLM only |
 
 Tier 2 is the objection raised on the thread — values drift through paraphrase and unit
 conversion, so exact matching will miss real references — and the "maybe it covers 90% of
@@ -94,10 +118,74 @@ surviving copy. Score on `(reference count, how long ago the last reference was,
 present)` — with recency measured **from the head of the transcript**, not from the output's own
 position, since "recent messages vs early messages" is a statement about now.
 
-And the witness turns out to be free. `coref` only ever cuts **tool outputs**; references live
-in **assistant** turns, which are never cut. So any reference at all *is* a surviving copy —
-"the model referred back to this" and "the value it took still exists in the request" are the
-same fact. That is what makes the closed case cheap to establish rather than a second search.
+And the witness looks free. `coref` only ever cuts **tool outputs**; references live in
+**assistant** turns, which are never cut. So a reference is always a *surviving copy of
+something* — which is what makes the closed case cheap to establish rather than a second search.
+
+**But "a surviving copy of something" is not "a surviving copy of what is needed", and the gap
+is a real hole in the argument above.** Raised in review, with this counter-example:
+
+```jsonc
+// tool output
+[{"name": "david", "id": 123, "address": "foobarbaz"},
+ {"name": "osher", "id": 235, "address": "banana"}]
+
+// the model's next turn
+"I need to remember david 123 address."
+```
+
+The reference is real. `david` and `123` genuinely came from the output and genuinely reappear.
+But the value the model actually needs — `foobarbaz` — was **never copied into a model turn**. It
+referenced an **anchor** precisely *in order to* point at a payload it did not restate. Cut the
+output and the address is gone.
+
+So the witness argument holds only when the reference *carries* the value, and an exact matcher
+cannot tell an anchor reference from a payload reference. Three consequences:
+
+1. **`closed` cannot rest on "referenced once, long ago" alone.** That is exactly the anchor
+   case's signature, so it is the *reason* `cut_closed` ships off rather than merely an
+   abundance of caution. Distinguishing anchors needs a signal this index does not have — most
+   plausibly requiring the reference to have consumed a large share of what the output
+   introduced, which is `used_frac`, and which cuts against the reading in §7 that a *low*
+   `used_frac` is evidence for case A. A low `used_frac` is in fact **ambiguous**: "took the
+   value, rest is chaff" and "took an anchor, still needs the payload" look identical.
+2. **It is not a contradiction of case B, it is a demonstration that the A/B labels are not
+   observable from a reference alone** — which is the same conclusion §3 reaches about distance,
+   arrived at from the other side.
+3. **The record shape it uses is exactly the shape this index is blind to.** `david`, `123`,
+   `foobarbaz` are short lowercase words and a 3-digit number — none survive the precision rules
+   in §2, so the index sees *no* novel tokens at all. That produced a separate and worse defect,
+   now fixed: see `opaque` below.
+
+### `opaque`: absence of evidence is not evidence of deadness
+
+The counter-example above exposed a defect in the first implementation. An output that
+introduced **no trackable identifier** was scored `unreferenced` — because both states satisfy
+`refs == 0` — and `unreferenced` is what the DEFAULT configuration cuts. But the two mean
+opposite things:
+
+| state | meaning |
+|---|---|
+| introduced 200 identifiers, no later turn touched one | evidence of deadness → the safe cut |
+| introduced nothing the index can see | **no evidence at all** → no opinion |
+
+Measured, this is not a corner case: **8% of tool-output mass on interactive traffic, 20% on
+UltraHorizon and 40% on LOCA-bench** introduces nothing the index can track. On LOCA that is 11
+outputs averaging 22k tokens — bulk record and spreadsheet dumps of human-readable values, the
+exact shape of the counter-example. The default config was about to delete them on no evidence.
+
+`opaque` is therefore its own class and is **never cut**. The asymmetry is deliberate: an opaque
+output costs tokens, while a wrongly cut one costs an `expand` round-trip plus a cache-write, and
+can cost the task.
+
+### The opportunity floor
+
+The same review raised the mirror-image error: an output near the *tail* has had no chance to be
+referenced yet, so scoring it as unused would make a batched pass preferentially cut the most
+**recent** context — the worst possible choice. `mask` avoids this with `keep_recent`; `coref`
+now expresses it in turns (`min_later_turns`, default 8): an output with fewer model turns after
+it than that is treated as `open` regardless of everything else. §7's measurement had *bounded*
+this bias but nothing had *guarded* against it.
 
 Framed this way, `coref` is `dedup` generalized: from "this tool output is byte-identical to
 another" to "this tool output's useful content survives elsewhere in the request".
@@ -213,7 +301,7 @@ requests / 51 sessions across `capture-tb`, `capture-swe`, `capture-swebench`).
 A second input path needs no proxy run at all:
 [`deploy/harbor/cc_capture.py`](https://github.com/rossoctl/context-guru/blob/main/deploy/harbor/cc_capture.py) converts a Claude Code
 session transcript — the agent's own append-only log of what it sent — into the same capture shape. That
-is what produced [the results in §9](../results/coref-density.md) when the eval box was out of reach, and
+is what produced [the measured results](../results/coref-density.md) when the eval box was out of reach, and
 it is the cheapest way to re-measure on any workstation.
 
 [`deploy/harbor/coref.py`](https://github.com/rossoctl/context-guru/blob/main/deploy/harbor/coref.py) computes, per capture file and
@@ -247,7 +335,12 @@ outputs whose correct classification is fixed by construction — one closed, tw
 one open — including the echo confound from §2 (a `Read(src/config.py)` whose only later
 overlap is the path that arrived as the `tool_use` argument). All four classify correctly.
 
-The **negative control** is the part worth keeping: with the echo-exclusion guard disabled, the
+The **negative control** is the part worth keeping. *Echo-exclusion guard* is the mechanism from
+§2 above, named: only tokens the output **introduced** are eligible, so any token already present
+at or before the producing tool call is discarded as an echo of context that predates the output.
+Disabling it means counting every token match, echoes included.
+
+With the guard disabled, the
 `src/config.py` output flips from `unreferenced` to `open`, and measured cuttable mass drops
 **49% → 23%**. The guard is not a refinement — it is the difference between a usable
 measurement and one that reports everything as load-bearing.
@@ -277,6 +370,15 @@ compactor cuts something load-bearing.
   component is a step-reduction and agent-compaction-deferral play only, and must be evaluated
   that way — or not built.
 
+**Every one of those rules is about cost, and cost alone can never authorize shipping this.** A
+compactor that saves tokens and loses a single task is a regression, because the value of the
+context it removed was never denominated in tokens. So **reward is a gate, not a metric**: no arm
+of any experiment here is interpretable without it, and a cost win alongside an unmeasured reward
+is not a result. §8's acceptance criteria are deliberately ordered with reward parity first, and
+the measurement in this section is explicitly *not* an experiment — it reads what a cut would
+remove from traffic that already happened, and can say nothing about reward by construction. That
+is a limitation of the measurement, not a reason to defer the question.
+
 ## 8. Consequences for benchmark selection
 
 A benchmark only tests this if its traffic contains co-reference **at the tier the detector
@@ -286,7 +388,7 @@ targets**. That criterion cuts against the intuitive ordering:
 |---|---|
 | **SWE-bench Verified** (already wired, `deploy/harbor/swebench.py`) | **Tier-1-rich.** `Read → Edit → Bash` flows reference earlier outputs by exact path, symbol, line, error string. The right substrate for the deterministic detector, and the incumbent cost/reward regression floor (cache-read-dominated: 64% of the bill) |
 | **Terminal-Bench 2.0** (already wired) | A **different cost regime** — output tokens are 47% of the bill, larger than cache-read. Must be tuned separately, and it is where a step-reduction claim is won or lost |
-| **LOCA-bench** (MIT, native `anthropic` SDK + `LOCA_ANTHROPIC_BASE_URL` → direct attach) | The **controlled instrument**: context length is a dial (8K→256K) with fixed task semantics, deterministic binary scoring, and built-in `memory_tool` / `ptc` / context-editing arms — the naive-compaction baselines to beat. But its BigQuery/Sheets/Snowflake domains *aggregate and compute over* tool results, so references arrive transformed: it is a **Tier-2/3 stress test**, not a showcase for exact matching. Note its native trimmer orphans `tool_use`/`tool_result` pairs at 64K and provokes provider 400s — a bug class our byte-lossless splice and reversibility are designed to avoid, and worth claiming |
+| **LOCA-bench** (MIT, native `anthropic` SDK + `LOCA_ANTHROPIC_BASE_URL` → direct attach) | The **controlled instrument**: context length is a dial (8K→256K) with fixed task semantics, deterministic binary scoring, and built-in `memory_tool` / `ptc` / context-editing arms — the naive-compaction baselines to beat. But its BigQuery/Sheets/Snowflake domains *aggregate and compute over* tool results, so references arrive transformed: it is a **Tier-2/3 stress test**, not a showcase for exact matching. Note its native trimmer orphans `tool_use`/`tool_result` pairs at 64K and provokes provider 400s. **Port the existing fix rather than rediscovering it:** `repair_tool_pairing()` in forever's `forever/benchmarks/_anthropic_auth_hop.py` already solves this rig-side in two phases — drop `tool_result` blocks whose `tool_use` was trimmed away (and any message left empty), then synthesize placeholder results for `tool_use` blocks left unanswered — and it counts the repairs so the rate is visible instead of silent. Worth noting separately that `coref` cannot *cause* this bug: it rewrites a tool message's text in place and never removes a message, so pairing is structurally preserved (unlike `summarize`, which restructures the list) |
 | **UltraHorizon** | The most extreme regime (200k+ tokens, 400+ tool calls, hard in-context wipe), but LLM-judged, capability-gated, expensive, no license. Not a driver |
 | **SlopCodeBench** | Resets per checkpoint, so sessions never approach the threshold. Structurally cannot test this |
 
@@ -297,121 +399,13 @@ paid for: do not stop at first significance (`p = 0.036` at `n ≈ 22` regressed
 `n = 30`), and prevent-and-measure rather than filter-after-the-fact (dropping anomalous runs
 introduced survivorship bias when the failure rate was arm-imbalanced).
 
-## 9. Implementation status
+!!! info "Implementation status lives in its own document"
+    What is built, what is deliberately inert, and the ordered next steps are in
+    **[`coref` implementation status](coref-implementation.md)**. It is kept separate because it
+    goes stale on every commit while the argument above does not — and because a proposal that
+    doubles as a changelog stops being reviewable as a proposal.
 
-Two pieces exist, and the split between them is the point: the **mechanism** is a matter of getting the
-definition of a reference right, which a known-answer fixture can settle; the **thresholds** are a
-matter of what real traffic looks like, which only §7's pass can settle. So the first is built and the
-second is not, and the component is configured to be inert on anything that depends on the second.
-
-**Built.**
-
-- [`internal/coref`](https://github.com/rossoctl/context-guru/blob/main/internal/coref/coref.go) — the Tier-1 index: identifier
-  tokenizer, novel-token (echo) exclusion, boilerplate exclusion, sibling exclusion, reference count,
-  recency from the head, consume lag, used-fraction, and the open/closed/unreferenced predicate. No
-  bifrost, no components, no tokenizer dependency, so it is a pure function of a flattened message list
-  — deliberately, because it must stay interchangeable with `coref.py`'s definition. The Go fixture is
-  the twin of `coref_fixture.py` down to the four known answers **and the negative control**: with the
-  echo guard disabled the `src/config.py` read flips out of `unreferenced` and measured cuttable mass
-  falls, and the test fails if it does *not* flip — the control is asserted, not just run once.
-- [`components/offload/coref.go`](https://github.com/rossoctl/context-guru/blob/main/components/offload/coref.go) — the Offload
-  component, with each of §5's constraints as a tested behaviour rather than a comment: latched
-  decisions replayed byte-for-byte even when fresh evidence would reclassify the span (constraint 1,
-  and `repairLostFreeze` deliberately not consulted), keep→cut only (2), prefix mutation on purpose
-  under a per-session `rewrite_budget` (3), `freeze`/`reapplyFrozen` wired from the start (4),
-  `<<cg:HASH>>` + stash + kept-verbatim (5), and side-effect-free planning so a batch that fails a gate
-  leaves the request byte-identical (6).
-- §4's arithmetic as an actual gate, not a note: `min_batch_frac` for batching, and `break_even`
-  applying `S × T > 11.5 × W` with `T` estimated from the transcript's observed growth rate and `W`
-  bounded to the *cached* span (content past the cache boundary would be written this turn regardless).
-  The counter-intuitive consequence from §6 is what the test pins: at the window edge `T ≈ 0` and the
-  pass correctly declines.
-
-**Deliberately not built, and why the "measure first" rule in §7 is not being broken.** §7 says nothing
-should be built before the substrate is measured. What that rule protects against is *calibrating* a
-component against numbers nobody has — so the implementation is scoped to the part that has no
-calibration in it. `cut_unreferenced` needs no threshold: "no later turn used anything this output
-introduced" is a fact about the transcript. `cut_closed` needs two (`closed_dist`, `open_reps`), which
-are precisely what §7 produces, so it defaults to **off** and the shipped values are placeholders
-carried over from `coref.py`'s defaults for comparability, not recommendations. `coref` is in **no
-preset** for the same reason.
-
-Also not built: the Tier-2 LLM escalation (§10), and the incremental per-session reference index. The
-index is currently recomputed per firing turn — acceptable because the trigger makes firings rare, but
-it is the latency question in §10 and it is unmeasured.
-
-**Measured, on three corpora.** The pass has run — on **Claude Code transcripts, UltraHorizon runs and
-LOCA-bench trajectories**, none of which is the eval-box capture set (unreachable). Full write-up and
-caveats: [co-reference density](../results/coref-density.md).
-
-The single most useful result is that the three corpora **disagree by a factor of three**, so
-`unreferenced` mass is a property of the workload rather than a constant:
-
-| | Claude Code (interactive) | UltraHorizon | LOCA-bench |
-|---|---|---|---|
-| `unreferenced` | 23% | 78% | 95% |
-| `closed` | 15% | 8% | **0%** |
-| `open` | 60% | 13% | 4% |
-| …restricted to outputs with ≥20 later turns | 21% | 70% | 70% |
-
-Interactive work on a coherent codebase keeps returning to the same files and errors; benchmark tasks
-survey, extract, and move on. The last row bounds the obvious bias (an output near the end has no later
-turns that *could* reference it) and the ordering survives it: **benchmark traffic carries ~3.3× the
-unreferenced mass of interactive traffic.** LOCA's 0% `closed` is also §8's own prediction landing — it
-argued LOCA would be a Tier-2/3 stress test where references arrive transformed past what a substring
-match can see, and an exact matcher finds not one output in 166 that was referenced once or twice and
-then left alone.
-
-Four things it settles, and one it overturns:
-
-- **`cut_unreferenced` is justified as the default** — 21% of mass on interactive traffic and ~70% on
-  benchmark traffic, with no calibrated threshold and no model call. Decision rule one from §7 is
-  answered yes on every corpus.
-- **A reference consumes a median 18.7% of what its output introduced** (11.5% on UltraHorizon).
-  Hypothesis A — "took one value, does not need the rest" — is confirmed rather than assumed.
-- **Tier-2 leakage is 2%** of model turns (a stated numeric absent from all prior context) — real, and
-  small enough that a deterministic first version is viable. But see the write-up: tightening the
-  identifier rules also blinded this proxy, so its 0% on LOCA means "none among the tokens the tokenizer
-  still accepts", not "none".
-- **Break-even is workload-dependent, and better on benchmarks than on long interactive sessions**:
-  median required `T` is 95 turns for Claude Code (15/30 sessions clear it) against 17 for UltraHorizon
-  (7/10) and 14 for LOCA (4/9) — the cut is a far larger share of a smaller transcript. §4's arithmetic
-  holds everywhere; batching moves break-even from unreachable to *comfortable on benchmarks* and
-  *marginal on long interactive sessions*, so decision rule three still applies and steps plus deferred
-  agent-compaction remain the load-bearing justification. One trap: a break-even figure measured against
-  a window the traffic never used is a construction, not a result — UltraHorizon reads 0/10 at a 200k
-  window purely because its peak request is 30k and the trigger never fires.
-- **Overturned: distance is not merely a lossy proxy, it is nearly inert.** Sweeping `closed_dist` over a
-  10× range moves closed mass by 2–3 points; sweeping `open_reps` from 2 to 6 moves it by 18. And 44% of
-  all mass was last referenced 40+ messages ago while 60% is `open` — most referenced mass is old *and
-  still hot*. A distance-based A/B split would confidently cut repeatedly-referenced content. §3's
-  reframe is load-bearing, `open_reps` is the only dial worth tuning, and `closed_dist` should be left
-  alone.
-
-One methodological result deserves promoting out of the write-up, because it nearly invalidated the
-measurement: **the identifier/prose rule decided the answer.** An earlier tokenizer accepted any 10+
-character token, so `description`, `transparency`, `efficiency` and `conditions` scored as references and
-referenced mass came out at 71% instead of 60%. A manufactured reference makes an output look
-load-bearing, so that class of bug fails by **silently declining to compact** — invisible to any metric
-that counts only what the component did. Every false positive is now a regression case in
-`internal/coref/coref_test.go`, and the residual (lowercase hyphenated compounds, indistinguishable from
-real names like `context-guru`) is bounded at ~6 points of *under*-reporting rather than argued away.
-
-**What has to happen next**, in order:
-
-1. Re-run `coref.py` over `capture-tb` / `capture-swe` / `capture-swebench` on the eval box. The spread
-   above is the reason: with `unreferenced` ranging 21-70% by workload, the only corpus that can size the
-   win for the shipped presets is the one the acceptance criteria are written against.
-2. Then, and only on that corpus, flip `cut_closed` on. `open_reps: 3` is the conservative setting;
-   `closed_dist` is inert and should stay at its default.
-3. `observe` mode on real traffic to read `expand` rate — the precision inner loop from §4 — before any
-   scored benchmark run.
-4. Only then §8's benchmarks, with the multi-seed and don't-stop-at-first-significance guards.
-
-Until step 1, the component's `closed`-cut defaults remain placeholders with a measured basis on the
-wrong corpus, which is why they are off rather than on.
-
-## 10. Open questions
+## 9. Open questions
 
 - **Is `xdedup` back on the table?** §C left one caveat explicitly open: compaction is the one
   regime that could make cross-turn dedup viable, because it removes the first copy while later

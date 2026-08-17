@@ -189,6 +189,7 @@ nav:
           - rtk: results/terminal-bench-rtk.md
   - Proposals:
       - "Co-reference-aware compaction": proposals/coref-compaction.md
+      - "…implementation status": proposals/coref-implementation.md
   - Integrations:
       - Host adapters: integrations.md
       - bifrost plugin: how-to/bifrost-plugin.md

@@ -10,8 +10,8 @@
     against ([results and caveats](../results/coref-density.md)). The `closed` cut stays **off by default**
     because its yield ranges from 15% of mass on interactive traffic to **0% on LOCA**, and a knob that
     varies that much by workload has no defensible default. `cut_unreferenced` (the default)
-    needs no threshold and is justified — 21% of tool-output mass was never referenced on interactive
-    traffic, and ~70% on benchmark traffic.
+    needs no threshold and is justified — 13% of tool-output mass on interactive traffic, 51% on
+    UltraHorizon, 22% on LOCA-bench.
 
     Two things that measurement already settles, before you tune anything: **`closed_dist` is nearly
     inert** (a 10× sweep moves the answer 2–3 points) and **`open_reps` is the dial** (2 → 6 moves it 18).
@@ -30,8 +30,10 @@ or from *age*. `coref` decides from **back-references**: for each tool output, w
    by the result, and used again by a later `Edit(src/auth.py)` — an exact matcher scores that as a
    reference, but nothing was ever lifted out. Tokens spread across many outputs are dropped as
    session furniture.
-2. **Classify.** `unreferenced` (no later turn used anything it introduced) · `closed`
-   (used once or twice, and not for a long time) · `open` (used recently, or repeatedly).
+2. **Classify**, into one of four: `opaque` (introduced nothing trackable — **no evidence**, never
+   cut) · `unreferenced` (introduced identifiers, no later turn used any) · `closed` (used once or
+   twice, and not for a long time) · `open` (used recently, repeatedly, or **too new to have had the
+   chance**).
 3. **Cut, once, in a batch.** Only the classes in the cut set, and only when the batch is large
    enough to be worth the cache-write it costs (below).
 4. **Latch.** The decision is stored per session and replayed byte-for-byte thereafter. It is never
@@ -88,7 +90,8 @@ precision metric** for this component and the one that needs no benchmark scorin
 |---|---|---|
 | `trigger` | fires always | Gates **new** cuts only (`min_request_frac` against the resolved context window is the natural dial). Replay of latched decisions is never gated — a latched cut that stops being replayed flips the prefix, which is the churn the whole design avoids. |
 | `min_tokens` | 300 | Per-output floor. Matches `coref.py`'s `min_output` so the component and the measurement consider the same population. |
-| `cut_unreferenced` | `true` | Cut outputs nothing later referred back to. The honest ceiling of a zero-LLM implementation; needs no calibrated threshold. |
+| `cut_unreferenced` | `true` | Cut outputs that introduced trackable identifiers which nothing later referred back to. The honest ceiling of a zero-LLM implementation; needs no calibrated threshold. Note this excludes `opaque` outputs by construction — an output the index cannot see into is never cut, at any setting. |
+| `min_later_turns` | 8 | Opportunity floor: an output with fewer model turns after it is treated as `open`. Near the tail "no references yet" and "recent" are the same thing, so without this a batched pass would preferentially cut the newest context. `mask`'s `keep_recent`, expressed in turns. |
 | `cut_closed` | `false` | Cut the `closed` class — the large, early, case-A cut. **Off by default**: measured yield is 15% of mass on interactive traffic, 8% on UltraHorizon and 0% on LOCA, so enable it per config for a measured arm rather than globally. |
 | `closed_dist` | 12 | A reference is `closed` once its last use is this many messages ago (from the head). **Measured to be nearly inert** — leave it alone. |
 | `open_reps` | 3 | Used at least this many times ⇒ `open` regardless of age. The dial that matters; 3 is the conservative setting and each step up trades ~5 points of cuttable mass for reclassifying genuinely repeated spans. |
@@ -107,6 +110,14 @@ precision metric** for this component and the one that needs no benchmark scorin
   exactly the prefix flip the repair exists to prevent. A lost `coref` freeze declines.
 - **It never resurrects a span.** New evidence cannot un-cut, because un-cutting is a second rewrite.
   Monotonicity here is a cache-cost requirement, not tidiness.
+- **It does not cut what it cannot see.** An output that introduced no trackable identifier is `opaque`,
+  not `unreferenced`, and is never cut at any setting. Measured, that is 8% of tool-output mass on
+  interactive traffic and **40% on LOCA-bench** — bulk record dumps of plain values like
+  `[{"name":"david","id":123,"address":"foobarbaz"}]`, where short lowercase words and 3-digit numbers
+  are exactly what the identifier rules exclude. Absence of evidence is not evidence of deadness.
+- **It cannot tell an anchor reference from a payload reference.** If the model says *"remember david 123
+  address"*, the reference is real but the value needed (`foobarbaz`) was never copied into a model turn.
+  So a *low* `used_frac` is ambiguous, and this is the substantive reason `cut_closed` ships off.
 - **It does not see Tier 2.** A value that was summed, unit-converted or reworded before being restated
   leaves no exact match. `unreferenced` means "no later *exact* use" and must never be read as "unused";
   the LLM escalation for that case is an open question in the proposal, not shipped.

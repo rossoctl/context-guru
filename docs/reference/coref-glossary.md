@@ -34,13 +34,14 @@ The idea started with: if a later turn references an earlier output, that means 
 The original framing separated A from B by **distance** (B = recent, A = early). The measurement says
 distance barely works — see `closed_dist` below.
 
-## 3. The three verdicts (what the classifier outputs)
+## 3. The four verdicts (what the classifier outputs)
 
 For each tool output, exactly one of:
 
 | Verdict | Means | Cut it? |
 |---|---|---|
-| **`unreferenced`** | No later turn ever used anything this output introduced. | **Yes — the free cut.** No threshold needed, no model call. This is the shipped default (`cut_unreferenced`). |
+| **`opaque`** | The output introduced **nothing the index can track** — so there is no evidence either way. | **Never.** Absence of evidence is not evidence of deadness (see the box below). |
+| **`unreferenced`** | It **did** introduce trackable identifiers, and no later turn used any of them. | **Yes — the free cut.** No threshold needed, no model call. This is the shipped default (`cut_unreferenced`). |
 | **`closed`** | Referenced **once or twice, and not for a long time**. Whatever the model took survives in the turn that took it, so the original is redundant *with content still in the request*. This is **case A** made checkable. | Optional (`cut_closed`, **off by default**). |
 | **`open`** | Referenced **recently, or repeatedly**. Still load-bearing. This is **case B**. | **No.** |
 
@@ -48,16 +49,36 @@ For each tool output, exactly one of:
     It means "no later **exact** use". A value the model summed, converted or reworded leaves no substring
     to match, so it lands here too. Always an **upper bound** on what is safe to cut.
 
-**Why "closed" is cheap to establish:** `coref` only ever cuts *tool outputs*, and references live in
-*model turns*, which it never cuts. So "a later turn referred back to this" and "the value it took still
-exists in the request" are the same fact — the surviving copy (the **witness**) needs no separate search.
+!!! danger "`opaque` vs `unreferenced` — the distinction that took a review to find"
+    Both have zero references, and they are opposites. "Introduced 200 identifiers, nobody touched one" is
+    *evidence of deadness*. "Introduced nothing I can see" is *absence of evidence*.
+
+    It matters because it is common, not exotic. A tool returning
+    `[{"name":"david","id":123,"address":"foobarbaz"}]` yields **no** trackable tokens — short lowercase
+    words and 3-digit numbers are exactly what the precision rules exclude. Measured: 8% of tool-output
+    mass on interactive traffic, 20% on UltraHorizon, **40% on LOCA-bench**. Folded into `unreferenced`,
+    all of it was a silent vote to delete under the default config.
+
+**Why "closed" looks cheap to establish:** `coref` only ever cuts *tool outputs*, and references live in
+*model turns*, which it never cuts. So a reference is always a surviving copy of *something* — no separate
+search for the **witness** is needed.
+
+!!! danger "…but a surviving copy of *something* is not a copy of what's *needed*"
+    Given the records above and a model that says *"I need to remember david 123 address"*, the reference
+    (`david`, `123`) is real — and the value actually needed (`foobarbaz`) was **never copied into a model
+    turn**. The model referenced an **anchor** in order to point at a payload it did not restate.
+
+    An exact matcher cannot tell an anchor reference from a payload reference. That is the real reason
+    `cut_closed` ships **off**, and it is why a low `used_frac` is *ambiguous* rather than evidence for
+    case A: "took the value, rest is chaff" and "took an anchor, still needs the payload" look identical.
 
 ## 4. The two thresholds that decide `closed` vs `open`
 
 | Knob | Default | Means | Verdict from the data |
 |---|---|---|---|
-| **`closed_dist`** | 12 | How many messages **ago** the last reference must be before the output counts as `closed`. Newer than this ⇒ `open`. | **Nearly inert.** A 10× sweep (4→40) moves the answer 2–3 points. Don't tune it. |
+| **`closed_dist`** | 12 | How many messages **ago** the last reference must be before the output counts as `closed`. Newer than this ⇒ `open`. | **It is load-bearing but flat.** Set it to 0 and the `closed` class stops existing, so it *matters*; but anywhere in 4–40 gives the same answer within 2–3 points, so there is no gain from tuning it. Leave it at the default and spend the effort on `open_reps`. |
 | **`open_reps`** | 3 | Referenced at least this many times ⇒ `open` **regardless of age**, because a span referenced repeatedly is a hot span that happens to be old. | **This is the dial.** 2→6 moves the answer 18 points. 3 is the conservative setting. |
+| **`min_later_turns`** | 8 | The **opportunity floor**: an output with fewer model turns after it is `open` regardless of everything else. | Necessary, not a refinement. Near the tail, "no references yet" and "recent" are the same thing, so without it a batched pass preferentially cuts the **most recent** context — the worst possible choice. It is `mask`'s `keep_recent` idea expressed in turns. |
 
 ## 5. The three measurements per output (and the one that's easy to get wrong)
 
@@ -66,7 +87,8 @@ exists in the request" are the same fact — the surviving copy (the **witness**
 | **ref count** | How many later turns used something this output introduced. Feeds `open_reps`. |
 | **ref age / recency** | How many messages ago the **last** reference was, counted **from the head of the transcript** (i.e. from *now*). Feeds `closed_dist`. |
 | **consume lag** | How many messages **after the output** its last reference was — i.e. how long it stayed live. A *different* axis, reported separately. |
-| **used fraction** | Of the identifiers the output introduced, the share the model actually carried forward. Measured median ~19%: "took a value, dropped the rest" confirmed. |
+| **used fraction** | Of the identifiers the output introduced, the share the model actually carried forward. Measured median ~19% — but see the anchor box in §3: a *low* value is **ambiguous**, not evidence for case A. |
+| **later turns** | How many model turns follow the output — its **opportunity** to be referenced. Feeds `min_later_turns`. |
 
 !!! note "recency ≠ consume lag, and conflating them is the bug"
     "Recent messages vs early messages" is a statement about **now**, so recency must be measured from the
@@ -113,6 +135,31 @@ transcript needs `T` > 276 turns. Three consequences, and they *are* the design:
 rewrite for a saving collected once. **The profitable moment to compact is earlier than the moment of
 maximum pressure.**
 
+### What all this means at 200k vs 1M
+
+Raised in review, and the answer is less obvious than "bigger window, more to cut".
+
+**The break-even inequality is scale-invariant.** Rearranged, `S × T > 11.5 × W` says `T > 11.5 × (W/S)`
+— the turns you need depend only on the **ratio** of rewritten suffix to cut mass, never on absolute size.
+On the measured interactive corpus that ratio is ~15 (a 10.5k cut against a 157k suffix), hence `T > 138`.
+A 1M-token transcript with the same *density* of cuttable mass has the same ratio and the same required
+`T`. So a larger window neither rescues nor damns the token economics; it only moves **when** the trigger
+fires. What actually improves the ratio is cutting a larger share of what lies *after* the shallowest cut —
+which is an argument for cutting deep and rarely, not for cutting more.
+
+**Three things genuinely do change:**
+
+| At a 1M window | Effect |
+|---|---|
+| Cache-read is the whole bill | Re-reading ~1M cached tokens every turn dominates cost long before the window is a constraint. That makes `coref` a **cost** play at 1M rather than a *fit* play, and it is the strongest argument for it there. |
+| The agent's own compaction recedes | Claude Code compacts at ~967k instead of ~167k, so the deferral prize becomes **rarer but much larger** — avoiding one summarization of a 1M transcript. As you note, it is also the one prize that is cheap to *measure* deterministically: compare the API-reported usage against the documented threshold and count the turns of headroom the cut bought. No benchmark scoring, no seeds. That belongs in the metrics, and it is not there yet. |
+| The index gets 5× more expensive | Recomputing the reference index over 1M tokens per firing turn is the open latency question, and it scales linearly with the window. An incremental per-session index stops being an optimization and becomes a requirement. |
+
+**And the prize is a step function, not a slope** — your point that it depends how much is being cut. You
+either drop below the agent's compaction threshold or you don't; cutting 90% of what was needed to get
+there is worth nothing. Which argues for sizing the batch against the *threshold distance*, not against a
+fixed fraction of the request — something `min_batch_frac` does not currently express.
+
 ## 8. Mechanism terms (how it stays cache-safe)
 
 | Term | Means |
@@ -120,8 +167,8 @@ maximum pressure.**
 | **latching** | The decision is stored per session and **replayed byte-for-byte** thereafter, never re-derived. A co-reference decision depends on *history*, so re-deriving it against a longer transcript could emit different bytes — which is exactly the prefix flip that costs a second cache-write. |
 | **one-way / monotonic** | Keep → cut only. New evidence can never un-cut, because un-cutting is another rewrite. Monotonicity is a cost requirement, not tidiness. |
 | **`freeze` / `reapplyFrozen`** | The mechanism that does it: record the replacement text against the original's content hash, and replay it on every later turn at any depth. |
-| **`TailOnly`** | The rule every *other* age-based offloader follows: never touch the already-cached prefix. `coref` deliberately violates it — that's its purpose — which is why the spend is budgeted. |
-| **`repairLostFreeze`** | A repair `mask`/`failed_run` may use: re-derive a lost decision at depth, safe because their output is a pure function of `(content, config)`. **`coref` must never use it** — its decision is history-dependent, so re-deriving is the very byte-flip the repair exists to prevent. |
+| **`TailOnly`** | A helper on `Ctx` that answers "may I safely modify the message at index *i*?" It returns false for anything the provider has already cached (index ≤ `MaxCachedIdx`), because editing cached content breaks the prefix hash and forces a cache-write. Every *other* age-based offloader (`mask`, `failed_run`, `collapse`) consults it and simply declines. `coref` deliberately ignores it — reaching into the cached prefix **is** its purpose, since by the time a session crosses the threshold all the mass is back there — which is exactly why its spend has to be budgeted (`rewrite_budget`) instead of forbidden. |
+| **`repairLostFreeze`** | Background: an offloader `freeze`s its replacement text against the original's content hash and replays it every turn, so the bytes stay stable. If the store *drops* that record (TTL, eviction), the offloader would normally decline to act at depth — but then the message reverts to full text, which is *itself* a prefix change. So `mask` and `failed_run` are allowed to re-derive the decision even deep in the prefix: their replacement is a pure function of `(content, config)`, so re-deriving reproduces byte-for-byte what the provider already cached. **`coref` must never use this.** Its decision depends on the whole transcript, so re-deriving against a longer one can yield a different class and different bytes — the precise byte-flip the repair exists to prevent. A lost `coref` freeze therefore declines and the output stays verbatim. |
 | **marker / `<<cg:HASH>>`** | What's left in place of cut content, resolvable back to the stashed original via `context_guru_expand`. |
 | **head peek** | A one-line snippet of the cut output left inside the marker, so the model knows *what* went missing without a blind `expand` round-trip. |
 | **kept-verbatim** | Once the agent expands something, it's marked never-re-cut — otherwise it expands again every turn (an **expand loop**). |
