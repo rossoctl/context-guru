@@ -51,30 +51,40 @@
   <select id="f-agent" data-testid="filter-agent" aria-label="Agent"><option value="">All agents</option></select>
   <select id="f-preset" data-testid="filter-preset" aria-label="Preset"><option value="">All presets</option></select>
   <select id="f-mode" data-testid="filter-mode" aria-label="Mode"><option value="">All modes</option></select>
-  <select id="f-component" data-testid="filter-component" aria-label="Component"><option value="">All components</option></select>
-  <select id="f-reason" data-testid="filter-reason" aria-label="Compaction outcome">
-    <option value="">Compacted or not</option>
-    <option value="compacted">Compacted</option>
-    <option value="bypassed">Not: bypassed</option>
-    <option value="below_trigger">Not: below trigger</option>
-    <option value="cache_frozen">Not: frozen for cache safety</option>
-    <option value="found_nothing">Not: found nothing</option>
-    <option value="reverted">Not: reverted</option>
-    <option value="no_messages">Not: no messages</option>
-  </select>
-  <!-- Request-metadata filters. Enumerated from the data (see facetQueries), so the
-       options are what this deployment's traffic actually carried rather than a guess at
-       one provider's vocabulary. -->
-  <select id="f-effort" data-testid="filter-effort" aria-label="Reasoning effort"><option value="">Any effort</option></select>
-  <select id="f-thinking" data-testid="filter-thinking" aria-label="Thinking mode"><option value="">Any thinking</option></select>
-  <select id="f-stop_reason" data-testid="filter-stop-reason" aria-label="Stop reason"><option value="">Any stop reason</option></select>
-  <select id="f-accounting" data-testid="filter-accounting" aria-label="Token accounting">
-    <option value="">Any accounting</option>
-    <option value="complete">Exact (complete)</option>
-    <option value="partial">Estimated (partial)</option>
-    <option value="missing">Unmeasured (missing)</option>
-  </select>
   <button id="f-clear" class="ghost" data-testid="filter-clear" disabled>Clear</button>
+  <!-- Second-tier filters, behind one disclosure: the compaction outcome and the
+       request-metadata dimensions. Thirteen controls in one wrapping row pushed the first
+       number below the fold on a laptop, and these are the six reached for occasionally.
+       Nothing is hidden by collapsing them — a filter set in here still gets its own
+       removable chip in the row below, and the summary carries a count. -->
+  <details class="more" id="f-more" data-testid="filter-more">
+    <summary>More filters<span class="more-count" id="f-more-count" hidden></span></summary>
+    <div class="more-body">
+      <select id="f-reason" data-testid="filter-reason" aria-label="Compaction outcome">
+        <option value="">Compacted or not</option>
+        <option value="compacted">Compacted</option>
+        <option value="bypassed">Not: bypassed</option>
+        <option value="below_trigger">Not: below trigger</option>
+        <option value="cache_frozen">Not: frozen for cache safety</option>
+        <option value="found_nothing">Not: found nothing</option>
+        <option value="reverted">Not: reverted</option>
+        <option value="no_messages">Not: no messages</option>
+      </select>
+      <!-- Request-metadata filters. Enumerated from the data (see facetQueries), so the
+           options are what this deployment's traffic actually carried rather than a guess
+           at one provider's vocabulary. -->
+      <select id="f-component" data-testid="filter-component" aria-label="Component"><option value="">All components</option></select>
+      <select id="f-effort" data-testid="filter-effort" aria-label="Reasoning effort"><option value="">Any effort</option></select>
+      <select id="f-thinking" data-testid="filter-thinking" aria-label="Thinking mode"><option value="">Any thinking</option></select>
+      <select id="f-stop_reason" data-testid="filter-stop-reason" aria-label="Stop reason"><option value="">Any stop reason</option></select>
+      <select id="f-accounting" data-testid="filter-accounting" aria-label="Token accounting">
+        <option value="">Any accounting</option>
+        <option value="complete">Exact (complete)</option>
+        <option value="partial">Estimated (partial)</option>
+        <option value="missing">Unmeasured (missing)</option>
+      </select>
+    </div>
+  </details>
   <!-- Active filters, one removable chip each. Filled by renderChips(): a filter set by
        drilling into a session or a tenant has no control up there, and an invisible
        filter is one only "Clear" can undo. -->
@@ -90,8 +100,11 @@
      nobody is signed in; absent entirely on a single-tenant proxy. -->
 <div id="gate" class="gate" role="main" hidden data-testid="gate">
   <div class="gate-card">
-    <h1>context-guru</h1>
-    <p class="muted" id="gate-intro">Sign in with your email and password, or register an account.</p>
+    <h1>
+      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18 L10 6 L14 14 L20 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>context-guru</span>
+    </h1>
+    <p class="muted" id="gate-intro">Sign in, or register an account.</p>
 
     <div class="gate-tabs" role="tablist" aria-label="Sign in or register">
       <button class="gate-tab" role="tab" id="gate-tab-signin" data-testid="gate-tab-signin" aria-selected="true">Sign in</button>
@@ -116,7 +129,7 @@
         <label for="gate-token">Your token</label>
         <input id="gate-token" type="password" autocomplete="off" spellcheck="false"
                placeholder="cg_live_…" data-testid="gate-token">
-        <p class="hint">Only for an account that has no password yet.</p>
+        <p class="hint">Only for an account with no password yet.</p>
       </details>
     </form>
 
@@ -127,8 +140,7 @@
       <label for="gate-new-password">Password</label>
       <input id="gate-new-password" type="password" autocomplete="new-password"
              minlength="8" data-testid="gate-new-password">
-      <p class="hint">At least 8 characters. Length is what makes a password strong, so
-         there are no symbol rules.</p>
+      <p class="hint">At least 8 characters. No symbol rules — length is what matters.</p>
       <label for="gate-label">Name this machine</label>
       <input id="gate-label" type="text" placeholder="laptop" value="laptop" data-testid="gate-label">
       <!-- Shown only in invite mode: a code box on a deployment that checks no code is a
@@ -168,28 +180,32 @@
   <div id="tiles"></div>
 
   <div class="panel">
-    <h2>Savings percentage — four denominators, four questions</h2>
-    <p class="note">A single savings figure would be a lie of omission. Each bar below divides
-      the same savings by a different denominator, and says which. Where the inputs are
-      missing the bar reads <em>n/a</em> rather than inventing a number.</p>
+    <h2>Savings percentage</h2>
+    <!-- Four bars, four denominators. The note stays short but must never let two of them
+         read as the same measurement, so each bar keeps its divisor on screen (see
+         .bar-formula) and only the prose folds away. -->
+    <p class="note">Four denominators, four questions. Missing inputs read <em>n/a</em>, never 0.</p>
     <div id="denominators" data-testid="denominators"></div>
   </div>
 
   <div class="panel">
-    <h2>Cumulative cost: without context-guru vs with</h2>
-    <p class="note">The shaded area between the lines is money saved. Baseline prices the
-      <strong>unique</strong> tokens we removed at the cache-write rate they would have entered
-      as (~11.5&times; a cache read on a prompt-caching backend), and the re-sent remainder at
-      the cache-read rate the provider would have served it from. Pricing gross savings as
-      writes is how a dashboard overstates itself by its own overcount ratio — which is why
-      dollar savings and token savings diverge so sharply on this workload.</p>
+    <h2>Cumulative cost</h2>
+    <p class="note">Shaded area = money saved.</p>
+    <details class="why">
+      <summary>How the baseline is priced</summary>
+      <p>The baseline prices the <strong>unique</strong> tokens we removed at the cache-write
+        rate they would have entered as (~11.5&times; a cache read on a prompt-caching
+        backend), and the re-sent remainder at the cache-read rate the provider would have
+        served it from. Pricing gross savings as writes is how a dashboard overstates itself
+        by its own overcount ratio — which is why dollar savings and token savings diverge so
+        sharply on this workload.</p>
+    </details>
     <div id="chart-cost" class="chart" data-testid="chart-cost"></div>
   </div>
 
   <div class="panel">
-    <h2>Honest savings waterfall</h2>
-    <p class="note">Baseline, every reduction, every penalty we owe back, and the net. If
-      context-guru cost more than it saved, this chart says so.</p>
+    <h2>Savings waterfall</h2>
+    <p class="note">Baseline, each reduction, each penalty, the net. A negative net is shown, not hidden.</p>
     <div id="waterfall" data-testid="waterfall"></div>
   </div>
 
@@ -203,49 +219,55 @@
       <div id="chart-cache" class="chart" data-testid="chart-cache"></div>
     </div>
     <div class="panel">
-      <h2>Latency: context-guru vs upstream</h2>
+      <h2>Latency</h2>
       <div id="chart-latency" class="chart" data-testid="chart-latency"></div>
     </div>
     <div class="panel">
-      <h2>Request volume &amp; restorations</h2>
+      <h2>Volume &amp; restorations</h2>
       <div id="chart-volume" class="chart" data-testid="chart-volume"></div>
     </div>
   </div>
 
   <div class="grid-2">
     <div class="panel">
-      <h2>What our own safety mechanisms cost</h2>
-      <p class="note" id="safety-note"></p>
+      <h2>What safety cost</h2>
+      <p class="note">Five units, five rows — bar lengths compare within a row, not across.</p>
+      <!-- The server's own long description, folded. It is the authoritative wording (and
+           part of /api/stats), so it is shown rather than paraphrased here. -->
+      <details class="why"><summary>What these five are</summary>
+        <p id="safety-note"></p>
+      </details>
       <div id="safety" data-testid="safety-cost"></div>
     </div>
     <div class="panel">
       <h2>Cache-miss attribution</h2>
-      <p class="note">A cold start is not a failure — the first request of a session, or the
-        first for a model, has nothing to hit. TTL expiry wins ties over a changed prefix.</p>
+      <p class="note">A cold start is not a failure — the first request has nothing to hit.</p>
       <div id="cachemiss" data-testid="cache-miss"></div>
     </div>
     <div class="panel">
       <h2>Why we didn't compact</h2>
-      <p class="note">A first-class reason bucket, not an absence of data.</p>
       <div id="reasons" data-testid="uncompressed-reasons"></div>
     </div>
     <div class="panel">
-      <h2>Token-accounting confidence</h2>
-      <p class="note">Only <code>complete</code> rows have all four billed token tiers. Anything
-        else is an estimate and is never rendered as exact.</p>
+      <h2>Token accounting</h2>
+      <p class="note">Only <code>complete</code> rows carry all four billed tiers; the rest are estimates.</p>
       <div id="accounting" data-testid="accounting"></div>
     </div>
   </div>
 
   <div class="panel">
-    <h2>Live feed <span class="section-note">since this page was opened</span></h2>
+    <h2>Live feed <span class="section-note">since you opened this page</span></h2>
     <!-- Says what the row count IS. The feed is fed only by SSE from page load, capped at
          25, and never seeded from history — so it sat at 24 rows beside a "Requests 26"
-         tile and the two looked like they disagreed about the same window. -->
-    <p class="note">Summary rows only, streamed over SSE, newest first: this table starts
-      empty and fills as requests arrive, up to the last 25. It is not the most recent rows
-      of history, so it does not count up to the tiles above — the Requests tab has the
-      full history. Content is never pushed to a live client; open a request to inspect it.</p>
+         tile and the two looked like they disagreed about the same window. That fact is
+         load-bearing, so it stays in the layout; the rest folds. -->
+    <p class="note">Last 25 arrivals, newest first. Does not count up to the tiles above.</p>
+    <details class="why"><summary>Why it does not match the tiles</summary>
+      <p>The feed starts empty and fills from the live SSE stream, so it holds only what has
+        arrived since you opened the page — never the most recent rows of history. The
+        Requests tab has the full history. Content is never pushed to a live client; open a
+        request to inspect it.</p>
+    </details>
     <p class="note" id="live-filter-note" data-testid="live-filter-note" hidden></p>
     <div class="tblwrap" tabindex="0">
       <table class="tbl compact" data-testid="live-table">
@@ -262,22 +284,25 @@
      filter bar above, so the time range is the range selected there. -->
 <section class="view" id="view-usage" hidden>
   <div class="panel">
-    <h2>Per day: spent against saved</h2>
-    <p class="note"><strong>Spent</strong> is what was billed plus context-guru's own model
-      spend. <strong>Saved</strong> is the baseline counterfactual minus that — negative
-      means context-guru cost more than it saved that day, which this will show rather than
-      hide. Days are UTC, so two people reading this see the same bars. Use the time range
-      in the filter bar to change the window.</p>
+    <h2>Per day <span class="section-note">UTC</span></h2>
+    <!-- Two dollar figures, and they are NOT either of the token savings ratios above: this
+         "Saved" is the daily counterfactual in dollars. The legend and the direct labels on
+         both bars carry that; the note only has to say which is which. -->
+    <p class="note"><strong>Spent</strong> = billed + our own model spend.
+      <strong>Saved</strong> = baseline − spent, and goes negative when it should.</p>
     <div id="chart-daily" class="chart" data-testid="chart-daily"></div>
   </div>
   <div class="panel">
-    <h2>Spent against saved, by <select id="f-dim" data-testid="filter-dim" aria-label="Breakdown dimension"></select></h2>
-    <p class="note">The same two figures grouped by one dimension of the request. Model
-      answers "where does the money go"; <strong>reasoning effort</strong>, <strong>thinking
-      mode</strong> and <strong>cache breakpoints</strong> answer whether the knobs the agent
-      sets correlate with what it costs — breakpoint placement being the question this whole
-      project exists to answer. A bar whose accounting is incomplete is labelled as
-      <em>unknown</em>, never drawn as zero.</p>
+    <h2>Spent vs saved, by <select id="f-dim" data-testid="filter-dim" aria-label="Breakdown dimension"></select></h2>
+    <p class="note">Same two figures, one group per value. Unpriced groups read
+      <em>unknown</em>, never 0.</p>
+    <details class="why"><summary>Which dimension answers what</summary>
+      <dl>
+        <dt>model, provider, agent</dt><dd>where the money goes</dd>
+        <dt>reasoning effort, thinking mode</dt><dd>whether the agent's knobs move the bill</dd>
+        <dt>cache_control breakpoints</dt><dd>whether placement pays — the question this project exists to answer</dd>
+      </dl>
+    </details>
     <div id="chart-breakdown" class="chart" data-testid="chart-breakdown"></div>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="breakdown-table">
@@ -296,11 +321,16 @@
 <section class="view" id="view-components" hidden>
   <div class="panel">
     <h2>Per-component economics</h2>
-    <p class="note">Which components earn their place. <strong>Unique</strong> counts each
-      distinct compaction once; <strong>gross</strong> re-counts it every turn the agent
-      re-sends the transcript, so <strong>overcount</strong> is how inflated the gross figure
-      is. <strong>Own latency</strong> is the wall time the component spent on the hot path,
-      and the <strong>verdict</strong> weighs those unique savings against that cost.</p>
+    <p class="note">Which components earn their place. A row opens that component's requests.</p>
+    <details class="why"><summary>What the columns mean</summary>
+      <dl>
+        <dt>Unique saved</dt><dd>each distinct compaction counted once</dd>
+        <dt>Gross saved</dt><dd>re-counted every turn the agent re-sends the transcript</dd>
+        <dt>Overcount</dt><dd>gross ÷ unique — how inflated the gross figure is</dd>
+        <dt>Own latency</dt><dd>wall time this component spent on the hot path</dd>
+        <dt>Verdict</dt><dd>those unique savings weighed against that cost</dd>
+      </dl>
+    </details>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="components-table">
         <thead><tr>
@@ -323,12 +353,14 @@
 <section class="view" id="view-sessions" hidden>
   <div class="panel">
     <h2>Sessions</h2>
-    <p class="note">A row opens that session's requests. <strong>Diff</strong> opens what
-      compaction did to it: every message context-guru rewrote, before against after, with
-      the component that produced each change. Transcripts that have moved to cold storage
-      are fetched only when you ask. A <strong>&dagger;</strong> on a dollar figure means some of
-      that session's turns carried no usable provider usage data, so the figure covers its
-      priced turns only while the token columns cover every turn.</p>
+    <p class="note">A row opens its requests; <strong>Diff</strong> opens what compaction
+      changed.</p>
+    <details class="why"><summary>Cold storage, and the &dagger; on a dollar figure</summary>
+      <p>A transcript that has moved to cold storage is fetched only when you ask for it. A
+        <strong>&dagger;</strong> means some of that session's turns carried no usable provider
+        usage data, so the dollar figure covers its priced turns only — while the token
+        columns beside it cover every turn.</p>
+    </details>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="sessions-table">
         <thead><tr>
@@ -371,9 +403,8 @@
 <section class="view" id="view-benchmarks" hidden>
   <div class="panel">
     <h2>Benchmark runs</h2>
-    <p class="note">Ingested from the harness artifacts (<code>summary.json</code> +
-      <code>rows-&lt;arm&gt;.json</code>). Reward sits beside cost on purpose: an arm that
-      saves money by failing tasks is not saving money.</p>
+    <p class="note">From the harness artifacts. Reward sits beside cost on purpose: an arm
+      that saves money by failing tasks is not saving money.</p>
     <button id="bench-refresh" class="ghost" data-testid="bench-refresh">Re-scan run directories</button>
     <div id="bench-list" data-testid="bench-list"></div>
   </div>
@@ -389,9 +420,8 @@
       <h2>Cold storage</h2>
       <span class="muted" id="archive-remote" data-testid="archive-remote"></span>
     </div>
-    <p class="muted small">Sessions here have been moved off local disk. Nothing was deleted:
-      the index below is permanent and local, so your whole history stays listed. Opening a
-      session fetches it back on demand.</p>
+    <p class="muted small">Moved off local disk, not deleted — this index is permanent and
+      local. Opening a session fetches it back.</p>
     <div id="archive-list" data-testid="archive-list" tabindex="0"></div>
   </div>
 </section>
@@ -401,16 +431,14 @@
   <div class="card">
     <div class="card-head"><h2>Point your agent at context-guru</h2></div>
     <div id="setup-token-banner" class="banner ok" hidden data-testid="setup-token-banner"></div>
-    <p class="muted small">One token, one host. Each agent reads a different environment
-      variable, so set each once and never think about it again. The token below is a
-      placeholder unless you have just minted one — substitute yours.</p>
+    <p class="muted small">One token, one host. Substitute your own token below — the one
+      shown is a placeholder unless you just minted one.</p>
     <div id="setup-blocks" data-testid="setup-blocks"></div>
-    <div class="card-head"><h3>If something goes wrong</h3></div>
+    <div class="card-head"><h3>Backing out</h3></div>
     <ul class="muted small">
-      <li>Unset the base URL to bypass context-guru entirely — your agent talks to the
-        gateway directly, exactly as before.</li>
-      <li>Send <code>x-context-guru-bypass: true</code> to keep the metrics but skip
-        compaction, which is the way to A/B a suspicion.</li>
+      <li>Unset the base URL to bypass context-guru entirely.</li>
+      <li>Send <code>x-context-guru-bypass: true</code> to keep the metrics and skip
+        compaction — the way to A/B a suspicion.</li>
     </ul>
   </div>
 </section>
@@ -424,15 +452,13 @@
   <div class="card">
     <div class="card-head"><h2>Tokens</h2>
       <button class="ghost" id="mint-token" data-testid="mint-token">Mint a token</button></div>
-    <p class="muted small">Tokens are stored hashed, so a lost token cannot be recovered —
-      mint a new one and revoke the old. Several can be live at once, which is how you
-      rotate without downtime.</p>
+    <p class="muted small">Stored hashed: a lost token cannot be recovered, only replaced.
+      Several may be live at once, which is how you rotate without downtime.</p>
     <div id="token-list" data-testid="token-list" tabindex="0"></div>
   </div>
   <div class="card">
     <div class="card-head"><h2>Signed-in machines</h2></div>
-    <p class="muted small">You can be signed in on several machines at once. Revoking one
-      signs that browser out and leaves the others alone — use it if you lose a laptop.</p>
+    <p class="muted small">Revoking one signs that browser out and leaves the others alone.</p>
     <div id="session-list" data-testid="session-list" tabindex="0"></div>
   </div>
   <div class="card">
@@ -446,8 +472,7 @@
   <div class="card">
     <div class="card-head"><h2>Tenants</h2><span class="muted" id="tenants-count"></span></div>
     <p class="muted small">Metrics and configuration for every account. Transcripts are
-      deliberately not here: reading another person's source code is not an
-      administrative need.</p>
+      deliberately not here — reading someone's source code is not an administrative need.</p>
     <div id="tenants-list" data-testid="tenants-list" tabindex="0"></div>
   </div>
 </section>
@@ -455,14 +480,22 @@
 <section class="view" id="view-config" hidden>
   <div class="panel">
     <h2>Effective configuration</h2>
-    <p class="note">The <strong>resolved</strong> configuration — preset expanded, defaults
-      filled, overrides applied — not what was typed. Visible from loopback or a trusted CIDR
-      only, and key-allowlisted even then.</p>
+    <p class="note">Resolved, not as typed: preset expanded, defaults filled, overrides
+      applied.</p>
     <div id="config-body" data-testid="config-body"></div>
   </div>
   <div class="panel">
     <h2>Capture pipeline health</h2>
     <div id="capture-body" data-testid="capture-body"></div>
+  </div>
+  <!-- Logs live in Grafana, which binds loopback on the box. Filled by renderLogsHelp()
+       with copyable TEXT and no hyperlink: a link to 127.0.0.1:3000 is dead for everyone
+       who has not opened the tunnel first, and a dead link is worse than instructions. -->
+  <div class="panel">
+    <h2>Logs <span class="section-note">Grafana, over an SSH tunnel</span></h2>
+    <p class="note">Not exposed on the public path. Open the tunnel, then the dashboard
+      address — both are copyable below.</p>
+    <div id="logs-help" data-testid="logs-help"></div>
   </div>
 </section>
 

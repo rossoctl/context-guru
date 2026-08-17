@@ -34,6 +34,10 @@
      and the brighter blue it replaced only reached 3.89:1 there. */
   --accent:      #175ac8;
   --accent-soft: #e2ecfd;
+  /* Ink for text sitting ON --accent (the primary button). A separate token because the
+     dark theme's accent is a LIGHT blue: white on it measures 2.99:1, so the light
+     theme's white had to stop being an assumption baked into the rule. */
+  --on-accent:   #ffffff;
   --good:        #14764a;
   --good-soft:   #d8f0e3;
   --warn:        #8a5800;
@@ -94,7 +98,7 @@
     --bg: #0d1117; --bg-raised: #151b23; --bg-sunken: #10161d; --bg-hover: #1b222c;
     --border: #2a313c; --border-soft: #21272f;
     --fg: #e8ebf0; --fg-muted: #9aa4b2; --fg-faint: #8792a1;
-    --accent: #4f96f6; --accent-soft: #14243b;
+    --accent: #4f96f6; --accent-soft: #14243b; --on-accent: #08111e;
     --good: #3fbe7f; --good-soft: #10301f;
     --warn: #dba43c; --warn-soft: #2f2510;
     --bad: #ef6f63; --bad-soft: #351815;
@@ -108,7 +112,7 @@
   --bg: #0d1117; --bg-raised: #151b23; --bg-sunken: #10161d; --bg-hover: #1b222c;
   --border: #2a313c; --border-soft: #21272f;
   --fg: #e8ebf0; --fg-muted: #9aa4b2; --fg-faint: #8792a1;
-  --accent: #4f96f6; --accent-soft: #14243b;
+  --accent: #4f96f6; --accent-soft: #14243b; --on-accent: #08111e;
   --good: #3fbe7f; --good-soft: #10301f;
   --warn: #dba43c; --warn-soft: #2f2510;
   --bad: #ef6f63; --bad-soft: #351815;
@@ -196,7 +200,13 @@ code, kbd { font-family: var(--mono); font-size: 0.92em; }
   box-shadow: inset 0 -2px 0 var(--accent);
   border-radius: var(--r-sm) var(--r-sm) 0 0;
 }
-.topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--sp-3); }
+/* min-width:0 and wrap: this group's own content (an email, two buttons and the live
+   pill) has a min-content width of ~260px, and without these it refused to shrink or
+   break — which is what pushed the body 17px wider than a 360px viewport. */
+.topbar-right {
+  margin-left: auto; display: flex; align-items: center; gap: var(--sp-3);
+  flex-wrap: wrap; justify-content: flex-end; min-width: 0;
+}
 .live {
   display: inline-flex; align-items: center; gap: var(--sp-2);
   font-size: var(--t-small); color: var(--fg-muted); font-variant-numeric: tabular-nums;
@@ -228,10 +238,11 @@ button.ghost:disabled { opacity: 0.4; cursor: default; background: var(--bg-rais
 button.ghost:disabled:hover { color: var(--fg-muted); border-color: var(--border); }
 button.ghost.small { padding: 2px var(--sp-2); font-size: var(--t-small); }
 button.primary {
-  background: var(--accent); color: #fff; border: 1px solid transparent;
+  background: var(--accent); color: var(--on-accent); border: 1px solid transparent;
   padding: var(--sp-2) var(--sp-4); font-weight: 600;
 }
 button.primary:hover { filter: brightness(1.08); }
+button.primary:disabled { opacity: 0.5; cursor: default; filter: none; }
 button.subtle {
   background: none; border: 0; color: var(--accent);
   padding: 2px var(--sp-1); font-size: var(--t-small); font-weight: 600;
@@ -254,6 +265,44 @@ button.subtle:hover { text-decoration: underline; }
 }
 .filters input[type="search"] { min-width: 200px; flex: 1 1 200px; max-width: 320px; }
 .filters select:hover, .filters input:hover { border-color: var(--fg-faint); }
+/* The filter bar is hidden on the views that have nothing to filter (Setup, Settings,
+   Tenants, Archive, Config). Fourteen dropdowns over a settings form invite clicks that
+   change nothing. */
+.filters[hidden] { display: none !important; }
+
+/* Second-tier filters — the request-metadata ones — behind one disclosure. Thirteen
+   controls wrapped to two rows on every viewport and pushed the first number below the
+   fold; these six are the ones an operator reaches for occasionally. Anything SET here is
+   still visible as a chip in the row below, so a collapsed filter is never a hidden one. */
+.filters details.more { position: relative; }
+.filters details.more > summary {
+  display: inline-flex; align-items: center; gap: var(--sp-1);
+  font-size: var(--t-small); color: var(--fg-muted); cursor: pointer;
+  padding: var(--sp-1) var(--sp-2); border-radius: var(--r-sm);
+  border: 1px dashed var(--border); background: var(--bg-raised); white-space: nowrap;
+}
+.filters details.more > summary:hover { color: var(--fg); border-color: var(--fg-faint); }
+.filters details.more[open] > summary { border-style: solid; color: var(--fg); font-weight: 600; }
+.filters details.more .more-count {
+  font-variant-numeric: tabular-nums; font-weight: 600;
+  background: var(--accent-soft); color: var(--accent);
+  border-radius: 999px; padding: 0 var(--sp-1); font-size: var(--t-micro);
+}
+/* A popover rather than an inline row: opening it must not reflow the controls beside it
+   and push the page down. Anchored to the summary, above the sticky filter bar's z-index. */
+.filters details.more > .more-body {
+  position: absolute; right: 0; top: calc(100% + var(--sp-1)); z-index: 25;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--sp-2); width: max-content; max-width: min(92vw, 620px);
+  padding: var(--sp-3);
+  background: var(--bg-raised); border: 1px solid var(--border);
+  border-radius: var(--r); box-shadow: var(--shadow-pop);
+}
+.filters details.more > .more-body select { max-width: none; width: 100%; }
+@media (max-width: 620px) {
+  .filters details.more { position: static; }
+  .filters details.more > .more-body { position: static; box-shadow: none; width: auto; max-width: none; }
+}
 
 /* Active-filter chips. Their own row under the controls, full width, so adding one
    never reflows the dropdowns — and so the set reads as a sentence rather than as more
@@ -296,12 +345,63 @@ main { padding: var(--sp-4) var(--sp-4) var(--sp-6); max-width: 1680px; margin: 
 }
 .section:first-child { margin-top: 0; }
 .section h2 { font-size: var(--t-h3); }
-.section .section-note { color: var(--fg-muted); font-size: var(--t-small); }
+/* A qualifier that belongs to a heading but is not part of it: "since you opened this
+   page", "UTC". Same weight wherever it appears, so it never reads as part of the title. */
+.section-note { color: var(--fg-muted); font-size: var(--t-small); font-weight: 400; letter-spacing: 0; }
+h2 > .section-note { margin-left: var(--sp-1); }
+h2 > .section-note::before { content: "· "; color: var(--fg-faint); }
+
+/* A control that lives inside a heading — the Usage breakdown's dimension picker. It is
+   part of the sentence the heading makes, so it is sized to the heading and not to the
+   filter bar. */
+h2 > select {
+  font: inherit; font-size: var(--t-h3); font-weight: 600;
+  background: var(--bg-sunken); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 1px var(--sp-1); margin-left: var(--sp-1); max-width: 22ch;
+}
+h2 > select:hover { border-color: var(--accent); color: var(--accent); }
 
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: var(--sp-4); }
 .grid-2 .panel { margin-bottom: 0; }
-.note { color: var(--fg-muted); font-size: var(--t-small); margin: var(--sp-1) 0 var(--sp-3); max-width: 82ch; }
+/* One line, two at most. A panel note is a caption, not documentation: the long version
+   lives in a <details class="why"> below it, so the layout carries the short form and the
+   reader opts in to the rest. 74ch is where a 12px line stops being scannable. */
+.note { color: var(--fg-muted); font-size: var(--t-small); margin: var(--sp-1) 0 var(--sp-3); max-width: 74ch; }
 .panel > h2 + .note { margin-top: var(--sp-1); }
+
+/* ── the disclosure that replaced the paragraphs ────────────────────────────
+   Native <details>: keyboard reachable, focusable, no JS, and it collapses by default so
+   an explanation costs nothing until it is wanted. Used for every "why is this number
+   what it is" paragraph that used to sit permanently in the layout. */
+details.why { margin: calc(var(--sp-1) * -1) 0 var(--sp-3); font-size: var(--t-small); }
+details.why > summary {
+  display: inline-flex; align-items: center; gap: var(--sp-1);
+  color: var(--fg-muted); cursor: pointer; width: fit-content;
+  padding: 1px var(--sp-1); margin-left: calc(var(--sp-1) * -1);
+  border-radius: var(--r-sm);
+}
+details.why > summary:hover { color: var(--accent); }
+/* display:inline-flex kills the native ::marker, so the affordance is drawn: without a
+   caret these summaries read as inert grey labels and nobody discovers there is anything
+   to open. */
+details.why > summary { list-style: none; }
+details.why > summary::-webkit-details-marker { display: none; }
+details.why > summary::before {
+  content: "›"; display: inline-block; font-size: 1.15em; line-height: 1;
+  color: var(--fg-faint); transform: rotate(0deg); transition: transform .12s;
+}
+details.why[open] > summary::before { transform: rotate(90deg); }
+details.why > summary:hover::before { color: var(--accent); }
+details.why > :not(summary) {
+  color: var(--fg-muted); max-width: 78ch; line-height: 1.55;
+  margin: var(--sp-2) 0 0; padding-left: var(--sp-3);
+  border-left: 2px solid var(--border-soft);
+}
+details.why[open] > summary { color: var(--fg); font-weight: 600; }
+details.why dl { display: grid; grid-template-columns: auto 1fr; gap: var(--sp-1) var(--sp-3); }
+details.why dt { color: var(--fg); font-weight: 600; }
+details.why dd { margin: 0; }
 
 .banner {
   padding: var(--sp-3) var(--sp-4); margin: var(--sp-3) var(--sp-4) 0;
@@ -340,7 +440,10 @@ main { padding: var(--sp-4) var(--sp-4) var(--sp-6); max-width: 1680px; margin: 
 
 /* ── bars (denominators, distributions, waterfall, component savings) ─── */
 .bars { display: grid; gap: var(--sp-2); }
-.bar-row { display: grid; grid-template-columns: minmax(140px, 30%) 1fr auto; gap: var(--sp-3); align-items: center; }
+/* The label column is CAPPED, not proportional. At 30% of a 1360px panel it was a 400px
+   column holding a 180px label, so every bar started a third of the way across the panel
+   and the plot area was the narrowest part of the widest row. */
+.bar-row { display: grid; grid-template-columns: minmax(120px, 220px) 1fr auto; gap: var(--sp-3); align-items: center; }
 .bar-label { font-size: var(--t-small); color: var(--fg); }
 .bar-track { background: var(--bg-sunken); border-radius: var(--r-sm); height: 10px; overflow: hidden; }
 /* Rounded on the data end only, square against the baseline: a pill-shaped bar
@@ -351,7 +454,28 @@ main { padding: var(--sp-4) var(--sp-4) var(--sp-6); max-width: 1680px; margin: 
   font-variant-numeric: tabular-nums; font-size: var(--t-small); font-weight: 600;
   min-width: 92px; text-align: right;
 }
-.bar-desc { grid-column: 1 / -1; color: var(--fg-muted); font-size: var(--t-micro); margin: -2px 0 var(--sp-2); max-width: 92ch; line-height: 1.5; }
+/* A bar's own explanation, one per row, collapsed — and its trigger is a GLYPH, not a
+   word: five bars each carrying three lines of prose is fifteen lines of documentation
+   between the reader and the next number, but five copies of the word "Why" underneath
+   five bars is its own kind of noise. The summary carries an aria-label, so what it does
+   is still announced. */
+.bars > details.why { margin: -4px 0 var(--sp-1); }
+.bars > details.why > summary {
+  font-size: var(--t-micro); width: 1.35em; height: 1.35em; justify-content: center;
+  border: 1px solid var(--border); border-radius: 50%; color: var(--fg-faint); padding: 0;
+}
+.bars > details.why > summary::before { content: "?"; font-size: 1em; transform: none; }
+.bars > details.why[open] > summary::before { transform: none; }
+.bars > details.why[open] > summary { background: var(--accent-soft); border-color: var(--accent); }
+.bars > details.why[open] > summary::before { color: var(--accent); }
+.bars > details.why > :not(summary) { font-size: var(--t-micro); margin-top: var(--sp-1); }
+/* The always-visible half of what the collapsed text used to say: the arithmetic. Two
+   ratios that differ only in their denominator must never look like the same number, so
+   the divisor stays on screen and only the prose folds away. */
+.bar-formula {
+  grid-column: 2 / -1; color: var(--fg-faint); font-size: var(--t-micro);
+  font-variant-numeric: tabular-nums; margin: -6px 0 var(--sp-1);
+}
 /* Two bars, one row, one scale (pairedBars). The 2px gap is the surface showing between
    the two fills — adjacent marks need a visible gap or they read as one stacked bar. */
 .bar-pair { display: grid; gap: 2px; }
@@ -474,6 +598,39 @@ main { padding: var(--sp-4) var(--sp-4) var(--sp-6); max-width: 1680px; margin: 
 .kv > div { font-size: var(--t-small); min-width: 0; }
 .kv .k { color: var(--fg-muted); }
 .kv .v { font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+/* A value the client never set. Not a zero and not a blank cell: temperature 0 is a real
+   instruction and had to stay distinguishable from its absence. */
+.kv .v.unset { font-weight: 400; color: var(--fg-faint); font-style: italic; }
+/* One band of related pairs, with a caption. Twenty-four pairs in one grid is a wall to
+   scan; four captioned bands of six are four things to look at. */
+.kv-band { margin-bottom: var(--sp-4); }
+.kv-band > h3 {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--fg-muted); margin-bottom: var(--sp-2);
+  padding-bottom: var(--sp-1); border-bottom: 1px solid var(--border-soft);
+}
+.kv-band > .kv { margin-bottom: 0; }
+/* Breakpoint placement: four slots, each labelled, each showing its own count. A single
+   "4 of 4 · system 1 · tools 1 · messages 2 · blocks 0" string wrapped mid-clause and
+   read as one sentence when it is really four measurements. */
+.kv-wide { grid-column: 1 / -1; font-size: var(--t-small); min-width: 0; }
+.bp { display: flex; flex-wrap: wrap; gap: var(--sp-1); font-weight: 400; }
+.bp > span {
+  display: inline-flex; gap: var(--sp-1); align-items: baseline;
+  padding: 0 var(--sp-1); border-radius: var(--r-sm);
+  background: var(--bg-sunken); color: var(--fg-muted); font-size: var(--t-micro);
+}
+.bp > span.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.bp > span b { font-variant-numeric: tabular-nums; }
+
+/* ── copyable command block ────────────────────────────────────────────────
+   Used for the Grafana/logs affordance, which is deliberately TEXT and not a link:
+   Grafana binds loopback on the box, so a hyperlink from this page would be dead for
+   everyone who has not already opened the tunnel. */
+.copyblock { margin: var(--sp-3) 0 0; }
+.copyblock > .setup-head { margin-bottom: var(--sp-1); }
+.copyblock > .setup-head h3 { font-size: var(--t-small); color: var(--fg-muted); font-weight: 600; }
+.copyblock pre.code { margin-top: 0; user-select: all; }
 
 /* ── diff view ────────────────────────────────────────────────────────── */
 .diff {
@@ -607,20 +764,31 @@ main { padding: var(--sp-4) var(--sp-4) var(--sp-6); max-width: 1680px; margin: 
 .state.failed strong { color: var(--bad); }
 .state code { overflow-wrap: anywhere; }
 
-/* ── gate ─────────────────────────────────────────────────────────────── */
-.gate { display: flex; align-items: center; justify-content: center; min-height: 72vh; padding: var(--sp-5); }
+/* ── gate ─────────────────────────────────────────────────────────────────
+   The auth screens. One card, centred, and deliberately the only thing on the page:
+   showGate() hides the tabs and the filter bar, so there is nothing to click that would
+   401. The three phases (sign in, register, verify) are one card with one width, so
+   moving between them never resizes or re-centres what the user is reading. */
+.gate { display: flex; align-items: center; justify-content: center; min-height: 78vh; padding: var(--sp-5) var(--sp-4); }
 .gate-card {
-  width: 100%; max-width: 400px;
+  width: 100%; max-width: 408px;
   background: var(--bg-raised); border: 1px solid var(--border);
   border-radius: var(--r-lg); padding: var(--sp-6);
+  box-shadow: var(--shadow-pop);
 }
-.gate-card h1 { margin-bottom: var(--sp-1); }
-.gate-tabs { display: flex; gap: var(--sp-1); margin: var(--sp-5) 0 var(--sp-3); }
+.gate-card h1 {
+  display: flex; align-items: center; gap: var(--sp-2);
+  margin-bottom: var(--sp-1); font-size: var(--t-h1);
+}
+.gate-card h1 .logo { width: 22px; height: 22px; }
+.gate-card #gate-intro { font-size: var(--t-small); }
+.gate-tabs { display: flex; gap: var(--sp-1); margin: var(--sp-5) 0 var(--sp-2); }
 .gate-tab {
   flex: 1; padding: var(--sp-2); font: inherit; font-size: var(--t-body);
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm);
   color: var(--fg-muted); cursor: pointer;
 }
+.gate-tab:hover { color: var(--fg); border-color: var(--fg-faint); }
 .gate-tab[aria-selected="true"] {
   background: var(--accent-soft); border-color: var(--accent);
   color: var(--accent); font-weight: 600;
@@ -629,12 +797,36 @@ main { padding: var(--sp-4) var(--sp-4) var(--sp-6); max-width: 1680px; margin: 
    field is not visibly a different shape from an unconditional one. */
 .gate-form, .gate-form > div { display: flex; flex-direction: column; gap: var(--sp-1); }
 .gate-card > .state { margin: var(--sp-3) 0 0; }
-.gate-form label { font-size: var(--t-small); color: var(--fg-muted); margin-top: var(--sp-2); font-weight: 600; }
+.gate-form label { font-size: var(--t-small); color: var(--fg); margin-top: var(--sp-3); font-weight: 600; }
 .gate-form input {
   padding: var(--sp-2) var(--sp-3); font: inherit;
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--fg);
 }
-.gate-form button.primary { margin-top: var(--sp-4); }
+.gate-form input:hover { border-color: var(--fg-faint); }
+.gate-form .hint { font-size: var(--t-micro); margin-top: var(--sp-1); }
+.gate-form button.primary { margin-top: var(--sp-4); width: 100%; padding: var(--sp-3); }
+.gate-form > #gate-verify-cancel { align-self: center; margin-top: var(--sp-2); }
+/* The token fallback is for accounts older than passwords. Folded away: it is the wrong
+   answer for everyone else, and an input labelled "token" beside one labelled "password"
+   is a choice nobody should have to make. */
+#gate-token-fallback { margin-top: var(--sp-4); border-top: 1px solid var(--border-soft); padding-top: var(--sp-3); }
+#gate-token-fallback > summary { cursor: pointer; width: fit-content; color: var(--fg-muted); }
+#gate-token-fallback > summary:hover { color: var(--accent); }
+
+/* The 6-digit code box: one glyph per position, monospaced and tracked out, so a
+   mistyped digit is visible without counting. */
+#gate-verify-code {
+  font-family: var(--mono); font-size: var(--t-h1); letter-spacing: 0.42em;
+  text-align: center; padding: var(--sp-3) var(--sp-2);
+}
+/* The countdown. Tabular so it does not jitter every second, and it turns amber under a
+   minute — the value itself still comes from the server's absolute expiry. */
+#gate-verify-timer {
+  font-variant-numeric: tabular-nums; font-size: var(--t-small);
+  margin-top: var(--sp-2); color: var(--fg-muted);
+}
+#gate-verify-timer.soon { color: var(--warn); font-weight: 600; }
+#gate-verify-timer.gone { color: var(--bad); font-weight: 600; }
 .gate-error {
   margin-top: var(--sp-4); padding: var(--sp-2) var(--sp-3); border-radius: var(--r);
   background: var(--bad-soft); color: var(--bad); font-size: var(--t-small);
@@ -663,10 +855,17 @@ pre.code {
 .field textarea { font-family: var(--mono); font-size: var(--t-small); max-width: none; line-height: 1.6; }
 details.field > summary { font-size: var(--t-small); color: var(--fg-muted); font-weight: 600; cursor: pointer; margin-bottom: var(--sp-2); }
 .hint { margin: 0; font-size: var(--t-small); color: var(--fg-muted); line-height: 1.55; max-width: 82ch; }
-.comp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); gap: var(--sp-1) var(--sp-4); }
-.comp { display: flex; align-items: baseline; gap: var(--sp-2); font-size: var(--t-body); cursor: pointer; flex-wrap: wrap; }
+/* One checkbox per cell, each a hit target of its own. align-items:start so a component
+   carrying a caveat does not push its neighbours' baselines down. */
+.comp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 230px), 1fr)); gap: var(--sp-1) var(--sp-4); align-items: start; }
+.comp {
+  display: flex; align-items: baseline; gap: var(--sp-2); font-size: var(--t-body);
+  cursor: pointer; flex-wrap: wrap; padding: var(--sp-1) var(--sp-2);
+  margin-left: calc(var(--sp-2) * -1); border-radius: var(--r-sm);
+}
+.comp:hover { background: var(--bg-hover); }
 .comp-name { font-family: var(--mono); }
-.comp-warn { color: var(--fg-muted); font-size: var(--t-micro); flex: 1 0 100%; padding-left: 22px; }
+.comp-warn { color: var(--warn); font-size: var(--t-micro); flex: 1 0 100%; padding-left: 22px; line-height: 1.45; }
 .actions { display: flex; gap: var(--sp-2); align-items: center; margin-top: var(--sp-3); }
 
 /* Which configuration is in force, and the one button that changes that. Its own class
@@ -701,7 +900,10 @@ table.grid th {
 }
 table.grid tr:last-child td { border-bottom: 0; }
 table.grid tr.revoked { opacity: 0.55; }
-td.clip, code.clip {
+/* Any element, not just td/code: the sign-in list puts it on a <span> around a 96-character
+   user-agent string, which the old two-selector list did not match — so one column of that
+   table was as wide as the whole card. */
+.clip {
   max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; display: inline-block; vertical-align: bottom;
 }
@@ -729,6 +931,12 @@ td.clip, code.clip {
   .tiles { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
   .bar-row { grid-template-columns: 1fr; gap: 2px; }
   .bar-val { text-align: left; min-width: 0; }
+  .bar-formula { grid-column: 1; margin-top: 0; }
   .dl { grid-template-columns: 30px 1fr; }
   .dl .ln:nth-child(2) { display: none; }
+  /* The identity group gets its own row instead of competing with the brand for one.
+     At 360px the two together were 375px of min-content, i.e. 17px of body scroll. */
+  .topbar-right { flex: 1 0 100%; margin-left: 0; justify-content: flex-start; }
+  .whoami { max-width: 18ch; }
+  .gate-card { padding: var(--sp-5) var(--sp-4); }
 }
