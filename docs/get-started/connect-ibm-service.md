@@ -407,7 +407,7 @@ a full agent turn means the traffic never arrived, whatever your shell says.
 | **502** | No upstream configured for that route, or the provider failed. The operator's problem. |
 | connection refused on `http://` | You used port 80. There deliberately isn't one — see the warning at the top of this page. |
 | **`fetch failed`** (Bob, or any Node agent), and **nothing in the service's log** | Node does not trust the IBM root CA. The request never left your machine, which is why there is nothing to see on our side. Set `NODE_EXTRA_CA_CERTS` — [step 2](#2-make-sure-your-machine-trusts-the-certificate). A passing `curl` does **not** rule this out. |
-| **401 "this provider key is not bound to an account"** (Bob) | Expected until you bind. Bob can send no header of ours, so it is identified by the sha256 of its `BOBSHELL_API_KEY` — run the `POST /api/me/agent-key` call in [step 3](#3-point-your-agent-at-it). |
+| **401 "this provider key is not bound to an account"** (Bob) | Expected until you bind. Bob can send no header of ours, so it is identified by the sha256 of its `BOBSHELL_API_KEY` — run the `POST /api/me/agent-key` call in [step 3](#3-point-claude-code-at-it). |
 
 ## Three things worth knowing before you rely on it
 
