@@ -911,9 +911,17 @@ commands:
 ```sh
 sudo deploy/service/install.sh grafana          # both containers, config, dashboards
 sudo deploy/service/install.sh grafana-status   # scrape health + provisioning errors
+# then, signed in as a MANAGER at /dashboard/:
+#   https://<the host>/grafana/d/context-guru/context-guru
+# or without the front end:
 ssh -L 3000:127.0.0.1:3000 <the host>
-# then http://127.0.0.1:3000/d/context-guru/context-guru
+# then http://127.0.0.1:3000/grafana/d/context-guru/context-guru
 ```
+
+The front end publishes Grafana at `/grafana/` behind an nginx `auth_request` that only a
+context-guru **manager**'s browser session satisfies — Grafana never sees a request that
+fails it, not even to show its login page. Its own login is the second door.
+Prometheus (9090) and Loki (3100) are not published at all.
 
 Containers rather than packages because Prometheus is in no RHEL 9 repository, so the
 alternative is a packaged Grafana beside a tarball Prometheus with two unrelated sets of

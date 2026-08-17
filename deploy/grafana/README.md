@@ -54,18 +54,48 @@ containers, which is how the edit takes effect. The TSDB, the log store and Graf
 database live outside the containers, so nothing is lost. Then:
 
 ```
-http://127.0.0.1:3000/d/context-guru/context-guru            # ssh -L 3000:127.0.0.1:3000 to reach it
-http://127.0.0.1:3000/d/context-guru-logs/context-guru-logs  # the logs
+https://<host>/grafana/d/context-guru/context-guru            # through the front end, manager only
+https://<host>/grafana/d/context-guru-logs/context-guru-logs  # the logs
+http://127.0.0.1:3000/grafana/d/context-guru/context-guru     # or ssh -L 3000:127.0.0.1:3000
 ```
+
+### Reaching it: the manager gate
+
+Grafana binds loopback and nginx is the only thing that talks to it. The front end
+publishes it at **`/grafana/`**, behind two doors:
+
+1. **Ours.** nginx `auth_request` asks the proxy's `GET /api/authz/grafana` first, which
+   answers 204 only for a `cg_dash` browser session belonging to a **manager** — the same
+   `webPrincipal` + `IsManager()` the control plane uses, so there is no second notion of
+   who an administrator is. Anyone else gets nginx's own 401/403 and Grafana never sees the
+   request. Not even its login page is reachable, which is the point: that form would
+   otherwise be a password-guessing target in front of every tenant's spend. A proxy token
+   does not work here — cookie only, like every other control-plane route.
+2. **Grafana's.** Its own login, still enabled, with `GF_AUTH_ANONYMOUS_ENABLED=false`.
+
+So a manager needs to be signed in at `/dashboard/` *and* have Grafana's admin password.
+Sub-path support (`GF_SERVER_ROOT_URL`, `GF_SERVER_SERVE_FROM_SUB_PATH=true`) is set by the
+installer; without both, every asset Grafana generates 404s.
+
+`/api/authz/grafana` ships with the nginx config but only takes effect when the proxy
+restarts, and the gate fails **closed** until it does: a manager sees 401 too. Check with
+`grep -c api/authz/grafana /usr/local/bin/context-guru-proxy`.
 
 ### The admin password
 
 Nothing here has a default password and `admin/admin` is never set.
 
 - **First install:** the installer generates a password and **prints it once**, as
-  `admin / <value>`. It is not written to any file — copy it out of that output. Or set
-  `GRAFANA_ADMIN_PASSWORD` in the environment of the `install.sh grafana` call and it uses
-  yours instead.
+  `admin / <value>`. It is not written to any file that outlives the install — copy it out
+  of that output. Or set `GRAFANA_ADMIN_PASSWORD` in the environment of the
+  `install.sh grafana` call and it uses yours instead.
+- **How it is passed, and why not `-e`:** through `docker run --env-file`, a 0600
+  root-owned file on the `/run` tmpfs that is deleted the moment the container exists.
+  `-e GF_SECURITY_ADMIN_PASSWORD=…` would put the password in the installer's own argv,
+  and `/proc/<pid>/cmdline` is world-readable — any local user running `ps auxww` during
+  the install would read it, and Grafana's admin sees every tenant's month-to-date cost.
+  If an install predating this ever ran on your box, treat that password as disclosed and
+  rotate it below.
 - **Every later run:** no password is set or needed. It already lives in Grafana's own
   database under `/var/lib/context-guru/observability/grafana`, so re-running the installer
   never demands a secret and never resets one.
@@ -153,19 +183,34 @@ sudo docker run -d --name cg-promtail --network=host --restart=unless-stopped \
   -v /var/log/context-guru:/var/log/context-guru:ro,Z \
   docker.io/grafana/promtail:3.4.2 -config.file=/etc/promtail/config.yml
 
-# 7. Grafana. GF_SERVER_HTTP_ADDR keeps it on loopback; reach it over an ssh tunnel.
-#    Choose the admin password first and pass it from the environment — never write it into
-#    a file here. Only the FIRST run needs it; drop the -e line on later runs, because after
-#    this the password lives in Grafana's database under $ST/grafana.
-read -rs GRAFANA_ADMIN_PASSWORD && export GRAFANA_ADMIN_PASSWORD
-sudo -E docker run -d --name cg-grafana --network=host --restart=unless-stopped \
-  -e GF_SERVER_HTTP_ADDR=127.0.0.1 -e GF_SERVER_HTTP_PORT=3000 \
-  -e GF_AUTH_ANONYMOUS_ENABLED=false -e GF_ANALYTICS_REPORTING_ENABLED=false \
-  -e GF_SECURITY_ADMIN_PASSWORD="$GRAFANA_ADMIN_PASSWORD" \
+# 7. Grafana. GF_SERVER_HTTP_ADDR keeps it on loopback — nginx publishes it at /grafana/,
+#    and ROOT_URL + SERVE_FROM_SUB_PATH are what make its redirects and asset URLs agree
+#    with that path. Only the FIRST run needs a password; drop that line on later runs,
+#    because after this it lives in Grafana's database under $ST/grafana.
+#
+#    Every variable goes through an env-FILE, and that is about the one secret among them:
+#    `-e GF_SECURITY_ADMIN_PASSWORD=…` puts the password in this shell's argv, and
+#    /proc/<pid>/cmdline is world-readable. 0600 on the /run tmpfs instead, deleted as soon
+#    as the container exists — the runtime has copied the values into it by then.
+read -rs GRAFANA_ADMIN_PASSWORD
+EF=$(sudo mktemp /run/cg-grafana-env.XXXXXX) && sudo chmod 0600 "$EF"
+sudo tee "$EF" >/dev/null <<EOF
+GF_SERVER_HTTP_ADDR=127.0.0.1
+GF_SERVER_HTTP_PORT=3000
+GF_SERVER_ROOT_URL=https://$(hostname -f)/grafana/
+GF_SERVER_SERVE_FROM_SUB_PATH=true
+GF_AUTH_ANONYMOUS_ENABLED=false
+GF_ANALYTICS_REPORTING_ENABLED=false
+GF_SECURITY_ADMIN_PASSWORD=$GRAFANA_ADMIN_PASSWORD
+EOF
+unset GRAFANA_ADMIN_PASSWORD
+sudo docker run -d --name cg-grafana --network=host --restart=unless-stopped \
+  --env-file "$EF" \
   -v "$ETC/grafana/provisioning:/etc/grafana/provisioning:ro,Z" \
   -v "$ETC/grafana/dashboards:/var/lib/grafana/dashboards/context-guru:ro,Z" \
   -v "$ST/grafana:/var/lib/grafana:Z" \
   docker.io/grafana/grafana:11.6.0
+sudo rm -f "$EF"; unset EF
 ```
 
 The dashboards mount **inside** the Grafana data volume on purpose: the provider yml points
@@ -179,7 +224,8 @@ directory.
 packaged Grafana with a tarball Prometheus, and then the paths differ from everything
 above. If you go that way the only changes are: provisioning lives at
 `/etc/grafana/provisioning`, dashboards at `/var/lib/grafana/dashboards/context-guru`, and
-you set `http_addr = 127.0.0.1` in `/etc/grafana/grafana.ini` instead of the env var.
+you set `http_addr = 127.0.0.1`, `root_url` and `serve_from_sub_path = true` in
+`/etc/grafana/grafana.ini` instead of the env vars.
 
 ## Verify it
 
@@ -223,15 +269,18 @@ $ curl -sG http://127.0.0.1:9090/api/v1/query --data-urlencode 'query=cg_request
 An empty `result` array means the target is up but the exposition changed — check the
 series names against `proxy/promexport.go`.
 
-**3. Grafana provisioned both dashboards.** Must list exactly these two uids:
+**3. Grafana provisioned every dashboard.** Note the `/grafana` prefix on its API too —
+`SERVE_FROM_SUB_PATH` moves the whole application, not just the UI, and the bare paths
+answer 301:
 
 ```console
-$ curl -s -u admin:"$GRAFANA_ADMIN_PASSWORD" 'http://127.0.0.1:3000/api/search?type=dash-db' \
+$ curl -s -u admin:"$GRAFANA_ADMIN_PASSWORD" 'http://127.0.0.1:3000/grafana/api/search?type=dash-db' \
     | python3 -c 'import json,sys;[print(d["uid"],"|",d["title"]) for d in json.load(sys.stdin)]'
 context-guru | context-guru
+context-guru-logs | context-guru logs
 context-guru-slo | context-guru service SLO
 
-$ curl -s -u admin:"$GRAFANA_ADMIN_PASSWORD" http://127.0.0.1:3000/api/dashboards/uid/context-guru \
+$ curl -s -u admin:"$GRAFANA_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/dashboards/uid/context-guru \
     | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["dashboard"]["uid"],len(d["dashboard"]["panels"]),"panels; provisioned:",d["meta"]["provisioned"])'
 context-guru 40 panels; provisioned: True
 ```
