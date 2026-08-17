@@ -55,6 +55,10 @@ var (
 	ErrBadVariant   = errors.New(
 		"tenant: variant must be 1-32 characters of letters, digits, '.', '_' or '-'")
 	ErrBadReason = errors.New("tenant: reason must be at most 200 printable characters")
+	// ErrLastManager guards the only route back into administration. Demoting or disabling
+	// the last manager locks every account out of the manager pages, and the manager pages
+	// are the only way to make another manager — so the database would be the only way back.
+	ErrLastManager = errors.New("tenant: this is the last manager; promote another one first")
 )
 
 // DisabledError is ErrDisabled carrying the manager's REASON, so the refusal an agent
@@ -528,6 +532,16 @@ func (r *Registry) List() ([]*Tenant, error) {
 	return out, rows.Err()
 }
 
+// otherActiveManagers counts the managers who could still administer the deployment if
+// this one stopped being one. Disabled accounts do not count: they cannot sign in, so
+// they are no way back.
+func (r *Registry) otherActiveManagers(exceptID string) (int, error) {
+	var n int
+	err := r.db.QueryRow(`SELECT COUNT(*) FROM tenants
+	  WHERE role = ? AND disabled = 0 AND id != ?`, string(RoleManager), exceptID).Scan(&n)
+	return n, err
+}
+
 // Patch is a sparse update: a nil field is left alone. One method with pointers
 // beats eight single-field setters, and it lets the audit trail record exactly the
 // fields that changed.
@@ -573,6 +587,19 @@ func (r *Registry) Update(actor *Tenant, targetID string, p Patch) error {
 	}
 	if p.Role != nil && *p.Role != RoleUser && *p.Role != RoleManager {
 		return fmt.Errorf("tenant: unknown role %q", *p.Role)
+	}
+	// Demoting or disabling the last manager is a one-way door: only a manager can hand
+	// out the manager role, so the deployment would have nobody left who can. Refused for
+	// both, because a disabled manager cannot sign in to re-enable themselves either.
+	demoting := p.Role != nil && *p.Role == RoleUser && cur.Role == RoleManager
+	if (demoting || (p.Disabled != nil && *p.Disabled)) && cur.Role == RoleManager && !cur.Disabled {
+		others, err := r.otherActiveManagers(targetID)
+		if err != nil {
+			return err
+		}
+		if others == 0 {
+			return ErrLastManager
+		}
 	}
 	if p.Variant != nil && !validVariant(strings.TrimSpace(*p.Variant)) {
 		return ErrBadVariant

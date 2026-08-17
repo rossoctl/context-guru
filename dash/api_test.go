@@ -345,6 +345,45 @@ func TestUIHasTestIDsForEveryStatTile(t *testing.T) {
 	}
 }
 
+// Which tabs a plain hosted account may see. applyAccount hides [data-manager] unless the
+// signed-in account is a manager, and [data-local-ok] exempts a single-tenant proxy, whose
+// operator is the only user of their own box. Components is manager-only on a shared
+// deployment: it is the view a tenant would use to tune a pipeline that is no longer theirs
+// to tune.
+func TestManagerOnlyTabsCarryTheGatingAttributes(t *testing.T) {
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"components": {"data-manager", "data-local-ok"},
+		"benchmarks": {"data-manager", "data-local-ok"},
+		"config":     {"data-manager", "data-local-ok"},
+		"tenants":    {"data-manager"},
+	}
+	for name, attrs := range want {
+		var line string
+		for _, l := range strings.Split(string(html), "\n") {
+			if strings.Contains(l, `data-testid="tab-`+name+`"`) {
+				line = l
+			}
+		}
+		if line == "" {
+			t.Errorf("no tab-%s in the markup", name)
+			continue
+		}
+		for _, a := range attrs {
+			if !strings.Contains(line, a) {
+				t.Errorf("tab-%s is missing %s; a non-manager would see it: %s",
+					name, a, strings.TrimSpace(line))
+			}
+		}
+		if len(attrs) == 1 && strings.Contains(line, "data-local-ok") {
+			t.Errorf("tab-%s must not be data-local-ok", name)
+		}
+	}
+}
+
 // TestBenchIngestCommitsNothingForARunWithNoTasks pins the counter/table agreement.
 // IngestBenchDir used to INSERT the bench_runs row before it knew whether any rows-*
 // file parsed, then return tasks=0 — so IngestBenchRoots did not count the run but the

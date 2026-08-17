@@ -3289,8 +3289,20 @@ function loadSettings() {
         }, 'Unbind all')
         : null));
 
+    // Who may shape the compaction itself. A plain account keeps its own settings — the
+    // upstreams it sends to, its capture consent, its tokens — but the pipeline is the
+    // manager's to set, on this page and in PUT /api/me. Drawing a component grid that
+    // the server answers 403 to would be a form that lies.
+    const mgr = isManager();
+    if (!mgr) {
+      host.appendChild(el('div', { class: 'cfg-state', 'data-testid': 'cfg-state-managed' },
+        el('div', {},
+          el('strong', {}, 'Your manager sets the compaction.'),
+          ' Ask them for a change; everything else on this page is yours.')));
+    }
+
     // Which configuration is in force, and how to change that.
-    host.appendChild(inherited
+    if (mgr) host.appendChild(inherited
       ? el('div', { class: 'cfg-state', 'data-testid': 'cfg-state-inherited' },
         el('div', {},
           el('strong', {}, 'Following the server default.'),
@@ -3326,10 +3338,12 @@ function loadSettings() {
       el('option', { value: 'observe' }, 'observe — measure only, requests untouched (Mode "observe")'));
     modeSel.value = /^mode:\s*observe/m.test(effective) ? 'observe' : 'sync';
     modeSel.disabled = inherited;
-    host.appendChild(el('div', { class: 'field' },
-      el('label', { for: 'set-mode' }, 'Mode'), modeSel,
-      el('p', { class: 'hint' },
-        'observe is the safe way to try a configuration: nothing is rewritten.')));
+    if (mgr) {
+      host.appendChild(el('div', { class: 'field' },
+        el('label', { for: 'set-mode' }, 'Mode'), modeSel,
+        el('p', { class: 'hint' },
+          'observe is the safe way to try a configuration: nothing is rewritten.')));
+    }
 
     // Upstreams, one per dialect, from the operator's allow-list.
     const ups = (opts && opts.upstreams) || [];
@@ -3358,7 +3372,7 @@ function loadSettings() {
         el('span', { class: 'comp-name' }, name),
         warn ? el('span', { class: 'comp-warn' }, warn) : null));
     }
-    host.appendChild(el('div', { class: 'field' },
+    if (mgr) host.appendChild(el('div', { class: 'field' },
       el('label', {}, 'Pipeline components'), grid,
       el('p', { class: 'hint' }, 'What runs. Run order comes from the YAML below.'),
       whyBlock('What saving changes',
@@ -3388,7 +3402,7 @@ function loadSettings() {
     });
     ta.value = effective;
     ta.disabled = inherited;
-    host.appendChild(el('details', { class: 'field' },
+    if (mgr) host.appendChild(el('details', { class: 'field' },
       el('summary', {}, 'Full configuration (YAML)'), ta,
       el('p', { class: 'hint' }, inherited
         ? 'The server default, read-only. Customise above to edit it as your own.'
@@ -3547,7 +3561,7 @@ async function saveSettings() {
   // The textarea wins when the user edited it; otherwise rebuild the pipeline line from
   // the checkboxes. Two sources for one field, so the precedence has to be explicit —
   // and "what you typed beats what you clicked" is the order that never surprises.
-  let yaml = $('#set-yaml').value;
+  let yaml = isManager() ? $('#set-yaml').value : '';
   const inherited = !!account.tenant.config_inherited;
   const original = account.tenant.effective_config_yaml || '';
   if (yaml.trim() === original.trim()) {
@@ -3574,7 +3588,10 @@ async function saveSettings() {
   // Omitted while the configuration is inherited: sending it would store a copy of
   // today's default, which is exactly the freeze this page exists to undo. Customise is
   // the deliberate way to start owning one.
-  if (!inherited) body.config_yaml = yaml;
+  // Never sent by a plain account: the pipeline is the manager's field, and PUT /api/me
+  // answers 403 to anyone else — sending it would fail the whole save, upstreams and
+  // capture consent included.
+  if (!inherited && isManager()) body.config_yaml = yaml;
   try {
     const out = await ctl('/api/me', { method: 'PUT', body: JSON.stringify(body) });
     account.tenant = out.tenant;

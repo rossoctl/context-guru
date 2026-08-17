@@ -174,7 +174,9 @@ func TestControlWritesRequireTheCookieNotAToken(t *testing.T) {
 
 func TestSettingsValidationAndUpstreamAllowList(t *testing.T) {
 	f := ctlFixture(t)
-	w, _ := f.signUp(t, "a@ibm.com", "l")
+	// The fixture's ManagerEmail: config_yaml on PUT /api/me is a manager's field, so a
+	// plain account is refused before the validation under test is ever reached.
+	w, _ := f.signUp(t, "boss@ibm.com", "l")
 	jar := w.Result().Cookies()
 
 	// A config that does not build is refused, and the message names the problem.
@@ -361,7 +363,9 @@ var _ = tenant.DefaultConfigYAML
 // as "my configuration is gone".
 func TestMeCarriesTheEffectiveConfigAndWhoOwnsIt(t *testing.T) {
 	f := ctlFixture(t)
-	w, _ := f.signUp(t, "a@ibm.com", "l")
+	// A manager, because customising through PUT /api/me is a manager's action now; the
+	// inherited/own distinction it asserts is the same one a user's page reads.
+	w, _ := f.signUp(t, "boss@ibm.com", "l")
 	jar := w.Result().Cookies()
 
 	_, out := f.do(t, "GET", "/api/me", "", jar)
