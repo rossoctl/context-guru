@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -125,29 +126,42 @@ func TestRegistrationBucketIsPerIPv6Prefix(t *testing.T) {
 	}
 
 	// End to end: rotating the host part of one /64 does not buy fresh budget.
+	//
+	// Retried on a minute rollover for the reason spendSignInBudget spells out: the
+	// limiter's window is a fixed calendar minute, so a probe straddling a boundary spends
+	// its attempts out of two budgets and neither half reaches the bound. From in here that
+	// is indistinguishable from the bypass this test exists to catch, so the crossing is
+	// detected rather than tolerated.
 	t.Setenv(envRegisterMode, "open")
-	f := newHostedFixture(t, "up", "openai")
-	limited := false
-	// Timed, for the same reason TestSignInAttemptsAreRateLimited is: each registration
-	// this loop is allowed hashes a password with argon2 at 64 MiB, and the limiter's
-	// window is one minute. On a contended machine the allowed attempts can outlast that
-	// window, ageing themselves out so the bound correctly never fires — which from in
-	// here is indistinguishable from a real bypass.
-	start := time.Now()
-	for i := 0; i < registrationsPerMinute+3; i++ {
-		addr := "[2001:db8::" + strconv.Itoa(i+1) + "]:5555"
-		if registerVia(t, f, "u"+strconv.Itoa(i)+"@ibm.com", "", addr) == http.StatusTooManyRequests {
-			limited = true
-			break
+	const attempts = registrationsPerMinute + 3
+	for try := 0; ; try++ {
+		f := newHostedFixture(t, "up", "openai")
+		limited := false
+		minute, start := time.Now().Truncate(time.Minute), time.Now()
+		for i := 0; i < attempts; i++ {
+			// A fresh email per try too, so a retry is not refused as a duplicate.
+			addr := "[2001:db8::" + strconv.Itoa(i+1) + "]:5555"
+			email := fmt.Sprintf("u%d-%d@ibm.com", try, i)
+			if registerVia(t, f, email, "", addr) == http.StatusTooManyRequests {
+				limited = true
+				break
+			}
 		}
-	}
-	if !limited {
-		if elapsed := time.Since(start); elapsed >= time.Minute {
-			t.Skipf("inconclusive: %d registrations took %v, outlasting the limiter's "+
-				"1-minute window, so the bound correctly did not fire. Not a bypass — "+
-				"re-run on a less loaded machine.", registrationsPerMinute+3, elapsed)
+		if limited {
+			return
 		}
-		t.Errorf("rotating addresses inside one IPv6 /64 bypassed the registration limit "+
-			"(%d attempts in %v)", registrationsPerMinute+3, time.Since(start))
+		elapsed := time.Since(start)
+		// Each allowed registration hashes a password with argon2 at 64 MiB; a machine that
+		// spends a whole window on these is reporting itself, not the code.
+		if elapsed >= time.Minute {
+			t.Skipf("inconclusive: %d registrations took %v, longer than the window itself. "+
+				"Re-run on a less loaded machine.", attempts, elapsed)
+		}
+		if !time.Now().Truncate(time.Minute).Equal(minute) && try < 2 {
+			t.Logf("the minute rolled over mid-probe (%v); retrying on a fresh limiter", elapsed)
+			continue
+		}
+		t.Fatalf("rotating addresses inside one IPv6 /64 bypassed the registration limit "+
+			"(%d attempts in %v, inside one window)", attempts, elapsed)
 	}
 }
