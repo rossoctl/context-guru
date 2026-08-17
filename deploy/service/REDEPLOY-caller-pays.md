@@ -164,9 +164,11 @@ view by design, and a wiped control DB means everyone re-registers.
 
 ## What this runbook deliberately does not do
 
-- **It does not expose Grafana.** Grafana remains on `127.0.0.1:3000`, reachable only
-  through `ssh -L 3000:127.0.0.1:3000 <host>`. Publishing an admin console to all of
-  `9.0.0.0/8` is a separate decision, with its own review.
+- **It does not expose Grafana.** Grafana binds `127.0.0.1:3000` and this runbook adds no
+  way in. Publishing an admin console to all of `9.0.0.0/8` was a separate decision with
+  its own review, taken afterwards: it is now at `/grafana/` on the front end, gated by
+  nginx `auth_request` to context-guru **managers**, with Grafana's own login behind that.
+  See `deploy/grafana/README.md`, "Reaching it: the manager gate".
 - **It does not open a second port.** There is no port 80 and no direct 3000/9090/3100,
   by design: every request carries a credential in a header, and a redirect cannot
   retract a credential already sent in cleartext.

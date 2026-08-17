@@ -102,8 +102,18 @@ func (h *Handler) ctlRoutes() []ctlRoute {
 		{"POST /api/tenants/{id}/purge", ctlManager, h.ctlPurgeTenant},
 		{"DELETE /api/tenants/{id}", ctlManager, h.ctlDeleteTenant},
 		{"GET /api/variants", ctlManager, h.ctlVariants},
+		// nginx's auth_request target for /grafana/. Grafana has no notion of our accounts,
+		// so the front end asks this before it proxies: 204 lets the request through, and
+		// gate's 401/403 is what nginx turns into a refusal. Cookie only, like every route
+		// in this table — a proxy token cannot open the dashboards.
+		{"GET /api/authz/grafana", ctlManager, ctlNoContent},
 	}
 }
+
+// ctlNoContent is an authorization answer with nothing to say. The whole decision is its
+// route's declared scope, enforced by gate before this runs, and a body would only
+// describe what is behind the gate to somebody who did not get through it.
+func ctlNoContent(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }
 
 // MountControl registers the control-plane routes. Called only in hosted mode; without
 // a tenant registry there are no accounts to manage.
