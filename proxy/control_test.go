@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 )
@@ -507,5 +511,69 @@ func TestDashWhoamiNeverLeaksTheInviteCode(t *testing.T) {
 	}
 	if strings.Contains(string(body), "correct-horse-battery-staple") {
 		t.Fatalf("the invite code is in the whoami payload: %s", body)
+	}
+}
+
+// The plaintext token exists for exactly one response, and then only as a hash. This
+// test pins all three halves of that claim at once, because each is a different way for
+// the same secret to escape:
+//
+//  1. every authenticated READ of the account afterwards — none may echo it;
+//  2. captured transcript content — the redactor must scrub the shape;
+//  3. a log record — the logging scrubber must scrub it too, whichever slot it lands in.
+//
+// The reveal on the Setup tab is the reason this matters more than it used to: the UI now
+// renders the plaintext, so a regression that also puts it in a log line would put a live
+// credential in Loki.
+func TestFirstTokenIsRevealedOnceAndNowhereElse(t *testing.T) {
+	f := ctlFixture(t)
+	w, out := f.signUp(t, "reveal@ibm.com", "laptop")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register = %d %s", w.Code, w.Body)
+	}
+	tok, _ := out["token"].(string)
+	if !tenant.LooksLikeToken(tok) {
+		t.Fatalf("registration did not reveal a token: %v", out)
+	}
+	var jar []*http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == dashCookie && c.Value != "" {
+			jar = append(jar, c)
+		}
+	}
+
+	// 1. Every read the account can perform. A later read that returns the plaintext
+	//    would make "shown once" a lie, and the Setup tab's warning a lie with it.
+	for _, path := range []string{"/api/me", "/api/me/sessions", "/api/me/audit", "/api/options"} {
+		rw, _ := f.do(t, "GET", path, "", jar)
+		if rw.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d %s", path, rw.Code, rw.Body)
+		}
+		if strings.Contains(rw.Body.String(), tok) {
+			t.Errorf("GET %s returned the plaintext token", path)
+		}
+	}
+	// Signing in again is the other way a client could ask for it back.
+	rw, again := f.signIn(t, "reveal@ibm.com")
+	if rw.Code != http.StatusOK {
+		t.Fatalf("sign in = %d %s", rw.Code, rw.Body)
+	}
+	if again["token"] != nil {
+		t.Errorf("signing in handed out a token: %v", again["token"])
+	}
+
+	// 2. Captured content. Headers are not recorded at all, but a user who pastes their
+	//    own token into a prompt must not have it stored.
+	if got := dash.RedactContent("run: curl -H 'x-context-guru-token: "+tok+"' https://x", 0); strings.Contains(got, tok) {
+		t.Errorf("the capture redactor stored the token: %s", got)
+	}
+
+	// 3. A log record, in the two shapes a mistake takes: interpolated into the message,
+	//    and passed as an attribute value.
+	var buf bytes.Buffer
+	lg := slog.New(logging.New(&buf, slog.LevelInfo, false))
+	lg.Info("cg.auth token="+tok, "presented", tok)
+	if strings.Contains(buf.String(), tok) {
+		t.Errorf("the log scrubber let the token through: %s", buf.String())
 	}
 }

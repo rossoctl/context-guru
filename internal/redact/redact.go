@@ -84,7 +84,13 @@ var contentSecrets = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(?:sk-[A-Za-z0-9_-]{16,}|sk_live_[A-Za-z0-9]{16,}|` +
 		`rk_live_[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|` +
 		`glpat-[A-Za-z0-9_-]{16,}|hf_[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|` +
-		`ya29\.[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{30,})`),
+		`ya29\.[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{30,}|` +
+		// Our own proxy token. Nothing on the capture or log paths is supposed to carry
+		// one — headers are not recorded, and the plaintext exists only in the
+		// registration reply — but the shape is ours and exactly known, so scrubbing it
+		// costs one alternation and removes the "a user pasted their token into the
+		// agent" case from the denylist's known gaps.
+		`cg_live_[A-Za-z0-9]{20,})`),
 	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),                                           // AWS access key id: case-SENSITIVE
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`), // JWT
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`),

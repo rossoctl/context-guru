@@ -3097,18 +3097,29 @@ async function loadOptions() {
 }
 
 // ── setup ──────────────────────────────────────────────────────────────────
+// TOKEN_SLOT is what stands in for a real token in every block on this page when we do
+// not have the plaintext. A NAMED slot rather than the account's real prefix plus an
+// ellipsis: these blocks exist to be pasted, and a credential fragment in one produces a
+// line that silently cannot work.
+const TOKEN_SLOT = 'cg_live_YOUR_TOKEN_HERE';
+
+/** claudeSettings is the WHOLE env block a Claude Code user ends up with — not a diff.
+ *  A beginner cannot apply a diff, and the two keys are the entire change. */
+function claudeSettings(base, tok) {
+  return [
+    '{',
+    '  "env": {',
+    `    "ANTHROPIC_BASE_URL": "${base}/anthropic",`,
+    `    "ANTHROPIC_CUSTOM_HEADERS": "x-context-guru-token: ${tok}"`,
+    '  }',
+    '}',
+  ];
+}
+
+// AGENTS covers the agents that are NOT Claude Code — those two are still shell exports,
+// because neither reads ~/.claude/settings.json. Claude Code has the numbered walkthrough
+// above them instead.
 const AGENTS = [
-  {
-    name: 'Claude Code',
-    path: '/anthropic',
-    // The auth slot keeps YOUR OWN Anthropic key — it is forwarded upstream, so your
-    // traffic is billed to your account. The context-guru token rides its own header.
-    lines: (base, tok) => [
-      `export ANTHROPIC_BASE_URL=${base}/anthropic`,
-      `export ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: ${tok}"`,
-      '# ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) stays your own provider key',
-    ],
-  },
   {
     name: 'Bob (BobShell)',
     path: '/',
@@ -3203,30 +3214,83 @@ function logQueryBlock(session, tenant) {
       [sel + ' | json | session="' + session + '"'], 'logs-session-query'));
 }
 
+/** step is one numbered instruction: the number, the sentence, and whatever it needs
+ *  pasted underneath. Short on purpose — a step that needs a paragraph is two steps. */
+function step(n, title, ...body) {
+  return el('div', { class: 'setup-step', 'data-testid': 'setup-step-' + n },
+    el('div', { class: 'setup-step-n' }, String(n)),
+    el('div', { class: 'setup-step-body' }, el('h3', {}, title), ...body));
+}
+
+/** revealToken is the one-time reveal: the plaintext, big, with a copy button and a
+ *  warning that cannot be scrolled past. Rendered only when we actually hold the
+ *  plaintext, which is only ever the reply to registration or to minting. */
+function revealToken(tok) {
+  return el('div', { class: 'token-reveal', 'data-testid': 'token-reveal' },
+    el('div', { class: 'setup-head' },
+      el('h3', {}, 'Your context-guru token'),
+      copyButton(tok)),
+    el('pre', { class: 'code token-plain', 'data-testid': 'token-plain' }, tok),
+    el('p', { class: 'warn-text', 'data-testid': 'token-once' },
+      'Shown once. We store only its hash, so nobody — including us — can show it again. '
+      + 'Copy it somewhere safe now; if you lose it, mint a new one on Settings.'));
+}
+
 function loadSetup() {
   const host = clear($('#setup-blocks'));
   const base = account.baseURL || location.origin;
-  // The plaintext only exists at mint time, so a returning user gets a placeholder. It is
-  // a NAMED slot rather than their real token's prefix plus an ellipsis: that version put
-  // a credential fragment in a block whose whole purpose is being pasted and shared, and
-  // copying it produced an export line that could not work.
-  const tok = account.freshToken || 'cg_live_YOUR_TOKEN';
+  // The plaintext only exists at mint time, so a returning user gets the named slot.
+  const tok = account.freshToken || TOKEN_SLOT;
+  const settings = claudeSettings(base, tok);
+
+  if (account.freshToken) host.appendChild(revealToken(account.freshToken));
+
+  host.appendChild(el('div', { class: 'setup-steps' },
+    step(1, 'Open your Claude Code settings file',
+      el('pre', { class: 'code' }, '~/.claude/settings.json'),
+      el('p', { class: 'hint' }, 'No such file? Create it — an empty file is fine.')),
+    step(2, 'Put this in it',
+      el('div', { class: 'setup-head' }, el('span', { class: 'hint' },
+        'Your token is already filled in.'), copyButton(settings.join('\n'))),
+      el('pre', { class: 'code', 'data-testid': 'setup-claude' }, settings.join('\n')),
+      el('p', { class: 'hint' },
+        'Already have an "env" block? Add just those two lines inside it. Leave every '
+        + 'other key alone.')),
+    step(3, 'Keep your own key where it is',
+      el('p', { class: 'hint' },
+        'ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN stays yours: we forward it, so your '
+        + 'traffic is billed to you. Without it every request answers 401.')),
+    step(4, 'Restart Claude Code, then check this dashboard',
+      el('p', { class: 'hint' },
+        'Ask it anything. Requests appear on Overview within a second.'))));
+
+  host.appendChild(el('div', { class: 'banner warn', 'data-testid': 'setup-trap' },
+    el('div', {}, el('strong', {}, 'Empty dashboard after exporting the variable? '),
+      'An "env" block in ~/.claude/settings.json silently overrides an exported '
+      + 'ANTHROPIC_BASE_URL. Claude Code answers normally and nothing reaches us. '
+      + 'Put the block in that file — step 2 — rather than in your shell.')));
+
+  const others = el('details', { class: 'setup-others' },
+    el('summary', {}, 'Other agents (Bob, OpenAI-dialect tools)'));
   for (const a of AGENTS) {
     const lines = a.lines(base, tok);
-    const block = el('div', { class: 'setup-block' },
+    others.appendChild(el('div', { class: 'setup-block' },
       el('div', { class: 'setup-head' },
         el('h3', { text: a.name }),
         copyButton(lines.join('\n'))),
-      el('pre', { class: 'code' }, lines.join('\n')));
-    host.appendChild(block);
+      el('pre', { class: 'code' }, lines.join('\n'))));
   }
+  host.appendChild(others);
+
+  // The banner above the blocks stays for the returning user's benefit — it is the only
+  // thing on the page that explains why step 2 shows a placeholder instead of a token.
   const banner = $('#setup-token-banner');
-  if (account.freshToken) {
+  banner.hidden = !!account.freshToken;
+  if (!account.freshToken) {
+    banner.className = 'banner';
     banner.hidden = false;
-    banner.textContent = 'Your new token is filled in below. It is shown once and cannot ' +
-      'be recovered — copy it somewhere safe now.';
-  } else {
-    banner.hidden = true;
+    banner.textContent = 'Paste your own token over ' + TOKEN_SLOT + ' below. Tokens are '
+      + 'shown once, at creation; mint a new one on Settings if you no longer have it.';
   }
 }
 

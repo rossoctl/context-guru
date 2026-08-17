@@ -834,6 +834,31 @@ details.why dd { margin: 0; }
 }
 
 /* ── setup ────────────────────────────────────────────────────────────── */
+/* The numbered walkthrough. A CSS counter would do the numbering, but the number is
+   also what a user points at when asking for help, so it is real content in the DOM
+   (see step() in app.js) and this only places it. */
+.setup-steps { margin: var(--sp-4) 0; display: flex; flex-direction: column; gap: var(--sp-4); }
+.setup-step { display: flex; gap: var(--sp-3); align-items: flex-start; }
+.setup-step-n {
+  flex: 0 0 auto; width: 26px; height: 26px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent); color: var(--on-accent);
+  font-size: var(--t-small); font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.setup-step-body { flex: 1 1 auto; min-width: 0; }  /* min-width:0 so pre.code scrolls itself */
+.setup-step-body h3 { margin: 0 0 var(--sp-2); font-size: var(--t-body); }
+.setup-step-body .hint { margin: var(--sp-2) 0 0; }
+/* The one-time reveal. Loud on purpose: it is the only moment this value exists. */
+.token-reveal {
+  margin: 0 0 var(--sp-4); padding: var(--sp-3); border-radius: var(--r);
+  background: var(--good-soft);
+  border: 1px solid color-mix(in srgb, var(--good) 40%, transparent);
+}
+.token-reveal h3 { margin: 0; }
+.token-reveal .warn-text { margin: var(--sp-2) 0 0; font-size: var(--t-small); }
+pre.token-plain { font-size: var(--t-body); font-weight: 600; user-select: all; }
+.setup-others { margin-top: var(--sp-5); }
+.setup-others > summary { cursor: pointer; font-size: var(--t-small); color: var(--fg-muted); }
 .setup-block { margin: var(--sp-4) 0; }
 .setup-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
 .setup-head h3 { margin: 0; }
