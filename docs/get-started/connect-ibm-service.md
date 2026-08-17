@@ -35,7 +35,7 @@ model budget, and puts near-zero latency on your agent turn.
 ## 1. Register
 
 Open **<https://contextguru.vpc.cloud9.ibm.com/dashboard/>**, register with your IBM email
-address, a password of at least 12 characters, and a label for the token. We mail a 6-digit
+address, a password of at least 8 characters, and a label for the token. We mail a 6-digit
 code to that address; entering it within 5 minutes is what creates the account. Signing in
 later is that same password plus a fresh mailed code.
 

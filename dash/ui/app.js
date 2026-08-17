@@ -3435,7 +3435,7 @@ function loadPassword() {
     type: 'password', id: 'pw-old', autocomplete: 'current-password', 'data-testid': 'pw-old',
   });
   const next = el('input', {
-    type: 'password', id: 'pw-new', autocomplete: 'new-password', minlength: '12',
+    type: 'password', id: 'pw-new', autocomplete: 'new-password', minlength: '8',
     'data-testid': 'pw-new',
   });
   const err = el('p', { class: 'hint warn-text', role: 'alert', 'data-testid': 'pw-error' });
@@ -3443,7 +3443,7 @@ function loadPassword() {
     el('label', { for: 'pw-old' }, 'Current password'), old));
   host.appendChild(el('div', { class: 'field' },
     el('label', { for: 'pw-new' }, 'New password'), next,
-    el('p', { class: 'hint' }, 'At least 12 characters. Your other signed-in machines are '
+    el('p', { class: 'hint' }, 'At least 8 characters. Your other signed-in machines are '
       + 'signed out; this browser stays in.')));
   host.appendChild(err);
   host.appendChild(el('div', { class: 'actions' },

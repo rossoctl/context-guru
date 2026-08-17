@@ -363,7 +363,7 @@ a token.
   code replaces the pending one rather than adding to it.
 - **Passwords** are stored as **argon2id** — 64 MiB, 3 passes, 2 lanes, a fresh 16-byte
   random salt per account — in PHC string format, so the parameters can be raised later
-  without invalidating a single existing password. Minimum 12 characters, no composition
+  without invalidating a single existing password. Minimum 8 characters, no composition
   rules: length is what buys entropy.
 - **Brute force.** A code tolerates **5 wrong guesses**, after which it is destroyed rather
   than merely refused. On top of that, password attempts are capped at 5/minute and code

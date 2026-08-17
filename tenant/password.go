@@ -31,7 +31,7 @@ import (
 
 // Errors callers branch on.
 var (
-	ErrBadPassword = errors.New("tenant: password must be at least 12 characters")
+	ErrBadPassword = errors.New("tenant: password must be at least 8 characters")
 	ErrNoPassword  = errors.New("tenant: account has no password set")
 	ErrWrongPass   = errors.New("tenant: wrong email or password")
 	ErrNotVerified = errors.New("tenant: email not verified")
@@ -74,7 +74,16 @@ const (
 	// MinPasswordLen is the only password rule. Length is the property that
 	// actually buys entropy; composition rules ("one symbol!") push users to
 	// Password1! and buy nothing, so there are none.
-	MinPasswordLen = 12
+	//
+	// 8 is the operator's chosen floor. It is lower than this file would pick on its
+	// own, and the reason it is defensible here is that the password is not the only
+	// thing standing between an attacker and an account: every sign-in also needs a
+	// 6-digit code mailed to the address, each verify is capped at 5 attempts before
+	// the code is destroyed, sign-in attempts are rate-limited per email AND per
+	// client address, and each guess costs a 64 MiB argon2id hash. Online guessing is
+	// bounded by those, not by this number. Offline guessing against a stolen hash is
+	// where a short password actually loses — that is the trade being made.
+	MinPasswordLen = 8
 	// maxPasswordLen bounds what we will hash. argon2's cost does not grow with
 	// input length, so this is only about not accepting a megabyte-long field.
 	maxPasswordLen = 256
