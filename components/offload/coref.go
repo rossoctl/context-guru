@@ -301,21 +301,24 @@ func (cf *Coref) planCuts(req *bschemas.BifrostChatRequest, rep *components.Repo
 			rep.Gate("not_indexed") // below the index floor, or not a recorded output
 			continue
 		}
-		var note string
-		switch {
-		case class == coref.Unreferenced && cf.cutUnreferenced:
-			note = "[tool output compacted: no later turn referred back to it"
-		case class == coref.Closed && cf.cutClosed:
-			// The witness is free here, and that is what makes the large cut defensible:
-			// coref only ever cuts TOOL outputs, and references live in model turns, which it
-			// never cuts. So "a later turn referred back to this" and "the value taken from it
-			// still exists in the request" are the same fact — no second search needed.
-			note = "[tool output compacted: the value taken from it survives in a later turn"
-		default:
+		if !(class == coref.Unreferenced && cf.cutUnreferenced) &&
+			!(class == coref.Closed && cf.cutClosed) {
 			rep.Gate("class_" + string(class))
 			continue
 		}
-		if peek := headPeek(content, cf.keepHeadChars); peek != "" {
+		// The marker states WHAT was removed and never why it was safe to remove. The
+		// earlier wording ("no later turn referred back to it") asserted the one claim that
+		// is false whenever the reference was transformed or semantic — tiers 2 and 3, which
+		// this index cannot see — so it read as reassurance and discouraged the expand call
+		// that would have repaired the mistake. Since only the model can initiate recovery, a
+		// marker that talks it out of recovering is worse than an opaque one.
+		note := "[tool output compacted"
+		if stub := corefStub(content); stub != "" {
+			// Structured content: describe the shape, which is addressable. "200 records,
+			// fields: address, id, name" tells a model hunting for an address that this is
+			// where addresses live; a head peek of one arbitrary row does not.
+			note += "; " + stub
+		} else if peek := headPeek(content, cf.keepHeadChars); peek != "" {
 			note += "; starts: " + peek
 		}
 		note += "] "

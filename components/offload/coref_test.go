@@ -141,9 +141,10 @@ func TestCorefCutsOnlyUnreferencedOutputs(t *testing.T) {
 	if cut == schema.MessageText(orig.Input[corefCutIdx]) {
 		t.Fatal("the unreferenced output was not cut")
 	}
-	if !strings.Contains(cut, "no later turn referred back to it") {
-		t.Errorf("marker note missing its reason: %q", cut)
+	if !strings.Contains(cut, "tool output compacted") {
+		t.Errorf("marker does not say what happened: %q", cut)
 	}
+	assertMarkerMakesNoSafetyClaim(t, cut)
 	for i := range req.Input {
 		if i == corefCutIdx {
 			continue
@@ -410,9 +411,7 @@ func TestCorefClosedCutIsOptIn(t *testing.T) {
 	if strings.Contains(got, corefNovelUsed) {
 		t.Fatalf("cut_closed: true did not take the closed cut; gates=%v", rep2.Gates)
 	}
-	if !strings.Contains(got, "survives in a later turn") {
-		t.Errorf("the closed marker should name its witness: %q", got)
-	}
+	assertMarkerMakesNoSafetyClaim(t, got)
 }
 
 // An unreadable budget counter must read as EXHAUSTED. Failing open on the request (no
@@ -505,5 +504,103 @@ func TestCorefNeverCutsOpaqueOutputs(t *testing.T) {
 	}
 	if rep.Gates["class_opaque"] == 0 {
 		t.Errorf("expected the candidate to be declined as opaque; gates=%v", rep.Gates)
+	}
+}
+
+// A marker may say WHAT was removed. It may never claim the removal was safe.
+//
+// The wording it replaced ("no later turn referred back to it") asserted exactly the claim
+// that is false whenever the reference was transformed or semantic — tiers 2 and 3, which
+// this index cannot see. Only the model can initiate recovery, so a marker that reads as
+// reassurance suppresses the expand call that would have repaired the mistake. That failure
+// is silent: no counter this component keeps can distinguish "never needed" from "needed and
+// never asked for".
+func assertMarkerMakesNoSafetyClaim(t *testing.T, marker string) {
+	t.Helper()
+	for _, claim := range []string{
+		"no later turn referred back",
+		"survives in a later turn",
+		"nothing referred",
+		"safe to",
+		"not needed",
+		"no longer needed",
+	} {
+		if strings.Contains(strings.ToLower(marker), claim) {
+			t.Errorf("marker asserts its own safety (%q), which discourages recovery: %q", claim, marker)
+		}
+	}
+}
+
+// For structured output the residue must be ADDRESSABLE — the shape, not one arbitrary row.
+// An agent looking for someone's address has to be able to tell from the marker alone that
+// this is the output where addresses live.
+func TestCorefMarkerDescribesStructuredShape(t *testing.T) {
+	people := strings.Repeat(
+		`{"name":"david","id":123456,"address":"foobarbaz","city":"haifa"},`, 200)
+	body := "[" + strings.TrimSuffix(people, ",") + "]"
+
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+		corefUser("load the directory"),
+		corefAsst("Loading.", "query_people", `{"q":"all"}`),
+		corefTool("p1", body),
+		corefAsst("Loaded; moving on to unrelated work.", "Bash", `{"cmd":"true"}`),
+	}}
+	for k := 0; k < 20; k++ {
+		req.Input = append(req.Input, corefAsst(fmt.Sprintf("step %d", k), "Bash", `{"cmd":"true"}`))
+	}
+	cf := corefFor(t, "")
+	var rep components.Report
+	if _, err := cf.Offload(req, &rep, corefCtx(store.NewMemory(store.Options{}))); err != nil {
+		t.Fatal(err)
+	}
+	got := schema.MessageText(req.Input[2])
+	if strings.Contains(got, "foobarbaz") {
+		t.Fatalf("not cut, so there is no marker to check; gates=%v", rep.Gates)
+	}
+	for _, want := range []string{"200 records", "address", "name"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("marker omits %q, so the model cannot tell what is in here: %q", want, got)
+		}
+	}
+	assertMarkerMakesNoSafetyClaim(t, got)
+}
+
+func TestCorefStub(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"array of records", `[{"b":1,"a":2},{"a":3,"b":4}]`, "2 records, fields: a, b"},
+		{"array of scalars", `[1,2,3]`, "3 records"},
+		{"wrapped collection", `{"total":2,"rows":[{"x":1},{"x":2}]}`, "object, fields: rows, total (rows: 2 items)"},
+		{"plain text has no shape", "Traceback (most recent call last):", ""},
+		{"empty", "", ""},
+		{"malformed json", `[{"a":`, ""},
+	} {
+		if got := corefStub(tc.in); got != tc.want {
+			t.Errorf("%s: corefStub(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+	// Field order must be stable: the marker text is replayed byte-for-byte every later
+	// turn, so a map-iteration-ordered descriptor would flip the prefix and cache-write it.
+	first := corefStub(`[{"z":1,"a":2,"m":3}]`)
+	for i := 0; i < 50; i++ {
+		if got := corefStub(`[{"z":1,"a":2,"m":3}]`); got != first {
+			t.Fatalf("descriptor is not deterministic: %q vs %q", got, first)
+		}
+	}
+	// A wide record must not turn the marker into a schema dump.
+	var wide strings.Builder
+	wide.WriteString("[{")
+	for i := 0; i < 40; i++ {
+		if i > 0 {
+			wide.WriteString(",")
+		}
+		fmt.Fprintf(&wide, `"field%02d":%d`, i, i)
+	}
+	wide.WriteString("}]")
+	got := corefStub(wide.String())
+	if !strings.Contains(got, "…+28") {
+		t.Errorf("wide record not truncated: %q", got)
+	}
+	if len([]rune(got)) > stubCap {
+		t.Errorf("descriptor exceeds stubCap: %d runes", len([]rune(got)))
 	}
 }

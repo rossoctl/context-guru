@@ -174,8 +174,24 @@ fixed fraction of the request — something `min_batch_frac` does not currently 
 | **marker / `<<cg:HASH>>`** | What's left in place of cut content, resolvable back to the stashed original via `context_guru_expand`. |
 | **head peek** | A one-line snippet of the cut output left inside the marker, so the model knows *what* went missing without a blind `expand` round-trip. |
 | **kept-verbatim** | Once the agent expands something, it's marked never-re-cut — otherwise it expands again every turn (an **expand loop**). |
-| **`expand` rate** | The precision metric that matters. A wrong cut isn't a wrong answer, it's one `expand` round-trip plus a cache-write — observable on any traffic with no benchmark scoring, no seeds, no n=30. |
+| **`expand` rate** | The precision inner loop: how often the model asks for cut content back. Cheap, needs no scoring, no seeds, no n=30. **But it counts *noticed* errors only** — see the box below — so a falling expand rate is ambiguous rather than good news. |
 | **fail open** | Any error reverts this component only; the original request is always forwardable. |
+
+!!! danger "Reversible does not mean recovered"
+    Expansion is **model-initiated**. The stash guarantees the bytes *can* come back; only the model
+    decides to ask, and nothing detects a bad cut. Three outcomes, not one:
+
+    1. it notices and expands the right marker → one round-trip + a cache-write;
+    2. it notices but cannot tell which marker holds it → several expands, or it proceeds without;
+    3. **it never notices** → it answers from less than it had, silently.
+
+    Tier 3 is where (3) lives: a missing semantic reference leaves nothing to look up, so nothing
+    prompts recovery. (3) is invisible to every counter this component keeps, which is exactly why
+    reward is a **gate** and not one metric among several.
+
+    What the design can influence is the 1-vs-2 gap, which is what the marker's structural descriptor
+    (`200 records, fields: address, id, name`) is for — and why the marker never asserts that the cut
+    was safe.
 
 ## 9. Where things live
 

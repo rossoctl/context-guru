@@ -241,11 +241,41 @@ Three things *can* pay, and they are the design:
   full-transcript summarization that is both a large cache event and a quality loss. Plausibly
   the largest prize here, and the reason a threshold-triggered regime is the right frame.
 
-One more asymmetry worth naming: a wrong cut is not a wrong answer, it is a
-`context_guru_expand` round-trip — one extra step plus a cache-write. Given fact (3), that
-means **expand-call rate is the dominant cost term and the primary precision metric** for this
-component. It is also observable on any traffic with no benchmark scoring, no seeds, and no
-n=30 — which makes it the inner loop.
+One more asymmetry, stated carefully because the obvious version of it is wrong. It is
+tempting to say a wrong cut is not a wrong answer, only a `context_guru_expand` round-trip
+plus a cache-write. **That holds only when the model notices.** Expansion is
+model-initiated — the tool is advertised and the host loop merely answers a call — and
+nothing in the system detects a bad cut. So a wrong cut has three outcomes:
+
+| | Outcome | Cost |
+|---|---|---|
+| 1 | The model notices and expands the right marker | one round-trip + a cache-write |
+| 2 | It notices something is missing but cannot tell which marker holds it | several expands, or it proceeds without |
+| 3 | **It never notices** | it answers from less than it had — silently |
+
+Only (1) is the cheap case. **Reversibility is a capability, not a guarantee:** the stash
+guarantees the bytes are recoverable, never that they get recovered.
+
+Row 3 is the one that matters, and Tier 3 is where it lives. A missing Tier-1 reference is a
+token the model goes looking for and cannot find. A missing *semantic* reference is the model
+reasoning from something it no longer has — there is nothing to look up, so nothing prompts
+the expand call. The result is a plausible answer built on less evidence.
+
+Two consequences the rest of this document depends on:
+
+- **`expand` rate is a precision metric for noticed errors only.** It is still the right
+  inner loop — cheap, available on any traffic, no scoring — but it is *blind to row 3* by
+  construction. Anything that improves it by making the model expand less could be an
+  improvement or could be row 3 getting worse, and the metric cannot tell you which.
+- **Reward is therefore the only instrument that sees the worst failure**, which is why §7
+  and §8 treat it as a gate rather than as one number among several.
+
+What the design *can* influence is the gap between rows 1 and 2: whether the residue left in
+place lets the model tell that this marker is where the thing it wants lives. That is why the
+marker describes the SHAPE of structured content (`200 records, fields: address, id, name`)
+rather than only peeking at its first line, and why it never asserts that the cut was safe —
+an earlier version wrote "no later turn referred back to it", which is precisely the claim
+that is false in the Tier-2/3 case, and which reads as reassurance not to bother expanding.
 
 ## 5. Hard constraints the codebase imposes
 

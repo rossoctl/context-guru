@@ -80,9 +80,32 @@ the request" are the same fact.
 ## Lossiness
 
 Lossy but reversible — cut outputs are stashed and recovered via `context_guru_expand` / `GET /expand`,
-and an expanded output is marked kept-verbatim so it is never re-cut. A wrong cut is therefore not a
-wrong answer, it is one `expand` round-trip plus a cache-write, which makes **`expand` rate the primary
-precision metric** for this component and the one that needs no benchmark scoring to read.
+and an expanded output is marked kept-verbatim so it is never re-cut.
+
+!!! warning "Reversibility is a capability, not a guarantee"
+    Expansion is **model-initiated**: the tool is advertised and the host loop only answers a call.
+    Nothing detects a bad cut. So a wrong cut costs one `expand` round-trip **only when the model
+    notices** — and if it doesn't, it answers from less than it had, silently.
+
+    That makes `expand` rate a precision metric for *noticed* errors only. It is still the right inner
+    loop (cheap, no scoring, any traffic) but it is blind to the silent case by construction, so a
+    falling expand rate is ambiguous. **Reward is the only instrument that sees it**, which is why it
+    is a gate here rather than one number among several. Tier 3 is where the silent case lives: a
+    missing semantic reference gives the model nothing to look up, so nothing prompts recovery.
+
+### What the marker leaves behind
+
+Two rules, both aimed at the gap between "notices and expands the right thing" and "notices but
+cannot tell which marker":
+
+- **It describes the shape of structured content**, not just its first line —
+  `200 records, fields: address, id, name`. That is *addressable*: an agent hunting for an address
+  can tell this is the output to expand. A head peek of one arbitrary row cannot do that, though it
+  works well for a file read or a traceback, which is what the peek is still used for.
+- **It never claims the cut was safe.** An earlier version wrote *"no later turn referred back to
+  it"* — precisely the claim that is false whenever the reference was transformed or semantic — which
+  read as reassurance and discouraged the expand call that would have repaired the mistake. A marker
+  that talks the model out of recovering is worse than an opaque one. A test enforces this.
 
 ## Configuration
 
