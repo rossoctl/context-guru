@@ -145,6 +145,28 @@ for p in /api/stats /api/requests /api/sessions; do
   [ "$code" = 401 ] && ok "$p 401 without a token" || no "$p returned $code without a token"
 done
 
+head_ "Grafana is behind the manager gate, and its sign-in header cannot be forged"
+# X-Cg-Grafana-User is an AUTHENTICATION: Grafana's auth-proxy signs in whoever it names,
+# as an Admin over every tenant's spend. nginx must therefore refuse an unauthenticated
+# request whatever headers it carries, and must never pass a client's own copy through.
+# Both checks below, and the body check is not decoration: a 401 rendered by GRAFANA would
+# mean the request reached it and only the login step said no.
+for hdr in "" "X-Cg-Grafana-User: attacker@ibm.com"; do
+  what=$([ -z "$hdr" ] && echo "no credential" || echo "a forged sign-in header")
+  body=$(mktemp)
+  code=$("${curlca[@]}" ${hdr:+-H "$hdr"} -o "$body" -w '%{http_code}' "$BASE/grafana/api/user")
+  [ "$code" = 401 ] && ok "/grafana/ 401 with $what" \
+                    || no "/grafana/ returned $code with $what — expected 401"
+  # nginx's own refusal page names nginx and nothing else. Anything Grafana-shaped in here
+  # means the gate let the request through to it.
+  if grep -qiE 'grafana|isGrafanaAdmin|orgRole|<script' "$body"; then
+    no "the refusal body carries Grafana content ($(wc -c <"$body") bytes) — the gate leaked"
+  else
+    ok "the refusal body carries zero Grafana content ($(wc -c <"$body") bytes)"
+  fi
+  rm -f "$body"
+done
+
 if [ -z "${CG_TOKEN:-}" ]; then
   head_ "Authenticated checks"
   echo "  skipped: set CG_TOKEN=cg_live_... to run them"

@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"regexp"
 	"strconv"
@@ -706,6 +707,58 @@ func TestUserCannotSetManagerOnlyFields(t *testing.T) {
 		}
 		if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, body, jar); w.Code != http.StatusForbidden {
 			t.Errorf("PATCH own tenant %s = %d, want 403", body, w.Code)
+		}
+	}
+}
+
+// The Grafana gate names the owner of the SESSION, never whoever the request claims to be.
+//
+// Grafana signs in whoever X-Cg-Grafana-User names, so that header is a complete
+// authentication and this endpoint is where its value is decided. Two properties, and the
+// second is the one an attacker goes for: a refusal carries no identity at all, and a
+// forged header on the request never becomes the identity on the response — nginx copies
+// onto the proxied request only what comes back from here (see nginx.conf), so a client
+// value that survived this would be an admin bypass.
+func TestGrafanaAuthzNamesTheSessionOwnerNotTheRequestsHeader(t *testing.T) {
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com") // matches the fixture's ManagerEmail
+	userJar, _ := f.signUpJar(t, "a@ibm.com")
+
+	for _, tc := range []struct {
+		name    string
+		cookies []*http.Cookie
+		forge   bool
+		code    int
+		want    string // the identity the answer may carry; "" for none at all
+	}{
+		{"anonymous", nil, false, http.StatusUnauthorized, ""},
+		{"anonymous, forged header", nil, true, http.StatusUnauthorized, ""},
+		{"plain user", userJar, false, http.StatusForbidden, ""},
+		{"plain user, forged header", userJar, true, http.StatusForbidden, ""},
+		{"manager", mgrJar, false, http.StatusNoContent, "boss@ibm.com"},
+		{"manager, forged header", mgrJar, true, http.StatusNoContent, "boss@ibm.com"},
+	} {
+		r := httptest.NewRequest("GET", "/api/authz/grafana", nil)
+		for _, c := range tc.cookies {
+			r.AddCookie(c)
+		}
+		if tc.forge {
+			r.Header.Set(grafanaUserHeader, "attacker@ibm.com")
+		}
+		w := httptest.NewRecorder()
+		f.mux.ServeHTTP(w, r)
+
+		if w.Code != tc.code {
+			t.Errorf("%s: %d, want %d", tc.name, w.Code, tc.code)
+		}
+		if got := w.Header().Get(grafanaUserHeader); got != tc.want {
+			t.Errorf("%s: %s = %q, want %q", tc.name, grafanaUserHeader, got, tc.want)
+		}
+		// An authorization carries nothing but the identity: a body here would describe
+		// what is behind the gate. (A REFUSAL keeps the control plane's own error body,
+		// which nginx discards — it reads the status only.)
+		if tc.code == http.StatusNoContent && w.Body.Len() != 0 {
+			t.Errorf("%s: the gate answered with a body: %s", tc.name, w.Body)
 		}
 	}
 }

@@ -106,14 +106,34 @@ func (h *Handler) ctlRoutes() []ctlRoute {
 		// so the front end asks this before it proxies: 204 lets the request through, and
 		// gate's 401/403 is what nginx turns into a refusal. Cookie only, like every route
 		// in this table — a proxy token cannot open the dashboards.
-		{"GET /api/authz/grafana", ctlManager, ctlNoContent},
+		{"GET /api/authz/grafana", ctlManager, h.ctlAuthzGrafana},
 	}
 }
 
-// ctlNoContent is an authorization answer with nothing to say. The whole decision is its
-// route's declared scope, enforced by gate before this runs, and a body would only
-// describe what is behind the gate to somebody who did not get through it.
-func ctlNoContent(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }
+// grafanaUserHeader carries the authorized manager's address from this endpoint to
+// Grafana's auth-proxy, via nginx's auth_request_set. It is an AUTHENTICATION, so nginx
+// must set it unconditionally on every request it proxies to Grafana and never forward a
+// client's own value — see deploy/service/nginx.conf, and the whitelist that stops
+// anything but the nginx peer from claiming it.
+const grafanaUserHeader = "X-Cg-Grafana-User"
+
+// ctlAuthzGrafana is nginx's auth_request answer for /grafana/: 204 with no body, plus
+// the address of the manager whose cookie satisfied the gate.
+//
+// The whole authorization decision is the route's declared scope, enforced by gate before
+// this runs; the principal is re-resolved here only for its address, which nginx copies
+// onto the proxied request so Grafana signs the same person in without a second password.
+// A body would describe what is behind the gate to somebody who did not get through it,
+// so there still is none — nginx reads the status and this one header.
+//
+// The address needs no escaping: checkEmail rejects whitespace and control characters on
+// every write, and net/http will not emit a header value containing a newline regardless.
+func (h *Handler) ctlAuthzGrafana(w http.ResponseWriter, r *http.Request) {
+	if t, err := h.webPrincipal(r); err == nil && t.Email != "" {
+		w.Header().Set(grafanaUserHeader, t.Email)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
 
 // MountControl registers the control-plane routes. Called only in hosted mode; without
 // a tenant registry there are no accounts to manage.

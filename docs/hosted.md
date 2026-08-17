@@ -920,8 +920,10 @@ ssh -L 3000:127.0.0.1:3000 <the host>
 
 The front end publishes Grafana at `/grafana/` behind an nginx `auth_request` that only a
 context-guru **manager**'s browser session satisfies — Grafana never sees a request that
-fails it, not even to show its login page. Its own login is the second door.
-Prometheus (9090) and Loki (3100) are not published at all.
+fails it, not even to show its login page. That gate is also the sign-in: it names the
+manager in a header Grafana's auth-proxy trusts from the loopback peer only, so a manager
+lands in Grafana as an **Admin with no second password to hold**. Prometheus (9090) and Loki
+(3100) are not published at all.
 
 Containers rather than packages because Prometheus is in no RHEL 9 repository, so the
 alternative is a packaged Grafana beside a tarball Prometheus with two unrelated sets of
@@ -930,9 +932,11 @@ paths to keep straight. Either podman or docker is used, whichever is present.
 **Both bind loopback only**, which is why the `ssh -L` line is part of the procedure and
 not a suggestion: `/metrics` is a service-wide view carrying every tenant's spend, and
 Grafana's session cookie is as good as its admin password. Neither belongs on a shared
-box's LAN interface. The admin password is generated on the **first** run only, printed
-once, and written nowhere — after that it lives in Grafana's own database. `grafana-remove`
-drops the containers and deliberately **keeps** the metrics history.
+box's LAN interface. The built-in `admin` account is break-glass only — a first install
+seeds it with a random value that is neither printed nor saved, because Grafana's default
+when it is unset is `admin/admin`; set one yourself if you want that door, with the one
+command in `deploy/grafana/README.md`. `grafana-remove` drops the containers and
+deliberately **keeps** the metrics history.
 
 The full procedure, the by-hand equivalent, password rotation, scraping a proxy on another
 host, and the panel-by-panel reading guide live in
