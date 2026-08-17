@@ -59,6 +59,18 @@ const (
 	argonKeyLen    = 32
 	argonSaltLen   = 16
 
+	// A stored hash carries the parameters it was made with, which means a row in the
+	// database is an instruction to allocate memory and burn CPU. Reachable only with
+	// write access to the control DB, so these caps are defence in depth: without them
+	// one poisoned row (m=1048576) turns every sign-in attempt against that account
+	// into a 1 GiB allocation on a box that also runs the proxy. Expressed as multiples
+	// of our own parameters, so raising those raises these with them; anything above is
+	// treated as a corrupt row, which VerifyPassword already reports as a failed
+	// sign-in rather than an error.
+	maxArgonMemoryKiB = 4 * argonMemoryKiB
+	maxArgonTime      = 2 * argonTime
+	maxArgonThreads   = 2 * argonThreads
+
 	// MinPasswordLen is the only password rule. Length is the property that
 	// actually buys entropy; composition rules ("one symbol!") push users to
 	// Password1! and buy nothing, so there are none.
@@ -122,7 +134,8 @@ func decodeHash(encoded string) (salt, sum []byte, mem, time uint32, threads uin
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &p); err != nil {
 		return nil, nil, 0, 0, 0, ErrBadPassHash
 	}
-	if m == 0 || t == 0 || p == 0 {
+	if m == 0 || t == 0 || p == 0 ||
+		m > maxArgonMemoryKiB || t > maxArgonTime || p > maxArgonThreads {
 		return nil, nil, 0, 0, 0, ErrBadPassHash
 	}
 	if salt, err = b64.DecodeString(parts[4]); err != nil {

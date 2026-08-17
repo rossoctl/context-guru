@@ -31,11 +31,18 @@ import (
 // RegisterAccount creates an unverified account with a password and no token. The
 // caller is expected to follow immediately with IssueCode + a mail send.
 //
-// Re-registering an address that exists but is still UNVERIFIED replaces its password
-// and label rather than failing. Nobody has proved they own that address yet, so
-// there is nothing to protect — and refusing would let anyone permanently reserve a
-// colleague's address by typing it once and closing the tab. Verifying still requires
-// the code, which only the mailbox owner receives.
+// Re-registering an existing address is refused unless the account behind it has NEVER
+// been usable: no password set and not one token row, live or revoked. "Unverified"
+// alone is not that test and must never be used as one — migration v3 added
+// email_verified_at with DEFAULT 0, so every account created before email auth is
+// unverified while being in daily use. Gating on unverified would make this endpoint a
+// password reset for those accounts: type a colleague's address, get their row back with
+// your own password installed, and the owner is locked out of both doors at once
+// (loginWithToken refuses an account that has a password; they do not know it).
+//
+// The cost of the strict test is that an abandoned half-registration reserves the
+// address until an operator clears it. That is the right way round: a squatted address
+// is a support ticket, a claimable live account is a takeover.
 func (r *Registry) RegisterAccount(label, email, password string) (*Tenant, error) {
 	t, err := r.newTenant(label, email)
 	if err != nil {
@@ -52,7 +59,9 @@ func (r *Registry) RegisterAccount(label, email, password string) (*Tenant, erro
 	if !errors.Is(err, ErrEmailTaken) {
 		return nil, err
 	}
-	// Taken: claimable only while unverified.
+	// Taken: claimable only by an account that has never been usable. The conditions are
+	// in the UPDATE rather than checked first, so a token minted or a password set
+	// between the read and the write loses the race instead of being overwritten.
 	existing, err := r.ByEmail(t.Email)
 	if err != nil {
 		return nil, err
@@ -60,9 +69,15 @@ func (r *Registry) RegisterAccount(label, email, password string) (*Tenant, erro
 	if existing.Verified() {
 		return nil, ErrEmailTaken
 	}
-	if _, err := r.db.Exec(`UPDATE tenants SET password_hash = ?, label = ?
-	  WHERE id = ? AND email_verified_at = 0`, hash, t.Label, existing.ID); err != nil {
+	res, err := r.db.Exec(`UPDATE tenants SET password_hash = ?, label = ?
+	  WHERE id = ? AND email_verified_at = 0 AND password_hash = ''
+	    AND NOT EXISTS (SELECT 1 FROM tenant_tokens WHERE tenant_id = tenants.id)`,
+		hash, t.Label, existing.ID)
+	if err != nil {
 		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrEmailTaken
 	}
 	r.clearCache()
 	existing.Label, existing.HasPassword = t.Label, true

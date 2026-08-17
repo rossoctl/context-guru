@@ -632,6 +632,16 @@ type AuditEntry struct {
 	Before, After string
 }
 
+// auditSelf records a change a tenant made to its own account, for the cases outside
+// Update's field-by-field diff (agent-key bindings). Actor and target are the same
+// tenant: these endpoints are self-service only.
+func (r *Registry) auditSelf(tenantID, field, before, after string) error {
+	_, err := r.db.Exec(`INSERT INTO tenant_config_audit
+	  (ts,actor_tenant,target_tenant,field,before,after) VALUES (?,?,?,?,?,?)`,
+		time.Now().UnixMilli(), tenantID, tenantID, field, before, after)
+	return err
+}
+
 // Audit returns the most recent changes to a tenant, newest first. A shared
 // service needs "which config change broke my agent, and who made it" to be
 // answerable.
@@ -645,7 +655,9 @@ func (r *Registry) Audit(targetID string, limit int) ([]AuditEntry, error) {
 		q += ` WHERE target_tenant = ?`
 		args = append(args, targetID)
 	}
-	q += ` ORDER BY ts DESC LIMIT ?`
+	// rowid breaks the tie: a single Update writes every changed field with one
+	// timestamp, so ts alone leaves the order within a change arbitrary.
+	q += ` ORDER BY ts DESC, rowid DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := r.db.Query(q, args...)
 	if err != nil {
@@ -706,6 +718,16 @@ func (r *Registry) checkEmail(email string) (string, error) {
 // ErrNoAgentKey is returned when a provider key's digest is bound to no tenant.
 var ErrNoAgentKey = errors.New("tenant: provider key is not bound to any account")
 
+// ErrBadAgentKey rejects a key too short to be one. A digest is only evidence of
+// holding a key if the key could not have been guessed.
+var ErrBadAgentKey = errors.New("tenant: provider key is too short to bind")
+
+// MinAgentKeyLen is the shortest string accepted as a provider key. Every real one is
+// far longer (sk-..., 40+ chars); this only rules out claiming "test" or "changeme",
+// which are digests anyone can compute and whose real owner would then be unable to
+// bind their own key.
+const MinAgentKeyLen = 20
+
 // agentKeyHash is the ONLY thing this package ever does with a provider key:
 // digest it and drop it. Nothing below this line holds the plaintext.
 func agentKeyHash(key string) []byte {
@@ -713,35 +735,55 @@ func agentKeyHash(key string) []byte {
 	return sum[:]
 }
 
-// BindAgentKey records that a provider key belongs to a tenant, by digest, so an
-// agent that can only send that key is still identified. Idempotent, and re-binding
-// a key moves it to the calling tenant — which is safe precisely because holding the
-// key is what proves the claim.
+// BindAgentKey records that a provider key belongs to a tenant, by digest, so an agent
+// that can only send that key is still identified. Idempotent for the tenant that
+// already holds the binding.
+//
+// What this actually establishes is only that the caller can type the string, NOT that
+// they hold a key of their own — the digest is computed here, from whatever arrived, and
+// nothing about it is verified against a provider. So a digest another tenant has bound
+// is refused (ErrForbidden), never moved: a transfer has to be an unbind by the real
+// owner followed by a fresh bind. Silently reassigning it would route the victim's
+// traffic — and, with capture_content on, their transcripts — to whoever guessed it.
 func (r *Registry) BindAgentKey(tenantID, key string) error {
-	if strings.TrimSpace(key) == "" {
-		return ErrUnknownToken
+	if len(strings.TrimSpace(key)) < MinAgentKeyLen {
+		return ErrBadAgentKey
 	}
 	if _, err := r.Get(tenantID); err != nil {
 		return err
 	}
-	_, err := r.db.Exec(`INSERT INTO tenant_agent_keys (key_hash,tenant_id,created_at)
-	  VALUES (?,?,?) ON CONFLICT(key_hash) DO UPDATE SET tenant_id = excluded.tenant_id`,
+	// The WHERE on the upsert is what refuses the steal: a conflicting row owned by
+	// someone else matches nothing, so zero rows change.
+	res, err := r.db.Exec(`INSERT INTO tenant_agent_keys (key_hash,tenant_id,created_at)
+	  VALUES (?,?,?) ON CONFLICT(key_hash) DO UPDATE SET tenant_id = excluded.tenant_id
+	  WHERE tenant_id = excluded.tenant_id`,
 		agentKeyHash(key), tenantID, time.Now().UnixMilli())
-	if err == nil {
-		r.clearCache()
+	if err != nil {
+		return err
 	}
-	return err
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrForbidden
+	}
+	r.clearCache()
+	// A credential change with no trail is one nobody can investigate afterwards. The
+	// digest is deliberately not recorded: the audit answers "when did this account's
+	// key binding change", which needs no material from the key itself.
+	return r.auditSelf(tenantID, "agent_key", "", "bound")
 }
 
 // UnbindAgentKeys drops every agent key bound to a tenant. There is no per-key
 // variant: the digests are not displayable, so "which one" is not a question the
 // user can answer.
 func (r *Registry) UnbindAgentKeys(tenantID string) error {
-	if _, err := r.db.Exec(`DELETE FROM tenant_agent_keys WHERE tenant_id = ?`, tenantID); err != nil {
+	res, err := r.db.Exec(`DELETE FROM tenant_agent_keys WHERE tenant_id = ?`, tenantID)
+	if err != nil {
 		return err
 	}
 	r.clearCache()
-	return nil
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil // nothing was bound; nothing to record
+	}
+	return r.auditSelf(tenantID, "agent_key", "bound", "unbound")
 }
 
 // AgentKeyCount reports how many keys a tenant has bound, for the settings page.
@@ -836,6 +878,22 @@ func mintToken() (plain string, hash []byte, prefix string, err error) {
 }
 
 // --- schema -----------------------------------------------------------------
+
+// stampInUseAccounts is the data half of the v3 upgrade, kept in a constant because it
+// is applied twice: once inside v3 for a database that has not reached it yet, and once
+// as v4 for a database that reached v3 before this statement existed.
+//
+// email_verified_at DEFAULT 0 means every account created before email auth migrates to
+// "unverified" while being in daily use, and RegisterAccount treats an unverified
+// address as claimable. An account holding a live token has demonstrably been usable, so
+// it is stamped rather than left in that state. created_at, not now(): the account has
+// been trusted since it was created, and a fixed value keeps the migration
+// deterministic. Idempotent — only rows still at 0 are touched.
+const stampInUseAccounts = `
+	 UPDATE tenants SET email_verified_at = MAX(created_at, 1)
+	   WHERE email_verified_at = 0
+	     AND EXISTS (SELECT 1 FROM tenant_tokens k
+	                 WHERE k.tenant_id = tenants.id AND k.revoked_at = 0);`
 
 // migrations is append-only: index+1 is the schema version it produces. Unlike
 // dash's disposable view, this database is migrated forward forever — never
@@ -950,7 +1008,11 @@ var migrations = []string{
 	   created_at INTEGER NOT NULL,
 	   expires_at INTEGER NOT NULL,
 	   PRIMARY KEY (tenant_id, purpose)
-	 );`,
+	 );` + stampInUseAccounts,
+
+	// v4: the backfill on its own, for a database that already reached v3 (dev and
+	// staging installs of the email-auth build) and so will never re-run it above.
+	stampInUseAccounts,
 }
 
 func migrate(db *sql.DB) error {

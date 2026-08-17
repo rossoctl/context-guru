@@ -10,10 +10,9 @@
 // home (dash/redact.go) and keeps its allowlists — those are about the dashboard's
 // own data shapes; only the credential vocabulary moved.
 //
-// The two mechanisms, and the reasoning behind each, are documented where they are
-// used: see dash/redact.go for why headers are allowlisted by KEY and config keys
-// by name, and why content — arbitrary agent output — can only get pattern-based
-// scrubbing plus a size cap.
+// The reasoning for each mechanism is documented where it is used: see dash/redact.go for
+// why config keys are allowlisted by name, and why content — arbitrary agent output — can
+// only get pattern-based scrubbing plus a size cap.
 package redact
 
 import (
@@ -65,6 +64,19 @@ const credentialWord = `api[_-]?key|access[_-]?key|secret[_-]?key|account[_-]?ke
 // contentSecretsDelimited close those 11 and are pinned by a table-driven test, but
 // the conclusion drawn from that review is not "the list is now complete", it is that
 // content capture must be opt-in. See --dashboard-content.
+//
+// Two classes are KNOWN to pass and are not chased, because chasing them would trade real
+// coverage for the appearance of it:
+//
+//   - A base64-encoded credential. `echo $KEY | base64` in a shell transcript has no
+//     recognisable shape at all; a pattern that decoded candidate blobs would flag ordinary
+//     text and teach readers to ignore the placeholder.
+//   - A prefix-less opaque credential — a bare 32-hex-character gateway key — unless it
+//     sits in a named field or an auth header, which is what the delimited rules key on.
+//     A rule for "any 32 hex characters" also matches every git sha and checksum in a
+//     transcript.
+//
+// The mitigation for both is opt-in capture, not another pattern.
 var contentSecrets = []*regexp.Regexp{
 	// Well-known credential prefixes, one alternation rather than seven separate passes
 	// over the blob. `sk-ant-` is covered by `sk-`; GitLab, Stripe, HuggingFace and
@@ -86,12 +98,26 @@ var contentSecrets = []*regexp.Regexp{
 // Ordering matters: the header and URL rules come before the generic assignment rule
 // so the more specific replacement wins.
 var contentSecretsDelimited = []*regexp.Regexp{
-	// Auth headers, matched to end of LINE rather than with `\S+`.
+	// Auth headers. The value is a SCHEME PLUS A TOKEN — two words — so `\S+` was the
+	// original bug: it stopped at the space after the scheme, redacted the word "Bearer"
+	// and left the credential in the diff view.
 	//
-	// This is the bug the review called most alarming: `\S+` stops at the space after
-	// the scheme, so `Authorization: Bearer <token>` redacted the word "Bearer" and left
-	// the credential in the diff view. A scheme plus a token is two words.
-	regexp.MustCompile(`(?i)\b(authorization|proxy-authorization|x-api-key|x-auth-token|api-key)\s*:[^\r\n]*`),
+	// The value therefore runs past spaces, but it stops at a string/field terminator as
+	// well as at the end of the line. Matching to end of line is fail-safe for a log
+	// record and DESTRUCTIVE here: Content also scrubs captured transcript content, where
+	// a minified JSON tool result is one line, so an `"authorization"` field took the
+	// entire rest of the blob with it — data loss in what the dashboard shows users, not
+	// redaction. A bare `Authorization: Bearer <token>` header line still has nothing to
+	// stop at but the newline, so the log case is unchanged.
+	//
+	// What this gives up: the old rule also ate whatever ELSE happened to follow on the
+	// same line, which incidentally covered auth headers this list has never heard of.
+	// That was never a protection — it depended on the unknown header appearing AFTER a
+	// known one — and a prefix-less opaque credential is a documented limit of a denylist
+	// either way. The quotes are optional on both sides so JSON and bare headers share one
+	// rule; a value containing a `,` or `;` keeps its tail, which no bearer token has.
+	regexp.MustCompile(`(?i)\b(authorization|proxy-authorization|x-api-key|x-auth-token|api-key)` +
+		`["']?\s*:\s*["']?[^\r\n"',;}\]]*["']?`),
 
 	// Credentials in a URL's userinfo (`scheme://user:pass@host`). Its own rule because
 	// the password, not the whole URL, is the secret: redacting the host would tell the
