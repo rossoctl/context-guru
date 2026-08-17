@@ -196,7 +196,14 @@ runs over the same token set. Requiring bare numbers to carry 5+ digits or a sep
 evidence now reads 2% on Claude Code and **0% on LOCA**, and that 0% must not be read as "LOCA has no
 transformed references": the 0% closed share says the opposite. It means *no transformed references among
 the tokens this tokenizer still accepts*. Precision for the primary signal was bought at the cost of
-recall for the caveat signal. Measuring Tier-2 properly needs its own detector, not this one.
+recall for the caveat signal. Measuring Tier 2 properly needs its own detector, not this one.
+
+Keep the scope straight, because it is easy to over-read a 0%: this proxy covers **Tier 2 only**. Tier 3
+— a semantic reference like "as I noted earlier" — carries no shared token *and* no novel numeric, so it
+has **no measurement here at all**, by design rather than by regression. The two therefore fail
+differently: Tier 2 has a detector that is nearly blind, Tier 3 has none. On LOCA, with 0% `closed` and
+40% `opaque`, the defensible statement is that Tier-2 *and* Tier-3 references are both common there and
+both unmeasured — not that transformed references are absent.
 
 ## What this settles, and what it does not
 

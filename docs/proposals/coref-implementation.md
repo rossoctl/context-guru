@@ -87,12 +87,18 @@ Four things it settles, and one it overturns:
   that, which says the deterministic ceiling is not badly compromised and a zero-LLM first version is
   viable.
 
-  Two caveats, both important. It is a *lower* bound: only numeric transformations leave this trace, so
-  reworded prose references are invisible to it. And tightening the identifier rules (see the results
-  write-up) also blinded the proxy — bare numbers now need 5+ digits, and most computed values are
-  small — so its **0% on LOCA means "none among tokens the tokenizer still accepts", not "none"**. On a
-  corpus with 0% `closed` and 40% `opaque`, the honest reading is that Tier-2 references there are
-  common and simply unmeasured. Measuring them properly needs its own detector.
+  Three caveats. It is a *lower* bound even for Tier 2: only numeric transformations leave this trace, so
+  a reworded finding is invisible to it. Tightening the identifier rules (see the results write-up) also
+  blinded it further — bare numbers now need 5+ digits, and most computed values are small — so its
+  **0% on LOCA means "none among tokens the tokenizer still accepts", not "none"**.
+
+  And the third is a scope point worth keeping straight: **this proxy is Tier-2 only, and Tier 3 has no
+  measurement at all** — not a degraded one, none. A semantic reference ("as I noted earlier", "per the
+  schema") carries no shared token *and* no novel numeric, so nothing here can see it, by design rather
+  than by regression. So on a corpus with 0% `closed` and 40% `opaque`, the honest reading is that
+  **Tier-2 and Tier-3 references there are both common and unmeasured**, for different reasons: Tier 2
+  has a detector that is nearly blind, Tier 3 has none. Tier 2 needs its own detector; Tier 3 needs a
+  model call, which is why it sits in open questions rather than in a measurement.
 - **Break-even is workload-dependent, and better on benchmarks than on long interactive sessions**:
   median required `T` is 95 turns for Claude Code (15/30 sessions clear it) against 17 for UltraHorizon
   (7/10) and 14 for LOCA (4/9) — the cut is a far larger share of a smaller transcript. §4's arithmetic

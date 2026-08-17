@@ -106,7 +106,9 @@ search for the **witness** is needed.
 | **Tier 3** | **Semantic** — "as I noted earlier", "per the schema" | LLM only. |
 
 Tier 2 is the objection raised on the original thread (values drift through paraphrase and unit
-conversion). Measured at ~2% of model turns on interactive traffic — real, small, and the reason
+conversion). Measured at ~2% of model turns on interactive traffic — but only via a numeric proxy, and
+**Tier 3 is not measured at all**, so treat that 2% as a floor on invisible references rather than a
+total. Real, small on this traffic, and the reason
 `unreferenced` is an upper bound.
 
 ## 7. The cache economics (why the component has this shape)
