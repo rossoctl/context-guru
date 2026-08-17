@@ -11,7 +11,7 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 |---|---|---|---|---|---|
 | `format` | Reformat | nothing (compacts JSON) | n/a (lossless) | pretty-printed JSON tool output | `min_tokens` (50) |
 | `toon` | Reformat | nothing (re-encodes JSON arrays as TOON) | n/a (lossless) | uniform flat JSON object-arrays | `min_tokens` (50) |
-| `cacheinject` | Reformat | nothing (adds `cache_control`) | n/a (lossless) | Anthropic-family requests; **opt-in, in no preset** — placement is unmeasured ([#36](https://github.com/rossoctl/context-guru/pull/36)) | `ttl` (5m) |
+| `cacheinject` | Reformat | nothing (adds `cache_control`) | n/a (lossless) | Anthropic-family requests; **opt-in, in no preset** — placement is unmeasured | `ttl` (5m) |
 | `cachesplit` | Reformat | nothing (splits a `system` block) | n/a (lossless) | Anthropic-family requests; **in every caching preset** — enables the measured volatile-tail split | — (no config) |
 | `skeleton` | Offload | function/method bodies | via expand | fenced ` ```lang ` code blocks | `min_tokens` (80) |
 | `dedup` | Offload | later byte-identical tool outputs | via expand | repeated identical outputs | `min_tokens` (100) |
@@ -113,12 +113,11 @@ Places Anthropic `cache_control: {type: ephemeral}` breakpoints at the positions
 billed input cost, so the provider KV cache is read rather than re-processed. Adds control
 directives, changes no model-visible content.
 
-**In no preset — opt in explicitly.** Until [#36](https://github.com/rossoctl/context-guru/pull/36)
-its breakpoints never reached the provider on Claude Code traffic (46 applied, 0 forwarded), so the
-placement policy has never been measured. The presets carry [`cachesplit`](components/cachesplit.md)
-instead, which enables the volatile-tail split (measured) without the placement (not). The one live
-placement measurement since the fix is n=1 and mildly *harmful* per step, with no mechanism
-established — see [cacheinject](components/cacheinject.md#what-placement-is-actually-worth).
+**In no preset — opt in explicitly.** The placement policy has never been shown to help: the one
+live measurement is n=1 and mildly *harmful* per step, with no mechanism established. The presets
+carry [`cachesplit`](components/cachesplit.md) instead, which enables the measured volatile-tail
+split without the placement — see
+[cacheinject](components/cacheinject.md#what-placement-is-actually-worth).
 
 - **Lossiness:** none. **Shines:** Anthropic/Bedrock/Vertex agents that don't self-cache (the
   savings lever is provider-side cache hits, invisible to `/stats` token counts). **Inert:**

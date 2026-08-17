@@ -11,7 +11,7 @@
 On a **prompt-caching backend** (the default for Anthropic/Bedrock traffic), `extract_llm` is
 **usually not worth running**, and the measurements say so plainly:
 
-| Measured (Terminal-Bench, pre-#28) | Value |
+| Measured (Terminal-Bench, gate off) | Value |
 |---|---|
 | Extraction calls | 271 |
 | Extraction cost | $3.26 |
@@ -58,16 +58,16 @@ declines to cut aggressively, and correctly so: its contract is recall-first.
 Most tool outputs are nowhere near 30,500 tokens — in one measured Terminal-Bench capture the
 **largest** tool output was 2,053 tokens, ~15× below the cached break-even. That is why the same
 component **wins on a non-caching backend and loses on a caching one**, and why the fix is not
-"compress harder" but "decide per call". Since #28 the [economic gate](#economics) makes that
+"compress harder" but "decide per call". The [economic gate](#economics) makes that
 decision automatically, so the component is safe to leave enabled — it simply declines to spend
 where it cannot win.
 
-### Measured after #28 (replay of real captures, `aws/claude-haiku-4-5`)
+### Measured with the gate on (replay of real captures, `aws/claude-haiku-4-5`)
 
-`forced` = pre-#28 behavior (`economic_gate: false`); `gated` = post-#28 defaults. Same
-capture, same floor, same model. **"Saved" is extract_llm's OWN savings**, not the pipeline's
-— an earlier draft of this table credited the whole pipeline's savings to this component and
-consequently reported a win that did not exist. Attribution is the difference between
+`forced` = gate off (`economic_gate: false`); `gated` = the shipped defaults. Same
+capture, same floor, same model. **"Saved" is extract_llm's OWN savings**, not the pipeline's:
+crediting the whole pipeline's savings to this component reports a win that does not exist.
+Attribution is the difference between
 "positive" and "negative" here, so it is worth stating twice.
 
 **Terminal-Bench capture (20 requests):**
@@ -90,8 +90,8 @@ consequently reported a win that did not exist. Attribution is the difference be
 
 Reading these:
 
-- **The gate is a strict improvement in every arm.** It never loses more than the pre-#28
-  behavior and usually far less: −$0.0172 → −$0.0054 (68% less waste) on Terminal-Bench
+- **The gate is a strict improvement in every arm.** It never loses more than the ungated
+  behaviour and usually far less: −$0.0172 → −$0.0054 (68% less waste) on Terminal-Bench
   non-caching *while saving more tokens*, and 26 calls → 1 on SWE-bench non-caching, taking
   a −$0.0652 loss to break-even.
 - **On a caching backend the component now makes zero calls and loses nothing**, because it
@@ -106,7 +106,7 @@ Reading these:
     On a caching backend, expect `extract_llm` to suppress most candidates and contribute
     little; its value comes from the **result cache**, not from new LLM calls. On a
     **non-caching** backend it is genuinely valuable. Check
-    **`extract_llm` is disabled by default on prompt-caching backends** as of #28 — in code,
+    **`extract_llm` is disabled by default on prompt-caching backends** — in code,
     not just documentation, because every caching workload measured came out net-negative even
     with a correctly-working gate. It runs on non-caching traffic, where the gate decides per
     call. Set `allow_on_caching_backend: true` to override. Check `/stats` →
@@ -140,7 +140,7 @@ filtered structurally.
 
 ## Economics
 
-Since #28 the component only calls the LLM when **expected saving > expected cost**.
+The component only calls the LLM when **expected saving > expected cost**.
 
 ```
 expected saving = tokens expected to remove
@@ -165,8 +165,8 @@ Each input is measured rather than assumed:
 
 Every decision records a **reason**, visible at `/stats` → `extract.reasons` and
 `extract.top_reason`, because the first question about an expensive component is always "why did
-this run?". Set `economic_gate: false` to restore the pre-#28 spend-on-size behavior — needed only
-to reproduce old benchmark numbers.
+this run?". Set `economic_gate: false` to restore the older spend-on-size behaviour — needed only to
+reproduce old benchmark numbers.
 
 ## Triggering
 
@@ -186,33 +186,21 @@ absolute `trigger` applies — the same fail-open convention `Trigger` already u
 
 **`min_tokens` still governs when set explicitly**, so existing configs keep their behavior.
 
-!!! note "`/compact` now resolves the context window too"
-    The `/compact` endpoint used to hard-code the window as unknown, which silently disabled
-    every fraction-based `trigger` threshold *and* this pressure-based logic on that path — so
-    offline replay/eval measured a different component than the one that ships. It now resolves
-    the window exactly as the chat path does.
+The `/compact` endpoint resolves the context window exactly as the chat path does, so
+fraction-based `trigger` thresholds and the pressure logic behave identically in offline
+replay and live traffic.
 
 ## Caching
 
 Three distinct caches, easily confused:
 
-1. **Global result cache** (new in #28). An extraction is a *context-free derived result*, so it is
-   keyed on `sha256(content + prompt version + model + config fingerprint)` with **no session
-   prefix** — identical content in a different session reuses the reduction. Previously the key
-   carried a session prefix, discarding ~80% of the available reuse. A prompt-version bump, model
-   switch, or config change **misses** rather than serving a stale extraction. Bounded by the
+1. **Global result cache.** An extraction is a *context-free derived result*, so it is keyed on
+   `sha256(content + prompt version + model + config fingerprint)` with **no session prefix** —
+   identical content in a different session reuses the reduction. A prompt-version bump, model
+   switch or config change **misses** rather than serving a stale extraction. Bounded by the
    store's existing TTL + LRU.
 
-    !!! note "One-time invalidation"
-        The key schema changed, so pre-#28 entries are inert (a miss, never mis-served). A
-        session-scoped entry from the old scheme is still honored as a migration read, so an
-        in-flight session does not re-pay for work already done.
-
-    Contrast [`xdedup`](../components.md) (#27), which is session-scoped **on purpose**: it mints a
-    *conversational reference* ("same as step N") that is meaningless outside its session. Reference
-    vs derived result is what decides the namespace.
-
-2. **Provider prompt cache on the extraction preamble** (#28 part A). The ~1,463-token invariant
+2. **Provider prompt cache on the extraction preamble.** The ~1,463-token invariant
    preamble is sent as a stable `system` block with a `cache_control` breakpoint (a leading system
    message on the OpenAI backend, which has no explicit breakpoints).
 
@@ -239,7 +227,7 @@ Three distinct caches, easily confused:
 
 ### Rejected: reusing the agent's cached prefix
 
-#28 part B proposed appending the extraction instruction after the agent's existing cached prefix so
+Appending the extraction instruction after the agent's existing cached prefix, so that
 extraction reads an already-cached context. **Prototyped against the live gateway and rejected.** It
 works mechanically (the extraction turn read a 103,019-token prefix from cache with no cache-write
 and no prefix invalidation), but cache-read is cheap, not free, and the bill scales with the *whole*
@@ -316,7 +304,7 @@ Lossy but reversible — the original is stashed and recovered via `context_guru
 | Key | Default | Meaning |
 |---|---|---|
 | `allow_on_caching_backend` | `false` | **Off by default on prompt-caching backends** — measured net-negative there even with the gate working. `true` re-enables it and lets the gate decide per call. |
-| `economic_gate` | `true` | Only call the LLM when expected saving > expected cost. `false` restores pre-#28 spend-on-size behavior (and implies `allow_on_caching_backend`). |
+| `economic_gate` | `true` | Only call the LLM when expected saving > expected cost. `false` restores the older spend-on-size behaviour (and implies `allow_on_caching_backend`). |
 | `min_tokens` | *derived* | Output floor. **Unset = derived from context pressure** (no tuning). Set explicitly to pin it (folds into `trigger.min_output_tokens`). |
 | `strategy` | `code` | `code` \| `single` \| `rlm` \| `auto` (`rlm` maps to `code`). |
 | `model.source` | `incoming` | `incoming` (proxied model+key) or `config` (cheap model via `CHEAP_MODEL*`). |

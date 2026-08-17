@@ -9,59 +9,31 @@ edit_uri: edit/main/docs/
 copyright: >-
   Apache-2.0 &middot; a <a href="https://github.com/rossoctl">Rossoctl</a> platform component
 
+# The site ships its own theme — `theme/` — rather than Material for MkDocs.
+# It is the design system already in production on the sibling cap-evolve site:
+# dark-first CSS custom properties with a light override on `html[data-theme]`,
+# one hand-written stylesheet, one small vanilla-JS file, no framework. MkDocs
+# core stays as the Markdown engine, so `docs/**/*.md` is still the only source
+# of prose and every page's nav, TOC and search index is still generated.
 theme:
-  name: material
-  custom_dir: overrides
-  language: en
+  name: null
+  custom_dir: theme
+  locale: en
   logo: img/context-guru.png
   favicon: img/context-guru.png
-  icon:
-    repo: fontawesome/brands/github
-  palette:
-    - media: "(prefers-color-scheme)"
-      toggle:
-        icon: material/brightness-auto
-        name: Switch to light mode
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: custom
-      accent: custom
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: custom
-      accent: custom
-      toggle:
-        icon: material/brightness-4
-        name: Switch to system preference
-  # `font: false` suppresses Material's <link> to fonts.googleapis.com. Setting
-  # `text:`/`code:` here would put a stylesheet and a woff2 fetch from Google on
-  # every page load of a static site — a third-party request per visitor, and a
-  # blank first paint anywhere that host is unreachable. Inter and JetBrains Mono
-  # are still asked for first in docs/stylesheets/extra.css, from the local system,
-  # ahead of the platform stack.
-  font: false
-  features:
-    - navigation.tabs
-    - navigation.tabs.sticky
-    - navigation.sections
-    - navigation.tracking
-    - navigation.top
-    - navigation.footer
-    - navigation.indexes
-    - navigation.instant
-    - navigation.instant.progress
-    - toc.follow
-    - search.suggest
-    - search.highlight
-    - search.share
-    - content.code.copy
-    - content.code.annotate
-    - content.tabs.link
-    - content.tooltips
-    - content.action.edit
+  # `name: null` means MkDocs never reads a `mkdocs_theme.yml`, so a theme's own
+  # options have to live here.
+  static_templates:
+    - 404.html
+  # The search plugin ships only its index. The search UI is a ~70-line overlay in
+  # theme/js/site.js reading search/search_index.json directly, so there is no
+  # lunr.js bundle, no web worker and no standalone /search/ page.
+  include_search_page: false
+  search_index_only: true
+  # One-line announcement bar. Keep it factual and keep it to one clause.
+  announce: >-
+    SWE-bench Verified, live, four arms: <strong>13% cheaper</strong> than no
+    compaction, and the highest reward.
 
 markdown_extensions:
   - abbr
@@ -90,16 +62,12 @@ markdown_extensions:
         - name: mermaid
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
-  - pymdownx.emoji:
-      emoji_index: !!python/name:material.extensions.emoji.twemoji
-      emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
-# No CDN and no JS of our own: one stylesheet on top of the theme, so the site
-# builds and serves identically on GitHub Pages and from a local `mkdocs serve`.
-# Material's own bundle is served from the site itself; the one request it can make
-# to another host is unpkg.com for mermaid, and only on a page that has a diagram.
-extra_css:
-  - stylesheets/extra.css
+# Wraps every generated <table> in a scroll container. A wide results table has to
+# scroll inside its own column, not push the page body sideways, and no author
+# should have to remember an HTML wrapper to get that.
+hooks:
+  - theme/hooks.py
 
 # Fail the build on a link that points at nothing, not just on a bad config.
 validation:
@@ -107,13 +75,6 @@ validation:
   absolute_links: warn
   unrecognized_links: warn
   anchors: warn
-
-extra:
-  social:
-    - icon: fontawesome/brands/github
-      link: https://github.com/rossoctl/context-guru
-    - icon: fontawesome/brands/golang
-      link: https://pkg.go.dev/github.com/rossoctl/context-guru
 
 # Nav mirrors how people arrive: evaluate it (Get started) → understand it
 # (Concepts) → look a component up (Components) → run it a particular way
@@ -131,7 +92,7 @@ nav:
   - Concepts:
       - Architecture: design.md
       - Reversibility & recovery: how-to/recover-context.md
-      - Agent compaction (Claude Code & Bob): how-to/agent-compaction.md
+      - When your agent compacts: how-to/agent-compaction.md
       - Measuring savings: how-to/measure-savings.md
   - Components:
       - Overview: components.md

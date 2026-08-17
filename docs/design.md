@@ -485,8 +485,8 @@ flowchart LR
   res -->|incoming| inc["Incoming: request's own<br/>model + upstream + key<br/>(built in proxy.chat)"]
   res -->|config| stat["Static: cheap model<br/>(CHEAP_MODEL* env)"]
   res -->|nil| deg["degrade: extract_llm→no-op,<br/>summarize→no-op"]
-  inc --> call["Model.Complete(ctx, prompt)"]
-  stat --> call
+  inc --> complete["Model.Complete(ctx, prompt)"]
+  stat --> complete
 ```
 
 - **`incoming`** (default) reuses the proxied request's model + the gateway's key — zero extra config,

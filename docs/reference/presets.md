@@ -36,12 +36,10 @@ taken exactly from the `presets` map in `config/config.go`.
 !!! info "`cachesplit`, not `cacheinject`"
     Every preset that touches caching carries [`cachesplit`](../components/cachesplit.md),
     which enables the measured volatile-tail split. Breakpoint *placement*
-    ([`cacheinject`](../components/cacheinject.md)) is in **no** preset: its marks only
-    began reaching the provider in
-    [#36](https://github.com/rossoctl/context-guru/pull/36), and placement has never been
-    shown to help. Add it by hand if you want to run the placement study.
+    ([`cacheinject`](../components/cacheinject.md)) is in **no** preset, because it has never
+    been shown to help. Add it by hand if you want to run the placement study.
 
-!!! warning "`extract_llm` is now OFF by default on prompt-caching backends (`codesmart`, `aggressive`)"
+!!! warning "`extract_llm` is off by default on prompt-caching backends"
     `extract_llm` is the only component that spends money to save money, and on a
     prompt-caching backend it was measured **~8× underwater**: a token removed from a cached
     region saves the cache-read rate (`$0.30/MTok`), not the fresh-input rate (`$3/MTok`), so
@@ -59,7 +57,7 @@ taken exactly from the `presets` map in `config/config.go`.
     over the old behavior in every arm measured (waste cut 68% while saving more tokens on one
     capture; 26 calls reduced to 1 on another). Even there the honest result on those captures
     is break-even rather than profit: it earns its place when outputs are genuinely large.
-    See [the component's measured tables](../components/extract_llm.md#measured-after-28-replay-of-real-captures-awsclaude-haiku-4-5).
+    See [the component's measured tables](../components/extract_llm.md#measured-with-the-gate-on-replay-of-real-captures-awsclaude-haiku-4-5).
 
     `codesmart`'s pinned `min_tokens: 3000` still governs its per-output floor, unchanged.
 

@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+
+{#-
+  Landing page. All of its content lives here; docs/index.md only selects this
+  template. The fold has one job: answer *what this does*, *what it measured*,
+  and *how to run it* without a scroll. Everything below the fold is mechanism
+  and routing. Every number is copied from docs/RESULTS.md — if a number moves
+  there, it moves here.
+-#}
+
+{% block body %}
+<main class="page" id="content">
+
+  <section class="hero">
+    {%- if config.theme.logo %}
+    <img class="hero-logo" src="{{ config.theme.logo | url }}" alt="" aria-hidden="true">
+    {%- endif %}
+    <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span> Context engineering for LLM agents</p>
+    <h1>Cut the tokens every request carries.<br><span class="grad">Leave the agent alone.</span></h1>
+    <p class="description">
+      A Go core that rewrites the bulky parts of a chat request — tool outputs, repeated
+      file reads, dead command logs — and returns a smaller request of the <strong>exact
+      same shape</strong>. Losslessly, or lossily with the original stashed behind a
+      <code>&lt;&lt;cg:HASH&gt;&gt;</code> marker the model can expand on demand.
+    </p>
+
+    <div class="btn-row">
+      <a class="btn btn-primary" href="{{ 'get-started/quickstart-proxy/' | url }}">Quickstart</a>
+      <a class="btn btn-ghost" href="{{ 'get-started/overview/' | url }}">Technical overview</a>
+      <a class="btn btn-ghost" href="{{ config.repo_url }}">Source</a>
+    </div>
+
+    <div class="pill-row">
+      <span class="pill">Apache-2.0</span>
+      <span class="pill">One Go binary</span>
+      <span class="pill">OpenAI + Anthropic dialects, one port</span>
+      <span class="badge badge-success">Fail open</span>
+      <span class="badge badge-success">Never worse</span>
+      <span class="badge badge-accent">Reversible</span>
+    </div>
+  </section>
+
+  <div class="cta reveal">
+    <h3>Run it in 60 seconds <span class="badge badge-success">no code changes</span></h3>
+<pre><code><span class="c">## build it — needs Go 1.26 and a C toolchain (the tokenizer uses cgo)</span>
+make build
+
+<span class="c">## start it — one port serves both dialects</span>
+./bin/context-guru-proxy --preset general
+<span class="c">## listening on :4000</span>
+
+<span class="c">## point the agent at it; nothing else about the agent changes</span>
+export ANTHROPIC_BASE_URL=http://localhost:4000/anthropic
+export OPENAI_BASE_URL=http://localhost:4000/openai/v1</code></pre>
+    <p class="cta-note">
+      Then <code>curl -s localhost:4000/stats | jq</code> for the token-weighted savings
+      rollup, or open <code>/dashboard/</code>.
+      <a href="{{ 'how-to/use-with-claude-code/' | url }}">Claude Code setup →</a>
+    </p>
+  </div>
+
+  <section class="section reveal" id="measured">
+    <h2>What it measured</h2>
+    <p class="section-intro">
+      SWE-bench Verified, run live end to end with the <strong>claude-code</strong> agent on
+      <code>aws/claude-sonnet-5</code>: 50 tasks that scored under all four arms
+      (no compaction, context-guru, headroom, rtk).
+    </p>
+
+    <div class="stat-strip">
+      <div class="stat">
+        <div class="stat-num success">−13.2%</div>
+        <div class="stat-label">billed cost<br>$27.77 vs $31.98 baseline</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num success">−17.8%</div>
+        <div class="stat-label">cache-read tokens<br>84.5M vs 102.8M</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num amber">44/50</div>
+        <div class="stat-label">tasks solved<br>baseline 43 · headroom 40 · rtk 43</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">117&thinsp;ms</div>
+        <div class="stat-label">added latency / request<br>what the compaction costs you</div>
+      </div>
+    </div>
+
+    <div class="callout callout-accent">
+      <div class="callout-title">The cheapest arm and the highest reward</div>
+      <p>
+        Cache-<strong>write</strong> stays within 1% of baseline in every arm — none of them
+        busts the prefix cache. rtk adds 0&thinsp;ms of latency but only filters Bash output.
+        <a href="{{ 'RESULTS/' | url }}">Method, decomposition and caveats →</a>
+      </p>
+    </div>
+  </section>
+
+  <section class="section reveal" id="how">
+    <h2>What happens to a request</h2>
+    <p class="section-intro">
+      The pipeline sees the parsed <code>messages</code> array on bifrost's
+      provider-agnostic schema, not a text blob, so it edits structure rather than
+      guessing at string boundaries.
+    </p>
+
+    <div class="flow">
+      <div class="flow-step">
+        <span class="fs-k">1 · normalize</span>
+        <h4>One shape for every provider</h4>
+        <p>An Anthropic <code>tool_result</code> block and an OpenAI <code>role:"tool"</code> message look identical to every component from here on.</p>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <div class="flow-step is-gate">
+        <span class="fs-k">2 · pipeline</span>
+        <h4>Components run in order</h4>
+        <p><strong>Reformat</strong> ones re-encode losslessly; <strong>Offload</strong> ones drop bytes, stash the original, and leave a recoverable marker.</p>
+      </div>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <div class="flow-step">
+        <span class="fs-k">3 · splice</span>
+        <h4>Changed spans only</h4>
+        <p>Untouched fields survive verbatim, so upstream sees a request of the same shape it would have got anyway.</p>
+      </div>
+    </div>
+
+    <div class="callout callout-amber">
+      <div class="callout-title">Three properties hold for every component, on every request</div>
+      <p>
+        <strong>Fail open</strong> — an error or a panic reverts that one component and the
+        original request is still forwarded. <strong>Never worse</strong> — a component that
+        grows the request is reverted, and cost is measured on message content, so you never
+        pay to compact. <strong>Reversible</strong> — every lossy drop is recoverable via the
+        <code>context_guru_expand</code> tool or <code>GET /expand</code>.
+        <a href="{{ 'design/' | url }}">Architecture →</a>
+      </p>
+    </div>
+  </section>
+
+  <section class="section reveal" id="components">
+    <h2>Fourteen components, stacked by config</h2>
+    <p class="section-intro">
+      Four lossless reformatters and ten reversible offloaders. Presets bundle the
+      combinations that were measured: <code>general</code> for everyday agent traffic,
+      <code>agent</code> for long sessions, <code>codesafe</code> for deterministic-only
+      pipelines, <code>mcp</code> for tool-heavy JSON. In the two agent presets
+      <code>mask</code> is the biggest single lever — ~27% of content tokens, with no
+      measured reward loss.
+    </p>
+    <div class="card-grid">
+      <a class="card" href="{{ 'components/' | url }}">
+        <div class="card-title">Component reference</div>
+        <p class="card-desc">What each one drops, when it fires, its defaults, and whether it is recoverable.</p>
+      </a>
+      <a class="card" href="{{ 'how-to/choose-a-preset/' | url }}">
+        <div class="card-title">Choose a preset</div>
+        <p class="card-desc">Which pipeline for coding agents, MCP traffic, or long-running sessions.</p>
+      </a>
+      <a class="card" href="{{ 'examples/before-after/' | url }}">
+        <div class="card-title">Before → after transcripts</div>
+        <p class="card-desc">Real captures: what the model saw before, and what it saw after.</p>
+      </a>
+    </div>
+  </section>
+
+  <section class="section reveal" id="dashboard">
+    <h2>See what it did</h2>
+    <p class="section-intro">
+      The proxy serves its own dashboard at <code>/dashboard/</code>: savings against four
+      denominators, per-component economics, per-session and per-request diffs of exactly
+      what was rewritten, and the cost of the safety mechanisms themselves.
+    </p>
+
+    <figure class="hero-screenshot">
+      <img src="{{ 'img/dashboard/01-overview.jpg' | url }}" alt="The context-guru dashboard overview: savings headline, cost-over-time curve and the per-component economics table." loading="lazy">
+      <figcaption class="caption">The dashboard Overview, served by the proxy itself at <code>/dashboard/</code>.</figcaption>
+    </figure>
+
+    <div class="card-grid">
+      <a class="card" href="{{ 'dashboard/' | url }}">
+        <div class="card-title">Dashboard</div>
+        <p class="card-desc">Every panel, the honest-metrics rules behind it, and its API.</p>
+      </a>
+      <a class="card" href="{{ 'how-to/operating-modes/' | url }}">
+        <div class="card-title">Observe mode</div>
+        <p class="card-desc">Measure what compaction <em>would</em> have saved without changing a single request.</p>
+      </a>
+      <a class="card" href="{{ 'how-to/measure-savings/' | url }}">
+        <div class="card-title">Measure savings</div>
+        <p class="card-desc">What <code>/stats</code> counts, and the denominator each number uses.</p>
+      </a>
+    </div>
+  </section>
+
+  <section class="section reveal" id="next">
+    <h2>Where to go next</h2>
+    <div class="card-grid">
+      <a class="card" href="{{ 'get-started/quickstart-proxy/' | url }}">
+        <div class="card-title">Quickstart: proxy <span class="tile-badge on-site">start here</span></div>
+        <p class="card-desc">Build, run, point an agent at it, read the savings.</p>
+      </a>
+      <a class="card" href="{{ 'get-started/quickstart-compaction/' | url }}">
+        <div class="card-title">Quickstart: compaction service</div>
+        <p class="card-desc">Run it as a compaction endpoint instead of a request-path proxy.</p>
+      </a>
+      <a class="card" href="{{ 'results/vs-competitors/' | url }}">
+        <div class="card-title">Where the money went</div>
+        <p class="card-desc">Why a whole-request proxy beat a stream compressor and a shell filter.</p>
+      </a>
+      <a class="card" href="{{ 'integrations/' | url }}">
+        <div class="card-title">Host adapters</div>
+        <p class="card-desc">Proxy, in-process plugin, or a bifrost <code>LLMPlugin</code> — one core.</p>
+      </a>
+      <a class="card" href="{{ 'hosted/' | url }}">
+        <div class="card-title">Hosted service</div>
+        <p class="card-desc">One instance, many users: tokens, per-tenant config, cold storage.</p>
+      </a>
+      <a class="card" href="{{ 'results/REPRODUCE/' | url }}">
+        <div class="card-title">Reproduce the results</div>
+        <p class="card-desc">Install and re-run all four benchmark arms yourself.</p>
+      </a>
+    </div>
+  </section>
+
+</main>
+{% endblock %}

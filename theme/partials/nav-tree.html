@@ -1,0 +1,27 @@
+{#-
+  Recursive sidebar tree for one top-level nav section. Depth 1 renders as a
+  labelled group (a small uppercase heading), deeper levels as an indented list —
+  the nav is three deep under Components and Results, and flattening those into
+  one list is what makes a long sidebar unreadable.
+-#}
+{%- macro tree(items, depth) -%}
+<ul class="side-list side-list--{{ depth }}">
+  {%- for item in items %}
+    {%- if item.children %}
+      {%- if depth == 1 %}
+  <li class="side-group">
+    <span class="side-group-label">{{ item.title }}</span>
+    {{ tree(item.children, depth + 1) }}
+  </li>
+      {%- else %}
+  <li class="side-sub">
+    <span class="side-sub-label">{{ item.title }}</span>
+    {{ tree(item.children, depth + 1) }}
+  </li>
+      {%- endif %}
+    {%- else %}
+  <li><a href="{{ item.url | url }}"{% if item.active %} class="active" aria-current="page"{% endif %}>{{ item.title }}</a></li>
+    {%- endif %}
+  {%- endfor %}
+</ul>
+{%- endmacro -%}

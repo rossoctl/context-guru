@@ -120,11 +120,16 @@ How the gateway routes Bob's traffic:
 - **Control-plane calls** (everything else Bob hits) are proxied **verbatim** to
   `BOB_UPSTREAM`, so Bob authenticates and starts normally.
 
-!!! tip "Start with deterministic components"
-    A lossless, LLM-free pipeline (`format`, `toon`, `dedup`, `failed_run`, `cmdfilter`)
-    needs no cheap-model config and leaves the transcript reversible. Verified end-to-end:
-    with `[format, toon]` Bob authenticates and answers correctly through the proxy, with
-    its model call reduced. For long Bob sessions, add `mask` (see [Choose a preset](how-to/choose-a-preset.md)).
+!!! warning "Use lossless components with Bob — it cannot expand a marker"
+    Bob sends no `tools` array and parses tool calls as XML tags out of the streamed
+    response text, so it has no way to call `context_guru_expand`. A `<<cg:HASH>>` marker
+    is a dead end in a Bob session: whatever a lossy component removed is gone for good.
+
+    Use the lossless components — `format`, `toon`, `cachesplit` — which need no
+    cheap-model config and leave the transcript intact. Verified end to end: with
+    `[format, toon]` Bob authenticates and answers correctly through the proxy with its
+    model call reduced. Add a lossy component (`mask`, `dedup`, `cmdfilter`, `extract`)
+    only where permanently losing that content is acceptable.
 
 !!! note "Bob speaks its own backend protocol"
     Unlike Claude Code (`ANTHROPIC_BASE_URL`) or OpenAI-surface agents (`OPENAI_BASE_URL`),

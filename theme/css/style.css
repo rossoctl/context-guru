@@ -1,0 +1,966 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   context-guru docs — the cap-evolve design system, ported to a MkDocs theme.
+
+   Dark-first. Every colour is a CSS custom property on :root; the light theme
+   redefines the same names under :root[data-theme="light"] and nothing else
+   changes. An inline <head> script sets data-theme before paint (no flash) and
+   adds html.js so the scroll-reveal only hides content when JS can reveal it.
+
+   Layer order below: tokens → base → chrome (announce/nav/search/footer) →
+   layout (doc shell, sidebar, TOC) → content (typography, code, tables,
+   admonitions, tabs, mermaid) → components (hero/cards/stats/flow) → motion →
+   responsive. Add new rules to the section they belong to, not the end.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* ═══════════════════ tokens ═══════════════════ */
+
+:root {
+  /* dark (default) */
+  --bg: #07090d;
+  --bg-soft: #0d1117;      /* surface / cards */
+  --bg-2: #141b24;         /* surface-2 / raised */
+  --bg-code: #0c1320;      /* inline code bg */
+  --border: #1e2733;
+  --border-soft: #161d26;
+  --ink: #e6edf3;          /* headings / strong fg */
+  --body: #c2ccd8;         /* body text */
+  --muted: #8b98a9;        /* secondary text — 7.0:1 on --bg */
+  --sub: #7d8b9c;          /* meta / labels — 5.7:1 on --bg */
+  --accent: #3b82f6;       /* primary blue — borders, rules, tints */
+  /* The accent is too light to carry white text: #fff on #3b82f6 is 3.68:1. Any
+     surface that puts white on blue (primary button, skip link, GitHub pill on
+     hover) uses this darker shade instead — 5.2:1 — and it is deliberately the
+     same value in both themes, because white text does not change. */
+  --accent-strong: #2563eb;
+  --accent-deep: #1e40af;  /* 8.7:1 under white — the hover/active step */
+  --accent-soft: rgba(59, 130, 246, 0.14);
+  --accent-ink: #93c5fd;   /* links — 11.1:1 on --bg */
+  --amber: #f59e0b;        /* highlight / caution accent */
+  --amber-ink: #fbbf24;
+  --amber-soft: rgba(245, 158, 11, 0.14);
+  /* Warm stop of the hero's headline gradient. Separate from --amber-ink because
+     that one is tuned to sit on --amber-soft, while this sits on plain --bg. */
+  --grad-warm: #fbbf24;
+  --success: #22c55e;
+  --success-ink: #4ade80;
+  --success-soft: rgba(34, 197, 94, 0.13);
+  --danger: #ef4444;
+  --danger-ink: #fca5a5;
+  --danger-soft: rgba(239, 68, 68, 0.14);
+  --seed: #64748b;
+  /* code blocks stay dark in both themes — one syntax palette, no double-tuning */
+  --code-bg: #0b1017;
+  --code-fg: #e6edf3;
+  --code-border: #1c2530;
+  /* Secondary text *inside* a code surface. Not theme-dependent: the surface is
+     dark in both themes, so --muted/--sub (tuned for the page) would fail there. */
+  --code-muted: #8b949e;   /* 6.3:1 on --code-bg */
+  /* effects */
+  --shadow: 0 18px 48px -24px rgba(0, 0, 0, 0.9);
+  --glow-a: rgba(59, 130, 246, 0.30);
+  --glow-b: rgba(245, 158, 11, 0.14);
+  --radius: 14px;
+  --maxw: 1120px;          /* marketing / home */
+  --maxw-docs: 1380px;     /* sidebar + content + toc */
+  --maxw-narrow: 760px;
+  --nav-h: 3.75rem;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-soft: #f7f8fb;
+  --bg-2: #eef1f6;
+  --bg-code: #f1f3f7;
+  --border: #e4e7ec;
+  --border-soft: #eef0f3;
+  --ink: #0f1620;
+  --body: #333a45;
+  --muted: #5b6472;        /* 6.0:1 on white */
+  --sub: #6b7280;          /* 4.8:1 on white */
+  --accent: #2563eb;
+  /* --accent-strong / --accent-deep / --code-* are intentionally NOT redefined
+     here: they back white-on-blue and dark code surfaces, which look the same in
+     both themes. */
+  --accent-deep: #1e40af;
+  --accent-soft: rgba(37, 99, 235, 0.10);
+  --accent-ink: #1d4ed8;   /* 6.7:1 on white */
+  --amber: #f59e0b;
+  --amber-ink: #92400e;    /* 6.3:1 on --amber-soft over white */
+  --amber-soft: rgba(245, 158, 11, 0.16);
+  --grad-warm: #c2410c;    /* 5.9:1 on white — #fbbf24 would be 1.6:1 there */
+  --success: #16a34a;
+  --success-ink: #12662f;  /* 6.2:1 on --success-soft over white */
+  --success-soft: rgba(22, 163, 74, 0.12);
+  --danger: #dc2626;
+  --danger-ink: #b91c1c;
+  --danger-soft: rgba(220, 38, 38, 0.10);
+  --seed: #64748b;
+  --shadow: 0 16px 40px -24px rgba(20, 20, 40, 0.28);
+  --glow-a: rgba(37, 99, 235, 0.16);
+  --glow-b: rgba(245, 158, 11, 0.12);
+  color-scheme: light;
+}
+
+/* ═══════════════════ base ═══════════════════ */
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--body);
+  /* Same stack as the cap-evolve site, but asked for from the local system only.
+     A <link> to fonts.googleapis.com would be a third-party request on every
+     page load of a public static site, and a blank first paint wherever that
+     host is unreachable. */
+  font-family: "Fira Sans", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+               Roboto, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Nothing may push the page sideways; wide content scrolls in its own box.
+     `clip` rather than `hidden` on purpose: `hidden` would make <body> a scroll
+     container and break the sticky nav's positioning. The declarations are
+     ordered so a browser without `clip` still gets `hidden`. */
+  overflow-x: hidden;
+  overflow-x: clip;
+}
+
+a { color: var(--accent-ink); }
+
+:where(a, button, input, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.skip-link {
+  position: absolute; left: -9999px; top: 0; z-index: 200;
+  background: var(--accent-strong); color: #fff; padding: 0.6rem 1rem;
+  border-radius: 0 0 8px 0; font-weight: 600; text-decoration: none;
+}
+.skip-link:focus { left: 0; }
+
+/* subtle page-wide top glow behind the hero */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 620px;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(60% 100% at 50% -10%, var(--glow-a), transparent 70%),
+    radial-gradient(40% 80% at 85% 0%, var(--glow-b), transparent 70%);
+  opacity: 0.9;
+}
+:root[data-theme="light"] body::before { opacity: 0.7; }
+
+.announce, .nav, .doc-shell, main, .footer { position: relative; z-index: 1; }
+
+/* ═══════════════════ announcement bar ═══════════════════ */
+
+.announce {
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.84rem;
+}
+.announce-inner {
+  max-width: var(--maxw-docs); margin: 0 auto;
+  padding: 0.5rem 1.5rem;
+  display: flex; align-items: center; gap: 0.55rem;
+  color: var(--muted);
+}
+.announce-dot {
+  flex: none; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--success-ink);
+}
+.announce strong { color: var(--ink); }
+.announce a { color: var(--accent-ink); white-space: nowrap; }
+
+/* ═══════════════════ top navigation ═══════════════════ */
+
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: saturate(150%) blur(12px);
+  -webkit-backdrop-filter: saturate(150%) blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-inner {
+  max-width: var(--maxw-docs);
+  margin: 0 auto;
+  padding: 0.6rem 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  min-height: var(--nav-h);
+}
+
+.nav-brand {
+  display: inline-flex; align-items: center; gap: 0.55rem;
+  font-weight: 600; font-size: 1.06rem;
+  color: var(--ink); text-decoration: none; letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.nav-brand-logo {
+  width: 30px; height: 30px; border-radius: 50%;
+  display: block; border: 1px solid var(--border);
+}
+.wordmark { font-weight: 650; }
+/* Part of the wordmark, so WCAG 1.4.3's logotype exemption applies — the amber
+   separator is decorative and the name reads from the two words either side. */
+.wordmark-dot { color: var(--amber); font-weight: 800; padding: 0 0.06em; }
+
+.nav-links {
+  display: flex; align-items: center; gap: 1.05rem;
+  font-size: 0.89rem; min-width: 0;
+}
+.nav-links a {
+  color: var(--muted); text-decoration: none; white-space: nowrap;
+  transition: color 0.14s ease;
+}
+.nav-links a:hover { color: var(--ink); }
+.nav-links a.active { color: var(--accent-ink); font-weight: 600; }
+
+.nav-tools { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
+
+.nav-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px;                 /* ≥ the 44px target once padding counts */
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-soft); color: var(--muted);
+  cursor: pointer; transition: color 0.14s ease, border-color 0.14s ease;
+}
+.nav-icon-btn:hover { color: var(--ink); border-color: var(--accent); }
+.nav-icon-btn svg { width: 17px; height: 17px; }
+.theme-toggle .icon-sun { display: none; }
+:root[data-theme="light"] .theme-toggle .icon-sun { display: block; }
+:root[data-theme="light"] .theme-toggle .icon-moon { display: none; }
+.nav-burger { display: none; }
+
+.nav-tools .gh {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  font-size: 0.85rem; text-decoration: none;
+  color: var(--ink); border: 1px solid var(--border);
+  padding: 0.4rem 0.7rem; border-radius: 8px; height: 36px;
+  transition: border-color 0.14s ease, color 0.14s ease, background 0.14s ease;
+}
+.nav-tools .gh svg { width: 15px; height: 15px; }
+.nav-tools .gh:hover { border-color: var(--accent-strong); color: #fff; background: var(--accent-strong); }
+
+/* ═══════════════════ search overlay ═══════════════════ */
+
+.search-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(6px);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 6vh 1rem 1rem;
+}
+.search-overlay[hidden] { display: none; }
+.search-panel {
+  width: 100%; max-width: 680px;
+  background: var(--bg-soft); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  display: flex; flex-direction: column; max-height: 78vh; overflow: hidden;
+}
+.search-field {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.85rem 1rem; border-bottom: 1px solid var(--border);
+}
+.search-field svg { width: 18px; height: 18px; color: var(--sub); flex: none; }
+.search-field input {
+  flex: 1; min-width: 0; font: inherit; font-size: 1rem;
+  background: none; border: none; color: var(--ink); outline: none;
+}
+.search-close {
+  font: inherit; font-size: 0.72rem; letter-spacing: 0.04em;
+  background: var(--bg-2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.2rem 0.45rem; cursor: pointer;
+}
+.search-results { overflow-y: auto; padding: 0.4rem; }
+.search-hit {
+  display: block; text-decoration: none; color: var(--body);
+  padding: 0.6rem 0.75rem; border-radius: 9px;
+}
+.search-hit:hover, .search-hit.sel { background: var(--bg-2); }
+.search-hit-title { color: var(--ink); font-weight: 600; font-size: 0.94rem; }
+.search-hit-crumb { color: var(--sub); font-size: 0.74rem; letter-spacing: 0.03em; }
+.search-hit-text { color: var(--muted); font-size: 0.83rem; line-height: 1.45; margin-top: 0.15rem; }
+.search-hit mark { background: var(--accent-soft); color: var(--accent-ink); border-radius: 3px; padding: 0 0.1em; }
+.search-empty { color: var(--muted); font-size: 0.9rem; padding: 1rem 0.75rem; }
+
+/* ═══════════════════ page containers & doc shell ═══════════════════ */
+
+.page { max-width: var(--maxw); margin: 0 auto; padding: 3rem 1.5rem 5rem; }
+.page-narrow { max-width: var(--maxw-narrow); margin: 0 auto; padding: 3rem 1.5rem 5rem; }
+
+.doc-shell {
+  max-width: var(--maxw-docs); margin: 0 auto;
+  padding: 0 1.5rem 5rem;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 0 2.5rem;
+}
+/* min-width:0 on every grid child: without it a wide <pre> makes the column
+   itself wider than its track and the whole grid overflows the viewport. */
+.doc-shell > * { min-width: 0; }
+
+@media (min-width: 1100px) {
+  .doc-shell.has-side.has-toc { grid-template-columns: 230px minmax(0, 1fr) 210px; }
+  .doc-shell.has-side:not(.has-toc) { grid-template-columns: 230px minmax(0, 1fr); }
+  .doc-shell:not(.has-side).has-toc { grid-template-columns: minmax(0, 1fr) 210px; }
+}
+@media (min-width: 900px) and (max-width: 1099px) {
+  .doc-shell.has-side { grid-template-columns: 210px minmax(0, 1fr); }
+}
+
+/* ── left sidebar: the active section's subtree ── */
+
+.side {
+  position: sticky; top: calc(var(--nav-h) + 1rem);
+  align-self: start; max-height: calc(100vh - var(--nav-h) - 2rem);
+  overflow-y: auto; overscroll-behavior: contain;
+  padding: 2.2rem 0.75rem 2rem 0;
+  border-right: 1px solid var(--border);
+  font-size: 0.87rem;
+}
+.side-title {
+  text-transform: uppercase; letter-spacing: 0.08em;
+  font-size: 0.7rem; color: var(--sub); font-weight: 600;
+  margin: 0 0 0.7rem;
+}
+.side-list { list-style: none; margin: 0; padding: 0; }
+.side-list--2, .side-list--3 { margin-left: 0; }
+.side li { margin: 0; }
+.side a {
+  display: block; color: var(--muted); text-decoration: none;
+  padding: 0.28rem 0.55rem; border-radius: 7px; line-height: 1.4;
+  transition: color 0.14s ease, background 0.14s ease;
+}
+.side a:hover { color: var(--ink); background: var(--bg-soft); }
+.side a.active {
+  color: var(--accent-ink); font-weight: 600;
+  background: var(--accent-soft);
+}
+.side-group { margin-top: 0.9rem; }
+.side-group:first-child { margin-top: 0; }
+.side-group-label, .side-sub-label {
+  display: block; color: var(--ink); font-weight: 650;
+  font-size: 0.82rem; padding: 0.28rem 0.55rem 0.1rem;
+}
+.side-sub { margin-top: 0.5rem; }
+.side-sub-label {
+  color: var(--sub); font-weight: 600; font-size: 0.72rem;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.side-list--2 > li > a, .side-list--3 > li > a { padding-left: 0.9rem; }
+.side-list--3 { border-left: 1px solid var(--border-soft); margin-left: 0.55rem; }
+
+@media (max-width: 899px) { .side { display: none; } }
+
+/* ── right rail: table of contents ── */
+
+.toc {
+  position: sticky; top: calc(var(--nav-h) + 1rem);
+  align-self: start; max-height: calc(100vh - var(--nav-h) - 2rem);
+  overflow-y: auto; overscroll-behavior: contain;
+  padding: 2.2rem 0 2rem 1rem;
+  border-left: 1px solid var(--border);
+  font-size: 0.83rem;
+}
+.toc-title {
+  text-transform: uppercase; letter-spacing: 0.08em;
+  font-size: 0.7rem; color: var(--sub); font-weight: 600; margin: 0 0 0.6rem;
+}
+.toc a {
+  display: block; color: var(--muted); text-decoration: none;
+  padding: 0.22rem 0; border: none; line-height: 1.35;
+  transition: color 0.14s ease;
+}
+.toc a:hover { color: var(--ink); }
+.toc a.active { color: var(--accent-ink); font-weight: 600; }
+.toc a.toc-l3 { padding-left: 0.85rem; font-size: 0.79rem; }
+@media (max-width: 1099px) { .toc { display: none; } }
+
+/* ═══════════════════ content typography ═══════════════════ */
+
+.doc {
+  padding: 2.2rem 0 0;
+  /* Bare URLs are common in these pages (gateway endpoints, GitHub blob links).
+     Without this a single 50-character link is wider than a phone's content
+     column and drags the whole page sideways. */
+  overflow-wrap: break-word;
+}
+.crumbs {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem;
+  font-size: 0.75rem; color: var(--sub);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  margin: 0 0 0.9rem;
+}
+.crumb-sep { color: var(--sub); }
+.crumb-here { color: var(--muted); }
+
+.doc h1 {
+  font-size: clamp(1.9rem, 4vw, 2.5rem); font-weight: 800;
+  letter-spacing: -0.025em; line-height: 1.12;
+  margin: 0 0 1.1rem; color: var(--ink);
+}
+.doc .lead { font-size: 1.15rem; color: var(--muted); margin: 0 0 2rem; line-height: 1.55; }
+.doc h2 {
+  font-size: 1.5rem; font-weight: 700; letter-spacing: -0.01em;
+  margin: 2.8rem 0 0.9rem; padding-top: 0.6rem;
+  border-top: 1px solid var(--border-soft); color: var(--ink);
+}
+.doc h3 { font-size: 1.14rem; font-weight: 650; margin: 2rem 0 0.6rem; color: var(--ink); }
+.doc h4 { font-size: 1rem; font-weight: 650; margin: 1.5rem 0 0.5rem; color: var(--ink); }
+.doc p { margin: 0 0 1rem; }
+.doc ul, .doc ol { margin: 0 0 1rem 1.3rem; padding: 0; }
+.doc li { margin: 0.3rem 0; }
+.doc li > ul, .doc li > ol { margin-bottom: 0.3rem; }
+.doc hr { border: none; border-top: 1px solid var(--border); margin: 2.2rem 0; }
+.doc a {
+  color: var(--accent-ink); text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.doc a:hover { border-bottom-color: var(--accent); }
+.doc strong { color: var(--ink); }
+.doc img { max-width: 100%; height: auto; border-radius: 10px; display: block; }
+.doc blockquote {
+  border-left: 3px solid var(--accent); background: var(--accent-soft);
+  color: var(--body); padding: 0.9rem 1.2rem; margin: 0 0 1.3rem;
+  border-radius: 0 8px 8px 0;
+}
+.doc blockquote p:last-child { margin-bottom: 0; }
+.doc abbr[title] { border-bottom: 1px dotted var(--sub); cursor: help; text-decoration: none; }
+
+/* definition lists (def_list) */
+.doc dl { margin: 0 0 1.3rem; }
+.doc dt { color: var(--ink); font-weight: 650; margin-top: 0.8rem; }
+.doc dd { margin: 0.2rem 0 0 1.2rem; color: var(--body); }
+
+/* heading anchors (toc: permalink) — visible on hover/focus, never a layout shift */
+.doc .headerlink {
+  color: var(--sub); border: none; margin-left: 0.4rem;
+  opacity: 0; transition: opacity 0.14s ease;
+  font-weight: 400; text-decoration: none;
+}
+.doc h1:hover .headerlink, .doc h2:hover .headerlink,
+.doc h3:hover .headerlink, .doc h4:hover .headerlink,
+.doc .headerlink:focus { opacity: 1; }
+.doc .headerlink:hover { color: var(--accent-ink); }
+
+/* Anything the nav can jump to has to clear the sticky header. */
+.doc :is(h1, h2, h3, h4, h5, h6)[id],
+.section[id], .doc [id]:target { scroll-margin-top: calc(var(--nav-h) + 1.5rem); }
+
+.doc kbd, .doc .key {
+  font-family: "Fira Code", "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.8em; background: var(--bg-2); color: var(--ink);
+  border: 1px solid var(--border); border-bottom-width: 2px;
+  border-radius: 5px; padding: 0.05rem 0.35rem;
+}
+
+/* footnotes */
+.doc .footnote { font-size: 0.9rem; color: var(--muted); border-top: 1px solid var(--border); margin-top: 2.5rem; }
+.doc .footnote-backref { border: none; }
+
+/* ═══════════════════ code ═══════════════════ */
+
+.doc code, .cta code, .card code, table code, .callout code, .admonition code {
+  font-family: "Fira Code", "SFMono-Regular", Menlo, Consolas, monospace;
+  background: var(--bg-code); padding: 0.12rem 0.4rem; border-radius: 5px;
+  font-size: 0.88em; color: var(--ink);
+  overflow-wrap: break-word;
+}
+
+pre {
+  margin: 0 0 1.3rem; padding: 1rem 1.15rem;
+  background: var(--code-bg); color: var(--code-fg);
+  border: 1px solid var(--code-border); border-radius: 10px;
+  font-family: "Fira Code", "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.855rem; line-height: 1.6;
+  overflow-x: auto; position: relative;
+  tab-size: 2;
+}
+/* `.doc pre code` (not bare `pre code`) so this outranks the `.doc code` inline
+   rule above: otherwise every code block in the light theme paints the *inline*
+   light code chip behind its own dark surface, and the dark syntax colours land
+   on a near-white background. */
+.doc pre code, .cta pre code, pre code {
+  color: inherit; font-family: inherit; background: none;
+  padding: 0; font-size: 1em; border-radius: 0;
+}
+/* pymdownx.highlight wraps in .highlight (and .highlighttable when line numbers
+   are on); the <pre> inside carries the styling above, the wrapper only carries
+   the scroll box and margin. */
+.highlight { margin: 0 0 1.3rem; }
+.highlight pre { margin: 0; }
+.highlighttable { margin: 0 0 1.3rem; display: block; width: 100%; }
+.highlighttable tbody, .highlighttable tr { display: flex; width: 100%; }
+.highlighttable td { padding: 0; border: none; }
+.highlighttable .linenos {
+  flex: none; background: var(--code-bg);
+  border: 1px solid var(--code-border); border-right: none;
+  border-radius: 10px 0 0 10px;
+}
+.highlighttable .linenos pre { border-radius: 0; border: none; color: var(--sub); user-select: none; }
+.highlighttable .code { flex: 1; min-width: 0; }
+.highlighttable .code pre { border-radius: 0 10px 10px 0; }
+.doc .linenos a, .doc .linenos { border: none; color: var(--sub); }
+.doc pre a { border: none; }
+.filename, .doc .filename {
+  display: block; background: var(--bg-2); color: var(--muted);
+  border: 1px solid var(--code-border); border-bottom: none;
+  border-radius: 10px 10px 0 0; padding: 0.4rem 0.9rem;
+  font-family: "Fira Code", monospace; font-size: 0.76rem;
+}
+.filename + .highlight pre, .filename + pre { border-radius: 0 0 10px 10px; }
+
+/* copy button injected by site.js */
+.copy-btn {
+  position: absolute; top: 0.5rem; right: 0.5rem;
+  font: inherit; font-size: 0.7rem;
+  background: var(--bg-2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.2rem 0.5rem; cursor: pointer;
+  opacity: 0; transition: opacity 0.14s ease, color 0.14s ease;
+}
+pre:hover .copy-btn, .copy-btn:focus-visible { opacity: 1; }
+.copy-btn:hover { color: var(--ink); }
+.copy-btn.done { color: var(--success-ink); }
+
+/* ═══════════════════ tables ═══════════════════ */
+
+/* Wrapper added by theme/hooks.py. The table keeps its natural width and scrolls
+   inside this box; the page body never moves. */
+.table-wrap {
+  margin: 0 0 1.5rem; overflow-x: auto; max-width: 100%;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+.table-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.9rem; margin: 0; }
+table th, table td {
+  padding: 0.68rem 0.9rem; text-align: left;
+  border-bottom: 1px solid var(--border-soft); vertical-align: top;
+}
+table th {
+  background: var(--bg-2); font-weight: 600; color: var(--ink);
+  font-size: 0.74rem; letter-spacing: 0.04em; text-transform: uppercase;
+  white-space: nowrap; position: sticky; top: 0;
+}
+table tbody tr:hover { background: var(--bg-2); }
+table tbody tr:last-child td { border-bottom: none; }
+.doc table a { border-bottom-color: transparent; }
+.doc table a:hover { border-bottom-color: var(--accent); }
+.gain { color: var(--success-ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.num { font-family: "Fira Code", monospace; font-variant-numeric: tabular-nums; }
+
+/* ═══════════════════ admonitions & details ═══════════════════ */
+
+.admonition, .doc details {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--seed);
+  border-radius: 0 10px 10px 0;
+  padding: 0.9rem 1.2rem; margin: 0 0 1.5rem; font-size: 0.94rem;
+}
+.admonition > :last-child, .doc details > :last-child { margin-bottom: 0; }
+.admonition-title, .doc details > summary {
+  font-weight: 650; color: var(--ink); margin: 0 0 0.45rem;
+  letter-spacing: -0.005em;
+}
+.doc details > summary { cursor: pointer; margin-bottom: 0; }
+.doc details[open] > summary { margin-bottom: 0.6rem; }
+.doc details > summary::marker { color: var(--sub); }
+
+/* Semantic variants. Each recolours only the left rule, the tint and the title —
+   the same three moves for every type, so a new one is three lines. */
+.admonition.note, details.note { border-left-color: var(--accent); background: var(--accent-soft); }
+.admonition.note > .admonition-title, details.note > summary { color: var(--accent-ink); }
+.admonition.info, .admonition.abstract, .admonition.tip, .admonition.example,
+details.info, details.abstract, details.tip, details.example {
+  border-left-color: var(--accent); background: var(--accent-soft);
+}
+.admonition.info > .admonition-title, .admonition.abstract > .admonition-title,
+.admonition.tip > .admonition-title, .admonition.example > .admonition-title,
+details.info > summary, details.abstract > summary,
+details.tip > summary, details.example > summary { color: var(--accent-ink); }
+
+.admonition.warning, .admonition.caution, .admonition.attention,
+details.warning, details.caution, details.attention {
+  border-left-color: var(--amber); background: var(--amber-soft);
+}
+.admonition.warning > .admonition-title, .admonition.caution > .admonition-title,
+.admonition.attention > .admonition-title,
+details.warning > summary, details.caution > summary,
+details.attention > summary { color: var(--amber-ink); }
+
+.admonition.danger, .admonition.error, .admonition.bug, .admonition.failure,
+details.danger, details.error, details.bug, details.failure {
+  border-left-color: var(--danger); background: var(--danger-soft);
+}
+.admonition.danger > .admonition-title, .admonition.error > .admonition-title,
+.admonition.bug > .admonition-title, .admonition.failure > .admonition-title,
+details.danger > summary, details.error > summary,
+details.bug > summary, details.failure > summary { color: var(--danger-ink); }
+
+.admonition.success, .admonition.check, .admonition.done,
+details.success, details.check, details.done {
+  border-left-color: var(--success); background: var(--success-soft);
+}
+.admonition.success > .admonition-title, .admonition.check > .admonition-title,
+.admonition.done > .admonition-title,
+details.success > summary, details.check > summary,
+details.done > summary { color: var(--success-ink); }
+
+.admonition.quote, details.quote { border-left-color: var(--seed); }
+
+/* the hand-written variant used by the home page and templates */
+.callout {
+  background: var(--bg-soft); border: 1px solid var(--border);
+  border-left: 3px solid var(--seed); border-radius: 0 10px 10px 0;
+  padding: 1rem 1.2rem; margin: 1.5rem 0; font-size: 0.94rem;
+}
+.callout-title { font-weight: 650; color: var(--ink); margin: 0 0 0.4rem; }
+.callout p:last-child { margin-bottom: 0; }
+.callout-accent { border-left-color: var(--accent); background: var(--accent-soft); }
+.callout-accent .callout-title { color: var(--accent-ink); }
+.callout-amber, .callout-warn { border-left-color: var(--amber); background: var(--amber-soft); }
+.callout-amber .callout-title, .callout-warn .callout-title { color: var(--amber-ink); }
+
+/* ═══════════════════ tabbed blocks (pymdownx.tabbed, alternate_style) ═══════════════════ */
+
+.tabbed-set {
+  display: flex; flex-wrap: wrap; position: relative;
+  margin: 0 0 1.5rem; border-radius: 10px;
+  /* A flex container sizes to its content by default, so a row of long tab
+     labels would widen the column instead of scrolling inside .tabbed-labels. */
+  min-width: 0; max-width: 100%;
+}
+.tabbed-set > input { position: absolute; opacity: 0; width: 0; height: 0; }
+.tabbed-labels {
+  display: flex; width: 100%; overflow-x: auto; gap: 0.15rem;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+.tabbed-labels::-webkit-scrollbar { display: none; }
+.tabbed-labels > label {
+  flex: none; cursor: pointer; white-space: nowrap;
+  padding: 0.5rem 0.85rem; font-size: 0.85rem; font-weight: 600;
+  color: var(--muted); border-bottom: 2px solid transparent;
+  margin-bottom: -1px; transition: color 0.14s ease, border-color 0.14s ease;
+}
+.tabbed-labels > label:hover { color: var(--ink); }
+.tabbed-content { width: 100%; }
+.tabbed-block { display: none; padding-top: 1rem; }
+.tabbed-block > :last-child { margin-bottom: 0; }
+/* nth-child pairing: input N checked → label N highlighted, block N shown.
+   Every selector pins BOTH the input's index and the label's. A rule like
+   `input:checked + .tabbed-labels > label:first-child` looks harmless, but the
+   *last* input is always the element immediately before .tabbed-labels, so
+   selecting the final tab would light up the first label too. */
+.tabbed-set > input:nth-child(1):checked ~ .tabbed-labels > label:nth-child(1),
+.tabbed-set > input:nth-child(2):checked ~ .tabbed-labels > label:nth-child(2),
+.tabbed-set > input:nth-child(3):checked ~ .tabbed-labels > label:nth-child(3),
+.tabbed-set > input:nth-child(4):checked ~ .tabbed-labels > label:nth-child(4),
+.tabbed-set > input:nth-child(5):checked ~ .tabbed-labels > label:nth-child(5),
+.tabbed-set > input:nth-child(6):checked ~ .tabbed-labels > label:nth-child(6),
+.tabbed-set > input:nth-child(7):checked ~ .tabbed-labels > label:nth-child(7),
+.tabbed-set > input:nth-child(8):checked ~ .tabbed-labels > label:nth-child(8) {
+  color: var(--accent-ink); border-bottom-color: var(--accent);
+}
+.tabbed-set > input:nth-child(1):checked ~ .tabbed-content > .tabbed-block:nth-child(1),
+.tabbed-set > input:nth-child(2):checked ~ .tabbed-content > .tabbed-block:nth-child(2),
+.tabbed-set > input:nth-child(3):checked ~ .tabbed-content > .tabbed-block:nth-child(3),
+.tabbed-set > input:nth-child(4):checked ~ .tabbed-content > .tabbed-block:nth-child(4),
+.tabbed-set > input:nth-child(5):checked ~ .tabbed-content > .tabbed-block:nth-child(5),
+.tabbed-set > input:nth-child(6):checked ~ .tabbed-content > .tabbed-block:nth-child(6),
+.tabbed-set > input:nth-child(7):checked ~ .tabbed-content > .tabbed-block:nth-child(7),
+.tabbed-set > input:nth-child(8):checked ~ .tabbed-content > .tabbed-block:nth-child(8) {
+  display: block;
+}
+.tabbed-set > input:focus-visible + .tabbed-labels > label,
+.tabbed-labels > label:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ═══════════════════ mermaid ═══════════════════ */
+
+/* Diagrams are rendered client-side into this box. It keeps its own scrollbar so
+   a wide sequence diagram never widens the page, and it holds its height while
+   mermaid boots so the surrounding text does not jump (CLS). */
+.mermaid {
+  background: var(--bg-soft); border: 1px solid var(--border);
+  border-radius: var(--radius); margin: 0 0 1.5rem;
+  padding: 1.25rem 1rem; overflow-x: auto;
+  font-family: inherit; font-size: 0.9rem; color: var(--muted);
+  min-height: 6rem; text-align: center;
+}
+.mermaid > svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+/* Pre-render the source is hidden rather than shown as raw text — a wall of
+   `flowchart LR` is worse than a labelled placeholder. */
+.mermaid:not([data-rendered]) > code { display: none; }
+.mermaid:not([data-rendered])::after {
+  content: "Rendering diagram…"; font-size: 0.85rem; color: var(--sub);
+}
+.mermaid[data-rendered="error"]::after { content: none; }
+.mermaid[data-rendered="error"] > code {
+  display: block; text-align: left; white-space: pre;
+  font-family: "Fira Code", monospace; font-size: 0.82rem; color: var(--body);
+}
+
+/* ═══════════════════ hero & marketing components ═══════════════════ */
+
+.hero { text-align: center; padding: 2.5rem 0 1rem; }
+.hero-logo {
+  width: 116px; height: 116px; margin: 0 auto 1.5rem; display: block;
+  border-radius: 50%; border: 1px solid var(--border);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  font-size: 0.76rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--accent-ink); background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  padding: 0.32rem 0.8rem; border-radius: 999px; margin: 0 0 1.4rem;
+}
+.eyebrow-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); }
+
+.hero h1 {
+  /* Capped at 3.1rem so the first sentence sits on one line at desktop width;
+     `balance` keeps the wrap even once it does have to break. */
+  font-size: clamp(2rem, 5vw, 3.1rem); font-weight: 800;
+  letter-spacing: -0.03em; line-height: 1.08;
+  margin: 0 auto 1rem; max-width: 900px; color: var(--ink);
+  text-wrap: balance;
+}
+.hero h1 .grad {
+  background: linear-gradient(100deg, var(--accent-ink), var(--grad-warm));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.hero .description {
+  font-size: 1.1rem; max-width: 680px; margin: 0 auto 2rem;
+  color: var(--body); line-height: 1.6;
+}
+.hero .description strong { color: var(--ink); }
+.hero code, .cta code, .stat code {
+  font-family: "Fira Code", monospace; background: var(--bg-code);
+  padding: 0.1rem 0.35rem; border-radius: 5px; font-size: 0.88em; color: var(--ink);
+}
+
+.btn-row { display: flex; justify-content: center; gap: 0.8rem; flex-wrap: wrap; margin: 0 0 1.6rem; }
+.btn {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  font-weight: 650; font-size: 0.98rem; text-decoration: none;
+  padding: 0.7rem 1.35rem; border-radius: 10px;
+  border: 1px solid transparent; cursor: pointer;
+  transition: transform 0.14s ease, box-shadow 0.14s ease, background 0.14s ease, border-color 0.14s ease;
+}
+.btn:hover { transform: translateY(-2px); }
+.btn-primary {
+  background: var(--accent-strong); color: #fff;
+  box-shadow: 0 10px 30px -8px rgba(37, 99, 235, 0.55);
+}
+.btn-primary:hover { background: var(--accent-deep); box-shadow: 0 14px 36px -8px rgba(37, 99, 235, 0.7); }
+.btn-ghost { background: var(--bg-soft); color: var(--ink); border-color: var(--border); }
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent-ink); }
+
+.pill-row { display: flex; justify-content: center; gap: 0.5rem; flex-wrap: wrap; margin: 0 0 2rem; }
+.pill, .badge {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  font-size: 0.78rem; font-weight: 500;
+  padding: 0.28rem 0.7rem; border-radius: 999px;
+  background: var(--bg-soft); color: var(--muted); border: 1px solid var(--border);
+}
+.badge-accent { background: var(--accent-soft); color: var(--accent-ink); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+.badge-success { background: var(--success-soft); color: var(--success-ink); border-color: color-mix(in srgb, var(--success) 30%, transparent); }
+.badge-amber { background: var(--amber-soft); color: var(--amber-ink); border-color: color-mix(in srgb, var(--amber) 30%, transparent); }
+
+.cta {
+  background: var(--bg-soft); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 1.4rem 1.5rem;
+  margin: 0 auto 3rem; max-width: 760px; box-shadow: var(--shadow);
+}
+.cta h3 { margin: 0 0 0.8rem; font-size: 0.95rem; color: var(--muted); font-weight: 500; }
+.cta pre { margin: 0; }
+.cta pre .c { color: var(--code-muted); }
+.cta-note { margin: 1rem 0 0; font-size: 0.86rem; color: var(--muted); }
+
+.section { padding: 3rem 0 1rem; border-top: 1px solid var(--border-soft); }
+.section > h2 {
+  font-size: clamp(1.5rem, 3vw, 1.9rem); font-weight: 750; letter-spacing: -0.02em;
+  margin: 0 0 0.6rem; color: var(--ink);
+}
+.section > .section-intro { color: var(--muted); font-size: 1.02rem; margin: 0 0 1.8rem; max-width: 720px; }
+.section-intro code { font-family: "Fira Code", monospace; background: var(--bg-code); padding: 0.1rem 0.35rem; border-radius: 5px; font-size: 0.88em; color: var(--ink); }
+
+.flow { display: flex; align-items: stretch; gap: 0.6rem; flex-wrap: wrap; margin: 1.5rem 0; }
+.flow-step {
+  flex: 1 1 220px; background: var(--bg-soft); border: 1px solid var(--border);
+  border-radius: 12px; padding: 1rem 1.1rem;
+  transition: border-color 0.16s ease, transform 0.16s ease;
+}
+.flow-step:hover { border-color: var(--accent); transform: translateY(-2px); }
+.flow-step .fs-k {
+  font-family: "Fira Code", monospace; font-size: 0.72rem; color: var(--accent-ink);
+  background: var(--accent-soft); border-radius: 5px; padding: 0.05rem 0.4rem;
+}
+.flow-step h4 { margin: 0.6rem 0 0.3rem; font-size: 0.98rem; color: var(--ink); font-weight: 650; }
+.flow-step p { margin: 0; font-size: 0.86rem; color: var(--muted); line-height: 1.5; }
+.flow-step.is-gate { border-color: color-mix(in srgb, var(--amber) 45%, var(--border)); }
+.flow-arrow { align-self: center; color: var(--sub); font-size: 1.2rem; }
+@media (max-width: 760px) { .flow-arrow { transform: rotate(90deg); } }
+
+.stat-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+.stat {
+  background: var(--bg-soft); border: 1px solid var(--border); border-radius: 12px;
+  padding: 1.2rem 1.3rem; text-align: center;
+}
+.stat-num {
+  font-family: "Fira Code", monospace; font-size: 1.9rem; font-weight: 600;
+  color: var(--ink); font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+}
+.stat-num.amber { color: var(--amber-ink); }
+.stat-num.success { color: var(--success-ink); }
+.stat-label { font-size: 0.79rem; color: var(--muted); margin-top: 0.35rem; line-height: 1.45; }
+
+.hero-screenshot, .shot {
+  margin: 1.5rem auto 2rem; border-radius: var(--radius); overflow: hidden;
+  border: 1px solid var(--border); background: var(--bg-soft); box-shadow: var(--shadow);
+  max-width: 1000px;
+}
+.hero-screenshot img, .shot img { display: block; width: 100%; height: auto; }
+/* The dashboard captures are full-page and very tall; on the landing page they
+   are a preview, so crop to the top rather than let one image own three screens. */
+.hero-screenshot img { max-height: 460px; object-fit: cover; object-position: top center; }
+.hero-screenshot .caption, .shot-cap {
+  padding: 0.7rem 1rem; font-size: 0.83rem; color: var(--muted);
+  border-top: 1px solid var(--border); text-align: center;
+}
+
+.card-grid, .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; margin: 1.2rem 0 0; }
+.card, .tile {
+  display: block; padding: 1.15rem 1.25rem;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg-soft);
+  color: var(--body); text-decoration: none;
+  transition: border-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
+}
+.card:hover, .tile:hover {
+  border-color: var(--accent); transform: translateY(-2px);
+  box-shadow: 0 12px 30px -14px rgba(0, 0, 0, 0.7);
+}
+.card-title, .tile-title {
+  font-weight: 650; color: var(--ink); font-size: 1rem; margin: 0 0 0.35rem;
+  display: flex; align-items: center; gap: 0.4rem; line-height: 1.3; flex-wrap: wrap;
+}
+.card-desc, .tile-desc { color: var(--muted); font-size: 0.88rem; line-height: 1.5; margin: 0; }
+.tile-badge {
+  font-size: 0.66rem; font-weight: 500; padding: 0.1rem 0.45rem; border-radius: 999px;
+  background: var(--bg-2); color: var(--muted); letter-spacing: 0.02em; text-transform: uppercase;
+}
+.tile-badge.on-site { background: var(--accent-soft); color: var(--accent-ink); }
+
+/* ═══════════════════ page footer bits ═══════════════════ */
+
+.doc-foot { margin: 3rem 0 0; }
+.edit-link {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  font-size: 0.83rem; color: var(--muted); text-decoration: none; border: none;
+}
+.edit-link svg { width: 14px; height: 14px; }
+.edit-link:hover { color: var(--accent-ink); }
+.doc .edit-link { border-bottom: none; }
+
+.pager {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;
+  margin: 1.5rem 0 0; padding-top: 1.5rem; border-top: 1px solid var(--border);
+}
+.pager-link {
+  display: flex; flex-direction: column; gap: 0.2rem;
+  padding: 0.85rem 1rem; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg-soft); text-decoration: none;
+  transition: border-color 0.16s ease;
+}
+.doc .pager-link { border-bottom: 1px solid var(--border); }
+.pager-link:hover { border-color: var(--accent); }
+.pager-next { text-align: right; }
+.pager-dir { font-size: 0.72rem; color: var(--sub); text-transform: uppercase; letter-spacing: 0.07em; }
+.pager-title { color: var(--ink); font-weight: 600; font-size: 0.92rem; }
+@media (max-width: 620px) { .pager { grid-template-columns: 1fr; } .pager-next { text-align: left; } }
+
+.footer {
+  border-top: 1px solid var(--border); padding: 2.5rem 1.5rem;
+  color: var(--muted); font-size: 0.86rem;
+}
+.footer a { color: var(--muted); text-decoration: none; }
+.footer a:hover { color: var(--accent-ink); }
+.footer-inner {
+  max-width: var(--maxw-docs); margin: 0 auto; display: flex;
+  justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;
+}
+.footer-links { display: flex; gap: 1.2rem; flex-wrap: wrap; }
+
+/* ═══════════════════ motion ═══════════════════ */
+
+/* Used on the landing page only. Doc pages never hide content behind an
+   IntersectionObserver — prose has to be readable the moment it paints. */
+html.js .reveal { opacity: 0; transform: translateY(16px); transition: opacity 0.6s ease, transform 0.6s ease; }
+html.js .reveal.in { opacity: 1; transform: none; }
+/* Printing never scrolls, so the observer never fires: show everything. */
+@media print {
+  html.js .reveal { opacity: 1; transform: none; }
+  .nav, .announce, .side, .toc, .pager, .search-overlay, .copy-btn { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  html.js .reveal { opacity: 1; transform: none; transition: none; }
+  .btn:hover, .card:hover, .tile:hover, .flow-step:hover { transform: none; }
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+
+/* ═══════════════════ responsive ═══════════════════ */
+
+@media (max-width: 1180px) {
+  .nav-links { gap: 0.85rem; font-size: 0.84rem; overflow-x: auto; scrollbar-width: none; }
+  .nav-links::-webkit-scrollbar { display: none; }
+}
+
+@media (max-width: 900px) {
+  .nav-inner { padding: 0.6rem 1rem; gap: 0.75rem; }
+  .nav-burger { display: inline-flex; }
+  .nav-tools .gh .gh-label { display: none; }
+  .nav-tools .gh { padding: 0.4rem 0.55rem; }
+  /* Drawer: the same link list, stacked under the bar. */
+  .nav-links {
+    position: absolute; top: 100%; left: 0; right: 0;
+    display: none; flex-direction: column; align-items: stretch; gap: 0;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    padding: 0.5rem 1rem 1rem; max-height: 70vh; overflow-y: auto;
+    box-shadow: var(--shadow);
+  }
+  .nav-links.open { display: flex; }
+  .nav-links a { padding: 0.65rem 0.25rem; border-bottom: 1px solid var(--border-soft); font-size: 0.95rem; }
+  .doc-shell { padding: 0 1rem 3.5rem; }
+}
+
+@media (max-width: 640px) {
+  .page, .page-narrow { padding: 2rem 1.1rem 3.5rem; }
+  .hero { padding: 1.5rem 0 0.5rem; }
+  .hero-logo { width: 92px; height: 92px; }
+  .hero .description { font-size: 1rem; }
+  .btn { width: 100%; justify-content: center; }
+  .cta { padding: 1.1rem 1rem; }
+  pre { font-size: 0.8rem; padding: 0.85rem 0.9rem; }
+  table { font-size: 0.83rem; }
+  table th, table td { padding: 0.55rem 0.6rem; }
+  .footer-inner { flex-direction: column; text-align: center; }
+  .announce-inner { padding: 0.5rem 1rem; font-size: 0.79rem; }
+}
