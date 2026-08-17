@@ -22,6 +22,7 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | `extract_llm` | Offload (LLM) | query-irrelevant content via an LLM-written sandboxed filter | via expand | large output in a large request | `strategy` (code), `model.source`, `trigger`, `rewrite`, `skip_file_reads` |
 | `smartcrush` | Offload | middle items of a JSON array | via expand | JSON-array tool output | `min_items` (5), `min_tokens` (200), `keep_first` (3), `keep_last` (2) |
 | `mask` | Offload | older tool outputs (age-based) | via expand | more than `keep_recent` outputs | `keep_recent` (3), `min_tokens` (100), `keep_head_chars` (96) |
+| `coref` | Offload | tool outputs no later turn referred back to (co-reference-based) | via expand | a threshold crossing, once per budgeted pass; **opt-in, in no preset** — [measured; yield is workload-dependent](results/coref-density.md) | `min_tokens` (300), `cut_closed` (false), `min_batch_frac` (0.15), `rewrite_budget` (3), `trigger` |
 | `summarize` | Offload (LLM) | the middle of the transcript → one summary | via expand | long trajectories | `summary_level` (regular), `keep_last` (3), `min_tokens` (500), `resummarize_tokens` (6000), `model.source`, `trigger` |
 
 Presets (`config/config.go`), verbatim: **`codesmart`** (the proxy default)
@@ -315,6 +316,36 @@ after (older):  [older tool output masked; starts: 700 701 def __rmul__(self, m)
 - **`keep_head_chars`** leaves a one-line head-peek of the hidden output inside the marker (see above) so
   the model knows *what* was masked without a blind `expand` round-trip — evidence showed a bare marker on
   a masked source-file read forces needless expands. Set `0` for the opaque marker (≈2pp more savings).
+
+### `coref`
+Co-reference-aware compaction: cut the tool outputs that no later model turn ever carried anything
+forward from. Decides from **back-references** rather than from content or age — for each output, which
+identifiers it *introduced* (tokens already in context before it existed are echoes, not references),
+and whether a later turn used them. See [components/coref.md](components/coref.md), the
+[cheat sheet](reference/coref-glossary.md) for every term, and the
+[proposal](proposals/coref-compaction.md) for the derivation.
+
+```
+after:  [tool output compacted: no later turn referred back to it; starts: 0 tree_line_0 = compute_tree_0(arg_0) …] <<cg:…>> [full output: call context_guru_expand]
+```
+
+- **Config:** `min_tokens` (300), `cut_unreferenced` (true), `cut_closed` (**false**), `closed_dist` (12),
+  `open_reps` (3), `min_batch_frac` (0.15), `rewrite_budget` (3), `break_even` (true), `keep_head_chars`
+  (96), `trigger`. **Shines:** long sessions with a lot of survey-and-discard traffic (listings, wide
+  searches, exploratory reads never returned to) — complementary to `mask`, which drops the *old* where
+  this drops the *never-used*, and an old-but-hot span is the case `mask` gets wrong. **Inert:** below the
+  trigger, everything referenced, batch below `min_batch_frac`, budget spent, or break-even unmet.
+- **It is the one component that mutates the cached prefix on purpose**, so the cut is **batched** (one
+  cache-write serves the whole pass — a single early cut can never repay its own rewrite), **budgeted**
+  (`rewrite_budget` per session), and **latched** (the decision is stored and replayed byte-for-byte,
+  never re-derived; unlike `mask` it must not use `repairLostFreeze`, because a history-dependent
+  decision re-derived at depth can emit different bytes).
+- **Opt-in and in no preset.** The measurement pass has run, but on Claude Code workstation transcripts
+  rather than the eval-box captures — [unreferenced mass runs 21% on interactive traffic
+  and ~70% on benchmark traffic, and recency is measured to be nearly inert while reference count does all
+  the work](results/coref-density.md).
+  So `cut_unreferenced` (default on) is justified, while `cut_closed` — the large case-A cut — stays off
+  until those thresholds are re-measured on the right corpus.
 
 ### `summarize` (LLM)
 Compresses the **middle of the trajectory** into one LLM-written summary (ported from CE-Manager's
