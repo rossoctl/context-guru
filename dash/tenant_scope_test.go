@@ -193,8 +193,10 @@ func TestAPIRequestByIDIsOwnershipChecked(t *testing.T) {
 	}
 }
 
-// A manager sees everyone's metrics and nobody's transcripts.
-func TestManagerSeesMetricsNotTranscripts(t *testing.T) {
+// NEW RULE, replacing "a manager sees nobody's transcripts": a manager sees everyone's
+// metrics AND everyone's transcripts, through the same request drawer and diff viewer a
+// tenant gets for their own.
+func TestManagerReadsAnyTenantsTranscript(t *testing.T) {
 	f := newScopeFixture(t, asTenant("tenant-a", true))
 	code, body := f.get(t, "/api/requests?tenant=*")
 	if code != http.StatusOK {
@@ -203,16 +205,72 @@ func TestManagerSeesMetricsNotTranscripts(t *testing.T) {
 	if !strings.Contains(body, "tenant-b") {
 		t.Errorf("a manager could not see another tenant's rows:\n%s", body)
 	}
-	// But not their content.
+	// And their content, on the ordinary per-request route.
 	code, body = f.get(t, "/api/requests/"+itoa(f.ids["tenant-b"]))
 	if code != http.StatusOK {
 		t.Fatalf("manager reading another tenant's row = %d", code)
 	}
-	if strings.Contains(body, "SECRET-OF-tenant-b") {
-		t.Errorf("a manager read another tenant's transcript:\n%s", body)
+	if !strings.Contains(body, "SECRET-OF-tenant-b") {
+		t.Errorf("a manager could not read another tenant's transcript:\n%s", body)
 	}
-	if strings.Contains(body, `"content_visible":true`) {
-		t.Error("content_visible was true for another tenant's row")
+	if !strings.Contains(body, `"content_visible":true`) {
+		t.Errorf("content_visible was not true for a manager:\n%s", body)
+	}
+	// Same for the whole-session diff, selected with ?tenant= as the UI does.
+	code, body = f.get(t, "/api/sessions/tenant-b:sess/transcript?tenant=tenant-b")
+	if code != http.StatusOK {
+		t.Fatalf("manager reading another tenant's session diff = %d\n%s", code, body)
+	}
+	if !strings.Contains(body, "SECRET-OF-tenant-b") {
+		t.Errorf("a manager could not read another tenant's session transcript:\n%s", body)
+	}
+}
+
+// The other half of the new rule: only the MANAGER branch widened. A plain user naming
+// another tenant's session is REFUSED — a 404 carrying unknown_session, the same answer an
+// id that does not exist gets, so the route never confirms whose session ids are real.
+func TestPlainUserCannotReadAnotherTenantsTranscript(t *testing.T) {
+	f := newScopeFixture(t, asTenant("tenant-a", false))
+	for _, path := range []string{
+		"/api/sessions/tenant-b:sess/transcript",
+		"/api/sessions/tenant-b:sess/transcript?tenant=tenant-b",
+		"/api/sessions/tenant-b:sess/transcript?tenant=*",
+		"/api/sessions/tenant-b:sess/transcript?tenant=tenant-b&fetch=1",
+	} {
+		code, body := f.get(t, path)
+		if code != http.StatusNotFound {
+			t.Errorf("%s = %d, want 404\n%s", path, code, body)
+		}
+		if !strings.Contains(body, TranscriptUnknownSession) {
+			t.Errorf("%s did not report %q:\n%s", path, TranscriptUnknownSession, body)
+		}
+		if strings.Contains(body, "SECRET-OF-tenant-b") {
+			t.Errorf("%s leaked another tenant's transcript:\n%s", path, body)
+		}
+	}
+	// Its own session still reads, so the refusals above are the scope and not a dead route.
+	code, body := f.get(t, "/api/sessions/tenant-a:sess/transcript")
+	if code != http.StatusOK || !strings.Contains(body, "SECRET-OF-tenant-a") {
+		t.Errorf("own session diff = %d:\n%s", code, body)
+	}
+}
+
+// Widening the manager branch must not have opened these routes to a caller with no
+// principal at all: the default stays fail-closed.
+func TestTranscriptRoutesFailClosedWithoutAPrincipal(t *testing.T) {
+	f := newScopeFixture(t, func(*http.Request) (Principal, bool) { return Principal{}, false })
+	for _, path := range []string{
+		"/api/sessions/tenant-b:sess/transcript?tenant=tenant-b",
+		"/api/sessions/tenant-a:sess/transcript",
+		"/api/requests/" + itoa(f.ids["tenant-b"]),
+	} {
+		code, body := f.get(t, path)
+		if code != http.StatusUnauthorized {
+			t.Errorf("%s without a principal = %d, want 401", path, code)
+		}
+		if strings.Contains(body, "SECRET-OF-") {
+			t.Errorf("%s served content to an unauthenticated caller:\n%s", path, body)
+		}
 	}
 }
 

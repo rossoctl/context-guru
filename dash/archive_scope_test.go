@@ -73,16 +73,17 @@ func TestArchiveAPIIsTenantScoped(t *testing.T) {
 	}
 }
 
-// A manager reads archived metrics for everyone and archived transcripts for nobody —
-// the same rule as the live path, so the archive is not a bypass.
-func TestManagerCannotReadArchivedTranscripts(t *testing.T) {
+// NEW RULE, replacing "archived transcripts for nobody": a manager reads archived metrics
+// AND archived transcripts for everyone — the same rule as the live path, so a session
+// does not become unreadable to a manager the moment it goes cold.
+func TestManagerReadsAnyTenantsArchivedTranscripts(t *testing.T) {
 	f, _ := archiveScopeFixture(t, asTenant("tenant-a", true))
 	code, body := f.get(t, "/api/archive/tenant-b:old")
 	if code != http.StatusOK {
 		t.Fatalf("manager reading another tenant's archive = %d", code)
 	}
-	if strings.Contains(body, "TRANSCRIPT-tenant-b") {
-		t.Errorf("a manager read another tenant's archived transcripts:\n%s", body)
+	if !strings.Contains(body, "TRANSCRIPT-tenant-b") {
+		t.Errorf("a manager could not read another tenant's archived transcripts:\n%s", body)
 	}
 	if !strings.Contains(body, "tenant-b:old") {
 		t.Errorf("a manager could not see the archived session's metadata:\n%s", body)

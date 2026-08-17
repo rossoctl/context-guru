@@ -1633,10 +1633,9 @@ function contentBlockedState(host, state, opts = {}) {
       box.className = 'state blocked';
       b.appendChild(el('strong', { text: 'Transcripts are not yours to read' }));
       b.appendChild(el('span', { text:
-        'Metrics for this traffic are visible; its content is not. On a hosted deployment only ' +
-        'the owning account can read its own transcripts — a manager cannot, because reading ' +
-        "someone else's source code is not an administrative need. On a single-tenant proxy, " +
-        'content is served to loopback or a configured trusted CIDR only.' }));
+        'Metrics for this traffic are visible; its content is not. On a hosted deployment the ' +
+        'owning account and the manager can read it. On a single-tenant proxy, content is ' +
+        'served to loopback or a configured trusted CIDR only.' }));
       break;
     case 'not_captured':
       // WHOSE gate is shut decides what to say. Storing a transcript needs the operator's
@@ -3375,11 +3374,12 @@ function loadSettings() {
       el('label', { class: 'comp', for: 'set-capture' }, cap,
         el('span', { class: 'comp-name' }, 'Store my transcripts for the diff view')),
       el('p', { class: 'hint warn-text' },
-        'Writes your agent output to disk. The redactor is best-effort, not a guarantee.'),
+        'Writes your agent output to disk. The manager can read what is stored. The ' +
+        'redactor is best-effort, not a guarantee.'),
       whyBlock('What "best-effort" means here',
         'Source code and tool results are stored behind a redactor whose own review found ' +
-        '11 of 22 realistic credential shapes passing through it. Only you can read them; ' +
-        'a manager cannot. Off by default.')));
+        '11 of 22 realistic credential shapes passing through it. The manager can read ' +
+        'whatever this stores. Off by default.')));
 
     // Raw YAML, for anything the toggles do not cover.
     const ta = el('textarea', {
@@ -3812,14 +3812,14 @@ function renderTenantEditor(host, t) {
       kv('Password', t.has_password ? 'set' : 'never set'),
       kv('Status', t.disabled ? 'disabled' : 'active'))));
 
-  // Stated as a boundary rather than left as a missing feature: a manager reading this
-  // panel is exactly the person who would otherwise go looking for the diff view.
+  // Says where the transcripts are rather than leaving a manager to hunt: the drawer and
+  // diff viewer are the tenant's own, reached by pointing the account selector here.
   host.appendChild(el('div', { class: 'state blocked' },
     el('div', { class: 'state-body' },
-      el('strong', { text: 'You cannot read this account’s transcripts' }),
+      el('strong', { text: 'You can read this account’s transcripts' }),
       el('span', {
-        text: 'Metrics and configuration for everyone, transcript text for nobody but its '
-          + 'owner. You can purge or delete what they captured; you cannot open it.',
+        text: 'Pick this account in the selector, then open any request or session diff. '
+          + 'Only what they consented to capture exists to read.',
       }))));
 
   const fields = el('div');

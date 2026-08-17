@@ -345,9 +345,9 @@ the operator's service-wide switch, and your account's own consent — which reg
 **on** for you. So if the operator has capture enabled, then from your very first request the
 before/after text of your messages — agent output, tool results, source code — is written to
 the service's database, scrubbed of known credential shapes and capped at 16 KB per message.
-It is what makes the diff view work, and only your own account can read yours: a manager sees
-everyone's metrics and nobody's transcripts. The scrubber is a pattern denylist, so treat this
-as storage you have agreed to, not a guarantee.
+It is what makes the diff view work, and two parties can read it: your own account, and the
+service manager. The scrubber is a pattern denylist, so treat this as storage you have agreed
+to, not a guarantee.
 
 **Check which state you are in, and turn it off if you do not want it.** Open a request in the
 dashboard: `content_captured` is the effective answer for your account, and
