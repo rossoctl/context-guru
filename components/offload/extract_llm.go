@@ -3,7 +3,6 @@ package offload
 import (
 	"context"
 	"errors"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
