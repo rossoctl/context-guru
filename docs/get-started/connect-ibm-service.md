@@ -1,12 +1,12 @@
 # Connect to the IBM service
 
-There is a context-guru instance running for IBM engineers. You do not build anything, you
-do not run a proxy, and you do not hand it a provider key — you register once, get a token,
-and set two environment variables per agent.
+There is a context-guru instance running for IBM engineers. You do not build anything and
+you do not run a proxy — you register once, get a token, and add two settings to Claude
+Code. Your own provider key stays yours and is forwarded unchanged.
 
 ```
 your agent ──▶ https://contextguru.vpc.cloud9.ibm.com ──▶ the model gateway
-                (rewrites `messages`, then forwards)        (the operator's credential)
+                (rewrites `messages`, then forwards)        (your own credential)
                         │
                         └──▶ your own dashboard: savings, sessions, before/after diffs
 ```
@@ -39,9 +39,11 @@ address, a password of at least 8 characters, and a label for the token. We mail
 code to that address; entering it within 5 minutes is what creates the account. Signing in
 later is that same password plus a fresh mailed code.
 
-The token is shown **once**, after the code. The server keeps only `sha256(token)` and its first 8
-characters (for display and revocation), so there is no code path that can print it back to
-you and a lost token has to be reissued, not recovered. Copy it somewhere safe now.
+The token is shown **once**, on the screen straight after the code, with a copy button and
+the setup steps below it already filled in with your token. The server keeps only
+`sha256(token)` and its first 8 characters (for display and revocation), so there is no
+code path that can print it back to you and a lost token has to be reissued, not
+recovered. Copy it somewhere safe before you leave that screen.
 
 !!! note "If registration is refused"
     Self-registration has three modes, and the operator picks one. A `403` means it is
@@ -101,22 +103,60 @@ Install the root CA system-wide:
     [`deploy/service/tls-smoke.sh`](https://github.com/rossoctl/context-guru/blob/main/deploy/service/tls-smoke.sh)
     defaults to.
 
-## 3. Point your agent at it
+## 3. Point Claude Code at it
+
+Four steps. Go through them in order and do nothing else.
+
+**1. Open your Claude Code settings file.**
+
+```
+~/.claude/settings.json
+```
+
+No such file? Create it — an empty file is fine.
+
+**2. Put this in it,** with your own token in place of `cg_live_YOUR_TOKEN_HERE`. This is
+the **whole** file, not a diff:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://contextguru.vpc.cloud9.ibm.com/anthropic",
+    "ANTHROPIC_CUSTOM_HEADERS": "x-context-guru-token: cg_live_YOUR_TOKEN_HERE"
+  }
+}
+```
+
+Already have an `env` block? Add just those two lines inside it and leave every other key
+alone.
+
+**3. Keep your own key exactly where it is.** `ANTHROPIC_API_KEY` (or
+`ANTHROPIC_AUTH_TOKEN`) stays yours: we forward it, so your traffic is billed to you, and a
+request with no provider credential of its own answers **401**. The context-guru token
+travels in its own header, so it never competes for that slot.
+
+**4. Restart Claude Code and ask it anything.** Your request appears on the
+[dashboard](https://contextguru.vpc.cloud9.ibm.com/dashboard/) Overview within a second.
+Zero requests after a full turn means the traffic never arrived — see
+[Is it actually on?](#is-it-actually-on).
+
+!!! warning "Put it in that file, not in your shell"
+    An `env` block in `~/.claude/settings.json` **silently overrides an exported
+    `ANTHROPIC_BASE_URL`**. The failure looks exactly like success: Claude Code answers
+    normally, nothing errors, and the only symptom is an empty dashboard and zero savings.
+    This has already caught us on this deployment — so if you exported the variable and see
+    nothing, look in that file first.
+
+<details markdown="1">
+<summary>Other agents, and where else the token is accepted</summary>
 
 One token, three dialects. The path carries the dialect; your account's settings decide
-which upstream each dialect goes to.
-
-**Leave your provider key exactly where it is.** The service forwards it, so your traffic
-is billed to your own account. The context-guru token travels in its own header,
-`x-context-guru-token`, so it never competes for the slot your key occupies.
+which upstream each dialect goes to. Neither of these reads `~/.claude/settings.json`, so
+they are still shell variables:
 
 ```bash
-# Claude Code — ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN stay YOUR key
-export ANTHROPIC_BASE_URL=https://contextguru.vpc.cloud9.ibm.com/anthropic
-export ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: cg_live_…"
-
 # OpenAI-dialect tools — OPENAI_API_KEY stays your key; send the header
-#   x-context-guru-token: cg_live_…
+#   x-context-guru-token: cg_live_YOUR_TOKEN_HERE
 export OPENAI_BASE_URL=https://contextguru.vpc.cloud9.ibm.com/openai/v1
 
 # Bob — BOBSHELL_API_KEY stays your key, and Bob can send no header of ours, so bind
@@ -126,20 +166,15 @@ curl -sS -XPOST https://contextguru.vpc.cloud9.ibm.com/api/me/agent-key \
   -H "Authorization: Bearer $BOBSHELL_API_KEY" -b "cg_dash=<your dashboard cookie>"
 ```
 
+Bob may also need `BOBSHELL_DEFAULT_AUTH_TYPE=custom` for it to use `BOBSHELL_API_KEY` at
+all — see [Host adapters](../integrations.md#use-it-with-an-agent-bob-bobshell).
+
 The token is read from `x-context-guru-token` first. It is still accepted in
 `Authorization`, `x-api-key` or `x-goog-api-key` for tools that have nowhere else to put
 it — recognised by its `cg_live_` shape, and scrubbed out before the request is forwarded —
 but a slot holding the token cannot also hold your provider key, so prefer the header.
 
-Bob may also need `BOBSHELL_DEFAULT_AUTH_TYPE=custom` for it to use `BOBSHELL_API_KEY` at
-all — see [Host adapters](../integrations.md#use-it-with-an-agent-bob-bobshell).
-
-!!! warning "An `export` is not proof the traffic arrives"
-    For Claude Code an `env` block in `~/.claude/settings.json` **silently overrides the
-    variable you exported**. The failure looks exactly like success: Claude Code answers
-    normally, nothing errors, and the only symptom is an empty dashboard and zero savings,
-    because nothing ever reached the service. This has already caught us on this deployment.
-    Run the check in [Is it actually on?](#is-it-actually-on) before you trust a number.
+</details>
 
 ## Turn it on for one session only
 
@@ -151,19 +186,19 @@ another terminal, another repo and another agent are untouched.
 ```sh
 # One command, one session. Your own key stays in ANTHROPIC_API_KEY.
 ANTHROPIC_BASE_URL=https://contextguru.vpc.cloud9.ibm.com/anthropic \
-ANTHROPIC_CUSTOM_HEADERS='x-context-guru-token: cg_live_…' \
+ANTHROPIC_CUSTOM_HEADERS='x-context-guru-token: cg_live_YOUR_TOKEN_HERE' \
   claude
 ```
 
-If `~/.claude/settings.json` has an `env` block, the line above does **nothing** — the
-settings file wins. `--settings` takes a JSON string as well as a path, and it is read as
-*additional* settings for this invocation only, so it overrides the global file without
-touching it:
+If `~/.claude/settings.json` has an `env` block, the line above does **nothing** — the same
+override as in step 2, and the settings file wins. `--settings` takes a JSON string as well
+as a path, read as *additional* settings for this invocation only, so it beats the global
+file without touching it:
 
 ```sh
 claude --settings '{"env":{
   "ANTHROPIC_BASE_URL":"https://contextguru.vpc.cloud9.ibm.com/anthropic",
-  "ANTHROPIC_CUSTOM_HEADERS":"x-context-guru-token: cg_live_…"}}'
+  "ANTHROPIC_CUSTOM_HEADERS":"x-context-guru-token: cg_live_YOUR_TOKEN_HERE"}}'
 ```
 
 Verified on Claude Code 2.1.215: with a global `env` block present, the `--settings` form
@@ -229,7 +264,7 @@ survives a bypass, compaction was never the cause.
 ```sh
 # Claude Code — verified on 2.1.215: these headers reach the wire. Several pairs are
 # newline-separated, which is how the token and the bypass travel together.
-ANTHROPIC_CUSTOM_HEADERS='x-context-guru-token: cg_live_…
+ANTHROPIC_CUSTOM_HEADERS='x-context-guru-token: cg_live_YOUR_TOKEN_HERE
 x-context-guru-bypass: true' \
 ANTHROPIC_BASE_URL=https://contextguru.vpc.cloud9.ibm.com/anthropic \
   claude
