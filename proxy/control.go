@@ -139,11 +139,66 @@ func (h *Handler) webPrincipal(r *http.Request) (*tenant.Tenant, error) {
 // readJSON decodes a bounded, strict JSON body. Strict because a typo'd field in a
 // settings save should be a visible error, not a silently ignored change the user
 // believes they made.
+//
+// It also carries the cross-site guard, because every write route funnels through it —
+// see checkOrigin. One guard in the shared decoder rather than one per handler, so a
+// route added later is covered by construction.
 func readJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	if err := checkOrigin(r); err != nil {
+		return err
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxControlBody)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	return dec.Decode(dst)
+}
+
+// errCrossOrigin refuses a browser-driven cross-site write.
+//
+// Every write here is authenticated by the COOKIE, and the cookie's SameSite=Lax is not
+// the boundary it looks like: SameSite's unit is the REGISTRABLE DOMAIN, so on a
+// deployment under ibm.com any colleague's host under ibm.com is "same site" and the
+// browser attaches the cookie. A form post needs no preflight either, and a
+// `text/plain` body reaches a JSON decoder unimpeded (DisallowUnknownFields is happy as
+// long as the form's `=` lands inside a string value). Nothing else stood in the way: a
+// cross-origin post could mint a token on the victim's account or sign them out.
+//
+// The Origin header is the boundary, and it is enough on its own: a browser sets it on
+// every write it makes, page script cannot forge it, and no CSRF token has to be
+// plumbed through the UI to use it.
+var errCrossOrigin = statusError{http.StatusForbidden,
+	"cross-origin request refused: control-plane writes must come from this deployment's own pages"}
+
+// checkOrigin rejects a request whose Origin is not this deployment's own.
+//
+// Present-and-different, NOT required-and-matching. A non-browser caller — curl, an
+// agent, the tests — sends no Origin at all, and demanding one would break every one of
+// them while adding nothing: the attack this closes is a BROWSER carrying someone
+// else's cookie, and a browser always tells us where the page came from.
+//
+// The comparison is against externalBase(r), the same reconstruction /api/me hands the
+// user as their base URL, so it is right on loopback, right behind nginx (which sets
+// X-Forwarded-Proto and Host — see deploy/service/nginx.conf) and right if the hostname
+// changes. An Origin of "null" (a sandboxed frame) matches nothing and is refused.
+func checkOrigin(r *http.Request) error {
+	o := r.Header.Get("Origin")
+	if o == "" || strings.EqualFold(o, externalBase(r)) {
+		return nil
+	}
+	return errCrossOrigin
+}
+
+// readErr writes the reply for a rejected request body: the status the error names — 403
+// for a cross-site refusal — or 400 for a body that simply did not decode. One mapping
+// for every route, so a refusal cannot present as a parse error on one endpoint and a
+// 403 on the next.
+func readErr(w http.ResponseWriter, err error) {
+	if _, ok := err.(StatusError); ok {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	ctlErr(w, http.StatusBadRequest, "malformed request: "+err.Error())
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -500,7 +555,7 @@ func (h *Handler) ctlRegister(w http.ResponseWriter, r *http.Request) {
 		Code     string `json:"code"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
-		ctlErr(w, http.StatusBadRequest, "malformed request: "+err.Error())
+		readErr(w, err)
 		return
 	}
 	// After the body is read (the invite code is in it), before anything is created.
@@ -516,8 +571,24 @@ func (h *Handler) ctlRegister(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, tenant.ErrEmailTaken):
-			ctlErr(w, http.StatusConflict,
-				"that email is already registered — sign in instead, or reset it with the operator")
+			// NOT a 409. This route is unauthenticated, so an answer that depends on
+			// whether the address already has an account tells anyone who asks which of
+			// their colleagues are signed up — the one channel ctlLogin and ctlVerify were
+			// deliberately built to close (one message for unknown/wrong/no-password, and
+			// VerifyLogin spends argon2 against a decoy hash so even the timings match).
+			//
+			// So the reply is the same 201 "check your mail" as a fresh registration, and
+			// the difference goes into the MAILBOX, which only the owner can read: they get
+			// a notice that someone tried, and no code. The timing matches too, because
+			// RegisterAccount hashes the password before it discovers the address is taken.
+			if mErr := mailRegisterNotice(normalEmail(in.Email)); mErr != nil {
+				code, msg := statusOf(mErr)
+				ctlErr(w, code, msg)
+				return
+			}
+			// The expiry is the one the code we did NOT issue would have carried. A zero
+			// here would be the tell the status no longer is.
+			registered(w, normalEmail(in.Email), time.Now().Add(tenant.CodeTTL))
 		case errors.Is(err, tenant.ErrEmailDomain):
 			ctlErr(w, http.StatusForbidden, "that email domain is not allowed to register here")
 		case errors.Is(err, tenant.ErrBadPassword):
@@ -536,13 +607,45 @@ func (h *Handler) ctlRegister(w http.ResponseWriter, r *http.Request) {
 		ctlErr(w, code, msg)
 		return
 	}
+	registered(w, t.Email, exp)
+}
+
+// registered is ctlRegister's reply, and the reason it is a function is that it must be
+// byte-identical on both paths through that handler — a taken address and a free one
+// (see the ErrEmailTaken branch above).
+func registered(w http.ResponseWriter, email string, exp time.Time) {
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"next":              "verify",
-		"email":             t.Email,
+		"email":             email,
 		"code_expires_at":   msOrZero(exp),
 		"code_valid_secs":   int(tenant.CodeTTL.Seconds()),
 		"code_max_attempts": tenant.MaxCodeAttempts,
 	})
+}
+
+// normalEmail is the address as the registry stores it, so the reply and the notice
+// name it the same way the success path does (which echoes tenant.Email).
+func normalEmail(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// mailRegisterNotice tells an address's OWNER that someone tried to register it. There
+// is no code and nothing to act on: the point is that the "this address has an account"
+// fact appears only in a mailbox the person asking cannot read.
+func mailRegisterNotice(to string) error {
+	err := sendMail(to, "Someone tried to register your context-guru account",
+		`Someone just tried to create a context-guru account with this email address.
+
+Nothing was created and no verification code was issued — this address already has an
+account. If it was you, sign in instead; if you have lost the password, ask the operator.
+
+If it was not you, there is nothing to do. Whoever tried learned nothing about this
+account, including whether it exists.
+`)
+	if err == nil {
+		return nil
+	}
+	// Mapped exactly as mailCode maps a send failure, because a mail outage must not
+	// answer differently on the two paths either — that would put the oracle back.
+	return mailFailed(err)
 }
 
 // mailCode issues a code and hands it to the mailer. The plaintext code exists only
@@ -554,16 +657,23 @@ func (h *Handler) mailCode(t *tenant.Tenant, p tenant.CodePurpose) (time.Time, e
 		return time.Time{}, statusError{http.StatusInternalServerError, "could not issue a code"}
 	}
 	if err := sendCode(t.Email, p, c); err != nil {
-		// The error is logged WITHOUT the address's code and without the recipient's
-		// mailbox contents; the relay's own message is the useful half.
-		slog.Warn("context-guru: verification mail failed", "err", err.Error())
-		if _, ok := err.(StatusError); ok {
-			return time.Time{}, err
-		}
-		return time.Time{}, statusError{http.StatusBadGateway,
-			"could not send the verification email; try again shortly"}
+		return time.Time{}, mailFailed(err)
 	}
 	return c.ExpiresAt, nil
+}
+
+// mailFailed maps a send failure to the status the caller should see. One mapping, two
+// callers (mailCode and mailRegisterNotice) — see the ErrEmailTaken branch of
+// ctlRegister for why the two must agree.
+func mailFailed(err error) error {
+	// Logged WITHOUT the address's code and without the recipient's mailbox contents;
+	// the relay's own message is the useful half.
+	slog.Warn("context-guru: verification mail failed", "err", err.Error())
+	if _, ok := err.(StatusError); ok {
+		return err
+	}
+	return statusError{http.StatusBadGateway,
+		"could not send the verification email; try again shortly"}
 }
 
 // ctlLogin is phase one of signing in: email + password, then a code in the mail.
@@ -579,7 +689,7 @@ func (h *Handler) ctlLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
-		ctlErr(w, http.StatusBadRequest, "malformed request")
+		readErr(w, err)
 		return
 	}
 	if tok := strings.TrimSpace(in.Token); tok != "" {
@@ -670,7 +780,7 @@ func (h *Handler) ctlVerify(w http.ResponseWriter, r *http.Request) {
 		Code  string `json:"code"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
-		ctlErr(w, http.StatusBadRequest, "malformed request")
+		readErr(w, err)
 		return
 	}
 	email := strings.ToLower(strings.TrimSpace(in.Email))
@@ -846,6 +956,12 @@ func (h *Handler) ctlRevokeSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ctlLogout(w http.ResponseWriter, r *http.Request) {
+	// The one write that reads no body, so readJSON's cross-site guard does not cover it
+	// — and a forced sign-out is exactly what a cross-origin form post can aim for.
+	if err := checkOrigin(r); err != nil {
+		readErr(w, err)
+		return
+	}
 	if c, err := r.Cookie(dashCookie); err == nil {
 		_ = h.registry().EndWebSession(c.Value)
 	}
@@ -890,6 +1006,27 @@ func externalBase(r *http.Request) string {
 	return scheme + "://" + host
 }
 
+// checkUpstreams validates upstream NAMES against the operator's allow-list, at WRITE
+// time as well as at request time. Not an SSRF boundary — a name is never a URL, and
+// upstreamFor looks it up in this same map — but a stored name the proxy will later
+// refuse breaks someone's agent with no feedback at the point the change was made, and
+// the person who broke it may not be the person whose agent stops working (see
+// ctlPatchTenant, which is a manager editing somebody else).
+//
+// One check, both writers. The user's own save had it; the manager's patch did not.
+func (h *Handler) checkUpstreams(names ...*string) error {
+	for _, name := range names {
+		if name == nil || *name == "" {
+			continue
+		}
+		if _, ok := h.opts.Upstreams[*name]; !ok {
+			return statusError{http.StatusBadRequest, "unknown upstream " + *name +
+				"; pick one of the names from /api/options"}
+		}
+	}
+	return nil
+}
+
 // ctlUpdateMe saves the caller's own settings.
 func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 	t, err := h.webPrincipal(r)
@@ -909,21 +1046,13 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 		CaptureContent *bool   `json:"capture_content"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
-		ctlErr(w, http.StatusBadRequest, "malformed request: "+err.Error())
+		readErr(w, err)
 		return
 	}
-	// Upstream names are validated against the operator's allow-list HERE as well as at
-	// request time: a settings page that accepts a name the proxy will later refuse is
-	// a page that lets someone break their own agent and not find out until they use it.
-	for _, name := range []*string{in.UpAnthropic, in.UpOpenAI, in.UpBob} {
-		if name == nil || *name == "" {
-			continue
-		}
-		if _, ok := h.opts.Upstreams[*name]; !ok {
-			ctlErr(w, http.StatusBadRequest, "unknown upstream "+*name+
-				"; pick one of the names from /api/options")
-			return
-		}
+	if err := h.checkUpstreams(in.UpAnthropic, in.UpOpenAI, in.UpBob); err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
 	}
 	patch := tenant.Patch{Label: in.Label, ConfigYAML: in.ConfigYAML,
 		UpAnthropic: in.UpAnthropic, UpOpenAI: in.UpOpenAI, UpBob: in.UpBob,
@@ -957,7 +1086,7 @@ func (h *Handler) ctlMintToken(w http.ResponseWriter, r *http.Request) {
 		Label string `json:"label"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
-		ctlErr(w, http.StatusBadRequest, "malformed request")
+		readErr(w, err)
 		return
 	}
 	if in.Label == "" {
@@ -1010,7 +1139,32 @@ func (h *Handler) ctlBindAgentKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.registry().BindAgentKey(t.ID, key); err != nil {
-		ctlErr(w, http.StatusInternalServerError, "could not bind the key")
+		// A registry refusal here is usually the USER's to fix, and answering 500 for all
+		// of them tells them nothing and points them at the operator instead.
+		//
+		// ErrForbidden is the anti-hijack case: this digest is already bound to a DIFFERENT
+		// account. Binding it used to transfer it silently, which handed the new binder the
+		// other account's traffic — so the refusal has to say who can undo it.
+		//
+		// ErrBadAgentKey is the length floor, and the message must not imply the key is
+		// malformed: a short key can be perfectly valid at its provider and merely too
+		// short for us to accept as an IDENTITY, because identity here is the key's
+		// digest — so a guessable key is a guessable account.
+		switch {
+		case errors.Is(err, tenant.ErrBadAgentKey):
+			ctlErr(w, http.StatusBadRequest, fmt.Sprintf("that provider key is shorter than %d "+
+				"characters; context-guru identifies this agent by the digest of its key, so a "+
+				"short key would be guessable. Use a longer key, or send the "+
+				"x-context-guru-token header from an agent that can set one",
+				tenant.MinAgentKeyLen))
+		case errors.Is(err, tenant.ErrForbidden):
+			ctlErr(w, http.StatusForbidden, "that provider key is already bound to another "+
+				"account; its owner has to unbind it first")
+		case errors.Is(err, tenant.ErrNotFound):
+			ctlErr(w, http.StatusNotFound, "no such account")
+		default:
+			ctlErr(w, http.StatusInternalServerError, "could not bind the key")
+		}
 		return
 	}
 	n, _ := h.registry().AgentKeyCount(t.ID)
@@ -1137,7 +1291,15 @@ func (h *Handler) ctlPatchTenant(w http.ResponseWriter, r *http.Request) {
 		Disabled       *bool   `json:"disabled"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
-		ctlErr(w, http.StatusBadRequest, "malformed request: "+err.Error())
+		readErr(w, err)
+		return
+	}
+	// Same allow-list check as PUT /api/me: a manager who parks a tenant on an upstream
+	// name the proxy refuses breaks that tenant's agent, and the tenant is the one who
+	// finds out.
+	if err := h.checkUpstreams(in.UpAnthropic, in.UpOpenAI, in.UpBob); err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
 		return
 	}
 	patch := tenant.Patch{Label: in.Label, ConfigYAML: in.ConfigYAML,
@@ -1185,7 +1347,7 @@ func (h *Handler) ctlManagerMintToken(w http.ResponseWriter, r *http.Request) {
 		Label string `json:"label"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
-		ctlErr(w, http.StatusBadRequest, "malformed request")
+		readErr(w, err)
 		return
 	}
 	if in.Label == "" {

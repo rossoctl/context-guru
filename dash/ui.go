@@ -38,8 +38,21 @@ func uiHandler() http.Handler {
 		// The page loads nothing from the network beyond its own origin; say so, so a
 		// stray CDN tag added later fails loudly in the browser instead of silently
 		// breaking the air-gapped install.
+		//
+		// The last three do NOT fall back to default-src — each is a separate fetch
+		// directive with its own default of "anything" — and nginx sets no
+		// X-Frame-Options, so without them a self-only policy still allowed:
+		// frame-ancestors, framing this page cross-site. The session cookie is
+		//   SameSite=Lax, so a frame renders the UNAUTHENTICATED sign-in gate, which
+		//   makes UI-redress phishing of the sign-in form the realistic abuse rather
+		//   than riding an existing session. 'none' beats X-Frame-Options: DENY (which
+		//   has no reliable ALLOW-FROM) and covers every embedding element.
+		// base-uri, an injected <base> rebasing every relative URL on the page —
+		//   which script-src cannot see, because the URLs stay same-origin-looking.
+		// form-action, posting the sign-in form to another origin.
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'")
+			"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "+
+				"connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		files.ServeHTTP(w, r)
 	})
 }

@@ -406,6 +406,12 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 		if drop < 1 {
 			drop = 1
 		}
+		// No tenant column, and there cannot be one — a byte budget is a property of
+		// the whole file. That is why the per-tenant row quota runs BEFORE this
+		// (Recorder.janitorPass): reached while one tenant's traffic is what put the
+		// database over budget, this statement evicts the QUIET tenants, because
+		// theirs are the oldest rows it selects.
+		//
 		// Row-granular, deliberately, and this is the ONE rule that is. The byte
 		// budget is a hard cap the operator asked to be honoured, and it has to be
 		// satisfiable even when everything in the database belongs to a single

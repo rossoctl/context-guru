@@ -88,7 +88,7 @@ func (o OpenAI) CompleteSystem(ctx context.Context, system, prompt string) (stri
 	// prompt_tokens (unlike Anthropic, which reports the tiers disjointly). Subtract so
 	// the "fresh input" figure means the same thing on both backends.
 	cached := out.Usage.PromptTokensDetails.CachedTokens
-	recordUsageCache(out.Usage.PromptTokens-cached, out.Usage.CompletionTokens, 0, cached)
+	recordUsageCache(ctx, out.Usage.PromptTokens-cached, out.Usage.CompletionTokens, 0, cached)
 	if len(out.Choices) == 0 {
 		return "", nil
 	}
