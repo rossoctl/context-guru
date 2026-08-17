@@ -177,62 +177,10 @@ func (l *Limiter) AcquireCheapModel(done <-chan struct{}) (release func(), ok bo
 	}
 }
 
-// SpendChecker reports a tenant's spend against its cap.
+// SpendChecker reports a tenant's month-to-date cost, for display. Not a cap: each
+// tenant spends their own provider credential, so there is no shared budget to guard.
 type SpendChecker interface {
 	// MonthToDateUSD returns what this tenant has spent since the start of the
 	// current calendar month.
 	MonthToDateUSD(tenantID string) (float64, error)
-}
-
-// spendCache memoises spend lookups. A SUM over a tenant's rows is cheap but not
-// free, and it runs on every request; a minute of staleness against a monthly budget
-// is irrelevant, while a query per request is not.
-type spendCache struct {
-	mu     sync.Mutex
-	ttl    time.Duration
-	values *lru[spendEntry]
-}
-
-type spendEntry struct {
-	usd float64
-	exp time.Time
-}
-
-// DefaultSpendCacheTTL bounds how stale a spend figure may be. A tenant can overshoot
-// its cap by at most one minute of traffic, which against a monthly budget is noise.
-const DefaultSpendCacheTTL = time.Minute
-
-func newSpendCache(ttl time.Duration) *spendCache {
-	if ttl <= 0 {
-		ttl = DefaultSpendCacheTTL
-	}
-	return &spendCache{ttl: ttl, values: newLRU[spendEntry](maxLimiterKeys, nil)}
-}
-
-func (c *spendCache) get(tenantID string, load func(string) (float64, error)) (float64, error) {
-	c.mu.Lock()
-	e, ok := c.values.get(tenantID)
-	c.mu.Unlock()
-	if ok && time.Now().Before(e.exp) {
-		return e.usd, nil
-	}
-	usd, err := load(tenantID)
-	if err != nil {
-		// Fail OPEN on a spend-lookup failure: a broken metrics query must not stop a
-		// user's agent. The cap is a budget guard, not a security boundary, and the
-		// operator can see the log.
-		return 0, err
-	}
-	c.mu.Lock()
-	c.values.put(tenantID, spendEntry{usd: usd, exp: time.Now().Add(c.ttl)})
-	c.mu.Unlock()
-	return usd, nil
-}
-
-// invalidate drops a tenant's cached spend, so a cap change takes effect at once
-// rather than after the TTL.
-func (c *spendCache) invalidate(tenantID string) {
-	c.mu.Lock()
-	c.values.remove(tenantID)
-	c.mu.Unlock()
 }

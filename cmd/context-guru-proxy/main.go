@@ -26,6 +26,7 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
@@ -93,8 +94,6 @@ func main() {
 		maxTenancies = flag.Int("max-tenancies", envInt("MAX_TENANCIES", proxy.DefaultMaxTenancies),
 			"hosted mode: how many tenants keep live pipelines and compaction state in memory; "+
 				"evicting a tenant costs it one cold cache on its next turn")
-		tenantCapUSD = flag.Float64("tenant-monthly-cap-usd", float64(envInt("TENANT_MONTHLY_CAP_USD", 50)),
-			"hosted mode: default monthly spend cap per tenant against the shared upstream credential")
 
 		// Disk-pressure eviction. The byte budget above bounds THIS database; these
 		// bound the FILESYSTEM, which on a shared box is mostly filled by other things.
@@ -291,12 +290,11 @@ func main() {
 		}
 		defAnthropic, defOpenAI, defBob := defaultUpstreams(list)
 		reg, err = tenant.Open(*controlDB, tenant.Options{
-			ManagerEmail:         *managerEmail,
-			EmailDomains:         splitComma(*registerDomains),
-			DefaultUpAnthropic:   defAnthropic,
-			DefaultUpOpenAI:      defOpenAI,
-			DefaultUpBob:         defBob,
-			DefaultMonthlyCapUSD: *tenantCapUSD,
+			ManagerEmail:       *managerEmail,
+			EmailDomains:       splitComma(*registerDomains),
+			DefaultUpAnthropic: defAnthropic,
+			DefaultUpOpenAI:    defOpenAI,
+			DefaultUpBob:       defBob,
 			// Reject a bad configuration when a user SAVES it, so the failure is a 400
 			// on their settings page instead of a silent pass-through on their next turn.
 			Validate: config.Validate,
@@ -318,13 +316,12 @@ func main() {
 			}
 			return t.MaxRows
 		})
-		// A cap can only bind if requests can be priced. Without a price map every row
-		// costs $0.00, month-to-date spend is always zero, and the cap silently never
-		// fires — which looks exactly like a generous budget until the invoice arrives.
-		if *tenantCapUSD > 0 && strings.EqualFold(os.Getenv("MODEL_INFO"), "off") {
-			slog.Warn("context-guru: per-tenant spend caps are configured but MODEL_INFO=off, " +
-				"so requests cannot be priced and NO CAP WILL EVER FIRE")
-		}
+		// A tenant's own configuration must never be able to spend the server's ambient
+		// provider credential: a `model:` block that names a model but no api_key would
+		// otherwise fall back to this process's ANTHROPIC_API_KEY / OPENAI_API_KEY. In
+		// hosted mode that is exactly the billing defect this deployment removes, so the
+		// fallback is switched off and such a block simply has no client (fail open).
+		offload.AllowEnvModelKey = false
 		slog.Info("context-guru: HOSTED multi-tenant mode",
 			"control_db", *controlDB, "upstreams", len(upstreams),
 			"register_domains", *registerDomains, "manager", *managerEmail != "")
@@ -345,19 +342,29 @@ func main() {
 		// The mode comes from proxy.RegisterMode(), NOT from reading CG_REGISTER here:
 		// the control plane trims and lower-cases the value, so a banner that switched on
 		// the raw string reported "off" for CG_REGISTER=Open while registration was open.
+		// Whether a code can be DELIVERED is a boot-time fact worth reporting: registration
+		// and password sign-in cannot complete without it, and an operator should learn
+		// that here rather than from the first user's bug report.
+		if ok, how := proxy.MailConfigured(); !ok {
+			slog.Warn("context-guru: no email path configured (" + how + "); verification " +
+				"codes cannot be delivered, so NOBODY can create an account or sign in " +
+				"with a password")
+		} else {
+			slog.Info("context-guru: verification email path", "via", how)
+		}
 		switch mode := proxy.RegisterMode(); mode {
 		case "open":
 			if *registerDomains == "" {
 				slog.Warn("context-guru: CG_REGISTER=open with no --register-domains; anyone " +
-					"who can reach this port may create an account that spends the operator's " +
-					"upstream key")
+					"who can receive mail at any address may create an account here")
 			} else {
 				// The match itself is sound (exact domain or a subdomain of it, so
-				// notibm.com does not match ibm.com). What is weak is that NOBODY PROVES
-				// they own the address: there is no mail path, so the domain is a claim.
-				// Naming the wrong weakness would send an operator to fix the matching.
-				slog.Warn("context-guru: CG_REGISTER=open; the email domain is UNVERIFIED "+
-					"(no ownership proof), so exposure is (accounts created) x (monthly cap)",
+				// notibm.com does not match ibm.com), and the address is now PROVEN by a
+				// mailed code rather than merely claimed — which is what the old warning
+				// here said was missing. What remains is that reachability is not
+				// entitlement: anyone with a mailbox in the domain may register.
+				slog.Info("context-guru: CG_REGISTER=open with verified email addresses; "+
+					"anyone with a mailbox in these domains may self-register",
 					"domains", *registerDomains)
 			}
 		case "invite":

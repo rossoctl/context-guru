@@ -875,7 +875,7 @@
    "id": 16,
    "type": "timeseries",
    "title": "Refusals by reason",
-   "description": "The same SLI, split by why. Which bar is tall decides who fixes it: rate_limit/concurrency are our limits (429), spend_cap is a budget (402), auth/forbidden is the caller's token, no_upstream is our configuration and upstream_error is the provider. Flat at zero is healthy.",
+   "description": "The same SLI, split by why. Which bar is tall decides who fixes it: rate_limit/concurrency are our limits (429), auth/forbidden is the caller's token, no_upstream is our configuration and upstream_error is the provider. Flat at zero is healthy.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"

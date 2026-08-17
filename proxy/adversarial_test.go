@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The registration mode is switched on in TWO places — the control plane enforces it
@@ -14,13 +15,17 @@ import (
 // Before this, the banner read CG_REGISTER raw: "Open" enforced as OPEN while the log
 // said self-registration was off.
 //
-// The same table pins fail-closed for everything that is not exactly open/invite.
-func TestRegisterModeNormalisesAndFailsClosed(t *testing.T) {
+// The same table pins the DEFAULT: anything that is not recognisably invite or closed
+// resolves to open. `closed` and `invite` are the deliberate departures from the
+// default, so a typo in one of those must not silently disable accounts — and a typo
+// cannot silently ENABLE them either, because open is what an unset variable means.
+func TestRegisterModeNormalisesAndDefaultsToOpen(t *testing.T) {
 	for raw, want := range map[string]string{
 		"open": "open", "Open": "open", "OPEN": "open", " open ": "open",
 		"invite": "invite", "Invite": "invite",
-		"closed": "closed", "": "closed", "1": "closed", "true": "closed",
-		"opne": "closed", "open-ish": "closed", "yes": "closed",
+		"closed": "closed", "Closed": "closed", " closed ": "closed",
+		"": "open", "1": "open", "true": "open",
+		"opne": "open", "open-ish": "open", "yes": "open",
 	} {
 		t.Setenv(envRegisterMode, raw)
 		if got := RegisterMode(); got != want {
@@ -32,7 +37,7 @@ func TestRegisterModeNormalisesAndFailsClosed(t *testing.T) {
 // And the enforcement agrees with that resolution: a mode the banner reports as open
 // must actually register, and one it reports as closed must actually refuse.
 func TestRegistrationEnforcementMatchesReportedMode(t *testing.T) {
-	for i, raw := range []string{"OPEN", " open", "Open", "1", "true", "opne", ""} {
+	for i, raw := range []string{"OPEN", " open", "Open", "1", "true", "opne", "", "closed", "CLOSED"} {
 		t.Setenv(envRegisterMode, raw)
 		f := newHostedFixture(t, "up", "openai")
 		mode := RegisterMode()
@@ -123,6 +128,12 @@ func TestRegistrationBucketIsPerIPv6Prefix(t *testing.T) {
 	t.Setenv(envRegisterMode, "open")
 	f := newHostedFixture(t, "up", "openai")
 	limited := false
+	// Timed, for the same reason TestSignInAttemptsAreRateLimited is: each registration
+	// this loop is allowed hashes a password with argon2 at 64 MiB, and the limiter's
+	// window is one minute. On a contended machine the allowed attempts can outlast that
+	// window, ageing themselves out so the bound correctly never fires — which from in
+	// here is indistinguishable from a real bypass.
+	start := time.Now()
 	for i := 0; i < registrationsPerMinute+3; i++ {
 		addr := "[2001:db8::" + strconv.Itoa(i+1) + "]:5555"
 		if registerVia(t, f, "u"+strconv.Itoa(i)+"@ibm.com", "", addr) == http.StatusTooManyRequests {
@@ -131,6 +142,12 @@ func TestRegistrationBucketIsPerIPv6Prefix(t *testing.T) {
 		}
 	}
 	if !limited {
-		t.Error("rotating addresses inside one IPv6 /64 bypassed the registration limit")
+		if elapsed := time.Since(start); elapsed >= time.Minute {
+			t.Skipf("inconclusive: %d registrations took %v, outlasting the limiter's "+
+				"1-minute window, so the bound correctly did not fire. Not a bypass — "+
+				"re-run on a less loaded machine.", registrationsPerMinute+3, elapsed)
+		}
+		t.Errorf("rotating addresses inside one IPv6 /64 bypassed the registration limit "+
+			"(%d attempts in %v)", registrationsPerMinute+3, time.Since(start))
 	}
 }

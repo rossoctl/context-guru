@@ -28,31 +28,47 @@ harnesses in `deploy/harbor/` are unaffected.
 | Who may call the proxy | anyone who can reach the port | a valid `cg_live_…` token |
 | Pipeline | `--config` / `--preset`, one for the process | the caller's own from the control database, or the [server default they track](#tenants-track-the-default-they-are-not-stamped-with-a-copy-of-it) |
 | Compaction state store | one, shared | one per tenant |
-| Upstream + credential | fixed at boot from flags/env | the tenant's chosen name from the allow-list; the operator's key injected |
+| Upstream + credential | fixed at boot from flags/env | the tenant's chosen name from the allow-list; **the caller's own provider key forwarded** |
 | Dashboard data | everything | scoped to the caller; managers may widen |
 | `/stats` | open | loopback or a manager (it is a service-wide aggregate) |
 | Transcript capture | operator's flag | operator's flag **and** the tenant's consent |
 
 ## Credentials, and what is never stored
 
-Two kinds of secret exist, and neither is written anywhere it could be read back.
+No secret is written anywhere it could be read back — every value in the control
+database is a digest of something, and none of them can be replayed as its input.
 
 **User tokens.** We mint them; the database holds `sha256(token)` and the first 8
 characters, and nothing else. After `Register` returns, the process no longer has the
 plaintext — so there is no code path that can print one, and a dump of the control
 database cannot be replayed against the proxy. Show it once, at registration.
 
-**Upstream provider keys.** These belong to the operator, never to a user. The
-allow-list names the *environment variable* each key lives in; the value is read at
-request time. It is not in the YAML, not in the control database, and not in a
-tenant's configuration.
+**Provider keys belong to the caller.** Your agent sends its own key in
+`Authorization` / `x-api-key` / `x-goog-api-key`, and the proxy **forwards it
+unchanged** — your traffic, your provider account, your invoice. The service holds no
+provider credential of its own and stores none: the key is read off the request and
+dropped.
 
-A user never hands us their own provider key, and we never ask for one.
+That is why identity moved to a header of its own. `x-context-guru-token` carries the
+`cg_live_…` token, and `copyHeaders` strips every `x-context-guru-*` header before
+forwarding, so a token cannot leave the box by construction. A token presented in an
+auth slot instead is still accepted (some tools have nowhere else to put it) and is
+scrubbed out on the way — recognisable because only *our* tokens are shaped
+`cg_live_` + 26 characters, which no provider key is.
 
-The proxy strips `Authorization`, `x-api-key` and `x-goog-api-key` before forwarding
-and injects the operator's credential instead. Every slot the tenant resolver accepts
-a token from is a slot that is dropped on the way out — `proxy.tokenHeaders` is the
-single list both behaviours read.
+A caller with no credential of their own gets a **401**. It never falls back to
+whatever key the box happens to hold: that fallback is the defect this design removes.
+
+**Dashboard credentials are separate, and also only ever stored derived**: an argon2id
+hash of the password, `sha256` of the session cookie, `sha256` of the 5-minute email
+code, and — for an agent that can carry no header of ours — `sha256` of the provider key
+it was bound with. See [the sign-in flow](#the-sign-in-flow).
+
+**Server-held keys are an explicit opt-in, not the default.** An allow-list entry may
+name a `key_env`, and then that variable's value replaces the caller's auth on
+forward. That is for a gateway deployment where the agent holds only a placeholder —
+eval containers, a local single-tenant proxy. Omit `key_env` (the hosted default) and
+the caller's own credential goes through.
 
 ## Operator setup
 
@@ -65,7 +81,7 @@ Everything below was derived from the scripts in `deploy/service/`, which are th
 | Building the binary | Go 1.26 and a C toolchain (`CGO_ENABLED=1`) — or an already-installed `/usr/local/bin/context-guru-proxy`, which `install` keeps if there is no fresh build |
 | Installing | root, and systemd. The scripts are written for **RHEL 9** (`dnf`, and nginx 1.20's config dialect) |
 | The TLS front end | `nginx`, plus a certificate and key at `/etc/context-guru/tls/{fullchain,privkey}.pem` |
-| Each upstream | one API key, and a host to send it to |
+| Each upstream | a host to send it to. A key only if you want the server to hold one — the default forwards each caller’s own |
 | Cold storage (optional) | `rclone`, and a browser somewhere for the one OAuth step |
 | Grafana (optional) | `podman` or `docker` |
 
@@ -107,26 +123,22 @@ make build
 # 2. Create the account, directories, binary, units and drop-ins.
 sudo deploy/service/install.sh install
 
-# 3. One credential file per upstream, named after its allow-list entry.
-printf %s "$UPSTREAM_KEY" | sudo tee /etc/context-guru/credentials/ibm-litellm >/dev/null
-sudo chmod 0400 /etc/context-guru/credentials/*
-
-# 4. Real hosts, and key_env names matching the files from step 3.
+# 3. Real hosts. No key_env, so each caller's own provider key is forwarded and no
+#    credential file is needed. (Gateway deployments only: add key_env: NAME, put the
+#    key in /etc/context-guru/credentials/<name>, chmod 0400, and re-run install.)
 sudoedit /etc/context-guru/upstreams.yaml
 
-# 5. Site settings — MANAGER_EMAIL above all. This file, NOT the unit.
+# 4. Site settings — MANAGER_EMAIL above all. This file, NOT the unit.
 sudoedit /etc/systemd/system/context-guru.service.d/20-local.conf
 
-# 6. Re-run install so the credential drop-in is regenerated from step 3.
-sudo deploy/service/install.sh install
-
-# 7. Preflight, then start.
+# 5. Preflight, then start.
 sudo deploy/service/install.sh start
 ```
 
-Then the TLS front end ([2b](#2b-tls-front-end)), cold storage
-([4](#4-cold-storage-on-box)), and a registration mode ([3](#3-choose-how-accounts-are-created)) —
-in any order, none of them blocking a first request.
+Then the TLS front end ([2b](#2b-tls-front-end)), the email path
+([3](#3-configure-the-email-path)), a registration mode
+([4](#4-choose-how-accounts-are-created)), and cold storage ([5](#5-cold-storage-on-box)).
+Only the email path blocks a first *account*; none of them block a first request.
 
 #### The four things worth understanding before you run it
 
@@ -146,14 +158,15 @@ unauthenticated forwarder to anything this host's network can reach. The example
 `REPLACE-WITH-…` placeholder hosts and `preflight` fails while they are still there —
 starting with them means every request 502s.
 
-**One credential file per upstream, delivered by `LoadCredential`.** Each allow-list
-entry names the environment variable its key lives in; the value lives in
+**Server-held keys, when you want them, arrive by `LoadCredential`.** The default needs
+none — the caller's own provider key is forwarded — but an allow-list entry may name a
+`key_env`, and then the value lives in
 `/etc/context-guru/credentials/<entry>` (root-owned, `0700` directory, `0400` files) and
 systemd hands it to the process as a credential rather than an `Environment=` line —
 which `systemctl show` would print to anyone who can read the unit. `install` **generates**
 `10-credentials.conf` from whatever is actually in that directory, because a hand-written
 `LoadCredential` naming a file that does not exist fails the whole unit with an error that
-does not say which file. So adding an upstream is: drop the key in, re-run `install`.
+does not say which file. So adding a server key is: drop it in, re-run `install`.
 Both spellings of a name work (`ibm-litellm` and `ibm_litellm`), and preflight accepts
 either.
 
@@ -266,56 +279,119 @@ originated server-side and reached the client unbuffered.
     if you want `tls-smoke.sh` to test against the root rather than falling back to the
     system trust store — it says which one it used.
 
-### 3. Choose how accounts are created
+### 3. Configure the email path
 
-**Self-registration is off by default, and a new deployment will look broken until you
-pick a mode** — the first user's `Register` gets a `403` saying to ask the operator.
-That is deliberate: an account is a spending credential against *your* upstream key, so
-N accounts are N × the monthly cap of your money.
+**Nothing about accounts works until this is set.** Registration mails a 6-digit code to
+prove the address is real, and signing in mails one as a second factor. With no mail path
+`POST /api/register` answers `503` naming the missing variable, and the startup banner
+warns. That is deliberate: a registration whose code went nowhere is worse than one that
+refuses.
+
+All of it is read from the environment *per send*, so pointing at a different relay needs
+no restart.
+
+| Variable | Meaning |
+|---|---|
+| `CG_SMTP_HOST` | Relay hostname. **Required.** Empty means no mail path. |
+| `CG_SMTP_PORT` | Default `25`. |
+| `CG_SMTP_FROM` | Envelope and `From:` address. Default `context-guru@<hostname>`. |
+| `CG_SMTP_HELO` | EHLO name. Default the local hostname. |
+| `CG_SMTP_USER` / `CG_SMTP_PASSWORD` | SMTP AUTH, if the relay wants it. Usually empty inside a corporate network, where the relay authorises by source IP. Read at send time, never stored. |
+| `CG_SMTP_INSECURE=1` | Skip STARTTLS certificate verification. For a relay with an internal-CA or mismatched certificate **only**. |
+| `CG_MAIL_DEV_SINK` | Development escape hatch — see the warning below. |
+
+STARTTLS is used whenever the relay advertises it, and a failure to negotiate **aborts the
+send** rather than continuing in the clear: a code that travels plaintext because a
+certificate expired is exactly the silent downgrade that makes "we use TLS" untrue.
+
+On the IBM internal network `na.relay.ibm.com:25` accepts mail from this host, advertises
+STARTTLS, verifies against the public trust store, and needs no AUTH:
+
+```
+Environment=CG_SMTP_HOST=na.relay.ibm.com
+Environment=CG_SMTP_FROM=context-guru@<this-host>.fyre.ibm.com
+```
+
+Egress on **465 and 587 is blocked** from this network; only 25 to the internal relay is
+open. Do not configure a public provider — it will time out.
+
+!!! danger "`CG_MAIL_DEV_SINK` must never be set on a real deployment"
+    `CG_MAIL_DEV_SINK=log` writes the six digits to the **server log** at INFO, so anyone
+    who can read the log can complete anyone's sign-in. Any other value is treated as a
+    file path, appended to with mode `0600`. It applies only when `CG_SMTP_HOST` is empty,
+    and every send through it logs a warning saying what it just did. It exists so a
+    deployment with no relay can still create its first account.
+
+### 4. Choose how accounts are created
+
+**Self-registration is open by default**: anyone whose address passes `--register-domains`
+can create an account, once they enter the code mailed to it. Two things make that safe
+enough to be the default — the address is now *proven* rather than claimed, and an account
+no longer spends the operator's money (each user forwards their own provider key).
 
 `CG_REGISTER` is read per request, so switching modes needs no restart.
 
 | `CG_REGISTER` | `POST /api/register` |
 |---|---|
-| unset / `closed` | **Default.** Refused with `403`. You create accounts. |
-| `invite` | Requires an exact `code` in the request body, compared against `CG_REGISTER_CODE`. With no code configured it refuses rather than falling through to open. |
-| `open` | Self-service, capped at 3 attempts per minute per client address. |
+| unset / `open` | **Default.** Self-service, capped at 3 attempts per minute per client address, plus mandatory email verification. |
+| `invite` | Additionally requires an exact `code` in the request body, compared against `CG_REGISTER_CODE` in constant time. With no code configured it refuses rather than falling through to open. |
+| `closed` | Refused with `403`. Nothing can create an account — see the bootstrap note below. |
 
 Anything the resolver does not recognise — a typo, `Open`, `" open"` — normalises to
-**closed**. This is the one place the project's fail-open rule does not apply: minting
-identity is auth, and auth fails closed. The startup banner and `/api/whoami` both report
-the mode through the same resolver the gate uses, so a log line cannot disagree with what
-is enforced.
+**open**, the default, like every other setting in this project. `closed` and `invite` are
+the deliberate departures, so a typo cannot silently disable accounts. The startup banner
+and `/api/whoami` both report the mode through the same resolver the gate uses, so a log
+line cannot disagree with what is enforced.
 
-#### Bootstrapping the first account
+#### The sign-in flow
+
+Two phases, and phase one issues **no cookie** — knowing a password is never by itself a
+signed-in browser.
+
+| Step | Route | Result |
+|---|---|---|
+| Register | `POST /api/register` `{email, password}` | account created **unverified**, no token, code mailed. The reply carries `code_expires_at` so the UI can count down against the server's clock. |
+| Confirm | `POST /api/verify` `{email, code}` | verified, first `cg_live_` token returned **once**, session opened. |
+| Sign in | `POST /api/login` `{email, password}` | password checked, fresh code mailed. |
+| Second factor | `POST /api/verify` `{email, code}` | session opened. |
+
+`/api/verify` decides which flow it is from the pending code's own *purpose*, never from
+anything the client says — otherwise a login code could be spent on the branch that mints
+a token.
+
+- **Codes** are 6 digits, valid **5 minutes**, one-time, and stored only as a hash. A new
+  code replaces the pending one rather than adding to it.
+- **Passwords** are stored as **argon2id** — 64 MiB, 3 passes, 2 lanes, a fresh 16-byte
+  random salt per account — in PHC string format, so the parameters can be raised later
+  without invalidating a single existing password. Minimum 12 characters, no composition
+  rules: length is what buys entropy.
+- **Brute force.** A code tolerates **5 wrong guesses**, after which it is destroyed rather
+  than merely refused. On top of that, password attempts are capped at 5/minute and code
+  submissions at 10/minute, charged against **both** the email address and the client
+  address — either bucket alone is trivially sidestepped (per-email only lets one host
+  grind every account; per-IP only lets a botnet grind one account). Deliberately a rolling
+  window rather than a sticky "locked for 30 minutes", which anyone could aim at a
+  colleague by typing their address.
+- **Proxy tokens are unchanged**, and are still how agents authenticate to the proxy. They
+  are a separate credential: a token cannot sign in to the dashboard once the account has a
+  password, and a dashboard session cannot send traffic. An account created before
+  passwords existed still signs in with its token, because it has nothing else.
+- **Several machines at once** is the expected state. Each session records a label,
+  User-Agent, address, and last-seen time; Settings → *Signed-in machines* lists them and
+  revokes them one at a time (`GET`/`DELETE /api/me/sessions/{id}`).
+
+#### Bootstrapping when you start `closed`
 
 !!! warning "`POST /api/register` is the only route that creates an account"
     There is no manager-side create. A manager can reissue a token for a tenant that
-    **already exists**, set a cap, or disable an account — but cannot bring one into
-    being. So a fresh control database on the default `closed` has **no path to a first
-    account at all**, and the deployment looks broken rather than locked.
+    **already exists**, set its row quota, or disable an account — but cannot bring one
+    into being. So a control database on `closed` has **no path to a first account at all**.
 
-The bootstrap is to open `invite` briefly, register the manager, and close it again:
-
-```sh
-# 1. An invite code, and a mode to use it in. Both are read per request.
-sudo systemctl edit context-guru      # in the drop-in editor:
-                                      #   Environment=CG_REGISTER=invite
-                                      #   Environment=CG_REGISTER_CODE=<a one-time string>
-sudo systemctl restart context-guru
-
-# 2. Register at /dashboard/ with the email that MANAGER_EMAIL names (matched
-#    case-insensitively) and that invite code. That account is the manager, and the
-#    token is shown ONCE.
-
-# 3. Close it again. No restart needed — CG_REGISTER is re-read per request.
-sudo systemctl edit context-guru      # Environment=CG_REGISTER=closed
-sudo systemctl daemon-reload && sudo systemctl restart context-guru
-```
-
-`MANAGER_EMAIL` has to be set *before* step 2: the role is assigned at registration by
-comparing the address, which is how the first manager exists at all without an
-interactive bootstrap step to forget and then work around.
+`MANAGER_EMAIL` has to be set *before* the manager registers: the role is assigned at
+registration by comparing the address, which is how the first manager exists at all without
+an interactive bootstrap step to forget and then work around. If you have set
+`CG_REGISTER=closed`, open `invite` briefly, register, and close it again — no restart
+needed, the variable is re-read per request.
 
 #### How the `open` limit is keyed
 
@@ -341,15 +417,16 @@ defends.
 **exact-domain-or-subdomain** match on the part after the `@` (`ibm.com` and
 `x.ibm.com` pass; `notibm.com` does not).
 
-**What these modes do not do.** The domain is checked; the *address* is not. There is no
-mail path on this deployment, so there is no email verification to be had — anyone who can
-guess a valid address in an allowed domain satisfies the check. So `open` mode's real
-exposure is (however many accounts somebody bothers to create) × (the per-tenant monthly
-cap) of the operator's money, and the rate limit only slows a single source. An invite code
-is a shared secret with no per-use accounting: once it leaks it is `open` until you rotate
-it. A port anything else can reach wants `invite` and a modest cap.
+**What these modes do not do.** The address is now proven — a code has to arrive in that
+mailbox — but reachability is not entitlement. Anyone with a real mailbox in an allowed
+domain can register, and can register more than once with more than one address; the rate
+limit only slows a single source. What that costs is not the operator's money — every
+account spends its own provider credential — but accounts on your box, consuming its CPU
+and its row quota (`--dashboard-max-rows-per-tenant`). An invite code is a shared secret
+with no per-use accounting: once it leaks it is `open` until you rotate it. A port the whole
+internet can reach wants `invite`.
 
-### 4. Cold storage on Box
+### 5. Cold storage on Box
 
 ```
 deploy/service/box-setup.sh check     # what is installed and configured
@@ -398,18 +475,17 @@ inbound exception for **TCP/443 and nothing else**. Port 80 is not requested and
 way in is through the TLS front end.
 
 **Registration policy.** `REGISTER_DOMAINS=ibm.com` in the shipped drop-in is what makes
-`open` mode tolerable there: an attacker needs an address in a domain you control. With no
-domain restriction, `open` means anyone who can reach the port can mint a spending credential
-against your upstream key, and the only brake is 3 attempts/minute per client address. There
-is **no mail path and therefore no email verification** — the domain is checked, the address
-is not. A publicly reachable deployment wants `invite` with a code you rotate, or `closed`
-with accounts you create yourself.
+`open` mode tolerable there: an attacker needs a real, reachable mailbox in a domain you
+control, since [registration mails a code](#3-configure-the-email-path) to it. With no
+domain restriction, `open` means anyone with any working mailbox can mint an account on
+your box, and the only brakes are the mailed code and 3 attempts/minute per client
+address. A publicly reachable deployment wants `invite` with a code you rotate, or
+`closed` with accounts you create yourself.
 
-**Spend caps.** The IBM default is $50/tenant/month against a shared internal gateway credential.
-Your exposure is (accounts that exist) × (their caps), so set `TENANT_MONTHLY_CAP_USD` to a
-number you would be willing to lose before you open registration, not after. A cap can only
-bind if requests can be priced — with `MODEL_INFO=off` every row costs $0.00 and no cap ever
-fires; the process warns about that combination at startup.
+**No spend caps, and none needed.** Every tenant's traffic is billed to the credential
+that tenant's agent sends, so there is no shared budget to guard. Month-to-date cost is
+still computed and shown, per tenant, on Settings and in the manager's roster — it needs
+`MODEL_INFO` on to be non-zero, because an unpriced row costs $0.00.
 
 Two things that are *not* IBM-specific and should not be relaxed: cold storage on Box is one
 rclone remote name away from being any other remote, and `/metrics` plus Grafana binding
@@ -422,26 +498,41 @@ loopback-only is about cross-tenant spend data, not about IBM.
     version of this section: register, trust the CA, point one agent at it, and turn it on and
     off per session.
 
-One token, one host. Each agent has its own environment variable, so a user sets each
-once and never thinks about it again.
+**Keep your own provider key where it already is.** The proxy forwards it, so your
+traffic is billed to you. What you add is a base URL and the context-guru token, and the
+token goes in `x-context-guru-token` — never in the slot your key occupies.
 
 ```bash
-# Claude Code
+# Claude Code — your own key stays in ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN)
 export ANTHROPIC_BASE_URL=https://cg.<host>/anthropic
-export ANTHROPIC_AUTH_TOKEN=cg_live_xxxxxxxx
+export ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: cg_live_xxxxxxxx"
 
-# Bob
-export CUSTOM_BASE_URL=https://cg.<host>
-export BOBSHELL_API_KEY=cg_live_xxxxxxxx
-
-# OpenAI-dialect tools
+# OpenAI-dialect tools — your own key stays in OPENAI_API_KEY; send the header
+#   x-context-guru-token: cg_live_xxxxxxxx
 export OPENAI_BASE_URL=https://cg.<host>/openai/v1
-export OPENAI_API_KEY=cg_live_xxxxxxxx
+
+# Bob — its client sets every header itself and cannot carry ours, so bind the key
+# it already sends (stored as sha256 only, never in plaintext). One-time, from the
+# Setup tab, with your dashboard cookie:
+export CUSTOM_BASE_URL=https://cg.<host>
+curl -sS -XPOST https://cg.<host>/api/me/agent-key \
+  -H "Authorization: Bearer $BOBSHELL_API_KEY" -b "cg_dash=<your dashboard cookie>"
 ```
+
+### How each agent identifies itself
+
+| Agent | Mechanism | Why |
+|---|---|---|
+| Claude Code | `ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: …"` (or the same pair in `~/.claude/settings.json` `env`) | Documented `Name: Value`, newline-separated for several. Leaves `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` free for your own key. |
+| OpenAI-dialect tools | `x-context-guru-token` header, however your tool sets extra headers | Same slot rule; `OPENAI_API_KEY` stays yours. |
+| Bob (BobShell) | `sha256(BOBSHELL_API_KEY)`, bound once via `POST /api/me/agent-key` | Bob's client builds `Content-Type`, `User-Agent`, `Authorization`, `x-instance-id` and `x-team-id` itself and exposes no hook for another header; its `headers` setting applies to MCP servers only. So it is recognised by the credential it already sends. |
+
+Agent *family* (claude-code / bob / codex / …) is read from the `User-Agent`, which none
+of this touches.
 
 The path carries the dialect; the tenant's configuration carries which upstream each
 dialect goes to. So switching between Claude Code and Bob needs no per-agent choice
-of gateway, and the same token works in all three.
+of gateway, and the same token works in all of them.
 
 !!! warning "Verify the traffic actually arrives — an `export` is not proof"
     For Claude Code, an `env` block in `~/.claude/settings.json` **overrides the variable
@@ -528,8 +619,9 @@ alone, deliberately.
 
 A tenant can enable `extract_llm` on their settings page. It is a real tradeoff, not
 a free upgrade — measured at +117 ms per request, up to ~945 ms when file reads are
-frequent — and it bills to the shared credential, so it counts against that tenant's
-spend cap.
+frequent — and its model calls go out on **that tenant's own credential**, the same one
+the request carries. With no caller credential available the component skips (fail
+open); it never borrows the server's.
 
 ## Storage
 
@@ -776,11 +868,11 @@ thing to keep in step with the server.
 
 | View | What it does |
 |---|---|
-| Sign in / Register | Registration takes an email, a token label, and an invite code if the deployment is in `invite` mode; it returns the token **once**. It also signs you in, so registration flows straight to Setup with the token already substituted into the snippets. On a `closed` deployment the attempt is refused — see [step 3](#3-choose-how-accounts-are-created). Signing in later exchanges the token for a session cookie — the token is never stored in the browser. |
-| Setup | The three copy-paste blocks, with your own token and this deployment's real base URL (derived from the request, so it is correct behind nginx and on loopback alike). |
-| Settings | Mode, upstream per dialect, component toggles, content-capture consent, raw YAML, spend against cap, token management, and your own configuration-change history. Read-only while you are [tracking the server default](#tenants-track-the-default-they-are-not-stamped-with-a-copy-of-it), with **Customise** to take ownership. |
+| Sign in / Register | Registration takes an email, a password, a token label, and an invite code if the deployment is in `invite` mode; entering the [mailed 6-digit code](#the-sign-in-flow) verifies the address, returns the token **once**, and signs you in — so registration flows straight to Setup with the token already substituted into the snippets. On a `closed` deployment the attempt is refused — see [step 4](#4-choose-how-accounts-are-created). Signing in later is password + a fresh mailed code, and an account created before passwords existed can still sign in with its token. Either way the browser only ever holds the session cookie. |
+| Setup | The three copy-paste blocks, with your own token and this deployment's real base URL (derived from the request, so it is correct behind nginx and on loopback alike). Your provider key stays where it already is; the blocks only add the base URL and the `x-context-guru-token` header — or, for Bob, the one-time key-binding curl. |
+| Settings | Mode, upstream per dialect, component toggles, content-capture consent, raw YAML, month-to-date spend, bound agent keys, token management, signed-in machines, and your own configuration-change history. Read-only while you are [tracking the server default](#tenants-track-the-default-they-are-not-stamped-with-a-copy-of-it), with **Customise** to take ownership. |
 | Archive | What has moved to cold storage, from the local index. Opening one fetches it back read-only. |
-| Tenants | Manager only: every account with spend against cap, set a cap, disable an account, reissue a lost token. |
+| Tenants | Manager only: every account with its month-to-date spend, disable an account, reissue a lost token. |
 
 ![Setup immediately after registering: a green banner reads "Your new token is filled in
 below. It is shown once and cannot be recovered — copy it somewhere safe now", above
@@ -788,15 +880,15 @@ copy-paste export blocks for Claude Code, Bob and OpenAI-dialect tools carrying 
 deployment's base URL and the freshly minted token (redacted
 here).](img/hosted/01-register.png)
 
-![The Settings page: spend this month, $86.42 of a $200.00 cap, drawn as a meter above the
+![The Settings page: spend this month, $86.42, reported above the
 knobs; a mode selector set to "sync — compaction is applied"; one upstream dropdown per
 dialect, populated from the operator's allow-list; a grid of pipeline-component
 checkboxes with extract_llm carrying its own latency-and-billing warning; and the
 transcript-capture consent box.](img/hosted/02-settings.png)
 
 ![The manager-only Tenants view: six placeholder accounts, each with its role,
-month-to-date spend against its cap, when it was last seen, the first line of its
-configuration, and per-row Metrics, Set cap, Disable and Reissue token buttons. The
+month-to-date spend, when it was last seen, the first line of its
+configuration, and per-row Metrics, Disable and Reissue token buttons. The
 disabled account is greyed out with its actions
 inert.](img/hosted/03-tenants.png)
 
@@ -817,20 +909,15 @@ The page keeps its strict same-origin CSP, no npm, no bundler and no CDN. `style
 | Requests per minute, per tenant | `--tenant-rpm` | 0 (unlimited) |
 | In-flight requests, per tenant | `--tenant-concurrent` | 0 (unlimited) |
 | Concurrent compaction-model calls, process-wide | `--cheap-model-concurrent` | 4 |
-| Monthly spend, per tenant | `--tenant-monthly-cap-usd` | $50 |
 
 The compaction-model bound is process-wide rather than per tenant on purpose: the point
 is to stop one tenant's `extract_llm` traffic from making everyone else's agents wait on
 a shared, rate-limited backend.
 
-Over the spend cap returns **402**, not 429: retrying will not help until a manager
-raises the cap or the month turns over, and saying so precisely is the difference
-between a bug report and a budget request.
-
-**A cap can only bind if requests can be priced.** With `MODEL_INFO=off` every row costs
-$0.00, month-to-date spend is always zero, and no cap ever fires — main warns at startup
-if you configure that combination. Note also that prices load asynchronously on first
-use, so the very first request after a restart is recorded as `partial` and unpriced.
+**There is no spend cap.** Each tenant's traffic is billed to the credential their own
+agent sends, so there is nothing shared to ration. Cost is still recorded and displayed;
+it needs `MODEL_INFO` on to be non-zero, and prices load asynchronously on first use, so
+the very first request after a restart is recorded as `partial` and unpriced.
 
 ## Privacy
 

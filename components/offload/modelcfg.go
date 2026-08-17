@@ -22,16 +22,30 @@ type modelConfig struct {
 	Auth     string `yaml:"auth"`     // anthropic only: "" | x-api-key (default) | bearer (LiteLLM/gateway)
 }
 
+// AllowEnvModelKey permits an api_key-less `model:` block to fall back to this
+// process's provider credential (OPENAI_API_KEY / ANTHROPIC_API_KEY /
+// ANTHROPIC_AUTH_TOKEN). True for single-tenant use, where the config and the
+// environment belong to the same person.
+//
+// A hosted host sets it FALSE: there, the config document is written by a tenant and
+// the environment holds the operator's credential, so the fallback would let any
+// tenant bill their compaction to the operator — the one thing per-caller credentials
+// exist to prevent. A block with no key then builds no client, and the component
+// degrades (fail open).
+var AllowEnvModelKey = true
+
 // Client builds the LLM client this block pins, or nil when no model is named
 // (the component then falls back to the host-resolved Ctx.Model.For(source)).
-// An empty api_key falls back to the provider's env key: OPENAI_API_KEY for
-// OpenAI; ANTHROPIC_API_KEY then ANTHROPIC_AUTH_TOKEN (bearer gateways) for
-// Anthropic — so secrets can stay in the environment, out of the config file.
+// An empty api_key falls back to the provider's env key when AllowEnvModelKey — so
+// secrets can stay in the environment, out of the config file.
 func (m modelConfig) Client() components.Model {
 	if m.Model == "" {
 		return nil
 	}
 	key := m.APIKey
+	if key == "" && !AllowEnvModelKey {
+		return nil
+	}
 	if m.Provider == "openai" {
 		if key == "" {
 			key = os.Getenv("OPENAI_API_KEY")

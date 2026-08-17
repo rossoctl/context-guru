@@ -8,10 +8,15 @@
 # that would make the proxy an unauthenticated forwarder to anything this host's
 # network can reach.
 #
-# No credential appears here. Each entry names the ENVIRONMENT VARIABLE its key
-# lives in, read at request time. The proxy refuses to start if any named variable
-# is unset — with no key to inject it would forward the caller's own header, which
-# in hosted mode is the token we minted.
+# NO CREDENTIAL IS CONFIGURED HERE, and by default none is used: the caller's own
+# provider key is forwarded upstream, so each user's traffic is billed to their own
+# account. A caller with no key of their own gets a 401 — never somebody else's key.
+#
+# `key_env: SOME_VAR` is the opt-in exception: it names an environment variable whose
+# value REPLACES the caller's auth on forward, read at request time. Use it only for a
+# gateway deployment where the agent holds a placeholder key (eval containers, a local
+# single-tenant proxy). If you name a variable, it must be set, or the proxy refuses to
+# start rather than silently forwarding a placeholder.
 #
 # The first entry of each dialect is the default a newly registered tenant gets, so
 # the common case needs no choices at registration.
@@ -22,21 +27,18 @@ upstreams:
   - name: ibm-litellm
     dialect: anthropic
     base_url: https://REPLACE-WITH-IBM-GATEWAY-HOST
-    key_env: UPSTREAM_IBM_LITELLM_KEY
 
   # The same gateway over its OpenAI-dialect route, for Codex, tau2-bench, etc.
   #   OPENAI_BASE_URL=https://cg.<host>/openai/v1
   - name: ibm-litellm-openai
     dialect: openai
     base_url: https://REPLACE-WITH-IBM-GATEWAY-HOST
-    key_env: UPSTREAM_IBM_LITELLM_KEY
 
   # IBM Bob Shell. Bob's model call and its control-plane paths both route here.
   #   CUSTOM_BASE_URL=https://cg.<host>
-  # `header` is only needed when the upstream wants the key somewhere other than
-  # this dialect's default (Authorization: Bearer for openai/bob, x-api-key for
+  # `header` is only needed when a key_env'd upstream wants the key somewhere other
+  # than this dialect's default (Authorization: Bearer for openai/bob, x-api-key for
   # anthropic).
   - name: bob-us-east
     dialect: bob
     base_url: https://api.us-east.bob.ibm.com
-    key_env: UPSTREAM_BOB_US_EAST_KEY

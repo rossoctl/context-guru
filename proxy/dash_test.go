@@ -473,18 +473,36 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 		return ds[len(ds)/2]
 	}
 	off, on := median(offs), median(ons)
-
 	added := on - off
-	t.Logf("median per-request latency over %d paired requests: dashboard off %v, "+
-		"on with content ON %v (added %v)", iters, off, on, added)
 
-	// The budget is loose in absolute terms (a fake-upstream request still moves by a
-	// millisecond or two under load) but an order of magnitude below the ~53 ms the
-	// regression cost. Anything that puts redaction, gzip or an insert back on the
-	// request goroutine blows straight through it.
-	if added > 5*time.Millisecond {
-		t.Errorf("the dashboard added %v per request with content capture on; "+
-			"something expensive is back on the request goroutine (budget 5ms)", added)
+	// The budget is RELATIVE with an absolute floor, because a fixed budget cannot mean
+	// the same thing at both ends of this machine's range. Measured on this box: idle, a
+	// fake-upstream request settles around 1-2 ms; with the test suite saturating 16
+	// cores (load average 12.9) the same request's own median was 331 ms. A flat 5 ms
+	// gate is a real constraint in the first case and pure scheduler noise in the second,
+	// which is why it failed roughly one run in three while nothing was wrong.
+	//
+	// 10% of the request's own cost keeps the guard honest at both ends: the regression
+	// this exists to catch (content redaction moved back onto the request goroutine,
+	// ~53 ms) is caught at any baseline, while contention that slows BOTH handlers
+	// equally cannot trip it.
+	//
+	// The gate reads the median, not the minimum. The minimum was tried and is worse: it
+	// is one sample with no averaging, so under load it tracks whichever handler caught
+	// a lucky scheduling moment. In the same run that produced this comment, the paired
+	// medians differed by 1.27 ms while the paired minima differed by 8.13 ms.
+	budget := 5 * time.Millisecond
+	if rel := off / 10; rel > budget {
+		budget = rel
+	}
+	t.Logf("median per-request latency over %d paired requests: dashboard off %v, on with "+
+		"content ON %v (added %v, budget %v); minima for reference: off %v, on %v",
+		iters, off, on, added, budget, slices.Min(offs), slices.Min(ons))
+
+	if added > budget {
+		t.Errorf("the dashboard added %v per request with content capture on (median of %d "+
+			"paired samples, budget %v = max(5ms, 10%% of the %v baseline)); something "+
+			"expensive is back on the request goroutine", added, iters, budget, off)
 	}
 }
 

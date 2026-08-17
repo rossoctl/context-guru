@@ -2,7 +2,9 @@ package tenant
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,11 +258,10 @@ func TestUpdatePrivilegeBoundaries(t *testing.T) {
 	if err := r.Update(a, b.ID, Patch{ConfigYAML: &cfg}); !errors.Is(err, ErrForbidden) {
 		t.Errorf("cross-tenant edit: got %v, want ErrForbidden", err)
 	}
-	// Nor their own role, cap, quota, or disabled flag.
-	mgrRole, cap2, rows, off := RoleManager, 1e9, int64(1<<40), false
+	// Nor their own role, quota, or disabled flag.
+	mgrRole, rows, off := RoleManager, int64(1<<40), false
 	for name, p := range map[string]Patch{
 		"role":     {Role: &mgrRole},
-		"cap":      {MonthlyCapUSD: &cap2},
 		"max_rows": {MaxRows: &rows},
 		"disabled": {Disabled: &off},
 	} {
@@ -269,11 +270,11 @@ func TestUpdatePrivilegeBoundaries(t *testing.T) {
 		}
 	}
 	// A manager may do all of it.
-	if err := r.Update(mgr, a.ID, Patch{Role: &mgrRole, MonthlyCapUSD: &cap2}); err != nil {
+	if err := r.Update(mgr, a.ID, Patch{Role: &mgrRole, MaxRows: &rows}); err != nil {
 		t.Fatalf("manager update: %v", err)
 	}
 	got, _ := r.Get(a.ID)
-	if !got.IsManager() || got.MonthlyCapUSD != cap2 {
+	if !got.IsManager() || got.MaxRows != rows {
 		t.Errorf("manager update did not apply: %+v", got)
 	}
 	if err := r.Update(nil, a.ID, Patch{ConfigYAML: &cfg}); !errors.Is(err, ErrForbidden) {
@@ -508,6 +509,99 @@ func TestMigrateRefusesNewerDatabase(t *testing.T) {
 	}
 }
 
+// wantSchema is every table and column the migrations are supposed to produce,
+// across all of them. Two features landed a migration each calling itself "v2"; this
+// is the test that would have caught one of them silently replacing the other.
+var wantSchema = map[string][]string{
+	"tenants": {"id", "label", "email", "role", "config_yaml", "up_anthropic",
+		"up_openai", "up_bob", "capture_content", "max_rows", "disabled", "created_at",
+		"last_seen_at", "password_hash", "email_verified_at"},
+	"tenant_tokens":       {"token_hash", "prefix", "tenant_id", "label", "created_at", "last_used_at", "revoked_at"},
+	"dash_sessions":       {"id", "tenant_id", "created_at", "expires_at", "label", "user_agent", "ip", "last_seen_at"},
+	"tenant_config_audit": {"ts", "actor_tenant", "target_tenant", "field", "before", "after"},
+	"tenant_agent_keys":   {"key_hash", "tenant_id", "created_at", "last_used_at"},
+	"email_codes":         {"tenant_id", "purpose", "code_hash", "attempts", "created_at", "expires_at"},
+}
+
+func assertSchema(t *testing.T, r *Registry) {
+	t.Helper()
+	var got int
+	if err := r.db.QueryRow(`PRAGMA user_version`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != len(migrations) {
+		t.Errorf("user_version = %d, want %d (one per migration)", got, len(migrations))
+	}
+	for table, cols := range wantSchema {
+		rows, err := r.db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		have := map[string]bool{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatal(err)
+			}
+			have[name] = true
+		}
+		rows.Close()
+		if len(have) == 0 {
+			t.Errorf("table %s does not exist", table)
+			continue
+		}
+		for _, c := range cols {
+			if !have[c] {
+				t.Errorf("%s.%s missing", table, c)
+			}
+		}
+	}
+	// tenantCols has to line up with what scanTenant reads, and a mismatch there
+	// compiles fine and returns the wrong field. One real read proves the alignment.
+	if _, _, err := r.Register("laptop", "schema@ibm.com"); err != nil {
+		t.Fatalf("Register on a freshly migrated database: %v", err)
+	}
+	tn, err := r.ByEmail("schema@ibm.com")
+	if err != nil || tn.Label != "laptop" || tn.Role != RoleUser || !tn.CaptureContent {
+		t.Fatalf("scanTenant read %+v, %v — tenantCols and scanTenant disagree", tn, err)
+	}
+}
+
+func TestFreshDatabaseHasEveryTableAndColumn(t *testing.T) {
+	r := open(t, Options{})
+	assertSchema(t, r)
+}
+
+// Every migration must also apply IN SEQUENCE to a database that stopped at an
+// earlier version, not just to an empty one.
+func TestMigrationsApplyInSequenceToAnOlderDatabase(t *testing.T) {
+	for stop := 1; stop < len(migrations); stop++ {
+		t.Run(fmt.Sprintf("from_v%d", stop), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "control.db")
+			db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < stop; i++ {
+				if _, err := db.Exec(migrations[i]); err != nil {
+					t.Fatalf("migration %d: %v", i+1, err)
+				}
+			}
+			if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, stop)); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+
+			r, err := Open(path, Options{})
+			if err != nil {
+				t.Fatalf("upgrading a v%d database: %v", stop, err)
+			}
+			defer r.Close()
+			assertSchema(t, r)
+		})
+	}
+}
+
 func TestInMemoryRegistriesAreIsolated(t *testing.T) {
 	a := open(t, Options{})
 	b := open(t, Options{})
@@ -561,4 +655,74 @@ func mustTenant(t *testing.T, r *Registry, email string) *Tenant {
 		t.Fatalf("ByEmail(%q): %v", email, err)
 	}
 	return tn
+}
+
+// Agent keys: bound by digest, resolvable, never stored in plaintext. This is the path
+// for an agent that can set no header of our choosing (Bob).
+func TestAgentKeyBindResolveUnbind(t *testing.T) {
+	r := open(t, Options{ManagerEmail: "boss@ibm.com"})
+	tn, _, err := r.Register("laptop", "a@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "caller-provider-key-value"
+	if _, err := r.ResolveAgentKey(key); !errors.Is(err, ErrNoAgentKey) {
+		t.Fatalf("unbound key resolved: %v", err)
+	}
+	if err := r.BindAgentKey(tn.ID, key); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.ResolveAgentKey(key)
+	if err != nil || got.ID != tn.ID {
+		t.Fatalf("ResolveAgentKey = %v, %v", got, err)
+	}
+	if n, err := r.AgentKeyCount(tn.ID); err != nil || n != 1 {
+		t.Fatalf("AgentKeyCount = %d, %v", n, err)
+	}
+	// Binding twice is idempotent, not a second row.
+	if err := r.BindAgentKey(tn.ID, key); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := r.AgentKeyCount(tn.ID); n != 1 {
+		t.Errorf("re-binding created %d rows", n)
+	}
+	// The plaintext must not be in the database anywhere.
+	var hits int
+	if err := r.db.QueryRow(
+		`SELECT COUNT(*) FROM tenant_agent_keys WHERE CAST(key_hash AS TEXT) LIKE ?`,
+		"%"+key+"%").Scan(&hits); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 0 {
+		t.Error("the provider key was stored in plaintext")
+	}
+	if err := r.UnbindAgentKeys(tn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ResolveAgentKey(key); !errors.Is(err, ErrNoAgentKey) {
+		t.Fatalf("key still resolved after unbinding: %v", err)
+	}
+}
+
+// A disabled account's bound key must stop working, exactly as its token does.
+func TestAgentKeyRespectsDisabled(t *testing.T) {
+	r := open(t, Options{ManagerEmail: "boss@ibm.com"})
+	mgr, _, err := r.Register("m", "boss@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tn, _, err := r.Register("laptop", "a@ibm.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.BindAgentKey(tn.ID, "k"); err != nil {
+		t.Fatal(err)
+	}
+	off := true
+	if err := r.Update(mgr, tn.ID, Patch{Disabled: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ResolveAgentKey("k"); !errors.Is(err, ErrDisabled) {
+		t.Fatalf("disabled account's agent key = %v, want ErrDisabled", err)
+	}
 }

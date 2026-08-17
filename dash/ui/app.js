@@ -2524,17 +2524,61 @@ function applyRegisterMode() {
   clear(box).appendChild(el('div', { class: 'state-body' },
     el('strong', { text: 'Registration is closed on this deployment' }),
     el('span', { text:
-      'Accounts are created by whoever operates this proxy — ask them for a token, then ' +
-      'sign in with it above. An account here spends the operator\'s upstream budget, ' +
-      'which is why it is not self-serve by default.' })));
+      'Accounts are created by whoever operates this proxy — ask them for one, then sign ' +
+      'in above. Self-registration is normally open; this deployment has turned it off.' })));
 
   const hint = $('#gate-register-hint');
   if (hint) {
     hint.textContent = mode === 'invite'
       ? 'Registration is invite-only: you need the code from the operator.'
-      : mode === 'open' ? 'Anyone who can reach this host may register.' : '';
+      : mode === 'open' ? 'Anyone with an allowed work email may register.' : '';
     hint.hidden = !hint.textContent;
   }
+}
+
+// ── two-phase verification ─────────────────────────────────────────────────
+//
+// Phase one (register or sign in) returns an absolute expiry; phase two posts the code.
+// The countdown ticks against THAT timestamp rather than a five-minute timer this page
+// starts, so a code that took forty seconds to arrive shows the time it really has left.
+// The server is the only thing that enforces the deadline; this is just honest about it.
+
+const verify = { email: '', expires: 0, tick: null };
+
+/** Show the code form for an email, counting down to `expires` (epoch ms). */
+function showVerify(email, expires, intro) {
+  verify.email = email;
+  verify.expires = expires || 0;
+  $('#gate-signin').hidden = true;
+  $('#gate-register').hidden = true;
+  $('#gate-closed').hidden = true;
+  $('#gate-verify').hidden = false;
+  $('#gate-verify-intro').textContent = intro;
+  $('#gate-verify-code').value = '';
+  $('#gate-verify-code').focus();
+  if (verify.tick) clearInterval(verify.tick);
+  const paint = () => {
+    const left = Math.max(0, Math.round((verify.expires - Date.now()) / 1000));
+    const timer = $('#gate-verify-timer');
+    if (!verify.expires) { timer.textContent = ''; return; }
+    timer.textContent = left > 0
+      ? `Expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`
+      : 'That code has expired — start over to get a new one.';
+    if (left <= 0 && verify.tick) { clearInterval(verify.tick); verify.tick = null; }
+  };
+  paint();
+  verify.tick = setInterval(paint, 1000);
+}
+
+/** Leave the code form, back to whichever tab is selected. */
+function cancelVerify() {
+  if (verify.tick) { clearInterval(verify.tick); verify.tick = null; }
+  verify.email = '';
+  $('#gate-verify').hidden = true;
+  const onRegister = $('#gate-tab-register').getAttribute('aria-selected') === 'true';
+  $('#gate-signin').hidden = onRegister;
+  $('#gate-register').hidden = !onRegister;
+  if (onRegister) applyRegisterMode();
 }
 
 function showGate(show) {
@@ -2613,17 +2657,26 @@ const AGENTS = [
   {
     name: 'Claude Code',
     path: '/anthropic',
+    // The auth slot keeps YOUR OWN Anthropic key — it is forwarded upstream, so your
+    // traffic is billed to your account. The context-guru token rides its own header.
     lines: (base, tok) => [
       `export ANTHROPIC_BASE_URL=${base}/anthropic`,
-      `export ANTHROPIC_AUTH_TOKEN=${tok}`,
+      `export ANTHROPIC_CUSTOM_HEADERS="x-context-guru-token: ${tok}"`,
+      '# ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) stays your own provider key',
     ],
   },
   {
     name: 'Bob (BobShell)',
     path: '/',
+    // Bob's client builds every request header itself and offers no hook for another
+    // one, so it cannot carry the token. Instead it is recognised by the sha256 of the
+    // key it already sends — bound once, below, and never stored in plaintext.
     lines: (base, tok) => [
       `export CUSTOM_BASE_URL=${base}`,
-      `export BOBSHELL_API_KEY=${tok}`,
+      '# BOBSHELL_API_KEY stays your own key. Bob cannot send a custom header, so',
+      '# bind it to this account once (hashed; the key is never stored):',
+      `curl -sS -XPOST ${base}/api/me/agent-key \\`,
+      '  -H "Authorization: Bearer $BOBSHELL_API_KEY" -b "cg_dash=<your dashboard cookie>"',
     ],
   },
   {
@@ -2631,7 +2684,8 @@ const AGENTS = [
     path: '/openai/v1',
     lines: (base, tok) => [
       `export OPENAI_BASE_URL=${base}/openai/v1`,
-      `export OPENAI_API_KEY=${tok}`,
+      '# OPENAI_API_KEY stays your own provider key; send the token as a header:',
+      `#   x-context-guru-token: ${tok}`,
     ],
   },
 ];
@@ -2708,17 +2762,35 @@ function loadSettings() {
     const effective = t.effective_config_yaml || t.config_yaml || '';
     const { active, all } = componentPickers(effective, opts);
 
-    // Spend, first: it is the thing that stops traffic, so it belongs above the knobs.
-    if (t.monthly_cap_usd > 0) {
-      const frac = Math.min(1, (t.spent_usd || 0) / t.monthly_cap_usd);
-      host.appendChild(el('div', { class: 'spend' },
-        el('div', { class: 'spend-label' },
-          `Spend this month: ${usd(t.spent_usd)} of ${usd(t.monthly_cap_usd)}`),
-        el('div', { class: 'meter' },
-          el('i', { style: `width:${(frac * 100).toFixed(1)}%`, class: frac > 0.9 ? 'hot' : '' })),
-        el('p', { class: 'hint' },
-          'Requests are refused once the cap is reached. A manager can raise it.')));
-    }
+    // Spend, first: it is what a shared box gets asked about most. Reported only —
+    // your traffic runs on YOUR provider credential, so there is nothing to cap.
+    host.appendChild(el('div', { class: 'spend' },
+      el('div', { class: 'spend-label' }, `Spend this month: ${usd(t.spent_usd)}`),
+      el('p', { class: 'hint' },
+        'Billed to your own provider account: the proxy forwards the key your agent ' +
+        'sends and holds none of its own.')));
+
+    // Agent keys. Only relevant to agents that cannot send x-context-guru-token.
+    host.appendChild(el('div', { class: 'field' },
+      el('label', {}, 'Bound agent keys'),
+      el('div', { 'data-testid': 'agent-keys' },
+        t.agent_keys > 0
+          ? `${t.agent_keys} provider key${t.agent_keys === 1 ? '' : 's'} bound to this account.`
+          : 'None bound.'),
+      el('p', { class: 'hint' },
+        'For agents that cannot send a custom header (Bob/BobShell): the proxy ' +
+        'recognises them by the sha256 of the provider key they already send. Only ' +
+        'the digest is stored. Bind one with the curl line on the Setup tab.'),
+      t.agent_keys > 0
+        ? el('button', {
+          class: 'ghost small', 'data-testid': 'agent-keys-clear',
+          onclick: async () => {
+            if (!confirm('Unbind every provider key? Agents that rely on key ' +
+              'recognition stop being identified until you bind again.')) return;
+            try { await ctl('/api/me/agent-key', { method: 'DELETE' }); await probeAccount(); loadSettings(); } catch (e) { alert(e.message); }
+          },
+        }, 'Unbind all')
+        : null));
 
     // Which configuration is in force, and how to change that.
     host.appendChild(inherited
@@ -2833,7 +2905,49 @@ function loadSettings() {
   });
 
   loadTokens();
+  loadSessions();
   loadAudit();
+}
+
+/** The machines this account is signed in on, each revocable on its own. */
+async function loadSessions() {
+  const host = clear($('#session-list'));
+  let rows = [];
+  try {
+    rows = (await ctl('/api/me/sessions')).sessions || [];
+  } catch (e) { errorState(host, 'Could not list your sessions', e); return; }
+  if (!rows.length) { emptyState(host, 'No sessions', 'Nothing is signed in.'); return; }
+  const tbl = el('table', { class: 'grid' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Machine'), el('th', {}, 'Browser'), el('th', {}, 'Address'),
+      el('th', {}, 'Signed in'), el('th', {}, 'Last active'),
+      el('th', {}, el('span', { class: 'vh' }, 'Row actions')))));
+  const body = el('tbody');
+  for (const s of rows) {
+    body.appendChild(el('tr', {},
+      el('td', {}, s.label || '—', s.current ? el('span', { class: 'muted' }, ' (this browser)') : ''),
+      el('td', {}, el('span', { class: 'clip' }, s.user_agent || '—')),
+      el('td', {}, el('code', {}, s.ip || '—')),
+      el('td', {}, when(s.created_at)),
+      el('td', {}, when(s.last_seen_at)),
+      el('td', {}, el('button', {
+        class: 'ghost small', 'data-testid': 'revoke-session-' + s.id,
+        onclick: async () => {
+          // Revoking the current browser IS signing out, so say so rather than doing it
+          // silently and leaving a dashboard that 401s on its next fetch.
+          if (!confirm(s.current
+            ? 'This is the browser you are using — revoking it signs you out here.'
+            : 'Sign this machine out? It will need to sign in again.')) return;
+          try {
+            await ctl('/api/me/sessions/' + s.id, { method: 'DELETE' });
+            if (s.current) { location.reload(); return; }
+            loadSessions();
+          } catch (e) { alert(e.message); }
+        },
+      }, s.current ? 'Sign out here' : 'Revoke'))));
+  }
+  tbl.appendChild(body);
+  host.appendChild(tbl);
 }
 
 /** Store this configuration as the tenant's own, or '' to go back to following the
@@ -3005,17 +3119,15 @@ async function loadTenants() {
     }
     const tbl = el('table', { class: 'grid' },
       el('thead', {}, el('tr', {},
-        el('th', {}, 'Account'), el('th', {}, 'Role'), el('th', {}, 'Spend / cap'),
+        el('th', {}, 'Account'), el('th', {}, 'Role'), el('th', {}, 'Spend'),
         el('th', {}, 'Last seen'), el('th', {}, 'Transcripts'), el('th', {}, 'Configuration'),
         el('th', {}, el('span', { class: 'vh' }, 'Row actions')))));
     const body = el('tbody');
     for (const t of rows) {
-      const over = t.monthly_cap_usd > 0 && t.spent_usd >= t.monthly_cap_usd;
       body.appendChild(el('tr', { class: t.disabled ? 'revoked' : '' },
         el('td', {}, el('div', {}, t.email), el('div', { class: 'muted small' }, t.label)),
         el('td', {}, t.role),
-        el('td', { class: over ? 'warn-text' : '' },
-          t.monthly_cap_usd > 0 ? `${usd(t.spent_usd)} / ${usd(t.monthly_cap_usd)}` : usd(t.spent_usd)),
+        el('td', {}, usd(t.spent_usd)),
         el('td', {}, t.last_seen_at ? when(t.last_seen_at) : el('span', { class: 'muted' }, 'never')),
         // The EFFECTIVE answer to "are this account's transcripts being kept", which is
         // the AND of both gates — never the account's flag on its own.
@@ -3029,16 +3141,6 @@ async function loadTenants() {
           el('button', {
             class: 'ghost small', onclick: () => showTenantMetrics(t.id),
           }, 'Metrics'),
-          el('button', {
-            class: 'ghost small', 'data-testid': 'cap-' + t.id,
-            onclick: async () => {
-              const v = prompt(`Monthly cap in USD for ${t.email} (0 = uncapped):`, String(t.monthly_cap_usd));
-              if (v === null) return;
-              const n = Number(v);
-              if (!Number.isFinite(n) || n < 0) { alert('Not a valid amount.'); return; }
-              try { await ctl('/api/tenants/' + t.id, { method: 'PATCH', body: JSON.stringify({ monthly_cap_usd: n }) }); loadTenants(); } catch (e) { alert(e.message); }
-            },
-          }, 'Set cap'),
           el('button', {
             class: 'ghost small', 'data-testid': 'toggle-' + t.id,
             onclick: async () => {
@@ -3143,6 +3245,7 @@ Object.assign(loaders, {
 
 function initAccounts() {
   $('#gate-tab-signin').addEventListener('click', () => {
+    cancelVerify(); // switching tabs abandons a pending code rather than hiding it
     $('#gate-signin').hidden = false; $('#gate-register').hidden = true;
     $('#gate-closed').hidden = true;
     $('#gate-tab-signin').setAttribute('aria-selected', 'true');
@@ -3150,6 +3253,7 @@ function initAccounts() {
     gateError('');
   });
   $('#gate-tab-register').addEventListener('click', () => {
+    cancelVerify();
     $('#gate-signin').hidden = true;
     $('#gate-tab-signin').setAttribute('aria-selected', 'false');
     $('#gate-tab-register').setAttribute('aria-selected', 'true');
@@ -3163,40 +3267,78 @@ function initAccounts() {
   $('#gate-signin').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     gateError('');
+    const token = $('#gate-token').value.trim();
     try {
-      await ctl('/api/login', { method: 'POST', body: JSON.stringify({ token: $('#gate-token').value.trim() }) });
-      // Do not keep the token in the DOM one moment longer than needed.
-      $('#gate-token').value = '';
-      await probeAccount();
-      go('overview'); // refresh() inside go() loads the facets for the new principal
-      connectLive();
-    } catch (e) { gateError(e.message); }
+      if (token) {
+        // The legacy path: a token, no second factor, for an account with no password.
+        await ctl('/api/login', { method: 'POST', body: JSON.stringify({ token }) });
+        $('#gate-token').value = ''; // not in the DOM one moment longer than needed
+        await probeAccount();
+        go('overview'); // refresh() inside go() loads the facets for the new principal
+        connectLive();
+        return;
+      }
+      const email = $('#gate-signin-email').value.trim();
+      const out = await ctl('/api/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password: $('#gate-password').value }),
+      });
+      // The password leaves the DOM the moment it has been spent, whatever happens next.
+      $('#gate-password').value = '';
+      showVerify(out.email || email, out.code_expires_at,
+        `We emailed a 6-digit code to ${out.email || email}.`);
+    } catch (e) { $('#gate-password').value = ''; gateError(e.message); }
   });
 
   $('#gate-register').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     gateError('');
+    const email = $('#gate-email').value.trim();
     try {
       const out = await ctl('/api/register', {
         method: 'POST',
         body: JSON.stringify({
-          email: $('#gate-email').value.trim(),
+          email,
+          password: $('#gate-new-password').value,
           label: $('#gate-label').value.trim(),
           // Sent only in invite mode, where the server compares it in constant time.
           // Always present as a key so the server sees "" rather than a missing field.
           code: account.register === 'invite' ? $('#gate-code').value : '',
         }),
       });
-      // Do not leave the invite code sitting in the DOM after it has been spent.
+      // Neither the password nor the invite code stays in the DOM after being spent.
+      $('#gate-new-password').value = '';
       $('#gate-code').value = '';
-      // Registration signs the user in and hands back the ONLY copy of the token, so go
-      // straight to Setup with it substituted into the snippets.
-      account.freshToken = out.token;
+      // No token and no session yet: the account is inert until the mailed code comes
+      // back. That is the whole point of phase two, so the UI must not pretend otherwise.
+      showVerify(out.email || email, out.code_expires_at,
+        `We emailed a 6-digit code to ${out.email || email} to confirm the address.`);
+    } catch (e) { $('#gate-new-password').value = ''; gateError(e.message); }
+  });
+
+  $('#gate-verify').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    gateError('');
+    try {
+      const out = await ctl('/api/verify', {
+        method: 'POST',
+        body: JSON.stringify({ email: verify.email, code: $('#gate-verify-code').value.trim() }),
+      });
+      cancelVerify();
       await probeAccount();
-      go('setup');
+      if (out.token) {
+        // Registration's reply carries the ONLY copy of the first token, so go straight
+        // to Setup with it substituted into the snippets.
+        account.freshToken = out.token;
+        go('setup');
+      } else {
+        go('overview');
+      }
       connectLive();
     } catch (e) { gateError(e.message); }
   });
+
+  $('#gate-verify-cancel').addEventListener('click', () => { gateError(''); cancelVerify(); });
 
   $('#signout').addEventListener('click', async () => {
     try { await ctl('/api/logout', { method: 'POST' }); } catch { /* clearing locally regardless */ }

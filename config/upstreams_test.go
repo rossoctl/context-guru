@@ -77,7 +77,6 @@ func TestLoadUpstreamsRejections(t *testing.T) {
 	cases := map[string]string{
 		"no name":        "upstreams:\n  - dialect: openai\n    base_url: https://a.example.com\n    key_env: UP_A\n",
 		"bad dialect":    "upstreams:\n  - name: u\n    dialect: gemini\n    base_url: https://a.example.com\n    key_env: UP_A\n",
-		"no key_env":     "upstreams:\n  - name: u\n    dialect: openai\n    base_url: https://a.example.com\n",
 		"no base_url":    "upstreams:\n  - name: u\n    dialect: openai\n    key_env: UP_A\n",
 		"bad scheme":     "upstreams:\n  - name: u\n    dialect: openai\n    base_url: file:///etc/passwd\n    key_env: UP_A\n",
 		"has path":       "upstreams:\n  - name: u\n    dialect: openai\n    base_url: https://a.example.com/v1\n    key_env: UP_A\n",

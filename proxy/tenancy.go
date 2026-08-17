@@ -96,7 +96,7 @@ func (c *lru[V]) remove(k string) {
 
 // Tenancy is everything the request path needs to know about the authenticated
 // caller. Built once per request (cached per tenant), and NEVER mutated after it is
-// published — readers on the request path (spendgate, captureContentFor, newCapture,
+// published — readers on the request path (captureContentFor, newCapture,
 // upstreamFor) take no lock, so a refresh publishes a new pointer instead of writing
 // through the old one. See tenancy().
 type Tenancy struct {
@@ -119,9 +119,6 @@ type Tenancy struct {
 	Mode components.Mode
 	// CaptureContent is this tenant's consent to storing transcript text.
 	CaptureContent bool
-	// MonthlyCapUSD is this tenant's spend ceiling against the shared upstream
-	// credential. 0 = no cap.
-	MonthlyCapUSD float64
 	// Upstream names, by dialect, into Options.Upstreams.
 	UpAnthropic, UpOpenAI, UpBob string
 }
@@ -134,17 +131,26 @@ type Upstream struct {
 	Header  string
 }
 
-// setKey returns the credential injector for this upstream. The key is read from
-// the environment at CALL time, so rotating a credential does not need a restart,
-// and no copy of it is held in a long-lived struct.
+// setKey returns the credential injector for this upstream, or nil when the
+// operator configured no server-held key — which is the DEFAULT and the point: the
+// caller's own provider credential is forwarded instead, so nobody's traffic is
+// billed to the operator. A server key remains supported as an explicit per-upstream
+// fallback (key_env), for single-tenant and local deployments where the agent holds
+// only a placeholder.
+//
+// The key is read from the environment at CALL time, so rotating a credential does
+// not need a restart, and no copy of it is held in a long-lived struct.
 func (u Upstream) setKey() func(http.Header) {
+	if u.KeyEnv == "" {
+		return nil
+	}
 	key := os.Getenv(u.KeyEnv)
 	if key == "" {
-		// LoadUpstreams refuses to boot on an unset key_env, so this is only
-		// reachable if the variable was cleared at runtime. Returning nil here would
-		// forward the caller's own token upstream; refusing to inject is not an
-		// option either, so callers treat a nil injector in hosted mode as fatal for
-		// the request. See Handler.upstreamFor.
+		// Named a variable that is not set. Forward the caller's own credential rather
+		// than nothing at all; the request then succeeds or is refused by the upstream,
+		// which is strictly better than refusing every request over an operator typo.
+		slog.Warn("context-guru: upstream names an unset key_env; forwarding the caller's own credential",
+			"key_env", u.KeyEnv)
 		return nil
 	}
 	if h := u.Header; h != "" && !strings.EqualFold(h, "Authorization") {
@@ -156,34 +162,78 @@ func (u Upstream) setKey() func(http.Header) {
 	return func(hd http.Header) { hd.Set("Authorization", "Bearer "+key) }
 }
 
-// tokenHeaders are the request slots a caller may present its context-guru token
-// in. Three, because one token has to work for agents that disagree about how to
-// send a credential — Claude Code uses Authorization or x-api-key, Bob and other
-// Gemini-CLI descendants use x-goog-api-key — and the whole point of the design is
-// that a user configures one token once and never thinks about it again.
+// TokenHeader is where a caller presents its context-guru token. A DEDICATED header,
+// because the Authorization / x-api-key slot now carries the caller's OWN provider
+// credential, which is what gets forwarded upstream — the whole point of not billing
+// every user's traffic to one server-held key.
 //
-// Every slot listed here is stripped before forwarding (see doUpstream). A slot we
-// accept a credential in is a slot that must never reach an upstream.
-var tokenHeaders = []string{"Authorization", "x-api-key", "x-goog-api-key"}
+// copyHeaders already strips every x-context-guru-* header before forwarding, so this
+// name is safe by construction: it cannot reach an upstream.
+const TokenHeader = "x-context-guru-token"
 
-// TokenFromRequest extracts a bearer-ish credential from the first slot that has
-// one. It does not validate: an unrecognised value is left for the registry to
-// reject, so there is exactly one place that decides what a valid token is.
+// authHeaders are the slots a caller's provider credential may arrive in. Three,
+// because agents disagree: Anthropic-dialect tools use Authorization or x-api-key,
+// Gemini-CLI descendants use x-goog-api-key.
+//
+// These are FORWARDED, not stripped — unless the operator configured a server-held
+// key for the upstream, or the slot happens to hold one of our own tokens (see
+// scrubToken).
+var authHeaders = []string{"Authorization", "x-api-key", "x-goog-api-key"}
+
+// headerCredential pulls a bearer-ish value out of one header. Splitting on fields
+// rather than trimming a prefix so that a lone "Bearer" yields nothing at all,
+// instead of the word "Bearer" being sent off to be looked up.
+func headerCredential(v string) string {
+	f := strings.Fields(v)
+	switch {
+	case len(f) == 2 && strings.EqualFold(f[0], "bearer"):
+		return f[1]
+	case len(f) == 1 && !strings.EqualFold(f[0], "bearer"):
+		return f[0]
+	}
+	return ""
+}
+
+// TokenFromRequest extracts the caller's context-guru token. The dedicated header
+// first; failing that, an auth slot — but ONLY a value shaped like one of our tokens,
+// so a provider key is never mistaken for a token and sent to the registry.
+//
+// It does not validate beyond the shape: the registry decides what a valid token is.
 func TokenFromRequest(r *http.Request) string {
-	for _, h := range tokenHeaders {
-		// Accept "Bearer <t>" and a bare token in any slot; agents differ, and a
-		// tenant should not have to know which convention its tool picked. Splitting
-		// on fields rather than trimming a prefix so that a lone "Bearer" yields no
-		// token at all, instead of the word "Bearer" being sent off to be looked up.
-		f := strings.Fields(r.Header.Get(h))
-		switch {
-		case len(f) == 2 && strings.EqualFold(f[0], "bearer"):
-			return f[1]
-		case len(f) == 1 && !strings.EqualFold(f[0], "bearer"):
-			return f[0]
+	if t := headerCredential(r.Header.Get(TokenHeader)); t != "" {
+		return t
+	}
+	for _, h := range authHeaders {
+		if v := headerCredential(r.Header.Get(h)); tenant.LooksLikeToken(v) {
+			return v
 		}
 	}
 	return ""
+}
+
+// CallerKey returns the caller's OWN provider credential — the first auth slot that
+// holds something which is not one of our tokens. "" means the caller presented no
+// credential of their own.
+func CallerKey(r *http.Request) string {
+	for _, h := range authHeaders {
+		if v := headerCredential(r.Header.Get(h)); v != "" && !tenant.LooksLikeToken(v) {
+			return v
+		}
+	}
+	return ""
+}
+
+// scrubToken removes OUR token from any auth slot, so a token presented there (by an
+// agent that can set no custom header) never leaves the box. The caller's provider
+// credential — anything not shaped like our token — is deliberately left in place:
+// forwarding it is the entire change.
+func scrubToken(h http.Header) {
+	h.Del(TokenHeader) // belt and braces; copyHeaders drops x-context-guru-* already
+	for _, hd := range authHeaders {
+		if tenant.LooksLikeToken(headerCredential(h.Get(hd))) {
+			h.Del(hd)
+		}
+	}
 }
 
 // statusError carries the HTTP status a resolution failure should produce.
@@ -204,10 +254,18 @@ type StatusError interface {
 // Resolution failures. Authentication fails CLOSED: a missing or unknown token is
 // never treated as an anonymous or new tenant.
 var (
-	errNoToken       = statusError{http.StatusUnauthorized, "no context-guru token; see /dashboard/ to register"}
-	errBadToken      = statusError{http.StatusUnauthorized, "unknown or revoked context-guru token"}
-	errTenantOff     = statusError{http.StatusForbidden, "this context-guru account is disabled"}
+	errNoToken = statusError{http.StatusUnauthorized,
+		"no context-guru token; send it in " + TokenHeader + " (see /dashboard/ to register)"}
+	errBadToken   = statusError{http.StatusUnauthorized, "unknown or revoked context-guru token"}
+	errTenantOff  = statusError{http.StatusForbidden, "this context-guru account is disabled"}
+	errUnboundKey = statusError{http.StatusUnauthorized,
+		"no " + TokenHeader + " header, and this provider key is not bound to an account; " +
+			"see /dashboard/ to register or bind it"}
 	errNoUpstreamFor = statusError{http.StatusBadGateway, "no upstream configured for this route"}
+	// errNoProviderKey is the one that must never become a fallback. Without a
+	// credential of their own the caller does not get someone else's: they get a 401.
+	errNoProviderKey = statusError{http.StatusUnauthorized,
+		"no provider credential; send your own API key in Authorization or x-api-key"}
 )
 
 // statusOf maps a resolution error to its HTTP status, defaulting to 401 rather
@@ -284,17 +342,32 @@ func NewTenantSource(reg *tenant.Registry, e components.Emitter, b ConfigBuilder
 }
 
 // Resolve authenticates a request and returns its tenancy.
+//
+// Two ways in, in order of preference. A context-guru token (TokenHeader) is the
+// normal one. Failing that, the caller's own provider key is looked up by its sha256
+// — the path for an agent that can set no header we do not already occupy (Bob), and
+// only for a digest a tenant has explicitly bound. Neither one falls open.
 func (s *TenantSource) Resolve(r *http.Request) (*Tenancy, error) {
-	tok := TokenFromRequest(r)
-	if tok == "" {
+	if tok := TokenFromRequest(r); tok != "" {
+		t, err := s.reg.Resolve(tok)
+		switch {
+		case errors.Is(err, tenant.ErrDisabled):
+			return nil, errTenantOff
+		case err != nil:
+			return nil, errBadToken
+		}
+		return s.tenancy(t)
+	}
+	key := CallerKey(r)
+	if key == "" {
 		return nil, errNoToken
 	}
-	t, err := s.reg.Resolve(tok)
+	t, err := s.reg.ResolveAgentKey(key)
 	switch {
 	case errors.Is(err, tenant.ErrDisabled):
 		return nil, errTenantOff
 	case err != nil:
-		return nil, errBadToken
+		return nil, errUnboundKey
 	}
 	return s.tenancy(t)
 }
@@ -323,11 +396,11 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 			// Fields that do not affect the pipeline are refreshed without a rebuild —
 			// but on a COPY, published by swapping the pointer. Writing through the
 			// cached *Tenancy would race every unlocked reader on the request path
-			// (spendgate's MonthlyCapUSD, captureContentFor, newCapture, upstreamFor),
+			// (captureContentFor, newCapture, upstreamFor),
 			// which is one agent with two turns in flight, not a rare interleaving.
 			tn := *c.t
 			tn.Label, tn.Manager = t.Label, t.IsManager()
-			tn.CaptureContent, tn.MonthlyCapUSD = t.CaptureContent, t.MonthlyCapUSD
+			tn.CaptureContent = t.CaptureContent
 			tn.UpAnthropic, tn.UpOpenAI, tn.UpBob = t.UpAnthropic, t.UpOpenAI, t.UpBob
 			// Pipe/Store/Shadow are shared with the previous copy on purpose: they are
 			// internally synchronised, and per-tenant state must not be duplicated.
@@ -370,8 +443,8 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 func (s *TenantSource) build(t *tenant.Tenant, cfgDoc string) (*Tenancy, error) {
 	tn := &Tenancy{
 		ID: t.ID, Label: t.Label, Manager: t.IsManager(),
-		CaptureContent: t.CaptureContent, MonthlyCapUSD: t.MonthlyCapUSD,
-		UpAnthropic: t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
+		CaptureContent: t.CaptureContent,
+		UpAnthropic:    t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
 		Mode: components.ModeSync,
 	}
 	built, err := s.builder([]byte(cfgDoc), s.emitter)
@@ -398,9 +471,12 @@ func (s *TenantSource) build(t *tenant.Tenant, cfgDoc string) (*Tenancy, error) 
 // upstreamFor resolves the upstream for one route. In single-tenant mode the
 // statically configured upstream is used unchanged. In hosted mode the tenant's
 // chosen NAME is looked up in the operator's allow-list — a tenant never supplies a
-// URL — and a missing credential fails the request rather than forwarding the
-// caller's own token to a third party.
-func (h *Handler) upstreamFor(tn *Tenancy, pick func(*Tenancy) string, static upstream) (upstream, error) {
+// URL, so this stays an allow-list and not an SSRF hop.
+//
+// Credentials: an upstream with no key_env forwards the CALLER's own provider key,
+// which is the hosted default. That makes a caller with no key of their own an
+// explicit 401 — never a silent fallback onto whatever key the box happens to hold.
+func (h *Handler) upstreamFor(r *http.Request, tn *Tenancy, pick func(*Tenancy) string, static upstream) (upstream, error) {
 	if h.opts.Tenants == nil {
 		return static, nil
 	}
@@ -415,11 +491,8 @@ func (h *Handler) upstreamFor(tn *Tenancy, pick func(*Tenancy) string, static up
 		return upstream{}, errNoUpstreamFor
 	}
 	set := u.setKey()
-	if set == nil {
-		slog.Error("context-guru: upstream has no credential in the environment; refusing to forward",
-			"upstream", name, "key_env", u.KeyEnv)
-		return upstream{}, statusError{http.StatusBadGateway,
-			fmt.Sprintf("upstream %q has no credential configured", name)}
+	if set == nil && CallerKey(r) == "" {
+		return upstream{}, errNoProviderKey
 	}
 	return upstream{base: u.BaseURL, path: static.path, setKey: set}, nil
 }
@@ -476,9 +549,9 @@ func (h *Handler) tenancyFor(r *http.Request) (*Tenancy, error) {
 func failAuth(w http.ResponseWriter, err error) {
 	code, msg := statusOf(err)
 	// Count the refusal. Every auth and upstream-resolution failure funnels through
-	// here, so this is the one place that sees them all — and 402/429 are deliberately
-	// NOT counted here, because the limit that decided them counted them already (see
-	// limits.go, spendgate.go) and only there is it known which limit it was.
+	// here, so this is the one place that sees them all — and 429 is deliberately NOT
+	// counted here, because the limiter that decided it counted it already (see
+	// limits.go) and only there is it known which limit it was.
 	switch code {
 	case http.StatusUnauthorized:
 		recordRefusal(refuseAuth, "")
