@@ -405,22 +405,83 @@ func TestStatsGatedInHostedMode(t *testing.T) {
 
 // The dashboard's routes must not be shadowed by Bob's catch-all. A silent outage
 // of /api/* would be indistinguishable from the dashboard being broken.
+//
+// Asserting on the PATTERN ServeMux resolves, not on the status: /api/* and /dashboard/
+// answer 401/403/200 depending on the caller, so a status assertion cannot tell "the
+// dashboard refused you" from "Bob's catch-all ate the request". The pattern can, and it
+// is the thing that actually regresses — a route dropped from the table falls through to
+// "/" and is forwarded to Bob's upstream.
 func TestBobCatchAllDoesNotShadowManagementRoutes(t *testing.T) {
-	f := newHostedFixture(t, "up", "bob")
-	for _, path := range []string{"/healthz", "/stats"} {
-		r := httptest.NewRequest(http.MethodGet, path, nil)
+	// The mgr fixture, because it is the only one with the dashboard's own routes
+	// (/dashboard/, /api/stats) mounted alongside the catch-all.
+	f := newMgrFixture(t)
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/healthz"},
+		{http.MethodGet, "/stats"},
+		{http.MethodGet, "/metrics"},
+		{http.MethodGet, "/favicon.ico"},
+		{http.MethodGet, "/dashboard/"},
+		{http.MethodGet, "/api/stats"},
+		{http.MethodGet, "/api/me"},
+		{http.MethodPost, "/api/register"},
+		{http.MethodPost, "/api/me/agent-key"},
+	} {
+		r := httptest.NewRequest(tc.method, tc.path, nil)
 		r.RemoteAddr = "127.0.0.1:1"
-		w := httptest.NewRecorder()
-		f.mux.ServeHTTP(w, r)
-		if w.Code == http.StatusUnauthorized {
-			t.Errorf("%s was swallowed by the Bob catch-all (got 401)", path)
+		if _, pattern := f.mux.Handler(r); pattern == "/" {
+			t.Errorf("%s %s resolves to the Bob catch-all", tc.method, tc.path)
 		}
+	}
+	// And the catch-all still exists, or the test above proves nothing.
+	if _, pattern := f.mux.Handler(
+		httptest.NewRequest(http.MethodGet, "/admin/v1/profile", nil)); pattern != "/" {
+		t.Fatalf("Bob's catch-all is not mounted (profile resolved to %q)", pattern)
 	}
 	f.mu.Lock()
 	n := len(f.seen)
 	f.mu.Unlock()
 	if n != 0 {
 		t.Error("a management route was forwarded to Bob")
+	}
+}
+
+// What a Bob user hits FIRST, and the only thing they get to read. Bob can set no header
+// of ours, so it authenticates by the sha256 of its own BOBSHELL_API_KEY — and until that
+// key is bound to an account, every path Bob calls is refused. It surfaces our body
+// verbatim ("Failed to fetch user profile - HTTP 401: <body>"), so the body IS the
+// diagnostic: it has to name WHICH credential is missing and where to fix it, on both the
+// control-plane catch-all and the model route. Reproduced live against the hosted service
+// with an unbound key, 2026-08-17.
+func TestUnboundBobKeyRefusalNamesTheMissingCredential(t *testing.T) {
+	f := newHostedFixtureNoKey(t, "up", "bob")
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, bobProfilePath},
+		{http.MethodPost, "/inference/v1/chat/completions"},
+	} {
+		r := httptest.NewRequest(tc.method, tc.path,
+			strings.NewReader(`{"model":"premium","messages":[]}`))
+		// Bob's dialect, verbatim: its own key, its own scheme, no header of ours.
+		r.Header.Set("Authorization", "Apikey bobshell-key-not-bound-to-anyone")
+		w := httptest.NewRecorder()
+		f.mux.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("%s = %d, want 401", tc.path, w.Code)
+		}
+		var body struct{ Error string }
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s: refusal body is not JSON: %q", tc.path, w.Body.String())
+		}
+		if body.Error != errUnboundKey.msg {
+			t.Errorf("%s refusal = %q, want %q", tc.path, body.Error, errUnboundKey.msg)
+		}
+		// The three things the reader has to be able to act on. Pinned by substring so the
+		// wording can improve without this test dictating it, and so it cannot quietly
+		// decay back into a bare "unauthorized".
+		for _, want := range []string{TokenHeader, "not bound to an account", "/dashboard/"} {
+			if !strings.Contains(body.Error, want) {
+				t.Errorf("%s refusal %q does not mention %q", tc.path, body.Error, want)
+			}
+		}
 	}
 }
 

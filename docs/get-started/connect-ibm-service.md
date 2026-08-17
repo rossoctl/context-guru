@@ -52,18 +52,41 @@ you and a lost token has to be reissued, not recovered. Copy it somewhere safe n
 ## 2. Make sure your machine trusts the certificate
 
 The certificate is issued by the **IBM INTERNAL INTERMEDIATE CA**, chaining to the **IBM
-Internal Root CA**. Any IBM-managed machine already trusts that root and there is nothing
-to do. A container, a fresh VM, or a CI runner usually does not — and this is the most
-common first-run failure, so check before anything else:
+Internal Root CA**. This is the most common first-run failure, so check before anything
+else — and check **once per runtime**, because they do not share a trust store:
 
 ```sh
+# The OS trust store (curl, Python, Go).
 curl -sS -o /dev/null -w '%{http_code}\n' https://contextguru.vpc.cloud9.ibm.com/healthz
+
+# Node's own trust store (Bob, Gemini CLI, anything on `fetch`). NOT the same answer.
+node -e 'fetch("https://contextguru.vpc.cloud9.ibm.com/healthz").then(r=>r.text()).then(console.log).catch(e=>console.log("FAIL",e.cause?.code))'
 ```
 
-`200` means you are fine. A certificate-verification error means the trust store is missing
-the IBM root, and every agent on that machine will fail the same way — usually with a
-message about a self-signed certificate in the chain, which is misleading: the chain is
-fine, your machine simply does not know the root.
+Both must print a success line: `200` from curl, `ok` from Node.
+
+!!! danger "`curl` passing does not mean Node passes — this is the trap"
+    **Node ships its own bundled CA list and ignores the operating system's entirely.** So
+    on an IBM-managed machine, whose OS trust store *does* have the IBM root, the `curl`
+    check returns `200` while every Node agent still fails. Bob reports that as:
+
+    ```
+    Request failed after 6 attempts: fetch failed
+    ```
+
+    …with **no request in the service's log**, because the connection never got that far.
+    The message names nothing, so it reads as "the proxy is down". It is not: the real error
+    is `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`, visible only from the `node -e` check above.
+    Observed on a machine where `curl` returned `200` (context-guru 2026-08-17).
+
+    The fix is `NODE_EXTRA_CA_CERTS` — see the **One tool only** tab below. Installing the
+    root system-wide does **not** help Node on its own; that variable is what makes Node
+    read it.
+
+A certificate-verification error from `curl` means the OS trust store is missing the IBM
+root — usually reported as a self-signed certificate in the chain, which is misleading: the
+chain is fine (the service serves the intermediate), your machine simply does not know the
+root.
 
 Install the root CA system-wide:
 
@@ -84,6 +107,10 @@ Install the root CA system-wide:
 === "One tool only"
 
     ```sh
+    # Node ignores the OS trust store, so this one is REQUIRED even on a machine where
+    # curl already works. It also accepts the OS bundle itself, which saves finding the
+    # single PEM: /etc/pki/tls/certs/ca-bundle.crt (RHEL) or
+    # /etc/ssl/certs/ca-certificates.crt (Debian).
     export NODE_EXTRA_CA_CERTS=/path/to/ibm-internal-root-ca.pem   # Claude Code, Bob (Node)
     export SSL_CERT_FILE=/path/to/ibm-internal-root-ca.pem         # Python / OpenSSL
     export REQUESTS_CA_BUNDLE=/path/to/ibm-internal-root-ca.pem    # python-requests
@@ -122,9 +149,13 @@ export OPENAI_BASE_URL=https://contextguru.vpc.cloud9.ibm.com/openai/v1
 # Bob — BOBSHELL_API_KEY stays your key, and Bob can send no header of ours, so bind
 # that key to your account once (sha256 only; the key itself is never stored)
 export CUSTOM_BASE_URL=https://contextguru.vpc.cloud9.ibm.com
+export NODE_EXTRA_CA_CERTS=/etc/pki/tls/certs/ca-bundle.crt   # step 2 — Bob is Node
 curl -sS -XPOST https://contextguru.vpc.cloud9.ibm.com/api/me/agent-key \
   -H "Authorization: Bearer $BOBSHELL_API_KEY" -b "cg_dash=<your dashboard cookie>"
 ```
+
+Bob needs **both** of its two lines. Skip the CA variable and it dies with `fetch failed`
+before it reaches us; skip the bind and it gets a 401 that says so.
 
 The token is read from `x-context-guru-token` first. It is still accepted in
 `Authorization`, `x-api-key` or `x-goog-api-key` for tools that have nowhere else to put
@@ -173,12 +204,17 @@ sent `POST /v1/messages` to the URL named there, and the exported variable alone
 
 ```sh
 CUSTOM_BASE_URL=https://contextguru.vpc.cloud9.ibm.com \
+NODE_EXTRA_CA_CERTS=/etc/pki/tls/certs/ca-bundle.crt \
   bob "your task"
 ```
 
 Bob keeps its own `BOBSHELL_API_KEY`. Because it can carry no header of ours, it is
 identified by the sha256 of that key — bind it once with the `curl` above, and rebind
 whenever you rotate the key.
+
+`NODE_EXTRA_CA_CERTS` is not optional and not covered by a system-wide CA install: Bob is
+a Node program, and Node reads only its own bundled CA list. Without it the session ends
+in `Request failed after 6 attempts: fetch failed` — see [step 2](#2-make-sure-your-machine-trusts-the-certificate).
 
 Bob's base URL is the **host**; Bob appends its own `/inference/…` and `/admin/…` paths, and
 the proxy passes its control-plane calls through verbatim so the CLI still boots.
@@ -336,6 +372,8 @@ a full agent turn means the traffic never arrived, whatever your shell says.
 | **429** | A per-tenant rate or in-flight limit. This one *is* worth retrying. |
 | **502** | No upstream configured for that route, or the provider failed. The operator's problem. |
 | connection refused on `http://` | You used port 80. There deliberately isn't one — see the warning at the top of this page. |
+| **`fetch failed`** (Bob, or any Node agent), and **nothing in the service's log** | Node does not trust the IBM root CA. The request never left your machine, which is why there is nothing to see on our side. Set `NODE_EXTRA_CA_CERTS` — [step 2](#2-make-sure-your-machine-trusts-the-certificate). A passing `curl` does **not** rule this out. |
+| **401 "this provider key is not bound to an account"** (Bob) | Expected until you bind. Bob can send no header of ours, so it is identified by the sha256 of its `BOBSHELL_API_KEY` — run the `POST /api/me/agent-key` call in [step 3](#3-point-your-agent-at-it). |
 
 ## Three things worth knowing before you rely on it
 
