@@ -8,6 +8,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/logging"
 )
 
 // Operating modes on the request path (#31).
@@ -92,13 +93,29 @@ func (h *Handler) observe(r *reqInfo) {
 	// the moment the handler returns.
 	info := *r
 	info.body = append([]byte(nil), r.body...)
+	// The request's LOGGER is part of "everything an off-path run must copy". The job runs
+	// under the pool's context — deliberately, since the request's is cancelled — and the
+	// pool's is context.Background(), so logging.From inside the pipeline would fall
+	// through to the process default and every line this observation writes would lose the
+	// tenant, the route, and the provider. A `{tenant="X"}` selector would then show that
+	// tenant's requests and none of its pipeline decisions, and apply's panic recovery —
+	// the line most worth attributing to a tenant — would be anonymous on this path. The
+	// logger is a value, immutable and safe to outlive the request; only cancellation
+	// belongs to the pool's context, which is why only the context is swapped.
+	//
+	// The mode stamp that keeps a projection from being summed with an enforced run is
+	// apply's, not ours: it stamps `mode` from Opts.Mode onto the same logger, so every
+	// line of every caller carries it and this one cannot forget to.
+	lg := logging.From(r.ctx)
 	// A plain counter as the dedup key: one observation per call, coalescing nothing. Also
 	// why observe needs no session resolve on the request path — one more thing the
-	// enforced path does not pay for.
-	key := "observe:" + strconv.FormatUint(h.observeSeq.Add(1), 10)
+	// enforced path does not pay for. The tenant is in the key because the pool's own two
+	// lines — queue full, and the last-resort panic recovery — hold a job rather than a
+	// request, so the key is the only place they can name whose measurement was lost.
+	key := "observe:" + tenantLabel(info.tn.ID) + ":" + strconv.FormatUint(h.observeSeq.Add(1), 10)
 
 	h.pool.Enqueue(key, func(ctx context.Context) {
-		apply.BodyOpts(ctx, info.tn.Pipe, info.tn.Shadow, apply.Opts{
+		apply.BodyOpts(logging.With(ctx, lg), info.tn.Pipe, info.tn.Shadow, apply.Opts{
 			Provider: info.provider, Body: info.body, Session: info.session, Tenant: info.tn.ID,
 			Models: info.models, Window: info.window, CacheMode: h.opts.CacheMode,
 			Mode: components.ModeObserve,

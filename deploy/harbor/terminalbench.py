@@ -27,9 +27,15 @@ Usage:
 import argparse, glob, json, os, socket, subprocess, sys, time, urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cgenv  # base URLs and credentials for both the hosted and the local deployment
+
 CG = Path("/home/vpcuser/projects/context-engineering/context-guru")
 HB = Path("/home/vpcuser/projects/context-engineering/harbor")
-BIN = "/tmp/cg-runs/cg-proxy-d1"
+# Overridable because two harnesses must not share a binary BASENAME: stop_proxy kills
+# by exact process name, so a second run using the same copy kills the first one's proxy
+# mid-task and the trials that follow record connection refusals as model failures.
+BIN = os.environ.get("CG_BENCH_BIN") or "/tmp/cg-runs/cg-proxy-d1"
 # The benchmark proxy's port. Overridable because 4000 is NO LONGER FREE on a box that
 # also runs the hosted service (deploy/service/), which binds 127.0.0.1:4000
 # permanently. When that clashed, the benchmark proxy died with "bind: address already
@@ -43,20 +49,47 @@ PORT = int(os.environ.get("CG_BENCH_PORT") or 4000)
 # default: a container that cannot reach the proxy fails EVERY task, and a run of all
 # failures reads as "the preset is bad" rather than "nothing could connect".
 LAN = os.environ.get("CG_LAN") or "127.0.0.1"
-if not os.environ.get("CG_LAN"):
+# An ALREADY-RUNNING proxy to measure, instead of starting one. Set CG_PROXY_URL to its
+# root (with or without the trailing /anthropic).
+#
+# This is the only honest way to benchmark a HOSTED proxy: there, the pipeline is a
+# property of the authenticated tenant's own configuration, not of a --preset flag this
+# harness could pass. So with CG_PROXY_URL the --configs values are LABELS only — they
+# name the jobs directory and the summary row, and the pipeline is whatever that proxy
+# serves the tenant whose CG_TOKEN is set.
+EXT = (os.environ.get("CG_PROXY_URL") or "").rstrip("/")
+if EXT.endswith("/anthropic"):
+    EXT = EXT[: -len("/anthropic")]
+if not os.environ.get("CG_LAN") and not EXT:
     print(f"WARNING: CG_LAN is unset, using {LAN}. Containers on a bridge network "
           "cannot reach the proxy there and every task will fail. Set CG_LAN to this "
           "host's LAN IP (`hostname -I`) unless the agent runs with --network host.",
           file=sys.stderr)
+
+
+def anthropic_url():
+    """The Anthropic-dialect base URL the agent under test is pointed at."""
+    return (EXT + "/anthropic") if EXT else f"http://{LAN}:{PORT}/anthropic"
+
+
+def stats_url():
+    """Where to read the proxy's own rollup.
+
+    Loopback by default, and CG_STATS_URL overrides it, because /stats is a
+    service-wide aggregate and the proxy only trusts it unauthenticated from a loopback
+    peer (proxy.statsTrusted). A CG_PROXY_URL naming this box's LAN address is NOT a
+    loopback peer even when it is the same machine, so pointing the stats read at the
+    same address would 403 and the summary would silently report zeros.
+    """
+    if u := os.environ.get("CG_STATS_URL"):
+        return u
+    return (EXT + "/stats") if EXT else f"http://localhost:{PORT}/stats"
+
+
 DATASET = "terminal-bench@2.0"  # <-- the only benchmark-specific difference vs swebench.py
 PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 MODEL = "aws/claude-sonnet-5"
 CHEAP_MODEL = "aws/claude-haiku-4-5"  # for CG's own compaction LLM (extract_llm) in later arms
-
-
-def creds():
-    e = json.load(open(Path("~/.claude/settings.json").expanduser()))["env"]
-    return e["ANTHROPIC_BASE_URL"], e["ANTHROPIC_AUTH_TOKEN"]
 
 
 def price(model):
@@ -74,10 +107,13 @@ def price(model):
 
 
 def stop_proxy():
+    # Kill by the basename of the binary WE started, not a hardcoded one: with
+    # CG_BENCH_BIN a hardcoded name kills somebody else's proxy and leaves ours running.
+    name = Path(BIN).name
     for _ in range(3):
-        subprocess.run("pkill -x cg-proxy-d1", shell=True)
+        subprocess.run(f"pkill -x {name}", shell=True)
         time.sleep(1)
-        r = subprocess.run("pgrep -x cg-proxy-d1", shell=True, capture_output=True)
+        r = subprocess.run(f"pgrep -x {name}", shell=True, capture_output=True)
         if not r.stdout.strip():
             return
     time.sleep(2)  # let the port fully release (avoids bind race on restart)
@@ -205,12 +241,19 @@ def start_proxy(preset, base, token, capture=None, dump=None):
 
 
 def run_harbor(tasks, jobs_dir, n, setup_mult, build_mult, agent_mult, max_retries=2):
-    proxy_url = f"http://{LAN}:{PORT}/anthropic"
+    proxy_url = anthropic_url()
     inc = " ".join(f"-i {t}" for t in tasks)
     home = os.path.expanduser("~")
     abs_path = f"{home}/.local/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    cmd = (f"cd {HB} && ANTHROPIC_BASE_URL='{proxy_url}' ANTHROPIC_API_KEY='sk-proxy' "
-           f"ANTHROPIC_AUTH_TOKEN='sk-proxy' PATH='{abs_path}' HOME='{home}' "
+    # The agent's credentials. Hosted: its own gateway key in the auth slots and the
+    # tenant token in x-context-guru-token. Local: the sk-proxy placeholder, because a
+    # single-tenant proxy injects its own upstream key. Both arrive as ${VAR} templates
+    # that harbor expands from the environment below, so neither value is written to
+    # this command line, to the run log, or to the jobs-dir run config.
+    overlay, ae_auth = cgenv.agent_auth()
+    cmd = (f"cd {HB} && ANTHROPIC_BASE_URL='{proxy_url}' "
+           f"ANTHROPIC_API_KEY=\"${{{cgenv.KEY_VAR}}}\" ANTHROPIC_AUTH_TOKEN=\"${{{cgenv.KEY_VAR}}}\" "
+           f"PATH='{abs_path}' HOME='{home}' "
            f"{home}/.local/bin/uv run harbor run -y -d {DATASET} -a claude-code -m '{MODEL}' "
            f"--env docker {inc} -n {n} --jobs-dir '{jobs_dir}' "
            # --no-delete keeps each task's image after the trial so its base layers are
@@ -218,10 +261,11 @@ def run_harbor(tasks, jobs_dir, n, setup_mult, build_mult, agent_mult, max_retri
            f"--no-delete "
            f"--agent-setup-timeout-multiplier {setup_mult} --environment-build-timeout-multiplier {build_mult} "
            f"--agent-timeout-multiplier {agent_mult} --max-retries {max_retries} "
-           f"--ae ANTHROPIC_BASE_URL='{proxy_url}' --ae ANTHROPIC_API_KEY='sk-proxy' --ae ANTHROPIC_AUTH_TOKEN='sk-proxy'")
+           f"--ae ANTHROPIC_BASE_URL='{proxy_url}' {ae_auth}")
     log = f"/tmp/tb-runs/run-terminalbench-{Path(jobs_dir).name}.log"
     with open(log, "w") as f:
-        subprocess.run(["sg", "docker", "-c", cmd], stdout=f, stderr=f)
+        subprocess.run(["sg", "docker", "-c", cmd], stdout=f, stderr=f,
+                       env=dict(os.environ, **overlay))
     return log
 
 
@@ -315,8 +359,12 @@ def main():
     ap.add_argument("--dump-configs", nargs="*", default=[], help="configs that DUMP before→after change logs")
     a = ap.parse_args()
     # Before any container is built or any token is spent.
-    require_free_port()
-    base, token = creds()
+    if EXT:
+        print(f"### measuring the ALREADY-RUNNING proxy at {EXT} — its pipeline is its "
+              f"own; --configs {a.configs} are labels only", flush=True)
+    else:
+        require_free_port()
+    base, token = cgenv.gateway()
     pr = price(MODEL)
     cpr = price(CHEAP_MODEL)
     tasks = [t.strip() for t in open(a.tasks) if t.strip()]
@@ -329,17 +377,19 @@ def main():
         cap = f"/tmp/tb-runs/capture-terminalbench.jsonl" if cfg == a.capture_config else None
         dump = f"/tmp/tb-runs/dump-terminalbench-{cfg}.jsonl" if cfg in a.dump_configs else None
         print(f"### config={cfg} (capture={'yes' if cap else 'no'} dump={'yes' if dump else 'no'}) ...", flush=True)
-        start_proxy(cfg, base, token, capture=cap, dump=dump)
+        if not EXT:
+            start_proxy(cfg, base, token, capture=cap, dump=dump)
         t0 = time.time()
         run_harbor(tasks, jobs, a.n, a.setup_mult, a.build_mult, a.agent_mult, a.max_retries)
         rows = parse_trials(jobs, pr)
         Path(f"{a.jobs_root}/rows-{cfg}.json").write_text(json.dumps(rows, indent=1))
         st = {}
         try:
-            st = json.load(urllib.request.urlopen(f"http://localhost:{PORT}/stats", timeout=5))
-        except Exception:
-            pass
-        stop_proxy()
+            st = json.load(urllib.request.urlopen(cgenv.stats_request(stats_url()), timeout=5))
+        except Exception as e:
+            print(f"[stats] {stats_url()}: {e}", file=sys.stderr)
+        if not EXT:
+            stop_proxy()
         s = summarize(cfg, rows)
         s["proxy_savings_pct"] = round(st.get("savings_pct", 0), 2)
         s["proxy_bounces"] = st.get("bounces")
