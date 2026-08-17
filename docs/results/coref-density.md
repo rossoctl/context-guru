@@ -114,6 +114,46 @@ Window choice matters here and is easy to get wrong: measured against a 200k win
 and `T` collapses to zero by construction. At a 32k window (matching what those runs actually held) it is
 4/8. A break-even figure is meaningless without a window the traffic actually used.
 
+## Can it defer the agent's own compaction?
+
+The proposal's largest claimed win is pushing back Claude Code's self-compaction (167k on a 200k
+model). Of the 31 Claude Code sessions, **19 passed that threshold**, so the question is answerable
+on this corpus. The requirement is not merely to clear the threshold but to stay clear — cutting to
+exactly the line buys one turn, and then you either eat the compaction or pay a *second* cache-write
+at maximum `W`:
+
+```
+required cut  ≥  (usage − threshold)  +  growthPerTurn × headroomTurns
+```
+
+| headroom bought | required cut, as a share of the request | achievable with `unreferenced` + `closed` |
+|---|---|---|
+| H = 0 (bare clear) | 7.3% | 10/19 |
+| H = 20 | 12.6% | 5/19 |
+| H = 40 | 18.0% | **0/19** |
+| H = 60 | 23.5% | **0/19** |
+
+Mean available cut is **4.4%** of the request (`unreferenced`) and **9.6%** (`+closed`), against a
+mean deficit of 12.9k on a ~180k request and mean growth of ~514 tokens/turn. So a bar high enough
+to avoid paying twice — 20–25%, which is what 40–60 turns of headroom costs — is a bar Tier-1
+matching **cannot clear on this corpus**.
+
+The same figures condemned the original `min_batch_frac: 0.15`, which admitted **1 of 19** sessions
+with `cut_closed` on and **0 of 19** at the shipped cut set. It is now 0.05 (16/19), recorded as a
+starting point rather than a claim.
+
+!!! warning "The deficit column is partly an artifact; the availability column is not"
+    Peak request ≈180k and deficit ≈13k are shaped by `cc_capture.py` segmenting at 180k tokens, so
+    peaks cluster there by construction. The durable finding is the one independent of it:
+    **available cuttable mass is 4–10% of the request.** Read the deficit figures as illustrative.
+
+The design consequence — a gate that asks whether `coref`'s cut is the *decisive* one rather than
+whether it is large, and what it would take to know the distance to the threshold — is worked
+through in the proposal's
+[deferral gate](../proposals/coref-compaction.md#the-deferral-gate-designed-unquantified). It is
+unbuilt, and deliberately so: how often the prize is reachable at all has never been measured, and
+`modes.Tracker`'s reset detection answers that with no new machinery.
+
 ## What review changed
 
 Review of PR #80 raised a counter-example that turned out to invalidate the first version of every number

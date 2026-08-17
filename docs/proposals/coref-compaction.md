@@ -321,6 +321,100 @@ Two additions the current `Trigger` cannot express, both implied by §4:
   moment of maximum pressure.**
 - **A rewrite budget** (constraint 3), which is a policy field rather than a shape threshold.
 
+### The deferral gate: designed, unquantified
+
+`min_batch_frac` is a correct implementation of the **token** argument in §4 and a poor proxy for
+the **deferral** argument — which is the one §7's measurement says actually pays. This subsection
+records the gap, the corrected arithmetic, and the order in which it should be closed. None of it
+is built.
+
+**The prize is a step function, and clearing the threshold is not enough.** Cutting to exactly the
+threshold buys one turn: the next turn grows the transcript, crosses again, and now you either eat
+the compaction anyway or pay a **second** cache-write — at the point where `W` is largest and each
+write is most expensive. So the requirement is not `deficit`, it is:
+
+```
+required cut  ≥  (usage − threshold)  +  growthPerTurn × headroomTurns
+```
+
+Measured on the 19 real sessions in [the corpus](../results/coref-density.md) that passed Claude
+Code's 167k threshold, expressed as a share of the request:
+
+| headroom bought | required cut | achievable with `unreferenced` + `closed` |
+|---|---|---|
+| H = 0 (bare clear) | 7.3% | 10/19 |
+| H = 20 | 12.6% | 5/19 |
+| H = 40 | 18.0% | **0/19** |
+| H = 60 | 23.5% | **0/19** |
+
+So a bar high enough to avoid paying twice (≈20–25% of the request, which is what 40–60 turns of
+headroom costs) is a bar **Tier-1 matching cannot clear**. Mean available cut is 4.4% of the
+request for `unreferenced` and 9.6% including `closed`. That is also how the old
+`min_batch_frac: 0.15` default was found to admit **1 of 19** sessions, and 0 at the shipped cut
+set — a gate no traffic can clear is an off switch that looks like a threshold.
+
+!!! warning "One figure here is partly an artifact"
+    Peak request ≈180k and deficit ≈13k are shaped by `cc_capture.py` segmenting transcripts at
+    180k tokens, so peaks cluster there by construction. The durable number is the one that does
+    not depend on it: **available cuttable mass is 4–10% of the request.**
+
+**What the gate should ask instead.** `coref` never runs alone, and it is the only component that
+pays a prefix rewrite — `mask`, `extract` and `cmdfilter` all work in the uncached tail and are
+cache-safe (`mask` alone measured 12.5% on SWE-bench, 27.5% on Terminal-Bench). So the deferral
+prize is mostly earned by the components that pay nothing for it, and `coref` is a marginal
+contributor paying the most. Its gate should therefore not ask "is my cut large?" but "**does my
+cut change the outcome?**":
+
+| Case | Condition, evaluated at `coref`'s entry | Action | Why |
+|---|---|---|---|
+| **Already safe** | under the threshold with headroom before `coref` runs | **do not cut** | The prize is already won; a rewrite buys nothing |
+| **Decisive** | over the threshold before, under it after | **cut** | `coref` is what tips it — the only case that justifies a rewrite |
+| **Unreachable** | still over the threshold even after `coref` | **do not cut** | The agent compacts regardless, so we would pay the rewrite *and* eat the compaction |
+
+The counter-intuitive case is the first: `coref` should be **less** aggressive when the rest of the
+pipeline is doing well. `min_batch_frac` cannot express any of this — a 6% cut is "too small"
+whether it is the decisive 6% or an irrelevant one.
+
+**It all reduces to one scalar: how many tokens until the agent compacts.** Which is the hard part,
+because the threshold is compared against the **provider's own reported usage**, not against
+anything we compute. Claude Code sums all four tiers of the most recent response's `usage`
+(`input_tokens + cache_creation + cache_read + output_tokens`) plus a local estimate for the
+trailing user turn ([agent compaction](../how-to/agent-compaction.md)). That figure includes the
+`system` array, the tool definitions and last turn's *output* — none of which a component can see,
+which is why `Ctx.ExistingBreakpoints` exists at all. `schema.MessagesTokens` is therefore a
+systematic undercount by an unknown amount.
+
+**Three routes, in increasing cost — and the order matters, because the first may make the others
+unnecessary:**
+
+1. **Measure whether the prize is even in play.** `modes.Tracker` already detects the agent's
+   compaction resets, so on real traffic we can ask how often the agent compacts and whether a
+   `coref` pass moves that at all. This needs *nothing new*, and it is ground truth rather than an
+   estimate. If the answer is "rarely, or not measurably", the whole gate is solving a problem we
+   do not have and `min_batch_frac` is adequate.
+2. **Let the host supply the distance.** The proxy holds the raw body, including `system` and
+   `tools`, so it can count the full request and pass one number down against a configured
+   threshold. Self-contained, and it avoids the response path entirely; last turn's `output_tokens`
+   is a correction (capped ~20k against 167k), not the substance.
+3. **Calibrate and learn.** Only if (2) proves too coarse: record per-session the offset between our
+   count and the previous turn's reported usage, and the observed marginal growth per turn, in the
+   Store — session-scoped like `sumCheckpoint`, with a cross-session prior like `markSeenContent` so
+   turn one is not cold. The offset is not constant within a session (tool definitions change,
+   output varies), so it wants a recent estimate rather than a lifetime average.
+
+**Start conservative, because the asymmetry is sharp.** Over-estimating growth means demanding more
+headroom and cutting less often — safe. Under-estimating means cutting, crossing again, and paying a
+second rewrite at maximum `W` — the disaster case. So a cold start should bias growth *high* and
+headroom *large*, and relax only as evidence accumulates.
+
+**And none of this touches reward.** Every route above can tell us whether a compaction was
+deferred. None can tell us whether the content we removed was needed — that is the silent failure in
+§4, and it remains visible only in reward.
+
+**Status: the prize is argued, not measured.** This document has claimed throughout that deferring
+the agent's own compaction is plausibly the largest win, without ever measuring how often it is
+reachable. Route (1) is the resolution, and nothing else here should be built before it.
+
 ## 7. What we do not know — the measurement pass
 
 Nothing above should be built before the substrate is measured, and it can be measured for
@@ -437,6 +531,11 @@ introduced survivorship bias when the failure rate was arm-imbalanced).
 
 ## 9. Open questions
 
+- **How often is the deferral prize actually reachable?** The largest claimed win in this document
+  has never been measured. `modes.Tracker` already detects the agent's compaction resets, so this is
+  answerable on existing traffic with no new machinery — and the answer decides whether the
+  [deferral gate](#the-deferral-gate-designed-unquantified) is worth building or whether
+  `min_batch_frac` is adequate. **Nothing else in that subsection should be built first.**
 - **Is `xdedup` back on the table?** §C left one caveat explicitly open: compaction is the one
   regime that could make cross-turn dedup viable, because it removes the first copy while later
   re-reads land in the mutable tail. `coref` *creates* that regime. C1 should be re-measured

@@ -128,7 +128,7 @@ transcript needs `T` > 276 turns. Three consequences, and they *are* the design:
 | Term | Means |
 |---|---|
 | **batching** | One rewrite must serve **every** cut in the pass, so `S` is the sum of all of them. That's what makes break-even reachable (60k of a 150k transcript needs `T` > 23). Hence a rare, threshold-triggered pass — never a per-output, per-turn decision. |
-| **`min_batch_frac`** | The operational form of that: the pass must cut at least this fraction of the request (default 0.05) or it declines and leaves the request byte-identical. It is a **proxy** for the real question and a poor one — see the deferral note in §7. |
+| **`min_batch_frac`** | The operational form of that: the pass must cut at least this fraction of the request (default 0.05) or it declines and leaves the request byte-identical. A correct implementation of the *token* argument, and a **poor proxy for the deferral argument** — it cannot express "is my cut the decisive one?". See the box below. |
 | **`rewrite_budget`** | Prefix-rewrite passes allowed per session (default 3). `coref` is the only component that spends cache-writes **on purpose**, so the spend is capped and reported. |
 | **step reduction** | The real prize. `corr(Δsteps, Δcost) = +0.95`; unique token removal is ~0.02% of the bill. The objective is **steps and reward, not bytes**. |
 | **deferring agent compaction** | Claude Code compacts itself at ~167k on a 200k model. Staying under that avoids a full-transcript summarization — a large cache event *and* a quality loss. Plausibly the biggest win. |
@@ -157,10 +157,29 @@ which is an argument for cutting deep and rarely, not for cutting more.
 | The agent's own compaction recedes | Claude Code compacts at ~967k instead of ~167k, so the deferral prize becomes **rarer but much larger** — avoiding one summarization of a 1M transcript. As you note, it is also the one prize that is cheap to *measure* deterministically: compare the API-reported usage against the documented threshold and count the turns of headroom the cut bought. No benchmark scoring, no seeds. That belongs in the metrics, and it is not there yet. |
 | The index gets 5× more expensive | Recomputing the reference index over 1M tokens per firing turn is the open latency question, and it scales linearly with the window. An incremental per-session index stops being an optimization and becomes a requirement. |
 
-**And the prize is a step function, not a slope** — your point that it depends how much is being cut. You
-either drop below the agent's compaction threshold or you don't; cutting 90% of what was needed to get
-there is worth nothing. Which argues for sizing the batch against the *threshold distance*, not against a
-fixed fraction of the request — something `min_batch_frac` does not currently express.
+**And the prize is a step function, not a slope.** You either drop below the agent's compaction
+threshold or you don't; cutting 90% of what was needed is worth nothing. Worse, clearing it *exactly*
+buys one turn — the next turn grows past it again, and then you pay a **second** cache-write at the
+point where `W` is largest. So the real requirement is
+`(usage − threshold) + growthPerTurn × headroomTurns`, which on measured traffic works out at 20–25%
+of the request for 40–60 turns of headroom — and Tier-1 matching finds only 4–10%.
+
+!!! danger "The gate is measuring the wrong thing, and the right thing is unmeasured"
+    `min_batch_frac` asks "is my cut large relative to the request?". The question that matters is
+    "**does my cut change the outcome?**" — because `coref` is the only component paying a prefix
+    rewrite, while `mask` and friends do 12–27% from the cache-safe tail for free. So `coref` should
+    cut **only when it is decisive**: not when the pipeline is already under the threshold (the prize
+    is won, a rewrite buys nothing), and not when even `coref` cannot get it under (the agent
+    compacts anyway, so we pay the write *and* eat the compaction).
+
+    That reduces to one scalar — **tokens until the agent compacts** — which is hard because the
+    threshold is compared against the provider's *reported usage*, including `system`, tool
+    definitions and last turn's output, none of which a component can see.
+
+    Fully worked through, with the measured numbers and a three-step order of attack, in the
+    proposal's [deferral gate](../proposals/coref-compaction.md#the-deferral-gate-designed-unquantified).
+    Unbuilt on purpose: **how often the prize is even reachable has never been measured**, and that
+    measurement needs nothing new.
 
 ## 8. Mechanism terms (how it stays cache-safe)
 

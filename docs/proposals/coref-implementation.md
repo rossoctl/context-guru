@@ -45,6 +45,14 @@ are precisely what §7 produces, so it defaults to **off** and the shipped value
 carried over from `coref.py`'s defaults for comparability, not recommendations. `coref` is in **no
 preset** for the same reason.
 
+**Also not built, and deliberately: the deferral gate.** `min_batch_frac` implements the token
+argument and is a poor proxy for the deferral argument — it cannot ask whether this cut is the
+*decisive* one. The design, the measured numbers (a bar high enough to avoid paying two cache-writes
+is 20–25% of the request; Tier-1 finds 4–10%) and a three-step order of attack are in
+[the deferral gate](coref-compaction.md#the-deferral-gate-designed-unquantified). Step one is to
+measure whether the prize is reachable at all, using `modes.Tracker`'s existing reset detection —
+which needs nothing new and may make the rest unnecessary. Nothing else there should be built first.
+
 Also not built: the Tier-2 LLM escalation ([open questions](coref-compaction.md#9-open-questions)), and the incremental per-session reference index. The
 index is currently recomputed per firing turn — acceptable because the trigger makes firings rare, but
 it is the latency question in the proposal's [open questions](coref-compaction.md#9-open-questions) and it is unmeasured.
@@ -133,6 +141,11 @@ real names like `context-guru`) is bounded at ~6 points of *under*-reporting rat
 3. `observe` mode on real traffic to read `expand` rate — the precision inner loop from §4 — before any
    scored benchmark run.
 4. Only then §8's benchmarks, with the multi-seed and don't-stop-at-first-significance guards.
+
+Separately and in parallel, because it needs no API budget and no eval box: measure how often the
+agent's own compaction is reachable at all (`modes.Tracker` reset detection). That decides whether the
+[deferral gate](coref-compaction.md#the-deferral-gate-designed-unquantified) is worth building, and it
+is the largest unexamined claim in the proposal.
 
 Until step 1, the component's `closed`-cut defaults remain placeholders with a measured basis on the
 wrong corpus, which is why they are off rather than on.
