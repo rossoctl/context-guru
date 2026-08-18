@@ -214,6 +214,39 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 	if err := crows.Err(); err != nil {
 		return nil, err
 	}
+	// Recorded model calls. Always loaded, even without content access: the numbers on these
+	// rows (cost, latency, tokens, gate reason, saving) are operational metrics rather than
+	// transcript content, and they are what answers "was this call worth it?". The text
+	// halves are loaded only WITH content access, below.
+	xrows, err := d.sql.Query(`SELECT component, model, strategy, aggressiveness, cold, escalated,
+		candidate_tokens, saved_tokens, prompt_tokens, completion_tokens, cache_read, cache_write,
+		cost_usd, latency_ms, accepted, gate_reason, summary, before_gz, after_gz
+		FROM extraction_calls WHERE request_id = ? ORDER BY seq`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer xrows.Close()
+	for xrows.Next() {
+		var x ExtractionRow
+		var cold, esc, acc int
+		var bz, az []byte
+		if err := xrows.Scan(&x.Component, &x.Model, &x.Strategy, &x.Aggressiveness, &cold, &esc,
+			&x.CandidateTokens, &x.SavedTokens, &x.PromptTokens, &x.CompletionTok,
+			&x.CacheRead, &x.CacheWrite, &x.CostUSD, &x.LatencyMs, &acc,
+			&x.GateReason, &x.Summary, &bz, &az); err != nil {
+			return nil, err
+		}
+		x.Cold, x.Escalated, x.Accepted = cold != 0, esc != 0, acc != 0
+		if withContent {
+			x.Before, x.After = gunzipText(bz), gunzipText(az)
+		} else {
+			x.Summary = "" // model-written text about a tool output; it can quote from it
+		}
+		e.Extractions = append(e.Extractions, x)
+	}
+	if err := xrows.Err(); err != nil {
+		return nil, err
+	}
 	if !withContent {
 		return e, nil
 	}
@@ -383,6 +416,19 @@ type ComponentRow struct {
 	Errors          int64   `json:"errors"`
 	// ActRate is acted/runs: how often the component finds anything to do.
 	ActRate float64 `json:"act_rate"`
+	// LLM-call economics, from the recorded per-call rows. Zero for every deterministic
+	// component, which is the point: only the components that SPEND can be net-negative,
+	// and until now the components view had no dollars in it at all, so it judged an
+	// expensive component on tokens and latency and could never say "underwater".
+	LLMCalls        int64   `json:"llm_calls"`
+	LLMCallsCold    int64   `json:"llm_calls_cold"`
+	LLMCallsAcc     int64   `json:"llm_calls_accepted"`
+	LLMCostUSD      float64 `json:"llm_cost_usd"`
+	LLMLatencyMsAvg float64 `json:"llm_latency_ms_avg"`
+	// LLMSavedTokens is what the CALLS removed, which is not the same as SavedUnique: the
+	// component's savings also include frozen results replayed with no call at all, and on
+	// measured traffic that replay is ~93% of its realized value.
+	LLMSavedTokens int64 `json:"llm_saved_tokens"`
 }
 
 // Components aggregates per-component accounting over the filtered window.
@@ -420,7 +466,40 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 		}
 		out = append(out, &c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// The per-call economics, in a second pass over the same filtered window. A JOIN into
+	// the query above would multiply the component rows by the number of calls and silently
+	// inflate every SUM in it.
+	xq := `SELECT x.component, COUNT(*), SUM(x.cold), SUM(x.accepted), SUM(x.cost_usd),
+		AVG(x.latency_ms), SUM(x.saved_tokens)
+		FROM extraction_calls x JOIN requests r ON r.id = x.request_id
+		WHERE ` + cond + ` GROUP BY x.component`
+	xrows, err := d.sql.Query(xq, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer xrows.Close()
+	byName := map[string]*ComponentRow{}
+	for _, c := range out {
+		byName[c.Component] = c
+	}
+	for xrows.Next() {
+		var name string
+		var calls, cold, acc, saved int64
+		var cost, lat sql.NullFloat64
+		if err := xrows.Scan(&name, &calls, &cold, &acc, &cost, &lat, &saved); err != nil {
+			return nil, err
+		}
+		c, ok := byName[name]
+		if !ok {
+			continue // a call recorded against a component with no surviving component row
+		}
+		c.LLMCalls, c.LLMCallsCold, c.LLMCallsAcc = calls, cold, acc
+		c.LLMCostUSD, c.LLMLatencyMsAvg, c.LLMSavedTokens = cost.Float64, lat.Float64, saved
+	}
+	return out, xrows.Err()
 }
 
 // Bucket is one time bucket of the series. Bucketing is done in SQL at query

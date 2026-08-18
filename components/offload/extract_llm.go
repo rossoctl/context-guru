@@ -694,6 +694,10 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		i       int
 		content string
 		id      string
+		// gate is what the economic gate concluded for this candidate — including when the
+		// conclusion was overridden. Recorded per call so an operator who turned the gate
+		// advisory can still see what it would have refused.
+		gate string
 	}
 	var cands []cand
 	skipFR := false
@@ -847,6 +851,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// OBSERVATION also means a suppressed candidate still counts as seen, which is
 		// correct: recurrence is a property of the content, not of what we decided to spend.
 		seenBefore := markSeenContent(c, id)
+		gateReason := "gate off"
 		if e.gate {
 			// Stop exploring once calls are observed to be slow: exploration spends wall
 			// clock as well as money, and an agent on a task deadline feels the former more.
@@ -861,7 +866,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				// then proceed anyway. Deliberately does NOT bump the suppressed counter:
 				// nothing was suppressed, and inflating that would make the gate look
 				// like it was working when it has been overridden.
-				metrics.RecordExtractionReason("advisory: " + d.reason)
+				d.reason = "advisory: " + d.reason
+				metrics.RecordExtractionReason(d.reason)
 				rep.Gate("economic_gate_advisory")
 				if dbg {
 					logging.From(c.Ctx).Debug("cg.extract_llm.gate", "decision", "advisory",
@@ -884,8 +890,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				continue
 			}
 			metrics.RecordExtractionReason(d.reason)
+			gateReason = d.reason
 		}
-		cands = append(cands, cand{i, content, id})
+		cands = append(cands, cand{i: i, content: content, id: id, gate: gateReason})
 	}
 	if dbg && len(tools) > 0 {
 		logging.From(c.Ctx).Debug("cg.extract_llm", "tools", len(tools), "cands", len(cands),
@@ -932,6 +939,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	if len(cands) > 0 {
 		type outT struct{ projected, summary string }
 		out := make([]outT, len(cands))
+		// One record per call, written to its own slot so the goroutines need no lock (a
+		// Report is copied by value across this codebase and cannot carry one).
+		calls := make([]components.ModelCall, len(cands))
 		sem := make(chan struct{}, llmConcurrency)
 		var wg sync.WaitGroup
 		for k := range cands {
@@ -942,10 +952,27 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				defer func() { <-sem }()
 				ctx, cancel := context.WithTimeout(c.Ctx, llmCallTimeout)
 				defer cancel()
+				// A per-CALL accounting window nested inside the request's, so this one
+				// call's tokens and cost are attributable without hiding them from the
+				// request's own bill (see cheapmodel.WithCallSink).
+				ctx, callSink := cheapmodel.WithCallSink(ctx)
 				before := schema.TextTokens(cands[k].content)
 				start := time.Now()
-				res, sum, _ := extract.RunExtractionSummary(ctx, cands[k].content, goal, keepIDs, before, extCfg, model)
-				metrics.RecordExtractionCall(float64(time.Since(start).Milliseconds()))
+				res, sum, strategy := extract.RunExtractionSummary(ctx, cands[k].content, goal, keepIDs, before, extCfg, model)
+				latency := float64(time.Since(start).Milliseconds())
+				metrics.RecordExtractionCall(latency)
+				_, inTok, outTok := callSink.Totals()
+				cw, cr := callSink.CacheTotals()
+				calls[k] = components.ModelCall{
+					Model: e.modelName, Strategy: strategy, Aggressiveness: string(e.aggro),
+					Cold: sweeping, Escalated: escalated,
+					CandidateTokens: before, LatencyMs: latency,
+					PromptTokens: inTok, CompletionTokens: outTok,
+					CacheRead: cr, CacheWrite: cw,
+					CostUSD:    e.pricing.Cost(inTok, outTok, cw, cr),
+					GateReason: cands[k].gate,
+					Before:     cands[k].content,
+				}
 				// CLASSIFY THE SILENT FAILURE — and classify it INDEPENDENTLY of whether
 				// a result came back. RunExtractionSummary returns ("", "", "none") for every
 				// failure mode, so timeout / sandbox rejection / "nothing shrank" are
@@ -970,6 +997,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				}
 				if res != "" && res != cands[k].content {
 					out[k] = outT{res, sum}
+					calls[k].Accepted = true
+					calls[k].SavedTokens = before - schema.TextTokens(res)
+					calls[k].Summary, calls[k].After = sum, res
 					// Feed the observed ratio so the gate prices future calls on what this
 					// workload actually achieves, not on an assumption.
 					e.ratios.observe(before-schema.TextTokens(res), before)
@@ -1001,6 +1031,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			}(k)
 		}
 		wg.Wait()
+		rep.Calls = calls      // serial: every goroutine has returned
 		for k := range cands { // Phase 3 (serial): freeze + splice.
 			if out[k].projected == "" {
 				continue

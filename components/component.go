@@ -289,6 +289,56 @@ type Report struct {
 	// sat at zero on a whole workload without anyone being able to say which case each
 	// was in. Filled by the component via Gate(); rolled up into /stats per component.
 	Gates map[string]int
+	// Calls records each LLM call this component made on this request. Empty for every
+	// deterministic component; one entry per model call for the two that make them.
+	//
+	// Assigned SERIALLY by the component, never appended to from a goroutine: a Report is
+	// copied by value all over this codebase (emitters take one), so it cannot carry a lock.
+	// extract_llm fans out into a pre-sized slice and assigns the result once, which is the
+	// same shape its projected-output collection already uses.
+	Calls []ModelCall
+}
+
+// ModelCall is one LLM call a component made, with what it cost and what it bought.
+//
+// It exists because "this component spent money" was previously a single dollar figure per
+// REQUEST, priced at the agent model's rate, with no record of how many calls made it up,
+// which candidate each looked at, whether it was accepted, or what the gate thought. For the
+// one component that can be net-negative, that is the difference between an operator being
+// able to answer "was that worth it?" and having to guess.
+//
+// Before/After hold the candidate's text either side of the call. They are transcript
+// content, so whether they are ever PERSISTED is decided downstream by the same per-account
+// capture consent that governs the diff view — this struct only carries them.
+type ModelCall struct {
+	Component string
+	Model     string
+	Strategy  string
+	// Aggressiveness is the compaction target asked for, so a level's real effect on this
+	// workload can be read off recorded calls instead of inferred.
+	Aggressiveness string
+	// Cold marks a call made during a cold-cache sweep, whose economics differ by ~12.5x.
+	Cold bool
+	// Escalated marks a call that fell back to the agent's own model because the transcript
+	// did not fit the extraction model's window.
+	Escalated       bool
+	CandidateTokens int
+	SavedTokens     int
+	LatencyMs       float64
+	// Token usage of the CALL itself, split by tier, and its cost priced with the extraction
+	// model's rates rather than the agent's.
+	PromptTokens     int64
+	CompletionTokens int64
+	CacheRead        int64
+	CacheWrite       int64
+	CostUSD          float64
+	Accepted         bool
+	// GateReason is what the economic gate concluded, including when it was overridden — the
+	// counterfactual an operator needs to see after choosing to override it.
+	GateReason string
+	Summary    string
+	Before     string
+	After      string
 }
 
 // Gate records that one candidate was declined by the named gate. Names are the

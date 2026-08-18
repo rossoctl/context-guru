@@ -272,6 +272,16 @@ func (d *DB) insertBatch(evs []*Event) error {
 		return err
 	}
 	defer contentStmt.Close()
+	xcallStmt, err := tx.Prepare(`INSERT INTO extraction_calls(
+		request_id, seq, component, tenant_id, session_id, ts, cold, escalated, aggressiveness,
+		strategy, model, candidate_tokens, saved_tokens, prompt_tokens, completion_tokens,
+		cache_read, cache_write, cost_usd, latency_ms, accepted, gate_reason, summary,
+		before_gz, after_gz
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer xcallStmt.Close()
 
 	spend := map[spendKey]float64{}
 	for _, e := range evs {
@@ -304,6 +314,20 @@ func (d *DB) insertBatch(evs []*Event) error {
 		for i, c := range e.Content {
 			if _, err := contentStmt.Exec(id, i, c.Path, c.BeforeTokens, c.AfterTokens,
 				gzipText(c.Before), gzipText(c.After), strings.Join(c.Components, ",")); err != nil {
+				return err
+			}
+		}
+		for i, x := range e.Extractions {
+			// tenant_id and session_id are denormalized onto the row on purpose: the queries
+			// that matter ("what did extraction cost this account this month", "show me this
+			// session's calls") would otherwise all need the join, and a request row can be
+			// evicted by retention while this row is still interesting.
+			if _, err := xcallStmt.Exec(id, i, x.Component, e.TenantID, e.SessionID, e.TS,
+				boolInt(x.Cold), boolInt(x.Escalated), x.Aggressiveness, x.Strategy, x.Model,
+				x.CandidateTokens, x.SavedTokens, x.PromptTokens, x.CompletionTok,
+				x.CacheRead, x.CacheWrite, x.CostUSD, x.LatencyMs, boolInt(x.Accepted),
+				x.GateReason, x.Summary,
+				gzipText(x.Before), gzipText(x.After)); err != nil {
 				return err
 			}
 		}

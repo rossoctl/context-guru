@@ -363,7 +363,8 @@
         <dt>Gross saved</dt><dd>re-counted every turn the agent re-sends the transcript</dd>
         <dt>Overcount</dt><dd>gross ÷ unique — how inflated the gross figure is</dd>
         <dt>Own latency</dt><dd>wall time this component spent on the hot path</dd>
-        <dt>Verdict</dt><dd>those unique savings weighed against that cost</dd>
+        <dt>LLM calls / cost</dt><dd>model calls this component made itself, and what they cost — blank for every deterministic component</dd>
+        <dt>Verdict</dt><dd>those unique savings weighed against that cost. For a component that makes LLM calls it is stated in dollars: what its calls removed, valued at the rate those tokens would have been billed at, minus what the calls cost</dd>
       </dl>
     </details>
     <div class="tblwrap" tabindex="0">
@@ -372,7 +373,9 @@
           <th>Component</th><th>Kind</th><th class="num">Runs</th><th class="num">Acted</th>
           <th class="num">Act rate</th><th class="num">Reverted</th>
           <th class="num">Unique saved</th><th class="num">Gross saved</th><th class="num">Overcount</th>
-          <th class="num">Own latency</th><th class="num">Avg ms</th><th class="num">Errors</th><th>Verdict</th>
+          <th class="num">Own latency</th><th class="num">Avg ms</th>
+          <th class="num">LLM calls</th><th class="num">LLM cost</th>
+          <th class="num">Errors</th><th>Verdict</th>
         </tr></thead>
         <tbody id="components-body"></tbody>
       </table>

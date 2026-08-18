@@ -63,6 +63,25 @@ function compact(v) {
   if (a >= 1e3) return (v / 1e3).toFixed(a >= 1e4 ? 0 : 1) + 'k';
   return nf.format(Math.round(v));
 }
+// netUSD is what one recorded compaction call was worth: the value of the tokens it removed
+// minus what the call cost. The per-token value depends on how the request was billed — a
+// token removed on a cold-cache turn is worth the cache-WRITE rate (1.25x fresh), one removed
+// from a warm cached prefix only the cache-READ rate (0.1x fresh), a ~12.5x spread. Using one
+// rate for both would either flatter warm calls or slander cold ones.
+const AGENT_FRESH_PER_MTOK = 3.0;
+const AGENT_CACHE_READ_PER_MTOK = 0.3;
+const AGENT_CACHE_WRITE_PER_MTOK = 3.75;
+
+function savedTokenUSD(x, cacheAware) {
+  if (x.cold) return AGENT_CACHE_WRITE_PER_MTOK / 1e6;
+  if (cacheAware) return AGENT_CACHE_READ_PER_MTOK / 1e6;
+  return AGENT_FRESH_PER_MTOK / 1e6;
+}
+
+function netUSD(x, cacheAware) {
+  return (x.saved_tokens || 0) * savedTokenUSD(x, cacheAware) - (x.cost_usd || 0);
+}
+
 function usd(v) {
   if (v === null || v === undefined) return '—';
   const a = Math.abs(v);
@@ -783,6 +802,16 @@ function renderSeries(buckets) {
 function verdict(c) {
   if (c.runs === 0) return ['—', 'neutral'];
   if (c.errors > 0) return ['errors', 'missing'];
+  // DOLLARS FIRST, where there are any. A component that makes LLM calls is the only kind
+  // that can be net-negative, and until the per-call records existed this function had no
+  // money to reason with — so it judged the one component that can lose money on tokens and
+  // latency, and could describe a $3 loss as "expensive for its yield".
+  if (c.llm_calls > 0) {
+    const net = componentNetUSD(c);
+    if (net < -0.01) return ['underwater ' + usd(net), 'missing'];
+    if (net <= 0) return ['break-even', 'partial'];
+    return ['net ' + usd(net), 'complete'];
+  }
   // Spent >1s of hot-path time and returned nothing: paid for, unused.
   if (c.saved_unique === 0 && c.duration_ms_total > 1000) return ['costly and inert', 'missing'];
   if (c.mutated === 0) return ['inert here', 'partial'];
@@ -793,6 +822,27 @@ function verdict(c) {
   }
   if (c.act_rate < 0.02) return ['rarely fires', 'partial'];
   return ['earning its place', 'complete'];
+}
+
+/**
+ * componentNetUSD prices a component's own LLM spend against what its calls removed.
+ *
+ * Deliberately uses only what the CALLS saved (llm_saved_tokens), not the component's total
+ * unique savings: most of an extractor's realized value comes from frozen results being
+ * replayed with no call at all — ~93% on measured traffic — and crediting that replay to the
+ * calls would make any amount of spending look profitable.
+ *
+ * Cold-sweep calls are valued at the cache-write rate and warm ones at the cache-read rate,
+ * a ~12.5x spread, so a component whose calls are mostly cold is judged on the right basis.
+ */
+function componentNetUSD(c) {
+  const cold = c.llm_calls_cold || 0;
+  const warm = Math.max(0, (c.llm_calls || 0) - cold);
+  const saved = c.llm_saved_tokens || 0;
+  const total = cold + warm;
+  const perTok = total === 0 ? 0
+    : (cold * AGENT_CACHE_WRITE_PER_MTOK + warm * AGENT_CACHE_READ_PER_MTOK) / total / 1e6;
+  return saved * perTok - (c.llm_cost_usd || 0);
 }
 
 /** DAY_MS is dash.DayMs: per-day bars are the shared time series at a day-wide bucket. */
@@ -886,12 +936,12 @@ function syncDimPicker(dims) {
 
 async function loadComponents() {
   const body = clear($('#components-body'));
-  loadingRows(body, 13);
+  loadingRows(body, 15);
   try {
     const { components } = await api('components');
     clear(body);
     if (!components.length) {
-      tableMessage(body, 13, 'No component runs captured',
+      tableMessage(body, 15, 'No component runs captured',
         'Run some traffic through the proxy with a non-empty pipeline.');
       emptyState($('#chart-comp'), 'No component data',
         'This chart fills in once a component has saved something.');
@@ -911,6 +961,8 @@ async function loadComponents() {
         el('td', { class: 'num', text: c.overcount_ratio ? c.overcount_ratio.toFixed(1) + '×' : '—' }),
         el('td', { class: 'num', text: dur(c.duration_ms_total) }),
         el('td', { class: 'num', text: ms(c.duration_ms_avg) }),
+        el('td', { class: 'num', text: c.llm_calls ? num(c.llm_calls) : '—' }),
+        el('td', { class: 'num', text: c.llm_calls ? usd(c.llm_cost_usd) : '—' }),
         el('td', { class: 'num', text: num(c.errors) }),
         el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext }))));
     }
@@ -928,7 +980,7 @@ async function loadComponents() {
     })), { emptyDetail: 'No component saved any content tokens in this window.' });
   } catch (err) {
     if (aborted(err)) return;
-    tableMessage(body, 13, 'Could not load components', String(err.message || err), { error: true });
+    tableMessage(body, 15, 'Could not load components', String(err.message || err), { error: true });
   }
 }
 
@@ -1560,6 +1612,62 @@ async function openRequest(id, fromURL) {
       });
       tbl.appendChild(tb);
       body.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
+    }
+
+    // Recorded model calls. This is the only place the cost of one extraction call is
+    // visible: the request row carries a single rolled-up dollar figure, and the components
+    // table has no dollars at all, so an expensive component could never be shown to be
+    // underwater on a particular KIND of call.
+    if (e.extractions && e.extractions.length) {
+      body.appendChild(el('h2', { text: 'Compaction model calls' }));
+      const net = e.extractions.reduce((a, x) => a + netUSD(x, e.cache_aware), 0);
+      const spent = e.extractions.reduce((a, x) => a + (x.cost_usd || 0), 0);
+      body.appendChild(el('div', { class: 'note' },
+        `${e.extractions.length} call(s), spent ${usd(spent)}, net `,
+        el('strong', { class: net < 0 ? 'warn-text' : '', text: usd(net) }),
+        net < 0 ? ' — these calls cost more than the tokens they removed were worth.' : '.'));
+      const xt = el('table', { class: 'tbl compact', 'data-testid': 'detail-extractions' },
+        el('thead', {}, el('tr', {},
+          el('th', { text: '#' }), el('th', { text: 'Component' }), el('th', { text: 'Target' }),
+          el('th', { class: 'num', text: 'Candidate' }), el('th', { class: 'num', text: 'Saved' }),
+          el('th', { class: 'num', text: 'Prompt' }), el('th', { class: 'num', text: 'Cost' }),
+          el('th', { class: 'num', text: 'Net' }), el('th', { class: 'num', text: 'Latency' }),
+          el('th', { text: 'Outcome' }))));
+      const xb = el('tbody');
+      e.extractions.forEach((x, i) => {
+        const n = netUSD(x, e.cache_aware);
+        xb.appendChild(el('tr', {},
+          el('td', { text: i + 1 }),
+          el('td', {}, el('code', { text: x.component }),
+            x.cold ? el('span', { class: 'pill complete', text: 'cold sweep' }) : null,
+            x.escalated ? el('span', { class: 'pill neutral', text: 'escalated' }) : null),
+          el('td', { text: x.aggressiveness || '—' }),
+          el('td', { class: 'num', text: compact(x.candidate_tokens) }),
+          el('td', { class: 'num', text: compact(x.saved_tokens) }),
+          el('td', { class: 'num', text: compact(x.prompt_tokens) }),
+          el('td', { class: 'num', text: usd(x.cost_usd) }),
+          el('td', { class: 'num ' + (n < 0 ? 'warn-text' : ''), text: usd(n) }),
+          el('td', { class: 'num', text: ms(x.latency_ms) }),
+          el('td', {},
+            el('span', {
+              class: 'pill ' + (x.accepted ? 'complete' : 'neutral'),
+              text: x.accepted ? 'accepted' : 'no reduction',
+            }),
+            x.summary ? el('div', { class: 's', text: x.summary }) : null,
+            x.gate_reason ? el('div', { class: 's', text: x.gate_reason }) : null)));
+      });
+      xt.appendChild(xb);
+      body.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, xt));
+      // The before/after of each call, where the account stores transcripts at all.
+      e.extractions.forEach((x, i) => {
+        if (!x.before && !x.after) return;
+        const d = el('details', { class: 'field' },
+          el('summary', { text: `Call ${i + 1}: what the model removed` }));
+        const host = el('div', {});
+        renderDiff(host, x.before || '', x.after || '', 'unified');
+        d.appendChild(host);
+        body.appendChild(d);
+      });
     }
 
     body.appendChild(el('h2', { text: 'What context-guru changed' }));

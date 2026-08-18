@@ -301,6 +301,15 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 
 	if !captureContent {
 		e.Content = nil
+		// Strip only the TEXT halves of the recorded calls, and keep the rows. Consent is
+		// about storing transcript content; the cost, latency, tokens, gate reason and
+		// saving of a call are our own operational metrics, and dropping them would leave
+		// an account unable to answer "was this component worth it?" — the reason the
+		// per-call record exists — as the price of not storing its transcripts.
+		for i := range e.Extractions {
+			e.Extractions[i].Before, e.Extractions[i].After = "", ""
+			e.Extractions[i].Summary = ""
+		}
 	} else {
 		// Truncate here (a slice reslice, free), but do NOT redact here.
 		//

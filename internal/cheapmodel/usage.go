@@ -45,6 +45,11 @@ type Sink struct {
 	in, out    atomic.Int64
 	cacheWrite atomic.Int64
 	cacheRead  atomic.Int64
+	// parent is the sink this one nests inside, so a narrower scope can be measured without
+	// hiding the call from the wider one. The proxy installs a per-REQUEST sink; a component
+	// that wants per-CALL numbers installs a child for the duration of one call, and the
+	// usage must reach both or the request's own bill silently loses those tokens.
+	parent *Sink
 }
 
 // Totals returns this scope's usage so far, at the same shape as Usage().
@@ -75,6 +80,28 @@ func WithSink(ctx context.Context, s *Sink) context.Context {
 	return context.WithValue(ctx, sinkKey{}, s)
 }
 
+// WithCallSink scopes a NARROWER accounting window inside whatever sink already scopes ctx,
+// returning the child so the caller can read exactly one call's usage. Usage recorded under
+// the child also reaches every ancestor, so installing one never costs the request its own
+// attribution.
+func WithCallSink(ctx context.Context) (context.Context, *Sink) {
+	child := &Sink{parent: SinkFrom(ctx)}
+	return context.WithValue(ctx, sinkKey{}, child), child
+}
+
+// add records one call's usage on this sink and every sink it nests inside.
+func (s *Sink) add(inTok, outTok, cacheWrite, cacheRead int) {
+	// Nil receiver is the common case: a call made with no sink installed counts toward the
+	// process totals only, which is correct — it is simply not attributable to one request.
+	for cur := s; cur != nil; cur = cur.parent {
+		cur.calls.Add(1)
+		cur.in.Add(int64(inTok))
+		cur.out.Add(int64(outTok))
+		cur.cacheWrite.Add(int64(cacheWrite))
+		cur.cacheRead.Add(int64(cacheRead))
+	}
+}
+
 // SinkFrom returns the sink scoping ctx, or nil.
 func SinkFrom(ctx context.Context) *Sink {
 	if ctx == nil {
@@ -93,13 +120,7 @@ func recordUsageCache(ctx context.Context, inTok, outTok, cacheWrite, cacheRead 
 	llmOutputTokens.Add(int64(outTok))
 	llmCacheWrite.Add(int64(cacheWrite))
 	llmCacheRead.Add(int64(cacheRead))
-	if s := SinkFrom(ctx); s != nil {
-		s.calls.Add(1)
-		s.in.Add(int64(inTok))
-		s.out.Add(int64(outTok))
-		s.cacheWrite.Add(int64(cacheWrite))
-		s.cacheRead.Add(int64(cacheRead))
-	}
+	SinkFrom(ctx).add(inTok, outTok, cacheWrite, cacheRead)
 }
 
 // Usage returns the cumulative cheap-model usage (calls, input tokens, output

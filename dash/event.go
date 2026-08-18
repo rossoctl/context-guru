@@ -100,6 +100,8 @@ type Event struct {
 
 	Components []CompRow    `json:"components,omitempty"`
 	Content    []ContentRow `json:"content,omitempty"`
+	// Extractions is one row per LLM call an expensive component made on this request.
+	Extractions []ExtractionRow `json:"extractions,omitempty"`
 
 	// ContentCap is the per-blob byte cap Redact applies. Set at the capture site and
 	// consumed by the writer goroutine; not persisted (a knob, not a fact about the
@@ -200,6 +202,14 @@ func (e *Event) Redact() {
 		e.Content[i].Before = RedactContent(e.Content[i].Before, e.ContentCap)
 		e.Content[i].After = RedactContent(e.Content[i].After, e.ContentCap)
 	}
+	// The same treatment for a recorded call's before/after, which is the same kind of
+	// material from the same transcript. The SUMMARY too: it is model-written text about a
+	// tool output, so it can quote from it.
+	for i := range e.Extractions {
+		e.Extractions[i].Before = RedactContent(e.Extractions[i].Before, e.ContentCap)
+		e.Extractions[i].After = RedactContent(e.Extractions[i].After, e.ContentCap)
+		e.Extractions[i].Summary = RedactContent(e.Extractions[i].Summary, e.ContentCap)
+	}
 }
 
 // Saved is this request's gross content-token saving.
@@ -238,6 +248,39 @@ type ContentRow struct {
 	// absent. Empty on rows written before this field existed, which the UI must read as
 	// "unknown", not as "nothing".
 	Components []string `json:"components,omitempty"`
+}
+
+// ExtractionRow is one recorded LLM call an expensive component made. See the
+// extraction_calls table for why this is not folded into CompRow.
+type ExtractionRow struct {
+	Component       string  `json:"component"`
+	Model           string  `json:"model,omitempty"`
+	Strategy        string  `json:"strategy,omitempty"`
+	Aggressiveness  string  `json:"aggressiveness,omitempty"`
+	Cold            bool    `json:"cold"`
+	Escalated       bool    `json:"escalated,omitempty"`
+	CandidateTokens int     `json:"candidate_tokens"`
+	SavedTokens     int     `json:"saved_tokens"`
+	PromptTokens    int64   `json:"prompt_tokens"`
+	CompletionTok   int64   `json:"completion_tokens"`
+	CacheRead       int64   `json:"cache_read"`
+	CacheWrite      int64   `json:"cache_write"`
+	CostUSD         float64 `json:"cost_usd"`
+	LatencyMs       float64 `json:"latency_ms"`
+	Accepted        bool    `json:"accepted"`
+	GateReason      string  `json:"gate_reason,omitempty"`
+	Summary         string  `json:"summary,omitempty"`
+	// Before/After are transcript content: persisted and served only under the same
+	// per-account capture consent as the diff view.
+	Before string `json:"before,omitempty"`
+	After  string `json:"after,omitempty"`
+}
+
+// NetUSD is what this call was worth: the value of the tokens it removed, minus what the
+// call cost. The whole point of recording calls individually — a component can be ahead
+// overall while a particular kind of call is underwater.
+func (r ExtractionRow) NetUSD(perSavedTokenUSD float64) float64 {
+	return float64(r.SavedTokens)*perSavedTokenUSD - r.CostUSD
 }
 
 // FromTrace fills the pipeline-derived half of an Event from an apply.Trace.
@@ -286,6 +329,18 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 			}
 			e.SavedUnique += row.SavedUnique
 			e.Components = append(e.Components, row)
+			for _, mc := range r.Calls {
+				e.Extractions = append(e.Extractions, ExtractionRow{
+					Component: mc.Component, Model: mc.Model, Strategy: mc.Strategy,
+					Aggressiveness: mc.Aggressiveness, Cold: mc.Cold, Escalated: mc.Escalated,
+					CandidateTokens: mc.CandidateTokens, SavedTokens: mc.SavedTokens,
+					PromptTokens: mc.PromptTokens, CompletionTok: mc.CompletionTokens,
+					CacheRead: mc.CacheRead, CacheWrite: mc.CacheWrite,
+					CostUSD: mc.CostUSD, LatencyMs: mc.LatencyMs, Accepted: mc.Accepted,
+					GateReason: mc.GateReason, Summary: mc.Summary,
+					Before: mc.Before, After: mc.After,
+				})
+			}
 		}
 	}
 	for _, c := range tr.Changes {

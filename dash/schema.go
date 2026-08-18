@@ -242,9 +242,72 @@ CREATE TABLE IF NOT EXISTS bench_tasks (
 CREATE INDEX IF NOT EXISTS idx_bt_run ON bench_tasks(run_id, arm);
 `
 
+// additiveDDL holds tables that can be created on an EXISTING database without touching
+// what is already there — so adding one does not need a schemaVersion bump.
+//
+// The bump is otherwise unavoidable and expensive: a version mismatch renames the file aside
+// and starts fresh, discarding every requests / request_components / request_content row
+// (only archived_sessions and tenant_spend are carried). For a purely new table that cost
+// buys nothing, so this runs unconditionally on every open and is idempotent.
+//
+// STRICTLY new tables only. Anything that alters an existing table — a new column, a changed
+// index, a different type — still requires a version bump, because an old file would
+// otherwise be read with the wrong shape.
+const additiveDDL = `
+-- One row per LLM call an expensive component made, with what it cost and what it bought.
+--
+-- Separate from request_components because the relationship is one-to-many and the columns
+-- are about a MODEL CALL, not a component run: which candidate it looked at, the tokens and
+-- cache tiers of the call itself, its own latency, whether the result was accepted, and what
+-- the economic gate concluded (including when that conclusion was overridden). Before this,
+-- the whole record of an extraction call was one dollar figure per request, priced at the
+-- agent model's rate.
+--
+-- before_gz/after_gz are transcript content and are written ONLY with the same per-account
+-- capture consent that governs the diff view.
+CREATE TABLE IF NOT EXISTS extraction_calls (
+  -- FK + cascade, matching request_components and request_content: retention, session
+  -- eviction, cold-storage migration and a manager purge all delete from requests, and
+  -- every one of them would otherwise leave orphans here (foreign_keys is on, see dsn()).
+  request_id   INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+  seq          INTEGER NOT NULL,
+  component    TEXT NOT NULL,
+  tenant_id    TEXT NOT NULL DEFAULT '',
+  session_id   TEXT NOT NULL DEFAULT '',
+  ts           INTEGER NOT NULL,
+  cold         INTEGER NOT NULL DEFAULT 0,
+  escalated    INTEGER NOT NULL DEFAULT 0,
+  aggressiveness TEXT NOT NULL DEFAULT '',
+  strategy     TEXT NOT NULL DEFAULT '',
+  model        TEXT NOT NULL DEFAULT '',
+  candidate_tokens INTEGER NOT NULL DEFAULT 0,
+  saved_tokens INTEGER NOT NULL DEFAULT 0,
+  prompt_tokens INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read   INTEGER NOT NULL DEFAULT 0,
+  cache_write  INTEGER NOT NULL DEFAULT 0,
+  cost_usd     REAL NOT NULL DEFAULT 0,
+  latency_ms   REAL NOT NULL DEFAULT 0,
+  accepted     INTEGER NOT NULL DEFAULT 0,
+  gate_reason  TEXT NOT NULL DEFAULT '',
+  summary      TEXT NOT NULL DEFAULT '',
+  before_gz    BLOB,
+  after_gz     BLOB,
+  PRIMARY KEY (request_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_xcalls_request ON extraction_calls(request_id);
+CREATE INDEX IF NOT EXISTS idx_xcalls_tenant_ts ON extraction_calls(tenant_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_xcalls_session ON extraction_calls(session_id, ts);
+`
+
 // migrate creates the schema and validates its version. A version mismatch is
 // reported to the caller, which renames the old file aside and retries — see Open.
 func migrate(db *sql.DB) error {
+	// Additive tables first, and on every open: an existing database at the current version
+	// returns early below, so a new table added to `ddl` would never appear on it.
+	if _, err := db.Exec(additiveDDL); err != nil {
+		return err
+	}
 	var have string
 	err := db.QueryRow(`SELECT value FROM meta WHERE key='schema_version'`).Scan(&have)
 	switch {
