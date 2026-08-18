@@ -37,14 +37,28 @@ type SystemModel interface {
 	CompleteSystem(ctx context.Context, system, prompt string) (string, error)
 }
 
-// completeSplit sends (system, user) via SystemModel when the client supports it, else
-// concatenates them into one user message. Callers get preamble caching where it exists
-// and identical content where it does not.
-func completeSplit(ctx context.Context, model Model, system, user string) (string, error) {
-	if sm, ok := model.(SystemModel); ok {
-		return sm.CompleteSystem(ctx, system, user)
+// SystemBlocksModel is the further optional capability: send the invariant instructions as
+// SEVERAL ordered blocks, so a provider can cache each prefix separately. It exists because
+// the general contract is identical for every tenant while the aggressiveness block is not,
+// and one joined string would give the two a single cache key — making the shared half
+// unshared the moment two tenants pick different levels.
+type SystemBlocksModel interface {
+	CompleteBlocks(ctx context.Context, system []string, prompt string) (string, error)
+}
+
+// completeSplit sends (systemBlocks, user) through the best capability the client has:
+// separate cacheable blocks, else one joined system field, else a single user message.
+// Identical content in all three cases — only the caching differs — so a Model that
+// implements neither optional interface still works.
+func completeSplit(ctx context.Context, model Model, system []string, user string) (string, error) {
+	if bm, ok := model.(SystemBlocksModel); ok {
+		return bm.CompleteBlocks(ctx, system, user)
 	}
-	return model.Complete(ctx, system+"\n\n"+user)
+	joined := strings.Join(system, "\n\n")
+	if sm, ok := model.(SystemModel); ok {
+		return sm.CompleteSystem(ctx, joined, user)
+	}
+	return model.Complete(ctx, joined+"\n\n"+user)
 }
 
 // Cfg configures extraction.
@@ -62,6 +76,11 @@ type Cfg struct {
 	// may reword/summarize/rewrite freely. Lossy + unverified — the caller must accept
 	// that (e.g. a non-full marker_mode). Default false keeps the verified guarantee.
 	Rewrite bool
+	// Aggressiveness selects the compaction target taught in the second system block
+	// (low | medium | high; empty = medium). It changes what the model is ASKED for, never
+	// what is ACCEPTED — the verbatim-preservation, strictly-smaller and (in deletion-only
+	// mode) subsequence checks are identical at every level.
+	Aggressiveness Aggressiveness
 }
 
 // DefaultCfg mirrors the reference prototype's ExtractCfg defaults.
@@ -194,6 +213,12 @@ func cfgFingerprint(cfg Cfg) string {
 		strconv.FormatFloat(cfg.MinKeepRatio, 'f', 4, 64),
 		strconv.Itoa(cfg.MaxChars),
 		strings.Join(allowed, ","),
+		// Aggressiveness changes the prompt, so it MUST rotate the key: without it the
+		// global result cache would serve a low-aggressiveness extraction to a request
+		// that asked for high, with nothing to notice. (The level's text is also in
+		// PromptVersion, which covers the case of the text itself changing; this covers
+		// two levels coexisting on one deployment.)
+		string(cfg.Aggressiveness),
 	}, "|")
 }
 
@@ -410,7 +435,7 @@ func RunExtractionSummary(ctx context.Context, body, goal string, keepIDs []stri
 		var cand, summary string
 		switch name {
 		case "code":
-			cand, summary = runStarlark(ctx, body, goal, keepIDs, model, cfg.Rewrite)
+			cand, summary = runStarlark(ctx, body, goal, keepIDs, model, cfg.Rewrite, cfg.Aggressiveness)
 		case "single":
 			cand = runSingle(ctx, body, goal, keepIDs, model)
 		case "rlm":

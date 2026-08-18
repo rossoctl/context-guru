@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -21,8 +22,11 @@ func TestAnthropicSendsCachedSystemBlock(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// Long enough to clear the model minimum, so the breakpoint is asked for. A SHORT
+	// preamble deliberately gets no mark — see TestCacheBreakpointOnlyWhenItWouldCache.
+	preamble := strings.Repeat("INVARIANT PREAMBLE. ", 1200)
 	_, err := Anthropic{BaseURL: srv.URL, Model: "m"}.
-		CompleteSystem(context.Background(), "INVARIANT PREAMBLE", "VARIABLE PART")
+		CompleteSystem(context.Background(), preamble, "VARIABLE PART")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +36,7 @@ func TestAnthropicSendsCachedSystemBlock(t *testing.T) {
 		t.Fatalf("expected a 1-block system array, got %#v", body["system"])
 	}
 	blk := sys[0].(map[string]any)
-	if blk["type"] != "text" || blk["text"] != "INVARIANT PREAMBLE" {
+	if blk["type"] != "text" || blk["text"] != preamble {
 		t.Fatalf("system block must carry the preamble as text: %#v", blk)
 	}
 	cc, ok := blk["cache_control"].(map[string]any)
@@ -170,4 +174,105 @@ func resetUsage() {
 	llmOutputTokens.Store(0)
 	llmCacheWrite.Store(0)
 	llmCacheRead.Store(0)
+}
+
+// The breakpoint must be placed only when the provider would actually cache the prefix.
+//
+// This is a MEASURED boundary, not a style choice: a mark below the model's minimum
+// cacheable prefix returns cache_creation_input_tokens: 0 with no error, so the old
+// unconditional mark was inert on haiku-class models — and where it is NOT inert but never
+// read, it is a 1.25x write paid for nothing. An unnameable model gets the conservative
+// (larger) floor so we do not write a cache we cannot verify.
+func TestCacheBreakpointOnlyWhenItWouldCache(t *testing.T) {
+	short := strings.Repeat("word ", 200) // ~200 tokens
+	mid := strings.Repeat("word ", 1500)  // ~1.5k tokens: the extractor's old preamble
+	long := strings.Repeat("word ", 6000) // ~6k tokens: clears every floor
+	for _, tc := range []struct {
+		name, model, system string
+		wantMark            bool
+	}{
+		{"haiku, short prefix", "claude-haiku-4-5", short, false},
+		{"haiku, 1.5k prefix is below its 4096 minimum", "claude-haiku-4-5", mid, false},
+		{"haiku, 6k prefix caches", "claude-haiku-4-5", long, true},
+		{"sonnet, 1.5k prefix clears its 1024 minimum", "aws/claude-sonnet-5", mid, true},
+		{"sonnet, short prefix", "claude-sonnet-5", short, false},
+		{"unnameable model gets the conservative floor", "qwen3-coder-30b", mid, false},
+		{"unnameable model, big prefix", "qwen3-coder-30b", long, true},
+		{"empty model name is treated as unknown", "", mid, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var body map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(b, &body)
+				_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"OK"}]}`)
+			}))
+			defer srv.Close()
+			if _, err := (Anthropic{BaseURL: srv.URL, Model: tc.model}).
+				CompleteSystem(context.Background(), tc.system, "VARIABLE"); err != nil {
+				t.Fatal(err)
+			}
+			sys, _ := body["system"].([]any)
+			if len(sys) != 1 {
+				t.Fatalf("expected one system block, got %#v", body["system"])
+			}
+			_, marked := sys[0].(map[string]any)["cache_control"]
+			if marked != tc.wantMark {
+				t.Fatalf("cache_control present = %v, want %v (model %q, ~%d tokens)",
+					marked, tc.wantMark, tc.model, len(tc.system)/5)
+			}
+		})
+	}
+}
+
+// Two ordered blocks must arrive as two blocks, in order, with the single breakpoint on
+// the LAST one — the whole preamble is the prefix worth caching, and a mark in the middle
+// would cache only the first half.
+func TestCompleteBlocksKeepsOrderAndMarksTheLastBlock(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"OK"}]}`)
+	}))
+	defer srv.Close()
+
+	general := strings.Repeat("general contract ", 1000)
+	aggro := strings.Repeat("compaction target ", 300)
+	if _, err := (Anthropic{BaseURL: srv.URL, Model: "aws/claude-sonnet-5"}).
+		CompleteBlocks(context.Background(), []string{general, "", aggro}, "VARIABLE"); err != nil {
+		t.Fatal(err)
+	}
+	sys, _ := body["system"].([]any)
+	if len(sys) != 2 {
+		t.Fatalf("expected 2 blocks (the blank one dropped), got %d: %#v", len(sys), body["system"])
+	}
+	if sys[0].(map[string]any)["text"] != general || sys[1].(map[string]any)["text"] != aggro {
+		t.Fatal("block order changed; the shared half must come first or it is not a shared prefix")
+	}
+	if _, marked := sys[0].(map[string]any)["cache_control"]; marked {
+		t.Fatal("the first block must not carry the breakpoint (that caches only half the preamble)")
+	}
+	if _, marked := sys[1].(map[string]any)["cache_control"]; !marked {
+		t.Fatal("the last block must carry the breakpoint")
+	}
+}
+
+// A blank-only system must omit the field entirely, leaving a request byte-identical to
+// one that never had a system prompt (the API rejects an empty text block).
+func TestBlankSystemSendsNoSystemField(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"OK"}]}`)
+	}))
+	defer srv.Close()
+	if _, err := (Anthropic{BaseURL: srv.URL, Model: "m"}).
+		CompleteBlocks(context.Background(), []string{"", "   "}, "VARIABLE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := body["system"]; present {
+		t.Fatalf("system field present for a blank preamble: %#v", body["system"])
+	}
 }

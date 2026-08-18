@@ -28,6 +28,21 @@ func (o OpenAI) Complete(ctx context.Context, prompt string) (string, error) {
 // is nothing to mark; a stable leading system message IS the cacheable-prefix idiom here.
 // The split is therefore honest on both backends: same call shape, provider-appropriate
 // mechanism, and no `cache_control` field invented for an API that would reject it.
+// CompleteBlocks joins the ordered blocks into that one leading system message. There is
+// no per-block mechanism to preserve here: OpenAI caches automatically on the longest
+// shared prefix, and two system messages would cache exactly as one does. Keeping the
+// method means the extractor gets the same content on both backends and only the caching
+// mechanism differs (see extract.SystemBlocksModel).
+func (o OpenAI) CompleteBlocks(ctx context.Context, system []string, prompt string) (string, error) {
+	kept := make([]string, 0, len(system))
+	for _, b := range system {
+		if strings.TrimSpace(b) != "" {
+			kept = append(kept, b)
+		}
+	}
+	return o.CompleteSystem(ctx, strings.Join(kept, "\n\n"), prompt)
+}
+
 func (o OpenAI) CompleteSystem(ctx context.Context, system, prompt string) (string, error) {
 	base := o.BaseURL
 	if base == "" {

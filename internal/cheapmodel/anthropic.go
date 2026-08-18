@@ -46,6 +46,30 @@ func (a Anthropic) Complete(ctx context.Context, prompt string) (string, error) 
 // wins on the source that can win — but price the gate on cache_read being ZERO.
 // Verified against the gateway: haiku 1.5k => write=0 read=0; sonnet 1.5k => write then read.
 func (a Anthropic) CompleteSystem(ctx context.Context, system, prompt string) (string, error) {
+	if system == "" {
+		return a.CompleteBlocks(ctx, nil, prompt)
+	}
+	return a.CompleteBlocks(ctx, []string{system}, prompt)
+}
+
+// CompleteBlocks sends the invariant instructions as ORDERED system blocks and the
+// per-call part as the user message. It exists so a caller whose preamble has a
+// deployment-wide half and a per-configuration half can keep them as separate blocks
+// rather than one joined string (see extract.SystemBlocksModel).
+//
+// THE BREAKPOINT IS CONDITIONAL, and that is the point. A cache_control below the model's
+// minimum cacheable prefix is not an error and not a no-op you can see — the response
+// simply reports cache_creation_input_tokens: 0. Measured against the gateway: a
+// ~1.5k-token prefix on claude-haiku-4-5 gives write=0 read=0, while the same prefix on
+// claude-sonnet-5 caches. Asking for a cache we cannot get is a request field with no
+// effect at best; asking for one we get but never read is a 1.25x write we pay for once
+// and waste. So place the mark only when the blocks actually clear the floor.
+//
+// One breakpoint, on the last block, not one per block: nested marks on a two-block
+// prefix would create a second cache entry whose only benefit is being shared between
+// configurations that differ in the second block, and it is paid for with another write.
+// Revisit if two levels are ever measured to be in flight at once often enough to matter.
+func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt string) (string, error) {
 	base := a.BaseURL
 	if base == "" {
 		base = "https://api.anthropic.com"
@@ -63,11 +87,8 @@ func (a Anthropic) CompleteSystem(ctx context.Context, system, prompt string) (s
 		"max_tokens": maxTok,
 		"messages":   []any{map[string]any{"role": "user", "content": prompt}},
 	}
-	if system != "" {
-		payload["system"] = []any{map[string]any{
-			"type": "text", "text": system,
-			"cache_control": map[string]any{"type": "ephemeral"},
-		}}
+	if blocks := systemBlocks(system, a.Model); len(blocks) > 0 {
+		payload["system"] = blocks
 	}
 	reqBody, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,

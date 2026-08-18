@@ -82,14 +82,14 @@ func reBuiltins() starlark.StringDict {
 // runs sandboxed over the FULL body — no imports, no I/O, step + time limits — and
 // returns (OUTPUT, SUMMARY), or ("","") on any failure (fail-open). Containment/
 // sanity is verified by the caller (RunExtraction).
-func runStarlark(ctx context.Context, body, goal string, keepIDs []string, model Model, rewrite bool) (out, summary string) {
+func runStarlark(ctx context.Context, body, goal string, keepIDs []string, model Model, rewrite bool, aggro Aggressiveness) (out, summary string) {
 	if model == nil {
 		return "", ""
 	}
 	// Split shape: the invariant contract+examples go in a cacheable system block, the
 	// goal/keep-list/output in the user message. Falls back to one message on a client
 	// without the capability. Same content either way.
-	sys, user := buildCodePromptSplit(body, goal, keepIDs, rewrite)
+	sys, user := buildCodePromptSplit(body, goal, keepIDs, rewrite, aggro)
 	src, err := completeSplit(ctx, model, sys, user)
 	if err != nil {
 		return "", ""
@@ -191,7 +191,30 @@ func execStarlarkSummary(ctx context.Context, body, src string) (out, summary st
 		return "", ""
 	}
 	if sum, ok := tup[1].(starlark.String); ok {
-		summary = strings.TrimSpace(string(sum))
+		summary = clipSummary(string(sum))
 	}
 	return string(res), summary
+}
+
+// maxSummaryRunes bounds the one-line digest spliced in next to the recovery marker.
+//
+// The prompt asks for ONE short line, and until now that was the only thing enforcing it.
+// A model that answered with a paragraph did not produce a long marker — it produced NO
+// compaction, because the marker-inclusive never-worse check in components/offload/marker.go
+// abandons the whole splice when the result is not smaller than the original. So an
+// over-long summary silently cost the call AND the reduction. Clipping keeps the reduction.
+const maxSummaryRunes = 120
+
+// clipSummary reduces a SUMMARY to one line of at most maxSummaryRunes runes. Runes, not
+// bytes: cutting mid-rune would splice invalid UTF-8 into the transcript we forward.
+func clipSummary(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	r := []rune(s)
+	if len(r) <= maxSummaryRunes {
+		return s
+	}
+	return strings.TrimSpace(string(r[:maxSummaryRunes-1])) + "\u2026"
 }

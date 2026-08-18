@@ -134,6 +134,7 @@ type ExtractLLM struct {
 	// fireOnSize is `fire_on: size`: trigger on candidate size alone, and treat the
 	// economic gate + caching-backend guard as advisory. See extractLLMConfig.FireOn.
 	fireOnSize bool
+	aggro      extract.Aggressiveness
 
 	// minTokensSet records whether the operator pinned min_tokens / trigger explicitly.
 	// When they did, their threshold governs (backward compatibility). When they did not,
@@ -275,6 +276,12 @@ type extractLLMConfig struct {
 	// is why the only brakes left are MinTokens, LLMMaxPerReq and LLMMaxPerSess. Set
 	// those before setting this.
 	FireOn string `yaml:"fire_on"`
+	// Aggressiveness selects the compaction target taught to the model: low | medium
+	// (default) | high. It changes what the model is ASKED for, never what is ACCEPTED —
+	// the verbatim-preservation and strictly-smaller checks are identical at every level,
+	// and in rewrite: false the subsequence proof still holds. It is part of the result
+	// cache key, so switching levels misses rather than replaying the other level's answer.
+	Aggressiveness string `yaml:"aggressiveness"`
 	// LLMMaxPerSess caps model calls for the whole SESSION (0 = unlimited). The
 	// per-request cap alone cannot bound a long session: 2 calls x 300 turns is 600
 	// calls. With `fire_on: size` this is the outer bound on spend, so it is the number
@@ -350,6 +357,10 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	if cfg.EconomicGate != nil {
 		gate = *cfg.EconomicGate
 	}
+	aggro, err := extract.ParseAggressiveness(cfg.Aggressiveness)
+	if err != nil {
+		return nil, fmt.Errorf("extract_llm: %w", err)
+	}
 	fireOnSize := false
 	switch cfg.FireOn {
 	case "", "pressure":
@@ -378,7 +389,7 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 		modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(),
 		trigger: cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode), rewrite: rewrite,
 		llmEveryN: cfg.LLMEveryN, llmMaxPerReq: cfg.LLMMaxPerReq,
-		llmMaxPerSess: cfg.LLMMaxPerSess, fireOnSize: fireOnSize,
+		llmMaxPerSess: cfg.LLMMaxPerSess, fireOnSize: fireOnSize, aggro: aggro,
 		skipFileReads: cfg.SkipFileReads, llmSeen: map[string]int{},
 		llmSpent:     map[string]int{},
 		minTokensSet: explicit, gate: gate, allowCached: allowCached,
@@ -514,6 +525,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	turnsSoFar := len(req.Input)
 	extCfg := extract.DefaultCfg()
 	extCfg.Mode, extCfg.Floor, extCfg.Rewrite = e.strategy, floor, e.rewrite
+	extCfg.Aggressiveness = e.aggro
 
 	keepIDs := extract.HarvestIdentifiers(goal, 40)
 	// Per-call context budget (constant across this request's candidates): the extraction

@@ -98,7 +98,8 @@ func TestPromptSplitPreservesContent(t *testing.T) {
 	goal := "find the keep records"
 	keep := []string{"keep"}
 	for _, rewrite := range []bool{true, false} {
-		sys, user := buildCodePromptSplit(body, goal, keep, rewrite)
+		blocks, user := buildCodePromptSplit(body, goal, keep, rewrite, AggroMedium)
+		sys := strings.Join(blocks, "\n\n")
 		single := buildCodePrompt(body, goal, keep, rewrite)
 		for _, want := range []string{"Starlark", "OUTPUT", "SUMMARY", "INPUT"} {
 			if !strings.Contains(sys+user, want) {
@@ -120,14 +121,15 @@ func TestPromptSplitPreservesContent(t *testing.T) {
 		}
 	}
 	// The two rewrite modes must produce different (but each stable) preambles.
-	sysA, _ := buildCodePromptSplit(body, goal, keep, true)
-	sysB, _ := buildCodePromptSplit(body, goal, keep, false)
+	blocksA, _ := buildCodePromptSplit(body, goal, keep, true, AggroMedium)
+	blocksB, _ := buildCodePromptSplit(body, goal, keep, false, AggroMedium)
+	sysA, sysB := strings.Join(blocksA, "\n\n"), strings.Join(blocksB, "\n\n")
 	if sysA == sysB {
 		t.Fatal("rewrite and deletion-only contracts must differ")
 	}
 	// Stability: same inputs, same bytes — the property caching depends on.
-	sysA2, _ := buildCodePromptSplit("totally different body", "different goal", nil, true)
-	if sysA != sysA2 {
+	blocksA2, _ := buildCodePromptSplit("totally different body", "different goal", nil, true, AggroMedium)
+	if sysA != strings.Join(blocksA2, "\n\n") {
 		t.Fatal("the system preamble must be byte-identical across calls (else it never caches)")
 	}
 }

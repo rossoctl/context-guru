@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -181,6 +182,160 @@ lines into one indented marker. Kept lines stay byte-identical (line numbers kep
   OUTPUT = "\n".join(out)
   SUMMARY = "skeleton: imports + signatures + parse_config kept; bodies elided"`
 
+// --- Aggressiveness -------------------------------------------------------------
+//
+// How hard to compact is a JUDGEMENT, not a threshold, so it is taught rather than
+// configured: the second system block carries a target and few-shot examples that
+// demonstrate it. Three levels, because two is not enough to express "about like today"
+// and four would be a distinction nobody can act on.
+//
+// Why this is a SEPARATE block from the general contract, and second: the general half is
+// byte-identical for every tenant on the deployment, so as its own leading block it is one
+// shared cacheable prefix no matter which level each tenant picked. Only the shorter second
+// block differs between them.
+//
+// Every example sets SUMMARY. That is not decoration — the summary is what the agent reads
+// next to the recovery marker, and it is the difference between "something was removed
+// here" and "the 118 passing test lines were removed here, call expand if you need them".
+// An example that omits it teaches the model to omit it.
+
+// Aggressiveness names the compaction target. Empty means AggroMedium.
+type Aggressiveness string
+
+// The compaction targets. The percentages are a target for the MODEL, not a guarantee
+// and not a gate: the acceptance checks (verbatim ids/paths/errors, strictly smaller,
+// and in deletion-only mode the subsequence proof) are unchanged at every level, so a
+// higher level asks for more and never buys it by weakening what must survive.
+const (
+	AggroLow    Aggressiveness = "low"
+	AggroMedium Aggressiveness = "medium"
+	AggroHigh   Aggressiveness = "high"
+)
+
+// ParseAggressiveness validates a configured level; empty means medium.
+func ParseAggressiveness(s string) (Aggressiveness, error) {
+	switch a := Aggressiveness(s); a {
+	case "", AggroMedium:
+		return AggroMedium, nil
+	case AggroLow, AggroHigh:
+		return a, nil
+	default:
+		return AggroMedium, fmt.Errorf("aggressiveness must be low|medium|high, got %q", s)
+	}
+}
+
+// aggroBlock returns the second system block for a level.
+func aggroBlock(a Aggressiveness) string {
+	switch a {
+	case AggroLow:
+		return aggroLow
+	case AggroHigh:
+		return aggroHigh
+	default:
+		return aggroMedium
+	}
+}
+
+const aggroLow = `COMPACTION TARGET: LOW. Remove only what is unambiguously redundant —
+exact repetition, progress bars, banners, boilerplate. If you are not certain a line is
+noise, KEEP it. A 10-25% reduction is a good result here; returning OUTPUT = INPUT is an
+acceptable answer when nothing is clearly redundant. Prefer under-cutting: at this level the
+agent has told us it would rather pay for tokens than risk re-running the tool.
+
+EXAMPLE A (JSON search hits) — keep every record; drop only a field repeated identically
+across all of them:
+  data = json.decode(INPUT)
+  for r in data:
+    r.pop("repo_root")          # identical in every record, restated below
+  OUTPUT = json.encode(data)
+  SUMMARY = "search: all %d hits kept; constant repo_root field dropped" % len(data)
+EXAMPLE B (bash / test log) — strip the progress column and collapse consecutive
+duplicates, keep every distinct line including passes:
+  out = []
+  prev = ""
+  for ln in INPUT.split("\n"):
+    ln = re_sub(" +\\[ *[0-9]+%\\]", "", ln)
+    if ln != prev:
+      out.append(ln)
+    prev = ln
+  OUTPUT = "\n".join(out)
+  SUMMARY = "log: progress column stripped, consecutive duplicate lines collapsed"
+EXAMPLE C (prose / documentation output) — drop only the legal footer and nav chrome:
+  parts = re_split("\n-{3,}\n", INPUT)
+  OUTPUT = parts[0]
+  SUMMARY = "doc: body kept; trailing footer/nav sections dropped"
+EXAMPLE D (source-code FILE READ) — keep imports, all signatures, and every body up to
+about 40 lines; elide only very long bodies with no KEEP/goal relevance:
+  OUTPUT = INPUT   # a small or highly relevant file: nothing safe to elide
+  SUMMARY = ""`
+
+const aggroMedium = `COMPACTION TARGET: MEDIUM (the default). Remove clear noise and
+irrelevant records, and skeletonize long source files, while keeping anything plausibly
+related to the goal. A 25-50% reduction is a good result. Keep ids, paths, numbers,
+timestamps, signatures and error text byte-identical.
+
+` + codeExample + `
+EXAMPLE E (prose / documentation output) — keep the sections that bear on the goal, drop
+boilerplate, and say what went:
+  paras = re_split("\n\n+", INPUT)
+  drop = ["Copyright", "This page was generated", "Table of contents"]
+  kept = [p for p in paras if not any([d in p for d in drop])]
+  OUTPUT = "\n\n".join(kept)
+  SUMMARY = "doc: %d of %d sections kept; boilerplate dropped" % (len(kept), len(paras))`
+
+const aggroHigh = `COMPACTION TARGET: HIGH. Keep what the goal needs and little else, plus
+every id, path, number, timestamp, signature, error line and KEEP-list identifier
+BYTE-IDENTICAL — those are never negotiable at any level. A 50-80% reduction is a good
+result. Where you remove a run, leave ONE marker line naming what went, and always set
+SUMMARY: the agent can call context_guru_expand to get the original back, but only if the
+summary tells it there is something worth getting.
+
+EXAMPLE A (JSON search hits) — keep only matching records, and only the fields the goal
+needs, with a count of what went:
+  data = json.decode(INPUT)
+  kept = [{"path": r["path"], "line": r["line"], "match": r["match"]}
+          for r in data if "col_insert" in r["match"] or "common.py" in r["path"]]
+  OUTPUT = json.encode(kept)
+  SUMMARY = "search: %d of %d hits kept, other fields dropped" % (len(kept), len(data))
+EXAMPLE B (bash / test log) — failures, the summary line, and nothing else:
+  lines = INPUT.split("\n")
+  keep = [ln for ln in lines
+          if re_match("(FAIL|ERROR|Traceback|assert|error:)", ln) or
+             re_match("^=+ .* =+$", ln) or re_match("[0-9]+ (passed|failed)", ln)]
+  OUTPUT = "\n".join(keep) + "\n# ... %d other log lines elided (call context_guru_expand) ..." % (len(lines) - len(keep))
+  SUMMARY = "pytest: failures + summary kept, %d passing/progress lines elided" % (len(lines) - len(keep))
+EXAMPLE C (prose / documentation output) — keep only paragraphs mentioning the goal terms:
+  terms = ["timeout", "auth"]        # from the goal / KEEP list
+  paras = re_split("\n\n+", INPUT)
+  kept = [p for p in paras if any([t in p.lower() for t in terms])]
+  OUTPUT = "\n\n".join(kept) + "\n\n# ... %d unrelated paragraphs elided (call context_guru_expand) ..." % (len(paras) - len(kept))
+  SUMMARY = "doc: %d of %d paragraphs kept (auth/timeout)" % (len(kept), len(paras))
+EXAMPLE D (source-code FILE READ) — full skeleton: imports, signatures and KEEP-relevant
+bodies only; elide every other body over about 5 lines, one indented marker per run:
+  keep_ids = ["parse_config"]
+  out = []
+  pending = 0
+  indent = ""
+  for ln in INPUT.split("\n"):
+    s = ln.strip()
+    struct = ("def " in s or "class " in s or "func " in s or "function " in s or
+              s.startswith("import ") or s.startswith("from ") or s.startswith("@") or
+              s.endswith(":") or s.endswith("{"))
+    keep = s == "" or struct or any([k in ln for k in keep_ids])
+    if keep:
+      if pending > 0:
+        out.append(indent + "# ... " + str(pending) + " lines elided (call context_guru_expand) ...")
+        pending = 0
+      out.append(ln)
+    else:
+      if pending == 0:
+        indent = ln[:len(ln) - len(s)]
+      pending = pending + 1
+  if pending > 0:
+    out.append(indent + "# ... " + str(pending) + " lines elided (call context_guru_expand) ...")
+  OUTPUT = "\n".join(out)
+  SUMMARY = "skeleton: imports + signatures + parse_config kept, other bodies elided"`
+
 // maxCodeContentChars bounds the full output shown to the model. Big enough to be
 // content-specific (~8k tokens), bounded so a giant output can't blow up the prompt;
 // beyond it we show head+tail and note the truncation (the program still runs over
@@ -210,6 +365,7 @@ func promptFingerprint() string {
 	for _, part := range []string{
 		semanticsVersion,
 		codeContract, codeRules, codeDeletionRules, codeExample,
+		aggroLow, aggroMedium, aggroHigh,
 		rules, example, sampleMarker,
 	} {
 		h.Write([]byte(part))
@@ -218,21 +374,26 @@ func promptFingerprint() string {
 	return "p" + hex.EncodeToString(h.Sum(nil))[:12]
 }
 
-// codeSystemPreamble is the INVARIANT half of the code-strategy prompt: the sandbox
-// contract, the rules, and the worked examples. It is byte-identical on every call, so
-// it is the cacheable prefix — sent as a `system` block with a cache_control breakpoint
-// (see cheapmodel.Anthropic.CompleteSystem). ~1463 tokens as measured.
+// codeSystemBlocks is the INVARIANT half of the code-strategy prompt, as TWO ordered
+// blocks so each can be cached independently:
 //
-// It is split by REWRITE MODE, not per call: two possible values total, so each is a
-// stable prefix that a provider can actually cache across calls. Anything that varies
-// per call (the goal, the keep-list, the tool output) stays in the user message.
-func codeSystemPreamble(rewrite bool) string {
+//	[0] the general contract — the sandbox API, the preservation rules, the source-file
+//	    skeleton rule. Selected only by REWRITE MODE, so there are two possible values on
+//	    the whole deployment and every tenant sending the same one shares a cache entry.
+//	[1] the compaction target and its worked examples, selected by AGGRESSIVENESS.
+//
+// Ordered general-first on purpose: a provider caches a PREFIX, so the block shared by
+// everyone has to come first or it is not shared at all. Anything that varies per call
+// (the goal, the keep-list, the tool output) stays in the user message.
+func codeSystemBlocks(rewrite bool, a Aggressiveness) []string {
 	rules := codeRules
 	if !rewrite {
 		rules = codeDeletionRules
 	}
-	return "You write a Starlark program that reduces ONE tool output to what the agent needs next.\n\n" +
-		rules + "\n\n" + codeExample
+	return []string{
+		"You write a Starlark program that reduces ONE tool output to what the agent needs next.\n\n" + rules,
+		aggroBlock(a),
+	}
 }
 
 // buildCodePrompt builds the prompt for the Starlark code-writing strategy. It shows
@@ -288,12 +449,13 @@ func buildCodePrompt(bodyText, goal string, keepIDs []string, rewrite bool) stri
 		keepBlock + label + "\n" + shown + "\n\n" + rules + "\n\n" + codeExample
 }
 
-// buildCodePromptSplit returns (system, user): the invariant preamble and the per-call
-// variable part. Same total content as buildCodePrompt, reordered so the stable half can
-// be a cacheable prefix. Order matters — the cacheable block must come FIRST on the
-// wire, which is exactly what a `system` block gives us.
-func buildCodePromptSplit(bodyText, goal string, keepIDs []string, rewrite bool) (system, user string) {
-	return codeSystemPreamble(rewrite), buildCodeUserPart(bodyText, goal, keepIDs)
+// buildCodePromptSplit returns (systemBlocks, user): the invariant preamble as ordered
+// cacheable blocks, and the per-call variable part. Same total content as
+// buildCodePrompt, reordered so the stable half can be a cacheable prefix. Order matters
+// — the cacheable blocks must come FIRST on the wire, which is exactly what a `system`
+// array gives us.
+func buildCodePromptSplit(bodyText, goal string, keepIDs []string, rewrite bool, a Aggressiveness) (system []string, user string) {
+	return codeSystemBlocks(rewrite, a), buildCodeUserPart(bodyText, goal, keepIDs)
 }
 
 // buildCodeUserPart is the VARIABLE half: the goal, the keep-list, and the tool output.
