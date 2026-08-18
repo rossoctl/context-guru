@@ -70,8 +70,21 @@ func Boundary(prev, n int) int {
 // one lock so concurrent turns cannot interleave a read and a write.
 type Tracker struct {
 	mu  sync.Mutex
-	m   map[string]int
+	m   map[string]turn
 	max int // bound on tracked sessions; 0 => default
+}
+
+// turn is what one session's previous request left behind: how long the transcript was,
+// and WHEN it happened.
+//
+// The timestamp is here rather than in a second map because the two are read together and
+// under the same lock, and because this is already the one place per-session request state
+// is bounded. It answers a question nothing on the request path could answer before: how
+// long has this session been idle — and therefore, given the provider's cache TTL, is the
+// prefix we are about to protect still cached at all?
+type turn struct {
+	n  int
+	at int64 // unix milliseconds; 0 = no previous turn recorded
 }
 
 // defaultMaxSessions bounds the tracker so an unbounded stream of distinct sessions
@@ -83,7 +96,7 @@ func NewTracker(maxSessions int) *Tracker {
 	if maxSessions <= 0 {
 		maxSessions = defaultMaxSessions
 	}
-	return &Tracker{m: map[string]int{}, max: maxSessions}
+	return &Tracker{m: map[string]turn{}, max: maxSessions}
 }
 
 // Turn records that this session's current turn carries n normalized messages and
@@ -94,6 +107,18 @@ func NewTracker(maxSessions int) *Tracker {
 // A shorter transcript under the same session id is the agent's own compaction, and
 // resets the boundary to 0 — see Boundary for the rule and why it is not "grow only".
 func (t *Tracker) Turn(session string, n int) (prevLen int) {
+	prevLen, _ = t.TurnAt(session, n, 0)
+	return prevLen
+}
+
+// TurnAt is Turn plus the previous turn's timestamp, so the caller can tell how long this
+// session has been idle. nowMs of 0 means "do not record a time" (the legacy Turn path);
+// the clock is the caller's so this stays a pure, testable function.
+//
+// prevAtMs is 0 when there is no previous turn recorded — a new session, or one evicted by
+// the bound above. A caller MUST treat that as "unknown", never as "idle forever": acting
+// on a fabricated idle time is how a warm cache gets invalidated after a proxy restart.
+func (t *Tracker) TurnAt(session string, n int, nowMs int64) (prevLen int, prevAtMs int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	prev, ok := t.m[session]
@@ -108,8 +133,12 @@ func (t *Tracker) Turn(session string, n int) (prevLen int) {
 	}
 	// Always record THIS turn's length: on growth it is the max anyway, and on a shrink
 	// it is the new prefix every later turn must be measured against.
-	t.m[session] = n
-	return Boundary(prev, n)
+	at := prev.at
+	if nowMs > 0 {
+		at = nowMs
+	}
+	t.m[session] = turn{n: n, at: at}
+	return Boundary(prev.n, n), prev.at
 }
 
 // Sessions reports how many sessions are tracked (test/telemetry aid).

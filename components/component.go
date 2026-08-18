@@ -151,6 +151,24 @@ type Ctx struct {
 	// tail/in-place offloaders (dedup, cmdfilter, extract) are already byte-stable on
 	// the unchanged prefix and ignore this. False = legacy compact-everything.
 	CacheAware bool
+	// ColdCache is true when this session has been idle longer than the provider's prompt
+	// cache TTL, so the cached prefix CacheAware exists to protect is certainly gone.
+	//
+	// It is deliberately INFORMATION, not an automatic lifting of the tail gate. Every
+	// offloader could safely rewrite the whole transcript on such a turn, but flipping
+	// TailOnly here would change what mask, failed_run and collapse do on live traffic the
+	// moment this shipped — including for deployments that asked for none of it. So the
+	// gate stays where it is and a component opts in (see extract_llm's cold_cache).
+	//
+	// False means "warm, or unknown". A new session, an evicted tracker entry and the first
+	// turn after a restart all read false: acting on a fabricated idle time would invalidate
+	// a live cache, which costs a full cache-write of the suffix at 1.25x the fresh rate.
+	ColdCache bool
+	// IdleMs is how long this session was idle before this request, in milliseconds; 0 when
+	// there is no previous turn on record. Carried alongside ColdCache so a component can
+	// demand MORE idle time than the provider TTL implies, and so the figure can be
+	// reported rather than re-derived.
+	IdleMs int64
 	// MaxCachedIdx is the highest req.Input index considered already committed to the
 	// provider cache (the messages present on the previous turn of this session).
 	// -1 = unknown/first turn/cache off ⇒ no tail restriction. Only meaningful when

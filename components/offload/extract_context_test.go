@@ -159,7 +159,7 @@ func TestContextFallsBackRatherThanInventing(t *testing.T) {
 		t.Fatal(err)
 	}
 	x := e.(*ExtractLLM)
-	if schema.TextTokens(x.extractionContext(ctxReq())) == 0 {
+	if schema.TextTokens(x.extractionContext(ctxReq(), false)) == 0 {
 		t.Fatal("the component's own context renderer returned nothing to count")
 	}
 }

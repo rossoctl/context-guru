@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -355,6 +356,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	sys, firstUser := schema.SessionHead(norm)
 	sessionID := session.Scoped(o.Tenant, explicitSession(o.Session, body), sys, firstUser)
 	cacheAware := resolveCacheAware(o.CacheMode, provider, body)
+	nowMs := o.nowMs()
+	coldCache := false
+	idleMs := int64(0)
 	maxCachedIdx := -1
 	if cacheAware && !bypass {
 		// Messages present on the previous turn of this session are already committed
@@ -375,7 +379,13 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// unconditionally, so it self-healed on the FOLLOWING turn but still froze the
 		// post-compaction one.
 		if o.Tracker != nil {
-			maxCachedIdx = o.Tracker.Turn(sessionID, len(norm)) - 1
+			var prevAt int64
+			maxCachedIdx, prevAt = o.Tracker.TurnAt(sessionID, len(norm), nowMs)
+			maxCachedIdx--
+			coldCache = cacheIsCold(prevAt, nowMs, cacheTTL(provider, body))
+			if prevAt > 0 && nowMs > prevAt {
+				idleMs = nowMs - prevAt
+			}
 		} else {
 			maxCachedIdx = modes.Boundary(prevLen(st, sessionID), len(norm)) - 1
 			defer putLen(st, sessionID, len(norm))
@@ -418,6 +428,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		Bypass:       bypass,
 		CtxWindow:    o.Window,
 		CacheAware:   cacheAware,
+		ColdCache:    coldCache,
+		IdleMs:       idleMs,
 		MaxCachedIdx: maxCachedIdx,
 		// Every breakpoint already on the wire — including the ones no component can
 		// see (`system`, `tools`, and the marks our own normalize drops). The
@@ -642,6 +654,92 @@ func resolveCacheAware(mode string, provider bschemas.ModelProvider, body []byte
 		}
 		return hasCacheBreakpoint(body)
 	}
+}
+
+// Prompt-cache lifetimes, per provider, for deciding whether a session that has been idle
+// still has a cached prefix at all.
+//
+// THE SAFE DIRECTION IS TO OVER-ESTIMATE. Believing a cache is cold when it is still warm
+// is the expensive mistake: a component that then rewrites deep history invalidates a live
+// prefix and forces a cache-WRITE of the whole suffix at 1.25x the fresh rate — precisely
+// the churn the tail gate exists to prevent. Believing it is warm when it has actually
+// expired only forgoes an opportunity. So every number here is an UPPER bound.
+const (
+	// anthropicDefaultTTL is the implicit lifetime of a bare {"type":"ephemeral"} mark.
+	// Every real captured Claude Code breakpoint is exactly that shape — no ttl field in
+	// any of ~5,000 captured requests — so this is the common case, not the fallback.
+	anthropicDefaultTTL = 5 * time.Minute
+	// extendedTTL is the lifetime an explicit ttl:"1h" asks for, and also the outer bound
+	// used where a provider caches automatically and declares no lifetime at all
+	// (OpenAI-shaped backends: documented as clearing after minutes of inactivity and
+	// always within the hour).
+	extendedTTL = time.Hour
+	// coldMargin is added to the TTL before calling a prefix cold, covering clock skew
+	// between this box and the provider and the gap between when a request was recorded
+	// here and when the provider last touched the entry.
+	coldMargin = time.Minute
+)
+
+// cacheTTL returns how long this request's prompt cache should be assumed to live.
+//
+// For the Anthropic family the request itself declares it, so this is exact rather than a
+// guess: the LONGEST ttl among the breakpoints wins, because any one of them being 1h means
+// part of the prefix may still be warm.
+func cacheTTL(provider bschemas.ModelProvider, body []byte) time.Duration {
+	switch provider {
+	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+		if bodyAsksExtendedTTL(body) {
+			return extendedTTL
+		}
+		return anthropicDefaultTTL
+	default:
+		return extendedTTL
+	}
+}
+
+// bodyAsksExtendedTTL reports whether any cache_control on the wire asks for the 1h tier.
+// Structural, for the same reason hasCacheBreakpoint is: a tool output containing the text
+// "1h" must not extend our idea of the cache lifetime.
+func bodyAsksExtendedTTL(body []byte) bool {
+	for _, p := range []string{
+		"messages.#.content.#.cache_control.ttl",
+		"messages.#.cache_control.ttl",
+		"system.#.cache_control.ttl",
+		"tools.#.cache_control.ttl",
+	} {
+		found := false
+		gjson.GetBytes(body, p).ForEach(func(_, v gjson.Result) bool {
+			if v.IsArray() {
+				v.ForEach(func(_, vv gjson.Result) bool {
+					if vv.String() == "1h" {
+						found = true
+					}
+					return !found
+				})
+			}
+			if v.String() == "1h" {
+				found = true
+			}
+			return !found
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+// cacheIsCold reports whether this session has been idle long enough that its prompt cache
+// is certainly gone.
+//
+// Returns FALSE when there is no previous turn on record (prevAtMs == 0). That is a new
+// session, or one the tracker evicted, or the first turn after a proxy restart — all
+// "unknown", and treating unknown as cold would invalidate a warm prefix on every restart.
+func cacheIsCold(prevAtMs, nowMs int64, ttl time.Duration) bool {
+	if prevAtMs <= 0 || nowMs <= prevAtMs {
+		return false
+	}
+	return time.Duration(nowMs-prevAtMs)*time.Millisecond >= ttl+coldMargin
 }
 
 // hasCacheBreakpoint reports whether the request carries a REAL prompt-cache
