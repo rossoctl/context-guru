@@ -133,8 +133,10 @@ type ExtractLLM struct {
 
 	// fireOnSize is `fire_on: size`: trigger on candidate size alone, and treat the
 	// economic gate + caching-backend guard as advisory. See extractLLMConfig.FireOn.
-	fireOnSize bool
-	aggro      extract.Aggressiveness
+	fireOnSize  bool
+	aggro       extract.Aggressiveness
+	ctxMode     contextMode
+	ctxMessages int
 
 	// minTokensSet records whether the operator pinned min_tokens / trigger explicitly.
 	// When they did, their threshold governs (backward compatibility). When they did not,
@@ -276,6 +278,11 @@ type extractLLMConfig struct {
 	// is why the only brakes left are MinTokens, LLMMaxPerReq and LLMMaxPerSess. Set
 	// those before setting this.
 	FireOn string `yaml:"fire_on"`
+	// Context selects how much conversation the extraction prompt carries:
+	// goal | recent (default) | full. See contextMode.
+	Context string `yaml:"context"`
+	// ContextMessages is the N for `context: recent` (0 = 7).
+	ContextMessages int `yaml:"context_messages"`
 	// Aggressiveness selects the compaction target taught to the model: low | medium
 	// (default) | high. It changes what the model is ASKED for, never what is ACCEPTED —
 	// the verbatim-preservation and strictly-smaller checks are identical at every level,
@@ -361,6 +368,10 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	if err != nil {
 		return nil, fmt.Errorf("extract_llm: %w", err)
 	}
+	ctxMode, err := parseContextMode(cfg.Context)
+	if err != nil {
+		return nil, fmt.Errorf("extract_llm: %w", err)
+	}
 	fireOnSize := false
 	switch cfg.FireOn {
 	case "", "pressure":
@@ -390,6 +401,7 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 		trigger: cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode), rewrite: rewrite,
 		llmEveryN: cfg.LLMEveryN, llmMaxPerReq: cfg.LLMMaxPerReq,
 		llmMaxPerSess: cfg.LLMMaxPerSess, fireOnSize: fireOnSize, aggro: aggro,
+		ctxMode: ctxMode, ctxMessages: cfg.ContextMessages,
 		skipFileReads: cfg.SkipFileReads, llmSeen: map[string]int{},
 		llmSpent:     map[string]int{},
 		minTokensSet: explicit, gate: gate, allowCached: allowCached,
@@ -411,6 +423,13 @@ func (e *ExtractLLM) noteRequestSize(session string, tokens int) int {
 
 func (*ExtractLLM) Name() string                 { return "extract_llm" }
 func (*ExtractLLM) Enabled(*components.Ctx) bool { return true }
+
+// extractionContext renders the conversation the extraction prompt will carry, in the
+// configured mode. One method so every caller (and every test) agrees on what the model is
+// told — the prompt's relevance judgement rests entirely on this.
+func (e *ExtractLLM) extractionContext(req *bschemas.BifrostChatRequest) string {
+	return conversationContext(req, e.ctxMode, e.ctxMessages)
+}
 
 func (e *ExtractLLM) outputFloor(window int) int {
 	return e.trigger.OutputFloor(window, e.minTokens)
@@ -479,7 +498,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// handler call rather than a field read.
 	dbg := debugExtractLLM(c)
 	fires := e.trigger.Fires(req, c.CtxWindow)
-	goal := conversationGoal(req)
+	goal := e.extractionContext(req)
 	query := keywords(goal)
 	if len(query) == 0 {
 		rep.Gate("no_goal_keywords")

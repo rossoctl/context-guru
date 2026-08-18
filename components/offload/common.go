@@ -1,6 +1,7 @@
 package offload
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"regexp"
@@ -233,6 +234,140 @@ func hasError(s string) bool {
 // task statement can't blow up every prompt. Generous — the point is to pass the
 // real task, not one trailing sentence.
 const goalCap = 8000
+
+// --- How much conversation the extraction prompt carries -------------------------
+//
+// The model is asked to reduce ONE tool output "toward what the agent needs next", so what
+// it is told about the conversation is the whole basis of that judgement. More context
+// means better decisions and a bigger prompt on every call, which is a cost/quality dial
+// the operator should own rather than a constant.
+
+// contextMode selects how much conversation goes into an extraction prompt.
+type contextMode string
+
+// The context modes.
+//
+//	goal   — the task statement plus the current intent. The cheapest useful signal, and
+//	         what this component sent before the mode existed.
+//	recent — every user turn plus the last N non-tool messages (the DEFAULT): the task, all
+//	         the corrections since, and what the agent has just been doing.
+//	full   — the entire transcript, tool outputs included. Expensive per call; the right
+//	         answer when the whole transcript is being swept at once and the request is
+//	         being re-billed from scratch anyway.
+const (
+	ctxGoal   contextMode = "goal"
+	ctxRecent contextMode = "recent"
+	ctxFull   contextMode = "full"
+)
+
+// defaultContextMessages is the N for `recent`. Seven is enough to hold a tool call, its
+// result and the reasoning either side of it without carrying a whole session.
+const defaultContextMessages = 7
+
+// Per-mode byte budgets. `recent` gets more room than a bare goal because it carries
+// several turns; `full` gets a large one because its whole purpose is completeness, and
+// the real bound on it is the extraction model's context window — checked by
+// fitsModelContext, which declines the call rather than truncating the conversation.
+const (
+	recentContextCap = 24_000
+	fullContextCap   = 400_000
+)
+
+func parseContextMode(s string) (contextMode, error) {
+	switch m := contextMode(s); m {
+	case "", ctxRecent:
+		return ctxRecent, nil
+	case ctxGoal, ctxFull:
+		return m, nil
+	default:
+		return ctxRecent, fmt.Errorf("context must be goal|recent|full, got %q", s)
+	}
+}
+
+// conversationContext renders the conversation for an extraction prompt in the requested
+// mode. Always returns something usable: an empty result would strip the only relevance
+// signal the model has, so every mode falls back to the goal.
+func conversationContext(req *bschemas.BifrostChatRequest, mode contextMode, lastN int) string {
+	switch mode {
+	case ctxFull:
+		if s := renderTranscript(req, len(req.Input), true, fullContextCap); s != "" {
+			return s
+		}
+	case ctxRecent:
+		if lastN <= 0 {
+			lastN = defaultContextMessages
+		}
+		if s := renderTranscript(req, lastN, false, recentContextCap); s != "" {
+			return s
+		}
+	}
+	return conversationGoal(req)
+}
+
+// renderTranscript writes "role: text" lines for every user turn plus the last n messages,
+// oldest first. withTools includes tool results (the bulk this component exists to reduce),
+// so only `full` asks for them.
+//
+// The last-n window is counted over the messages that will actually be RENDERED, not over
+// raw indices: in agent traffic most messages are tool results, so counting raw indices
+// would make "the last 7" resolve to nothing but output the model is about to be asked to
+// cut anyway.
+func renderTranscript(req *bschemas.BifrostChatRequest, n int, withTools bool, cap int) string {
+	type line struct {
+		role, text string
+	}
+	var all []line
+	for i := range req.Input {
+		role := string(req.Input[i].Role)
+		isTool := req.Input[i].Role == bschemas.ChatMessageRoleTool
+		if isTool && !withTools {
+			continue
+		}
+		txt := strings.TrimSpace(schema.MessageText(req.Input[i]))
+		if txt == "" {
+			continue
+		}
+		all = append(all, line{role, txt})
+	}
+	keep := make([]bool, len(all))
+	for i, l := range all {
+		if l.role == string(bschemas.ChatMessageRoleUser) || i >= len(all)-n {
+			keep[i] = true
+		}
+	}
+	var b strings.Builder
+	for i, l := range all {
+		if !keep[i] {
+			continue
+		}
+		b.WriteString(l.role)
+		b.WriteString(": ")
+		b.WriteString(l.text)
+		b.WriteString("\n\n")
+	}
+	// Clip from the FRONT: the most recent turns are the ones that say what the agent needs
+	// next, so an over-long transcript must lose its oldest part, not its newest.
+	out := strings.TrimSpace(b.String())
+	if len(out) > cap {
+		out = "…[earlier conversation elided]…\n\n" + clipRunesTail(out, cap)
+	}
+	return out
+}
+
+// clipRunesTail returns the LAST maxBytes bytes of s on a rune boundary.
+func clipRunesTail(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	s = s[len(s)-maxBytes:]
+	for len(s) > 0 && !utf8.ValidString(s[:1]) {
+		s = s[1:]
+	}
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[1:]
+	}
+	return s
+}
 
 // conversationGoal is the relevance/context signal for the LLM components: the
 // TASK the agent is working (first user turn — in agent traffic this holds the

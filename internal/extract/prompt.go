@@ -40,9 +40,7 @@ func buildPrompt(bodyText, goal string, keepIDs []string) string {
 	if g == "" {
 		g = "(no explicit goal stated)"
 	}
-	if len(g) > 8000 {
-		g = g[:8000]
-	}
+	g = clipGoal(g)
 	keep := keepIDs
 	if len(keep) > 60 {
 		keep = keep[:60]
@@ -336,6 +334,27 @@ bodies only; elide every other body over about 5 lines, one indented marker per 
   OUTPUT = "\n".join(out)
   SUMMARY = "skeleton: imports + signatures + parse_config kept, other bodies elided"`
 
+// maxGoalChars is the BACKSTOP on the conversational context a prompt carries. The caller
+// decides how much context to send (see the component's context: goal|recent|full) and
+// clips to its own per-mode budget; this only stops a caller with no budget at all from
+// producing an unbounded prompt. It is therefore set above the largest caller budget rather
+// than at the old 8000, which would have silently truncated `context: full` to a few turns.
+const maxGoalChars = 400_000
+
+// clipGoal bounds the context on a rune boundary. The old code sliced bytes, which can
+// split a multi-byte rune and hand the model invalid UTF-8 mid-prompt.
+func clipGoal(g string) string {
+	if len(g) <= maxGoalChars {
+		return g
+	}
+	r := []rune(g)
+	// Keep the TAIL: the newest turns say what the agent needs next.
+	if len(r) > maxGoalChars {
+		r = r[len(r)-maxGoalChars:]
+	}
+	return string(r)
+}
+
 // maxCodeContentChars bounds the full output shown to the model. Big enough to be
 // content-specific (~8k tokens), bounded so a giant output can't blow up the prompt;
 // beyond it we show head+tail and note the truncation (the program still runs over
@@ -408,9 +427,7 @@ func buildCodePrompt(bodyText, goal string, keepIDs []string, rewrite bool) stri
 	if g == "" {
 		g = "(no explicit goal stated)"
 	}
-	if len(g) > 8000 {
-		g = g[:8000]
-	}
+	g = clipGoal(g)
 	keep := keepIDs
 	if len(keep) > 60 {
 		keep = keep[:60]
@@ -464,9 +481,7 @@ func buildCodeUserPart(bodyText, goal string, keepIDs []string) string {
 	if g == "" {
 		g = "(no explicit goal stated)"
 	}
-	if len(g) > 8000 {
-		g = g[:8000]
-	}
+	g = clipGoal(g)
 	keep := keepIDs
 	if len(keep) > 60 {
 		keep = keep[:60]

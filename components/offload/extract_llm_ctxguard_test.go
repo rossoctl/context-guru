@@ -154,7 +154,11 @@ func TestExtractLLMContextGuard(t *testing.T) {
 	}
 	// The exact budget this fixture needs, derived through the component's own goal
 	// derivation so "exactly at the limit" really sits on the boundary.
-	overhead := extractPromptOverheadTokens + schema.TextTokens(conversationGoal(newReq()))
+	// Through the component's OWN context renderer, in the mode it will actually use, so
+	// "exactly at the limit" really sits on the boundary. Deriving this from
+	// conversationGoal was correct only while that was the one possible context.
+	overhead := extractPromptOverheadTokens +
+		schema.TextTokens(conversationContext(newReq(), ctxRecent, defaultContextMessages))
 	need := budgetFor(shownBodyTokens(output), overhead)
 
 	cases := []struct {
