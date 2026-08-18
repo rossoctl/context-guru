@@ -149,7 +149,20 @@ filtered structurally.
 
 Two knobs the prompt itself carries.
 
-**`aggressiveness`** is `low` | `medium` (default) | `high`. It is *taught* rather than
+**`aggressiveness`** is `low` | `medium` (default) | `high`. Measured live on identical bodies,
+two samples per level:
+
+| shape | low | medium | high |
+|---|---|---|---|
+| source file read, 3,598 tok | 64.8% removed | 90.0% | 90.4% |
+| access log, 8,722 tok | *declined* | 98.8% | 98.1% |
+
+Note the access-log row: `low` is explicitly told that returning the input unchanged is an
+acceptable answer, so on an almost-all-noise shape it may decline — and a declined call still
+costs its money and its seconds. `low` is for "I would rather pay for tokens than risk a
+re-read", not for "spend less".
+
+ It is *taught* rather than
 thresholded: the second system block states a target and carries three or four worked examples
 demonstrating it, across the shapes real traffic contains — JSON, bash and test logs, prose, and
 a source-file read. It changes what the model is **asked** for and never what is **accepted**:

@@ -53,3 +53,61 @@ func TestRecallCheckProtectsNeedlesNotBoilerplate(t *testing.T) {
 		}
 	})
 }
+
+// A line-numbered FILE READ must never be structurally parsed. parseBody turns
+// `     1\timport json…` into the JSON number 1, and the deterministic projection of 1 is the
+// string "1" — smaller than the input, so it was ACCEPTED and a whole source file became a
+// single character.
+//
+// MEASURED live: a 3,598-token file came back as "1", by strategy "deterministic", with the
+// acceptance check satisfied. The prompt builder already guards this case for the text it shows
+// the model; the fallback did not.
+func TestDeterministicNeverParsesALineNumberedFileRead(t *testing.T) {
+	body := "     1\timport json\n     2\timport os\n     3\t\n" +
+		"     4\tdef parse_config(path):\n     5\t    return json.load(open(path))\n"
+
+	if got := deterministicInput(body); got != body {
+		t.Fatalf("a line-numbered file read was parsed into %T (%v); it must stay raw text",
+			got, got)
+	}
+	out := resultToText(DeterministicProject(deterministicInput(body), []string{"parse_config"}, 4000))
+	if len(out) < 20 {
+		t.Fatalf("the deterministic projection collapsed a source file to %q", out)
+	}
+	if !strings.Contains(out, "parse_config") {
+		t.Fatalf("the projection dropped the identifier it was told to keep: %q", out)
+	}
+
+	// A genuine JSON body must still be projected structurally — that is the whole point of
+	// the deterministic strategy.
+	jsonBody := `[{"path":"a.py","match":"parse_config"},{"path":"b.py","match":"other"}]`
+	if _, raw := deterministicInput(jsonBody).(string); raw {
+		t.Fatal("a real JSON array was treated as raw text, disabling structural projection")
+	}
+}
+
+// An identifier at the end of a sentence must not carry the period. identRe allows '.' inside
+// an identifier so paths survive whole, which also swallowed the full stop in
+// "fix parse_config." — and because the recall check skips ids absent from the body, the one
+// identifier the agent actually named then protected nothing.
+func TestHarvestIdentifiersTrimsTrailingPunctuation(t *testing.T) {
+	got := HarvestIdentifiers("Find the auth timeout in src/api/users.py and fix parse_config.", 40)
+	has := func(s string) bool {
+		for _, g := range got {
+			if g == s {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("parse_config") {
+		t.Fatalf("parse_config was not harvested cleanly: %q", got)
+	}
+	if has("parse_config.") {
+		t.Fatalf("harvested an identifier with its sentence period: %q", got)
+	}
+	// A path must still survive whole, dots included.
+	if !has("src/api/users.py") {
+		t.Fatalf("a path was mangled: %q", got)
+	}
+}

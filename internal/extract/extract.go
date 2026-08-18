@@ -230,6 +230,16 @@ func HarvestIdentifiers(text string, cap int) []string {
 	var seen []string
 	idx := map[string]struct{}{}
 	for _, m := range identRe.FindAllString(text, -1) {
+		// Trim trailing punctuation. identRe allows '.', '/' and '-' INSIDE an identifier so
+		// that a path like src/api/users.py survives whole — but that also swallows the
+		// sentence period in "fix parse_config.", and the resulting id then matches nothing in
+		// the tool output. The recall check skips any id that is absent from the body, so the
+		// identifier the agent actually named ended up protecting nothing: MEASURED, that is
+		// how a source-file read was reduced to a single character with the check satisfied.
+		m = strings.TrimRight(m, "./-")
+		if len(m) < 4 {
+			continue
+		}
 		if _, ok := idx[m]; ok {
 			continue
 		}
@@ -240,6 +250,26 @@ func HarvestIdentifiers(text string, cap int) []string {
 		}
 	}
 	return seen
+}
+
+// deterministicInput is parseBody guarded by the same rule the prompt builder uses.
+//
+// parseBody will happily turn `     1\timport json…` — a line-numbered file read — into the
+// JSON NUMBER 1, and the deterministic projection of the number 1 is the string "1". MEASURED
+// live: a 3,598-token source file came back as a single character, accepted, because it was
+// smaller and the keep-id that should have caught it had been harvested with a trailing period.
+// buildCodeUserPart already guards against exactly this for the text it SHOWS the model
+// (isJSONContainer); the deterministic strategy had no such guard, so the guard belongs here
+// too rather than in one of the two callers.
+func deterministicInput(body string) any {
+	if !isJSONContainer(body) {
+		return body // raw text: project over the text, never over a number parsed out of it
+	}
+	v := parseBody(body)
+	if isRawString(v) {
+		return body
+	}
+	return v
 }
 
 // parseBody returns the parsed value handed to the extractor: JSON if possible, then
@@ -483,7 +513,7 @@ func RunExtractionDetail(ctx context.Context, body, goal string, keepIDs []strin
 		case "rlm":
 			cand = runRLMBatched(ctx, body, goal, keepIDs, model)
 		case "deterministic":
-			cand = resultToText(DeterministicProject(parseBody(body), keepIDs, cfg.MaxChars))
+			cand = resultToText(DeterministicProject(deterministicInput(body), keepIDs, cfg.MaxChars))
 		}
 		switch {
 		case cand == "":
