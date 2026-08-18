@@ -447,7 +447,14 @@ func growthRate(currentTokens, prevTokens int) float64 {
 //
 // minTokensSet reports whether the operator pinned min_tokens explicitly; when they did,
 // their threshold governs and this stays out of the way.
-func shouldFire(pressure, growth float64, minTokensSet bool) (bool, string) {
+func shouldFire(pressure, growth float64, minTokensSet, fireOnSize bool) (bool, string) {
+	// `fire_on: size` short-circuits everything below: the operator asked for the
+	// candidate's own size to be the whole decision, so context pressure is not consulted
+	// at all. The per-output floor still gates each candidate, and llm_max_per_request /
+	// llm_max_per_session bound how many calls a firing turn may make.
+	if fireOnSize {
+		return true, "size threshold (fire_on: size)"
+	}
 	if minTokensSet {
 		return true, "explicit min_tokens/trigger configured"
 	}

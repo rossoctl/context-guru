@@ -145,7 +145,7 @@ func TestTriggerDoesNotFireEveryStepOnGrowingContext(t *testing.T) {
 		cur := turn * 5000
 		p := contextPressure(cur, window)
 		g := growthRate(cur, prev)
-		if ok, _ := shouldFire(p, g, false); ok {
+		if ok, _ := shouldFire(p, g, false, false); ok {
 			fired++
 		}
 		prev = cur
@@ -158,7 +158,7 @@ func TestTriggerDoesNotFireEveryStepOnGrowingContext(t *testing.T) {
 	}
 	// It must still fire when pressure is genuinely high — a gate that never fires is
 	// just as broken as one that always does.
-	if ok, reason := shouldFire(0.75, 0.05, false); !ok {
+	if ok, reason := shouldFire(0.75, 0.05, false, false); !ok {
 		t.Fatalf("high pressure must fire, got reason %q", reason)
 	}
 }
@@ -166,7 +166,7 @@ func TestTriggerDoesNotFireEveryStepOnGrowingContext(t *testing.T) {
 // An explicitly-configured min_tokens keeps governing: existing configs must not change
 // behavior silently under them.
 func TestExplicitMinTokensStillGoverns(t *testing.T) {
-	ok, reason := shouldFire(0.01, 0, true) // pressure so low the derived trigger declines
+	ok, reason := shouldFire(0.01, 0, true, false) // pressure so low the derived trigger declines
 	if !ok {
 		t.Fatal("an explicit min_tokens/trigger must still fire (backward compatibility)")
 	}

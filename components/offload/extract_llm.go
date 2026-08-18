@@ -3,6 +3,7 @@ package offload
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -124,9 +125,15 @@ type ExtractLLM struct {
 	rewrite       bool
 	llmEveryN     int
 	llmMaxPerReq  int
+	llmMaxPerSess int
 	skipFileReads *bool // nil = auto (skip when cache-aware); true/false = force
 	mu            sync.Mutex
 	llmSeen       map[string]int // session -> count of qualifying (LLM-eligible) requests
+	llmSpent      map[string]int // session -> model calls actually made (the per-session cap)
+
+	// fireOnSize is `fire_on: size`: trigger on candidate size alone, and treat the
+	// economic gate + caching-backend guard as advisory. See extractLLMConfig.FireOn.
+	fireOnSize bool
 
 	// minTokensSet records whether the operator pinned min_tokens / trigger explicitly.
 	// When they did, their threshold governs (backward compatibility). When they did not,
@@ -186,6 +193,14 @@ const (
 	// bounded. Mirrored rather than imported because it is unexported there; it is a
 	// conservative direction only while it is >= extract's own bound, so raise it in step.
 	extractShownBodyChars = 32000
+	// defaultSizeThreshold is the per-output floor `fire_on: size` uses when the operator
+	// named no min_tokens. It is NOT the legacy 300-token default on purpose: 300 is
+	// cleared by almost every tool output, so a size trigger inheriting it would fire on
+	// every turn of every session — which is precisely the 271-call, $3.26, 82x-underwater
+	// behaviour the economic gate was built to stop. 2000 tokens is roughly the largest
+	// output observed on Terminal-Bench, so this errs toward "fires rarely, tune it up or
+	// down deliberately".
+	defaultSizeThreshold = 2000
 	// unknownModelInputLimit is the budget for an extraction model we cannot name. Low
 	// enough to protect a small self-hosted deployment, high enough that it does not gate
 	// realistic candidates (the largest tool output measured on Terminal-Bench was ~2k
@@ -241,13 +256,33 @@ func fitsModelContext(bodyTok, overheadTok, limit int) bool {
 }
 
 type extractLLMConfig struct {
-	MinTokens    int                `yaml:"min_tokens"`
-	Strategy     string             `yaml:"strategy"`             // code (default) | single | rlm | auto
-	LLMEveryN    int                `yaml:"llm_every_n_requests"` // throttle LLM path: fire once per N requests/session
-	LLMMaxPerReq int                `yaml:"llm_max_per_request"`  // cap LLM calls per firing request (0 = unlimited)
-	Model        modelConfig        `yaml:"model"`
-	Trigger      components.Trigger `yaml:"trigger"`
-	MarkerMode   string             `yaml:"marker_mode"` // full (default) | summary | off
+	MinTokens    int    `yaml:"min_tokens"`
+	Strategy     string `yaml:"strategy"`             // code (default) | single | rlm | auto
+	LLMEveryN    int    `yaml:"llm_every_n_requests"` // throttle LLM path: fire once per N requests/session
+	LLMMaxPerReq int    `yaml:"llm_max_per_request"`  // cap LLM calls per firing request (0 = unlimited)
+	// FireOn selects what decides that a request is worth a model call.
+	//
+	//	pressure (default) — the derived context-pressure trigger (#28 E): fire above
+	//	                     60% of the window, or above 25% while growing >10%/turn.
+	//	size               — fire whenever ANY candidate output clears MinTokens.
+	//
+	// `size` is the operator saying "I want this to run, bound it by size and by the
+	// caps, not by economics". It therefore ALSO demotes the economic gate and the
+	// caching-backend guard to ADVISORY: both still evaluate and still record what they
+	// would have refused (visible as the economic_gate_advisory gate and at /stats), but
+	// neither blocks the call. That is a deliberate licence to spend, and on a
+	// prompt-caching backend our own measurements say most such calls lose money — which
+	// is why the only brakes left are MinTokens, LLMMaxPerReq and LLMMaxPerSess. Set
+	// those before setting this.
+	FireOn string `yaml:"fire_on"`
+	// LLMMaxPerSess caps model calls for the whole SESSION (0 = unlimited). The
+	// per-request cap alone cannot bound a long session: 2 calls x 300 turns is 600
+	// calls. With `fire_on: size` this is the outer bound on spend, so it is the number
+	// that matters most.
+	LLMMaxPerSess int                `yaml:"llm_max_per_session"`
+	Model         modelConfig        `yaml:"model"`
+	Trigger       components.Trigger `yaml:"trigger"`
+	MarkerMode    string             `yaml:"marker_mode"` // full (default) | summary | off
 	// Rewrite lets the program reword/summarize/collapse (not just delete), dropping
 	// the strict deletion-only containment proof; ids/paths/errors/keep-ids are still
 	// required verbatim by the sanity check. Default true (the powerful mode) — set
@@ -315,6 +350,22 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	if cfg.EconomicGate != nil {
 		gate = *cfg.EconomicGate
 	}
+	fireOnSize := false
+	switch cfg.FireOn {
+	case "", "pressure":
+	case "size":
+		fireOnSize = true
+		// A size trigger with no size is the 271-call failure mode: the legacy MinTokens
+		// default is 300 tokens, which nearly every tool output clears, so the component
+		// would fire on every turn. Require a real threshold and supply a conservative
+		// one when the operator gave none.
+		if !explicit {
+			cfg.MinTokens = defaultSizeThreshold
+			explicit = true // their number governs the floor, not the pressure curve
+		}
+	default:
+		return nil, fmt.Errorf("extract_llm: fire_on must be pressure|size, got %q", cfg.FireOn)
+	}
 	// Off by default on caching backends (see AllowOnCachingBackend). Disabling the gate
 	// entirely is an explicit request for pre-#28 behavior, so honor it here too — otherwise
 	// `economic_gate: false` would still be silently blocked on caching traffic.
@@ -327,7 +378,9 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 		modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(),
 		trigger: cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode), rewrite: rewrite,
 		llmEveryN: cfg.LLMEveryN, llmMaxPerReq: cfg.LLMMaxPerReq,
+		llmMaxPerSess: cfg.LLMMaxPerSess, fireOnSize: fireOnSize,
 		skipFileReads: cfg.SkipFileReads, llmSeen: map[string]int{},
+		llmSpent:     map[string]int{},
 		minTokensSet: explicit, gate: gate, allowCached: allowCached,
 		pricing:    cheapmodel.PricingFromEnv(),
 		prevTokens: map[string]int{}, modelName: cfg.Model.Model,
@@ -362,6 +415,30 @@ func (e *ExtractLLM) llmAllowedThisRequest(session string) bool {
 	defer e.mu.Unlock()
 	e.llmSeen[session]++
 	return (e.llmSeen[session]-1)%e.llmEveryN == 0
+}
+
+// reserveSessionBudget hands out up to want model-call slots from this session's
+// remaining LLM_MAX_PER_SESSION allowance and returns how many were granted (want when
+// the cap is unset). Slots are taken BEFORE the calls are made, so two concurrent turns
+// of one session cannot both read "19 spent" and both spend.
+//
+// It counts CALLS, not requests: llm_every_n_requests already throttles requests, and a
+// request may make up to llmMaxPerReq calls, so a request-based cap cannot bound spend.
+func (e *ExtractLLM) reserveSessionBudget(session string, want int) int {
+	if e.llmMaxPerSess <= 0 || want <= 0 {
+		return want
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	left := e.llmMaxPerSess - e.llmSpent[session]
+	if left <= 0 {
+		return 0
+	}
+	if want > left {
+		want = left
+	}
+	e.llmSpent[session] += want
+	return want
 }
 
 var lineNumberedRe = regexp.MustCompile(`^\s{0,6}\d+[\t ]`)
@@ -412,7 +489,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	prevTokens := e.noteRequestSize(c.Session, reqTokens)
 	pressure := contextPressure(reqTokens, c.CtxWindow)
 	growth := growthRate(reqTokens, prevTokens)
-	pressureFires, triggerReason := shouldFire(pressure, growth, e.minTokensSet)
+	pressureFires, triggerReason := shouldFire(pressure, growth, e.minTokensSet, e.fireOnSize)
 	// An unknown context window (0) makes pressure meaningless; fall back to the
 	// configured Trigger alone, the same fail-open convention Trigger itself uses.
 	if c.CtxWindow <= 0 {
@@ -426,7 +503,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	floor := e.outputFloor(c.CtxWindow)
 	// Without an explicit min_tokens, derive the per-output floor from context pressure so
 	// there is no per-workload number to pick (#28 E).
-	if !e.minTokensSet {
+	if !e.minTokensSet && !e.fireOnSize {
 		if pf := pressureFloor(c.CtxWindow, pressure); pf > 0 {
 			floor = pf
 		}
@@ -633,6 +710,22 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				e.ratios.exploring(c.Session)
 			d := evaluateGate(sz, ratio, val, callCost(e.pricing, sz), seenBefore, turnsSoFar,
 				explore, e.allowCached)
+			if !d.allow && e.fireOnSize {
+				// ADVISORY: `fire_on: size` is the operator taking the spending decision
+				// away from the gate, so record what the gate would have refused — the
+				// counterfactual is the only way anyone later sees what this cost — and
+				// then proceed anyway. Deliberately does NOT bump the suppressed counter:
+				// nothing was suppressed, and inflating that would make the gate look
+				// like it was working when it has been overridden.
+				metrics.RecordExtractionReason("advisory: " + d.reason)
+				rep.Gate("economic_gate_advisory")
+				if dbg {
+					logging.From(c.Ctx).Debug("cg.extract_llm.gate", "decision", "advisory",
+						"reason", d.reason, "size", sz, "exp_saving_usd", d.expSaving,
+						"exp_cost_usd", d.expCost, "cacheAware", c.CacheAware)
+				}
+				d.allow = true
+			}
 			if !d.allow {
 				metrics.RecordExtractionSuppressed(d.reason)
 				// Just the gate name here: the per-reason breakdown already ships in
@@ -662,6 +755,15 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			rep.Gate("over_per_request_cap")
 		}
 		cands = cands[:e.llmMaxPerReq] // cap model calls per request
+	}
+	// Then the session's own allowance. Reserved here, after the per-request cap, because
+	// every surviving candidate becomes exactly one model call in phase 2 below — so the
+	// reservation is the spend.
+	if n := e.reserveSessionBudget(c.Session, len(cands)); n < len(cands) {
+		for k := n; k < len(cands); k++ {
+			rep.Gate("over_per_session_cap")
+		}
+		cands = cands[:n]
 	}
 
 	// Phase 2 (parallel): the candidate compactions are independent. A focused per-output
