@@ -557,6 +557,12 @@ type Snapshot struct {
 	LLMTimeouts      int64 `json:"llm_timeouts"`
 	LLMErrors        int64 `json:"llm_errors"`
 	LLMCallTimeoutMs int64 `json:"llm_call_timeout_ms"`
+	// LLMTruncated counts replies that stopped at the model's output cap. Its own figure
+	// because it is the failure whose fix is a config change rather than a decision to stop
+	// calling, and because it was previously invisible: a truncated program parses as
+	// nothing, which is indistinguishable from a model that declined to compact. It is the
+	// worst outcome available — full price, zero result — and it was happening.
+	LLMTruncated int64 `json:"llm_truncated"`
 	// Summarize* are the same three figures for `summarize`, which owns a SEPARATE
 	// budget (its call is one big span, not one tool output, so the two cannot share a
 	// ceiling). Reported separately rather than folded into LLM* above because the

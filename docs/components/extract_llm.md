@@ -343,6 +343,11 @@ questions at a flat rate.
 | `gross_saved_tokens` | Tokens removed |
 | `reasons` / `top_reason` | Why extraction ran or was suppressed |
 
+Plus, at the top level of `/stats`: **`llm_truncated`** — replies that stopped at the model's
+output cap. That is the worst outcome available, full price for zero result, and it used to be
+invisible because a truncated program parses as nothing, exactly like a model that declined to
+compact. A non-zero count means the reply budget is too small for what the model is writing.
+
 ## Before → After
 
 Captured **live** through the proxy (`pipeline: [extract_llm]`, `strategy: code`,

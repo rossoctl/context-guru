@@ -1426,6 +1426,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.LLMTimeouts = offload.LLMTimeouts()
 	snap.LLMErrors = offload.LLMErrors()
 	snap.LLMCallTimeoutMs = offload.LLMCallTimeout().Milliseconds()
+	snap.LLMTruncated = offload.LLMTruncated()
 	// summarize owns a separate budget (one call over a whole span, not one tool
 	// output), so it reports separately — folded together, a summarize-only pipeline
 	// would show llm_timeouts 0 while its own deadline expired on every request.

@@ -55,6 +55,7 @@ var statsGoldenTopLevel = []string{
 	"llm_input_tokens",
 	"llm_output_tokens",
 	"llm_timeouts",
+	"llm_truncated",
 
 	"mode",
 	"observe_hypothetical_requests",
