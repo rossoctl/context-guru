@@ -1654,6 +1654,7 @@ async function openRequest(id, fromURL) {
               text: x.accepted ? 'accepted' : 'no reduction',
             }),
             x.summary ? el('div', { class: 's', text: x.summary }) : null,
+            x.rejection ? el('div', { class: 's warn-text', text: x.rejection }) : null,
             x.gate_reason ? el('div', { class: 's', text: x.gate_reason }) : null)));
       });
       xt.appendChild(xb);

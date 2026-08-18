@@ -290,6 +290,7 @@ CREATE TABLE IF NOT EXISTS extraction_calls (
   latency_ms   REAL NOT NULL DEFAULT 0,
   accepted     INTEGER NOT NULL DEFAULT 0,
   gate_reason  TEXT NOT NULL DEFAULT '',
+  rejection    TEXT NOT NULL DEFAULT '',
   summary      TEXT NOT NULL DEFAULT '',
   before_gz    BLOB,
   after_gz     BLOB,

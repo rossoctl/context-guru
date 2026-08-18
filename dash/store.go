@@ -275,9 +275,9 @@ func (d *DB) insertBatch(evs []*Event) error {
 	xcallStmt, err := tx.Prepare(`INSERT INTO extraction_calls(
 		request_id, seq, component, tenant_id, session_id, ts, cold, escalated, aggressiveness,
 		strategy, model, candidate_tokens, saved_tokens, prompt_tokens, completion_tokens,
-		cache_read, cache_write, cost_usd, latency_ms, accepted, gate_reason, summary,
+		cache_read, cache_write, cost_usd, latency_ms, accepted, gate_reason, rejection, summary,
 		before_gz, after_gz
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -326,7 +326,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 				boolInt(x.Cold), boolInt(x.Escalated), x.Aggressiveness, x.Strategy, x.Model,
 				x.CandidateTokens, x.SavedTokens, x.PromptTokens, x.CompletionTok,
 				x.CacheRead, x.CacheWrite, x.CostUSD, x.LatencyMs, boolInt(x.Accepted),
-				x.GateReason, x.Summary,
+				x.GateReason, x.Rejection, x.Summary,
 				gzipText(x.Before), gzipText(x.After)); err != nil {
 				return err
 			}

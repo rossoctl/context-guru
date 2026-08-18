@@ -371,9 +371,13 @@ type ModelCall struct {
 	// GateReason is what the economic gate concluded, including when it was overridden — the
 	// counterfactual an operator needs to see after choosing to override it.
 	GateReason string
-	Summary    string
-	Before     string
-	After      string
+	// Rejection says why a call produced nothing: no usable reply, a result that was not
+	// smaller, or one the acceptance check refused. Empty on success. Without it every
+	// failure looked identical, and they have opposite fixes.
+	Rejection string
+	Summary   string
+	Before    string
+	After     string
 }
 
 // Gate records that one candidate was declined by the named gate. Names are the

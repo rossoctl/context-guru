@@ -1004,7 +1004,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				ctx, callSink := cheapmodel.WithCallSink(ctx)
 				before := schema.TextTokens(cands[k].content)
 				start := time.Now()
-				res, sum, strategy := extract.RunExtractionSummary(ctx, cands[k].content, goal, keepIDs, before, extCfg, model)
+				res, sum, strategy, why := extract.RunExtractionDetail(ctx, cands[k].content, goal,
+					keepIDs, before, extCfg, model)
 				latency := float64(time.Since(start).Milliseconds())
 				metrics.RecordExtractionCall(latency)
 				_, inTok, outTok := callSink.Totals()
@@ -1019,6 +1020,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 					CostUSD:    pricing.Cost(inTok, outTok, cw, cr),
 					GateReason: cands[k].gate,
 					Before:     cands[k].content,
+					Rejection:  why,
 				}
 				// A reply that stopped exactly at the output cap was TRUNCATED, so the
 				// Starlark program is incomplete, unparseable, and the whole call — its

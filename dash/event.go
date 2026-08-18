@@ -269,6 +269,7 @@ type ExtractionRow struct {
 	LatencyMs       float64 `json:"latency_ms"`
 	Accepted        bool    `json:"accepted"`
 	GateReason      string  `json:"gate_reason,omitempty"`
+	Rejection       string  `json:"rejection,omitempty"`
 	Summary         string  `json:"summary,omitempty"`
 	// Before/After are transcript content: persisted and served only under the same
 	// per-account capture consent as the diff view.
@@ -337,7 +338,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 					PromptTokens: mc.PromptTokens, CompletionTok: mc.CompletionTokens,
 					CacheRead: mc.CacheRead, CacheWrite: mc.CacheWrite,
 					CostUSD: mc.CostUSD, LatencyMs: mc.LatencyMs, Accepted: mc.Accepted,
-					GateReason: mc.GateReason, Summary: mc.Summary,
+					GateReason: mc.GateReason, Rejection: mc.Rejection, Summary: mc.Summary,
 					Before: mc.Before, After: mc.After,
 				})
 			}

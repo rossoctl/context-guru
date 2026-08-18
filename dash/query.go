@@ -220,7 +220,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 	// halves are loaded only WITH content access, below.
 	xrows, err := d.sql.Query(`SELECT component, model, strategy, aggressiveness, cold, escalated,
 		candidate_tokens, saved_tokens, prompt_tokens, completion_tokens, cache_read, cache_write,
-		cost_usd, latency_ms, accepted, gate_reason, summary, before_gz, after_gz
+		cost_usd, latency_ms, accepted, gate_reason, rejection, summary, before_gz, after_gz
 		FROM extraction_calls WHERE request_id = ? ORDER BY seq`, id)
 	if err != nil {
 		return nil, err
@@ -233,7 +233,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		if err := xrows.Scan(&x.Component, &x.Model, &x.Strategy, &x.Aggressiveness, &cold, &esc,
 			&x.CandidateTokens, &x.SavedTokens, &x.PromptTokens, &x.CompletionTok,
 			&x.CacheRead, &x.CacheWrite, &x.CostUSD, &x.LatencyMs, &acc,
-			&x.GateReason, &x.Summary, &bz, &az); err != nil {
+			&x.GateReason, &x.Rejection, &x.Summary, &bz, &az); err != nil {
 			return nil, err
 		}
 		x.Cold, x.Escalated, x.Accepted = cold != 0, esc != 0, acc != 0

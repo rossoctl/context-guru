@@ -332,13 +332,39 @@ func extractionIsSane(bodyText, resultText string, keepIDs []string, minKeepRati
 		return false
 	}
 	for _, kid := range keepIDs {
-		if len(kid) >= 5 && strings.ContainsFunc(kid, isLetter) &&
-			strings.Contains(bodyText, kid) && !strings.Contains(resultText, kid) {
-			return false
+		if len(kid) < 5 || !strings.ContainsFunc(kid, isLetter) {
+			continue // too short or too numeric to be a distinctive reference
 		}
+		n := strings.Count(bodyText, kid)
+		if n == 0 || strings.Contains(resultText, kid) {
+			continue
+		}
+		// PERVASIVE identifiers are exempt, and this is the difference between the check
+		// protecting recall and the check preventing compaction.
+		//
+		// The rule is "an id the agent referenced must survive verbatim", which is right for
+		// a NEEDLE: a specific error code, a path mentioned once, a test name. It is wrong for
+		// an id that appears on every line of the noise. MEASURED live: an access log where
+		// every one of 900 routine lines carried `handler=src/api/users.py` — the very path in
+		// the user's request. A reduction that keeps only the ERROR line therefore drops that
+		// id and was rejected, so 3 of 6 calls paid full price for nothing BECAUSE the model
+		// had compacted well; the calls that passed were the ones that kept sample noise.
+		//
+		// An id repeated this often is boilerplate, not a reference at risk of being lost: the
+		// marker's summary names what was elided, the original is recoverable via expand, and
+		// the surrounding transcript — where the id was harvested from — still contains it.
+		if n > pervasiveIDOccurrences {
+			continue
+		}
+		return false
 	}
 	return true
 }
+
+// pervasiveIDOccurrences is where "the agent referenced this" stops meaning "this exact
+// occurrence must survive". A needle is rare by definition; twenty-plus copies in one tool
+// output is structure, not a reference.
+const pervasiveIDOccurrences = 20
 
 func isLetter(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
@@ -430,12 +456,28 @@ func RunExtraction(ctx context.Context, body, goal string, keepIDs []string, tok
 // summary is used as the marker digest so the agent sees the gist of the elided
 // output inline.
 func RunExtractionSummary(ctx context.Context, body, goal string, keepIDs []string, tokenEst int, cfg Cfg, model Model) (string, string, string) {
+	out, summary, strategy, _ := RunExtractionDetail(ctx, body, goal, keepIDs, tokenEst, cfg, model)
+	return out, summary, strategy
+}
+
+// RunExtractionDetail is RunExtractionSummary plus WHY it failed.
+//
+// The three-value version reported "none" for every failure alike, and this file's own
+// callers complain about it: a reply that never arrived, a program the sandbox rejected, a
+// result that did not shrink and a result that failed the recall check are indistinguishable
+// in the return value, and they have completely different fixes — raise the reply budget,
+// fix the prompt, stop calling, loosen the keep-set. On a real session that cost four calls,
+// ~$0.27 and 100 seconds to learn nothing at all, because every one of them just said "none".
+//
+// reason is empty on success, and a short stable slug otherwise, per strategy tried.
+func RunExtractionDetail(ctx context.Context, body, goal string, keepIDs []string, tokenEst int, cfg Cfg, model Model) (result, summary, strategy, reason string) {
 	base := tokens.Count(body)
+	var reasons []string
 	for _, name := range strategyOrder(tokenEst, cfg) {
-		var cand, summary string
+		var cand, sum string
 		switch name {
 		case "code":
-			cand, summary = runStarlark(ctx, body, goal, keepIDs, model, cfg.Rewrite, cfg.Aggressiveness)
+			cand, sum = runStarlark(ctx, body, goal, keepIDs, model, cfg.Rewrite, cfg.Aggressiveness)
 		case "single":
 			cand = runSingle(ctx, body, goal, keepIDs, model)
 		case "rlm":
@@ -443,14 +485,26 @@ func RunExtractionSummary(ctx context.Context, body, goal string, keepIDs []stri
 		case "deterministic":
 			cand = resultToText(DeterministicProject(parseBody(body), keepIDs, cfg.MaxChars))
 		}
-		if cand == "" || tokens.Count(cand) >= base {
+		switch {
+		case cand == "":
+			// No usable candidate: no reply, a transport error, or a program the sandbox
+			// refused to run (bad syntax, a step/time/memory limit, a non-string OUTPUT).
+			reasons = append(reasons, name+": no usable program or reply")
+			continue
+		case tokens.Count(cand) >= base:
+			reasons = append(reasons, name+": result not smaller")
 			continue
 		}
-		if validateExtraction(cand, body, keepIDs, cfg) {
-			return cand, summary, name
+		if !validateExtraction(cand, body, keepIDs, cfg) {
+			// Either the recall check (a keep-list identifier present in the body and absent
+			// from the result, or a degenerate empty result) or, in deletion-only mode, the
+			// containment proof.
+			reasons = append(reasons, name+": rejected by the acceptance check")
+			continue
 		}
+		return cand, sum, name, ""
 	}
-	return "", "", "none"
+	return "", "", "none", strings.Join(reasons, "; ")
 }
 
 // runSingle asks the model for the filtered subset in one call. It is a FALLBACK
