@@ -174,3 +174,46 @@ func assistantMsg(text string) bschemas.ChatMessage {
 		Content: &bschemas.ChatMessageContent{ContentStr: &t},
 	}
 }
+
+// Keep-ids must come from the AGENT's words, never from the tool outputs — even when the
+// prompt's context includes them (context: full, and every cold-cache sweep).
+//
+// The keep-list means "identifiers the agent referenced, so do not lose them". Harvested from
+// a context containing the candidate, every unique token in the noise becomes a required
+// identifier and no reduction can pass. MEASURED live, four samples per arm on the same
+// 26k-token access log: harvesting from the full transcript gave 0/6 accepted across two runs;
+// with keep-ids taken from the conversation alone, a full-sized context accepts 3/4 — the same
+// as a small one. That was the difference between the cold sweep working and being an
+// expensive no-op.
+func TestKeepIdsNeverComeFromToolOutput(t *testing.T) {
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+		userMsg("Find the auth timeout in src/api/users.py and fix it."),
+		assistantMsg("reading the access log"),
+		toolResultMsg(strings.Repeat(
+			"2024-01-01T00:37:37 GET /orders/9 200 12ms trace=zz9plural-z-alpha\n", 400)),
+		userMsg("keep going"),
+	}}
+	// What the component harvests from, in every context mode: the conversation-only render.
+	for _, mode := range []contextMode{ctxGoal, ctxRecent, ctxFull} {
+		e, err := newExtractLLM([]byte("context: " + string(mode) + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		x := e.(*ExtractLLM)
+		// The prompt's context may include the payload (that is what `full` is for)...
+		if mode == ctxFull && !strings.Contains(x.extractionContext(req, false), "zz9plural") {
+			t.Fatal("full context should carry the tool output")
+		}
+		// ...but the keep-list must not be derived from it.
+		src := conversationContext(req, ctxRecent, x.ctxMessages)
+		for _, id := range []string{"zz9plural-z-alpha", "orders"} {
+			if strings.Contains(src, id) {
+				t.Errorf("mode %s: keep-id source contains %q, harvested from the tool output; "+
+					"every unique token in the noise then becomes un-removable", mode, id)
+			}
+		}
+		if !strings.Contains(src, "src/api/users.py") {
+			t.Errorf("mode %s: keep-id source lost the path the agent actually referenced", mode)
+		}
+	}
+}

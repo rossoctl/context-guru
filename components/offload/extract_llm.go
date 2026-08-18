@@ -668,7 +668,20 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	extCfg.Mode, extCfg.Floor, extCfg.Rewrite = e.strategy, floor, e.rewrite
 	extCfg.Aggressiveness = e.aggro
 
-	keepIDs := extract.HarvestIdentifiers(goal, 40)
+	// Keep-ids are harvested from the AGENT's OWN WORDS, never from the tool outputs — even
+	// when the prompt's context includes them.
+	//
+	// The keep-list means "identifiers the agent referenced recently, so do not lose them".
+	// Harvesting it from a context that CONTAINS the candidate turns every unique token in the
+	// noise into a required identifier, and then no reduction can pass: a single timestamp
+	// appearing once in a 900-line log becomes something the result must reproduce verbatim.
+	//
+	// MEASURED, three samples each on the same 26k-token access log: with a small
+	// conversation-only context 2/3 extractions were accepted; with a full-transcript context
+	// 0/3 were, and the failures were "rejected by the acceptance check". That is the cold
+	// sweep's own configuration (it forces context: full), so this was the difference between
+	// the sweep working and the sweep being an expensive no-op.
+	keepIDs := extract.HarvestIdentifiers(conversationContext(req, ctxRecent, e.ctxMessages), 40)
 	// Per-call context budget (constant across this request's candidates): the extraction
 	// model's input limit, and the prompt's fixed cost around the tool output itself.
 	inputLimit := e.inputLimit(c)
