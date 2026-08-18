@@ -517,6 +517,26 @@ export OPENAI_BASE_URL=https://cg.<host>/openai/v1
 export BOB_GATEWAY_URL=https://cg.<host>   # bobshell 2.x; older builds: CUSTOM_BASE_URL
 ```
 
+### Choosing which gateway your traffic goes to
+
+Each account picks its upstream **by name** on its Settings page, one dropdown per dialect,
+from the operator's allow-list. Where a deployment lists two hostnames for the same gateway —
+an internal and an external one — that dropdown is how a laptop that can only reach one of
+them gets pointed at it. No account can supply a URL; that would make the proxy an
+unauthenticated forwarder to anything this host can reach.
+
+New accounts start on the first entry of their dialect, which is an accident of file order
+once there is more than one. Name the default explicitly instead:
+
+```ini
+Environment=CG_DEFAULT_ANTHROPIC_UPSTREAM=ibm-litellm
+```
+
+`CG_DEFAULT_OPENAI_UPSTREAM` and `CG_DEFAULT_BOB_UPSTREAM` do the same for the other dialects.
+An unknown name warns at startup and is ignored — the allow-list is the authority on what
+exists, and a typo in an optional default must not stop the service. Changing the default
+never moves an existing account.
+
 ### How each agent identifies itself
 
 | Agent | Mechanism | Why |
@@ -582,6 +602,60 @@ mode: sync
 Fully deterministic, which is the property that matters on a shared box: no
 cheap-model calls, so it adds no upstream spend, contends for no shared LLM budget,
 and puts near-zero latency on anyone else's agent turn.
+
+### Turning on the compaction model (`extract_llm`)
+
+Off for everyone by default, and it stays off after a deploy — nothing below happens unless
+an account opts in. It is the only component that spends money to save money, and its two
+halves have opposite economics, so they are separate switches.
+
+**Settings → Compaction model calls (extract_llm)** on the account's own page (manager-only,
+because the server refuses `config_yaml` from anyone else). Each control states what it costs.
+
+**Start with the cold-cache sweep alone.** This is the half whose economics are not in doubt:
+turns that resume after the provider's cache TTL are ~4% of this deployment's requests and
+~31% of its spend, they re-bill the whole transcript at 1.25x the fresh rate, and today
+nothing touches them.
+
+1. Tick **"Sweep the transcript when the prompt cache has expired"**.
+2. Leave **"Also reduce large tool outputs as they arrive"** unticked.
+3. Save. The page warns that saving discards frozen compaction decisions, so the next turn
+   is not cache-warm — expected, once.
+
+Equivalent YAML, for the Advanced box or the server default:
+
+```yaml
+components:
+  extract_llm:
+    per_output: false
+    cold_cache:
+      enabled: true
+      min_tokens: 1000
+```
+
+**Then check what it did**, before turning on anything else. Requests tab → open a request →
+**Compaction model calls**: one row per call with its cost, its saving, its latency, whether
+the result was accepted, and why not when it was not. The Components tab now carries an
+`LLM cost` column and states the verdict in dollars. What to look for:
+
+| reading | meaning |
+|---|---|
+| `net` positive on cold rows | it is paying; consider the per-output half next |
+| `underwater $x` | the calls cost more than the tokens they removed were worth |
+| `rejected by the acceptance check` | the model compacted but the result was refused |
+| `reply truncated at the output cap` | raise the reply budget, or the call is wasted |
+| latency several seconds per call | the agent's turn wears that; bound it with the caps |
+
+**Only then consider the per-output half**, and set the caps first: a size threshold
+(`min_tokens`), a per-turn cap, and a per-session cap. Ticking it makes the size threshold the
+whole trigger, which also demotes the economic gate **and** the caching-backend guard to
+advisory — they still record what they would have refused, visible as
+`economic_gate_advisory`, but they no longer block. On measured warm traffic that path ranged
+from break-even to net negative even when it reduced a 26k-token output by 99.6%, because a
+token removed from a warm cached prefix saves only the cache-read rate.
+
+To turn either half off again, untick it and save; unticking both removes the component from
+the pipeline entirely.
 
 ### Tenants TRACK the default; they are not stamped with a copy of it
 
@@ -990,10 +1064,23 @@ Every panel carries a description saying what a *bad* value looks like.
 Worth knowing before you read either dashboard as a verdict:
 
 - **Cache hit ratio reads `n/a`, not 0**, against an upstream that reports no cache tiers
-  in its usage block (IBM LiteLLM does not). That zero is the upstream's silence, not a
-  cache miss. The cost of rendering it neutral is that a genuine collapse to exactly 0
-  would also read `n/a`; the metric cannot tell the two apart, and only the upstream can
-  fix that.
+  in its usage block. That zero would be the upstream's silence, not a cache miss. The cost
+  of rendering it neutral is that a genuine collapse to exactly 0 would also read `n/a`; the
+  metric cannot tell the two apart, and only the upstream can fix that.
+
+    !!! note "Corrected: the IBM gateway DOES report cache tiers"
+        This page previously said IBM LiteLLM does not. Measured directly against
+        `ete-litellm.ai-models.vpc-int` with a `cache_control` breakpoint, it returns
+        `cache_creation_input_tokens`, `cache_read_input_tokens`, and even the
+        `cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens` split:
+
+        | prefix | model | call 1 | call 2 |
+        |---|---|---|---|
+        | ~4.4k tok | `aws/claude-sonnet-5` | `cache_creation=4424` | `cache_read=4424` |
+        | ~3.7k tok | `claude-haiku-4-5` | `write=0 read=0` (below its 4096 minimum) | same |
+
+        So the tiers are usable on this deployment. If a panel still reads `n/a`, suspect the
+        *streaming* path or a model the pricer cannot name, not the gateway.
 - **`Availability, 30 days` is meaningless until Prometheus has retained 30 days.**
   `avg_over_time(up[30d])` averages the samples that exist, so a Prometheus started an hour
   ago reports a flattering 100%.

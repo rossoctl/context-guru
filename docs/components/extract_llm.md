@@ -138,6 +138,37 @@ filtered structurally.
   when the request is prompt-cached (they already bill at the cheap cache-read rate), reduce them
   otherwise. The economic gate now generalizes this same reasoning to *every* candidate.
 
+    !!! warning "AUTO was not implemented until recently"
+        Unset used to mean "always reduce", which defeated the entire measured rationale for the
+        flag. Live confirmation of the shape it produces: a ~7k-token Go file read went to the
+        model, which spent 40 s on a reply that hit the output cap and saved nothing. AUTO now
+        behaves as documented, and a cold-cache sweep is the deliberate exception — there nothing
+        is cached and file reads are the largest mass being re-billed at the write rate.
+
+### Compaction target and how much conversation the model sees
+
+Two knobs the prompt itself carries.
+
+**`aggressiveness`** is `low` | `medium` (default) | `high`. It is *taught* rather than
+thresholded: the second system block states a target and carries three or four worked examples
+demonstrating it, across the shapes real traffic contains — JSON, bash and test logs, prose, and
+a source-file read. It changes what the model is **asked** for and never what is **accepted**:
+the verbatim-preservation rule, the strictly-smaller rule and (in `rewrite: false`) the
+subsequence proof are identical at every level.
+
+**`context`** is `goal` | `recent` (default) | `full`, with `context_messages` (7) as the N for
+`recent`. The model is asked to reduce one output "toward what the agent needs next", so what it
+is told about the conversation is the whole basis of that judgement. `goal` carries the task and
+the latest turn; `recent` adds every user turn plus the last N non-tool messages, which is what
+puts mid-session corrections ("it must default to 30s, not 10s") in front of the model that is
+deciding whether the line saying so may go; `full` carries the entire transcript and is what a
+cold-cache sweep always uses.
+
+The two system blocks are ordered general-contract-first because a provider caches a *prefix*:
+the half that is byte-identical for every account has to come first or it is shared with nobody.
+Both the level's text and the level itself are part of the result cache key, so switching level
+**misses** rather than replaying the previous level's answer.
+
 ## Economics
 
 The component only calls the LLM when **expected saving > expected cost**.
@@ -189,6 +220,52 @@ absolute `trigger` applies — the same fail-open convention `Trigger` already u
 The `/compact` endpoint resolves the context window exactly as the chat path does, so
 fraction-based `trigger` thresholds and the pressure logic behave identically in offline
 replay and live traffic.
+
+## Cold-cache sweep
+
+The one regime where this component's economics are not in doubt.
+
+When a session resumes after the provider's prompt-cache TTL, the cached prefix is gone and
+the **whole transcript is re-billed as cache creation at 1.25x the fresh rate**. Two things
+are true only on that turn: a removed token is worth 12.5x what it is worth on a warm turn
+(cache-write rate vs cache-read rate), and rewriting deep history is free, because there is no
+live cached prefix left to invalidate.
+
+**Measured on the hosted service, 1.4 days of real traffic:**
+
+| cache outcome | requests | cache_write tokens | cost |
+|---|---|---|---|
+| `hit` | 4,787 | 26.1M | $689.29 |
+| **`ttl_expiry`** | **219** | **56.7M** | **$360.09** |
+| `prefix_change` | 121 | 13.3M | $72.95 |
+| `cold_start` | 231 | 7.8M | $51.03 |
+
+TTL-expired turns were **4% of requests and 31% of spend** — $1.64 each against $0.144 for a
+warm turn — and the shipped pipeline saved **0.015%** of it (`baseline_cost_usd` $360.14 vs an
+actual $360.09).
+
+```yaml
+extract_llm:
+  per_output: false          # leave ordinary turns alone
+  cold_cache:
+    enabled: true
+    min_tokens: 1000
+```
+
+On such a turn the sweep lifts the tail gate (nothing is cached, so depth is free), takes the
+whole transcript as context, prices saved tokens at the cache-write rate, and escalates to the
+agent's own model if the transcript will not fit the extraction model's window. Every removal
+leaves a `<<cg:HASH>>` marker with a one-line summary, and the result is frozen so later warm
+turns replay it byte-for-byte and the new prefix stays cache-stable.
+
+!!! note "Detection errs toward 'still warm'"
+    The two errors are not symmetric. Believing a warm cache is cold makes a component rewrite
+    a live prefix and forces a cache-write of the whole suffix; believing a cold cache is warm
+    only forgoes a saving. So: the Anthropic family reads the TTL out of the request itself
+    (exact — and every one of ~5,000 captured real requests carries a bare `ephemeral` mark,
+    i.e. the 5-minute tier), anything else takes the documented one-hour outer bound, a minute
+    of margin covers clock skew, and **no previous turn on record reads WARM**, so a proxy
+    restart cannot invalidate a live cache.
 
 ## Caching
 
@@ -313,7 +390,17 @@ Lossy but reversible — the original is stashed and recovered via `context_guru
 | `llm_every_n_requests` | — | Fire the LLM path at most once per N requests per session. |
 | `llm_max_per_request` | 0 | Cap LLM calls per firing request (0 = unlimited). |
 | `rewrite` | `true` | `false` forces the verified deletion-only (subsequence) guarantee. |
-| `skip_file_reads` | auto | Skip line-numbered source dumps when cached; `true`/`false` to force. |
+| `skip_file_reads` | auto | Skip line-numbered source dumps when cached; `true`/`false` to force. AUTO now actually works — see the note below. |
+| `per_output` | `true` | The hot-path pass: reduce individual tool outputs as they arrive. `false` leaves only the cold-cache sweep, which is the half whose economics are unambiguous. |
+| `cold_cache.enabled` | `false` | Sweep the whole transcript on a turn whose prompt cache has expired. See [Cold-cache sweep](#cold-cache-sweep). |
+| `cold_cache.min_tokens` | 1000 | Per-output floor for the sweep — lower than the everyday one, because on that turn every candidate is re-billed at the write rate anyway. |
+| `cold_cache.min_idle_seconds` | 0 | Demand MORE idle time than the provider TTL implies. Raises the bar, never lowers it. |
+| `cold_cache.max_calls` | 0 | Cap model calls in one sweep (0 = unlimited). |
+| `fire_on` | `pressure` | `pressure` = the derived context-pressure trigger. `size` = fire whenever a candidate clears `min_tokens`, and demote the economic gate **and** the caching-backend guard to advisory. |
+| `llm_max_per_session` | 0 | Cap model calls for the whole session (0 = unlimited). The per-request cap cannot bound a long session: 2 calls x 300 turns is 600 calls. |
+| `aggressiveness` | `medium` | `low` \| `medium` \| `high` — the compaction target, taught with worked examples. |
+| `context` | `recent` | How much conversation the prompt carries: `goal` \| `recent` \| `full`. |
+| `context_messages` | 7 | N for `context: recent`. |
 | `marker_mode` | `full` | How the recovery marker is emitted: `full` \| `summary` \| `off`. |
 
 ### Context guard

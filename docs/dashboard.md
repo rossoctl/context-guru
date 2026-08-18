@@ -119,6 +119,36 @@ to content-token counts), and a component that burned wall time for nothing read
 `overcount_ratio` is the number that keeps the rest honest: a ratio of 7× means the
 gross figure counted the same compaction seven times as the agent re-sent its transcript.
 
+**LLM calls · LLM cost** are blank for every deterministic component and filled for the ones
+that call a model themselves. Where they are filled, the verdict is stated in **dollars**
+rather than inferred from tokens and latency: what that component's calls removed, valued at
+the rate those tokens would actually have been billed at, minus what the calls cost. Cold-sweep
+calls are valued at the cache-write rate and warm ones at the cache-read rate — a ~12.5×
+spread, so a component whose calls are mostly cold is judged on the right basis. The value
+deliberately counts only what the CALLS removed, not the component's total savings: most of an
+extractor's realized value comes from frozen results replayed with no call at all (~93% on
+measured traffic), and crediting that replay to the calls would make any amount of spending
+look profitable.
+
+### Compaction model calls
+
+Open any request and, if a component made model calls on it, there is a row per call:
+candidate size, tokens saved, prompt tokens, cost, **net**, latency, and an outcome —
+`accepted`, or `no reduction` with the reason attached (`rejected by the acceptance check`,
+`reply truncated at the output cap`, `no usable program or reply`). A `cold sweep` pill marks
+calls made on a turn whose prompt cache had expired, and `escalated` marks one that fell back
+to the agent's own model because the transcript would not fit the extraction model's window.
+Underneath, the before/after of each call as a diff.
+
+This is the only place the cost of an individual compaction call is visible. The request row
+carries one rolled-up figure and the components table an aggregate, so before this an expensive
+component could be ahead overall while a particular *kind* of call was quietly underwater.
+
+Both halves of the text (before/after, and the model-written summary) are transcript content:
+they are stored, and shown, only under the same per-account capture consent that governs the
+diff view. The numbers are kept either way — consent is about storing transcripts, and dropping
+the cost of a call would leave an account unable to answer the question the record exists for.
+
 ### Sessions
 
 ![Session list](img/dashboard/04-sessions.jpg)
