@@ -76,7 +76,7 @@ func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt s
 	}
 	maxTok := a.MaxTokens
 	if maxTok == 0 {
-		maxTok = 2048
+		maxTok = DefaultMaxTokens
 	}
 	client := a.Client
 	if client == nil {
@@ -87,7 +87,12 @@ func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt s
 		"max_tokens": maxTok,
 		"messages":   []any{map[string]any{"role": "user", "content": prompt}},
 	}
-	if blocks := systemBlocks(system, a.Model); len(blocks) > 0 {
+	blocks, releasePrefix := systemBlocks(system, a.Model)
+	// Released here so every exit path (transport error, non-200, decode failure) frees the
+	// write slot; the success path calls it again with the real outcome and wins, because
+	// release is idempotent and first-call-wins.
+	defer releasePrefix(false, false)
+	if len(blocks) > 0 {
 		payload["system"] = blocks
 	}
 	reqBody, _ := json.Marshal(payload)
@@ -130,6 +135,9 @@ func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt s
 	// preamble breakpoint actually caches (read>0) or is silently ignored (read==0).
 	recordUsageCache(ctx, out.Usage.InputTokens, out.Usage.OutputTokens,
 		out.Usage.CacheCreationTok, out.Usage.CacheReadTok)
+	// Tell the prefix bookkeeping what actually happened, so the next call knows whether a
+	// breakpoint would be a read (worth it) or another write (not).
+	releasePrefix(out.Usage.CacheCreationTok > 0, out.Usage.CacheReadTok > 0)
 	// Return the first content block that carries text. A leading non-text block
 	// (e.g. "thinking") has an empty Text, so we skip it rather than returning "".
 	for _, c := range out.Content {

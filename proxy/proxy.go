@@ -599,6 +599,26 @@ func headerKey(name, key string) func(http.Header) {
 	return func(h http.Header) { h.Set(name, key) }
 }
 
+// selfRates resolves the per-token rates of the model THIS request targets, for a component
+// that will call the same model itself (model.source: incoming, the shipped default). Without
+// it such a component prices its own spend at a built-in constant — measured on a real
+// session, that understated one call by about 3x, and the economic gate spends on that number.
+//
+// Nil pricer or an unnameable model returns the zero value, which the component must read as
+// "unknown" and fall back on, never as free.
+func (h *Handler) selfRates(ctx context.Context, model string) components.TokenRates {
+	if h.opts.Prices == nil || model == "" {
+		return components.TokenRates{}
+	}
+	p, ok := h.opts.Prices.Price(ctx, model)
+	if !ok || p.Zero() {
+		return components.TokenRates{}
+	}
+	return components.TokenRates{
+		Input: p.Input, Output: p.Output, CacheRead: p.CacheRead, CacheWrite: p.CacheWrite,
+	}
+}
+
 // incomingModel builds an LLM client that reuses the proxied request's own model
 // and the route's upstream, so a NeedsModel component can call the same backend the
 // request targets.
@@ -956,6 +976,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				bypassed: bypassed,
 				models:   models,
 				window:   window,
+				rates:    h.selfRates(r.Context(), gjson.GetBytes(body, "model").String()),
 				tn:       tn,
 			})
 			addedMs := float64(added.Microseconds()) / 1000.0

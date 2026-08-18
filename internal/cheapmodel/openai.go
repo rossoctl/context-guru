@@ -50,7 +50,7 @@ func (o OpenAI) CompleteSystem(ctx context.Context, system, prompt string) (stri
 	}
 	maxTok := o.MaxTokens
 	if maxTok == 0 {
-		maxTok = 2048
+		maxTok = DefaultMaxTokens
 	}
 	client := o.Client
 	if client == nil {

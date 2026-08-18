@@ -276,3 +276,72 @@ func TestBlankSystemSendsNoSystemField(t *testing.T) {
 		t.Fatalf("system field present for a blank preamble: %#v", body["system"])
 	}
 }
+
+// A cache entry that is only ever WRITTEN is worse than no breakpoint at all: the write costs
+// 1.25x fresh input and buys nothing. Measured on a live session — two extraction calls in one
+// request ran concurrently, so neither could read what neither had written yet, and both paid:
+// cache_write=5228, cache_read=0.
+//
+// So the first call in flight takes the write slot and marks; its concurrent siblings do not.
+// Once an entry demonstrably exists, every later call marks again, because then the mark is a
+// READ.
+func TestOnlyOneConcurrentCallPaysForTheCacheWrite(t *testing.T) {
+	resetPrefixCache()
+	t.Cleanup(resetPrefixCache)
+	const model = "aws/claude-sonnet-5"
+	prefix := []string{strings.Repeat("stable preamble ", 400)}
+
+	// Nothing written yet: the first claim marks, a concurrent second does not.
+	first, releaseFirst := systemBlocks(prefix, model)
+	second, releaseSecond := systemBlocks(prefix, model)
+	if !marked(first) {
+		t.Fatal("the first call did not ask for the cache, so nothing is ever written")
+	}
+	if marked(second) {
+		t.Fatal("a concurrent sibling also asked for the cache: both pay the 1.25x write " +
+			"premium for the same entry, which is the measured waste this prevents")
+	}
+
+	// The write happened. Now a mark is a READ, so every call should carry one.
+	releaseFirst(true, false)
+	releaseSecond(false, false)
+	third, _ := systemBlocks(prefix, model)
+	if !marked(third) {
+		t.Fatal("no mark after the entry exists, so the write is never amortised by a read")
+	}
+
+	// A DIFFERENT prefix is a different entry and must be claimed separately.
+	other, _ := systemBlocks([]string{strings.Repeat("different preamble ", 400)}, model)
+	if !marked(other) {
+		t.Fatal("a distinct prefix was denied its own first write")
+	}
+}
+
+// A claimed slot must be freed even when the call fails, or one transport error stops the
+// prefix from ever being cached again for the life of the process.
+func TestAFailedCallReleasesTheWriteSlot(t *testing.T) {
+	resetPrefixCache()
+	t.Cleanup(resetPrefixCache)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	sys := strings.Repeat("stable preamble ", 400)
+	if _, err := (Anthropic{BaseURL: srv.URL, Model: "aws/claude-sonnet-5"}).
+		CompleteSystem(context.Background(), sys, "x"); err == nil {
+		t.Fatal("expected the 500 to be an error")
+	}
+	blocks, _ := systemBlocks([]string{sys}, "aws/claude-sonnet-5")
+	if !marked(blocks) {
+		t.Fatal("the write slot was still held after a failed call, so this prefix can " +
+			"never be cached again")
+	}
+}
+
+func marked(blocks []any) bool {
+	if len(blocks) == 0 {
+		return false
+	}
+	_, ok := blocks[len(blocks)-1].(map[string]any)["cache_control"]
+	return ok
+}

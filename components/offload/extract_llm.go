@@ -174,11 +174,12 @@ type ExtractLLM struct {
 // deployment, a gateway alias): the call then 400s, which fails open correctly but burns a
 // round-trip and a slot in the request's wall clock every turn.
 const (
-	// cheapExtractOutputTokens mirrors the `max_tokens` the cheap clients send
-	// (cheapmodel.Anthropic/OpenAI default to 2048). Most APIs bound input+output against
-	// the same window — vLLM and friends reject the request outright — so the reply must be
-	// reserved out of the budget rather than assumed free.
-	cheapExtractOutputTokens = 2048
+	// cheapExtractOutputTokens mirrors the `max_tokens` the cheap clients send. Most APIs
+	// bound input+output against the same window — vLLM and friends reject the request
+	// outright — so the reply must be reserved out of the budget rather than assumed free.
+	// Taken from the client's own constant so the two cannot drift: they did, and the
+	// mismatch showed up as replies truncated at exactly the cap.
+	cheapExtractOutputTokens = cheapmodel.DefaultMaxTokens
 	// cheapExtractSlack covers the JSON envelope, role framing and provider-side
 	// accounting that never appear in a token count of the text itself.
 	cheapExtractSlack = 512
@@ -541,6 +542,15 @@ func (e *ExtractLLM) reserveSessionBudget(session string, want int) int {
 	return want
 }
 
+// llmTruncated counts extraction replies that stopped at the output cap. Its own counter
+// because it is the one failure whose fix is a config change rather than a decision to stop
+// calling, and it was previously invisible: a truncated program parses as nothing, which
+// looks exactly like a model that declined to compact.
+var llmTruncated int64
+
+// LLMTruncated returns the number of extraction replies cut off at the output cap.
+func LLMTruncated() int64 { return atomic.LoadInt64(&llmTruncated) }
+
 var lineNumberedRe = regexp.MustCompile(`^\s{0,6}\d+[\t ]`)
 
 // looksLikeFileRead reports whether content is a line-numbered source-file dump (a
@@ -630,6 +640,27 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		floor = e.cold.MinTokens
 	}
 	// Gate inputs shared by every candidate this request.
+	//
+	// pricing is the extraction model's REAL rates where the host could resolve them. The
+	// built-in default is claude-haiku's, while the shipped model.source is `incoming` — the
+	// agent's own model — so on a sonnet-class agent the fallback understates every call by
+	// about 3x, and the gate spends on that number. MEASURED on a real session: a call
+	// recorded at $0.0276 had cost about $0.083.
+	pricing := e.pricing
+	if e.modelSource != "config" && !c.SelfRates.Zero() {
+		pricing = cheapmodel.Pricing{
+			InputPerMTok:      c.SelfRates.Input * 1_000_000,
+			OutputPerMTok:     c.SelfRates.Output * 1_000_000,
+			CacheReadPerMTok:  c.SelfRates.CacheRead * 1_000_000,
+			CacheWritePerMTok: c.SelfRates.CacheWrite * 1_000_000,
+		}
+	}
+	// The model id actually used, for the record. `source: incoming` pins no name, so without
+	// this every recorded call said model="".
+	callModel := e.modelName
+	if callModel == "" {
+		callModel = c.ModelName
+	}
 	val := savedTokenValue(c)
 	ratio := e.ratios.ratio()
 	turnsSoFar := len(req.Input)
@@ -700,7 +731,22 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		gate string
 	}
 	var cands []cand
-	skipFR := false
+	// skip_file_reads is TRI-STATE, and unset really means AUTO.
+	//
+	// It did not. `skipFR := false` made unset mean "always reduce", while this file's own
+	// config comment and docs/components/extract_llm.md both document unset as AUTO: skip
+	// line-numbered source dumps when the request is prompt-cached, reduce them otherwise.
+	// The default therefore defeated the entire measured rationale for the flag — on a
+	// ~98%-cached agent a file read already bills at the cache-read rate, so skeletonizing it
+	// saves almost nothing and costs a model call plus a one-time cache-write transition,
+	// measured at +30% billed cost. Live confirmation of the same shape: a real session sent a
+	// ~7k-token Go file read to the model, which spent 40 s on a reply that hit the output cap
+	// and saved nothing.
+	//
+	// A cold sweep is the exception in the other direction: nothing is cached, file reads are
+	// the largest mass in a coding transcript, and every token of them is being re-billed at
+	// the cache-write rate — so AUTO reduces them there.
+	skipFR := c.CacheAware && !sweeping
 	if e.skipFileReads != nil {
 		skipFR = *e.skipFileReads
 	}
@@ -857,7 +903,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// clock as well as money, and an agent on a task deadline feels the former more.
 			explore := !tooSlowToExplore(metrics.ExtractionAvgLatencyMs()) &&
 				e.ratios.exploring(c.Session)
-			d := evaluateGate(sz, ratio, val, callCost(e.pricing, sz), seenBefore, turnsSoFar,
+			d := evaluateGate(sz, ratio, val, callCost(pricing, sz), seenBefore, turnsSoFar,
 				explore, e.allowCached)
 			if !d.allow && e.fireOnSize {
 				// ADVISORY: `fire_on: size` is the operator taking the spending decision
@@ -964,14 +1010,26 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				_, inTok, outTok := callSink.Totals()
 				cw, cr := callSink.CacheTotals()
 				calls[k] = components.ModelCall{
-					Model: e.modelName, Strategy: strategy, Aggressiveness: string(e.aggro),
+					Component: rep.Component, Model: callModel,
+					Strategy: strategy, Aggressiveness: string(e.aggro),
 					Cold: sweeping, Escalated: escalated,
 					CandidateTokens: before, LatencyMs: latency,
 					PromptTokens: inTok, CompletionTokens: outTok,
 					CacheRead: cr, CacheWrite: cw,
-					CostUSD:    e.pricing.Cost(inTok, outTok, cw, cr),
+					CostUSD:    pricing.Cost(inTok, outTok, cw, cr),
 					GateReason: cands[k].gate,
 					Before:     cands[k].content,
+				}
+				// A reply that stopped exactly at the output cap was TRUNCATED, so the
+				// Starlark program is incomplete, unparseable, and the whole call — its
+				// money and its seconds — bought nothing. It is indistinguishable from
+				// "the model declined to shrink this" in the return value, and the two
+				// have opposite fixes: raise the cap versus stop calling. MEASURED on a
+				// real session: 26.8s and ~$0.08 for a reply cut off at 2048 tokens.
+				if outTok >= int64(cheapExtractOutputTokens) {
+					calls[k].GateReason = "reply truncated at the output cap: " + calls[k].GateReason
+					rep.Gate("reply_truncated")
+					atomic.AddInt64(&llmTruncated, 1)
 				}
 				// CLASSIFY THE SILENT FAILURE — and classify it INDEPENDENTLY of whether
 				// a result came back. RunExtractionSummary returns ("", "", "none") for every

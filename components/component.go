@@ -164,6 +164,13 @@ type Ctx struct {
 	// turn after a restart all read false: acting on a fabricated idle time would invalidate
 	// a live cache, which costs a full cache-write of the suffix at 1.25x the fresh rate.
 	ColdCache bool
+	// ModelName is the id of the model this request targets, so a component that reuses it
+	// (model.source: incoming, the default for the LLM components) can say WHICH model it
+	// called instead of recording an empty string.
+	ModelName string
+	// SelfRates are the per-token rates for the model a component would call itself — the
+	// incoming model's, since that is what `source: incoming` uses. Zero when unknown.
+	SelfRates TokenRates
 	// IdleMs is how long this session was idle before this request, in milliseconds; 0 when
 	// there is no previous turn on record. Carried alongside ColdCache so a component can
 	// demand MORE idle time than the provider TTL implies, and so the figure can be
@@ -297,6 +304,34 @@ type Report struct {
 	// extract_llm fans out into a pre-sized slice and assigns the result once, which is the
 	// same shape its projected-output collection already uses.
 	Calls []ModelCall
+}
+
+// TokenRates are per-token USD rates for the model a component would call ITSELF, so a
+// component that spends money can price its own calls correctly.
+//
+// It exists because the alternative was a constant. extract_llm priced every call it made at
+// claude-haiku rates, while the shipped default routes extraction to the AGENT's model — so a
+// call on a sonnet-class model was recorded, and judged by the economic gate, at roughly a
+// third of what it actually cost. MEASURED on a real session: a call recorded at $0.0276 had
+// really cost about $0.083.
+//
+// Zero means unknown, and a caller must then fall back rather than treat a call as free.
+type TokenRates struct {
+	Input      float64
+	Output     float64
+	CacheRead  float64
+	CacheWrite float64
+}
+
+// Zero reports whether no rate is known.
+func (r TokenRates) Zero() bool {
+	return r.Input == 0 && r.Output == 0 && r.CacheRead == 0 && r.CacheWrite == 0
+}
+
+// Cost prices one call's four token tiers.
+func (r TokenRates) Cost(fresh, output, cacheWrite, cacheRead int64) float64 {
+	return float64(fresh)*r.Input + float64(output)*r.Output +
+		float64(cacheWrite)*r.CacheWrite + float64(cacheRead)*r.CacheRead
 }
 
 // ModelCall is one LLM call a component made, with what it cost and what it bought.

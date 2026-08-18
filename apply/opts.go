@@ -37,6 +37,10 @@ type Opts struct {
 	CacheMode string
 	// Now is the clock, injected so idle-time reasoning is testable. Zero means time.Now().
 	Now time.Time
+	// SelfRates are the per-token rates of the model a NeedsModel component would call via
+	// `model.source: incoming` — i.e. the request's own model. Supplied by the host, which is
+	// the only layer with a Pricer. Zero means unknown and the component falls back.
+	SelfRates components.TokenRates
 
 	// Mode is the operating mode. Empty means components.ModeSync, so a caller that does
 	// not know about modes gets exactly today's behavior.

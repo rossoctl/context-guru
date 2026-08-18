@@ -427,6 +427,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		Model:        models,
 		Bypass:       bypass,
 		CtxWindow:    o.Window,
+		ModelName:    gjson.GetBytes(body, "model").String(),
+		SelfRates:    o.SelfRates,
 		CacheAware:   cacheAware,
 		ColdCache:    coldCache,
 		IdleMs:       idleMs,
