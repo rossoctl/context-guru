@@ -696,6 +696,22 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	if sweeping && model != nil && !fitsModelContext(0, promptOverhead, inputLimit) {
 		if inc := c.Model.For("incoming"); inc != nil && c.CtxWindow > inputLimit {
 			model, inputLimit, escalated = inc, c.CtxWindow, true
+			// The call is now going to a DIFFERENT model, so the two things derived from
+			// which model it is must be re-derived. Leaving them meant an escalated call was
+			// recorded under the pinned cheap model's id and priced at its rates — the exact
+			// ~3x understatement the pricing block above exists to remove, reintroduced on
+			// the most expensive calls the component makes.
+			if !c.SelfRates.Zero() {
+				pricing = cheapmodel.Pricing{
+					InputPerMTok:      c.SelfRates.Input * 1_000_000,
+					OutputPerMTok:     c.SelfRates.Output * 1_000_000,
+					CacheReadPerMTok:  c.SelfRates.CacheRead * 1_000_000,
+					CacheWritePerMTok: c.SelfRates.CacheWrite * 1_000_000,
+				}
+			}
+			if c.ModelName != "" {
+				callModel = c.ModelName
+			}
 			if dbg {
 				logging.From(c.Ctx).Debug("cg.extract_llm.escalate",
 					"reason", "transcript exceeds the extraction model's window",

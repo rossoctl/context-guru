@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
@@ -117,7 +118,19 @@ func CacheablePrefix(model string, promptTokens int) bool {
 type prefixState struct {
 	written  bool
 	inflight bool
+	// at is when the entry was last observed to exist. The provider's ephemeral entry expires
+	// after a few minutes of not being used, and `written` without an expiry was sticky for
+	// the process lifetime: after an idle gap every concurrent caller would mark, each pay a
+	// full creation charge, and the double-write waste this protocol exists to prevent would
+	// return on the first burst after every quiet period.
+	at time.Time
 }
+
+// prefixEntryTTL is how long we keep believing a cache entry exists. Deliberately under the
+// provider's 5-minute ephemeral lifetime: being wrong in this direction costs one extra
+// single-writer round (correct behaviour, slightly conservative), while being wrong the other
+// way costs a concurrent burst of full-price writes.
+const prefixEntryTTL = 4 * time.Minute
 
 var (
 	prefixMu    sync.Mutex
@@ -136,6 +149,9 @@ func claimCacheWrite(model, prefix string) (mark bool, release func(wrote, read 
 	if st == nil {
 		st = &prefixState{}
 		prefixCache[key] = st
+	}
+	if st.written && time.Since(st.at) > prefixEntryTTL {
+		st.written = false // the provider's entry has almost certainly expired
 	}
 	switch {
 	case st.written:
@@ -163,7 +179,7 @@ func claimCacheWrite(model, prefix string) (mark bool, release func(wrote, read 
 			st.inflight = false
 		}
 		if wrote || read {
-			st.written = true
+			st.written, st.at = true, time.Now()
 			return
 		}
 		// Neither written nor read while we asked for it: the provider ignored the mark (a

@@ -354,16 +354,18 @@ func renderTranscript(req *bschemas.BifrostChatRequest, n int, withTools bool, c
 	return out
 }
 
-// clipRunesTail returns the LAST maxBytes bytes of s on a rune boundary.
+// clipRunesTail returns the LAST maxBytes bytes of s, starting on a rune boundary.
+//
+// The boundary test is utf8.RuneStart, not utf8.ValidString(s[:1]): a single byte is only
+// "valid UTF-8" when it is ASCII, so testing it that way advanced past every leading
+// multi-byte rune and returned "" for any non-ASCII tail — which left the extraction model
+// with the elision marker and no conversation at all.
 func clipRunesTail(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s
 	}
 	s = s[len(s)-maxBytes:]
-	for len(s) > 0 && !utf8.ValidString(s[:1]) {
-		s = s[1:]
-	}
-	for len(s) > 0 && !utf8.ValidString(s) {
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
 		s = s[1:]
 	}
 	return s

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // Prompt building. Because the model returns the filtered VALUE (which containment
@@ -344,15 +345,15 @@ const maxGoalChars = 400_000
 // clipGoal bounds the context on a rune boundary. The old code sliced bytes, which can
 // split a multi-byte rune and hand the model invalid UTF-8 mid-prompt.
 func clipGoal(g string) string {
-	if len(g) <= maxGoalChars {
+	// Counted in RUNES, because that is what the trim below uses. Gating on len(g) in bytes
+	// while trimming runes meant a multi-byte goal over the byte cap but under the rune cap
+	// came back unclipped, so the backstop bounded ASCII input only.
+	if utf8.RuneCountInString(g) <= maxGoalChars {
 		return g
 	}
 	r := []rune(g)
 	// Keep the TAIL: the newest turns say what the agent needs next.
-	if len(r) > maxGoalChars {
-		r = r[len(r)-maxGoalChars:]
-	}
-	return string(r)
+	return string(r[len(r)-maxGoalChars:])
 }
 
 // maxCodeContentChars bounds the full output shown to the model. Big enough to be

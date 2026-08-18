@@ -3789,6 +3789,7 @@ async function setStoredConfig(yaml) {
  */
 const XLLM_DEFAULTS = {
   per_output: false,
+  size_trigger: false,
   cold_enabled: true,
   min_tokens: 2000,
   max_per_request: 2,
@@ -3819,18 +3820,33 @@ function readXllm(yaml) {
     const m = new RegExp('^\\s*' + k + ':\\s*(true|false)\\s*$', 'm').exec(blk);
     return m ? m[1] === 'true' : d;
   };
-  const cold = /^\s*cold_cache:/m.test(blk);
+  // The cold_cache SUB-BLOCK, read separately: `num('min_tokens')` matches the first
+  // occurrence in the whole block, which is the hot-path threshold — so the sweep's floor was
+  // displayed wrong and then overwritten with the hot-path value on save.
+  const sub = coldSubBlock(blk);
+  const subNum = (k, d) => {
+    const m = new RegExp('^\\s*' + k + ':\\s*(\\d+)\\s*$', 'm').exec(sub);
+    return m ? parseInt(m[1], 10) : d;
+  };
+  const subBool = (k, d) => {
+    const m = new RegExp('^\\s*' + k + ':\\s*(true|false)\\s*$', 'm').exec(sub);
+    return m ? m[1] === 'true' : d;
+  };
+  const cold = sub !== '';
   return {
     in_pipeline: pipelineList(yaml).includes('extract_llm'),
     per_output: bool('per_output', true),
-    cold_enabled: cold ? bool('enabled', false) : false,
+    size_trigger: str('fire_on', 'pressure') === 'size',
+    cold_enabled: cold ? subBool('enabled', false) : false,
     min_tokens: num('min_tokens', XLLM_DEFAULTS.min_tokens),
     max_per_request: num('llm_max_per_request', XLLM_DEFAULTS.max_per_request),
     max_per_session: num('llm_max_per_session', XLLM_DEFAULTS.max_per_session),
     aggressiveness: str('aggressiveness', XLLM_DEFAULTS.aggressiveness),
     context: str('context', XLLM_DEFAULTS.context),
     context_messages: num('context_messages', XLLM_DEFAULTS.context_messages),
-    cold_min_tokens: num('min_tokens', XLLM_DEFAULTS.cold_min_tokens),
+    cold_min_tokens: subNum('min_tokens', XLLM_DEFAULTS.cold_min_tokens),
+    // Keys the form does not manage, preserved verbatim on save (see writeXllm).
+    keep_lines: unmanagedXllmLines(blk),
   };
 }
 
@@ -3853,6 +3869,51 @@ function xllmBlock(yaml) {
     end++;
   }
   return lines.slice(start, end).join('\n');
+}
+
+/** coldSubBlock returns the text of the cold_cache: sub-block inside an extract_llm block. */
+function coldSubBlock(blk) {
+  const lines = blk.split('\n');
+  const start = lines.findIndex((l) => /^\s*cold_cache:\s*$/.test(l));
+  if (start < 0) return '';
+  const indent = lines[start].match(/^\s*/)[0].length;
+  let end = start + 1;
+  while (end < lines.length) {
+    const l = lines[end];
+    if (l.trim() !== '' && l.match(/^\s*/)[0].length <= indent) break;
+    end++;
+  }
+  return lines.slice(start, end).join('\n');
+}
+
+/** MANAGED_XLLM_KEYS are the keys the form owns and will rewrite. Everything else in the
+ *  block is somebody's deliberate configuration and must survive a save untouched. */
+const MANAGED_XLLM_KEYS = ['per_output', 'fire_on', 'min_tokens', 'llm_max_per_request',
+  'llm_max_per_session', 'aggressiveness', 'context', 'context_messages', 'cold_cache'];
+
+/** unmanagedXllmLines returns the top-level lines of an extract_llm block whose keys the form
+ *  does not manage, with their sub-blocks, so a save preserves them.
+ *
+ *  Without this, any manager settings save rewrote the block from the form's fields alone and
+ *  silently DELETED rewrite, marker_mode, model, economic_gate, trigger, skip_file_reads and
+ *  llm_every_n_requests. Unticking an unrelated component in the grid would have reset
+ *  somebody's deliberate compaction configuration. */
+function unmanagedXllmLines(blk) {
+  const lines = blk.split('\n').slice(1); // drop the "extract_llm:" header
+  const out = [];
+  let skipping = false;
+  let skipIndent = 0;
+  for (const l of lines) {
+    if (l.trim() === '') continue;
+    const indent = l.match(/^\s*/)[0].length;
+    if (skipping && indent > skipIndent) continue;
+    skipping = false;
+    const key = (/^\s*([A-Za-z_][\w]*):/.exec(l) || [])[1];
+    if (!key) { out.push(l); continue; }
+    if (MANAGED_XLLM_KEYS.includes(key)) { skipping = true; skipIndent = indent; continue; }
+    out.push(l);
+  }
+  return out;
 }
 
 /** writeXllm returns the document with components.extract_llm replaced by cfg, and the
@@ -3884,9 +3945,12 @@ function writeXllm(yaml, cfg) {
   // 2. the block itself.
   const body = [
     '  extract_llm:',
-    '    strategy: code',
+    ...(cfg.keep_lines || []),
     `    per_output: ${cfg.per_output}`,
-    `    fire_on: ${cfg.per_output ? 'size' : 'pressure'}`,
+    // fire_on comes from an explicit choice, never from per_output being on. Deriving it
+    // meant a plain save turned the economic gate and the caching-backend guard advisory --
+    // i.e. quietly removed the spending brakes -- as a side effect of ticking a checkbox.
+    `    fire_on: ${cfg.size_trigger ? 'size' : 'pressure'}`,
     `    min_tokens: ${cfg.min_tokens}`,
     `    llm_max_per_request: ${cfg.max_per_request}`,
     `    llm_max_per_session: ${cfg.max_per_session}`,
@@ -3923,7 +3987,9 @@ function renderXllmForm(host, yaml, disabled) {
   const cur = readXllm(yaml);
   const state = {
     per_output: cur.in_pipeline && cur.per_output,
+    size_trigger: cur.size_trigger,
     cold_enabled: cur.in_pipeline && cur.cold_enabled,
+    keep_lines: cur.keep_lines,
     min_tokens: cur.min_tokens,
     max_per_request: cur.max_per_request,
     max_per_session: cur.max_per_session,
@@ -3980,10 +4046,14 @@ function renderXllmForm(host, yaml, disabled) {
       'Runs on ordinary turns. On a warm prompt cache a removed token saves only the '
       + 'cache-read rate, so measured results here range from break-even to underwater, and '
       + 'each call adds seconds to the turn. Turn it on deliberately, watch the net figure.'),
+    sw('size_trigger', 'Let size alone decide, and make the economic gate advisory',
+      'Off: the gate blocks a call it expects to lose money on, and on a warm prompt cache '
+      + 'that is most of them. On: the threshold and the caps below are the ONLY brakes — the '
+      + 'gate still records what it would have refused (shown on each call) but no longer '
+      + 'stops it. This is a deliberate licence to spend; set the caps first.'),
     numField('min_tokens', 'Only consider outputs above (tokens)',
-      'The size threshold. With this set, size is the whole trigger — context pressure is '
-      + 'not consulted, and the economic gate becomes advisory: it still records what it '
-      + 'would have refused, but it no longer blocks.'),
+      'The size threshold: below this an output is never a candidate. Whether size is the '
+      + 'WHOLE trigger depends on the switch above.'),
     numField('max_per_request', 'Max calls per turn',
       'Bounds one turn\'s added latency. Calls run concurrently, so a turn costs about one '
       + 'call\'s wall time.'),

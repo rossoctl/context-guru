@@ -411,7 +411,13 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// Recording is safe in both directions. On a genuine agent compaction the next
 		// turn is shorter, so modes.Boundary resets anyway and this record is discarded.
 		if o.Tracker != nil {
-			o.Tracker.Turn(sessionID, len(norm))
+			// nowMs, not Turn(): a bypassed request is forwarded IN FULL, so the provider
+			// cached it exactly as a compacted turn's would be — it is activity on this
+			// session's prefix. Leaving the timestamp at the last non-bypassed turn made a
+			// session that had been bypassing for ten minutes look ten minutes IDLE, and a
+			// cold sweep would then rewrite a prefix the provider had just cached: the 1.25x
+			// suffix re-write this whole design exists to avoid.
+			o.Tracker.TurnAt(sessionID, len(norm), nowMs)
 		} else {
 			defer putLen(st, sessionID, len(norm))
 		}

@@ -345,3 +345,36 @@ func marked(blocks []any) bool {
 	_, ok := blocks[len(blocks)-1].(map[string]any)["cache_control"]
 	return ok
 }
+
+// Believing an entry exists must EXPIRE. The provider's ephemeral entry dies after a few
+// minutes unused; a sticky `written` flag meant that after any idle gap every concurrent
+// caller marked and each paid a full creation charge — the waste the protocol prevents,
+// returning on the first burst after every quiet period.
+func TestPrefixBeliefExpires(t *testing.T) {
+	resetPrefixCache()
+	t.Cleanup(resetPrefixCache)
+	const model = "aws/claude-sonnet-5"
+	prefix := []string{strings.Repeat("stable preamble ", 400)}
+
+	first, release := systemBlocks(prefix, model)
+	if !marked(first) {
+		t.Fatal("the first call did not claim the write")
+	}
+	release(true, false) // the entry now exists
+
+	// Age it past the TTL, as the provider would.
+	prefixMu.Lock()
+	for _, st := range prefixCache {
+		st.at = st.at.Add(-2 * prefixEntryTTL)
+	}
+	prefixMu.Unlock()
+
+	a, _ := systemBlocks(prefix, model)
+	b, _ := systemBlocks(prefix, model)
+	if !marked(a) {
+		t.Fatal("no call re-claimed the write after the entry expired, so it is never re-cached")
+	}
+	if marked(b) {
+		t.Fatal("both callers marked after expiry: back to paying twice for one entry")
+	}
+}

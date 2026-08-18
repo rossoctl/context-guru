@@ -217,3 +217,32 @@ func TestKeepIdsNeverComeFromToolOutput(t *testing.T) {
 		}
 	}
 }
+
+// A non-ASCII tail must survive clipping. The first version of clipRunesTail advanced past
+// every leading multi-byte rune (it tested utf8.ValidString on a single byte, which is only
+// true for ASCII), so a CJK or accented transcript clipped to nothing and the extraction model
+// received the elision marker and no conversation.
+func TestTailClipKeepsNonASCII(t *testing.T) {
+	for _, tc := range []struct{ name, text string }{
+		{"CJK", strings.Repeat("需要保留最新的对话内容。", 4000)},
+		{"accented", strings.Repeat("il faut préserver la fin de la conversation. ", 2000)},
+		{"emoji", strings.Repeat("keep the tail 🚀 ", 3000)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clipRunesTail(tc.text, recentContextCap)
+			if got == "" {
+				t.Fatal("clipping a non-ASCII tail returned nothing")
+			}
+			if !utf8Valid(got) {
+				t.Fatal("clipped tail is not valid UTF-8")
+			}
+			if len(got) > recentContextCap {
+				t.Fatalf("clipped tail is %d bytes, over the %d cap", len(got), recentContextCap)
+			}
+			// It must be a SUFFIX of the input: the newest turns are the point.
+			if !strings.HasSuffix(tc.text, got) {
+				t.Fatal("clipped tail is not a suffix of the input")
+			}
+		})
+	}
+}
