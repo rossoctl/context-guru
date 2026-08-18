@@ -655,6 +655,14 @@ func buildTenantConfig(doc []byte, e components.Emitter) (proxy.BuiltConfig, err
 // defaultUpstreams picks the first entry of each dialect as the default a newly
 // registered tenant starts on, so registration needs no choices and the common case
 // (one gateway, one Bob region) needs no configuration at all.
+//
+// Once a deployment lists MORE than one gateway of a dialect — two regions, an internal and
+// an external hostname for the same service — "the first one" becomes an accident of file
+// order that silently decides where every new account's traffic goes. CG_DEFAULT_*_UPSTREAM
+// names it instead, so changing the default for future registrations is an environment
+// change rather than a reshuffle of the allow-list. An unknown name is ignored rather than
+// fatal: the allow-list is the authority on what exists, and a typo in an optional default
+// must not stop the service from starting.
 func defaultUpstreams(list []config.Upstream) (anthropic, openai, bob string) {
 	for _, u := range list {
 		switch u.Dialect {
@@ -672,6 +680,24 @@ func defaultUpstreams(list []config.Upstream) (anthropic, openai, bob string) {
 			}
 		}
 	}
+	// An explicit preference wins over file order, when it names an entry of the right dialect.
+	pin := func(env, dialect string, cur *string) {
+		want := os.Getenv(env)
+		if want == "" {
+			return
+		}
+		for _, u := range list {
+			if u.Name == want && u.Dialect == dialect {
+				*cur = want
+				return
+			}
+		}
+		slog.Warn("context-guru: ignoring "+env+": no upstream of that name and dialect in "+
+			"the allow-list", "wanted", want, "dialect", dialect)
+	}
+	pin("CG_DEFAULT_ANTHROPIC_UPSTREAM", config.DialectAnthropic, &anthropic)
+	pin("CG_DEFAULT_OPENAI_UPSTREAM", config.DialectOpenAI, &openai)
+	pin("CG_DEFAULT_BOB_UPSTREAM", config.DialectBob, &bob)
 	return
 }
 

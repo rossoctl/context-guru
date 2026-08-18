@@ -3611,6 +3611,9 @@ function loadSettings() {
         '11 of 22 realistic credential shapes passing through it. The manager can read ' +
         'whatever this stores. Off by default.')));
 
+    // The compaction-model form, above the raw YAML it writes into.
+    if (mgr) renderXllmForm(host, effective, inherited);
+
     // Raw YAML, for anything the toggles do not cover.
     const ta = el('textarea', {
       id: 'set-yaml', rows: 10, spellcheck: 'false', 'data-testid': 'set-yaml',
@@ -3771,6 +3774,248 @@ async function setStoredConfig(yaml) {
   setTimeout(() => { status.textContent = ''; }, 3000);
 }
 
+/**
+ * The compaction-model form.
+ *
+ * extract_llm has fourteen knobs and every one of them is reachable only by hand-editing
+ * raw YAML, in a textarea, with no validation until save — and the component's own loader
+ * unmarshals its block NON-strictly, so a misspelled key is silently ignored rather than
+ * rejected. It is also the one component that spends money, so a typo there is not a typo,
+ * it is a bill. Hence a form with the recommended defaults filled in.
+ *
+ * The YAML textarea stays, as Advanced, and still wins when edited: it is the only way to
+ * express anything this form does not cover.
+ */
+const XLLM_DEFAULTS = {
+  per_output: false,
+  cold_enabled: true,
+  min_tokens: 2000,
+  max_per_request: 2,
+  max_per_session: 20,
+  aggressiveness: 'medium',
+  context: 'recent',
+  context_messages: 7,
+  cold_min_tokens: 1000,
+};
+
+/** readXllm pulls the current settings out of a YAML document by regex.
+ *
+ *  Regex, not a YAML parser, for the same reason componentPickers uses one: this file ships
+ *  no dependencies. It reads only the keys the form owns and it never WRITES through these
+ *  patterns — writeXllm replaces the whole block — so a document shape it misreads costs a
+ *  wrong default in the form, never a corrupted config. */
+function readXllm(yaml) {
+  const blk = xllmBlock(yaml);
+  const num = (k, d) => {
+    const m = new RegExp('^\\s*' + k + ':\\s*(\\d+)\\s*$', 'm').exec(blk);
+    return m ? parseInt(m[1], 10) : d;
+  };
+  const str = (k, d) => {
+    const m = new RegExp('^\\s*' + k + ':\\s*([a-z_]+)\\s*$', 'm').exec(blk);
+    return m ? m[1] : d;
+  };
+  const bool = (k, d) => {
+    const m = new RegExp('^\\s*' + k + ':\\s*(true|false)\\s*$', 'm').exec(blk);
+    return m ? m[1] === 'true' : d;
+  };
+  const cold = /^\s*cold_cache:/m.test(blk);
+  return {
+    in_pipeline: pipelineList(yaml).includes('extract_llm'),
+    per_output: bool('per_output', true),
+    cold_enabled: cold ? bool('enabled', false) : false,
+    min_tokens: num('min_tokens', XLLM_DEFAULTS.min_tokens),
+    max_per_request: num('llm_max_per_request', XLLM_DEFAULTS.max_per_request),
+    max_per_session: num('llm_max_per_session', XLLM_DEFAULTS.max_per_session),
+    aggressiveness: str('aggressiveness', XLLM_DEFAULTS.aggressiveness),
+    context: str('context', XLLM_DEFAULTS.context),
+    context_messages: num('context_messages', XLLM_DEFAULTS.context_messages),
+    cold_min_tokens: num('min_tokens', XLLM_DEFAULTS.cold_min_tokens),
+  };
+}
+
+/** pipelineList returns the configured component names. */
+function pipelineList(yaml) {
+  return ((/^pipeline:\s*\[(.*?)\]\s*$/m.exec(yaml) || ['', ''])[1])
+    .split(',').map((x) => x.trim()).filter(Boolean);
+}
+
+/** xllmBlock returns the text of the components.extract_llm block, or ''. */
+function xllmBlock(yaml) {
+  const lines = yaml.split('\n');
+  const start = lines.findIndex((l) => /^\s+extract_llm:\s*$/.test(l));
+  if (start < 0) return '';
+  const indent = lines[start].match(/^\s*/)[0].length;
+  let end = start + 1;
+  while (end < lines.length) {
+    const l = lines[end];
+    if (l.trim() !== '' && l.match(/^\s*/)[0].length <= indent) break;
+    end++;
+  }
+  return lines.slice(start, end).join('\n');
+}
+
+/** writeXllm returns the document with components.extract_llm replaced by cfg, and the
+ *  pipeline updated to match whether the component is wanted at all.
+ *
+ *  Whole-block replacement rather than per-key edits: a partial edit has to reason about
+ *  which keys already exist and at what indentation, which is where a hand-rolled YAML
+ *  writer goes wrong. The server validates the result strictly (LoadBytes + a real pipeline
+ *  build) and answers 400 naming the offending key, so a document this mangles is rejected
+ *  rather than stored. */
+function writeXllm(yaml, cfg) {
+  const wanted = cfg.per_output || cfg.cold_enabled;
+  let out = yaml.replace(/\s*$/, '\n');
+
+  // 1. pipeline membership.
+  const names = pipelineList(out);
+  if (wanted && !names.includes('extract_llm')) {
+    // Before the deterministic `extract` where possible: the cheap pass should see whatever
+    // the LLM pass leaves, which is the order every shipped preset uses.
+    const at = names.indexOf('extract');
+    if (at >= 0) names.splice(at, 0, 'extract_llm'); else names.push('extract_llm');
+  } else if (!wanted) {
+    const at = names.indexOf('extract_llm');
+    if (at >= 0) names.splice(at, 1);
+  }
+  const line = `pipeline: [${names.join(', ')}]`;
+  out = /^pipeline:/m.test(out) ? out.replace(/^pipeline:.*$/m, line) : line + '\n' + out;
+
+  // 2. the block itself.
+  const body = [
+    '  extract_llm:',
+    '    strategy: code',
+    `    per_output: ${cfg.per_output}`,
+    `    fire_on: ${cfg.per_output ? 'size' : 'pressure'}`,
+    `    min_tokens: ${cfg.min_tokens}`,
+    `    llm_max_per_request: ${cfg.max_per_request}`,
+    `    llm_max_per_session: ${cfg.max_per_session}`,
+    `    aggressiveness: ${cfg.aggressiveness}`,
+    `    context: ${cfg.context}`,
+    `    context_messages: ${cfg.context_messages}`,
+    '    cold_cache:',
+    `      enabled: ${cfg.cold_enabled}`,
+    `      min_tokens: ${cfg.cold_min_tokens}`,
+  ].join('\n');
+
+  const lines = out.split('\n');
+  const start = lines.findIndex((l) => /^\s+extract_llm:\s*$/.test(l));
+  if (start >= 0) {
+    const indent = lines[start].match(/^\s*/)[0].length;
+    let end = start + 1;
+    while (end < lines.length) {
+      const l = lines[end];
+      if (l.trim() !== '' && l.match(/^\s*/)[0].length <= indent) break;
+      end++;
+    }
+    if (!wanted) return lines.slice(0, start).concat(lines.slice(end)).join('\n');
+    return lines.slice(0, start).concat(body.split('\n'), lines.slice(end)).join('\n');
+  }
+  if (!wanted) return out;
+  const ci = lines.findIndex((l) => /^components:\s*$/.test(l));
+  if (ci >= 0) return lines.slice(0, ci + 1).concat(body.split('\n'), lines.slice(ci + 1)).join('\n');
+  return out.replace(/\s*$/, '\n') + 'components:\n' + body + '\n';
+}
+
+/** renderXllmForm draws the compaction-model controls. Manager-only, matching the server:
+ *  PUT /api/me answers 403 to anyone else sending config_yaml. */
+function renderXllmForm(host, yaml, disabled) {
+  const cur = readXllm(yaml);
+  const state = {
+    per_output: cur.in_pipeline && cur.per_output,
+    cold_enabled: cur.in_pipeline && cur.cold_enabled,
+    min_tokens: cur.min_tokens,
+    max_per_request: cur.max_per_request,
+    max_per_session: cur.max_per_session,
+    aggressiveness: cur.aggressiveness,
+    context: cur.context,
+    context_messages: cur.context_messages,
+    cold_min_tokens: cur.cold_min_tokens,
+  };
+  xllmState = state;
+
+  const sw = (key, label, hint) => {
+    const cb = el('input', { type: 'checkbox', id: 'x-' + key, 'data-testid': 'x-' + key });
+    cb.checked = !!state[key];
+    cb.disabled = disabled;
+    cb.addEventListener('change', () => { state[key] = cb.checked; });
+    return el('div', { class: 'field' },
+      el('label', { class: 'comp', for: 'x-' + key }, cb, el('span', { class: 'comp-name' }, label)),
+      el('p', { class: 'hint' }, hint));
+  };
+  const numField = (key, label, hint) => {
+    const inp = el('input', { type: 'number', min: '0', id: 'x-' + key, 'data-testid': 'x-' + key });
+    inp.value = String(state[key]);
+    inp.disabled = disabled;
+    inp.addEventListener('change', () => {
+      const v = parseInt(inp.value, 10);
+      state[key] = Number.isFinite(v) && v >= 0 ? v : XLLM_DEFAULTS[key];
+      inp.value = String(state[key]);
+    });
+    return el('div', { class: 'field' },
+      el('label', { for: 'x-' + key }, label), inp, el('p', { class: 'hint' }, hint));
+  };
+  const pick = (key, label, opts, hint) => {
+    const sel = el('select', { id: 'x-' + key, 'data-testid': 'x-' + key },
+      ...opts.map(([v, t]) => el('option', { value: v }, t)));
+    sel.value = state[key];
+    sel.disabled = disabled;
+    sel.addEventListener('change', () => { state[key] = sel.value; });
+    return el('div', { class: 'field' },
+      el('label', { for: 'x-' + key }, label), sel, el('p', { class: 'hint' }, hint));
+  };
+
+  host.appendChild(el('details', { class: 'field', 'data-testid': 'xllm-form' },
+    el('summary', {}, 'Compaction model calls (extract_llm)'),
+    el('p', { class: 'hint warn-text' },
+      'This is the only component that spends money to save money, and it can be net '
+      + 'negative. Both switches are off by default. Every call it makes is recorded with '
+      + 'its cost and its saving — open any request to see them.'),
+    sw('cold_enabled', 'Sweep the transcript when the prompt cache has expired',
+      'Fires only on a turn that resumes after the provider\'s cache TTL, where the whole '
+      + 'transcript is re-billed at 1.25x the fresh rate anyway. Measured on this service: '
+      + 'those turns are 4% of requests and 31% of spend, and nothing touches them today. '
+      + 'This is the half whose economics are unambiguous.'),
+    sw('per_output', 'Also reduce large tool outputs as they arrive',
+      'Runs on ordinary turns. On a warm prompt cache a removed token saves only the '
+      + 'cache-read rate, so measured results here range from break-even to underwater, and '
+      + 'each call adds seconds to the turn. Turn it on deliberately, watch the net figure.'),
+    numField('min_tokens', 'Only consider outputs above (tokens)',
+      'The size threshold. With this set, size is the whole trigger — context pressure is '
+      + 'not consulted, and the economic gate becomes advisory: it still records what it '
+      + 'would have refused, but it no longer blocks.'),
+    numField('max_per_request', 'Max calls per turn',
+      'Bounds one turn\'s added latency. Calls run concurrently, so a turn costs about one '
+      + 'call\'s wall time.'),
+    numField('max_per_session', 'Max calls per session',
+      'The outer bound on spend. The per-turn cap alone cannot bound a long session: 2 calls '
+      + 'across 300 turns is 600 calls. 0 means unlimited.'),
+    pick('aggressiveness', 'How hard to compact', [
+      ['low', 'low — remove only clear redundancy (~10-25%)'],
+      ['medium', 'medium — recommended (~25-50%)'],
+      ['high', 'high — keep what the goal needs (~50-80%)'],
+    ], 'Taught with worked examples rather than a threshold. It changes what the model is '
+      + 'asked for, never what is accepted: ids, paths, numbers and error lines stay '
+      + 'byte-identical at every level, and the original is always recoverable.'),
+    pick('context', 'Conversation the model is shown', [
+      ['goal', 'goal — the task and the latest turn (cheapest)'],
+      ['recent', 'recent — every user turn plus the last N (recommended)'],
+      ['full', 'full — the whole transcript (expensive per call)'],
+    ], 'More context means better decisions and a bigger prompt on every call. A cold-cache '
+      + 'sweep always uses the full transcript regardless of this.'),
+    numField('context_messages', 'N, for "recent"', 'Messages of recent history to include.'),
+    numField('cold_min_tokens', 'Cold sweep: only outputs above (tokens)',
+      'Lower than the everyday threshold on purpose — on that turn every candidate is being '
+      + 're-billed at the write rate whatever we do.'),
+    whyBlock('What happens when you save',
+      'Saving rebuilds your pipeline and discards frozen compaction decisions, so the next '
+      + 'turn will not be cache-warm. The document this form writes is validated on the '
+      + 'server exactly as hand-written YAML is; a rejected save names the offending key.')));
+}
+
+/** xllmState holds the form's current values between render and save. One variable because
+ *  the form is rendered once per Settings load and read once per save. */
+let xllmState = null;
+
 async function saveSettings() {
   const status = $('#settings-saved');
   status.textContent = 'saving…';
@@ -3794,6 +4039,10 @@ async function saveSettings() {
     yaml = yaml.replace(/^pipeline:.*$/m, `pipeline: [${ordered.join(', ')}]`);
     if (!/^pipeline:/m.test(yaml)) yaml = `pipeline: [${ordered.join(', ')}]\n` + yaml;
     yaml = /^mode:/m.test(yaml) ? yaml.replace(/^mode:.*$/m, `mode: ${mode}`) : yaml + `\nmode: ${mode}\n`;
+    // The form last, so it owns the extract_llm block and the component's presence in the
+    // pipeline — otherwise the checkbox grid and the form would disagree about whether the
+    // component runs, and whichever wrote last would win by accident.
+    if (xllmState) yaml = writeXllm(yaml, xllmState);
   }
   const body = {
     capture_content: $('#set-capture').checked,

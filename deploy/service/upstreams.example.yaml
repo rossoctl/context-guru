@@ -19,7 +19,14 @@
 # start rather than silently forwarding a placeholder.
 #
 # The first entry of each dialect is the default a newly registered tenant gets, so
-# the common case needs no choices at registration.
+# the common case needs no choices at registration. Once you list MORE than one gateway of
+# a dialect, "the first one" is an accident of file order that decides where every new
+# account's traffic goes, so name the default explicitly instead:
+#
+#   Environment=CG_DEFAULT_ANTHROPIC_UPSTREAM=ibm-litellm
+#
+# Every entry stays selectable by name on each account's Settings page whatever the default
+# is, and changing an existing account's choice never moves anyone else.
 
 upstreams:
   # Claude Code and anything else speaking the Anthropic dialect.
@@ -27,6 +34,14 @@ upstreams:
   - name: ibm-litellm
     dialect: anthropic
     base_url: https://REPLACE-WITH-IBM-GATEWAY-HOST
+
+  # The same service on its EXTERNAL hostname. Two entries rather than one because they are
+  # genuinely different network paths to the same gateway and a given laptop may only be able
+  # to reach one of them; an account picks by name on its Settings page. Listed second so the
+  # internal host stays the default (or pin CG_DEFAULT_ANTHROPIC_UPSTREAM above).
+  - name: ibm-litellm-ext
+    dialect: anthropic
+    base_url: https://REPLACE-WITH-IBM-GATEWAY-EXTERNAL-HOST
 
   # The same gateway over its OpenAI-dialect route, for Codex, tau2-bench, etc.
   #   OPENAI_BASE_URL=https://cg.<host>/openai/v1
