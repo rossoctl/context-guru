@@ -11,7 +11,8 @@ cache-aware token/cost metrics.
 
 ## 1. Prerequisites (one-time)
 
-- **OS**: Linux (RHEL/Fedora family here), passwordless `sudo`.
+- **OS**: Linux (RHEL/Fedora family here), passwordless `sudo`. **On x86_64 — this is a hard
+  requirement, not a preference. See the box below before trying an Apple-silicon Mac.**
 - **Go 1.26** + `CGO_ENABLED=1` (context-guru's `cg_skeleton` build tag needs cgo/tree-sitter).
 - **Python 3.13** + [`uv`](https://docs.astral.sh/uv/) (Harbor needs ≥3.12).
 - **Docker** (each task builds a container). Use it via `sg docker -c '...'` — do **not**
@@ -23,11 +24,49 @@ cache-aware token/cost metrics.
   `aws/claude-sonnet-5` (agent) and `aws/claude-haiku-4-5` (context-guru's cheap
   compaction model).
 
+!!! danger "Not reproducible on Apple silicon (arm64), and the failure looks like a bad result"
+    Tried and characterised on an M-series Mac with Docker 29.1.3. It does not work, and the way it
+    fails is worse than not working.
+
+    **Every task image is linux/amd64 only**, for both benchmarks. SWE-bench's are
+    `swebench/sweb.eval.x86_64.*` by name. Terminal-Bench 2.0 *looks* portable — its task
+    Dockerfiles use multi-arch bases (`python:3.13-slim`, `ubuntu:24.04`) — but all 89 `task.toml`
+    files pin a prebuilt `alexgshaw/<task>:20251031` image that overrides the Dockerfile, and those
+    are single-arch amd64. A container started from one reports `x86_64`. So both benchmarks run
+    under QEMU emulation.
+
+    Emulation itself works. **Claude Code does not run under it.** The agent is a bun-compiled
+    single-file native executable, and it dies immediately:
+
+    ```
+    panic(main thread): Segmentation fault at address 0x490BF8348C5B9
+    qemu: uncaught target signal 11 (Segmentation fault) - core dumped
+    ```
+
+    Installing via `npm install -g @anthropic-ai/claude-code` instead of the native bootstrap
+    installer does **not** help — the npm package ships the same executable, so the install
+    succeeds and then `claude --version` segfaults. There is no configuration that avoids this.
+
+    **Why this matters even if you have a Linux box:** Harbor reports the segfault as
+    `NonZeroAgentExitCodeError`, which is **indistinguishable from an agent failure** unless you
+    read the container log. A whole run comes back with `reward=0` on every task and reads as "the
+    preset is catastrophic" rather than "the agent never started". Same failure mode as the
+    `CG_LAN` and port-clash gotchas already documented below — check the container log before
+    believing a zero.
+
+    If you only have arm64 hardware, the options are an x86_64 VM or remote host; substituting a
+    pure-Python agent (`mini-swe-agent`, `swe-agent`) runs fine emulated but is **not** comparable
+    to the published `claude-code` numbers.
+
 ### Docker Hub authentication (required — avoids the 429 pull-quota wall)
 
 SWE-bench task images live on Docker Hub (`docker.io/swebench/…`). Harbor pulls one per
-task; ~100 pulls exhausts the **anonymous** quota (HTTP 429) and environments fail to
-build. Authenticate once (an authenticated account has a separate 200-pulls/6h quota):
+task; the **anonymous** quota (HTTP 429) is per-IP and environments then fail to build.
+Authenticate once. Measured against the live registry on 2026-08-20, the quotas are
+`RateLimit-Limit: 100;w=3600` anonymous and `200;w=3600` authenticated — a 2× improvement
+rather than the order of magnitude this section used to imply, but still the difference
+between finishing a 50-task run and dying partway, and the anonymous limit is shared with
+anything else pulling from your IP:
 
 ```
 sg docker -c 'docker login -u <your-dockerhub-user>'   # paste a Read-only Personal Access Token
