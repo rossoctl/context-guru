@@ -344,6 +344,13 @@ func TestUIHasTestIDsForEveryStatTile(t *testing.T) {
 		// The gate's three registration modes: the closed explanation that replaces the
 		// form, and the invite-code field that only appears when a code is checked.
 		"gate-closed", "gate-code", "gate-register", "gate-signin",
+		// The Grafana-style time range: the popover itself, its absolute pair and Apply.
+		// (the per-range buttons get their testid from QUICK_RANGES at runtime, so they are
+		// asserted in TestUINeverShowsABareCost against the table instead of by literal)
+		"filter-from", "filter-to", "filter-range-apply",
+		// The manager's scope control, and the two things the money pass added to the page:
+		// the not-netted prefix-change diagnostic and the unfinished-amortization pill.
+		"filter-tenant", "prefix-change-cost", "in-flight",
 	} {
 		if !strings.Contains(source, `"`+id+`"`) && !strings.Contains(source, "'"+id+"'") {
 			t.Errorf("data-testid %q is not produced by the UI; a check or screenshot depends on it", id)
@@ -773,5 +780,151 @@ func TestSettingsFormSpeaksTheSameFieldNamesAsTheServer(t *testing.T) {
 	if strings.Contains(src, "effective_config_yaml || '').split('\\n')[0]") {
 		t.Error("the tenants roster is back to showing line one of the document, which now " +
 			"reads \"components:\" for every configured account")
+	}
+}
+
+// TestUINeverShowsABareCost is the UI contract for the cost-accounting pass, and it reflects
+// over the Go structs on purpose: a hand-kept list of field names is exactly how the view
+// ended up improvising dollars client-side from a hardcoded rate table. Rename a field on the
+// server and this test names it; drop it from the view and this test names it.
+//
+// The complaint it exists to prevent is specific. Users saw what extract_llm COST — a bare
+// figure, with no saving and no net anywhere near it — and concluded the product was
+// worthless. Every one of these fields is half of a pair that has to appear together.
+func TestUINeverShowsABareCost(t *testing.T) {
+	js, err := uiFS.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := uiFS.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(js) + string(html)
+
+	// hasTag asserts the struct really carries this json tag. Checking only the JS side
+	// would pass forever after a server-side rename; checking only the Go side would pass
+	// with the field rendered nowhere.
+	hasTag := func(v any, name string) bool {
+		rt := reflect.TypeOf(v)
+		for i := 0; i < rt.NumField(); i++ {
+			if strings.Split(rt.Field(i).Tag.Get("json"), ",")[0] == name {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range []struct {
+		v     any
+		field string
+		why   string
+	}{
+		{ComponentRow{}, "saved_usd", "the components table would show a bare LLM cost again"},
+		{ComponentRow{}, "net_usd", "verdict() would have to improvise a net client-side"},
+		{SessionRow{}, "in_flight", "a young session's incomplete amortization would read as a verdict"},
+		{SessionRow{}, "tenant_id", "a manager's service-wide list would be unattributable"},
+		{Overview{}, "prefix_change_cost_usd", "the largest figure on the corpus would be invisible"},
+	} {
+		rt := reflect.TypeOf(c.v)
+		if !hasTag(c.v, c.field) {
+			t.Errorf("%s no longer has json field %q; the dashboard reads it", rt.Name(), c.field)
+		}
+		if !strings.Contains(src, c.field) {
+			t.Errorf("the dashboard does not render %s.%s — %s", rt.Name(), c.field, c.why)
+		}
+	}
+
+	// The client-side rate table is gone and must stay gone: 3.75/0.30 per MTok is
+	// sonnet-class, this deployment bills opus (4.75/0.38), and the figures it produced were
+	// ~27% wrong with no way for a reader to tell. It also valued only what the CALLS removed
+	// and so discarded replay, which is ~93% of an extractor's realized value.
+	for _, gone := range []string{
+		"componentNetUSD", "AGENT_CACHE_WRITE_PER_MTOK", "AGENT_CACHE_READ_PER_MTOK",
+		"AGENT_FRESH_PER_MTOK", "savedTokenUSD",
+	} {
+		if strings.Contains(src, gone) {
+			t.Errorf("%s is back on the page; component dollars must come from the server, "+
+				"which prices them at the model the request actually paid", gone)
+		}
+	}
+	// verdict() must read the server's net rather than any local arithmetic.
+	if !strings.Contains(src, "c.net_usd") {
+		t.Error("verdict() does not read c.net_usd")
+	}
+	// The Saved $ / Net $ columns are static markup, so their absence is a markup fact.
+	for _, th := range []string{`<th class="num">Saved $</th>`, `<th class="num">Net $</th>`} {
+		if !strings.Contains(string(html), th) {
+			t.Errorf("the components table has no %s column header", th)
+		}
+	}
+
+	// The time range is from/to now, not one duration. A <select id="f-range"> back in the
+	// markup means the absolute window and the once-per-refresh clock stamp went with it.
+	if strings.Contains(string(html), `<select id="f-range"`) {
+		t.Error(`the time range is a <select> again; an absolute "from X to Y" window cannot ` +
+			"be expressed as one value, and a relative window resolved per-request produced " +
+			"a different window for each panel of one repaint")
+	}
+	if !strings.Contains(src, "state.nowMs = Date.now()") {
+		t.Error("refresh() does not stamp state.nowMs; relative windows would resolve " +
+			"separately in every fetch of one repaint")
+	}
+	// Legacy range= bookmarks must still land somewhere sensible.
+	// The quick ranges are a table, and their testids are derived from it, so the table is
+	// what a check can assert on.
+	for _, tok := range []string{"now-5m", "now-1h", "now-6h", "now-24h", "now-7d", "now-30d"} {
+		if !strings.Contains(src, "'"+tok+"'") {
+			t.Errorf("QUICK_RANGES no longer offers %q", tok)
+		}
+	}
+	if !strings.Contains(src, "'range-' + (tok || 'all')") {
+		t.Error("the quick-range buttons no longer carry a data-testid per range")
+	}
+	if !strings.Contains(src, "legacyFrom") {
+		t.Error("the legacy range=<ms> URL parameter is no longer honoured; existing " +
+			"bookmarks would silently widen to all time")
+	}
+
+	// Sorting: aria-sort on the <th> is the announced state, and the arrow is drawn from it.
+	if !strings.Contains(src, "aria-sort") {
+		t.Error("no column publishes aria-sort")
+	}
+	css, err := uiFS.ReadFile("ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(css), `th[aria-sort="ascending"]`) {
+		t.Error("the sort arrow is not driven by aria-sort, so the glyph and the announced " +
+			"state can drift apart")
+	}
+	// Only the unpaginated table is sorted client-side. /api/components returns every row;
+	// /api/sessions and /api/requests are LIMIT 25 / LIMIT 50, so sorting those here would
+	// order one arbitrary page under a header that reads as global.
+	if strings.Contains(src, "sortable('[data-testid=sessions-table]") ||
+		strings.Contains(src, "sortable('[data-testid=requests-table]") {
+		t.Error("a paginated table was made sortable client-side; that sorts one page and " +
+			"presents it as a global ordering. Push ?sort=/?dir= into the SQL first.")
+	}
+
+	// Manager scope: one select, and tenant is a full filter dimension with a control.
+	if !strings.Contains(src, `id="f-tenant"`) {
+		t.Error("there is no manager scope control")
+	}
+	if !strings.Contains(src, "['tenant', 'tenant', '#f-tenant']") {
+		t.Error("tenant is still a control-less filter dimension; the select cannot be synced " +
+			"from state.filter and the chip/URL layer would disagree with the bar")
+	}
+	// The control must be manager-gated by the same attribute every other manager-only
+	// element uses, and must NOT be data-local-ok: a single-tenant proxy has nothing to scope.
+	for _, line := range strings.Split(string(html), "\n") {
+		if !strings.Contains(line, `id="f-tenant"`) {
+			continue
+		}
+		if !strings.Contains(line, "data-manager") {
+			t.Errorf("the scope select is not manager-gated: %s", strings.TrimSpace(line))
+		}
+		if strings.Contains(line, "data-local-ok") {
+			t.Error("the scope select is data-local-ok; a single-tenant proxy has one account")
+		}
 	}
 }

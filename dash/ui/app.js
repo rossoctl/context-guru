@@ -63,23 +63,31 @@ function compact(v) {
   if (a >= 1e3) return (v / 1e3).toFixed(a >= 1e4 ? 0 : 1) + 'k';
   return nf.format(Math.round(v));
 }
-// netUSD is what one recorded compaction call was worth: the value of the tokens it removed
-// minus what the call cost. The per-token value depends on how the request was billed — a
-// token removed on a cold-cache turn is worth the cache-WRITE rate (1.25x fresh), one removed
-// from a warm cached prefix only the cache-READ rate (0.1x fresh), a ~12.5x spread. Using one
-// rate for both would either flatter warm calls or slander cold ones.
-const AGENT_FRESH_PER_MTOK = 3.0;
-const AGENT_CACHE_READ_PER_MTOK = 0.3;
-const AGENT_CACHE_WRITE_PER_MTOK = 3.75;
-
-function savedTokenUSD(x, cacheAware) {
-  if (x.cold) return AGENT_CACHE_WRITE_PER_MTOK / 1e6;
-  if (cacheAware) return AGENT_CACHE_READ_PER_MTOK / 1e6;
-  return AGENT_FRESH_PER_MTOK / 1e6;
+/**
+ * savedPerTok is what ONE token removed from this request was worth, read off the
+ * request's own billed figures: (baseline − actual) ÷ tokens removed.
+ *
+ * There used to be a rate table here — 3.00/3.75/0.30 per MTok, hardcoded — and it was
+ * sonnet-class while this deployment bills opus, so every net figure derived from it was
+ * ~27% wrong, in a direction nobody could see. The request already carries the answer,
+ * priced server-side at write time from its OWN model and the tiers it actually paid, which
+ * is the same rule dash's baselineDeltaUSD and CompRow.SavedUSD use. So the browser asks
+ * the row instead of guessing.
+ *
+ * null, not 0, when the request is not fully priced: an unknown must not render as "worth
+ * nothing".
+ */
+function savedPerTok(e) {
+  if (e.token_accounting !== 'complete') return null;
+  const removed = (e.tokens_before || 0) - (e.tokens_after || 0);
+  if (removed <= 0) return null;
+  return ((e.baseline_cost_usd || 0) - (e.cost_usd || 0)) / removed;
 }
 
-function netUSD(x, cacheAware) {
-  return (x.saved_tokens || 0) * savedTokenUSD(x, cacheAware) - (x.cost_usd || 0);
+/** netUSD prices one recorded compaction call: what its removals were worth, less the call. */
+function netUSD(x, perTok) {
+  if (perTok === null || perTok === undefined) return null;
+  return (x.saved_tokens || 0) * perTok - (x.cost_usd || 0);
 }
 
 function usd(v) {
@@ -152,7 +160,21 @@ function modeLabel(m) {
 const state = {
   view: 'overview',
   filter: {},
-  range: 0,
+  // The time range, Grafana's model: `from` and `to` are each EITHER a relative token
+  // ('now-6h', 'now') or an absolute epoch-ms number. 0 means unbounded, which is what
+  // "All time" is. Keeping a relative window relative is the whole point — the old
+  // state.range froze the window at the moment it was resolved, and one refresh() that
+  // fires stats + series + breakdown resolved Date.now() three times and produced three
+  // slightly different windows for one screen of numbers.
+  from: 0,
+  to: 'now',
+  // nowMs is stamped ONCE per refresh() and every relative token in that repaint resolves
+  // against it. That is the fix for the three-windows bug above.
+  nowMs: 0,
+  // sort is the client-side sort of the components table: a field name and a direction, or
+  // '' for the server's own order (saved_unique DESC, which the bar chart beside it shares).
+  sort: '',
+  dir: 'desc',
   reqCursor: 0,
   reqStack: [],
   sessOffset: 0,
@@ -171,10 +193,48 @@ const state = {
   ac: null,
 };
 
+/** RANGE_UNIT_MS is the suffix table for a relative token: `now-90m`, `now-7d`. */
+const RANGE_UNIT_MS = { s: 1000, m: 60000, h: 3600000, d: 86400000, w: 604800000 };
+
+/**
+ * resolveTime turns one endpoint into epoch ms against a FIXED `now`, or 0 for unbounded.
+ * Accepts 'now', 'now-<n><unit>', a number, or a numeric string (the URL gives us strings).
+ */
+function resolveTime(v, nowMs) {
+  if (v === 'now') return nowMs;
+  if (typeof v === 'string') {
+    const m = /^now-(\d+)([smhdw])$/.exec(v);
+    if (m) return nowMs - Number(m[1]) * RANGE_UNIT_MS[m[2]];
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  return Number(v) > 0 ? Number(v) : 0;
+}
+/** The window as the server sees it: [since, until), either bound 0 for unbounded. */
+function rangeMs() {
+  const now = state.nowMs || Date.now();
+  return [resolveTime(state.from, now), state.to === 'now' ? 0 : resolveTime(state.to, now)];
+}
+/**
+ * writeRange stamps since/until onto a URLSearchParams. `until` is OMITTED while `to` is
+ * 'now', so a live window stays live rather than being pinned to this repaint.
+ *
+ * It lives here rather than being passed through qs()'s `extra` because that argument drops
+ * any value that is '', 0 or undefined — so `until: 0` could never mean "unbounded" through it.
+ */
+function writeRange(p) {
+  const [since, until] = rangeMs();
+  if (since > 0) p.set('since', String(since));
+  if (until > 0) p.set('until', String(until));
+  return p;
+}
+/** hasRange is whether the time filter is narrowing anything at all. */
+function hasRange() { const [a, b] = rangeMs(); return a > 0 || b > 0; }
+
 function qs(extra) {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(state.filter)) if (v) p.set(k, v);
-  if (state.range > 0) p.set('since', String(Date.now() - state.range));
+  writeRange(p);
   for (const [k, v] of Object.entries(extra || {})) if (v !== '' && v !== 0 && v !== undefined) p.set(k, String(v));
   const s = p.toString();
   return s ? '?' + s : '';
@@ -728,6 +788,33 @@ function renderSafety(o) {
   ]);
 }
 
+/**
+ * renderPrefixChangeCost surfaces prefix_change_cost_usd, beside the prefix_change bucket it
+ * is computed from — and says in the sentence itself that it is a DIAGNOSTIC that is
+ * subtracted from nothing.
+ *
+ * It is not a tile and it is not summed into any saving: components act where there is
+ * something to act on, which are also the long churny turns most likely to break a prefix on
+ * their own, so mutation is not randomly assigned and this is observational. Netting it would
+ * book a correlation as a debt. It is nonetheless larger than every saving on this page on
+ * some corpora, so hiding it would be the dishonest option.
+ */
+function renderPrefixChangeCost(o) {
+  const n = $('#prefix-change-note');
+  if (!n) return;
+  const v = o.prefix_change_cost_usd;
+  n.hidden = !v;
+  if (!v) return;
+  clear(n);
+  n.appendChild(el('strong', { text: 'Diagnostic, not netted: ' + usd(v) }));
+  n.appendChild(document.createTextNode(
+    ' was billed on turns whose cache missed with prefix_change directly after a turn we '
+    + 'mutated. That is where "we rewrote history and the next turn re-billed the whole '
+    + 'prompt" is a live hypothesis — but components act on exactly the long, churny turns '
+    + 'most likely to break a prefix by themselves, so this is a correlation. It is '
+    + 'subtracted from no savings figure on this dashboard; settling it needs the A/B.'));
+}
+
 function renderLive() {
   const body = clear($('#live-body'));
   // The feed is the raw capture stream: it is not filtered, and with a filter bar right
@@ -769,6 +856,7 @@ async function loadOverview() {
       hit: 'cache hit', cold_start: 'cold start (not a failure)', ttl_expiry: 'TTL expiry',
       prefix_change: 'prefix change', unknown: 'unknown', '': 'no cache data',
     }, 'Every request carries a cache attribution once one has been captured in this window.');
+    renderPrefixChangeCost(o);
     renderDistribution('#reasons', o.uncompressed, {
       '': 'compacted', bypassed: 'bypassed by header', below_trigger: 'below every trigger',
       cache_frozen: 'frozen for cache safety', found_nothing: 'nothing to remove',
@@ -785,9 +873,11 @@ async function loadOverview() {
 }
 
 function bucketFor() {
-  if (state.range === 0) return 3600000;
-  if (state.range <= 3600000) return 60000;
-  if (state.range <= 86400000) return 300000;
+  const [since, until] = rangeMs();
+  if (since === 0) return 3600000;
+  const span = (until || state.nowMs || Date.now()) - since;
+  if (span <= 3600000) return 60000;
+  if (span <= 86400000) return 300000;
   return 3600000;
 }
 
@@ -861,7 +951,11 @@ function verdict(c) {
   // money to reason with — so it judged the one component that can lose money on tokens and
   // latency, and could describe a $3 loss as "expensive for its yield".
   if (c.llm_calls > 0) {
-    const net = componentNetUSD(c);
+    // c.net_usd is the SERVER's figure: saved_usd (summed per turn, so the amortization of
+    // a frozen reduction replaying across a session is already in it) minus llm_cost_usd.
+    // The browser used to compute this from a hardcoded rate table AND from calls-only
+    // savings, which both mispriced it and threw away ~93% of the realized value.
+    const net = c.net_usd || 0;
     if (net < -0.01) return ['underwater ' + usd(net), 'missing'];
     if (net <= 0) return ['break-even', 'partial'];
     return ['net ' + usd(net), 'complete'];
@@ -876,27 +970,6 @@ function verdict(c) {
   }
   if (c.act_rate < 0.02) return ['rarely fires', 'partial'];
   return ['earning its place', 'complete'];
-}
-
-/**
- * componentNetUSD prices a component's own LLM spend against what its calls removed.
- *
- * Deliberately uses only what the CALLS saved (llm_saved_tokens), not the component's total
- * unique savings: most of an extractor's realized value comes from frozen results being
- * replayed with no call at all — ~93% on measured traffic — and crediting that replay to the
- * calls would make any amount of spending look profitable.
- *
- * Cold-sweep calls are valued at the cache-write rate and warm ones at the cache-read rate,
- * a ~12.5x spread, so a component whose calls are mostly cold is judged on the right basis.
- */
-function componentNetUSD(c) {
-  const cold = c.llm_calls_cold || 0;
-  const warm = Math.max(0, (c.llm_calls || 0) - cold);
-  const saved = c.llm_saved_tokens || 0;
-  const total = cold + warm;
-  const perTok = total === 0 ? 0
-    : (cold * AGENT_CACHE_WRITE_PER_MTOK + warm * AGENT_CACHE_READ_PER_MTOK) / total / 1e6;
-  return saved * perTok - (c.llm_cost_usd || 0);
 }
 
 /** DAY_MS is dash.DayMs: per-day bars are the shared time series at a day-wide bucket. */
@@ -1020,14 +1093,26 @@ function gateSummary(gates) {
   return el('span', { title: all.map(([k, v]) => k + ' ' + num(v)).join('\n'), text: shown + rest });
 }
 
+/**
+ * COMPONENT_SORT is one field per column of the components table, in column order. null is
+ * a column with nothing orderable in it (the gate summary, the verdict prose).
+ */
+const COMPONENT_SORT = ['component', 'kind', 'runs', 'acted', 'act_rate', 'reverted',
+  'saved_unique', 'saved_gross', 'overcount_ratio', 'duration_ms_total', 'duration_ms_avg',
+  'llm_calls', 'llm_cost_usd', 'saved_usd', 'net_usd', 'errors', null, null];
+
 async function loadComponents() {
   const body = clear($('#components-body'));
-  loadingRows(body, 16);
+  loadingRows(body, 18);
   try {
-    const { components } = await api('components');
+    const { components: raw } = await api('components');
+    // /api/components has no LIMIT — every component that ran in the window is in this
+    // array — so sorting it here IS a global sort, not a sort of one page.
+    const components = state.sort ? sortRows(raw, state.sort, state.dir) : raw;
+    syncSortHeads('[data-testid=components-table]', COMPONENT_SORT);
     clear(body);
     if (!components.length) {
-      tableMessage(body, 16, 'No component runs captured',
+      tableMessage(body, 18, 'No component runs captured',
         'Run some traffic through the proxy with a non-empty pipeline.');
       emptyState($('#chart-comp'), 'No component data',
         'This chart fills in once a component has saved something.');
@@ -1049,6 +1134,15 @@ async function loadComponents() {
         el('td', { class: 'num', text: ms(c.duration_ms_avg) }),
         el('td', { class: 'num', text: c.llm_calls ? num(c.llm_calls) : '—' }),
         el('td', { class: 'num', text: c.llm_calls ? usd(c.llm_cost_usd) : '—' }),
+        // A cost never travels alone. saved_usd is what this component's removals were
+        // worth over the window — summed per turn, so a frozen reduction replaying across a
+        // session is already amortized into it — and net_usd is the verdict. Both from the
+        // server, priced at the model this deployment actually bills.
+        el('td', { class: 'num', text: usd(c.saved_usd) }),
+        el('td', {
+          class: 'num' + (c.net_usd < 0 ? ' warn-text' : ''),
+          title: 'saved ' + usd(c.saved_usd) + ' − own LLM cost ' + usd(c.llm_cost_usd || 0),
+        }, usd(c.net_usd)),
         el('td', { class: 'num', text: num(c.errors) }),
         el('td', {}, gateSummary(c.gates)),
         el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext }))));
@@ -1067,27 +1161,54 @@ async function loadComponents() {
     })), { emptyDetail: 'No component saved any content tokens in this window.' });
   } catch (err) {
     if (aborted(err)) return;
-    tableMessage(body, 16, 'Could not load components', String(err.message || err), { error: true });
+    tableMessage(body, 18, 'Could not load components', String(err.message || err), { error: true });
   }
 }
 
 // ── sessions ───────────────────────────────────────────────────────────────
+/**
+ * wideScope is "this list can contain more than one account", which is a manager with no
+ * ?tenant= — the server's default. It is what decides whether the Account column is shown:
+ * a single-account list does not need a column repeating the filter bar.
+ */
+function wideScope() { return isManager() && !state.filter.tenant; }
+/** showScopeCol toggles the static Account <th> of one table. */
+function showScopeCol(tableSel, wide) {
+  for (const th of $$('thead th[data-scope-col]', $(tableSel))) th.hidden = !wide;
+  return wide;
+}
+
 async function loadSessions() {
   const body = clear($('#sessions-body'));
-  loadingRows(body, 13);
+  const wide = showScopeCol('[data-testid=sessions-table]', wideScope());
+  const cols = wide ? 14 : 13;
+  loadingRows(body, cols);
   try {
     const { sessions, total } = await api('sessions', { limit: 25, offset: state.sessOffset });
     clear(body);
     if (!sessions.length) {
-      if (activeFilters().length) renderNoMatch(body, 13, 'sessions');
+      if (activeFilters().length) renderNoMatch(body, cols, 'sessions');
       else {
-        tableMessage(body, 13, 'No sessions yet',
+        tableMessage(body, cols, 'No sessions yet',
           'A session appears as soon as its first request is captured.');
       }
     }
     for (const s of sessions) {
       body.appendChild(el('tr', { class: 'click', onclick: () => { setFilter('session', s.session_id, { quiet: true }); go('requests'); } },
-        el('td', {}, el('span', { class: 'trunc', title: s.session_id, text: s.session_id || '(none)' })),
+        el('td', {}, el('span', { class: 'trunc', title: s.session_id, text: s.session_id || '(none)' }),
+          // A young session has paid for its extraction call and not yet collected the
+          // replay, so its net reads underwater and stops doing so as the turns come in.
+          // The pill says the amortization is unfinished instead of letting a half-collected
+          // figure read as a verdict.
+          s.in_flight
+            ? el('span', {
+              class: 'pill partial', 'data-testid': 'in-flight',
+              title: 'This session\'s last request is still inside one provider cache TTL, so '
+                   + 'the next turn may replay the same reduction. Its dollar figures are an '
+                   + 'incomplete amortization, not a verdict.',
+            }, 'in flight')
+            : null),
+        wide ? el('td', {}, el('span', { class: 'trunc', title: s.tenant_id, text: s.tenant_id || '—' })) : null,
         el('td', { text: firstOf(s.models) }),
         el('td', { text: firstOf(s.agents) }),
         el('td', { text: firstOf(s.presets) }),
@@ -1123,25 +1244,28 @@ async function loadSessions() {
     $('#sess-next').disabled = state.sessOffset + 25 >= total;
   } catch (err) {
     if (aborted(err)) return;
-    tableMessage(body, 13, 'Could not load sessions', String(err.message || err), { error: true });
+    tableMessage(body, cols, 'Could not load sessions', String(err.message || err), { error: true });
   }
 }
 
 // ── requests ───────────────────────────────────────────────────────────────
 async function loadRequests() {
   const body = clear($('#requests-body'));
-  loadingRows(body, 13, 6);
+  const wide = showScopeCol('[data-testid=requests-table]', wideScope());
+  const cols = wide ? 14 : 13;
+  loadingRows(body, cols, 6);
   try {
     const page = await api('requests', { limit: 50, before: state.reqCursor });
     clear(body);
     if (!page.requests.length) {
-      renderNoMatch(body, 13, 'requests');
+      renderNoMatch(body, cols, 'requests');
     }
     for (const e of page.requests) {
       body.appendChild(el('tr', { class: 'click', 'data-testid': 'request-row', onclick: () => openRequest(e.id) },
         el('td', { text: e.id }),
         el('td', { text: when(e.ts) }),
         el('td', {}, el('span', { class: 'trunc', title: e.session_id, text: e.session_id || '—' })),
+        wide ? el('td', {}, el('span', { class: 'trunc', title: e.tenant_id, text: e.tenant_id || '—' })) : null,
         el('td', { text: e.model || '—' }),
         el('td', {}, el('span', { class: 'pill neutral', text: modeLabel(e.mode) })),
         el('td', { class: 'num', text: compact(e.tokens_before) }),
@@ -1159,7 +1283,7 @@ async function loadRequests() {
     state.nextCursor = page.next_cursor;
   } catch (err) {
     if (aborted(err)) return;
-    tableMessage(body, 13, 'Could not load requests', String(err.message || err), { error: true });
+    tableMessage(body, cols, 'Could not load requests', String(err.message || err), { error: true });
   }
 }
 
@@ -1628,6 +1752,11 @@ async function openRequest(id, fromURL) {
     body.appendChild(kvBand('Cost and latency', 'detail-cost',
       kv('Cost (actual / baseline)', priced ? usd(e.cost_usd) + ' / ' + usd(e.baseline_cost_usd) : 'not priced'),
       kv('Our own LLM cost', priced ? usd(e.cg_llm_cost_usd) : '—'),
+      // Directly beneath the cost, because the cost on its own is the figure that makes
+      // readers conclude the product is worthless: baseline − actual − our own spend is
+      // what this one turn was actually worth.
+      kv('Net after our cost',
+        priced ? usd(e.baseline_cost_usd - e.cost_usd - e.cg_llm_cost_usd) : '—'),
       // On a turn whose cache HIT this is usually the largest money figure on the row,
       // and it was not reported anywhere: the cache reads this request was billed for,
       // against the fresh rate they would have cost without the cache.
@@ -1715,12 +1844,15 @@ async function openRequest(id, fromURL) {
     // underwater on a particular KIND of call.
     if (e.extractions && e.extractions.length) {
       body.appendChild(el('h2', { text: 'Compaction model calls' }));
-      const net = e.extractions.reduce((a, x) => a + netUSD(x, e.cache_aware), 0);
+      const perTok = savedPerTok(e);
+      const net = perTok === null ? null
+        : e.extractions.reduce((a, x) => a + netUSD(x, perTok), 0);
       const spent = e.extractions.reduce((a, x) => a + (x.cost_usd || 0), 0);
       body.appendChild(el('div', { class: 'note' },
         `${e.extractions.length} call(s), spent ${usd(spent)}, net `,
-        el('strong', { class: net < 0 ? 'warn-text' : '', text: usd(net) }),
-        net < 0 ? ' — these calls cost more than the tokens they removed were worth.' : '.'));
+        el('strong', { class: net !== null && net < 0 ? 'warn-text' : '', text: usd(net) }),
+        net === null ? ' — this request is not fully priced, so the calls cannot be valued.'
+          : net < 0 ? ' — these calls cost more than the tokens they removed were worth.' : '.'));
       const xt = el('table', { class: 'tbl compact', 'data-testid': 'detail-extractions' },
         el('thead', {}, el('tr', {},
           el('th', { text: '#' }), el('th', { text: 'Component' }), el('th', { text: 'Target' }),
@@ -1730,7 +1862,7 @@ async function openRequest(id, fromURL) {
           el('th', { text: 'Outcome' }))));
       const xb = el('tbody');
       e.extractions.forEach((x, i) => {
-        const n = netUSD(x, e.cache_aware);
+        const n = netUSD(x, perTok);
         xb.appendChild(el('tr', {},
           el('td', { text: i + 1 }),
           el('td', {}, el('code', { text: x.component }),
@@ -1741,7 +1873,7 @@ async function openRequest(id, fromURL) {
           el('td', { class: 'num', text: compact(x.saved_tokens) }),
           el('td', { class: 'num', text: compact(x.prompt_tokens) }),
           el('td', { class: 'num', text: usd(x.cost_usd) }),
-          el('td', { class: 'num ' + (n < 0 ? 'warn-text' : ''), text: usd(n) }),
+          el('td', { class: 'num ' + (n !== null && n < 0 ? 'warn-text' : ''), text: usd(n) }),
           el('td', { class: 'num', text: ms(x.latency_ms) }),
           el('td', {},
             el('span', {
@@ -2471,8 +2603,8 @@ const loaders = {
  * DIMS is every filter dimension, and it is the single list the whole filter layer
  * reads: the URL, the chips, the facet dropdowns and the "why is this empty" copy.
  *
- * The third column is the control, where one exists. `session` and `tenant` have NO
- * control — they are set by drilling in from the Sessions or Tenants table — and that
+ * The third column is the control, where one exists. `session` has NO control — it is set
+ * by drilling in from the Sessions table — and that
  * is exactly what the reported bug was: state.filter was rebuilt from the DOM on every
  * change, so a filter with no control could only be got rid of by pressing Clear, and
  * a filter with no control and no chip could not even be SEEN. Nothing here is
@@ -2492,7 +2624,7 @@ const DIMS = [
   ['thinking', 'thinking', '#f-thinking'],
   ['stop_reason', 'stop reason', '#f-stop_reason'],
   ['session', 'session', null],
-  ['tenant', 'tenant', null],
+  ['tenant', 'tenant', '#f-tenant'],
 ];
 /** The facet dimensions the server can enumerate; the rest are fixed option lists. */
 const FACET_DIMS = ['model', 'provider', 'agent', 'preset', 'mode', 'component',
@@ -2501,12 +2633,29 @@ const FACET_DIMS = ['model', 'provider', 'agent', 'preset', 'mode', 'component',
 /** activeFilters lists the set filters as [key, label, value], time range included. */
 function activeFilters() {
   const out = DIMS.filter(([k]) => state.filter[k]).map(([k, label]) => [k, label, state.filter[k]]);
-  if (state.range > 0) out.push(['range', 'range', rangeLabel()]);
+  if (hasRange()) out.push(['range', 'range', rangeLabel()]);
   return out;
 }
+/**
+ * QUICK_RANGES are the relative windows offered in the popover. The label is also the chip
+ * text and the summary text, so there is one wording per window rather than three.
+ */
+const QUICK_RANGES = [
+  ['now-5m', 'Last 5 minutes'], ['now-15m', 'Last 15 minutes'], ['now-1h', 'Last hour'],
+  ['now-6h', 'Last 6 hours'], ['now-12h', 'Last 12 hours'], ['now-24h', 'Last 24 hours'],
+  ['now-2d', 'Last 2 days'], ['now-7d', 'Last 7 days'], ['now-30d', 'Last 30 days'],
+  [0, 'All time'],
+];
 function rangeLabel() {
-  const opt = $('#f-range').selectedOptions[0];
-  return (opt ? opt.textContent : String(state.range)).toLowerCase();
+  if (state.to === 'now') {
+    const q = QUICK_RANGES.find(([tok]) => tok === state.from);
+    if (q) return q[1].toLowerCase();
+    if (!state.from) return 'all time';
+    return 'since ' + when(resolveTime(state.from, state.nowMs || Date.now()));
+  }
+  const [since, until] = rangeMs();
+  if (!since) return 'up to ' + when(until);
+  return when(since) + ' → ' + when(until);
 }
 /** describeFilters renders the active set the way a person would say it out loud. */
 function describeFilters() {
@@ -2557,22 +2706,127 @@ function setFilter(key, value, opts = {}) {
   syncURL();
   refresh();
 }
-function setRange(msWindow) {
-  state.range = Number(msWindow) || 0;
-  $('#f-range').value = String(state.range);
+/** setRange is the one way the window changes: a quick token, or an absolute pair. */
+function setRange(from, to = 'now') {
+  state.from = from || 0;
+  state.to = to || 'now';
+  syncRangeControl();
   resetPaging();
   syncURL();
   refresh();
 }
 function clearFilters() {
   state.filter = {};
-  state.range = 0;
+  state.from = 0;
+  state.to = 'now';
   for (const [k] of DIMS) syncControl(k);
-  $('#f-range').value = '0';
+  syncRangeControl();
   resetPaging();
   syncURL();
   refresh();
 }
+/**
+ * initRange builds the quick-range buttons and wires the absolute pair. Called once.
+ *
+ * The two <input type="datetime-local"> are the platform's own picker: nothing here needs a
+ * date library, and a native picker is the one a user already knows how to type into.
+ */
+function initRange() {
+  const quick = clear($('#f-range-quick'));
+  for (const [tok, label] of QUICK_RANGES) {
+    quick.appendChild(el('button', {
+      class: 'ghost small', 'data-testid': 'range-' + (tok || 'all'),
+      onclick: () => { $('#f-range').open = false; setRange(tok); },
+    }, label));
+  }
+  $('#f-range-apply').addEventListener('click', () => {
+    const from = localToMs($('#f-from').value);
+    const to = localToMs($('#f-to').value);
+    // Either bound alone is a legitimate window ("everything before Friday"), so this does
+    // not demand both. Both empty means the same as All time.
+    if (!from && !to) { setRange(0); return; }
+    $('#f-range').open = false;
+    setRange(from || 0, to || 'now');
+  });
+  syncRangeControl();
+}
+/** localToMs reads a datetime-local value (no zone, so it is the VIEWER's local time). */
+function localToMs(v) { const t = v ? Date.parse(v) : NaN; return Number.isFinite(t) ? t : 0; }
+/** msToLocal writes one back, in the form the input accepts: YYYY-MM-DDTHH:mm, local. */
+function msToLocal(ms) {
+  if (!ms) return '';
+  const d = new Date(ms - new Date(ms).getTimezoneOffset() * 60000);
+  return d.toISOString().slice(0, 16);
+}
+/** syncRangeControl makes the popover show what state.from/to actually say. */
+function syncRangeControl() {
+  const label = $('#f-range-label');
+  if (!label) return;
+  label.textContent = rangeLabel().replace(/^./, (c) => c.toUpperCase());
+  const [since, until] = rangeMs();
+  // An absolute window fills the inputs; a relative one leaves them empty rather than
+  // printing a resolved instant the window is not actually pinned to.
+  $('#f-from').value = typeof state.from === 'number' && since ? msToLocal(since) : '';
+  $('#f-to').value = state.to === 'now' ? '' : msToLocal(until);
+}
+
+// ── sortable columns ───────────────────────────────────────────────────────
+/**
+ * sortable turns a static <thead> into a sortable one. `keys` is one entry per column, in
+ * column order; a null means that column is not sortable.
+ *
+ * Only wired where the sort can be honest — see sortRows. A <button> inside the <th>, not a
+ * click handler on the <th>, because a header a mouse can activate and a keyboard cannot is
+ * not a control. aria-sort goes on the <th>, which is where a screen reader looks for it.
+ */
+function sortable(tableSel, keys) {
+  const ths = $$('thead th', $(tableSel));
+  keys.forEach((key, i) => {
+    const th = ths[i];
+    if (!th || !key) return;
+    const label = th.textContent;
+    clear(th).appendChild(el('button', {
+      class: 'sort', title: 'Sort by ' + label, onclick: () => toggleSort(key),
+    }, label));
+  });
+  syncSortHeads(tableSel, keys);
+}
+/** syncSortHeads publishes the current sort on the headers. */
+function syncSortHeads(tableSel, keys) {
+  const ths = $$('thead th', $(tableSel));
+  keys.forEach((key, i) => {
+    const th = ths[i];
+    if (!th || !key) return;
+    th.setAttribute('aria-sort', key === state.sort
+      ? (state.dir === 'asc' ? 'ascending' : 'descending') : 'none');
+  });
+}
+/** toggleSort flips direction on the current column, or takes over a new one descending. */
+function toggleSort(key) {
+  state.dir = state.sort === key && state.dir === 'desc' ? 'asc' : 'desc';
+  state.sort = key;
+  resetPaging();
+  syncURL();
+  refresh();
+}
+/**
+ * sortRows sorts a COMPLETE result set in place. Numbers compare numerically, everything
+ * else by locale — one comparator, because a column is one type in every row.
+ *
+ * "Complete" is load-bearing: /api/components returns every row, so sorting it here is the
+ * whole answer. Sessions and Requests are paginated server-side, so the same code applied
+ * there would label a column "Net saved $" and show the top spender of an arbitrary page.
+ * They are deliberately NOT wired — see docs/dashboard.md.
+ */
+function sortRows(rows, key, dir) {
+  const sign = dir === 'asc' ? 1 : -1;
+  return rows.slice().sort((a, b) => {
+    const x = a[key], y = b[key];
+    if (typeof x === 'number' || typeof y === 'number') return sign * ((x || 0) - (y || 0));
+    return sign * String(x || '').localeCompare(String(y || ''));
+  });
+}
+
 /** Push the state value into the control, adding the option if the facets dropped it. */
 function syncControl(key) {
   const dim = DIMS.find(([k]) => k === key);
@@ -2590,6 +2844,9 @@ function resetPaging() { state.reqCursor = 0; state.reqStack = []; state.sessOff
 /** refresh aborts whatever the previous filter state was still fetching, then reloads
  *  the current view, the chips and the facet lists. */
 function refresh() {
+  // ONE clock reading for the whole repaint. Every relative token resolves against it, so
+  // the tiles, the series and the breakdown describe the same window.
+  state.nowMs = Date.now();
   if (state.ac) state.ac.abort();
   state.ac = new AbortController();
   renderChips();
@@ -2609,7 +2866,13 @@ function refresh() {
 function urlFor() {
   const p = new URLSearchParams();
   for (const [k] of DIMS) if (state.filter[k]) p.set(k, state.filter[k]);
-  if (state.range > 0) p.set('range', String(state.range));
+  // from/to rather than one duration, and only when they are not the defaults. `to` is
+  // omitted while it is 'now' so a shared link to a live window stays live for its reader.
+  if (state.from) p.set('from', String(state.from));
+  if (state.to !== 'now') p.set('to', String(state.to));
+  // A sort is a VIEW of the same rows, so it belongs in the URL (a link reproduces what its
+  // author was looking at) but gets no chip: it narrows nothing.
+  if (state.sort && state.view === 'components') { p.set('sort', state.sort); p.set('dir', state.dir); }
   // The open drawer is state too, so a request and a session diff are both linkable and
   // Back dismisses the drawer rather than undoing the last filter change — which was the
   // one thing that made Back dangerous here. `diff` rather than `session` because
@@ -2636,23 +2899,45 @@ function parseURL() {
   const req = Number(p.get('req')) || 0;
   const diff = p.get('diff') || '';
   const acct = p.get('acct') || '';
+  // Legacy `range=<ms>` bookmarks: the same window, said the new way. Kept because links
+  // into this dashboard are pasted into issues and they should not quietly widen to all time.
+  const legacy = Number(p.get('range')) || 0;
+  let from = p.get('from') || (legacy ? 'now-' + legacy + 'ms' : 0);
+  if (legacy) from = legacyFrom(legacy);
   return {
-    view: view || 'overview', filter, range: Number(p.get('range')) || 0,
+    view: view || 'overview', filter,
+    from: numish(from), to: numish(p.get('to') || 'now'),
+    sort: p.get('sort') || '', dir: p.get('dir') === 'asc' ? 'asc' : 'desc',
     drawer: req ? { req } : diff ? { diff } : acct ? { acct } : null,
   };
+}
+/** numish keeps a relative token as a string and an absolute stamp as a number. */
+function numish(v) {
+  if (typeof v !== 'string' || /^now/.test(v)) return v || 0;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+/** legacyFrom maps an old `range=<ms>` duration onto the nearest relative token. */
+function legacyFrom(ms) {
+  const unit = [['w', 604800000], ['d', 86400000], ['h', 3600000], ['m', 60000], ['s', 1000]]
+    .find(([, u]) => ms % u === 0 && ms >= u);
+  return unit ? 'now-' + ms / unit[1] + unit[0] : 'now-' + Math.round(ms / 1000) + 's';
 }
 /** applyURL makes the page match the address bar. Used on load, on Back/Forward, and
  *  when someone edits the hash by hand — one reader for all three. */
 function applyURL() {
   const want = parseURL();
   state.filter = want.filter;
-  state.range = want.range;
+  state.from = want.from;
+  state.to = want.to;
+  state.sort = want.sort;
+  state.dir = want.dir;
   // state.drawer is adopted BEFORE go(), because go() calls syncURL(replace) and would
   // otherwise rewrite the entry we just navigated to with the drawer we are leaving.
   const prev = state.drawer;
   state.drawer = want.drawer;
   for (const [k] of DIMS) syncControl(k);
-  $('#f-range').value = String(state.range);
+  syncRangeControl();
   resetPaging();
   go(want.view, false);
   syncDrawer(prev);
@@ -2775,11 +3060,10 @@ function renderNoMatch(body, cols, noun) {
 /** suggestDrop measures each filter's cost: the count with that one filter removed. */
 async function suggestDrop(active) {
   const base = { ...state.filter };
-  const baseRange = state.range;
   const counts = await Promise.all(active.map(async ([key]) => {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(base)) if (v && k !== key) p.set(k, v);
-    if (baseRange > 0 && key !== 'range') p.set('since', String(Date.now() - baseRange));
+    if (key !== 'range') writeRange(p);
     p.set('limit', '1');
     const res = await fetch('/api/requests?' + p.toString(),
       { headers: { accept: 'application/json' }, signal: state.ac ? state.ac.signal : undefined });
@@ -2817,7 +3101,7 @@ async function loadFacets() {
   // permission boundary, not a view preference.
   const uni = new URLSearchParams();
   if (state.filter.tenant) uni.set('tenant', state.filter.tenant);
-  if (state.range > 0) uni.set('since', String(Date.now() - state.range));
+  writeRange(uni);
   try {
     const [scoped, all] = await Promise.all([
       api('facets'),
@@ -2899,7 +3183,11 @@ function init() {
     if (!ctl || ctl === '#f-q') continue;
     $(ctl).addEventListener('change', (ev) => setFilter(key, ev.currentTarget.value));
   }
-  $('#f-range').addEventListener('change', (ev) => setRange(ev.currentTarget.value));
+  initRange();
+  // Only the components table. Sessions and Requests are LIMIT 25 / LIMIT 50 server-side, so
+  // a client-side sort there would sort ONE PAGE under a header that looks global — see
+  // sortRows and docs/dashboard.md. They stay unsorted until ?sort=/?dir= reach the SQL.
+  sortable('[data-testid=components-table]', COMPONENT_SORT);
   $('#f-dim').addEventListener('change', (ev) => { state.dim = ev.currentTarget.value; loadUsage(); });
   // Debounced, and Enter commits immediately rather than waiting out the delay. The
   // pending timer is dropped on submit so the same query is not sent twice.
@@ -2963,7 +3251,11 @@ function init() {
   // the login form — and after a sign-out — so a page left sitting on the gate produced
   // a 401 every ten seconds forever.
   const gated = () => !$('#gate').hidden;
-  setInterval(() => { if (state.view === 'overview' && !gated()) loadOverview(); }, 10000);
+  // A window whose `to` is absolute cannot gain rows, so repolling it is pure waste — and
+  // on a wide manager scope it is a full-corpus aggregate every ten seconds for no new data.
+  setInterval(() => {
+    if (state.view === 'overview' && !gated() && state.to === 'now') loadOverview();
+  }, 10000);
   setInterval(() => { if (!gated()) { loadFacets(); checkCapture(); } }, 30000);
 }
 
@@ -3258,8 +3550,29 @@ function applyAccount() {
   for (const el of $$('[data-manager]')) {
     el.hidden = account.hosted ? !(t && t.role === 'manager') : !el.hasAttribute('data-local-ok');
   }
+  loadTenantOptions();
 }
 function isManager() { return !!(account.tenant && account.tenant.role === 'manager'); }
+
+/**
+ * loadTenantOptions fills the manager's scope select from the roster. Once per session: the
+ * roster changes when an account is created, which is a page the manager is already on.
+ *
+ * The first two options are in the markup because they are not accounts: '' is the server's
+ * own default (the whole service) and 'me' is the way back to own-only. A failure here leaves
+ * those two, which is a usable control, so it is not reported.
+ */
+async function loadTenantOptions() {
+  const sel = $('#f-tenant');
+  if (!sel || !isManager() || sel.dataset.filled) return;
+  sel.dataset.filled = '1';
+  try {
+    for (const t of (await ctl('/api/tenants')).tenants || []) {
+      sel.appendChild(el('option', { value: t.id }, t.label ? t.email + ' · ' + t.label : t.email));
+    }
+    syncControl('tenant');
+  } catch (_) { /* All accounts / Mine still work */ }
+}
 
 /**
  * probeAccount decides which of the three worlds this page is in: a single-tenant proxy,

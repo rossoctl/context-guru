@@ -40,18 +40,37 @@
 
 <section class="filters" aria-label="Filters">
   <input id="f-q" type="search" placeholder="Search session, model, agent…" data-testid="filter-q" aria-label="Search">
-  <select id="f-range" data-testid="filter-range" aria-label="Time range">
-    <option value="0">All time</option>
-    <option value="3600000">Last hour</option>
-    <option value="21600000">Last 6 hours</option>
-    <option value="86400000">Last 24 hours</option>
-    <option value="604800000">Last 7 days</option>
-  </select>
+  <!-- Time range, Grafana's model: a quick relative token or an absolute pair. A popover
+       rather than a <select> because "from X to Y" is two inputs and a select can only
+       carry one value — and because a relative window has to stay relative, so a live
+       "last 6 hours" keeps moving instead of freezing at the moment it was picked. -->
+  <details class="more range" id="f-range" data-testid="filter-range">
+    <summary><span id="f-range-label">All time</span></summary>
+    <div class="more-body">
+      <!-- The quick ranges are built by initRange(): ten buttons is ten lines of markup
+           that say the same thing as one list. -->
+      <div class="range-quick" id="f-range-quick" role="group" aria-label="Quick ranges"></div>
+      <div class="range-abs">
+        <label for="f-from">From</label>
+        <input type="datetime-local" id="f-from" data-testid="filter-from">
+        <label for="f-to">To</label>
+        <input type="datetime-local" id="f-to" data-testid="filter-to">
+        <button id="f-range-apply" class="ghost" data-testid="filter-range-apply">Apply</button>
+      </div>
+    </div>
+  </details>
   <select id="f-model" data-testid="filter-model" aria-label="Model"><option value="">All models</option></select>
   <select id="f-provider" data-testid="filter-provider" aria-label="Provider"><option value="">All providers</option></select>
   <select id="f-agent" data-testid="filter-agent" aria-label="Agent"><option value="">All agents</option></select>
   <select id="f-preset" data-testid="filter-preset" aria-label="Preset"><option value="">All presets</option></select>
   <select id="f-mode" data-testid="filter-mode" aria-label="Mode"><option value="">All modes</option></select>
+  <!-- Manager-only scope control. data-manager without data-local-ok is exactly right here:
+       a single-tenant proxy has one account and nothing to scope. Options past the first two
+       are filled from /api/tenants by loadTenantOptions(). -->
+  <select id="f-tenant" data-testid="filter-tenant" aria-label="Account" data-manager hidden>
+    <option value="">All accounts</option>
+    <option value="me">Mine</option>
+  </select>
   <button id="f-clear" class="ghost" data-testid="filter-clear" disabled>Clear</button>
   <!-- Second-tier filters, behind one disclosure: the compaction outcome and the
        request-metadata dimensions. Thirteen controls in one wrapping row pushed the first
@@ -278,6 +297,10 @@
       <h2>Cache-miss attribution</h2>
       <p class="note">A cold start is not a failure — the first request has nothing to hit.</p>
       <div id="cachemiss" data-testid="cache-miss"></div>
+      <!-- prefix_change_cost_usd. Filled by loadOverview; deliberately a note beside the
+           bucket it is computed from and NOT a tile, because it is observational and is
+           subtracted from nothing. -->
+      <p id="prefix-change-note" class="note" data-testid="prefix-change-cost" hidden></p>
     </div>
     <div class="panel">
       <h2>Why we didn't compact</h2>
@@ -377,6 +400,7 @@
           <th class="num">Unique saved</th><th class="num">Gross saved</th><th class="num">Overcount</th>
           <th class="num">Own latency</th><th class="num">Avg ms</th>
           <th class="num">LLM calls</th><th class="num">LLM cost</th>
+          <th class="num">Saved $</th><th class="num">Net $</th>
           <th class="num">Errors</th><th>Why declined</th><th>Verdict</th>
         </tr></thead>
         <tbody id="components-body"></tbody>
@@ -404,7 +428,7 @@
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="sessions-table">
         <thead><tr>
-          <th>Session</th><th>Model</th><th>Agent</th><th>Preset</th>
+          <th>Session</th><th data-scope-col hidden>Account</th><th>Model</th><th>Agent</th><th>Preset</th>
           <th class="num">Turns</th><th class="num">Before</th><th class="num">Saved (gross)</th>
           <th class="num">Net saved $</th><th class="num">Cache r/w</th><th class="num">Expands</th>
           <th class="num">CG ms</th><th>Started</th><th><span class="vh">Row actions</span></th>
@@ -423,7 +447,7 @@
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="requests-table">
         <thead><tr>
-          <th>ID</th><th>Time</th><th>Session</th><th>Model</th><th>Mode</th>
+          <th>ID</th><th>Time</th><th>Session</th><th data-scope-col hidden>Account</th><th>Model</th><th>Mode</th>
           <th class="num">Before</th><th class="num">After</th><th class="num">Saved (gross)</th>
           <th class="num">Cache r/w</th><th class="num">$</th><th class="num">CG ms</th>
           <th>Cache</th><th>Accounting</th>

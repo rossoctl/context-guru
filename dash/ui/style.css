@@ -299,6 +299,20 @@ button.subtle:hover { text-decoration: underline; }
   border-radius: var(--r); box-shadow: var(--shadow-pop);
 }
 .filters details.more > .more-body select { max-width: none; width: 100%; }
+
+/* The time-range popover. One column, not the auto-fit grid the other popover uses: the
+   quick list and the from/to pair are a sequence, not a set of peers. */
+.filters details.range > .more-body { display: block; width: min(92vw, 320px); }
+.range-quick { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-1); }
+.range-quick button { justify-content: flex-start; text-align: left; }
+.range-abs {
+  display: grid; grid-template-columns: auto 1fr; gap: var(--sp-1) var(--sp-2);
+  align-items: center; margin-top: var(--sp-3);
+  padding-top: var(--sp-3); border-top: 1px solid var(--border-soft);
+  font-size: var(--t-small); color: var(--fg-muted);
+}
+.range-abs input { width: 100%; }
+.range-abs button { grid-column: 1 / -1; justify-self: end; }
 @media (max-width: 620px) {
   .filters details.more { position: static; }
   .filters details.more > .more-body { position: static; box-shadow: none; width: auto; max-width: none; }
@@ -503,6 +517,23 @@ details.why dd { margin: 0; }
   border-bottom: 1px solid var(--border);
 }
 .tbl td.num, .tbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* Sortable headers. The <th> carries aria-sort (where a screen reader looks) and the arrow
+   is drawn FROM that attribute, so the glyph and the announced state cannot disagree — the
+   usual bug here is a arrow kept in a separate class that drifts out of step. */
+.tbl th > button.sort {
+  all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;
+  font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit;
+}
+.tbl th > button.sort:hover { color: var(--fg); }
+.tbl th > button.sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tbl th.num > button.sort { flex-direction: row-reverse; }
+.tbl th[aria-sort] > button.sort::after {
+  content: "↕"; color: var(--fg-faint); font-size: var(--t-micro);
+}
+.tbl th[aria-sort="ascending"] > button.sort::after { content: "↑"; color: var(--accent); }
+.tbl th[aria-sort="descending"] > button.sort::after { content: "↓"; color: var(--accent); }
+.tbl th[aria-sort="ascending"] > button.sort,
+.tbl th[aria-sort="descending"] > button.sort { color: var(--fg); }
 .tbl tbody tr:hover { background: var(--bg-hover); }
 .tbl tbody tr:last-child td { border-bottom: 0; }
 .tbl tbody tr.click { cursor: pointer; }
