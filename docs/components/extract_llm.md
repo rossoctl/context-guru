@@ -402,7 +402,7 @@ Lossy but reversible — the original is stashed and recovered via `context_guru
 | `economic_gate` | `true` | Only call the LLM when expected saving > expected cost. `false` restores the older spend-on-size behaviour (and implies `allow_on_caching_backend`). |
 | `min_tokens` | *derived* | Output floor. **Unset = derived from context pressure** (no tuning). Set explicitly to pin it (folds into `trigger.min_output_tokens`). |
 | `strategy` | `code` | `code` \| `single` \| `rlm` \| `auto` (`rlm` maps to `code`). |
-| `model.source` | `incoming` | `incoming` (proxied model+key) or `config` (cheap model via `CHEAP_MODEL*`). |
+| `model.source` | `incoming` | `incoming` (proxied model+key) or `config` (cheap model via `CHEAP_MODEL*`). **On a multi-tenant deployment `config` resolves to NOTHING** — `staticModel()` withholds the operator's compaction model from tenant traffic on purpose — so the component silently makes no calls however else it is configured. Measured on the hosted service: one account with `source: config`, 251 requests, zero model calls. The settings page now warns in the field itself. |
 | `model_max_input_tokens` | *derived* | The extraction model's input budget (see [Context guard](#context-guard)). Pin it for a model whose id nothing can resolve. |
 | `trigger` | *derived* | Explicit gate: `min_output_tokens`, `min_request_tokens`, `min_messages`. Setting any pins the trigger. |
 | `llm_every_n_requests` | — | Fire the LLM path at most once per N requests per session. |

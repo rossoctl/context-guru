@@ -646,3 +646,54 @@ func TestSettingsFieldsAreAManagersField(t *testing.T) {
 		t.Fatalf("a plain account set the configuration through fields: %d %s", w.Code, w.Body)
 	}
 }
+
+// The two fields that decide whether extract_llm can act at all have to make the round trip
+// like any other. They were in stored documents and NOT on the page, which is how an account
+// whose extract_llm was fully configured watched it run 251 times and act zero times: its
+// traffic is prompt-cached (so the economic gate hard-declines by default) and its
+// model.source was `config`, which on this service resolves to no model whatsoever.
+func TestTheFieldsThatDecideWhetherExtractLLMRunsAtAllRoundTrip(t *testing.T) {
+	f := ctlFixture(t)
+	w, _ := f.signUp(t, "boss@ibm.com", "l")
+	jar := w.Result().Cookies()
+
+	body := `{"config":{"pipeline":["format"],"mode":"sync","extract_llm":{"per_output":true,` +
+		`"cold_enabled":true,"min_tokens":2000,"max_per_request":2,"max_per_session":20,` +
+		`"aggressiveness":"medium","context":"recent","context_messages":7,"cold_min_tokens":1000,` +
+		`"allow_on_caching_backend":true,"model_source":"incoming","strategy":"code",` +
+		`"every_n_requests":1,"trigger_min_tokens":3000}}}`
+	w, out := f.do(t, "PUT", "/api/me", body, jar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("field save = %d %s", w.Code, w.Body)
+	}
+	tn, _ := out["tenant"].(map[string]any)
+	eff, _ := tn["effective_config"].(map[string]any)
+	x, _ := eff["extract_llm"].(map[string]any)
+	if x == nil {
+		t.Fatalf("no extract_llm on the form: %v", eff)
+	}
+	if x["allow_on_caching_backend"] != true {
+		t.Error("allow_on_caching_backend did not survive the round trip")
+	}
+	if x["model_source"] != "incoming" {
+		t.Errorf("model_source = %v, want incoming", x["model_source"])
+	}
+	// And it is really in the document, where the component reads it.
+	doc, _ := tn["config_yaml"].(string)
+	for _, want := range []string{"allow_on_caching_backend: true", "source: incoming"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("the document does not carry %q:\n%s", want, doc)
+		}
+	}
+
+	// The settings page needs to know whether `source: config` can resolve to anything here,
+	// because on this service it cannot and the choice would otherwise read as available.
+	w, out = f.do(t, "GET", "/api/options", "", jar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("options = %d", w.Code)
+	}
+	if out["compaction_model"] != false {
+		t.Errorf("compaction_model = %v; a multi-tenant deployment withholds the operator's "+
+			"compaction model, so the page must be told", out["compaction_model"])
+	}
+}

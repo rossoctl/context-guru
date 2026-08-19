@@ -105,7 +105,11 @@ const (
 //
 // Expressed as a literal pipeline rather than a registered preset name: this is one
 // default value, not a new vocabulary word.
-const DefaultConfigYAML = `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]
+// failed_run is deliberately absent. Measured on this service and on Terminal-Bench it
+// acted ZERO times while spending real wall clock scanning every request for superseded
+// failures (843 ms across 251 requests on one account, 28.8 s on the Terminal-Bench arm).
+// A component that has never once fired on agentic traffic is latency with a name.
+const DefaultConfigYAML = `pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
 components:
   extract:
     min_tokens: 400

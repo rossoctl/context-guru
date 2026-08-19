@@ -1436,6 +1436,12 @@ func (h *Handler) ctlOptions(w http.ResponseWriter, r *http.Request) {
 		"presets":        h.opts.PresetNames,
 		"components":     h.opts.ComponentNames,
 		"default_config": tenant.DefaultConfigYAML,
+		// Whether `extract_llm.model.source: config` can resolve to anything here. It
+		// cannot on the hosted service — staticModel() withholds the operator's compaction
+		// model from tenant traffic on purpose — and a settings page that offers the choice
+		// without saying so is how an account ran that component 251 times, made zero model
+		// calls, and had nothing on screen to explain it.
+		"compaction_model": h.staticModel() != nil,
 	})
 }
 

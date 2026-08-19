@@ -7,10 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/config"
 )
 
 // newTestAPI wires a recorder + API with a few requests already persisted.
@@ -724,10 +727,16 @@ func TestSettingsFormSpeaksTheSameFieldNamesAsTheServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(js)
-	// Every key of config.ExtractLLMForm, by its json tag.
-	for _, key := range []string{"per_output", "cold_enabled", "size_trigger", "min_tokens",
-		"max_per_request", "max_per_session", "aggressiveness", "context", "context_messages",
-		"cold_min_tokens"} {
+	// Every key of config.ExtractLLMForm, by its json tag, read off the STRUCT rather than
+	// listed here — a hand-kept list is how the page ended up not showing
+	// allow_on_caching_backend and model.source, the two fields that decided whether the
+	// component could act at all. Add a field on the server and this test names it.
+	ft := reflect.TypeOf(config.ExtractLLMForm{})
+	for i := 0; i < ft.NumField(); i++ {
+		key := strings.Split(ft.Field(i).Tag.Get("json"), ",")[0]
+		if key == "" || key == "-" {
+			continue
+		}
 		if !strings.Contains(src, key) {
 			t.Errorf("the form does not mention %q, a field the server expects", key)
 		}
@@ -751,5 +760,18 @@ func TestSettingsFormSpeaksTheSameFieldNamesAsTheServer(t *testing.T) {
 		if !strings.Contains(src, want) {
 			t.Errorf("the settings page does not handle an unreadable stored configuration (%q)", want)
 		}
+	}
+	// The fields are a subset of what a document can say, so the document itself has to be
+	// on the page somewhere — read-only, since an editable box here is the writer that
+	// corrupted configurations.
+	if !strings.Contains(src, "full-config-yaml") {
+		t.Error("the settings page does not show the full stored configuration")
+	}
+	// The roster's configuration column must not be the document's first line: the form
+	// writes YAML through a marshaller, so that line is the word `components:` for every
+	// account that has saved once.
+	if strings.Contains(src, "effective_config_yaml || '').split('\\n')[0]") {
+		t.Error("the tenants roster is back to showing line one of the document, which now " +
+			"reads \"components:\" for every configured account")
 	}
 }

@@ -200,7 +200,7 @@ func TestBarePresetDoesNotReadAsSwitchedOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !contains(mustParse(t, out).Pipeline, "extract_llm") {
+	if !contains(mustLoad(t, out).Pipeline, "extract_llm") {
 		t.Errorf("saving dropped extract_llm from a preset that ran it:\n%s", out)
 	}
 }
@@ -215,8 +215,9 @@ components:
   extract_llm:
     model:
       name: claude-haiku-4-5
-    strategy: code
+    marker_mode: summary
     per_output: true
+    strategy: code
 `
 	f, err := ParseForm(doc)
 	if err != nil {
@@ -228,16 +229,20 @@ components:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if contains(mustParse(t, out).Pipeline, "extract_llm") {
+	if contains(mustLoad(t, out).Pipeline, "extract_llm") {
 		t.Errorf("the component still runs:\n%s", out)
 	}
-	for _, want := range []string{"claude-haiku-4-5", "strategy: code"} {
+	// strategy is a key the form OWNS now, so it is cleared like per_output. marker_mode
+	// and model.name are not, and must survive.
+	for _, want := range []string{"claude-haiku-4-5", "marker_mode: summary"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("switching off destroyed %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "per_output") {
-		t.Errorf("a key the form owns survived:\n%s", out)
+	for _, gone := range []string{"per_output", "strategy"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("a key the form owns survived (%s):\n%s", gone, out)
+		}
 	}
 }
 
@@ -291,6 +296,17 @@ func TestAnUnloadableDocumentIsReportedNotHidden(t *testing.T) {
 	}
 }
 
+// mustLoad is the strict loader, for the assertions that are about the DOCUMENT rather
+// than about the form's reading of it.
+func mustLoad(t *testing.T, doc string) *Config {
+	t.Helper()
+	c, err := LoadBytes([]byte(doc))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	return c
+}
+
 func mustParse(t *testing.T, doc string) Form {
 	t.Helper()
 	f, err := ParseForm(doc)
@@ -298,4 +314,187 @@ func mustParse(t *testing.T, doc string) Form {
 		t.Fatalf("ParseForm: %v", err)
 	}
 	return f
+}
+
+// osherDoc is a real stored document from the hosted service, the one whose extract_llm
+// ran 251 times and acted zero times. It is the regression case for this whole file: the
+// form has to SHOW why it is inert (model.source: config has no model on that deployment,
+// and allow_on_caching_backend is absent so the gate hard-declines cached traffic) and it
+// has to leave every key it does not own exactly where it found it.
+const osherDoc = `components:
+  extract:
+    min_tokens: 400
+  extract_llm:
+    aggressiveness: medium
+    cold_cache:
+      enabled: true
+      min_tokens: 1000
+    context: recent
+    context_messages: 7
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 20
+    llm_max_per_session: 80
+    min_tokens: 1000
+    model:
+      source: config
+    per_output: true
+    strategy: code
+    trigger:
+      min_request_tokens: 3000
+mode: sync
+pipeline:
+  - format
+  - toon
+  - dedup
+  - failed_run
+  - cmdfilter
+  - extract_llm
+  - extract
+  - cachesplit
+`
+
+func TestTheFormShowsWhyARealAccountsExtractLLMWasInert(t *testing.T) {
+	f, err := ParseForm(osherDoc)
+	if err != nil {
+		t.Fatalf("ParseForm: %v", err)
+	}
+	if f.ParseError != "" {
+		t.Fatalf("a document the proxy runs must load strictly: %s", f.ParseError)
+	}
+	x := f.ExtractLLM
+	// The two facts that made it inert, both invisible on the old form.
+	if x.ModelSource != "config" {
+		t.Errorf("model source: got %q, want config — the form must show the source that has no model here", x.ModelSource)
+	}
+	if x.AllowOnCachingBackend {
+		t.Error("allow_on_caching_backend is absent in the document, so the form must show it OFF")
+	}
+	// And the knobs that were already there.
+	for _, c := range []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"per_output", x.PerOutput, true},
+		{"cold_enabled", x.ColdEnabled, true},
+		{"size_trigger", x.SizeTrigger, false},
+		{"min_tokens", x.MinTokens, 1000},
+		{"max_per_request", x.MaxPerRequest, 20},
+		{"max_per_session", x.MaxPerSession, 80},
+		{"every_n_requests", x.EveryNRequests, 1},
+		{"trigger_min_tokens", x.TriggerMinTokens, 3000},
+		{"strategy", x.Strategy, "code"},
+		{"aggressiveness", x.Aggressiveness, "medium"},
+		{"context", x.Context, "recent"},
+		{"context_messages", x.ContextMessages, 7},
+		{"cold_min_tokens", x.ColdMinTokens, 1000},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
+// The direction that actually bites: a field the page offers must reach the document, and
+// a save must not quietly drop a key the form has no control for. Every field is moved off
+// its parsed value here, so a field the writer forgot shows up as an unchanged value.
+func TestEveryFormFieldReachesTheDocumentAndNothingElseMoves(t *testing.T) {
+	f, err := ParseForm(osherDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := f.ExtractLLM
+	x.ModelSource = "incoming"
+	x.AllowOnCachingBackend = true
+	x.SizeTrigger = true
+	x.Strategy = "auto"
+	x.MinTokens = 1500
+	x.MaxPerRequest = 3
+	x.MaxPerSession = 40
+	x.EveryNRequests = 2
+	x.TriggerMinTokens = 5000
+	x.Aggressiveness = "high"
+	x.Context = "full"
+	x.ContextMessages = 9
+	x.ColdMinTokens = 800
+
+	out, err := ApplyForm(osherDoc, f)
+	if err != nil {
+		t.Fatalf("ApplyForm: %v", err)
+	}
+	blk := mustLoad(t, out).Components["extract_llm"]
+	var got extractLLMDoc
+	if err := blk.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"model.source", got.Model.Source, "incoming"},
+		{"allow_on_caching_backend", *got.AllowOnCaching, true},
+		{"fire_on", got.FireOn, "size"},
+		{"strategy", got.Strategy, "auto"},
+		{"min_tokens", *got.MinTokens, 1500},
+		{"llm_max_per_request", *got.MaxPerRequest, 3},
+		{"llm_max_per_session", *got.MaxPerSession, 40},
+		{"llm_every_n_requests", *got.EveryN, 2},
+		{"trigger.min_request_tokens", *got.Trigger.MinRequestTokens, 5000},
+		{"aggressiveness", got.Aggressiveness, "high"},
+		{"context", got.Context, "full"},
+		{"context_messages", *got.ContextMessages, 9},
+		{"cold_cache.min_tokens", *got.ColdCache.MinTokens, 800},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s did not reach the document: got %v, want %v", c.name, c.got, c.want)
+		}
+	}
+	// And a re-read comes back with what was written: the form is the same shape in both
+	// directions, which is what "the dashboard shows my configuration" means.
+	back, err := ParseForm(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *back.ExtractLLM != *x {
+		t.Errorf("round trip changed the fields:\n got %+v\nwant %+v", *back.ExtractLLM, *x)
+	}
+	// Unowned keys, still where they were.
+	if got := mustLoad(t, out).Components["extract"]; got.IsZero() {
+		t.Error("another component's block was dropped")
+	}
+}
+
+// Switching the component off must not delete the model or trigger blocks: they are the
+// keys a manager set, and re-enabling on the expensive default model is a form that costs
+// money.
+func TestSwitchingOffKeepsTheModelAndTriggerBlocks(t *testing.T) {
+	f, err := ParseForm(osherDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.ExtractLLM.PerOutput = false
+	f.ExtractLLM.ColdEnabled = false
+	out, err := ApplyForm(osherDoc, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blk := mustLoad(t, out).Components["extract_llm"]
+	var got extractLLMDoc
+	if err := blk.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Model.Source != "config" {
+		t.Errorf("model.source was lost on switch-off: %q", got.Model.Source)
+	}
+	if got.Trigger.MinRequestTokens == nil || *got.Trigger.MinRequestTokens != 3000 {
+		t.Error("trigger.min_request_tokens was lost on switch-off")
+	}
+	if got.Strategy != "" {
+		t.Errorf("strategy is a managed key and should have been cleared, got %q", got.Strategy)
+	}
+	if contains(mustLoad(t, out).Pipeline, "extract_llm") {
+		t.Error("the component is still in the pipeline")
+	}
 }

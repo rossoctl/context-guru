@@ -3730,7 +3730,24 @@ function loadSettings() {
     // whose pipeline was written as a block sequence and produced "did not find expected
     // key" on every save, with no way out from the UI. Fields post fields; the server owns
     // the document.
-    if (mgr) renderXllmForm(host, cfg.extract_llm, inherited);
+    if (mgr) renderXllmForm(host, cfg.extract_llm, inherited, opts);
+
+    // The whole document, read-only. The fields above are the knobs worth turning from a
+    // page; they are not every key a configuration can hold, and an operator asking "what
+    // am I actually running" deserves the answer rather than an inference from a form. Not
+    // editable: a textarea here is the regex-rewriting save path this page was rebuilt to
+    // remove. Anything the fields do not cover is a manager edit on the account page.
+    if (effective) {
+      host.appendChild(el('details', { class: 'field', 'data-testid': 'full-config' },
+        el('summary', {}, 'Full configuration (read-only)'),
+        el('p', { class: 'hint' },
+          inherited
+            ? 'The server default, which your traffic follows because you have stored no '
+              + 'configuration of your own.'
+            : 'Your stored document, exactly as the proxy builds it. The fields above write '
+              + 'into it; every other key here was set by a manager and is left untouched.'),
+        el('pre', { class: 'code', 'data-testid': 'full-config-yaml' }, effective)));
+    }
 
     // Save covers the upstreams and the capture consent in both states; it leaves the
     // configuration alone while it is inherited (see saveSettings), so saving one of
@@ -3901,13 +3918,21 @@ const XLLM_DEFAULTS = {
   context: 'recent',
   context_messages: 7,
   cold_min_tokens: 1000,
+  allow_on_caching_backend: false,
+  model_source: 'incoming',
+  strategy: 'code',
+  every_n_requests: 1,
+  trigger_min_tokens: 3000,
 };
 
 /** renderXllmForm draws the compaction-model controls from the fields the server parsed.
  *  Manager-only, matching the server: PUT /api/me answers 403 to anyone else sending a
  *  configuration. */
-function renderXllmForm(host, cfg, disabled) {
+function renderXllmForm(host, cfg, disabled, opts) {
   const state = { ...XLLM_DEFAULTS, ...(cfg || {}) };
+  // Whether `source: config` can resolve to a model on THIS deployment. Absent from an
+  // older server means "assume it can", which is the pre-existing reading.
+  const hasStatic = !opts || opts.compaction_model !== false;
   xllmState = state;
 
   const sw = (key, label, hint) => {
@@ -3987,6 +4012,38 @@ function renderXllmForm(host, cfg, disabled) {
     numField('cold_min_tokens', 'Cold sweep: only outputs above (tokens)',
       'Lower than the everyday threshold on purpose — on that turn every candidate is being '
       + 're-billed at the write rate whatever we do.'),
+    // The two fields below decide whether ANY of the above can happen. They were in the
+    // stored document all along and not on this page, which is how a fully configured
+    // account watched this component run 251 times and act zero times.
+    sw('allow_on_caching_backend', 'Allow it on a prompt-caching provider',
+      'OFF by default, and that default is why a configured extract_llm can do nothing at '
+      + 'all: Anthropic (and Claude Code against it) caches your prompt, so the economic '
+      + 'gate declines every candidate whose tokens are already cached — measured '
+      + 'break-even is ~30,500 tokens per output against a largest-observed 2,053. Turn it '
+      + 'on only if your tool outputs are genuinely enormous, or use the cold-cache sweep '
+      + 'above, which is not subject to this.'),
+    pick('model_source', 'Which model does the compacting', [
+      ['incoming', 'your own model and key (the request\'s own credential)'],
+      ['config', 'a compaction model configured by the operator'],
+    ], hasStatic
+      ? 'Your own model bills to your provider account and always exists. A configured '
+        + 'model is usually a cheap one, and bills to whoever owns it.'
+      : 'THIS DEPLOYMENT HAS NO CONFIGURED COMPACTION MODEL — it deliberately does not '
+        + 'spend the operator\'s credential on your traffic. So "config" here means the '
+        + 'component has no model and silently never makes a call, however it is otherwise '
+        + 'configured. Choose your own model.'),
+    pick('strategy', 'How the reduction is framed', [
+      ['code', 'code — recommended for coding agents'],
+      ['single', 'single — one pass over one output'],
+      ['rlm', 'rlm — reduce via a language model'],
+      ['auto', 'auto — pick per output'],
+    ], 'What the extraction is asked to do with an output. Leave this on code unless you '
+      + 'are comparing strategies.'),
+    numField('every_n_requests', 'Fire at most once every N turns',
+      'A cadence throttle on top of the caps: 1 means every turn that qualifies may call.'),
+    numField('trigger_min_tokens', 'Ignore requests smaller than (tokens)',
+      'A whole-request floor, separate from the per-output threshold above. 0 means no '
+      + 'floor.'),
     whyBlock('What happens when you save',
       'Saving rebuilds your pipeline and discards frozen compaction decisions, so the next '
       + 'turn will not be cache-warm. These fields are applied to your configuration on the '
@@ -4168,10 +4225,19 @@ async function loadTenants() {
         // The EFFECTIVE answer to "are this account's transcripts being kept", which is
         // the AND of both gates — never the account's flag on its own.
         el('td', {}, captureCell(t.capture_content, operatorGate)),
-        // The EFFECTIVE first line, plus whose it is: an account that follows the
-        // default stores nothing, and an empty cell would read as a broken account.
+        // The EFFECTIVE pipeline, plus whose it is: an account that follows the default
+        // stores nothing, and an empty cell would read as a broken account.
+        //
+        // Not the document's first line, which is what this cell used to show. Since the
+        // settings form writes the document through a YAML marshaller its keys come out
+        // alphabetically, so line one is the word `components:` for every account that has
+        // ever saved — a cell that reads as "configured with no components" on exactly the
+        // accounts that are configured. The pipeline is the fact anyone opens this column
+        // for anyway.
         el('td', {},
-          el('code', { class: 'clip' }, (t.effective_config_yaml || '').split('\n')[0] || '—'),
+          el('code', { class: 'clip' },
+            ((t.effective_config || {}).pipeline || []).join(' → ')
+            || (t.effective_config_yaml ? 'no components' : '—')),
           t.config_inherited ? el('div', { class: 'muted small' }, 'server default') : null),
         // Two buttons, not five. Everything that CHANGES this account — its configuration,
         // its variant, disable, a reissued token, a reset, purge, delete — is in the editor,

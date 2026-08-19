@@ -612,12 +612,18 @@ Every new tenant starts on `codesmart` minus the LLM extractor (and minus `codes
 blind `collapse`):
 
 ```yaml
-pipeline: [format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]
+pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
 components:
   extract:
     min_tokens: 400
 mode: sync
 ```
+
+`failed_run` used to be in that list and is not any more. It acted **zero** times on every
+workload measured here — 251 requests on one account (843 ms spent scanning), and 28.8 s on
+the Terminal-Bench arm — so it was latency with a name. It is still a registered component
+and can be added back on the settings page by anyone whose traffic actually re-sends
+superseded failures.
 
 Fully deterministic, which is the property that matters on a shared box: no
 cheap-model calls, so it adds no upstream spend, contends for no shared LLM budget,
@@ -655,6 +661,28 @@ key order: a map has neither, and that is the trade for never emitting a broken 
 
 Anything the fields do not cover is set by a manager through **Accounts → the account →
 Full configuration (YAML)**, which still takes a document and still validates it strictly.
+The settings page shows that whole document read-only under **Full configuration**, so
+"what am I actually running" is a fact on the page rather than an inference from the fields.
+
+#### Two fields decide whether `extract_llm` can act at all
+
+Both were in stored documents and on neither the form nor the page, and the result was an
+account whose `extract_llm` was fully configured, ran on 251 requests, and made zero model
+calls with nothing on screen to explain it:
+
+- **`model.source`** — `config` selects an operator-configured compaction model, and this
+  service deliberately has none: it will not spend the operator's credential on a tenant's
+  traffic. So `config` here means *the component has no model* and silently never calls
+  anything. `incoming` uses the caller's own model and key. The settings page now says this
+  in the field's own hint, driven by `compaction_model` from `GET /api/options`.
+- **`allow_on_caching_backend`** — absent means **false**, and the economic gate then
+  hard-declines every candidate whose tokens are already prompt-cached. On Claude Code
+  against Anthropic that is the whole workload. The cold-cache sweep is not subject to it,
+  which is why the sweep is the recommended way in.
+
+Both are switches on the settings page now, alongside `strategy`,
+`llm_every_n_requests` and `trigger.min_request_tokens` — the other keys real stored
+documents already carried and the form could not show.
 
 
 **Start with the cold-cache sweep alone.** This is the half whose economics are not in doubt:
