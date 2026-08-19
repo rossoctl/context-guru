@@ -926,3 +926,41 @@ func mustJSON(t *testing.T, v any) string {
 }
 
 var _ = tenant.PurposeReset
+
+// A manager signed into the real hosted stack sees the whole service with NO query
+// parameter at all. This is the end-to-end half of the default: the cookie-derived
+// principal is the only thing that widened it, and a plain account's own dashboard is
+// unchanged by that.
+func TestManagerDashboardDefaultsToEveryAccount(t *testing.T) {
+	f := newMgrFixture(t)
+	mgrJar, mgrID := f.signUpJar(t, "boss@ibm.com")
+	userJar, userID := f.signUpJar(t, "a@ibm.com")
+	f.record(t, userID, "sess-a", &dash.Event{Model: "m-user", TokensBefore: 100, TokensAfter: 60})
+	f.record(t, mgrID, "sess-boss", &dash.Event{Model: "m-boss", TokensBefore: 100, TokensAfter: 60})
+
+	for _, path := range []string{"/api/requests", "/api/sessions", "/api/breakdown?dim=tenant"} {
+		w, _ := f.do(t, "GET", path, "", mgrJar)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s for a manager = %d %s", path, w.Code, w.Body)
+		}
+		if !strings.Contains(w.Body.String(), userID) {
+			t.Errorf("%s did not default to the whole service for a manager:\n%s", path, w.Body)
+		}
+	}
+	// ?tenant=me is the way back to their own traffic.
+	w, _ := f.do(t, "GET", "/api/requests?tenant=me", "", mgrJar)
+	if b := w.Body.String(); strings.Contains(b, "m-user") {
+		t.Errorf("?tenant=me did not narrow a manager to their own rows:\n%s", b)
+	}
+	// The plain account's dashboard is unaffected, with or without a crafted parameter.
+	for _, path := range []string{"/api/requests", "/api/requests?tenant=*",
+		"/api/requests?tenant=" + mgrID, "/api/breakdown?dim=tenant&tenant=*"} {
+		w, _ := f.do(t, "GET", path, "", userJar)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s for a plain account = %d %s", path, w.Code, w.Body)
+		}
+		if b := w.Body.String(); strings.Contains(b, "m-boss") || strings.Contains(b, mgrID) {
+			t.Errorf("%s widened a plain account's view:\n%s", path, b)
+		}
+	}
+}

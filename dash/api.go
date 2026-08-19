@@ -154,9 +154,16 @@ func (a *API) scope(r *http.Request) (Filter, Principal, bool) {
 	f.Tenant, f.TenantAll = p.TenantID, false
 	if p.Manager {
 		switch q := r.URL.Query().Get("tenant"); q {
-		case "":
-		case "*":
-			f.TenantAll = true
+		case "me":
+			// The way back to own-only, for a manager who wants to see their own
+			// traffic. It is a value of the SAME parameter rather than a second knob,
+			// so there is still exactly one input that moves the scope.
+		case "", "*":
+			// A manager's DEFAULT is the whole service. Tenant is EMPTIED as well as
+			// widened: captureState(f.Tenant) would otherwise report the manager's own
+			// content-capture consent as if it were the viewed session's, and "" is
+			// what makes it say "no one tenant in view" instead.
+			f.Tenant, f.TenantAll = "", true
 		default:
 			f.Tenant = q
 		}
@@ -306,6 +313,21 @@ func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// A session id is unique per ACCOUNT, not per service, so under a manager's
+	// service-wide scope SessionEvents matches the id in every account that has one —
+	// interleaving two people's code into a single diff. Pin the view to the account
+	// whose turn came first and treat that as the tenant in view below, so the archive
+	// row and the capture-consent answer belong to the same account as the turns.
+	if f.TenantAll && len(evs) > 0 {
+		owner := evs[0].TenantID
+		keep := make([]*Event, 0, len(evs))
+		for _, e := range evs {
+			if e.TenantID == owner {
+				keep = append(keep, e)
+			}
+		}
+		evs, f.Tenant, f.TenantAll = keep, owner, false
 	}
 	var arch *ArchivedSession
 	if meta, mErr := a.rec.DB().ArchivedSessionByID(session); mErr == nil {
@@ -483,19 +505,15 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 		a.rec.Hub().ServeHTTP(w, r)
 		return
 	}
-	p, ok := a.auth(r)
+	// The scope comes from the ONE resolver, not from a second copy of the widening
+	// rule parsed here: `all` is a manager-only service-wide feed, and an `all`
+	// computed without the role check ships every tenant's session ids to everyone.
+	f, _, ok := a.scope(r)
 	if !ok {
 		unauthorized(w)
 		return
 	}
-	all := p.Manager && r.URL.Query().Get("tenant") == "*"
-	tenant := p.TenantID
-	if p.Manager {
-		if q := r.URL.Query().Get("tenant"); q != "" && q != "*" {
-			tenant = q
-		}
-	}
-	a.rec.Hub().ServeScoped(w, r, tenant, all)
+	a.rec.Hub().ServeScoped(w, r, f.Tenant, f.TenantAll)
 }
 
 // trusted reports whether a request may see per-request CONTENT and the effective

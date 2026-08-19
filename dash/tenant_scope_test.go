@@ -443,3 +443,223 @@ func TestCaptureCountersAreManagerOnly(t *testing.T) {
 		t.Errorf("a manager cannot see the capture counters:\n%s", body)
 	}
 }
+
+// scopeOf resolves one request's scope through the real resolver.
+func scopeOf(t *testing.T, principal func(*http.Request) (Principal, bool), url string) Filter {
+	t.Helper()
+	rec, err := NewRecorder(Options{DBPath: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec.Close() })
+	a := NewAPI(rec)
+	a.SetAuth(principal)
+	f, _, ok := a.scope(httptest.NewRequest(http.MethodGet, url, nil))
+	if !ok {
+		t.Fatalf("scope(%s) refused the principal", url)
+	}
+	return f
+}
+
+// A manager runs the service, so their DEFAULT view is the service. This is only the
+// default that changed: the widening still happens in the manager branch alone, below
+// an unconditional narrowing overwrite.
+func TestManagerDefaultsToTheWholeService(t *testing.T) {
+	mgr := asTenant("tenant-a", true)
+	for _, tc := range []struct {
+		url        string
+		wantTenant string
+		wantAll    bool
+	}{
+		{"/api/requests", "", true},                          // no param: the whole service
+		{"/api/requests?tenant=*", "", true},                 // explicit, same thing
+		{"/api/requests?tenant=me", "tenant-a", false},       // the way back to own-only
+		{"/api/requests?tenant=tenant-b", "tenant-b", false}, // one named account
+	} {
+		f := scopeOf(t, mgr, tc.url)
+		if f.Tenant != tc.wantTenant || f.TenantAll != tc.wantAll {
+			t.Errorf("scope(%s) = {Tenant:%q, TenantAll:%v}, want {%q, %v}",
+				tc.url, f.Tenant, f.TenantAll, tc.wantTenant, tc.wantAll)
+		}
+	}
+	// Emptying Tenant while widening is load-bearing, not tidiness: captureState would
+	// otherwise report the MANAGER's own consent as the viewed session's.
+	if f := scopeOf(t, mgr, "/api/requests"); f.Tenant != "" {
+		t.Errorf("a widened scope kept Tenant=%q; captureState would report the manager's "+
+			"own capture consent as the session's", f.Tenant)
+	}
+}
+
+// The other half: nothing a non-manager puts in the query string moves their scope,
+// and the resolved value is their principal's own id with TenantAll off.
+func TestNonManagerScopeIsUnwidenable(t *testing.T) {
+	user := asTenant("tenant-a", false)
+	for _, url := range []string{
+		"/api/requests",
+		"/api/requests?tenant=*",
+		"/api/requests?tenant=tenant-b",
+		"/api/requests?tenant=me",
+		"/api/requests?tenant=&tenant=*",
+		"/api/requests?all=1",
+		"/api/requests?tenant_all=1",
+	} {
+		f := scopeOf(t, user, url)
+		if f.Tenant != "tenant-a" || f.TenantAll {
+			t.Errorf("scope(%s) for a plain user = {Tenant:%q, TenantAll:%v}, want {tenant-a, false}",
+				url, f.Tenant, f.TenantAll)
+		}
+	}
+}
+
+// captureState has no single tenant to report on under a service-wide scope, and must
+// blame nobody rather than answer with whoever's id happens to be in the filter.
+func TestCaptureStateUnderWideScopeNamesNobody(t *testing.T) {
+	rec, err := NewRecorder(Options{DBPath: ":memory:", CaptureContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	a := NewAPI(rec)
+	a.SetAuth(asTenant("boss", true))
+	// The manager's OWN account consents; nobody else's does. A wide scope must not
+	// report that "true" as the viewed session's answer.
+	a.SetTenantCapture(func(id string) bool { return id == "boss" })
+
+	f, _, _ := a.scope(httptest.NewRequest(http.MethodGet, "/api/requests", nil))
+	captured, blockedBy := a.captureState(f.Tenant)
+	if captured || blockedBy != "" {
+		t.Errorf("captureState under a wide scope = (%v, %q), want (false, \"\") — no one "+
+			"tenant is in view, so there is no consent to report and nobody to blame",
+			captured, blockedBy)
+	}
+	// Narrowed back, it answers about that account again.
+	f, _, _ = a.scope(httptest.NewRequest(http.MethodGet, "/api/requests?tenant=me", nil))
+	if captured, _ := a.captureState(f.Tenant); !captured {
+		t.Error("captureState(?tenant=me) did not report the manager's own consent")
+	}
+	f, _, _ = a.scope(httptest.NewRequest(http.MethodGet, "/api/requests?tenant=other", nil))
+	if captured, by := a.captureState(f.Tenant); captured || by != CaptureBlockedByTenant {
+		t.Errorf("captureState(?tenant=other) = (%v, %q), want (false, %q)",
+			captured, by, CaptureBlockedByTenant)
+	}
+}
+
+// The live feed must take its scope from the SAME resolver as every other read. It used
+// to parse ?tenant= itself, which is one copy of the widening rule too many: an `all`
+// computed without the role check ships every tenant's session ids to every open tab.
+func TestEventsDerivesItsScopeFromTheResolver(t *testing.T) {
+	mgr := newScopeFixture(t, asTenant("tenant-a", true))
+	if code, body := mgr.get(t, "/api/events"); code != http.StatusOK {
+		t.Fatalf("manager /api/events = %d: %s", code, body)
+	} else if !strings.Contains(body, "tenant-b") {
+		t.Errorf("a manager's default live feed did not carry other accounts' events:\n%s", body)
+	}
+	if _, body := mgr.get(t, "/api/events?tenant=me"); strings.Contains(body, "tenant-b") {
+		t.Errorf("?tenant=me did not narrow the live feed:\n%s", body)
+	}
+	// And the non-manager side is exactly as closed as before.
+	user := newScopeFixture(t, asTenant("tenant-a", false))
+	for _, path := range []string{"/api/events", "/api/events?tenant=*", "/api/events?tenant=tenant-b"} {
+		if _, body := user.get(t, path); strings.Contains(body, "tenant-b") {
+			t.Errorf("%s widened a plain user's live feed:\n%s", path, body)
+		}
+	}
+}
+
+// A manager's default is wide on the ordinary read routes, with no parameter at all.
+func TestManagerSeesEveryAccountByDefault(t *testing.T) {
+	mgr := newScopeFixture(t, asTenant("tenant-a", true))
+	for _, path := range []string{"/api/requests", "/api/sessions", "/api/breakdown?dim=tenant"} {
+		code, body := mgr.get(t, path)
+		if code != http.StatusOK {
+			t.Fatalf("%s = %d: %s", path, code, body)
+		}
+		if !strings.Contains(body, "tenant-b") {
+			t.Errorf("%s did not default to the whole service for a manager:\n%s", path, body)
+		}
+	}
+	// The Sessions list is attributable, which is what makes an all-accounts list usable.
+	if _, body := mgr.get(t, "/api/sessions"); !strings.Contains(body, `"tenant_id":"tenant-b"`) {
+		t.Errorf("/api/sessions carries no tenant_id, so an all-accounts list is unattributable:\n%s", body)
+	}
+	// ?tenant=me is the way back.
+	if _, body := mgr.get(t, "/api/requests?tenant=me"); strings.Contains(body, "tenant-b") {
+		t.Errorf("?tenant=me did not narrow a manager back to their own rows:\n%s", body)
+	}
+}
+
+// The guard on the tenant breakdown is the ROLE, not the dimension: a plain user may ask
+// for dim=tenant and gets exactly one group — their own.
+func TestTenantBreakdownIsGuardedByTheRoleNotTheDimension(t *testing.T) {
+	f := newScopeFixture(t, asTenant("tenant-a", false))
+	code, body := f.get(t, "/api/breakdown?dim=tenant")
+	if code != http.StatusOK {
+		t.Fatalf("/api/breakdown?dim=tenant for a plain user = %d: %s", code, body)
+	}
+	var out struct {
+		Groups []*GroupRow `json:"groups"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, body)
+	}
+	if len(out.Groups) != 1 || out.Groups[0].Key != "tenant-a" {
+		t.Errorf("a plain user's tenant breakdown = %d groups %+v, want exactly [tenant-a]",
+			len(out.Groups), out.Groups)
+	}
+}
+
+// Under a manager's wide scope a session id that two accounts share must not interleave
+// two people's turns into one diff. The single-session view pins itself to one account.
+func TestWideScopeSingleSessionViewDoesNotInterleaveTwoAccounts(t *testing.T) {
+	rec, err := NewRecorder(Options{DBPath: ":memory:", CaptureContent: true, ContentCap: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	now := time.Now().UnixMilli()
+	for i, tid := range []string{"tenant-a", "tenant-b"} {
+		rec.Record(&Event{
+			TS: now + int64(i), TenantID: tid, SessionID: "shared-id", Model: "m",
+			Provider: "openai", Preset: "p", Mode: ModeActive, Route: "/r", Status: 200,
+			TokensBefore: 100, TokensAfter: 90, TokenAccounting: AccountingComplete,
+			Content: []ContentRow{{Path: "0", Before: "SECRET-OF-" + tid, After: "x"}},
+		})
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		p, err := rec.DB().Requests(Filter{TenantAll: true}, 0, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(p.Requests) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("writer did not persist 2 rows (got %d)", len(p.Requests))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The DB layer really does return both, so the pinning above it is what protects this.
+	both, err := rec.DB().SessionEvents(Filter{TenantAll: true}, "shared-id", true)
+	if err != nil || len(both) != 2 {
+		t.Fatalf("SessionEvents wide = %d rows, %v (fixture assumption)", len(both), err)
+	}
+
+	api := NewAPI(rec)
+	api.SetAuth(asTenant("boss", true))
+	mux := http.NewServeMux()
+	api.Mount(mux)
+	r := httptest.NewRequest(http.MethodGet, "/api/sessions/shared-id/transcript", nil)
+	r.RemoteAddr = "10.9.9.9:1234"
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	body := w.Body.String()
+	if w.Code != http.StatusOK {
+		t.Fatalf("manager transcript on a shared session id = %d: %s", w.Code, body)
+	}
+	a, b := strings.Contains(body, "SECRET-OF-tenant-a"), strings.Contains(body, "SECRET-OF-tenant-b")
+	if a == b {
+		t.Errorf("a wide-scope single-session view served both accounts' turns under one "+
+			"session id (a=%v b=%v):\n%s", a, b, body)
+	}
+}

@@ -83,5 +83,11 @@ func TestFacetSelfBlankingNeverWidensTheTenantScope(t *testing.T) {
 			t.Errorf("selfBlanked(%q) set TenantAll: that is a manager-only service-wide "+
 				"view, not something a dropdown may switch on", dim)
 		}
+		// The other direction: a manager's already-wide scope must be PRESERVED, or a
+		// manager's dropdowns silently narrow to their own account's values.
+		if wide := selfBlanked(Filter{TenantAll: true, Agent: "bob"}, dim); !wide.TenantAll {
+			t.Errorf("selfBlanked(%q) cleared TenantAll: it must preserve the resolved "+
+				"scope in both directions, never decide it", dim)
+		}
 	}
 }
