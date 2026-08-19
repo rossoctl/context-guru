@@ -827,7 +827,7 @@
   {
    "id": 15,
    "type": "row",
-   "title": "Processes, file descriptors and the units",
+   "title": "Processes, file descriptors and kernel pressure",
    "collapsed": false,
    "gridPos": {
     "h": 1,
@@ -982,8 +982,8 @@
   {
    "id": 18,
    "type": "timeseries",
-   "title": "Service state",
-   "description": "systemd's own view of context-guru and nginx: 1 while active. This is the only panel here that does not care whether the PROXY thinks it is healthy \u2014 it reads the unit, so it still answers during a crash loop.",
+   "title": "Pressure stall (PSI): time spent waiting",
+   "description": "The kernel's own answer to \"is this box short of something?\", which no utilisation number gives: the share of wall time tasks spent WAITING on cpu, memory or io. Utilisation at 100% with zero pressure is a box working; a few percent of pressure with moderate utilisation is a box already queueing. This is the panel that distinguishes a slow gateway from a starved host.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -1001,14 +1001,34 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "node_systemd_unit_state{job=\"node\",state=\"active\"}",
+     "expr": "rate(node_pressure_cpu_waiting_seconds_total{job=\"node\"}[5m])",
      "editorMode": "code",
-     "legendFormat": "{{name}}"
+     "legendFormat": "cpu"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "rate(node_pressure_memory_waiting_seconds_total{job=\"node\"}[5m])",
+     "editorMode": "code",
+     "legendFormat": "memory"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "rate(node_pressure_io_waiting_seconds_total{job=\"node\"}[5m])",
+     "editorMode": "code",
+     "legendFormat": "io"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
+     "unit": "percentunit",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
@@ -1019,9 +1039,7 @@
        "group": "A"
       }
      },
-     "mappings": [],
-     "max": 1.2,
-     "min": 0
+     "mappings": []
     },
     "overrides": []
    },

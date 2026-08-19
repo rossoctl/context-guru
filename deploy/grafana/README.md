@@ -29,8 +29,14 @@ runs **node_exporter** (the `cg-node-exporter` container, loopback `:9100`, host
 and `/sys` mounted read-only) and the `node` scrape job feeds
 `d/context-guru-host/context-guru-host`: CPU by mode, memory including swap, filesystem
 fill per mountpoint, disk and network throughput, file descriptors against the kernel
-limit, and systemd's own view of the `context-guru` and `nginx` units — the last of which
-still answers during a crash loop, because it reads the unit rather than the process.
+limit, and the kernel's own pressure-stall numbers — the last of which is the one thing a
+utilisation graph cannot tell you: 100% CPU with no pressure is a box working, while a few
+percent of pressure at moderate utilisation is a box already queueing.
+
+Not systemd's unit states, deliberately: node_exporter's systemd collector needs
+`/run/systemd/private` mounted **writable**, and that socket is full control of systemd on
+this host. One panel does not justify handing that to a metrics exporter —
+`up{job="context-guru"}` on the SLO dashboard answers the same question from outside.
 
 Its top row alone settles the question: exporter up, uptime, CPU, memory, disk, load per
 core. If those panels are empty, read the **Exporter** stat first — empty means the

@@ -564,6 +564,12 @@ promtail will find nothing until the service starts"
   #
   # Loopback only, like everything else here: host metrics name every mountpoint and every
   # process count on a box that serves several tenants.
+  #
+  # NOT --collector.systemd. It would report the context-guru unit's own state, which is the
+  # one thing here the proxy's /metrics cannot answer during a crash loop — but it needs
+  # /run/systemd/private mounted WRITABLE, and that socket is full control of systemd on this
+  # host. One panel is not worth handing that to a metrics exporter; `up{job="context-guru"}`
+  # on the SLO dashboard covers the same question from outside.
   $oci run -d --name cg-node-exporter --network=host --restart=unless-stopped \
     --pid=host \
     -v /proc:/host/proc:ro,rslave \
@@ -572,8 +578,6 @@ promtail will find nothing until the service starts"
     "$NODE_EXPORTER_IMAGE" \
     --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/rootfs \
     --web.listen-address=127.0.0.1:9100 \
-    --collector.systemd \
-    --collector.systemd.unit-include="^(context-guru|nginx)\\.service$" \
     --collector.filesystem.mount-points-exclude='^/(dev|proc|sys|var/lib/docker/.+|var/lib/containers/.+)($|/)' >/dev/null
   ok "cg-node-exporter on 127.0.0.1:9100 (host cpu/memory/disk/network)"
 
