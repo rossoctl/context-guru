@@ -120,10 +120,14 @@ models:
 ```
 
 Rates are **dollars per million tokens**, matching every vendor's price page; they are
-converted once on load. Ids are matched case-insensitively, whole first, then as a family
-prefix, then by containment — longest match always wins, so order in the file decides
-nothing. `window:` optionally supplies a context window for a model the public map does not
-list either.
+converted once on load. Ids are matched case-insensitively: an exact id wins, and otherwise
+the **longest** entry wins whether it matched as a family prefix or by containment — so a
+specific entry always beats the family it belongs to and order in the file decides nothing.
+Containment applies only to entries that look like a model id (one containing a `/` or a
+`.`), which is what stops a short word-like entry such as Bob's `fast` tier from claiming
+`azure/gpt-5.2-fast` and pricing it ten times under with `ok=true`, where a miss would have
+let the public map answer. `window:` optionally supplies a context window for a model the
+public map does not list either.
 
 These are list prices, not credentials, and the file holds no secret. A malformed one is a
 **startup error** rather than a fallback: a price list that silently failed to load is
@@ -133,8 +137,10 @@ indistinguishable from "every model is free".
     Bob puts `premium` / `premium-ide` / `standard` / `fast` on the wire — a tier, resolved
     server-side, not a model. Any rate for it is a guess. The shipped entry is fitted against
     the `session_costs` Bob prints for itself and lands within about a third on real runs;
-    the example file shows both measurements. Read a Bob row's **savings** normally (a uniform
-    rate error cancels in the ratio) and its absolute cost with that error bar.
+    the example file shows both measurements. That error bar carries into every **absolute**
+    dollar figure for those rows — baseline, compaction savings, prompt-cache savings and the
+    "total avoided" headline. It does not touch the before/after **ratio**, where a uniform
+    rate error cancels.
 
 ### Extraction-model pricing
 

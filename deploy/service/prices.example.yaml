@@ -74,7 +74,7 @@ models:
   - {match: "gemini-2.0*",    in: 0.10, out: 0.40}
   - {match: "gemini-2.5-pro", in: 1.25, out: 10.00}
   - {match: "gemini-2.5*",    in: 0.30, out: 2.50}
-  - {match: "gemma*",         in: 0.01, out: 0.01, note: "self-hosted on RITS; billed at zero, priced non-zero so it is not read as free"}
+  - {match: "google/gemma",   in: 0.01, out: 0.01, note: "self-hosted on RITS; billed at zero, priced non-zero so it is not read as free"}
 
   # ── Bob (BobShell) ────────────────────────────────────────────────────────────
   # Bob names a TIER, not a model: the server picks what serves it, and the id on the
@@ -91,10 +91,21 @@ models:
   # both: Bob's own figure is not a linear function of the token tiers the gateway
   # reports (it prices its auxiliary calls too, and the tier's backing model can change
   # between calls). $3.00 is between them and is a published rate rather than a fudge.
-  # Read a Bob row's cost as "right to within about a third", and read its SAVINGS
-  # normally — a uniform rate error cancels in the before/after ratio.
-  - {match: "premium*",  in: 3.00, out: 15.00, note: "ESTIMATE, fitted: see the note above"}
-  - {match: "standard*", in: 0.76, out: 3.80, note: "estimate: claude-haiku-4-5 class"}
-  - {match: "fast*",     in: 0.15, out: 0.60, note: "estimate: gpt-oss-120b class"}
+  # So read a Bob row's cost as "right to within about a third". That error bar carries into
+  # every ABSOLUTE dollar figure derived from it — baseline, compaction savings, the
+  # prompt-cache saving and the "total avoided" tile and Grafana panel. What it does NOT
+  # touch is the before/after RATIO, where a uniform rate error cancels: "68% of the tokens
+  # removed" is exact whatever the rate is.
+  #
+  # Enumerated, NOT `premium*` / `standard*` / `fast*`. These are ordinary English words, and
+  # as family prefixes they claimed every id that merely began with one — `standard-diffusion-xl`
+  # would have been priced as a Bob tier, and priced CONFIDENTLY, so the public map was never
+  # consulted for it. Add a variant here if Bob starts sending one.
+  - {match: "premium",      in: 3.00, out: 15.00, note: "ESTIMATE, fitted: see the note above"}
+  - {match: "premium-ide",  in: 3.00, out: 15.00, note: "ESTIMATE, fitted: see the note above"}
+  - {match: "standard",     in: 0.76, out: 3.80, note: "estimate: claude-haiku-4-5 class"}
+  - {match: "standard-ide", in: 0.76, out: 3.80, note: "estimate: claude-haiku-4-5 class"}
+  - {match: "fast",         in: 0.15, out: 0.60, note: "estimate: gpt-oss-120b class"}
+  - {match: "fast-ide",     in: 0.15, out: 0.60, note: "estimate: gpt-oss-120b class"}
   # Bob's own auxiliary calls (title generation, classification) name a real model.
   - {match: "openai/gpt-oss-20b", in: 0.10, out: 0.40, note: "estimate: gpt-oss class"}

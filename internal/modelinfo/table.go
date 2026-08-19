@@ -32,8 +32,11 @@ type Table struct{ entries []tableEntry }
 type tableEntry struct {
 	match  string // normalized model id, or a substring of one
 	prefix bool   // match is a prefix (trailing * in the file), not an exact id
-	price  Price
-	window int
+	// qualified means the match looks like a model id rather than a bare word — it carries
+	// a `/` or a `.`. Only those may match by containment; see lookup.
+	qualified bool
+	price     Price
+	window    int
 }
 
 // tableFile is the on-disk shape.
@@ -115,7 +118,8 @@ func ParseTable(b []byte) (*Table, error) {
 		if p.CacheWrite == 0 {
 			p.CacheWrite = p.Input * f.CacheWriteFrac
 		}
-		t.entries = append(t.entries, tableEntry{match: match, prefix: prefix, price: p, window: m.Window})
+		t.entries = append(t.entries, tableEntry{match: match, prefix: prefix,
+			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window})
 	}
 	// Longest match first, so `aws/claude-opus-4-8` wins over `aws/claude-opus-4*`
 	// and the file's own order cannot make a lookup ambiguous.
@@ -133,11 +137,25 @@ func (t *Table) Len() int {
 	return len(t.entries)
 }
 
-// lookup finds the most specific entry for a model id. The id is matched whole
-// first (with and without its provider prefix), then as a family prefix, then —
-// for a gateway that decorates the id (`bedrock/us.anthropic.claude-opus-5`) — by
-// containment. Longest entry wins throughout, so this is deterministic; the
-// LiteLLM map's own containment scan iterates a Go map and is not.
+// lookup finds the most specific entry for a model id.
+//
+// Two passes, not three, and that is the whole subtlety. An exact match wins outright.
+// Everything else — a family `prefix*` and a bare id matched by containment — competes in
+// ONE pass ordered by match length, because entries are sorted longest-first. Three
+// separate passes made specificity depend on the KIND of match rather than on how specific
+// it was: `gemini-2.5*` (a prefix entry) beat `gemini-2.5-pro` (an exact entry reached only
+// by containment) for `gcp/gemini-2.5-pro-preview-05-06`, pricing a Pro deployment at
+// Flash's rate — a 4x underprice on its cost, its baseline and every saving derived from
+// them.
+//
+// Containment is restricted twice over, for the symmetric reason. A `*` entry only ever
+// matches as a prefix, and a non-`*` entry is only matched by containment when it LOOKS
+// like a qualified model id — when it contains a `/` or a `.`. Without that second rule
+// Bob's tier names, which are 4-8 characters of ordinary English (`fast`, `premium`,
+// `standard`), claimed every unrelated id that happened to contain them:
+// `azure/gpt-5.2-fast` priced at Bob's `fast` estimate, ten times under, and reported
+// `ok=true` so the public map was never consulted and the row read `complete` rather than
+// `partial`. A confidently wrong price is worse than a missing one.
 func (t *Table) lookup(model string) (tableEntry, bool) {
 	if t == nil || len(t.entries) == 0 {
 		return tableEntry{}, false
@@ -148,13 +166,14 @@ func (t *Table) lookup(model string) (tableEntry, bool) {
 			return e, true
 		}
 	}
-	for _, e := range t.entries {
-		if e.prefix && (strings.HasPrefix(full, e.match) || strings.HasPrefix(tail, e.match)) {
-			return e, true
+	for _, e := range t.entries { // longest match first
+		if e.prefix {
+			if strings.HasPrefix(full, e.match) || strings.HasPrefix(tail, e.match) {
+				return e, true
+			}
+			continue
 		}
-	}
-	for _, e := range t.entries {
-		if strings.Contains(full, e.match) {
+		if e.qualified && strings.Contains(full, e.match) {
 			return e, true
 		}
 	}

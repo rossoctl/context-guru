@@ -188,3 +188,44 @@ func TestEveryGatewayModelIsPriced(t *testing.T) {
 		}
 	}
 }
+
+// Two ways a lookup used to pick the wrong entry, both measured against the SHIPPED list
+// because both produced a confidently wrong price rather than a miss.
+func TestSpecificEntryBeatsAFamilyRegardlessOfMatchKind(t *testing.T) {
+	tb, err := LoadTable("../../deploy/service/prices.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id     string
+		wantIn float64 // $/MTok
+		why    string
+	}{
+		// `gemini-2.5*` (flash, $0.30) used to beat `gemini-2.5-pro` ($1.25) here, because
+		// the family entry was reached in an earlier PASS than the specific one.
+		{"gcp/gemini-2.5-pro-preview-05-06", 1.25, "a Pro deployment priced at Flash's rate"},
+		{"gemini-2.5-pro", 1.25, "the bare Pro id"},
+		{"gemini-2.5-flash-8b", 0.30, "an unlisted Flash member still gets the family"},
+		// Bob's tier names are ordinary English words; containment on them claimed
+		// unrelated ids and reported ok=true, so the public map was never consulted.
+		{"premium-ide", 3.00, "Bob's own tier still resolves"},
+	} {
+		p, ok := tb.Price(context.Background(), tc.id)
+		if !ok {
+			t.Errorf("%s: unpriced (%s)", tc.id, tc.why)
+			continue
+		}
+		if math.Abs(p.Input-tc.wantIn/1e6) > 1e-15 {
+			t.Errorf("%s: in = $%.2f/MTok, want $%.2f — %s", tc.id, p.Input*1e6, tc.wantIn, tc.why)
+		}
+	}
+	// These must NOT match anything in the file: falling through to the public map is the
+	// correct answer, and a wrong price that reads `complete` is worse than "unknown".
+	for _, id := range []string{
+		"azure/gpt-5.2-fast", "gpt-5-fast-preview", "standard-diffusion-xl", "my-premium-model",
+	} {
+		if p, ok := tb.Price(context.Background(), id); ok {
+			t.Errorf("%s matched a Bob tier and was priced at $%.2f/MTok in", id, p.Input*1e6)
+		}
+	}
+}

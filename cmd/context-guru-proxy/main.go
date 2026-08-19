@@ -827,15 +827,18 @@ func dashMode(m components.Mode) string {
 // fallback. MODEL_INFO_URL overrides the map source; MODEL_INFO=off disables it
 // (windows unknown => fraction triggers ignored, absolutes apply).
 func modelWindows() modelinfo.Resolver {
-	if strings.EqualFold(os.Getenv("MODEL_INFO"), "off") {
-		return nil
-	}
 	chain := modelinfo.Chain{}
-	// MODEL_PRICES first: an operator's own price list beats the public map, which
-	// prices the public API and not this gateway. A file that fails to load is FATAL
-	// rather than skipped — a silently-absent price list is indistinguishable from
-	// "these models are free", and every cost on the dashboard would be wrong by
-	// whatever margin the gateway's rates differ by. See deploy/service/prices.example.yaml.
+	// MODEL_PRICES first: an operator's own price list beats the public map, which prices the
+	// public API and not this gateway. A file that fails to load is FATAL rather than skipped
+	// — a silently-absent price list is indistinguishable from "these models are free", and
+	// every cost on the dashboard would be wrong by whatever margin the gateway's rates
+	// differ by. See deploy/service/prices.example.yaml.
+	//
+	// Loaded ABOVE the MODEL_INFO=off check, and outside it. `off` turns off the fetched
+	// public map — a network dependency, which is what an operator disables — and it must not
+	// also discard a local file they explicitly configured. With the check first, MODEL_PRICES
+	// was never even opened, so the fatal-on-malformed promise did not hold either and every
+	// row priced as `partial`: exactly the silent failure the promise exists to prevent.
 	if path := os.Getenv("MODEL_PRICES"); strings.TrimSpace(path) != "" {
 		t, err := modelinfo.LoadTable(path)
 		if err != nil {
@@ -843,6 +846,12 @@ func modelWindows() modelinfo.Resolver {
 		}
 		slog.Info("model price list loaded", "path", path, "entries", t.Len())
 		chain = append(chain, t)
+	}
+	if strings.EqualFold(os.Getenv("MODEL_INFO"), "off") {
+		if len(chain) == 0 {
+			return nil // no local list either: windows and prices are both unknown, as asked
+		}
+		return chain
 	}
 	return append(chain,
 		modelinfo.NewLiteLLM(os.Getenv("MODEL_INFO_URL"), nil, 0),

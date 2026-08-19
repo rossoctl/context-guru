@@ -356,16 +356,20 @@ func monthKey(tsMillis int64) string {
 	return time.UnixMilli(tsMillis).UTC().Format("2006-01")
 }
 
-// gatesJSON encodes a gate map for storage. Empty stays the empty STRING rather than
-// "{}" or NULL, so `gates <> ”` is the test for "this row has gate data" on rows written
-// before the column existed as well as rows whose component gated nothing.
+// gatesJSON encodes a gate map for storage.
+//
+// A component that gated NOTHING stores "{}", not the empty string. The two are different
+// facts and the UI shows them differently: "{}" is "this component turned nothing away",
+// while an empty string can only mean "written before this column existed", i.e. unknown.
+// Collapsing them made every healthy component read "unknown" - the exact confusion the
+// column was added to remove.
 func gatesJSON(g map[string]int) string {
-	if len(g) == 0 {
-		return ""
+	if g == nil {
+		return "{}"
 	}
 	b, err := json.Marshal(g)
 	if err != nil {
-		return ""
+		return "{}"
 	}
 	return string(b)
 }

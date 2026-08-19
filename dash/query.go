@@ -213,10 +213,13 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		}
 		c.Acted, c.Mutated, c.Reverted, c.Skipped = a != 0, m != 0, rv != 0, sk != 0
 		if gates != "" {
-			// A row written before the column existed, or one whose JSON is somehow
-			// unreadable, leaves Gates nil — which the UI shows as "unknown", not as
-			// "gated nothing".
-			_ = json.Unmarshal([]byte(gates), &c.Gates)
+			// "{}" decodes to an EMPTY map, which is the point: the UI shows that as "gated
+			// nothing". A row written before the column existed holds the empty string and
+			// leaves Gates nil, which the UI shows as "unknown"; so does unparseable JSON.
+			m := map[string]int{}
+			if err := json.Unmarshal([]byte(gates), &m); err == nil {
+				c.Gates = m
+			}
 		}
 		e.Components = append(e.Components, c)
 	}
@@ -442,7 +445,9 @@ type ComponentRow struct {
 	// window. For a component with act_rate 0 it is the whole story, and it used to be
 	// visible only in /stats (service-wide) and the log line (per request) — never in the
 	// dashboard, which is what a user opens when they ask why nothing was compacted.
-	Gates map[string]int64 `json:"gates,omitempty"`
+	// Not omitempty - see CompRow.Gates. Over a window an absent map means no row in it
+	// carried gate data at all.
+	Gates map[string]int64 `json:"gates"`
 }
 
 // Components aggregates per-component accounting over the filtered window.
@@ -521,7 +526,7 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	// the widest text on each of them.
 	gq := `SELECT c.component, j.key, SUM(CAST(j.value AS INTEGER))
 		FROM request_components c JOIN requests r ON r.id = c.request_id, json_each(c.gates) j
-		WHERE ` + cond + ` AND c.gates <> '' GROUP BY 1, 2`
+		WHERE ` + cond + ` AND json_valid(c.gates) GROUP BY 1, 2`
 	grows, err := d.sql.Query(gq, args...)
 	if err != nil {
 		return nil, err

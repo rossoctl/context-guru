@@ -144,6 +144,14 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(r.output_tokens),0),
 		COALESCE(SUM(r.cost_usd),0), COALESCE(SUM(r.baseline_cost_usd),0), COALESCE(SUM(r.cg_llm_cost_usd),0),
 		COALESCE(SUM(r.cache_saved_usd),0),
+		-- The cache-saving subset that landed on requests where a component of ours whose job
+		-- IS the cache actually acted. Folded into this aggregate rather than run as a second
+		-- query, so a dashboard load still costs one scan of the window (measured: 199 ms as
+		-- its own query over 200,000 rows). A CASE, not a JOIN: joining request_components
+		-- would multiply every other SUM here by the number of components that ran.
+		COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM request_components c
+			WHERE c.request_id = r.id AND c.mutated = 1
+			  AND c.component IN ('cachesplit','cacheinject')) THEN r.cache_saved_usd ELSE 0 END),0),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0),
 		COALESCE(SUM(CASE WHEN r.uncompressed_reason <> '' THEN 1 ELSE 0 END),0),
@@ -152,7 +160,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.FreshInput, &o.CacheRead, &o.CacheWrite,
 		&o.OutputTokens, &o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD,
-		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
+		&o.CacheSavedProtectedUSD, &cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal)
 	if err != nil {
 		return nil, err
@@ -168,15 +176,6 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	}
 	o.NetSavedUSD = o.BaselineCostUSD - o.CostUSD - o.CGLLMCostUSD
 	o.TotalSavedUSD = o.NetSavedUSD + o.CacheSavedUSD
-	// The cache-saving subset that landed on requests where a component of ours whose
-	// job is the cache actually acted. One extra query rather than a column: which
-	// components those are is a property of this build, not of the row.
-	if err := d.sql.QueryRow(`SELECT COALESCE(SUM(r.cache_saved_usd),0) FROM requests r
-		WHERE `+cond+` AND EXISTS (SELECT 1 FROM request_components c
-			WHERE c.request_id = r.id AND c.mutated = 1 AND c.component IN ('cachesplit','cacheinject'))`,
-		args...).Scan(&o.CacheSavedProtectedUSD); err != nil {
-		return nil, err
-	}
 
 	for name, col := range map[string]string{
 		"accounting": "token_accounting", "cache_miss": "cache_miss_reason", "uncompressed": "uncompressed_reason",
@@ -255,8 +254,9 @@ func (o *Overview) denominators() []Denominator {
 	return ds
 }
 
-// waterfall builds the honest cost walk: baseline, each reduction, each penalty
-// we owe back, and the net. Signed deltas, so the UI just accumulates.
+// waterfall builds the honest cost walk: baseline, each reduction, each penalty we owe back,
+// and the net. Signed deltas — negative is money not spent — and each bar is drawn against
+// the largest absolute delta rather than accumulated, so a step may be read on its own.
 func (o *Overview) waterfall() []WaterfallStep {
 	compactionSaving := o.BaselineCostUSD - o.CostUSD
 	// Split the compaction saving into the part attributable to LLM-based
@@ -265,14 +265,17 @@ func (o *Overview) waterfall() []WaterfallStep {
 		{Key: "baseline", Label: "Baseline cost (no context-guru)", DeltaUSD: o.BaselineCostUSD, Total: true,
 			Description: "What this window's requests would have cost with nothing removed: the " +
 				"billed cost, plus the UNIQUE removed tokens priced at the cache-WRITE rate they " +
-				"would have entered as, plus the re-sent remainder priced at the cache-READ rate " +
-				"the provider would have served it from."},
+				"would have entered as, plus the re-sent remainder priced at the rate each request " +
+				"ACTUALLY paid — the cache-read rate where its cache hit, the cache-creation rate " +
+				"where it had expired and the whole prompt was re-billed."},
 		{Key: "compaction", Label: "Compaction savings", DeltaUSD: -compactionSaving,
 			Description: "Cost avoided because content never reached the provider. Only the UNIQUE " +
-				"saving earns the cache-write rate (~11.5x a read on a prompt-caching backend); the " +
-				"re-sent remainder earns the read rate, because that is all it would ever have been " +
-				"billed at. Pricing gross savings as writes is how a dashboard overstates itself by " +
-				"its own overcount_ratio."},
+				"saving earns the cache-write rate (12.5x a read on a prompt-caching backend); the " +
+				"re-sent remainder earns whatever the request itself was billed at, which is the " +
+				"read rate on a warm turn and the creation rate on a turn whose cache had expired. " +
+				"Pricing gross savings as writes is how a dashboard overstates itself by its own " +
+				"overcount_ratio; pricing an expired turn's removals as reads was how this one " +
+				"understated the turns that matter most."},
 		{Key: "cg_llm", Label: "context-guru's own LLM cost", DeltaUSD: o.CGLLMCostUSD,
 			Description: "What context-guru's own model calls (extract_llm, summarize) cost. Paid " +
 				"out of the savings above; a component whose spend exceeds its saving is " +
@@ -291,8 +294,13 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"cache components acted. Not inside net savings: the baseline above already " +
 				"assumes the cache behaved as it did, so adding it there would double-count."},
 		{Key: "total_saved", Label: "Total cost avoided", DeltaUSD: o.TotalSavedUSD, Total: true,
-			Description: "Net compaction savings plus prompt-cache savings: everything this " +
-				"window did not pay, against a world with neither compaction nor a warm cache."},
+			Description: "Net compaction savings plus prompt-cache savings: what this window did " +
+				"not pay for what it sent, plus what it did not pay for what we removed. The two " +
+				"token sets are disjoint, so nothing is counted twice — but this is not the cost " +
+				"of a fully uncached world either, because the compaction half still prices a warm " +
+				"turn's re-sent remainder as a cache read. It also includes requests context-guru " +
+				"did not touch: on bypassed or observe-mode traffic the compaction half is zero " +
+				"and every dollar here is the provider's cache."},
 	}
 	return steps
 }

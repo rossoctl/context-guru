@@ -368,3 +368,53 @@ func TestSplitDoesNotDuplicateBedrockCachePoint(t *testing.T) {
 		}
 	}
 }
+
+// The split is reported against the `cachesplit` component when it fires.
+//
+// It never was: the split edits the top-level `system` array, which components cannot see,
+// so Cachesplit.Reformat unconditionally sets Skipped and every report read "declined" — on
+// the requests where the measured −34.1%-cost mechanism had just run. The dashboard derives
+// `mutated` from `skipped`, so the share of prompt-cache savings attributable to our own
+// prefix placement was structurally $0.00 on every deployment that uses the default presets.
+func TestSplitIsReportedAgainstCachesplit(t *testing.T) {
+	full, _, _ := blockWithGitTail(6000)
+	pipe := pipeWith(t, "pipeline: [cachesplit]\n")
+
+	find := func(tr Trace) (components.Report, bool) {
+		if tr.Run == nil {
+			return components.Report{}, false
+		}
+		for _, r := range tr.Run.Components {
+			if r.Component == "cachesplit" {
+				return r, true
+			}
+		}
+		return components.Report{}, false
+	}
+
+	res := BodyOpts(context.Background(), pipe, store.NewMemory(store.Options{}), Opts{
+		Provider: bschemas.Anthropic, Body: sysBody(textBlock(full, true)), Session: "s-split",
+	})
+	rep, ok := find(res.Trace)
+	if !ok {
+		t.Fatal("no cachesplit report at all")
+	}
+	if rep.Skipped {
+		t.Error("the split fired and cachesplit still reported skipped: the dashboard reads " +
+			"mutated from that, so the component looks inert and nothing can be attributed to it")
+	}
+	if rep.Saved() != 0 {
+		t.Errorf("the split saves no CONTENT tokens; reported %d", rep.Saved())
+	}
+
+	// And when it does not fire, the report must still say skipped — a component credited for
+	// work it did not do is the same defect in the other direction.
+	res = BodyOpts(context.Background(), pipe, store.NewMemory(store.Options{}), Opts{
+		Provider: bschemas.Anthropic, Session: "s-nosplit",
+		Body: []byte(`{"model":"claude-sonnet-5","system":[{"type":"text","text":"short"}],` +
+			`"messages":[{"role":"user","content":"hi"}]}`),
+	})
+	if rep, ok := find(res.Trace); ok && !rep.Skipped {
+		t.Error("cachesplit reported work on a request with nothing to split")
+	}
+}

@@ -547,8 +547,11 @@ function renderTiles(o) {
   // same ("gross" vs "unique"). Anything that only restated the label is gone — "Tokens
   // before / content tokens in" was a caption explaining a caption.
   host.appendChild(tileGroup(null, null, [
+    // Two savings, added. It can be positive on traffic context-guru never touched — on a
+    // bypassed or observe-mode window the compaction half is zero and all of this is the
+    // provider's cache — so the sub-line names both halves rather than implying credit.
     tile('total-saved-usd', 'Total dollars avoided', costKnown ? usd(o.total_saved_usd) : 'unknown',
-      'compaction + prompt cache', costKnown ? (o.total_saved_usd < 0 ? 'bad' : 'good') : ''),
+      'compaction + provider cache', costKnown ? (o.total_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-usd', 'Net dollars saved', costKnown ? usd(o.net_saved_usd) : 'unknown',
       'baseline − actual − our spend', costKnown ? (o.net_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-unique', 'Tokens saved (unique)', compact(o.saved_unique),
@@ -954,8 +957,12 @@ function syncDimPicker(dims) {
  * This is the answer to the question the components table could not answer before —
  * "act rate 0%, why?" — and it is the difference between a Bob user concluding
  * context-guru does nothing and reading `no_filter_match 15`, which says the heuristics
- * were written for another agent's tool-output shapes. An absent map means the row
- * predates the column: "unknown", not "gated nothing".
+ * were written for another agent's tool-output shapes.
+ *
+ * Three states, all different: a populated map is the reasons; an EMPTY map is "this
+ * component turned nothing away"; a MISSING map is "unknown" — on a request row that means
+ * it was written before the column existed, and on an aggregate row that no row in the
+ * window carried gate data at all.
  */
 function gateSummary(gates) {
   if (!gates) return el('span', { class: 'na', text: 'unknown' });

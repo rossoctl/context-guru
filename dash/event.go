@@ -243,7 +243,10 @@ type CompRow struct {
 	// the thing a user actually opens — had a table of zeros with no explanation. On a
 	// Bob session almost every row is a gate name, because the offload heuristics were
 	// tuned on Claude Code's tool-output shapes.
-	Gates map[string]int `json:"gates,omitempty"`
+	// Not omitempty: an EMPTY map means "gated nothing" and a MISSING field means "this row
+	// predates the column". The UI renders the first as a dash and the second as "unknown",
+	// and omitempty made every healthy component look like the second.
+	Gates map[string]int `json:"gates"`
 }
 
 // ContentRow is one rewritten message's before/after text (already redacted and
@@ -409,15 +412,17 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 //     window that is a 13.1x overcount — a factor this dashboard computes and
 //     displays as `overcount_ratio` right beside the dollar figure. Only
 //     SavedUnique is content that genuinely never reached the provider.
-//   - Pricing everything at the cache-WRITE rate. That rate (11.5x a read) is
+//   - Pricing everything at the cache-WRITE rate. That rate (12.5x a read) is
 //     right for content entering the prompt for the first time. The re-sent
-//     remainder would have been served from the provider's cache, so the most it
-//     could have been billed at is the cache-READ rate. Pricing it as a write
-//     multiplies the overcount by another ~11.5.
+//     remainder, on a turn whose cache HIT, would have been served from the
+//     provider's cache, so the most it could have been billed at is the
+//     cache-READ rate. Pricing it as a write multiplies the overcount by ~12.5.
 //
-// So: unique savings at the write rate, the re-sent remainder at the read rate.
-// Restored (expanded) content is content we removed and then had to serve back,
-// so it is added to the ACTUAL cost side, never subtracted from baseline.
+// So: unique savings at the write rate, and the re-sent remainder at the rate the
+// request itself actually paid — see repeatRate, which is where "whose cache hit"
+// stopped being an assumption. Restored (expanded) content is content we removed
+// and then had to serve back, so it is added to the ACTUAL cost side, never
+// subtracted from baseline.
 //
 // accountingComplete=false leaves every cost at zero and the row is marked
 // partial/missing: a cost we cannot compute must read as unknown, not as free.
@@ -475,7 +480,7 @@ func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
 // transcript is served from the provider's cache. That is true only of a request
 // whose cache actually HIT. When it missed, the provider re-billed the entire prompt
 // — so the content we had removed would have been re-billed too, at the
-// cache-creation rate (11.5x a read on the Anthropic family), or at the fresh rate
+// cache-creation rate (12.5x a read on the Anthropic family), or at the fresh rate
 // where nothing was written.
 //
 // This is not a rounding correction. On production traffic, turns whose cache had
@@ -483,14 +488,27 @@ func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
 // their re-sent remainder as reads understated the value of removing it by ~12x, on
 // exactly the turns where removing it is worth the most.
 //
-// A PARTIAL hit (some read, some written) keeps the read rate: which side of the
-// boundary the removed content sat on is not knowable from the usage block, and
-// understating is the safe direction for a savings figure.
+// Three guards keep this from inflating, which is the only direction that matters for a
+// savings figure:
+//
+//   - A PARTIAL hit (some read, some written) keeps the read rate: which side of the
+//     boundary the removed content sat on is not knowable from the usage block.
+//   - A cache WRITE only earns the write rate when the write actually covers the prompt.
+//     `cache_write > 0` does not mean the prompt was cached: a client with one breakpoint
+//     after `tools` bills `cache_creation=2k, input=100k`, and the removed transcript there
+//     would have been billed FRESH, not at 1.25x. So the write rate needs the written part
+//     to be at least as large as the fresh part.
+//   - Everything else is the fresh rate, never zero.
+//
+// It still UNDER-states in one known case, deliberately. In cache-aware mode compaction only
+// touches the uncached tail, so on a hit turn the removed content would have been billed
+// fresh rather than as a read — the event carries FrozenTokens and could tell. Correcting
+// that would raise reported savings, so it waits for a measurement rather than an argument.
 func (e *Event) repeatRate(p modelinfo.Price) float64 {
 	if e.CacheRead > 0 {
 		return p.CacheRead
 	}
-	if e.CacheWrite > 0 {
+	if e.CacheWrite > 0 && e.CacheWrite >= e.FreshInput {
 		return p.CacheWrite
 	}
 	return p.Input

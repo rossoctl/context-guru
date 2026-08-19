@@ -2,8 +2,10 @@ package dash
 
 import (
 	"database/sql"
+	"encoding/json"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -212,8 +214,35 @@ func TestGatesReachTheDashboard(t *testing.T) {
 	if got.Components[0].Gates["no_filter_match"] != 15 {
 		t.Errorf("per-request gates = %v", got.Components[0].Gates)
 	}
-	// A component that gated nothing must read as an empty map or nil, never as a gate.
 	if len(got.Components) != 2 {
 		t.Fatalf("%d component rows", len(got.Components))
+	}
+
+	// "Gated nothing" and "written before this column existed" are DIFFERENT facts, and the
+	// UI renders them differently ("—" against "unknown"). A component that declined nothing
+	// must therefore arrive as an empty map, not as an absent one — with omitempty on the
+	// field and "" in the column, every healthy component read "unknown", which is the
+	// confusion this column was added to remove.
+	e3 := &Event{TS: 1002, SessionID: "s", Model: "m", TokensBefore: 10, TokensAfter: 10,
+		Components: []CompRow{{Component: "format", Kind: "reformat", Acted: true, Mutated: true}}}
+	if err := db.insertBatch([]*Event{e3}); err != nil {
+		t.Fatal(err)
+	}
+	got3, err := db.Request(3, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got3.Components[0].Gates == nil {
+		t.Error("a component that gated nothing came back as nil, i.e. as \"unknown\"")
+	}
+	if len(got3.Components[0].Gates) != 0 {
+		t.Errorf("gates = %v, want empty", got3.Components[0].Gates)
+	}
+	b, err := json.Marshal(got3.Components[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"gates":{}`) {
+		t.Errorf("the empty map is omitted from the JSON the UI reads: %s", b)
 	}
 }
