@@ -733,6 +733,47 @@ print("  cg_requests_total = %s" % r[0]["value"][1] if r else "  EMPTY — targe
     no "query failed"
   fi
 
+  # Every panel of the HOST dashboard, asked whether it would actually draw anything.
+  #
+  # This check exists because a panel that queries a series this kernel or this exporter does
+  # not produce renders EMPTY, which looks exactly like a healthy idle box — and PromQL that
+  # parses is no evidence at all. Two of the eighteen were caught this way on first install:
+  # load-per-core divided a labelled series by a bare aggregate (no labels, so vector matching
+  # matched nothing), and the pressure-stall panels needed /proc/pressure, which this kernel
+  # does not expose.
+  say "Host dashboard panels with no data"
+  if ! python3 - "$OBS_ETC/grafana/dashboards/context-guru-host.json" <<'PY' 2>/dev/null; then
+import json, sys, urllib.parse, urllib.request
+try:
+    d = json.load(open(sys.argv[1]))
+except OSError as e:
+    print("  cannot read the dashboard: %s" % e)
+    raise SystemExit(0)
+bad = []
+for p in d.get("panels", []):
+    for t in p.get("targets", []):
+        e = t.get("expr")
+        if not e:
+            continue
+        try:
+            u = "http://127.0.0.1:9090/api/v1/query?" + urllib.parse.urlencode({"query": e})
+            with urllib.request.urlopen(u, timeout=10) as r:
+                out = json.load(r)
+        except Exception as err:
+            bad.append((p.get("title"), "query failed: %s" % err))
+            continue
+        if out.get("status") != "success":
+            bad.append((p.get("title"), "rejected: %s" % out.get("error")))
+        elif not out["data"]["result"]:
+            bad.append((p.get("title"), "no data"))
+if not bad:
+    print("  all panels return data")
+for title, why in bad:
+    print("  EMPTY  %-42s %s" % (title, why))
+PY
+    no "could not check the host panels"
+  fi
+
   say "Loki"
   # `ready` is the one that matters: Loki answers /metrics while its ingester is still
   # coming up, so a health check that only tests the port reports green for a minute

@@ -379,7 +379,7 @@
    "id": 7,
    "type": "stat",
    "title": "Load, 5m / core",
-   "description": "Run-queue length divided by core count. Above 1 means work is waiting for CPU \u2014 the one number that distinguishes a slow upstream from a saturated box.",
+   "description": "Run-queue length divided by core count. Above 1 means work is waiting for CPU \u2014 the one number that distinguishes a slow upstream from a saturated box. The core count is wrapped in scalar() deliberately: as a bare aggregate it carries no labels, so dividing a labelled node_load5 by it matches nothing and the panel reads empty rather than wrong.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -397,7 +397,7 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "node_load5{job=\"node\"} / count(count by (cpu) (node_cpu_seconds_total{job=\"node\",mode=\"idle\"}))",
+     "expr": "node_load5{job=\"node\"} / scalar(count(count by (cpu) (node_cpu_seconds_total{job=\"node\",mode=\"idle\"})))",
      "editorMode": "code",
      "legendFormat": "Load, 5m / core",
      "instant": true,
@@ -827,7 +827,7 @@
   {
    "id": 15,
    "type": "row",
-   "title": "Processes, file descriptors and kernel pressure",
+   "title": "Processes, file descriptors and disk utilisation",
    "collapsed": false,
    "gridPos": {
     "h": 1,
@@ -982,8 +982,8 @@
   {
    "id": 18,
    "type": "timeseries",
-   "title": "Pressure stall (PSI): time spent waiting",
-   "description": "The kernel's own answer to \"is this box short of something?\", which no utilisation number gives: the share of wall time tasks spent WAITING on cpu, memory or io. Utilisation at 100% with zero pressure is a box working; a few percent of pressure with moderate utilisation is a box already queueing. This is the panel that distinguishes a slow gateway from a starved host.",
+   "title": "Disk busy",
+   "description": "Share of wall time each device had at least one I/O in flight \u2014 disk utilisation, the counterpart to the CPU panel. A device pinned near 100% while throughput is unremarkable is a device that is seeking, and on this box the writers are the dashboard database, the log sink and Prometheus's own TSDB compaction.\n\nKernel pressure-stall (PSI) would be the better metric and is not available: it needs /proc/pressure, which this kernel does not expose, so node_exporter reports node_scrape_collector_success{collector=\"pressure\"} 0 and every PSI panel would read empty \u2014 which looks identical to a healthy box.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -1001,29 +1001,9 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "rate(node_pressure_cpu_waiting_seconds_total{job=\"node\"}[5m])",
      "editorMode": "code",
-     "legendFormat": "cpu"
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "rate(node_pressure_memory_waiting_seconds_total{job=\"node\"}[5m])",
-     "editorMode": "code",
-     "legendFormat": "memory"
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "rate(node_pressure_io_waiting_seconds_total{job=\"node\"}[5m])",
-     "editorMode": "code",
-     "legendFormat": "io"
+     "expr": "rate(node_disk_io_time_seconds_total{job=\"node\"}[5m])",
+     "legendFormat": "{{device}}"
     }
    ],
    "fieldConfig": {
@@ -1039,7 +1019,8 @@
        "group": "A"
       }
      },
-     "mappings": []
+     "mappings": [],
+     "min": 0
     },
     "overrides": []
    },

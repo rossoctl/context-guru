@@ -38,6 +38,19 @@ Not systemd's unit states, deliberately: node_exporter's systemd collector needs
 this host. One panel does not justify handing that to a metrics exporter —
 `up{job="context-guru"}` on the SLO dashboard answers the same question from outside.
 
+Not kernel pressure-stall either, on this box: PSI needs `/proc/pressure`, which the RHEL 9
+kernel here does not expose, so `node_scrape_collector_success{collector="pressure"}` is `0`
+and every PSI panel would read empty. Disk utilisation
+(`rate(node_disk_io_time_seconds_total[5m])`) answers the same "is something starved?"
+question from what this kernel does report. If you run this on a host with PSI enabled, those
+series are worth a panel.
+
+**`grafana-status` checks every host panel for data**, not just for a scrape target being up.
+That check is there because PromQL which *parses* is no evidence: a panel querying a series
+this kernel or exporter does not produce renders empty, which is indistinguishable from a
+healthy idle box. Two of the eighteen were caught by it on first install — the one above, and
+load-per-core, which divided a labelled series by a bare aggregate and so matched nothing.
+
 Its top row alone settles the question: exporter up, uptime, CPU, memory, disk, load per
 core. If those panels are empty, read the **Exporter** stat first — empty means the
 exporter is missing or unscraped, not that the box is idle.
