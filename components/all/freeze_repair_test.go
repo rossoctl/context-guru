@@ -2,6 +2,7 @@ package all_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,11 @@ import (
 // varyingModel returns a DIFFERENT valid projection on each call — exactly what a SAMPLED
 // model may do. cheapmodel sends no temperature and no seed, so extract_llm's replacement
 // text is not reproducible.
+//
+// Each variant is a DERIVED projection (a prefix of INPUT of a varying length), not invented
+// text: the acceptance gate now requires the result to derive from the input, so a stub that
+// answers with a string absent from the body is refused before this fixture's real subject —
+// what happens to a LOST decision at depth — is reached.
 type varyingModel struct {
 	mu sync.Mutex
 	n  int
@@ -25,7 +31,7 @@ func (m *varyingModel) Complete(context.Context, string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.n++
-	return "OUTPUT = \"projection variant " + strings.Repeat("x", m.n) + "\"\n", nil
+	return "OUTPUT = INPUT[:" + strconv.Itoa(200+m.n) + "]\n", nil
 }
 
 func (m *varyingModel) calls() int {

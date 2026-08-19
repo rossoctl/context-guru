@@ -132,8 +132,15 @@ func TestSummarizeEmptyResponseSkips(t *testing.T) {
 	}
 }
 
-// TestExtractRLMUsesModel: strategy=rlm currently maps to code and still runs the
-// model's filter (not silently deterministic).
+// TestExtractRLMUsesModel: strategy=rlm runs the MODEL's filter (not silently the
+// deterministic projection) and its result is spliced in.
+//
+// The stub answers with the reduced VALUE, which is what the rlm/single leg asks for — it
+// prompts for "a smaller value of the same shape", not for a program. It used to answer
+// with a Starlark program, and that program's SOURCE was accepted as the reduction and
+// spliced into the transcript in place of the tool output: smaller, sane, and completely
+// unrelated to the input. The gate now requires the result to derive from the input, so
+// that no longer passes anywhere — including here.
 func TestExtractRLMUsesModel(t *testing.T) {
 	// economic_gate: false — this is a MECHANISM test (does the model-written filter
 	// run and reduce?), and its small fixture output is genuinely uneconomic, so the
@@ -147,8 +154,8 @@ func TestExtractRLMUsesModel(t *testing.T) {
 		{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: strp("find keep")}},
 		toolMsg(body),
 	}}
-	filter := "data = json.decode(INPUT)\nOUTPUT = json.encode([r for r in data if \"keep\" in r[\"name\"]])\n"
-	c := &components.Ctx{Ctx: context.Background(), Store: st, Model: components.ModelSpec{Static: stubModel{resp: filter}}}
+	kept := `[{"id":1,"name":"keep this one ` + pad + `"}]`
+	c := &components.Ctx{Ctx: context.Background(), Store: st, Model: components.ModelSpec{Static: stubModel{resp: kept}}}
 	var rep components.Report
 	if keys, err := off.Offload(req, &rep, c); err != nil || len(keys) != 1 {
 		t.Fatalf("rlm should run the model filter: keys=%v err=%v skipped=%v", keys, err, rep.Skipped)
