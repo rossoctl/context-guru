@@ -113,6 +113,8 @@ nav:
           - extract_llm: components/extract_llm.md
           - smartcrush: components/smartcrush.md
           - mask: components/mask.md
+          - coref: components/coref.md
+          - "coref cheat sheet": reference/coref-glossary.md
           - summarize: components/summarize.md
           - agentdiet: components/agentdiet.md
       - The DSL filter engine:
@@ -134,6 +136,8 @@ nav:
       - Component internals & examples: results/components.md
       - Reproduce the results: results/REPRODUCE.md
       - Improvement plan: results/improvement-plan.md
+      - "Co-reference density (measurement)": results/coref-density.md
+      - "Co-reference selection (experiment)": results/coref-selection-experiment.md
       - "SWE-bench Verified: per-arm detail":
           - baseline: results/baseline.md
           - context-guru: results/context-guru.md
@@ -146,6 +150,9 @@ nav:
           - context-guru: results/terminal-bench-context-guru.md
           - headroom: results/terminal-bench-headroom.md
           - rtk: results/terminal-bench-rtk.md
+  - Proposals:
+      - "Co-reference-aware compaction": proposals/coref-compaction.md
+      - "…implementation status": proposals/coref-implementation.md
   - Integrations:
       - Host adapters: integrations.md
       - bifrost plugin: how-to/bifrost-plugin.md

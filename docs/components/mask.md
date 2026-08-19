@@ -40,6 +40,36 @@ the biggest lever (~27% content-token savings, no reward loss — see
 
 ## When it's inert
 
-≤ `keep_recent` tool outputs, small outputs.
+≤ `keep_recent` tool outputs, small outputs — **and, structurally, every request on a
+caching backend.** That last one is not a tuning caveat; it is geometry, and it was found while
+measuring [`coref`](coref.md).
+
+!!! danger "On sequential caching traffic `mask` masks nothing, for any `keep_recent ≥ 1`"
+    `mask` consults `TailOnly` before modifying a message, because editing content the provider
+    has already cached breaks the prefix hash and forces a cache-write. `TailOnly` permits index
+    `i` only when `i > MaxCachedIdx`, and on a sequential conversation `MaxCachedIdx = prevLen − 1`
+    — everything the *previous* request contained.
+
+    But `mask`'s candidates are, by definition, the outputs **older** than the newest
+    `keep_recent`. On turn *N* every one of those was present in turn *N−1*, so every candidate
+    sits at `i ≤ prevLen − 1` and every candidate is refused. **The candidate set and the
+    permitted set are disjoint by construction**, and no value of `keep_recent ≥ 1` separates
+    them. A probe over captured sequential traffic masked **0 of 8** eligible outputs.
+
+    `repairLostFreeze` is what makes it *appear* to work in production: once a mask has been
+    frozen, the replacement is a pure function of `(content, config)`, so it can be re-derived
+    byte-identically at any depth and replayed. That covers **maintaining** existing masks — it
+    cannot **create** the first one at depth. So `mask` earns its savings on the turns before the
+    prefix is cached, then coasts.
+
+    **The published 12.5% / 27.5% figures therefore straddle a behaviour change** (the tail gate
+    commit) and should not be read as measurements of the current component on caching traffic.
+    Re-measuring them is outstanding.
+
+    This is also the cleanest statement of why [`coref`](coref.md) is shaped the way it is: it is
+    the only offloader that *deliberately ignores* `TailOnly`, because on a long session all the
+    cuttable mass is behind `MaxCachedIdx`, and an offloader that refuses to reach there can only
+    ever work on traffic that is not being cached.
 
 See also: [Components overview](../components.md) · [Choose a preset](../how-to/choose-a-preset.md)
+· [coref](coref.md)
