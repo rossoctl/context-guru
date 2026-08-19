@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS requests (
   cost_usd           REAL    NOT NULL DEFAULT 0,
   baseline_cost_usd  REAL    NOT NULL DEFAULT 0, -- what the same request would have cost uncompacted
   cg_llm_cost_usd    REAL    NOT NULL DEFAULT 0, -- context-guru's OWN model spend attributable here
+  -- What the provider's prompt cache saved on this request: its cache-read tokens priced
+  -- at the fresh rate, minus what they were billed. A saving we do not create but do
+  -- protect; reported beside compaction savings, never inside them.
+  cache_saved_usd    REAL    NOT NULL DEFAULT 0,
   cg_latency_ms      REAL    NOT NULL DEFAULT 0,
   upstream_ms        REAL    NOT NULL DEFAULT 0,
   expands            INTEGER NOT NULL DEFAULT 0,
@@ -301,12 +305,32 @@ CREATE INDEX IF NOT EXISTS idx_xcalls_tenant_ts ON extraction_calls(tenant_id, t
 CREATE INDEX IF NOT EXISTS idx_xcalls_session ON extraction_calls(session_id, ts);
 `
 
+// additiveColumns are columns added to an EXISTING table without a version bump.
+//
+// The same argument as additiveDDL, one step further: `ALTER TABLE … ADD COLUMN` with a
+// NOT NULL DEFAULT is non-destructive and instant in SQLite, every read of the column on
+// an old row yields the default, and every query that does not name it is unaffected. The
+// alternative is a version bump, which renames the file aside and discards every request
+// row — on the live service, thousands of them — to gain one column.
+//
+// So the rule additiveDDL states is narrowed, not broken: a NEW column with a default may
+// go here; a column without a default, a changed type, a renamed or dropped column, or a
+// changed index still needs a bump, because those cannot be reconciled with an old file.
+// Every entry must ALSO be present in `ddl` above, or a fresh database and an upgraded one
+// end up with different shapes.
+var additiveColumns = []struct{ table, column, ddl string }{
+	{"requests", "cache_saved_usd", "REAL NOT NULL DEFAULT 0"},
+}
+
 // migrate creates the schema and validates its version. A version mismatch is
 // reported to the caller, which renames the old file aside and retries — see Open.
 func migrate(db *sql.DB) error {
 	// Additive tables first, and on every open: an existing database at the current version
 	// returns early below, so a new table added to `ddl` would never appear on it.
 	if _, err := db.Exec(additiveDDL); err != nil {
+		return err
+	}
+	if err := addColumns(db); err != nil {
 		return err
 	}
 	var have string
@@ -326,6 +350,40 @@ func migrate(db *sql.DB) error {
 	}
 	_, err = db.Exec(`INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)`, fmt.Sprint(schemaVersion))
 	return err
+}
+
+// addColumns applies additiveColumns idempotently. It probes pragma table_info rather
+// than swallowing the "duplicate column name" error, so a genuine failure is still an
+// error; a table that does not exist yet is skipped, because `ddl` below will create it
+// with the column already in place.
+func addColumns(db *sql.DB) error {
+	for _, c := range additiveColumns {
+		rows, err := db.Query(`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`, c.table, c.column)
+		if err != nil {
+			return err
+		}
+		has := rows.Next()
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if has {
+			continue
+		}
+		// No such table yet (fresh database): nothing to alter.
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, c.table).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE ` + c.table + ` ADD COLUMN ` + c.column + ` ` + c.ddl); err != nil {
+			return fmt.Errorf("dash: add %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return nil
 }
 
 // versionMismatch signals that the file on disk was written by another schema.

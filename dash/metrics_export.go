@@ -75,6 +75,7 @@ type TenantMetricRow struct {
 	CostUSD       float64
 	BaselineUSD   float64
 	CGLLMCostUSD  float64
+	CacheSavedUSD float64
 	CGLatencyMs   float64
 	UpstreamMs    float64
 	Sessions      int64
@@ -94,7 +95,7 @@ func (d *DB) TenantMetrics(since int64) ([]TenantMetricRow, error) {
 		       COALESCE(t.requests,0), COALESCE(t.tokens_before,0), COALESCE(t.tokens_after,0),
 		       COALESCE(t.saved_unique,0), COALESCE(t.cache_read,0), COALESCE(t.cache_write,0),
 		       COALESCE(t.fresh_input,0), COALESCE(t.output_tokens,0),
-		       COALESCE(t.cost,0), COALESCE(t.baseline,0), COALESCE(t.cg_llm,0),
+		       COALESCE(t.cost,0), COALESCE(t.baseline,0), COALESCE(t.cg_llm,0), COALESCE(t.cache_saved,0),
 		       COALESCE(t.cg_ms,0), COALESCE(t.up_ms,0), COALESCE(t.sessions,0),
 		       COALESCE(a.n,0), COALESCE(a.bytes,0)
 		FROM (
@@ -103,12 +104,13 @@ func (d *DB) TenantMetrics(since int64) ([]TenantMetricRow, error) {
 		         SUM(saved_unique) saved_unique, SUM(cache_read) cache_read, SUM(cache_write) cache_write,
 		         SUM(fresh_input) fresh_input, SUM(output_tokens) output_tokens,
 		         SUM(cost_usd) cost, SUM(baseline_cost_usd) baseline, SUM(cg_llm_cost_usd) cg_llm,
+		         SUM(cache_saved_usd) cache_saved,
 		         AVG(cg_latency_ms) cg_ms, AVG(upstream_ms) up_ms,
 		         COUNT(DISTINCT session_id) sessions
 		  FROM requests WHERE ts >= ? GROUP BY tenant_id
 		  UNION ALL
 		  -- Tenants whose live rows have all been archived still deserve a row.
-		  SELECT tenant_id, 0,0,0,0,0,0,0,0,0,0,0,0,0,0 FROM archived_sessions
+		  SELECT tenant_id, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 FROM archived_sessions
 		  WHERE tenant_id NOT IN (SELECT tenant_id FROM requests WHERE ts >= ?)
 		  GROUP BY tenant_id
 		) t
@@ -125,7 +127,7 @@ func (d *DB) TenantMetrics(since int64) ([]TenantMetricRow, error) {
 		var t TenantMetricRow
 		if err := rows.Scan(&t.TenantID, &t.Requests, &t.TokensBefore, &t.TokensAfter,
 			&t.SavedUnique, &t.CacheRead, &t.CacheWrite, &t.FreshInput, &t.OutputTokens,
-			&t.CostUSD, &t.BaselineUSD, &t.CGLLMCostUSD, &t.CGLatencyMs, &t.UpstreamMs,
+			&t.CostUSD, &t.BaselineUSD, &t.CGLLMCostUSD, &t.CacheSavedUSD, &t.CGLatencyMs, &t.UpstreamMs,
 			&t.Sessions, &t.ArchivedCount, &t.ArchivedBytes); err != nil {
 			return nil, err
 		}

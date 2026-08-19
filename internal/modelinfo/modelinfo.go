@@ -234,10 +234,22 @@ func (l *LiteLLM) Price(ctx context.Context, model string) (Price, bool) {
 	if p, ok := l.priceBy[tail]; ok {
 		return p, true
 	}
+	// Last resort: a key that CONTAINS the bare id (claude-sonnet-5 vs
+	// anthropic.claude-sonnet-5). The SHORTEST such key wins, because the exact
+	// matches are already handled above, so the remaining candidates differ from the
+	// id only by decoration and the least-decorated one is the canonical entry
+	// (`gpt-5` over `gpt-5-nano`). This used to return the
+	// first hit of a Go map range, so which price a gateway id resolved to was
+	// randomised per process: `gpt-5` could pick up `gpt-5-nano`'s rates on one boot
+	// and `gpt-5-pro`'s on the next, and nothing in the dashboard would say so.
+	best, found := Price{}, ""
 	for k, p := range l.priceBy {
-		if strings.Contains(k, tail) {
-			return p, true
+		if strings.Contains(k, tail) && (found == "" || len(k) < len(found)) {
+			best, found = p, k
 		}
+	}
+	if found != "" {
+		return best, true
 	}
 	return Price{}, false
 }

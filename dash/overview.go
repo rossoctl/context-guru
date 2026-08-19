@@ -72,6 +72,17 @@ type Overview struct {
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
 	NetSavedUSD     float64 `json:"net_saved_usd"`
+	// CacheSavedUSD is what the provider's prompt cache saved over paying the fresh
+	// rate for the same tokens, and CacheSavedProtectedUSD is the part of it that
+	// landed on requests where one of OUR cache components acted — the honest upper
+	// bound on what to credit context-guru for, since the agent places most
+	// breakpoints itself.
+	CacheSavedUSD          float64 `json:"cache_saved_usd"`
+	CacheSavedProtectedUSD float64 `json:"cache_saved_protected_usd"`
+	// TotalSavedUSD is both savings together: what compaction avoided plus what the
+	// prompt cache avoided, less our own spend. The headline number, decomposed by
+	// the waterfall so no part of it is taken on trust.
+	TotalSavedUSD float64 `json:"total_saved_usd"`
 
 	CGLatencyMsAvg float64 `json:"cg_latency_ms_avg"`
 	UpstreamMsAvg  float64 `json:"upstream_ms_avg"`
@@ -132,6 +143,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(r.fresh_input),0), COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
 		COALESCE(SUM(r.output_tokens),0),
 		COALESCE(SUM(r.cost_usd),0), COALESCE(SUM(r.baseline_cost_usd),0), COALESCE(SUM(r.cg_llm_cost_usd),0),
+		COALESCE(SUM(r.cache_saved_usd),0),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0),
 		COALESCE(SUM(CASE WHEN r.uncompressed_reason <> '' THEN 1 ELSE 0 END),0),
@@ -139,7 +151,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.FreshInput, &o.CacheRead, &o.CacheWrite,
-		&o.OutputTokens, &o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD,
+		&o.OutputTokens, &o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD,
 		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal)
 	if err != nil {
@@ -155,6 +167,16 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		o.ExpandRate = float64(o.Expands) / float64(o.Requests)
 	}
 	o.NetSavedUSD = o.BaselineCostUSD - o.CostUSD - o.CGLLMCostUSD
+	o.TotalSavedUSD = o.NetSavedUSD + o.CacheSavedUSD
+	// The cache-saving subset that landed on requests where a component of ours whose
+	// job is the cache actually acted. One extra query rather than a column: which
+	// components those are is a property of this build, not of the row.
+	if err := d.sql.QueryRow(`SELECT COALESCE(SUM(r.cache_saved_usd),0) FROM requests r
+		WHERE `+cond+` AND EXISTS (SELECT 1 FROM request_components c
+			WHERE c.request_id = r.id AND c.mutated = 1 AND c.component IN ('cachesplit','cacheinject'))`,
+		args...).Scan(&o.CacheSavedProtectedUSD); err != nil {
+		return nil, err
+	}
 
 	for name, col := range map[string]string{
 		"accounting": "token_accounting", "cache_miss": "cache_miss_reason", "uncompressed": "uncompressed_reason",
@@ -260,6 +282,17 @@ func (o *Overview) waterfall() []WaterfallStep {
 		{Key: "net_saved", Label: "Net savings", DeltaUSD: o.NetSavedUSD, Total: true,
 			Description: "Baseline minus net. Negative means context-guru cost more than it saved " +
 				"in this window, which is a real outcome the dashboard will not hide."},
+		{Key: "cache_saved", Label: "Prompt-cache savings", DeltaUSD: -o.CacheSavedUSD,
+			Description: "A SECOND saving, outside the walk above: every cache-read token was " +
+				"billed at the read rate instead of the fresh rate it would have cost with no " +
+				"cache at all. The provider's mechanism, not ours — but a compaction proxy that " +
+				"rewrites deep history destroys it, so protecting it is work, and " +
+				"cache_saved_protected_usd is the part that landed on requests where one of our " +
+				"cache components acted. Not inside net savings: the baseline above already " +
+				"assumes the cache behaved as it did, so adding it there would double-count."},
+		{Key: "total_saved", Label: "Total cost avoided", DeltaUSD: o.TotalSavedUSD, Total: true,
+			Description: "Net compaction savings plus prompt-cache savings: everything this " +
+				"window did not pay, against a world with neither compaction nor a warm cache."},
 	}
 	return steps
 }

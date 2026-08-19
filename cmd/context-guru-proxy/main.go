@@ -625,6 +625,7 @@ func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRo
 			SavedUnique: r.SavedUnique, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite,
 			FreshInput: r.FreshInput, OutputTokens: r.OutputTokens,
 			CostUSD: r.CostUSD, BaselineUSD: r.BaselineUSD, CGLLMCostUSD: r.CGLLMCostUSD,
+			CacheSavedUSD: r.CacheSavedUSD,
 			CGLatencyMs: r.CGLatencyMs, UpstreamMs: r.UpstreamMs, Sessions: r.Sessions,
 			ArchivedCount: r.ArchivedCount, ArchivedBytes: r.ArchivedBytes,
 		})
@@ -829,10 +830,24 @@ func modelWindows() modelinfo.Resolver {
 	if strings.EqualFold(os.Getenv("MODEL_INFO"), "off") {
 		return nil
 	}
-	return modelinfo.Chain{
+	chain := modelinfo.Chain{}
+	// MODEL_PRICES first: an operator's own price list beats the public map, which
+	// prices the public API and not this gateway. A file that fails to load is FATAL
+	// rather than skipped — a silently-absent price list is indistinguishable from
+	// "these models are free", and every cost on the dashboard would be wrong by
+	// whatever margin the gateway's rates differ by. See deploy/service/prices.example.yaml.
+	if path := os.Getenv("MODEL_PRICES"); strings.TrimSpace(path) != "" {
+		t, err := modelinfo.LoadTable(path)
+		if err != nil {
+			log.Fatalf("MODEL_PRICES: %v", err)
+		}
+		slog.Info("model price list loaded", "path", path, "entries", t.Len())
+		chain = append(chain, t)
+	}
+	return append(chain,
 		modelinfo.NewLiteLLM(os.Getenv("MODEL_INFO_URL"), nil, 0),
 		modelinfo.DefaultStatic(),
-	}
+	)
 }
 
 // cheapModelFromEnv builds the static "config"-source LLM client for NeedsModel

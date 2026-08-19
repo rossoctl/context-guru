@@ -1,0 +1,76 @@
+# Operator price list — USD per MILLION tokens.
+#
+# Consulted BEFORE the public LiteLLM prices map, because a gateway does not charge
+# the public API's rates: ete-litellm bills aws/claude-sonnet-5 at $1.52/MTok in
+# where anthropic.com bills $3.00, so without this file every dollar figure on the
+# dashboard for that gateway was about twice the truth. It is also the only way to
+# price a model the public map has never heard of — a preview id, or a server-resolved
+# TIER like Bob's `premium`, which is not a model id at all.
+#
+# Install:  sudo install -m0644 prices.example.yaml /etc/context-guru/prices.yaml
+#           then set MODEL_PRICES=/etc/context-guru/prices.yaml (a systemd drop-in)
+#           and restart. The startup log line reports how many entries loaded.
+#
+# Rates here are LIST PRICES, not credentials. Nothing in this file is a secret.
+#
+# `in`/`out` are required. `cache_read`/`cache_write` are optional and default to
+# 0.1x and 1.25x of `in` (the Anthropic-family multiples) — ete-litellm does not
+# publish separate cache rates, and those multiples are what its Bedrock backend
+# bills. State them explicitly for any model where that stops being true.
+#
+# A trailing `*` matches a family. The longest match wins, so a specific id always
+# beats the family it belongs to regardless of order in this file.
+
+cache_read_frac: 0.1
+cache_write_frac: 1.25
+
+models:
+  # ── ete-litellm: bedrock ──────────────────────────────────────────────────────
+  - {match: "aws/claude-opus-5",     in: 3.80, out: 19.00}
+  - {match: "aws/claude-opus-4-8",   in: 3.80, out: 19.00}
+  - {match: "aws/claude-opus-4-7",   in: 3.80, out: 19.00}
+  - {match: "aws/us.claude-opus-4-7", in: 3.80, out: 19.00}
+  - {match: "aws/claude-opus-4-6",   in: 3.80, out: 19.00}
+  - {match: "aws/claude-sonnet-5",   in: 1.52, out: 7.60}
+  - {match: "aws/claude-sonnet-4-6", in: 2.28, out: 11.40}
+  - {match: "aws/claude-sonnet-4-5", in: 2.28, out: 11.40}
+  - {match: "aws/claude-haiku-4-5",  in: 0.76, out: 3.80}
+  - {match: "aws/gpt-oss-120b",      in: 0.15, out: 0.60}
+
+  # ── ete-litellm: azure ────────────────────────────────────────────────────────
+  - {match: "azure/gpt-4o",   in: 2.50, out: 10.00}
+  - {match: "azure/gpt-4.1",  in: 2.00, out: 8.00}
+  - {match: "azure/gpt-5-2025-08-07",      in: 1.25, out: 10.00}
+  - {match: "azure/gpt-5-mini-2025-08-07", in: 0.25, out: 2.00}
+  - {match: "azure/gpt-5-nano-2025-08-07", in: 0.05, out: 0.40}
+  - {match: "azure/gpt-5.1-codex-2025-11-13", in: 1.25, out: 10.00}
+  - {match: "azure/gpt-5.3-codex", in: 1.75, out: 14.00}
+  - {match: "azure/gpt-5.3-chat",  in: 1.75, out: 14.00}
+  - {match: "azure/gpt-5.4",       in: 2.50, out: 15.00}
+  - {match: "azure/gpt-5.5",       in: 2.50, out: 15.00}
+  - {match: "azure/gpt-5.6-sol",   in: 5.00, out: 30.00}
+  - {match: "azure/gpt-5.6-luna",  in: 1.00, out: 6.00}
+  - {match: "azure/gpt-5.6-terra", in: 2.50, out: 15.00}
+
+  # ── ete-litellm: vertex ───────────────────────────────────────────────────────
+  - {match: "gcp/gemini-2.0-flash",        in: 0.10, out: 0.40}
+  - {match: "gcp/gemini-2.5-flash",        in: 0.30, out: 2.50}
+  - {match: "gcp/gemini-2.5-pro",          in: 1.25, out: 10.00}
+  - {match: "gcp/gemini-3-pro-preview",    in: 2.00, out: 12.00}
+  - {match: "gcp/gemini-3.1-pro-preview",  in: 2.00, out: 12.00}
+  - {match: "gcp/gemini-3-flash-preview",  in: 0.50, out: 3.00}
+  - {match: "gcp/gemini-3.6-flash",        in: 1.50, out: 7.50}
+  - {match: "gcp/gemini-3.5-flash-lite",   in: 0.30, out: 2.50}
+
+  # ── Bob (BobShell) ────────────────────────────────────────────────────────────
+  # Bob names a TIER, not a model: the server picks what serves it, and the id on the
+  # wire is `premium`, `premium-ide`, `standard` or `fast`. These are therefore an
+  # operator ESTIMATE — the tier's usual backing model — and a Bob row's cost is only
+  # as good as this guess. Cross-check against the `session_costs` Bob itself prints
+  # (`-f stream-json`, the final `result` record) before trusting the absolute number;
+  # the ratios and the savings are unaffected by a uniform error here.
+  - {match: "premium*",  in: 1.52, out: 7.60, note: "estimate: claude-sonnet-5 class"}
+  - {match: "standard*", in: 0.76, out: 3.80, note: "estimate: claude-haiku-4-5 class"}
+  - {match: "fast*",     in: 0.15, out: 0.60, note: "estimate: gpt-oss-120b class"}
+  # Bob's own auxiliary calls (title generation, classification) name a real model.
+  - {match: "openai/gpt-oss-20b", in: 0.10, out: 0.40, note: "estimate: gpt-oss class"}

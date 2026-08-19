@@ -176,6 +176,7 @@ type TenantMetricRow struct {
 	CostUSD       float64
 	BaselineUSD   float64
 	CGLLMCostUSD  float64
+	CacheSavedUSD float64
 	CGLatencyMs   float64
 	UpstreamMs    float64
 	Sessions      int64
@@ -518,6 +519,11 @@ func (h *Handler) renderMetrics() string {
 				"What context-guru's own compaction model cost this tenant. Compare against the saving to see whether it paid for itself.", "gauge")
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_cg_llm_cost_usd", tenantLabels(t), t.CGLLMCostUSD)
+			}
+			promHeader(&b, "cg_tenant_cache_saved_usd",
+				"What the provider's prompt cache saved this tenant against paying the fresh rate for the same tokens. A saving context-guru does not create but does protect: rewriting a live prefix destroys it, so a drop here beside a rise in cg_tenant_baseline_cost_usd is compaction paying for itself with the cache.", "gauge")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_cache_saved_usd", tenantLabels(t), t.CacheSavedUSD)
 			}
 			promHeader(&b, "cg_tenant_tokens_total", "Content tokens per tenant, before and after compaction.", "counter")
 			for _, t := range rows {

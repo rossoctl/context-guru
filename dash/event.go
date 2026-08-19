@@ -84,7 +84,12 @@ type Event struct {
 	CostUSD         float64 `json:"cost_usd"`
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
-	CGLatencyMs     float64 `json:"cg_latency_ms"`
+	// CacheSavedUSD is what the provider's prompt cache saved on this request: its
+	// cache-read tokens priced at the fresh rate they would have cost with no cache,
+	// minus what they actually cost. Reported beside compaction savings, never added
+	// into them — see Price.
+	CacheSavedUSD float64 `json:"cache_saved_usd"`
+	CGLatencyMs   float64 `json:"cg_latency_ms"`
 	UpstreamMs      float64 `json:"upstream_ms"`
 
 	Expands      int `json:"expands"`
@@ -420,6 +425,21 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	e.TokenAccounting = AccountingComplete
 	e.CostUSD = p.Cost(e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens)
 	e.BaselineCostUSD = e.CostUSD + e.baselineDeltaUSD(p)
+	// What the provider's prompt cache saved on THIS request, which is a different
+	// saving from compaction's and was invisible until now: every cache-read token was
+	// billed at the read rate instead of the fresh rate it would have cost with no cache
+	// at all. It is the provider's mechanism, not ours — but keeping that prefix
+	// byte-stable is exactly what cache-aware compaction and cachesplit exist to do, and
+	// a component that protects it had nothing to show for it in dollars.
+	//
+	// Deliberately NOT folded into net savings: the baseline above already assumes the
+	// cache behaved as it did, so adding this to it would double-count. It is reported
+	// beside it, and the UI attributes the subset of it that lands on requests where one
+	// of our cache components actually acted.
+	e.CacheSavedUSD = float64(e.CacheRead) * (p.Input - p.CacheRead)
+	if e.CacheSavedUSD < 0 {
+		e.CacheSavedUSD = 0 // a provider whose cache reads cost MORE than fresh input saved nothing
+	}
 }
 
 // baselineDeltaUSD is what the removed content would have cost had it been sent:
@@ -437,7 +457,35 @@ func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
 	if unique < 0 {
 		unique = 0
 	}
-	return float64(unique)*p.CacheWrite + float64(gross-unique)*p.CacheRead
+	return float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)
+}
+
+// repeatRate is what the RE-SENT part of the removed content would have been billed
+// at on this request.
+//
+// The old answer was always the cache-read rate, on the reasoning that a re-sent
+// transcript is served from the provider's cache. That is true only of a request
+// whose cache actually HIT. When it missed, the provider re-billed the entire prompt
+// — so the content we had removed would have been re-billed too, at the
+// cache-creation rate (11.5x a read on the Anthropic family), or at the fresh rate
+// where nothing was written.
+//
+// This is not a rounding correction. On production traffic, turns whose cache had
+// expired were 4% of requests and 31% of spend, all of it cache_creation; pricing
+// their re-sent remainder as reads understated the value of removing it by ~12x, on
+// exactly the turns where removing it is worth the most.
+//
+// A PARTIAL hit (some read, some written) keeps the read rate: which side of the
+// boundary the removed content sat on is not knowable from the usage block, and
+// understating is the safe direction for a savings figure.
+func (e *Event) repeatRate(p modelinfo.Price) float64 {
+	if e.CacheRead > 0 {
+		return p.CacheRead
+	}
+	if e.CacheWrite > 0 {
+		return p.CacheWrite
+	}
+	return p.Input
 }
 
 // AttributeCache buckets this request's cache behavior. seenSession/seenModel say

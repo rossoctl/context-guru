@@ -547,6 +547,8 @@ function renderTiles(o) {
   // same ("gross" vs "unique"). Anything that only restated the label is gone — "Tokens
   // before / content tokens in" was a caption explaining a caption.
   host.appendChild(tileGroup(null, null, [
+    tile('total-saved-usd', 'Total dollars avoided', costKnown ? usd(o.total_saved_usd) : 'unknown',
+      'compaction + prompt cache', costKnown ? (o.total_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-usd', 'Net dollars saved', costKnown ? usd(o.net_saved_usd) : 'unknown',
       'baseline − actual − our spend', costKnown ? (o.net_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-unique', 'Tokens saved (unique)', compact(o.saved_unique),
@@ -575,6 +577,15 @@ function renderTiles(o) {
       costKnown ? 'as billed' : 'needs all four tiers'),
     tile('cost-cg', 'Our own LLM cost', costKnown ? usd(o.cg_llm_cost_usd) : 'unknown',
       'extract_llm, summarize'),
+    // The prompt cache is the other half of the money on this page, and it was missing
+    // from it entirely. It is deliberately a separate tile from "Net dollars saved": the
+    // baseline counterfactual already assumes the cache behaved as it did, so this is a
+    // second saving beside that one, not part of it.
+    tile('cache-saved', 'Prompt-cache savings', costKnown ? usd(o.cache_saved_usd) : 'unknown',
+      'cache reads vs the fresh rate', costKnown && o.cache_saved_usd > 0 ? 'good' : ''),
+    tile('cache-saved-protected', 'of which on our breakpoints',
+      costKnown ? usd(o.cache_saved_protected_usd) : 'unknown',
+      'requests where cachesplit acted'),
   ]));
 
   host.appendChild(tileGroup('Billed tokens', 'the four tiers the provider charges on', [
@@ -862,7 +873,7 @@ async function loadUsage() {
   const dayHost = $('#chart-daily');
   const breakHost = $('#chart-breakdown');
   const body = clear($('#breakdown-body'));
-  loadingRows(body, 8);
+  loadingRows(body, 10);
   try {
     // Per-day bars need no endpoint of their own: the series is bucketed in SQL from the
     // raw timestamp, so a day-wide bucket is a query parameter.
@@ -888,7 +899,7 @@ async function loadUsage() {
     const groups = bd.groups || [];
     clear(body);
     if (!groups.length) {
-      tableMessage(body, 8, 'Nothing to break down', 'No requests match the current filters.');
+      tableMessage(body, 10, 'Nothing to break down', 'No requests match the current filters.');
       emptyState(breakHost, 'Nothing to break down', 'No requests match the current filters.');
       return;
     }
@@ -912,12 +923,14 @@ async function loadUsage() {
         el('td', { class: 'num', text: compact(g.saved_unique) }),
         el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.spent_usd) }),
         el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.saved_usd) }),
+        el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.cache_saved_usd) }),
+        el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.total_saved_usd) }),
         el('td', { class: 'num', text: num(g.incomplete_rows) })));
     }
   } catch (err) {
     if (aborted(err)) return;
     clear(body);
-    tableMessage(body, 8, 'Could not load the breakdown', err.message);
+    tableMessage(body, 10, 'Could not load the breakdown', err.message);
     emptyState(breakHost, 'Could not load the breakdown', err.message, { error: true });
     emptyState(dayHost, 'Could not load daily usage', err.message, { error: true });
   }
