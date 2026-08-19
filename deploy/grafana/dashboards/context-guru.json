@@ -441,7 +441,7 @@
    },
    "gridPos": {
     "h": 5,
-    "w": 6,
+    "w": 4,
     "x": 0,
     "y": 7
    },
@@ -504,8 +504,8 @@
    },
    "gridPos": {
     "h": 5,
-    "w": 6,
-    "x": 6,
+    "w": 4,
+    "x": 4,
     "y": 7
    },
    "targets": [
@@ -568,8 +568,8 @@
    },
    "gridPos": {
     "h": 5,
-    "w": 6,
-    "x": 12,
+    "w": 4,
+    "x": 8,
     "y": 7
    },
    "targets": [
@@ -647,8 +647,8 @@
    },
    "gridPos": {
     "h": 5,
-    "w": 6,
-    "x": 18,
+    "w": 4,
+    "x": 12,
     "y": 7
    },
    "targets": [
@@ -706,7 +706,7 @@
    "id": 12,
    "type": "timeseries",
    "title": "Spend: actual against baseline",
-   "description": "Blue is what was billed; orange is what the same traffic would have cost uncompacted. The gap IS the saving \u2014 orange meeting or crossing blue means the tool is not paying for itself. One axis on purpose.",
+   "description": "Blue is what was billed; orange is what the same traffic would have cost uncompacted. The gap IS the saving \u2014 orange meeting or crossing blue means the tool is not paying for itself. One axis on purpose. The third series is what the prompt cache saved over the fresh rate: a separate saving from compaction's, and the one a too-aggressive pipeline spends.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -737,6 +737,16 @@
      "expr": "sum(cg_tenant_baseline_cost_usd)",
      "editorMode": "code",
      "legendFormat": "baseline (no compaction)"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum(cg_tenant_cache_saved_usd)",
+     "editorMode": "code",
+     "legendFormat": "saved by the prompt cache"
     }
    ],
    "fieldConfig": {
@@ -2938,6 +2948,126 @@
      "mode": "multi",
      "sort": "none"
     }
+   }
+  },
+  {
+   "id": 41,
+   "type": "stat",
+   "title": "Prompt cache saved this month",
+   "description": "What the provider's prompt cache saved against paying the fresh rate for the same tokens. Not context-guru's doing \u2014 but rewriting a live prefix destroys it, so this is the number that falls when compaction goes too deep, and cache-aware compaction is what keeps it up.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 16,
+    "y": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum(cg_tenant_cache_saved_usd)",
+     "editorMode": "code",
+     "legendFormat": "Prompt cache saved this month",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "currencyUSD",
+     "decimals": 2,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 42,
+   "type": "stat",
+   "title": "Total avoided this month",
+   "description": "Both savings together: compaction (baseline minus actual, minus what our own model calls cost) plus the prompt cache. The two are separate counterfactuals and are added, not nested \u2014 the compaction baseline already assumes the cache behaved as it did.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 20,
+    "y": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum(cg_tenant_baseline_cost_usd) - sum(cg_tenant_cost_usd) - sum(cg_tenant_cg_llm_cost_usd) + sum(cg_tenant_cache_saved_usd)",
+     "editorMode": "code",
+     "legendFormat": "Total avoided this month",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "currencyUSD",
+     "decimals": 2,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
    }
   }
  ]

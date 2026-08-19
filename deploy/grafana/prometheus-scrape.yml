@@ -19,6 +19,16 @@ scrape_configs:
         labels:
           service: context-guru
 
+  # The HOST itself: cpu, memory, disk, filesystem fill, network, load. Installed by
+  # `install.sh grafana` as the cg-node-exporter container, loopback only. Absent
+  # exporter => this target reads "down" and the host dashboard is empty, which is the
+  # honest outcome; nothing else is affected.
+  - job_name: node
+    static_configs:
+      - targets: ['127.0.0.1:9100']
+        labels:
+          service: context-guru-host
+
   # Scraping across the network. Uncomment, and put METRICS_TOKEN in the file below
   # rather than inline, so the token is not in your Prometheus config in plaintext.
   # - job_name: context-guru-remote

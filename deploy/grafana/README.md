@@ -1,12 +1,12 @@
 # Grafana for context-guru
 
-Three provisioned dashboards — two over the proxy's own `/metrics`, one over its logs —
-plus the Prometheus job and the Loki/promtail pair that feed them. Everything here is
+Four provisioned dashboards — two over the proxy's own `/metrics`, one over its logs, one
+over the HOST — plus the Prometheus jobs and the exporters that feed them. Everything here is
 **file-provisioned**: nothing is clicked into Grafana, so a redeploy cannot lose it and a
 review can read it.
 
 ```
-prometheus-scrape.yml                     the scrape job (merge into your prometheus.yml)
+prometheus-scrape.yml                     the scrape jobs (merge into your prometheus.yml)
 loki.yml                                  the log store: single binary, filesystem, 30d
 promtail.yml                              tails the JSON log sink into Loki
 context-guru.logrotate                    rotation for that sink (copytruncate; see the file)
@@ -16,7 +16,31 @@ provisioning/dashboards/context-guru.yml  where Grafana looks for the JSON
 dashboards/context-guru.json              the service dashboard, 6 rows
 dashboards/context-guru-slo.json          the SLO dashboard, 4 rows
 dashboards/context-guru-logs.json         the log dashboard, filterable by tenant/session/level/component
+dashboards/context-guru-host.json         the HOST dashboard, from node_exporter
 ```
+
+## Why a host dashboard
+
+The other three answer "is context-guru working". None answered "is this box healthy",
+which is the question behind every report that begins "it felt slow" — and the proxy
+cannot answer it about itself: a box that is out of memory, out of disk or out of CPU
+looks, from inside the proxy, like a slow upstream. `install.sh grafana` therefore also
+runs **node_exporter** (the `cg-node-exporter` container, loopback `:9100`, host `/proc`
+and `/sys` mounted read-only) and the `node` scrape job feeds
+`d/context-guru-host/context-guru-host`: CPU by mode, memory including swap, filesystem
+fill per mountpoint, disk and network throughput, file descriptors against the kernel
+limit, and systemd's own view of the `context-guru` and `nginx` units — the last of which
+still answers during a crash loop, because it reads the unit rather than the process.
+
+Its top row alone settles the question: exporter up, uptime, CPU, memory, disk, load per
+core. If those panels are empty, read the **Exporter** stat first — empty means the
+exporter is missing or unscraped, not that the box is idle.
+
+Two panels are worth reading beside the service dashboard rather than alone. Filesystem
+free sits next to the dashboard janitor's own guard (`--dashboard-disk-high`, 90%), so a
+line falling towards zero is history about to be evicted. Load per core is what separates
+a saturated box from a slow gateway, which is otherwise indistinguishable in the proxy's
+own latency numbers.
 
 ## Why Loki
 
@@ -46,9 +70,9 @@ and the ranking would flip the day we needed real full-text search over log bodi
 sudo deploy/service/install.sh grafana
 ```
 
-That is the whole install: it needs `docker` (or `podman`), pulls Prometheus, Grafana, Loki
-and promtail, writes the config under `/etc/context-guru/observability`, installs the
-logrotate snippet, and starts all four bound to **loopback only**. It is idempotent —
+That is the whole install: it needs `docker` (or `podman`), pulls Prometheus, Grafana, Loki,
+promtail and node_exporter, writes the config under `/etc/context-guru/observability`, installs the
+logrotate snippet, and starts all five bound to **loopback only**. It is idempotent —
 re-run it after editing a dashboard JSON and it re-copies the files and recreates the
 containers, which is how the edit takes effect. The TSDB, the log store and Grafana's
 database live outside the containers, so nothing is lost. Then:
@@ -56,6 +80,7 @@ database live outside the containers, so nothing is lost. Then:
 ```
 https://<host>/grafana/d/context-guru/context-guru            # through the front end, manager only
 https://<host>/grafana/d/context-guru-logs/context-guru-logs  # the logs
+https://<host>/grafana/d/context-guru-host/context-guru-host  # the box: cpu, memory, disk
 http://127.0.0.1:3000/grafana/d/context-guru/context-guru     # or ssh -L 3000:127.0.0.1:3000
 ```
 

@@ -1,0 +1,1046 @@
+{
+ "__comment": [
+  "The HOST this proxy runs on: cpu, memory, disk, filesystem fill, network, fds and the",
+  "systemd units. Backed entirely by node_exporter (the `node` scrape job), which",
+  "deploy/service/install.sh installs as the cg-node-exporter container.",
+  "",
+  "It exists because every other dashboard here answers 'is context-guru working' and",
+  "none answered 'is this box healthy' \u2014 the question behind every report that begins",
+  "'it felt slow'. Panels are ordered so the top row alone settles that: exporter up,",
+  "uptime, CPU, memory, disk, load.",
+  "",
+  "Empty panels mean the exporter is not installed or not scraped, not that the box is",
+  "idle: check the Exporter stat first, then `install.sh grafana-status`."
+ ],
+ "uid": "context-guru-host",
+ "title": "context-guru host",
+ "tags": [
+  "context-guru",
+  "host"
+ ],
+ "timezone": "browser",
+ "editable": false,
+ "graphTooltip": 1,
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "1m",
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "row",
+   "title": "Is the box healthy right now",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "panels": []
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Exporter",
+   "description": "Whether node_exporter answered the last scrape. 0 means the host panels below are stale or empty \u2014 `install.sh grafana` installs the cg-node-exporter container, and `grafana-status` lists it.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 0,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "up{job=\"node\"}",
+     "editorMode": "code",
+     "legendFormat": "Exporter",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#e66767",
+        "value": null
+       },
+       {
+        "color": "#199e70",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value_and_name",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "Uptime",
+   "description": "Time since boot. A number that keeps resetting is a box that keeps rebooting, which no request-level metric will tell you.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 4,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "time() - node_boot_time_seconds{job=\"node\"}",
+     "editorMode": "code",
+     "legendFormat": "Uptime",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value_and_name",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "CPU busy",
+   "description": "Fraction of all cores not idle, averaged over five minutes. The proxy is I/O-bound on the upstream, so sustained high CPU here is compaction (token counting, extraction) or a neighbour, not waiting on the gateway.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 8,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "1 - avg(rate(node_cpu_seconds_total{job=\"node\",mode=\"idle\"}[5m]))",
+     "editorMode": "code",
+     "legendFormat": "CPU busy",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 0.8
+       },
+       {
+        "color": "#e66767",
+        "value": 0.92
+       }
+      ]
+     },
+     "decimals": 2,
+     "max": 1,
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value_and_name",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Memory used",
+   "description": "Used / total, excluding cache and buffers. The proxy buffers whole request bodies (32 MiB cap each) and the dashboard writer holds a queue, so this is the number that decides whether a burst of large transcripts is survivable.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 12,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "1 - node_memory_MemAvailable_bytes{job=\"node\"} / node_memory_MemTotal_bytes{job=\"node\"}",
+     "editorMode": "code",
+     "legendFormat": "Memory used",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 0.8
+       },
+       {
+        "color": "#e66767",
+        "value": 0.92
+       }
+      ]
+     },
+     "decimals": 2,
+     "max": 1,
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value_and_name",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 6,
+   "type": "stat",
+   "title": "Root filesystem used",
+   "description": "Fill on /. The dashboard database, the log sink, Prometheus's TSDB and Loki's chunks all live on disk here, and all four grow with traffic; the proxy's own janitor only bounds the first.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 16,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "max(1 - node_filesystem_avail_bytes{job=\"node\",mountpoint=\"/\"} / node_filesystem_size_bytes{job=\"node\",mountpoint=\"/\"})",
+     "editorMode": "code",
+     "legendFormat": "Root filesystem used",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 0.8
+       },
+       {
+        "color": "#e66767",
+        "value": 0.92
+       }
+      ]
+     },
+     "decimals": 2,
+     "max": 1,
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value_and_name",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 7,
+   "type": "stat",
+   "title": "Load, 5m / core",
+   "description": "Run-queue length divided by core count. Above 1 means work is waiting for CPU \u2014 the one number that distinguishes a slow upstream from a saturated box.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 20,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "node_load5{job=\"node\"} / count(count by (cpu) (node_cpu_seconds_total{job=\"node\",mode=\"idle\"}))",
+     "editorMode": "code",
+     "legendFormat": "Load, 5m / core",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 1
+       },
+       {
+        "color": "#e66767",
+        "value": 2
+       }
+      ]
+     },
+     "decimals": 2
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value_and_name",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 8,
+   "type": "row",
+   "title": "CPU and memory over time",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 6
+   },
+   "panels": []
+  },
+  {
+   "id": 9,
+   "type": "timeseries",
+   "title": "CPU by mode",
+   "description": "Where the time goes, summed across cores. `iowait` rising with steady user time is a disk problem, not a load problem.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 12,
+    "x": 0,
+    "y": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum by (mode) (rate(node_cpu_seconds_total{job=\"node\",mode!=\"idle\"}[5m]))",
+     "editorMode": "code",
+     "legendFormat": "{{mode}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 18,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ],
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 10,
+   "type": "timeseries",
+   "title": "Memory",
+   "description": "Used, cached and free, plus swap. Swap in use on this box is worth acting on: the proxy holds request bodies and the dashboard queue in memory, so paging shows up directly as request latency.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 12,
+    "x": 12,
+    "y": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "node_memory_MemTotal_bytes{job=\"node\"} - node_memory_MemAvailable_bytes{job=\"node\"}",
+     "editorMode": "code",
+     "legendFormat": "used"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "node_memory_Cached_bytes{job=\"node\"} + node_memory_Buffers_bytes{job=\"node\"}",
+     "editorMode": "code",
+     "legendFormat": "cache + buffers"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "node_memory_MemFree_bytes{job=\"node\"}",
+     "editorMode": "code",
+     "legendFormat": "free"
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "node_memory_SwapTotal_bytes{job=\"node\"} - node_memory_SwapFree_bytes{job=\"node\"}",
+     "editorMode": "code",
+     "legendFormat": "swap used"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ],
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 11,
+   "type": "row",
+   "title": "Disk and network",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 14
+   },
+   "panels": []
+  },
+  {
+   "id": 12,
+   "type": "timeseries",
+   "title": "Filesystem free",
+   "description": "Free bytes per mountpoint. Read it beside the dashboard's own disk guard: the janitor starts evicting rows at 90% full (--dashboard-disk-high), so a line falling towards zero here is history about to be deleted.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 0,
+    "y": 15
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "node_filesystem_avail_bytes{job=\"node\",fstype!~\"tmpfs|devtmpfs|overlay\"}",
+     "editorMode": "code",
+     "legendFormat": "{{mountpoint}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ],
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 13,
+   "type": "timeseries",
+   "title": "Disk throughput",
+   "description": "Bytes read and written per second, per device. Writes here are mostly the dashboard database and the log sink; a sustained write rate with no traffic is usually Prometheus compacting its own TSDB.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 8,
+    "y": 15
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum by (device) (rate(node_disk_read_bytes_total{job=\"node\"}[5m]))",
+     "editorMode": "code",
+     "legendFormat": "read {{device}}"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum by (device) (rate(node_disk_written_bytes_total{job=\"node\"}[5m]))",
+     "editorMode": "code",
+     "legendFormat": "written {{device}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ],
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 14,
+   "type": "timeseries",
+   "title": "Network throughput",
+   "description": "Per-interface traffic. The proxy relays whole transcripts in both directions, so this tracks token volume more closely than request count does.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 16,
+    "y": 15
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum by (device) (rate(node_network_receive_bytes_total{job=\"node\",device!=\"lo\"}[5m]))",
+     "editorMode": "code",
+     "legendFormat": "in {{device}}"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum by (device) (rate(node_network_transmit_bytes_total{job=\"node\",device!=\"lo\"}[5m]))",
+     "editorMode": "code",
+     "legendFormat": "out {{device}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ],
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 15,
+   "type": "row",
+   "title": "Processes, file descriptors and the units",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 22
+   },
+   "panels": []
+  },
+  {
+   "id": 16,
+   "type": "timeseries",
+   "title": "Open file descriptors",
+   "description": "Allocated file descriptors against the kernel limit. Every in-flight request holds a socket to the upstream, so an fd count that climbs and never falls is a leak that ends in refused connections.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 0,
+    "y": 23
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "node_filefd_allocated{job=\"node\"}",
+     "editorMode": "code",
+     "legendFormat": "allocated"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "node_filefd_maximum{job=\"node\"}",
+     "editorMode": "code",
+     "legendFormat": "maximum"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ],
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 17,
+   "type": "timeseries",
+   "title": "Context switches and forks",
+   "description": "Scheduler pressure. A jump with no traffic change points at a neighbour on the box rather than at agent load.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 8,
+    "y": 23
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "rate(node_context_switches_total{job=\"node\"}[5m])",
+     "editorMode": "code",
+     "legendFormat": "context switches/s"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "rate(node_forks_total{job=\"node\"}[5m])",
+     "editorMode": "code",
+     "legendFormat": "forks/s"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ],
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 18,
+   "type": "timeseries",
+   "title": "Service state",
+   "description": "systemd's own view of context-guru and nginx: 1 while active. This is the only panel here that does not care whether the PROXY thinks it is healthy \u2014 it reads the unit, so it still answers during a crash loop.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 16,
+    "y": 23
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "node_systemd_unit_state{job=\"node\",state=\"active\"}",
+     "editorMode": "code",
+     "legendFormat": "{{name}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "mappings": [],
+     "max": 1.2,
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ],
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  }
+ ]
+}

@@ -463,6 +463,13 @@ GRAFANA_ROOT_URL="${GRAFANA_ROOT_URL:-https://$(hostname -f 2>/dev/null || hostn
 # Loki holds the LOGS; Prometheus holds the numbers. Both are read through the same
 # Grafana, which is the whole reason Loki won over the alternatives — see
 # deploy/grafana/README.md, "Why Loki".
+# node_exporter is the HOST's own metrics — CPU, memory, disk, filesystem fill, network,
+# load. The proxy's /metrics answers "is context-guru working"; nothing answered "is this
+# box healthy", which is the question behind every report that starts "it felt slow".
+# Writing our own /proc reader was the alternative and it is strictly worse: this is the
+# standard exporter, the queries are the ones every runbook already uses, and it is one
+# more container beside four.
+NODE_EXPORTER_IMAGE="${NODE_EXPORTER_IMAGE:-docker.io/prom/node-exporter:v1.9.0}"
 LOKI_IMAGE="${LOKI_IMAGE:-docker.io/grafana/loki:3.4.2}"
 PROMTAIL_IMAGE="${PROMTAIL_IMAGE:-docker.io/grafana/promtail:3.4.2}"
 # Where the proxy writes its JSON log sink (CG_LOG_FILE in the unit) and promtail
@@ -547,6 +554,28 @@ promtail will find nothing until the service starts"
     --storage.tsdb.retention.time="$PROM_RETENTION" \
     --web.listen-address=127.0.0.1:9090 >/dev/null
   ok "cg-prometheus on 127.0.0.1:9090, retention $PROM_RETENTION"
+
+  say "node_exporter"
+  $oci rm -f cg-node-exporter >/dev/null 2>&1 || true
+  # The host's /proc, /sys and / are mounted read-only and the exporter is pointed at them,
+  # which is the documented way to make a containerised node_exporter report the HOST rather
+  # than the container. --path.rootfs makes its filesystem metrics carry the host's
+  # mountpoints, so a full /var shows up as /var and not as /host/var.
+  #
+  # Loopback only, like everything else here: host metrics name every mountpoint and every
+  # process count on a box that serves several tenants.
+  $oci run -d --name cg-node-exporter --network=host --restart=unless-stopped \
+    --pid=host \
+    -v /proc:/host/proc:ro,rslave \
+    -v /sys:/host/sys:ro,rslave \
+    -v /:/rootfs:ro,rslave \
+    "$NODE_EXPORTER_IMAGE" \
+    --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/rootfs \
+    --web.listen-address=127.0.0.1:9100 \
+    --collector.systemd \
+    --collector.systemd.unit-include="^(context-guru|nginx)\\.service$" \
+    --collector.filesystem.mount-points-exclude='^/(dev|proc|sys|var/lib/docker/.+|var/lib/containers/.+)($|/)' >/dev/null
+  ok "cg-node-exporter on 127.0.0.1:9100 (host cpu/memory/disk/network)"
 
   say "Loki"
   $oci rm -f cg-loki >/dev/null 2>&1 || true
@@ -675,7 +704,7 @@ cmd_grafana_status() {
   oci=$(oci_runtime) || { no "no container runtime"; exit 1; }
   say "Containers"
   $oci ps -a --filter name=cg-prometheus --filter name=cg-grafana \
-    --filter name=cg-loki --filter name=cg-promtail \
+    --filter name=cg-loki --filter name=cg-promtail --filter name=cg-node-exporter \
     --format '{{.Names}}  {{.Status}}' 2>&1 | sed 's/^/  /' || true
 
   say "Prometheus scrape target"
@@ -766,8 +795,8 @@ cmd_grafana_remove() {
   need_root
   local oci
   oci=$(oci_runtime) || { no "no container runtime"; exit 1; }
-  $oci rm -f cg-prometheus cg-grafana cg-loki cg-promtail >/dev/null 2>&1 || true
-  ok "removed cg-prometheus, cg-grafana, cg-loki and cg-promtail"
+  $oci rm -f cg-prometheus cg-grafana cg-loki cg-promtail cg-node-exporter >/dev/null 2>&1 || true
+  ok "removed cg-prometheus, cg-grafana, cg-loki, cg-promtail and cg-node-exporter"
   warn "kept $OBS_STATE — the metrics history, the log store and Grafana's database, and"
   warn "kept $LOG_DIR. Delete them by hand if you actually want the history gone."
 }
