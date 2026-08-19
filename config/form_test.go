@@ -488,8 +488,15 @@ func perturbations(fd components.Field, cur any) []any {
 	case components.FieldString:
 		return []any{"cg-form-sentinel"}
 	case components.FieldStrings:
-		// A filter list has to be a valid DSL document or the component refuses to build,
-		// so the sentinel for this type is a real one.
+		// A string LIST is validated by the component that owns it, so one sentinel cannot
+		// serve every such field: a filter list has to be a valid DSL document, and
+		// toolfilter's removal list has to be a declaration NAME (it rejects anything else
+		// so a junk entry is a 400 on the settings page rather than a filter that silently
+		// matches nothing). Keyed by the field, because a value valid for both would have to
+		// satisfy two grammars that share nothing.
+		if fd.Key == "remove" {
+			return []any{[]string{"cg-form-sentinel"}}
+		}
 		return []any{[]string{"schema_version: 1\nfilters:\n  cgsentinel:\n    description: sentinel\n    match: 'cg-form-sentinel'\n"}}
 	}
 	return nil

@@ -1,0 +1,225 @@
+package proxy
+
+// The WRITE half of declaration removal, and the read hook the dashboard's control needs.
+//
+// It lives in the control plane rather than beside the read route in dash for one reason:
+// the removal list is part of an account's compaction configuration, and the rules that
+// govern writing that — strict validation of the whole document, an audit entry naming the
+// field, and the manager gate — already exist here on PUT /api/me. A second writer with its
+// own copy of those rules is how one of the two ends up missing one; this route reuses the
+// same Form round trip and the same registry Update, so the only thing it adds is the shape
+// a single switch posts.
+//
+// It also inherits what the route table gives every control-plane write: the ctlTenant gate,
+// cookie-only identity (a pasted proxy token cannot change a configuration), and the
+// cross-site guard inside readJSON.
+
+import (
+	"errors"
+	"net/http"
+	"sort"
+	"strings"
+
+	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/tenant"
+)
+
+// toolFilterComponent is the pipeline name that carries the list.
+const toolFilterComponent = "toolfilter"
+
+// DashToolFilter is the dashboard's READ hook for an account's removal list: the inventory
+// page needs to draw a switch per declaration, and dash holds no tenant configuration of its
+// own. Wired in cmd/context-guru-proxy beside the capture hook.
+func (h *Handler) DashToolFilter() func(string) dash.ToolFilterState {
+	return func(id string) dash.ToolFilterState {
+		reg := h.registry()
+		if reg == nil {
+			return dash.ToolFilterState{Reason: "this proxy has no accounts, so the removal " +
+				"list is whatever its own config file sets"}
+		}
+		t, err := reg.Get(id)
+		if err != nil {
+			return dash.ToolFilterState{Reason: "could not read your account"}
+		}
+		names, enabled, reason := removedFrom(reg.Config(t))
+		// The control is offered even when the component is not in the pipeline yet — adding
+		// it is exactly what the first exclusion does. What genuinely disables the control is
+		// a document we could not read, because a save from a misread form would post whatever
+		// the fallback happened to see (the same refusal PUT /api/me makes).
+		if !enabled {
+			return dash.ToolFilterState{Removed: names, Reason: reason}
+		}
+		return dash.ToolFilterState{Enabled: true, Removed: names}
+	}
+}
+
+// removedFrom reads the removal list out of a stored configuration document.
+func removedFrom(doc string) (names []string, ok bool, reason string) {
+	f, err := config.ParseForm(doc)
+	if err != nil || f.ParseError != "" {
+		return nil, false, "your stored configuration does not load, so it cannot be edited " +
+			"as fields; a manager must repair it on the account page"
+	}
+	// The Form holds a stated key as `any`, and yaml.v3 decodes a sequence into []any — so
+	// both shapes are read rather than only the one a Go caller would have set.
+	switch list := f.Components[toolFilterComponent]["remove"].(type) {
+	case []string:
+		names = append(names, list...)
+	case []any:
+		for _, v := range list {
+			if str, isStr := v.(string); isStr && str != "" {
+				names = append(names, str)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names, true, ""
+}
+
+// ctlToolFilter excludes or re-includes ONE declaration and answers with the same document
+// GET /api/toolfilter serves, so a switch repaints from the server's state rather than from
+// the DOM it just changed.
+func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
+	t, err := h.webPrincipal(r)
+	if err != nil {
+		code, msg := statusOf(err)
+		ctlErr(w, code, msg)
+		return
+	}
+	var in struct {
+		Kind   string `json:"kind"`
+		Name   string `json:"name"`
+		Server string `json:"server"`
+		Action string `json:"action"`
+	}
+	if err := readJSON(w, r, &in); err != nil {
+		readErr(w, err)
+		return
+	}
+	// The same gate PUT /api/me applies to config_yaml, and for the same reason: this decides
+	// what runs on the traffic. Enforced here and not only by hiding the switch — a hidden
+	// control is not a permission, and this route is one curl away.
+	if !t.IsManager() {
+		ctlErr(w, http.StatusForbidden, "a manager sets the compaction configuration")
+		return
+	}
+	name, err := declConfigName(in.Kind, in.Name, in.Server)
+	if err != nil {
+		ctlErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	exclude := in.Action == "exclude"
+	if !exclude && in.Action != "include" {
+		ctlErr(w, http.StatusBadRequest, `action must be "exclude" or "include"`)
+		return
+	}
+	reg := h.registry()
+	current := reg.Config(t)
+	f, perr := config.ParseForm(current)
+	if perr != nil || f.ParseError != "" {
+		ctlErr(w, http.StatusConflict, "your stored configuration does not load, so it cannot "+
+			"be edited as fields; a manager must repair it on the account page")
+		return
+	}
+	names, _, _ := removedFrom(current)
+	names = withDecl(names, name, exclude)
+	if f.Components == nil {
+		f.Components = map[string]map[string]any{}
+	}
+	if f.Components[toolFilterComponent] == nil {
+		f.Components[toolFilterComponent] = map[string]any{}
+	}
+	f.Components[toolFilterComponent]["remove"] = names
+	// The component runs LAST, after cachesplit: it edits the top-level `tools` array rather
+	// than a message, so its position among the message reducers is meaningless, and appending
+	// keeps an existing order untouched. An empty list leaves the pipeline entirely — a
+	// component with nothing to remove is a pass over every request for nothing.
+	f.Pipeline = withComponent(f.Pipeline, toolFilterComponent, len(names) > 0)
+	doc, err := config.ApplyForm(current, f)
+	if err != nil {
+		// The message names the offending value; showing it beats "invalid".
+		ctlErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := reg.Update(t, t.ID, tenant.Patch{ConfigYAML: &doc}); err != nil {
+		if errors.Is(err, tenant.ErrForbidden) {
+			ctlErr(w, http.StatusForbidden, "not permitted")
+			return
+		}
+		ctlErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.writeToolFilterDoc(w, r, t.ID)
+}
+
+// writeToolFilterDoc answers with the read route's document, so one shape serves both.
+func (h *Handler) writeToolFilterDoc(w http.ResponseWriter, r *http.Request, id string) {
+	if h.api != nil {
+		if doc, err := h.api.ToolFilterDocument(r); err == nil {
+			writeJSON(w, http.StatusOK, doc)
+			return
+		}
+	}
+	// No dashboard (or its read failed): the write succeeded, so answer with the part we
+	// know rather than an error the caller would read as "the change did not happen".
+	st := h.DashToolFilter()(id)
+	writeJSON(w, http.StatusOK, dash.ToolFilterState{
+		Enabled: st.Enabled, Removed: st.Removed, Reason: st.Reason,
+	})
+}
+
+// declConfigName maps an inventory row to the string the removal list holds, and refuses the
+// kinds that are not removable — a suggestion never offers them, and a hand-crafted POST
+// should get a reason rather than a configuration the filter will silently decline.
+func declConfigName(kind, name, server string) (string, error) {
+	switch kind {
+	case "mcp_server":
+		if server == "" {
+			return "", errors.New("an MCP server needs a server name")
+		}
+		return "mcp__" + server, nil
+	case dash.KindServerTool:
+		return "", errors.New("a provider-side tool is resolved by the provider from its " +
+			"type, not by a schema we send, so it cannot be removed here")
+	case dash.KindSkill, dash.KindSkillListing:
+		return "", errors.New("a skill is declared as prose inside the transcript rather than " +
+			"as a tool, so removing one is not supported yet")
+	case dash.KindTool, dash.KindMCPTool, "":
+		if name == "" {
+			return "", errors.New("no declaration name")
+		}
+		return name, nil
+	}
+	return "", errors.New("unknown declaration kind " + kind)
+}
+
+// withDecl adds or removes one name, keeping the list sorted and duplicate-free so the stored
+// document does not churn on a no-op change.
+func withDecl(names []string, name string, add bool) []string {
+	out := make([]string, 0, len(names)+1)
+	for _, n := range names {
+		if n != name {
+			out = append(out, n)
+		}
+	}
+	if add {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// withComponent ensures a component is present (appended last) or absent from a pipeline.
+func withComponent(pipeline []string, name string, want bool) []string {
+	out := make([]string, 0, len(pipeline)+1)
+	for _, n := range pipeline {
+		if strings.TrimSpace(n) != name {
+			out = append(out, n)
+		}
+	}
+	if want {
+		out = append(out, name)
+	}
+	return out
+}

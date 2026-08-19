@@ -234,6 +234,22 @@ func (p *Pipeline) RecordDiscards(rr *RunReport, discarded map[int]int) {
 	}
 }
 
+// Find returns the configured component with this name, or nil. It is Has for the case
+// where the host needs the component's CONFIGURATION and not just its presence — toolfilter
+// carries the account's removal list, and a body-level transform in apply cannot read it off
+// a boolean. Callers type-assert to the narrow interface they need.
+func (p *Pipeline) Find(name string) Component {
+	if p == nil {
+		return nil
+	}
+	for _, c := range p.comps {
+		if c != nil && c.Name() == name {
+			return c
+		}
+	}
+	return nil
+}
+
 // Has reports whether a component with this name is configured in the pipeline.
 // Hosts use it to gate body-level work that belongs to a component's concern but
 // cannot be done inside it — e.g. cacheinject's cache-prefix repair, which must

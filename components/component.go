@@ -269,6 +269,11 @@ type Ctx struct {
 	// the top-level `tools` array for this request. Only `toolschema` reads it, and
 	// only to report itself honestly — same arrangement, same reason, as SystemSplit.
 	ToolSchema bool
+	// FilteredDecls is how many tool/MCP declarations the host dropped from `tools` on
+	// this request under the account's opt-in removal list. Set for the same reason
+	// ToolSchema is: `tools` is a top-level field no component can see, so toolfilter
+	// would otherwise report itself as skipped on every request where it just acted.
+	FilteredDecls int
 }
 
 // effMode is Ctx.Mode with the zero value normalized to sync, so a Ctx built by older

@@ -533,6 +533,11 @@ func main() {
 			t, err := reg.Get(id)
 			return err == nil && t.CaptureContent
 		})
+		// The account's declaration-removal list, for the inventory page's per-tool switch.
+		// Read-only here: the WRITE goes through the control plane (POST /api/toolfilter), which
+		// is where the validation, the audit entry and the manager gate for a compaction
+		// configuration already live.
+		h.API().SetToolFilterState(h.DashToolFilter())
 	}
 
 	defer h.Close() // stop the off-path worker pool cleanly (no-op in sync mode)

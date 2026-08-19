@@ -86,6 +86,11 @@ func (h *Handler) ctlRoutes() []ctlRoute {
 		{"POST /api/me/agent-key", ctlTenant, h.ctlBindAgentKey},
 		{"DELETE /api/me/agent-key", ctlTenant, h.ctlUnbindAgentKeys},
 		{"GET /api/me/audit", ctlTenant, h.ctlAudit},
+		// Declaration removal: the WRITE half of the inventory page's switch. Here rather
+		// than beside its read route in dash because the removal list is part of the
+		// compaction configuration, so it must go through the same validation, audit entry
+		// and manager gate as PUT /api/me — see proxy/toolfilterctl.go.
+		{"POST /api/toolfilter", ctlTenant, h.ctlToolFilter},
 		{"GET /api/options", ctlTenant, h.ctlOptions},
 		{"GET /api/tenants", ctlManager, h.ctlTenants},
 		{"PATCH /api/tenants/{id}", ctlManager, h.ctlPatchTenant},

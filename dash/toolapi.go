@@ -498,6 +498,10 @@ func sortStats(s []ToolStat) {
 func (a *API) toolRoutes() []route {
 	return []route{
 		{"GET /api/tools", scopeTenant, a.tools},
+		// The decision surface: what is currently excluded, what excluding it has actually
+		// saved, and what is safe to offer next. scopeTenant like the report it reads. The
+		// WRITE half is the control plane's (POST /api/toolfilter) — see dash/toolsuggest.go.
+		{"GET /api/toolfilter", scopeTenant, a.toolFilterDoc},
 	}
 }
 
@@ -518,22 +522,28 @@ func (a *API) tools(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	var price func(string) (modelinfo.Price, bool)
-	if a.pricer != nil {
-		ctx := r.Context()
-		price = func(model string) (modelinfo.Price, bool) {
-			if model == "" {
-				return modelinfo.Price{}, false
-			}
-			return a.pricer.Price(ctx, model)
-		}
-	}
-	rep, err := a.rec.DB().ToolReportFor(f, price)
+	rep, err := a.rec.DB().ToolReportFor(f, a.priceFn(r))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "could not read the tool inventory")
 		return
 	}
 	writeJSON(w, rep)
+}
+
+// priceFn resolves a model's rates for the duration of one request, or nil when the
+// deployment has no pricer. Shared by every route that has to price a token count at the
+// tier it was billed at, so two of them cannot disagree about what "unpriced" means.
+func (a *API) priceFn(r *http.Request) func(string) (modelinfo.Price, bool) {
+	if a.pricer == nil {
+		return nil
+	}
+	ctx := r.Context()
+	return func(model string) (modelinfo.Price, bool) {
+		if model == "" {
+			return modelinfo.Price{}, false
+		}
+		return a.pricer.Price(ctx, model)
+	}
 }
 
 // countInventoryRows is a test and diagnostic helper: how many inventory rows exist.
