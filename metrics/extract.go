@@ -28,12 +28,52 @@ var (
 
 	xReasonMu sync.Mutex
 	xReasons  = map[string]int64{} // trigger/suppression reason -> count
+
+	// A ring of recent per-call latencies, for the MEDIAN. The mean cannot answer "are
+	// calls slow?" on this workload: measured n=8 on one gateway, p50 3,748 ms against a
+	// max of 11,663, and an 8-token no-op call spanned 1,490-15,800 ms. Latency here is
+	// queue time, so one tail sample moves the mean past a brake the typical call is
+	// nowhere near. A ring rather than a histogram because the only consumer is one
+	// threshold comparison and 64 samples is already more evidence than the gate needs.
+	xLatMu   sync.Mutex
+	xLatRing [64]float64
+	xLatN    int
 )
+
+// latencyP50 returns the median of the retained samples, and how many there are.
+func latencyP50() (float64, int) {
+	xLatMu.Lock()
+	defer xLatMu.Unlock()
+	n := xLatN
+	if n > len(xLatRing) {
+		n = len(xLatRing)
+	}
+	if n == 0 {
+		return 0, 0
+	}
+	cp := make([]float64, n)
+	copy(cp, xLatRing[:n])
+	sort.Float64s(cp)
+	return cp[n/2], n
+}
 
 // RecordExtractionCall notes one extraction LLM call and its wall time.
 func RecordExtractionCall(latencyMs float64) {
 	xCalls.Add(1)
 	xLatencyMs.Add(int64(latencyMs))
+	xLatMu.Lock()
+	xLatRing[xLatN%len(xLatRing)] = latencyMs
+	xLatN++
+	xLatMu.Unlock()
+}
+
+// ExtractionP50LatencyMs returns the MEDIAN observed wall time per extraction call and the
+// number of samples behind it. The gate reads this rather than the mean to decide whether
+// speculative calls have become too slow to be worth their wall clock — see
+// offload.tooSlowToExplore for the measurement that made the mean unusable here.
+func ExtractionP50LatencyMs() (float64, int64) {
+	p50, n := latencyP50()
+	return p50, int64(n)
 }
 
 // RecordExtractionCacheLookup notes one global result-cache lookup and whether it hit.

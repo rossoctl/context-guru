@@ -188,10 +188,19 @@ const (
 	// and section labels (≤60 short identifiers). Rounded up.
 	extractPromptOverheadTokens = 2000
 	// extractContextMargin marks up the estimate. tokens.Count is a real BPE count, but in
-	// o200k_base — the extraction model may tokenize the same bytes 10-15% heavier
-	// (Anthropic's tokenizer is not published, self-hosted models vary), so a count that is
-	// exact for GPT is only an estimate for anyone else.
-	extractContextMargin = 1.15
+	// o200k_base — the extraction model tokenizes the same bytes heavier (Anthropic's
+	// tokenizer is not published, self-hosted models vary), so a count that is exact for GPT
+	// is only an estimate for anyone else.
+	//
+	// MEASURED 2026-08-19, identical bytes on both sides of the wire: o200k counted 6,396;
+	// claude-haiku-4-5 billed 8,222 (1.29x) and aws/claude-sonnet-5 billed 10,574 (1.65x).
+	// The old 1.15 under-stated BOTH, and the direction matters: this margin's only job is
+	// keeping a request inside a window, where under-counting puts a prompt on the wire the
+	// upstream may reject. So it takes the conservative-high end of the measurement, not the
+	// mean. Cost estimation uses the same measurement at the haiku end — see
+	// extract_econ.go's realTokenMarkup, which wants accuracy rather than headroom.
+	// Re-measure with the profile's live probe whenever the extraction model family changes.
+	extractContextMargin = 1.65
 	// extractShownBodyChars mirrors the bound internal/extract puts on the body it SHOWS
 	// the model (maxCodeContentChars: head+tail beyond it, the program still runs over the
 	// full input at runtime). Counting the whole output instead would decline calls on
@@ -491,15 +500,28 @@ func (e *ExtractLLM) sweepThisRequest(c *components.Ctx) bool {
 // extractionContext renders the conversation the extraction prompt will carry, in the
 // configured mode. One method so every caller (and every test) agrees on what the model is
 // told — the prompt's relevance judgement rests entirely on this.
-func (e *ExtractLLM) extractionContext(req *bschemas.BifrostChatRequest, sweeping bool) string {
-	mode := e.ctxMode
-	if sweeping {
-		// The sweep judges the WHOLE transcript at once, so it gets the whole conversation
-		// whatever the configured mode: deciding what a message three hours back may lose
-		// requires knowing what happened since.
-		mode = ctxFull
-	}
-	return conversationContext(req, mode, e.ctxMessages)
+// THE SWEEP NO LONGER FORCES `full`, and that is the single largest change to this
+// component's economics. It used to, on the argument that judging a message three hours back
+// requires knowing what happened since. The argument does not survive measurement:
+//
+//   - `full` IS the whole request. Measured at 127 turns: 138,596 context tokens against a
+//     138,341-token request — 99% of the sweep's prompt is a copy of the transcript it is
+//     compacting, sent once per candidate.
+//   - the break-even removal R* at k=4 is 113,286 tokens under `full` and 6,833 under
+//     `recent` — a 16x lower bar. Above R*/T = 1 the sweep must delete more than the whole
+//     transcript to pay, which is structurally impossible; `full` sits there.
+//   - the one real counter-argument was about KEEP-IDS: a full-transcript context took
+//     acceptance from 3/4 to 0/6, because every unique token in the noise became a required
+//     identifier. That is now separable and already separated — HarvestIdentifiers below
+//     reads `ctxRecent` explicitly, never this string.
+//   - measured on the cold corpus (bench/cold.jsonl, 8 requests, verified cache_read=0):
+//     `full` sent 36,686 prompt tokens for one candidate of 15,473 and cost $0.0387 to
+//     remove 0 tokens; `recent` is in the table in docs/components/extract_llm.md.
+//
+// An operator who wants the old behaviour writes `context: full`, which now means what it
+// says on every turn instead of being imposed on one.
+func (e *ExtractLLM) extractionContext(req *bschemas.BifrostChatRequest, _ bool) string {
+	return conversationContext(req, e.ctxMode, e.ctxMessages)
 }
 
 func (e *ExtractLLM) outputFloor(window int) int {
@@ -686,6 +708,16 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// about 3x, and the gate spends on that number. MEASURED on a real session: a call
 	// recorded at $0.0276 had cost about $0.083.
 	pricing := e.pricingFor(*c)
+	// SAY SO WHEN THE RATE CARD IS A GUESS. When a cheap model is named, its own rates govern
+	// (pricingFor), and those rates come from CHEAP_MODEL_PRICE_* — which is unset on this
+	// deployment, so the gate spends against haiku LIST ($1/$5 per MTok) while the dashboard
+	// prices the same request from the operator's card ($0.80/$4.00), ~25% apart. The gate
+	// cannot resolve the operator's card itself (no price table reaches a component), so the
+	// remaining honest move is to make the divergence visible on every request that spends
+	// on it rather than let a silent 25% sit under every allow/suppress decision.
+	if e.modelName != "" && !cheapmodel.PricingConfigured() {
+		rep.Gate("cheap_model_price_unconfigured")
+	}
 	// The model id actually used, for the record. `source: incoming` pins no name, so without
 	// this every recorded call said model="".
 	callModel := e.modelName
@@ -709,9 +741,11 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	//
 	// MEASURED, three samples each on the same 26k-token access log: with a small
 	// conversation-only context 2/3 extractions were accepted; with a full-transcript context
-	// 0/3 were, and the failures were "rejected by the acceptance check". That is the cold
-	// sweep's own configuration (it forces context: full), so this was the difference between
-	// the sweep working and the sweep being an expensive no-op.
+	// 0/3 were, and the failures were "rejected by the acceptance check". That WAS the cold
+	// sweep's own configuration, back when the sweep forced context: full — so this was the
+	// difference between the sweep working and the sweep being an expensive no-op. Harvesting
+	// from ctxRecent explicitly is also what makes the sweep's context mode a free choice
+	// again (see extractionContext): the keep-list no longer moves when the context does.
 	keepIDs := extract.HarvestIdentifiers(conversationContext(req, ctxRecent, e.ctxMessages), 40)
 	// Per-call context budget (constant across this request's candidates): the extraction
 	// model's input limit, and the prompt's fixed cost around the tool output itself.
@@ -961,7 +995,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		if e.gate {
 			// Stop exploring once calls are observed to be slow: exploration spends wall
 			// clock as well as money, and an agent on a task deadline feels the former more.
-			explore := !tooSlowToExplore(metrics.ExtractionAvgLatencyMs()) &&
+			explore := !tooSlowToExplore(metrics.ExtractionP50LatencyMs()) &&
 				e.ratios.exploring(c.Session)
 			// promptOverhead, not the 200-token constant: it already counts the rendered
 			// conversation context, which under `context: full` (every cold sweep) IS the
@@ -1054,6 +1088,25 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// costs 1.25x fresh — so paying for it would be a 25% loss. Decided here because this
 		// is the only place the final candidate count is known (the caps above trim it).
 		extCfg.CacheContext = len(cands) > 1
+		// AND THE WRITE HAS TO BE EARNED BEFORE IT CAN BE READ. Setting CacheContext was not
+		// enough: cheapmodel.claimCacheWrite deliberately suppresses the breakpoint on
+		// CONCURRENT siblings (a cache entry only ever written is worse than no breakpoint),
+		// so with llmConcurrency=4 the first call took the write slot and calls 2-4 sent no
+		// mark and paid plain fresh input for the same context — the saving the flag exists
+		// for was never collected. Measured on production: five haiku calls on ONE request
+		// each sent ~138,000 prompt tokens with cache_read=0 AND cache_write=0.
+		//
+		// So run the first call alone, then the rest concurrently: one writer, then readers.
+		// At T=180k, k=4 that moves break-even removal from 198,620 tokens to 79,088.
+		//
+		// IT COSTS WALL CLOCK AND THE TRADE IS DELIBERATE. Per-call latency here is gateway
+		// QUEUE time, not prompt size (measured: an 8-token call has a 1,812 ms p50 floor and
+		// is not faster than an 8k-token one), so serializing one call adds roughly one whole
+		// queue round — ~2-4 s p50, and the tail reaches 12-16 s. We pay it only where the
+		// money is overwhelming: k >= 2 on a turn whose entire transcript is being re-billed
+		// at 1.25x fresh. On the warm per-output path the extra second buys a fraction of a
+		// cent, so it stays fully concurrent.
+		serialFirst := extCfg.CacheContext && sweeping
 		type outT struct{ projected, summary string }
 		out := make([]outT, len(cands))
 		// One record per call, written to its own slot so the goroutines need no lock (a
@@ -1061,104 +1114,112 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		calls := make([]components.ModelCall, len(cands))
 		sem := make(chan struct{}, llmConcurrency)
 		var wg sync.WaitGroup
-		for k := range cands {
+		runCall := func(k int) {
+			ctx, cancel := context.WithTimeout(c.Ctx, llmCallTimeout)
+			defer cancel()
+			// A per-CALL accounting window nested inside the request's, so this one
+			// call's tokens and cost are attributable without hiding them from the
+			// request's own bill (see cheapmodel.WithCallSink).
+			ctx, callSink := cheapmodel.WithCallSink(ctx)
+			before := schema.TextTokens(cands[k].content)
+			start := time.Now()
+			res, sum, strategy, why := extract.RunExtractionDetail(ctx, cands[k].content, goal,
+				keepIDs, before, extCfg, model)
+			latency := float64(time.Since(start).Milliseconds())
+			metrics.RecordExtractionCall(latency)
+			_, inTok, outTok := callSink.Totals()
+			cw, cr := callSink.CacheTotals()
+			calls[k] = components.ModelCall{
+				Component: rep.Component, Model: callModel,
+				Strategy: strategy, Aggressiveness: string(e.aggro),
+				Cold: sweeping, Escalated: escalated,
+				CandidateTokens: before, LatencyMs: latency,
+				PromptTokens: inTok, CompletionTokens: outTok,
+				CacheRead: cr, CacheWrite: cw,
+				CostUSD:    pricing.Cost(inTok, outTok, cw, cr),
+				GateReason: cands[k].gate,
+				Before:     cands[k].content,
+				Rejection:  why,
+			}
+			// A reply that stopped exactly at the output cap was TRUNCATED, so the
+			// Starlark program is incomplete, unparseable, and the whole call — its
+			// money and its seconds — bought nothing. It is indistinguishable from
+			// "the model declined to shrink this" in the return value, and the two
+			// have opposite fixes: raise the cap versus stop calling. MEASURED on a
+			// real session: 26.8s and ~$0.08 for a reply cut off at 2048 tokens.
+			if outTok >= int64(cheapExtractOutputTokens) {
+				calls[k].GateReason = "reply truncated at the output cap: " + calls[k].GateReason
+				rep.Gate("reply_truncated")
+				atomic.AddInt64(&llmTruncated, 1)
+			}
+			// CLASSIFY THE SILENT FAILURE — and classify it INDEPENDENTLY of whether
+			// a result came back. RunExtractionSummary returns ("", "", "none") for every
+			// failure mode, so timeout / sandbox rejection / "nothing shrank" are
+			// indistinguishable in its return value. Our own ctx is the one reliable
+			// signal: if its deadline expired, THIS call was abandoned.
+			//
+			// Do NOT fold this into an `else` of the success check. In `code` mode the
+			// deterministic strategy runs as a fallback (extract.go:367-368), so a call
+			// whose LLM leg timed out can still return a smaller `res` — and an `else`
+			// would then record nothing. That is exactly the shape of the bug these
+			// counters exist to expose: the arm keeps compacting a little, so no
+			// dashboard looks broken while the expensive path has silently stopped.
+			//
+			// Fail-open behaviour is unchanged either way — this only records.
+			timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+			if ctx.Err() != nil {
+				if timedOut {
+					atomic.AddInt64(&llmTimeouts, 1)
+				} else {
+					atomic.AddInt64(&llmErrors, 1)
+				}
+			}
+			if res != "" && res != cands[k].content {
+				out[k] = outT{res, sum}
+				calls[k].Accepted = true
+				calls[k].SavedTokens = before - schema.TextTokens(res)
+				calls[k].Summary, calls[k].After = sum, res
+				// Feed the observed ratio so the gate prices future calls on what this
+				// workload actually achieves, not on an assumption.
+				e.ratios.observe(before-schema.TextTokens(res), before)
+				metrics.RecordExtractionSaving(before - schema.TextTokens(res))
+			} else if !timedOut {
+				e.ratios.observe(0, before) // a miss is real evidence: ratio 0
+			}
+			// TIMED OUT WITH NOTHING BACK => DELIBERATELY NOT OBSERVED. A ratio-0
+			// observation means "the model looked at this output and could not shrink
+			// it", which is real evidence about the workload. A deadline means the call
+			// never finished — evidence about SERVER LATENCY, not compressibility — and
+			// feeding it to the tracker makes the gate shut itself permanently on
+			// exactly the deployment where the budget is already too small:
+			//
+			//   minRatioSampleTokens is 1500, so ONE timed-out medium output both ends
+			//   this session's exploration (r.total >= the sample floor => exploring()
+			//   returns false) and starts dragging ratio() down from the 0.12 prior. A
+			//   few more and expectedRemoved falls below call cost for everything, so
+			//   evaluateGate suppresses every call — and the tracker lives on the
+			//   Pipeline for the proxy's LIFETIME, so nothing revises it afterwards.
+			//
+			// That is the self-justifying prior extract_econ.go's exploration budget
+			// exists to prevent, re-entered through the timeout path. MEASURED: 13
+			// timeouts in one 50-task arm at the 90s budget on a KV-pressured TP=1
+			// server, i.e. this is a live regime, not a hypothetical. Skipping the
+			// observation leaves the gate's estimate untouched; the timeouts are still
+			// counted (above) and still brake exploration via slowCallMs, which is the
+			// latency-aware layer that SHOULD react to a slow server.
+		}
+		first := 0
+		if serialFirst {
+			runCall(0) // the writer; its release() marks the prefix as present
+			first = 1
+		}
+		for k := first; k < len(cands); k++ {
 			wg.Add(1)
 			go func(k int) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				ctx, cancel := context.WithTimeout(c.Ctx, llmCallTimeout)
-				defer cancel()
-				// A per-CALL accounting window nested inside the request's, so this one
-				// call's tokens and cost are attributable without hiding them from the
-				// request's own bill (see cheapmodel.WithCallSink).
-				ctx, callSink := cheapmodel.WithCallSink(ctx)
-				before := schema.TextTokens(cands[k].content)
-				start := time.Now()
-				res, sum, strategy, why := extract.RunExtractionDetail(ctx, cands[k].content, goal,
-					keepIDs, before, extCfg, model)
-				latency := float64(time.Since(start).Milliseconds())
-				metrics.RecordExtractionCall(latency)
-				_, inTok, outTok := callSink.Totals()
-				cw, cr := callSink.CacheTotals()
-				calls[k] = components.ModelCall{
-					Component: rep.Component, Model: callModel,
-					Strategy: strategy, Aggressiveness: string(e.aggro),
-					Cold: sweeping, Escalated: escalated,
-					CandidateTokens: before, LatencyMs: latency,
-					PromptTokens: inTok, CompletionTokens: outTok,
-					CacheRead: cr, CacheWrite: cw,
-					CostUSD:    pricing.Cost(inTok, outTok, cw, cr),
-					GateReason: cands[k].gate,
-					Before:     cands[k].content,
-					Rejection:  why,
-				}
-				// A reply that stopped exactly at the output cap was TRUNCATED, so the
-				// Starlark program is incomplete, unparseable, and the whole call — its
-				// money and its seconds — bought nothing. It is indistinguishable from
-				// "the model declined to shrink this" in the return value, and the two
-				// have opposite fixes: raise the cap versus stop calling. MEASURED on a
-				// real session: 26.8s and ~$0.08 for a reply cut off at 2048 tokens.
-				if outTok >= int64(cheapExtractOutputTokens) {
-					calls[k].GateReason = "reply truncated at the output cap: " + calls[k].GateReason
-					rep.Gate("reply_truncated")
-					atomic.AddInt64(&llmTruncated, 1)
-				}
-				// CLASSIFY THE SILENT FAILURE — and classify it INDEPENDENTLY of whether
-				// a result came back. RunExtractionSummary returns ("", "", "none") for every
-				// failure mode, so timeout / sandbox rejection / "nothing shrank" are
-				// indistinguishable in its return value. Our own ctx is the one reliable
-				// signal: if its deadline expired, THIS call was abandoned.
-				//
-				// Do NOT fold this into an `else` of the success check. In `code` mode the
-				// deterministic strategy runs as a fallback (extract.go:367-368), so a call
-				// whose LLM leg timed out can still return a smaller `res` — and an `else`
-				// would then record nothing. That is exactly the shape of the bug these
-				// counters exist to expose: the arm keeps compacting a little, so no
-				// dashboard looks broken while the expensive path has silently stopped.
-				//
-				// Fail-open behaviour is unchanged either way — this only records.
-				timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
-				if ctx.Err() != nil {
-					if timedOut {
-						atomic.AddInt64(&llmTimeouts, 1)
-					} else {
-						atomic.AddInt64(&llmErrors, 1)
-					}
-				}
-				if res != "" && res != cands[k].content {
-					out[k] = outT{res, sum}
-					calls[k].Accepted = true
-					calls[k].SavedTokens = before - schema.TextTokens(res)
-					calls[k].Summary, calls[k].After = sum, res
-					// Feed the observed ratio so the gate prices future calls on what this
-					// workload actually achieves, not on an assumption.
-					e.ratios.observe(before-schema.TextTokens(res), before)
-					metrics.RecordExtractionSaving(before - schema.TextTokens(res))
-				} else if !timedOut {
-					e.ratios.observe(0, before) // a miss is real evidence: ratio 0
-				}
-				// TIMED OUT WITH NOTHING BACK => DELIBERATELY NOT OBSERVED. A ratio-0
-				// observation means "the model looked at this output and could not shrink
-				// it", which is real evidence about the workload. A deadline means the call
-				// never finished — evidence about SERVER LATENCY, not compressibility — and
-				// feeding it to the tracker makes the gate shut itself permanently on
-				// exactly the deployment where the budget is already too small:
-				//
-				//   minRatioSampleTokens is 1500, so ONE timed-out medium output both ends
-				//   this session's exploration (r.total >= the sample floor => exploring()
-				//   returns false) and starts dragging ratio() down from the 0.12 prior. A
-				//   few more and expectedRemoved falls below call cost for everything, so
-				//   evaluateGate suppresses every call — and the tracker lives on the
-				//   Pipeline for the proxy's LIFETIME, so nothing revises it afterwards.
-				//
-				// That is the self-justifying prior extract_econ.go's exploration budget
-				// exists to prevent, re-entered through the timeout path. MEASURED: 13
-				// timeouts in one 50-task arm at the 90s budget on a KV-pressured TP=1
-				// server, i.e. this is a live regime, not a hypothetical. Skipping the
-				// observation leaves the gate's estimate untouched; the timeouts are still
-				// counted (above) and still brake exploration via slowCallMs, which is the
-				// latency-aware layer that SHOULD react to a slow server.
+				runCall(k)
 			}(k)
 		}
 		wg.Wait()

@@ -54,10 +54,16 @@ func TestGatePermitsOnNonCachingBackend(t *testing.T) {
 // 82/103 across sessions, so this is the common case, not an edge case.
 func TestGatePermitsHighReuseContent(t *testing.T) {
 	val := savedTokenValue(&components.Ctx{CacheAware: true})
-	// 34000 tokens: above the ~30.5k cached-RECURRING break-even, below the ~42.6k
-	// cached-once one. This size is the gate's whole thesis in one fixture — recurrence is
-	// what tips an otherwise-losing call into profit, so the SAME size goes both ways.
-	size := 34000
+	// 44,000 tokens: above the ~40.3k cached-RECURRING break-even, below the cached-once
+	// one. This size is the gate's whole thesis in one fixture — recurrence is what tips an
+	// otherwise-losing call into profit, so the SAME size goes both ways.
+	//
+	// It was 34,000 against a ~30.5k break-even until the prompt was measured: the analytic
+	// cost was built on preambleTokens = 1463 and no tokenizer markup, i.e. 3,663 o200k
+	// tokens priced as if they were the provider's, against a real 5,600. Correcting both
+	// (1,893 o200k x 1.29) moved the break-even up 32%. Nothing about the component got
+	// worse — the number was simply 35% optimistic, in the numerator of every decision.
+	size := 44000
 	once := evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size, 0), false, 5, false, true)
 	recur := evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size, 0), true, 5, false, true)
 
@@ -91,12 +97,17 @@ func TestBreakEvenSizesMatchTheDocumentedVerdict(t *testing.T) {
 	}
 	cachedRecur := breakEven(true, true)
 	freshRecur := breakEven(false, true)
-	if cachedRecur < 26_000 || cachedRecur > 35_000 {
-		t.Errorf("cached+recurring break-even = %d tokens, expected ~30,500 "+
+	// ~40,300 and ~3,100 on the MEASURED prompt (1,893 o200k preamble x 1.29 real-token
+	// markup). The previous ~30,500 / ~1,800 were the same arithmetic over a preamble
+	// constant that was 29% low and no markup at all, so they under-stated call cost by ~35%
+	// and let the gate allow calls that could not pay. Re-derive from the profile's prompt
+	// budget, not from these literals, if the prompt text changes.
+	if cachedRecur < 35_000 || cachedRecur > 46_000 {
+		t.Errorf("cached+recurring break-even = %d tokens, expected ~40,300 "+
 			"(docs/components/extract_llm.md states this figure)", cachedRecur)
 	}
-	if freshRecur < 1_400 || freshRecur > 2_400 {
-		t.Errorf("fresh+recurring break-even = %d tokens, expected ~1,800", freshRecur)
+	if freshRecur < 2_500 || freshRecur > 3_800 {
+		t.Errorf("fresh+recurring break-even = %d tokens, expected ~3,100", freshRecur)
 	}
 	// The gap is WIDER than the bare 10x rate haircut, because cost stops growing once the
 	// prompt hits the shown-content cap while value keeps scaling with output size.

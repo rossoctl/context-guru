@@ -3,6 +3,7 @@ package cheapmodel
 import (
 	"context"
 	"encoding/json"
+	"github.com/rossoctl/context-guru/internal/tokens"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -376,5 +377,59 @@ func TestPrefixBeliefExpires(t *testing.T) {
 	}
 	if marked(b) {
 		t.Fatal("both callers marked after expiry: back to paying twice for one entry")
+	}
+}
+
+// THE FLOOR MUST BE COMPARED IN THE PROVIDER'S UNITS. minCacheableHaiku is 4,096 of the
+// PROVIDER's tokens; tokens.Count returns o200k_base. Comparing the two directly is a unit
+// error, and it silently cost every haiku call its cache.
+//
+// The counter-example, MEASURED 2026-08-19 against the gateway: a 3,682-o200k prefix billed
+// 4,412 input tokens and cached fine (write=4,412, then read=4,412 on the next two calls) —
+// while 3,682 < 4,096 made the old comparison withhold the breakpoint. A cache the provider
+// was willing to grant, declined on arithmetic.
+func TestHaikuFloorIsComparedInProviderTokensNotOurs(t *testing.T) {
+	resetPrefixCache()
+	t.Cleanup(resetPrefixCache)
+	const model = "claude-haiku-4-5" // the family carrying the 4,096 floor
+
+	// Build a prefix at the measured counter-example's size, in OUR units.
+	block := grow(t, 3682)
+	if got := tokens.Count(block); got < 3600 || got > 3800 {
+		t.Fatalf("fixture is %d o200k tokens, wanted ~3,682", got)
+	}
+	blocks, release := systemBlocks([]string{block}, model)
+	release(false, false)
+	if !marked(blocks) {
+		t.Fatalf("a %d-o200k prefix (measured: 4,412 billed, cached) was not marked, so haiku "+
+			"caching is still dead on exactly the prefix that provably caches", tokens.Count(block))
+	}
+
+	// And it must still withhold below the corrected floor: asking for a cache the provider
+	// ignores is harmless, but claiming one we have no evidence for is how the 4,096 got here.
+	resetPrefixCache()
+	small := grow(t, 2000)
+	blocks, release = systemBlocks([]string{small}, model)
+	release(false, false)
+	if marked(blocks) {
+		t.Fatalf("a %d-o200k prefix was marked on haiku; the corrected floor is %d o200k "+
+			"(4,096 provider tokens / 1.20)", tokens.Count(small), minCacheableO200k(model))
+	}
+	// sonnet-class keeps its own, much lower floor.
+	if minCacheableO200k("aws/claude-sonnet-5") >= minCacheableO200k(model) {
+		t.Error("sonnet's floor is no longer below haiku's, so the per-family table has collapsed")
+	}
+}
+
+// grow returns text of approximately want o200k tokens.
+func grow(t *testing.T, want int) string {
+	t.Helper()
+	const unit = "auth timeout src/api/users.py handler=42 "
+	n := want/tokens.Count(unit) + 1
+	for out := strings.Repeat(unit, n); ; out = strings.Repeat(unit, n) {
+		if tokens.Count(out) >= want {
+			return out
+		}
+		n += n/8 + 1
 	}
 }

@@ -45,12 +45,17 @@ func (a Anthropic) Complete(ctx context.Context, prompt string) (string, error) 
 //
 // MEASURED CAVEAT (this is why the caller must not assume a win): a breakpoint below
 // the model's MINIMUM CACHEABLE PREFIX is silently ignored — no error, no cache entry,
-// `cache_creation_input_tokens: 0`. That minimum is 4096 tokens on claude-haiku-4-5 and
-// 1024 on claude-sonnet-5, while the extractor's invariant preamble is ~1463 tokens. So
-// on the CHEAP model (haiku) this split provably caches NOTHING, and on the agent model
-// (model.source: incoming, the default) it does. Split anyway — it is free, correct, and
-// wins on the source that can win — but price the gate on cache_read being ZERO.
-// Verified against the gateway: haiku 1.5k => write=0 read=0; sonnet 1.5k => write then read.
+// `cache_creation_input_tokens: 0`. That minimum is 4096 PROVIDER tokens on claude-haiku-4-5 and
+// 1024 on claude-sonnet-5, while the extractor's invariant preamble is 1,893 o200k tokens. So on
+// the CHEAP model (haiku) the preamble ALONE still caches nothing, and on the agent model
+// (model.source: incoming, the default) it does. Split anyway — it is free, correct, and wins on
+// the source that can win.
+//
+// The preamble PLUS the conversation context (extract.Cfg.CacheContext, on a multi-candidate
+// request) does clear the floor and does cache on haiku, and that only started working once the
+// comparison was fixed to convert units — see minCacheableO200k. Verified against the gateway:
+// haiku 1.5k => write=0 read=0; haiku 3,673 o200k => write=4,217 then read=4,217; sonnet 1.5k =>
+// write then read.
 func (a Anthropic) CompleteSystem(ctx context.Context, system, prompt string) (string, error) {
 	if system == "" {
 		return a.CompleteBlocks(ctx, nil, prompt)

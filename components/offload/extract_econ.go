@@ -70,6 +70,19 @@ type tokenValue struct {
 // Default agent-model rates (claude-sonnet-5 class, $3/$15 per MTok, cache read 0.1x).
 // The gate is a comparison, so what matters is the RATIO between a saved token's value
 // and the extraction call's cost — both scale together if an operator's contract differs.
+// THESE ARE A FALLBACK, NOT THE PRICE. The real numerator of every gate decision is the
+// request's own rate card (Ctx.SelfRates), which the proxy resolves from the provider's live
+// price table — see savedTokenValue. Hardcoding it was measurably wrong in both directions:
+// the code said $3.75/MTok for a cold-turn token and docs/results/measured-2026-08.md §9 said
+// $4.75, a 27% disagreement in the numerator of the ONE regime that pays. NEITHER is right on
+// this deployment. Derived 2026-08-19 from the recorded per-request cost_usd and token tiers
+// of four captured corpora (solving two independent requests simultaneously):
+//
+//	aws/claude-sonnet-5   $2.00 in / $10.00 out per MTok  => cache write $2.50, read $0.20
+//
+// $3.75 is 1.25x sonnet-4-5's $3.00 LIST rate and $4.75 is the opus-5-era figure; both are
+// list prices for models this deployment does not bill at. A literal cannot be right for
+// every operator, so the literal is now only what we use when the table said nothing.
 const (
 	agentFreshPerMTok     = 3.00
 	agentCacheReadPerMTok = 0.30 // 0.1x fresh, the standard Anthropic cache-read multiplier
@@ -90,17 +103,35 @@ const (
 // prefix, so removing it saves the cache-read rate — the 10x haircut that sinks the
 // component's economics.
 func savedTokenValue(c *components.Ctx) tokenValue {
+	fresh, read, write := agentFreshPerMTok/1e6, agentCacheReadPerMTok/1e6, agentCacheWritePerMTok/1e6
+	// The request's own model, at the rates this deployment is actually billed, beats any
+	// constant. Ctx.SelfRates comes from the same provider price table the dashboard prices
+	// requests with, so the gate's numerator and the operator's bill can no longer disagree.
+	// A tier the table left blank falls back to the standard multipliers off fresh rather
+	// than to the sonnet-class literal, which would mix two different rate cards.
+	if c != nil && !c.SelfRates.Zero() {
+		if c.SelfRates.Input > 0 {
+			fresh = c.SelfRates.Input
+		}
+		read, write = c.SelfRates.CacheRead, c.SelfRates.CacheWrite
+		if read <= 0 {
+			read = fresh * 0.1
+		}
+		if write <= 0 {
+			write = fresh * 1.25
+		}
+	}
 	if c != nil && c.CacheAware {
 		// A cache-aware turn whose cache has EXPIRED is the opposite case to a warm one: the
 		// whole prefix is about to be re-written at 1.25x fresh, so a token removed here is
 		// the most valuable token there is — not the least. Reporting it as `cached` would
 		// hand the gate the 10x haircut that (correctly) suppresses warm-turn calls.
 		if c.ColdCache {
-			return tokenValue{perToken: agentCacheWritePerMTok / 1_000_000, cached: false}
+			return tokenValue{perToken: write, cached: false}
 		}
-		return tokenValue{perToken: agentCacheReadPerMTok / 1_000_000, cached: true}
+		return tokenValue{perToken: read, cached: true}
 	}
-	return tokenValue{perToken: agentFreshPerMTok / 1_000_000, cached: false}
+	return tokenValue{perToken: fresh, cached: false}
 }
 
 // priorCallCost is a last-resort per-call cost estimate (~the Terminal-Bench average).
@@ -110,10 +141,33 @@ const priorCallCost = 0.012
 
 // Prompt-size constants for the analytic cost estimate, in tokens.
 const (
-	// preambleTokens is the invariant contract + examples sent on every call (measured
-	// 1463 for the code strategy). It is billed as fresh input whenever the provider's
-	// minimum cacheable prefix is above it — which is the case on claude-haiku-4-5.
-	preambleTokens = 1463
+	// preambleTokens is the invariant contract + examples sent on every call, in o200k
+	// tokens. It is billed as fresh input whenever the provider's minimum cacheable prefix
+	// is above it — which was the case on claude-haiku-4-5 until the unit fix in
+	// cheapmodel.minCacheableO200k.
+	//
+	// MEASURED 2026-08-19 by tokenizing the assembled prefix internal/extract actually
+	// sends (codeSystemBlocks, rewrite: true, aggressiveness: medium — the shipped default):
+	//
+	//	block 0 (lead-in + codeContract + codeRules) 1,138 o200k
+	//	block 1 (aggroMedium, embeds codeExample)      755 o200k
+	//	TOTAL                                       1,893 o200k  = 2,956 billed on sonnet
+	//
+	// The previous 1463 was 29% below that, so every gate decision was priced against a
+	// fixed half that does not exist. Re-measure with the profile's TestProfilePromptBudget
+	// whenever internal/extract's prompt text changes; a stale figure here is invisible.
+	preambleTokens = 1893
+	// realTokenMarkup converts an o200k count (internal/tokens, what every estimate here is
+	// in) into the count the provider BILLS, which is what Pricing is per. Without it the
+	// whole analytic estimate is priced in the wrong unit.
+	//
+	// MEASURED 2026-08-19, identical bytes both sides: o200k said 6,396; claude-haiku-4-5
+	// billed 8,222 (1.29x) and aws/claude-sonnet-5 billed 10,574 (1.65x). The haiku figure is
+	// used because haiku-class is the intended compactor; on a sonnet-class compactor this
+	// under-states by ~28%, which callCost's observed-cost reconciliation then corrects.
+	// (extract_llm.extractContextMargin is the same measurement used for a different purpose
+	// — fitting a window rather than pricing — and takes the conservative-high end.)
+	realTokenMarkup = 1.29
 	// promptOverheadTokens covers the goal + keep-list + labels in the variable part.
 	promptOverheadTokens = 200
 	// expectedOutputTokens is a Starlark filter program's typical length (observed ~77
@@ -147,7 +201,7 @@ func callCost(pricing cheapmodel.Pricing, sizeTokens, overheadTokens int) float6
 	if overheadTokens <= 0 {
 		overheadTokens = promptOverheadTokens
 	}
-	inTok := int64(preambleTokens + shown + overheadTokens)
+	inTok := int64(float64(preambleTokens+shown+overheadTokens) * realTokenMarkup)
 	analytic := pricing.Cost(inTok, expectedOutputTokens, 0, 0)
 
 	// Reconcile with reality: if observed calls came in cheaper or dearer than the
@@ -173,7 +227,8 @@ func analyticBaseline(pricing cheapmodel.Pricing, overheadTokens int) float64 {
 	if overheadTokens <= 0 {
 		overheadTokens = promptOverheadTokens
 	}
-	return pricing.Cost(int64(preambleTokens+2000+overheadTokens), expectedOutputTokens, 0, 0)
+	return pricing.Cost(int64(float64(preambleTokens+2000+overheadTokens)*realTokenMarkup),
+		expectedOutputTokens, 0, 0)
 }
 
 // gateDecision records why the gate allowed or suppressed a call. The reason string is
@@ -383,7 +438,7 @@ func (r *ratioTracker) exploring(session string) bool {
 // ~5-15s of latency, so this is also the knob that bounds exploration's latency cost.
 const maxExploreCalls = 2
 
-// slowCallMs is the mean per-call latency above which the gate stops exploring. Exploration
+// slowCallMs is the MEDIAN per-call latency above which the gate stops exploring. Exploration
 // is a bet that costs money AND wall-clock time, and on an agent with a task deadline the
 // wall clock is the scarcer resource: PR #37 measured 17.8s across 2 calls that saved 0
 // tokens, contributing to a task exhausting its budget. Money-only reasoning cannot see
@@ -392,10 +447,18 @@ const maxExploreCalls = 2
 const slowCallMs = 6000
 
 // tooSlowToExplore reports whether observed extraction latency is high enough that
-// speculative calls should stop. Uses the observed mean, so it self-tunes to the deployment
-// rather than assuming a gateway's speed.
-func tooSlowToExplore(avgLatencyMs float64, calls int64) bool {
-	return calls > 0 && avgLatencyMs >= slowCallMs
+// speculative calls should stop. Self-tunes to the deployment rather than assuming a
+// gateway's speed.
+//
+// It reads the MEDIAN, not the mean. MEASURED 2026-08-19 on this gateway, n=8 identical
+// calls: min 2,091 / p50 3,748 / max 11,663 ms, and an 8-token no-op call ran min 1,490 /
+// p50 1,812 / max 15,800. One tail sample drags the mean over the 6,000 ms brake while the
+// typical call is well under half of it, so the mean answers "was there a slow call?" when
+// the question is "are calls slow?". Per-call latency here is gateway queue time, not prompt
+// size (a 1-token call is not faster than an 8k-token one), so the tail is noise about the
+// queue rather than evidence about our own work.
+func tooSlowToExplore(p50LatencyMs float64, calls int64) bool {
+	return calls > 0 && p50LatencyMs >= slowCallMs
 }
 
 // minRatioSampleTokens is how much observed content the ratio estimate needs before it

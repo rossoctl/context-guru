@@ -186,11 +186,32 @@ func HaikuPricing() Pricing {
 	return Pricing{InputPerMTok: 1.00, OutputPerMTok: 5.00, CacheWritePerMTok: 1.25, CacheReadPerMTok: 0.10}
 }
 
+// PricingConfigured reports whether the operator priced the cheap model at all, i.e. whether
+// any CHEAP_MODEL_PRICE_* is set to a usable value.
+//
+// It exists so a caller can SAY SO when it is spending against a list price nobody confirmed.
+// MEASURED on this deployment: none of the four variables is set, so the economic gate priced
+// every call at haiku LIST ($1.00/$5.00 per MTok) while the request-level figure on the
+// dashboard came from the operator's own card ($0.80/$4.00) — about 25% apart, in the
+// numerator of every allow/suppress decision, with nothing anywhere reporting the divergence.
+// A silent 25% is worse than a wrong 25%: the wrong one can be corrected.
+func PricingConfigured() bool {
+	_, ok := pricingFromEnv()
+	return ok
+}
+
 // PricingFromEnv returns HaikuPricing overridden by any of CHEAP_MODEL_PRICE_IN,
 // _OUT, _CACHE_WRITE, _CACHE_READ (dollars per million tokens). An unparseable or
-// absent value leaves the default — pricing must never fail a request.
+// absent value leaves the default — pricing must never fail a request. Use
+// PricingConfigured to find out whether the result is the operator's card or our guess.
 func PricingFromEnv() Pricing {
+	p, _ := pricingFromEnv()
+	return p
+}
+
+func pricingFromEnv() (Pricing, bool) {
 	p := HaikuPricing()
+	set := false
 	for _, f := range []struct {
 		env string
 		dst *float64
@@ -201,10 +222,10 @@ func PricingFromEnv() Pricing {
 		{"CHEAP_MODEL_PRICE_CACHE_READ", &p.CacheReadPerMTok},
 	} {
 		if v, err := strconv.ParseFloat(os.Getenv(f.env), 64); err == nil && v >= 0 {
-			*f.dst = v
+			*f.dst, set = v, true
 		}
 	}
-	return p
+	return p, set
 }
 
 // Cost prices one call's token usage in dollars.

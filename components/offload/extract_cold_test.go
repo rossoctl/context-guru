@@ -4,8 +4,10 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
@@ -149,19 +151,35 @@ func TestColdSweepMinIdleRaisesTheBar(t *testing.T) {
 	}
 }
 
-// The sweep gets the WHOLE conversation regardless of the configured context mode: deciding
-// what a message from three hours ago may lose requires knowing what happened since.
-func TestColdSweepForcesFullContext(t *testing.T) {
-	e := newSizeComponent(t, &silentModel{},
+// THE SWEEP MUST NOT FORCE `context: full`. It used to, and that one line was the largest
+// single cost in this component: `full` renders the whole request (measured 138,596 context
+// tokens on a 138,341-token request), once per candidate, so the break-even removal at k=4
+// was 113,286 tokens — more than the transcript holds — against 6,833 under `recent`.
+//
+// The original justification was that a full transcript is needed to judge what an old
+// message may lose. It was tested and it is the keep-list, not the context, that carries
+// that: a full-transcript context took acceptance from 3/4 to 0/6 because every unique token
+// in the noise became a required identifier, and HarvestIdentifiers now reads ctxRecent
+// explicitly, so the two concerns are separate. Measured on bench/cold.jsonl (8 requests,
+// coldness verified by cache_read=0), `full` spent $0.0387 on a 36,686-token prompt to
+// remove 0 tokens.
+//
+// So the configured mode governs on a sweep exactly as it does on a warm turn, and an
+// operator who wants the old behaviour writes `context: full`.
+func TestColdSweepHonoursTheConfiguredContextMode(t *testing.T) {
+	goalOnly := newSizeComponent(t, &silentModel{},
 		"context: goal\ncold_cache:\n  enabled: true\nstrategy: code\n")
-	warm := e.extractionContext(ctxReq(), false)
-	swept := e.extractionContext(ctxReq(), true)
-	if len(swept) <= len(warm) {
-		t.Fatalf("sweep context (%d bytes) is not larger than the configured goal mode (%d)",
-			len(swept), len(warm))
+	if warm, swept := goalOnly.extractionContext(ctxReq(), false), goalOnly.extractionContext(ctxReq(), true); warm != swept {
+		t.Fatalf("sweep overrode context: goal (%d bytes warm, %d bytes swept)", len(warm), len(swept))
 	}
-	if !strings.Contains(swept, "file body line") {
-		t.Fatal("sweep context excluded tool output, so it is not the full transcript")
+	if s := goalOnly.extractionContext(ctxReq(), true); strings.Contains(s, "file body line") {
+		t.Fatal("sweep included tool output under context: goal, so it is still rendering the transcript")
+	}
+	// `full` still means full, on the sweep and off it — the escape hatch has to work.
+	full := newSizeComponent(t, &silentModel{},
+		"context: full\ncold_cache:\n  enabled: true\nstrategy: code\n")
+	if s := full.extractionContext(ctxReq(), true); !strings.Contains(s, "file body line") {
+		t.Fatal("context: full excluded tool output, so the escape hatch no longer renders the transcript")
 	}
 }
 
@@ -268,4 +286,93 @@ func TestColdSweepCapIsItsOwn(t *testing.T) {
 	if rep.Gates["over_per_request_cap"] != 0 {
 		t.Fatal("the hot path's per-request cap was applied to a sweep")
 	}
+}
+
+// overlapModel records whether any two calls were ever in flight at once, and how many ran.
+type overlapModel struct {
+	mu       sync.Mutex
+	inFlight int
+	overlaps int
+	calls    int
+}
+
+func (m *overlapModel) Complete(context.Context, string) (string, error) {
+	m.mu.Lock()
+	m.calls++
+	m.inFlight++
+	if m.inFlight > 1 {
+		m.overlaps++
+	}
+	m.mu.Unlock()
+	time.Sleep(5 * time.Millisecond) // wide enough for a sibling to arrive if one is coming
+	m.mu.Lock()
+	m.inFlight--
+	m.mu.Unlock()
+	return "", nil
+}
+
+// THE CACHE WRITE HAS TO BE EARNED BEFORE ANYTHING CAN READ IT. `CacheContext = len(cands) > 1`
+// moves the conversation context into a cacheable system block, but cheapmodel.claimCacheWrite
+// deliberately withholds the breakpoint from CONCURRENT siblings — a cache entry that is only
+// ever written costs 1.25x fresh and buys nothing. So with llmConcurrency = 4 the first call
+// took the write slot and calls 2..4 sent no mark and paid plain fresh input for the identical
+// context. Measured on production: five haiku calls on ONE request each sent ~138,000 prompt
+// tokens with cache_read = 0 AND cache_write = 0.
+//
+// The sweep therefore issues its first call ALONE, then the rest concurrently. At T = 180k,
+// k = 4 that moves break-even removal from 198,620 tokens to 79,088.
+//
+// The warm per-output path stays fully concurrent: serializing costs a whole gateway queue
+// round (~2-4 s p50, tail 12-16 s — latency here is queue time, not prompt size), which is
+// worth paying only on a turn whose entire transcript is being re-billed at 1.25x fresh.
+func TestSweepEarnsTheContextCacheWriteBeforeReadingIt(t *testing.T) {
+	// Two big outputs at depth, so the sweep has k >= 2 and CacheContext is on. The salt keeps
+	// the two subtests' content DISTINCT: the extraction result cache and the seen-content
+	// ledger are process-wide, so reusing bytes makes the second subtest answer from state and
+	// make no calls at all.
+	req := func(salt string) *bschemas.BifrostChatRequest {
+		return &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+			userMsg("Find the auth timeout in src/api/users.py and fix it."),
+			toolResultMsg(strings.Repeat("2024-01-01 GET /users/42 200 12ms src/api/users.py "+salt+"\n", 700)),
+			assistantMsg("Now the second log."),
+			toolResultMsg(strings.Repeat("2024-01-02 POST /login 500 31ms src/api/auth.py "+salt+"\n", 700)),
+			userMsg("keep going"),
+		}}
+	}
+	run := func(t *testing.T, yaml string, cold bool) *overlapModel {
+		t.Helper()
+		m := &overlapModel{}
+		e := newSizeComponent(t, m, yaml)
+		c := coldCtx("earn-"+t.Name(), cold, 3_600_000, m)
+		c.MaxCachedIdx = 0 // both outputs in the tail, so only the sweep/gate can stop them
+		rep := &components.Report{}
+		if _, err := e.Offload(req(t.Name()), rep, c); err != nil {
+			t.Fatal(err)
+		}
+		if m.calls < 2 {
+			t.Fatalf("fixture made %d calls, need >= 2 for the write/read split to exist (gates: %v)",
+				m.calls, rep.Gates)
+		}
+		return m
+	}
+
+	t.Run("sweep serializes the writer", func(t *testing.T) {
+		m := run(t, "per_output: false\nstrategy: code\neconomic_gate: false\n"+
+			"cold_cache:\n  enabled: true\n  min_tokens: 500\n", true)
+		// The FIRST call must have run alone. With k=2 that means no overlap at all; with
+		// more, the readers may overlap each other but never the writer.
+		if m.overlaps > m.calls-2 {
+			t.Fatalf("%d overlapping calls across %d: the first call did not run alone, so "+
+				"the readers cannot have read what nothing had written yet", m.overlaps, m.calls)
+		}
+	})
+
+	t.Run("warm per-output path stays concurrent", func(t *testing.T) {
+		m := run(t, "fire_on: size\nmin_tokens: 500\nstrategy: code\neconomic_gate: false\n"+
+			"cold_cache:\n  enabled: true\n", false)
+		if m.overlaps == 0 {
+			t.Fatalf("no overlap across %d warm calls: the hot path was serialized too, and it "+
+				"pays a whole gateway queue round (~2-4s p50) for a fraction of a cent", m.calls)
+		}
+	})
 }

@@ -34,7 +34,35 @@ const (
 	minCacheableSmall = 1024
 )
 
-// minCacheablePrefix returns the smallest system prefix worth marking for this model.
+// realTokensPerO200k converts our own token count into the count the provider will bill.
+//
+// THE FLOORS ABOVE ARE IN THE PROVIDER'S TOKENS; internal/tokens counts o200k_base. Comparing
+// the two directly is a unit error, and it was silently costing every haiku call its cache.
+// MEASURED 2026-08-19 against the gateway, same bytes both sides:
+//
+//	preamble+context, claude-haiku-4-5:  3,682 o200k  ->  4,412 billed  (1.20x)
+//	preamble only,    aws/claude-sonnet-5: 1,893 o200k ->  2,956 billed  (1.56x)
+//
+// The 3,682-o200k prefix CACHED (write=4,412 then read=4,412) while the unconverted
+// comparison (3,682 < 4,096) withheld the breakpoint — a cache the provider was willing to
+// grant, declined on arithmetic. 1.20x is the haiku figure, and haiku-class is the family
+// carrying the 4,096 floor, so it is the right conversion here; it is also the smaller of
+// the two, so it never claims a cache we have evidence would be refused.
+//
+// Being wrong in the LOOSE direction is nearly free: a breakpoint below the provider's real
+// minimum is ignored, not charged (measured: write=0, read=0, input_tokens identical with and
+// without the mark), and claimCacheWrite's release() records that and retries later. Being
+// wrong in the TIGHT direction forgoes the cache permanently, which is what happened here.
+const realTokensPerO200k = 1.20
+
+// minCacheableO200k is minCacheablePrefix expressed in the units tokens.Count actually
+// returns, so like is compared with like.
+func minCacheableO200k(model string) int {
+	return int(float64(minCacheablePrefix(model)) / realTokensPerO200k)
+}
+
+// minCacheablePrefix returns the smallest system prefix worth marking for this model, in the
+// PROVIDER's tokens. Callers holding an o200k count must go through minCacheableO200k.
 //
 // An UNNAMEABLE model gets the haiku figure, not the smaller default: the failure we are
 // avoiding is paying for a cache entry that is never read, so when we cannot tell which
@@ -77,7 +105,7 @@ func systemBlocks(system []string, model string) (blocks []any, release func(wro
 	// provider to cache it at all, and a read must be able to follow the write.
 	mark := false
 	release = noop
-	if total >= minCacheablePrefix(model) {
+	if total >= minCacheableO200k(model) {
 		mark, release = claimCacheWrite(model, strings.Join(kept, "\x00"))
 	}
 	out := make([]any, 0, len(kept))
@@ -93,9 +121,11 @@ func systemBlocks(system []string, model string) (blocks []any, release func(wro
 
 // CacheablePrefix reports whether a system prefix of promptTokens would actually be
 // cached by this model. Exported so a caller pricing a call does not have to duplicate
-// the table (the economic gate must not assume a cache it will not get).
+// the table (the economic gate must not assume a cache it will not get). promptTokens is an
+// o200k count (internal/tokens), the same unit systemBlocks uses, so the conversion to the
+// provider's tokens happens in exactly one place.
 func CacheablePrefix(model string, promptTokens int) bool {
-	return promptTokens >= minCacheablePrefix(model)
+	return promptTokens >= minCacheableO200k(model)
 }
 
 // --- Only write a cache entry something can read ------------------------------------
