@@ -2,7 +2,8 @@
 
 Every term the co-reference work uses, in one page, in the order you meet them. Full argument in
 [the proposal](../proposals/coref-compaction.md); measured numbers in
-[the results](../results/coref-density.md); config in [the component reference](../components/coref.md).
+[the density pass](../results/coref-density.md) and [the selection
+experiment](../results/coref-selection-experiment.md); config in [the component reference](../components/coref.md).
 
 ## The one-sentence version
 
@@ -41,13 +42,26 @@ For each tool output, exactly one of:
 | Verdict | Means | Cut it? |
 |---|---|---|
 | **`opaque`** | The output introduced **nothing the index can track** — so there is no evidence either way. | **Never.** Absence of evidence is not evidence of deadness (see the box below). |
-| **`unreferenced`** | It **did** introduce trackable identifiers, and no later turn used any of them. | **Yes — the free cut.** No threshold needed, no model call. This is the shipped default (`cut_unreferenced`). |
+| **`unreferenced`** | It **did** introduce trackable identifiers, and no later turn used any of them. | **Yes — the shipped default** (`cut_unreferenced`). No threshold, no model call. **Not free:** measured **11% false-drop** against held-out ground truth — see the box below. |
 | **`closed`** | Referenced **once or twice, and not for a long time**. Whatever the model took survives in the turn that took it, so the original is redundant *with content still in the request*. This is **case A** made checkable. | Optional (`cut_closed`, **off by default**). |
 | **`open`** | Referenced **recently, or repeatedly**. Still load-bearing. This is **case B**. | **No.** |
 
-!!! warning "`unreferenced` never means 'unused'"
+!!! warning "`unreferenced` never means 'unused' — and it is wrong 11% of the time"
     It means "no later **exact** use". A value the model summed, converted or reworded leaves no substring
     to match, so it lands here too. Always an **upper bound** on what is safe to cut.
+
+    Now measured, not argued. Held out the future of 885 real tool outputs and asked how often
+    "unreferenced at the firing point" was contradicted later: **11%**. It is **not a boundary
+    artifact** — 0% of those errors are one turn past the firing point and **57% are 51+ turns
+    past it** — and it is **irreducible with the features the index has**: demanding more
+    introduced identifiers makes it *worse* (11% → 21%), demanding longer dormancy barely moves
+    it while costing 2.5× the mass. An output that lies dormant for a hundred turns and is then
+    used carries no signal, at the moment of decision, that distinguishes it from one dormant
+    forever.
+
+    Since ground truth is Tier-1 matching only, **11% is a lower bound.** Full method and the
+    ten arms it was measured against: [the selection
+    experiment](../results/coref-selection-experiment.md).
 
 !!! danger "`opaque` vs `unreferenced` — the distinction that took a review to find"
     Both have zero references, and they are opposites. "Introduced 200 identifiers, nobody touched one" is
@@ -78,7 +92,7 @@ search for the **witness** is needed.
 |---|---|---|---|
 | **`closed_dist`** | 12 | How many messages **ago** the last reference must be before the output counts as `closed`. Newer than this ⇒ `open`. | **It is load-bearing but flat.** Set it to 0 and the `closed` class stops existing, so it *matters*; but anywhere in 4–40 gives the same answer within 2–3 points, so there is no gain from tuning it. Leave it at the default and spend the effort on `open_reps`. |
 | **`open_reps`** | 3 | Referenced at least this many times ⇒ `open` **regardless of age**, because a span referenced repeatedly is a hot span that happens to be old. | **This is the dial.** 2→6 moves the answer 18 points. 3 is the conservative setting. |
-| **`min_later_turns`** | 8 | The **opportunity floor**: an output with fewer model turns after it is `open` regardless of everything else. | Necessary, not a refinement. Near the tail, "no references yet" and "recent" are the same thing, so without it a batched pass preferentially cuts the **most recent** context — the worst possible choice. It is `mask`'s `keep_recent` idea expressed in turns. |
+| **`min_later_turns`** | 8 | The **opportunity floor**: an output with fewer model turns after it is `open` regardless of everything else. | **Justified structurally, not by safety.** Near the tail, "no references yet" and "recent" are the same thing, so without it a batched pass preferentially cuts the **most recent** context — the worst possible choice, and `mask`'s `keep_recent` idea expressed in turns. But it does **not** buy accuracy: swept against held-out ground truth, `min_later=0` yields *more* mass (363k vs 207k) at a *lower* false-drop rate (8% vs 11%). Keep it for the structural reason; do not claim it as a safety margin. |
 
 ## 5. The three measurements per output (and the one that's easy to get wrong)
 
@@ -229,6 +243,28 @@ why the same fixture and the same false-positive regression cases exist on both 
 
 ## 10. Status in one line
 
-Mechanism implemented and tested; `cut_unreferenced` on by default and justified (21% of mass on
-interactive traffic, ~70% on benchmark traffic); `cut_closed` **off** until measured on the eval-box
-corpus; component **opt-in, in no preset**.
+Mechanism implemented and tested; `cut_unreferenced` on by default, justified on yield (21% of mass on
+interactive traffic, ~70% on benchmark traffic) and now bounded on accuracy (**11% false-drop**);
+`cut_closed` **off** until measured on the eval-box corpus; component **opt-in, in no preset**; no
+reward measurement exists, which remains the gate.
+
+## 11. Experiment terms (the held-out measurement)
+
+Introduced by [the selection experiment](../results/coref-selection-experiment.md), and worth having
+here because they are how any future claim about this component should be scored.
+
+| Term | Means |
+|---|---|
+| **firing point `F`** | The message index a compaction pass is imagined to fire at. Everything before it is a candidate; everything after it is ground truth the decider never sees. |
+| **evidence window** | `(output, F]` — the only thing any arm may look at. |
+| **held-out future** | `(F, end]` — what the agent actually went on to do. Scoring only. |
+| **false-drop** | Of what an arm removed, the share that *was* referenced later. A definite error. Bounded above by the base rate, which is why it is misleading alone. |
+| **live-kept** | Of what *was* referenced later, the share an arm correctly kept. **The discrimination metric**, and base-rate independent. |
+| **null baseline** | Drop everything. Scores exactly the base rate at 0% live-kept. A high removal rate paired with a base-rate false-drop rate means an arm is doing nothing but deleting. |
+| **base rate** | The share of candidates referenced after `F` at all. 4% on LOCA, 11% on UltraHorizon, 46% on interactive traffic — so **the same arm scores wildly different false-drop rates on different corpora**, and comparing arms across corpora without this control produces artifacts. It produced two in this work. |
+
+!!! danger "Where this metric stops being valid"
+    It scores **verbatim survival**, so it can compare arms that keep-or-drop text and **cannot**
+    score one that *paraphrases*. A summary reading "found the grace-period bug in the auth module"
+    has preserved the information while containing none of the identifiers. Any comparison between
+    selective compaction and summarization needs **downstream task outcome**, not this.

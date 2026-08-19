@@ -249,9 +249,11 @@ both unmeasured — not that transformed references are absent.
 
 **Settled enough to act on:**
 
-- `cut_unreferenced` (the shipped default) is justified everywhere, and its size is workload-dependent:
-  21% of mass on interactive traffic, ~70% on benchmark traffic, with no calibrated threshold and no
-  model call.
+- `cut_unreferenced` (the shipped default) is justified **on yield** everywhere, and its size is
+  workload-dependent: 21% of mass on interactive traffic, ~70% on benchmark traffic, with no
+  calibrated threshold and no model call. Its **accuracy** is a separate question this pass could
+  not ask, and [the held-out experiment](coref-selection-experiment.md) since answered it:
+  **11% false-drop**, irreducible, and a lower bound. Read the yield figures here alongside that.
 - `closed_dist` is nearly inert; `open_reps` is the dial. Leave the recency threshold alone.
 - Break-even needs a window the traffic actually used, or it reports a construction rather than a result.
 
@@ -272,6 +274,10 @@ rate as the precision inner loop, and only then the scored benchmarks.
   project. No seeds, no variance estimates. Every figure is a point estimate of unknown spread.
 - **Tail bias is now guarded, not merely bounded** — `min_later_turns` (default 8) treats an output with
   too few later model turns as `open`. Before that guard existed, LOCA's headline was the most affected.
+  Note the guard is justified **structurally** (it stops a batched pass preferring the newest
+  context) and **not** by accuracy: swept against held-out ground truth, `min_later=0` gives more
+  mass at a *lower* false-drop rate. See
+  [the experiment](coref-selection-experiment.md#5-min_later_turns-does-not-earn-its-keep-on-this-metric-measured).
 - **Session boundaries are reconstructed.** Claude Code transcripts are cut at 180k tokens to approximate
   compaction boundaries the transcript does not record; UltraHorizon runs are cut where the harness's own
   context wipe drops the message count. Measuring across a boundary the model cannot see across would
@@ -282,5 +288,6 @@ rate as the precision inner loop, and only then the scored benchmarks.
 - **Two additive fields** (`turn_tokens`, `conv`) were added to what `coref.py` accepts, for converted
   logs only. A real capture sets neither and its behaviour is unchanged.
 
-See also: [the proposal](../proposals/coref-compaction.md) · [the component](../components/coref.md) ·
+See also: [the proposal](../proposals/coref-compaction.md) · [the held-out selection
+experiment](coref-selection-experiment.md) · [the component](../components/coref.md) ·
 [glossary / cheat sheet](../reference/coref-glossary.md) · [improvement plan](improvement-plan.md)

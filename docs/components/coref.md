@@ -10,8 +10,15 @@
     against ([results and caveats](../results/coref-density.md)). The `closed` cut stays **off by default**
     because its yield ranges from 15% of mass on interactive traffic to **0% on LOCA**, and a knob that
     varies that much by workload has no defensible default. `cut_unreferenced` (the default)
-    needs no threshold and is justified — 13% of tool-output mass on interactive traffic, 51% on
-    UltraHorizon, 22% on LOCA-bench.
+    needs no threshold and is justified **on yield** — 13% of tool-output mass on interactive traffic,
+    51% on UltraHorizon, 22% on LOCA-bench.
+
+    **On accuracy it is not free.** Against held-out ground truth over 885 real tool outputs,
+    `cut_unreferenced` removes content the agent later used **11% of the time** — not a boundary
+    artifact (57% of those references land 51+ turns past the firing point) and not reducible with
+    the features the index has. Since ground truth is Tier-1 exact matching, 11% is a **lower
+    bound**. Budget for it: [the selection
+    experiment](../results/coref-selection-experiment.md).
 
     Two things that measurement already settles, before you tune anything: **`closed_dist` is nearly
     inert** (a 10× sweep moves the answer 2–3 points) and **`open_reps` is the dial** (2 → 6 moves it 18).
@@ -159,5 +166,6 @@ Below the `trigger`; no output above `min_tokens`; every large output referenced
 edge, is the common and correct outcome.
 
 See also: [cheat sheet: every term on one page](../reference/coref-glossary.md) ·
+[the held-out selection experiment](../results/coref-selection-experiment.md) ·
 [the proposal and its derivation](../proposals/coref-compaction.md) ·
 [Components overview](../components.md) · [mask](mask.md) · [dedup](dedup.md)

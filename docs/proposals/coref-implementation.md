@@ -149,3 +149,36 @@ is the largest unexamined claim in the proposal.
 
 Until step 1, the component's `closed`-cut defaults remain placeholders with a measured basis on the
 wrong corpus, which is why they are off rather than on.
+
+## What the held-out experiment removed from this list
+
+A separate [selection experiment](../results/coref-selection-experiment.md) ran ten arms against
+held-out ground truth. It **closed three questions** that were queued here, and it did so mostly by
+ruling things out — which is the cheapest kind of progress this list can make:
+
+- **Do not build a model-in-the-verdict variant.** Eight model arms across two models and four
+  prompt shapes; none beat the deterministic index on both axes, and no intersection or union of
+  index and model beat the index alone. The intermediate design (`coref` supplies evidence,
+  `extract_llm`'s prompt supplies the verdict) is refuted, not merely unproven.
+- **Do not specify trims as free text.** Models returned text that was not verbatim in the original
+  in the majority of trim verdicts. Any trim path must go through `extract_llm`'s sandboxed-filter
+  mechanism, which enforces containment structurally
+  (`internal/extract/contain.go`), rather than through a "return the part worth keeping" prompt.
+- **Do not pursue replacing the agent's summarizer.** Sustained selective removal is `f × g` with
+  `f < 1`, so it multiplies time-to-threshold by `1/(1−f)` — 1.05–1.32× on measured traffic — and
+  cannot hold a context flat at any aggression setting. `coref` is a deferral play permanently.
+
+And it **added one item**, ahead of everything above because it is a correctness issue in shipped
+code rather than a calibration question:
+
+0. **Fix the kept-verbatim guard before `coref` goes in any preset.** `MarkKeptVerbatim` keys by
+   content hash with no session component, so one expand exempts that byte-identical content in
+   *every future session* — permanently eroding yield on exactly the recurring content worth
+   cutting. The flag also shares the payload LRU, so it can be evicted and the guard silently lost.
+   `coref` is the first component whose decisions are latched and never revisited, which makes it
+   the first for which a lost guard is unrecoverable. Details in
+   [the proposal, §5.8](coref-compaction.md#5-hard-constraints-the-codebase-imposes).
+
+Two other things it did **not** settle, and neither is cheap: nothing here touches **reward**, and
+the experiment ran on captured traffic with a single firing point per transcript. The ordering above
+is unchanged — reward is still the gate.

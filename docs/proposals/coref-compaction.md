@@ -8,6 +8,11 @@ with the calibrated (`closed`) cut **off by default**. See [implementation statu
 benchmark traffic** (a 3.3x workload difference, not a constant), a reference consumes a median
 18.7% of what its output introduced, and — the result that most affects the design — **recency is
 nearly inert while reference count does all the discrimination**.
+A later [held-out experiment](../results/coref-selection-experiment.md) added the decision-quality
+numbers the density pass could not: the deterministic index keeps **95%** of what the agent went on
+to need while removing 11.8% of mass, no model-in-the-verdict arm beat it, `cut_unreferenced`
+carries an irreducible **11% false-drop**, and selective removal **cannot replace a summarizer** at
+any aggression setting — see [§8b](#8b-what-the-held-out-experiment-settled).
 **Related:** [the component reference](../components/coref.md) · [cheat sheet](../reference/coref-glossary.md) ·
 [dynamic, model-aware triggers](../components.md) ·
 [improvement plan §0, §C](../results/improvement-plan.md) · [agent compaction](../how-to/agent-compaction.md)
@@ -27,6 +32,23 @@ cut, a large cut rewrites the cache, so A must only fire when confidence is high
 This doc does three things: says what a reference actually is in our traffic, argues that
 distance is the wrong discriminator and proposes a better one, and then prices the whole idea
 against numbers already measured in this repo. The pricing is the part that changes the design.
+
+!!! info "Scope: this proposal is now explicitly about the **caching** regime only"
+    Earlier drafts priced both regimes. That was wasted breath: on a non-caching backend every
+    turn re-sends the whole transcript at full input price, so the bill grows quadratically in
+    session length and the workload is uneconomic before any component's decisions matter.
+    **The non-caching regime is out of scope by decision, not by oversight.**
+
+    This narrows the proposal in a useful way. `coref` no longer has to justify itself as a
+    general token reducer; it has exactly one job — **be worth a cache-write** — and every
+    section below is a test of that. It also removes the only argument for a `coref` variant that
+    scans all messages instead of the tail: the tail restriction was never the point, the
+    cache-write was.
+
+    Two conventions are being **changed** as a consequence, and both are recorded where they
+    live: `TailOnly` is no longer treated as inviolable for backward-looking offloaders (§5.3),
+    and `allow_on_caching_backend` is no longer a blanket veto on model-calling offloaders — the
+    gate becomes "does this pay for the rewrite", which is a measurement rather than a policy.
 
 ---
 
@@ -225,6 +247,28 @@ gives `W ≈ 120k`, so it needs `5k × T > 1.38M` → **T > 276 turns**. That do
 > argument against the idea — it is the quantified version of the original concern about cache
 > rewrites, and it dictates the design.
 
+!!! note "`W` is not "everything after `i`" — it is set by the breakpoints, and that is favourable"
+    The formula above prices `W` as the whole suffix, which is the conservative reading and the
+    one the measurement used. The provider is more forgiving than that. Anthropic caching has
+    **at most 4 `cache_control` breakpoints** and reads from the deepest one whose prefix still
+    matches, with a 20-block lookback. So a cut at index `i` invalidates only from **the nearest
+    live breakpoint at or before `i`** — the blocks before it are still served from cache. The
+    honest cost term is:
+
+    ```
+    cost = 11.5 × (nearest live breakpoint at or before i  →  end)
+    ```
+
+    Two consequences worth acting on. **Cutting several outputs that share one breakpoint span is
+    free relative to cutting one of them** — which strengthens the batching argument in a way §4
+    understates. And **where the breakpoints sit is a lever `coref` could pull**, via
+    [`cachesplit`](../components/cachesplit.md): placing a breakpoint just below the intended cut
+    depth bounds the damage in advance.
+
+    Unmeasured, and it needs to be before this is leaned on: whether adding a breakpoint over
+    bytes the provider has *already* cached itself incurs a write charge. If it does, the lever
+    costs what it saves. Cheap to answer with a two-request probe against real usage figures.
+
 Three things *can* pay, and they are the design:
 
 - **Batching.** One rewrite serves every cut taken at that boundary, so `S` is the **sum** of
@@ -305,6 +349,36 @@ These are not preferences; each one is a property of existing machinery.
    `MarkKeptVerbatim` on anything the agent expands, so a restored span is never re-cut.
 6. **Fail open, never worse.** Unchanged: any error reverts this component only; a pass that
    would not shrink the request is reverted.
+7. **`skipReduce` makes `coref` and `extract_llm` mutually exclusive per output, first-come.**
+   Every offloader consults `skipReduce` (`components/offload/state.go:292`), which refuses any
+   content already carrying an offload marker. So whichever of the two reaches an output first
+   owns it: once `coref` has replaced it with `<<cg:HASH>>`, `extract_llm` sees a placeholder and
+   declines, and vice versa. They do not compose or stack on the same output — pipeline order is
+   the whole policy. That is a **design constraint that has never been stated**, and it decides
+   the shape of the answer: a "coref-aware `extract_llm`" and a separate `coref` component are
+   not additive alternatives, they are competing owners of the same candidate set. If the two
+   ideas are to combine, they must combine **inside one component's decision**, not as two
+   components in a pipeline.
+8. **The kept-verbatim guard is cross-session and best-effort, and both halves are surprises.**
+   `MarkKeptVerbatim` keys purely by content hash (`keptKey(ck) = "cg:keep:" + ck`,
+   `state.go:275`) with **no session in the key** — the comment says "session-independent" and
+   means it. So one expand of a given byte-identical output permanently exempts *that content in
+   every future session*. For genuinely per-session content that is harmless; for content that
+   recurs across sessions — a config file, a repeated banner, a standard schema dump, exactly the
+   high-value repeated mass — **one agent asking for it back once opts it out of compaction
+   globally, for every session thereafter.** Nothing reports this, so the effect is a slow,
+   invisible erosion of yield that looks like the component getting worse over time.
+
+   And it is best-effort in the other direction: the flag goes through `Store.Put`, so it carries
+   the store's default TTL *and* competes for capacity in the same LRU as multi-kilobyte stash
+   payloads. A one-byte guard flag can be evicted by payload pressure, after which the content is
+   re-cut and the expand loop the guard exists to prevent can recur.
+
+   Neither behaviour is `coref`-specific and neither is a `coref` bug — but `coref` is the first
+   component whose cuts are **latched and never revisited**, so it is the first for which a lost
+   guard flag is unrecoverable rather than self-healing next turn. Worth fixing before `coref`
+   ships in a preset: scope the key by session (or record it alongside the latched decision), and
+   keep guard flags out of the payload LRU.
 
 ## 6. Trigger integration
 
@@ -528,6 +602,80 @@ introduced survivorship bias when the failure rate was arm-imbalanced).
     **[`coref` implementation status](coref-implementation.md)**. It is kept separate because it
     goes stale on every commit while the argument above does not — and because a proposal that
     doubles as a changelog stops being reviewable as a proposal.
+
+## 8b. What the held-out experiment settled
+
+§7's measurement pass reads what a cut *would* remove. A separate, later experiment asked the
+harder question — **do the decisions come out right** — by holding out the future of 885 real tool
+outputs and scoring ten arms against it. Full method, arms and limitations:
+[the selection experiment](../results/coref-selection-experiment.md). Four of its results change
+this proposal.
+
+**1. The deterministic index is the strongest discriminator measured, not a fallback.** It keeps
+95% of what the agent went on to need while removing 11.8% of mass. Every arm that put a model in
+the verdict path — including a merged prompt seeing both the content and the reference evidence —
+scored *worse on both axes*, and no combination of index and model beat the index alone. This
+**refutes** the intermediate design the discussion around this proposal had converged on
+(demote the index to an evidence supplier, move the verdict into `extract_llm`'s prompt).
+
+**2. `cut_unreferenced` is not the free safe cut §3 calls it.** Measured false-drop is **11%**,
+it is not a boundary artifact (57% of the errors land 51+ turns past the firing point), and it is
+irreducible with the features the index has. §3's language has been corrected in the
+[cheat sheet](../reference/coref-glossary.md); it should be read as a *cheap* cut with a bounded
+error rate, never a free one.
+
+**3. Prompt framing is worth ~26 points of accuracy — and reassurance is the failure mode.** A
+prompt telling the model its cuts "stay recoverable on request" produced 91% removal at 6%
+live-kept. Replacing that with the real cost — *the agent usually does not notice the gap and
+answers from worse information instead of asking for it back* — moved live-kept to 58%. This is
+the same finding as the marker rule in [`corefstub.go`](../components/coref.md), arrived at from
+the other end: **any surface that tells a decider a cut is cheap makes the decider careless**,
+whether that decider is the compacting model or the agent reading the marker.
+
+**4. Selection cannot replace a summarizer, and this is arithmetic rather than a measurement.**
+Let `g` be the mass arriving per turn and `f` the fraction that ever becomes removable. Sustained
+removal is `f × g`, and `f < 1` always — dead content is a subset of arriving content — so removal
+is strictly less than growth. Selection cannot hold the line; it multiplies time-to-threshold by
+`1/(1−f)`:
+
+| removable share of request | session extension |
+|---|---|
+| 4.4% (`unreferenced`, measured) | 1.05× |
+| 9.6% (`+closed`, measured) | 1.11× |
+| 18% (most aggressive model arm) | 1.22× |
+| 24% (most aggressive arm at 34% false-drop) | 1.32× |
+
+A summarizer reaches ~96% reduction because it compresses **live** content; `coref` can only
+remove **dead** content. So the ambition of replacing the agent's own compaction — running a
+lighter pass at 60% and a heavier one at the threshold — is **not available to a selective
+component at any aggression setting.** `coref` is a deferral play, permanently. The honest
+framing is that it buys 5–30% more turns before the summarizer runs, and its case rests on
+whether those turns are worth a cache-write.
+
+### The hypothesis this proposal should be tested against
+
+Everything above narrows the claim to one testable sentence, which is what §8's acceptance
+criteria should be pointed at:
+
+> **On a caching backend, a batched, latched, one-way `coref` pass firing once per session at
+> 55–70% of the context window removes 10–25% of the request at ≤11% false-drop, defers the
+> agent's own compaction by 20+ turns, and does so at reward parity — with the cache-write it
+> spends repaid by the deferred summarization rather than by the tokens it removed.**
+
+It is falsifiable in four independent places, and three of the four are cheap:
+
+| Clause | How it fails | Cost to test |
+|---|---|---|
+| "removes 10–25%" | Measured 4.4–9.6% on interactive traffic at the shipped cut set | **done** — it currently fails |
+| "defers by 20+ turns" | 0/19 sessions could reach 40 turns of headroom | **done** — it currently fails |
+| "cache-write repaid by deferred summarization" | Needs the deferral prize to be reachable at all | cheap — `modes.Tracker` reset detection, no new machinery |
+| "at reward parity" | Any task lost to a false drop | expensive — the eval box, and the only real gate |
+
+Two of the four clauses **already fail on measured traffic**, which is why the component ships
+opt-in and in no preset. Recording that plainly is more useful than restating the ambition: the
+remaining case for `coref` is that the corpus it failed on is the wrong one (interactive research
+traffic, mostly one author, `opaque`-heavy), and the corpus the acceptance criteria are written
+against has never been measured.
 
 ## 9. Open questions
 
