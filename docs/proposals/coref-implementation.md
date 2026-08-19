@@ -171,12 +171,18 @@ ruling things out — which is the cheapest kind of progress this list can make:
 And it **added one item**, ahead of everything above because it is a correctness issue in shipped
 code rather than a calibration question:
 
-0. **Fix the kept-verbatim guard before `coref` goes in any preset.** `MarkKeptVerbatim` keys by
-   content hash with no session component, so one expand exempts that byte-identical content in
-   *every future session* — permanently eroding yield on exactly the recurring content worth
-   cutting. The flag also shares the payload LRU, so it can be evicted and the guard silently lost.
-   `coref` is the first component whose decisions are latched and never revisited, which makes it
-   the first for which a lost guard is unrecoverable. Details in
+0. ~~**Fix the kept-verbatim guard before `coref` goes in any preset.**~~ **Done.**
+   `MarkKeptVerbatim` keyed by content hash with no session component, so one expand exempted that
+   byte-identical content in *every future session* — permanently eroding yield on exactly the
+   recurring content worth cutting — and the one-byte flag shared the payload LRU with the
+   multi-kilobyte stashes it guards, so it could be evicted and the guard silently lost.
+
+   `keptKey` is now session-scoped (the loop it prevents is intra-session by construction, so that
+   is the minimal correct scope), `store.KeptPrefix` is pinned against LRU eviction, and the proxy
+   threads `apply.Trace.Session` into the expand loop so the mark lands under the same id the
+   pipeline compacted under. Empty session is a no-op rather than a global mark. Covered by
+   `TestKeptVerbatimDoesNotLeakAcrossSessions` and
+   `TestMarkKeptVerbatimIgnoresAnEmptySession`. Rationale in
    [the proposal, §5.8](coref-compaction.md#5-hard-constraints-the-codebase-imposes).
 
 Two other things it did **not** settle, and neither is cheap: nothing here touches **reward**, and

@@ -270,17 +270,44 @@ func contentKey(s string) string { return extract.ContentKey(s) }
 // churn). The expand handler marks the restored content's key kept-verbatim so the
 // offloaders leave it alone thereafter.
 
-func keptKey(ck string) string { return "cg:keep:" + ck }
+// keptKey is scoped BY SESSION, and that scope is the whole point of the key's shape.
+//
+// The loop this guard prevents is intra-session by construction: the agent expands a marker,
+// the next turn of THAT session re-sends the restored original, and re-compacting it sends
+// the agent straight back to expand. A different session that happens to carry
+// byte-identical content has never expanded anything and cannot be in a loop, so it needs
+// no exemption.
+//
+// The key used to be the bare content hash, session-independent — deliberately, but the
+// consequence was not the intended one. Because the hash is global, ONE expand in ONE
+// session permanently exempted that byte-identical content in EVERY session thereafter. The
+// content most likely to recur byte-identically across sessions is exactly the content most
+// worth compacting: a config dump, a manifest, a schema, a file the agent re-reads every
+// time. So the guard preferentially and permanently disabled compaction on the highest-value
+// targets, nothing reported it, and the effect looked like yield decaying for no reason.
+//
+// Scoping by session is the minimal fix: it is the smallest scope that still prevents every
+// loop the guard was built for.
+func keptKey(session, ck string) string { return store.KeptPrefix + session + ":" + ck }
 
-// MarkKeptVerbatim records that this original content was expanded and must not be
-// re-compacted (keyed by content hash, session-independent). Exported for the proxy's
-// expand loop, which has the restored original but not the offload Ctx.
-func MarkKeptVerbatim(st store.Store, original string) {
-	st.Put(keptKey(contentKey(original)), []byte{1})
+// MarkKeptVerbatim records that this original content was expanded in this session and must
+// not be re-compacted there. Exported for the proxy's expand loop, which has the restored
+// original and the session id but not the offload Ctx.
+//
+// An empty session is a no-op rather than a global mark. It is unreachable on the live path
+// — observe mode compacts nothing, so there is no marker to expand, and a request with no
+// messages cannot carry one either — but if it ever becomes reachable, declining to record
+// costs at most one expand bounce, while recording under an empty session segment would
+// reinstate exactly the cross-session leak this scoping exists to remove.
+func MarkKeptVerbatim(st store.Store, session, original string) {
+	if session == "" {
+		return
+	}
+	st.Put(keptKey(session, contentKey(original)), []byte{1})
 }
 
 func isKeptVerbatim(c *components.Ctx, ck string) bool {
-	_, ok := c.Store.Get(keptKey(ck))
+	_, ok := c.Store.Get(keptKey(c.Session, ck))
 	return ok
 }
 

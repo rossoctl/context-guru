@@ -62,15 +62,24 @@ type FrozenLoser interface {
 // The prefixes are declared by their OWNERS (components/offload, apply) and passed in via
 // Options.PinPrefixes — the store must not know what a component names its keys.
 const (
-	FrozenPrefix = "cg:frz:" // mask / failed_run freeze decisions
-	ResultPrefix = "cg:res:" // extract_llm's replayed result (projection + summary, one key)
-	LenPrefix    = "cg:len:" // apply's prev-turn message count (the MaxCachedIdx boundary)
+	FrozenPrefix = "cg:frz:"  // mask / failed_run freeze decisions
+	ResultPrefix = "cg:res:"  // extract_llm's replayed result (projection + summary, one key)
+	LenPrefix    = "cg:len:"  // apply's prev-turn message count (the MaxCachedIdx boundary)
+	KeptPrefix   = "cg:keep:" // content the agent expanded: never re-compact it
 )
 
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
-var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix}
+//
+// KeptPrefix belongs here by the same criterion as the rest, which is easy to miss because
+// its payload is one byte. Losing it does not lose data — it loses the FACT that the agent
+// already asked for this content back, so the next turn re-compacts it, the agent expands it
+// again, and every turn thereafter pays a round-trip plus a fresh cache-write. That is the
+// expand loop the flag exists to prevent, and it is cache-destructive in exactly the sense
+// this namespace is for. Before it was pinned, a one-byte guard competed for LRU capacity
+// against the multi-kilobyte rewind stashes it guards, and lost.
+var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, KeptPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {

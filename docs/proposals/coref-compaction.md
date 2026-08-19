@@ -376,9 +376,16 @@ These are not preferences; each one is a property of existing machinery.
 
    Neither behaviour is `coref`-specific and neither is a `coref` bug — but `coref` is the first
    component whose cuts are **latched and never revisited**, so it is the first for which a lost
-   guard flag is unrecoverable rather than self-healing next turn. Worth fixing before `coref`
-   ships in a preset: scope the key by session (or record it alongside the latched decision), and
-   keep guard flags out of the payload LRU.
+   guard flag is unrecoverable rather than self-healing next turn.
+
+   **Both halves are now fixed.** `keptKey` is scoped by session — the minimal scope that still
+   prevents every loop the guard was built for, since the loop is intra-session by construction —
+   and `store.KeptPrefix` joined `DefaultPinPrefixes`, so a one-byte guard no longer competes for
+   LRU capacity against the multi-kilobyte stashes it guards. The scoped session travels from
+   `apply.Trace.Session` through to the proxy's expand loop rather than being recomputed there,
+   so the mark is always written under the id the pipeline compacted under. An empty session is a
+   no-op rather than a global mark. Two tests cover the half that used to be wrong: the exemption
+   does not leak to another session, and it still holds for the session that earned it.
 
 ## 6. Trigger integration
 

@@ -227,7 +227,7 @@ func TestKeptVerbatimNotRecompacted(t *testing.T) {
 	}
 	st := store.NewMemory(store.Options{})
 	big := strings.Repeat("recoverable content the agent just expanded and needs verbatim\n", 30)
-	offload.MarkKeptVerbatim(st, big) // simulate the proxy's expand loop
+	offload.MarkKeptVerbatim(st, "s", big) // simulate the proxy's expand loop (session "s")
 
 	req := &schemas.BifrostChatRequest{Input: []schemas.ChatMessage{toolMsg(big), toolMsg("newest tiny output")}}
 	c := &components.Ctx{Ctx: context.Background(), Session: "s", Store: st}

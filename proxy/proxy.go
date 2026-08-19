@@ -647,6 +647,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// panic anywhere here must forward the PRISTINE inbound body, never 500 the client.
 		// apply.BodyFull has its own recover; this backstops expand.Inject and anything else.
 		orig := body
+		// The pipeline's scoped session id, needed after the forward: the expand loop marks
+		// recovered content kept-verbatim under it, and that mark must use the SAME id the
+		// pipeline compacted under or the guard is written where nothing reads it. Only
+		// apply computes it (tenant + explicit header + session-head hash), so it comes back
+		// out through the trace rather than being recomputed here and risking divergence.
+		var sess string
 		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
@@ -666,6 +672,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				window:   window,
 				tn:       tn,
 			})
+			sess = tr.Session
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
 			cp.noteTrace(tr)
@@ -692,7 +699,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				body, _ = expand.Inject(string(provider), im, body, tn.Store.Persists())
 			}
 		}()
-		h.serve(w, r, provider, up, body, bypassed, cp, tn)
+		h.serve(w, r, provider, up, body, bypassed, cp, tn, sess)
 	}
 }
 
@@ -732,7 +739,10 @@ var errNoUpstream = errors.New("no upstream configured")
 // → /stats sse_streamed / sse_buffered). It previously matched the expand tool
 // description this proxy injects itself, so it was unconditionally true and the
 // zero-added-latency promise above never held for any request (issue #26).
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy) {
+// sess is the pipeline's scoped session id (empty when the pipeline never ran, e.g. observe
+// mode or a request with no messages). The expand loop needs it to scope the kept-verbatim
+// guard; nothing else on this path depends on it.
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy, sess string) {
 	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
 	// it is advertised on the outgoing request. Those used to be different conditions —
 	// advertised when the request had tools, intercepted (for SSE) when it had markers —
@@ -858,7 +868,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				got++
 				// The agent needed this content back — don't re-compact it on later turns
 				// (that would loop it straight back into another expand). Keep it verbatim.
-				offload.MarkKeptVerbatim(tn.Store, orig)
+				offload.MarkKeptVerbatim(tn.Store, sess, orig)
 				back := schema.TextTokens(orig)
 				if h.agg != nil {
 					h.agg.RecordExpand(back) // bounce: offload had to come back
