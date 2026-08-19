@@ -273,7 +273,8 @@ What actually moved the number:
    so the rejected program and the error go back for exactly one correction — without the tool
    output, since fixing syntax needs the program and not the data. Measured: 2 attempts, 2
    recovered, ≈$0.004 marginal per attempt. It pays at the cold-turn valuation of a removed
-   token ($3.75/MTok) and is about break-even at the fresh rate; it does not pay if the removed
+   token (the cache-creation rate — $2.50/MTok on this gateway, read from the request's own rate
+   card rather than a constant; see [Economics](#economics)) and is about break-even at the fresh rate; it does not pay if the removed
    tokens would only ever have been billed as cache reads. Kept on, bounded to one retry.
 4. **Truncation is no longer reported as a syntax error.** A reply cut off at the output cap
    leaves an incomplete program that fails with whatever error the cut produced. Detected from
@@ -399,7 +400,7 @@ Each input is measured rather than assumed:
 |---|---|
 | Per-token value | `Ctx.CacheAware` selects the cache-read vs fresh rate (the 10× factor) |
 | Expected compression ratio | **Learned** from this workload's accepted results; a conservative **0.12** (the measured figure) until ~1.5k tokens of evidence. Repeated misses drive it toward 0, shutting the gate. Note the direction of conservatism: for a *spending* gate, conservative means under-estimating the saving |
-| Call cost | **Analytic and size-aware** — `preamble (1,463 tok) + shown content + overhead`, priced at real model rates — then reconciled with the observed mean once real calls exist. A flat per-call constant is not just imprecise, it **deadlocks**: pricing every call at the $0.012 average (≈5× the true cost on small outputs) suppressed everything, so nothing was ever observed and the estimate could never correct itself. Measured: $0.0024/call actual vs the $0.012 prior |
+| Call cost | **Analytic and size-aware** — `(preamble (1,893 o200k, measured) + shown content + overhead) × 1.29` to convert our `o200k_base` count into the tokens the provider bills, priced at real model rates — then reconciled with the observed mean once real calls exist. A flat per-call constant is not just imprecise, it **deadlocks**: pricing every call at the $0.012 average (≈5× the true cost on small outputs) suppressed everything, so nothing was ever observed and the estimate could never correct itself. Measured: $0.0024/call actual vs the $0.012 prior |
 | Model pricing | `claude-haiku-4-5` list rates by default; override with `CHEAP_MODEL_PRICE_IN` / `_OUT` / `_CACHE_WRITE` / `_CACHE_READ` (dollars per MTok) |
 | Expected replays | Recurrence: content seen before in **any** session is expected to recur (measured 82/103 across sessions) |
 | Remaining horizon | Fewer expected replays late in a long session |
@@ -462,11 +463,86 @@ extract_llm:
     min_tokens: 1000
 ```
 
-On such a turn the sweep lifts the tail gate (nothing is cached, so depth is free), takes the
-whole transcript as context, prices saved tokens at the cache-write rate, and escalates to the
-agent's own model if the transcript will not fit the extraction model's window. Every removal
-leaves a `<<cg:HASH>>` marker with a one-line summary, and the result is frozen so later warm
-turns replay it byte-for-byte and the new prefix stays cache-stable.
+On such a turn the sweep lifts the tail gate (nothing is cached, so depth is free), prices saved
+tokens at the cache-write rate, and escalates to the agent's own model if the transcript will not
+fit the extraction model's window. Every removal leaves a `<<cg:HASH>>` marker with a one-line
+summary, and the result is frozen so later warm turns replay it byte-for-byte and the new prefix
+stays cache-stable.
+
+### The sweep no longer forces `context: full` — measured before/after
+
+It used to, on the argument that judging what an old message may lose requires knowing what
+happened since. The argument does not survive measurement, and removing that one line is the
+largest single change to this component's economics.
+
+`full` **is the whole request**: at 127 turns the rendered context was 138,596 tokens against a
+138,341-token request, sent once per candidate. Break-even removal at k=4 falls from **113,286
+tokens (1.13x the transcript — structurally impossible) to 6,833**. The counter-argument was real
+but is about the **keep-list**, not the context — a full-transcript context took acceptance from
+3/4 to 0/6 because every unique token in the noise became a required identifier — and
+`HarvestIdentifiers` now reads `ctxRecent` explicitly, so the two are separate concerns.
+
+Replayed on `bench/cold.jsonl` (9 real Claude Code requests, 3 of them verified `ttl_expiry`
+with `cache_read = 0`), `CG_IDLE=430`, compactor `claude-haiku-4-5`, agent model
+`aws/claude-sonnet-5` at $2.00/MTok. Identical config on both sides; only the code differs.
+**n=3 per arm, because this arm's LLM output is noisy enough that the shipped default's net sign
+flips between identical runs** (`bench/BASELINE.md`):
+
+| | calls | prompt tok/call | our spend | tokens removed | accepted | net (see below) |
+|---|---|---|---|---|---|---|
+| **before** (`full` forced) | 1 | 36,686 | $0.0385–0.0396 | **0** | 0/3 runs | **−$0.0385…−$0.0396** |
+| **after** (`recent`) | 2 | 18,657 + 13,101 | $0.0344–0.0366 | 92,948–95,944 | 3/3 runs | **+$0.0195…+$0.0217** |
+
+The same candidate (15,473 tokens) went from a 36,686-token prompt rejected by the acceptance
+check on all three runs, to an 18,657-token prompt accepted on all three, removing 14,438 tokens.
+**Halving the prompt is the smaller half of the win; the acceptance rate going 0/3 → 3/3 is the
+larger one**, and it is the keep-list effect above, now visible because the context shrank.
+
+!!! warning "How that net is computed, and why it is not the `$@write` column"
+    The arm's raw `net@write` reads **+$0.196…+$0.205**, and quoting that would be dishonest:
+    `removed` (95,944) exceeds `attempted` (27,189), i.e. most of it is history the provider had
+    already cached. Priced honestly instead:
+
+    * **16,100–16,829 tokens** were removed *uniquely, on `ttl_expiry` turns* — the sweep's own
+      work, correctly valued at the cache-creation rate ($2.50/MTok) = **$0.0403–0.0421**;
+    * the remaining ~79,000 are that reduction **replayed** on later warm turns of the same
+      session, which would have been billed as cache reads ($0.20/MTok) = **$0.0158**.
+
+    Total value $0.0561–0.0579 against $0.0344–0.0366 of our own spend. Positive, ~20x smaller
+    than the headline column, and stable in sign across all three runs — which the shipped
+    default's +$0.0097 is not.
+
+`context: full` still exists and still means full; it is simply no longer imposed. Also measured:
+on real Claude Code traffic `recent` renders **2,734–5,681** tokens, not the 100–436 of a
+synthetic transcript — the last seven messages are mostly large tool results, clipped at
+`recentContextCap`. So the real prompt reduction is ~2x, not ~16x, and the R\* table above is an
+upper bound on this corpus.
+
+### The context cache write is now earned before it is read
+
+`CacheContext` moves the per-request conversation context into a trailing cacheable **system**
+block, and was set whenever a request had more than one candidate — but `claimCacheWrite`
+deliberately withholds the breakpoint from **concurrent siblings** (an entry that is only ever
+written costs 1.25x fresh and buys nothing), so with `llmConcurrency = 4` the first call took the
+write slot and calls 2–4 sent no mark and paid plain fresh input for the identical context.
+Measured on production: five haiku calls on **one** request each sent ~138,000 prompt tokens with
+`cache_read = 0` **and** `cache_write = 0`.
+
+The sweep therefore issues its **first call alone, then the rest concurrently** — one writer,
+then readers. At T = 180k, k = 4 that moves break-even removal from 198,620 tokens to **79,088**.
+
+**The cost is wall clock and the trade is deliberate.** Per-call latency here is gateway *queue*
+time, not prompt size (measured: an 8-token call has a 1,812 ms p50 floor and is not faster than
+an 8k-token one), so serializing one call adds roughly one whole queue round — ~2–4 s at p50,
+12–16 s in the tail. It is paid only on a turn whose entire transcript is re-billing at 1.25x
+fresh; the warm per-output path stays fully concurrent, where the extra second would buy a
+fraction of a cent. `TestSweepEarnsTheContextCacheWriteBeforeReadingIt` pins both halves.
+
+!!! note "Not exercised on the current bench corpus"
+    On `bench/cold.jsonl` each request yields a single candidate, so `CacheContext` is `false`
+    and this path never engaged in the numbers above. Its effect is proven by unit test and by
+    the arithmetic, not by that corpus — an honest gap, and the reason the before/after table
+    credits it with nothing.
 
 !!! tip "The deterministic offloaders can do this too — and they should go first"
     `mask`, `failed_run` and `collapse` take the same `cold_cache` option (also off by default) and
@@ -496,14 +572,15 @@ Three distinct caches, easily confused:
    switch or config change **misses** rather than serving a stale extraction. Bounded by the
    store's existing TTL + LRU.
 
-2. **Provider prompt cache on the extraction preamble.** The ~1,463-token invariant
+2. **Provider prompt cache on the extraction preamble.** The 1,893-o200k invariant
    preamble is sent as a stable `system` block with a `cache_control` breakpoint (a leading system
    message on the OpenAI backend, which has no explicit breakpoints).
 
     !!! warning "Measured: this buys nothing on `claude-haiku-4-5`"
         A breakpoint below the model's **minimum cacheable prefix** is silently ignored — no error,
         `cache_creation_input_tokens: 0`. That minimum is **4096 tokens on `claude-haiku-4-5`** and
-        1024 on `claude-sonnet-5`, against a **1,463-token** preamble. Verified against the gateway:
+        1024 on `claude-sonnet-5`, against a **1,893-o200k** preamble — and the floor is in the
+        provider's tokens, so the comparison converts first (see [4b](#4b-and-the-floor-itself-compared-unlike-units)). Verified against the gateway:
 
         | Prefix | Model | Result |
         |---|---|---|

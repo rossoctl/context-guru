@@ -342,7 +342,18 @@ recommended configuration. The turn was genuinely cold: `cache_miss_reason: ttl_
 | the other | `program rejected: extract.star:4:7: got ':', want newline` |
 | request | `tokens_before 27,570 → 26,025`, `saved_unique 1,545` |
 | our spend | $0.0556 + $0.0624 = **$0.118** |
-| value of the removal on that turn | 1,571 × $4.75/MTok ≈ **$0.0075**, plus replay on later turns |
+| value of the removal on that turn | 1,571 × $2.50/MTok ≈ **$0.0039**, plus replay on later turns |
+
+!!! warning "The $4.75/MTok this row originally used was wrong, and so was the code's $3.75"
+    A cold-turn token is worth the **cache-creation** rate for the request's own model. On this
+    gateway `aws/claude-sonnet-5` bills **$2.00/MTok** fresh (derived 2026-08-19 by solving the
+    recorded `cost_usd` and token-tier columns of two captured corpora simultaneously), so
+    creation is **$2.50/MTok**. `$4.75` is the opus-5-era *fresh* rate and `$3.75` — the figure in
+    `extract_econ.go` until 2026-08-19 — is 1.25x `claude-sonnet-4-5`'s $3.00 *list* rate. The two
+    disagreed by 27% in the numerator of every gate decision on the one regime that pays, and
+    neither described this deployment. The gate now reads the request's own rate card
+    (`Ctx.SelfRates`) and keeps the literals only as a fallback. **The loss below gets larger, not
+    smaller, when priced correctly.**
 
 So the mechanism is confirmed working — the gate fires on a genuinely cold turn, the model
 returns a program, the sandbox runs it, the acceptance check passes it and the saving is

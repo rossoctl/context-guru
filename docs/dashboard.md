@@ -30,11 +30,17 @@ Every headline number, with the honesty machinery visible rather than hidden:
 | Group | Fields |
 |---|---|
 | Volume | requests · sessions · tokens before/after |
-| Savings | gross · unique · net-of-restores · overcount ratio |
+| Savings | gross · unique · net-of-restores · **each reduction re-earned** (was "overcount ratio") |
+| Amortization | **replay realized · replay ceiling · % of ceiling** |
 | Money | baseline cost · actual cost · context-guru's own LLM spend · net dollars saved · **prefix-cache savings** · **total avoided** |
-| Tokens billed | fresh input · cache reads · cache writes · output |
+| Addressable spend | **addressable (input-side) spend · saved as % of it · output-token cost · reconciliation against the bill** |
+| Tokens billed | fresh input · cache reads · cache writes · output — each **with what that tier cost** |
 | Latency | context-guru added (mean + **p95**) · upstream (mean + p95) |
 | Quality | restorations + rate · reverts · not-compacted count |
+
+The headline row carries **prefix-change exposure** beside the savings, at the same weight.
+See [What the value pass changed](#what-the-value-pass-changed) for which numbers changed
+meaning and why.
 
 Three of those deserve their own explanation.
 
@@ -46,7 +52,7 @@ itself (`GET /api/stats` → `denominators[].description`):
 
 | Denominator | Question it answers |
 |---|---|
-| **of what we tried to compact** | Are we good *when we have something to work with?* Divides by the tokens compaction was allowed to touch — the uncached tail when cache-aware. |
+| **gross, of what we tried to compact** | Are we good *when we have something to work with?* Divides by the tokens compaction was allowed to touch — the uncached tail when cache-aware. **Gross** over attempted, because `attempted_tokens` is re-counted every turn and a numerator deduplicated *across* turns is a different basis. It used to divide `saved_unique` by it, which made this bar 13× too small: 0.140% where the same-basis figure on the same corpus is **1.838%**. |
 | **of new provider-billed input** | The honest economic ratio. Divides by fresh input + cache writes + what we removed, so transcript history the provider served from cache is not recounted. |
 | **of the whole request (diluted)** | Kept for transparency. A long session re-sends its history every turn, so this denominator grows quadratically and trends to ~0% however well compaction works. |
 | **unique, of the whole request** | The most conservative figure the dashboard can produce. |
@@ -81,11 +87,19 @@ removed is unfalsifiable:
   cost is the latency of the attempt.
 - **context-guru's own latency and LLM spend** — paid out of the savings above.
 
-#### Cumulative cost, with and without
+#### Cumulative net saving
 
 ![Cost chart with a tooltip](img/dashboard/02-savings-cost-graph-tooltip.jpg)
 
-The shaded band between the lines is money saved. Baseline prices the **unique** tokens we
+This panel plots the **difference** — baseline − billed − our own model spend, accumulated —
+and not the two cost curves it is the difference of. It used to plot both and call the area
+between them the money; on real traffic they are a few tenths of a percent apart, so there was
+no visible area and the caption described something the chart could not show. The saving on its
+own axis starts at zero, so the scale of the plot is the scale of the money, and the crossing
+below zero — our own spend overtaking what compaction avoided — is impossible to miss. The two
+cost totals are still tiles, where a number that differs in the third decimal belongs.
+
+Baseline prices the **unique** tokens we
 removed at the **cache-write** rate they would have entered as — on a prompt-caching
 backend that is ~11.5× a cache read — and the re-sent remainder at the **cache-read** rate
 the provider would have served it from. That split is the whole reason token savings and
@@ -498,7 +512,9 @@ marketing surface.
 1. **Every ratio names its denominator.** See above.
 2. **Gross, unique and adjusted are visibly distinct.** `overcount_ratio` is surfaced,
    not hidden.
-3. **The cost of our own safety mechanisms sits beside their benefit.**
+3. **The cost of our own safety mechanisms sits beside their benefit — as a number.**
+   The freeze's benefit was prose for a long time; it is now priced (`frozen_read_usd`,
+   `frozen_write_risk_usd`), and reads *unpriced* rather than *zero* where no rates exist.
 4. **`token_accounting` per row: `complete | partial | missing`.** Only `complete` rows
    have all four billed token tiers. A row we cannot price is rendered as *unknown* —
    never as free, and never as exact.
@@ -509,8 +525,89 @@ marketing surface.
    was not the cause.
 
 Plus a sixth, which is really rule 0: **"why didn't you compact this?" is a first-class
-answer**, not an absence of data. Buckets: `bypassed · no_messages · below_trigger ·
-cache_frozen · found_nothing · reverted`, and an empty reason means we did compact.
+answer**, not an absence of data. Buckets: `bypassed · no_messages · no_tool_output ·
+no_candidate · cache_frozen · found_nothing · reverted`, and an empty reason means we did
+compact.
+
+`no_tool_output` and `no_candidate` replace **`below_trigger`**, which was a wrong label rather
+than a wrong number. `components.Trigger` is not consulted in that decision at all — the
+condition is simply "no component mutated anything" — and of the eight components in the default
+preset only `extract_llm` ever calls `Trigger.Fires`. The label was believed: it was reported
+upward as *"$744.62 of spend was gated by the trigger"*, and an agent spent a full investigation
+tuning triggers whose measured counterfactual on interactive traffic was **$0.00**. The real
+cause is structural — every deployed offloader and both JSON reformatters rewrite `role == tool`
+content and nothing else, so a request carrying no tool output has nothing any of them can act
+on, whatever a trigger would have said. Measured over the 7,660 affected requests: 4,199 of them
+(206.9M tokens, 54.3% of the gated total) carry four messages or fewer and so hold no
+`tool_result` at all, the largest group being 734 `claude-cli` requests averaging 120,245 tokens
+with **one** message and **zero** tools — Claude Code's own summarisation call, which flattens
+the transcript into a single user text block. The rest are long transcripts 65–89% frozen whose
+eligible tail holds no recognised candidate. Rows written before the rename keep the old slug and
+are labelled with the same words as `no_candidate`.
+
+**`frozen_tokens = 0` does not mean the provider's cache is cold.** It means our own
+`MaxCachedIdx` was reset — a restart, or an evicted tracker entry. On the production corpus 3,092
+such requests still cache-**HIT**, for 404,376,878 cache-read tokens. Nothing on this dashboard
+should be read as "low frozen fraction ⇒ safe to rewrite deep history": priced on sonnet-5 that
+reading is worth about **−$708** against **+$0.62** of upside.
+
+## What the value pass changed
+
+Nine numbers on this page were either wrong, mislabelled, or missing. This section records what
+each one read before, what it reads now, and — where the change makes a figure *smaller* — why
+that is the correct direction. Every figure below comes from a 14,407-request / 1,772-session
+production snapshot; reproduce them with
+`CG_SNAPSHOT_DB=/path/to/cg.db go test ./dash -run Snapshot -v`.
+
+| # | Number | Before | After | Why |
+|---|---|---|---|---|
+| 1 | Components tab, `Saved $` | `$0.00` for 7 of 8 components; `$0.0064` in total | `$5.74` in total, marked with a `†` | `request_components.saved_usd` is an **additive column**. It arrived with a restart, so only the requests served after that restart carry it — 6 rows of 100,579. The write path was never broken; there was no read-time fallback, unlike the one `split_stable_tokens` already had. `DB.EstimateComponentSavedUSD` runs the write path's own arithmetic over the tokens and tiers those rows do carry, into a **separate** field, and a test pins it to the write path to the cent. |
+| 1b | `extract_llm` net | `−$17.48` | `−$17.32` | Still negative, and it must be: $17.48 of our own model spend against $0.16 of value on this traffic. The estimate moved it by 16¢, not into the black. |
+| 2 | `of what we tried to compact` | 0.140% | **1.838%** | Basis mismatch: unique numerator over a per-turn denominator. Now gross over the same per-turn denominator. One-line change; the conservative unique ratios are unchanged and still on the page. |
+| 3 | `Overcount ratio 13.1×` | framed as a discount against us | **`Each reduction re-earned 13.1×`**, plus a new Amortization group: realized replay **7.96M** tokens against a ceiling of **148.5M** (**5.4%**) | The replay was always priced into `baseline_cost_usd` and into every component's `saved_usd`, per turn, at the tier each turn paid. Only the *label* said "overcount". The ceiling is new and it is the point: 94.6% of the possible replay is forgone by the cache-safety freeze, and nothing on the page could say so. |
+| 4 | Savings ÷ the whole bill | 0.28% of spend, with no per-tier costs at all | Addressable-spend group + a cost figure under every billed-token tile | The correct denominator for an input-side saving is the input side. **But the audit's premise did not survive measurement**: it inferred that 67% of the bill is output tokens, so the ratio would triple. Solving each row exactly (`cost_usd = In × (fresh + 0.1·read + 1.25·write + 5·output)` fits **13,597 of 13,597** priced rows) gives output at **8.1%** of the bill and addressable at **91.9%**. So the reframing is right and the effect is small: **−0.395% → −0.430%**. Reported as it is. |
+| 5a | Prefix split `844 acted / 314 moved / 3 credited` | internally inconsistent | **844 / 16 / 3**, plus `Credited and moved: 0` | One definition of "moved", used at both sites: differs from the last **non-zero** tail hash in the session, and a session with no earlier one counts as moved. The read path used to compare against the previous row's hash *including 0*, where 0 means "nothing was split on that turn". |
+| 5b | `cachesplit_saved_usd $0.0287` on 3 requests | credited on `TailChanged` | Same stored $0.0287, and the page now says **none of the three** is a moved snapshot | Measured: the volatile tail does **not** move within a session (1 distinct hash across the largest session's 257 turns). All three credits were paid because the write-time tail map is process-scoped, so a restart or an eviction made a mid-session turn look like a first sighting. `Recorder.ObserveSplit` no longer treats a session it has **seen** but whose tail it has **forgotten** as a move, so the figure trends to $0 — which is the honest value of this credit condition on this traffic. The −34.1% the A/B measured was *cross-session* reuse, which this per-request condition cannot see, and no number is invented for it. |
+| 6 | `cachesplit act_rate 0%` on 1,805 mutated requests | red, permanently | `acted_tokens 0 / acted_structural 1,805` | `acted` requires token removal, so any component whose value is cache *placement* was pinned at 0% forever. Derived on read from the stored `mutated`; no schema change. |
+| 7a | `prefix_change` exposure | folded footnote, conditional figure only | Headline tile: **$156.55 over 214 turns**, with the after-mutation subset (**$73.49 / 60**) named inside it | 22× every saving on the page. Still subtracted from nothing — mutation is not randomly assigned — but a page that renders $7 of savings large and $157 of exposure small is not honest about which is bigger. |
+| 7b | SafetyCost benefit | promised in prose, never computed | **396.5M frozen tokens billed $133 as reads; $1,530 of re-creation avoided** | The panel has always said "its benefit is the cache reads it preserved". Now it is a number, and it is the largest figure on the page — which is the actual argument for the freeze. |
+| 8 | Prometheus | no dollar series at all | `cg_saved_usd` · `cg_baseline_cost_usd` · `cg_net_saved_usd` · `cg_frozen_tokens_total` | Grafana could plot every input to "is this worth running" and not the answer. `cg_net_saved_usd` goes negative and is not clamped. |
+| 9 | Cumulative cost chart | two lines 0.28% apart, captioned "the area between the lines is the money" | one line: the cumulative net saving | See [Cumulative net saving](#cumulative-net-saving). |
+
+### Three rules this pass added, and why each cost something to learn
+
+**A column computed downstream of an outcome cannot validate a predictor of that outcome, and a
+name containing a cause is a branch label, not a measured mechanism.** `below_trigger` is the
+worked example: the branch was "nothing mutated", the name said "the trigger declined", and the
+name was believed all the way up to a spend figure and an investigation.
+
+**A missing component means NOT DEPLOYED, never "ran and did nothing."** `mask`, `skeleton`,
+`summarize` and `agentdiet` have zero rows on this corpus because they are not in the running
+preset. `DB.Components` returns only components that actually ran, so they are absent from the
+table rather than present at 0% — rendering them as ineffective would be defaming code that
+never executed. A component with rows and no mutations is the different, real case, and reads
+*inert here*.
+
+**`cache_saved_usd` is the PROVIDER's saving and must never appear as ours.** It is $3,339.18 on
+this corpus against context-guru's $7.07 — a 470× overstatement one column away — and the agent
+places most of those breakpoints itself. Two structural guards, not a remembered convention:
+`total_saved_usd` is `net_saved_usd + cachesplit_saved_usd` and nothing else, and a test fails
+if any line of the UI renders `cache_saved_usd` without naming the provider within three lines.
+
+### What is still an estimate, and what is measured
+
+* **Measured, from stored columns:** every token figure, the replay and its ceiling, the split
+  counts, the prefix-change exposure, and the per-component saving on rows that carry
+  `saved_usd`.
+* **Derived at read time, and labelled:** the per-component saving on pre-column rows (`†`, with
+  the row count and the unpriceable count in the cell's tooltip), and the per-tier cost split.
+  The tier split is priced at **today's** rates over tokens billed at whatever the rate was
+  then, so a gateway price change inside the window makes it drift from the bill; the group
+  shows the derived total beside the billed total and flags a drift over 5%. On the production
+  snapshot that drift is ~15%, because there are two distinct rate regimes per model in the
+  window.
+* **Not computed at all, deliberately:** any cross-session value for the prefix split, and any
+  netting of the prefix-change exposure. Both need the A/B, not a bigger query.
 
 ## Architecture
 
@@ -547,6 +644,14 @@ there is paid by the next request on a keep-alive connection — by every real a
 guard is therefore an end-to-end handler-latency test with content capture on
 (`TestDashboardAddsNoRequestLatencyWithContentCapture`, budget 5 ms); moving redaction back
 onto the request goroutine measures +87 ms and fails it.
+
+**The tool-inventory capture is the one thing read on the request path**, because it reads
+the *pristine* body alongside the metadata pass — 0.18 ms warm on a 121 KB, 24-tool body,
+against a turn whose upstream leg is hundreds of milliseconds. Everything expensive (the
+parse and the BPE weight of every declaration) is memoized by a digest of the declaration
+set, so a session pays it on its first request and not on the other 64; the rows themselves
+go to a second writer goroutine with the same drop-never-block contract. See
+[Tool inventory](tool-inventory.md).
 
 **Redaction happens before the database, never on read.** Request headers are never
 captured at all, so nothing redacts them; config keys are allowlisted, and an allowlisted
@@ -587,6 +692,7 @@ already requires), in WAL mode.
 | `request_content` | before/after text, gzip-compressed and size-capped; skippable entirely |
 | `archived_sessions` | the cold-storage index — one small row per archived session, local and permanent, so the session list works while the remote is unreachable |
 | `tenant_spend` | the month-to-date spend rollup Settings and the manager's roster display; retention and archiving never touch it, so evicting request rows inside the calendar month cannot make the figure under-count. Reported only — each account bills its own provider credential, so there is nothing to cap |
+| `tool_declarations` / `tool_uses` | which tools, MCP servers and skills each session **declared**, the token weight of carrying each, and which of them it actually **invoked** — see [Tool inventory](tool-inventory.md). Names and token counts only, never a description; keyed by session and declaration-set digest rather than per request, and gated on tenant scoping rather than on content consent, because a tool or server name is an identifier of the caller's own configuration and not their transcript |
 | `bench_runs` / `bench_tasks` | ingested harness runs and their per-task rows |
 
 Timestamps are **epoch milliseconds** everywhere. A formatted locale string cannot be
@@ -709,6 +815,7 @@ curl -s localhost:4000/api/stats | jq '.denominators[] | {label, percent, availa
 curl -s 'localhost:4000/api/requests?component=extract&reason=compacted&limit=20'
 curl -s 'localhost:4000/api/series?bucket=300000&since=1786300000000'
 curl -N  localhost:4000/api/events        # live summary rows over SSE
+curl -s 'localhost:4000/api/tools'        # declared vs used tools/MCP/skills, and the dead weight
 ```
 
 ## Verifying it yourself
