@@ -265,6 +265,10 @@ type Ctx struct {
 	// on the very requests where the mechanism had just run — and everything downstream
 	// derives "did it do anything" from that.
 	SystemSplit bool
+	// ToolSchema says the host already stripped JSON-Schema annotation keywords from
+	// the top-level `tools` array for this request. Only `toolschema` reads it, and
+	// only to report itself honestly — same arrangement, same reason, as SystemSplit.
+	ToolSchema bool
 }
 
 // effMode is Ctx.Mode with the zero value normalized to sync, so a Ctx built by older

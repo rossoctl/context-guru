@@ -22,8 +22,10 @@ func init() { components.Register("cmdfilter", newCmdfilter) }
 
 // Cmdfilter shrinks tool-output messages with declarative DSL filters. It is an
 // Offload: it stashes the original before filtering so the expand tool can
-// recover it. Filters match on the tool output's first non-empty line (the
-// proxy-world stand-in for rtk's shell command).
+// recover it. Filters match on the tool output's first few non-empty lines AND,
+// when the transcript pairs the result with its call (schema.ToolCalls), on a
+// leading `$ <command>` line — so a filter can key on the command that produced
+// the output the way rtk's do, not only on the output's shape.
 type Cmdfilter struct {
 	reg     *dsl.Registry
 	mode    markerMode
@@ -91,6 +93,7 @@ func (f *Cmdfilter) Enabled(*components.Ctx) bool { return f.reg.Len() > 0 }
 func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	var keys []string
 	changed := 0
+	pairs := schema.ToolCalls(req)
 	for i := range req.Input {
 		m := &req.Input[i]
 		if m.Role != schemas.ChatMessageRoleTool {
@@ -116,7 +119,11 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 			continue
 		}
 		key := selectorKey(content)
-		filt := f.reg.Match(key)
+		// Additive: the shape key is unchanged, a `$ <command>` line is PREPENDED when
+		// the producing call is known. A filter that matched on shape still matches
+		// (match regexes are (?m) and scan the whole key); one anchored on `^\$ ` now
+		// matches by command as well.
+		filt := f.reg.Match(matchKey(pairs[i], key))
 		if filt == nil {
 			if fs := c.Stats(); fs != nil {
 				// The miss ledger: it turns "which filter to write next" into data
@@ -248,6 +255,26 @@ func selectorKey(content string) string {
 		}
 	}
 	return strings.Join(head, "\n")
+}
+
+// matchKey is the string a filter's match regex is tested against: the output-shape
+// selector, prefixed with `$ <command>` when the request pairs this tool result with
+// the call that produced it.
+//
+// The `$ ` sigil is what keeps command matching from colliding with shape matching —
+// a shape signature is a line of program output, which does not start with a shell
+// prompt. The ledger key stays shape-only (see the FilterMiss call site): commands
+// carry paths and arguments, so keying the bounded miss ledger on them would make
+// almost every entry unique.
+func matchKey(tc schema.ToolCall, shape string) string {
+	cmd := tc.Command()
+	if cmd == "" {
+		return shape
+	}
+	if i := strings.IndexByte(cmd, '\n'); i >= 0 {
+		cmd = cmd[:i] // a heredoc/multi-line command: its first line is the selector
+	}
+	return "$ " + cmd + "\n" + shape
 }
 
 // recoveryHint types the hint by WHAT was lost. A clean contiguous tail cut is

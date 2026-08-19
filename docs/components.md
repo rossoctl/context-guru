@@ -11,6 +11,8 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 |---|---|---|---|---|---|
 | `format` | Reformat | nothing (compacts JSON) | n/a (lossless) | pretty-printed JSON tool output | `min_tokens` (50) |
 | `toon` | Reformat | nothing (re-encodes JSON arrays as TOON) | n/a (lossless) | uniform flat JSON object-arrays | `min_tokens` (50) |
+| `textclean` | Reformat | nothing (strips ANSI + `\r` redraws) | n/a (lossless) | plain-text tool output with terminal control | `min_tokens` (50) |
+| `searchfold` | Reformat | nothing (folds the repeated path prefix out of search output) | n/a (lossless, exact inverse) | `rg`/`grep -rn`/`find`/`ls -1` output; **opt-in, in no preset** | `min_tokens` (50) |
 | `cacheinject` | Reformat | nothing (adds `cache_control`) | n/a (lossless) | Anthropic-family requests; **opt-in, in no preset** — placement is unmeasured | `ttl` (5m) |
 | `cachesplit` | Reformat | nothing (splits a `system` block) | n/a (lossless) | Anthropic-family requests; **in every caching preset** — enables the measured volatile-tail split | — (no config) |
 | `skeleton` | Offload | function/method bodies | via expand | fenced ` ```lang ` code blocks | `min_tokens` (80) |
@@ -35,7 +37,7 @@ Presets (`config/config.go`), verbatim: **`codesmart`** (the proxy default)
 **`agent`** `[format, dedup, failed_run, mask, extract, extract_llm, cachesplit]` — for long agentic
 sessions; `mask` is the biggest lever there (~27–30% content-token savings, no reward loss — see
 [RESULTS.md](RESULTS.md)) ·
-**`general`** `[format, toon, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, cachesplit]`
+**`general`** `[format, toon, textclean, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, cachesplit]`
 — the recommended all-round pipeline: the reward-neutral levers of `agent` plus the situational
 shrinkers (`toon`/`cmdfilter`/`collapse`) that cost nothing when they don't fire. `balanced` is
 **not** recommended for agentic traffic — it omits `mask`, so it barely helps (6% vs 31% in the
@@ -111,6 +113,34 @@ after:   [2]{id,name}:
 - **Config:** `min_tokens` (50). **Lossiness:** none — nothing stashed (JSON `null` → empty cell).
   **Shines:** long homogeneous JSON arrays (the llm-d TOON config). **Inert:** nested/ragged/non-array
   output, or not smaller.
+
+### `searchfold`
+Folds the repeated path prefix out of search output — `rg`/`grep -rn` hit lists and
+`find`/`ls -1`/`rg -l` path lists — by emitting each path (or its parent directory) once as a
+heading with the rows beneath it. Routing is by COMMAND, not by shape: the request pairs each
+tool result with the call that produced it (`schema.ToolCalls`), so `grep` output is folded and
+`cat`/build/test output is never looked at.
+
+```
+before:  pkg/a.go:12:foo      after:   pkg/a.go
+         pkg/a.go:31:foo               12:foo
+         pkg/b.go:7:foo                31:foo
+                                       pkg/b.go
+                                       7:foo
+```
+
+It is lossless *by construction*, not by argument: every fold has an exact inverse, and a fold is
+adopted only when applying that inverse reproduces the input **byte for byte** and the result is
+strictly smaller. Anything else — output already grouped by file, a content line that reads as a
+path, a basename ending in `/` — is declined and passes through untouched. No path, line number or
+line is ever dropped, so there is nothing to stash and no marker.
+
+- **Config:** `min_tokens` (50). **Lossiness:** none. **Measured** on 466 real captured
+  search-command outputs (Terminal-Bench + SWE-bench): it fires on 81 of them and takes those from
+  21,088 to 14,410 tokens (**−31.7%**), which is −7.0% across all search-command output and ~1.2% of
+  all captured tool-output bytes. Small in absolute terms because real agent traffic is dominated by
+  single-file `grep -n` (no path prefix to fold) and by `Read`; it is in no preset for that reason.
+  **Inert:** single-file `grep -n`, prose, already-grouped output.
 
 ### `cacheinject`
 Places Anthropic `cache_control: {type: ephemeral}` breakpoints at the positions that minimise

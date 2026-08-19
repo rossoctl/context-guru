@@ -4,10 +4,19 @@ package offload
 // definitions (github.com/rtk-ai/rtk, Apache-2.0 — see THIRD-PARTY-NOTICES) with
 // two systematic modifications:
 //
-//  1. Selectors are rewritten. rtk matches a SHELL COMMAND (`^terraform\s+plan`);
-//     a proxy never sees the command, so every `match` here is an OUTPUT-SHAPE
-//     signature tested against the first non-empty, trimmed line of the tool
-//     output. rtk's command regexes would never fire.
+//  1. Selectors are rewritten to OUTPUT-SHAPE signatures. rtk matches a SHELL
+//     COMMAND (`^terraform\s+plan`); these match a signature tested against the
+//     first few non-empty, trimmed lines of the tool output, which works whether or
+//     not the request pairs the output with its call.
+//
+//     The command is NOT invisible to a proxy, as this comment used to claim: both
+//     dialects carry the call and its result in the same request, joined by an id
+//     (Anthropic `tool_use`/`tool_result`, OpenAI `tool_calls`/`tool_call_id`), and
+//     schema.ToolCalls pairs them. cmdfilter therefore prefixes the selector with
+//     `$ <command>` when the pairing exists, so a filter MAY be keyed on the command
+//     — `match: '^\$ (rg|grep) '` — exactly as rtk's are. Shape signatures are still
+//     the default because they fire on unpaired traffic too.
+//
 //  2. Where two tools' output is INDISTINGUISHABLE from the output alone,
 //     rtk's per-command filters are merged into one (terraform/tofu plan;
 //     terraform/tofu init; the five pulumi subcommands). Splitting them would

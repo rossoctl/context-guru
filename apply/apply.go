@@ -1010,6 +1010,7 @@ func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bsch
 		if err := cm.UnmarshalJSON([]byte(m.Raw)); err != nil {
 			continue // unparseable message — leave it in the body untouched
 		}
+		attachToolUse(&cm, m)
 		preMarshal, _ := json.Marshal(cm)
 		norm = append(norm, cm)
 		slots = append(slots, slot{
@@ -1020,6 +1021,54 @@ func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bsch
 		})
 	}
 	return norm, slots
+}
+
+// attachToolUse lifts an Anthropic assistant turn's `tool_use` blocks into bifrost's
+// OpenAI-shaped ToolCalls, so the normalized transcript exposes WHICH tool produced
+// each tool_result in both dialects (schema.ToolCalls pairs them by id).
+//
+// It is needed because bifrost's chat schema does not model `tool_use`: unmarshalling
+// `{"type":"tool_use","id":…,"name":…,"input":{…}}` keeps the block's TYPE and drops
+// its id, name and input entirely. Every capture of real Claude Code traffic is this
+// dialect, so without the lift a command-keyed filter would only ever fire on
+// OpenAI-shaped requests.
+//
+// Purely additive to the NORMALIZED view: the raw body is untouched, and a message
+// that no component changes is still emitted from its original bytes (the writeback
+// compares the post-pipeline marshal against slot.pre, which is taken after this
+// runs). Such a message is already not round-trip-lossless — the dropped tool_use
+// fields are why — so this changes no writeback decision.
+func attachToolUse(cm *bschemas.ChatMessage, m gjson.Result) {
+	if cm.Role != bschemas.ChatMessageRoleAssistant {
+		return
+	}
+	content := m.Get("content")
+	if !content.IsArray() {
+		return
+	}
+	var calls []bschemas.ChatAssistantMessageToolCall
+	for _, blk := range content.Array() {
+		if blk.Get("type").String() != "tool_use" {
+			continue
+		}
+		id, name := blk.Get("id").String(), blk.Get("name").String()
+		fn := bschemas.ChatAssistantMessageToolCallFunction{Arguments: blk.Get("input").Raw}
+		if name != "" {
+			fn.Name = &name
+		}
+		call := bschemas.ChatAssistantMessageToolCall{Index: uint16(len(calls)), Function: fn}
+		if id != "" {
+			call.ID = &id
+		}
+		calls = append(calls, call)
+	}
+	if len(calls) == 0 {
+		return
+	}
+	if cm.ChatAssistantMessage == nil {
+		cm.ChatAssistantMessage = &bschemas.ChatAssistantMessage{}
+	}
+	cm.ChatAssistantMessage.ToolCalls = append(cm.ChatAssistantMessage.ToolCalls, calls...)
 }
 
 // toolMessage builds a synthetic OpenAI-shaped tool message from an Anthropic

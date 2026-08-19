@@ -101,8 +101,10 @@ nav:
       - Reformat:
           - format: components/format.md
           - toon: components/toon.md
+          - textclean: components/textclean.md
           - cachesplit: components/cachesplit.md
           - cacheinject: components/cacheinject.md
+          - toolschema: components/toolschema.md
       - "Offload (reversible)":
           - skeleton: components/skeleton.md
           - dedup: components/dedup.md

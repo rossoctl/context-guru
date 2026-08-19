@@ -226,9 +226,10 @@ func splitSteps(req *bschemas.BifrostChatRequest) []step {
 //	</step>
 //
 // `<result>` carries an id so a reduced reply can be mapped back to the right
-// message when a step made parallel tool calls. `<call>` appears only when the
-// dialect exposes tool calls in bifrost's schema (OpenAI-shaped traffic); Anthropic
-// `tool_use` blocks are not modelled there, so they are simply absent.
+// message when a step made parallel tool calls. `<call>` covers both dialects:
+// OpenAI-shaped traffic exposes tool calls in bifrost's schema directly, and the
+// host's normalize step lifts Anthropic `tool_use` blocks into the same field
+// (apply.attachToolUse), since bifrost does not model them.
 func serializeStep(req *bschemas.BifrostChatRequest, id int, s step) string {
 	var b strings.Builder
 	b.WriteString(`<step id="`)

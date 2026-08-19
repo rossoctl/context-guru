@@ -158,7 +158,9 @@ var presets = map[string][]string{
 	// prefix cacheable. Order: lossless first, then offload old-then-large, cache last.
 	"agent": {"format", "dedup", "failed_run", "mask", "extract", "extract_llm", "cachesplit"},
 	// general: the recommended all-round pipeline, safe+effective for any agent/
-	// benchmark. Ordered by pipeline semantics: lossless repack first (format, toon)
+	// benchmark. Ordered by pipeline semantics: lossless repack first (format, toon,
+	// textclean — textclean is the plain-text one, and plain text is what most tool
+	// output is: 1,724 of 1,748 distinct outputs in the captures measured here)
 	// so downstream token counts are honest; cheap structural offloaders next (dedup,
 	// failed_run, cmdfilter); age-based mask; relevance-based extract; the blind
 	// head/tail collapse as the last-resort catch-all for anything still oversized;
@@ -168,7 +170,7 @@ var presets = map[string][]string{
 	// levers that proved reward-neutral in the benchmark sweeps without stacking the
 	// two overlapping old-context reducers (mask is the one kept; summarize
 	// is its own preset — see docs/components.md redundancy notes).
-	"general": {"format", "toon", "dedup", "failed_run", "cmdfilter", "mask", "extract", "extract_llm", "collapse", "cachesplit"},
+	"general": {"format", "toon", "textclean", "dedup", "failed_run", "cmdfilter", "mask", "extract", "extract_llm", "collapse", "cachesplit"},
 	// summarize restructures the whole transcript (changes the message count) — run
 	// it alone so no other component's in-place edits race apply's rebuild.
 	"summarize": {"summarize"},

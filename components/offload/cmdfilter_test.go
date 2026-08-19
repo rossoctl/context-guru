@@ -2,6 +2,7 @@ package offload
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -473,4 +474,118 @@ func TestPdflatexOutputIsFiltered(t *testing.T) {
 	if !strings.Contains(lout, "Output written on main.pdf") {
 		t.Errorf("the line budget truncated the output summary off a long log:\n%s", lout)
 	}
+}
+
+// A filter may now be keyed on the COMMAND that produced the output, and shape-keyed
+// filters must keep matching exactly as before. Both halves are asserted with one
+// registry, because the risk in making the selector richer is not that command
+// matching fails — it is that a shape match silently starts resolving elsewhere.
+func TestSelectorMatchesCommandAndShape(t *testing.T) {
+	const doc = `
+schema_version: 1
+filters:
+  bycmd:
+    description: keyed on the command, rtk-style
+    family: search
+    match: '^\$ (rg|grep)\s'
+    strip_lines_matching: ['^Binary file ']
+  byshape:
+    description: keyed on the output shape, as the builtins are
+    family: tests
+    match: '^=+ test session starts'
+    strip_lines_matching: [' PASSED']
+`
+	// Each fixture is mostly lines its filter STRIPS, so the rewrite clears the size
+	// floor and beats the marker's own token cost; otherwise every case gates on
+	// marker_no_win and the routing assertion never gets made.
+	binaries := strings.Repeat("Binary file /x/some/deep/path/a.bin matches\n", 40)
+	passing := strings.Repeat("tests/test_mod.py::test_something_long PASSED\n", 40)
+	tests := []struct {
+		name, cmd, text, want, family string
+	}{
+		{"command selects a command-keyed filter", "grep -rn foo /x",
+			"/x/a.go:1:foo\n" + binaries, "bycmd", "search"},
+		{"a shape-keyed filter still matches with no pairing at all", "",
+			"=== test session starts ===\n" + passing, "byshape", "tests"},
+		{"a shape-keyed filter still matches when the command IS paired", "python -m pytest -q",
+			"=== test session starts ===\n" + passing, "byshape", "tests"},
+		{"neither: no filter", "cat /x/a.txt", "just some prose\n" + strings.Repeat("more prose\n", 40), "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFilterComp(t, "disable_builtins: true\nfilters:\n  - |\n"+indent(doc))
+			req := &schemas.BifrostChatRequest{Provider: schemas.Anthropic}
+			if tc.cmd != "" {
+				id, name := "t1", "Bash"
+				args := `{"command":` + quote(tc.cmd) + `}`
+				req.Input = append(req.Input, schemas.ChatMessage{
+					Role: schemas.ChatMessageRoleAssistant,
+					ChatAssistantMessage: &schemas.ChatAssistantMessage{ToolCalls: []schemas.ChatAssistantMessageToolCall{{
+						ID: &id, Function: schemas.ChatAssistantMessageToolCallFunction{Name: &name, Arguments: args}}}}})
+				m := cmdToolMsg(tc.text)
+				m.ChatToolMessage = &schemas.ChatToolMessage{ToolCallID: &id}
+				req.Input = append(req.Input, m)
+			} else {
+				req.Input = append(req.Input, cmdToolMsg(tc.text))
+			}
+			c := &components.Ctx{Ctx: context.Background(), Session: "s",
+				Store: store.NewMemory(store.Options{}), MaxCachedIdx: -1, FilterStats: &fakeStats{}}
+			rep := &components.Report{}
+			if _, err := f.Offload(req, rep, c); err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Join(c.FilterStats.(*fakeStats).acts, ",")
+			if tc.want == "" {
+				if got != "" {
+					t.Fatalf("expected no filter to act, %q did", got)
+				}
+				if rep.Gates["no_filter_match"] == 0 {
+					t.Fatalf("expected a no_filter_match gate, got %v", rep.Gates)
+				}
+				return
+			}
+			if got != tc.family+"/"+tc.want {
+				t.Fatalf("filter %q acted, want %q (gates %v)", got, tc.want, rep.Gates)
+			}
+		})
+	}
+}
+
+// The miss ledger stays keyed on the output SHAPE even though matching now sees the
+// command: commands carry paths and arguments, so keying the bounded ledger on them
+// would make almost every entry unique and rank nothing.
+func TestMissLedgerKeyExcludesTheCommand(t *testing.T) {
+	fs := &fakeStats{}
+	req := &schemas.BifrostChatRequest{Provider: schemas.Anthropic}
+	id, name := "t1", "Bash"
+	req.Input = append(req.Input, schemas.ChatMessage{
+		Role: schemas.ChatMessageRoleAssistant,
+		ChatAssistantMessage: &schemas.ChatAssistantMessage{ToolCalls: []schemas.ChatAssistantMessageToolCall{{
+			ID: &id, Function: schemas.ChatAssistantMessageToolCallFunction{
+				Name: &name, Arguments: `{"command":"weirdtool --flag /tmp/unique-path-1"}`}}}}})
+	m := cmdToolMsg("some unmatched output line\n" + strings.Repeat("filler filler\n", 40))
+	m.ChatToolMessage = &schemas.ChatToolMessage{ToolCallID: &id}
+	req.Input = append(req.Input, m)
+	f := newFilterComp(t, "")
+	c := &components.Ctx{Ctx: context.Background(), Session: "s",
+		Store: store.NewMemory(store.Options{}), MaxCachedIdx: -1, FilterStats: fs}
+	if _, err := f.Offload(req, &components.Report{}, c); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(fs.misses, ","); got != "some unmatched output line" {
+		t.Fatalf("miss ledger key %q must be the output shape, not the command", got)
+	}
+}
+
+func indent(s string) string {
+	var b strings.Builder
+	for _, l := range strings.Split(strings.TrimPrefix(s, "\n"), "\n") {
+		b.WriteString("    " + l + "\n")
+	}
+	return b.String()
+}
+
+func quote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }

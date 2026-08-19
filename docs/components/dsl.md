@@ -23,7 +23,10 @@ flowchart LR
 All optional except `match`:
 
 - `match` — regex vs the selector (= the first few non-empty lines, `(?m)` applied so `^`/`$`
-  anchor per line)
+  anchor per line). When the request pairs the output with the call that produced it, the selector
+  is PREFIXED with a `$ <command>` line, so a filter can be keyed on the command instead —
+  `match: '^\$ (rg|grep)\s'` — the way rtk's are. Shape signatures remain the default because
+  they fire on unpaired traffic too.
 - `family` — command family for per-family metrics (`builds` / `tests` / `iac` / `pkg` / `net` / …)
 - `priority` — match order; higher first, then by name. Absent (`0`) is today's name ordering.
 - `strip_ansi`
@@ -38,8 +41,8 @@ All optional except `match`:
 
 ### `priority`, and why order matters more here
 
-`cmdfilter` matches on the *shape of the output*, not on a command, and against several leading lines
-rather than one — so a generic pattern can shadow a specific one in a way rtk's command matching
+`cmdfilter` matches on the *shape of the output* (a command line is available too, but every
+shipped filter is shape-keyed) and against several leading lines rather than one — so a generic pattern can shadow a specific one in a way rtk's command matching
 never had to deal with. This is not hypothetical: widening the selector made `gcc` start claiming
 `make`, `swift-build` and `dotnet-build` output, because a bare `file:line: error:` line appears
 inside all of them. `priority` makes specific-before-generic explicit instead of dependent on
