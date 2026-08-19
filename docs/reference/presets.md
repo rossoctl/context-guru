@@ -13,21 +13,26 @@ taken exactly from the `presets` map in `config/config.go`.
 | `safe` | `format` → `cachesplit` | Lossless only: repack JSON compactly and split the volatile system tail so the shared prefix stays cacheable. Zero risk of dropping content. |
 | `balanced` | `format` → `dedup` → `failed_run` → `cmdfilter` → `cachesplit` | Lossless repack + conservative offloads (dedupe, drop superseded/failed runs, filter command noise) + the cache split. **Not recommended for agentic traffic** — it omits `mask`, the biggest lever there. |
 | `aggressive` | `format` → `dedup` → `failed_run` → `cmdfilter` → `smartcrush` → `extract` → `extract_llm` → `cachesplit` | `balanced` plus `smartcrush` (crush long homogeneous arrays), deterministic `extract` (noise collapse), and `extract_llm` (cheap-model relevance trim) for deeper savings. |
-| `coding` | `format` → `skeleton` → `cmdfilter` → `cachesplit` | Coding agents: `skeleton` reduces big source-file reads to their structure via tree-sitter. **Needs a `cg_skeleton` build** — see below. |
+| `coding` | `format` → `toon` → `dedup` → `cmdfilter` → `extract` → `cachesplit` | Coding agents, deterministic only: the components measured to actually act on real Claude Code traffic. **Changed 2026-08** — it previously named `skeleton` and therefore could not start on a normal build; see below. |
 | `mcp` | `format` → `smartcrush` → `cachesplit` | Tool/MCP servers returning long homogeneous JSON arrays (list endpoints, search hits). |
 | `agent` | `format` → `dedup` → `failed_run` → `mask` → `extract` → `extract_llm` → `cachesplit` | Long agentic sessions (e.g. Claude Code on SWE-bench) where re-sent tool outputs dominate cost. `mask` is the biggest lever — ~27% content-token savings with no task-reward loss (see [Benchmarks](../RESULTS.md)). |
 | `general` | `format` → `toon` → `dedup` → `failed_run` → `cmdfilter` → `mask` → `extract` → `extract_llm` → `collapse` → `cachesplit` | The recommended all-round pipeline: the reward-neutral levers of `agent` plus the situational shrinkers (`toon` / `cmdfilter` / `collapse`) that cost nothing when they don't fire. |
 | `summarize` | `summarize` | Long trajectories where the transcript itself is the cost. **Runs alone** — it restructures the whole transcript (changes the message count), so no other component's in-place edits race the rebuild. |
 | `agentdiet` | `format` → `agentdiet` → `cachesplit` | A **comparable baseline**, not a recommendation: the published [AgentDiet](../components/agentdiet.md) method ([arXiv:2509.23586](https://arxiv.org/abs/2509.23586)) at its tuned hyperparameters, for A/B'ing against our own reducers. One cheap-model reflection per turn on the step that just aged past `delay_steps`. Carries no other offloader on purpose — they would reduce the same tool outputs first and leave nothing to attribute. |
 
-!!! warning "`coding` will not start on a default build"
-    [`skeleton`](../components/skeleton.md) is the only component behind a build tag
-    (`cg_skeleton`, because it is the only cgo one). Without the tag it is not registered,
-    so `--preset coding` fails at pipeline build with
-    `components: unknown component "skeleton"` and the proxy exits. `make build` does not
-    pass the tag; build with
-    `CGO_ENABLED=1 go build -tags cg_skeleton ./cmd/context-guru-proxy`. Every other preset
-    runs on a default build.
+!!! note "`coding` changed in August 2026"
+    It used to be `format → skeleton → cmdfilter → cachesplit`, and because
+    [`skeleton`](../components/skeleton.md) is behind the `cg_skeleton` build tag (it is the
+    only cgo component) it was **not registered in a normal binary** — so `--preset coding`
+    failed at pipeline build with `components: unknown component "skeleton"` and the proxy
+    exited. A preset is a promise that one word of config works, so a preset nobody could
+    start was not worth keeping: it now names the deterministic components measured to act on
+    this traffic. `TestEveryPresetBuilds` now FAILS on a preset that depends on a tag-gated
+    component, instead of skipping it as it did while this shipped.
+
+    `skeleton` itself remains available in a `cg_skeleton` build and remains **not
+    recommended** — see its page for the measured 67.5% reduction on source reads and the
+    correctness argument against enabling it.
 
 !!! tip "Order matters"
     Components run in pipeline order: lossless repack first, then offloads

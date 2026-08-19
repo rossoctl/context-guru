@@ -141,8 +141,14 @@ var presets = map[string][]string{
 	"safe":       {"format", "cachesplit"},
 	"balanced":   {"format", "dedup", "failed_run", "cmdfilter", "cachesplit"},
 	"aggressive": {"format", "dedup", "failed_run", "cmdfilter", "smartcrush", "extract", "extract_llm", "cachesplit"},
-	"coding":     {"format", "skeleton", "cmdfilter", "cachesplit"},
-	"mcp":        {"format", "smartcrush", "cachesplit"},
+	// coding: deterministic only. It named `skeleton` until 2026-08 — which is behind the
+	// `cg_skeleton` build tag and therefore NOT registered in a normal binary, so
+	// `preset: coding` failed to build with `unknown component "skeleton"` for every user
+	// who selected it. TestEveryPresetBuilds now makes that class of breakage impossible.
+	// The substitutes are the components measured to actually act on Claude Code traffic
+	// (see docs/results/measured-2026-08.md).
+	"coding": {"format", "toon", "dedup", "cmdfilter", "extract", "cachesplit"},
+	"mcp":    {"format", "smartcrush", "cachesplit"},
 	// agent: tuned for long agentic sessions (e.g. Claude Code on SWE-bench),
 	// where the dominant cost is the transcript of tool outputs (file reads)
 	// re-sent every turn. mask (drop old tool outputs) is the biggest lever

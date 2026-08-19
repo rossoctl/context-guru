@@ -42,7 +42,8 @@ func TestBuildMarshalsComponentBlock(t *testing.T) {
 // pure-Go build legitimately does not have them. `skeleton` needs `cg_skeleton`
 // (tree-sitter), and neither the Makefile nor CI passes that tag — so a preset naming
 // it cannot build here. That is the tag, not a typo, which is why the test below skips
-// such a preset instead of failing it.
+// buildTagged lists components that only exist in a tagged build. A preset naming one is a
+// FAILURE, not an excuse (see the loop below) — this map exists so the failure can say why.
 var buildTagged = map[string]bool{"skeleton": true}
 
 // Every preset must actually BUILD. A name-list is only a promise until the registry
@@ -57,10 +58,20 @@ func TestEveryPresetBuilds(t *testing.T) {
 	for name := range presets {
 		t.Run(name, func(t *testing.T) {
 			pipeline, _ := PresetPipeline(name)
+			// NOT a skip. A preset is a promise that one word of config works, and it is
+			// resolved in whatever binary the user is running — so a preset that names a
+			// tag-gated component is broken FOR EVERY USER of the default build, which is
+			// exactly the failure this test was written to catch. Skipping it is how
+			// `preset: coding` shipped naming `skeleton` and died at boot with
+			// `unknown component "skeleton"` for anyone who selected it.
+			//
+			// A tag-gated component is welcome to exist; a DEFAULT-BUILD preset may not
+			// depend on one. If a tagged build ever needs its own preset, give it a
+			// separate name declared in the tagged file.
 			for _, comp := range pipeline {
 				if buildTagged[comp] && !registered[comp] {
-					t.Skipf("preset %q needs %q, which is behind a build tag absent from this build",
-						name, comp)
+					t.Fatalf("preset %q names %q, which is behind a build tag and is not in this build: "+
+						"every user selecting this preset gets a boot failure", name, comp)
 				}
 			}
 			c, err := LoadBytes([]byte("preset: " + name + "\n"))

@@ -95,7 +95,8 @@ The `cg_skeleton` build tag pulls in tree-sitter (via cgo) so the `skeleton` com
 It is **optional** — omit the tag and the tree-sitter dependency for a pure-Go build; everything else
 works. Note that without the tag `skeleton` is not *inert*, it is **not registered**: a config or
 preset naming it fails at pipeline build with `components: unknown component "skeleton"` and the
-proxy exits rather than starting without it. So the `coding` preset needs a `cg_skeleton` binary,
+proxy exits rather than starting without it. The `coding` preset no longer names it (it could
+not start on a normal build while it did), so `skeleton` now needs an explicit pipeline entry and a `cg_skeleton` binary,
 and `make build` does not pass the tag. Or build the gateway image
 (see [docs/setup.md](docs/setup.md)):
 

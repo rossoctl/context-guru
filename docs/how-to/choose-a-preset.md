@@ -31,7 +31,7 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 | `safe` | `format, cachesplit` |
 | `balanced` | `format, dedup, failed_run, cmdfilter, cachesplit` |
 | `aggressive` | `format, dedup, failed_run, cmdfilter, smartcrush, extract, extract_llm, cachesplit` |
-| `coding` | `format, skeleton, cmdfilter, cachesplit` |
+| `coding` | `format, toon, dedup, cmdfilter, extract, cachesplit` |
 | `mcp` | `format, smartcrush, cachesplit` |
 | `agent` | `format, dedup, failed_run, mask, extract, extract_llm, cachesplit` |
 | `general` | `format, toon, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, cachesplit` |
@@ -62,9 +62,11 @@ delivered ~27% mean content-token savings (up to 93.5% on a long session) with n
 loss. `balanced` omits `mask` and is *not* the choice for a long agentic session: it
 delivered 6% against `general`'s 31% on the Terminal-Bench replay.
 
-**`coding`** swaps in `skeleton`, which replaces function bodies with `{ … }` while keeping
-signatures, imports and types — for an agent that reads large source files but mostly needs
-their shape.
+**`coding`** is deterministic only: the components measured to actually act on real Claude
+Code traffic. Until August 2026 it named `skeleton` instead, which is behind a build tag and
+so is absent from a normal binary — meaning the preset could not start at all. `skeleton`
+still exists in a `cg_skeleton` build and is still not recommended; its page has the numbers
+and the reason.
 
 **`summarize`** must run alone. It restructures the whole transcript, so no other component's
 in-place edits can share the request with it.
@@ -72,10 +74,11 @@ in-place edits can share the request with it.
 <details markdown="1">
 <summary>Troubleshooting</summary>
 
-**The proxy exits with `components: unknown component "skeleton"`.** The `coding` preset
-needs a build with the `cg_skeleton` tag — it is the only cgo component, and `make build`
-does not pass the tag. Without it the component is not registered and the pipeline cannot be
-built.
+**The proxy exits with `components: unknown component "skeleton"`.** You are naming
+`skeleton` in a pipeline built without the `cg_skeleton` tag — it is the only cgo component
+and `make build` does not pass the tag, so it is not registered. This used to happen from
+`--preset coding`; that preset no longer names it. Either drop `skeleton` from your pipeline
+or build with `CGO_ENABLED=1 go build -tags cg_skeleton ./cmd/context-guru-proxy`.
 
 **`skeleton` is loaded but never fires.** It is inert on unfenced file reads, unknown
 languages, and whenever the skeleton would not be smaller than the body.
