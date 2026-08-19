@@ -514,6 +514,13 @@ cmd_grafana() {
     "$OBS_ETC/grafana/provisioning/datasources/"
   install -m0644 "$REPO_DIR"/deploy/grafana/provisioning/dashboards/*.yml \
     "$OBS_ETC/grafana/provisioning/dashboards/"
+  # Alert rules, if any are provisioned. Guarded with a glob check because the directory
+  # is deliberately created empty (Grafana logs a warning without it) and shipped empty for
+  # a long time — which is why the first rules written into the repo never reached a box.
+  if compgen -G "$REPO_DIR/deploy/grafana/provisioning/alerting/*.yml" >/dev/null; then
+    install -m0644 "$REPO_DIR"/deploy/grafana/provisioning/alerting/*.yml \
+      "$OBS_ETC/grafana/provisioning/alerting/"
+  fi
   install -m0644 "$REPO_DIR"/deploy/grafana/dashboards/*.json "$OBS_ETC/grafana/dashboards/"
   ok "$OBS_ETC ($(ls "$OBS_ETC/grafana/dashboards" | wc -l) dashboard(s))"
 

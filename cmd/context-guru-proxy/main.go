@@ -658,7 +658,7 @@ func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRo
 			h, err := a.rec.DB().CachesplitHistoricalUSD(
 				dash.Filter{Since: since, Tenant: r.TenantID}, a.prices)
 			if err != nil {
-				break
+				continue // per tenant, as the comment above promises: break zeroed every tenant after this one
 			}
 			hist[r.TenantID] = h.USD
 		}

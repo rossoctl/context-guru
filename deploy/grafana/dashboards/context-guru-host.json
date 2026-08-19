@@ -841,7 +841,7 @@
    "id": 16,
    "type": "timeseries",
    "title": "Open file descriptors",
-   "description": "Allocated file descriptors against the kernel limit. Every in-flight request holds a socket to the upstream, so an fd count that climbs and never falls is a leak that ends in refused connections.",
+   "description": "Allocated file descriptors. The kernel maximum (node_filefd_maximum) is deliberately NOT plotted: it reads 9.2e18 here \u2014 effectively unlimited \u2014 and on a shared linear axis it flattened the 5,000-odd allocated line into the x-axis. Descriptor exhaustion on this box would show as a climb here, not as a gap to a ceiling.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -862,16 +862,6 @@
      "expr": "node_filefd_allocated{job=\"node\"}",
      "editorMode": "code",
      "legendFormat": "allocated"
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "node_filefd_maximum{job=\"node\"}",
-     "editorMode": "code",
-     "legendFormat": "maximum"
     }
    ],
    "fieldConfig": {

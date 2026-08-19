@@ -190,6 +190,40 @@ tenant scope, not a counting error. **For the persistent, per-tenant numbers, us
 meaning is "what this process did", and `/stats` — which the harnesses read — reports the
 same snapshot.
 
+!!! warning "Four `cg_tenant_*` names end in `_total` and are GAUGES"
+    `cg_tenant_requests_total`, `cg_tenant_tokens_total`,
+    `cg_tenant_saved_tokens_unique_total` and `cg_tenant_billed_tokens_total` are re-read
+    from the store for the **current calendar month**. They reset at the month boundary and
+    they *fall* mid-month as request rows migrate to cold storage, so they are declared
+    `# TYPE gauge` despite the suffix (the name is kept because dashboards and scrapes
+    already reference it). **Never wrap them in `rate()` or `increase()`** — both read a
+    fall as a counter reset and extrapolate a spike at exactly the moment the value went
+    down. For a per-second rate use the process-wide `cg_*` counters, which are monotonic.
+
+### Reading `acted: 0`
+
+Three families answer "this component ran and did nothing — is it broken?":
+
+- `cg_component_runs_total{outcome="ran|mutated|acted|discarded|reverted"}`. The outcomes
+  are **nested, not disjoint**: `acted` ⊆ `mutated` ⊆ `ran`. `acted` means content tokens
+  were removed; `mutated` means the request changed at all. A component can be
+  mutated-never-acted **by design** — `cachesplit` moves tokens out of the hashed prefix
+  rather than removing any, so `acted/ran` reads 0% for the component with the largest
+  measured cost effect in the pipeline. Any "is it doing anything?" query wants `mutated`.
+  `discarded` is the odd one out: it counts *changes* the writeback layer threw away, not
+  runs.
+- `cg_component_gate_declines_total{component,gate}` — how many candidates each named gate
+  turned away. This is what separates "the guard is misfiring" from "there was genuinely
+  nothing to do": `toon` declining 14,675 of 18,288 candidates as
+  `not_uniform_object_array` is the component working. Cardinality is bounded by code
+  (gate names are constants), not by traffic.
+- `cg_extract_*` — extraction economics, the one component that spends money:
+  `cg_extract_calls_total{outcome="made|avoided|suppressed"}`, `cg_extract_cost_usd`,
+  `cg_extract_net_value_usd`, `cg_extract_latency_ms`, and
+  `cg_extract_gate_declines_total{reason}`. **`cg_extract_net_value_usd` going negative is
+  the alert**: it means the component's own saved tokens are worth less than its own model
+  spend, which is a state gross token counts cannot show (measured live at −$0.7085).
+
 ## Dashboard routes (`--dashboard`)
 
 Present only when the [dashboard](../dashboard.md) is enabled. Without the flag the route

@@ -445,7 +445,7 @@
       "id": 6,
       "type": "timeseries",
       "title": "Refusals per minute, by reason",
-      "description": "Every deliberate turn-away: rate limit, concurrency, unknown or disabled token, no upstream, upstream error. There is no spend cap — every tenant bills its own credential, so nothing is ever refused over money. The reason string is the same one the caller received and the same category cg_refused_requests_total counts, so this and the SLO dashboard agree.",
+      "description": "Every deliberate turn-away: rate limit, concurrency, unknown or disabled token, no upstream, upstream error. There is no spend cap \u2014 every tenant bills its own credential, so nothing is ever refused over money. The reason string is the same one the caller received and the same category cg_refused_requests_total counts, so this and the SLO dashboard agree.",
       "datasource": {
         "type": "loki",
         "uid": "cg-loki"
@@ -571,10 +571,10 @@
       "id": 8,
       "type": "table",
       "title": "Which gate declined candidates",
-      "description": "Per component, the gate histogram off the DEBUG decision lines \u2014 the same Report.Gates map /stats sums into components.<name>.gates, so this cannot disagree with the metric. This is the answer to 'the component did nothing and I do not know why': the gate name says which guard turned the candidates away and the count says how many. `mode` is a column for the same reason the verdict graph splits on it: an observe row was never enforced. Needs CG_LOG_LEVEL=debug.",
+      "description": "Which named gate turned candidates away, per component \u2014 the answer to 'it ran 18,288 times and acted 0 times, is it broken?'. Read from Prometheus, not from Loki: apply.formatGates renders the whole histogram into ONE log attribute with the counts inside it (deliberately, so gate names cannot trip the credential denylist), so grouping by that field mints a distinct series per request and the query died on 'maximum of series (500) reached'. cg_component_gate_declines_total has the same numbers with the gate as a label and bounded cardinality. Process-wide across every tenant, so the Tenant variable does not scope it \u2014 the metric carries component and gate only, which is what keeps its cardinality bounded.",
       "datasource": {
-        "type": "loki",
-        "uid": "cg-loki"
+        "type": "prometheus",
+        "uid": "cg-prom"
       },
       "gridPos": {
         "h": 8,
@@ -586,12 +586,11 @@
         {
           "refId": "A",
           "datasource": {
-            "type": "loki",
-            "uid": "cg-loki"
+            "type": "prometheus",
+            "uid": "cg-prom"
           },
-          "expr": "sum by (component, gates, mode) (count_over_time({job=\"context-guru\", tenant=~\"$tenant\"} | json | msg=\"cg.component\" | component=~\"$component\" | gates!=\"\" [$__range]))",
+          "expr": "topk(50, sum by (component, gate) (cg_component_gate_declines_total{component=~\"$component\"}))",
           "editorMode": "code",
-          "queryType": "instant",
           "instant": true,
           "range": false,
           "format": "table"
@@ -605,7 +604,9 @@
               "Time": true
             },
             "renameByName": {
-              "Value": "requests"
+              "component": "Component",
+              "gate": "Gate",
+              "Value": "Candidates declined"
             }
           }
         }

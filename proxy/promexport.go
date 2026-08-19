@@ -13,6 +13,7 @@ import (
 
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/metrics"
 )
 
 // Prometheus exposition at /metrics, for Grafana.
@@ -278,6 +279,24 @@ const procCaveat = " Counted in THIS PROCESS since it started and summed over ev
 	"equal the dashboard's figure for the same window, which is database-backed and " +
 	"tenant-scoped. Use the cg_tenant_* series for the persistent, per-tenant numbers."
 
+// monthToDateCaveat marks a per-tenant series as a MONTH-TO-DATE gauge rather than a
+// counter, and says why.
+//
+// These four families were typed `counter` and are not one. They are re-queried from the
+// store for the current calendar month, so they reset to 0 at the month boundary — and
+// they SHRINK mid-month whenever request rows migrate to Box archival. rate() and
+// increase() both treat a fall as a counter reset and extrapolate a spike at exactly the
+// moment the number went DOWN. The _total suffix is kept because dashboards and scrapes
+// already reference these names; the TYPE is what a query engine acts on.
+func monthToDateCaveat(help string) string {
+	return help + " A MONTH-TO-DATE GAUGE, not a counter, despite the _total name: it is " +
+		"re-read from the store for the current calendar month, so it resets at the month " +
+		"boundary and FALLS mid-month as request rows migrate to cold storage. Do not wrap it " +
+		"in rate() or increase() — both read a fall as a counter reset and extrapolate a spike " +
+		"exactly where the value went down. For a per-second rate use the process-wide cg_* " +
+		"counters instead."
+}
+
 // promHeaderProc writes a header for an in-process series, caveat attached.
 func promHeaderProc(b *strings.Builder, name, help, typ string) {
 	promHeader(b, name, help+procCaveat, typ)
@@ -363,7 +382,20 @@ func (h *Handler) renderMetrics() string {
 		promLine(&b, "cg_sse_ttfb_ms", "", s.SSETTFBMsAvg)
 
 		// Per component: which parts of the pipeline are earning their place.
-		promHeaderProc(&b, "cg_component_runs_total", "Component invocations by outcome.", "counter")
+		// The outcomes are NESTED, not disjoint: acted ⊆ mutated ⊆ ran. `acted` means the
+		// run removed content tokens; `mutated` means it changed the request at all. A
+		// component can be mutated-never-acted BY DESIGN — cachesplit moves tokens out of
+		// the hashed prefix without removing any, so acted/ran reads 0% and the one
+		// component with a measured -34.1% cost effect renders as dead. Any "is this
+		// component doing anything?" panel wants mutated. `discarded` is the odd one out:
+		// it counts CHANGES the writeback layer threw away, not runs, and it is here
+		// because the family is where an operator already looks.
+		promHeaderProc(&b, "cg_component_runs_total",
+			"Component invocations by outcome. acted (removed content tokens) is a subset of "+
+				"mutated (changed the request at all), which is a subset of ran — a component "+
+				"that mutates without saving content tokens, like cachesplit moving tokens out "+
+				"of the cached prefix, is working. discarded counts changes the writeback layer "+
+				"threw away, so it is a count of changes rather than of runs.", "counter")
 		names := make([]string, 0, len(s.Components))
 		for name := range s.Components {
 			names = append(names, name)
@@ -374,7 +406,33 @@ func (h *Handler) renderMetrics() string {
 			l := `component="` + escapeLabel(name) + `"`
 			promLine(&b, "cg_component_runs_total", l+`,outcome="ran"`, float64(c.Runs))
 			promLine(&b, "cg_component_runs_total", l+`,outcome="acted"`, float64(c.Acted))
+			promLine(&b, "cg_component_runs_total", l+`,outcome="mutated"`, float64(c.Mutated))
+			promLine(&b, "cg_component_runs_total", l+`,outcome="discarded"`, float64(c.Discarded))
 			promLine(&b, "cg_component_runs_total", l+`,outcome="reverted"`, float64(c.Reverted))
+		}
+		// Why a component declined. Without this, `acted: 0` is undiagnosable: it cannot
+		// tell a misfiring guard from a workload with genuinely nothing to do. The gate
+		// histogram is already in the snapshot (deep-copied, race-free); the same data is in
+		// the logs as ONE string field, which is why grouping a Loki panel by it mints a
+		// series per request and hits the 500-series ceiling.
+		//
+		// Cardinality is bounded by code, not by traffic: gate names are constants in the
+		// components, ~7 components x <=8 gates.
+		promHeaderProc(&b, "cg_component_gate_declines_total",
+			"Candidates a component's named gate turned away. This is the answer to \"it ran "+
+				"18,288 times and acted 0 times, is it broken?\" — e.g. toon declining 14,675 "+
+				"candidates as not_uniform_object_array is the component working as designed.", "counter")
+		for _, name := range names {
+			gates := s.Components[name].Gates
+			gateNames := make([]string, 0, len(gates))
+			for g := range gates {
+				gateNames = append(gateNames, g)
+			}
+			sort.Strings(gateNames) // stable output, same reason as the component order
+			for _, g := range gateNames {
+				promLine(&b, "cg_component_gate_declines_total",
+					`component="`+escapeLabel(name)+`",gate="`+escapeLabel(g)+`"`, float64(gates[g]))
+			}
 		}
 		promHeaderProc(&b, "cg_component_saved_tokens_unique_total",
 			"Tokens each component removed, deduplicated by content.", "counter")
@@ -441,6 +499,42 @@ func (h *Handler) renderMetrics() string {
 	promLine(&b, "cg_llm_failures_total", `kind="timeout"`, float64(offload.LLMTimeouts()))
 	promLine(&b, "cg_llm_failures_total", `kind="error"`, float64(offload.LLMErrors()))
 
+	// extract_llm economics. The one component that SPENDS money, so gross savings can look
+	// impressive while it is underwater — measured live at a NET of -$0.7085, and until these
+	// series existed that number appeared nowhere a monitor could reach it (only in /stats,
+	// which nothing alerts on). Priced exactly as statsHandler prices it, so /metrics and
+	// /stats cannot disagree: same cheapmodel usage, same per-saved-token rate.
+	cacheWrite, cacheRead := cheapmodel.CacheUsage()
+	perSavedTok := agentCacheReadPerMTok / 1e6
+	if h.opts.CacheMode == "off" {
+		perSavedTok = agentFreshPerMTok / 1e6
+	}
+	xs := metrics.ExtractSnapshot(
+		cheapmodel.PricingFromEnv().Cost(in, out, cacheWrite, cacheRead), perSavedTok, cacheWrite, cacheRead)
+	promHeader(&b, "cg_extract_calls_total",
+		"Extraction calls by outcome: made is an LLM call paid for, avoided is a result-cache hit (the cheapest outcome), suppressed is the economic gate declining one.", "counter")
+	promLine(&b, "cg_extract_calls_total", `outcome="made"`, float64(xs.Calls))
+	promLine(&b, "cg_extract_calls_total", `outcome="avoided"`, float64(xs.CallsAvoided))
+	promLine(&b, "cg_extract_calls_total", `outcome="suppressed"`, float64(xs.CallsSuppressed))
+	promHeader(&b, "cg_extract_cost_usd", "What extraction spent on its own model calls.", "gauge")
+	promLine(&b, "cg_extract_cost_usd", "", xs.ExtractionCostUSD)
+	promHeader(&b, "cg_extract_net_value_usd",
+		"What extraction's own saved tokens are worth at the rate they would have been billed, MINUS what it spent. NEGATIVE means the component is underwater and should be turned off — alert on it.", "gauge")
+	promLine(&b, "cg_extract_net_value_usd", "", xs.NetValueUSD)
+	promHeader(&b, "cg_extract_latency_ms",
+		"Mean wall time per extraction call. The gate stops speculative calls once this is observed to be slow, so it is an input as well as a symptom.", "gauge")
+	promLine(&b, "cg_extract_latency_ms", "", xs.AvgLatencyMs)
+	promHeader(&b, "cg_extract_gate_declines_total",
+		"Why extraction ran or was suppressed, per reason — the first question about an expensive component is always why it fired.", "counter")
+	reasons := make([]string, 0, len(xs.Reasons))
+	for r := range xs.Reasons {
+		reasons = append(reasons, r)
+	}
+	sort.Strings(reasons)
+	for _, r := range reasons {
+		promLine(&b, "cg_extract_gate_declines_total", `reason="`+escapeLabel(r)+`"`, float64(xs.Reasons[r]))
+	}
+
 	// --- dashboard / storage health ----------------------------------------
 	if h.rec != nil {
 		st := h.rec.Stats()
@@ -504,7 +598,7 @@ func (h *Handler) renderMetrics() string {
 				"err", err)
 		}
 		if err == nil {
-			promHeader(&b, "cg_tenant_requests_total", "Requests this calendar month, per tenant.", "counter")
+			promHeader(&b, "cg_tenant_requests_total", monthToDateCaveat("Requests this calendar month, per tenant."), "gauge")
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_requests_total", tenantLabels(t), float64(t.Requests))
 			}
@@ -542,16 +636,16 @@ func (h *Handler) renderMetrics() string {
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_total_cost_usd", tenantLabels(t), t.CostUSD+t.CGLLMCostUSD)
 			}
-			promHeader(&b, "cg_tenant_tokens_total", "Content tokens per tenant, before and after compaction.", "counter")
+			promHeader(&b, "cg_tenant_tokens_total", monthToDateCaveat("Content tokens per tenant this calendar month, before and after compaction."), "gauge")
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_tokens_total", tenantLabels(t)+`,stage="before"`, float64(t.TokensBefore))
 				promLine(&b, "cg_tenant_tokens_total", tenantLabels(t)+`,stage="after"`, float64(t.TokensAfter))
 			}
-			promHeader(&b, "cg_tenant_saved_tokens_unique_total", "Tokens removed per tenant, deduplicated.", "counter")
+			promHeader(&b, "cg_tenant_saved_tokens_unique_total", monthToDateCaveat("Tokens removed per tenant this calendar month, deduplicated."), "gauge")
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_saved_tokens_unique_total", tenantLabels(t), float64(t.SavedUnique))
 			}
-			promHeader(&b, "cg_tenant_billed_tokens_total", "Provider-billed tokens per tenant by tier.", "counter")
+			promHeader(&b, "cg_tenant_billed_tokens_total", monthToDateCaveat("Provider-billed tokens per tenant this calendar month, by tier."), "gauge")
 			for _, t := range rows {
 				l := tenantLabels(t)
 				promLine(&b, "cg_tenant_billed_tokens_total", l+`,tier="cache_read"`, float64(t.CacheRead))

@@ -706,7 +706,7 @@
    "id": 12,
    "type": "timeseries",
    "title": "Spend: actual against baseline",
-   "description": "Blue is what was billed; orange is what the same traffic would have cost uncompacted. The gap IS the saving \u2014 orange meeting or crossing blue means the tool is not paying for itself. One axis on purpose. The third series is what the prompt cache saved over the fresh rate: a separate saving from compaction's, and the one a too-aggressive pipeline spends.",
+   "description": "Blue is what was billed; orange is what the same traffic would have cost uncompacted. The gap IS the saving \u2014 orange meeting or crossing blue means the tool is not paying for itself. One axis on purpose. The prefix-split saving used to be a third series here and was invisible: at $0.03 against $2,523 it is four orders of magnitude down, pinned flat on the x-axis. It has its own stat tile, 'Prefix-cache saved this month'.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -737,16 +737,6 @@
      "expr": "sum(cg_tenant_baseline_cost_usd)",
      "editorMode": "code",
      "legendFormat": "baseline (no compaction)"
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum(cg_tenant_cachesplit_saved_usd)",
-     "editorMode": "code",
-     "legendFormat": "saved by our prefix split"
     }
    ],
    "fieldConfig": {
@@ -1264,8 +1254,8 @@
   {
    "id": 18,
    "type": "bargauge",
-   "title": "Hit rate by component",
-   "description": "How often a component that ran actually changed the request. 0% is the value to act on \u2014 it ran on every request and never acted.",
+   "title": "Activity rate by component",
+   "description": "How often a component that ran actually CHANGED the request (mutated), not just how often it removed content tokens (acted). The distinction is the whole panel: cachesplit is mutated-never-acted by design \u2014 it moves tokens out of the hashed prefix rather than removing any \u2014 so acted/ran painted the component with the largest measured cost effect (-34.1%) as a dead red bar. 0% here means it genuinely never did anything; check cg_component_gate_declines_total for which gate turned every candidate away.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -1283,7 +1273,7 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "sum by (component) (cg_component_runs_total{outcome=\"acted\"}) / clamp_min(sum by (component) (cg_component_runs_total{outcome=\"ran\"}), 1)",
+     "expr": "sum by (component) (cg_component_runs_total{outcome=\"mutated\"}) / clamp_min(sum by (component) (cg_component_runs_total{outcome=\"ran\"}), 1)",
      "editorMode": "code",
      "legendFormat": "{{component}}",
      "instant": true,
@@ -1416,8 +1406,8 @@
   {
    "id": 22,
    "type": "timeseries",
-   "title": "Requests per tenant",
-   "description": "Who is actually using the service. A line pinned flat at a ceiling is a tenant being throttled by TENANT_RPM, not a tenant being quiet.",
+   "title": "Requests per tenant, month to date",
+   "description": "Who is actually using the service, cumulative for the calendar month. NOT a rate: cg_tenant_requests_total is re-read from the store each scrape, resets at the month boundary and FALLS when rows migrate to cold storage, so rate() extrapolated a spike exactly where the value dropped. Fleet-wide requests per minute is on the 'Requests' tile at the top, off the in-process counter.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -1435,14 +1425,14 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "sum by (label) (rate(cg_tenant_requests_total{label=~\"$tenant\"}[5m])) * 60",
+     "expr": "sum by (label) (cg_tenant_requests_total{label=~\"$tenant\"})",
      "editorMode": "code",
      "legendFormat": "{{label}}"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "reqpm",
+     "unit": "short",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 2,
@@ -1476,7 +1466,7 @@
      "color": {
       "mode": "palette-classic-by-name"
      },
-     "decimals": 1
+     "decimals": 0
     },
     "overrides": []
    },
@@ -1497,7 +1487,7 @@
    "id": 23,
    "type": "table",
    "title": "Per-tenant month to date",
-   "description": "One row per account. A table rather than more coloured series: past a handful of tenants, hues stop being distinguishable. Bad rows are a non-zero 'Disabled', or added latency far above the fleet mean.",
+   "description": "One row per account. A table rather than more coloured series: past a handful of tenants, hues stop being distinguishable. Bad rows are a non-zero 'Disabled', or added latency far above the fleet mean. The Disabled column is intersected with this month's request rows: it is built from the REGISTRY (13 accounts) while every other column comes from tenants with traffic this month (11), so the outer join minted two rows with every cell blank but 'Disabled: no'. Fleet-wide disabled count is the 'Tenants disabled' tile, which is registry-scoped on purpose.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -1587,7 +1577,7 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "cg_tenant_disabled{label=~\"$tenant\"}",
+     "expr": "cg_tenant_disabled{label=~\"$tenant\"} and on (tenant) cg_tenant_requests_total",
      "editorMode": "code",
      "instant": true,
      "range": false,
@@ -2954,7 +2944,7 @@
    "id": 43,
    "type": "stat",
    "title": "Total cost of all requests",
-   "description": "What every request through this proxy cost IN TOTAL: the provider's billed cost for the traffic plus context-guru's own compaction-model spend. The bill, with no counterfactual in it -- the savings panels beside this one are all differences against a baseline, this is the number on the invoice. cg_tenant_cost_usd is the provider half and cg_tenant_cg_llm_cost_usd is ours; a deployment where the second is a large fraction of the first is paying too much to compact.",
+   "description": "What every request through this proxy cost IN TOTAL: the provider's billed cost for the traffic plus context-guru's own compaction-model spend. The bill, with no counterfactual in it \u2014 the savings panels beside this one are all differences against a baseline, this is the number on the invoice. cg_tenant_cost_usd is the provider half and cg_tenant_cg_llm_cost_usd is ours; a deployment where the second is a large fraction of the first is paying too much to compact.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -3012,7 +3002,7 @@
    "id": 41,
    "type": "stat",
    "title": "Prefix-cache saved this month",
-   "description": "What context-guru's volatile-tail split saved: counted only where the split ran, the environment snapshot had MOVED since that session's previous request, and the provider then read at least the stable half from cache while writing less than it. The amount is the stable half, not the request's whole cache_read -- a cachesplit-off control arm still read 45,805 tokens, because the agent's other breakpoints match regardless. Priced against a cache MISS (creation rate, 1.25x fresh) because those tokens carry cache_control. EXPECT IT TO BE SMALL on interactive traffic: Claude Code captures its environment block once per session (measured: one distinct tail hash across nine turns and four commits), and a new session finds the previous prefix already expired unless it started inside the provider's 5-minute TTL (measured: 1,105 of 1,127 session starts read zero from cache). The regime where this pays is back-to-back sessions -- which is what the SWE-bench A/B measured at -34.1% cost. The provider's own total cache saving is cg_tenant_cache_saved_usd, a diagnostic. This stat ADDS cg_tenant_cachesplit_historical_usd: the same saving on requests written before it could be measured per request, valued on read from the model's measured stable half and never stored. Only the session's FIRST request of each of those, because crediting a mid-session turn needs a tail hash those rows do not carry -- so it is a floor on a floor.",
+   "description": "What context-guru's volatile-tail split saved: counted only where the split ran, the environment snapshot had MOVED since that session's previous request, and the provider then read at least the stable half from cache while writing less than it. The amount is the stable half, not the request's whole cache_read \u2014 a cachesplit-off control arm still read 45,805 tokens, because the agent's other breakpoints match regardless. Priced against a cache MISS (creation rate, 1.25x fresh) because those tokens carry cache_control. EXPECT IT TO BE SMALL on interactive traffic: Claude Code captures its environment block once per session (measured: one distinct tail hash across nine turns and four commits), and a new session finds the previous prefix already expired unless it started inside the provider's 5-minute TTL (measured: 1,105 of 1,127 session starts read zero from cache). The regime where this pays is back-to-back sessions \u2014 which is what the SWE-bench A/B measured at -34.1% cost. The provider's own total cache saving is cg_tenant_cache_saved_usd, a diagnostic. This stat ADDS cg_tenant_cachesplit_historical_usd: the same saving on requests written before it could be measured per request, valued on read from the model's measured stable half and never stored. Only the session's FIRST request of each of those, because crediting a mid-session turn needs a tail hash those rows do not carry \u2014 so it is a floor on a floor.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -3072,7 +3062,7 @@
    "id": 42,
    "type": "stat",
    "title": "Total avoided this month",
-   "description": "Our two savings together: compaction (baseline minus actual, minus what our own model calls cost) plus the prefix-cache saving. Two disjoint token sets, both ours, added rather than nested -- the compaction baseline already assumes the cache behaved as it did. It is NOT the cost of an uncached world: the provider's own cache saved far more on the same traffic (cg_tenant_cache_saved_usd) and none of that is credited here.",
+   "description": "Our two savings together: compaction (baseline minus actual, minus what our own model calls cost) plus the prefix-cache saving. Two disjoint token sets, both ours, added rather than nested \u2014 the compaction baseline already assumes the cache behaved as it did. It is NOT the cost of an uncached world: the provider's own cache saved far more on the same traffic (cg_tenant_cache_saved_usd) and none of that is credited here. NEGATIVE is the bad value and is painted red: compaction spending more on its own model than it saves is exactly the state this tile exists to show, and a green -$10.19 congratulates the operator for being underwater.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -3106,8 +3096,12 @@
       "mode": "absolute",
       "steps": [
        {
-        "color": "#199e70",
+        "color": "#e66767",
         "value": null
+       },
+       {
+        "color": "#199e70",
+        "value": 0
        }
       ]
      }

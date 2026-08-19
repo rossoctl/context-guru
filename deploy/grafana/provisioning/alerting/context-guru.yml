@@ -1,0 +1,123 @@
+# Grafana alert rules for context-guru.
+#
+#   cp -r deploy/grafana/provisioning/* /etc/grafana/provisioning/
+#   systemctl restart grafana-server        # or: docker restart cg-grafana
+#
+# The alerting directory shipped EMPTY, so nothing paged. Two rules, both chosen because
+# they are the failures a dashboard cannot catch: nobody is watching a screen when the
+# service dies at 03:00, and a refusal rate is invisible on every panel that plots only
+# the requests that got through.
+#
+# Rules fire into whatever notification policy the instance already has (Grafana's default
+# one if none was provisioned) — deliberately not overridden here, because a contact point
+# in version control is either a stale email address or a leaked webhook secret.
+#
+# Each rule is a Prometheus query (refId A) plus a threshold expression (refId B), which is
+# the shape Grafana's UI produces; edit-in-UI then export stays round-trippable.
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: context-guru
+    folder: context-guru
+    interval: 1m
+    rules:
+      # --- the service is not there ---------------------------------------
+      #
+      # NoData is Alerting on purpose: a scrape target that has disappeared from
+      # Prometheus altogether is the same outage as one returning up == 0, and the
+      # default (NoData) resolves to a silent "unknown" state that nobody looks at.
+      - uid: cg-service-down
+        title: context-guru is down
+        condition: B
+        for: 5m
+        noDataState: Alerting
+        execErrState: Alerting
+        annotations:
+          summary: context-guru has not been scrapeable for 5 minutes.
+          description: >-
+            up{job="context-guru"} is 0 or missing. Every agent pointed at the proxy is
+            failing right now. Check `systemctl status context-guru` and the last lines of
+            its journal; if the process is up, check that it is still listening on the
+            scrape address.
+        labels:
+          severity: critical
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: cg-prom
+            model:
+              refId: A
+              editorMode: code
+              expr: min(up{job="context-guru"})
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+
+      # --- requests are being turned away ---------------------------------
+      #
+      # Measured live at 20.3% of all requests, 92% of them rate_limit — a tenant's agent
+      # failing over and over while every throughput panel looked healthy, because a
+      # refused request never reaches the counters those panels plot.
+      #
+      # The denominator is refusals + requests, matching the SLO dashboard's error-rate
+      # SLI exactly, so the alert and the panel can never disagree about the number.
+      # NoData is OK: an idle deployment refuses nothing and must not page.
+      - uid: cg-refusal-rate
+        title: context-guru is refusing more than 10% of requests
+        condition: B
+        for: 15m
+        noDataState: OK
+        execErrState: Alerting
+        annotations:
+          summary: Over 10% of requests are being refused before reaching an upstream.
+          description: >-
+            Break it down by reason with
+            `sum by (reason) (increase(cg_refused_requests_total[15m]))`, and by account
+            with cg_tenant_refused_requests_total. rate_limit and concurrency are both 429
+            with different fixes (raise TENANT_RPM, raise the in-flight cap);
+            no_provider_key means the accounts are fine and are sending no provider
+            credential of their own; upstream_error is the provider, not us.
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: cg-prom
+            model:
+              refId: A
+              editorMode: code
+              expr: >-
+                sum(increase(cg_refused_requests_total[15m])) /
+                clamp_min(sum(increase(cg_refused_requests_total[15m])) +
+                sum(increase(cg_requests_total[15m])), 1)
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.1]
