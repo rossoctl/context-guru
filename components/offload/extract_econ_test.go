@@ -17,7 +17,7 @@ func TestGateSuppressesSmallOutputWhenCacheAware(t *testing.T) {
 	if val.cached != true {
 		t.Fatal("cache-aware ctx must price saved tokens at the cache-read rate")
 	}
-	d := evaluateGate(400, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), 400), false, 5, false, true)
+	d := evaluateGate(400, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), 400, 0), false, 5, false, true)
 	if d.allow {
 		t.Fatalf("small cached output must be suppressed: saving=$%.5f cost=$%.5f", d.expSaving, d.expCost)
 	}
@@ -35,9 +35,9 @@ func TestGateSuppressesSmallOutputWhenCacheAware(t *testing.T) {
 func TestGatePermitsOnNonCachingBackend(t *testing.T) {
 	size := 60000 // above both break-evens (~1.8k non-caching, ~42.6k cached)
 	cached := evaluateGate(size, defaultCompressionRatio,
-		savedTokenValue(&components.Ctx{CacheAware: true}), callCost(cheapmodel.HaikuPricing(), size), false, 5, false, true)
+		savedTokenValue(&components.Ctx{CacheAware: true}), callCost(cheapmodel.HaikuPricing(), size, 0), false, 5, false, true)
 	fresh := evaluateGate(size, defaultCompressionRatio,
-		savedTokenValue(&components.Ctx{CacheAware: false}), callCost(cheapmodel.HaikuPricing(), size), false, 5, false, true)
+		savedTokenValue(&components.Ctx{CacheAware: false}), callCost(cheapmodel.HaikuPricing(), size, 0), false, 5, false, true)
 
 	if !fresh.allow {
 		t.Fatalf("non-caching backend must permit a %d-token output: saving=$%.5f cost=$%.5f",
@@ -58,8 +58,8 @@ func TestGatePermitsHighReuseContent(t *testing.T) {
 	// cached-once one. This size is the gate's whole thesis in one fixture — recurrence is
 	// what tips an otherwise-losing call into profit, so the SAME size goes both ways.
 	size := 34000
-	once := evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size), false, 5, false, true)
-	recur := evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size), true, 5, false, true)
+	once := evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size, 0), false, 5, false, true)
+	recur := evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size, 0), true, 5, false, true)
 
 	if recur.expSaving <= once.expSaving {
 		t.Fatalf("recurring content must be valued higher: recur=%v once=%v", recur.expSaving, once.expSaving)
@@ -83,7 +83,7 @@ func TestBreakEvenSizesMatchTheDocumentedVerdict(t *testing.T) {
 	breakEven := func(cacheAware, recurring bool) int {
 		val := savedTokenValue(&components.Ctx{CacheAware: cacheAware})
 		for size := 200; size <= 400_000; size += 100 {
-			if evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size), recurring, 5, false, true).allow {
+			if evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size, 0), recurring, 5, false, true).allow {
 				return size
 			}
 		}
@@ -129,7 +129,7 @@ func TestCostModelMatchesKnownTokensTimesKnownPrice(t *testing.T) {
 // callCost must fall back to the prior only until a real observation exists; it must never
 // return zero, which would make the gate permit everything.
 func TestCallCostNeverZero(t *testing.T) {
-	if c := callCost(cheapmodel.HaikuPricing(), 3000); c <= 0 {
+	if c := callCost(cheapmodel.HaikuPricing(), 3000, 0); c <= 0 {
 		t.Fatalf("callCost must be positive, got %v", c)
 	}
 }
@@ -222,9 +222,9 @@ func TestRatioTrackerLearnsFromObservations(t *testing.T) {
 // very first call with no observations at all.
 func TestCallCostIsSizeAwareNotFlat(t *testing.T) {
 	p := cheapmodel.HaikuPricing()
-	small := callCost(p, 400)
-	mid := callCost(p, 2000)
-	big := callCost(p, 5000)
+	small := callCost(p, 400, 0)
+	mid := callCost(p, 2000, 0)
+	big := callCost(p, 5000, 0)
 
 	if !(small < mid && mid < big) {
 		t.Fatalf("cost must scale with candidate size, got %v %v %v", small, mid, big)
@@ -242,7 +242,7 @@ func TestCallCostIsSizeAwareNotFlat(t *testing.T) {
 	}
 	// Beyond the shown-content cap the prompt is truncated, so cost must stop growing —
 	// otherwise a huge output is priced as if the whole thing were sent.
-	if callCost(p, 50_000) != callCost(p, 500_000) {
+	if callCost(p, 50_000, 0) != callCost(p, 500_000, 0) {
 		t.Fatal("cost must plateau past the shown-content cap (the prompt is truncated)")
 	}
 }
@@ -257,7 +257,7 @@ func TestGateIsDecidableFromColdOnFirstCall(t *testing.T) {
 
 	small := 2000
 	d := evaluateGate(small, defaultCompressionRatio, val,
-		callCost(cheapmodel.HaikuPricing(), small), false, 5, false, true)
+		callCost(cheapmodel.HaikuPricing(), small, 0), false, 5, false, true)
 	if d.allow {
 		t.Errorf("a %d-token output should not pay at the measured 0.12 ratio: "+
 			"saving=$%.5f cost=$%.5f", small, d.expSaving, d.expCost)
@@ -265,7 +265,7 @@ func TestGateIsDecidableFromColdOnFirstCall(t *testing.T) {
 
 	big := 20000 // comfortably above the ~1.8k-3.4k non-caching break-even
 	d = evaluateGate(big, defaultCompressionRatio, val,
-		callCost(cheapmodel.HaikuPricing(), big), false, 5, false, true)
+		callCost(cheapmodel.HaikuPricing(), big, 0), false, 5, false, true)
 	if !d.allow {
 		t.Errorf("a %d-token output on a non-caching backend must pay on the first call: "+
 			"saving=$%.5f cost=$%.5f", big, d.expSaving, d.expCost)
@@ -306,7 +306,7 @@ func TestGateExploresThenSettles(t *testing.T) {
 	// An exploration slot must actually flip an otherwise-suppressed decision.
 	val := savedTokenValue(&components.Ctx{CacheAware: true})
 	size := 400 // far below break-even: normally suppressed
-	cost := callCost(cheapmodel.HaikuPricing(), size)
+	cost := callCost(cheapmodel.HaikuPricing(), size, 0)
 	suppressed := evaluateGate(size, defaultCompressionRatio, val, cost, false, 5, false, true)
 	if suppressed.allow {
 		t.Fatal("without an exploration slot a tiny cached output must be suppressed")
@@ -371,7 +371,7 @@ func TestSuppressedByDefaultOnCachingBackend(t *testing.T) {
 	val := savedTokenValue(&components.Ctx{CacheAware: true})
 	// A candidate far ABOVE the cached break-even — economics alone would permit it.
 	size := 200_000
-	cost := callCost(cheapmodel.HaikuPricing(), size)
+	cost := callCost(cheapmodel.HaikuPricing(), size, 0)
 
 	blocked := evaluateGate(size, defaultCompressionRatio, val, cost, true, 5, false, false)
 	if blocked.allow {
@@ -391,7 +391,7 @@ func TestSuppressedByDefaultOnCachingBackend(t *testing.T) {
 	// The default must NOT block a non-caching backend — that is where the component wins.
 	fresh := savedTokenValue(&components.Ctx{CacheAware: false})
 	ok := evaluateGate(20000, defaultCompressionRatio, fresh,
-		callCost(cheapmodel.HaikuPricing(), 20000), false, 5, false, false)
+		callCost(cheapmodel.HaikuPricing(), 20000, 0), false, 5, false, false)
 	if !ok.allow {
 		t.Fatalf("non-caching traffic must still be permitted: saving=$%.5f cost=$%.5f",
 			ok.expSaving, ok.expCost)
@@ -448,5 +448,30 @@ func TestANamedCompactionModelIsNotPricedAsTheAgent(t *testing.T) {
 					tc.wantAgent, agentRates.Input*1e6, cheapmodel.HaikuPricing().InputPerMTok)
 			}
 		})
+	}
+}
+
+// TestTheGateSeesTheWholePromptNotJustTheCandidate pins the defect that let the cold sweep
+// spend money: callCost used a flat 200-token overhead, but under `context: full` the
+// rendered transcript is the prompt. Measured on production, five haiku calls on one request
+// each sent ~138,000 prompt tokens while the gate priced them at <=6,663 — 21x to 31x low.
+func TestTheGateSeesTheWholePromptNotJustTheCandidate(t *testing.T) {
+	p := cheapmodel.HaikuPricing()
+	const candidate = 3433 // a real candidate size from the production rows
+	blind := callCost(p, candidate, 0)
+	// The real overhead on those calls: ~138k prompt tokens, almost all of it transcript.
+	seeing := callCost(p, candidate, 138_000)
+	if !(seeing > blind*10) {
+		t.Fatalf("a 138k-token prompt must cost far more than a blind estimate: blind=%.6f seeing=%.6f", blind, seeing)
+	}
+	// And the gate must actually refuse on that cost. A 3433-token candidate at the
+	// cache-read rate cannot repay a six-figure prompt.
+	val := savedTokenValue(&components.Ctx{CacheAware: true})
+	if d := evaluateGate(candidate, defaultCompressionRatio, val, seeing, false, 5, false, true); d.allow {
+		t.Fatalf("gate allowed a call whose prompt costs $%.4f: %s", seeing, d.reason)
+	}
+	// Zero means "unknown", and must fall back to the old constant rather than to no cost.
+	if callCost(p, candidate, 0) != callCost(p, candidate, promptOverheadTokens) {
+		t.Fatal("overhead 0 must fall back to promptOverheadTokens")
 	}
 }

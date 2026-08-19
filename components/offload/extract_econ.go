@@ -139,19 +139,22 @@ const (
 // overhead, priced at real rates), blended with the observed mean once real calls exist.
 // The observed mean alone is not enough either: it is an average over past candidate
 // sizes, and cost genuinely scales with THIS candidate's size.
-func callCost(pricing cheapmodel.Pricing, sizeTokens int) float64 {
+func callCost(pricing cheapmodel.Pricing, sizeTokens, overheadTokens int) float64 {
 	shown := sizeTokens
 	if shown > maxShownTokens {
 		shown = maxShownTokens
 	}
-	inTok := int64(preambleTokens + shown + promptOverheadTokens)
+	if overheadTokens <= 0 {
+		overheadTokens = promptOverheadTokens
+	}
+	inTok := int64(preambleTokens + shown + overheadTokens)
 	analytic := pricing.Cost(inTok, expectedOutputTokens, 0, 0)
 
 	// Reconcile with reality: if observed calls came in cheaper or dearer than the
 	// analytic model predicts (a working preamble cache, a different tokenizer, a
 	// gateway contract), scale by that ratio rather than discarding size-sensitivity.
 	if avg, ok := cheapmodel.AvgCallCost(pricing); ok && avg > 0 {
-		if base := analyticBaseline(pricing); base > 0 {
+		if base := analyticBaseline(pricing, overheadTokens); base > 0 {
 			if ratio := avg / base; ratio > 0.1 && ratio < 10 {
 				return analytic * ratio
 			}
@@ -166,8 +169,11 @@ func callCost(pricing cheapmodel.Pricing, sizeTokens int) float64 {
 
 // analyticBaseline is the analytic cost of a mid-sized candidate, used as the denominator
 // when scaling the analytic estimate to observed reality.
-func analyticBaseline(pricing cheapmodel.Pricing) float64 {
-	return pricing.Cost(preambleTokens+2000+promptOverheadTokens, expectedOutputTokens, 0, 0)
+func analyticBaseline(pricing cheapmodel.Pricing, overheadTokens int) float64 {
+	if overheadTokens <= 0 {
+		overheadTokens = promptOverheadTokens
+	}
+	return pricing.Cost(int64(preambleTokens+2000+overheadTokens), expectedOutputTokens, 0, 0)
 }
 
 // gateDecision records why the gate allowed or suppressed a call. The reason string is

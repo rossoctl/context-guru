@@ -93,6 +93,18 @@ Sandbox:
   re_sub(pattern, repl, s) -> s, re_findall(pattern, s) -> [str],
   re_split(pattern, s) -> [str], re_match(pattern, s) -> bool. RE2 syntax.
 - NO imports (no load()), NO I/O, NO network.
+STARLARK IS NOT PYTHON. These are the constructs models reach for that the sandbox
+REJECTS outright — a rejected program means your whole reply is discarded:
+- NO generator expressions. ` + "`any(k in ln for k in ids)`" + ` is a syntax error.
+  Write a list comprehension instead: ` + "`any([k in ln for k in ids])`" + `.
+- NO f-strings and no %-formatting. Use ` + "`str(x)`" + ` and ` + "`+`" + ` to build strings.
+- NO while loops, NO try/except, NO lambda with statements, NO ` + "`global`" + `/` + "`nonlocal`" + `.
+- NO set literals, NO ` + "`dict.setdefault`" + `, NO ` + "`sorted(key=...)`" + ` with a lambda closure
+  over a mutable local.
+- Strings have .strip()/.split()/.startswith()/.endswith()/.replace()/.lower(); lists
+  have .append(). Use ` + "`for`" + ` over a list, ` + "`if/elif/else`" + `, and plain function defs.
+When in doubt write the dumb, explicit loop — a plain program that runs beats a clever
+one that does not.
 Rule for SOURCE-CODE FILES (a file read: imports + function/class defs). A large
 file read is the MOST important thing to reduce — produce a SKELETON. Do NOT return it
 unchanged; a large file always has bodies to elide, and bodies are recoverable via
@@ -472,8 +484,37 @@ func buildCodePrompt(bodyText, goal string, keepIDs []string, rewrite bool) stri
 // buildCodePrompt, reordered so the stable half can be a cacheable prefix. Order matters
 // — the cacheable blocks must come FIRST on the wire, which is exactly what a `system`
 // array gives us.
-func buildCodePromptSplit(bodyText, goal string, keepIDs []string, rewrite bool, a Aggressiveness) (system []string, user string) {
-	return codeSystemBlocks(rewrite, a), buildCodeUserPart(bodyText, goal, keepIDs)
+// The GOAL is a system block, not part of the user message, and that placement is the
+// whole economics of a multi-candidate request. The rendered conversation context is
+// computed ONCE per request (it is the same for every candidate in it) and under
+// `context: full` it is the overwhelming bulk of the prompt. Measured on production: five
+// haiku calls on ONE request each sent ~138,000 prompt tokens with cache_read = 0 and
+// cache_write = 0 — the same transcript re-sent fresh five times — because it sat in the
+// uncacheable user half.
+//
+// As a trailing system block it falls inside the prefix CompleteBlocks marks, so calls
+// 2..N of a request read it instead of re-sending it. It also lifts the prefix over the
+// model's minimum cacheable size: the invariant preamble alone is ~1,463 tokens, below
+// claude-haiku-4-5's 4,096 floor, so on haiku nothing was being cached at all.
+func buildCodePromptSplit(bodyText, goal string, keepIDs []string, rewrite, cacheContext bool, a Aggressiveness) (system []string, user string) {
+	blocks := codeSystemBlocks(rewrite, a)
+	if !cacheContext {
+		return blocks, buildCodeUserPart(bodyText, goal, keepIDs)
+	}
+	if g := goalBlock(goal); g != "" {
+		blocks = append(blocks, g)
+	}
+	return blocks, buildCodeUserPart(bodyText, "", keepIDs)
+}
+
+// goalBlock renders the conversation context as its own cacheable system block. Empty when
+// there is no goal, so the block list stays exactly as it was for callers that pass none.
+func goalBlock(goal string) string {
+	g := strings.TrimSpace(goal)
+	if g == "" {
+		return ""
+	}
+	return "WHAT THE AGENT IS DOING (context for judging relevance):\n" + clipGoal(g)
 }
 
 // buildCodeUserPart is the VARIABLE half: the goal, the keep-list, and the tool output.

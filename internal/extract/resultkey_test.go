@@ -98,7 +98,7 @@ func TestPromptSplitPreservesContent(t *testing.T) {
 	goal := "find the keep records"
 	keep := []string{"keep"}
 	for _, rewrite := range []bool{true, false} {
-		blocks, user := buildCodePromptSplit(body, goal, keep, rewrite, AggroMedium)
+		blocks, user := buildCodePromptSplit(body, goal, keep, rewrite, false, AggroMedium)
 		sys := strings.Join(blocks, "\n\n")
 		single := buildCodePrompt(body, goal, keep, rewrite)
 		for _, want := range []string{"Starlark", "OUTPUT", "SUMMARY", "INPUT"} {
@@ -121,14 +121,14 @@ func TestPromptSplitPreservesContent(t *testing.T) {
 		}
 	}
 	// The two rewrite modes must produce different (but each stable) preambles.
-	blocksA, _ := buildCodePromptSplit(body, goal, keep, true, AggroMedium)
-	blocksB, _ := buildCodePromptSplit(body, goal, keep, false, AggroMedium)
+	blocksA, _ := buildCodePromptSplit(body, goal, keep, true, false, AggroMedium)
+	blocksB, _ := buildCodePromptSplit(body, goal, keep, false, false, AggroMedium)
 	sysA, sysB := strings.Join(blocksA, "\n\n"), strings.Join(blocksB, "\n\n")
 	if sysA == sysB {
 		t.Fatal("rewrite and deletion-only contracts must differ")
 	}
 	// Stability: same inputs, same bytes — the property caching depends on.
-	blocksA2, _ := buildCodePromptSplit("totally different body", "different goal", nil, true, AggroMedium)
+	blocksA2, _ := buildCodePromptSplit("totally different body", "different goal", nil, true, false, AggroMedium)
 	if sysA != strings.Join(blocksA2, "\n\n") {
 		t.Fatal("the system preamble must be byte-identical across calls (else it never caches)")
 	}
@@ -207,5 +207,51 @@ func TestFloorDoesNotRotateKeyOutsideAutoMode(t *testing.T) {
 	b.Mode, b.Floor = "auto", 500
 	if ResultKey(ck, "m", a) == ResultKey(ck, "m", b) {
 		t.Error("auto mode: Floor selects the strategy order, so it must be part of the key")
+	}
+}
+
+// TestCacheContextMovesTheTranscriptIntoTheCacheablePrefix pins the placement decision and
+// the reason it is conditional. The conversation context is identical across a request's
+// candidates, so caching it lets calls 2..N read it — but a cache WRITE costs 1.25x fresh,
+// so a single-call request must keep the old placement or it pays 25% for nothing.
+func TestCacheContextMovesTheTranscriptIntoTheCacheablePrefix(t *testing.T) {
+	body := `[{"id":1,"name":"keep"}]`
+	goal := "the agent is reading dash/query.go to find where savings are computed"
+	keep := []string{"keep"}
+
+	offSys, offUser := buildCodePromptSplit(body, goal, keep, true, false, AggroMedium)
+	onSys, onUser := buildCodePromptSplit(body, goal, keep, true, true, AggroMedium)
+
+	// Off: the goal stays in the uncacheable user half (the prior behaviour, unchanged).
+	if !strings.Contains(offUser, goal) {
+		t.Fatal("cacheContext=false must leave the goal in the user message")
+	}
+	if strings.Contains(strings.Join(offSys, "\n"), goal) {
+		t.Fatal("cacheContext=false must keep the system blocks invariant")
+	}
+	// On: the goal moves into a trailing system block, which is what CompleteBlocks marks.
+	if !strings.Contains(strings.Join(onSys, "\n"), goal) {
+		t.Fatal("cacheContext=true must put the goal in a system block")
+	}
+	if strings.Contains(onUser, goal) {
+		t.Fatal("cacheContext=true must not also send the goal in the user message")
+	}
+	if len(onSys) != len(offSys)+1 {
+		t.Fatalf("cacheContext=true must add exactly one block: %d vs %d", len(onSys), len(offSys))
+	}
+	// Either way the instructions and the body survive — no content is lost by the move.
+	for _, want := range []string{"Starlark", "OUTPUT", "INPUT"} {
+		if !strings.Contains(strings.Join(onSys, "\n")+onUser, want) {
+			t.Fatalf("cacheContext=true lost %q", want)
+		}
+	}
+	// The builder re-indents a JSON container, so match on content rather than bytes.
+	if !strings.Contains(onUser, "keep") {
+		t.Fatal("cacheContext=true lost the tool output")
+	}
+	// The cached prefix must be STABLE for a given goal, or it can never be read back.
+	again, _ := buildCodePromptSplit("a different body", goal, keep, true, true, AggroMedium)
+	if strings.Join(onSys, "\x00") != strings.Join(again, "\x00") {
+		t.Fatal("the cached prefix must not depend on the candidate body")
 	}
 }

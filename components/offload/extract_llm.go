@@ -954,7 +954,12 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// clock as well as money, and an agent on a task deadline feels the former more.
 			explore := !tooSlowToExplore(metrics.ExtractionAvgLatencyMs()) &&
 				e.ratios.exploring(c.Session)
-			d := evaluateGate(sz, ratio, val, callCost(pricing, sz), seenBefore, turnsSoFar,
+			// promptOverhead, not the 200-token constant: it already counts the rendered
+			// conversation context, which under `context: full` (every cold sweep) IS the
+			// prompt. Measured on production: five haiku calls on ONE request each sent
+			// ~138,000 prompt tokens while the gate priced them at <=6,663 — 21x to 31x low,
+			// which is what let the sweep spend $0.71 to remove 63 tokens worth $0.0003.
+			d := evaluateGate(sz, ratio, val, callCost(pricing, sz, promptOverhead), seenBefore, turnsSoFar,
 				explore, e.allowCached)
 			if !d.allow && e.fireOnSize {
 				// ADVISORY: `fire_on: size` is the operator taking the spending decision
@@ -1034,6 +1039,12 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// so parallel beats a single-call batch on tokens AND latency. Each output fails open
 	// independently (a miss leaves that one verbatim).
 	if len(cands) > 0 {
+		// The conversation context is identical for every candidate in this request, so with
+		// two or more calls it is worth writing into the provider's cache once and reading it
+		// back on the rest. With ONE call there is nothing to read it back, and a cache write
+		// costs 1.25x fresh — so paying for it would be a 25% loss. Decided here because this
+		// is the only place the final candidate count is known (the caps above trim it).
+		extCfg.CacheContext = len(cands) > 1
 		type outT struct{ projected, summary string }
 		out := make([]outT, len(cands))
 		// One record per call, written to its own slot so the goroutines need no lock (a

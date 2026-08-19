@@ -2,6 +2,7 @@ package extract
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"runtime"
 	"strings"
@@ -82,19 +83,22 @@ func reBuiltins() starlark.StringDict {
 // runs sandboxed over the FULL body — no imports, no I/O, step + time limits — and
 // returns (OUTPUT, SUMMARY), or ("","") on any failure (fail-open). Containment/
 // sanity is verified by the caller (RunExtraction).
-func runStarlark(ctx context.Context, body, goal string, keepIDs []string, model Model, rewrite bool, aggro Aggressiveness) (out, summary string) {
+func runStarlark(ctx context.Context, body, goal string, keepIDs []string, model Model, rewrite, cacheContext bool, aggro Aggressiveness) (out, summary, reason string) {
 	if model == nil {
-		return "", ""
+		return "", "", "no model"
 	}
 	// Split shape: the invariant contract+examples go in a cacheable system block, the
 	// goal/keep-list/output in the user message. Falls back to one message on a client
 	// without the capability. Same content either way.
-	sys, user := buildCodePromptSplit(body, goal, keepIDs, rewrite, aggro)
+	sys, user := buildCodePromptSplit(body, goal, keepIDs, rewrite, cacheContext, aggro)
 	src, err := completeSplit(ctx, model, sys, user)
 	if err != nil {
-		return "", ""
+		return "", "", "model call failed: " + err.Error()
 	}
-	return execStarlarkSummary(ctx, body, stripFences(src))
+	if strings.TrimSpace(src) == "" {
+		return "", "", "model replied with nothing"
+	}
+	return execStarlarkDetail(ctx, body, stripFences(src))
 }
 
 // execStarlark runs a Starlark filter source over the body and returns OUTPUT (or ""
@@ -114,13 +118,28 @@ func execStarlark(ctx context.Context, body, src string) string {
 // json module + regex helpers, no imports, no I/O, step + time limits. Fail-open to
 // ("","") on any error/panic.
 func execStarlarkSummary(ctx context.Context, body, src string) (out, summary string) {
+	out, summary, _ = execStarlarkDetail(ctx, body, src)
+	return out, summary
+}
+
+// execStarlarkDetail is execStarlarkSummary plus WHY the program produced nothing.
+//
+// The reason has to escape this function. Collapsing a Starlark SYNTAX error into the same
+// empty result as "the model never replied" is what hid the component's single largest
+// failure mode: measured on real Claude Code traffic, claude-haiku-4-5 replies with a
+// perfectly plausible program every time and 12 of 13 were rejected here, because the model
+// writes PYTHON — generator expressions (`any(k in ln for k in ids)`), which Starlark has no
+// such thing as. Every one of those surfaced as "no usable program or reply", so the prompt
+// looked like it was being ignored when it was being answered and then thrown away.
+func execStarlarkDetail(ctx context.Context, body, src string) (out, summary, reason string) {
 	defer func() {
-		if recover() != nil {
-			out, summary = "", ""
+		if r := recover(); r != nil {
+			out, summary, reason = "", "", fmt.Sprintf("sandbox panic: %v", r)
 		}
 	}()
 	if len(body) > maxSandboxInput {
-		return "", "" // oversized: fail open, let the deterministic path handle it
+		// oversized: fail open, let the deterministic path handle it
+		return "", "", "input above the sandbox limit"
 	}
 	ctx, cancel := context.WithTimeout(ctx, starlarkTimeout)
 	defer cancel()
@@ -180,20 +199,20 @@ func execStarlarkSummary(ctx context.Context, body, src string) (out, summary st
 
 	globals, err := starlark.ExecFile(thread, "extract.star", b.String(), predeclared)
 	if err != nil {
-		return "", ""
+		return "", "", "program rejected: " + err.Error()
 	}
 	tup, ok := globals["_CG_RES"].(starlark.Tuple)
 	if !ok || len(tup) != 2 {
-		return "", ""
+		return "", "", "program returned no (OUTPUT, SUMMARY) pair"
 	}
 	res, ok := tup[0].(starlark.String)
 	if !ok {
-		return "", ""
+		return "", "", "OUTPUT was not a string"
 	}
 	if sum, ok := tup[1].(starlark.String); ok {
 		summary = clipSummary(string(sum))
 	}
-	return string(res), summary
+	return string(res), summary, ""
 }
 
 // maxSummaryRunes bounds the one-line digest spliced in next to the recovery marker.

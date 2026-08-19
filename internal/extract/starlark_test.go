@@ -29,7 +29,7 @@ func TestRunStarlarkFiltersFullBody(t *testing.T) {
 		recs = append(recs, `{"id":`+strconv.Itoa(i)+`,"name":"`+name+`"}`)
 	}
 	body := "[" + strings.Join(recs, ",") + "]"
-	out, _ := runStarlark(context.Background(), body, "find keep", nil, starlarkModel{}, false, AggroMedium)
+	out, _, _ := runStarlark(context.Background(), body, "find keep", nil, starlarkModel{}, false, false, AggroMedium)
 	if out == "" {
 		t.Fatal("expected a Starlark result")
 	}
@@ -52,7 +52,41 @@ func (evilModel) Complete(_ context.Context, _ string) (string, error) {
 }
 
 func TestRunStarlarkFailsOpenOnDisallowed(t *testing.T) {
-	if out, _ := runStarlark(context.Background(), `[{"a":1}]`, "", nil, evilModel{}, false, AggroMedium); out != "" {
+	if out, _, _ := runStarlark(context.Background(), `[{"a":1}]`, "", nil, evilModel{}, false, false, AggroMedium); out != "" {
 		t.Fatalf("disallowed program must fail open to \"\", got %q", out)
+	}
+}
+
+// TestAPythonismIsReportedAsASyntaxRejection pins the diagnosis that was impossible before.
+// claude-haiku-4-5 reliably writes Python, not Starlark: a generator expression inside any()
+// is the single most common form. Measured on real Claude Code traffic, 12 of 13 calls were
+// discarded here and every one of them reported "no usable program or reply", so the failure
+// read as "the model ignored the prompt" when it had answered and been thrown away.
+func TestAPythonismIsReportedAsASyntaxRejection(t *testing.T) {
+	// A generator expression: valid Python, not a thing in Starlark.
+	out, _, reason := execStarlarkDetail(context.Background(), "a\nb\nc\n",
+		"OUTPUT = \"\\n\".join([l for l in INPUT.split(\"\\n\") if any(k in l for k in [\"a\"])])")
+	if out != "" {
+		t.Fatal("a generator expression must not execute")
+	}
+	if !strings.Contains(reason, "program rejected") {
+		t.Fatalf("the sandbox rejection must be reported, got %q", reason)
+	}
+	// The list-comprehension form the prompt now mandates must run.
+	out, _, reason = execStarlarkDetail(context.Background(), "a\nb\nc\n",
+		"OUTPUT = \"\\n\".join([l for l in INPUT.split(\"\\n\") if any([k in l for k in [\"a\"]])])")
+	if reason != "" || out != "a" {
+		t.Fatalf("the mandated form must run: out=%q reason=%q", out, reason)
+	}
+}
+
+// TestTheContractTeachesTheSandboxsRestrictions guards the prompt text itself: these lines
+// took extract_llm from a 92% program-rejection rate to 0/3 failures on the same real file
+// read, so deleting them silently returns the component to useless.
+func TestTheContractTeachesTheSandboxsRestrictions(t *testing.T) {
+	for _, want := range []string{"STARLARK IS NOT PYTHON", "generator expression", "f-string"} {
+		if !strings.Contains(codeContract, want) {
+			t.Fatalf("codeContract no longer warns about %q", want)
+		}
 	}
 }
