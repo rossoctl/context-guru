@@ -84,10 +84,19 @@ CREATE TABLE IF NOT EXISTS requests (
   cost_usd           REAL    NOT NULL DEFAULT 0,
   baseline_cost_usd  REAL    NOT NULL DEFAULT 0, -- what the same request would have cost uncompacted
   cg_llm_cost_usd    REAL    NOT NULL DEFAULT 0, -- context-guru's OWN model spend attributable here
-  -- What the provider's prompt cache saved on this request: its cache-read tokens priced
-  -- at the fresh rate, minus what they were billed. A saving we do not create but do
-  -- protect; reported beside compaction savings, never inside them.
+  -- What the PROVIDER's prompt cache saved on this request: its cache-read tokens priced
+  -- at the fresh rate, minus what they were billed. A measurement of their mechanism, kept
+  -- because it is what collapses when a pipeline rewrites deep history. Never reported as
+  -- our saving.
   cache_saved_usd    REAL    NOT NULL DEFAULT 0,
+  -- What OUR prefix components saved: nonzero only where cachesplit/cacheinject rewrote the
+  -- prefix, the provider read it from cache, and it was the session's first request — the
+  -- one that would have missed. Priced against a cache MISS (creation rate), not fresh
+  -- input. See Event.cachesplitSavedUSD.
+  cachesplit_saved_usd REAL  NOT NULL DEFAULT 0,
+  -- The size of the prefix half cachesplit moved the breakpoint onto: the numerator of the
+  -- column above, stored so a dollar figure can be checked against a token count.
+  split_stable_tokens INTEGER NOT NULL DEFAULT 0,
   cg_latency_ms      REAL    NOT NULL DEFAULT 0,
   upstream_ms        REAL    NOT NULL DEFAULT 0,
   expands            INTEGER NOT NULL DEFAULT 0,
@@ -325,6 +334,8 @@ CREATE INDEX IF NOT EXISTS idx_xcalls_session ON extraction_calls(session_id, ts
 // end up with different shapes.
 var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "cache_saved_usd", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "cachesplit_saved_usd", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "split_stable_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
 }
 

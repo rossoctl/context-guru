@@ -31,7 +31,7 @@ Every headline number, with the honesty machinery visible rather than hidden:
 |---|---|
 | Volume | requests · sessions · tokens before/after |
 | Savings | gross · unique · net-of-restores · overcount ratio |
-| Money | baseline cost · actual cost · context-guru's own LLM spend · net dollars saved · **prompt-cache savings** · **total avoided** |
+| Money | baseline cost · actual cost · context-guru's own LLM spend · net dollars saved · **prefix-cache savings** · **total avoided** |
 | Tokens billed | fresh input · cache reads · cache writes · output |
 | Latency | context-guru added (mean + **p95**) · upstream (mean + p95) |
 | Quality | restorations + rate · reverts · not-compacted count |
@@ -102,10 +102,10 @@ net savings by ~9× on the same data, which is why the dashboard puts `overcount
 right beside the dollar figure.
 
 Beneath it, the **honest savings waterfall**: baseline → compaction savings →
-context-guru's own LLM cost → net cost → net savings → prompt-cache savings → total
+context-guru's own LLM cost → net cost → net savings → prefix-cache savings → total
 avoided. If context-guru cost more than it saved, the waterfall says so.
 
-#### Two savings, added and not nested
+#### Two savings, added and not nested — and one number that is not a saving
 
 There are two different counterfactuals on this page and conflating them is the easiest way
 to overstate a dashboard.
@@ -118,31 +118,74 @@ request whose cache had expired re-billed the whole prompt and would have re-bil
 removed part with it. On production traffic those expired turns were 4% of requests and 31%
 of spend, so valuing their removals as cache reads understated them by ~12×.
 
-**Prompt-cache savings** (`cache_saved_usd`) is a request's cache-read tokens priced at the
-fresh rate they would have cost with no cache at all, minus what they were billed. This one
-is the *provider's* mechanism, not ours. It is here because a compaction proxy that rewrites
-deep history destroys it — so it is the number that falls when a pipeline goes too deep.
+**Prefix-cache savings** (`cachesplit_saved_usd`) is the one cache figure this project
+claims. The mechanism is specific: Claude Code appends a live environment snapshot (branch,
+git status, recent commits) to the **end** of its big system block, and that block is one
+cacheable unit whose breakpoint sits *after* the churn — so the provider's hash covers the
+snapshot, the prefix never matches across sessions, and every new session re-pays for ~7k
+tokens of identical instructions. `cachesplit` splits the block in two and moves the
+breakpoint onto the stable half: byte-identical prompt to the model, hash boundary that
+excludes the churn.
 
-`cache_saved_protected_usd` **locates** part of that money rather than claiming it: it is the
-share billed on requests where one of our own cache components (`cachesplit`, `cacheinject`)
-had just rewritten the prefix. That is co-occurrence, not cause — the agent places most
-breakpoints itself, and most cache reads would have happened anyway. Two things follow:
+A request contributes only when **all three** of these are true:
 
-* **Causation needs an A/B**, and there is one for the split: −34.1% cost and 0% → 96.7% cache
-  hit with it on, on the same traffic. That is the evidence; this figure is a pointer to where
-  to look.
-* **It is a floor, not an estimate.** A stable prefix is a property of the *session*, while this
-  counts only the turns where the component acted — and the turn we place a boundary on is
-  often the turn that *writes* the cache, with the reads arriving on later turns that are not
-  counted. Expect it to be a small fraction of the total even where the split is doing real
-  work.
+1. the split **actually ran** on it (`split_stable_tokens > 0`), which is exactly when
+   `cachesplit` reports `mutated`;
+2. the provider **read from cache** on it — a split that produced no hit produced no saving;
+3. it was the **session's first request** — the one that would have missed without the split.
 
-They are **added**, never nested: `total_saved_usd = net_saved_usd + cache_saved_usd`. Folding
-the cache saving into the compaction baseline would double-count, because that baseline
-already assumes the cache behaved exactly as it did.
+The third is the one that matters. Later turns in a session hit the cache whether or not the
+tail was ever split, because the snapshot does not change mid-session; crediting them counts
+the provider's money as ours.
 
-Both are only as good as the per-model rates behind them. On a gateway that does not charge
-the public API's prices — IBM's `ete-litellm` bills half of anthropic.com for
+**The amount is the stable half, not the request's whole `cache_read`.** That correction came
+out of running the control arm rather than reasoning about it. Four real Claude Code sessions
+through `ete-litellm`, each started after a fresh commit so the snapshot genuinely differed,
+first request of each session:
+
+| | `cache_read` | `cache_write` |
+|---|---|---|
+| cachesplit **on** | 54,304 | 1,063 |
+| cachesplit **off** (control) | 45,805 | 9,555 |
+
+The control still **hit**. Claude Code sets several breakpoints and the ones before this block
+match whatever we do, so crediting the whole 54,304 would have booked the agent's own cache
+placement as ours — a ~9.6× overstatement. What the split moved is the difference: 8,499
+tokens, from the write tier to the read tier. The dashboard claims less still: the split's own
+measurement of the half it moved (`split_stable_tokens`, 5,654 BPE tokens on that traffic).
+The two disagree because they count different things — the provider reports block-granular
+usage over a prefix that also gained a block boundary, while ours counts the text — and the
+smaller one is what gets billed, because under-crediting is the only safe direction.
+
+The counterfactual is a cache **miss**, not fresh input: those tokens carry `cache_control`,
+so a miss bills them as cache *creation* — 1.25× fresh on the Anthropic family — and the next
+turn pays again. Hence `min(split_stable_tokens, cache_read) × (cache_write_rate −
+cache_read_rate)`, an 11.5×-fresh spread rather than 9×.
+
+On that measured traffic it came to **$0.0099 per new session**, against a provider-cache
+figure of **$0.2258** over the same four requests — the number that used to be the headline.
+
+It is a **floor**. A stable prefix serves a whole session while this counts one request of
+it, and a session resumed from disk after the TTL expires starts another first-request hit
+this cannot see. Under-crediting is the only direction a savings figure is allowed to be
+wrong in. The independent evidence that the mechanism works is the A/B: **−34.1% cost, 0% →
+96.7% cache hit** with the split on, on the same traffic.
+
+They are **added**, never nested: `total_saved_usd = net_saved_usd + cachesplit_saved_usd`.
+Both are ours and the token sets are disjoint.
+
+**`cache_saved_usd` is not a saving of ours and is not on the page.** It is what the
+*provider's* prompt cache saved over paying the fresh rate for the same tokens — typically
+one to two orders of magnitude larger than the figure above, because the agent places most
+breakpoints itself. The API and `cg_tenant_cache_saved_usd` still report it, as a
+**diagnostic**: it is the number that collapses when a compaction pipeline rewrites deep
+history, so watching it fall is how you catch a pipeline going too deep. It was briefly a
+headline tile, alongside a "of which our components acted" subset. Both were removed: the
+first measured somebody else's mechanism, and the second measured co-occurrence and read as
+cause.
+
+Both real savings are only as good as the per-model rates behind them. On a gateway that does
+not charge the public API's prices — IBM's `ete-litellm` bills half of anthropic.com for
 `claude-sonnet-5` — set [`MODEL_PRICES`](reference/config.md#per-model-prices-and-why-the-public-map-is-not-enough),
 or every figure in this section is wrong by whatever margin your contract differs by.
 

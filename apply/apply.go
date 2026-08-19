@@ -190,6 +190,12 @@ type Trace struct {
 	// split by location. Observational, and free: the pipeline already counts them to
 	// respect the provider's cap of four.
 	Breakpoints Breakpoints
+	// SplitStableTokens is the token count of the half the volatile-tail split moved the
+	// breakpoint onto — the tokens it moved out of the cache-creation tier. 0 when nothing
+	// split. It is the honest numerator for the prefix-cache saving: the alternative,
+	// crediting the request's whole cache_read, over-credits by whatever the agent's OTHER
+	// breakpoints were already matching, measured at 6.4x on a real session.
+	SplitStableTokens int
 	// Run is the pipeline's aggregate report (nil when the pipeline never ran).
 	Run *components.RunReport
 	// Changes lists each rewritten message's before/after text (clipped).
@@ -339,8 +345,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// than re-parse the whole messages array to find each message again — that parse
 	// measured ~3x the cost of the whole-body copy it was meant to save.
 	shiftAt, shift := 0, 0
+	// splitStableTokens is what the split rescued from the cache-creation tier; the
+	// dashboard prices it (see dash.Event.cachesplitSavedUSD). 0 when nothing split.
+	splitStableTokens := 0
 	if !bypass && pipe != nil && (pipe.Has("cachesplit") || pipe.Has("cacheinject")) {
-		body, systemSplit, shiftAt, shift = splitVolatileTail(body, provider)
+		body, systemSplit, shiftAt, shift, splitStableTokens = splitVolatileTail(body, provider)
 	}
 
 	// Parsed ONCE and shared: normalize, the count-changed rebuild and the writeback
@@ -452,6 +461,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	}
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
 	tr.Breakpoints = bps
+	tr.SplitStableTokens = splitStableTokens
 	// The eligible (attempted) denominator: what age/supersession offloaders were
 	// allowed to touch. Everything before MaxCachedIdx is frozen for cache safety —
 	// the cost of that mechanism, reported next to its benefit.

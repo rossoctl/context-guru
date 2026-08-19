@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -70,17 +71,26 @@ const minSplitTokens = 1024
 // `system` value in place (prefix + new value + suffix), so that is the whole of it — and
 // the writeback needs it to keep using the byte offsets it already has for each message
 // instead of re-parsing the body to find them again. shift is 0 when nothing split.
-func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte, split bool, shiftAt, shift int) {
+//
+// `stableTokens` is the token count of the half the breakpoint moved onto, which is exactly
+// what the split RESCUES: without it, the whole block re-bills as cache creation whenever
+// the snapshot changes; with it, those tokens bill as cache reads. It is the numerator of
+// the dashboard's prefix-cache saving, and it has to be measured here because this is the
+// only place that knows where the boundary went. Measured on a real Claude Code session:
+// 8,478 of a 9,519-token block, and the cachesplit-off control arm confirmed the size of
+// the effect — its first-request read fell by 8,499 tokens and its cache WRITE rose by the
+// same, which is what "moved from the write tier to the read tier" means.
+func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte, split bool, shiftAt, shift, stableTokens int) {
 	if !explicitBreakpointProvider(provider) {
-		return body, false, 0, 0
+		return body, false, 0, 0, 0
 	}
 	sys := gjson.GetBytes(body, "system")
 	if !sys.Exists() || !sys.IsArray() {
-		return body, false, 0, 0 // a string system prompt carries no block to split
+		return body, false, 0, 0, 0 // a string system prompt carries no block to split
 	}
 	blocks := sys.Array()
 	if len(blocks) == 0 {
-		return body, false, 0, 0
+		return body, false, 0, 0, 0
 	}
 
 	sysOut := make([]json.RawMessage, 0, len(blocks)+1)
@@ -135,23 +145,24 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 		}
 		sysOut = append(sysOut, sb, vb)
 		split = true
+		stableTokens = tokens.Count(txt[:at])
 	}
 	if !split {
-		return body, false, 0, 0
+		return body, false, 0, 0, 0
 	}
 	enc, err := json.Marshal(sysOut)
 	if err != nil {
-		return body, false, 0, 0
+		return body, false, 0, 0, 0
 	}
 	next, err := sjson.SetRawBytes(body, "system", enc)
 	if err != nil {
-		return body, false, 0, 0
+		return body, false, 0, 0, 0
 	}
 	slog.Debug("context-guru: split volatile tail out of a system block",
 		"provider", provider)
 	// sjson spliced the new value over [sys.Index, sys.Index+len(sys.Raw)); every byte
 	// after that range moved by the length difference.
-	return next, true, sys.Index + len(sys.Raw), len(next) - len(body)
+	return next, true, sys.Index + len(sys.Raw), len(next) - len(body), stableTokens
 }
 
 // explicitBreakpointProvider reports whether this backend honours Anthropic-style

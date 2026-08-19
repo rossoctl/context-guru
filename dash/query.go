@@ -102,7 +102,7 @@ const requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider,
 	r.status, r.bypassed, r.cache_aware, r.messages, r.tokens_before, r.tokens_after,
 	r.attempted_tokens, r.frozen_tokens, r.saved_unique, r.fresh_input, r.cache_read,
 	r.cache_write, r.output_tokens, r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd,
-	r.cache_saved_usd, r.cg_latency_ms, r.upstream_ms, r.expands, r.expand_tokens, r.reverts,
+	r.cache_saved_usd, r.cachesplit_saved_usd, r.split_stable_tokens, r.cg_latency_ms, r.upstream_ms, r.expands, r.expand_tokens, r.reverts,
 	r.token_accounting, r.cache_miss_reason, r.uncompressed_reason,
 	r.reasoning_effort, r.thinking_mode, r.thinking_budget, r.temperature, r.top_p,
 	r.max_tokens, r.stream, r.tool_choice, r.tools, r.system_blocks,
@@ -116,7 +116,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
 		&e.CacheWrite, &e.OutputTokens, &e.CostUSD, &e.BaselineCostUSD, &e.CGLLMCostUSD,
-		&e.CacheSavedUSD,
+		&e.CacheSavedUSD, &e.CachesplitSavedUSD, &e.SplitStableTokens,
 		&e.CGLatencyMs, &e.UpstreamMs, &e.Expands, &e.ExpandTokens, &e.Reverts,
 		&e.TokenAccounting, &e.CacheMissReason, &e.UncompressedReason,
 		&e.ReasoningEffort, &e.ThinkingMode, &e.ThinkingBudget, &temp, &topP,
@@ -573,15 +573,16 @@ type Bucket struct {
 	// bar, derived here so every caller subtracts the same three terms. Nothing new is
 	// stored for it.
 	SavedUSD float64 `json:"saved_usd"`
-	// CacheSavedUSD is what the provider's prompt cache saved in this bucket over
-	// paying the fresh rate — the second savings series, and the one that moves when
-	// compaction starts rewriting a live prefix.
-	CacheSavedUSD float64 `json:"cache_saved_usd"`
-	CGLatencyMs   float64 `json:"cg_latency_ms_avg"`
-	UpstreamMs    float64 `json:"upstream_ms_avg"`
-	Expands       int64   `json:"expands"`
-	ExpandTokens  int64   `json:"expand_tokens"`
-	Misses        int64   `json:"cache_misses"`
+	// CacheSavedUSD is what the PROVIDER's prompt cache saved in this bucket — a
+	// diagnostic series, the one that moves when compaction starts rewriting a live
+	// prefix. CachesplitSavedUSD is the part that is ours (see Overview).
+	CacheSavedUSD      float64 `json:"cache_saved_usd"`
+	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
+	CGLatencyMs        float64 `json:"cg_latency_ms_avg"`
+	UpstreamMs         float64 `json:"upstream_ms_avg"`
+	Expands            int64   `json:"expands"`
+	ExpandTokens       int64   `json:"expand_tokens"`
+	Misses             int64   `json:"cache_misses"`
 }
 
 // DayMs is one day of buckets. Per-DAY usage bars are Series with this bucket — the
@@ -606,7 +607,7 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		SUM(r.tokens_before), SUM(r.tokens_after), SUM(r.saved_unique),
 		SUM(r.attempted_tokens), SUM(r.frozen_tokens),
 		SUM(r.fresh_input), SUM(r.cache_read), SUM(r.cache_write), SUM(r.output_tokens),
-		SUM(r.cost_usd), SUM(r.baseline_cost_usd), SUM(r.cg_llm_cost_usd), SUM(r.cache_saved_usd),
+		SUM(r.cost_usd), SUM(r.baseline_cost_usd), SUM(r.cg_llm_cost_usd), SUM(r.cache_saved_usd), SUM(r.cachesplit_saved_usd),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		SUM(r.expands), SUM(r.expand_tokens),
 		SUM(CASE WHEN r.cache_miss_reason NOT IN ('hit','') THEN 1 ELSE 0 END)
@@ -622,7 +623,7 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		var cgAvg, upAvg sql.NullFloat64
 		if err := rows.Scan(&b.TS, &b.Requests, &b.TokensBefore, &b.TokensAfter, &b.SavedUnique,
 			&b.AttemptedTokens, &b.FrozenTokens, &b.FreshInput, &b.CacheRead, &b.CacheWrite,
-			&b.OutputTokens, &b.CostUSD, &b.BaselineCostUSD, &b.CGLLMCostUSD, &b.CacheSavedUSD,
+			&b.OutputTokens, &b.CostUSD, &b.BaselineCostUSD, &b.CGLLMCostUSD, &b.CacheSavedUSD, &b.CachesplitSavedUSD,
 			&cgAvg, &upAvg, &b.Expands, &b.ExpandTokens, &b.Misses); err != nil {
 			return nil, err
 		}
@@ -658,12 +659,14 @@ type GroupRow struct {
 	// minus that. The pair is the "spent vs saved" comparison, per group.
 	SpentUSD float64 `json:"spent_usd"`
 	SavedUSD float64 `json:"saved_usd"`
-	// CacheSavedUSD is the prompt-cache saving for this group, and TotalSavedUSD is
-	// both savings together. Per MODEL this is the number that was most wrong before:
-	// the rates now come from the operator's price list, so a gateway that charges half
-	// the public API's rate is no longer reported at the public rate.
-	CacheSavedUSD float64 `json:"cache_saved_usd"`
-	TotalSavedUSD float64 `json:"total_saved_usd"`
+	// CacheSavedUSD is the PROVIDER's prompt-cache saving for this group (a diagnostic);
+	// CachesplitSavedUSD is ours, and TotalSavedUSD is compaction's plus ours. Per MODEL
+	// these are the numbers that were most wrong before: the rates now come from the
+	// operator's price list, so a gateway that charges half the public API's rate is no
+	// longer reported at the public rate.
+	CacheSavedUSD      float64 `json:"cache_saved_usd"`
+	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
+	TotalSavedUSD      float64 `json:"total_saved_usd"`
 	// Incomplete counts rows whose accounting is not `complete`, i.e. rows whose cost
 	// contribution is unknown rather than zero. A bar with Requests>0 and
 	// Incomplete==Requests is a bar whose money figures mean nothing, and the UI has to
@@ -741,7 +744,7 @@ func (d *DB) Breakdown(f Filter, dim string) ([]*GroupRow, error) {
 		COALESCE(SUM(r.fresh_input),0), COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
 		COALESCE(SUM(r.output_tokens),0),
 		COALESCE(SUM(r.cost_usd),0), COALESCE(SUM(r.baseline_cost_usd),0), COALESCE(SUM(r.cg_llm_cost_usd),0),
-		COALESCE(SUM(r.cache_saved_usd),0),
+		COALESCE(SUM(r.cache_saved_usd),0), COALESCE(SUM(r.cachesplit_saved_usd),0),
 		COALESCE(SUM(CASE WHEN r.token_accounting <> 'complete' THEN 1 ELSE 0 END),0)
 		FROM requests r WHERE ` + cond + `
 		GROUP BY k ORDER BY SUM(r.cost_usd) DESC, COUNT(*) DESC, k LIMIT 200`
@@ -756,13 +759,13 @@ func (d *DB) Breakdown(f Filter, dim string) ([]*GroupRow, error) {
 		if err := rows.Scan(&g.Key, &g.Requests, &g.Sessions,
 			&g.TokensBefore, &g.TokensAfter, &g.SavedUnique,
 			&g.FreshInput, &g.CacheRead, &g.CacheWrite, &g.OutputTokens,
-			&g.CostUSD, &g.BaselineCostUSD, &g.CGLLMCostUSD, &g.CacheSavedUSD, &g.Incomplete); err != nil {
+			&g.CostUSD, &g.BaselineCostUSD, &g.CGLLMCostUSD, &g.CacheSavedUSD, &g.CachesplitSavedUSD, &g.Incomplete); err != nil {
 			return nil, err
 		}
 		g.Saved = g.TokensBefore - g.TokensAfter
 		g.SpentUSD = g.CostUSD + g.CGLLMCostUSD
 		g.SavedUSD = g.BaselineCostUSD - g.SpentUSD
-		g.TotalSavedUSD = g.SavedUSD + g.CacheSavedUSD
+		g.TotalSavedUSD = g.SavedUSD + g.CachesplitSavedUSD
 		out = append(out, &g)
 	}
 	return out, rows.Err()

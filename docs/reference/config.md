@@ -138,7 +138,7 @@ indistinguishable from "every model is free".
     server-side, not a model. Any rate for it is a guess. The shipped entry is fitted against
     the `session_costs` Bob prints for itself and lands within about a third on real runs;
     the example file shows both measurements. That error bar carries into every **absolute**
-    dollar figure for those rows — baseline, compaction savings, prompt-cache savings and the
+    dollar figure for those rows — baseline, compaction savings, prefix-cache savings and the
     "total avoided" headline. It does not touch the before/after **ratio**, where a uniform
     rate error cancels.
 

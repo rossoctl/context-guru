@@ -72,16 +72,19 @@ type Overview struct {
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
 	NetSavedUSD     float64 `json:"net_saved_usd"`
-	// CacheSavedUSD is what the provider's prompt cache saved over paying the fresh
-	// rate for the same tokens, and CacheSavedProtectedUSD is the part of it that
-	// landed on requests where one of OUR cache components acted — the honest upper
-	// bound on what to credit context-guru for, since the agent places most
-	// breakpoints itself.
-	CacheSavedUSD          float64 `json:"cache_saved_usd"`
-	CacheSavedProtectedUSD float64 `json:"cache_saved_protected_usd"`
-	// TotalSavedUSD is both savings together: what compaction avoided plus what the
-	// prompt cache avoided, less our own spend. The headline number, decomposed by
-	// the waterfall so no part of it is taken on trust.
+	// CacheSavedUSD is what the PROVIDER's prompt cache saved over paying the fresh rate
+	// for the same tokens. Context, not credit: the agent places most of the breakpoints
+	// itself. It is here because it is the number that collapses when a pipeline rewrites
+	// deep history — a diagnostic, and the API keeps it for that. The dashboard does not
+	// show it as a saving, because it is not ours.
+	CacheSavedUSD float64 `json:"cache_saved_usd"`
+	// CachesplitSavedUSD is the cache saving that IS ours: summed over requests where a
+	// prefix component rewrote the prefix, the provider then read it from cache, and it
+	// was the session's first request — the one that would have missed without the
+	// rewrite. Priced against a cache miss. A floor. See Event.cachesplitSavedUSD.
+	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
+	// TotalSavedUSD is our two savings together: compaction's, less our own spend, plus
+	// the prefix components'. Both are ours and the token sets are disjoint.
 	TotalSavedUSD float64 `json:"total_saved_usd"`
 
 	CGLatencyMsAvg float64 `json:"cg_latency_ms_avg"`
@@ -144,14 +147,13 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(r.output_tokens),0),
 		COALESCE(SUM(r.cost_usd),0), COALESCE(SUM(r.baseline_cost_usd),0), COALESCE(SUM(r.cg_llm_cost_usd),0),
 		COALESCE(SUM(r.cache_saved_usd),0),
-		-- The cache-saving subset that landed on requests where a component of ours whose job
-		-- IS the cache actually acted. Folded into this aggregate rather than run as a second
-		-- query, so a dashboard load still costs one scan of the window (measured: 199 ms as
-		-- its own query over 200,000 rows). A CASE, not a JOIN: joining request_components
-		-- would multiply every other SUM here by the number of components that ran.
-		COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM request_components c
-			WHERE c.request_id = r.id AND c.mutated = 1
-			  AND c.component IN ('cachesplit','cacheinject')) THEN r.cache_saved_usd ELSE 0 END),0),
+		-- Our own cache saving. A plain SUM of a per-request column, because all three
+		-- conditions that qualify a request were settled at write time where the model's
+		-- rates and the session's history were both in hand (Event.cachesplitSavedUSD).
+		-- The predecessor did the component test here as a correlated EXISTS over
+		-- request_components, which was both slower and wrong: it credited every cache read
+		-- in a session, including the later turns that would have hit anyway.
+		COALESCE(SUM(r.cachesplit_saved_usd),0),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0),
 		COALESCE(SUM(CASE WHEN r.uncompressed_reason <> '' THEN 1 ELSE 0 END),0),
@@ -160,7 +162,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.FreshInput, &o.CacheRead, &o.CacheWrite,
 		&o.OutputTokens, &o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD,
-		&o.CacheSavedProtectedUSD, &cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
+		&o.CachesplitSavedUSD, &cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal)
 	if err != nil {
 		return nil, err
@@ -175,7 +177,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		o.ExpandRate = float64(o.Expands) / float64(o.Requests)
 	}
 	o.NetSavedUSD = o.BaselineCostUSD - o.CostUSD - o.CGLLMCostUSD
-	o.TotalSavedUSD = o.NetSavedUSD + o.CacheSavedUSD
+	o.TotalSavedUSD = o.NetSavedUSD + o.CachesplitSavedUSD
 
 	for name, col := range map[string]string{
 		"accounting": "token_accounting", "cache_miss": "cache_miss_reason", "uncompressed": "uncompressed_reason",
@@ -285,22 +287,23 @@ func (o *Overview) waterfall() []WaterfallStep {
 		{Key: "net_saved", Label: "Net savings", DeltaUSD: o.NetSavedUSD, Total: true,
 			Description: "Baseline minus net. Negative means context-guru cost more than it saved " +
 				"in this window, which is a real outcome the dashboard will not hide."},
-		{Key: "cache_saved", Label: "Prompt-cache savings", DeltaUSD: -o.CacheSavedUSD,
-			Description: "A SECOND saving, outside the walk above: every cache-read token was " +
-				"billed at the read rate instead of the fresh rate it would have cost with no " +
-				"cache at all. The provider's mechanism, not ours — but a compaction proxy that " +
-				"rewrites deep history destroys it, so protecting it is work, and " +
-				"cache_saved_protected_usd is the part that landed on requests where one of our " +
-				"cache components acted. Not inside net savings: the baseline above already " +
-				"assumes the cache behaved as it did, so adding it there would double-count."},
+		{Key: "cachesplit_saved", Label: "Prefix-cache savings", DeltaUSD: -o.CachesplitSavedUSD,
+			Description: "A SECOND saving, outside the walk above, and the only cache figure we " +
+				"claim. Claude Code ends its big system block with a live environment snapshot, so " +
+				"the block's own breakpoint hashes the churn and the prefix never matches across " +
+				"sessions; cachesplit moves the breakpoint onto the stable half. Counted only where " +
+				"the component rewrote the prefix, the provider then read it from cache, AND it was " +
+				"the session's first request — the one that would otherwise have missed. Later turns " +
+				"hit whether or not we ever split, so they are not ours. Priced against a cache " +
+				"MISS, which is what the counterfactual actually is: those tokens carry " +
+				"cache_control, so a miss bills them as creation at 1.25x fresh, not at 1x. A " +
+				"floor — a stable prefix serves a whole session and this counts one request of it."},
 		{Key: "total_saved", Label: "Total cost avoided", DeltaUSD: o.TotalSavedUSD, Total: true,
-			Description: "Net compaction savings plus prompt-cache savings: what this window did " +
-				"not pay for what it sent, plus what it did not pay for what we removed. The two " +
-				"token sets are disjoint, so nothing is counted twice — but this is not the cost " +
-				"of a fully uncached world either, because the compaction half still prices a warm " +
-				"turn's re-sent remainder as a cache read. It also includes requests context-guru " +
-				"did not touch: on bypassed or observe-mode traffic the compaction half is zero " +
-				"and every dollar here is the provider's cache."},
+			Description: "Net compaction savings plus prefix-cache savings. Two disjoint token " +
+				"sets, both ours, so nothing is counted twice. It is not the cost of a fully " +
+				"uncached world: the provider's own cache saved far more than this on the same " +
+				"traffic (cache_saved_usd, reported by the API as a diagnostic), and none of that " +
+				"is credited here."},
 	}
 	return steps
 }

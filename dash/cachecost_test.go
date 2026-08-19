@@ -80,18 +80,74 @@ func TestCacheSavedIsCacheReadsAgainstTheFreshRate(t *testing.T) {
 	}
 }
 
-// And the aggregate: the overview's headline must add the two savings without
-// double-counting either, and must attribute the protected subset to the requests where
-// one of our cache components actually acted.
-func TestOverviewReportsBothSavings(t *testing.T) {
+// The three conditions, one test each, because each one rules out a different way of
+// over-claiming — and the figure this replaces failed all three.
+func TestCachesplitSavingNeedsTheSplit_TheHit_AndTheFirstRequest(t *testing.T) {
+	const stable = 8_478 // what the split measured as the stable half on a real session
+	split := []CompRow{{Component: "cachesplit", Kind: "reformat", Acted: true, Mutated: true}}
+	mk := func(comps []CompRow, read int64, first bool, stableTok int) *Event {
+		e := &Event{TS: 1, SessionID: "s", Model: "aws/claude-sonnet-5",
+			TokensBefore: 50_000, TokensAfter: 50_000,
+			FreshInput: 10, CacheRead: read, OutputTokens: 20,
+			Components: comps, SessionFirst: first, SplitStableTokens: stableTok}
+		e.Price(ibmSonnet, true)
+		return e
+	}
+	// The counterfactual is a MISS, which bills those tokens as cache creation, not as
+	// fresh input: they carry cache_control. So the spread is write minus read. And the
+	// amount is the STABLE HALF, not the request's whole cache_read — the control arm still
+	// hit on 45,805 tokens with cachesplit off, so the rest was never ours to claim.
+	want := float64(stable) * (ibmSonnet.CacheWrite - ibmSonnet.CacheRead)
+	if got := mk(split, 54_304, true, stable).CachesplitSavedUSD; math.Abs(got-want) > 1e-12 {
+		t.Errorf("all three conditions met: %.10f, want %.10f", got, want)
+	}
+	for name, e := range map[string]*Event{
+		"nothing split":             mk(nil, 54_304, true, 0),
+		"component ran but skipped": mk([]CompRow{{Component: "cachesplit", Skipped: true}}, 54_304, true, 0),
+		"the split produced no hit": mk(split, 0, true, stable),
+		// The one that matters most: mid-session reads happen whether or not the tail was
+		// ever split, because the environment snapshot does not change mid-session.
+		"not the session's first request": mk(split, 54_304, false, stable),
+	} {
+		if e.CachesplitSavedUSD != 0 {
+			t.Errorf("%s: claimed %.10f", name, e.CachesplitSavedUSD)
+		}
+	}
+	// A partial hit smaller than the half we split off claims only what was served.
+	part := mk(split, 3_000, true, stable)
+	if wantPart := 3_000 * (ibmSonnet.CacheWrite - ibmSonnet.CacheRead); math.Abs(part.CachesplitSavedUSD-wantPart) > 1e-12 {
+		t.Errorf("partial hit claimed %.10f, want the read %.10f", part.CachesplitSavedUSD, wantPart)
+	}
+	// The provider's own cache saving is still measured on every one of them — it is a
+	// diagnostic, and losing it would hide a pipeline destroying a prefix.
+	if mk(nil, 54_304, false, 0).CacheSavedUSD <= 0 {
+		t.Error("the provider-cache diagnostic stopped being measured")
+	}
+	// And ours is a small fraction of it, which is the whole correction: 8,478 tokens at
+	// 1.15x versus 54,304 at 0.9x. Pinned as a bound so a revert to "credit the whole
+	// cache_read" fails here rather than in production.
+	e := mk(split, 54_304, true, stable)
+	if e.CachesplitSavedUSD > e.CacheSavedUSD/3 {
+		t.Errorf("ours %.10f is too large a share of the provider figure %.10f",
+			e.CachesplitSavedUSD, e.CacheSavedUSD)
+	}
+}
+
+// The aggregate: our two savings add, and the provider's does not join them.
+func TestOverviewClaimsOnlyTheFirstRequestHit(t *testing.T) {
+	const stable = 8_478
 	db := openTestDB(t)
 	var evs []*Event
-	for i := range 2 {
+	for i := range 4 {
 		e := &Event{TS: int64(1000 + i), SessionID: "s", Model: "aws/claude-sonnet-5",
 			TokensBefore: 50_000, TokensAfter: 49_000, SavedUnique: 1_000,
-			FreshInput: 10, CacheRead: 40_000, CacheWrite: 0, OutputTokens: 20}
-		if i == 0 { // only the first request had cachesplit act on it
-			e.Components = []CompRow{{Component: "cachesplit", Kind: "reformat", Acted: true, Mutated: true}}
+			FreshInput: 10, CacheRead: 54_304, CacheWrite: 0, OutputTokens: 20,
+			// cachesplit acts on EVERY turn of a session — it is the same system prompt
+			// every time. So the component test alone cannot distinguish the turn that did
+			// the work from the three that rode along.
+			Components:        []CompRow{{Component: "cachesplit", Kind: "reformat", Acted: true, Mutated: true}},
+			SplitStableTokens: stable,
+			SessionFirst:      i == 0,
 		}
 		e.Price(ibmSonnet, true)
 		evs = append(evs, e)
@@ -103,27 +159,37 @@ func TestOverviewReportsBothSavings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	perReq := 40_000 * (ibmSonnet.Input - ibmSonnet.CacheRead)
-	if math.Abs(o.CacheSavedUSD-2*perReq) > 1e-12 {
-		t.Errorf("cache_saved_usd = %.10f, want %.10f", o.CacheSavedUSD, 2*perReq)
+	want := float64(stable) * (ibmSonnet.CacheWrite - ibmSonnet.CacheRead)
+	if math.Abs(o.CachesplitSavedUSD-want) > 1e-12 {
+		t.Errorf("cachesplit_saved_usd = %.10f, want ONE request's worth %.10f", o.CachesplitSavedUSD, want)
 	}
-	if math.Abs(o.CacheSavedProtectedUSD-perReq) > 1e-12 {
-		t.Errorf("cache_saved_protected_usd = %.10f, want one request's worth %.10f",
-			o.CacheSavedProtectedUSD, perReq)
+	// The provider's figure counts all four requests' whole reads, and is an order of
+	// magnitude larger. Both are reported; only one is added to the total.
+	if o.CacheSavedUSD <= o.CachesplitSavedUSD*10 {
+		t.Errorf("the provider figure (%.10f) should dwarf ours (%.10f)", o.CacheSavedUSD, o.CachesplitSavedUSD)
 	}
-	if math.Abs(o.TotalSavedUSD-(o.NetSavedUSD+o.CacheSavedUSD)) > 1e-15 {
-		t.Errorf("total_saved_usd is not the sum of the two savings")
+	if math.Abs(o.TotalSavedUSD-(o.NetSavedUSD+o.CachesplitSavedUSD)) > 1e-15 {
+		t.Errorf("total_saved_usd = %.10f, want net %.10f + ours %.10f",
+			o.TotalSavedUSD, o.NetSavedUSD, o.CachesplitSavedUSD)
 	}
-	if o.NetSavedUSD >= o.TotalSavedUSD || o.NetSavedUSD <= 0 {
-		t.Errorf("net %.10f vs total %.10f: the two savings must be separable", o.NetSavedUSD, o.TotalSavedUSD)
-	}
-	// Both are in the waterfall, and the cache step is not folded into the compaction one.
 	steps := map[string]float64{}
 	for _, s := range o.Waterfall {
 		steps[s.Key] = s.DeltaUSD
 	}
-	if math.Abs(steps["cache_saved"]+o.CacheSavedUSD) > 1e-15 || math.Abs(steps["total_saved"]-o.TotalSavedUSD) > 1e-15 {
-		t.Errorf("waterfall is missing the cache savings: %v", steps)
+	if _, ok := steps["cache_saved"]; ok {
+		t.Error("the provider's cache saving is still a step in OUR savings waterfall")
+	}
+	if math.Abs(steps["cachesplit_saved"]+o.CachesplitSavedUSD) > 1e-15 ||
+		math.Abs(steps["total_saved"]-o.TotalSavedUSD) > 1e-15 {
+		t.Errorf("waterfall does not carry the prefix saving: %v", steps)
+	}
+	// Per-model too, since that is where a wrong rate shows up first.
+	groups, err := db.Breakdown(Filter{}, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || math.Abs(groups[0].CachesplitSavedUSD-want) > 1e-12 {
+		t.Errorf("per-model prefix saving is wrong: %+v", groups)
 	}
 }
 

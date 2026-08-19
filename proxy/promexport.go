@@ -163,25 +163,26 @@ type TenantMetricsSource interface {
 // TenantMetricRow is one tenant's rollup. Deliberately flat: every field becomes one
 // Prometheus series, and a nested shape would just have to be flattened here anyway.
 type TenantMetricRow struct {
-	TenantID      string
-	Label         string
-	Requests      int64
-	TokensBefore  int64
-	TokensAfter   int64
-	SavedUnique   int64
-	CacheRead     int64
-	CacheWrite    int64
-	FreshInput    int64
-	OutputTokens  int64
-	CostUSD       float64
-	BaselineUSD   float64
-	CGLLMCostUSD  float64
-	CacheSavedUSD float64
-	CGLatencyMs   float64
-	UpstreamMs    float64
-	Sessions      int64
-	ArchivedCount int64
-	ArchivedBytes int64
+	TenantID           string
+	Label              string
+	Requests           int64
+	TokensBefore       int64
+	TokensAfter        int64
+	SavedUnique        int64
+	CacheRead          int64
+	CacheWrite         int64
+	FreshInput         int64
+	OutputTokens       int64
+	CostUSD            float64
+	BaselineUSD        float64
+	CGLLMCostUSD       float64
+	CacheSavedUSD      float64
+	CachesplitSavedUSD float64
+	CGLatencyMs        float64
+	UpstreamMs         float64
+	Sessions           int64
+	ArchivedCount      int64
+	ArchivedBytes      int64
 }
 
 type promCache struct {
@@ -521,9 +522,14 @@ func (h *Handler) renderMetrics() string {
 				promLine(&b, "cg_tenant_cg_llm_cost_usd", tenantLabels(t), t.CGLLMCostUSD)
 			}
 			promHeader(&b, "cg_tenant_cache_saved_usd",
-				"What the provider's prompt cache saved this tenant against paying the fresh rate for the same tokens. A saving context-guru does not create but does protect: rewriting a live prefix destroys it, so a drop here beside a rise in cg_tenant_baseline_cost_usd is compaction paying for itself with the cache.", "gauge")
+				"DIAGNOSTIC, not a saving of ours: what the PROVIDER's prompt cache saved this tenant against paying the fresh rate for the same tokens. The agent places most of the breakpoints. Watch it because rewriting a live prefix destroys it — a fall here is a compaction pipeline going too deep.", "gauge")
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_cache_saved_usd", tenantLabels(t), t.CacheSavedUSD)
+			}
+			promHeader(&b, "cg_tenant_cachesplit_saved_usd",
+				"What context-guru's volatile-tail split (cachesplit) saved this tenant. Counted only where the split actually ran on the request, the provider then READ that prefix from cache, AND it was the session's first request — the one that would have missed. The amount is the stable half the split moved, not the request's whole cache_read: with cachesplit off, a real session's first request still read 45,805 tokens, so only the 8,499-token difference was ever ours. Priced against a cache miss (creation rate), because those tokens carry cache_control. A floor.", "gauge")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_cachesplit_saved_usd", tenantLabels(t), t.CachesplitSavedUSD)
 			}
 			promHeader(&b, "cg_tenant_tokens_total", "Content tokens per tenant, before and after compaction.", "counter")
 			for _, t := range rows {

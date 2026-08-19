@@ -93,7 +93,7 @@ models:
   # between calls). $3.00 is between them and is a published rate rather than a fudge.
   # So read a Bob row's cost as "right to within about a third". That error bar carries into
   # every ABSOLUTE dollar figure derived from it — baseline, compaction savings, the
-  # prompt-cache saving and the "total avoided" tile and Grafana panel. What it does NOT
+  # prefix-cache saving and the "total avoided" tile and Grafana panel. What it does NOT
   # touch is the before/after RATIO, where a uniform rate error cancels: "68% of the tokens
   # removed" is exact whatever the rate is.
   #

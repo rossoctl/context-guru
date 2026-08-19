@@ -10,6 +10,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 )
@@ -17,7 +18,7 @@ import (
 // splitTail drops the byte-shift bookkeeping splitVolatileTail reports for the
 // writeback's benefit; these tests are about the split itself.
 func splitTail(body []byte, p bschemas.ModelProvider) ([]byte, bool) {
-	out, split, _, _ := splitVolatileTail(body, p)
+	out, split, _, _, _ := splitVolatileTail(body, p)
 	return out, split
 }
 
@@ -465,4 +466,32 @@ func pipeWithEmitter(t *testing.T, yaml string, e components.Emitter) *component
 		t.Fatal(err)
 	}
 	return p
+}
+
+// The split has to report the SIZE of the half it moved the breakpoint onto, because that
+// is what the dashboard prices — and it is the number that stopped the prefix-cache saving
+// from being 6.4x too large. Crediting the request's whole cache_read counted the agent's
+// own breakpoints as ours: with cachesplit off, a real session's first request still read
+// 45,805 tokens from cache and only 8,499 more moved when it was on.
+func TestSplitReportsTheSizeOfTheStableHalf(t *testing.T) {
+	full, _, _ := blockWithGitTail(6000)
+	body := sysBody(textBlock(full, true))
+	_, split, _, _, stable := splitVolatileTail(body, bschemas.Anthropic)
+	if !split {
+		t.Fatal("did not split")
+	}
+	if stable < minSplitTokens {
+		t.Fatalf("stable half reported as %d tokens, below the minimum that permits a split", stable)
+	}
+	// It is the STABLE half, not the whole block: the volatile tail is excluded by
+	// construction, so the count must be strictly smaller than the block it came from.
+	whole := tokens.Count(full)
+	if stable >= whole {
+		t.Errorf("stable half %d is not smaller than the whole block %d", stable, whole)
+	}
+	// And nothing is reported when nothing splits, so a dollar figure can key off it.
+	plain := []byte(`{"system":[{"type":"text","text":"short"}]}`)
+	if _, sp, _, _, n := splitVolatileTail(plain, bschemas.Anthropic); sp || n != 0 {
+		t.Errorf("no split, but reported %d stable tokens", n)
+	}
 }

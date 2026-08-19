@@ -86,11 +86,20 @@ type Event struct {
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
 	// CacheSavedUSD is what the provider's prompt cache saved on this request: its
 	// cache-read tokens priced at the fresh rate they would have cost with no cache,
-	// minus what they actually cost. Reported beside compaction savings, never added
-	// into them — see Price.
+	// minus what they actually cost. A measurement of the PROVIDER's mechanism, kept
+	// because it is the number that falls when a compaction pipeline destroys a prefix —
+	// and reported nowhere as a saving of ours, because it is not one.
 	CacheSavedUSD float64 `json:"cache_saved_usd"`
-	CGLatencyMs   float64 `json:"cg_latency_ms"`
-	UpstreamMs    float64 `json:"upstream_ms"`
+	// CachesplitSavedUSD is what the volatile-tail split saved, and it is the only cache
+	// figure this project claims. See Price.
+	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
+	// SplitStableTokens is the size of the prefix half cachesplit moved the breakpoint
+	// onto — the tokens it moved out of the cache-creation tier, and the numerator of the
+	// figure above. Persisted so the dollar number can be checked against a token count
+	// instead of taken on trust.
+	SplitStableTokens int     `json:"split_stable_tokens"`
+	CGLatencyMs       float64 `json:"cg_latency_ms"`
+	UpstreamMs        float64 `json:"upstream_ms"`
 
 	Expands      int `json:"expands"`
 	ExpandTokens int `json:"expand_tokens"`
@@ -107,6 +116,12 @@ type Event struct {
 	Content    []ContentRow `json:"content,omitempty"`
 	// Extractions is one row per LLM call an expensive component made on this request.
 	Extractions []ExtractionRow `json:"extractions,omitempty"`
+
+	// SessionFirst marks the first request captured for this session, which is what makes
+	// a cache hit attributable (see Price). Not persisted: it is an input to a dollar
+	// figure, and cache_miss_reason already records the same fact in a form a query can
+	// group by.
+	SessionFirst bool `json:"-"`
 
 	// ContentCap is the per-blob byte cap Redact applies. Set at the capture site and
 	// consumed by the writer goroutine; not persisted (a knob, not a fact about the
@@ -316,6 +331,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.CacheBPTools = tr.Breakpoints.Tools
 	e.CacheBPMessages = tr.Breakpoints.Messages
 	e.CacheBPBlocks = tr.Breakpoints.Blocks
+	e.SplitStableTokens = tr.SplitStableTokens
 	if tr.Bypassed {
 		e.Mode = ModeBypass
 	} else if e.Mode == "" {
@@ -438,21 +454,79 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	e.TokenAccounting = AccountingComplete
 	e.CostUSD = p.Cost(e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens)
 	e.BaselineCostUSD = e.CostUSD + e.baselineDeltaUSD(p)
-	// What the provider's prompt cache saved on THIS request, which is a different
-	// saving from compaction's and was invisible until now: every cache-read token was
-	// billed at the read rate instead of the fresh rate it would have cost with no cache
-	// at all. It is the provider's mechanism, not ours — but keeping that prefix
-	// byte-stable is exactly what cache-aware compaction and cachesplit exist to do, and
-	// a component that protects it had nothing to show for it in dollars.
-	//
-	// Deliberately NOT folded into net savings: the baseline above already assumes the
-	// cache behaved as it did, so adding this to it would double-count. It is reported
-	// beside it, and the UI attributes the subset of it that lands on requests where one
-	// of our cache components actually acted.
+	// What the PROVIDER's prompt cache saved on this request: every cache-read token was
+	// billed at the read rate instead of the fresh rate it would have cost with no cache at
+	// all. Kept as a measurement, reported as one, and never called a saving of ours — it is
+	// the provider's mechanism and the agent places most of the breakpoints itself. It earns
+	// its place by being the number that COLLAPSES when a compaction pipeline rewrites deep
+	// history, which is the failure this project has to be able to see.
 	e.CacheSavedUSD = float64(e.CacheRead) * (p.Input - p.CacheRead)
 	if e.CacheSavedUSD < 0 {
 		e.CacheSavedUSD = 0 // a provider whose cache reads cost MORE than fresh input saved nothing
 	}
+	e.CachesplitSavedUSD = e.cachesplitSavedUSD(p)
+}
+
+// cachesplitSavedUSD is the cache saving this project is willing to sign its name to.
+//
+// The mechanism: Claude Code appends a live environment snapshot (branch, git status, recent
+// commits) to the END of its big system block, and that block is ONE cacheable unit whose
+// breakpoint sits after the churn. So the provider's hash covers the volatile tail and the
+// block re-bills as cache CREATION every time the snapshot changes. cachesplit splits the
+// block in two and moves the breakpoint onto the stable half — same bytes to the model, a
+// hash boundary that excludes the snapshot.
+//
+// Three conditions, each ruling out a way of being wrong:
+//
+//   - SplitStableTokens > 0, i.e. the split actually happened on this request. It is set
+//     only where splitVolatileTail rewrote the block, which is exactly when cachesplit
+//     reports `mutated`, so this is the component test as well as the size.
+//   - the provider READ from cache. A split that produced no hit produced no saving, and
+//     saying otherwise is how a dashboard starts reporting intentions.
+//   - it was the session's FIRST request. This is the one that does the work; later turns in
+//     a session hit whether or not the tail was ever split, because the snapshot does not
+//     change mid-session.
+//
+// And the amount is the STABLE HALF, not the request's whole cache_read. That distinction
+// was found by running the control arm rather than by reasoning, and it matters by 6.4x:
+//
+//	                     first-request cache_read   cache_write
+//	cachesplit on                          54,304         1,041
+//	cachesplit off (control)               45,805         9,555
+//
+// The control still hit, because Claude Code sets several breakpoints and the ones before
+// this block match regardless. What the split moved is the difference — 8,499 tokens, from
+// the write tier to the read tier — and 8,478 is what the split itself measured as the
+// stable half on those same requests. Crediting the whole 54,304 would have claimed the
+// agent's own cache placement as ours.
+//
+// The counterfactual is a cache MISS, not fresh input: those tokens carry cache_control, so
+// a miss bills them as creation at 1.25x fresh, not at 1x. Hence CacheWrite - CacheRead, an
+// 11.5x-fresh spread rather than 9x. The max(CacheWrite, Input) floor covers a provider that
+// charges no write premium, where a miss still costs at least the fresh rate.
+//
+// It is a FLOOR: a stable prefix serves a whole session while this counts one request of it,
+// and a session resumed after the TTL expires starts another first-request hit this cannot
+// see. Under-crediting is the only direction a savings figure is allowed to be wrong in.
+func (e *Event) cachesplitSavedUSD(p modelinfo.Price) float64 {
+	if !e.SessionFirst || e.CacheRead <= 0 || e.SplitStableTokens <= 0 {
+		return 0
+	}
+	// Never claim more tokens than the provider actually served from cache: on a partial
+	// hit the read may be smaller than the half we split off.
+	n := int64(e.SplitStableTokens)
+	if n > e.CacheRead {
+		n = e.CacheRead
+	}
+	miss := p.CacheWrite
+	if miss < p.Input {
+		miss = p.Input
+	}
+	delta := miss - p.CacheRead
+	if delta <= 0 {
+		return 0
+	}
+	return float64(n) * delta
 }
 
 // baselineDeltaUSD is what the removed content would have cost had it been sent:

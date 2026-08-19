@@ -283,6 +283,15 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// close enough here that over-reporting our own cost is the safe direction.
 	_, cgIn, cgOut := c.llm.Totals()
 
+	// Cache attribution, with a cold start treated as the non-failure it is. BEFORE
+	// pricing, because whether this is the session's first request is an input to a dollar
+	// figure and not only to a label — see Event.cachesplitSavedUSD.
+	seenSession, seenModel, sinceMs := c.rec.Observe(e.TenantID, e.SessionID, e.Model, e.TS)
+	// Anthropic's prompt cache has a 5-minute TTL; a gap wider than that explains a
+	// miss without blaming a prefix change (TTL wins ties).
+	e.AttributeCache(seenSession, seenModel, sinceMs, 5*60*1000, e.CacheWrite > 0)
+	e.SessionFirst = !seenSession
+
 	var price modelinfo.Price
 	priced := false
 	if c.pricer != nil && c.model != "" {
@@ -292,12 +301,6 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	if priced && (cgIn > 0 || cgOut > 0) {
 		e.CGLLMCostUSD = price.Cost(cgIn, 0, 0, cgOut)
 	}
-
-	// Cache attribution, with a cold start treated as the non-failure it is.
-	seenSession, seenModel, sinceMs := c.rec.Observe(e.TenantID, e.SessionID, e.Model, e.TS)
-	// Anthropic's prompt cache has a 5-minute TTL; a gap wider than that explains a
-	// miss without blaming a prefix change (TTL wins ties).
-	e.AttributeCache(seenSession, seenModel, sinceMs, 5*60*1000, e.CacheWrite > 0)
 
 	if !captureContent {
 		e.Content = nil
