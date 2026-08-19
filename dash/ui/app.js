@@ -586,9 +586,15 @@ function renderTiles(o) {
     // second saving beside that one, not part of it.
     tile('cache-saved', 'Prompt-cache savings', costKnown ? usd(o.cache_saved_usd) : 'unknown',
       'cache reads vs the fresh rate', costKnown && o.cache_saved_usd > 0 ? 'good' : ''),
-    tile('cache-saved-protected', 'of which on our breakpoints',
+    // Deliberately NOT labelled as our saving. It locates the cache money on the requests
+    // where one of our cache components had just rewritten the prefix; it does not show that
+    // the cache read happened BECAUSE of that. The causal claim needs an A/B with the
+    // component off, and there is one (-34.1% cost, 0% -> 96.7% hit) — this figure is a
+    // pointer to where to look, and a floor, since a prefix is a property of the session
+    // while this counts only the turns we acted on.
+    tile('cache-saved-protected', 'of which where we split the prefix',
       costKnown ? usd(o.cache_saved_protected_usd) : 'unknown',
-      'requests where cachesplit or cacheinject acted'),
+      'not a causal claim — needs an A/B'),
   ]));
 
   host.appendChild(tileGroup('Billed tokens', 'the four tiers the provider charges on', [

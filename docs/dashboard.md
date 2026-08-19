@@ -121,9 +121,21 @@ of spend, so valuing their removals as cache reads understated them by ~12×.
 **Prompt-cache savings** (`cache_saved_usd`) is a request's cache-read tokens priced at the
 fresh rate they would have cost with no cache at all, minus what they were billed. This one
 is the *provider's* mechanism, not ours. It is here because a compaction proxy that rewrites
-deep history destroys it — so it is the number that falls when a pipeline goes too deep, and
-`cache_saved_protected_usd` reports the part of it that landed on requests where one of our
-own cache components (`cachesplit`, `cacheinject`) actually acted.
+deep history destroys it — so it is the number that falls when a pipeline goes too deep.
+
+`cache_saved_protected_usd` **locates** part of that money rather than claiming it: it is the
+share billed on requests where one of our own cache components (`cachesplit`, `cacheinject`)
+had just rewritten the prefix. That is co-occurrence, not cause — the agent places most
+breakpoints itself, and most cache reads would have happened anyway. Two things follow:
+
+* **Causation needs an A/B**, and there is one for the split: −34.1% cost and 0% → 96.7% cache
+  hit with it on, on the same traffic. That is the evidence; this figure is a pointer to where
+  to look.
+* **It is a floor, not an estimate.** A stable prefix is a property of the *session*, while this
+  counts only the turns where the component acted — and the turn we place a boundary on is
+  often the turn that *writes* the cache, with the reads arriving on later turns that are not
+  counted. Expect it to be a small fraction of the total even where the split is doing real
+  work.
 
 They are **added**, never nested: `total_saved_usd = net_saved_usd + cache_saved_usd`. Folding
 the cache saving into the compaction baseline would double-count, because that baseline
