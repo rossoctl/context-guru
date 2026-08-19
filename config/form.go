@@ -43,6 +43,12 @@ type Form struct {
 	Mode     string   `json:"mode"`
 	// ExtractLLM is nil when the form does not manage that component on this request.
 	ExtractLLM *ExtractLLMForm `json:"extract_llm"`
+	// ParseError is set when the stored document did not load strictly and these fields
+	// came from a best-effort read of it. The settings page must say so and refuse to
+	// save: a save from a misread form would post whatever the fallback managed to see,
+	// and with the YAML box gone there is no other way to correct the document from the
+	// page. Fixing it needs the account editor, which still takes a document.
+	ParseError string `json:"parse_error,omitempty"`
 }
 
 // ExtractLLMForm is the compaction-model component's knobs, the ones the settings page
@@ -96,34 +102,41 @@ func ParseForm(doc string) (Form, error) {
 	f.ExtractLLM = new(ExtractLLMForm)
 	*f.ExtractLLM = DefaultExtractLLMForm()
 
-	loose := func() error {
+	loose := func(strictErr error) (Form, error) {
 		var d formDoc
 		if err := yaml.Unmarshal([]byte(doc), &d); err != nil {
-			return err
+			return f, err
 		}
 		f.Pipeline, f.Mode = d.Pipeline, d.Mode
 		d.Components.ExtractLLM.into(f.ExtractLLM, contains(d.Pipeline, "extract_llm"))
-		return nil
+		// Recorded on the form, not only returned: the caller publishes this to the settings
+		// page, and the page has to be able to say "these fields are a guess at a document
+		// that does not load" rather than draw them as fact and accept a save over them.
+		f.ParseError = strictErr.Error()
+		return f, nil
 	}
 
 	c, err := LoadBytes([]byte(doc))
 	if err != nil {
-		return f, loose()
+		return loose(err)
 	}
 	f.Pipeline, f.Mode = c.Pipeline, c.Mode
+	inPipeline := contains(c.Pipeline, "extract_llm")
 	blk, ok := c.Components["extract_llm"]
 	if !ok {
-		// Not configured: the defaults stand, except that a component absent from the
-		// pipeline is off however its block reads.
-		f.ExtractLLM.PerOutput = false
-		f.ExtractLLM.ColdEnabled = false
+		// No block of its own. That does NOT mean the component is off: a bare `preset:`
+		// resolves to a pipeline containing extract_llm and no per-component blocks at all,
+		// and per_output defaults to true there. Forcing both switches off here showed such
+		// an account an empty form and then, on save, wrote a pipeline with the component
+		// REMOVED — the same silent loss this type exists to prevent.
+		extractLLMDoc{}.into(f.ExtractLLM, inPipeline)
 		return f, nil
 	}
 	var x extractLLMDoc
 	if err := blk.Decode(&x); err != nil {
 		return f, nil
 	}
-	x.into(f.ExtractLLM, contains(c.Pipeline, "extract_llm"))
+	x.into(f.ExtractLLM, inPipeline)
 	return f, nil
 }
 
@@ -137,18 +150,22 @@ type formDoc struct {
 	} `yaml:"components"`
 }
 
+// Pointers on the ints, so ABSENT and 0 are different answers. With plain ints a stored
+// `llm_max_per_session: 0` — which the component reads as UNLIMITED — was indistinguishable
+// from an unset key, so the form displayed 20, and the next save wrote 20 over a deliberate
+// "no cap". A settings page must not change a value it was only asked to display.
 type extractLLMDoc struct {
 	PerOutput       *bool  `yaml:"per_output"`
 	FireOn          string `yaml:"fire_on"`
-	MinTokens       int    `yaml:"min_tokens"`
-	MaxPerRequest   int    `yaml:"llm_max_per_request"`
-	MaxPerSession   int    `yaml:"llm_max_per_session"`
+	MinTokens       *int   `yaml:"min_tokens"`
+	MaxPerRequest   *int   `yaml:"llm_max_per_request"`
+	MaxPerSession   *int   `yaml:"llm_max_per_session"`
 	Aggressiveness  string `yaml:"aggressiveness"`
 	Context         string `yaml:"context"`
-	ContextMessages int    `yaml:"context_messages"`
+	ContextMessages *int   `yaml:"context_messages"`
 	ColdCache       struct {
 		Enabled   bool `yaml:"enabled"`
-		MinTokens int  `yaml:"min_tokens"`
+		MinTokens *int `yaml:"min_tokens"`
 	} `yaml:"cold_cache"`
 }
 
@@ -171,9 +188,10 @@ func (x extractLLMDoc) into(f *ExtractLLMForm, inPipeline bool) {
 	}
 }
 
-func setIf(dst *int, v int) {
-	if v > 0 {
-		*dst = v
+// setIf overlays a value the document actually stated, 0 included.
+func setIf(dst *int, v *int) {
+	if v != nil {
+		*dst = *v
 	}
 }
 
@@ -217,7 +235,11 @@ func ApplyForm(doc string, f Form) (string, error) {
 			blk["per_output"] = x.PerOutput
 			// fire_on follows the explicit choice and never per_output: deriving it once
 			// meant ticking a checkbox quietly turned the spending brakes advisory.
-			blk["fire_on"] = map[bool]string{true: "size", false: "pressure"}[x.SizeTrigger]
+			fireOn := "pressure"
+			if x.SizeTrigger {
+				fireOn = "size"
+			}
+			blk["fire_on"] = fireOn
 			blk["min_tokens"] = x.MinTokens
 			blk["llm_max_per_request"] = x.MaxPerRequest
 			blk["llm_max_per_session"] = x.MaxPerSession
@@ -236,7 +258,21 @@ func ApplyForm(doc string, f Form) (string, error) {
 				pipeline = insertBefore(pipeline, "extract_llm", "extract")
 			}
 		} else {
-			delete(comps, "extract_llm")
+			// Off means "do not run it", not "forget how it was configured". Deleting the
+			// whole block took `model:` with it, so re-enabling the component later ran it
+			// on the expensive default model — a form that quietly costs money. Only the
+			// keys this form owns go; the rest is somebody's deliberate configuration, and
+			// leaving the component out of the pipeline is what actually stops it.
+			if blk, ok := comps["extract_llm"].(map[string]any); ok {
+				for _, k := range managedKeys {
+					delete(blk, k)
+				}
+				if len(blk) == 0 {
+					delete(comps, "extract_llm")
+				} else {
+					comps["extract_llm"] = blk
+				}
+			}
 			pipeline = remove(pipeline, "extract_llm")
 		}
 	}
@@ -281,17 +317,32 @@ func (f Form) validate() error {
 	if !contains(contextValues, x.Context) {
 		return fmt.Errorf("config: context %q is not goal, recent or full", x.Context)
 	}
+	// A zero SIZE threshold is not a configuration, it is a removed brake: every candidate
+	// output clears it, and with fire_on: size that is the only content gate there is. The
+	// caps are different — the component documents 0 as "unlimited", so 0 is a real choice
+	// there and the form's hint says so.
 	for name, v := range map[string]int{
-		"min_tokens": x.MinTokens, "max_per_request": x.MaxPerRequest,
-		"max_per_session": x.MaxPerSession, "context_messages": x.ContextMessages,
+		"min_tokens": x.MinTokens, "context_messages": x.ContextMessages,
 		"cold_min_tokens": x.ColdMinTokens,
 	} {
+		if v < 1 {
+			return fmt.Errorf("config: %s must be at least 1", name)
+		}
+	}
+	for name, v := range map[string]int{
+		"max_per_request": x.MaxPerRequest, "max_per_session": x.MaxPerSession,
+	} {
 		if v < 0 {
-			return fmt.Errorf("config: %s cannot be negative", name)
+			return fmt.Errorf("config: %s cannot be negative (0 means unlimited)", name)
 		}
 	}
 	return nil
 }
+
+// managedKeys are the keys inside an extract_llm block that this form writes, and therefore
+// the only ones it may remove.
+var managedKeys = []string{"per_output", "fire_on", "min_tokens", "llm_max_per_request",
+	"llm_max_per_session", "aggressiveness", "context", "context_messages", "cold_cache"}
 
 // child returns m[key] as a map, creating it when absent and replacing it when it is
 // something else (a `components:` that decoded as nil because the key was written with no

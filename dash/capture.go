@@ -451,12 +451,18 @@ func (r *Recorder) Observe(tenant, session, model string, now int64) (seenSessio
 	}
 	seenModel = r.seenModel[mk]
 	// Bound both maps: a proxy runs for weeks and every distinct session id would
-	// otherwise be retained forever. Sessions are keyed by content hash or client
-	// id, so the working set is small; a reset just re-reports a cold start, which
-	// is honest (we genuinely no longer know).
-	// ponytail: crude clear-on-overflow; swap for an LRU if session churn ever matters.
+	// otherwise be retained forever. Sessions are keyed by content hash or client id, so
+	// the working set is small.
+	//
+	// By AGE, not by clearing the map. The old code emptied lastSeen entirely at 20,000
+	// entries, which made every live session's next turn report a cold start at once —
+	// and `seenSession` is no longer only a label: it decides whether a cache hit is
+	// credited as ours (see Event.cachesplitSavedUSD), so a wholesale reset was a
+	// wholesale over-claim. Dropping entries by age cannot do that: a session with no
+	// request for staleSession really has lost its provider cache, so treating its next
+	// turn as a cold start is not a guess, it is correct.
 	if len(r.lastSeen) > 20000 {
-		r.lastSeen = map[string]int64{}
+		r.pruneSessionsLocked(now)
 	}
 	if len(r.seenModel) > 1000 {
 		r.seenModel = map[string]bool{}
@@ -464,6 +470,71 @@ func (r *Recorder) Observe(tenant, session, model string, now int64) (seenSessio
 	r.lastSeen[session] = now
 	r.seenModel[mk] = true
 	return seenSession, seenModel, sinceLastMs
+}
+
+// staleSession is how long a session must be silent before its state is forgettable. Well
+// past every provider cache TTL this code knows about (Anthropic 5m, or 1h with the extended
+// beta), so a pruned session's next request genuinely is a cold start.
+const staleSession = 2 * 60 * 60 * 1000
+
+// pruneSessionsLocked drops sessions idle longer than staleSession. Caller holds r.mu.
+//
+// If that frees nothing — 20,000 sessions all active inside two hours, which would be a
+// different kind of day — it falls back to emptying the map, because an unbounded map on a
+// long-running proxy is the worse failure.
+func (r *Recorder) pruneSessionsLocked(now int64) {
+	for k, ts := range r.lastSeen {
+		if now-ts > staleSession {
+			delete(r.lastSeen, k)
+		}
+	}
+	if len(r.lastSeen) > 20000 {
+		r.lastSeen = map[string]int64{}
+	}
+}
+
+// SeedSessions primes the session-recency map from the database, so a RESTART does not make
+// every live conversation's next turn look like the start of a new one.
+//
+// It matters because seenSession is not just a label any more: it is one of the three
+// conditions that decide whether a cache read is credited as our saving, so a proxy restart
+// used to hand out one bonus credit per live session — small, but exactly the kind of quiet
+// over-claim the prefix-cache figure exists to avoid. It also fixes cache_miss_reason, which
+// reported a cold start for every session in flight across a restart.
+//
+// One indexed group-by at startup, bounded to sessions young enough to still matter.
+func (r *Recorder) SeedSessions(now int64) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, nil
+	}
+	rows, err := r.db.sql.Query(`SELECT session_id, MAX(ts) FROM requests
+		WHERE ts >= ? GROUP BY session_id`, now-staleSession)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	seeded := map[string]int64{}
+	for rows.Next() {
+		var id string
+		var ts int64
+		if err := rows.Scan(&id, &ts); err != nil {
+			return 0, err
+		}
+		seeded[id] = ts
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, ts := range seeded {
+		// Never overwrite something this process has already observed: that is newer by
+		// construction, and its sinceLastMs is the one the request path measured.
+		if _, ok := r.lastSeen[id]; !ok {
+			r.lastSeen[id] = ts
+		}
+	}
+	return len(seeded), nil
 }
 
 // MarkUnique attributes a component's savings to NEW content only, deduping by

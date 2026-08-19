@@ -89,10 +89,10 @@ CREATE TABLE IF NOT EXISTS requests (
   -- because it is what collapses when a pipeline rewrites deep history. Never reported as
   -- our saving.
   cache_saved_usd    REAL    NOT NULL DEFAULT 0,
-  -- What OUR prefix components saved: nonzero only where cachesplit/cacheinject rewrote the
-  -- prefix, the provider read it from cache, and it was the session's first request — the
-  -- one that would have missed. Priced against a cache MISS (creation rate), not fresh
-  -- input. See Event.cachesplitSavedUSD.
+  -- What OUR volatile-tail split saved: nonzero only where the split ran on the request, the
+  -- provider read at least that much from cache while writing less, and it was the session's
+  -- first request — the one that would have missed. Priced against a cache MISS (creation
+  -- rate), not fresh input. See Event.cachesplitSavedUSD.
   cachesplit_saved_usd REAL  NOT NULL DEFAULT 0,
   -- The size of the prefix half cachesplit moved the breakpoint onto: the numerator of the
   -- column above, stored so a dollar figure can be checked against a token count.

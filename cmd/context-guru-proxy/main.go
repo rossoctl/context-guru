@@ -271,6 +271,16 @@ func main() {
 		}
 		rec = r
 		defer rec.Close()
+		// Recover which sessions were live before this restart. Without it every conversation
+		// in flight reports a cold start on its next turn — and that flag also decides whether
+		// a cache hit counts as our saving, so a restart handed out one bonus credit per live
+		// session (see dash.Event.cachesplitSavedUSD).
+		if n, err := rec.SeedSessions(time.Now().UnixMilli()); err != nil {
+			slog.Warn("dashboard: could not recover session recency; the first turn of each live "+
+				"session will be reported as a cold start", "err", err)
+		} else {
+			slog.Info("dashboard: recovered session recency across the restart", "sessions", n)
+		}
 		if runs, tasks := rec.DB().IngestBenchRoots(opts.BenchDirs); runs > 0 {
 			slog.Info("dashboard: ingested benchmark runs", "runs", runs, "tasks", tasks)
 		} else if len(opts.BenchDirs) > 0 {

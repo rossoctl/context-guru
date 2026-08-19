@@ -470,7 +470,7 @@ func pipeWithEmitter(t *testing.T, yaml string, e components.Emitter) *component
 
 // The split has to report the SIZE of the half it moved the breakpoint onto, because that
 // is what the dashboard prices — and it is the number that stopped the prefix-cache saving
-// from being 6.4x too large. Crediting the request's whole cache_read counted the agent's
+// from being 7.5x too large. Crediting the request's whole cache_read counted the agent's
 // own breakpoints as ours: with cachesplit off, a real session's first request still read
 // 45,805 tokens from cache and only 8,499 more moved when it was on.
 func TestSplitReportsTheSizeOfTheStableHalf(t *testing.T) {

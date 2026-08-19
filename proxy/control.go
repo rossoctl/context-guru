@@ -1209,7 +1209,18 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 			ctlErr(w, http.StatusForbidden, "a manager sets the compaction configuration")
 			return
 		}
-		doc, err := config.ApplyForm(h.registry().Config(t), *in.Config)
+		current := h.registry().Config(t)
+		// Refuse to edit a document we could not fully read. ParseForm falls back to a
+		// best-effort decode so the page can still draw controls, but a SAVE from a misread
+		// form would post whatever the fallback happened to see — and with no YAML box on
+		// that page, over an already-broken document. The account editor still takes a
+		// document, which is where this gets fixed.
+		if cur, _ := config.ParseForm(current); cur.ParseError != "" {
+			ctlErr(w, http.StatusConflict, "your stored configuration does not load ("+cur.ParseError+
+				"), so it cannot be edited as fields; a manager must repair it on the account page")
+			return
+		}
+		doc, err := config.ApplyForm(current, *in.Config)
 		if err != nil {
 			// The message names the field or the offending key; showing it beats "invalid".
 			ctlErr(w, http.StatusBadRequest, err.Error())

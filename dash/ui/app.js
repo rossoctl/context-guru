@@ -3669,6 +3669,19 @@ function loadSettings() {
         '11 of 22 realistic credential shapes passing through it. The manager can read ' +
         'whatever this stores. Off by default.')));
 
+    // A stored document the server could not fully load. The fields below are a best-effort
+    // read of it, and saving from them would post whatever that read happened to see — over
+    // an already-broken document, on a page with no YAML box. So say so, and let the server's
+    // 409 be the backstop rather than the only guard.
+    if (mgr && cfg.parse_error) {
+      host.appendChild(el('div', { class: 'state blocked', 'data-testid': 'cfg-unreadable' },
+        el('div', { class: 'state-body' },
+          el('strong', {}, 'Your stored configuration does not load.'),
+          el('span', {}, cfg.parse_error),
+          el('span', {}, 'The controls below are a guess at it and saving them is refused. '
+            + 'A manager can repair the document on this account\u2019s page under Accounts.'))));
+    }
+
     // The compaction-model form.
     //
     // There is no YAML editor here any more. It was not a convenience, it was the failure:
@@ -3968,7 +3981,10 @@ async function saveSettings() {
   // Never sent by a plain account: the pipeline is the manager's field, and PUT /api/me
   // answers 403 to anyone else — sending it would fail the whole save, upstreams and
   // capture consent included.
-  if (!inherited && isManager()) {
+  // Never posted from a form the server told us was a guess: the fields would carry the
+  // fallback's reading of a document nobody can see. The server refuses this too (409).
+  const unreadable = !!(account.tenant.effective_config || {}).parse_error;
+  if (!inherited && isManager() && !unreadable) {
     body.config = { pipeline: ordered, mode: $('#set-mode').value, extract_llm: xllmState };
   }
   try {
@@ -4494,7 +4510,7 @@ async function loadVariants() {
       el('th', {}, 'Variant'), el('th', {}, 'Accounts'), el('th', {}, 'Requests'),
       el('th', {}, 'Tokens in → out'), el('th', {}, 'Saved'), el('th', {}, 'Spent'),
       el('th', {}, 'Spent / request'), el('th', {}, 'Saved (est.)'),
-      el('th', {}, 'Cache saved'),
+      el('th', {}, 'Prefix split'), el('th', {}, 'Provider cache'),
       el('th', {}, 'Unpriced'))));
   const body = el('tbody');
   for (const v of rows) {
@@ -4525,9 +4541,13 @@ async function loadVariants() {
       el('td', {}, usd(v.saved_usd),
         el('span', { class: 'denom' }, 'counterfactual')),
       // Beside it, because an arm that compacts deeper can win on the column above while
-      // losing more than that on the prefix cache it destroyed.
+      // losing more than that on the cache it destroyed. Both figures, because they answer
+      // different questions: ours is what the prefix split earned in this arm, the provider's
+      // is the control variable — the thing a deep pipeline silently spends.
+      el('td', {}, usd(v.cachesplit_saved_usd),
+        el('span', { class: 'denom' }, 'prefix split, ours')),
       el('td', {}, usd(v.cache_saved_usd),
-        el('span', { class: 'denom' }, 'prompt cache')),
+        el('span', { class: 'denom' }, 'provider cache')),
       // Rows the provider priced for nobody. Where this approaches the request count, the
       // money columns on this row are unknown rather than small.
       el('td', {}, num(v.incomplete_rows),

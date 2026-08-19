@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -108,22 +109,32 @@ func TestCachesplitSavingNeedsTheSplit_TheHit_AndTheFirstRequest(t *testing.T) {
 		// The one that matters most: mid-session reads happen whether or not the tail was
 		// ever split, because the environment snapshot does not change mid-session.
 		"not the session's first request": mk(split, 54_304, false, stable),
+		// A read too small to have contained our half. Refused rather than clamped: a hit on
+		// some other, smaller prefix says nothing about ours.
+		"read smaller than the half we split": mk(split, 3_000, true, stable),
 	} {
 		if e.CachesplitSavedUSD != 0 {
 			t.Errorf("%s: claimed %.10f", name, e.CachesplitSavedUSD)
 		}
 	}
-	// A partial hit smaller than the half we split off claims only what was served.
-	part := mk(split, 3_000, true, stable)
-	if wantPart := 3_000 * (ibmSonnet.CacheWrite - ibmSonnet.CacheRead); math.Abs(part.CachesplitSavedUSD-wantPart) > 1e-12 {
-		t.Errorf("partial hit claimed %.10f, want the read %.10f", part.CachesplitSavedUSD, wantPart)
+	// The subtle over-claim, and the reason a hit alone is not enough: the session's first
+	// request AFTER the stable half itself changed (someone edited CLAUDE.md, the tool list
+	// moved). An earlier agent breakpoint still hits, so cache_read is large — but our half is
+	// being billed as CREATION on this very request, so there is nothing to credit.
+	changed := &Event{TS: 1, SessionID: "s", Model: "aws/claude-sonnet-5",
+		TokensBefore: 50_000, TokensAfter: 50_000, FreshInput: 10,
+		CacheRead: 20_000, CacheWrite: 12_000, OutputTokens: 20,
+		Components: split, SessionFirst: true, SplitStableTokens: stable}
+	changed.Price(ibmSonnet, true)
+	if changed.CachesplitSavedUSD != 0 {
+		t.Errorf("credited a request that re-created the stable half: %.10f", changed.CachesplitSavedUSD)
 	}
 	// The provider's own cache saving is still measured on every one of them — it is a
 	// diagnostic, and losing it would hide a pipeline destroying a prefix.
 	if mk(nil, 54_304, false, 0).CacheSavedUSD <= 0 {
 		t.Error("the provider-cache diagnostic stopped being measured")
 	}
-	// And ours is a small fraction of it, which is the whole correction: 8,478 tokens at
+	// And ours is a small fraction of it, which is the whole correction: 5,654 tokens at
 	// 1.15x versus 54,304 at 0.9x. Pinned as a bound so a revert to "credit the whole
 	// cache_read" fails here rather than in production.
 	e := mk(split, 54_304, true, stable)
@@ -194,10 +205,13 @@ func TestOverviewClaimsOnlyTheFirstRequestHit(t *testing.T) {
 }
 
 // A new column must not cost the history. The version-bump path renames the file aside
-// and discards every request row; on the live service that is thousands of rows to gain
-// one column, so cache_saved_usd is added by ALTER TABLE on open instead. This opens a
-// database that predates the column and checks both halves: the column appears, and the
-// rows are still there.
+// and discards every request row; on the live service that is a hundred thousand rows to
+// gain one column, so these are added by ALTER TABLE on open instead. This opens a database
+// that predates every one of them and checks both halves: the columns appear, and the rows
+// are still there.
+//
+// It is the migration the deployed service actually runs on restart, so every entry in
+// additiveColumns for `requests` belongs in the list below.
 func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	db, err := Open(path)
@@ -209,13 +223,16 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 	}
 	db.Close()
 
-	// Drop the column back off to simulate the on-disk shape before this change.
+	// Drop the columns back off to simulate the on-disk shape before these changes.
 	raw, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`ALTER TABLE requests DROP COLUMN cache_saved_usd`); err != nil {
-		t.Fatal(err)
+	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens"}
+	for _, col := range added {
+		if _, err := raw.Exec(`ALTER TABLE requests DROP COLUMN ` + col); err != nil {
+			t.Fatal(err)
+		}
 	}
 	raw.Close()
 
@@ -231,9 +248,19 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("%d rows survived the migration, want 1", n)
 	}
-	var sum float64
-	if err := db2.sql.QueryRow(`SELECT COALESCE(SUM(cache_saved_usd),0) FROM requests`).Scan(&sum); err != nil {
-		t.Fatalf("cache_saved_usd was not added: %v", err)
+	for _, col := range added {
+		var sum float64
+		if err := db2.sql.QueryRow(`SELECT COALESCE(SUM(` + col + `),0) FROM requests`).Scan(&sum); err != nil {
+			t.Fatalf("%s was not added back: %v", col, err)
+		}
+	}
+	// And the whole read path works over rows that predate the columns — a query naming a
+	// column the file has just gained is where a migration that "succeeded" still fails.
+	if _, err := db2.Overview(Filter{}); err != nil {
+		t.Fatalf("Overview over migrated rows: %v", err)
+	}
+	if _, err := db2.Requests(Filter{}, 10, 0); err != nil {
+		t.Fatalf("Requests over migrated rows: %v", err)
 	}
 }
 
@@ -310,5 +337,80 @@ func TestGatesReachTheDashboard(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"gates":{}`) {
 		t.Errorf("the empty map is omitted from the JSON the UI reads: %s", b)
+	}
+}
+
+// "First request of the session" used to mean "first this PROCESS has seen", which is not the
+// same thing and not the safe direction. Two ways it over-claimed:
+//
+//   - a restart mid-conversation: the recency map is in memory and started empty, so every
+//     live session's next turn looked like a session start and earned a credit for a cache
+//     hit that would have happened anyway;
+//   - the 20,000-entry bound, which emptied the whole map at once and did it to every live
+//     session simultaneously.
+//
+// Both are fixed at the source rather than papered over in the price: the map is seeded from
+// the database at startup, and it is pruned by AGE, where forgetting is genuinely correct
+// because a session silent that long has lost its provider cache anyway.
+func TestSessionRecencySurvivesARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "d.db")
+	rec, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const now = int64(1_700_000_000_000)
+	e := &Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10}
+	rec.Record(e)
+	// Drain, then stop: this is the restart.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int64
+		_ = rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n)
+		if n == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	rec.Close()
+
+	rec2, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec2.Close()
+	if seen, _, _ := rec2.Observe("t1", "t1:live", "m", now+1000); seen {
+		t.Fatal("a fresh recorder should not know the session before it is seeded")
+	}
+	rec3, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec3.Close()
+	if n, err := rec3.SeedSessions(now + 1000); err != nil || n == 0 {
+		t.Fatalf("SeedSessions recovered %d sessions: %v", n, err)
+	}
+	seen, _, since := rec3.Observe("t1", "t1:live", "m", now+1000)
+	if !seen {
+		t.Error("the session was not recovered across the restart, so its next turn would be " +
+			"credited as a first-request cache hit")
+	}
+	if since != 1000 {
+		t.Errorf("recovered gap = %d ms, want 1000 from the stored row", since)
+	}
+	// A session silent past every cache TTL is forgettable, and forgetting it is correct.
+	if seen, _, _ := rec3.Observe("t1", "t1:ancient", "m", now); seen {
+		t.Error("an unknown session read as seen")
+	}
+	rec3.mu.Lock()
+	rec3.lastSeen["t1:ancient"] = now - staleSession - 1
+	rec3.pruneSessionsLocked(now)
+	_, still := rec3.lastSeen["t1:ancient"]
+	_, kept := rec3.lastSeen["t1:live"]
+	rec3.mu.Unlock()
+	if still {
+		t.Error("pruning kept a session idle past every cache TTL")
+	}
+	if !kept {
+		t.Error("pruning dropped an active session; that is the wholesale reset this replaced")
 	}
 }

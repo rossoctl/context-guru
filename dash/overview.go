@@ -78,10 +78,11 @@ type Overview struct {
 	// deep history — a diagnostic, and the API keeps it for that. The dashboard does not
 	// show it as a saving, because it is not ours.
 	CacheSavedUSD float64 `json:"cache_saved_usd"`
-	// CachesplitSavedUSD is the cache saving that IS ours: summed over requests where a
-	// prefix component rewrote the prefix, the provider then read it from cache, and it
-	// was the session's first request — the one that would have missed without the
-	// rewrite. Priced against a cache miss. A floor. See Event.cachesplitSavedUSD.
+	// CachesplitSavedUSD is the cache saving that IS ours: summed over requests where the
+	// volatile-tail split ran, the provider then read at least that much from cache while
+	// writing less than it, and it was the session's first request — the one that would have
+	// missed without the split. Priced against a cache miss. A floor.
+	// See Event.cachesplitSavedUSD.
 	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
 	// TotalSavedUSD is our two savings together: compaction's, less our own spend, plus
 	// the prefix components'. Both are ours and the token sets are disjoint.

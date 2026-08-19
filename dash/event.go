@@ -117,10 +117,13 @@ type Event struct {
 	// Extractions is one row per LLM call an expensive component made on this request.
 	Extractions []ExtractionRow `json:"extractions,omitempty"`
 
-	// SessionFirst marks the first request captured for this session, which is what makes
-	// a cache hit attributable (see Price). Not persisted: it is an input to a dollar
-	// figure, and cache_miss_reason already records the same fact in a form a query can
-	// group by.
+	// SessionFirst marks the first request captured for this session, which is what makes a
+	// cache hit attributable (see Price). Not persisted because it does not need to be: a
+	// nonzero cachesplit_saved_usd identifies exactly the rows that qualified, and
+	// split_stable_tokens, cache_read and cache_write are all stored beside it, so the
+	// figure can be recomputed from the row. (It is NOT recoverable from
+	// cache_miss_reason, which reads "hit" on every qualifying row — AttributeCache
+	// short-circuits on cache_read > 0 before it ever considers a cold start.)
 	SessionFirst bool `json:"-"`
 
 	// ContentCap is the per-blob byte cap Redact applies. Set at the capture site and
@@ -481,24 +484,41 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 //   - SplitStableTokens > 0, i.e. the split actually happened on this request. It is set
 //     only where splitVolatileTail rewrote the block, which is exactly when cachesplit
 //     reports `mutated`, so this is the component test as well as the size.
-//   - the provider READ from cache. A split that produced no hit produced no saving, and
-//     saying otherwise is how a dashboard starts reporting intentions.
+//   - the provider READ from cache, and read AT LEAST as much as the half we split off while
+//     WRITING less than that. A hit alone is not enough: on the first request after the
+//     stable half itself changed — someone edited CLAUDE.md, the tool list changed — an
+//     earlier agent breakpoint still hits, so cache_read > 0 while OUR half is being billed
+//     as creation on that very request. The write test is what excludes it. Neither test can
+//     isolate our breakpoint from the usage block, so both are deliberately blunt and both
+//     err towards refusing the credit.
 //   - it was the session's FIRST request. This is the one that does the work; later turns in
 //     a session hit whether or not the tail was ever split, because the snapshot does not
-//     change mid-session.
+//     change mid-session. "First" survives a restart (dash.Recorder.SeedSessions) and is
+//     forgotten only after a session has been silent past every cache TTL — before that fix
+//     a restart handed out one bonus credit per live conversation.
 //
-// And the amount is the STABLE HALF, not the request's whole cache_read. That distinction
-// was found by running the control arm rather than by reasoning, and it matters by 6.4x:
+// And the amount is the STABLE HALF, not the request's whole cache_read. That distinction was
+// found by running the control arm rather than by reasoning about it. Real Claude Code
+// sessions against ete-litellm, each started after a fresh commit so the environment snapshot
+// genuinely differed, first request of each session:
 //
-//	                     first-request cache_read   cache_write
-//	cachesplit on                          54,304         1,041
-//	cachesplit off (control)               45,805         9,555
+//	                     first-request cache_read     cache_write
+//	cachesplit on                          54,304     1,030-1,065
+//	cachesplit off (control)               45,805     9,555-9,564
 //
-// The control still hit, because Claude Code sets several breakpoints and the ones before
-// this block match regardless. What the split moved is the difference — 8,499 tokens, from
-// the write tier to the read tier — and 8,478 is what the split itself measured as the
-// stable half on those same requests. Crediting the whole 54,304 would have claimed the
-// agent's own cache placement as ours.
+// The control still HIT. Claude Code sets several breakpoints and the ones before this block
+// match whatever we do — so crediting the whole 54,304 would have booked the agent's own cache
+// placement as ours. What the split moved is the difference the provider reports: 8,499
+// tokens, from the write tier to the read tier.
+//
+// We claim less than that. The split's own measurement of the half it moved is 5,654 tokens on
+// that traffic, and the two disagree because they count different things — the provider reports
+// block-granular usage over a prefix that also gained a block boundary, while this counts BPE
+// tokens over the text. Both are evidence; the smaller one is what gets billed, because
+// under-crediting is the only safe direction.
+//
+// In dollars on that request: $0.0099 ours against $0.0743 for the provider's whole cache read.
+// 7.5x, and that 7.5x is the claim this replaced.
 //
 // The counterfactual is a cache MISS, not fresh input: those tokens carry cache_control, so
 // a miss bills them as creation at 1.25x fresh, not at 1x. Hence CacheWrite - CacheRead, an
@@ -509,14 +529,15 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 // and a session resumed after the TTL expires starts another first-request hit this cannot
 // see. Under-crediting is the only direction a savings figure is allowed to be wrong in.
 func (e *Event) cachesplitSavedUSD(p modelinfo.Price) float64 {
-	if !e.SessionFirst || e.CacheRead <= 0 || e.SplitStableTokens <= 0 {
+	if !e.SessionFirst || e.SplitStableTokens <= 0 {
 		return 0
 	}
-	// Never claim more tokens than the provider actually served from cache: on a partial
-	// hit the read may be smaller than the half we split off.
+	// The read has to be big enough to have included our half, and the write small enough
+	// not to have re-created it. Either failing means the stable half was not what got served
+	// from cache on this request, whatever else was.
 	n := int64(e.SplitStableTokens)
-	if n > e.CacheRead {
-		n = e.CacheRead
+	if e.CacheRead < n || e.CacheWrite >= n {
+		return 0
 	}
 	miss := p.CacheWrite
 	if miss < p.Input {

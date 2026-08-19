@@ -129,14 +129,22 @@ excludes the churn.
 
 A request contributes only when **all three** of these are true:
 
-1. the split **actually ran** on it (`split_stable_tokens > 0`), which is exactly when
-   `cachesplit` reports `mutated`;
-2. the provider **read from cache** on it — a split that produced no hit produced no saving;
+1. the split **actually ran** on it (`split_stable_tokens > 0`), which happens when
+   `cachesplit` — or `cacheinject`, which enables the same rewrite — is in the pipeline and
+   the request's system prompt really carried a volatile tail;
+2. the provider **read at least that much** from cache **while writing less than it**. A hit
+   alone is not enough: on the first request after the stable half itself changed (someone
+   edited `CLAUDE.md`, the tool list moved) an earlier agent breakpoint still hits, so
+   `cache_read > 0` while *our* half is billed as creation on that very request. Neither test
+   can isolate our breakpoint from the usage block, so both are blunt and both err towards
+   refusing the credit;
 3. it was the **session's first request** — the one that would have missed without the split.
 
 The third is the one that matters. Later turns in a session hit the cache whether or not the
 tail was ever split, because the snapshot does not change mid-session; crediting them counts
-the provider's money as ours.
+the provider's money as ours. "First" survives a proxy restart (the recency map is seeded from
+the database at startup) and is forgotten only once a session has been silent past every cache
+TTL — before that, every restart handed out one bonus credit per live conversation.
 
 **The amount is the stable half, not the request's whole `cache_read`.** That correction came
 out of running the control arm rather than reasoning about it. Four real Claude Code sessions
@@ -159,11 +167,13 @@ smaller one is what gets billed, because under-crediting is the only safe direct
 
 The counterfactual is a cache **miss**, not fresh input: those tokens carry `cache_control`,
 so a miss bills them as cache *creation* — 1.25× fresh on the Anthropic family — and the next
-turn pays again. Hence `min(split_stable_tokens, cache_read) × (cache_write_rate −
-cache_read_rate)`, an 11.5×-fresh spread rather than 9×.
+turn pays again. Hence `split_stable_tokens × (max(cache_write_rate, input_rate) −
+cache_read_rate)`, an 11.5×-fresh spread rather than 9×. The `max` floor covers a provider
+that charges no write premium, where a miss still costs at least the fresh rate.
 
-On that measured traffic it came to **$0.0099 per new session**, against a provider-cache
-figure of **$0.2258** over the same four requests — the number that used to be the headline.
+On that measured traffic it came to **$0.0099 per new session** — against **$0.0743** for the
+provider's whole cache read on the *same request*, and **$0.2258** across the four requests of
+the run. That $0.2258 is the number that used to be the headline.
 
 It is a **floor**. A stable prefix serves a whole session while this counts one request of
 it, and a session resumed from disk after the TTL expires starts another first-request hit

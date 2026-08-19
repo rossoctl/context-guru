@@ -194,7 +194,7 @@ type Trace struct {
 	// breakpoint onto — the tokens it moved out of the cache-creation tier. 0 when nothing
 	// split. It is the honest numerator for the prefix-cache saving: the alternative,
 	// crediting the request's whole cache_read, over-credits by whatever the agent's OTHER
-	// breakpoints were already matching, measured at 6.4x on a real session.
+	// breakpoints were already matching — 7.5x in dollars on a measured session.
 	SplitStableTokens int
 	// Run is the pipeline's aggregate report (nil when the pipeline never ran).
 	Run *components.RunReport

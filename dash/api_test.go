@@ -742,4 +742,12 @@ func TestSettingsFormSpeaksTheSameFieldNamesAsTheServer(t *testing.T) {
 	if !strings.Contains(src, "body.config = {") {
 		t.Error("saveSettings does not post structured fields")
 	}
+	// With the YAML box gone, a document the server could not fully read must be VISIBLE and
+	// unsaveable. Otherwise the fields draw a guess as fact and a save writes the guess back,
+	// which is a worse version of the bug this replaced.
+	for _, want := range []string{"cfg-unreadable", "parse_error"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("the settings page does not handle an unreadable stored configuration (%q)", want)
+		}
+	}
 }

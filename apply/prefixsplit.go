@@ -77,9 +77,11 @@ const minSplitTokens = 1024
 // the snapshot changes; with it, those tokens bill as cache reads. It is the numerator of
 // the dashboard's prefix-cache saving, and it has to be measured here because this is the
 // only place that knows where the boundary went. Measured on a real Claude Code session:
-// 8,478 of a 9,519-token block, and the cachesplit-off control arm confirmed the size of
-// the effect — its first-request read fell by 8,499 tokens and its cache WRITE rose by the
-// same, which is what "moved from the write tier to the read tier" means.
+// 5,654 tokens, and the cachesplit-off control arm confirmed the effect independently — its
+// first-request cache_read was 8,499 tokens lower and its cache WRITE higher by about the
+// same, which is what "moved from the write tier to the read tier" means. The two measure
+// different things (BPE over the text vs the provider's block-granular usage); the dashboard
+// prices this one because it is the smaller.
 func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte, split bool, shiftAt, shift, stableTokens int) {
 	if !explicitBreakpointProvider(provider) {
 		return body, false, 0, 0, 0

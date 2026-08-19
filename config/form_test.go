@@ -159,3 +159,143 @@ func TestApplyFormRejectsValuesTheComponentWouldSilentlyIgnore(t *testing.T) {
 		})
 	}
 }
+
+// A bare `preset:` resolves to a pipeline that CONTAINS extract_llm and carries no
+// per-component block at all. Reading "no block" as "switched off" showed such an account an
+// empty form and then, on save, wrote a pipeline with the component removed — silently, which
+// is the failure class this file exists to close.
+func TestBarePresetDoesNotReadAsSwitchedOff(t *testing.T) {
+	// Find a shipped preset whose pipeline includes extract_llm; if none does, there is
+	// nothing to regress and the test says so rather than passing vacuously.
+	var name string
+	for p := range presetConfigs {
+		c, err := LoadBytes([]byte("preset: " + p + "\n"))
+		if err == nil && contains(c.Pipeline, "extract_llm") && len(c.Components) == 0 {
+			name = p
+			break
+		}
+	}
+	if name == "" {
+		for p := range presets {
+			if contains(presets[p], "extract_llm") {
+				name = p
+				break
+			}
+		}
+	}
+	if name == "" {
+		t.Skip("no shipped preset runs extract_llm without a block of its own")
+	}
+	doc := "preset: " + name + "\nmode: sync\n"
+	f, err := ParseForm(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.ExtractLLM.PerOutput {
+		t.Errorf("preset %q runs extract_llm with per_output defaulting on, but the form reads it off", name)
+	}
+	// And a save that changes something unrelated must not drop it.
+	f.ExtractLLM.Aggressiveness = "high"
+	out, err := ApplyForm(doc, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(mustParse(t, out).Pipeline, "extract_llm") {
+		t.Errorf("saving dropped extract_llm from a preset that ran it:\n%s", out)
+	}
+}
+
+// Switching the component off means "do not run it", not "forget how it was configured".
+// Deleting the whole block took `model:` with it, so re-enabling it later ran on the
+// expensive default — a form that quietly costs money.
+func TestSwitchingOffKeepsTheKeysTheFormDoesNotOwn(t *testing.T) {
+	doc := `pipeline: [format, extract_llm]
+mode: sync
+components:
+  extract_llm:
+    model:
+      name: claude-haiku-4-5
+    strategy: code
+    per_output: true
+`
+	f, err := ParseForm(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.ExtractLLM.PerOutput = false
+	f.ExtractLLM.ColdEnabled = false
+	out, err := ApplyForm(doc, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contains(mustParse(t, out).Pipeline, "extract_llm") {
+		t.Errorf("the component still runs:\n%s", out)
+	}
+	for _, want := range []string{"claude-haiku-4-5", "strategy: code"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("switching off destroyed %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "per_output") {
+		t.Errorf("a key the form owns survived:\n%s", out)
+	}
+}
+
+// The form must not change a value it was only asked to display. `llm_max_per_session: 0`
+// means UNLIMITED to the component; with a plain int it was indistinguishable from an unset
+// key, so the form showed 20 and the next save wrote 20 over a deliberate "no cap".
+func TestAZeroCapIsDisplayedAndPreserved(t *testing.T) {
+	doc := "pipeline: [format, extract_llm]\nmode: sync\ncomponents:\n  extract_llm:\n" +
+		"    per_output: true\n    llm_max_per_session: 0\n    llm_max_per_request: 0\n"
+	f, err := ParseForm(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.ExtractLLM.MaxPerSession != 0 || f.ExtractLLM.MaxPerRequest != 0 {
+		t.Fatalf("a stored 0 was displayed as %d/%d",
+			f.ExtractLLM.MaxPerSession, f.ExtractLLM.MaxPerRequest)
+	}
+	out, err := ApplyForm(doc, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, _ := ParseForm(out)
+	if back.ExtractLLM.MaxPerSession != 0 {
+		t.Errorf("the round trip raised a deliberate no-cap to %d:\n%s", back.ExtractLLM.MaxPerSession, out)
+	}
+	// A zero SIZE threshold is different: it is a removed brake, not a setting.
+	f.ExtractLLM.MinTokens = 0
+	if _, err := ApplyForm(doc, f); err == nil {
+		t.Error("accepted min_tokens: 0, which makes every output a candidate")
+	}
+}
+
+// A document that does not load strictly still has to draw a usable form — but the form must
+// say it is a guess, because with the YAML box gone a save from a misread form is the only
+// way left to make things worse.
+func TestAnUnloadableDocumentIsReportedNotHidden(t *testing.T) {
+	f, err := ParseForm("pipeline: [format]\nmode: sync\nbogus_key_no_binding: 1\n")
+	if err != nil {
+		t.Fatalf("a document that fails the strict load must still produce a form: %v", err)
+	}
+	if f.ParseError == "" {
+		t.Error("the form does not report that it came from a best-effort read")
+	}
+	if !strings.Contains(f.ParseError, "bogus_key_no_binding") {
+		t.Errorf("the reported error does not name the offending key: %q", f.ParseError)
+	}
+	// A document that loads cleanly reports nothing, so the UI has a reliable signal.
+	ok, err := ParseForm(tenant.DefaultConfigYAML)
+	if err != nil || ok.ParseError != "" {
+		t.Errorf("a healthy document reported a parse error: %q (%v)", ok.ParseError, err)
+	}
+}
+
+func mustParse(t *testing.T, doc string) Form {
+	t.Helper()
+	f, err := ParseForm(doc)
+	if err != nil {
+		t.Fatalf("ParseForm: %v", err)
+	}
+	return f
+}
