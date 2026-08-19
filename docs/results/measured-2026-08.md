@@ -328,3 +328,41 @@ provider had *already* expired the cache at the same instant our predictor was s
 and the only reason we know the provider's answer is a column nothing reads for this purpose.
 A threshold whose correctness turns on rounding is a threshold that should be calibrated
 against observation rather than argued about.
+
+## 9. End-to-end verification, and what it says about when the sweep pays
+
+A real Claude Code session, resumed after a 547-second idle gap, through a proxy carrying the
+recommended configuration. The turn was genuinely cold: `cache_miss_reason: ttl_expiry`,
+`cache_read: 0`, `cache_write: 83,834`.
+
+| | |
+|---|---|
+| cold-sweep calls made | 2 |
+| accepted | 1 (`SAVED = 1,571` tokens) |
+| the other | `program rejected: extract.star:4:7: got ':', want newline` |
+| request | `tokens_before 27,570 → 26,025`, `saved_unique 1,545` |
+| our spend | $0.0556 + $0.0624 = **$0.118** |
+| value of the removal on that turn | 1,571 × $4.75/MTok ≈ **$0.0075**, plus replay on later turns |
+
+So the mechanism is confirmed working — the gate fires on a genuinely cold turn, the model
+returns a program, the sandbox runs it, the acceptance check passes it and the saving is
+recorded and priced. **And on this transcript it still lost money**: 27,570 tokens is far too
+small for two calls at ~$0.06 each to repay. That is not a contradiction of §7, it is the same
+arithmetic: the cold sweep pays in proportion to the transcript it is shrinking, which is why
+`cold_cache.min_tokens` and the economic gate exist and why the gate must stay binding. The
+earlier measurement where it paid (+$0.221) removed 65,764 tokens, 42× as much.
+
+Two things worth noting from the same run.
+
+**The rejection message is now actionable.** `extract.star:4:7: got ':', want newline` names the
+line and column of a Python-ism that still slips past the hardened contract — a type annotation
+or a dict comprehension. Before this branch that call reported "no usable program or reply",
+and one call in two failing would have been invisible. The remaining prompt work is now a
+matter of reading the failures rather than guessing at them.
+
+**The compaction-induced cache miss showed up unprompted.** The very next request after the
+sweep is `cache_miss_reason: prefix_change`, `cache_write: 86,130` on a 27,745-token transcript
+— our own mutation invalidating the prefix, on the turn straight after we saved 1,545 tokens.
+That is the effect §5 ships as a labelled diagnostic rather than a subtraction, observed here in
+a controlled single-session run rather than inferred from a correlation. It is the strongest
+argument for calibrating `coldMargin` and for A/B'ing the sweep before widening it.
