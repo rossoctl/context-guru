@@ -94,10 +94,10 @@ models:
 // zero rate reads downstream as "this model is free".
 func TestTableRejectsFilesThatWouldPriceSomethingFree(t *testing.T) {
 	for name, doc := range map[string]string{
-		"unknown key":  `models: [{match: "m", input: 1.0, out: 2.0}]`,
-		"no rates":     `models: [{match: "m", note: "todo"}]`,
-		"no match":     `models: [{in: 1.0, out: 2.0}]`,
-		"negative":     `models: [{match: "m", in: -1.0, out: 2.0}]`,
+		"unknown key":   `models: [{match: "m", input: 1.0, out: 2.0}]`,
+		"no rates":      `models: [{match: "m", note: "todo"}]`,
+		"no match":      `models: [{in: 1.0, out: 2.0}]`,
+		"negative":      `models: [{match: "m", in: -1.0, out: 2.0}]`,
 		"not a mapping": `[1,2,3]`,
 	} {
 		if _, err := ParseTable([]byte(doc)); err == nil {

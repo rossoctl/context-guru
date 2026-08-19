@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -259,8 +260,9 @@ func (d *DB) insertBatch(evs []*Event) error {
 	}
 	defer reqStmt.Close()
 	compStmt, err := tx.Prepare(`INSERT INTO request_components(
-		request_id, component, kind, acted, mutated, reverted, skipped, saved_gross, saved_unique, duration_ms, err
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+		request_id, component, kind, acted, mutated, reverted, skipped, saved_gross, saved_unique,
+		duration_ms, err, gates
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -307,7 +309,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 		for _, c := range e.Components {
 			if _, err := compStmt.Exec(id, c.Component, c.Kind,
 				boolInt(c.Acted), boolInt(c.Mutated), boolInt(c.Reverted), boolInt(c.Skipped),
-				c.SavedGross, c.SavedUnique, c.DurationMs, c.Err); err != nil {
+				c.SavedGross, c.SavedUnique, c.DurationMs, c.Err, gatesJSON(c.Gates)); err != nil {
 				return err
 			}
 		}
@@ -352,6 +354,20 @@ type spendKey struct{ tenant, month string }
 // monthKey renders an event timestamp as the UTC calendar month the cap bills against.
 func monthKey(tsMillis int64) string {
 	return time.UnixMilli(tsMillis).UTC().Format("2006-01")
+}
+
+// gatesJSON encodes a gate map for storage. Empty stays the empty STRING rather than
+// "{}" or NULL, so `gates <> ”` is the test for "this row has gate data" on rows written
+// before the column existed as well as rows whose component gated nothing.
+func gatesJSON(g map[string]int) string {
+	if len(g) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(g)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func boolInt(b bool) int {

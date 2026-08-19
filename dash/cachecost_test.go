@@ -27,8 +27,8 @@ func TestRepeatSavingsAreValuedByTheCacheOutcome(t *testing.T) {
 		e := &Event{
 			TS: 1000, SessionID: "s", Model: "aws/claude-sonnet-5",
 			TokensBefore: 90_000, TokensAfter: 90_000 - removed,
-			SavedUnique:  unique,
-			FreshInput:   10, CacheRead: read, CacheWrite: write, OutputTokens: 50,
+			SavedUnique: unique,
+			FreshInput:  10, CacheRead: read, CacheWrite: write, OutputTokens: 50,
 		}
 		e.Price(ibmSonnet, true)
 		return e
@@ -166,5 +166,54 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 	var sum float64
 	if err := db2.sql.QueryRow(`SELECT COALESCE(SUM(cache_saved_usd),0) FROM requests`).Scan(&sum); err != nil {
 		t.Fatalf("cache_saved_usd was not added: %v", err)
+	}
+}
+
+// Gates are the answer to "act rate 0%, why?" and they never reached the dashboard: they
+// were in /stats service-wide and in the log line per request, and the components table
+// showed a row of zeros. This pins the round trip, per request and aggregated.
+func TestGatesReachTheDashboard(t *testing.T) {
+	db := openTestDB(t)
+	e := &Event{TS: 1000, SessionID: "s", Model: "m", TokensBefore: 9000, TokensAfter: 9000,
+		Components: []CompRow{
+			{Component: "cmdfilter", Kind: "offload", Skipped: true,
+				Gates: map[string]int{"no_filter_match": 15, "marker_or_kept_verbatim": 4}},
+			{Component: "extract", Kind: "offload", Skipped: true,
+				Gates: map[string]int{"no_obvious_noise": 14}},
+		}}
+	e2 := &Event{TS: 1001, SessionID: "s", Model: "m", TokensBefore: 100, TokensAfter: 100,
+		Components: []CompRow{{Component: "cmdfilter", Kind: "offload", Skipped: true,
+			Gates: map[string]int{"no_filter_match": 5}}}}
+	if err := db.insertBatch([]*Event{e, e2}); err != nil {
+		t.Fatal(err)
+	}
+	comps, err := db.Components(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]*ComponentRow{}
+	for _, c := range comps {
+		byName[c.Component] = c
+	}
+	if got := byName["cmdfilter"].Gates["no_filter_match"]; got != 20 {
+		t.Errorf("aggregated no_filter_match = %d, want 20 (15 + 5)", got)
+	}
+	if got := byName["cmdfilter"].Gates["marker_or_kept_verbatim"]; got != 4 {
+		t.Errorf("aggregated marker_or_kept_verbatim = %d, want 4", got)
+	}
+	if got := byName["extract"].Gates["no_filter_match"]; got != 0 {
+		t.Errorf("a gate leaked across components: %d", got)
+	}
+	// And per request, which is what the drawer shows.
+	got, err := db.Request(1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Components[0].Gates["no_filter_match"] != 15 {
+		t.Errorf("per-request gates = %v", got.Components[0].Gates)
+	}
+	// A component that gated nothing must read as an empty map or nil, never as a gate.
+	if len(got.Components) != 2 {
+		t.Fatalf("%d component rows", len(got.Components))
 	}
 }

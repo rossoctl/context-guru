@@ -90,7 +90,7 @@ type Event struct {
 	// into them — see Price.
 	CacheSavedUSD float64 `json:"cache_saved_usd"`
 	CGLatencyMs   float64 `json:"cg_latency_ms"`
-	UpstreamMs      float64 `json:"upstream_ms"`
+	UpstreamMs    float64 `json:"upstream_ms"`
 
 	Expands      int `json:"expands"`
 	ExpandTokens int `json:"expand_tokens"`
@@ -237,6 +237,13 @@ type CompRow struct {
 	SavedUnique int     `json:"saved_unique"`
 	DurationMs  float64 `json:"duration_ms"`
 	Err         string  `json:"err,omitempty"`
+	// Gates counts, per named gate, the candidates this component turned away. It is the
+	// only answer to "why did nothing happen?", and it never left the pipeline before:
+	// /stats had it service-wide, the log line had it per request, and the dashboard —
+	// the thing a user actually opens — had a table of zeros with no explanation. On a
+	// Bob session almost every row is a gate name, because the offload heuristics were
+	// tuned on Claude Code's tool-output shapes.
+	Gates map[string]int `json:"gates,omitempty"`
 }
 
 // ContentRow is one rewritten message's before/after text (already redacted and
@@ -330,6 +337,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 			if r.Err != nil {
 				row.Err = r.Err.Error()
 			}
+			row.Gates = r.Gates
 			if r.Reverted {
 				e.Reverts++
 			}

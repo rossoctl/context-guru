@@ -947,14 +947,33 @@ function syncDimPicker(dims) {
   sel.value = state.dim;
 }
 
+/**
+ * gateSummary renders a component's gate counts: the reasons it turned candidates away,
+ * commonest first.
+ *
+ * This is the answer to the question the components table could not answer before —
+ * "act rate 0%, why?" — and it is the difference between a Bob user concluding
+ * context-guru does nothing and reading `no_filter_match 15`, which says the heuristics
+ * were written for another agent's tool-output shapes. An absent map means the row
+ * predates the column: "unknown", not "gated nothing".
+ */
+function gateSummary(gates) {
+  if (!gates) return el('span', { class: 'na', text: 'unknown' });
+  const all = Object.entries(gates).sort((a, b) => b[1] - a[1]);
+  if (!all.length) return el('span', { class: 'na', text: '—' });
+  const shown = all.slice(0, 2).map(([k, v]) => k + ' ' + num(v)).join(' · ');
+  const rest = all.length > 2 ? ' +' + (all.length - 2) : '';
+  return el('span', { title: all.map(([k, v]) => k + ' ' + num(v)).join('\n'), text: shown + rest });
+}
+
 async function loadComponents() {
   const body = clear($('#components-body'));
-  loadingRows(body, 15);
+  loadingRows(body, 16);
   try {
     const { components } = await api('components');
     clear(body);
     if (!components.length) {
-      tableMessage(body, 15, 'No component runs captured',
+      tableMessage(body, 16, 'No component runs captured',
         'Run some traffic through the proxy with a non-empty pipeline.');
       emptyState($('#chart-comp'), 'No component data',
         'This chart fills in once a component has saved something.');
@@ -977,6 +996,7 @@ async function loadComponents() {
         el('td', { class: 'num', text: c.llm_calls ? num(c.llm_calls) : '—' }),
         el('td', { class: 'num', text: c.llm_calls ? usd(c.llm_cost_usd) : '—' }),
         el('td', { class: 'num', text: num(c.errors) }),
+        el('td', {}, gateSummary(c.gates)),
         el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext }))));
     }
     // One measure (unique tokens saved) across up to twelve components: a magnitude
@@ -993,7 +1013,7 @@ async function loadComponents() {
     })), { emptyDetail: 'No component saved any content tokens in this window.' });
   } catch (err) {
     if (aborted(err)) return;
-    tableMessage(body, 15, 'Could not load components', String(err.message || err), { error: true });
+    tableMessage(body, 16, 'Could not load components', String(err.message || err), { error: true });
   }
 }
 
@@ -1608,7 +1628,8 @@ async function openRequest(id, fromURL) {
         el('thead', {}, el('tr', {},
           el('th', { text: '#' }), el('th', { text: 'Component' }), el('th', { text: 'Kind' }),
           el('th', { class: 'num', text: 'Saved' }), el('th', { class: 'num', text: 'Unique' }),
-          el('th', { class: 'num', text: 'Latency' }), el('th', { text: 'Outcome' }))));
+          el('th', { class: 'num', text: 'Latency' }), el('th', { text: 'Outcome' }),
+          el('th', { text: 'Why declined' }))));
       const tb = el('tbody');
       e.components.forEach((c, i) => {
         const outcome = c.reverted ? ['reverted', 'missing'] : c.skipped ? ['skipped', 'neutral']
@@ -1621,7 +1642,8 @@ async function openRequest(id, fromURL) {
           el('td', { class: 'num', text: compact(c.saved_unique) }),
           el('td', { class: 'num', text: ms(c.duration_ms) }),
           el('td', {}, el('span', { class: 'pill ' + outcome[1], text: outcome[0] }),
-            c.err ? el('div', { class: 's', text: c.err }) : null)));
+            c.err ? el('div', { class: 's', text: c.err }) : null),
+          el('td', {}, gateSummary(c.gates))));
       });
       tbl.appendChild(tb);
       body.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));

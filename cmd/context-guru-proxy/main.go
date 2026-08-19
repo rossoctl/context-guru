@@ -626,7 +626,7 @@ func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRo
 			FreshInput: r.FreshInput, OutputTokens: r.OutputTokens,
 			CostUSD: r.CostUSD, BaselineUSD: r.BaselineUSD, CGLLMCostUSD: r.CGLLMCostUSD,
 			CacheSavedUSD: r.CacheSavedUSD,
-			CGLatencyMs: r.CGLatencyMs, UpstreamMs: r.UpstreamMs, Sessions: r.Sessions,
+			CGLatencyMs:   r.CGLatencyMs, UpstreamMs: r.UpstreamMs, Sessions: r.Sessions,
 			ArchivedCount: r.ArchivedCount, ArchivedBytes: r.ArchivedBytes,
 		})
 	}

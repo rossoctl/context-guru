@@ -2,6 +2,7 @@ package dash
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -195,7 +196,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		return nil, err
 	}
 	crows, err := d.sql.Query(`SELECT component, kind, acted, mutated, reverted, skipped,
-		saved_gross, saved_unique, duration_ms, err FROM request_components
+		saved_gross, saved_unique, duration_ms, err, gates FROM request_components
 		WHERE request_id = ? ORDER BY rowid`, id)
 	if err != nil {
 		return nil, err
@@ -204,11 +205,18 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 	for crows.Next() {
 		var c CompRow
 		var a, m, rv, sk int
+		var gates string
 		if err := crows.Scan(&c.Component, &c.Kind, &a, &m, &rv, &sk,
-			&c.SavedGross, &c.SavedUnique, &c.DurationMs, &c.Err); err != nil {
+			&c.SavedGross, &c.SavedUnique, &c.DurationMs, &c.Err, &gates); err != nil {
 			return nil, err
 		}
 		c.Acted, c.Mutated, c.Reverted, c.Skipped = a != 0, m != 0, rv != 0, sk != 0
+		if gates != "" {
+			// A row written before the column existed, or one whose JSON is somehow
+			// unreadable, leaves Gates nil — which the UI shows as "unknown", not as
+			// "gated nothing".
+			_ = json.Unmarshal([]byte(gates), &c.Gates)
+		}
 		e.Components = append(e.Components, c)
 	}
 	if err := crows.Err(); err != nil {
@@ -429,6 +437,11 @@ type ComponentRow struct {
 	// component's savings also include frozen results replayed with no call at all, and on
 	// measured traffic that replay is ~93% of its realized value.
 	LLMSavedTokens int64 `json:"llm_saved_tokens"`
+	// Gates totals the named reasons this component turned candidates away over the
+	// window. For a component with act_rate 0 it is the whole story, and it used to be
+	// visible only in /stats (service-wide) and the log line (per request) — never in the
+	// dashboard, which is what a user opens when they ask why nothing was compacted.
+	Gates map[string]int64 `json:"gates,omitempty"`
 }
 
 // Components aggregates per-component accounting over the filtered window.
@@ -499,7 +512,36 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 		c.LLMCalls, c.LLMCallsCold, c.LLMCallsAcc = calls, cold, acc
 		c.LLMCostUSD, c.LLMLatencyMsAvg, c.LLMSavedTokens = cost.Float64, lat.Float64, saved
 	}
-	return out, xrows.Err()
+	if err := xrows.Err(); err != nil {
+		return nil, err
+	}
+	// Gate totals, summed in SQL with json_each rather than by decoding a map per row in
+	// Go: a filtered window is hundreds of thousands of component rows and the gate map is
+	// the widest text on each of them.
+	gq := `SELECT c.component, j.key, SUM(CAST(j.value AS INTEGER))
+		FROM request_components c JOIN requests r ON r.id = c.request_id, json_each(c.gates) j
+		WHERE ` + cond + ` AND c.gates <> '' GROUP BY 1, 2`
+	grows, err := d.sql.Query(gq, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer grows.Close()
+	for grows.Next() {
+		var name, gate string
+		var n int64
+		if err := grows.Scan(&name, &gate, &n); err != nil {
+			return nil, err
+		}
+		c, ok := byName[name]
+		if !ok {
+			continue
+		}
+		if c.Gates == nil {
+			c.Gates = map[string]int64{}
+		}
+		c.Gates[gate] += n
+	}
+	return out, grows.Err()
 }
 
 // Bucket is one time bucket of the series. Bucketing is done in SQL at query
@@ -532,8 +574,8 @@ type Bucket struct {
 	CGLatencyMs   float64 `json:"cg_latency_ms_avg"`
 	UpstreamMs    float64 `json:"upstream_ms_avg"`
 	Expands       int64   `json:"expands"`
-	ExpandTokens int64   `json:"expand_tokens"`
-	Misses       int64   `json:"cache_misses"`
+	ExpandTokens  int64   `json:"expand_tokens"`
+	Misses        int64   `json:"cache_misses"`
 }
 
 // DayMs is one day of buckets. Per-DAY usage bars are Series with this bucket — the

@@ -172,7 +172,12 @@ CREATE TABLE IF NOT EXISTS request_components (
   saved_gross  INTEGER NOT NULL DEFAULT 0,
   saved_unique INTEGER NOT NULL DEFAULT 0,
   duration_ms  REAL    NOT NULL DEFAULT 0,
-  err          TEXT    NOT NULL DEFAULT ''
+  err          TEXT    NOT NULL DEFAULT '',
+  -- Why this component turned candidates away, as {"gate_name":count} — the only answer
+  -- to "nothing happened, why?", and the answer a user of a non-Claude agent needs most.
+  -- JSON rather than a row per gate: it is read whole, never joined on, and json_each
+  -- aggregates it in SQL when the components view needs totals.
+  gates        TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_rc_request ON request_components(request_id);
 CREATE INDEX IF NOT EXISTS idx_rc_comp    ON request_components(component);
@@ -320,6 +325,7 @@ CREATE INDEX IF NOT EXISTS idx_xcalls_session ON extraction_calls(session_id, ts
 // end up with different shapes.
 var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "cache_saved_usd", "REAL NOT NULL DEFAULT 0"},
+	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
 }
 
 // migrate creates the schema and validates its version. A version mismatch is
