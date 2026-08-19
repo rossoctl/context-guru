@@ -995,6 +995,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// The request's own metadata (effort, thinking, sampling, tool_choice, shape),
 		// read from the PRISTINE body in one pass before the pipeline touches it.
 		cp.noteMeta(metaFromBody(body))
+		// Which tools, MCP servers and skills the request DECLARED, and which its last turn
+		// called — off the same pristine body, memoized by declaration-set digest.
+		cp.noteInventory(string(provider), body)
 		// Fail open around the whole pre-forward rewrite (pipeline + expand injection): a
 		// panic anywhere here must forward the PRISTINE inbound body, never 500 the client.
 		// apply.BodyFull has its own recover; this backstops expand.Inject and anything else.

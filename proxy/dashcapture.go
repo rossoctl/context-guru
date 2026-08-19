@@ -50,6 +50,11 @@ type capture struct {
 	tenant string
 	// meta is the request's own metadata, read once off the pristine inbound body.
 	meta dash.Meta
+	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
+	// weights) plus the tool calls of its last tool-using turn — nil when the request
+	// declares no tools, and nil when the dashboard is off. Read on the request path with
+	// the pristine body, like meta; emitted at finish, where the session id is known.
+	inv *dash.Inventory
 }
 
 // newCapture starts a capture for one request, or returns nil when the dashboard
@@ -111,6 +116,24 @@ func (c *capture) noteMeta(m dash.Meta) {
 	if c != nil {
 		c.meta = m
 	}
+}
+
+// noteInventory records WHICH tools, MCP servers and skills the request declared, and
+// which of them its last turn actually called. The count in Meta.Tools answers "how
+// many"; this answers "which", which is the only way to say how much of a declared
+// inventory is dead weight.
+//
+// Cheap by construction, because it runs on every request: the whole per-request cost is
+// one structural scan of the tools array, two byte searches for the skills listing, one
+// hash of that set and one map lookup. Parsing and tokenizing happen once per distinct
+// declaration set (dash.ScanInventory memoizes by digest), so a session pays for its
+// inventory on its first request and nothing on the other 64. Measured in
+// dash.BenchmarkScanInventory.
+func (c *capture) noteInventory(provider string, body []byte) {
+	if c == nil {
+		return
+	}
+	c.inv = dash.ScanInventory(provider, body)
 }
 
 // The dialect map metaFromBody normalizes. Two dialects onto one set of columns, because a
@@ -354,5 +377,11 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		}
 		e.ContentCap = contentCap
 	}
+	// The declared/used inventory goes to its own tables, keyed by session: NOT under the
+	// content gate, because these are identifiers of the caller's own configuration rather
+	// than transcript text (see dash/toolinventory.go), and NOT on the Event, because the
+	// rows are per session and deduped by declaration-set digest rather than one set per
+	// request. Same discipline as Record: a non-blocking send, nothing else here.
+	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv)
 	c.rec.Record(e)
 }

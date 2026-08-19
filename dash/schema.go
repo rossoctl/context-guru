@@ -327,6 +327,87 @@ CREATE TABLE IF NOT EXISTS extraction_calls (
 CREATE INDEX IF NOT EXISTS idx_xcalls_request ON extraction_calls(request_id);
 CREATE INDEX IF NOT EXISTS idx_xcalls_tenant_ts ON extraction_calls(tenant_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_xcalls_session ON extraction_calls(session_id, ts);
+
+-- What a session DECLARED it could do: tool, MCP tool, provider-side tool and skill
+-- NAMES, each with the token weight of carrying it. The requests table has only a
+-- COUNT (requests.tools), which can find a heavy user but cannot name what they carry
+-- — so "how much of what you carry do you actually use" had no data behind it.
+--
+-- Names, never descriptions: a tool/server/skill name is an IDENTIFIER of the user's
+-- own configuration, the same class as tool_choice, so these rows are gated on the
+-- tenant_id scoping every query already applies and NOT on transcript-capture consent
+-- (which would deny the feature to the accounts that declined it, over data that is
+-- not their transcript).
+--
+-- Keyed by SESSION plus a digest of the declaration set, not by request. The set is
+-- constant for a whole session unless the client changes it — measured: 34 of 135
+-- production sessions ever change it — so a per-request table would be ~45 identical
+-- rows x 65 requests per session saying the same thing. A session that changes its set
+-- simply gains a second digest, which is also how the change itself becomes visible.
+-- ts is when the set was first seen.
+--
+-- kind='skill_listing' is ONE marker row per set: name is empty, tokens is the prose
+-- listing's own cost, and server holds the PARSE STATE ('ok' | 'unknown'). It exists so
+-- a listing whose format moved reads as "not known" rather than "no skills declared" —
+-- a wrong-but-confident empty inventory is the one output that could later authorise
+-- stripping something real.
+CREATE TABLE IF NOT EXISTS tool_declarations (
+  tenant_id  TEXT    NOT NULL DEFAULT '',
+  session_id TEXT    NOT NULL DEFAULT '',
+  digest     TEXT    NOT NULL DEFAULT '',   -- identity of the declaration SET
+  kind       TEXT    NOT NULL DEFAULT '',   -- tool|mcp_tool|server_tool|skill|skill_listing
+  name       TEXT    NOT NULL DEFAULT '',
+  server     TEXT    NOT NULL DEFAULT '',   -- MCP server half of mcp__<server>__<tool>
+  tokens     INTEGER NOT NULL DEFAULT 0,    -- BPE cost of carrying this declaration
+  ts         INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (session_id, digest, kind, name)
+);
+CREATE INDEX IF NOT EXISTS idx_tooldecl_tenant ON tool_declarations(tenant_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_tooldecl_name   ON tool_declarations(name);
+
+-- What a session actually INVOKED: one row per distinct tool name (and, for the Skill
+-- tool, per skill — input.skill is the only place a skill invocation is identifiable,
+-- since the Skill tool's schema carries no enum). Counted from the LAST tool-using turn
+-- of each request, deduped by that turn's fingerprint, because the agent resends the
+-- whole transcript every request.
+CREATE TABLE IF NOT EXISTS tool_uses (
+  tenant_id  TEXT    NOT NULL DEFAULT '',
+  session_id TEXT    NOT NULL DEFAULT '',
+  name       TEXT    NOT NULL DEFAULT '',
+  server     TEXT    NOT NULL DEFAULT '',
+  skill      TEXT    NOT NULL DEFAULT '',   -- '' for anything but a Skill call
+  calls      INTEGER NOT NULL DEFAULT 0,
+  first_ts   INTEGER NOT NULL DEFAULT 0,
+  last_ts    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (session_id, name, skill)
+);
+CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts DESC);
+
+`
+
+// additiveDDL2 is the additive phase that must run AFTER `ddl`, because it references a
+// table `ddl` creates. On a fresh database `additiveDDL` runs first of all — before
+// `requests` exists — and SQLite resolves a trigger's body at CREATE time, so a trigger
+// on `requests` can only be created here. Executed on EVERY open and on both paths
+// (fresh and already-at-version), like additiveDDL, and idempotent for the same reason.
+const additiveDDL2 = `
+-- Lifetime. These two tables are keyed by session rather than by request_id, so they
+-- have no FK to hang an ON DELETE CASCADE on — and every deletion path in this package
+-- (retention eviction, a disk-pressure sweep, cold-storage migration, a manager's
+-- tenant purge) works by deleting from the requests table. This trigger is how the inventory
+-- follows: when a session's LAST request row goes, its inventory goes with it. The WHEN
+-- clause is one indexed lookup (idx_requests_session) per deleted row, the same order
+-- of cost as the cascades already on that path, and it keeps a live session's inventory
+-- while a quota trim removes only its oldest rows.
+--
+-- A trigger, not a table, so this stays inside the additive rule: it creates a new
+-- object and alters nothing about the shape of the requests table.
+CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
+WHEN NOT EXISTS (SELECT 1 FROM requests WHERE session_id = OLD.session_id)
+BEGIN
+  DELETE FROM tool_declarations WHERE session_id = OLD.session_id;
+  DELETE FROM tool_uses         WHERE session_id = OLD.session_id;
+END;
 `
 
 // additiveColumns are columns added to an EXISTING table without a version bump.
@@ -372,9 +453,14 @@ func migrate(db *sql.DB) error {
 	case have != fmt.Sprint(schemaVersion):
 		return &versionMismatch{have: have}
 	default:
-		return nil // already at this version
+		// Already at this version: `ddl` is skipped, but the late additive phase still runs.
+		_, err = db.Exec(additiveDDL2)
+		return err
 	}
 	if _, err := db.Exec(ddl); err != nil {
+		return err
+	}
+	if _, err := db.Exec(additiveDDL2); err != nil {
 		return err
 	}
 	_, err = db.Exec(`INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)`, fmt.Sprint(schemaVersion))

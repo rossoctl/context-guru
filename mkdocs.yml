@@ -129,6 +129,7 @@ nav:
       - Config & environment: reference/config.md
       - Settings form & field descriptors: how-to/settings-form.md
   - Dashboard: dashboard.md
+  - Tool inventory: tool-inventory.md
   - Hosted service: hosted.md
   - Results:
       - Overview: RESULTS.md
