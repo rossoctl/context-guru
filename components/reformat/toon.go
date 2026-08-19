@@ -2,6 +2,7 @@ package reformat
 
 import (
 	"encoding/json"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,11 +19,13 @@ func init() { components.Register("toon", newToon) }
 // comma-separated row per element. It drops the braces, repeated keys, and
 // quotes that dominate a JSON array's token cost. It's a Reformat (repack in
 // place, nothing stashed), so it must be LOSSLESS: every scalar value is preserved and
-// stays distinguishable from every other. Arrays are encoded only when the element key
-// sets match, the values are scalars, and no cell would be AMBIGUOUS once its quotes are
-// dropped — a null, or a string that reads back as a number or a bool, makes the whole
-// array non-encodable (see scalarCell). Anything nested, ragged or non-array is left
-// untouched, and the pipeline's never-worse guard reverts any case that fails to shrink.
+// stays distinguishable from every other. Ambiguity is resolved by QUOTING, not by
+// refusing: a string that would read back as a number or a bool is quoted ("1"), a bare
+// empty cell is null and `""` is the empty string (see scalarCell for the full cell
+// grammar). Arrays are encoded when the element key sets match and every value is a
+// scalar; anything nested or non-array is left untouched. Every candidate table is
+// decoded again before it is adopted (decodeTOON) and dropped unless it reproduces the
+// input exactly, and the pipeline's never-worse guard reverts any case that fails to shrink.
 //
 //	[{"id":1,"name":"Alice"},{"id":2,"name":"Bob"}]
 //	=>
@@ -160,11 +163,18 @@ func encodeTOON(content string) (string, bool) {
 	}
 	sort.Strings(keys) // deterministic column order; header preserves the mapping
 
+	hdr := make([]string, len(keys))
+	for j, k := range keys {
+		hdr[j] = k // a key carrying a delimiter is quoted like a cell, and unquoted back
+		if k == "" || needsQuote(k) {
+			hdr[j] = quoteCell(k)
+		}
+	}
 	var b strings.Builder
 	b.WriteString("[")
 	b.WriteString(strconv.Itoa(len(arr)))
 	b.WriteString("]{")
-	b.WriteString(strings.Join(keys, ","))
+	b.WriteString(strings.Join(hdr, ","))
 	b.WriteString("}:\n")
 
 	for _, row := range arr {
@@ -186,50 +196,69 @@ func encodeTOON(content string) (string, bool) {
 		b.WriteString(strings.Join(cells, ","))
 		b.WriteByte('\n')
 	}
-	return b.String(), true
-}
-
-// scalarCell renders one JSON scalar as a TOON cell, quoting CSV-style when the
-// value contains a delimiter. ok=false means "not encodable" — the caller then leaves the
-// whole array untouched.
-//
-// It refuses three cases that would make the encoding LOSSY, because toon is a Reformat
-// and Reformat's contract is a lossless repack: the type carries no stash, no
-// <<cg:HASH>> marker and no expand path, so a value it flattens is unrecoverable.
-//   - null: would render as an empty cell, indistinguishable from a real "".
-//   - a string that reads back as a number ("1", "1.50", "01234"): collapses onto the
-//     number cell, so the reader cannot tell 1 from "1".
-//   - a string that reads back as a bool ("true"): same collapse.
-//
-// Refusing costs only a table we decline to compress; encoding it would silently change
-// what the model is told, which is the one thing a lossless component may not do.
-func scalarCell(v any) (string, bool) {
-	var s string
-	switch x := v.(type) {
-	case nil:
-		return "", false // ambiguous with a real empty string, and unrecoverable
-	case bool:
-		s = strconv.FormatBool(x)
-	case json.Number:
-		s = x.String()
-	case string:
-		if ambiguousScalarString(x) {
-			return "", false
-		}
-		s = x
-	default:
+	out := b.String()
+	// Verify-then-adopt: decode the candidate and adopt it ONLY IF it reproduces the
+	// input exactly. Losslessness is then a property this function checked, not one a
+	// comment claims — and a cell shape the encoder mishandles (a literal newline, an
+	// unanticipated key) costs a declined table instead of silently corrupting one.
+	if back, ok := decodeTOON(out); !ok || !reflect.DeepEqual(back, arr) {
 		return "", false
 	}
-	if strings.ContainsAny(s, ",\"\n\r") || s != strings.TrimSpace(s) {
-		s = `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
-	}
-	return s, true
+	return out, true
 }
 
+// scalarCell renders one JSON scalar as a TOON cell. Every scalar is encodable: the
+// ambiguity that would make the encoding lossy is removed by QUOTING, which is the
+// same CSV-style mechanism the delimiter case already used, rather than by refusing
+// the whole table.
+//
+// The cell grammar, and what makes each value distinguishable from every other:
+//
+//   - a bare empty cell is null;
+//   - `""` (quoted, empty) is the empty string;
+//   - a bare `true`/`false` is a bool, a bare number is a number;
+//   - a string that would read back as a number or a bool ("1", "1.50", "true") is
+//     QUOTED, so it reads back as a string;
+//   - anything containing a delimiter, or with leading/trailing space, is quoted too.
+//
+// ok=false only for a value that is not a scalar at all (a nested object or array),
+// which means the array is not a flat table. decodeTOON is the inverse, and
+// encodeTOON refuses to adopt any table that does not survive it (verify-then-adopt),
+// so a shape this comment has not anticipated — a cell holding a literal newline, say,
+// which quoting cannot rescue because rows are newline-separated — costs a declined
+// table, never a corrupted one.
+func scalarCell(v any) (string, bool) {
+	switch x := v.(type) {
+	case nil:
+		return "", true // bare empty cell: null
+	case bool:
+		return strconv.FormatBool(x), true
+	case json.Number:
+		return x.String(), true
+	case string:
+		if x == "" || ambiguousScalarString(x) || needsQuote(x) {
+			return quoteCell(x), true
+		}
+		return x, true
+	default:
+		return "", false // nested object/array — not a flat table
+	}
+}
+
+// needsQuote reports whether a cell's text would not survive the row/cell split
+// unquoted: it carries a delimiter, or space the split would not preserve.
+func needsQuote(s string) bool {
+	return strings.ContainsAny(s, ",\"\n\r") || s != strings.TrimSpace(s)
+}
+
+// quoteCell applies CSV-style quoting: wrap in quotes, double any interior quote.
+func quoteCell(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+
 // ambiguousScalarString reports whether a string cell would be indistinguishable from a
-// number or boolean cell once the quotes are dropped. Uses the same parsers the JSON
-// decoder would, so the test is "does this round-trip as a different type", not a regex
-// guess. Bare "" is fine: it is only ambiguous with null, which scalarCell already refuses.
+// number or boolean cell if it were emitted bare. Uses the same parsers the JSON decoder
+// would, so the test is "does this read back as a different type", not a regex guess.
+// Such a cell is quoted (see scalarCell); over-quoting costs two characters, and
+// decodeTOON reads a quoted cell back as a string unconditionally.
 func ambiguousScalarString(s string) bool {
 	if s == "" {
 		return false
@@ -241,6 +270,114 @@ func ambiguousScalarString(s string) bool {
 		return true
 	}
 	return false
+}
+
+// decodeTOON is encodeTOON's inverse: it parses a TOON table back into the value it
+// was built from, or reports ok=false. It exists so losslessness is PROVEN rather
+// than argued — encodeTOON runs it on its own output and adopts the table only if
+// the result is deep-equal to the input (headroom's verify-then-adopt discipline).
+// It is also what the round-trip tests decode with.
+func decodeTOON(s string) ([]map[string]any, bool) {
+	nl := strings.IndexByte(s, '\n')
+	if nl < 0 || len(s) == 0 || s[0] != '[' {
+		return nil, false
+	}
+	hdr, body := s[:nl], s[nl+1:]
+	brace := strings.Index(hdr, "]{")
+	if brace < 0 || !strings.HasSuffix(hdr, "}:") {
+		return nil, false
+	}
+	n, err := strconv.Atoi(hdr[1:brace])
+	if err != nil || n <= 0 {
+		return nil, false
+	}
+	keys, _, ok := splitCells(hdr[brace+2 : len(hdr)-2])
+	if !ok {
+		return nil, false
+	}
+	lines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
+	if len(lines) != n {
+		return nil, false
+	}
+	out := make([]map[string]any, 0, n)
+	for _, ln := range lines {
+		cells, quoted, ok := splitCells(ln)
+		if !ok || len(cells) != len(keys) {
+			return nil, false
+		}
+		row := make(map[string]any, len(keys))
+		for j, k := range keys {
+			row[k] = decodeCell(cells[j], quoted[j])
+		}
+		if len(row) != len(keys) {
+			return nil, false // duplicate key in the header
+		}
+		out = append(out, row)
+	}
+	return out, true
+}
+
+// splitCells splits one TOON row (or the header's key list) into cells, honouring the
+// CSV-style quoting scalarCell applies. It returns each cell's text with its quotes
+// removed plus whether it ARRIVED quoted — that flag is what keeps "1" distinguishable
+// from 1 on the way back.
+func splitCells(row string) (cells []string, quoted []bool, ok bool) {
+	for {
+		if strings.HasPrefix(row, `"`) {
+			var b strings.Builder
+			i := 1
+			for {
+				j := strings.IndexByte(row[i:], '"')
+				if j < 0 {
+					return nil, nil, false // unterminated quote
+				}
+				b.WriteString(row[i : i+j])
+				i += j + 1
+				if i < len(row) && row[i] == '"' { // doubled quote: a literal one
+					b.WriteByte('"')
+					i++
+					continue
+				}
+				break
+			}
+			cells, quoted = append(cells, b.String()), append(quoted, true)
+			row = row[i:]
+			if row == "" {
+				return cells, quoted, true
+			}
+			if row[0] != ',' {
+				return nil, nil, false // trailing junk after a closing quote
+			}
+			row = row[1:]
+			continue
+		}
+		k := strings.IndexByte(row, ',')
+		if k < 0 {
+			return append(cells, row), append(quoted, false), true
+		}
+		cells, quoted = append(cells, row[:k]), append(quoted, false)
+		row = row[k+1:]
+	}
+}
+
+// decodeCell maps one cell back to its JSON scalar, mirroring scalarCell exactly: a
+// quoted cell is always a string, a bare empty cell is null, and a bare cell is typed
+// by the same parsers that decided it did not need quoting.
+func decodeCell(cell string, quoted bool) any {
+	switch {
+	case quoted:
+		return cell
+	case cell == "":
+		return nil
+	case cell == "true":
+		return true
+	case cell == "false":
+		return false
+	}
+	if _, err := strconv.ParseFloat(cell, 64); err == nil {
+		return json.Number(cell)
+	}
+	return cell
 }
 
 func init() {
