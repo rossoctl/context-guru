@@ -321,7 +321,10 @@ Until it is measured, `coldMargin` is an un-calibrated guess. It is also the gat
 front of the largest unclaimed saving on this page (§4, `TailOnly` and `ColdCache`) — so
 calibrating it is a prerequisite for that work, not a separate errand.
 
-Recorded honestly: the local run above was engineered with a ~350-second idle gap, which is
-below the 360-second threshold, so the sweep not firing was **correct behaviour on a
-mis-specified test**, not a defect. The finding is the missing comparison, not a bug in the
-predictor.
+Recorded honestly: the measured gap on that request was **360 seconds — exactly the
+threshold**, which `cacheIsCold` compares with `>=`. So it is a boundary case, not a clear
+defect, and a sub-second difference decided it. That is precisely what makes the point: the
+provider had *already* expired the cache at the same instant our predictor was still deciding,
+and the only reason we know the provider's answer is a column nothing reads for this purpose.
+A threshold whose correctness turns on rounding is a threshold that should be calibrated
+against observation rather than argued about.
