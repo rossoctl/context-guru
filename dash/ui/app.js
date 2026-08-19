@@ -1574,6 +1574,10 @@ async function openRequest(id, fromURL) {
     body.appendChild(kvBand('Cost and latency', 'detail-cost',
       kv('Cost (actual / baseline)', priced ? usd(e.cost_usd) + ' / ' + usd(e.baseline_cost_usd) : 'not priced'),
       kv('Our own LLM cost', priced ? usd(e.cg_llm_cost_usd) : '—'),
+      // On a turn whose cache HIT this is usually the largest money figure on the row,
+      // and it was not reported anywhere: the cache reads this request was billed for,
+      // against the fresh rate they would have cost without the cache.
+      kv('Prompt cache saved', priced ? usd(e.cache_saved_usd) : '—'),
       kv('context-guru latency', ms(e.cg_latency_ms)),
       kv('Upstream latency', ms(e.upstream_ms)),
       kv('Restorations', num(e.expands) + ' (' + compact(e.expand_tokens) + ' tok)'),
