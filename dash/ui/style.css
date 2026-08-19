@@ -924,6 +924,19 @@ details.field > summary { font-size: var(--t-small); color: var(--fg-muted); fon
 .comp-warn { color: var(--warn); font-size: var(--t-micro); flex: 1 0 100%; padding-left: 22px; line-height: 1.45; }
 .actions { display: flex; gap: var(--sp-2); align-items: center; margin-top: var(--sp-3); }
 
+/* One folded section per component, 97 fields across fourteen of them. Folded is the only
+   layout that works at that size, and the summary carries how many keys are actually SET so
+   the operator can find the configured ones without opening all fourteen. */
+.comp-fields { margin: var(--sp-2) 0; padding-left: var(--sp-3); border-left: 2px solid var(--border-soft); }
+.comp-fields[open] { border-left-color: var(--border); }
+.comp-fields > summary { display: flex; gap: var(--sp-2); align-items: baseline; flex-wrap: wrap; }
+.comp-fields > summary .comp-name { color: var(--fg); font-weight: 600; }
+/* Tighter than a top-level .field: these come thirty at a time. The dotted key is shown as
+   code because it is the key in the document, not a prose label — the same string the
+   server's 400 will name if a value is refused. */
+.cfg-field { margin: var(--sp-3) 0; }
+.cfg-field > label > code { font-size: var(--t-small); }
+
 /* Which configuration is in force, and the one button that changes that. Its own class
    rather than .banner: that one is page-level (page margins, status colours), and this
    states a fact about the form it sits in, not an alert. */

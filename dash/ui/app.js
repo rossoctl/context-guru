@@ -3841,6 +3841,44 @@ function loadSettings() {
     const inherited = !!t.config_inherited;
     const cfg = t.effective_config || {};
     const { active, all } = componentPickers(cfg.pipeline, opts);
+    // The descriptors and the recommended prefill, both from /api/options. Nothing about a
+    // field — its name, type, default, enum options, min or hint — is written in this file.
+    const compFields = (opts && opts.component_fields) || {};
+    const recommended = (opts && opts.recommended) || {};
+    // Seeded with ONLY the keys the stored document states. See cfgState — an absent key is
+    // not a zero. Secrets are dropped on the way in as well as on the way out: the server
+    // does not read one back (config.readBlocks skips them), and if some future payload did,
+    // holding it here would put a credential in a form's state and post it straight back.
+    cfgState = {};
+    for (const [cname, vals] of Object.entries(cfg.components || {})) {
+      const secret = new Set((compFields[cname] || []).filter((fd) => fd.secret).map((fd) => fd.key));
+      cfgState[cname] = Object.fromEntries(Object.entries(vals).filter(([k]) => !secret.has(k)));
+    }
+    // A best-effort read of a document the server could not fully load is drawn but never
+    // editable: posting it back would write the fallback's guess over the real thing. The
+    // server refuses that too (409), which is the backstop rather than the only guard.
+    const cfgDisabled = inherited || !!cfg.parse_error;
+
+    // One <details> per component that HAS knobs, drawn from the descriptors. Redrawn in
+    // place when a component is enabled or disabled, or when the recommended values are
+    // taken — cfgState survives a redraw, which is what makes the round trip work.
+    const compHost = el('div', { 'data-testid': 'comp-fields' });
+    const enabledNow = (cname) => {
+      const cb = $('#comp-' + cname);
+      return cb ? cb.checked : active.has(cname);
+    };
+    const drawComps = () => {
+      clear(compHost);
+      for (const cname of all) {
+        const fields = compFields[cname] || [];
+        if (!fields.length) continue; // takes no configuration (cachesplit)
+        if (!cfgState[cname]) cfgState[cname] = {};
+        const off = !enabledNow(cname);
+        compHost.appendChild(renderComponentFields(cname, fields, cfgState[cname],
+          cfgDisabled || off,
+          { recommended: recommended[cname], redraw: drawComps, opts, off }));
+      }
+    };
     // Still the document itself, for the two things that are ABOUT the document rather than
     // about its contents: Customise stores a byte-identical copy of the default (comments and
     // all), and "identical to the current default" is a text comparison.
@@ -3990,7 +4028,10 @@ function loadSettings() {
       const id = 'comp-' + name;
       const cb = el('input', { type: 'checkbox', id, 'data-comp': name, 'data-testid': id });
       cb.checked = active.has(name);
-      cb.disabled = inherited;
+      cb.disabled = cfgDisabled;
+      // Enablement is pipeline membership, so this checkbox is what makes a component's
+      // fields editable — and unticking it is what clears them on save.
+      cb.addEventListener('change', () => drawComps());
       const warn = name === 'extract_llm'
         ? ' — calls a compaction model on the request path (+117ms typical, up to ~945ms on file reads) and bills to the shared credential'
         : '';
@@ -4002,10 +4043,12 @@ function loadSettings() {
       el('label', {}, 'Pipeline components'), grid,
       el('p', { class: 'hint' }, 'What runs, in the order shown.'),
       whyBlock('What saving changes',
-        'A newly enabled component is appended at the end of the pipeline. Saving rebuilds ' +
-        'your pipeline and discards frozen compaction decisions, so the next turn will not ' +
-        'be cache-warm. Per-component knobs beyond the fields on this page are set by a ' +
-        'manager on your account.')));
+        'A newly enabled component is appended at the end of the pipeline. Ticking one here ' +
+        'is what makes its fields below editable, and unticking one CLEARS the keys it has ' +
+        'in your document — a block is configuration, not enablement, so leaving a block ' +
+        'behind for a component that does not run is the state nobody can read back. ' +
+        'Saving rebuilds your pipeline and discards frozen compaction decisions, so the ' +
+        'next turn will not be cache-warm.')));
 
     // Content capture consent.
     const cap = el('input', {
@@ -4036,14 +4079,37 @@ function loadSettings() {
             + 'A manager can repair the document on this account\u2019s page under Accounts.'))));
     }
 
-    // The compaction-model form.
+    // Every component's configuration, one <details> each, drawn from /api/options.
     //
     // There is no YAML editor here any more. It was not a convenience, it was the failure:
     // the page rewrote the document with regular expressions, which corrupted any config
     // whose pipeline was written as a block sequence and produced "did not find expected
     // key" on every save, with no way out from the UI. Fields post fields; the server owns
     // the document.
-    if (mgr) renderXllmForm(host, cfg.extract_llm, inherited, opts);
+    //
+    // And the fields themselves are not written here either. The hand-written version of
+    // this form covered 18 keys of 97 and one component of fourteen, and every field on it
+    // was a second copy of a fact the server already stated — including a strategy list the
+    // engine had outgrown, which silently rewrote a stored value. So the descriptors decide
+    // what is drawn, and a knob added to a component appears here with no change to this
+    // file.
+    if (mgr) {
+      host.appendChild(el('div', { class: 'field' },
+        el('label', {}, 'Component configuration'),
+        el('p', { class: 'hint' },
+          'Every key each component reads, from the server\u2019s own declarations. A field '
+          + 'left empty is UNSET: the key is removed from your document and the component\u2019s '
+          + 'default decides, which is not the same thing as writing that default down.'),
+        whyBlock('What happens when you save',
+          'These fields are applied to your configuration on the server with a YAML library '
+          + 'and the result is built once before it is stored, so a value that would not work '
+          + 'is a refusal naming the field rather than a surprise on your next turn. A key you '
+          + 'leave empty is REMOVED from the document and the component\u2019s own default '
+          + 'takes over. Saving rebuilds your pipeline and discards frozen compaction '
+          + 'decisions, so the next turn will not be cache-warm.')));
+      host.appendChild(compHost);
+      drawComps();
+    }
 
     // The whole document, read-only. The fields above are the knobs worth turning from a
     // page; they are not every key a configuration can hold, and an operator asking "what
@@ -4209,180 +4275,261 @@ async function setStoredConfig(yaml) {
 }
 
 /**
- * The compaction-model form.
+ * cfgState is what Save posts as `components`: component name → DOTTED key → value, holding
+ * ONLY the keys the stored document actually states plus the ones edited on this page.
  *
- * extract_llm has fourteen knobs and every one of them is reachable only by hand-editing
- * raw YAML, in a textarea, with no validation until save — and the component's own loader
- * unmarshals its block NON-strictly, so a misspelled key is silently ignored rather than
- * rejected. It is also the one component that spends money, so a typo there is not a typo,
- * it is a bill. Hence a form with the recommended defaults filled in.
+ * The distinction is the whole contract. An absent key means "the component's own default",
+ * which is a DIFFERENT thing from a value — so a key this object does not carry is deleted
+ * from the block on save and the component decides again. Inventing a value for a key the
+ * document never stated is how a save wrote 20 over a deliberate `llm_max_per_session: 0`.
+ * Every control below therefore renders an unstated key as EMPTY with its default as the
+ * placeholder, and only writes into this object when somebody changes it.
  *
- * The YAML textarea stays, as Advanced, and still wins when edited: it is the only way to
- * express anything this form does not cover.
+ * One entry per component with knobs, created on load and kept even when it empties: a name
+ * present in `components` is what tells the server to CLEAR that block, so dropping an
+ * emptied entry would silently ignore a field the operator just cleared.
  */
-const XLLM_DEFAULTS = {
-  per_output: false,
-  size_trigger: false,
-  cold_enabled: true,
-  min_tokens: 2000,
-  max_per_request: 2,
-  max_per_session: 20,
-  aggressiveness: 'medium',
-  context: 'recent',
-  context_messages: 7,
-  cold_min_tokens: 1000,
-  allow_on_caching_backend: false,
-  model_source: 'incoming',
-  model_name: 'claude-haiku-4-5',
-  strategy: 'code',
-  every_n_requests: 1,
-  trigger_min_tokens: 3000,
-};
+let cfgState = null;
 
-/** renderXllmForm draws the compaction-model controls from the fields the server parsed.
- *  Manager-only, matching the server: PUT /api/me answers 403 to anyone else sending a
- *  configuration. */
-function renderXllmForm(host, cfg, disabled, opts) {
-  const state = { ...XLLM_DEFAULTS, ...(cfg || {}) };
-  // Whether `source: config` can resolve to a model on THIS deployment. Absent from an
-  // older server means "assume it can", which is the pre-existing reading.
-  const hasStatic = !opts || opts.compaction_model !== false;
-  xllmState = state;
+/** openComps remembers which component sections are unfolded, so redrawing one (the
+ *  recommended button) does not collapse the page under the cursor. */
+const openComps = new Set();
 
-  const sw = (key, label, hint) => {
-    const cb = el('input', { type: 'checkbox', id: 'x-' + key, 'data-testid': 'x-' + key });
-    cb.checked = !!state[key];
-    cb.disabled = disabled;
-    cb.addEventListener('change', () => { state[key] = cb.checked; });
-    return el('div', { class: 'field' },
-      el('label', { class: 'comp', for: 'x-' + key }, cb, el('span', { class: 'comp-name' }, label)),
-      el('p', { class: 'hint' }, hint));
-  };
-  const numField = (key, label, hint) => {
-    const inp = el('input', { type: 'number', min: '0', id: 'x-' + key, 'data-testid': 'x-' + key });
-    inp.value = String(state[key]);
-    inp.disabled = disabled;
-    inp.addEventListener('change', () => {
-      const v = parseInt(inp.value, 10);
-      state[key] = Number.isFinite(v) && v >= 0 ? v : XLLM_DEFAULTS[key];
-      inp.value = String(state[key]);
-    });
-    return el('div', { class: 'field' },
-      el('label', { for: 'x-' + key }, label), inp, el('p', { class: 'hint' }, hint));
-  };
-  const textField = (key, label, hint, placeholder) => {
-    const inp = el('input', { type: 'text', id: 'x-' + key, 'data-testid': 'x-' + key,
-      placeholder: placeholder || '' });
-    inp.value = state[key] || '';
-    inp.disabled = disabled;
-    inp.addEventListener('change', () => { state[key] = inp.value.trim(); });
-    return el('div', { class: 'field' },
-      el('label', { for: 'x-' + key }, label), inp, el('p', { class: 'hint' }, hint));
-  };
-  const pick = (key, label, opts, hint) => {
-    const sel = el('select', { id: 'x-' + key, 'data-testid': 'x-' + key },
-      ...opts.map(([v, t]) => el('option', { value: v }, t)));
-    sel.value = state[key];
-    sel.disabled = disabled;
-    sel.addEventListener('change', () => { state[key] = sel.value; });
-    return el('div', { class: 'field' },
-      el('label', { for: 'x-' + key }, label), sel, el('p', { class: 'hint' }, hint));
-  };
-
-  host.appendChild(el('details', { class: 'field', 'data-testid': 'xllm-form' },
-    el('summary', {}, 'Compaction model calls (extract_llm)'),
-    el('p', { class: 'hint warn-text' },
-      'This is the only component that spends money to save money, and it can be net '
-      + 'negative. Both switches are off by default. Every call it makes is recorded with '
-      + 'its cost and its saving — open any request to see them.'),
-    sw('cold_enabled', 'Sweep the transcript when the prompt cache has expired',
-      'Fires only on a turn that resumes after the provider\'s cache TTL, where the whole '
-      + 'transcript is re-billed at 1.25x the fresh rate anyway. Measured on this service: '
-      + 'those turns are 4% of requests and 31% of spend, and nothing touches them today. '
-      + 'This is the half whose economics are unambiguous.'),
-    sw('per_output', 'Also reduce large tool outputs as they arrive',
-      'Runs on ordinary turns. On a warm prompt cache a removed token saves only the '
-      + 'cache-read rate, so measured results here range from break-even to underwater, and '
-      + 'each call adds seconds to the turn. Turn it on deliberately, watch the net figure.'),
-    sw('size_trigger', 'Let size alone decide, and make the economic gate advisory',
-      'Off: the gate blocks a call it expects to lose money on, and on a warm prompt cache '
-      + 'that is most of them. On: the threshold and the caps below are the ONLY brakes — the '
-      + 'gate still records what it would have refused (shown on each call) but no longer '
-      + 'stops it. This is a deliberate licence to spend; set the caps first.'),
-    numField('min_tokens', 'Only consider outputs above (tokens)',
-      'The size threshold: below this an output is never a candidate. Whether size is the '
-      + 'WHOLE trigger depends on the switch above.'),
-    numField('max_per_request', 'Max calls per turn',
-      'Bounds one turn\'s added latency. Calls run concurrently, so a turn costs about one '
-      + 'call\'s wall time.'),
-    numField('max_per_session', 'Max calls per session',
-      'The outer bound on spend. The per-turn cap alone cannot bound a long session: 2 calls '
-      + 'across 300 turns is 600 calls. 0 means unlimited.'),
-    pick('aggressiveness', 'How hard to compact', [
-      ['low', 'low — remove only clear redundancy (~10-25%)'],
-      ['medium', 'medium — recommended (~25-50%)'],
-      ['high', 'high — keep what the goal needs (~50-80%)'],
-    ], 'Taught with worked examples rather than a threshold. It changes what the model is '
-      + 'asked for, never what is accepted: ids, paths, numbers and error lines stay '
-      + 'byte-identical at every level, and the original is always recoverable.'),
-    pick('context', 'Conversation the model is shown', [
-      ['goal', 'goal — the task and the latest turn (cheapest)'],
-      ['recent', 'recent — every user turn plus the last N (recommended)'],
-      ['full', 'full — the whole transcript (expensive per call)'],
-    ], 'More context means better decisions and a bigger prompt on every call. A cold-cache '
-      + 'sweep always uses the full transcript regardless of this.'),
-    numField('context_messages', 'N, for "recent"', 'Messages of recent history to include.'),
-    numField('cold_min_tokens', 'Cold sweep: only outputs above (tokens)',
-      'Lower than the everyday threshold on purpose — on that turn every candidate is being '
-      + 're-billed at the write rate whatever we do.'),
-    // The two fields below decide whether ANY of the above can happen. They were in the
-    // stored document all along and not on this page, which is how a fully configured
-    // account watched this component run 251 times and act zero times.
-    sw('allow_on_caching_backend', 'Allow it on a prompt-caching provider',
-      'OFF by default, and that default is why a configured extract_llm can do nothing at '
-      + 'all: Anthropic (and Claude Code against it) caches your prompt, so the economic '
-      + 'gate declines every candidate whose tokens are already cached — measured '
-      + 'break-even is ~30,500 tokens per output against a largest-observed 2,053. Turn it '
-      + 'on only if your tool outputs are genuinely enormous, or use the cold-cache sweep '
-      + 'above, which is not subject to this.'),
-    pick('model_source', 'Which model does the compacting', [
-      ['incoming', 'your own model and key (the request\'s own credential)'],
-      ['config', 'a compaction model configured by the operator'],
-    ], hasStatic
-      ? 'Your own model bills to your provider account and always exists. A configured '
-        + 'model is usually a cheap one, and bills to whoever owns it.'
-      : 'THIS DEPLOYMENT HAS NO CONFIGURED COMPACTION MODEL — it deliberately does not '
-        + 'spend the operator\'s credential on your traffic. So "config" here means the '
-        + 'component has no model and silently never makes a call, however it is otherwise '
-        + 'configured. Choose your own model.'),
-    textField('model_name', 'Model that does the compacting',
-      'On the endpoint and credential chosen above, but this model. Leave it empty to compact '
-      + 'with your agent\'s own model — which does not pay: a measured cold-cache sweep cut the '
-      + 'provider bill by $0.63 and spent $1.25 of opus doing it. A cheap model does the same '
-      + 'work for roughly a tenth of that, and it bills to the same account either way.',
-      'claude-haiku-4-5'),
-    pick('strategy', 'How the reduction is framed', [
-      ['code', 'code — recommended for coding agents'],
-      ['single', 'single — one pass over one output'],
-      ['rlm', 'rlm — reduce via a language model'],
-      ['auto', 'auto — pick per output'],
-    ], 'What the extraction is asked to do with an output. Leave this on code unless you '
-      + 'are comparing strategies.'),
-    numField('every_n_requests', 'Fire at most once every N turns',
-      'A cadence throttle on top of the caps: 1 means every turn that qualifies may call.'),
-    numField('trigger_min_tokens', 'Ignore requests smaller than (tokens)',
-      'A whole-request floor, separate from the per-output threshold above. 0 means no '
-      + 'floor.'),
-    whyBlock('What happens when you save',
-      'Saving rebuilds your pipeline and discards frozen compaction decisions, so the next '
-      + 'turn will not be cache-warm. These fields are applied to your configuration on the '
-      + 'server and the result is built once before it is stored, so a value that would not '
-      + 'work is a refusal naming the field rather than a surprise on your next turn.')));
+/** fieldDefault is what an ABSENT key means: the descriptor's `default`, and when that is
+ *  omitted the type's zero — the server omits it exactly when it is the zero value. */
+function fieldDefault(fd) {
+  if (fd.default !== undefined && fd.default !== null) return fd.default;
+  switch (fd.type) {
+    case 'bool': return false;
+    case 'int': case 'float': return 0;
+    case 'strings': return [];
+    default: return '';
+  }
 }
 
-/** xllmState holds the form's current values between render and save. One variable because
- *  the form is rendered once per Settings load and read once per save. */
-let xllmState = null;
+/** fieldText renders a value for a text input. */
+function fieldText(fd, v) {
+  return fd.type === 'strings' ? (Array.isArray(v) ? v.join(', ') : String(v || '')) : String(v);
+}
+
+/** XLLM_SWITCHES are the two passes extract_llm can do. Its constructor REFUSES both off
+ *  ("nothing to do"), so the form must not be able to post that combination — see
+ *  config.applyExtractLLMCoupling, which takes the component out of the pipeline instead. */
+const XLLM_SWITCHES = ['per_output', 'cold_cache.enabled'];
+
+/**
+ * renderComponentFields draws ONE component's whole configuration from the descriptors the
+ * server serves at /api/options — no field names, types, defaults, enum options or hints in
+ * this file at all.
+ *
+ * That is the point. The hand-written version reached 18 keys of 97, one component of
+ * fourteen, and had already drifted: it offered four strategies where the engine parses
+ * five, so a stored `deterministic` was not recognised and got rewritten to `code`, quietly
+ * turning an LLM-free configuration into one that makes model calls. Anything hand-copied
+ * here is a second source of truth for the same fact, which is the bug.
+ *
+ *   name      component name, used for the ids and for the one coupling below
+ *   fields    the descriptors, in declaration order
+ *   values    this component's entry in cfgState — MUTATED in place as controls change
+ *   disabled  read-only: an inherited configuration, an unreadable one, or a component
+ *             that is not in the pipeline
+ *   ctx       { recommended, redraw, opts }
+ */
+function renderComponentFields(name, fields, values, disabled, ctx) {
+  const { recommended, redraw, opts } = ctx || {};
+  const tid = (key) => 'x-' + name + '-' + key.replace(/\./g, '-');
+  const stated = (key) => Object.prototype.hasOwnProperty.call(values, key);
+  const set = (key, v) => { values[key] = v; };
+  // Deleting, not zeroing: "unset" hands the key back to the component's default, and the
+  // server deletes exactly the declared leaf from the document.
+  const unset = (key) => { delete values[key]; };
+  // Every hint gains what an absent key does, phrased so it stays true whatever the control
+  // currently holds — a live "currently unset" note goes stale the moment somebody types.
+  const hintOf = (fd) => {
+    const def = fieldDefault(fd);
+    const shown = fd.type === 'strings' ? (def.length ? fieldText(fd, def) : 'nothing') : String(def);
+    return (fd.hint ? fd.hint + ' ' : '') + `Unset means ${shown === '' ? 'empty' : shown}.`;
+  };
+  const field = (fd, ctl, ...extra) => el('div', { class: 'field cfg-field' },
+    el('label', { for: tid(fd.key) }, el('code', {}, fd.key)),
+    ctl, el('p', { class: 'hint' }, hintOf(fd)), ...extra);
+
+  // The one place a combination is refused client-side, and it is refused because the
+  // component's constructor refuses it. Rather than redraw, the sibling switch is flipped
+  // in place and the note says what happened and what to do instead.
+  const boxes = {};
+  const note = el('p', { class: 'hint warn-text', role: 'status', 'data-testid': 'cfg-note-' + name });
+  const effective = (key) => {
+    const fd = fields.find((f) => f.key === key);
+    return stated(key) ? values[key] : (fd ? fieldDefault(fd) : false);
+  };
+
+  const sw = (fd) => {
+    const cb = el('input', { type: 'checkbox', id: tid(fd.key), 'data-testid': tid(fd.key) });
+    // The default's own value while unstated: a checkbox cannot draw "absent", but leaving
+    // it alone still posts nothing, so an untouched form adds no key.
+    cb.checked = !!(stated(fd.key) ? values[fd.key] : fieldDefault(fd));
+    cb.disabled = disabled;
+    boxes[fd.key] = cb;
+    cb.addEventListener('change', () => {
+      set(fd.key, cb.checked);
+      note.textContent = '';
+      if (name !== 'extract_llm' || !XLLM_SWITCHES.includes(fd.key) || cb.checked) return;
+      if (XLLM_SWITCHES.some((k) => effective(k))) return;
+      const other = XLLM_SWITCHES.find((k) => k !== fd.key);
+      set(other, true);
+      if (boxes[other]) boxes[other].checked = true;
+      note.textContent = 'extract_llm with both passes off is a component with nothing to '
+        + 'do — its own constructor refuses that, so ' + other + ' was switched back on. To '
+        + 'stop it running at all, untick extract_llm in Pipeline components above.';
+    });
+    return el('div', { class: 'field cfg-field' },
+      el('label', { class: 'comp', for: tid(fd.key) }, cb, el('span', { class: 'comp-name' }, fd.key)),
+      el('p', { class: 'hint' }, hintOf(fd)));
+  };
+
+  const numField = (fd) => {
+    // min is semantics, not decoration: 0 on a CAP means unlimited and is a legitimate
+    // choice, while 0 on a size threshold is not a setting, it is a removed brake — and the
+    // server answers 400 for it. Carrying the right min is what stops a user earning that.
+    const min = fd.min || 0;
+    const inp = el('input', {
+      type: 'number', min: String(min), step: fd.type === 'float' ? 'any' : '1',
+      id: tid(fd.key), 'data-testid': tid(fd.key), placeholder: String(fieldDefault(fd)),
+    });
+    inp.value = stated(fd.key) ? String(values[fd.key]) : '';
+    inp.disabled = disabled;
+    const err = el('p', { class: 'hint warn-text', role: 'status', 'data-testid': tid(fd.key) + '-err' });
+    const restore = () => { inp.value = stated(fd.key) ? String(values[fd.key]) : ''; };
+    inp.addEventListener('change', () => {
+      err.textContent = '';
+      const raw = inp.value.trim();
+      if (raw === '') { unset(fd.key); return; }
+      const v = fd.type === 'float' ? Number(raw) : parseInt(raw, 10);
+      if (!Number.isFinite(v)) {
+        err.textContent = 'Not a number. Left as it was; clear the box to use the default.';
+        restore();
+        return;
+      }
+      if (v < min) {
+        err.textContent = min > 0
+          ? `Must be at least ${min}: ${v} here is not a setting, it removes the brake — `
+            + 'every candidate clears a floor of 0. Left as it was.'
+          : 'Cannot be negative. 0 is allowed here and means unlimited.';
+        restore();
+        return;
+      }
+      set(fd.key, v);
+    });
+    return field(fd, inp, err);
+  };
+
+  const textField = (fd) => {
+    const inp = el('input', {
+      type: fd.secret ? 'password' : 'text', id: tid(fd.key), 'data-testid': tid(fd.key),
+      autocomplete: 'off', spellcheck: 'false',
+      placeholder: fd.secret
+        ? 'stored credential kept — type to replace it'
+        : (fd.type === 'strings' ? 'comma separated' : String(fieldDefault(fd))),
+    });
+    // A secret is WRITE-ONLY. The server never reads it back into the form, and this never
+    // puts one in the DOM: a value here would be a credential in every screenshot of this
+    // page. Empty therefore means "leave the stored credential alone" — never "clear it" —
+    // which is the same reading the server has (an absent secret is not a deletion).
+    inp.value = fd.secret || !stated(fd.key) ? '' : fieldText(fd, values[fd.key]);
+    inp.disabled = disabled;
+    inp.addEventListener('change', () => {
+      const raw = inp.value.trim();
+      if (raw === '') { unset(fd.key); return; }
+      set(fd.key, fd.type === 'strings' ? raw.split(',').map((s) => s.trim()).filter(Boolean) : raw);
+    });
+    return field(fd, inp);
+  };
+
+  const pick = (fd) => {
+    // The empty option is how an enum gets back to "unset". The server reads an empty enum
+    // as the component's default too, but deleting the key is the honest version of it.
+    const sel = el('select', { id: tid(fd.key), 'data-testid': tid(fd.key) },
+      el('option', { value: '' }, `— default (${fieldDefault(fd)}) —`),
+      ...(fd.options || []).map((v) => el('option', { value: v }, v)));
+    sel.value = stated(fd.key) ? String(values[fd.key]) : '';
+    sel.disabled = disabled;
+    sel.addEventListener('change', () => {
+      if (sel.value === '') unset(fd.key); else set(fd.key, sel.value);
+    });
+    // Whether `source: config` can resolve to anything on THIS deployment. It cannot on the
+    // hosted service, and a page that offers the choice silently is how an account watched
+    // this component run 251 times and make zero model calls.
+    const noStatic = fd.key === 'model.source' && opts && opts.compaction_model === false;
+    return field(fd, sel, noStatic
+      ? el('p', { class: 'hint warn-text' },
+        'THIS DEPLOYMENT HAS NO CONFIGURED COMPACTION MODEL — it deliberately does not spend '
+        + 'the operator’s credential on your traffic. So "config" here means the '
+        + 'component has no model and never makes a call, however else it is configured.')
+      : null);
+  };
+
+  const control = (fd) => {
+    switch (fd.type) {
+      case 'bool': return sw(fd);
+      case 'int': case 'float': return numField(fd);
+      case 'enum': return pick(fd);
+      case 'string': case 'strings': return textField(fd);
+      // A type this bundle does not know — the server is newer than the cached page. Shown
+      // with no control rather than as a text box: a string posted where the server wants a
+      // number is a 400, and inventing a control for an unknown type is guessing.
+      default: return el('div', { class: 'field cfg-field' },
+        el('label', {}, el('code', {}, fd.key)),
+        el('p', { class: 'hint warn-text' },
+          `This page does not know the field type “${fd.type}”, so it cannot draw a control `
+          + 'for it. Reload; if it persists, the server is newer than this dashboard and a '
+          + 'manager can set the key on the account page.'),
+        el('p', { class: 'hint' }, hintOf(fd)));
+    }
+  };
+
+  // A component that reaches a model is the one that can cost more than it saves, and that
+  // is read off the descriptors (it has a model block) rather than from a list here.
+  const callsModel = fields.some((fd) => fd.key === 'model.source');
+  const setCount = fields.filter((fd) => stated(fd.key)).length;
+  const det = el('details', { class: 'field comp-fields', 'data-testid': 'cfg-' + name });
+  det.open = openComps.has(name);
+  det.addEventListener('toggle', () => {
+    if (det.open) openComps.add(name); else openComps.delete(name);
+  });
+  det.appendChild(el('summary', {},
+    el('span', { class: 'comp-name' }, name),
+    el('span', { class: 'muted' },
+      ` — ${setCount} of ${fields.length} key${fields.length === 1 ? '' : 's'} set`
+      + (disabled ? ', read-only' : ''))));
+  // Why it is locked, when the reason is this component rather than the whole page (an
+  // inherited or unreadable configuration is stated once, above, not fourteen times).
+  if (ctx && ctx.off) {
+    det.appendChild(el('p', { class: 'hint', 'data-testid': 'cfg-off-' + name },
+      'Not editable here. Tick it under Pipeline components to configure it — a component '
+      + 'that is not in the pipeline does not run, whatever its block says, and switching it '
+      + 'off clears the keys below.'));
+  }
+  if (callsModel) {
+    det.appendChild(el('p', { class: 'hint warn-text' },
+      'This component calls a model to save tokens, so it can be net negative. Every call is '
+      + 'recorded with its cost and its saving — open any request to see them.'));
+  }
+  det.appendChild(note);
+  if (recommended) {
+    det.appendChild(el('div', { class: 'actions' },
+      el('button', {
+        class: 'ghost small', 'data-testid': 'cfg-rec-' + name, disabled: disabled || null,
+        onclick: () => { Object.assign(values, recommended); if (redraw) redraw(); },
+      }, 'Use recommended values')));
+    det.appendChild(el('p', { class: 'hint' },
+      'Recommended is not the same thing as default: the defaults below are what an unset '
+      + 'key means to the component, this is what we suggest you spend, from our own '
+      + 'measurements. It fills the fields in; nothing is saved until you press Save.'));
+  }
+  for (const fd of fields) det.appendChild(control(fd));
+  return det;
+}
 
 async function saveSettings() {
   const status = $('#settings-saved');
@@ -4412,7 +4559,12 @@ async function saveSettings() {
   // fallback's reading of a document nobody can see. The server refuses this too (409).
   const unreadable = !!(account.tenant.effective_config || {}).parse_error;
   if (!inherited && isManager() && !unreadable) {
-    body.config = { pipeline: ordered, mode: $('#set-mode').value, extract_llm: xllmState };
+    // components carries, per component, ONLY the dotted keys the form actually holds a
+    // value for. A key that is not here is DELETED from the block on the server and the
+    // component's own default takes over, which is the same thing an absent key means — so
+    // the page must not invent one. A component present with an empty object is how a
+    // cleared block is expressed; a component absent from it entirely is left untouched.
+    body.config = { pipeline: ordered, mode: $('#set-mode').value, components: cfgState || {} };
   }
   try {
     const out = await ctl('/api/me', { method: 'PUT', body: JSON.stringify(body) });

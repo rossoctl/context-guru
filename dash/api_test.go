@@ -13,7 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rossoctl/context-guru/config"
+	"slices"
+
+	"github.com/rossoctl/context-guru/components"
+	// The registry is populated by each component's init(), so the descriptors this test
+	// walks only exist if every component is linked in.
+	_ "github.com/rossoctl/context-guru/components/all"
 )
 
 // newTestAPI wires a recorder + API with a few requests already persisted.
@@ -721,34 +726,195 @@ func TestUIClaimsOnlyTheCacheSavingWeMeasure(t *testing.T) {
 	}
 }
 
-// The settings page is fields now, and its field NAMES are a wire contract with
-// config.Form's json tags. Nothing else checks that: a renamed tag would leave the form
-// silently posting a key the server ignores, which is the failure mode the YAML box already
-// had — extract_llm's own loader is non-strict, so an ignored key does nothing at all, and
-// this is the component that spends money.
+// TestSettingsFormSpeaksTheSameFieldNamesAsTheServer is the UI half of the descriptor
+// contract, and it is deliberately INVERTED from the test it replaces.
 //
-// Asserted from the JS side because that is the half with no compiler.
+// The old one asserted that app.js MENTIONED every field name the server expected, because
+// the page hand-wrote one control per knob and the failure mode was omission: it reached 18
+// keys of 97 and one component of fourteen, and the two fields that decided whether
+// extract_llm could act at all (allow_on_caching_backend, model.source) were simply absent.
+//
+// A page that renders from components.Field cannot omit a field — the loop does not have an
+// opinion — so mentioning a name is no longer evidence of anything. What can still go wrong
+// is the opposite: somebody hand-writes a control again, and their copy of a default, an
+// enum list or a threshold drifts from the declaration. That already happened once, and it
+// was not cosmetic: the browser offered four strategies where the engine parses five, so a
+// stored `strategy: deterministic` was not recognised and got rewritten to `code`, silently
+// turning an LLM-free configuration into one that makes model calls.
+//
+// So this test walks every declared field and asserts the page does NOT name it, plus the
+// typed structure a name-only grep could not check: one branch per declared type, the enum
+// options taken from the descriptor, secrets write-only, and Min carried through as the
+// number input's floor. The per-field RENDERING is checked by driving the real page under
+// jsdom; what a Go test can pin is that nothing here is hand-copied.
 func TestSettingsFormSpeaksTheSameFieldNamesAsTheServer(t *testing.T) {
 	js, err := uiFS.ReadFile("ui/app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	src := string(js)
-	// Every key of config.ExtractLLMForm, by its json tag, read off the STRUCT rather than
-	// listed here — a hand-kept list is how the page ended up not showing
-	// allow_on_caching_backend and model.source, the two fields that decided whether the
-	// component could act at all. Add a field on the server and this test names it.
-	ft := reflect.TypeOf(config.ExtractLLMForm{})
-	for i := 0; i < ft.NumField(); i++ {
-		key := strings.Split(ft.Field(i).Tag.Get("json"), ",")[0]
-		if key == "" || key == "-" {
-			continue
-		}
-		if !strings.Contains(src, key) {
-			t.Errorf("the form does not mention %q, a field the server expects", key)
+	all := components.AllFields()
+	if len(all) < 10 {
+		t.Fatalf("only %d components registered; the blank import of components/all is missing "+
+			"and this test would pass by having nothing to check", len(all))
+	}
+
+	// The page reads the descriptors, every part of them. Each of these is a fact about a
+	// field that used to be retyped in JavaScript.
+	for _, want := range []string{
+		"opts.component_fields", "renderComponentFields(",
+		"fd.key", "fd.type", "fd.default", "fd.options", "fd.min", "fd.secret", "fd.hint",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("the settings form does not read %s; it is not descriptor-driven", want)
 		}
 	}
-	// The document itself is the server's now: no YAML editor on the settings page, and no
+	// And the hand-kept copies are gone. XLLM_DEFAULTS duplicated the server's default table,
+	// which is the drift this refactor removes; renderXllmForm was the sixteen literal control
+	// calls, and one component of fourteen.
+	for _, gone := range []string{"XLLM_DEFAULTS", "renderXllmForm", "xllmState"} {
+		if strings.Contains(src, gone) {
+			t.Errorf("%s is back: the page is hand-listing fields again, which is a second "+
+				"source of truth for every default and enum it names", gone)
+		}
+	}
+
+	// One branch per DECLARED type, derived from the declarations rather than listed here: a
+	// component that gains the first field of some type must not fall through to a text box
+	// that posts a string where the server demands a number.
+	types := map[string]string{} // type -> an example field, for the message
+	for name, decls := range all {
+		for _, fd := range decls {
+			if _, seen := types[fd.Type]; !seen {
+				types[fd.Type] = name + "." + fd.Key
+			}
+		}
+	}
+	if len(types) < 5 {
+		t.Errorf("only %d field types in the registry (%v); this test is not covering much", len(types), types)
+	}
+	for typ, example := range types {
+		if !strings.Contains(src, "case '"+typ+"'") {
+			t.Errorf("no control for field type %q (e.g. %s): it would fall through to the "+
+				"string branch and post the wrong JSON type", typ, example)
+		}
+	}
+
+	// No field NAME is written in the page. The allowlist is short and each entry is a
+	// deliberate exception with a reason — add a control by hand and this names your key.
+	allowed := map[string]string{
+		// The one coupling the page is allowed to know: extract_llm's constructor refuses
+		// both passes off ("nothing to do"), so the form must not be able to post that.
+		"per_output":         "the extract_llm both-switches-off coupling",
+		"cold_cache.enabled": "the extract_llm both-switches-off coupling",
+		// Whether `source: config` resolves to anything on this deployment. It does not on
+		// the hosted service, and a page that offers the choice silently is how an account
+		// ran extract_llm 251 times and made zero model calls.
+		"model.source": "the no-configured-compaction-model warning",
+		// Not a component key here: the request drawer's own max_tokens fact band, which
+		// predates the form and is a different thing from collapse.max_tokens.
+		"max_tokens": "the request drawer's sampling-parameter band",
+	}
+	for name, decls := range all {
+		for _, fd := range decls {
+			if _, ok := allowed[fd.Key]; ok {
+				continue
+			}
+			for _, quoted := range []string{"'" + fd.Key + "'", `"` + fd.Key + `"`} {
+				if strings.Contains(src, quoted) {
+					t.Errorf("app.js names the field %s.%s literally (%s); controls come from "+
+						"the descriptor, and a hand-written one is a copy of a default, a min "+
+						"or an enum list that can drift from the declaration",
+						name, fd.Key, quoted)
+				}
+			}
+		}
+	}
+
+	// Enum options come from the descriptor, in its order, and the page adds exactly one
+	// option of its own: the empty "use the component's default" choice. R8 was a hand-typed
+	// list missing a value the engine accepts.
+	if !strings.Contains(src, "(fd.options || []).map(") {
+		t.Error("the enum control does not render fd.options; a retyped list is how a stored " +
+			"`strategy: deterministic` came to be rewritten to `code`")
+	}
+	for name, decls := range all {
+		for _, fd := range decls {
+			if fd.Type != components.FieldEnum {
+				continue
+			}
+			// A descriptor whose default is not one of its own options would render an
+			// unselectable "— default (x) —", i.e. a control with no way back to unset.
+			if len(fd.Options) == 0 {
+				t.Errorf("%s.%s is an enum with no options: the control would offer only the "+
+					"default choice", name, fd.Key)
+			}
+			if def, ok := fd.Default.(string); ok && def != "" && !slices.Contains(fd.Options, def) {
+				t.Errorf("%s.%s defaults to %q, which is not one of its options %v", name, fd.Key, def, fd.Options)
+			}
+		}
+	}
+
+	// Secrets are WRITE-ONLY, in both directions: never rendered from the server's payload
+	// (a credential in the DOM is a credential in every screenshot), and an empty box means
+	// "leave the stored one alone" rather than "delete it".
+	if !strings.Contains(src, "fd.secret ? 'password' : 'text'") {
+		t.Error("a secret field is not rendered as a password input")
+	}
+	if !strings.Contains(src, "fd.secret || !stated(fd.key) ? '' :") {
+		t.Error("the text control does not blank a secret before rendering: a stored " +
+			"credential would be echoed into the DOM")
+	}
+	secrets := 0
+	for name, decls := range all {
+		for _, fd := range decls {
+			if !fd.Secret {
+				continue
+			}
+			secrets++
+			if fd.Type != components.FieldString {
+				t.Errorf("%s.%s is secret but typed %q; only the string control blanks a secret",
+					name, fd.Key, fd.Type)
+			}
+		}
+	}
+	if secrets == 0 {
+		t.Error("no secret fields declared; the write-only path above is untested")
+	}
+
+	// Min is semantics, not validation trivia, and the number input has to carry the right
+	// one: 0 on a CAP means unlimited and is a legitimate choice, while 0 on a size threshold
+	// is a removed brake the server answers 400 for. Both readings must be in the page,
+	// because a control that posts a value earning an unactionable 400 is the failure.
+	if !strings.Contains(src, "min: String(min)") || !strings.Contains(src, "fd.min || 0") {
+		t.Error("the number control does not carry the declared min")
+	}
+	if !strings.Contains(src, "0 is allowed here and means unlimited") {
+		t.Error("the number control does not distinguish min 0 (a cap, where 0 is a choice)")
+	}
+	if !strings.Contains(src, "it removes the brake") {
+		t.Error("the number control does not refuse a value below a min of 1 (a threshold, " +
+			"where 0 is not a setting)")
+	}
+	caps, floors := 0, 0
+	for _, decls := range all {
+		for _, fd := range decls {
+			if fd.Type != components.FieldInt && fd.Type != components.FieldFloat {
+				continue
+			}
+			if fd.Min == 0 {
+				caps++
+			} else {
+				floors++
+			}
+		}
+	}
+	if caps == 0 || floors == 0 {
+		t.Errorf("the min 0 / min 1 distinction is not exercised by the registry "+
+			"(%d with min 0, %d with a floor)", caps, floors)
+	}
+
+	// The document itself is the server's: no YAML editor on the settings page, and no
 	// hand-rolled writer behind it.
 	for _, gone := range []string{"'#set-yaml'", "writeXllm", "readXllm", "unmanagedXllmLines"} {
 		if strings.Contains(src, gone) {
@@ -756,9 +922,13 @@ func TestSettingsFormSpeaksTheSameFieldNamesAsTheServer(t *testing.T) {
 				"(that is what produced \"did not find expected key\" on every save)", gone)
 		}
 	}
-	// And it posts fields, not text.
-	if !strings.Contains(src, "body.config = {") {
-		t.Error("saveSettings does not post structured fields")
+	// And it posts fields, in the shape the server reads: components keyed by name, each a
+	// map of DOTTED keys. The old flat `extract_llm:` payload was silently ignored by
+	// ApplyForm — no data loss, but every component control on the page was inert on save,
+	// which is worse than a missing one.
+	if !strings.Contains(src, "body.config = {") || !strings.Contains(src, "components: cfgState") {
+		t.Error("saveSettings does not post the descriptor-driven shape " +
+			"({pipeline, mode, components: {name: {dotted: value}}})")
 	}
 	// With the YAML box gone, a document the server could not fully read must be VISIBLE and
 	// unsaveable. Otherwise the fields draw a guess as fact and a save writes the guess back,
