@@ -33,6 +33,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/reformat"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
@@ -322,12 +323,22 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// its own; it does not any more, because that would now render the key twice.
 	ctx = logging.With(ctx, logging.From(ctx).With("mode", string(mode)))
 	models := o.Models
+	// Tool-schema annotation strip: a top-level field the pipeline never sees (it
+	// operates on `messages`). Done FIRST, before any byte offset into the body is
+	// taken, because `tools` may be serialized either side of `messages` and a rewrite
+	// after the fact would move every offset the writeback relies on.
+	// See components/reformat/toolschema.go for the mechanism and the break-even.
+	toolSchema := false
+	if !bypass && pipe != nil && pipe.Has("toolschema") {
+		body, toolSchema = reformat.CompactToolSchemas(body)
+	}
+
 	msgsRaw := gjson.GetBytes(body, "messages")
 	if !msgsRaw.Exists() || !msgsRaw.IsArray() {
 		// Assign rather than return a fresh Result: res already carries the trace fields
 		// set above, and a bypassed request that also lacks a messages array must still
 		// report itself as bypassed rather than as "no messages".
-		res.Body = body
+		res.Body, res.Changed = body, toolSchema
 		return res
 	}
 
@@ -366,7 +377,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	msgs := msgsRaw.Array()
 	norm, slots := normalize(provider, msgs)
 	if len(norm) == 0 {
-		res.Body, res.Changed = body, systemSplit // keep the split even with nothing to compact
+		res.Body, res.Changed = body, systemSplit || toolSchema // keep the envelope rewrites even with nothing to compact
 		return res
 	}
 
@@ -467,6 +478,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// left /stats and the Prometheus component counters still saying "skipped",
 		// because the pipeline emits each report to them as it goes.
 		SystemSplit: systemSplit,
+		ToolSchema:  toolSchema,
 	}
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
 	tr.Breakpoints = bps
@@ -522,13 +534,13 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
 			return res
 		}
-		res.Body, res.Changed = nb, ok || systemSplit
+		res.Body, res.Changed = nb, ok || systemSplit || toolSchema
 		return res
 	}
 
-	// The tail split already rewrote `body`, so the result must be forwarded even
-	// if no component changes a message.
-	changed := systemSplit
+	// The envelope rewrites (tail split, tool-schema strip) already rewrote `body`, so
+	// the result must be forwarded even if no component changes a message.
+	changed := systemSplit || toolSchema
 	// Each changed message's new bytes, keyed by its index in the body's messages array,
 	// spliced into the body in ONE pass after the loop (spliceMessages). The loop used to
 	// sjson.SetBytes into the whole body per changed message, which copies the entire
