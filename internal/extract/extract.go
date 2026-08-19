@@ -441,6 +441,17 @@ func intersectAllowed(order, allowed []string) []string {
 	return out
 }
 
+// Modes are the values Cfg.Mode accepts, in the order a settings form should offer them.
+// The empty string means "auto".
+//
+// It is a declared list because the settings form used to carry its own copy, which had
+// drifted: "deterministic" was missing, so a stored `strategy: deterministic` was not
+// recognised, fell back to "code", and the next save WROTE `strategy: code` over it —
+// silently turning an LLM-free configuration into one that makes model calls. Anything
+// offering these values reads them from here; TestModesAreTheModesRawStrategyOrderHonors
+// pins the list against the switch below.
+var Modes = []string{"auto", "code", "single", "rlm", "deterministic"}
+
 func strategyOrder(tokenEst int, cfg Cfg) []string {
 	return intersectAllowed(rawStrategyOrder(tokenEst, cfg), cfg.AllowedStrategies)
 }

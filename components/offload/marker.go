@@ -95,3 +95,11 @@ func commitMark(c *components.Ctx, rep *components.Report, eff markerMode, key, 
 	}
 	rep.Irreversible = true
 }
+
+// markerModeField is the marker_mode descriptor, shared by every Offload that honors the
+// key. Declared once because the accepted values are parseMarkerMode's, above.
+func markerModeField() components.Field {
+	return components.Field{Key: "marker_mode", Type: components.FieldEnum, Default: "full",
+		Options: []string{"full", "summary", "off"},
+		Hint:    "How elided content is referenced. full = a reversible <<cg:HASH>> marker the expand tool can restore; summary = a one-line digest, nothing stashed; off = no marker (irreversible)."}
+}

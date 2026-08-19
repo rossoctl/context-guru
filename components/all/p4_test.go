@@ -105,7 +105,7 @@ func TestExtractProjectsRelevantLines(t *testing.T) {
 		toolMsg(b.String()),
 	}}
 	before := schema.MessagesTokens(req)
-	_, st := run(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 50, head_lines: 2, tail_lines: 2}\n", req)
+	_, st := run(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 50}\n", req)
 	got := schema.MessageText(req.Input[1])
 	if schema.TextTokens(got) >= before {
 		t.Fatalf("extract should project down: %q", got[:min(80, len(got))])

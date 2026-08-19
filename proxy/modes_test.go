@@ -411,8 +411,8 @@ func TestObserveProjectionAgreesWithSyncActuals(t *testing.T) {
 		return out
 	}()
 
-	// keep_last: 1 so each turn's growth pushes the previous tool output into mask's range.
-	yaml := "pipeline: [mask]\ncomponents:\n  mask:\n    keep_last: 1\n"
+	// keep_recent: 1 so each turn's growth pushes the previous tool output into mask's range.
+	yaml := "pipeline: [mask]\ncomponents:\n  mask:\n    keep_recent: 1\n"
 	drive := func(mode components.Mode) metrics.Snapshot {
 		up, _ := captureUpstream(t)
 		// cache=on so cache-awareness (and therefore the tail gate) is live: that gate is
@@ -463,7 +463,7 @@ func TestObserveProjectionAgreesWithSyncActuals(t *testing.T) {
 // was never enforced, which is a request modification arriving by the back door.
 func TestObserveNeverWritesTheLiveStore(t *testing.T) {
 	up, _ := captureUpstream(t)
-	cfg, err := config.LoadBytes([]byte("pipeline: [mask]\ncomponents:\n  mask:\n    keep_last: 1\n"))
+	cfg, err := config.LoadBytes([]byte("pipeline: [mask]\ncomponents:\n  mask:\n    keep_recent: 1\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

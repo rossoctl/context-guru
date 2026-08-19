@@ -9,7 +9,6 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("smartcrush", newSmartCrush) }
@@ -37,10 +36,8 @@ type smartCrushConfig struct {
 
 func newSmartCrush(raw []byte) (components.Component, error) {
 	cfg := smartCrushConfig{MinItems: 5, MinTokens: 200, KeepFirst: 3, KeepLast: 2}
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	return &SmartCrush{minItems: cfg.MinItems, minTokens: cfg.MinTokens, keepFirst: cfg.KeepFirst, keepLast: cfg.KeepLast, mode: parseMarkerMode(cfg.MarkerMode)}, nil
 }
@@ -119,4 +116,18 @@ func (s *SmartCrush) keepSet(items []json.RawMessage) map[int]struct{} {
 		}
 	}
 	return keep
+}
+
+func init() {
+	components.RegisterFields("smartcrush", smartCrushConfig{}, []components.Field{
+		{Key: "min_items", Type: components.FieldInt, Default: 5, Min: 1,
+			Hint: "Only crush a list carrying at least this many items."},
+		{Key: "min_tokens", Type: components.FieldInt, Default: 200, Min: 1,
+			Hint: "Only crush a list above this many tokens."},
+		{Key: "keep_first", Type: components.FieldInt, Default: 3,
+			Hint: "Items kept verbatim at the head of the list."},
+		{Key: "keep_last", Type: components.FieldInt, Default: 2,
+			Hint: "Items kept verbatim at the tail of the list."},
+		markerModeField(),
+	})
 }

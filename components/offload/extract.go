@@ -5,7 +5,6 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("extract", newExtract) }
@@ -37,10 +36,8 @@ type extractConfig struct {
 
 func newExtract(raw []byte) (components.Component, error) {
 	cfg := extractConfig{MinTokens: 300}
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	return &Extract{minTokens: cfg.MinTokens, trigger: cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode)}, nil
 }
@@ -93,4 +90,13 @@ func (e *Extract) Offload(req *bschemas.BifrostChatRequest, rep *components.Repo
 		rep.Skipped = true
 	}
 	return keys, nil
+}
+
+func init() {
+	f := []components.Field{
+		{Key: "min_tokens", Type: components.FieldInt, Default: 300, Min: 1,
+			Hint: "Per-output floor: only extract from a tool output above this many tokens."},
+		markerModeField(),
+	}
+	components.RegisterFields("extract", extractConfig{}, append(f, components.TriggerFields("trigger")...))
 }

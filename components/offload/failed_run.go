@@ -7,7 +7,6 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("failed_run", newFailedRun) }
@@ -61,10 +60,8 @@ type failedRunConfig struct {
 
 func newFailedRun(raw []byte) (components.Component, error) {
 	cfg := failedRunConfig{MinTokens: 100}
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	return &FailedRun{minTokens: cfg.MinTokens, mode: parseMarkerMode(cfg.MarkerMode)}, nil
 }
@@ -172,4 +169,12 @@ func (fr *FailedRun) Offload(req *schemas.BifrostChatRequest, rep *components.Re
 		rep.Skipped = true
 	}
 	return keys, nil
+}
+
+func init() {
+	components.RegisterFields("failed_run", failedRunConfig{}, []components.Field{
+		{Key: "min_tokens", Type: components.FieldInt, Default: 100, Min: 1,
+			Hint: "Only collapse a superseded failed run above this many tokens."},
+		markerModeField(),
+	})
 }

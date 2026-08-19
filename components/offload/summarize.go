@@ -12,7 +12,6 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("summarize", newSummarize) }
@@ -127,10 +126,8 @@ type summarizeConfig struct {
 
 func newSummarize(raw []byte) (components.Component, error) {
 	cfg := summarizeConfig{SummaryLevel: "regular", KeepLast: 3, StartFrom: 6, MinTokens: 500, ResummarizeTokens: 6000}
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	// Legacy start_from_message is a message-count gate; the canonical knob is
 	// trigger.min_messages. Fold one into the other so both work.
@@ -415,4 +412,25 @@ var summaryLevelSuffix = map[string]string{
 	"concise":         "Please generate a concise summary",
 	"regular":         "Please generate a comprehensive and useful summary",
 	"highly_detailed": "Please generate a highly detailed, fully comprehensive, explicitly grounded summary that includes every relevant and certain piece of information from the conversation.",
+}
+
+func init() {
+	f := []components.Field{
+		{Key: "summary_level", Type: components.FieldEnum, Default: "regular",
+			Options: []string{"concise", "regular", "highly_detailed"},
+			Hint:    "How much detail the summary is asked for. The keys of summaryLevelSuffix — an unrecognised value silently produces no level instruction at all."},
+		{Key: "keep_last", Type: components.FieldInt, Default: 3,
+			Hint: "Messages kept verbatim at the tail; only what precedes them is summarized."},
+		{Key: "start_from_message", Type: components.FieldInt, Default: 6,
+			Hint: "Legacy message-count gate, folded into trigger.min_messages when that is unset. Set trigger.min_messages instead."},
+		{Key: "min_tokens", Type: components.FieldInt, Default: 500, Min: 1,
+			Hint: "Minimum content tokens in the span before a summary is worth an LLM call."},
+		{Key: "resummarize_tokens", Type: components.FieldInt, Default: 6000,
+			Hint: "Once a summary exists, reuse it with no model call until the tail since that checkpoint grows past this many tokens. 0 = re-summarize every eligible turn."},
+		{Key: "include_tool_calls", Type: components.FieldBool,
+			Hint: "Include tool calls and their results in the trajectory handed to the summarizer."},
+		markerModeField(),
+	}
+	f = append(f, modelFields("model")...)
+	components.RegisterFields("summarize", summarizeConfig{}, append(f, components.TriggerFields("trigger")...))
 }

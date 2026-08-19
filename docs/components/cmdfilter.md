@@ -53,11 +53,13 @@ streams replayed through `/compact` (44-request Terminal-Bench, 1795-request SWE
 | 500 | 13 / 391 | 305 / 1,290 | 97 |
 | **400 (shipped)** | **36 / 483** | **389 / 1,447** | **97** |
 | 300 | 36 / 483 | 424 / 1,467 | 117 |
-| 250 | 36 / 483 | 424 / 1,467 | 118 |
-| 200 | 36 / 483 | 512 / 1,481 | 118 |
 | 150 | 36 / 483 | 512 / 1,481 | 118 |
 
-400 is where the evidence stops paying: it takes the entire Terminal-Bench win and 82% of the
+(These are the four floors the sweep actually ran, as recorded beside `defaultMinSize` in
+`components/offload/cmdfilter.go`. This table used to carry two more rows, 250 and 200, that
+the code's record does not have — the code is the measurement.)
+
+400 is where the evidence stops paying: it takes the entire Terminal-Bench win and most of the
 SWE-bench one, and it is the last value at which the never-worse guard rejects nothing new. Below
 400 the unique saving flattens while `marker_no_win` climbs — the floor and the guard start
 refusing the same rewrites, on ever-smaller outputs where a ~12-token marker is a larger share of

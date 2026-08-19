@@ -13,7 +13,7 @@ The document has six top-level fields (from the `Config` struct in
 |---|---|---|
 | `preset` | string | Named default pipeline (see [Presets](presets.md)). |
 | `pipeline` | `[]string` | Ordered component names — controls **order + enablement**. Overrides the preset's pipeline when present. |
-| `components:<name>` | map | Each component's typed config block, handed to its constructor verbatim. |
+| `components:<name>` | map | Each component's typed config block, handed to its constructor verbatim. Decoded **strictly** — an unknown key inside a block is an error, not silence — and every key is declared for the dashboard's field form: see [the settings form](../how-to/settings-form.md). |
 | `store` | object | State store options — see [`store`](#store) below. |
 | `mode` | string | Operating mode: `sync` (default) \| `observe`. See [Operating modes](../how-to/operating-modes.md). |
 | `observe` | object | Observe-mode tuning; ignored in sync mode. |

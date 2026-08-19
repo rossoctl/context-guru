@@ -125,6 +125,7 @@ nav:
       - Sync & observe: how-to/operating-modes.md
       - Routes & headers: reference/routes.md
       - Config & environment: reference/config.md
+      - Settings form & field descriptors: how-to/settings-form.md
   - Dashboard: dashboard.md
   - Hosted service: hosted.md
   - Results:

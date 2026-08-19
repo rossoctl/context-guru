@@ -67,6 +67,11 @@ recovered via `context_guru_expand` / `GET /expand`.
 | `min_saved_tokens` | 400 | Apply the reduction if it saves at least this many tokens… |
 | `max_keep_ratio` | 0.8 | …or if it keeps less than this fraction of the step. |
 | `model.source` | `incoming` | LLM source: `incoming` or `config` (the cheap model). The preset uses `config`. |
+| `model.model` | *the source's own model* | The reflection model, on that source's endpoint and credential. The method's economics depend on it being much cheaper than the agent's. |
+| `model.provider` | `anthropic` | Wire dialect for a config-pinned endpoint: `anthropic` \| `openai`. |
+| `model.base_url` | *the provider's public API* | Pin a dedicated endpoint as a full URL. |
+| `model.api_key` | *the process env key* | **Credential** for the pinned endpoint; empty falls back to the provider env key, which a hosted deployment refuses. Write-only on the settings page. |
+| `model.auth` | `x-api-key` | Anthropic only: `x-api-key` \| `bearer`. |
 | `marker_mode` | `full` | `full` (reversible) \| `summary` \| `off`. |
 | `cache_tail_only` | `false` | Restrict new reductions to the uncached tail. See the warning below. |
 

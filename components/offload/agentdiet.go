@@ -12,7 +12,6 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("agentdiet", newAgentDiet) }
@@ -109,10 +108,8 @@ type agentDietConfig struct {
 
 func newAgentDiet(raw []byte) (components.Component, error) {
 	cfg := agentDietConfig{}
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	d := &AgentDiet{
 		delay: 2, ctxBefore: 1, minStep: 500, minSaved: 400, maxKeepRatio: 0.8,
@@ -573,4 +570,23 @@ func (d *AgentDiet) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		rep.Skipped = true
 	}
 	return keys, nil
+}
+
+func init() {
+	f := []components.Field{
+		{Key: "delay_steps", Type: components.FieldInt, Default: 2,
+			Hint: "a: how many of the most recent steps are never touched. 0 is accepted for an ablation, but it targets the step just completed and gives up the paper's protection against a malfunctioning reflection model."},
+		{Key: "context_steps", Type: components.FieldInt, Default: 1,
+			Hint: "b: how many steps before the target are shown to the reflection model as context."},
+		{Key: "min_step_tokens", Type: components.FieldInt, Default: 500,
+			Hint: "θ: skip a step smaller than this."},
+		{Key: "min_saved_tokens", Type: components.FieldInt, Default: 400,
+			Hint: "Apply the reflection only if it saves at least this many tokens (the authors' artifact gate)."},
+		{Key: "max_keep_ratio", Type: components.FieldFloat, Default: 0.8,
+			Hint: "…and only if the rewrite keeps less than this fraction of the original."},
+		{Key: "cache_tail_only", Type: components.FieldBool,
+			Hint: "Restrict NEW reductions to the uncached tail. Default false, which is the faithful setting: the target step is chosen by age, so it is always inside the cached prefix and a tail restriction would make this component a silent no-op."},
+		markerModeField(),
+	}
+	components.RegisterFields("agentdiet", agentDietConfig{}, append(f, modelFields("model")...))
 }

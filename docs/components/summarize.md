@@ -49,8 +49,14 @@ recovered via `context_guru_expand` / `GET /expand`.
 | `min_tokens` | 500 | Span floor — minimum middle size before summarizing. |
 | `include_tool_calls` | `false` | `false` → tool outputs masked in the summarized trajectory. |
 | `resummarize_tokens` | 6000 | Tail growth that triggers rolling the checkpoint forward. |
+| `start_from_message` | 6 | Legacy message-count gate, folded into `trigger.min_messages` when that is unset. Prefer `trigger.min_messages`; this key is still read so old documents keep working. |
 | `model.source` | `incoming` | LLM source: `incoming` (proxied model+key) or `config` (cheap model). |
-| `trigger` | — | Gates the first summary: `min_request_tokens`, `min_messages`. |
+| `model.model` | *the source's own model* | The model to summarize WITH, on that source's endpoint and credential. |
+| `model.provider` | `anthropic` | Wire dialect for a config-pinned endpoint: `anthropic` \| `openai`. |
+| `model.base_url` | *the provider's public API* | Pin a dedicated endpoint as a full URL. |
+| `model.api_key` | *the process env key* | **Credential** for the pinned endpoint; empty falls back to the provider env key, which a hosted deployment refuses. Write-only on the settings page. |
+| `model.auth` | `x-api-key` | Anthropic only: `x-api-key` \| `bearer`. |
+| `trigger` | — | Gates the first summary: `min_request_tokens`, `min_messages`, `min_output_tokens`, and the window fractions `min_request_frac`, `min_output_frac`, `huge_output_frac`. |
 | `marker_mode` | `full` | `full` (stash + resolvable marker) / `summary` / `off`. |
 
 ## When it shines

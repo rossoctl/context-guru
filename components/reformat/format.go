@@ -8,7 +8,6 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/schema"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("format", newFormat) }
@@ -29,10 +28,8 @@ type formatConfig struct {
 
 func newFormat(raw []byte) (components.Component, error) {
 	cfg := formatConfig{MinTokens: 50}
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	return &Format{minTokens: cfg.MinTokens}, nil
 }
@@ -200,4 +197,11 @@ func marshalJSON(v any) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimRight(b.Bytes(), "\n"), nil
+}
+
+func init() {
+	components.RegisterFields("format", formatConfig{}, []components.Field{
+		{Key: "min_tokens", Type: components.FieldInt, Default: 50, Min: 1,
+			Hint: "Only re-encode content estimated above this many tokens. Below it the repack cannot pay for the work."},
+	})
 }

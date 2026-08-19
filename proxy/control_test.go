@@ -605,18 +605,21 @@ func TestSettingsFieldsSaveOverABlockSequencePipeline(t *testing.T) {
 	}
 
 	// Now save through the fields, turning the compaction model on.
-	body := `{"config":{"pipeline":["format","extract"],"mode":"sync","extract_llm":` +
-		`{"per_output":true,"cold_enabled":true,"size_trigger":false,"min_tokens":2000,` +
-		`"max_per_request":2,"max_per_session":20,"aggressiveness":"medium","context":"recent",` +
-		`"context_messages":7,"cold_min_tokens":1000}}}`
+	// The wire shape is components{name{dotted key: value}} — the same keys the YAML
+	// document uses, so the page cannot post a field name the server does not read.
+	body := `{"config":{"pipeline":["format","extract"],"mode":"sync","components":{"extract_llm":` +
+		`{"per_output":true,"fire_on":"pressure","min_tokens":2000,` +
+		`"llm_max_per_request":2,"llm_max_per_session":20,"aggressiveness":"medium","context":"recent",` +
+		`"context_messages":7,"cold_cache.enabled":true,"cold_cache.min_tokens":1000}}}}`
 	w, out = f.do(t, "PUT", "/api/me", body, jar)
 	if w.Code != http.StatusOK {
 		t.Fatalf("field save = %d %s", w.Code, w.Body)
 	}
 	tn, _ = out["tenant"].(map[string]any)
 	eff, _ = tn["effective_config"].(map[string]any)
-	x, _ := eff["extract_llm"].(map[string]any)
-	if x == nil || x["per_output"] != true || x["cold_enabled"] != true {
+	comps, _ := eff["components"].(map[string]any)
+	x, _ := comps["extract_llm"].(map[string]any)
+	if x == nil || x["per_output"] != true || x["cold_cache.enabled"] != true {
 		t.Errorf("the switches did not stick: %v", eff)
 	}
 	if !strings.Contains(fmt.Sprint(eff["pipeline"]), "extract_llm") {
@@ -625,7 +628,7 @@ func TestSettingsFieldsSaveOverABlockSequencePipeline(t *testing.T) {
 
 	// A bad value is a 400 naming the field, not a key the component silently ignores.
 	w, out = f.do(t, "PUT", "/api/me",
-		`{"config":{"mode":"sync","extract_llm":{"per_output":true,"aggressiveness":"very","context":"recent"}}}`, jar)
+		`{"config":{"mode":"sync","components":{"extract_llm":{"per_output":true,"aggressiveness":"very","context":"recent"}}}}`, jar)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("a bad aggressiveness = %d, want 400", w.Code)
 	}
@@ -657,26 +660,27 @@ func TestTheFieldsThatDecideWhetherExtractLLMRunsAtAllRoundTrip(t *testing.T) {
 	w, _ := f.signUp(t, "boss@ibm.com", "l")
 	jar := w.Result().Cookies()
 
-	body := `{"config":{"pipeline":["format"],"mode":"sync","extract_llm":{"per_output":true,` +
-		`"cold_enabled":true,"min_tokens":2000,"max_per_request":2,"max_per_session":20,` +
-		`"aggressiveness":"medium","context":"recent","context_messages":7,"cold_min_tokens":1000,` +
-		`"allow_on_caching_backend":true,"model_source":"incoming","strategy":"code",` +
-		`"every_n_requests":1,"trigger_min_tokens":3000}}}`
+	body := `{"config":{"pipeline":["format"],"mode":"sync","components":{"extract_llm":{"per_output":true,` +
+		`"cold_cache.enabled":true,"min_tokens":2000,"llm_max_per_request":2,"llm_max_per_session":20,` +
+		`"aggressiveness":"medium","context":"recent","context_messages":7,"cold_cache.min_tokens":1000,` +
+		`"allow_on_caching_backend":true,"model.source":"incoming","strategy":"code",` +
+		`"llm_every_n_requests":1,"trigger.min_request_tokens":3000}}}}`
 	w, out := f.do(t, "PUT", "/api/me", body, jar)
 	if w.Code != http.StatusOK {
 		t.Fatalf("field save = %d %s", w.Code, w.Body)
 	}
 	tn, _ := out["tenant"].(map[string]any)
 	eff, _ := tn["effective_config"].(map[string]any)
-	x, _ := eff["extract_llm"].(map[string]any)
+	comps, _ := eff["components"].(map[string]any)
+	x, _ := comps["extract_llm"].(map[string]any)
 	if x == nil {
 		t.Fatalf("no extract_llm on the form: %v", eff)
 	}
 	if x["allow_on_caching_backend"] != true {
 		t.Error("allow_on_caching_backend did not survive the round trip")
 	}
-	if x["model_source"] != "incoming" {
-		t.Errorf("model_source = %v, want incoming", x["model_source"])
+	if x["model.source"] != "incoming" {
+		t.Errorf("model.source = %v, want incoming", x["model.source"])
 	}
 	// And it is really in the document, where the component reads it.
 	doc, _ := tn["config_yaml"].(string)

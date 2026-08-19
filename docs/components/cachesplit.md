@@ -59,6 +59,10 @@ None. It is a name in the pipeline:
 pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]
 ```
 
+A `components.cachesplit:` block is an **error**, not a no-op. The constructor used to take
+its raw block and discard it, so a document saying `cachesplit: {ttl: 1h}` looked configured
+and was not; it now decodes strictly like every other component and refuses the block.
+
 ## When it shines
 
 Anthropic-family agents whose system prompt carries a volatile tail (an environment

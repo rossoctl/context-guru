@@ -21,7 +21,6 @@ import (
 	"github.com/rossoctl/context-guru/internal/treesitter"
 	"github.com/rossoctl/context-guru/schema"
 	sitter "github.com/tree-sitter/go-tree-sitter"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("skeleton", newSkeleton) }
@@ -46,10 +45,8 @@ type skeletonConfig struct {
 
 func newSkeleton(raw []byte) (components.Component, error) {
 	cfg := skeletonConfig{MinTokens: 80}
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	// Unlike every other Offload, skeleton refuses the irreversible marker modes.
 	// What it drops is CODE BODIES from a file the agent is reading — and unlike a
@@ -240,4 +237,17 @@ func placeholder(seg []byte) string {
 		return "{ … }" + nl
 	}
 	return "… " + expand.SummaryMarker + nl
+}
+
+func init() {
+	components.RegisterFields("skeleton", skeletonConfig{}, []components.Field{
+		{Key: "min_tokens", Type: components.FieldInt, Default: 80, Min: 1,
+			Hint: "Only skeletonize a code block above this many tokens."},
+		// Not markerModeField(): skeleton REFUSES the irreversible modes at config time,
+		// because an elided function body the agent cannot tell from an empty one gets
+		// edited against a body that never existed. The key stays accepted so an existing
+		// `marker_mode: full` document still loads.
+		{Key: "marker_mode", Type: components.FieldEnum, Default: "full", Options: []string{"full"},
+			Hint: "full only. summary and off leave no stash, which would make the one lossy component whose loss is dangerous permanently lossy."},
+	})
 }

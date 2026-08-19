@@ -16,7 +16,6 @@ import (
 	"github.com/rossoctl/context-guru/components/dsl"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("cmdfilter", newCmdfilter) }
@@ -64,10 +63,8 @@ const defaultMinSize = 400
 
 func newCmdfilter(raw []byte) (components.Component, error) {
 	var cfg cmdfilterConfig
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	reg := &dsl.Registry{}
 	if !cfg.DisableBuiltins {
@@ -272,4 +269,16 @@ func recoveryHint(loss dsl.Lossiness, kept int) string {
 func hashKey(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])[:16]
+}
+
+func init() {
+	components.RegisterFields("cmdfilter", cmdfilterConfig{}, []components.Field{
+		{Key: "filters", Type: components.FieldStrings,
+			Hint: "Inline filter YAML documents, added to the bundled set. See the DSL reference."},
+		{Key: "disable_builtins", Type: components.FieldBool,
+			Hint: "Skip the bundled starter filters and run only the ones configured above."},
+		{Key: "min_size", Type: components.FieldInt, Default: defaultMinSize,
+			Hint: "Byte floor below which a filter is not attempted at all (0 = no floor). 400 is measured: it takes the whole Terminal-Bench win and is the last value at which the never-worse guard rejects nothing new."},
+		markerModeField(),
+	})
 }

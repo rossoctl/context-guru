@@ -5,7 +5,6 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("mask", newMask) }
@@ -32,10 +31,8 @@ type maskConfig struct {
 
 func newMask(raw []byte) (components.Component, error) {
 	cfg := maskConfig{KeepRecent: 3, MinTokens: 100}
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	keepHead := 96 // default: one-line cue in the marker
 	if cfg.KeepHeadChars != nil {
@@ -111,4 +108,16 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 		rep.Skipped = true
 	}
 	return keys, nil
+}
+
+func init() {
+	components.RegisterFields("mask", maskConfig{}, []components.Field{
+		{Key: "keep_recent", Type: components.FieldInt, Default: 3,
+			Hint: "How many of the newest tool results stay verbatim. Everything older is masked; 0 masks them all."},
+		{Key: "min_tokens", Type: components.FieldInt, Default: 100, Min: 1,
+			Hint: "Only mask an output above this many tokens."},
+		{Key: "keep_head_chars", Type: components.FieldInt, Default: 96,
+			Hint: "Leave a one-line peek of the masked output inside the marker so the model knows what was hidden (cuts blind expand round-trips); 0 disables."},
+		markerModeField(),
+	})
 }

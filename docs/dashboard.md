@@ -723,3 +723,108 @@ The UI itself is regression-tested two ways: a Go test asserts every stat tile's
 `data-testid` exists (and that `app.js` parses — a dropped paren renders a blank page
 that no Go test would otherwise catch), and a browser check drives the rendered app
 end to end. See [Measure savings](how-to/measure-savings.md) for the workflow.
+
+## The time range
+
+The range control is a popover, not a dropdown, and it follows Grafana's model: the window
+is a **pair** — `from` and `to` — and each side is *either* a relative token (`now-6h`,
+`now`) or an absolute epoch-ms instant. Ten quick relative windows (5m to 30d, plus All
+time) sit above two `datetime-local` inputs and an Apply button, and the summary always
+reads the window currently in force.
+
+Why a pair rather than one duration:
+
+- **A relative window has to stay relative.** The old control stored a duration and
+  resolved `Date.now() − duration` at fetch time. One `refresh()` fires the tiles, the
+  series and the breakdown, so it called `Date.now()` three times and produced three
+  slightly different windows for one screen of numbers. `refresh()` now stamps
+  `state.nowMs` **once** and every token in that repaint resolves against that stamp.
+- **`until` is omitted while `to` is `now`.** A shared link to a live window stays live for
+  whoever opens it, instead of being pinned to the instant its author copied it.
+- **An absolute window is frozen, so it is not repolled.** The 10-second overview poll is
+  skipped whenever `to` is absolute: a past window cannot gain rows, and on a manager's
+  service-wide scope that poll is a full-corpus aggregate every ten seconds for no new data.
+
+On the wire this is `?since=`/`?until=` — `requests.ts` is epoch milliseconds UTC, `since`
+inclusive, `until` exclusive, both covered by `idx_requests_ts`. In the URL it is
+`#requests?from=now-24h&to=now`. Old `range=<ms>` bookmarks are still parsed and mapped to
+the nearest relative token, so a link pasted into an issue last month does not silently
+widen to all time.
+
+The range params are written inside `qs()` rather than passed through its `extra` argument,
+because `extra` drops any value that is `''`, `0` or `undefined` — so `until: 0` could never
+have meant "unbounded" through it.
+
+## Sortable columns — and the two tables that are not
+
+Only the **Components** table sorts. `/api/components` has no `LIMIT`: every component that
+ran in the window is in the response, so ordering it in the browser *is* a global ordering.
+The default is untouched (`saved_unique DESC`, the order the bar chart beside it shares), and
+the chosen column lands in the URL as `?sort=&dir=` so a link reproduces what its author was
+looking at. A sort gets no removable chip — it narrows nothing.
+
+**Sessions and Requests are deliberately inert.** They are `LIMIT 25` and `LIMIT 50`
+server-side. A client-side sort there would label a column "Net saved $" and show the top
+spender *of one arbitrary page*, under a header that reads as global — a feature that lies.
+Sorting them honestly needs `?sort=`/`?dir=` pushed into the SQL (`ORDER BY` off a whitelist
+of column names, keyed the way `Filter.where()` already keys its dimensions, with the
+existing `idx_requests_ts` / `idx_requests_tenant` deciding which orders are cheap). Until
+that lands, the headers carry no sort affordance at all rather than a broken one.
+
+`aria-sort` on the `<th>` is the announced state, and the arrow glyph is drawn *from that
+attribute* in CSS — so the thing a screen reader says and the thing an eye sees cannot drift
+apart, which is the usual bug when the arrow lives in its own class.
+
+## Manager scope
+
+A manager's default scope is the **whole service**: no `?tenant=` means every account. The
+filter bar's account select makes that visible and reversible — `All accounts` (the default),
+`Mine` (`?tenant=me`), or one named account. It is `data-manager` and hidden for everyone
+else; a non-manager cannot widen scope whatever they put in the query string, and the browser
+never even asks for the roster.
+
+Under wide scope the Sessions and Requests tables grow an **Account** column, because a
+session id is only unique *within* an account and a service-wide list without it is
+unattributable. The column disappears again when the scope names one account, where it would
+only repeat the filter bar.
+
+One server-side asymmetry to know about: a wide-scope single-session transcript is pinned to
+the **first turn's** tenant. A manager who wants another account's copy of a shared session
+id has to pass `?tenant=<id>` explicitly.
+
+## Never a bare cost
+
+The complaint this pass answers: users saw what `extract_llm` **cost** — a bare dollar
+figure, with no saving and no net anywhere near it — and concluded the product was
+worthless. Every place a cost appears now shows the saving and the net beside it.
+
+- **Components table**: `LLM cost`, `Saved $`, `Net $`, adjacent. Both dollar figures come
+  from the server (`ComponentRow.saved_usd` / `net_usd`), priced at write time from the
+  request's own model and the tiers it actually paid.
+- **Request drawer**: a `Net after our cost` row sits directly under `Our own LLM cost`
+  (`baseline_cost_usd − cost_usd − cg_llm_cost_usd`).
+- **Sessions table**: an `in flight` pill on any session whose last request is still inside
+  one provider cache TTL. Such a session has paid for its extraction call and not yet
+  collected the replay, so its net reads underwater and stops doing so as the turns arrive.
+  The pill says the amortization is unfinished rather than letting a half-collected figure
+  read as a verdict.
+
+The browser no longer prices anything from a rate table. It used to: `3.00`/`3.75`/`0.30` per
+MTok, hardcoded, sonnet-class — while this deployment bills opus (`4.75`/`0.38`), so every
+figure derived from them was ~27% wrong in a direction no reader could see. The
+component-level version also valued only what the *calls* removed and so discarded replay,
+which is ~93% of an extractor's realized value. `verdict()` reads `net_usd`; the per-call
+panel in the drawer derives its per-token value from the request's own
+`(baseline_cost_usd − cost_usd) ÷ tokens removed`, which is the same rule the server uses,
+and prints `—` rather than a number when the request is not fully priced.
+
+### The prefix-change diagnostic
+
+`prefix_change_cost_usd` appears as a sentence beside the cache-miss attribution it is
+computed from, and the sentence says what it is: money billed on turns whose cache missed
+with `prefix_change` directly after a turn we mutated. It is **not** a tile and it is
+subtracted from no savings figure on the page. Components act on exactly the long, churny
+turns most likely to break a prefix by themselves, so mutation is not randomly assigned and
+this is a correlation; netting it would book a correlation as a debt. It is nonetheless
+larger than every saving on some corpora, which is why hiding it would be the dishonest
+option. Settling it needs the A/B, not a bigger query.

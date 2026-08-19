@@ -9,7 +9,6 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/schema"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("toon", newToon) }
@@ -42,10 +41,8 @@ type toonConfig struct {
 
 func newToon(raw []byte) (components.Component, error) {
 	cfg := toonConfig{MinTokens: 50}
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	return &Toon{minTokens: cfg.MinTokens}, nil
 }
@@ -244,4 +241,11 @@ func ambiguousScalarString(s string) bool {
 		return true
 	}
 	return false
+}
+
+func init() {
+	components.RegisterFields("toon", toonConfig{}, []components.Field{
+		{Key: "min_tokens", Type: components.FieldInt, Default: 50, Min: 1,
+			Hint: "Only convert a uniform JSON array to TOON above this many tokens; below it the saving is noise."},
+	})
 }

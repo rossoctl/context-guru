@@ -86,3 +86,19 @@ func (t Trigger) IsHuge(outputTokens, window int) bool {
 	h := frac(t.HugeOutputFrac, window)
 	return h > 0 && outputTokens >= h
 }
+
+// TriggerFields declares Trigger's keys for the settings form, under prefix (normally
+// "trigger"). It lives beside the struct so a new threshold cannot be added without the
+// form learning about it — the fields parity test compares these keys against the struct's
+// yaml tags.
+func TriggerFields(prefix string) []Field {
+	p := prefix + "."
+	return []Field{
+		{Key: p + "min_request_tokens", Type: FieldInt, Hint: "Fire only when the whole request carries at least this many tokens (0 = no constraint)."},
+		{Key: p + "min_messages", Type: FieldInt, Hint: "…and at least this many messages, which is roughly agent steps (0 = no constraint)."},
+		{Key: p + "min_output_tokens", Type: FieldInt, Hint: "Per-item floor: only act on a tool output at least this big (0 = use the component's own min_tokens)."},
+		{Key: p + "min_request_frac", Type: FieldFloat, Hint: "The request threshold as a fraction of the model's context window, e.g. 0.6. Raises the absolute floor, never lowers it; ignored when the window is unknown."},
+		{Key: p + "min_output_frac", Type: FieldFloat, Hint: "The per-item floor as a fraction of the window. Also only ever raises the absolute one."},
+		{Key: p + "huge_output_frac", Type: FieldFloat, Hint: "Hard per-item trigger: a single output at least this fraction of the window is acted on regardless of the request-level gate."},
+	}
+}

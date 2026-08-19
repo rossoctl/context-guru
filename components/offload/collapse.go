@@ -8,7 +8,6 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("collapse", newCollapse) }
@@ -36,10 +35,8 @@ type collapseConfig struct {
 
 func newCollapse(raw []byte) (components.Component, error) {
 	cfg := collapseConfig{MaxTokens: 2000, HeadLines: 20, TailLines: 20}
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	return &Collapse{maxTokens: cfg.MaxTokens, maxFrac: cfg.MaxFrac, headLines: cfg.HeadLines, tailLines: cfg.TailLines, mode: parseMarkerMode(cfg.MarkerMode)}, nil
 }
@@ -91,4 +88,18 @@ func (cl *Collapse) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 		rep.Skipped = true
 	}
 	return keys, nil
+}
+
+func init() {
+	components.RegisterFields("collapse", collapseConfig{}, []components.Field{
+		{Key: "max_tokens", Type: components.FieldInt, Default: 2000,
+			Hint: "Collapse any output above this many tokens to its head and tail. 0 leaves the threshold to max_frac."},
+		{Key: "max_frac", Type: components.FieldFloat,
+			Hint: "The same threshold as a fraction of the model's context window; wins when the window is known. 0 = unset."},
+		{Key: "head_lines", Type: components.FieldInt, Default: 20,
+			Hint: "Lines kept from the start of a collapsed output."},
+		{Key: "tail_lines", Type: components.FieldInt, Default: 20,
+			Hint: "Lines kept from the end of a collapsed output."},
+		markerModeField(),
+	})
 }

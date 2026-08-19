@@ -12,7 +12,6 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/schema"
-	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("cacheinject", newCacheinject) }
@@ -78,10 +77,8 @@ type Cacheinject struct {
 
 func newCacheinject(raw []byte) (components.Component, error) {
 	c := &Cacheinject{TTL: "5m"}
-	if len(raw) > 0 {
-		if err := yaml.Unmarshal(raw, c); err != nil {
-			return nil, err
-		}
+	if err := components.Decode(raw, c); err != nil {
+		return nil, err
 	}
 	if c.TTL != "5m" && c.TTL != "1h" {
 		return nil, fmt.Errorf("cacheinject: ttl must be \"5m\" or \"1h\", got %q", c.TTL)
@@ -313,7 +310,17 @@ func init() { components.Register("cachesplit", newCachesplit) }
 // every host.
 type Cachesplit struct{}
 
-func newCachesplit([]byte) (components.Component, error) { return Cachesplit{}, nil }
+// newCachesplit takes no configuration. It decodes STRICTLY into an empty struct, so a
+// `cachesplit:` block with anything in it is an error rather than silence: the signature
+// used to be `newCachesplit([]byte)`, which discarded whatever was written there — a
+// config saying `cachesplit: {ttl: 1h}` looked configured and was not.
+func newCachesplit(raw []byte) (components.Component, error) {
+	var none struct{}
+	if err := components.Decode(raw, &none); err != nil {
+		return nil, fmt.Errorf("cachesplit: takes no configuration: %w", err)
+	}
+	return Cachesplit{}, nil
+}
 
 func (Cachesplit) Name() string { return "cachesplit" }
 
@@ -338,4 +345,15 @@ func (Cachesplit) Enabled(*components.Ctx) bool { return true }
 func (Cachesplit) Reformat(_ *schemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) error {
 	rep.Skipped = c == nil || !c.SystemSplit
 	return nil
+}
+
+func init() {
+	components.RegisterFields("cacheinject", Cacheinject{}, []components.Field{
+		{Key: "ttl", Type: components.FieldEnum, Default: "5m", Options: []string{"5m", "1h"},
+			Hint: "Cache lifetime to request. Leave 5m: a 1h write costs 2.0x instead of 1.25x and only pays when reuse is genuinely sparse (task starts more than 5 minutes apart), because every read refreshes the TTL for free."},
+	})
+	// cachesplit takes no configuration at all, and says so: an empty descriptor is what
+	// the settings page draws as "no options", and the strict decode in newCachesplit now
+	// REJECTS a block instead of accepting one and discarding it.
+	components.RegisterFields("cachesplit", struct{}{}, nil)
 }

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/tenant"
@@ -1432,9 +1433,21 @@ func (h *Handler) ctlOptions(w http.ResponseWriter, r *http.Request) {
 		ups = append(ups, up{Name: name, Dialect: u.Dialect})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"upstreams":      ups,
-		"presets":        h.opts.PresetNames,
-		"components":     h.opts.ComponentNames,
+		"upstreams":  ups,
+		"presets":    h.opts.PresetNames,
+		"components": h.opts.ComponentNames,
+		// component_fields is every configurable key of every REGISTERED component, as
+		// declared beside the config struct that reads it (components.Field): the settings
+		// page draws its controls from this rather than from a hand-kept list in
+		// JavaScript, which is how it came to expose 18 keys of about a hundred and to
+		// offer a strategy list the engine had outgrown. Keyed by component name, in
+		// declaration order, and served next to "components" so a name in that list always
+		// has an entry here — empty for a component that takes no configuration.
+		"component_fields": components.AllFields(),
+		// recommended is the PREFILL policy — what to offer somebody switching a component
+		// on for the first time — which is not the same thing as a component's default
+		// (that is Field.default, i.e. what an absent key means). One copy, on the server.
+		"recommended":    config.RecommendedComponents(),
 		"default_config": tenant.DefaultConfigYAML,
 		// Whether `extract_llm.model.source: config` can resolve to anything here. It
 		// cannot on the hosted service — staticModel() withholds the operator's compaction
