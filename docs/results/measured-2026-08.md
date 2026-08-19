@@ -292,3 +292,36 @@ Two notes on things that changed underneath these numbers:
 from the deterministic fallback and the reapplied frozen result, not from the level asked
 for. Sweep it again now that the LLM path actually returns programs; the earlier comparison
 was measuring nothing.
+
+## 8. Two cold-cache signals that nobody compares
+
+Reproduced locally on a single request, and worth acting on.
+
+The dashboard labels a turn `ttl_expiry` **observationally**: `cache_read == 0` and
+`cache_write >= fresh_input`, i.e. the provider demonstrably re-billed the whole prompt. The
+component's `Ctx.ColdCache` is **predictive**: idle time since the previous turn on this
+session exceeded the provider TTL plus a safety margin (`anthropicDefaultTTL` 5m +
+`coldMargin` 1m, so 6 minutes for Anthropic).
+
+On a real resumed session they disagreed. The request was labelled `ttl_expiry` with
+`cache_read: 0` and `cache_write: 168,576` — the cache was unambiguously gone — while
+`extract_llm` declined all 15 candidates with `cached_prefix`, because the measured idle gap
+was just under the 6-minute predictive threshold. 96.9% of that transcript stayed frozen to
+protect a cache that had already expired, on a turn that cost the write rate on 168k tokens.
+
+The margin is deliberately conservative and in the right direction: believing a warm cache is
+cold is the expensive error, because rewriting then forces a 1.25× re-write of the suffix. But
+we now have a **post-hoc ground truth** for every request — `cache_read == 0` — and nothing in
+the system compares it against what the predictor said. That comparison is nearly free, both
+values are already stored per request, and it would answer the only question that matters
+here: on real traffic, how often does the predictor say warm on a turn the provider had
+already expired, and what does that cost?
+
+Until it is measured, `coldMargin` is an un-calibrated guess. It is also the gate standing in
+front of the largest unclaimed saving on this page (§4, `TailOnly` and `ColdCache`) — so
+calibrating it is a prerequisite for that work, not a separate errand.
+
+Recorded honestly: the local run above was engineered with a ~350-second idle gap, which is
+below the 360-second threshold, so the sweep not firing was **correct behaviour on a
+mis-specified test**, not a defect. The finding is the missing comparison, not a bug in the
+predictor.
