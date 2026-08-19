@@ -29,7 +29,7 @@ harnesses in `deploy/harbor/` are unaffected.
 | Pipeline | `--config` / `--preset`, one for the process | the caller's own from the control database, or the [server default they track](#tenants-track-the-default-they-are-not-stamped-with-a-copy-of-it) |
 | Compaction state store | one, shared | one per tenant |
 | Upstream + credential | fixed at boot from flags/env | the tenant's chosen name from the allow-list; **the caller's own provider key forwarded** |
-| Dashboard data | everything | scoped to the caller; managers may widen |
+| Dashboard data | everything | scoped to the caller; a **manager defaults to the whole service** (`?tenant=me` for their own, `?tenant=<id>` for one account) |
 | `/stats` | open | loopback or a manager (it is a service-wide aggregate) |
 | Transcript capture | operator's flag | operator's flag **and** the tenant's consent |
 
@@ -1101,6 +1101,16 @@ dozen series we already compute.
     person reading the panel never sees. See
     [Routes](reference/routes.md#get-metrics-the-two-families-do-not-agree).
 
+!!! warning "Four `cg_tenant_*` names end in `_total` and are gauges"
+    `cg_tenant_requests_total`, `cg_tenant_tokens_total`,
+    `cg_tenant_saved_tokens_unique_total` and `cg_tenant_billed_tokens_total` are
+    month-to-date: they reset on the first and they **fall** mid-month as rows migrate to
+    cold storage. `rate()` and `increase()` both read a fall as a counter reset and
+    extrapolate a spike where the value went *down*, so those series are declared `gauge`
+    and no shipped panel wraps them — `Requests per tenant, month to date` plots the
+    cumulative value, and fleet-wide requests per minute comes off the in-process
+    `cg_requests_total`, which is a real counter.
+
 The installer brings up Prometheus and Grafana beside the proxy, provisioned, in two
 commands:
 
@@ -1186,9 +1196,31 @@ Worth knowing before you read either dashboard as a verdict:
   `avg_over_time(up[30d])` averages the samples that exist, so a Prometheus started an hour
   ago reports a flattering 100%.
 
+Two panels that *did* lie and no longer do, worth knowing because a screenshot taken
+before this may still be in circulation:
+
+- **`Total avoided this month` used to paint a negative figure green.** Its only threshold
+  step was green at `null`, so −$10.19 — compaction saving $6.96 against $17.22 of its own
+  model spend — read as a win. It now steps red below 0. An honest negative has to *look*
+  negative; that tile is the one number an operator reads to decide whether to keep the
+  thing switched on.
+- **`Hit rate by component` divided `acted` by `ran`**, which paints `cachesplit` as a dead
+  red component. It is mutated-never-acted by design (the split removes no content tokens,
+  it moves them out of the hashed prefix), so the component with the measured −34.1% cost
+  effect ranked last. The panel is now **`Activity rate by component`** over
+  `outcome="mutated"`, and "why did it decline?" has its own panel over
+  `cg_component_gate_declines_total`.
+
+**Alert rules are provisioned** — two, in
+`deploy/grafana/provisioning/alerting/context-guru.yml`: `up{job="context-guru"} == 0` for
+5 minutes, and refusals above 10% of `refused + processed` for 15 minutes (measured live at
+20.3% of requests, 92% of them `rate_limit` — invisible on every panel that plots only the
+requests that got through). They fire into whatever notification policy the instance
+already has; a contact point in version control is either a stale address or a leaked
+webhook secret.
+
 Those and the rest — what `cg_refused_requests_total` does *not* count, the per-tenant
-series cap, month-to-date counters resetting at the first of the month, and the fact that
-no alert rules are provisioned — are in
+series cap, and month-to-date series resetting at the first of the month — are in
 [`deploy/grafana/README.md`, "Known gaps"](https://github.com/rossoctl/context-guru/blob/main/deploy/grafana/README.md#known-gaps).
 
 **Access.** `/metrics` is a service-wide view that includes per-tenant cost, so in
@@ -1210,14 +1242,23 @@ and personal data does not belong in a scrape target. There is a test asserting 
    doing nothing, so the deployment looks fast because it stopped working.
 
 `cg_archive_configured` at 0 is the fourth: while it is 0, disk pressure deletes
-instead of migrating.
+instead of migrating. `cg_extract_net_value_usd` below 0 is the fifth, and the only one
+denominated in money: extraction is the one component that *spends*, so its gross token
+count can look impressive while it is underwater (measured live at −$0.7085).
+
+Two of those are wired as provisioned Grafana rules today — service down and refusal rate,
+the two failures a dashboard cannot catch because nobody is watching a screen at 03:00. The
+rest are one `data:` block each in the same file if you want them.
 
 Series colours in the dashboard are pinned rather than left to Grafana's classic
 palette, which cycles hues and repaints the survivors when a series disappears. The
 three used are validated colourblind-safe against Grafana's dark surface (worst
 all-pairs CVD ΔE 9.4, normal-vision 20.9), and the meaning is consistent across
 panels: **blue is what actually happened, orange is the comparison to read it
-against**, so the gap between them is the story. No panel uses two y-axes.
+against**, so the gap between them is the story. No panel uses two y-axes, which is also
+why `Spend: actual against baseline` no longer plots the prefix-split saving: at $0.03
+against $2,523 of spend it was four orders of magnitude down, pinned flat on the x-axis
+and readable as zero. It has its own stat tile.
 
 ## Accounts, in the browser
 

@@ -10,6 +10,28 @@
 and newlines that dominate a pretty-printed payload's token cost. v1 is json-compact only (a TOON
 encoder is planned — see [`toon`](toon.md)).
 
+### Envelope descent
+
+Claude Code tool results do not arrive as bare JSON: the tool runner wraps them, and the payload
+the agent reads is a JSON document **escaped inside a string field**.
+
+```
+{"ok": true, "exit_code": 0, "stdout": "{\n  \"total\": 50, ... \"tasks\": [ {…} x50 ]}"}
+```
+
+Re-encoding only that outer object is worth nothing: measured on real traffic it saved **9 tokens
+of 6,459 (0.1%)**, and `not_json_shaped`/`already_compact` accounted for 98.4% of candidates. Of the
+large low-reduction JSON blobs, **673/673 carried their payload in a `stdout` string field**.
+
+So `format` descends **one level**: after parsing the object, any string field that cheaply looks
+like JSON (leading `{`/`[` after trimming, ≥ 64 bytes) is parsed, compacted, and written back into
+the field, correctly re-escaped. `stdout` is the measured case but the field name is not
+special-cased. Fields it does not transform are re-emitted byte-exact (they are held as raw JSON,
+and HTML escaping is off), so the envelope still parses for the agent and its siblings (`ok`,
+`exit_code`, …) are unchanged. If the descent finds nothing, or the payload does not shrink, the
+whole blob is left untouched and a gate reason is reported (`envelope_no_embedded_json`,
+`envelope_inner_not_smaller`).
+
 ## Before → After
 
 ```
@@ -30,10 +52,11 @@ None — nothing stashed. The value is identical; only whitespace tokens are rem
 
 ## When it shines
 
-Verbose pretty-printed JSON/MCP payloads.
+Verbose pretty-printed JSON/MCP payloads, including the pretty-printed payload inside a Claude Code
+tool-runner envelope.
 
 ## When it's inert
 
-Already-compact JSON, non-JSON text, small outputs.
+Already-compact JSON (at both levels), non-JSON text, small outputs.
 
 See also: [Components overview](../components.md) · [Choose a preset](../how-to/choose-a-preset.md)

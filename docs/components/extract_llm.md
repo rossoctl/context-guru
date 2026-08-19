@@ -112,6 +112,82 @@ Reading these:
     call. Set `allow_on_caching_backend: true` to override. Check `/stats` →
     `extract.net_value_usd` on your own workload before doing so.
 
+## Four defects fixed, August 2026
+
+A measurement pass over real production traffic and fresh Claude Code CLI sessions found four
+independent reasons this component was losing money. All four are fixed; the numbers below are
+measured, not projected. Full context in
+[Measured value, Aug 2026](../results/measured-2026-08.md).
+
+### 1. The model was writing Python, and every program was thrown away
+
+On real traffic `claude-haiku-4-5` returns a plausible filter program on essentially every
+call, and the sandbox discarded **12 of 13**. Starlark is a Python *subset*: it has no
+generator expressions, and `any(k in ln for k in ids)` — the single most natural way to write
+the filter — is a syntax error.
+
+The prompt contract now states what Starlark is not, naming the constructs models actually
+reach for: generator expressions, f-strings, `while`, `try/except`, set literals,
+`sorted(key=…)` closing over a mutable local. `codeContract` is part of `PromptVersion`, so
+results cached against the old prompt are not reused.
+
+**Measured on the same real 33,932-character file read, three runs each:** before, 0/3
+produced any output; after, 3/3, at 56%, 83% and 55% reduction.
+
+### 2. Every failure reported the same reason
+
+`RunExtractionDetail` collapsed a sandbox syntax rejection, a transport error and "the model
+never replied" into one string, `"no usable program or reply"`. Three causes with opposite
+fixes — fix the prompt, retry the call, stop calling — reported identically. That is why
+defect 1 survived: the component looked like it was being ignored when it was being answered
+and then thrown away.
+
+The reason now escapes to the call record and into the dashboard: `program rejected: <the
+sandbox error>`, `model call failed: <status>`, `OUTPUT was not a string`, `program returned
+no (OUTPUT, SUMMARY) pair`. The first thing this bought was a `status 401` in a test harness,
+visible immediately instead of after an afternoon.
+
+### 3. The economic gate under-priced its own calls by 21–31×
+
+`callCost` modelled the prompt as `preamble(1463) + min(candidate, 5000) + 200` — at most
+6,663 tokens. Under `context: full`, which every cold sweep uses, the rendered transcript
+**is** the prompt. Measured on production: five calls on one request each sent **~138,000**
+prompt tokens. For a 3,433-token candidate the gate weighed an expected saving of $0.0077
+against an estimated cost of $0.0046 and allowed the call; it cost $0.1422 and removed nothing.
+
+The true figure was already computed two lines from the gate, as `promptOverhead`, and
+discarded. The gate now receives it, and `analyticBaseline` scales with it so the
+observed-cost blend stays comparable.
+
+### 4. Our own calls were not being prompt-cached
+
+Five calls on one request with `cache_read = 0` and `cache_write = 0` on all five: the same
+~138k transcript sent fresh, five times over. The conversation context is computed **once per
+request** and is identical for every candidate in it — but it sat in the user message, which
+is not cacheable.
+
+It is now a trailing **system** block, inside the prefix `CompleteBlocks` marks — but only when
+the request will make more than one call (`Cfg.CacheContext`, set from the final candidate
+count). That condition is the design, not an optimisation: a cache write costs 1.25× fresh, so
+paying it for a single call is a 25% loss with nothing to read it back.
+
+It also lifts the prefix over the model's minimum cacheable size. The invariant preamble alone
+is ~1,463 tokens, below `claude-haiku-4-5`'s 4,096-token floor — so on haiku **nothing was
+being cached at all**, breakpoint or not.
+
+Verified against the live gateway: first call `cache_creation_input_tokens: 30007`, every
+repeat `cache_read_input_tokens: 30007` with `cache_creation: 0`. On a five-call request that
+is $0.114 → $0.038, a **67% reduction**.
+
+### The one thing not fixed here
+
+**94% of the losing spend ($16.38 of $17.48 on the affected account) was made against this
+gate's own written advisory.** `fire_on: size` demotes the economic gate to advisory and
+leaves the per-turn and per-session caps as the only brake. The gate was right and was
+overridden by configuration. The advisory is recorded per call so the counterfactual is
+visible, but no code change can rescue an operator from switching the brake off — if you set
+`fire_on: size`, read the `economic_gate_advisory` gate count and the net column.
+
 ## How it works
 
 For a large tool output, `extract_llm` asks a **cheap model** to write a short **Starlark filter**

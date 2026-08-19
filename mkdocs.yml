@@ -131,6 +131,7 @@ nav:
       - Overview: RESULTS.md
       - Where the money went: results/vs-competitors.md
       - Full comparison: results/comparison.md
+      - Measured value, Aug 2026: results/measured-2026-08.md
       - Component internals & examples: results/components.md
       - Reproduce the results: results/REPRODUCE.md
       - Improvement plan: results/improvement-plan.md

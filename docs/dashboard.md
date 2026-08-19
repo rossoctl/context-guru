@@ -249,6 +249,17 @@ headline tile, alongside a "of which our components acted" subset. Both were rem
 first measured somebody else's mechanism, and the second measured co-occurrence and read as
 cause.
 
+**`prefix_change_cost_usd` is a second diagnostic, and it is bigger than every saving here.**
+It sums the cost of requests whose cache missed with reason `prefix_change` *and* whose previous
+turn in the same session had a component that mutated the transcript — the population where "we
+rewrote history and the next turn re-billed the whole prompt" is a live hypothesis. On the
+current corpus that is roughly **$24**, and **+$39** on transcripts past 60k tokens. It is
+reported because a number that large may not be invisible, and it is **not subtracted from
+net**, because mutation is not randomly assigned: components act where there is something to
+act on, which are also the long, churny turns most likely to break a prefix on their own, and
+`prefix_change` already loses ties to `ttl_expiry`. Settling it needs the A/B, not a bigger
+query.
+
 Both real savings are only as good as the per-model rates behind them. On a gateway that does
 not charge the public API's prices — IBM's `ete-litellm` bills half of anthropic.com for
 `claude-sonnet-5` — set [`MODEL_PRICES`](reference/config.md#per-model-prices-and-why-the-public-map-is-not-enough),
@@ -275,16 +286,42 @@ Without it a table of zeros is unfalsifiable: it looks the same whether the pipe
 broken, the traffic is uncompactable, or the heuristics were written for a different agent's
 tool-output shapes. On a Bob session it is usually the last of those, and it says so.
 
+**Saved · LLM cost · net** is the per-component verdict, in dollars, and no bare cost is
+rendered without it. `saved_usd` is that component's share of the request-level
+counterfactual, priced **at write time from the request's own model** and at the tier the
+request itself paid:
+
+```
+saved_usd(c,r) = u·W + (g − u)·tier(r)
+```
+
+where `g` is what the component removed on that turn, `u = min(unique, g)` is the
+part that had never been sent before, `W` is the cache-creation rate, and `tier(r)` is the
+cache-read rate on a turn that hit, the creation rate on a turn whose cache had expired and
+whose whole prompt was re-billed, and the fresh rate on a backend with no cache. It is the same
+rule and the same rates as the request-level baseline, so the per-component figures **sum** to
+it — a unit fixture reconciles exactly, and production data to 0.9%. `net_usd` is
+`saved_usd − llm_cost_usd`, and it is **negative when the component is underwater**, which is
+a real outcome the page shows rather than hides.
+
+Summing over a component's turns *is* the amortization: value realized turn by turn as a frozen
+reduction replays, not a projection from one turn. That matters because most of an extractor's
+realized value comes from replay with no call at all (~93% on measured traffic) — so a single
+warm turn with one call sits near break-even by construction, and a verdict read off one turn
+is not a verdict. Sessions still inside a provider cache TTL carry `in_flight` for exactly this
+reason (see [Sessions](#sessions)).
+
+Replay is priced at the cached rate on a warm turn deliberately: it is content removed on an
+*earlier* turn that now sits deep inside the cached prefix, where the read rate is correct.
+Re-pricing it fresh — which the cache-aware argument tempts you into, since compaction only
+touches the *uncached tail* — confuses it with the unique term, which is already priced as a
+write, and inflates warm-turn savings roughly 6× with nothing behind it.
+
 **LLM calls · LLM cost** are blank for every deterministic component and filled for the ones
-that call a model themselves. Where they are filled, the verdict is stated in **dollars**
-rather than inferred from tokens and latency: what that component's calls removed, valued at
-the rate those tokens would actually have been billed at, minus what the calls cost. Cold-sweep
-calls are valued at the cache-write rate and warm ones at the cache-read rate — a ~12.5×
-spread, so a component whose calls are mostly cold is judged on the right basis. The value
-deliberately counts only what the CALLS removed, not the component's total savings: most of an
-extractor's realized value comes from frozen results replayed with no call at all (~93% on
-measured traffic), and crediting that replay to the calls would make any amount of spending
-look profitable.
+that call a model themselves. `llm_saved_tokens` counts only what the CALLS removed, which is
+why it is not the same as the component's `saved_usd`: cold-sweep calls are valued at the
+cache-write rate and warm ones at the cache-read rate — a ~12.5× spread, so a component whose
+calls are mostly cold is judged on the right basis.
 
 ### Compaction model calls
 
@@ -312,6 +349,12 @@ the cost of a call would leave an account unable to answer the question the reco
 Searchable, filterable, paginated. Per session: model · agent · preset · turns · tokens
 before/saved · dollars saved · cache reads/writes · restorations · context-guru latency ·
 start time. Clicking a session filters the request list to it.
+
+`in_flight` marks a session whose last request is still inside one provider cache TTL. Its
+dollar figures are an **incomplete amortization, not a verdict**: the next turn may replay the
+same reduction and add to its value, so a young session with one extraction call reads
+underwater and stops reading underwater as the turns come in. It is derived from the session's
+`MAX(ts)`, not stored — nothing about it is a fact about a request.
 
 ### Requests, and the diff
 
@@ -610,10 +653,21 @@ Two access rules differ from the local case, and both are enforced server-side:
   The honest reason it matters is the one above: the redactor is a best-effort denylist, and a
   review of 22 realistic credential shapes found **11 passing through it**. 22-of-22 now
   passing does not prove completeness.
-- **A manager sees everyone's metrics and everyone's transcripts.** An explicit owner
-  decision: the account selector points the ordinary request drawer and diff view at any
-  account. The archive route applies the same rule, so hot and cold cannot disagree.
-  Everyone else still reads only their own, whatever they put in `?tenant=`.
+- **A manager sees everyone's metrics and everyone's transcripts, by default.** An
+  explicit owner decision: a manager runs the service, so with no `?tenant=` at all every
+  read route — including the live SSE feed — is service-wide, and the account selector
+  points the ordinary request drawer and diff view at any account. `?tenant=<id>` picks one
+  account, `?tenant=*` is the explicit form of the default, and **`?tenant=me`** is the way
+  back to the manager's own traffic. The archive route applies the same rule, so hot and
+  cold cannot disagree. Everyone else still reads only their own, whatever they put in
+  `?tenant=` — the scope is resolved once, from the cookie-derived principal, and the
+  narrowing assignment is an overwrite of the parsed filter rather than a merge into it.
+  There is no client-supplied widening: no `?all=`, no header, nothing the browser echoes
+  back. Because the scope is service-wide by default, the session list carries
+  `tenant_id` (a comma-joined value if two accounts happen to share a session id), and a
+  **single-session** view pins itself to the account whose first turn it is — a session id
+  is unique per account, not per service, so an unpinned wide diff would interleave two
+  people's code under one id.
 - **Three surfaces become manager-only**, because they are not anybody's tenant data:
   the server's effective configuration (`/api/config`, which
   [says so in its own payload](reference/routes.md#the-config-route-serves-the-servers-configuration-not-yours)
