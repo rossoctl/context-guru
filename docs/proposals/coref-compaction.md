@@ -674,23 +674,27 @@ It is falsifiable in four independent places, and three of the four are cheap:
 | Clause | How it fails | Cost to test |
 |---|---|---|
 | "removes 10–25%" | Measured 4.4–9.6% on interactive traffic at the shipped cut set | **done** — it currently fails |
-| "defers by 20+ turns" | 0/19 sessions could reach 40 turns of headroom | **done** — it currently fails |
+| "defers by 20+ turns" | 0/19 sessions could reach 40 turns of headroom **when fired late**; fired at the crossing the deficit term vanishes and 20–60 turns is affordable, but only in the 17–29% of sessions that compact at all | **partly answered** — see [reachability](../results/coref-reachability.md) |
 | "cache-write repaid by deferred summarization" | Needs the deferral prize to be reachable at all | cheap — `modes.Tracker` reset detection, no new machinery |
 | "at reward parity" | Any task lost to a false drop | expensive — the eval box, and the only real gate |
 
-Two of the four clauses **already fail on measured traffic**, which is why the component ships
-opt-in and in no preset. Recording that plainly is more useful than restating the ambition: the
+One clause **fails on measured traffic** and one is **partly rescued** by firing earlier, which is
+why the component ships opt-in and in no preset. Recording that plainly is more useful than restating the ambition: the
 remaining case for `coref` is that the corpus it failed on is the wrong one (interactive research
 traffic, mostly one author, `opaque`-heavy), and the corpus the acceptance criteria are written
 against has never been measured.
 
 ## 9. Open questions
 
-- **How often is the deferral prize actually reachable?** The largest claimed win in this document
-  has never been measured. `modes.Tracker` already detects the agent's compaction resets, so this is
-  answerable on existing traffic with no new machinery — and the answer decides whether the
-  [deferral gate](#the-deferral-gate-designed-unquantified) is worth building or whether
-  `min_batch_frac` is adequate. **Nothing else in that subsection should be built first.**
+- ~~**How often is the deferral prize actually reachable?**~~ **Measured** — see
+  [reachability](../results/coref-reachability.md). The prize exists in **17% of sessions (6/35)**
+  and **29% of sessions past 200 model turns**, so every expected-value argument here must be
+  multiplied by ~0.17–0.29 — a factor no version of this document carried. The same pass produced
+  the first clause of the hypothesis that does *not* fail: fired **at** the threshold crossing the
+  deficit term vanishes (it was an artifact of measuring after a late fire), leaving only
+  `growth × headroom`, which the available cut can supply for 20–60 turns. That vindicates §6's
+  counter-intuitive claim about the profitable moment from a second direction. It is sensitive to a
+  growth estimator two measurements disagree about by 2×, and it still inherits the 11% false-drop.
 - **Is `xdedup` back on the table?** §C left one caveat explicitly open: compaction is the one
   regime that could make cross-turn dedup viable, because it removes the first copy while later
   re-reads land in the mutable tail. `coref` *creates* that regime. C1 should be re-measured

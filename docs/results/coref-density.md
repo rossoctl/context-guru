@@ -142,10 +142,23 @@ The same figures condemned the original `min_batch_frac: 0.15`, which admitted *
 with `cut_closed` on and **0 of 19** at the shipped cut set. It is now 0.05 (16/19), recorded as a
 starting point rather than a claim.
 
-!!! warning "The deficit column is partly an artifact; the availability column is not"
+!!! danger "The deficit column is an artifact of firing LATE, and the peak column is not usable at all"
     Peak request ≈180k and deficit ≈13k are shaped by `cc_capture.py` segmenting at 180k tokens, so
     peaks cluster there by construction. The durable finding is the one independent of it:
-    **available cuttable mass is 4–10% of the request.** Read the deficit figures as illustrative.
+    **available cuttable mass is 4–10% of the request.**
+
+    Two later corrections, both from [the reachability pass](coref-reachability.md):
+
+    1. **The deficit term should be ~0, not 7.3%.** Segmenting at 180k places the measurement point
+       *past* the threshold; at the moment the agent actually compacts, usage *is* the threshold by
+       definition. Fired at the crossing, the requirement collapses to `growth × headroom` — and the
+       H=40 row below goes from 0/19 to affordable. The table measures a late fire, not the design.
+    2. **Absolute request sizes are not recoverable from this corpus at all.** Claude Code
+       transcripts are trees (25–51 forks, 338–632 leaves per compacted transcript) and the
+       `parentUuid` graph is too fragmented to reconstruct the active branch. A linear read spans
+       multiple context windows. Duplicate tool-output mass is only 3% pooled / 2% median, so the
+       **share**-based results on this page are unaffected — but read every absolute token figure as
+       indicative only.
 
 The design consequence — a gate that asks whether `coref`'s cut is the *decisive* one rather than
 whether it is large, and what it would take to know the distance to the threshold — is worked

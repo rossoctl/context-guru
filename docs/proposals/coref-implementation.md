@@ -142,10 +142,11 @@ real names like `context-guru`) is bounded at ~6 points of *under*-reporting rat
    scored benchmark run.
 4. Only then §8's benchmarks, with the multi-seed and don't-stop-at-first-significance guards.
 
-Separately and in parallel, because it needs no API budget and no eval box: measure how often the
-agent's own compaction is reachable at all (`modes.Tracker` reset detection). That decides whether the
-[deferral gate](coref-compaction.md#the-deferral-gate-designed-unquantified) is worth building, and it
-is the largest unexamined claim in the proposal.
+~~Separately and in parallel, because it needs no API budget and no eval box: measure how often the
+agent's own compaction is reachable at all.~~ **Done** — [reachability](../results/coref-reachability.md).
+17% of sessions, 29% past 200 model turns; and firing at the crossing rather than late removes the
+deficit term, which makes 20–60 turns of headroom affordable where the density pass had 0/19. The
+deferral gate is therefore worth building, but it should gate on *fire early*, not just on batch size.
 
 Until step 1, the component's `closed`-cut defaults remain placeholders with a measured basis on the
 wrong corpus, which is why they are off rather than on.

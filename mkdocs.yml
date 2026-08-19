@@ -176,6 +176,7 @@ nav:
       - Improvement plan: results/improvement-plan.md
       - "Co-reference density (measurement)": results/coref-density.md
       - "Co-reference selection (experiment)": results/coref-selection-experiment.md
+      - "Co-reference reachability (measurement)": results/coref-reachability.md
       - "SWE-bench Verified: per-arm detail":
           - baseline: results/baseline.md
           - context-guru: results/context-guru.md

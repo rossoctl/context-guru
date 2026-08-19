@@ -263,6 +263,13 @@ operational damage rate.
   present only in them. Model arms received `later_turns` as information with no enforced floor. A
   floor-symmetric re-run is cheap and has not been done.
 - **`n = 7` compaction events** for finding 10, from 4 sessions, one contributing 3.
+- **The Claude Code corpus is read linearly out of a tree-structured transcript**, so abandoned
+  `--resume`/edit branches are present. Measured contamination is small — exact-duplicate tool
+  outputs are 3% of mass pooled, 2% median ([reachability §2](coref-reachability.md)) — so class
+  shares and the arm comparison hold. But it introduces a bias *opposing* the Tier-1 one: an
+  abandoned branch can supply a "later reference" that the live conversation never made, which
+  inflates false-drop. So the 11% is bracketed by two biases of unknown relative size rather than
+  being a clean lower bound, and the earlier claim that it is purely a lower bound was too strong.
 - **"Referenced later" ≠ "the agent was harmed."** Removed content is recoverable via `expand`, so
   the true cost is a round-trip *if the model notices*. Treating a later reference as an error is an
   assumption inside the metric.
