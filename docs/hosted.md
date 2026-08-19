@@ -487,6 +487,26 @@ that tenant's agent sends, so there is no shared budget to guard. Month-to-date 
 still computed and shown, per tenant, on Settings and in the manager's roster — it needs
 `MODEL_INFO` on to be non-zero, because an unpriced row costs $0.00.
 
+**Set `MODEL_PRICES` on this box.** ete-litellm bills about half of anthropic.com's published
+rates (`aws/claude-sonnet-5`: $1.52/MTok in against $3.00), and it serves ids the public price
+map has never heard of — the preview Gemini deployments, and Bob's server-resolved tier names,
+which are why a Bob session used to show tokens and latency but no cost at all. Both are fixed
+by pointing at the shipped list:
+
+```sh
+sudo install -m0644 deploy/service/prices.example.yaml /etc/context-guru/prices.yaml
+sudo systemctl edit context-guru          # or a drop-in file:
+#   [Service]
+#   Environment=MODEL_PRICES=/etc/context-guru/prices.yaml
+sudo systemctl restart context-guru
+journalctl -u context-guru -n 20 | grep "price list"   # "entries=42"
+```
+
+A malformed file refuses to start rather than falling back, because a price list that
+silently failed to load is indistinguishable from "every model is free". The file holds list
+prices and no credential. Details and the matching rules:
+[Per-model prices](reference/config.md#per-model-prices-and-why-the-public-map-is-not-enough).
+
 Two things that are *not* IBM-specific and should not be relaxed: cold storage on Box is one
 rclone remote name away from being any other remote, and `/metrics` plus Grafana binding
 loopback-only is about cross-tenant spend data, not about IBM.
@@ -1005,10 +1025,11 @@ The installer brings up Prometheus and Grafana beside the proxy, provisioned, in
 commands:
 
 ```sh
-sudo deploy/service/install.sh grafana          # both containers, config, dashboards
+sudo deploy/service/install.sh grafana          # all five containers, config, dashboards
 sudo deploy/service/install.sh grafana-status   # scrape health + provisioning errors
 # then, signed in as a MANAGER at /dashboard/:
 #   https://<the host>/grafana/d/context-guru/context-guru
+#   https://<the host>/grafana/d/context-guru-host/context-guru-host   # the box itself
 # or without the front end:
 ssh -L 3000:127.0.0.1:3000 <the host>
 # then http://127.0.0.1:3000/grafana/d/context-guru/context-guru

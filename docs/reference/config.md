@@ -88,8 +88,53 @@ for every component's config block.
 | `INJECT_EXPAND` | `auto` | Whether the `context_guru_expand` tool is advertised: `auto` (only when the request already declares tools, carries a `<<cg:HASH>>` marker, and the store persists) \| `always` \| `never`. |
 | `CACHE_MODE` | `auto` | Cache-aware compaction: `auto` (on when the agent sets its own breakpoints) \| `on` \| `off`. |
 | `MODEL_INFO_URL` / `MODEL_INFO` | LiteLLM map | Source for context-window sizes (used by the fractional triggers). `MODEL_INFO=off` disables the lookup; fractions are then ignored and absolutes apply. |
+| `MODEL_PRICES` | — | Path to an **operator price list**, consulted before the public map. See below. A file that fails to load is fatal. |
 | `--store` / `STORE` | on | Enable/disable the state store; `--store=false` disables offload reversibility. Wins over the file's `store:` block. |
 | `--mode` / `MODE` | `sync` | Operating mode: `sync` \| `observe`. Wins over the file's `mode:`. |
+
+### Per-model prices, and why the public map is not enough
+
+Every dollar figure on the dashboard is `observed tokens × per-model rates`. Those rates come
+from LiteLLM's public `model_prices_and_context_window.json`, which prices the **public API**.
+A gateway does not have to charge that, and two things go wrong when it does not:
+
+* **Wrong rates.** IBM's `ete-litellm` bills `aws/claude-sonnet-5` at $1.52/MTok in where
+  anthropic.com bills $3.00 — so every cost, every baseline and every saving for that gateway
+  read about twice the truth.
+* **No rates at all.** A model the public map has never heard of — a preview id, an internal
+  route name, or a server-resolved **tier** like Bob's `premium`, which is not a model id —
+  resolves to nothing, the row is marked `partial`, and its cost reads *unknown*. That is why
+  a Bob session showed tokens and latency but no money.
+
+`MODEL_PRICES=/etc/context-guru/prices.yaml` fixes both. Start from
+[`deploy/service/prices.example.yaml`](https://github.com/rossoctl/context-guru/blob/main/deploy/service/prices.example.yaml),
+which carries the whole ete-litellm table:
+
+```yaml
+cache_read_frac: 0.1     # fills cache_read where an entry omits it
+cache_write_frac: 1.25   # …and cache_write
+models:
+  - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}
+  - {match: "claude-sonnet*",      in: 2.28, out: 11.40}   # a family; longest match wins
+  - {match: "premium*",            in: 3.00, out: 15.00, note: "Bob tier — an ESTIMATE"}
+```
+
+Rates are **dollars per million tokens**, matching every vendor's price page; they are
+converted once on load. Ids are matched case-insensitively, whole first, then as a family
+prefix, then by containment — longest match always wins, so order in the file decides
+nothing. `window:` optionally supplies a context window for a model the public map does not
+list either.
+
+These are list prices, not credentials, and the file holds no secret. A malformed one is a
+**startup error** rather than a fallback: a price list that silently failed to load is
+indistinguishable from "every model is free".
+
+!!! warning "A tier is an estimate, and the file should say so"
+    Bob puts `premium` / `premium-ide` / `standard` / `fast` on the wire — a tier, resolved
+    server-side, not a model. Any rate for it is a guess. The shipped entry is fitted against
+    the `session_costs` Bob prints for itself and lands within about a third on real runs;
+    the example file shows both measurements. Read a Bob row's **savings** normally (a uniform
+    rate error cancels in the ratio) and its absolute cost with that error bar.
 
 ### Extraction-model pricing
 

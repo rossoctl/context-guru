@@ -585,7 +585,7 @@ function renderTiles(o) {
       'cache reads vs the fresh rate', costKnown && o.cache_saved_usd > 0 ? 'good' : ''),
     tile('cache-saved-protected', 'of which on our breakpoints',
       costKnown ? usd(o.cache_saved_protected_usd) : 'unknown',
-      'requests where cachesplit acted'),
+      'requests where cachesplit or cacheinject acted'),
   ]));
 
   host.appendChild(tileGroup('Billed tokens', 'the four tiers the provider charges on', [

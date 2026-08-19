@@ -31,7 +31,7 @@ Every headline number, with the honesty machinery visible rather than hidden:
 |---|---|
 | Volume | requests · sessions · tokens before/after |
 | Savings | gross · unique · net-of-restores · overcount ratio |
-| Money | baseline cost · actual cost · context-guru's own LLM spend · net dollars saved |
+| Money | baseline cost · actual cost · context-guru's own LLM spend · net dollars saved · **prompt-cache savings** · **total avoided** |
 | Tokens billed | fresh input · cache reads · cache writes · output |
 | Latency | context-guru added (mean + **p95**) · upstream (mean + p95) |
 | Quality | restorations + rate · reverts · not-compacted count |
@@ -102,8 +102,37 @@ net savings by ~9× on the same data, which is why the dashboard puts `overcount
 right beside the dollar figure.
 
 Beneath it, the **honest savings waterfall**: baseline → compaction savings →
-context-guru's own LLM cost → net cost → net savings. If context-guru cost more than it
-saved, the waterfall says so.
+context-guru's own LLM cost → net cost → net savings → prompt-cache savings → total
+avoided. If context-guru cost more than it saved, the waterfall says so.
+
+#### Two savings, added and not nested
+
+There are two different counterfactuals on this page and conflating them is the easiest way
+to overstate a dashboard.
+
+**Compaction savings** (`net_saved_usd`) is baseline − actual − our own spend: what content
+that never reached the provider would have cost. Its baseline prices the unique removal at
+the cache-write rate and the re-sent remainder at the rate *this request actually paid* — the
+cache-read rate when its cache hit, and the cache-**write** rate when it missed, because a
+request whose cache had expired re-billed the whole prompt and would have re-billed the
+removed part with it. On production traffic those expired turns were 4% of requests and 31%
+of spend, so valuing their removals as cache reads understated them by ~12×.
+
+**Prompt-cache savings** (`cache_saved_usd`) is a request's cache-read tokens priced at the
+fresh rate they would have cost with no cache at all, minus what they were billed. This one
+is the *provider's* mechanism, not ours. It is here because a compaction proxy that rewrites
+deep history destroys it — so it is the number that falls when a pipeline goes too deep, and
+`cache_saved_protected_usd` reports the part of it that landed on requests where one of our
+own cache components (`cachesplit`, `cacheinject`) actually acted.
+
+They are **added**, never nested: `total_saved_usd = net_saved_usd + cache_saved_usd`. Folding
+the cache saving into the compaction baseline would double-count, because that baseline
+already assumes the cache behaved exactly as it did.
+
+Both are only as good as the per-model rates behind them. On a gateway that does not charge
+the public API's prices — IBM's `ete-litellm` bills half of anthropic.com for
+`claude-sonnet-5` — set [`MODEL_PRICES`](reference/config.md#per-model-prices-and-why-the-public-map-is-not-enough),
+or every figure in this section is wrong by whatever margin your contract differs by.
 
 ### Components — which ones earn their place
 
@@ -118,6 +147,13 @@ to content-token counts), and a component that burned wall time for nothing read
 
 `overcount_ratio` is the number that keeps the rest honest: a ratio of 7× means the
 gross figure counted the same compaction seven times as the agent re-sent its transcript.
+
+**Why declined** is the column to read when `act rate` is 0%. It is the component's own gate
+counts — `no_filter_match`, `no_obvious_noise`, `below_output_floor` — commonest first, with
+the full list on hover, and the same column appears per component in the request drawer.
+Without it a table of zeros is unfalsifiable: it looks the same whether the pipeline is
+broken, the traffic is uncompactable, or the heuristics were written for a different agent's
+tool-output shapes. On a Bob session it is usually the last of those, and it says so.
 
 **LLM calls · LLM cost** are blank for every deterministic component and filled for the ones
 that call a model themselves. Where they are filled, the verdict is stated in **dollars**
