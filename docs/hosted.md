@@ -630,7 +630,32 @@ an account opts in. It is the only component that spends money to save money, an
 halves have opposite economics, so they are separate switches.
 
 **Settings → Compaction model calls (extract_llm)** on the account's own page (manager-only,
-because the server refuses `config_yaml` from anyone else). Each control states what it costs.
+because the server refuses a configuration from anyone else). Each control states what it costs.
+
+#### The settings page has no YAML box
+
+It had one, and it was the cause of the failure it was supposed to be the escape hatch from.
+The page built the document by rewriting the `pipeline:` line with a regular expression in the
+browser, which produced this on a config whose pipeline was written as a block sequence:
+
+```
+Not saved: tenant: config rejected: config: yaml: line 3: did not find expected key
+```
+
+The refusal left the old document stored, so the next attempt mangled the same input again —
+two accounts were stuck in that loop on every save. A `preset:` document lost its entire
+pipeline the same way, silently, because there was no flow-style line to read the existing
+names out of.
+
+So the page posts **fields** (`config` on `PUT /api/me`) and the server applies them to the
+account's document with a real YAML library, validates the result by building it, and stores
+it only then. Keys the form does not own — `model:`, `strategy`, `marker_mode`, another
+component's block — survive the round trip untouched. What is not preserved is comments and
+key order: a map has neither, and that is the trade for never emitting a broken document.
+
+Anything the fields do not cover is set by a manager through **Accounts → the account →
+Full configuration (YAML)**, which still takes a document and still validates it strictly.
+
 
 **Start with the cold-cache sweep alone.** This is the half whose economics are not in doubt:
 turns that resume after the provider's cache TTL are ~4% of this deployment's requests and
@@ -642,7 +667,9 @@ nothing touches them.
 3. Save. The page warns that saving discards frozen compaction decisions, so the next turn
    is not cache-warm — expected, once.
 
-Equivalent YAML, for the Advanced box or the server default:
+Equivalent YAML, for the **server default** (`--config`) or a manager setting it on someone
+else's account through the account editor — the settings page itself has no YAML box any
+more, see below:
 
 ```yaml
 components:
@@ -713,7 +740,7 @@ because drawing the empty stored one would read as "my configuration is gone":
 
 | State | Settings shows |
 |---|---|
-| Tracking | *Following the server default.* The pipeline, mode and YAML are shown **read-only**, labelled as the operator's, with a note that they change when the operator changes the default. One button: **Customise**. |
+| Tracking | *Following the server default.* The pipeline, mode and compaction fields are shown **read-only**, labelled as the operator's, with a note that they change when the operator changes the default. One button: **Customise**. |
 | Own configuration | *Using your own configuration*, plus the warning that changes to the server default do not reach you — and, when the stored document is byte-identical to the current default, that it is identical. Controls editable. One button: **Follow the server default** (confirmed, audited). |
 
 Moving between them: **Customise** stores the current effective document as your own, so
@@ -1153,7 +1180,7 @@ thing to keep in step with the server.
 |---|---|
 | Sign in / Register | Registration takes an email, a password, a token label, and an invite code if the deployment is in `invite` mode; entering the [mailed 6-digit code](#the-sign-in-flow) verifies the address, returns the token **once**, and signs you in — so registration flows straight to Setup with the token already substituted into the snippets. On a `closed` deployment the attempt is refused — see [step 4](#4-choose-how-accounts-are-created). Signing in later is password + a fresh mailed code, and an account created before passwords existed can still sign in with its token. Either way the browser only ever holds the session cookie. |
 | Setup | The three copy-paste blocks, with your own token and this deployment's real base URL (derived from the request, so it is correct behind nginx and on loopback alike). Your provider key stays where it already is; the blocks only add the base URL and the `x-context-guru-token` header — or, for Bob, the one-time key-binding curl. |
-| Settings | Upstream per dialect, content-capture consent, month-to-date spend, bound agent keys, token management, signed-in machines, and your own configuration-change history. Mode, component toggles and raw YAML are the **manager's**, per account; a plain account is told so and asks them. For a manager, they are read-only while [tracking the server default](#tenants-track-the-default-they-are-not-stamped-with-a-copy-of-it), with **Customise** to take ownership. |
+| Settings | Upstream per dialect, content-capture consent, month-to-date spend, bound agent keys, token management, signed-in machines, and your own configuration-change history. Mode, component toggles and the compaction fields are the **manager's**, per account; a plain account is told so and asks them. For a manager, they are read-only while [tracking the server default](#tenants-track-the-default-they-are-not-stamped-with-a-copy-of-it), with **Customise** to take ownership. |
 | Archive | What has moved to cold storage, from the local index. Opening one fetches it back read-only. |
 | Components | Manager only on a hosted deployment, since the pipeline it exists to tune is the manager's. Still there on a single-tenant proxy, where the operator is the only user of their own box. |
 | Tenants | Manager only: every account with its month-to-date spend, disable an account, reissue a lost token. |

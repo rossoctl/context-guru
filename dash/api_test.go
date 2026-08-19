@@ -305,7 +305,8 @@ func TestUIHasTestIDsForEveryStatTile(t *testing.T) {
 	for _, key := range []string{
 		"requests", "tokens-before", "tokens-after", "saved-gross", "saved-unique",
 		"saved-adjusted", "overcount", "cost-baseline", "cost-actual", "cost-cg",
-		"saved-usd", "cache-read", "cache-write", "fresh-input", "output",
+		"saved-usd", "total-saved-usd", "cachesplit-saved",
+		"cache-read", "cache-write", "fresh-input", "output",
 		"cg-latency", "upstream-latency", "expands", "reverts", "passthroughs",
 	} {
 		if !strings.Contains(source, "tile('"+key+"'") {
@@ -674,4 +675,71 @@ func unbalancedAt(s string) (int, bool) {
 		return openLine[len(stack)], false
 	}
 	return 0, true
+}
+
+// The dashboard must not reference a savings field the API stopped emitting, and must not
+// re-grow the two it deliberately dropped.
+//
+// `cache_saved_usd` was a headline tile reading "Prompt-cache savings", and
+// `cache_saved_protected_usd` a second one reading "of which where we split the prefix".
+// Neither was a saving of ours: the first is the provider's whole prompt cache, which the
+// agent's own breakpoints earn, and the second was co-occurrence dressed as cause. They were
+// replaced by `cachesplit_saved_usd`, which is measured, and the provider figure stays in the
+// API as a diagnostic only. A revert that puts either back on the page fails here.
+func TestUIClaimsOnlyTheCacheSavingWeMeasure(t *testing.T) {
+	js, err := uiFS.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(js)
+	if !strings.Contains(src, "o.cachesplit_saved_usd") {
+		t.Error("the overview does not render cachesplit_saved_usd, the one cache saving we claim")
+	}
+	if strings.Contains(src, "cache_saved_protected_usd") {
+		t.Error("cache_saved_protected_usd is back on the page; it measured co-occurrence, not cause")
+	}
+	// The provider figure may appear ONCE in the per-request drawer and ONCE in the A/B
+	// comparison (where it is the control variable, not the credit) — never in a tile.
+	for _, forbidden := range []string{
+		"tile('cache-saved'", "'Prompt-cache savings'", "o.cache_saved_usd",
+	} {
+		if strings.Contains(src, forbidden) {
+			t.Errorf("the provider's cache saving is presented as ours again: %q", forbidden)
+		}
+	}
+}
+
+// The settings page is fields now, and its field NAMES are a wire contract with
+// config.Form's json tags. Nothing else checks that: a renamed tag would leave the form
+// silently posting a key the server ignores, which is the failure mode the YAML box already
+// had — extract_llm's own loader is non-strict, so an ignored key does nothing at all, and
+// this is the component that spends money.
+//
+// Asserted from the JS side because that is the half with no compiler.
+func TestSettingsFormSpeaksTheSameFieldNamesAsTheServer(t *testing.T) {
+	js, err := uiFS.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(js)
+	// Every key of config.ExtractLLMForm, by its json tag.
+	for _, key := range []string{"per_output", "cold_enabled", "size_trigger", "min_tokens",
+		"max_per_request", "max_per_session", "aggressiveness", "context", "context_messages",
+		"cold_min_tokens"} {
+		if !strings.Contains(src, key) {
+			t.Errorf("the form does not mention %q, a field the server expects", key)
+		}
+	}
+	// The document itself is the server's now: no YAML editor on the settings page, and no
+	// hand-rolled writer behind it.
+	for _, gone := range []string{"'#set-yaml'", "writeXllm", "readXllm", "unmanagedXllmLines"} {
+		if strings.Contains(src, gone) {
+			t.Errorf("%s is back; the browser must not build the configuration document "+
+				"(that is what produced \"did not find expected key\" on every save)", gone)
+		}
+	}
+	// And it posts fields, not text.
+	if !strings.Contains(src, "body.config = {") {
+		t.Error("saveSettings does not post structured fields")
+	}
 }

@@ -547,11 +547,12 @@ function renderTiles(o) {
   // same ("gross" vs "unique"). Anything that only restated the label is gone — "Tokens
   // before / content tokens in" was a caption explaining a caption.
   host.appendChild(tileGroup(null, null, [
-    // Two savings, added. It can be positive on traffic context-guru never touched — on a
-    // bypassed or observe-mode window the compaction half is zero and all of this is the
-    // provider's cache — so the sub-line names both halves rather than implying credit.
+    // Our two savings, added: compaction's and the prefix components'. Both are ours and
+    // the token sets are disjoint. The provider's own cache saving is much larger and is
+    // NOT in here — it was, under the label "compaction + provider cache", and a headline
+    // number that mostly measures somebody else's mechanism is not a headline number.
     tile('total-saved-usd', 'Total dollars avoided', costKnown ? usd(o.total_saved_usd) : 'unknown',
-      'compaction + provider cache', costKnown ? (o.total_saved_usd < 0 ? 'bad' : 'good') : ''),
+      'compaction + prefix cache', costKnown ? (o.total_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-usd', 'Net dollars saved', costKnown ? usd(o.net_saved_usd) : 'unknown',
       'baseline − actual − our spend', costKnown ? (o.net_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-unique', 'Tokens saved (unique)', compact(o.saved_unique),
@@ -580,21 +581,18 @@ function renderTiles(o) {
       costKnown ? 'as billed' : 'needs all four tiers'),
     tile('cost-cg', 'Our own LLM cost', costKnown ? usd(o.cg_llm_cost_usd) : 'unknown',
       'extract_llm, summarize'),
-    // The prompt cache is the other half of the money on this page, and it was missing
-    // from it entirely. It is deliberately a separate tile from "Net dollars saved": the
-    // baseline counterfactual already assumes the cache behaved as it did, so this is a
-    // second saving beside that one, not part of it.
-    tile('cache-saved', 'Prompt-cache savings', costKnown ? usd(o.cache_saved_usd) : 'unknown',
-      'cache reads vs the fresh rate', costKnown && o.cache_saved_usd > 0 ? 'good' : ''),
-    // Deliberately NOT labelled as our saving. It locates the cache money on the requests
-    // where one of our cache components had just rewritten the prefix; it does not show that
-    // the cache read happened BECAUSE of that. The causal claim needs an A/B with the
-    // component off, and there is one (-34.1% cost, 0% -> 96.7% hit) — this figure is a
-    // pointer to where to look, and a floor, since a prefix is a property of the session
-    // while this counts only the turns we acted on.
-    tile('cache-saved-protected', 'of which where we split the prefix',
-      costKnown ? usd(o.cache_saved_protected_usd) : 'unknown',
-      'not a causal claim — needs an A/B'),
+    // The cache saving this project claims, and the only one. Three conditions per request:
+    // the volatile-tail split ran, the provider then READ that prefix from cache, and it was
+    // the session's FIRST request — the one that would have missed. And the amount is the
+    // stable half the split moved, not the whole cache_read: the cachesplit-off control arm
+    // still read 45,805 tokens, so only the 8,499-token difference was ever ours.
+    //
+    // What was here before was the provider's whole cache saving ("Prompt-cache savings")
+    // plus the subset that merely co-occurred with our components. On the traffic that
+    // measured this, 23x larger — and neither of them a thing we did.
+    tile('cachesplit-saved', 'Prefix-cache savings', costKnown ? usd(o.cachesplit_saved_usd) : 'unknown',
+      'the prefix half we moved, on first-request hits',
+      costKnown && o.cachesplit_saved_usd > 0 ? 'good' : ''),
   ]));
 
   host.appendChild(tileGroup('Billed tokens', 'the four tiers the provider charges on', [
@@ -932,7 +930,9 @@ async function loadUsage() {
         el('td', { class: 'num', text: compact(g.saved_unique) }),
         el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.spent_usd) }),
         el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.saved_usd) }),
-        el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.cache_saved_usd) }),
+        // Ours, not the provider's: this column used to carry cache_saved_usd, which made
+        // every model look like a large cache saving we had nothing to do with.
+        el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.cachesplit_saved_usd) }),
         el('td', { class: 'num' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.total_saved_usd) }),
         el('td', { class: 'num', text: num(g.incomplete_rows) })));
     }
@@ -1590,7 +1590,9 @@ async function openRequest(id, fromURL) {
       // On a turn whose cache HIT this is usually the largest money figure on the row,
       // and it was not reported anywhere: the cache reads this request was billed for,
       // against the fresh rate they would have cost without the cache.
-      kv('Prompt cache saved', priced ? usd(e.cache_saved_usd) : '—'),
+      kv('Prefix-cache saved (ours)', priced ? usd(e.cachesplit_saved_usd) : '—'),
+      kv('Prefix half we moved', e.split_stable_tokens ? compact(e.split_stable_tokens) + ' tok' : '—'),
+      kv('Provider cache saved', priced ? usd(e.cache_saved_usd) : '—'),
       kv('context-guru latency', ms(e.cg_latency_ms)),
       kv('Upstream latency', ms(e.upstream_ms)),
       kv('Restorations', num(e.expands) + ' (' + compact(e.expand_tokens) + ' tok)'),
@@ -3462,14 +3464,12 @@ function loadSetup() {
 }
 
 // ── settings ───────────────────────────────────────────────────────────────
-function componentPickers(cfgText, opts) {
-  // Parse the pipeline line out of the YAML rather than shipping a YAML parser: the one
-  // field the checkboxes drive is `pipeline: [a, b, c]`, and a full parser for one line
-  // would be a lot of bytes in a page that has no build step.
-  const m = /^pipeline:\s*\[(.*?)\]\s*$/m.exec(cfgText || '');
-  const active = new Set((m ? m[1] : '').split(',').map((s) => s.trim()).filter(Boolean));
-  const all = (opts && opts.components) || [];
-  return { active, all };
+function componentPickers(pipeline, opts) {
+  // The pipeline comes from the server as a resolved list of names (tenant.effective_config).
+  // It used to be scraped out of the YAML text with a regex here, which only understood the
+  // flow style and read an empty pipeline for a `preset:` account — so the grid showed
+  // nothing running on the very configurations that ran the most.
+  return { active: new Set(pipeline || []), all: (opts && opts.components) || [] };
 }
 
 function loadSettings() {
@@ -3485,8 +3485,12 @@ function loadSettings() {
     // EFFECTIVE document — what the proxy actually runs — and when it is inherited they
     // are read-only and labelled as such, because it is not this tenant's choice yet.
     const inherited = !!t.config_inherited;
+    const cfg = t.effective_config || {};
+    const { active, all } = componentPickers(cfg.pipeline, opts);
+    // Still the document itself, for the two things that are ABOUT the document rather than
+    // about its contents: Customise stores a byte-identical copy of the default (comments and
+    // all), and "identical to the current default" is a text comparison.
     const effective = t.effective_config_yaml || t.config_yaml || '';
-    const { active, all } = componentPickers(effective, opts);
 
     // Spend, first: it is what a shared box gets asked about most. Reported only —
     // your traffic runs on YOUR provider credential, so there is nothing to cap.
@@ -3604,7 +3608,7 @@ function loadSettings() {
     const modeSel = el('select', { id: 'set-mode', 'data-testid': 'set-mode' },
       el('option', { value: 'sync' }, 'sync — compaction is applied (requests show Mode "active")'),
       el('option', { value: 'observe' }, 'observe — measure only, requests untouched (Mode "observe")'));
-    modeSel.value = /^mode:\s*observe/m.test(effective) ? 'observe' : 'sync';
+    modeSel.value = cfg.mode === 'observe' ? 'observe' : 'sync';
     modeSel.disabled = inherited;
     if (mgr) {
       host.appendChild(el('div', { class: 'field' },
@@ -3642,11 +3646,12 @@ function loadSettings() {
     }
     if (mgr) host.appendChild(el('div', { class: 'field' },
       el('label', {}, 'Pipeline components'), grid,
-      el('p', { class: 'hint' }, 'What runs. Run order comes from the YAML below.'),
+      el('p', { class: 'hint' }, 'What runs, in the order shown.'),
       whyBlock('What saving changes',
-        'A newly enabled component is appended at the end of the pipeline — move it in the ' +
-        'YAML below if it belongs earlier. Saving rebuilds your pipeline and discards frozen ' +
-        'compaction decisions, so the next turn will not be cache-warm.')));
+        'A newly enabled component is appended at the end of the pipeline. Saving rebuilds ' +
+        'your pipeline and discards frozen compaction decisions, so the next turn will not ' +
+        'be cache-warm. Per-component knobs beyond the fields on this page are set by a ' +
+        'manager on your account.')));
 
     // Content capture consent.
     const cap = el('input', {
@@ -3664,22 +3669,14 @@ function loadSettings() {
         '11 of 22 realistic credential shapes passing through it. The manager can read ' +
         'whatever this stores. Off by default.')));
 
-    // The compaction-model form, above the raw YAML it writes into.
-    if (mgr) renderXllmForm(host, effective, inherited);
-
-    // Raw YAML, for anything the toggles do not cover.
-    const ta = el('textarea', {
-      id: 'set-yaml', rows: 10, spellcheck: 'false', 'data-testid': 'set-yaml',
-      'aria-label': 'Full configuration, YAML',
-    });
-    ta.value = effective;
-    ta.disabled = inherited;
-    if (mgr) host.appendChild(el('details', { class: 'field' },
-      el('summary', {}, 'Full configuration (YAML)'), ta,
-      el('p', { class: 'hint' }, inherited
-        ? 'The server default, read-only. Customise above to edit it as your own.'
-        : 'Edited here, this wins over the toggles above. Rejected on save if it does not ' +
-          'build, with the offending key named.')));
+    // The compaction-model form.
+    //
+    // There is no YAML editor here any more. It was not a convenience, it was the failure:
+    // the page rewrote the document with regular expressions, which corrupted any config
+    // whose pipeline was written as a block sequence and produced "did not find expected
+    // key" on every save, with no way out from the UI. Fields post fields; the server owns
+    // the document.
+    if (mgr) renderXllmForm(host, cfg.extract_llm, inherited);
 
     // Save covers the upstreams and the capture consent in both states; it leaves the
     // configuration alone while it is inherited (see saveSettings), so saving one of
@@ -3852,204 +3849,11 @@ const XLLM_DEFAULTS = {
   cold_min_tokens: 1000,
 };
 
-/** readXllm pulls the current settings out of a YAML document by regex.
- *
- *  Regex, not a YAML parser, for the same reason componentPickers uses one: this file ships
- *  no dependencies. It reads only the keys the form owns and it never WRITES through these
- *  patterns — writeXllm replaces the whole block — so a document shape it misreads costs a
- *  wrong default in the form, never a corrupted config. */
-function readXllm(yaml) {
-  const blk = xllmBlock(yaml);
-  const num = (k, d) => {
-    const m = new RegExp('^\\s*' + k + ':\\s*(\\d+)\\s*$', 'm').exec(blk);
-    return m ? parseInt(m[1], 10) : d;
-  };
-  const str = (k, d) => {
-    const m = new RegExp('^\\s*' + k + ':\\s*([a-z_]+)\\s*$', 'm').exec(blk);
-    return m ? m[1] : d;
-  };
-  const bool = (k, d) => {
-    const m = new RegExp('^\\s*' + k + ':\\s*(true|false)\\s*$', 'm').exec(blk);
-    return m ? m[1] === 'true' : d;
-  };
-  // The cold_cache SUB-BLOCK, read separately: `num('min_tokens')` matches the first
-  // occurrence in the whole block, which is the hot-path threshold — so the sweep's floor was
-  // displayed wrong and then overwritten with the hot-path value on save.
-  const sub = coldSubBlock(blk);
-  const subNum = (k, d) => {
-    const m = new RegExp('^\\s*' + k + ':\\s*(\\d+)\\s*$', 'm').exec(sub);
-    return m ? parseInt(m[1], 10) : d;
-  };
-  const subBool = (k, d) => {
-    const m = new RegExp('^\\s*' + k + ':\\s*(true|false)\\s*$', 'm').exec(sub);
-    return m ? m[1] === 'true' : d;
-  };
-  const cold = sub !== '';
-  return {
-    in_pipeline: pipelineList(yaml).includes('extract_llm'),
-    per_output: bool('per_output', true),
-    size_trigger: str('fire_on', 'pressure') === 'size',
-    cold_enabled: cold ? subBool('enabled', false) : false,
-    min_tokens: num('min_tokens', XLLM_DEFAULTS.min_tokens),
-    max_per_request: num('llm_max_per_request', XLLM_DEFAULTS.max_per_request),
-    max_per_session: num('llm_max_per_session', XLLM_DEFAULTS.max_per_session),
-    aggressiveness: str('aggressiveness', XLLM_DEFAULTS.aggressiveness),
-    context: str('context', XLLM_DEFAULTS.context),
-    context_messages: num('context_messages', XLLM_DEFAULTS.context_messages),
-    cold_min_tokens: subNum('min_tokens', XLLM_DEFAULTS.cold_min_tokens),
-    // Keys the form does not manage, preserved verbatim on save (see writeXllm).
-    keep_lines: unmanagedXllmLines(blk),
-  };
-}
-
-/** pipelineList returns the configured component names. */
-function pipelineList(yaml) {
-  return ((/^pipeline:\s*\[(.*?)\]\s*$/m.exec(yaml) || ['', ''])[1])
-    .split(',').map((x) => x.trim()).filter(Boolean);
-}
-
-/** xllmBlock returns the text of the components.extract_llm block, or ''. */
-function xllmBlock(yaml) {
-  const lines = yaml.split('\n');
-  const start = lines.findIndex((l) => /^\s+extract_llm:\s*$/.test(l));
-  if (start < 0) return '';
-  const indent = lines[start].match(/^\s*/)[0].length;
-  let end = start + 1;
-  while (end < lines.length) {
-    const l = lines[end];
-    if (l.trim() !== '' && l.match(/^\s*/)[0].length <= indent) break;
-    end++;
-  }
-  return lines.slice(start, end).join('\n');
-}
-
-/** coldSubBlock returns the text of the cold_cache: sub-block inside an extract_llm block. */
-function coldSubBlock(blk) {
-  const lines = blk.split('\n');
-  const start = lines.findIndex((l) => /^\s*cold_cache:\s*$/.test(l));
-  if (start < 0) return '';
-  const indent = lines[start].match(/^\s*/)[0].length;
-  let end = start + 1;
-  while (end < lines.length) {
-    const l = lines[end];
-    if (l.trim() !== '' && l.match(/^\s*/)[0].length <= indent) break;
-    end++;
-  }
-  return lines.slice(start, end).join('\n');
-}
-
-/** MANAGED_XLLM_KEYS are the keys the form owns and will rewrite. Everything else in the
- *  block is somebody's deliberate configuration and must survive a save untouched. */
-const MANAGED_XLLM_KEYS = ['per_output', 'fire_on', 'min_tokens', 'llm_max_per_request',
-  'llm_max_per_session', 'aggressiveness', 'context', 'context_messages', 'cold_cache'];
-
-/** unmanagedXllmLines returns the top-level lines of an extract_llm block whose keys the form
- *  does not manage, with their sub-blocks, so a save preserves them.
- *
- *  Without this, any manager settings save rewrote the block from the form's fields alone and
- *  silently DELETED rewrite, marker_mode, model, economic_gate, trigger, skip_file_reads and
- *  llm_every_n_requests. Unticking an unrelated component in the grid would have reset
- *  somebody's deliberate compaction configuration. */
-function unmanagedXllmLines(blk) {
-  const lines = blk.split('\n').slice(1); // drop the "extract_llm:" header
-  const out = [];
-  let skipping = false;
-  let skipIndent = 0;
-  for (const l of lines) {
-    if (l.trim() === '') continue;
-    const indent = l.match(/^\s*/)[0].length;
-    if (skipping && indent > skipIndent) continue;
-    skipping = false;
-    const key = (/^\s*([A-Za-z_][\w]*):/.exec(l) || [])[1];
-    if (!key) { out.push(l); continue; }
-    if (MANAGED_XLLM_KEYS.includes(key)) { skipping = true; skipIndent = indent; continue; }
-    out.push(l);
-  }
-  return out;
-}
-
-/** writeXllm returns the document with components.extract_llm replaced by cfg, and the
- *  pipeline updated to match whether the component is wanted at all.
- *
- *  Whole-block replacement rather than per-key edits: a partial edit has to reason about
- *  which keys already exist and at what indentation, which is where a hand-rolled YAML
- *  writer goes wrong. The server validates the result strictly (LoadBytes + a real pipeline
- *  build) and answers 400 naming the offending key, so a document this mangles is rejected
- *  rather than stored. */
-function writeXllm(yaml, cfg) {
-  const wanted = cfg.per_output || cfg.cold_enabled;
-  let out = yaml.replace(/\s*$/, '\n');
-
-  // 1. pipeline membership.
-  const names = pipelineList(out);
-  if (wanted && !names.includes('extract_llm')) {
-    // Before the deterministic `extract` where possible: the cheap pass should see whatever
-    // the LLM pass leaves, which is the order every shipped preset uses.
-    const at = names.indexOf('extract');
-    if (at >= 0) names.splice(at, 0, 'extract_llm'); else names.push('extract_llm');
-  } else if (!wanted) {
-    const at = names.indexOf('extract_llm');
-    if (at >= 0) names.splice(at, 1);
-  }
-  const line = `pipeline: [${names.join(', ')}]`;
-  out = /^pipeline:/m.test(out) ? out.replace(/^pipeline:.*$/m, line) : line + '\n' + out;
-
-  // 2. the block itself.
-  const body = [
-    '  extract_llm:',
-    ...(cfg.keep_lines || []),
-    `    per_output: ${cfg.per_output}`,
-    // fire_on comes from an explicit choice, never from per_output being on. Deriving it
-    // meant a plain save turned the economic gate and the caching-backend guard advisory --
-    // i.e. quietly removed the spending brakes -- as a side effect of ticking a checkbox.
-    `    fire_on: ${cfg.size_trigger ? 'size' : 'pressure'}`,
-    `    min_tokens: ${cfg.min_tokens}`,
-    `    llm_max_per_request: ${cfg.max_per_request}`,
-    `    llm_max_per_session: ${cfg.max_per_session}`,
-    `    aggressiveness: ${cfg.aggressiveness}`,
-    `    context: ${cfg.context}`,
-    `    context_messages: ${cfg.context_messages}`,
-    '    cold_cache:',
-    `      enabled: ${cfg.cold_enabled}`,
-    `      min_tokens: ${cfg.cold_min_tokens}`,
-  ].join('\n');
-
-  const lines = out.split('\n');
-  const start = lines.findIndex((l) => /^\s+extract_llm:\s*$/.test(l));
-  if (start >= 0) {
-    const indent = lines[start].match(/^\s*/)[0].length;
-    let end = start + 1;
-    while (end < lines.length) {
-      const l = lines[end];
-      if (l.trim() !== '' && l.match(/^\s*/)[0].length <= indent) break;
-      end++;
-    }
-    if (!wanted) return lines.slice(0, start).concat(lines.slice(end)).join('\n');
-    return lines.slice(0, start).concat(body.split('\n'), lines.slice(end)).join('\n');
-  }
-  if (!wanted) return out;
-  const ci = lines.findIndex((l) => /^components:\s*$/.test(l));
-  if (ci >= 0) return lines.slice(0, ci + 1).concat(body.split('\n'), lines.slice(ci + 1)).join('\n');
-  return out.replace(/\s*$/, '\n') + 'components:\n' + body + '\n';
-}
-
-/** renderXllmForm draws the compaction-model controls. Manager-only, matching the server:
- *  PUT /api/me answers 403 to anyone else sending config_yaml. */
-function renderXllmForm(host, yaml, disabled) {
-  const cur = readXllm(yaml);
-  const state = {
-    per_output: cur.in_pipeline && cur.per_output,
-    size_trigger: cur.size_trigger,
-    cold_enabled: cur.in_pipeline && cur.cold_enabled,
-    keep_lines: cur.keep_lines,
-    min_tokens: cur.min_tokens,
-    max_per_request: cur.max_per_request,
-    max_per_session: cur.max_per_session,
-    aggressiveness: cur.aggressiveness,
-    context: cur.context,
-    context_messages: cur.context_messages,
-    cold_min_tokens: cur.cold_min_tokens,
-  };
+/** renderXllmForm draws the compaction-model controls from the fields the server parsed.
+ *  Manager-only, matching the server: PUT /api/me answers 403 to anyone else sending a
+ *  configuration. */
+function renderXllmForm(host, cfg, disabled) {
+  const state = { ...XLLM_DEFAULTS, ...(cfg || {}) };
   xllmState = state;
 
   const sw = (key, label, hint) => {
@@ -4131,8 +3935,9 @@ function renderXllmForm(host, yaml, disabled) {
       + 're-billed at the write rate whatever we do.'),
     whyBlock('What happens when you save',
       'Saving rebuilds your pipeline and discards frozen compaction decisions, so the next '
-      + 'turn will not be cache-warm. The document this form writes is validated on the '
-      + 'server exactly as hand-written YAML is; a rejected save names the offending key.')));
+      + 'turn will not be cache-warm. These fields are applied to your configuration on the '
+      + 'server and the result is built once before it is stored, so a value that would not '
+      + 'work is a refusal naming the field rather than a surprise on your next turn.')));
 }
 
 /** xllmState holds the form's current values between render and save. One variable because
@@ -4142,31 +3947,15 @@ let xllmState = null;
 async function saveSettings() {
   const status = $('#settings-saved');
   status.textContent = 'saving…';
-  // The textarea wins when the user edited it; otherwise rebuild the pipeline line from
-  // the checkboxes. Two sources for one field, so the precedence has to be explicit —
-  // and "what you typed beats what you clicked" is the order that never surprises.
-  let yaml = isManager() ? $('#set-yaml').value : '';
   const inherited = !!account.tenant.config_inherited;
-  const original = account.tenant.effective_config_yaml || '';
-  if (yaml.trim() === original.trim()) {
-    const picked = new Set($$('#comp-grid input[type=checkbox]')
-      .filter((c) => c.checked).map((c) => c.dataset.comp));
-    // Keep the configured run order for everything still enabled; a newly ticked
-    // component is appended, never inserted, because this grid does not know where in
-    // the pipeline it belongs.
-    const prev = (/^pipeline:\s*\[(.*?)\]\s*$/m.exec(original) || ['', ''])[1]
-      .split(',').map((x) => x.trim()).filter(Boolean);
-    const ordered = prev.filter((n) => picked.has(n))
-      .concat([...picked].filter((n) => !prev.includes(n)));
-    const mode = $('#set-mode').value;
-    yaml = yaml.replace(/^pipeline:.*$/m, `pipeline: [${ordered.join(', ')}]`);
-    if (!/^pipeline:/m.test(yaml)) yaml = `pipeline: [${ordered.join(', ')}]\n` + yaml;
-    yaml = /^mode:/m.test(yaml) ? yaml.replace(/^mode:.*$/m, `mode: ${mode}`) : yaml + `\nmode: ${mode}\n`;
-    // The form last, so it owns the extract_llm block and the component's presence in the
-    // pipeline — otherwise the checkbox grid and the form would disagree about whether the
-    // component runs, and whichever wrote last would win by accident.
-    if (xllmState) yaml = writeXllm(yaml, xllmState);
-  }
+  const prev = (account.tenant.effective_config || {}).pipeline || [];
+  const picked = new Set($$('#comp-grid input[type=checkbox]')
+    .filter((c) => c.checked).map((c) => c.dataset.comp));
+  // Keep the configured run order for everything still enabled; a newly ticked component is
+  // appended, never inserted, because this grid does not know where in the pipeline it
+  // belongs.
+  const ordered = prev.filter((n) => picked.has(n))
+    .concat([...picked].filter((n) => !prev.includes(n)));
   const body = {
     capture_content: $('#set-capture').checked,
     up_anthropic: $('#set-up_anthropic').value,
@@ -4179,7 +3968,9 @@ async function saveSettings() {
   // Never sent by a plain account: the pipeline is the manager's field, and PUT /api/me
   // answers 403 to anyone else — sending it would fail the whole save, upstreams and
   // capture consent included.
-  if (!inherited && isManager()) body.config_yaml = yaml;
+  if (!inherited && isManager()) {
+    body.config = { pipeline: ordered, mode: $('#set-mode').value, extract_llm: xllmState };
+  }
   try {
     const out = await ctl('/api/me', { method: 'PUT', body: JSON.stringify(body) });
     account.tenant = out.tenant;

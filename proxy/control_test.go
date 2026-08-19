@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -575,5 +576,73 @@ func TestFirstTokenIsRevealedOnceAndNowhereElse(t *testing.T) {
 	lg.Info("cg.auth token="+tok, "presented", tok)
 	if strings.Contains(buf.String(), tok) {
 		t.Errorf("the log scrubber let the token through: %s", buf.String())
+	}
+}
+
+// The settings page posts FIELDS, and the round trip has to survive the document shape that
+// broke it before: a pipeline written as a YAML block sequence. The browser rewrote that line
+// in place and orphaned the items under it, so every save answered
+// "config: yaml: line 3: did not find expected key" and the stored document stayed broken for
+// the next attempt. Two accounts were stuck there.
+func TestSettingsFieldsSaveOverABlockSequencePipeline(t *testing.T) {
+	f := ctlFixture(t)
+	w, _ := f.signUp(t, "boss@ibm.com", "l")
+	jar := w.Result().Cookies()
+
+	// Store the shape the old writer could not edit.
+	w, out := f.do(t, "PUT", "/api/me",
+		`{"config_yaml":"mode: sync\npipeline:\n  - format\n  - extract\n"}`, jar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("storing a block-sequence pipeline = %d %s", w.Code, w.Body)
+	}
+	tn, _ := out["tenant"].(map[string]any)
+	eff, _ := tn["effective_config"].(map[string]any)
+	if eff == nil {
+		t.Fatal("no effective_config for the settings page to render")
+	}
+	if got := eff["pipeline"]; fmt.Sprint(got) != "[format extract]" {
+		t.Fatalf("the block sequence did not reach the form as fields: %v", got)
+	}
+
+	// Now save through the fields, turning the compaction model on.
+	body := `{"config":{"pipeline":["format","extract"],"mode":"sync","extract_llm":` +
+		`{"per_output":true,"cold_enabled":true,"size_trigger":false,"min_tokens":2000,` +
+		`"max_per_request":2,"max_per_session":20,"aggressiveness":"medium","context":"recent",` +
+		`"context_messages":7,"cold_min_tokens":1000}}}`
+	w, out = f.do(t, "PUT", "/api/me", body, jar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("field save = %d %s", w.Code, w.Body)
+	}
+	tn, _ = out["tenant"].(map[string]any)
+	eff, _ = tn["effective_config"].(map[string]any)
+	x, _ := eff["extract_llm"].(map[string]any)
+	if x == nil || x["per_output"] != true || x["cold_enabled"] != true {
+		t.Errorf("the switches did not stick: %v", eff)
+	}
+	if !strings.Contains(fmt.Sprint(eff["pipeline"]), "extract_llm") {
+		t.Errorf("the component is configured but not in the pipeline: %v", eff["pipeline"])
+	}
+
+	// A bad value is a 400 naming the field, not a key the component silently ignores.
+	w, out = f.do(t, "PUT", "/api/me",
+		`{"config":{"mode":"sync","extract_llm":{"per_output":true,"aggressiveness":"very","context":"recent"}}}`, jar)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("a bad aggressiveness = %d, want 400", w.Code)
+	}
+	if msg, _ := out["error"].(string); !strings.Contains(msg, "aggressiveness") {
+		t.Errorf("the error does not name the field: %q", msg)
+	}
+}
+
+// A plain account cannot set the compaction configuration through the fields either — a
+// second route to a manager's field would be the same hole with a different name.
+func TestSettingsFieldsAreAManagersField(t *testing.T) {
+	f := ctlFixture(t)
+	_, _ = f.register(t, "boss@ibm.com") // the manager exists but is not who we are
+	w, _ := f.signUp(t, "user@ibm.com", "l")
+	jar := w.Result().Cookies()
+	w, _ = f.do(t, "PUT", "/api/me", `{"config":{"mode":"observe"}}`, jar)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("a plain account set the configuration through fields: %d %s", w.Code, w.Body)
 	}
 }
