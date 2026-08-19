@@ -74,6 +74,24 @@ type Model interface {
 	Complete(ctx context.Context, prompt string) (string, error)
 }
 
+// Remodeler is an optional interface on a Model: the same endpoint and the same credential,
+// pointed at a DIFFERENT model id. It exists for one measured reason.
+//
+// The incoming-source client is the proxied request's own model, which for a coding agent is a
+// frontier model. Compaction on a frontier model cannot pay: measured on a real Claude Code
+// session through the hosted service, a cold-cache sweep cut the provider bill by $0.63 and
+// spent $1.25 of opus doing it — net MINUS $0.62. The same work on a cheap model is roughly an
+// order of magnitude less on the call side, which is the difference between a component that
+// pays and one that does not.
+//
+// The static ("config") source cannot supply that cheap model on a multi-tenant deployment,
+// because there the operator will not spend its own credential on a tenant's traffic. So the
+// remaining honest option is the tenant's OWN credential and upstream with a cheaper model id
+// on it, which is exactly what this returns.
+type Remodeler interface {
+	AsModel(id string) Model
+}
+
 // ModelSpec carries the LLM clients a NeedsModel component may use, resolved per
 // request by the host adapter. Incoming is the proxied request's own model +
 // credentials (nil when unavailable, e.g. the AuthBridge host); Static is a
@@ -88,6 +106,23 @@ type ModelSpec struct {
 // the static cheap model; anything else ("incoming"/unset) -> the incoming model,
 // falling back to the static one when there is no incoming client. Returns nil
 // when nothing is available, and the caller must degrade gracefully.
+// ForModel is For plus an optional model-id override: when id is set and the selected client
+// can be re-pointed, the returned client talks to id instead of its own model. An id the
+// client cannot honour is ignored rather than fatal — the component still runs, on the model
+// it would have used anyway, and the caller sees that in the recorded model name.
+func (m ModelSpec) ForModel(source, id string) Model {
+	c := m.For(source)
+	if id == "" || c == nil {
+		return c
+	}
+	if r, ok := c.(Remodeler); ok {
+		if swapped := r.AsModel(id); swapped != nil {
+			return swapped
+		}
+	}
+	return c
+}
+
 func (m ModelSpec) For(source string) Model {
 	if source == "config" {
 		return m.Static

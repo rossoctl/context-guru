@@ -415,3 +415,38 @@ func TestTooSlowToExplore(t *testing.T) {
 		t.Error("PR #37's measured latency must stop exploration")
 	}
 }
+
+// A named compaction model is priced at ITS rates, not the agent's.
+//
+// The rate card is overridden with the agent's own rates when model.source is `incoming`,
+// which was right when that meant "the agent's model does the compacting". `model.model` now
+// re-points an incoming-source client at a cheap model on the same endpoint, and the override
+// then prices haiku calls as opus: on the deployment where this was found, 4.75x, which is
+// what made the Components tab disagree with the request row and turned a paying
+// configuration into a losing one on screen.
+func TestANamedCompactionModelIsNotPricedAsTheAgent(t *testing.T) {
+	// The agent is expensive; the component's own default card is haiku-class.
+	agentRates := components.TokenRates{Input: 3.8 / 1e6, Output: 19.0 / 1e6,
+		CacheRead: 0.38 / 1e6, CacheWrite: 4.75 / 1e6}
+
+	for _, tc := range []struct {
+		name      string
+		modelName string
+		wantAgent bool
+	}{
+		{"no model named: the agent compacts, so the agent's rates", "", true},
+		{"a model named: its own rates", "claude-haiku-4-5", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &ExtractLLM{modelSource: "incoming", modelName: tc.modelName,
+				pricing: cheapmodel.HaikuPricing()}
+			got := e.pricingFor(components.Ctx{SelfRates: agentRates})
+			isAgent := got.InputPerMTok == agentRates.Input*1e6
+			if isAgent != tc.wantAgent {
+				t.Errorf("input rate $%.2f/MTok: agent-priced=%v, want %v (agent is $%.2f, "+
+					"the component's own card is $%.2f)", got.InputPerMTok, isAgent,
+					tc.wantAgent, agentRates.Input*1e6, cheapmodel.HaikuPricing().InputPerMTok)
+			}
+		})
+	}
+}

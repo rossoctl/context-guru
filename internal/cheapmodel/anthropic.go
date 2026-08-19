@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/rossoctl/context-guru/components"
 )
 
 // Anthropic calls a small Anthropic model with a single user prompt and returns the
@@ -28,6 +30,9 @@ type Anthropic struct {
 	// anthropic-version header is sent in both cases.
 	AuthScheme string
 }
+
+// AsModel is components.Remodeler: same endpoint, same credential, different model.
+func (a Anthropic) AsModel(id string) components.Model { a.Model = id; return a }
 
 func (a Anthropic) Complete(ctx context.Context, prompt string) (string, error) {
 	return a.CompleteSystem(ctx, "", prompt)
@@ -133,7 +138,7 @@ func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt s
 	}
 	// track CG component LLM cost, split by cache tier so /stats can show whether the
 	// preamble breakpoint actually caches (read>0) or is silently ignored (read==0).
-	recordUsageCache(ctx, out.Usage.InputTokens, out.Usage.OutputTokens,
+	recordUsageCache(ctx, a.Model, out.Usage.InputTokens, out.Usage.OutputTokens,
 		out.Usage.CacheCreationTok, out.Usage.CacheReadTok)
 	// Tell the prefix bookkeeping what actually happened, so the next call knows whether a
 	// breakpoint would be a read (worth it) or another write (not).

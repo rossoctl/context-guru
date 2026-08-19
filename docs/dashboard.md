@@ -230,6 +230,15 @@ billed cost for the traffic plus context-guru's own compaction-model spend, with
 counterfactual in it. A deployment where the second term is a large fraction of the first is
 paying too much to compact, and the Components tab says which component.
 
+`cg_llm_cost_usd` is priced at the **compaction model's** own rate. It used to be priced at the
+agent's rate, on the theory that a cheap model was "close enough" and that over-reporting our
+own cost was the safe direction. It is not safe in either direction: on this deployment's rate
+card opus is 4.75x haiku, so a sweep that really spent $0.21 of haiku reported $1.02, which was
+enough to make a configuration that pays read as one that loses money — and this is the number
+someone uses to decide whether to run the component at all. The model is taken from the calls
+themselves; a request whose compaction mixed several models falls back to the agent's rate,
+because no single rate is honest for it.
+
 **`cache_saved_usd` is not a saving of ours and is not on the page.** It is what the
 *provider's* prompt cache saved over paying the fresh rate for the same tokens — typically
 one to two orders of magnitude larger than the figure above, because the agent places most

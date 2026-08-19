@@ -3920,6 +3920,7 @@ const XLLM_DEFAULTS = {
   cold_min_tokens: 1000,
   allow_on_caching_backend: false,
   model_source: 'incoming',
+  model_name: 'claude-haiku-4-5',
   strategy: 'code',
   every_n_requests: 1,
   trigger_min_tokens: 3000,
@@ -3953,6 +3954,15 @@ function renderXllmForm(host, cfg, disabled, opts) {
       state[key] = Number.isFinite(v) && v >= 0 ? v : XLLM_DEFAULTS[key];
       inp.value = String(state[key]);
     });
+    return el('div', { class: 'field' },
+      el('label', { for: 'x-' + key }, label), inp, el('p', { class: 'hint' }, hint));
+  };
+  const textField = (key, label, hint, placeholder) => {
+    const inp = el('input', { type: 'text', id: 'x-' + key, 'data-testid': 'x-' + key,
+      placeholder: placeholder || '' });
+    inp.value = state[key] || '';
+    inp.disabled = disabled;
+    inp.addEventListener('change', () => { state[key] = inp.value.trim(); });
     return el('div', { class: 'field' },
       el('label', { for: 'x-' + key }, label), inp, el('p', { class: 'hint' }, hint));
   };
@@ -4032,6 +4042,12 @@ function renderXllmForm(host, cfg, disabled, opts) {
         + 'spend the operator\'s credential on your traffic. So "config" here means the '
         + 'component has no model and silently never makes a call, however it is otherwise '
         + 'configured. Choose your own model.'),
+    textField('model_name', 'Model that does the compacting',
+      'On the endpoint and credential chosen above, but this model. Leave it empty to compact '
+      + 'with your agent\'s own model — which does not pay: a measured cold-cache sweep cut the '
+      + 'provider bill by $0.63 and spent $1.25 of opus doing it. A cheap model does the same '
+      + 'work for roughly a tenth of that, and it bills to the same account either way.',
+      'claude-haiku-4-5'),
     pick('strategy', 'How the reduction is framed', [
       ['code', 'code — recommended for coding agents'],
       ['single', 'single — one pass over one output'],

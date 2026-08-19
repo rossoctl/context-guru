@@ -41,6 +41,14 @@ var (
 // derive their timeouts from it, and internal/extract sees only a context.Context. One
 // plumbing point, and no call path can silently miss it.
 type Sink struct {
+	// model is the id the calls in this scope were made with, so the request's own bill can
+	// be priced at THAT model's rate. Before this, our compaction spend was priced at the
+	// AGENT's rate on the theory that a configured cheap model was "close enough": haiku
+	// tokens billed as opus tokens, roughly 15x over, which made a configuration that pays
+	// look like one that loses $0.28 a session. A cost figure used to decide whether to run
+	// a component cannot be off by an order of magnitude in the pessimistic direction any
+	// more than in the optimistic one.
+	model      atomic.Value // string
 	calls      atomic.Int64
 	in, out    atomic.Int64
 	cacheWrite atomic.Int64
@@ -53,6 +61,23 @@ type Sink struct {
 }
 
 // Totals returns this scope's usage so far, at the same shape as Usage().
+// Model reports the model these calls were made with, or "" when nothing was recorded or the
+// scope mixed several (in which case no single rate is honest and the caller must fall back).
+func (s *Sink) Model() string {
+	if s == nil {
+		return ""
+	}
+	m, _ := s.model.Load().(string)
+	if m == mixedModels {
+		return ""
+	}
+	return m
+}
+
+// mixedModels marks a sink whose calls used more than one model. Distinct from "" so a mixed
+// scope is not silently priced as the first model seen.
+const mixedModels = "\x00mixed"
+
 func (s *Sink) Totals() (calls, inTokens, outTokens int64) {
 	if s == nil {
 		return 0, 0, 0
@@ -90,10 +115,17 @@ func WithCallSink(ctx context.Context) (context.Context, *Sink) {
 }
 
 // add records one call's usage on this sink and every sink it nests inside.
-func (s *Sink) add(inTok, outTok, cacheWrite, cacheRead int) {
+func (s *Sink) add(model string, inTok, outTok, cacheWrite, cacheRead int) {
 	// Nil receiver is the common case: a call made with no sink installed counts toward the
 	// process totals only, which is correct — it is simply not attributable to one request.
 	for cur := s; cur != nil; cur = cur.parent {
+		if model != "" {
+			if prev, ok := cur.model.Load().(string); !ok || prev == "" {
+				cur.model.Store(model)
+			} else if prev != model {
+				cur.model.Store(mixedModels)
+			}
+		}
 		cur.calls.Add(1)
 		cur.in.Add(int64(inTok))
 		cur.out.Add(int64(outTok))
@@ -114,13 +146,13 @@ func SinkFrom(ctx context.Context) *Sink {
 // recordUsageCache adds one call's token usage to the process totals and to the calling
 // scope's sink, split by cache tier. inTok is FRESH (uncached) input on both backends —
 // see openai.go for why that needs normalizing there.
-func recordUsageCache(ctx context.Context, inTok, outTok, cacheWrite, cacheRead int) {
+func recordUsageCache(ctx context.Context, model string, inTok, outTok, cacheWrite, cacheRead int) {
 	llmCalls.Add(1)
 	llmInputTokens.Add(int64(inTok))
 	llmOutputTokens.Add(int64(outTok))
 	llmCacheWrite.Add(int64(cacheWrite))
 	llmCacheRead.Add(int64(cacheRead))
-	SinkFrom(ctx).add(inTok, outTok, cacheWrite, cacheRead)
+	SinkFrom(ctx).add(model, inTok, outTok, cacheWrite, cacheRead)
 }
 
 // Usage returns the cumulative cheap-model usage (calls, input tokens, output

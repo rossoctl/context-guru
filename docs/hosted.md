@@ -696,6 +696,10 @@ calls with nothing on screen to explain it:
   traffic. So `config` here means *the component has no model* and silently never calls
   anything. `incoming` uses the caller's own model and key. The settings page now says this
   in the field's own hint, driven by `compaction_model` from `GET /api/options`.
+- **`model.model`** — the model that does the compacting, on the same endpoint and credential.
+  Leave it empty and the work runs on your agent's own frontier model, which does not pay:
+  measured here, a cold-cache sweep cut the provider bill by $0.63 and spent **$1.25 of opus**
+  doing it. `claude-haiku-4-5` is the recommended value and is what the form pre-fills.
 - **`allow_on_caching_backend`** — absent means **false**, and the economic gate then
   hard-declines every candidate whose tokens are already prompt-cached. On Claude Code
   against Anthropic that is the whole workload. The cold-cache sweep is not subject to it,

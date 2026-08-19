@@ -89,9 +89,15 @@ type ExtractLLMForm struct {
 	//	  describe.
 	AllowOnCachingBackend bool   `json:"allow_on_caching_backend"`
 	ModelSource           string `json:"model_source"`
-	Strategy              string `json:"strategy"`
-	EveryNRequests        int    `json:"every_n_requests"`
-	TriggerMinTokens      int    `json:"trigger_min_tokens"`
+	// ModelName is the model to COMPACT with, on the source's endpoint and credential.
+	// Empty means "whatever the source's own model is", which for `incoming` is the agent's
+	// frontier model — and compaction on one does not pay: a measured cold-cache sweep cut
+	// the provider bill by $0.63 and spent $1.25 of opus doing it. This field is how the
+	// same work runs on a cheap model without the operator paying for it.
+	ModelName        string `json:"model_name"`
+	Strategy         string `json:"strategy"`
+	EveryNRequests   int    `json:"every_n_requests"`
+	TriggerMinTokens int    `json:"trigger_min_tokens"`
 }
 
 // DefaultExtractLLMForm is what the settings page pre-fills. The sweep on, the hot path
@@ -105,7 +111,8 @@ func DefaultExtractLLMForm() ExtractLLMForm {
 		ColdMinTokens: 1000,
 		// incoming, not config: on the hosted service there is no operator-configured
 		// compaction model, so `source: config` is a component that can never make a call.
-		ModelSource: "incoming", Strategy: "code", EveryNRequests: 1,
+		ModelSource: "incoming", ModelName: "claude-haiku-4-5",
+		Strategy: "code", EveryNRequests: 1,
 		TriggerMinTokens: 3000,
 		// Left FALSE: the component's own measurements say it loses money on a caching
 		// backend, and a default that starts spending is not this form's call. It is a
@@ -203,6 +210,7 @@ type extractLLMDoc struct {
 	EveryN         *int   `yaml:"llm_every_n_requests"`
 	Model          struct {
 		Source string `yaml:"source"`
+		Model  string `yaml:"model"`
 	} `yaml:"model"`
 	Trigger struct {
 		MinRequestTokens *int `yaml:"min_request_tokens"`
@@ -237,6 +245,7 @@ func (x extractLLMDoc) into(f *ExtractLLMForm, inPipeline bool) {
 	if contains(modelSourceValues, x.Model.Source) {
 		f.ModelSource = x.Model.Source
 	}
+	f.ModelName = x.Model.Model
 }
 
 // setIf overlays a value the document actually stated, 0 included.
@@ -306,6 +315,13 @@ func ApplyForm(doc string, f Form) (string, error) {
 			// rather than the block being replaced.
 			mdl := child(blk, "model")
 			mdl["source"] = x.ModelSource
+			if x.ModelName == "" {
+				// Absent, not empty: an empty `model:` string is a pinned-client attempt with
+				// no model, which reads as misconfiguration rather than "use the source's own".
+				delete(mdl, "model")
+			} else {
+				mdl["model"] = x.ModelName
+			}
 			blk["model"] = mdl
 			trg := child(blk, "trigger")
 			trg["min_request_tokens"] = x.TriggerMinTokens

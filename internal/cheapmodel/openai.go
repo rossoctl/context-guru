@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/rossoctl/context-guru/components"
 )
 
 // OpenAI calls a small OpenAI chat-completions model with a single user prompt and
@@ -18,6 +20,9 @@ type OpenAI struct {
 	MaxTokens int    // default 2048
 	Client    *http.Client
 }
+
+// AsModel is components.Remodeler: same endpoint, same credential, different model.
+func (o OpenAI) AsModel(id string) components.Model { o.Model = id; return o }
 
 func (o OpenAI) Complete(ctx context.Context, prompt string) (string, error) {
 	return o.CompleteSystem(ctx, "", prompt)
@@ -103,7 +108,7 @@ func (o OpenAI) CompleteSystem(ctx context.Context, system, prompt string) (stri
 	// prompt_tokens (unlike Anthropic, which reports the tiers disjointly). Subtract so
 	// the "fresh input" figure means the same thing on both backends.
 	cached := out.Usage.PromptTokensDetails.CachedTokens
-	recordUsageCache(ctx, out.Usage.PromptTokens-cached, out.Usage.CompletionTokens, 0, cached)
+	recordUsageCache(ctx, o.Model, out.Usage.PromptTokens-cached, out.Usage.CompletionTokens, 0, cached)
 	if len(out.Choices) == 0 {
 		return "", nil
 	}

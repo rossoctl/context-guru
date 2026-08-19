@@ -224,7 +224,7 @@ func (e *ExtractLLM) inputLimit(c *components.Ctx) int {
 	if e.modelMaxInput > 0 {
 		return e.modelMaxInput
 	}
-	if e.modelName != "" { // a config-pinned client: we know exactly which model it is
+	if e.modelName != "" { // the model is named in config, so we know exactly which it is
 		if w, ok := staticWindows.Window(c.Ctx, e.modelName); ok {
 			return w
 		}
@@ -573,6 +573,31 @@ func looksLikeFileRead(content string) bool {
 	return checked >= 8 && numbered*100/checked >= 60
 }
 
+// pricingFor is the extraction model's REAL rates where the host could resolve them.
+//
+// The built-in default is haiku-class, while the shipped model.source is `incoming` — the
+// agent's own model — so on a sonnet-class agent the default understates every call by about
+// 3x, and the gate spends against that number. MEASURED: a call recorded at $0.0276 had cost
+// about $0.083. Hence the agent's own rates when the agent is what compacts.
+//
+// But ONLY then. `model.model` re-points an incoming-source client at a cheap model on the
+// same endpoint, and applying the agent's rates to those calls is the same error in the other
+// direction: on the deployment where this was found opus is 4.75x haiku, the per-call figure
+// on the Components tab disagreed with the request row by exactly that factor, and a
+// configuration that pays read as one that loses money. When a model is named, its rates
+// govern.
+func (e *ExtractLLM) pricingFor(c components.Ctx) cheapmodel.Pricing {
+	if e.modelSource == "config" || e.modelName != "" || c.SelfRates.Zero() {
+		return e.pricing
+	}
+	return cheapmodel.Pricing{
+		InputPerMTok:      c.SelfRates.Input * 1_000_000,
+		OutputPerMTok:     c.SelfRates.Output * 1_000_000,
+		CacheReadPerMTok:  c.SelfRates.CacheRead * 1_000_000,
+		CacheWritePerMTok: c.SelfRates.CacheWrite * 1_000_000,
+	}
+}
+
 func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	// Resolved once: the candidate loop below tests it per tool output, and it is a
 	// handler call rather than a field read.
@@ -594,7 +619,12 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	}
 	model := e.modelClient
 	if model == nil {
-		model = c.Model.For(e.modelSource)
+		// ForModel, not For: `model.model` names the model to COMPACT with even when the
+		// source is the incoming request. Without that, compaction on a coding agent runs on
+		// the agent's frontier model, and the arithmetic never closes — a real cold-cache
+		// sweep measured here cut the provider bill by $0.63 and spent $1.25 of opus doing
+		// it. Same endpoint, same credential, cheap model.
+		model = c.Model.ForModel(e.modelSource, e.modelName)
 	}
 	// Per-session cadence: on throttled steps drop the model (skip this request). The sweep
 	// is exempt — it happens at most once per idle gap, which is its own throttle, and
@@ -646,15 +676,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// agent's own model — so on a sonnet-class agent the fallback understates every call by
 	// about 3x, and the gate spends on that number. MEASURED on a real session: a call
 	// recorded at $0.0276 had cost about $0.083.
-	pricing := e.pricing
-	if e.modelSource != "config" && !c.SelfRates.Zero() {
-		pricing = cheapmodel.Pricing{
-			InputPerMTok:      c.SelfRates.Input * 1_000_000,
-			OutputPerMTok:     c.SelfRates.Output * 1_000_000,
-			CacheReadPerMTok:  c.SelfRates.CacheRead * 1_000_000,
-			CacheWritePerMTok: c.SelfRates.CacheWrite * 1_000_000,
-		}
-	}
+	pricing := e.pricingFor(*c)
 	// The model id actually used, for the record. `source: incoming` pins no name, so without
 	// this every recorded call said model="".
 	callModel := e.modelName
