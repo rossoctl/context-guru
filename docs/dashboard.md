@@ -183,6 +183,15 @@ split**: requests it ran on · snapshot had moved · served from cache). A small
 counts beside it is indistinguishable from a broken component; that is not hypothetical, it is
 what happened while the figure was gated on the session's first request and read ~$0.
 
+**For some accounts it does nothing at all**, and the counts say so. Three of this deployment's
+larger accounts have `cachesplit` running on 125, 1,035 and 1,972 requests and **acting on none
+of them** — their system prompt carries no volatile tail for it to split, either because the big
+block is under the 1,024-token floor or because it does not contain one of the snapshot markers
+(`Recent commits:`, `Current branch: `, `gitStatus:`, `Here is a snapshot of the current
+directory`). Agents run outside a git repository are the common case. "Requests it acted on: 0"
+beside a nonzero run count on the Components tab is that situation: a fact about the prompt, not
+a fault.
+
 This is version-dependent. If a future Claude Code refreshes its environment block mid-session,
 condition 2 starts matching many more turns and the figure rises on its own — which is the point
 of measuring the tail rather than assuming it.

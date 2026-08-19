@@ -600,7 +600,13 @@ function renderTiles(o) {
   // session's first request it read ~$0, and the reason (1,105 of 1,127 session starts had no
   // cache to hit) was invisible.
   host.appendChild(tileGroup('Prefix split', 'the turns behind the saving above', [
-    tile('split-requests', 'Requests it ran on', num(o.split_requests)),
+    // "acted on", not "ran on": the component runs on every request and does nothing on most.
+    // Three of this deployment's largest accounts have it running on 125, 1,035 and 1,972
+    // requests and acting on NONE of them — their system prompts carry no volatile tail to
+    // split. All zeros here with a nonzero run count on the Components tab is that case, and
+    // it is a fact about their prompt, not a fault.
+    tile('split-requests', 'Requests it acted on', num(o.split_requests),
+      o.split_requests === 0 ? 'no volatile tail to split' : ''),
     tile('split-tail-moved', 'Snapshot had moved', num(o.split_tail_moved),
       'the turns it can earn on'),
     tile('split-credited', 'Served from cache', num(o.split_credited),
