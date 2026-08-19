@@ -591,8 +591,23 @@ function renderTiles(o) {
     // plus the subset that merely co-occurred with our components. On the traffic that
     // measured this, 23x larger — and neither of them a thing we did.
     tile('cachesplit-saved', 'Prefix-cache savings', costKnown ? usd(o.cachesplit_saved_usd) : 'unknown',
-      'the prefix half we moved, on first-request hits',
+      num(o.split_credited) + ' of ' + num(o.split_tail_moved) + ' moved-snapshot turns',
       costKnown && o.cachesplit_saved_usd > 0 ? 'good' : ''),
+  ]));
+
+  // Why the figure above is the size it is. Without these three counts a small number is
+  // indistinguishable from a broken component — which is exactly what happened: gated on the
+  // session's first request it read ~$0, and the reason (1,105 of 1,127 session starts had no
+  // cache to hit) was invisible.
+  host.appendChild(tileGroup('Prefix split', 'the turns behind the saving above', [
+    tile('split-requests', 'Requests it ran on', num(o.split_requests)),
+    tile('split-tail-moved', 'Snapshot had moved', num(o.split_tail_moved),
+      'the turns it can earn on'),
+    tile('split-credited', 'Served from cache', num(o.split_credited),
+      'the turns it did earn on'),
+    tile('split-hit-rate', 'Of moved snapshots', o.split_tail_moved > 0
+      ? pct((100 * o.split_credited) / o.split_tail_moved) : '—',
+      'kept out of the write tier'),
   ]));
 
   host.appendChild(tileGroup('Billed tokens', 'the four tiers the provider charges on', [

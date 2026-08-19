@@ -18,7 +18,7 @@ import (
 // splitTail drops the byte-shift bookkeeping splitVolatileTail reports for the
 // writeback's benefit; these tests are about the split itself.
 func splitTail(body []byte, p bschemas.ModelProvider) ([]byte, bool) {
-	out, split, _, _, _ := splitVolatileTail(body, p)
+	out, split, _, _, _, _ := splitVolatileTail(body, p)
 	return out, split
 }
 
@@ -476,7 +476,7 @@ func pipeWithEmitter(t *testing.T, yaml string, e components.Emitter) *component
 func TestSplitReportsTheSizeOfTheStableHalf(t *testing.T) {
 	full, _, _ := blockWithGitTail(6000)
 	body := sysBody(textBlock(full, true))
-	_, split, _, _, stable := splitVolatileTail(body, bschemas.Anthropic)
+	_, split, _, _, stable, _ := splitVolatileTail(body, bschemas.Anthropic)
 	if !split {
 		t.Fatal("did not split")
 	}
@@ -491,7 +491,7 @@ func TestSplitReportsTheSizeOfTheStableHalf(t *testing.T) {
 	}
 	// And nothing is reported when nothing splits, so a dollar figure can key off it.
 	plain := []byte(`{"system":[{"type":"text","text":"short"}]}`)
-	if _, sp, _, _, n := splitVolatileTail(plain, bschemas.Anthropic); sp || n != 0 {
+	if _, sp, _, _, n, _ := splitVolatileTail(plain, bschemas.Anthropic); sp || n != 0 {
 		t.Errorf("no split, but reported %d stable tokens", n)
 	}
 }

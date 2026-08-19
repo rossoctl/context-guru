@@ -177,7 +177,8 @@ type Recorder struct {
 	// Cache-attribution state: the last time we saw each session and whether we
 	// have seen each model, so a cold start is never reported as a bust.
 	mu        sync.Mutex
-	lastSeen  map[string]int64 // session -> epoch ms of previous request
+	lastSeen  map[string]int64  // session -> epoch ms of previous request
+	lastTail  map[string]uint64 // session -> previous request's volatile-tail hash
 	seenModel map[string]bool
 	// perComp accumulates unique-savings dedup keys so a per-request unique figure
 	// exists at capture time. Bounded; see markUnique.
@@ -214,6 +215,7 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		ch:        make(chan *Event, opts.QueueSize),
 		done:      make(chan struct{}),
 		lastSeen:  map[string]int64{},
+		lastTail:  map[string]uint64{},
 		seenModel: map[string]bool{},
 		seenKeys:  map[string]struct{}{},
 		remote:    opts.Remote,
@@ -439,8 +441,19 @@ func (r *Recorder) run() {
 // warm cache because a DIFFERENT tenant had used it. That is both wrong and a small
 // disclosure — it tells you which models other people are running.
 func (r *Recorder) Observe(tenant, session, model string, now int64) (seenSession, seenModel bool, sinceLastMs int64) {
+	seenSession, seenModel, sinceLastMs, _ = r.ObserveSplit(tenant, session, model, now, 0)
+	return seenSession, seenModel, sinceLastMs
+}
+
+// ObserveSplit is Observe plus the volatile-tail comparison: tailChanged reports whether this
+// request's tail differs from the previous request's in the same session, which is the turn on
+// which the split is worth money (see dash.Event.cachesplitSavedUSD). A session's FIRST request
+// counts as changed — there was nothing there to match.
+//
+// tailHash 0 means nothing split, and then tailChanged is false: there is no split to credit.
+func (r *Recorder) ObserveSplit(tenant, session, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
 	if r == nil {
-		return true, true, 0
+		return true, true, 0, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -467,9 +480,14 @@ func (r *Recorder) Observe(tenant, session, model string, now int64) (seenSessio
 	if len(r.seenModel) > 1000 {
 		r.seenModel = map[string]bool{}
 	}
+	if tailHash != 0 {
+		prevTail, had := r.lastTail[session]
+		tailChanged = !had || prevTail != tailHash
+		r.lastTail[session] = tailHash
+	}
 	r.lastSeen[session] = now
 	r.seenModel[mk] = true
-	return seenSession, seenModel, sinceLastMs
+	return seenSession, seenModel, sinceLastMs, tailChanged
 }
 
 // staleSession is how long a session must be silent before its state is forgettable. Well
@@ -486,10 +504,11 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 	for k, ts := range r.lastSeen {
 		if now-ts > staleSession {
 			delete(r.lastSeen, k)
+			delete(r.lastTail, k)
 		}
 	}
 	if len(r.lastSeen) > 20000 {
-		r.lastSeen = map[string]int64{}
+		r.lastSeen, r.lastTail = map[string]int64{}, map[string]uint64{}
 	}
 }
 
@@ -507,20 +526,29 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	if r == nil || r.db == nil {
 		return 0, nil
 	}
-	rows, err := r.db.sql.Query(`SELECT session_id, MAX(ts) FROM requests
-		WHERE ts >= ? GROUP BY session_id`, now-staleSession)
+	// The tail hash of each session's LATEST request, alongside its recency: without it the
+	// first turn after a restart reads as a tail change and earns a credit it did not.
+	rows, err := r.db.sql.Query(`SELECT r.session_id, r.ts, r.split_tail_hash FROM requests r
+		WHERE r.ts >= ? AND r.id = (SELECT r2.id FROM requests r2
+			WHERE r2.session_id = r.session_id ORDER BY r2.ts DESC, r2.id DESC LIMIT 1)`,
+		now-staleSession)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
 	seeded := map[string]int64{}
+	tails := map[string]uint64{}
 	for rows.Next() {
 		var id string
 		var ts int64
-		if err := rows.Scan(&id, &ts); err != nil {
+		var tail uint64
+		if err := rows.Scan(&id, &ts, &tail); err != nil {
 			return 0, err
 		}
 		seeded[id] = ts
+		if tail != 0 {
+			tails[id] = tail
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return 0, err
@@ -532,6 +560,9 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 		// construction, and its sinceLastMs is the one the request path measured.
 		if _, ok := r.lastSeen[id]; !ok {
 			r.lastSeen[id] = ts
+			if t, ok := tails[id]; ok {
+				r.lastTail[id] = t
+			}
 		}
 	}
 	return len(seeded), nil

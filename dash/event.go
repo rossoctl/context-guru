@@ -97,9 +97,14 @@ type Event struct {
 	// onto — the tokens it moved out of the cache-creation tier, and the numerator of the
 	// figure above. Persisted so the dollar number can be checked against a token count
 	// instead of taken on trust.
-	SplitStableTokens int     `json:"split_stable_tokens"`
-	CGLatencyMs       float64 `json:"cg_latency_ms"`
-	UpstreamMs        float64 `json:"upstream_ms"`
+	SplitStableTokens int `json:"split_stable_tokens"`
+	// SplitTailHash identifies the volatile half on this request. Persisted for two reasons:
+	// it seeds the per-session comparison across a restart, and it lets the whole figure be
+	// recomputed from the table rather than trusted.
+	SplitTailHash uint64 `json:"split_tail_hash"`
+
+	CGLatencyMs float64 `json:"cg_latency_ms"`
+	UpstreamMs  float64 `json:"upstream_ms"`
 
 	Expands      int `json:"expands"`
 	ExpandTokens int `json:"expand_tokens"`
@@ -116,6 +121,17 @@ type Event struct {
 	Content    []ContentRow `json:"content,omitempty"`
 	// Extractions is one row per LLM call an expensive component made on this request.
 	Extractions []ExtractionRow `json:"extractions,omitempty"`
+
+	// TailChanged says the volatile tail differs from this session's previous request (or that
+	// this is its first). It is the condition that makes a cache hit attributable to the
+	// split: only on such a turn would the unsplit block have been re-created.
+	//
+	// It replaced "the session's first request", which was the wrong test on real traffic.
+	// Measured on this deployment: 1,105 of 1,127 session starts were COLD — the previous
+	// session's cache had expired before the next began — so a figure gated on the session's
+	// first request was structurally near zero while the component was in fact serving the
+	// system prompt from cache on hundreds of mid-session turns.
+	TailChanged bool `json:"-"`
 
 	// SessionFirst marks the first request captured for this session, which is what makes a
 	// cache hit attributable (see Price). Not persisted because it does not need to be: a
@@ -334,7 +350,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.CacheBPTools = tr.Breakpoints.Tools
 	e.CacheBPMessages = tr.Breakpoints.Messages
 	e.CacheBPBlocks = tr.Breakpoints.Blocks
-	e.SplitStableTokens = tr.SplitStableTokens
+	e.SplitStableTokens, e.SplitTailHash = tr.SplitStableTokens, tr.SplitTailHash
 	if tr.Bypassed {
 		e.Mode = ModeBypass
 	} else if e.Mode == "" {
@@ -484,6 +500,7 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 //   - SplitStableTokens > 0, i.e. the split actually happened on this request. It is set
 //     only where splitVolatileTail rewrote the block, which is exactly when cachesplit
 //     reports `mutated`, so this is the component test as well as the size.
+//
 //   - the provider READ from cache, and read AT LEAST as much as the half we split off while
 //     WRITING less than that. A hit alone is not enough: on the first request after the
 //     stable half itself changed — someone edited CLAUDE.md, the tool list changed — an
@@ -491,11 +508,23 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 //     as creation on that very request. The write test is what excludes it. Neither test can
 //     isolate our breakpoint from the usage block, so both are deliberately blunt and both
 //     err towards refusing the credit.
-//   - it was the session's FIRST request. This is the one that does the work; later turns in
-//     a session hit whether or not the tail was ever split, because the snapshot does not
-//     change mid-session. "First" survives a restart (dash.Recorder.SeedSessions) and is
-//     forgotten only after a session has been silent past every cache TTL — before that fix
-//     a restart handed out one bonus credit per live conversation.
+//
+//   - the volatile TAIL CHANGED since this session's previous request (a session's first
+//     request counts as changed — there was nothing there to match). This is the condition
+//     that makes the hit ours: with the block unsplit, a moved snapshot re-creates the whole
+//     thing, while a tail that did not move would have been served from cache either way.
+//
+//     It replaced "the session's first request", which sounded conservative and was simply
+//     wrong about how this traffic behaves. Measured over 1,127 stored sessions: 1,105 of
+//     the first requests were COLD — the previous session's cache had expired before the
+//     next one began — so that test reported ~$0 while the component was demonstrably
+//     serving the system prompt from cache on hundreds of mid-session turns. The turn that
+//     matters is the one where the agent commits or edits and the snapshot moves, which is
+//     mid-session, and which the SWE-bench A/B (0% -> 96.7% hit) was measuring all along.
+//
+//     The comparison survives a restart: the tail hash is stored per request and the map is
+//     seeded from it (dash.Recorder.SeedSessions), so the first turn after a restart is not
+//     mistaken for a change.
 //
 // And the amount is the STABLE HALF, not the request's whole cache_read. That distinction was
 // found by running the control arm rather than by reasoning about it. Real Claude Code
@@ -529,7 +558,7 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 // and a session resumed after the TTL expires starts another first-request hit this cannot
 // see. Under-crediting is the only direction a savings figure is allowed to be wrong in.
 func (e *Event) cachesplitSavedUSD(p modelinfo.Price) float64 {
-	if !e.SessionFirst || e.SplitStableTokens <= 0 {
+	if !e.TailChanged || e.SplitStableTokens <= 0 {
 		return 0
 	}
 	// The read has to be big enough to have included our half, and the write small enough

@@ -83,14 +83,14 @@ func TestCacheSavedIsCacheReadsAgainstTheFreshRate(t *testing.T) {
 
 // The three conditions, one test each, because each one rules out a different way of
 // over-claiming — and the figure this replaces failed all three.
-func TestCachesplitSavingNeedsTheSplit_TheHit_AndTheFirstRequest(t *testing.T) {
+func TestCachesplitSavingNeedsTheSplit_TheHit_AndAMovedTail(t *testing.T) {
 	const stable = 8_478 // what the split measured as the stable half on a real session
 	split := []CompRow{{Component: "cachesplit", Kind: "reformat", Acted: true, Mutated: true}}
-	mk := func(comps []CompRow, read int64, first bool, stableTok int) *Event {
+	mk := func(comps []CompRow, read int64, tailMoved bool, stableTok int) *Event {
 		e := &Event{TS: 1, SessionID: "s", Model: "aws/claude-sonnet-5",
 			TokensBefore: 50_000, TokensAfter: 50_000,
 			FreshInput: 10, CacheRead: read, OutputTokens: 20,
-			Components: comps, SessionFirst: first, SplitStableTokens: stableTok}
+			Components: comps, TailChanged: tailMoved, SplitStableTokens: stableTok}
 		e.Price(ibmSonnet, true)
 		return e
 	}
@@ -106,9 +106,9 @@ func TestCachesplitSavingNeedsTheSplit_TheHit_AndTheFirstRequest(t *testing.T) {
 		"nothing split":             mk(nil, 54_304, true, 0),
 		"component ran but skipped": mk([]CompRow{{Component: "cachesplit", Skipped: true}}, 54_304, true, 0),
 		"the split produced no hit": mk(split, 0, true, stable),
-		// The one that matters most: mid-session reads happen whether or not the tail was
-		// ever split, because the environment snapshot does not change mid-session.
-		"not the session's first request": mk(split, 54_304, false, stable),
+		// A turn whose snapshot did NOT move: the stable half would have been served from
+		// cache either way, split or not, so there is nothing of ours in it.
+		"the tail did not change": mk(split, 54_304, false, stable),
 		// A read too small to have contained our half. Refused rather than clamped: a hit on
 		// some other, smaller prefix says nothing about ours.
 		"read smaller than the half we split": mk(split, 3_000, true, stable),
@@ -124,7 +124,7 @@ func TestCachesplitSavingNeedsTheSplit_TheHit_AndTheFirstRequest(t *testing.T) {
 	changed := &Event{TS: 1, SessionID: "s", Model: "aws/claude-sonnet-5",
 		TokensBefore: 50_000, TokensAfter: 50_000, FreshInput: 10,
 		CacheRead: 20_000, CacheWrite: 12_000, OutputTokens: 20,
-		Components: split, SessionFirst: true, SplitStableTokens: stable}
+		Components: split, TailChanged: true, SplitStableTokens: stable}
 	changed.Price(ibmSonnet, true)
 	if changed.CachesplitSavedUSD != 0 {
 		t.Errorf("credited a request that re-created the stable half: %.10f", changed.CachesplitSavedUSD)
@@ -145,7 +145,7 @@ func TestCachesplitSavingNeedsTheSplit_TheHit_AndTheFirstRequest(t *testing.T) {
 }
 
 // The aggregate: our two savings add, and the provider's does not join them.
-func TestOverviewClaimsOnlyTheFirstRequestHit(t *testing.T) {
+func TestOverviewClaimsOnlyTheTurnsWhoseTailMoved(t *testing.T) {
 	const stable = 8_478
 	db := openTestDB(t)
 	var evs []*Event
@@ -158,7 +158,9 @@ func TestOverviewClaimsOnlyTheFirstRequestHit(t *testing.T) {
 			// the work from the three that rode along.
 			Components:        []CompRow{{Component: "cachesplit", Kind: "reformat", Acted: true, Mutated: true}},
 			SplitStableTokens: stable,
-			SessionFirst:      i == 0,
+			// One turn in four moved the snapshot — the agent committed. The other three
+			// would have been cache reads whatever we did.
+			TailChanged: i == 0,
 		}
 		e.Price(ibmSonnet, true)
 		evs = append(evs, e)
@@ -412,5 +414,69 @@ func TestSessionRecencySurvivesARestart(t *testing.T) {
 	}
 	if !kept {
 		t.Error("pruning dropped an active session; that is the wholesale reset this replaced")
+	}
+}
+
+// The tail comparison is per session and must survive a restart, or the first turn after one
+// reads as a snapshot change and earns a credit it did not.
+func TestTailChangeIsPerSessionAndSurvivesARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "d.db")
+	rec, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const now = int64(1_700_000_000_000)
+	const tailA, tailB = uint64(0xAAAA), uint64(0xBBBB)
+
+	// First request of a session: nothing to match, so it counts as changed.
+	if _, _, _, changed := rec.ObserveSplit("t", "t:s", "m", now, tailA); !changed {
+		t.Error("a session's first request should count as a tail change")
+	}
+	// Same tail again: not a change, so not ours.
+	if _, _, _, changed := rec.ObserveSplit("t", "t:s", "m", now+1, tailA); changed {
+		t.Error("an unchanged tail was reported as changed")
+	}
+	// The agent commits: the snapshot moves.
+	if _, _, _, changed := rec.ObserveSplit("t", "t:s", "m", now+2, tailB); !changed {
+		t.Error("a moved tail was not reported")
+	}
+	// Another session's tail is independent.
+	if _, _, _, changed := rec.ObserveSplit("t", "t:other", "m", now+3, tailB); !changed {
+		t.Error("a different session's first request should count as changed")
+	}
+	// No split, no credit and no state.
+	if _, _, _, changed := rec.ObserveSplit("t", "t:s", "m", now+4, 0); changed {
+		t.Error("a request with no split reported a tail change")
+	}
+
+	e := &Event{TS: now + 5, TenantID: "t", SessionID: "t:s", Model: "m", TokensBefore: 10,
+		SplitStableTokens: 5654, SplitTailHash: tailB}
+	rec.Record(e)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int64
+		_ = rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM requests WHERE split_tail_hash <> 0`).Scan(&n)
+		if n == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	rec.Close()
+
+	rec2, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec2.Close()
+	if _, err := rec2.SeedSessions(now + 6); err != nil {
+		t.Fatal(err)
+	}
+	// The SAME tail after the restart is not a change; without the stored hash it would have
+	// looked like one and paid out.
+	if _, _, _, changed := rec2.ObserveSplit("t", "t:s", "m", now+6, tailB); changed {
+		t.Error("the tail was forgotten across the restart, so the next turn earned a free credit")
+	}
+	if _, _, _, changed := rec2.ObserveSplit("t", "t:s", "m", now+7, tailA); !changed {
+		t.Error("a real change after a restart was missed")
 	}
 }

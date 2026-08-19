@@ -306,6 +306,7 @@ func TestUIHasTestIDsForEveryStatTile(t *testing.T) {
 		"requests", "tokens-before", "tokens-after", "saved-gross", "saved-unique",
 		"saved-adjusted", "overcount", "cost-baseline", "cost-actual", "cost-cg",
 		"saved-usd", "total-saved-usd", "cachesplit-saved",
+		"split-requests", "split-tail-moved", "split-credited", "split-hit-rate",
 		"cache-read", "cache-write", "fresh-input", "output",
 		"cg-latency", "upstream-latency", "expands", "reverts", "passthroughs",
 	} {

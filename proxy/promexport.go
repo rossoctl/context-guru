@@ -527,7 +527,7 @@ func (h *Handler) renderMetrics() string {
 				promLine(&b, "cg_tenant_cache_saved_usd", tenantLabels(t), t.CacheSavedUSD)
 			}
 			promHeader(&b, "cg_tenant_cachesplit_saved_usd",
-				"What context-guru's volatile-tail split (cachesplit) saved this tenant. Counted only where the split actually ran on the request, the provider then READ that prefix from cache, AND it was the session's first request — the one that would have missed. The amount is the stable half the split moved, not the request's whole cache_read: with cachesplit off, a real session's first request still read 45,805 tokens, so only the 8,499-token difference was ever ours. Priced against a cache miss (creation rate), because those tokens carry cache_control. A floor.", "gauge")
+				"What context-guru's volatile-tail split (cachesplit) saved this tenant. Counted only where the split ran, the environment snapshot had MOVED since that session's previous request, and the provider then read at least the stable half from cache while writing less than it. The amount is the stable half, not the whole cache_read: with cachesplit off a real session's first request still read 45,805 tokens, so only the difference was ever ours. Priced against a cache miss (creation rate), because those tokens carry cache_control. Expect it to be SMALL against a warm-cache workload: Claude Code captures its environment block once per session, and a session start finds the previous session's prefix already expired unless it began inside the provider's TTL — measured, 1,105 of 1,127 starts were cold. A floor.", "gauge")
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_cachesplit_saved_usd", tenantLabels(t), t.CachesplitSavedUSD)
 			}

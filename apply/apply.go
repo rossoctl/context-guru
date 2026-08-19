@@ -190,6 +190,11 @@ type Trace struct {
 	// split by location. Observational, and free: the pipeline already counts them to
 	// respect the provider's cap of four.
 	Breakpoints Breakpoints
+	// SplitTailHash identifies the VOLATILE half the split moved the breakpoint off. Compared
+	// against the same session's previous request to decide whether the snapshot moved, which
+	// is the turn on which the split is worth anything: with the block unsplit, a moved
+	// snapshot re-creates the whole thing. 0 when nothing split.
+	SplitTailHash uint64
 	// SplitStableTokens is the token count of the half the volatile-tail split moved the
 	// breakpoint onto — the tokens it moved out of the cache-creation tier. 0 when nothing
 	// split. It is the honest numerator for the prefix-cache saving: the alternative,
@@ -348,8 +353,12 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// splitStableTokens is what the split rescued from the cache-creation tier; the
 	// dashboard prices it (see dash.Event.cachesplitSavedUSD). 0 when nothing split.
 	splitStableTokens := 0
+	// splitTailHash identifies the volatile half, so a later turn can tell whether the
+	// snapshot MOVED. Only on such a turn would the unsplit block have been re-created.
+	var splitTailHash uint64
 	if !bypass && pipe != nil && (pipe.Has("cachesplit") || pipe.Has("cacheinject")) {
-		body, systemSplit, shiftAt, shift, splitStableTokens = splitVolatileTail(body, provider)
+		body, systemSplit, shiftAt, shift, splitStableTokens, splitTailHash =
+			splitVolatileTail(body, provider)
 	}
 
 	// Parsed ONCE and shared: normalize, the count-changed rebuild and the writeback
@@ -461,7 +470,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	}
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
 	tr.Breakpoints = bps
-	tr.SplitStableTokens = splitStableTokens
+	tr.SplitStableTokens, tr.SplitTailHash = splitStableTokens, splitTailHash
 	// The eligible (attempted) denominator: what age/supersession offloaders were
 	// allowed to touch. Everything before MaxCachedIdx is frozen for cache safety —
 	// the cost of that mechanism, reported next to its benefit.

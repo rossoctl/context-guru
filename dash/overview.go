@@ -79,11 +79,21 @@ type Overview struct {
 	// show it as a saving, because it is not ours.
 	CacheSavedUSD float64 `json:"cache_saved_usd"`
 	// CachesplitSavedUSD is the cache saving that IS ours: summed over requests where the
-	// volatile-tail split ran, the provider then read at least that much from cache while
-	// writing less than it, and it was the session's first request — the one that would have
-	// missed without the split. Priced against a cache miss. A floor.
-	// See Event.cachesplitSavedUSD.
+	// volatile-tail split ran, the snapshot had MOVED since the session's previous request,
+	// and the provider then read at least the stable half from cache while writing less than
+	// it. Priced against a cache miss. A floor. See Event.cachesplitSavedUSD.
 	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
+	// The three counts behind that figure, so a small number is explicable rather than
+	// mysterious. This mattered: gated on the session's first request the figure read ~$0 on
+	// real traffic, and the reason was visible only in these counts — 1,105 of 1,127 session
+	// starts had no cache to hit, because the previous session's had expired.
+	//
+	// SplitRequests is requests the split ran on; SplitTailMoved is the subset whose snapshot
+	// had moved (the turns it can earn on); SplitCredited is the subset that also read the
+	// stable half from cache instead of re-creating it (the turns it did earn on).
+	SplitRequests  int64 `json:"split_requests"`
+	SplitTailMoved int64 `json:"split_tail_moved"`
+	SplitCredited  int64 `json:"split_credited"`
 	// TotalSavedUSD is our two savings together: compaction's, less our own spend, plus
 	// the prefix components'. Both are ours and the token sets are disjoint.
 	TotalSavedUSD float64 `json:"total_saved_usd"`
@@ -155,6 +165,16 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		-- request_components, which was both slower and wrong: it credited every cache read
 		-- in a session, including the later turns that would have hit anyway.
 		COALESCE(SUM(r.cachesplit_saved_usd),0),
+		-- The counts behind that dollar figure. tail_moved is derived rather than stored: a
+		-- request's tail moved if the previous request in the same session carried a different
+		-- one. Recomputable from the table on purpose, so the money can be audited without
+		-- trusting the write path.
+		COALESCE(SUM(CASE WHEN r.split_stable_tokens > 0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.split_stable_tokens > 0 AND r.split_tail_hash <> COALESCE((
+			SELECT p.split_tail_hash FROM requests p
+			WHERE p.session_id = r.session_id AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
+			ORDER BY p.ts DESC, p.id DESC LIMIT 1), 0) THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.cachesplit_saved_usd > 0 THEN 1 ELSE 0 END),0),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0),
 		COALESCE(SUM(CASE WHEN r.uncompressed_reason <> '' THEN 1 ELSE 0 END),0),
@@ -163,7 +183,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.FreshInput, &o.CacheRead, &o.CacheWrite,
 		&o.OutputTokens, &o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD,
-		&o.CachesplitSavedUSD, &cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
+		&o.CachesplitSavedUSD, &o.SplitRequests, &o.SplitTailMoved, &o.SplitCredited, &cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal)
 	if err != nil {
 		return nil, err

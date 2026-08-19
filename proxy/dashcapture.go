@@ -286,11 +286,12 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Cache attribution, with a cold start treated as the non-failure it is. BEFORE
 	// pricing, because whether this is the session's first request is an input to a dollar
 	// figure and not only to a label — see Event.cachesplitSavedUSD.
-	seenSession, seenModel, sinceMs := c.rec.Observe(e.TenantID, e.SessionID, e.Model, e.TS)
+	seenSession, seenModel, sinceMs, tailChanged := c.rec.ObserveSplit(
+		e.TenantID, e.SessionID, e.Model, e.TS, e.SplitTailHash)
 	// Anthropic's prompt cache has a 5-minute TTL; a gap wider than that explains a
 	// miss without blaming a prefix change (TTL wins ties).
 	e.AttributeCache(seenSession, seenModel, sinceMs, 5*60*1000, e.CacheWrite > 0)
-	e.SessionFirst = !seenSession
+	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 
 	var price modelinfo.Price
 	priced := false

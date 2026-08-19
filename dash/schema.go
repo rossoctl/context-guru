@@ -97,6 +97,10 @@ CREATE TABLE IF NOT EXISTS requests (
   -- The size of the prefix half cachesplit moved the breakpoint onto: the numerator of the
   -- column above, stored so a dollar figure can be checked against a token count.
   split_stable_tokens INTEGER NOT NULL DEFAULT 0,
+  -- The volatile half's identity on this request. Compared against the same session's previous
+  -- request to decide whether the snapshot MOVED, which is the turn the split is worth
+  -- anything on. Stored so the figure survives a restart and can be recomputed from the table.
+  split_tail_hash    INTEGER NOT NULL DEFAULT 0,
   cg_latency_ms      REAL    NOT NULL DEFAULT 0,
   upstream_ms        REAL    NOT NULL DEFAULT 0,
   expands            INTEGER NOT NULL DEFAULT 0,
@@ -336,6 +340,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "cache_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	{"requests", "cachesplit_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	{"requests", "split_stable_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "split_tail_hash", "INTEGER NOT NULL DEFAULT 0"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
 }
 

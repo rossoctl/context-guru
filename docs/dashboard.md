@@ -127,53 +127,65 @@ tokens of identical instructions. `cachesplit` splits the block in two and moves
 breakpoint onto the stable half: byte-identical prompt to the model, hash boundary that
 excludes the churn.
 
-A request contributes only when **all three** of these are true:
+A request contributes only when **all** of these hold:
 
 1. the split **actually ran** on it (`split_stable_tokens > 0`), which happens when
    `cachesplit` — or `cacheinject`, which enables the same rewrite — is in the pipeline and
    the request's system prompt really carried a volatile tail;
-2. the provider **read at least that much** from cache **while writing less than it**. A hit
-   alone is not enough: on the first request after the stable half itself changed (someone
-   edited `CLAUDE.md`, the tool list moved) an earlier agent breakpoint still hits, so
-   `cache_read > 0` while *our* half is billed as creation on that very request. Neither test
-   can isolate our breakpoint from the usage block, so both are blunt and both err towards
-   refusing the credit;
-3. it was the **session's first request** — the one that would have missed without the split.
+2. the **snapshot moved** since this session's previous request (`split_tail_hash` differs; a
+   session's first request counts as moved, there was nothing to match). This is the condition
+   that makes the hit *ours*: with the block unsplit a moved snapshot re-creates the whole
+   thing, while a tail that did not move would have been served from cache either way;
+3. the provider **read at least the stable half** from cache **while writing less than it** —
+   on the first request after the stable half itself changed, an earlier agent breakpoint still
+   hits while our half is billed as creation.
 
-The third is the one that matters. Later turns in a session hit the cache whether or not the
-tail was ever split, because the snapshot does not change mid-session; crediting them counts
-the provider's money as ours. "First" survives a proxy restart (the recency map is seeded from
-the database at startup) and is forgotten only once a session has been silent past every cache
-TTL — before that, every restart handed out one bonus credit per live conversation.
+Condition 2 replaced "it was the session's first request", which sounded conservative and was
+simply wrong about how this traffic behaves — see the measurement below.
 
-**The amount is the stable half, not the request's whole `cache_read`.** That correction came
-out of running the control arm rather than reasoning about it. Four real Claude Code sessions
-through `ete-litellm`, each started after a fresh commit so the snapshot genuinely differed,
-first request of each session:
+**The amount is the stable half**, not the request's whole `cache_read`. From the control arm:
 
-| | `cache_read` | `cache_write` |
+| first request of a new session | `cache_read` | `cache_write` |
 |---|---|---|
-| cachesplit **on** | 54,304 | 1,063 |
-| cachesplit **off** (control) | 45,805 | 9,555 |
+| cachesplit **on** | 54,304 | ~1,050 |
+| cachesplit **off** | 45,805 | ~9,560 |
 
-The control still **hit**. Claude Code sets several breakpoints and the ones before this block
-match whatever we do, so crediting the whole 54,304 would have booked the agent's own cache
-placement as ours — a ~9.6× overstatement. What the split moved is the difference: 8,499
-tokens, from the write tier to the read tier. The dashboard claims less still: the split's own
-measurement of the half it moved (`split_stable_tokens`, 5,654 BPE tokens on that traffic).
-The two disagree because they count different things — the provider reports block-granular
-usage over a prefix that also gained a block boundary, while ours counts the text — and the
-smaller one is what gets billed, because under-crediting is the only safe direction.
+The control still **hit** — Claude Code sets several breakpoints and the ones before this block
+match whatever we do — so crediting the whole read would have booked the agent's own cache
+placement as ours, **7.5× in dollars**. The counterfactual is a cache *miss*, not fresh input,
+because those tokens carry `cache_control`: hence
+`split_stable_tokens × (max(cache_write_rate, input_rate) − cache_read_rate)`, an 11.5×-fresh
+spread rather than 9×.
 
-The counterfactual is a cache **miss**, not fresh input: those tokens carry `cache_control`,
-so a miss bills them as cache *creation* — 1.25× fresh on the Anthropic family — and the next
-turn pays again. Hence `split_stable_tokens × (max(cache_write_rate, input_rate) −
-cache_read_rate)`, an 11.5×-fresh spread rather than 9×. The `max` floor covers a provider
-that charges no write premium, where a miss still costs at least the fresh rate.
+#### What it is actually worth here, and why that is small
 
-On that measured traffic it came to **$0.0099 per new session** — against **$0.0743** for the
-provider's whole cache read on the *same request*, and **$0.2258** across the four requests of
-the run. That $0.2258 is the number that used to be the headline.
+Measured on this deployment: **$0.0298 across 1,127 sessions / 11,361 requests.** That is a real
+number, not a placeholder, and three independent measurements explain it:
+
+* **The snapshot is captured once per session.** A nine-turn session in which the agent created
+  and committed four files produced **one distinct `split_tail_hash`** — Claude Code does not
+  refresh the environment block mid-session, even after commits. So within a session there is
+  nothing for the split to protect, and every turn after the first hits regardless.
+* **Session starts are almost always cold.** 1,105 of 1,127 first requests read **zero** tokens
+  from cache: the previous session's prefix had expired under the provider's 5-minute TTL before
+  the next session began. Only **9** session starts had a warm prefix to hit at all.
+* **On those 9 it works exactly as designed** — 3 qualified and each earned ~$0.010, matching
+  the controlled measurement above to the cent.
+
+So the component is not broken and the figure is not a bug: the mechanism needs a *second
+session inside five minutes*, and humans do not work that way. The SWE-bench A/B that measured
+**−34.1% cost, 0% → 96.7% hit** ran tasks back-to-back inside the TTL, which is precisely the
+regime where this pays — and is why the benchmark result and the production result differ by
+three orders of magnitude without either being wrong.
+
+The three counts behind the dollar figure are on the page for exactly this reason (**Prefix
+split**: requests it ran on · snapshot had moved · served from cache). A small saving with no
+counts beside it is indistinguishable from a broken component; that is not hypothetical, it is
+what happened while the figure was gated on the session's first request and read ~$0.
+
+This is version-dependent. If a future Claude Code refreshes its environment block mid-session,
+condition 2 starts matching many more turns and the figure rises on its own — which is the point
+of measuring the tail rather than assuming it.
 
 It is a **floor**. A stable prefix serves a whole session while this counts one request of
 it, and a session resumed from disk after the TTL expires starts another first-request hit
