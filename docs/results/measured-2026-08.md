@@ -232,3 +232,63 @@ it ships as a labelled diagnostic, not a subtraction, until an A/B settles it.
   Asking for `cache_control.ttl: "1h"` costs 2× on writes instead of 1.25×, but only on the
   writes that happen. That is arithmetic on a $434 line against a $6.96 line, and it wants one
   tenant A/B'd rather than a global change.
+
+## 7. The configuration the measurements support
+
+Not a guess — each line is here because something above measured it.
+
+```yaml
+pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract, cachesplit]
+mode: sync
+components:
+  extract:
+    min_tokens: 400
+  extract_llm:
+    # Leave the economic gate BINDING. `fire_on: size` demotes it to advisory and leaves
+    # the caps as the only brake — that is how 94% of the losing spend happened. With the
+    # gate's cost model now correct, it refuses the bad calls itself.
+    fire_on: pressure
+    # Warm cached turns stay off. Measured: LLM calls on the warm tail delivered 765 unique
+    # tokens out of 641,053, and the gate's own verdict on them was "saving below call cost".
+    allow_on_caching_backend: false
+    per_output: false
+    # The cold sweep is the only regime where the arithmetic works: the whole prompt
+    # re-bills at 1.25x fresh, so a token removed there is worth 12.5x a warm one.
+    cold_cache:
+      enabled: true
+      min_tokens: 1000
+    # Compaction on the agent's own frontier model cannot pay. Measured over five real
+    # sessions: opus as the compactor was −$0.618, claude-haiku-4-5 was +$0.221.
+    model:
+      source: incoming
+      model: claude-haiku-4-5
+    # A cold sweep can spend ~$0.14 per call. 80 per session is an $11 worst case with no
+    # ceiling anyone reads. These are bounds, not targets — the gate should refuse long
+    # before them.
+    llm_max_per_request: 4
+    llm_max_per_session: 20
+    strategy: code
+    aggressiveness: medium
+    context: recent
+    context_messages: 7
+    trigger:
+      min_request_tokens: 3000
+```
+
+Two notes on things that changed underneath these numbers:
+
+- `llm_max_per_request` above 1 is now *cheaper per call* than it was, not merely permitted:
+  the shared conversation context is cached across a request's candidates, so calls 2..N read
+  it instead of re-sending it (67% off a five-call request). Before this branch, raising the
+  cap multiplied the prompt.
+- `toon` is worth keeping in the pipeline now. It acted 22 times in 14,262 production
+  requests before the envelope fix; on the envelope shape that dominates this traffic it now
+  reduces by 72.9%.
+
+### What we did not tune, and why
+
+`aggressiveness` made no difference on real traffic — `low`, `medium` and `high` removed
+**identically** 9,633 tokens across the same replayed capture, because the saving was coming
+from the deterministic fallback and the reapplied frozen result, not from the level asked
+for. Sweep it again now that the LLM path actually returns programs; the earlier comparison
+was measuring nothing.
