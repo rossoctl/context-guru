@@ -92,13 +92,24 @@ func (f *Format) Reformat(req *schemas.BifrostChatRequest, rep *components.Repor
 
 // compactJSON re-encodes a JSON document as compact JSON. UseNumber keeps numbers
 // byte-exact: a float64 round-trip rewrites big integers in exponent form, which a
-// lossless Reformat may not do. ok=false means "not valid JSON".
+// lossless Reformat may not do. ok=false means "not usable".
+//
+// The dec.More() check is the losslessness guard, and it is not theoretical. A
+// json.Decoder reads ONE value and ignores whatever follows, so a tool output that is a
+// JSON document followed by anything else — `[1, 2]\nwarnings: 0 []`, a jq document plus
+// a stderr line, an NDJSON stream — used to be "compacted" to just its first document,
+// silently DELETING the rest. Two such outputs exist in the captures measured here; only
+// the min_tokens floor kept the deletion from firing. A Reformat may not drop content, so
+// trailing content means decline.
 func compactJSON(s string) (string, bool) {
 	dec := json.NewDecoder(strings.NewReader(s))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
 		return "", false
+	}
+	if dec.More() {
+		return "", false // more than one document: compacting would keep only the first
 	}
 	b, err := marshalJSON(v)
 	if err != nil {

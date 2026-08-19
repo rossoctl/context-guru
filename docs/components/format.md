@@ -44,6 +44,11 @@ before:  { "id": 1,           after:  {"id":1,"name":"ada","tags":["x","y"]}
 
 None — nothing stashed. The value is identical; only whitespace tokens are removed.
 
+One case is refused for exactly that reason: a `json.Decoder` reads **one** value and ignores
+whatever follows, so an output that is a JSON document plus anything else (a `jq` document with a
+stderr line after it, or an NDJSON stream) would be "compacted" to its first document with the rest
+silently deleted. `format` declines such an output. [`toon`](toon.md) declines it too.
+
 ## Configuration
 
 | Key | Default | Meaning |
@@ -57,6 +62,9 @@ tool-runner envelope.
 
 ## When it's inert
 
-Already-compact JSON (at both levels), non-JSON text, small outputs.
+Already-compact JSON (at both levels), non-JSON text, more than one document in one output, small
+outputs. **Measured:** of 1,748 distinct tool outputs across every capture available here, 1,724 are
+not JSON at all and `format` fires on none of them — its value is in JSON/MCP-shaped traffic, not in
+a coding agent's own output. [`textclean`](textclean.md) is the reformatter for the other 1,724.
 
 See also: [Components overview](../components.md) · [Choose a preset](../how-to/choose-a-preset.md)

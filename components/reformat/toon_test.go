@@ -177,3 +177,27 @@ func TestToonIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// A Reformat may not delete content. encoding/json's Decoder reads ONE value and ignores
+// whatever follows it, so a tool output that is a JSON document plus anything else — the
+// real shapes are a jq document with a stderr line after it, and NDJSON — used to be
+// re-encoded as just its first document. Both reformatters must decline instead. (Two
+// such outputs exist in the captures measured here; only min_tokens hid the deletion.)
+func TestReformattersRefuseTrailingContent(t *testing.T) {
+	for _, in := range []string{
+		"[{\"a\":1},{\"a\":2}]\nwarnings: 0 []",
+		"{\"a\":{\"b\":\"c\"}}\n[\"a\",\"b\"]\n\"a\"",
+		"{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n", // NDJSON
+	} {
+		if out, ok := compactJSON(in); ok {
+			t.Errorf("compactJSON dropped trailing content:\n in %q\nout %q", in, out)
+		}
+		if out, ok := encodeTOON(in); ok {
+			t.Errorf("encodeTOON dropped trailing content:\n in %q\nout %q", in, out)
+		}
+	}
+	// A single document with trailing whitespace is still fine.
+	if _, ok := compactJSON("{\"a\": 1}\n\n"); !ok {
+		t.Error("declined a single document with trailing whitespace")
+	}
+}

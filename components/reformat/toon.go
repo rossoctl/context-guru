@@ -156,6 +156,13 @@ func encodeTOON(content string) (string, bool) {
 	if err := dec.Decode(&arr); err != nil || len(arr) == 0 {
 		return "", false
 	}
+	if dec.More() {
+		// A json.Decoder reads one value and ignores the rest, so an array followed by
+		// anything else would be re-encoded as a table with the remainder DELETED. The
+		// round-trip check below cannot catch that (it compares against the value that
+		// was parsed), so it has to be refused here.
+		return "", false
+	}
 
 	keys := make([]string, 0, len(arr[0]))
 	for k := range arr[0] {
