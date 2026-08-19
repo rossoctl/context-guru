@@ -45,6 +45,13 @@ func main() {
 		preset    = flag.String("preset", envOr("PRESET", "codesmart"), "preset to use when --config is absent (codesmart = the SWE-bench-winning cache-aware config; codesafe = deterministic-only)")
 		openai    = flag.String("openai-upstream", envOr("OPENAI_UPSTREAM", "https://api.openai.com"), "OpenAI upstream base URL")
 		anthropic = flag.String("anthropic-upstream", envOr("ANTHROPIC_UPSTREAM", "https://api.anthropic.com"), "Anthropic upstream base URL")
+		// Not a whole-request timeout on purpose: a streaming turn that is still producing
+		// tokens must never be cut off for taking a while. See proxy.upstreamTransport.
+		upstreamHeaderTimeout = flag.Duration("upstream-header-timeout",
+			envDuration("UPSTREAM_HEADER_TIMEOUT", 10*time.Minute),
+			"how long an upstream may take to send its FIRST byte before we treat it as gone. "+
+				"Not a cap on a streaming response's duration; it is the whole budget for a "+
+				"non-streaming one, whose headers arrive only once it is generated")
 		bob       = flag.String("bob-upstream", envOr("BOB_UPSTREAM", ""), "Bob (BobShell) backend base URL; enables the Bob gateway routes when set (e.g. https://api.us-east.bob.ibm.com)")
 		storeFlag = flag.String("store", envOr("STORE", ""), "override state store: true|false (default: config store.enabled, else on)")
 		modeFlag  = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | observe (overrides the config's mode:)")
@@ -464,9 +471,10 @@ func main() {
 			Concurrent:           *tenantConcurrent,
 			CheapModelConcurrent: *cheapConcurrent,
 		},
-		OpenAIUpstream:    *openai,
-		AnthropicUpstream: *anthropic,
-		BobUpstream:       *bob, // enables the Bob gateway routes when set (BOB_UPSTREAM)
+		OpenAIUpstream:        *openai,
+		AnthropicUpstream:     *anthropic,
+		UpstreamHeaderTimeout: *upstreamHeaderTimeout,
+		BobUpstream:           *bob, // enables the Bob gateway routes when set (BOB_UPSTREAM)
 		// Gateway mode: real provider keys live here (eval-containers passes them
 		// via env); the agent holds only a placeholder. Empty => pass client auth.
 		OpenAIKey:    os.Getenv("OPENAI_API_KEY"),

@@ -65,6 +65,10 @@ type Options struct {
 	// uses this to pin every call to EVAL_MODEL regardless of what the agent asked for.
 	ForceModel string
 	Client     *http.Client
+	// UpstreamHeaderTimeout bounds how long an upstream may take to send its first byte
+	// (0 = defaultUpstreamHeaderTimeout). Deliberately NOT a whole-request timeout — see
+	// upstreamTransport for the 502s that cost.
+	UpstreamHeaderTimeout time.Duration
 	// CheapModel is the static "config"-source LLM client for NeedsModel
 	// components (nil = none). The "incoming"-source client is built per request
 	// from the route's upstream + the gateway's real key.
@@ -225,11 +229,43 @@ type Handler struct {
 	promCache promCache
 }
 
+// upstreamTransport is the default upstream client's transport, and the reason there is no
+// http.Client.Timeout on it.
+//
+// http.Client.Timeout covers reading the response BODY, so on a streaming proxy it is not a
+// stall detector, it is a hard ceiling on how long a generation may take. It was 5 minutes,
+// and Claude Code streams with thinking enabled: a long turn on a large session hit exactly
+// 297,9xx ms of upstream time and came back 502, which the agent shows as an API error after
+// four or five minutes of apparently healthy work. Eleven such failures on one account, all
+// of them streaming, all of them large — while 160 shorter streamed turns from the same
+// account through the same upstream succeeded. Nothing was wrong upstream and nothing was
+// wrong with the pipeline (our own time on those requests was 25-84 ms); we cut the
+// connection ourselves.
+//
+// ResponseHeaderTimeout is the right shape instead: it bounds waiting for the FIRST byte, so
+// a dead upstream is still caught, and a stream that is producing tokens is never
+// interrupted for having produced them for too long. It also still bounds a non-streaming
+// request end to end, because such a response's headers do not arrive until it is generated
+// — which is why the default is generous rather than tight.
+func upstreamTransport(headerTimeout time.Duration) http.RoundTripper {
+	if headerTimeout <= 0 {
+		headerTimeout = defaultUpstreamHeaderTimeout
+	}
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = headerTimeout
+	return t
+}
+
+// defaultUpstreamHeaderTimeout is how long an upstream may take to say ANYTHING before we
+// treat it as gone. Generous on purpose: a non-streaming request generates its whole answer
+// before sending headers, so this is that request's whole budget.
+const defaultUpstreamHeaderTimeout = 10 * time.Minute
+
 // New builds the proxy handler. agg may be nil (no /stats rollups).
 func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opts Options) *Handler {
 	c := opts.Client
 	if c == nil {
-		c = &http.Client{Timeout: 5 * time.Minute}
+		c = &http.Client{Transport: upstreamTransport(opts.UpstreamHeaderTimeout)}
 	}
 	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
 		tracker: modes.NewTracker(0), rec: opts.Dashboard}

@@ -664,6 +664,27 @@ Full configuration (YAML)**, which still takes a document and still validates it
 The settings page shows that whole document read-only under **Full configuration**, so
 "what am I actually running" is a fact on the page rather than an inference from the fields.
 
+#### A long streamed turn is not a timeout
+
+Symptom: a big session, `continue`, four or five minutes of apparently healthy work, then the
+agent reports an API error. It looks like compaction is hanging. It is not — on the eleven
+requests measured this way, context-guru's own time was 25-84 ms and it made zero model calls.
+
+The proxy's upstream client carried `http.Client{Timeout: 5 * time.Minute}`, and that timeout
+covers reading the response **body**. On a streaming dialect that is not a liveness check, it
+is a ceiling on how long a generation may take: a long turn with thinking enabled hit
+~297,900 ms of upstream time and came back **502**, while 160 shorter streamed turns from the
+same account through the same upstream succeeded.
+
+It is `ResponseHeaderTimeout` now — time to the FIRST byte, so a dead upstream is still
+caught and a stream that is producing tokens is never interrupted for having produced them
+for a while. `--upstream-header-timeout` / `UPSTREAM_HEADER_TIMEOUT` tunes it (default 10m).
+That default is generous because a NON-streaming request sends its headers only once it is
+generated, so for that shape it is still the whole budget.
+
+If you see this symptom, check `upstream_ms` on the request row before suspecting a
+component: ours is the `cg_latency_ms` column, and the two are not close.
+
 #### Two fields decide whether `extract_llm` can act at all
 
 Both were in stored documents and on neither the form nor the page, and the result was an
