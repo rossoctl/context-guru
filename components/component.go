@@ -303,6 +303,25 @@ func (c *Ctx) TailOnly(i int) bool {
 	return i > c.MaxCachedIdx
 }
 
+// TailOnlyCold is TailOnly with the depth restriction lifted on a turn whose prompt cache
+// is provably gone (ColdCache), for a component that opted in.
+//
+// The opt-in is per component and off by default. When ColdCache is right there is no
+// prefix to disturb, so acting at depth is free by construction — but when it is WRONG the
+// component flips content the provider is still holding and forces a cache-write of the
+// whole suffix at 1.25x the fresh rate. A missed cold turn only forgoes a saving, so the
+// asymmetry decides the default. See docs/design.md.
+//
+// Only safe for a component whose replacement is a pure function of (content, config) —
+// the same property repairLostFreeze requires — because the decision it makes at depth is
+// frozen and replayed on every later (warm) turn.
+func (c *Ctx) TailOnlyCold(i int, optIn bool) bool {
+	if c != nil && optIn && c.ColdCache {
+		return true
+	}
+	return c.TailOnly(i)
+}
+
 // Stats returns the per-filter ledger sink, or nil in observe mode.
 //
 // Observe computes what compaction WOULD have done and forwards the request untouched, so

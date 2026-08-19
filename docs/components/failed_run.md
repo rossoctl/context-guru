@@ -45,6 +45,7 @@ Lossy but reversible — superseded runs are stashed and recovered via `context_
 |---|---|---|
 | `min_tokens` | 100 | Skip runs smaller than this token count. |
 | `marker_mode` | `full` | `full` (stash + resolvable marker) / `summary` / `off`. |
+| `cold_cache` | `false` | On a turn whose prompt cache has **provably expired** (idle past the provider TTL), act at any depth instead of only in the uncached tail. Free when the cache really is gone — the whole transcript is re-billed anyway — and the decision is frozen so later warm turns replay it. Off by default because a *wrong* cold reading costs a cache-write of the whole suffix. See [Freeze / cold_cache](../design.md#the-one-turn-where-depth-is-free-cold_cache). |
 
 ## When it shines
 

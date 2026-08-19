@@ -42,20 +42,31 @@ costing ~$0.012 must therefore remove a *lot* of tokens to break even:
 
 | Backend | Content | Break-even output size |
 |---|---|---|
-| Caching | seen once | **~42,600 tokens** |
-| Caching | recurring (amortized over replays) | **~30,500 tokens** |
-| Non-caching | seen once | ~3,400 tokens |
-| Non-caching | recurring | **~1,800 tokens** |
+| Caching | seen once | **~56,400 tokens** |
+| Caching | recurring (amortized over replays) | **~40,300 tokens** |
+| Non-caching | seen once | ~5,600 tokens |
+| Non-caching | recurring | **~3,100 tokens** |
+
+!!! warning "These figures were 30% optimistic until 2026-08-19"
+    They read ~42,600 / ~30,500 / ~3,400 / ~1,800, and the difference is entirely two
+    mis-measured constants in the *cost* half. `preambleTokens` was `1463` against a measured
+    **1,893** o200k tokens for the assembled prefix (29% low), and the whole estimate was
+    counted in `o200k_base` while being priced per **provider** token — measured markup
+    **1.29x** on `claude-haiku-4-5` (identical bytes: 6,396 o200k billed as 8,222) and 1.65x on
+    `aws/claude-sonnet-5`. Together they under-stated every call's cost by ~35%, in the
+    denominator of every allow/suppress decision. Both are now derived from a dated measurement
+    and pinned by `TestBreakEvenSizesMatchTheDocumentedVerdict`. **The component did not get
+    worse; the number was wrong in the direction that lets the gate spend.**
 
 The caching figures are why the component is now **off by default on caching backends**: no
-realistic tool output reaches 30,500 tokens, so the gate would only ever be declining.
+realistic tool output reaches 40,300 tokens, so the gate would only ever be declining.
 
 These use the **measured** compression ratio, and that measurement is the uncomfortable part: on
 real captures an accepted extraction removed only **31–254 tokens per call** on outputs of
 400–2,000 tokens — an actual ratio around **0.10–0.12**, not the ~0.45 one might assume. The model
 declines to cut aggressively, and correctly so: its contract is recall-first.
 
-Most tool outputs are nowhere near 30,500 tokens — in one measured Terminal-Bench capture the
+Most tool outputs are nowhere near 40,300 tokens — in one measured Terminal-Bench capture the
 **largest** tool output was 2,053 tokens, ~15× below the cached break-even. That is why the same
 component **wins on a non-caching backend and loses on a caching one**, and why the fix is not
 "compress harder" but "decide per call". The [economic gate](#economics) makes that
@@ -152,7 +163,7 @@ below, which found the real dominant failure hiding inside the acceptance bucket
 ### 3. The economic gate under-priced its own calls by 21–31×
 
 `callCost` modelled the prompt as `preamble(1463) + min(candidate, 5000) + 200` — at most
-6,663 tokens. Under `context: full`, which every cold sweep uses, the rendered transcript
+6,663 tokens. Under `context: full`, which every cold sweep used to force, the rendered transcript
 **is** the prompt. Measured on production: five calls on one request each sent **~138,000**
 prompt tokens. For a 3,433-token candidate the gate weighed an expected saving of $0.0077
 against an estimated cost of $0.0046 and allowed the call; it cost $0.1422 and removed nothing.
@@ -174,8 +185,32 @@ count). That condition is the design, not an optimisation: a cache write costs 1
 paying it for a single call is a 25% loss with nothing to read it back.
 
 It also lifts the prefix over the model's minimum cacheable size. The invariant preamble alone
-is ~1,463 tokens, below `claude-haiku-4-5`'s 4,096-token floor — so on haiku **nothing was
+is 1,893 o200k tokens, below `claude-haiku-4-5`'s 4,096-token floor — so on haiku **nothing was
 being cached at all**, breakpoint or not.
+
+### 4b. …and the floor itself compared unlike units
+
+`claude-haiku-4-5`'s 4,096-token minimum is in the **provider's** tokens. The gate compared it
+against `internal/tokens`' `o200k_base` count. That is a unit error, and it silently declined a
+cache the provider was willing to grant: measured 2026-08-19, a **3,673 o200k** prefix billed
+**4,217** input tokens and cached perfectly, while `3,673 < 4,096` withheld the breakpoint.
+
+The comparison now converts first (`cheapmodel.minCacheableO200k`, `4,096 / 1.20` = 3,413 o200k,
+using the markup measured on haiku itself). Raw `usage` from the gateway, same prefix, three
+consecutive calls — this is the whole of the fix's effect:
+
+```
+model=claude-haiku-4-5  prefix=3673 o200k  new floor=3413 o200k  (old gate compared it against 4096)
+call 1  {"input_tokens":8,"cache_creation_input_tokens":4217,"cache_read_input_tokens":0,
+         "cache_creation":{"ephemeral_5m_input_tokens":4217,"ephemeral_1h_input_tokens":0}}
+call 2  {"input_tokens":8,"cache_creation_input_tokens":0,"cache_read_input_tokens":4217}
+call 3  {"input_tokens":8,"cache_creation_input_tokens":0,"cache_read_input_tokens":4217}
+```
+
+Being wrong in the loose direction is nearly free — a breakpoint below the provider's real
+minimum is *ignored*, not charged (measured: `input_tokens` identical with and without it), and
+`claimCacheWrite`'s release records that and retries. Being wrong tight forgoes the cache
+forever, which is what was happening.
 
 Verified against the live gateway: first call `cache_creation_input_tokens: 30007`, every
 repeat `cache_read_input_tokens: 30007` with `cache_creation: 0`. On a five-call request that
@@ -433,6 +468,15 @@ agent's own model if the transcript will not fit the extraction model's window. 
 leaves a `<<cg:HASH>>` marker with a one-line summary, and the result is frozen so later warm
 turns replay it byte-for-byte and the new prefix stays cache-stable.
 
+!!! tip "The deterministic offloaders can do this too — and they should go first"
+    `mask`, `failed_run` and `collapse` take the same `cold_cache` option (also off by default) and
+    lift the same gate without spending a model call. On the measured window the cold path of *this*
+    component cost **$12.71 of our own LLM spend to save 3,161 tokens** — about 4x worse per token
+    than its warm path — so where a deterministic offloader can take a cold-turn token, it should:
+    same saving, no call. Enable both and the deterministic pass runs first, leaving the sweep the
+    residue. See [Freeze / cold_cache](../design.md#the-one-turn-where-depth-is-free-cold_cache) for
+    the measured delta, which is single-digit percent of cold spend rather than all of it.
+
 !!! note "Detection errs toward 'still warm'"
     The two errors are not symmetric. Believing a warm cache is cold makes a component rewrite
     a live prefix and forces a cache-write of the whole suffix; believing a cold cache is warm
@@ -599,12 +643,15 @@ prompt exceeding the *extraction* model's window — not a conversation that gre
 messages are candidates). Before each call the component checks that
 
 ```
-(shown body + prompt overhead) × 1.15  +  2048 (reply) + 512  ≤  input limit
+(shown body + prompt overhead) × 1.65  +  4096 (reply) + 512  ≤  input limit
 ```
 
 fits, where the *shown body* is the bounded head+tail the prompt actually carries (a 200k-token
-log still travels as a ~8k-token sample), `× 1.15` covers the extraction model tokenizing the
-same bytes more heavily than our own `o200k_base` counter, and `2048` is the `max_tokens` the
+log still travels as a ~8k-token sample), `× 1.65` covers the extraction model tokenizing the
+same bytes more heavily than our own `o200k_base` counter (**measured** 2026-08-19: 6,396 o200k
+billed as 8,222 on `claude-haiku-4-5` and 10,574 on `aws/claude-sonnet-5`, i.e. 1.29x and 1.65x —
+the old `1.15` under-stated both, and this margin's only job is keeping a request inside a
+window, where under-counting puts a prompt on the wire the upstream may reject), and `4096` is the `max_tokens` the
 cheap clients send — most APIs bound input+output against the same window.
 
 The **input limit** is resolved as data, never a constant: `model_max_input_tokens` if pinned →
@@ -622,6 +669,26 @@ small for the outputs being seen.
 
 Extraction-model pricing for the gate comes from `CHEAP_MODEL_PRICE_IN`, `_OUT`,
 `_CACHE_WRITE`, `_CACHE_READ` (dollars per MTok; defaults are `claude-haiku-4-5` list rates).
+
+!!! warning "Set them, or the gate spends against a list price nobody checked"
+    None of the four is set on this deployment, so the gate priced every call at haiku **list**
+    ($1.00/$5.00 per MTok) while the dashboard priced the same request from the operator's own
+    card ($0.80/$4.00) — ~25% apart, in the numerator of every allow/suppress decision, with
+    nothing reporting the divergence. A component cannot reach the provider's price table, so
+    it now says so instead: a request that spends on a *named* cheap model with no
+    `CHEAP_MODEL_PRICE_*` configured records the gate `cheap_model_price_unconfigured` at
+    `/stats`. A silent 25% is worse than a wrong 25% — the wrong one can be corrected.
+
+**The value of a saved token is no longer a constant either.** It is read from the request's own
+rate card (`Ctx.SelfRates`, resolved from the same provider price table the dashboard uses); the
+`agentFreshPerMTok` / `agentCacheReadPerMTok` / `agentCacheWritePerMTok` literals are only the
+fallback for when the table said nothing. This settles a 27% disagreement that sat under every
+cold-turn decision: the code said a cold-turn token was worth **$3.75/MTok** and
+`docs/results/measured-2026-08.md` §9 said **$4.75/MTok**. Neither is right here — $3.75 is
+1.25x `claude-sonnet-4-5`'s $3.00 *list* rate and $4.75 is the opus-5-era figure, while this
+gateway bills `aws/claude-sonnet-5` at **$2.00 in / $10.00 out** per MTok (derived 2026-08-19 by
+solving the recorded `cost_usd` and token-tier columns of two captured corpora simultaneously),
+making a cold-turn token worth **$2.50/MTok**. A literal cannot be right for every operator.
 
 ## When it shines
 

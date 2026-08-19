@@ -18,6 +18,7 @@ type Mask struct {
 	minTokens     int
 	keepHeadChars int
 	mode          markerMode
+	coldCache     bool
 }
 
 type maskConfig struct {
@@ -27,6 +28,9 @@ type maskConfig struct {
 	// so the model knows what was hidden (cuts blind expand round-trips); 0 disables.
 	KeepHeadChars *int   `yaml:"keep_head_chars"`
 	MarkerMode    string `yaml:"marker_mode"` // full (default) | summary | off
+	// ColdCache lets a NEW mask act at any depth on a turn whose prompt cache has
+	// provably expired (see components.Ctx.TailOnlyCold). Off by default.
+	ColdCache bool `yaml:"cold_cache"`
 }
 
 func newMask(raw []byte) (components.Component, error) {
@@ -38,7 +42,8 @@ func newMask(raw []byte) (components.Component, error) {
 	if cfg.KeepHeadChars != nil {
 		keepHead = *cfg.KeepHeadChars
 	}
-	return &Mask{keepRecent: cfg.KeepRecent, minTokens: cfg.MinTokens, keepHeadChars: keepHead, mode: parseMarkerMode(cfg.MarkerMode)}, nil
+	return &Mask{keepRecent: cfg.KeepRecent, minTokens: cfg.MinTokens, keepHeadChars: keepHead,
+		mode: parseMarkerMode(cfg.MarkerMode), coldCache: cfg.ColdCache}, nil
 }
 
 func (Mask) Name() string                 { return "mask" }
@@ -47,6 +52,9 @@ func (Mask) Enabled(*components.Ctx) bool { return true }
 func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	tools := toolIndices(req)
 	if len(tools) <= m.keepRecent {
+		// Reported, not silent: mask is the biggest lever in the docs and "acted: 0" with
+		// no reason was indistinguishable from a broken component (see docs/reference/components.md).
+		rep.Gate("within_keep_recent")
 		rep.Skipped = true
 		return nil, nil
 	}
@@ -56,7 +64,8 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 	for _, i := range tools[:len(tools)-m.keepRecent] {
 		msg := &req.Input[i]
 		if !schema.Rewritable(*msg) {
-			continue // non-text blocks would be dropped by a text rewrite
+			rep.Gate("non_text_blocks") // would be dropped by a text rewrite
+			continue
 		}
 		content := schema.MessageText(*msg)
 		if content == "" {
@@ -72,9 +81,11 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 			continue
 		}
 		if skipReduce(c, content) {
-			continue // already offloaded, or expanded by the agent — don't re-hide
+			rep.Gate("marker_or_kept_verbatim") // already offloaded, or expanded by the agent
+			continue
 		}
 		if schema.TextTokens(content) < m.minTokens {
+			rep.Gate("below_min_tokens")
 			continue
 		}
 		// A NEW mask only in the uncached tail: masking content the provider already
@@ -84,7 +95,13 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 		// already holds the masked bytes, so re-deriving them (deterministic: same content
 		// + config ⇒ same text and same sha256 key) PRESERVES the cache and leaving the
 		// output verbatim is what destroys it.
-		if !c.TailOnly(i) && !repairLostFreeze(c, m.Name(), content) {
+		//
+		// The one place the depth restriction lifts wholesale is a turn whose cache has
+		// provably expired (cold_cache, off by default): there is no cached prefix left to
+		// flip, so the freeze below simply establishes the decision a turn earlier than the
+		// tail would have.
+		if !c.TailOnlyCold(i, m.coldCache) && !repairLostFreeze(c, m.Name(), content) {
+			rep.Gate("cached_prefix")
 			continue
 		}
 		prefix := "[older tool output masked] "
@@ -94,7 +111,8 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 		newText, key, eff, ok := tryMark(c, m.mode, content, " [full output: call "+expand.ToolName+"]",
 			func(tok string) string { return prefix + tok })
 		if !ok {
-			continue // marker-inclusive rewrite wouldn't shrink this message; leave it verbatim
+			rep.Gate("marker_no_win") // rewrite+marker wouldn't shrink this message
+			continue
 		}
 		commitMark(c, rep, eff, key, content)
 		schema.SetMessageText(msg, newText)
@@ -119,5 +137,15 @@ func init() {
 		{Key: "keep_head_chars", Type: components.FieldInt, Default: 96,
 			Hint: "Leave a one-line peek of the masked output inside the marker so the model knows what was hidden (cuts blind expand round-trips); 0 disables."},
 		markerModeField(),
+		coldCacheField(),
 	})
+}
+
+// coldCacheField is the cold_cache descriptor, shared by the age/supersession offloaders
+// that can lift their depth restriction on a provably-expired cache (mask, failed_run,
+// collapse). Declared once because the trade-off — and the reason it defaults to off —
+// is one decision, not three.
+func coldCacheField() components.Field {
+	return components.Field{Key: "cold_cache", Type: components.FieldBool, Default: false,
+		Hint: "On a turn whose prompt cache has provably expired (idle past the provider TTL), also compact at depth instead of only in the uncached tail. Free when the cache really is gone; a wrong cold reading costs a cache-write of the whole suffix, so this is off by default."}
 }

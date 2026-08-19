@@ -295,26 +295,72 @@ Both are rare on real Claude Code traffic — every one of ~5,000 captured reque
 `ephemeral` mark — and both are the expensive direction, which is the whole reason an operator has
 to ask for this rather than inherit it.
 
-**Measured delta, and it is much smaller than the headroom suggests.** On the deployment's own
-dashboard DB over 2.4 days (14,407 requests), TTL-expired turns were 3.46% of requests but
-**$564.38 = 22.06% of all spend**, the pipeline realized **$0.50** on them, and **92.54%** of their
-tokens were withheld as frozen. That 92.5% is the number this option unfreezes — but almost none of
-it is mass these components can compact. Replaying real captures with every turn forced cold
-(`CG_SWEEP_IDLE=430`, `apply/sweep_capture_test.go`):
+**What "cold" was actually verified to mean.** Note that the dashboard's `ttl_expiry` bucket cannot
+be used to check this: `Event.AttributeCache` only reaches it when `cache_read == 0`, so it agrees
+with the runtime predicate by construction. Checked instead against the recorded upstream usage of
+the bench cold session (`cg-research/bench`, epoch-ms `ts` per request, gap to the previous request
+of the same session): the predicate fires on **4** of the 9 requests, and **3 of those 4 recorded
+`cache_read = 0`**. The fourth (gap 437s) read exactly **54,800** tokens — Claude Code's shared
+`system` + `tools` prefix, which other traffic on the same gateway keeps warm — while the session's
+own message history was cache-*written* in full (88,154 tokens).
 
-| pipeline | tokens removed, gate as-is | with `cold_cache` | delta | share of transcript |
-|---|---|---|---|---|
-| deployed shape (`failed_run` only) | 33,695 | 38,249 | **+4,554** | +0.24% |
-| `general` shape, SWE-bench capture | 950,532 | 973,120 | **+22,588** | +1.19% |
-| `general` shape, one real Claude Code session | 1,004,216 | 1,119,523 | **+115,307** | +7.14% |
+That is the precise form of the guarantee, and it is narrower than "nothing is cached":
+
+> `ColdCache` means **this session's own message prefix** is gone. It does **not** mean
+> `cache_read == 0`, because a shared `system`/`tools` prefix can stay warm across the gap.
+
+Which is exactly enough for these three components, since they only ever rewrite `messages`. It is
+**not** enough for anything that would mutate `system` or `tools` on a cold reading — that could
+break a prefix another tenant is keeping warm — so the lift is deliberately not offered there. Four
+predicate firings in one session is a thin basis; a deployment enabling this should watch
+`cache_miss_reason` and `frozen_flips` on its own traffic first.
+
+**It cannot widen the `MaxCachedIdx < 0` hole.** A compaction reset opens the boundary to -1 on
+turns that then cache-HIT, and there `TailOnly` already returns true for every index — the lift adds
+nothing, because `TailOnlyCold` is a pure widening that only fires when the component opted in *and*
+the cache is cold (`TestTailOnlyColdOnlyWidensWhenOptedInAndCold`). `collapse` is the only component
+whose exposure to that hole changes, and it *narrows*: it had no boundary check at all before.
+
+**Measured delta, and it is much smaller than the headroom suggests.** On the deployment's own
+dashboard DB over 2.4 days (14,407 requests, read-only snapshot), TTL-expired turns were 3.46% of
+requests but **$564.38 = 22.06% of all spend**, the pipeline realized **$0.50** on them, and
+**92.54%** of their tokens were withheld as frozen. That 92.5% is what this option unfreezes — and
+almost none of it turns out to be mass these components can compact.
+
+Replayed through `apply/sweep_capture_test.go` (`CG_SWEEP_YAML` A/B, config the only difference,
+n=3 — the arms are deterministic and repeated **byte-identically**, zero variance):
+
+| corpus | pipeline | removed, gate as-is | with `cold_cache` | delta | of transcript |
+|---|---|---|---|---|---|
+| bench `cold.jsonl` — 9 requests, **3 verified `cache_read=0` / `ttl_expiry`** | `general` shape | 96,940 | 97,558 | **+618** | +0.37% |
+| SWE-bench, 300 requests, every turn forced cold | `general` shape | 950,532 | 973,120 | **+22,588** | +1.19% |
+| one real Claude Code session, 35 requests, every turn forced cold | `general` shape | 1,004,216 | 1,119,523 | **+115,307** | +7.14% |
+| SWE-bench, 300 requests, every turn forced cold | **as deployed** (`failed_run` only) | 33,695 | 38,249 | **+4,554** | +0.24% |
 
 Priced at the deployment's own measured cold rate ($564.38 / 31.2M tokens = **$18.07/MTok**, an
-opus-class cache-write), those shares are worth **$1.36 / $6.71 / $40.29** across the same 2.4-day
-window of cold traffic. So the honest claim is *dollars, not hundreds of dollars*: the $564 of cold
-spend is real, but the deterministic offloaders can only reach a low single-digit percentage of it,
-and on the pipeline as deployed — which runs neither `mask` nor `collapse` — the lift is worth about
-**$1.40**, not $434. The gap is not the gate: 92.5% of a cold turn is assistant text, small tool
-outputs and content below every floor.
+opus-class cache-write), those shares are worth **$2.09 – $40.29** of the same 2.4-day window of
+cold traffic on a `general`-shaped pipeline, and **$0 – $1.36** on the pipeline as actually deployed,
+which runs neither `mask` nor `collapse`. Against the $0.50 realized today that is a large *ratio*
+and a small *number*: the honest claim is single-digit-to-low-tens of dollars over two days, not the
+$564 the cold turns cost. The remaining 92% of a cold turn is assistant text, small tool outputs and
+content below every floor — the gate was never what stood in the way.
+
+Three caveats that belong with the numbers:
+
+- **3 genuinely cold requests is a thin evidence base.** In the bench cold arm only 3 of 9 requests
+  recorded `cache_read = 0`; Claude Code's ~54.8k-token system+tools prefix is shared and kept warm
+  by other traffic on the same gateway, so the earlier post-gap turns are not cold at all. The
+  larger corpora are *forced* cold on every turn, which is not a realistic mix — it is an upper
+  bound on steady-state behaviour, not a projection.
+- **`removed > attempted` is not a saving.** `attempted_tokens` is derived from the tail boundary,
+  so it does not widen when the gate lifts (nor did it account for `collapse` ignoring the gate
+  entirely). On a *cold* turn the excess is real removal, because there is no live cache to
+  invalidate; on a warm turn the same shape would be invalidation. Read the two apart before
+  quoting either.
+- **It overlaps `extract_llm`'s cold sweep.** Both target the same tokens on the same turns. The
+  deterministic pass runs first and costs nothing, and on the measured window the LLM cold path
+  spent $12.71 to save 3,161 tokens — 4x worse per token than its own warm path. If both are
+  enabled, the sweep should fire *less* on cold turns, not more.
 
 `/stats` reports `frozen_hits`, `frozen_misses`, `frozen_dropped`, `frozen_repaired`, and
 `frozen_flips` (= dropped − repaired; should be 0). `frozen_misses` is a *lookup* counter dominated

@@ -23,6 +23,7 @@ type Collapse struct {
 	headLines int
 	tailLines int
 	mode      markerMode
+	coldCache bool
 }
 
 type collapseConfig struct {
@@ -31,6 +32,9 @@ type collapseConfig struct {
 	HeadLines  int     `yaml:"head_lines"`
 	TailLines  int     `yaml:"tail_lines"`
 	MarkerMode string  `yaml:"marker_mode"` // full (default) | summary | off
+	// ColdCache lets a NEW collapse act at any depth on a turn whose prompt cache has
+	// provably expired (see components.Ctx.TailOnlyCold). Off by default.
+	ColdCache bool `yaml:"cold_cache"`
 }
 
 func newCollapse(raw []byte) (components.Component, error) {
@@ -38,7 +42,8 @@ func newCollapse(raw []byte) (components.Component, error) {
 	if err := components.Decode(raw, &cfg); err != nil {
 		return nil, err
 	}
-	return &Collapse{maxTokens: cfg.MaxTokens, maxFrac: cfg.MaxFrac, headLines: cfg.HeadLines, tailLines: cfg.TailLines, mode: parseMarkerMode(cfg.MarkerMode)}, nil
+	return &Collapse{maxTokens: cfg.MaxTokens, maxFrac: cfg.MaxFrac, headLines: cfg.HeadLines,
+		tailLines: cfg.TailLines, mode: parseMarkerMode(cfg.MarkerMode), coldCache: cfg.ColdCache}, nil
 }
 
 func (Collapse) Name() string                 { return "collapse" }
@@ -54,18 +59,47 @@ func (cl *Collapse) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 			continue
 		}
 		if !schema.Rewritable(*m) {
-			continue // non-text blocks would be dropped by a text rewrite
+			rep.Gate("non_text_blocks") // would be dropped by a text rewrite
+			continue
 		}
 		content := schema.MessageText(*m)
-		if content == "" || schema.TextTokens(content) <= maxTokens {
+		if content == "" {
+			continue
+		}
+		// Replay a previously-frozen collapse on EVERY turn, regardless of depth and BEFORE
+		// the size test: the agent re-sends the original each turn, so the only way the
+		// representation stays stable is to re-derive the same bytes. Ahead of the size test
+		// on purpose — with max_frac set, CtxWindow can resolve differently mid-session
+		// (model swap, refreshed modelinfo), and a threshold that drifts above this output
+		// would otherwise flip it collapsed→full inside the cached prefix.
+		if fk, _, ok := reapplyFrozen(c, cl.Name(), m); ok {
+			changed++
+			keys = append(keys, fk...)
+			continue
+		}
+		if schema.TextTokens(content) <= maxTokens {
+			rep.Gate("below_max_tokens")
 			continue
 		}
 		if skipReduce(c, content) {
-			continue // already offloaded by an earlier component, or expanded by the agent
+			rep.Gate("marker_or_kept_verbatim") // already offloaded, or expanded by the agent
+			continue
 		}
 		lines := strings.Split(content, "\n")
 		if len(lines) <= cl.headLines+cl.tailLines {
-			continue // few long lines; head/tail wouldn't help
+			rep.Gate("too_few_lines") // few long lines; head/tail wouldn't help
+			continue
+		}
+		// A NEW collapse only in the uncached tail. This component used to carry no depth
+		// restriction at all, contradicting the contract in components/component.go: it
+		// rewrote the whole transcript on every turn and survived only because the rewrite is
+		// deterministic. It is not quite: `max_tokens` is resolved through resolveBudget, so a
+		// max_frac config plus a mid-session CtxWindow change silently re-thresholds messages
+		// inside the cached prefix. Tail gate + freeze is the same pair mask and failed_run
+		// use, and it decides each output once, on the turn it arrives.
+		if !c.TailOnlyCold(i, cl.coldCache) && !repairLostFreeze(c, cl.Name(), content) {
+			rep.Gate("cached_prefix")
+			continue
 		}
 		omitted := len(lines) - cl.headLines - cl.tailLines
 		head := strings.Join(lines[:cl.headLines], "\n")
@@ -75,10 +109,12 @@ func (cl *Collapse) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 				return fmt.Sprintf("%s\n... (%d lines omitted) %s\n%s", head, omitted, tok, tail)
 			})
 		if !ok {
-			continue // head/tail window+marker wouldn't shrink this output; leave it verbatim
+			rep.Gate("marker_no_win") // head/tail window+marker wouldn't shrink this output
+			continue
 		}
 		commitMark(c, rep, eff, key, content)
 		schema.SetMessageText(m, newText)
+		freeze(c, cl.Name(), content, newText) // freeze so later turns replay it (no churn)
 		changed++
 		if key != "" {
 			keys = append(keys, key)
@@ -101,5 +137,6 @@ func init() {
 		{Key: "tail_lines", Type: components.FieldInt, Default: 20,
 			Hint: "Lines kept from the end of a collapsed output."},
 		markerModeField(),
+		coldCacheField(),
 	})
 }

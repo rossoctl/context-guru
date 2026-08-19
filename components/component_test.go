@@ -111,3 +111,33 @@ func TestTheModelSourceFallbackIsReportable(t *testing.T) {
 		})
 	}
 }
+
+// TailOnlyCold must be a pure WIDENING of TailOnly, and only on the one input that earns
+// it: opted in AND a provably cold cache. Anything else has to agree with TailOnly
+// index-for-index — including the fail-open MaxCachedIdx < 0 case, which already returns
+// true for every index (a compaction reset opens it on turns that then cache-HIT, so the
+// lift must not be able to make that hole any wider than it already is).
+func TestTailOnlyColdOnlyWidensWhenOptedInAndCold(t *testing.T) {
+	for _, c := range []*Ctx{
+		{CacheAware: true, MaxCachedIdx: 3},
+		{CacheAware: true, MaxCachedIdx: 3, ColdCache: true},
+		{CacheAware: true, MaxCachedIdx: -1, ColdCache: true},
+		{CacheAware: false, MaxCachedIdx: 3, ColdCache: true},
+		{CacheAware: true, MaxCachedIdx: 0},
+	} {
+		for i := 0; i < 6; i++ {
+			base := c.TailOnly(i)
+			if got := c.TailOnlyCold(i, false); got != base {
+				t.Fatalf("optIn=false must equal TailOnly: idx %d cold=%v got %v want %v",
+					i, c.ColdCache, got, base)
+			}
+			got := c.TailOnlyCold(i, true)
+			if want := base || c.ColdCache; got != want {
+				t.Fatalf("optIn=true: idx %d cold=%v got %v want %v", i, c.ColdCache, got, want)
+			}
+			if !base && got && !c.ColdCache {
+				t.Fatalf("idx %d: lifted the gate on a WARM turn", i)
+			}
+		}
+	}
+}
