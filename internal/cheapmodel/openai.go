@@ -85,7 +85,12 @@ func (o OpenAI) CompleteSystem(ctx context.Context, system, prompt string) (stri
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("cheapmodel: status %d", resp.StatusCode)
+		// The upstream's own message, clipped. A bare status is undiagnosable: a 401 can be a
+		// wrong auth scheme, an expired key, a model the key may not use, or a gateway policy,
+		// and those have nothing in common. Clipped and body-only — the response body of an
+		// auth failure does not echo the credential, but the REQUEST headers would, so this
+		// deliberately reads the body and never the request.
+		return "", fmt.Errorf("cheapmodel: status %d: %s", resp.StatusCode, clipErrBody(resp.Body))
 	}
 	var out struct {
 		Choices []struct {

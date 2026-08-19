@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -120,7 +121,12 @@ func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt s
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("cheapmodel: status %d", resp.StatusCode)
+		// The upstream's own message, clipped. A bare status is undiagnosable: a 401 can be a
+		// wrong auth scheme, an expired key, a model the key may not use, or a gateway policy,
+		// and those have nothing in common. Clipped and body-only — the response body of an
+		// auth failure does not echo the credential, but the REQUEST headers would, so this
+		// deliberately reads the body and never the request.
+		return "", fmt.Errorf("cheapmodel: status %d: %s", resp.StatusCode, clipErrBody(resp.Body))
 	}
 	var out struct {
 		Content []struct {
@@ -152,3 +158,16 @@ func (a Anthropic) CompleteBlocks(ctx context.Context, system []string, prompt s
 	}
 	return "", nil
 }
+
+// clipErrBody reads at most errBodyCap bytes of an error response for the message, so a
+// gateway that answers with a whole HTML page cannot flood a log line.
+func clipErrBody(r io.Reader) string {
+	b, _ := io.ReadAll(io.LimitReader(r, errBodyCap))
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return "(empty body)"
+	}
+	return strings.Join(strings.Fields(s), " ")
+}
+
+const errBodyCap = 512
