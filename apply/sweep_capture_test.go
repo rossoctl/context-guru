@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -26,6 +30,12 @@ import (
 //
 // Set CG_SWEEP_IDLE=<seconds> to advance the injected clock between requests, which is what
 // makes a cold-cache sweep fire. CG_SWEEP_VARIANTS=name1,name2 narrows the table.
+//
+// CG_SWEEP_YAML=a.yaml,b.yaml replaces the built-in table with configs read from disk —
+// that is what makes this a general A/B instrument (bench/ab.sh) instead of a fixed study.
+// CG_SWEEP_IN_RATE / CG_SWEEP_OUT_RATE are the capture model's real $/MTok on the
+// deployment being measured; they set both the agent-model SelfRates and the tier prices
+// the value line is quoted at.
 func TestSweepCapture(t *testing.T) {
 	if os.Getenv("CG_SWEEP") == "" {
 		t.Skip("set CG_SWEEP=1 to run the config sweep")
@@ -44,8 +54,23 @@ func TestSweepCapture(t *testing.T) {
 		idle = time.Duration(secs) * time.Second
 	}
 
-	fmt.Printf("\ncapture: %d requests   idle-gap: %v\n", len(recs), idle)
-	for _, v := range sweepVariants {
+	variants := sweepVariants
+	if paths := splitComma(os.Getenv("CG_SWEEP_YAML")); len(paths) > 0 {
+		variants = nil
+		for _, p := range paths {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatalf("variant yaml %s: %v", p, err)
+			}
+			name := filepath.Base(p)
+			name = strings.TrimSuffix(name, filepath.Ext(name))
+			variants = append(variants, sweepVariant{name: name, yaml: string(b)})
+		}
+	}
+
+	fmt.Printf("\ncapture: %d requests   idle-gap: %v   in-rate: $%.2f/MTok\n",
+		len(recs), idle, sweepRate("CG_SWEEP_IN_RATE", 3.80))
+	for _, v := range variants {
 		if len(only) > 0 && !only[v.name] {
 			continue
 		}
@@ -70,6 +95,11 @@ func runVariant(t *testing.T, v sweepVariant, recs []capRec, models components.M
 		t.Fatalf("variant %s build: %v", v.name, err)
 	}
 	st := store.NewMemory(store.Options{})
+	// A Tracker, because coldness is only computed on the tracker path (apply.go: the
+	// legacy store path has no previous-turn TIMESTAMP, so coldCache stays false forever).
+	// Without this, CG_SWEEP_IDLE advanced the clock and changed nothing — a cold-cache
+	// replay silently measured a warm one.
+	tracker := modes.NewTracker(0)
 	ctx := context.Background()
 
 	type compAgg struct {
@@ -97,9 +127,13 @@ func runVariant(t *testing.T, v sweepVariant, recs []capRec, models components.M
 			Session:  fmt.Sprintf("sweep-%s", v.name),
 			Models:   models,
 			Now:      now,
+			Tracker:  tracker,
 			// SelfRates are the agent model's real per-token rates on this deployment
 			// (aws/claude-opus-5: $3.80 in / $19.00 out per MTok).
-			SelfRates: components.TokenRates{Input: 3.80 / 1e6, Output: 19.00 / 1e6},
+			SelfRates: components.TokenRates{
+				Input:  sweepRate("CG_SWEEP_IN_RATE", 3.80) / 1e6,
+				Output: sweepRate("CG_SWEEP_OUT_RATE", 19.00) / 1e6,
+			},
 		})
 		_ = i
 		attempted += res.AttemptedTokens
@@ -167,6 +201,23 @@ func runVariant(t *testing.T, v sweepVariant, recs []capRec, models components.M
 		a := comps[n]
 		fmt.Printf("%-12s %6d %6d %8d %9.1f  %v\n", n, a.fired, a.fired-a.skipped, a.saved, a.ms, a.gates)
 	}
+	// Value of the WHOLE arm's removed tokens, at each tier they could have been billed
+	// at: fresh, cache_creation (1.25x fresh — what an uncached tail token costs) and
+	// cache_read (0.1x). Which one applies is a property of the capture, not of the
+	// config, so all three are printed and the caller picks from the capture's own tier
+	// split; net subtracts what our own model calls cost to get it.
+	fresh := sweepRate("CG_SWEEP_IN_RATE", 3.80)
+	removed := float64(before - after)
+	var pipeMs float64
+	for _, a := range comps {
+		pipeMs += a.ms
+	}
+	fmt.Printf("value: removed=%d  @fresh($%.2f)=$%.4f  @cache_write($%.2f)=$%.4f  @cache_read($%.2f)=$%.4f  llm_cost=$%.4f  net@write=$%+.4f  net@read=$%+.4f\n",
+		before-after, fresh, removed*fresh/1e6, fresh*1.25, removed*fresh*1.25/1e6,
+		fresh*0.1, removed*fresh*0.1/1e6, callCost,
+		removed*fresh*1.25/1e6-callCost, removed*fresh*0.1/1e6-callCost)
+	fmt.Printf("latency: pipeline=%.0fms total (%.1fms/req)   llm=%.0fms total\n",
+		pipeMs, pipeMs/float64(len(recs)), callMs)
 	if calls > 0 {
 		fmt.Printf("llm: calls=%d accepted=%d cold=%d saved_tokens=%d cost=$%.4f mean_latency=%.0fms\n",
 			calls, accepted, cold, callSaved, callCost, callMs/float64(calls))
@@ -219,4 +270,12 @@ func sweepModels(t *testing.T) components.ModelSpec {
 	}
 	m := cheapmodel.Anthropic{BaseURL: base, APIKey: key, Model: model, AuthScheme: "bearer"}
 	return components.ModelSpec{Incoming: m, Static: m}
+}
+
+// sweepRate reads a $/MTok price from the environment; def when unset or unparsable.
+func sweepRate(env string, def float64) float64 {
+	if v, err := strconv.ParseFloat(os.Getenv(env), 64); err == nil && v > 0 {
+		return v
+	}
+	return def
 }
