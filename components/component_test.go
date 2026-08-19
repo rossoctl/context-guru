@@ -71,7 +71,7 @@ func TestForModelSwapsTheModelButNotTheEndpoint(t *testing.T) {
 type remodelable struct{ id string }
 
 func (r remodelable) Complete(context.Context, string) (string, error) { return "", nil }
-func (r remodelable) AsModel(id string) Model                         { r.id = id; return r }
+func (r remodelable) AsModel(id string) Model                          { r.id = id; return r }
 
 type stubNamed string
 
