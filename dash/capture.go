@@ -540,14 +540,18 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	tails := map[string]uint64{}
 	for rows.Next() {
 		var id string
-		var ts int64
-		var tail uint64
+		var ts, tail int64
+		// int64, not uint64: SQLite's INTEGER is signed, so a hash whose top bit is set
+		// comes back negative and scanning it straight into a uint64 fails the whole
+		// query — which it did on every start, silently costing the seeding this function
+		// exists for ("could not recover session recency" in the log). The bits are the
+		// same; only the Go type of the container differs.
 		if err := rows.Scan(&id, &ts, &tail); err != nil {
 			return 0, err
 		}
 		seeded[id] = ts
 		if tail != 0 {
-			tails[id] = tail
+			tails[id] = uint64(tail)
 		}
 	}
 	if err := rows.Err(); err != nil {

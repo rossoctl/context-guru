@@ -427,7 +427,11 @@ func TestTailChangeIsPerSessionAndSurvivesARestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	const now = int64(1_700_000_000_000)
-	const tailA, tailB = uint64(0xAAAA), uint64(0xBBBB)
+	// Top bit SET on purpose. SQLite's INTEGER is signed, so a hash above 2^63 round-trips
+	// as a negative number, and reading it back into a uint64 failed the whole seeding query
+	// — in production, on every restart, while this test passed against 0xBBBB. FNV-1a puts
+	// half of all real hashes in this range.
+	const tailA, tailB = uint64(0xAAAA_AAAA_AAAA_AAAA), uint64(0xEC5B_3A1F_9D42_7E05)
 
 	// First request of a session: nothing to match, so it counts as changed.
 	if _, _, _, changed := rec.ObserveSplit("t", "t:s", "m", now, tailA); !changed {
