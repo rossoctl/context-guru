@@ -118,7 +118,7 @@ func TestShippedPriceListLoads(t *testing.T) {
 	}
 	for id, wantIn := range map[string]float64{
 		"aws/claude-sonnet-5": 1.52, "aws/claude-opus-5": 3.80,
-		"premium-ide": 1.52, "gcp/gemini-3-pro-preview": 2.00,
+		"premium-ide": 3.00, "gcp/gemini-3-pro-preview": 2.00,
 	} {
 		p, ok := tb.Price(context.Background(), id)
 		if !ok {
@@ -127,6 +127,64 @@ func TestShippedPriceListLoads(t *testing.T) {
 		}
 		if math.Abs(p.Input-wantIn/1e6) > 1e-15 {
 			t.Errorf("%s: in = $%.4f/MTok, want $%.2f", id, p.Input*1e6, wantIn)
+		}
+	}
+}
+
+// The exact model ids ete-litellm serves, read from its /v1/models on 2026-08-19, plus
+// the tier names Bob puts on the wire. Every one of them must price, because an id that
+// does not is a dashboard row whose cost reads "unknown" — the Bob symptom this file
+// exists to fix. Note the gateway's own casing (`Azure/gpt-4o`) and the ids it serves
+// with no provider prefix at all (`claude-opus-4-8`): both used to miss.
+func TestEveryGatewayModelIsPriced(t *testing.T) {
+	tb, err := LoadTable("../../deploy/service/prices.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{
+		"aws/claude-opus-4-7",
+		"claude-haiku-4-5-20251001",
+		"aws/us.claude-opus-4-7",
+		"Azure/gpt-4o",
+		"gemini-2.5-pro",
+		"azure/gpt-5.6-terra",
+		"Azure/gpt-5-nano-2025-08-07",
+		"aws/claude-sonnet-5",
+		"aws/claude-sonnet-4-5",
+		"Azure/gpt-5-2025-08-07",
+		"aws/claude-haiku-4-5",
+		"azure/gpt-5.3-chat",
+		"gcp/gemini-3-pro-preview",
+		"gcp/gemini-3.1-pro-preview",
+		"azure/gpt-5.5",
+		"aws/gpt-oss-120b",
+		"azure/gpt-5.6-sol",
+		"claude-opus-4-8",
+		"GCP/gemini-2.0-flash",
+		"claude-opus-4-6",
+		"azure/gpt-5.4",
+		"claude-sonnet-4-6",
+		"azure/gpt-5.6-luna",
+		"gcp/gemini-3-flash-preview",
+		"Azure/gpt-5.1-codex-2025-11-13",
+		"rits/google/gemma-4-31B",
+		"claude-sonnet-4-5-20250929",
+		"Azure/gpt-5-mini-2025-08-07",
+		"Azure/gpt-4.1",
+		"azure/gpt-5.3-codex",
+		"gemini-2.5-flash",
+		"aws/claude-opus-5",
+		"gcp/gemini-3.6-flash",
+		"gcp/gemini-3.5-flash-lite",
+		"premium",
+		"premium-ide",
+		"standard",
+		"fast",
+		"openai/gpt-oss-20b",
+	} {
+		p, ok := tb.Price(context.Background(), id)
+		if !ok || p.Zero() {
+			t.Errorf("%s is unpriced: a request on it reports cost unknown", id)
 		}
 	}
 }

@@ -62,14 +62,38 @@ models:
   - {match: "gcp/gemini-3.6-flash",        in: 1.50, out: 7.50}
   - {match: "gcp/gemini-3.5-flash-lite",   in: 0.30, out: 2.50}
 
+  # ── ete-litellm: the bare aliases ────────────────────────────────────────────
+  # The gateway also serves several ids WITHOUT a provider prefix (`claude-opus-4-8`,
+  # `claude-sonnet-4-6`, `gemini-2.5-pro`, …) and with mixed case (`Azure/gpt-4o`).
+  # Case is normalised on lookup; the missing prefix is not, so these families catch
+  # the aliases. They sit below the specific entries above and only apply where none
+  # of those matched.
+  - {match: "claude-opus*",   in: 3.80, out: 19.00}
+  - {match: "claude-sonnet*", in: 2.28, out: 11.40, note: "the 4-x rate; 5 is listed specifically above"}
+  - {match: "claude-haiku*",  in: 0.76, out: 3.80}
+  - {match: "gemini-2.0*",    in: 0.10, out: 0.40}
+  - {match: "gemini-2.5-pro", in: 1.25, out: 10.00}
+  - {match: "gemini-2.5*",    in: 0.30, out: 2.50}
+  - {match: "gemma*",         in: 0.01, out: 0.01, note: "self-hosted on RITS; billed at zero, priced non-zero so it is not read as free"}
+
   # ── Bob (BobShell) ────────────────────────────────────────────────────────────
   # Bob names a TIER, not a model: the server picks what serves it, and the id on the
   # wire is `premium`, `premium-ide`, `standard` or `fast`. These are therefore an
-  # operator ESTIMATE — the tier's usual backing model — and a Bob row's cost is only
-  # as good as this guess. Cross-check against the `session_costs` Bob itself prints
-  # (`-f stream-json`, the final `result` record) before trusting the absolute number;
-  # the ratios and the savings are unaffected by a uniform error here.
-  - {match: "premium*",  in: 1.52, out: 7.60, note: "estimate: claude-sonnet-5 class"}
+  # operator ESTIMATE, and a Bob row's absolute cost is only as good as the guess.
+  #
+  # The premium rate below was fitted against the `session_costs` Bob itself prints
+  # (`-f stream-json`, final `result` record) on two real runs through the proxy:
+  #
+  #   run A  fresh 94,795  cached 14,996  out 1,253   Bob $0.2221   here $0.3077  (+39%)
+  #   run B  fresh 58,133  cached 68,951  out   943   Bob $0.2561   here $0.2092  (-18%)
+  #
+  # The two runs imply in-rates of $2.17 and $3.67/MTok, so no single rate reproduces
+  # both: Bob's own figure is not a linear function of the token tiers the gateway
+  # reports (it prices its auxiliary calls too, and the tier's backing model can change
+  # between calls). $3.00 is between them and is a published rate rather than a fudge.
+  # Read a Bob row's cost as "right to within about a third", and read its SAVINGS
+  # normally — a uniform rate error cancels in the before/after ratio.
+  - {match: "premium*",  in: 3.00, out: 15.00, note: "ESTIMATE, fitted: see the note above"}
   - {match: "standard*", in: 0.76, out: 3.80, note: "estimate: claude-haiku-4-5 class"}
   - {match: "fast*",     in: 0.15, out: 0.60, note: "estimate: gpt-oss-120b class"}
   # Bob's own auxiliary calls (title generation, classification) name a real model.
