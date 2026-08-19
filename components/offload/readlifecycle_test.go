@@ -537,3 +537,38 @@ func mustJSONMsg(t *testing.T, m bschemas.ChatMessage) string {
 	}
 	return string(b)
 }
+
+// stale_at_depth lifts the tail gate for the STALE class only — superseded Reads stay
+// gated, because only the stale case carries the correctness argument that might justify
+// paying a re-anchor. Measured net-negative on real traffic (see the doc), so this test
+// pins the behaviour of a knob that ships off rather than endorsing it.
+func TestStaleAtDepthLiftsGateForStaleOnly(t *testing.T) {
+	body := strings.Repeat("    12\tsome real source line\n", 60)
+	for _, tc := range []struct {
+		name   string
+		second func([]bschemas.ChatMessage) []bschemas.ChatMessage
+		acted  bool
+	}{
+		{"stale", func(m []bschemas.ChatMessage) []bschemas.ChatMessage {
+			return callMsgs(m, "Edit", map[string]string{"file_path": "/x/a.go"}, "ok")
+		}, true},
+		{"superseded", func(m []bschemas.ChatMessage) []bschemas.ChatMessage {
+			return callMsgs(m, "Read", map[string]string{"file_path": "/x/a.go"}, body)
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msgs := tc.second(callMsgs(nil, "Read", map[string]string{"file_path": "/x/a.go"}, body))
+			req := &bschemas.BifrostChatRequest{Input: msgs}
+			c := &components.Ctx{Session: "s", Store: store.NewMemory(store.Options{}),
+				CacheAware: true, MaxCachedIdx: len(msgs) - 1} // everything already cached
+			var rep components.Report
+			rl := rlFor(t, "min_tokens: 5\nstale_at_depth: true\n")
+			if _, err := rl.Offload(req, &rep, c); err != nil {
+				t.Fatal(err)
+			}
+			if acted := schema.MessageText(req.Input[1]) != body; acted != tc.acted {
+				t.Fatalf("acted at depth = %v, want %v (gates %v)", acted, tc.acted, rep.Gates)
+			}
+		})
+	}
+}
