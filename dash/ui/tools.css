@@ -1,0 +1,100 @@
+/* Inventory view. The rest of the page's vocabulary — .panel, .tile, .tbl, .pill, .state,
+ * .hint, .empty — is style.css's and is reused as-is; this file adds ONLY what does not
+ * exist there:
+ *
+ *   1. the carry-vs-use gauge, which is the one picture on the page,
+ *   2. the opt-out row, which is a checkbox with evidence attached rather than a form field,
+ *   3. one row tint for "declared and never called".
+ *
+ * Every colour, space and size below is a token from style.css, so dark mode needs nothing
+ * here: it re-declares the tokens and this file follows.
+ */
+
+/* ── the gauge ─────────────────────────────────────────────────────────────
+ * One bar, two segments, drawn TO SCALE against the declared total. To scale is the
+ * point: a 4%-unused account and an 83%-unused account must not look alike, and two
+ * tiles of the same type size make them look alike. Nothing here is normalised to full
+ * width, and there is no minimum segment width — a sliver is allowed to be a sliver.
+ */
+.cg-gauge-head { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); align-items: baseline; justify-content: space-between; margin-bottom: var(--sp-3); }
+.cg-gauge-head h2 { margin: 0; }
+.cg-gauge-track {
+  display: flex; height: 22px; border-radius: var(--r-sm); overflow: hidden;
+  background: var(--bg-sunken);
+}
+.cg-seg { display: block; height: 100%; }
+/* Invoked is the primary series blue; never-invoked is the STATUS red, not a fifth series
+   step. It is not another category on a chart, it is a fault being reported. */
+.cg-seg.cg-used   { background: var(--s1); }
+.cg-seg.cg-unused { background: var(--bad); }
+.cg-gauge-legend {
+  display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); margin-top: var(--sp-2);
+  font-size: var(--t-small); color: var(--fg-muted); font-variant-numeric: tabular-nums;
+}
+.cg-gauge-legend i, .cg-sw {
+  display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+  margin-right: var(--sp-1); vertical-align: baseline;
+}
+.cg-sw.cg-used   { background: var(--s1); }
+.cg-sw.cg-unused { background: var(--bad); }
+
+/* ── the opt-out list ──────────────────────────────────────────────────────
+ * One row per candidate: a checkbox, one line of what it costs, and one line of the
+ * evidence. The evidence line is not optional and not folded away — it is the difference
+ * between a suggestion and an instruction, so it gets its own grid row rather than a
+ * tooltip.
+ */
+.cg-items { display: grid; gap: var(--sp-1); margin-top: var(--sp-3); }
+.cg-item {
+  display: grid; grid-template-columns: auto 1fr; gap: var(--sp-1) var(--sp-2);
+  align-items: baseline; padding: var(--sp-2); margin-left: calc(var(--sp-2) * -1);
+  border-radius: var(--r-sm); cursor: pointer; font-size: var(--t-body);
+}
+.cg-item:hover { background: var(--bg-hover); }
+.cg-item > input { margin: 0; grid-row: 1; }
+/* Everything after the checkbox lines up under the first line's text, so a three-line row
+   still reads as one row. */
+.cg-item > :not(input) { grid-column: 2; }
+.cg-item-main { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-2); align-items: baseline; }
+.cg-item-name { font-weight: 600; }
+.cg-item-srv { font-family: var(--mono); font-size: var(--t-micro); color: var(--fg-faint); }
+.cg-item-weight, .cg-item-usd {
+  font-size: var(--t-small); color: var(--fg-muted); font-variant-numeric: tabular-nums;
+}
+.cg-item-usd { font-weight: 600; color: var(--fg); }
+/* The basis sentence. Deliberately legible rather than fine print: --fg-faint at
+   --t-micro was the version that read as a disclaimer nobody has to look at, which is
+   exactly the thing it must not be. */
+.cg-item-basis { font-size: var(--t-small); color: var(--fg-muted); line-height: 1.5; max-width: 82ch; }
+.cg-item-basis:last-child { margin-bottom: 0; }
+/* Already opted out: still fully legible, just visibly not in the set any more. Dimming
+   to near-invisible is how "I turned that off" becomes "where did my tool go". */
+.cg-item.cg-off { background: var(--good-soft); }
+.cg-item.cg-off .cg-item-name { text-decoration: line-through; text-decoration-thickness: 1px; }
+/* Not removable from here (a provider-side tool). Inert, and it says why in .comp-warn. */
+.cg-item.cg-fixed { cursor: default; }
+.cg-item.cg-fixed:hover { background: none; }
+.cg-item.cg-fixed .cg-item-name { color: var(--fg-muted); }
+
+/* ── tables ────────────────────────────────────────────────────────────────
+ * A tint, not a colour: a row that is never called is the page's subject, and forty
+ * red rows would leave the eye nowhere to go. The "never" pill in the cell carries the
+ * actual statement — this only groups them.
+ */
+.tbl tbody tr.cg-row-unused > td:first-child { box-shadow: inset 2px 0 var(--bad); }
+
+/* ── coverage ──────────────────────────────────────────────────────────────
+ * The denominator panel, last on the page and always present. Sunken rather than raised:
+ * it qualifies the numbers above it, it is not another one of them.
+ */
+.cg-coverage { background: var(--bg-sunken); }
+.cg-coverage .state { margin-top: var(--sp-3); }
+.cg-coverage > details.why { margin-top: var(--sp-3); }
+
+/* Narrow screens: the gauge is already fluid, the tables already scroll inside .tblwrap.
+   The only thing that needs saying is that the checkbox row must not squeeze its evidence
+   into a column two words wide. */
+@media (max-width: 560px) {
+  .cg-item { grid-template-columns: auto 1fr; }
+  .cg-item-weight, .cg-item-usd { flex: 1 0 100%; }
+}
