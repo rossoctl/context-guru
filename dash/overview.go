@@ -102,6 +102,21 @@ type Overview struct {
 	// TotalSavedUSD is our two savings together: compaction's, less our own spend, plus
 	// the prefix components'. Both are ours and the token sets are disjoint.
 	TotalSavedUSD float64 `json:"total_saved_usd"`
+	// PrefixChangeCost is a DIAGNOSTIC, not a cost subtracted from net.
+	//
+	// It sums cost_usd over requests whose cache missed with reason prefix_change AND whose
+	// PREVIOUS request in the same session had a component that mutated the transcript. That
+	// is the population where "we rewrote history and the next turn re-billed the whole
+	// prompt" is a live hypothesis, and it has to be visible: size-stratified it comes to
+	// roughly $24 on the current corpus, and +$39 over transcripts past 60k tokens — larger
+	// than every saving on this dashboard.
+	//
+	// It stays observational because mutation is NOT randomly assigned. Components act where
+	// there is something to act on, which are also the long, churny turns most likely to break
+	// a prefix for reasons of their own; and prefix_change already loses ties to ttl_expiry, so
+	// this bucket is not even a clean partition of causes. Subtracting it from net would book a
+	// correlation as a debt. Settling it needs the A/B, not a bigger query.
+	PrefixChangeCost float64 `json:"prefix_change_cost_usd"`
 
 	CGLatencyMsAvg float64 `json:"cg_latency_ms_avg"`
 	UpstreamMsAvg  float64 `json:"upstream_ms_avg"`
@@ -180,6 +195,16 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 			WHERE p.session_id = r.session_id AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 			ORDER BY p.ts DESC, p.id DESC LIMIT 1), 0) THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.cachesplit_saved_usd > 0 THEN 1 ELSE 0 END),0),
+		-- The prefix-change diagnostic (Overview.PrefixChangeCost): what the turns cost where
+		-- the cache missed on a changed prefix AND the session's previous turn had mutated
+		-- something. Derived, never stored, and never netted off — see the field's comment for
+		-- why a correlation this confounded may not be turned into a debt.
+		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' AND EXISTS (
+			SELECT 1 FROM request_components c WHERE c.mutated = 1 AND c.request_id = (
+				SELECT p.id FROM requests p
+				WHERE p.session_id = r.session_id AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
+				ORDER BY p.ts DESC, p.id DESC LIMIT 1)
+		) THEN r.cost_usd ELSE 0 END),0),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0),
 		COALESCE(SUM(CASE WHEN r.uncompressed_reason <> '' THEN 1 ELSE 0 END),0),
@@ -188,7 +213,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.FreshInput, &o.CacheRead, &o.CacheWrite,
 		&o.OutputTokens, &o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD,
-		&o.CachesplitSavedUSD, &o.SplitRequests, &o.SplitTailMoved, &o.SplitCredited, &cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
+		&o.CachesplitSavedUSD, &o.SplitRequests, &o.SplitTailMoved, &o.SplitCredited,
+		&o.PrefixChangeCost, &cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal)
 	if err != nil {
 		return nil, err

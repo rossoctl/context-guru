@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Filter is the server-side filter set every list/aggregate query accepts. Every
@@ -197,7 +198,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		return nil, err
 	}
 	crows, err := d.sql.Query(`SELECT component, kind, acted, mutated, reverted, skipped,
-		saved_gross, saved_unique, duration_ms, err, gates FROM request_components
+		saved_gross, saved_unique, saved_usd, duration_ms, err, gates FROM request_components
 		WHERE request_id = ? ORDER BY rowid`, id)
 	if err != nil {
 		return nil, err
@@ -208,7 +209,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		var a, m, rv, sk int
 		var gates string
 		if err := crows.Scan(&c.Component, &c.Kind, &a, &m, &rv, &sk,
-			&c.SavedGross, &c.SavedUnique, &c.DurationMs, &c.Err, &gates); err != nil {
+			&c.SavedGross, &c.SavedUnique, &c.SavedUSD, &c.DurationMs, &c.Err, &gates); err != nil {
 			return nil, err
 		}
 		c.Acted, c.Mutated, c.Reverted, c.Skipped = a != 0, m != 0, rv != 0, sk != 0
@@ -329,7 +330,11 @@ func (d *DB) SessionEvents(f Filter, sessionID string, withContent bool) ([]*Eve
 // SessionRow is one row of the session list — the view neither reference
 // implementation has at all, despite both having sessions internally.
 type SessionRow struct {
-	SessionID       string  `json:"session_id"`
+	SessionID string `json:"session_id"`
+	// TenantID names the account. A session id is unique per account, so under a
+	// manager's service-wide scope this is what makes the list attributable — and a
+	// comma-joined value is the honest answer when two accounts share an id.
+	TenantID        string  `json:"tenant_id"`
 	Turns           int64   `json:"turns"`
 	Start           int64   `json:"start"`
 	End             int64   `json:"end"`
@@ -357,7 +362,23 @@ type SessionRow struct {
 	CGLatencyMs     float64 `json:"cg_latency_ms_avg"`
 	UpstreamMs      float64 `json:"upstream_ms_avg"`
 	Incomplete      int64   `json:"incomplete_rows"` // rows whose accounting is not `complete`
+	// InFlight is true when this session's last request is still inside one provider cache
+	// TTL, i.e. the next turn may well replay the same reduction and add to its value. Such a
+	// session's net is an INCOMPLETE amortization, not a verdict: a young session with one
+	// extraction call has paid for the call and not yet collected the replay, so it reads
+	// underwater and stops reading underwater as the turns come in. The UI has to be able to
+	// say so instead of rendering a half-finished number as a result.
+	//
+	// Derived from MAX(ts), not stored: nothing about it is a fact about the request.
+	InFlight bool `json:"in_flight"`
 }
+
+// cacheTTLMs is one provider prompt-cache TTL, the horizon inside which a session's next
+// turn can still replay a reduction and add to its realized value. Anthropic's default is
+// five minutes (the extended beta is an hour, which would only widen the "still counting"
+// window — under-claiming the in-flight state is the safe direction, since it never labels a
+// settled session as provisional).
+const cacheTTLMs int64 = 5 * 60 * 1000
 
 // Sessions returns the session list, most-recently-active first, filtered and
 // paginated server-side.
@@ -366,7 +387,7 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 		limit = 50
 	}
 	cond, args := f.where()
-	q := `SELECT r.session_id, COUNT(*), MIN(r.ts), MAX(r.ts),
+	q := `SELECT r.session_id, GROUP_CONCAT(DISTINCT r.tenant_id), COUNT(*), MIN(r.ts), MAX(r.ts),
 		GROUP_CONCAT(DISTINCT r.model), GROUP_CONCAT(DISTINCT r.provider),
 		GROUP_CONCAT(DISTINCT r.agent), GROUP_CONCAT(DISTINCT r.preset),
 		SUM(r.tokens_before), SUM(r.tokens_after), SUM(r.saved_unique),
@@ -384,10 +405,11 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 	}
 	defer rows.Close()
 	out := []*SessionRow{}
+	now := time.Now().UnixMilli()
 	for rows.Next() {
 		var s SessionRow
-		var models, providers, agents, presets sql.NullString
-		if err := rows.Scan(&s.SessionID, &s.Turns, &s.Start, &s.End,
+		var models, providers, agents, presets, tenant sql.NullString
+		if err := rows.Scan(&s.SessionID, &tenant, &s.Turns, &s.Start, &s.End,
 			&models, &providers, &agents, &presets,
 			&s.TokensBefore, &s.TokensAfter, &s.SavedUnique,
 			&s.AttemptedTokens, &s.FrozenTokens,
@@ -397,9 +419,11 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 			&s.CGLatencyMs, &s.UpstreamMs, &s.Incomplete); err != nil {
 			return nil, 0, err
 		}
+		s.TenantID = tenant.String
 		s.Models, s.Providers, s.Agents, s.Presets = models.String, providers.String, agents.String, presets.String
 		s.Saved = s.TokensBefore - s.TokensAfter
 		s.SavedUSD = s.BaselineCostUSD - s.CostUSD - s.CGLLMCostUSD
+		s.InFlight = now-s.End < cacheTTLMs
 		out = append(out, &s)
 	}
 	if err := rows.Err(); err != nil {
@@ -413,16 +437,25 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 // ComponentRow is one component's economics across the filtered window — the view
 // that makes "which components earn their place" obvious without reading a doc.
 type ComponentRow struct {
-	Component       string  `json:"component"`
-	Kind            string  `json:"kind"`
-	Runs            int64   `json:"runs"`
-	Acted           int64   `json:"acted"`
-	Mutated         int64   `json:"mutated"`
-	Reverted        int64   `json:"reverted"`
-	Skipped         int64   `json:"skipped"`
-	SavedGross      int64   `json:"saved_gross"`
-	SavedUnique     int64   `json:"saved_unique"`
-	OvercountRatio  float64 `json:"overcount_ratio"`
+	Component      string  `json:"component"`
+	Kind           string  `json:"kind"`
+	Runs           int64   `json:"runs"`
+	Acted          int64   `json:"acted"`
+	Mutated        int64   `json:"mutated"`
+	Reverted       int64   `json:"reverted"`
+	Skipped        int64   `json:"skipped"`
+	SavedGross     int64   `json:"saved_gross"`
+	SavedUnique    int64   `json:"saved_unique"`
+	OvercountRatio float64 `json:"overcount_ratio"`
+	// SavedUSD is what this component's removals were worth over the window, in dollars,
+	// summed from the per-request figures priced at write time (CompRow.SavedUSD). The sum
+	// over turns IS the amortization: value realized turn by turn as a frozen reduction
+	// replays, not a projection from one turn.
+	SavedUSD float64 `json:"saved_usd"`
+	// NetUSD is SavedUSD − LLMCostUSD: the honest verdict on this component, and the number
+	// the view must render instead of a bare cost. Negative is a real outcome and is shown
+	// as one — a component underwater over the window says so here.
+	NetUSD          float64 `json:"net_usd"`
 	DurationMsTotal float64 `json:"duration_ms_total"`
 	DurationMsAvg   float64 `json:"duration_ms_avg"`
 	Errors          int64   `json:"errors"`
@@ -458,7 +491,7 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	// them, which is how you see what a component co-occurs with.
 	q := `SELECT c.component, MAX(c.kind), COUNT(*),
 		SUM(c.acted), SUM(c.mutated), SUM(c.reverted), SUM(c.skipped),
-		SUM(c.saved_gross), SUM(c.saved_unique), SUM(c.duration_ms),
+		SUM(c.saved_gross), SUM(c.saved_unique), SUM(c.saved_usd), SUM(c.duration_ms),
 		SUM(CASE WHEN c.err <> '' THEN 1 ELSE 0 END)
 		FROM request_components c JOIN requests r ON r.id = c.request_id
 		WHERE ` + cond + ` GROUP BY c.component ORDER BY SUM(c.saved_unique) DESC, c.component`
@@ -471,10 +504,12 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	for rows.Next() {
 		var c ComponentRow
 		var kind sql.NullString
+		var savedUSD sql.NullFloat64
 		if err := rows.Scan(&c.Component, &kind, &c.Runs, &c.Acted, &c.Mutated, &c.Reverted,
-			&c.Skipped, &c.SavedGross, &c.SavedUnique, &c.DurationMsTotal, &c.Errors); err != nil {
+			&c.Skipped, &c.SavedGross, &c.SavedUnique, &savedUSD, &c.DurationMsTotal, &c.Errors); err != nil {
 			return nil, err
 		}
+		c.SavedUSD = savedUSD.Float64
 		c.Kind = kind.String
 		if c.SavedUnique > 0 {
 			c.OvercountRatio = float64(c.SavedGross) / float64(c.SavedUnique)
@@ -520,6 +555,11 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	}
 	if err := xrows.Err(); err != nil {
 		return nil, err
+	}
+	// The verdict, once both halves are in. A deterministic component spends nothing, so its
+	// net is just its saving; only a component that calls a model can come out negative.
+	for _, c := range out {
+		c.NetUSD = c.SavedUSD - c.LLMCostUSD
 	}
 	// Gate totals, summed in SQL with json_each rather than by decoding a map per row in
 	// Go: a filtered window is hundreds of thousands of component rows and the gate map is

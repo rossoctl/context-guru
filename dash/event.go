@@ -261,16 +261,24 @@ func (e *Event) Saved() int {
 
 // CompRow is one component's accounting on one request.
 type CompRow struct {
-	Component   string  `json:"component"`
-	Kind        string  `json:"kind"`
-	Acted       bool    `json:"acted"`
-	Mutated     bool    `json:"mutated"`
-	Reverted    bool    `json:"reverted"`
-	Skipped     bool    `json:"skipped"`
-	SavedGross  int     `json:"saved_gross"`
-	SavedUnique int     `json:"saved_unique"`
-	DurationMs  float64 `json:"duration_ms"`
-	Err         string  `json:"err,omitempty"`
+	Component   string `json:"component"`
+	Kind        string `json:"kind"`
+	Acted       bool   `json:"acted"`
+	Mutated     bool   `json:"mutated"`
+	Reverted    bool   `json:"reverted"`
+	Skipped     bool   `json:"skipped"`
+	SavedGross  int    `json:"saved_gross"`
+	SavedUnique int    `json:"saved_unique"`
+	// SavedUSD is this component's share of the request's baseline delta, in dollars,
+	// priced at write time from the request's OWN model and the tier the request itself
+	// paid — the same rule and the same rates as baselineDeltaUSD, so the per-component
+	// figures sum to the request-level saving. It exists because the components view had
+	// only a bare COST for the components that spend, and a dollar value improvised
+	// client-side from hardcoded rates is wrong by whatever the deployment's model
+	// actually charges.
+	SavedUSD   float64 `json:"saved_usd"`
+	DurationMs float64 `json:"duration_ms"`
+	Err        string  `json:"err,omitempty"`
 	// Gates counts, per named gate, the candidates this component turned away. It is the
 	// only answer to "why did nothing happen?", and it never left the pipeline before:
 	// /stats had it service-wide, the log line had it per request, and the dashboard —
@@ -484,6 +492,24 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 		e.CacheSavedUSD = 0 // a provider whose cache reads cost MORE than fresh input saved nothing
 	}
 	e.CachesplitSavedUSD = e.cachesplitSavedUSD(p)
+	// Per-component dollars, same rule and same rates as baselineDeltaUSD above: the unique
+	// part at the write rate it would have entered as, the re-sent remainder at the tier this
+	// request actually paid. Summed over a component's turns this IS the amortization — value
+	// realized turn by turn as the frozen reduction replays, not a projection.
+	for i := range e.Components {
+		c := &e.Components[i]
+		gross, unique := c.SavedGross, c.SavedUnique
+		if gross < 0 {
+			gross = 0
+		}
+		if unique > gross {
+			unique = gross // same clamp as baselineDeltaUSD: shared content keys can over-attribute
+		}
+		if unique < 0 {
+			unique = 0
+		}
+		c.SavedUSD = float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)
+	}
 }
 
 // cachesplitSavedUSD is the cache saving this project is willing to sign its name to.
@@ -624,10 +650,14 @@ func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
 //     to be at least as large as the fresh part.
 //   - Everything else is the fresh rate, never zero.
 //
-// It still UNDER-states in one known case, deliberately. In cache-aware mode compaction only
-// touches the uncached tail, so on a hit turn the removed content would have been billed
-// fresh rather than as a read — the event carries FrozenTokens and could tell. Correcting
-// that would raise reported savings, so it waits for a measurement rather than an argument.
+// One tempting "correction" here is wrong, and the old wording of this paragraph invited it.
+// In cache-aware mode compaction only touches the UNCACHED tail, so it is true that the
+// content removed on THIS turn would have been billed fresh rather than as a read. But that
+// is the UNIQUE term, which is already priced at the write rate — this function only ever
+// prices the REPLAY term, and replayed content is content removed on an EARLIER turn that by
+// now sits deep inside the cached prefix, where CacheRead is exactly right. Replay is ~93% of
+// realized value, so re-pricing it fresh on every warm turn would inflate warm-turn savings
+// roughly 6x with nothing behind it.
 func (e *Event) repeatRate(p modelinfo.Price) float64 {
 	if e.CacheRead > 0 {
 		return p.CacheRead

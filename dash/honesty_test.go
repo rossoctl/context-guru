@@ -1,11 +1,16 @@
 package dash
 
 import (
+	"database/sql"
+	"math"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // TestContentComponentsRoundTrip: exact diff attribution is only useful if it survives
@@ -254,6 +259,319 @@ func TestConfigSaysWhoseConfigurationItIs(t *testing.T) {
 		if !strings.Contains(hdesc, want) {
 			t.Errorf("hosted description does not mention %q, so nothing on the page keeps a "+
 				"reader from taking the server default for their own: %q", want, hdesc)
+		}
+	}
+}
+
+// ibmOpus is what this deployment actually bills for the opus family: $4.75/MTok fresh and
+// $0.38/MTok cached, with the 1.25x creation premium. It is in this file for a reason —
+// the UI used to improvise a per-component dollar figure from hardcoded sonnet-class rates
+// (3.75/0.30), which is 27% wrong on exactly this deployment. The rate has to come from the
+// request's own model at write time, and these tests assert it does.
+var ibmOpus = modelinfo.Price{Input: 4.75e-6, Output: 23.75e-6, CacheRead: 3.8e-7, CacheWrite: 5.9375e-6}
+
+// perComponentEvent is one request whose component rows sum to its request-level savings —
+// the shape the reconciliation identity is about. gross/unique across the four rows are
+// 20,000 and 2,000, matching TokensBefore−TokensAfter and SavedUnique.
+func perComponentEvent(read, write, fresh int64) *Event {
+	return &Event{
+		TS: 1000, SessionID: "s", Model: "aws/claude-opus-5",
+		TokensBefore: 100_000, TokensAfter: 80_000, SavedUnique: 2_000,
+		FreshInput: fresh, CacheRead: read, CacheWrite: write, OutputTokens: 500,
+		Components: []CompRow{
+			{Component: "mask", Kind: "reformat", Acted: true, Mutated: true, SavedGross: 12_000, SavedUnique: 900},
+			{Component: "extract_llm", Kind: "offload", Acted: true, Mutated: true, SavedGross: 6_000, SavedUnique: 1_100},
+			// Gross with no unique: a reduction made on an EARLIER turn, replaying. It is
+			// most of realized value (~93% on measured traffic) and it must be valued at the
+			// tier this request paid, not at the creation rate.
+			{Component: "collapse", Kind: "offload", Acted: true, Mutated: true, SavedGross: 2_000},
+			// Ran, saved nothing. Worth $0, not worth "unknown".
+			{Component: "cacheinject", Kind: "reformat", Mutated: true},
+		},
+	}
+}
+
+// tierCases are the three billing outcomes a removed token can be valued at, which is the
+// whole of the tier rule: a warm turn replays from cache, a cold/TTL-expired turn has the
+// entire prompt re-billed as creation, and a non-caching backend bills fresh.
+var tierCases = []struct {
+	name               string
+	read, write, fresh int64
+	tier               func(modelinfo.Price) float64
+}{
+	{"warm", 80_000, 0, 10, func(p modelinfo.Price) float64 { return p.CacheRead }},
+	{"cold_ttl", 0, 80_000, 10, func(p modelinfo.Price) float64 { return p.CacheWrite }},
+	{"non_caching", 0, 0, 80_000, func(p modelinfo.Price) float64 { return p.Input }},
+}
+
+// TestPerComponentSavedUSDReconcilesWithTheBaseline is the identity that makes the
+// per-component dollars trustworthy: they are a PARTITION of the request's own saving, not
+// a second, independently-computed estimate that can drift from the headline. Reconciled
+// against production data at 0.9%; on a fixture whose component rows sum exactly to the
+// request's, it has to be exact to float noise.
+func TestPerComponentSavedUSDReconcilesWithTheBaseline(t *testing.T) {
+	for _, tc := range tierCases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := perComponentEvent(tc.read, tc.write, tc.fresh)
+			e.Price(ibmOpus, true)
+			var sum float64
+			for _, c := range e.Components {
+				sum += c.SavedUSD
+			}
+			want := e.BaselineCostUSD - e.CostUSD
+			if want <= 0 {
+				t.Fatalf("fixture removed nothing: baseline %.10f cost %.10f", e.BaselineCostUSD, e.CostUSD)
+			}
+			if math.Abs(sum-want) > 1e-12 {
+				t.Errorf("Σ per-component saved_usd = %.10f, request-level saving = %.10f (error %.3g); "+
+					"the components view and the headline would disagree",
+					sum, want, math.Abs(sum-want)/want)
+			}
+		})
+	}
+}
+
+// TestComponentSavingUsesTheTierTheRequestPaid: the same removals are worth different money
+// depending on how the provider billed THIS request, and a component whose saving is pure
+// replay earns that tier — not the creation rate. Pricing replay as creation is the ~12.5x
+// overstatement the request-level figure already avoids; this pins the per-component path
+// against the same mistake.
+func TestComponentSavingUsesTheTierTheRequestPaid(t *testing.T) {
+	for _, tc := range tierCases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := perComponentEvent(tc.read, tc.write, tc.fresh)
+			e.Price(ibmOpus, true)
+			tier := tc.tier(ibmOpus)
+			for _, want := range []struct {
+				comp           string
+				unique, replay float64
+			}{
+				{"mask", 900, 11_100},
+				{"extract_llm", 1_100, 4_900},
+				{"collapse", 0, 2_000}, // pure replay
+				{"cacheinject", 0, 0},
+			} {
+				got := compByName(t, e, want.comp).SavedUSD
+				exp := want.unique*ibmOpus.CacheWrite + want.replay*tier
+				if math.Abs(got-exp) > 1e-12 {
+					t.Errorf("%s saved_usd = %.10f, want %.10f (unique at the write rate, "+
+						"replay at this request's %s tier)", want.comp, got, exp, tc.name)
+				}
+			}
+			// And on a warm turn the replay term must NOT be the creation rate, which is the
+			// specific inflation the tier rule exists to prevent.
+			if tc.name == "warm" {
+				if got, ceiling := compByName(t, e, "collapse").SavedUSD, 2_000*ibmOpus.CacheWrite; got >= ceiling {
+					t.Errorf("a pure-replay component on a warm turn is valued at %.10f, at or above "+
+						"the creation rate %.10f — replay sits in the cached prefix", got, ceiling)
+				}
+			}
+		})
+	}
+}
+
+func compByName(t *testing.T, e *Event, name string) CompRow {
+	t.Helper()
+	for _, c := range e.Components {
+		if c.Component == name {
+			return c
+		}
+	}
+	t.Fatalf("no component %q on the event", name)
+	return CompRow{}
+}
+
+// TestComponentsViewReportsNetNotABareCost.
+//
+// The components view had a COST for the components that spend and no dollar value at all
+// for what they saved, so extract_llm read as pure expense and the honest conclusion was
+// unavailable. This pins both halves through the store: the saving survives the round trip
+// un-multiplied by the extraction-call join, and net is saving minus spend — including when
+// that is negative, which is a real outcome the dashboard shows rather than hides.
+func TestComponentsViewReportsNetNotABareCost(t *testing.T) {
+	db := openTestDB(t)
+	e := perComponentEvent(80_000, 0, 10)
+	// Two calls on ONE component: if the saving were summed in the query that joins these,
+	// every figure on the row would double.
+	e.Extractions = []ExtractionRow{
+		{Component: "extract_llm", Model: "aws/claude-haiku-5", SavedTokens: 1_100, CostUSD: 0.004, Accepted: true},
+		{Component: "extract_llm", Model: "aws/claude-haiku-5", SavedTokens: 0, CostUSD: 0.004},
+	}
+	e.Price(ibmOpus, true)
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Components(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]*ComponentRow{}
+	for _, r := range rows {
+		by[r.Component] = r
+	}
+	for _, c := range e.Components {
+		got, ok := by[c.Component]
+		if !ok {
+			t.Fatalf("component %q missing from the view", c.Component)
+		}
+		if math.Abs(got.SavedUSD-c.SavedUSD) > 1e-12 {
+			t.Errorf("%s saved_usd = %.10f, want the stored %.10f (a 2x here is the "+
+				"extraction-call join multiplying the component sums)", c.Component, got.SavedUSD, c.SavedUSD)
+		}
+		if math.Abs(got.NetUSD-(got.SavedUSD-got.LLMCostUSD)) > 1e-12 {
+			t.Errorf("%s net_usd = %.10f, want saved %.10f − spend %.10f",
+				c.Component, got.NetUSD, got.SavedUSD, got.LLMCostUSD)
+		}
+	}
+	// The honest number on this fixture: one warm turn, two calls at $0.004 each, against a
+	// saving whose replay term is billed at the cached rate. It lands within a rounding error
+	// of break-even, which is the actual shape of a single-turn verdict on an LLM component —
+	// and the reason a session still inside the cache TTL is marked in_flight rather than
+	// judged.
+	x := by["extract_llm"]
+	if x.LLMCostUSD <= 0 {
+		t.Fatalf("the spend did not survive the store: %+v", x)
+	}
+	t.Logf("extract_llm on this fixture: net %+.6f (saved %.6f, spent %.6f). One warm turn "+
+		"barely covers two calls; the sign is data, not a requirement, and the field reports "+
+		"whichever it is.", x.NetUSD, x.SavedUSD, x.LLMCostUSD)
+	// A deterministic component spends nothing, so its net is exactly its saving. If that
+	// were ever not true the view would be inventing a cost for components that have none.
+	if m := by["mask"]; math.Abs(m.NetUSD-m.SavedUSD) > 1e-15 || m.LLMCostUSD != 0 {
+		t.Errorf("a deterministic component's net is not its saving: %+v", m)
+	}
+}
+
+// TestComponentSavedUSDArrivesWithoutDiscardingRows: the same rule the requests columns
+// follow (see TestAdditiveColumnKeepsExistingRows) applies to request_components. A version
+// bump renames the file aside and discards every component row on the live service to gain
+// one column, so this one is an ALTER TABLE on open — and the read path has to work over
+// rows that predate it, which is where a "successful" migration still fails.
+func TestComponentSavedUSDArrivesWithoutDiscardingRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.insertBatch([]*Event{perComponentEvent(80_000, 0, 10)}); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE request_components DROP COLUMN saved_usd`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	db2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopening a database without the column failed: %v", err)
+	}
+	defer db2.Close()
+	var n int64
+	if err := db2.sql.QueryRow(`SELECT COUNT(*) FROM request_components`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 4 {
+		t.Fatalf("%d component rows survived the migration, want 4", n)
+	}
+	rows, err := db2.Components(Filter{})
+	if err != nil {
+		t.Fatalf("Components over migrated rows: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("the components view lost rows across the migration: %d", len(rows))
+	}
+	for _, r := range rows {
+		if r.SavedUSD != 0 || r.NetUSD != 0 {
+			t.Errorf("%s: a pre-column row must read 0, not a fabricated value: %+v", r.Component, r)
+		}
+	}
+	// And the per-request read path, which names the column explicitly.
+	var id int64
+	if err := db2.sql.QueryRow(`SELECT id FROM requests LIMIT 1`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db2.Request(id, false); err != nil {
+		t.Fatalf("Request over migrated rows: %v", err)
+	}
+}
+
+// TestInFlightSessionIsNotAVerdict: a session whose last turn is inside a provider cache
+// TTL may still replay its reduction on the next turn, so its net is an incomplete
+// amortization. A young session with one extraction call reads underwater and then stops
+// reading underwater, and the UI cannot say so without this flag.
+func TestInFlightSessionIsNotAVerdict(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now().UnixMilli()
+	if err := db.insertBatch([]*Event{
+		mkEvent(now-1_000, "young", "m", 10_000, 9_000),
+		mkEvent(now-30*60*1000, "settled", "m", 10_000, 9_000),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, _, err := db.Sessions(Filter{}, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.SessionID] = r.InFlight
+	}
+	if !got["young"] {
+		t.Error("a session that spoke a second ago is not marked in_flight; its net is still being earned")
+	}
+	if got["settled"] {
+		t.Error("a session idle for half an hour is marked in_flight; its amortization is over")
+	}
+}
+
+// TestPrefixChangeCostIsAnObservationNotADebt. The figure is bigger than every saving on
+// the dashboard, so it has to be visible; mutation is not randomly assigned, so it may not
+// be netted off. Both halves are the test.
+func TestPrefixChangeCostIsAnObservationNotADebt(t *testing.T) {
+	db := openTestDB(t)
+	mk := func(ts int64, session string, mutated bool, reason string, cost float64) *Event {
+		e := &Event{TS: ts, SessionID: session, Model: "m", Provider: "anthropic",
+			TokensBefore: 10_000, TokensAfter: 10_000, CostUSD: cost, BaselineCostUSD: cost,
+			TokenAccounting: AccountingComplete, CacheMissReason: reason,
+			Components: []CompRow{{Component: "mask", Kind: "reformat", Mutated: mutated, Skipped: !mutated}}}
+		return e
+	}
+	if err := db.insertBatch([]*Event{
+		// The population that counts: we rewrote history, the next turn missed on a changed prefix.
+		mk(1_000, "blamed", true, CacheHit, 0.10),
+		mk(2_000, "blamed", false, CachePrefixChange, 0.50),
+		// Same miss, but nothing had mutated on the previous turn — not ours to look at.
+		mk(1_000, "clean", false, CacheHit, 0.10),
+		mk(2_000, "clean", false, CachePrefixChange, 0.70),
+		// Mutated, but the miss was the TTL, which wins ties and is not a prefix change.
+		mk(1_000, "expired", true, CacheHit, 0.10),
+		mk(2_000, "expired", false, CacheTTLExpiry, 0.90),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := db.Overview(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(o.PrefixChangeCost-0.50) > 1e-12 {
+		t.Errorf("prefix_change_cost_usd = %.4f, want 0.50 — only the turn that missed on a "+
+			"changed prefix AFTER a mutating turn belongs in it", o.PrefixChangeCost)
+	}
+	// It is a diagnostic. Net is baseline − cost − our spend and nothing else; subtracting an
+	// unrandomized correlation from it would book a hypothesis as money owed.
+	if want := o.BaselineCostUSD - o.CostUSD - o.CGLLMCostUSD; math.Abs(o.NetSavedUSD-want) > 1e-12 {
+		t.Errorf("net_saved_usd = %.6f, want %.6f: the prefix-change diagnostic has been "+
+			"subtracted from net", o.NetSavedUSD, want)
+	}
+	for _, s := range o.Waterfall {
+		if strings.Contains(s.Key, "prefix_change") {
+			t.Errorf("the prefix-change diagnostic is a step in the savings waterfall: %+v", s)
 		}
 	}
 }
