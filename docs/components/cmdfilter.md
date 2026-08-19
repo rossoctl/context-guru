@@ -14,14 +14,18 @@ when the filter was actually lossy — typed by *what* was lost. Filters are tri
 Deterministic filtering costs nothing — no LLM call, ~0 latency — and it is cache-safe: it acts on
 the newest tool output, in the mutable tail.
 
-### Selectors match OUTPUT, not commands
+### Selectors match output shape, and now the command too
 
 The shipped filters are adapted from [rtk](https://github.com/rtk-ai/rtk) (Apache-2.0 — see
 `THIRD-PARTY-NOTICES`), with one systematic rewrite. rtk is a shell hook: it matches a **command
-string** (`^terraform\s+plan`). A proxy never sees the command — it sees the *result*. So every
-filter here matches an **output-shape signature** against the output's first few non-empty lines
-(`^Refreshing state`, `^> Task :`, `^==> Downloading`). rtk's command regexes are not portable as
-written; copied over they would compile fine and never fire.
+string** (`^terraform\s+plan`). The builtins were written when a proxy was believed not to see the
+command; it does — `schema.ToolCalls` pairs each result with its call, and the selector carries a
+leading `$ <command>` line whenever the pairing exists (the
+[`agent_filters`](#the-coding-agent-filter-sets-agent_filters) sets key on it). The builtins still
+match an **output-shape signature** against the output's first few non-empty lines
+(`^Refreshing state`, `^> Task :`, `^==> Downloading`), because a shape fires on unpaired traffic
+too. rtk's command regexes are not portable as written; copied over they would compile fine and
+never fire.
 
 The selector spans the first **6** non-empty lines, not one, and that detail is load-bearing.
 Measured on real agent traffic, a one-line selector missed 112 pytest runs (311 KB) outright: the
@@ -234,6 +238,111 @@ from a port. The rest is excluded on purpose:
   that cannot inject `--format json` into a command it never sees. The output-side half — a JSON or
   TRX blob that *arrives* as a tool result and could be re-rendered — remains open.
 
+## The coding-agent filter sets (`agent_filters`)
+
+The 26 shipped filters cover CI, build, IaC, network and package-manager output. Mining the miss
+ledger says that is not what a coding agent produces. Replaying the selector over **1,657 distinct
+(command, output) pairs / 637,634 tokens** from every capture on this box
+(`TestLedgerRankedMisses` in `components/offload/cmdfilter_ledger_test.go`, re-runnable against any
+capture via `CG_CORPUS`), ranked by tokens that reached the filter and matched nothing:
+
+| class | tokens | share of corpus | filter written? |
+|---|--:|--:|---|
+| file dumps — `Read`, `cat`, `head`, `tail`, `sed -n` | 516,205 | 81.0% | **no** — see below |
+| pytest / unittest / `runtests.py` | 65,469 | 10.3% | yes |
+| git (`diff`, `log`, `show`, `stash`) | 62,273 | 9.8% | no |
+| pip / npm | 21,246 | 3.3% | yes, narrowly |
+| ruff / mypy / pylint / flake8 | ~0 | ~0% | no |
+| `go test` / cargo / jest / vitest / tsc / eslint / docker / kubectl | 0 | 0% | no |
+
+Two modes load extra filters, both **off by default** so `codesmart` and `codesafe` — the published
+SWE-bench arms — keep their measured baseline:
+
+- **`safe`** removes only *enumerated* known-boilerplate line shapes. As with the builtins, an
+  unrecognised line is never dropped, so an unanticipated diagnostic survives.
+- **`lossy`** adds `pytest-signal`, which uses `keep_lines_matching` — an allow-list of what to keep,
+  i.e. a catch-all **drop** of everything else. The original is still stashed and the marker still
+  names the recovery tool, but the model has to know to ask. `TestSafeSetDropsOnlyEnumeratedShapes`
+  keeps the two sets from blurring.
+
+Measured on the same corpus, marker-inclusive and never-worse-gated exactly as `cmdfilter` applies
+them (`TestAgentFilterCorpusMeasure`). Dollars are at the tier **actually billed**: the corpus is
+90.54% `cache_read`, so a removed token is worth 0.9054×0.1 + 0.0946×1.25 = **0.209× the fresh input
+rate** ($0.6265/Mtok at Sonnet's $3/Mtok), not the fresh rate.
+
+| filter | set | fire rate | tokens removed | of what it saw | $ |
+|---|---|--:|--:|--:|--:|
+| `pytest-signal` | lossy | 57/1657 (3.4%) | 21,796 (3.42%) | 73.9% | $0.0137 |
+| `django-runtests` | safe | 70/1657 (4.2%) | 16,805 (2.64%) | 69.4% | $0.0105 |
+| `pip-resolver` | safe | 2/1657 (0.1%) | 6,533 (1.02%) | 93.0% | $0.0041 |
+| `pytest-warnings` | safe | 9/1657 (0.5%) | 925 (0.15%) | 35.4% | $0.0006 |
+| **`safe` total** | | | **26,947 (4.23%)** | | **$0.0169** |
+| **`lossy` total** | | | **47,218 (7.41%)** | | **$0.0296** |
+
+(The `safe`/`lossy` totals include the builtins that fire underneath them — `apt`, `pip-install`,
+`pytest`, `uv-sync`, 2,741 tokens together, which is what the shipped default removes on this
+corpus.)
+
+### The honest negative: zero on the interactive arms
+
+On the four **fresh interactive Claude Code** captures — the true target workload —
+`safe` and `lossy` each remove **0 tokens**, exactly like the shipped default:
+
+| arm | corpus tokens | `off` | `safe` | `lossy` |
+|---|--:|--:|--:|--:|
+| `short` | 18,414 | 0 | 0 | 0 |
+| `long` | 131,615 | 0 | 0 | 0 |
+| `mixed` | 40,673 | 0 | 0 | 0 |
+| `cold` | 20,018 | 0 | 0 | 0 |
+
+All of the 4.23%/7.41% above is SWE-bench and Terminal-Bench traffic, which is Python-test-heavy.
+Interactive traffic is 85% `Read` file dumps, and **a file dump has no lossless reduction**: its
+content *is* the file, the only removable bytes are `Read`'s `NNN\t` gutter, and a line number is on
+the never-drop list. Shrinking a file dump needs signature extraction
+([`skeleton`](skeleton.md), tree-sitter), not a line filter. That is the finding, not a defect in the
+filters: `cmdfilter` is the wrong mechanism for 81% of the mass.
+
+Nothing here duplicates the lossless reformatters. `grep`/`find`/`ls` path-prefix output is folded by
+`components/reformat/searchfold.go` and ANSI/`\r` terminal noise by [`textclean`](textclean.md), both with
+no marker and no stash — which strictly dominates a filter in this component.
+
+### The filters
+
+| filter | set | family | preserves | drops |
+|---|---|---|---|---|
+| `django-runtests` | safe | tests | failure lines, `Ran N tests`, `FAILED (…)`, error output | migration/table-creation chatter, `Creating/Cloning/Destroying test database`, `System check identified no issues`, verbose `… ok` PASS lines |
+| `pytest-warnings` | safe | tests | first-party warnings with their file and line, the section header | `site-packages` warning header lines, the `-- Docs:` footer |
+| `pip-resolver` | safe | pkg | the error text and the first 200 characters of the version list | the rest of a thousand-version line |
+| `pytest-signal` | **lossy** | tests | `FAILED`/`ERROR` names, `E   ` detail, `>   ` assert lines, failure banners, section headers, counts, tracebacks, `file.py:line` refs | **everything else**, including lines nobody anticipated |
+
+All four are keyed on the **command** (`^\$ …`) with a shape alternative where the output
+self-identifies — that is the point: the misses share generic plain-text shapes but distinct
+commands. `pytest-signal` sits at `priority: 15`, ahead of the builtin shape-keyed `pytest` (10), so
+asking for the aggressive reducer cannot silently get the conservative one.
+
+### Filters deliberately NOT written
+
+Rejected on measurement, not taste — each would have been intuition:
+
+- **`git diff` / `git log` / `git show`** (9.8% of the corpus). A diff *is* content. The only
+  boilerplate, `index ab12cd..34ef56 100644`, is ~4 tokens per changed file.
+- **`ruff` / `mypy` / `pylint` / `flake8`.** The 44 apparent hits were `Read` of paths containing the
+  word "pylint". Real occurrences: none.
+- **`go test`, `cargo`, `jest`, `vitest`, `tsc`, `eslint`, `docker`, `kubectl`.** Zero occurrences
+  across 1,657 pairs. rtk has filters for all of them; on this traffic they would measure zero.
+- **`pytest-cmd`**, a command-keyed twin of the builtin `pytest` using the same strip list. It fired
+  23 times and removed **112 tokens** (1.2% of what it saw): once a run is piped through `tail`, the
+  session banner and `PASSED` lines the strip list targets are already gone. Superseded by
+  `pytest-signal`.
+- **A `replace`-based collapse of pip's version lists.** `replace` does not set `Lossiness`, so the
+  recovery hint would claim nothing was lost. `truncate_lines_at` types the loss correctly, so
+  `pip-resolver` uses that instead.
+- **A `Read`-gutter fold.** Byte-reversible, and the largest class by far — but it drops line numbers,
+  which are on the never-drop list.
+
+`pip-resolver`'s 1.02% comes from **two** outputs. That is corpus-specific luck, not a fire rate; it
+is kept because it costs nothing when inert, not because 1% is expected to hold.
+
 ## Observability
 
 Savings are attributed **per command family** and per filter in `/stats`, cumulative and unique
@@ -274,6 +383,7 @@ a whole-blob loss points at the expand tool. See [the DSL engine](dsl.md#lossine
 | `disable_builtins` | `false` | Disable the shipped filter set and run only your own. |
 | `marker_mode` | `full` | `full` (stash + resolvable marker) / `summary` / `off`. |
 | `min_size` | `400` | Byte floor; smaller outputs are left alone. See [the size floor](#size-floor). |
+| `agent_filters` | `off` | `off` / `safe` / `lossy` — load the ledger-derived coding-agent filters. See [below](#the-coding-agent-filter-sets-agent_filters). |
 
 ## When it shines
 
