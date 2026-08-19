@@ -36,6 +36,21 @@ Lossy but reversible — the full original array is stashed and recovered via `c
 
 Long homogeneous JSON arrays (list endpoints, search hits) — the `mcp` preset.
 
+## Measured on real traffic
+
+`smartcrush` needs a top-level JSON array of at least `min_items`. Across **1,748 distinct tool
+outputs** from every capture available here (SWE-bench, Terminal-Bench, Claude Code), 15 outputs
+*start* with `[` and **none of them parse as JSON** (they are log lines and Python list reprs), and
+no envelope string field holds a JSON array either. So the component has zero eligible input on
+that corpus.
+
+That is also why it does **not** descend the tool-runner envelope the way [`format`](format.md) and
+[`toon`](toon.md) do. The descent was proposed on the strength of the 673/673 envelope finding, but
+adding it would have changed nothing measurable here: there are no arrays inside those envelopes
+either. Its value, if any, is in MCP-style traffic that returns record arrays — measure that traffic
+before adding the descent, and note that the note+marker would have to be placed *inside* the
+string field for the envelope to keep parsing.
+
 ## When it's inert
 
 Non-array output, fewer than `min_items`, nothing to drop.
