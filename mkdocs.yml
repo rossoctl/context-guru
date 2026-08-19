@@ -94,6 +94,7 @@ nav:
       - Reversibility & recovery: how-to/recover-context.md
       - When your agent compacts: how-to/agent-compaction.md
       - Measuring savings: how-to/measure-savings.md
+      - Stop carrying unused tools: how-to/declaration-removal.md
   - Components:
       - Overview: components.md
       - Choose a preset: how-to/choose-a-preset.md
@@ -105,9 +106,11 @@ nav:
           - cachesplit: components/cachesplit.md
           - cacheinject: components/cacheinject.md
           - toolschema: components/toolschema.md
+          - toolfilter: components/toolfilter.md
       - "Offload (reversible)":
           - skeleton: components/skeleton.md
           - dedup: components/dedup.md
+          - readlifecycle: components/readlifecycle.md
           - collapse: components/collapse.md
           - failed_run: components/failed_run.md
           - cmdfilter: components/cmdfilter.md
@@ -130,6 +133,7 @@ nav:
       - Settings form & field descriptors: how-to/settings-form.md
   - Dashboard: dashboard.md
   - Tool inventory: tool-inventory.md
+  - Inventory page (UI): dashboard-inventory-page.md
   - Hosted service: hosted.md
   - Results:
       - Overview: RESULTS.md

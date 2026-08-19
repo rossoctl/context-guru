@@ -14,10 +14,12 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | `textclean` | Reformat | nothing (strips ANSI + `\r` redraws) | n/a (lossless) | plain-text tool output with terminal control | `min_tokens` (50) |
 | `searchfold` | Reformat | nothing (folds the repeated path prefix out of search output) | n/a (lossless, exact inverse) | `rg`/`grep -rn`/`find`/`ls -1` output; **opt-in, in no preset** | `min_tokens` (50) |
 | `toolschema` | Reformat | nothing (strips JSON-Schema annotation keywords from `tools`) | n/a (lossless) | any request carrying tool schemas; **opt-in, in no preset** — it re-anchors the cached prefix once, see the break-even | — (no config) |
+| `toolfilter` | Reformat | the tool/MCP declarations the account listed in `remove` (82.7% of a session's declared tokens are never invoked) | yes — delete the name from `remove` (re-anchors the prefix once) | any request carrying declarations; **opt-in, in no preset** — it never removes a name the account did not list, and keeps any name still described in the system prompt's prose, see [declaration-removal](how-to/declaration-removal.md) | `remove` (empty) |
 | `cacheinject` | Reformat | nothing (adds `cache_control`) | n/a (lossless) | Anthropic-family requests; **opt-in, in no preset** — placement is unmeasured | `ttl` (5m) |
 | `cachesplit` | Reformat | nothing (splits a `system` block) | n/a (lossless) | Anthropic-family requests; **in every caching preset** — enables the measured volatile-tail split | — (no config) |
-| `skeleton` | Offload | function/method bodies | via expand | fenced ` ```lang ` code blocks | `min_tokens` (80) |
+| `skeleton` | Offload | function/method bodies | via expand | fenced ` ```lang ` code blocks and raw file dumps (`Read`/`cat`/`sed -n`); **behind the `cg_skeleton` build tag, needs CGO, in no preset, and must not be enabled** — it removes 0 tokens per live turn because every `Read` is the newest of its path, and the guards that make it safe are what make it worthless, see the measurement | `min_tokens` (80) |
 | `dedup` | Offload | later byte-identical tool outputs | via expand | repeated identical outputs | `min_tokens` (100) |
+| `readlifecycle` | Offload | file `Read` bodies the transcript proves are stale (file edited later) or superseded (re-read later) | via expand | `Read` results in an editing session; **opt-in, in no preset** — 0 tokens warm, a third of a *cold* request, see the break-even | `min_tokens` (100), `stale`, `superseded`, `bash_edits`, `stale_at_depth`, `cold_cache` |
 | `collapse` | Offload | middle of an oversized output | via expand | any large tool output (fallback) | `max_tokens` (2000), `head_lines` (20), `tail_lines` (20) |
 | `failed_run` | Offload | earlier superseded test/build runs | via expand | ≥2 run-like outputs | `min_tokens` (100) |
 | `cmdfilter` | Offload | lines per declarative DSL filter | via expand | output matching a filter | `filters` ([]), `disable_builtins` (false), `min_size` (400) |
@@ -34,7 +36,7 @@ Presets (`config/config.go`), verbatim: **`codesmart`** (the proxy default)
 `off` `[]` · `safe` `[format, cachesplit]` · `balanced`
 `[format, dedup, failed_run, cmdfilter, cachesplit]` · `aggressive`
 `[format, dedup, failed_run, cmdfilter, smartcrush, extract, extract_llm, cachesplit]` ·
-`coding` `[format, skeleton, cmdfilter, cachesplit]` · `mcp` `[format, smartcrush, cachesplit]` ·
+`coding` `[format, toon, dedup, cmdfilter, extract, cachesplit]` · `mcp` `[format, smartcrush, cachesplit]` ·
 **`agent`** `[format, dedup, failed_run, mask, extract, extract_llm, cachesplit]` — for long agentic
 sessions; `mask` is the biggest lever there (~27–30% content-token savings, no reward loss — see
 [RESULTS.md](RESULTS.md)) ·

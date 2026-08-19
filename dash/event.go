@@ -126,6 +126,15 @@ type Event struct {
 	// it seeds the per-session comparison across a restart, and it lets the whole figure be
 	// recomputed from the table rather than trusted.
 	SplitTailHash uint64 `json:"split_tail_hash"`
+	// FilteredDeclTokens is what the declaration filter stopped carrying on this request —
+	// the token weight of the `tools` elements it removed under the account's opt-in list.
+	//
+	// It is a TOKEN count and not a dollar figure on purpose: what those tokens would have
+	// cost depends on the tier this same row was billed at (cache_read 0.1x, cache creation
+	// 1.25x, fresh 1.0x), and those columns are right here — so the price is computed by the
+	// query that reads them together rather than frozen into a second column that could
+	// disagree with them. See DB.DeclFilterSavings.
+	FilteredDeclTokens int `json:"filtered_decl_tokens"`
 
 	CGLatencyMs float64 `json:"cg_latency_ms"`
 	UpstreamMs  float64 `json:"upstream_ms"`
@@ -383,6 +392,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.CacheBPMessages = tr.Breakpoints.Messages
 	e.CacheBPBlocks = tr.Breakpoints.Blocks
 	e.SplitStableTokens, e.SplitTailHash = tr.SplitStableTokens, tr.SplitTailHash
+	e.FilteredDeclTokens = tr.FilteredDeclTokens
 	if tr.Bypassed {
 		e.Mode = ModeBypass
 	} else if e.Mode == "" {

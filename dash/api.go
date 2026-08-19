@@ -26,6 +26,11 @@ type API struct {
 	// whoami describes the caller's session for the UI's mode probe. Supplied by the
 	// host in hosted mode; nil means single-tenant.
 	whoami func(*http.Request) any
+	// toolFilterFn resolves a tenant's declaration-removal configuration for the inventory
+	// page's control. A hook rather than a field of our own: the list is the account's
+	// compaction configuration, owned, validated and audited by the control plane, and a
+	// copy here would be a second answer to "what is this proxy actually sending".
+	toolFilterFn func(tenantID string) ToolFilterState
 	// tenantCapture reports whether ONE tenant consented to transcript capture. nil =
 	// single-tenant: there is no consent layer, so the operator's flag is the whole
 	// decision. Supplied by the host in hosted mode.

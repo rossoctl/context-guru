@@ -101,6 +101,13 @@ CREATE TABLE IF NOT EXISTS requests (
   -- request to decide whether the snapshot MOVED, which is the turn the split is worth
   -- anything on. Stored so the figure survives a restart and can be recomputed from the table.
   split_tail_hash    INTEGER NOT NULL DEFAULT 0,
+  -- What the declaration filter stopped carrying on this request: the token weight of the
+  -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
+  -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
+  -- inventory reads the PRISTINE body, so a figure computed from it would keep reporting a
+  -- saving for a request the filter had declined to touch. 0 therefore means "nothing was
+  -- removed here", which is the honest reading on every row that predates the feature.
+  filtered_decl_tokens INTEGER NOT NULL DEFAULT 0,
   cg_latency_ms      REAL    NOT NULL DEFAULT 0,
   upstream_ms        REAL    NOT NULL DEFAULT 0,
   expands            INTEGER NOT NULL DEFAULT 0,
@@ -428,6 +435,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "cachesplit_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	{"requests", "split_stable_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "split_tail_hash", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
 }
