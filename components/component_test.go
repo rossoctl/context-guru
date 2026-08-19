@@ -76,3 +76,38 @@ func (r remodelable) AsModel(id string) Model                          { r.id = 
 type stubNamed string
 
 func (stubNamed) Complete(context.Context, string) (string, error) { return "", nil }
+
+// TestTheModelSourceFallbackIsReportable pins that a component can tell whether it got the
+// source it asked for. `source: incoming` means "spend on the credential the caller is already
+// paying for"; falling back to the static model spends a DIFFERENT credential on a DIFFERENT
+// endpoint. That substitution was silent, and its invisibility cost a real investigation: an
+// authentication failure could not be attributed to either credential.
+func TestTheModelSourceFallbackIsReportable(t *testing.T) {
+	inc, stat := stubNamed("incoming-client"), stubNamed("static-client")
+
+	for _, tc := range []struct {
+		name, source string
+		spec         ModelSpec
+		wantModel    Model
+		wantUsed     string
+	}{
+		{"incoming when present", "incoming", ModelSpec{Incoming: inc, Static: stat}, inc, "incoming"},
+		{"falls back and says so", "incoming", ModelSpec{Static: stat}, stat, "config"},
+		{"config asked for, config used", "config", ModelSpec{Incoming: inc, Static: stat}, stat, "config"},
+		{"unset behaves as incoming", "", ModelSpec{Incoming: inc, Static: stat}, inc, "incoming"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, used := tc.spec.ForSource(tc.source)
+			if got != tc.wantModel {
+				t.Fatalf("model = %v, want %v", got, tc.wantModel)
+			}
+			if used != tc.wantUsed {
+				t.Fatalf("used = %q, want %q", used, tc.wantUsed)
+			}
+			// For must stay byte-identical in behaviour to before the split.
+			if plain := tc.spec.For(tc.source); plain != tc.wantModel {
+				t.Fatalf("For disagrees with ForSource: %v vs %v", plain, got)
+			}
+		})
+	}
+}

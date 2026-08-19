@@ -387,9 +387,9 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 				(probe.Trigger != nil &&
 					(probe.Trigger.MinRequestTokens != nil || probe.Trigger.MinOutputTokens != nil))
 		}
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
+	}
+	if err := components.Decode(raw, &cfg); err != nil {
+		return nil, err
 	}
 	rewrite := true
 	if cfg.Rewrite != nil {
@@ -624,7 +624,16 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// the agent's frontier model, and the arithmetic never closes — a real cold-cache
 		// sweep measured here cut the provider bill by $0.63 and spent $1.25 of opus doing
 		// it. Same endpoint, same credential, cheap model.
-		model = c.Model.ForModel(e.modelSource, e.modelName)
+		var usedSource string
+		model, usedSource = c.Model.ForModelSource(e.modelSource, e.modelName)
+		// The fallback from `incoming` to the static model is a DIFFERENT credential on a
+		// DIFFERENT endpoint, so it cannot be silent: an operator whose config says
+		// `source: incoming` would otherwise have no way to learn that none of their calls
+		// went there. This gate is what makes an authentication failure attributable to the
+		// credential that was actually presented.
+		if model != nil && usedSource != "" && e.modelSource != "config" && usedSource == "config" {
+			rep.Gate("model_source_fell_back_to_config")
+		}
 	}
 	// Per-session cadence: on throttled steps drop the model (skip this request). The sweep
 	// is exempt — it happens at most once per idle gap, which is its own throttle, and
@@ -1187,4 +1196,51 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		rep.Skipped = true
 	}
 	return keys, nil
+}
+
+func init() {
+	f := []components.Field{
+		{Key: "per_output", Type: components.FieldBool, Default: true,
+			Hint: "The HOT-PATH pass: reduce individual tool outputs as they arrive. With this off and cold_cache.enabled off the component has nothing to do and refuses to build — take it out of the pipeline instead."},
+		{Key: "fire_on", Type: components.FieldEnum, Default: "pressure", Options: []string{"pressure", "size"},
+			Hint: "What decides a request is worth a model call. pressure = the derived context-pressure trigger. size = fire whenever any candidate clears min_tokens, which ALSO demotes the economic gate and the caching-backend guard to advisory — a deliberate licence to spend, so set the caps first."},
+		{Key: "min_tokens", Type: components.FieldInt, Default: 300, Min: 1,
+			Hint: "Per-output floor. Setting it pins the trigger to your number instead of the derived pressure curve. Under fire_on: size an unset floor is raised to 2000, because 300 is a threshold nearly every output clears."},
+		{Key: "strategy", Type: components.FieldEnum, Default: "code", Options: extract.Modes,
+			Hint: "How the extraction is produced. code = model-written Starlark filter over the body; single = one JSON-returning call; rlm = chunked, for very large bodies; deterministic = NO model call at all; auto picks by size."},
+		{Key: "aggressiveness", Type: components.FieldEnum, Default: "medium",
+			Options: []string{string(extract.AggroLow), string(extract.AggroMedium), string(extract.AggroHigh)},
+			Hint:    "The compaction target taught to the model. It changes what is ASKED for, never what is ACCEPTED — the verbatim-preservation and strictly-smaller checks are identical at every level."},
+		{Key: "context", Type: components.FieldEnum, Default: "recent", Options: []string{"goal", "recent", "full"},
+			Hint: "How much conversation the extraction prompt carries: just the goal, the recent N messages, or the whole transcript."},
+		{Key: "context_messages", Type: components.FieldInt, Default: defaultContextMessages,
+			Hint: "The N for context: recent (0 = 7)."},
+		{Key: "llm_every_n_requests", Type: components.FieldInt, Default: 1,
+			Hint: "Throttle: fire at most once per N requests in a session (0 or 1 = every request)."},
+		{Key: "llm_max_per_request", Type: components.FieldInt,
+			Hint: "Cap model calls for one request. 0 = UNLIMITED, which is a real choice and not an unset value."},
+		{Key: "llm_max_per_session", Type: components.FieldInt,
+			Hint: "Cap model calls for the whole session. 0 = UNLIMITED. The per-request cap alone cannot bound a long session (2 calls x 300 turns is 600 calls), so with fire_on: size this is the outer bound on spend."},
+		{Key: "allow_on_caching_backend", Type: components.FieldBool,
+			Hint: "Re-enable extraction on prompt-caching backends. Unset = FALSE, and the economic gate then hard-declines every candidate whose tokens are prompt-cached — on Claude Code against Anthropic that is the whole workload, which is how a fully configured component ran 251 times and acted 0 times."},
+		{Key: "economic_gate", Type: components.FieldBool, Default: true,
+			Hint: "Only call the model when the expected saving exceeds the expected call cost, priced from real rates. Turning it off restores spend-on-size, needed only to reproduce old benchmark numbers."},
+		{Key: "rewrite", Type: components.FieldBool, Default: true,
+			Hint: "Let the program reword and summarize rather than only delete. Off forces verified deletion-only (the containment proof); ids, paths and errors are required verbatim either way."},
+		{Key: "skip_file_reads", Type: components.FieldBool,
+			Hint: "Leave line-numbered source dumps verbatim. Unset = AUTO: skip them when the request is prompt-cached (where reducing them measured +30% billed cost), reduce them otherwise."},
+		{Key: "model_max_input_tokens", Type: components.FieldInt,
+			Hint: "Pin the EXTRACTION model's input budget, for a model id the static table cannot name (a self-hosted id, or a gateway alias). Unset = resolved per model."},
+		markerModeField(),
+		{Key: "cold_cache.enabled", Type: components.FieldBool,
+			Hint: "The whole-transcript sweep on a turn whose prompt cache has EXPIRED. Measured here: those turns were 4% of requests and 31% of spend, and removing a token on one is worth 12.5x what it is worth on a warm turn."},
+		{Key: "cold_cache.min_tokens", Type: components.FieldInt, Default: defaultColdFloor, Min: 1,
+			Hint: "Per-output floor for the sweep. Lower than the hot path's, because on that turn every candidate is being re-billed at the write rate anyway."},
+		{Key: "cold_cache.min_idle_seconds", Type: components.FieldInt,
+			Hint: "Demand MORE idle time than the provider TTL implies (0 = just the TTL). Raises the bar, never lowers it."},
+		{Key: "cold_cache.max_calls", Type: components.FieldInt,
+			Hint: "Cap model calls for one sweep. 0 = unlimited, which is the default because the sweep runs once per idle gap on a turn that is already expensive."},
+	}
+	f = append(f, modelFields("model")...)
+	components.RegisterFields("extract_llm", extractLLMConfig{}, append(f, components.TriggerFields("trigger")...))
 }

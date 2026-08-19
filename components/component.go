@@ -111,26 +111,48 @@ type ModelSpec struct {
 // client cannot honour is ignored rather than fatal — the component still runs, on the model
 // it would have used anyway, and the caller sees that in the recorded model name.
 func (m ModelSpec) ForModel(source, id string) Model {
-	c := m.For(source)
-	if id == "" || c == nil {
-		return c
-	}
-	if r, ok := c.(Remodeler); ok {
-		if swapped := r.AsModel(id); swapped != nil {
-			return swapped
-		}
-	}
+	c, _ := m.ForModelSource(source, id)
 	return c
 }
 
+// ForModelSource is ForModel plus the source actually used — see ForSource.
+func (m ModelSpec) ForModelSource(source, id string) (Model, string) {
+	c, used := m.ForSource(source)
+	if id == "" || c == nil {
+		return c, used
+	}
+	if r, ok := c.(Remodeler); ok {
+		if swapped := r.AsModel(id); swapped != nil {
+			return swapped, used
+		}
+	}
+	return c, used
+}
+
 func (m ModelSpec) For(source string) Model {
+	c, _ := m.ForSource(source)
+	return c
+}
+
+// ForSource is For, plus the source that was ACTUALLY used. It exists because the fallback
+// below is silent and the substitution is not cosmetic: `source: incoming` means "spend on the
+// model and credential the caller is already paying for", and falling back to the static one
+// spends a DIFFERENT credential on a DIFFERENT model. A component that cannot tell the
+// difference cannot report it, and an operator reading `model.source: incoming` in their config
+// has no way to learn that none of their calls went there.
+//
+// Cost a real investigation: a local run's extraction calls failed authentication, and because
+// the fallback is invisible there was no way to tell whether the caller's credential or the
+// operator's static one was being presented. Callers should record `used` (extract_llm gates on
+// it) rather than assume the configured source is the one that ran.
+func (m ModelSpec) ForSource(source string) (c Model, used string) {
 	if source == "config" {
-		return m.Static
+		return m.Static, "config"
 	}
 	if m.Incoming != nil {
-		return m.Incoming
+		return m.Incoming, "incoming"
 	}
-	return m.Static
+	return m.Static, "config"
 }
 
 // Mode is context-guru's operating mode for one request. The host sets it explicitly
