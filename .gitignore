@@ -165,6 +165,9 @@ cython_debug/
 
 # Go / lab-context-engineering
 /bin/
+# `go build ./cmd/...` writes its binaries into the WORKING DIRECTORY, not into bin/ — which
+# is how a 37 MB artifact reached a commit here once.
+/context-guru-proxy
 *.test
 *.out
 coverage.txt
