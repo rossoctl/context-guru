@@ -2,14 +2,18 @@ package extract
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	starjson "go.starlark.net/lib/json"
+	"go.starlark.net/resolve"
 	"go.starlark.net/starlark"
+	"go.starlark.net/syntax"
 )
 
 const (
@@ -96,10 +100,46 @@ func runStarlark(ctx context.Context, body, goal string, keepIDs []string, model
 		return "", "", "model call failed: " + err.Error()
 	}
 	if strings.TrimSpace(src) == "" {
-		return "", "", "model replied with nothing"
+		return "", "", "empty reply"
 	}
-	return execStarlarkDetail(ctx, body, stripFences(src))
+	prog := stripFences(src)
+	out, summary, reason = execStarlarkDetail(ctx, body, prog)
+	if !strings.HasPrefix(reason, "syntax error") || !repairSyntax {
+		return out, summary, reason
+	}
+	// ONE repair round-trip. The interpreter's message is actionable on its own
+	// (file:line:col plus the token it wanted), and the failure is almost always a
+	// Python-ism the model can fix in place — measured, syntax rejections were the
+	// single largest cause of a code leg that bought nothing. The repair deliberately
+	// does NOT resend the tool output: fixing syntax needs the program and the error,
+	// not the data, so the second call costs the (cacheable) preamble plus a few
+	// hundred tokens instead of the whole body again. Exactly one retry — a model that
+	// cannot fix its own program with the parser's own message will not fix it on the
+	// third try either, and every attempt is real money.
+	repairTried.Add(1)
+	fixed, err := completeSplit(ctx, model, sys, repairUserPart(prog, reason))
+	if err != nil || strings.TrimSpace(fixed) == "" {
+		return out, summary, reason
+	}
+	out2, summary2, reason2 := execStarlarkDetail(ctx, body, stripFences(fixed))
+	if reason2 != "" {
+		return "", "", reason + " (repair: " + reason2 + ")"
+	}
+	repairFixed.Add(1)
+	return out2, summary2, ""
 }
+
+// repairSyntax enables the single syntax-repair round-trip. A var, not a const, so the
+// diagnostic harness can measure the leg with it off — the retry is a second billed call
+// and has to earn its place.
+var repairSyntax = true
+
+var repairTried, repairFixed atomic.Int64
+
+// RepairStats reports how many syntax-repair round-trips were attempted and how many
+// produced an accepted-by-the-sandbox program. tried-fixed is what the retry cost for
+// nothing, and the ratio is the only honest basis for keeping it.
+func RepairStats() (tried, fixed int64) { return repairTried.Load(), repairFixed.Load() }
 
 // execStarlark runs a Starlark filter source over the body and returns OUTPUT (or ""
 // on failure). Thin wrapper over execStarlarkSummary for callers/tests that don't
@@ -199,15 +239,15 @@ func execStarlarkDetail(ctx context.Context, body, src string) (out, summary, re
 
 	globals, err := starlark.ExecFile(thread, "extract.star", b.String(), predeclared)
 	if err != nil {
-		return "", "", "program rejected: " + err.Error()
+		return "", "", classifyExecError(src, err)
 	}
 	tup, ok := globals["_CG_RES"].(starlark.Tuple)
 	if !ok || len(tup) != 2 {
-		return "", "", "program returned no (OUTPUT, SUMMARY) pair"
+		return "", "", "bad program result: no (OUTPUT, SUMMARY) pair"
 	}
 	res, ok := tup[0].(starlark.String)
 	if !ok {
-		return "", "", "OUTPUT was not a string"
+		return "", "", "bad program result: OUTPUT was not a string"
 	}
 	if sum, ok := tup[1].(starlark.String); ok {
 		summary = clipSummary(string(sum))
@@ -236,4 +276,86 @@ func clipSummary(s string) string {
 		return s
 	}
 	return strings.TrimSpace(string(r[:maxSummaryRunes-1])) + "\u2026"
+}
+
+// classifyExecError turns one interpreter error into a STABLE SLUG, because the rate of
+// each cause is the only thing that says what to fix — and collapsing them is precisely
+// what hid a 92% syntax-rejection rate for months. Four causes, four fixes:
+//
+//	truncated reply  the program is incomplete (the reply stopped at the output cap):
+//	                 raise the cap or shrink the ask. Detected from the SOURCE, not from
+//	                 the parser message, because a cut-off program fails with whatever
+//	                 error the cut happens to produce.
+//	syntax error     the model wrote Python the sandbox refuses: fix the prompt (and the
+//	                 one repair round-trip retries it).
+//	runtime error    the program parsed and then failed (bad regex, wrong type, step /
+//	                 time / memory limit): nothing the prompt text can do reliably.
+func classifyExecError(src string, err error) string {
+	if incompleteProgram(src) {
+		return "truncated reply: " + err.Error()
+	}
+	var se syntax.Error
+	var rl resolve.ErrorList
+	if errors.As(err, &se) || errors.As(err, &rl) {
+		return "syntax error: " + err.Error()
+	}
+	return "runtime error: " + err.Error()
+}
+
+// incompleteProgram reports whether src stops in the middle of something — an unclosed
+// bracket or an unterminated string literal. That is the signature of a reply CUT OFF at
+// the output cap, which produces a partial program and, until now, presented as an
+// ordinary syntax error: same slug, same "fix the prompt" conclusion, wrong fix. A
+// complete program always balances, so this cannot mistake a well-formed one for a
+// truncated one.
+func incompleteProgram(src string) bool {
+	depth := 0
+	for i := 0; i < len(src); i++ {
+		switch c := src[i]; c {
+		case '#':
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case '\'', '"':
+			n, closed := skipString(src, i)
+			if !closed {
+				return true
+			}
+			i = n
+		}
+	}
+	return depth > 0
+}
+
+// skipString advances past the string literal starting at i (quote char included),
+// handling triple quotes, escapes and the r"" prefix. It returns the index of the closing
+// quote and whether the literal was closed at all.
+func skipString(src string, i int) (int, bool) {
+	q := src[i]
+	triple := strings.HasPrefix(src[i:], strings.Repeat(string(q), 3))
+	end := string(q)
+	if triple {
+		end = strings.Repeat(string(q), 3)
+		i += 3
+	} else {
+		i++
+	}
+	for i < len(src) {
+		if src[i] == '\\' {
+			i += 2
+			continue
+		}
+		if !triple && src[i] == '\n' {
+			return i, false // a single-quoted literal cannot span lines
+		}
+		if strings.HasPrefix(src[i:], end) {
+			return i + len(end) - 1, true
+		}
+		i++
+	}
+	return i, false
 }

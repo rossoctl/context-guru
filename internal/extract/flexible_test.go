@@ -31,24 +31,41 @@ func TestExecStarlarkBadRegexFailsOpen(t *testing.T) {
 	}
 }
 
-// TestRewriteModeSkipsContainment: with Rewrite, a reworded (non-contained) result
-// is accepted (sanity + smaller only); by default it is rejected.
-func TestRewriteModeSkipsContainment(t *testing.T) {
+// TestRewriteModeStillRequiresTheResultToDeriveFromTheInput pins the boundary of the
+// rewrite contract. Rewrite mode drops the exact subsequence proof — a filter that strips
+// a progress column and adds "N lines elided" markers is doing what it was asked — but it
+// must NOT accept a result the model largely retyped: a paraphrase, a renumbered file, an
+// invented value. Before the derivation floor, the default mode verified NOTHING about the
+// relationship between output and input, and the only backstop was that the original stayed
+// recoverable via context_guru_expand, at the cost of an agent turn.
+func TestRewriteModeStillRequiresTheResultToDeriveFromTheInput(t *testing.T) {
 	body := "the build failed because widget.c has an index error at line 86"
-	reword := "widget.c: index error line 86" // NOT a subsequence (reordered/reworded)
-	if IsContained(reword, body) {
-		t.Skip("test premise: reword must not be a subsequence")
+	def, rw := Cfg{}, Cfg{Rewrite: true}
+	for _, bad := range []string{
+		"widget.c raised a NullPointerException at line 421", // fabricated values
+		"index error at line 86 in widget.c (build failed)",  // reordered paraphrase
+	} {
+		if IsContained(bad, body) {
+			t.Skipf("test premise: %q must not be a subsequence", bad)
+		}
+		if ok, _ := validateExtraction(bad, body, nil, def); ok {
+			t.Fatalf("default (deletion-only) must reject %q", bad)
+		}
+		if ok, why := validateExtraction(bad, body, nil, rw); ok {
+			t.Fatalf("rewrite mode must refuse %q, got accepted (%q)", bad, why)
+		}
 	}
-	def := Cfg{}
-	if validateExtraction(reword, body, nil, def) {
-		t.Fatal("default (deletion-only) must reject a reworded result")
+	// A deletion plus an elision marker — the shape the prompt teaches — is accepted.
+	kept := "the build failed because widget.c\n# ... 1 line elided (call context_guru_expand) ..."
+	if ok, why := validateExtraction(kept, body, nil, rw); !ok {
+		t.Fatalf("rewrite mode must accept a marked deletion: %s", why)
 	}
-	rw := Cfg{Rewrite: true}
-	if !validateExtraction(reword, body, nil, rw) {
-		t.Fatal("rewrite mode must accept a reworded (sane, smaller) result")
+	// And a within-line rewrite that only deletes characters stays acceptable.
+	if ok, why := validateExtraction("build failed widget.c index error line 86", body, nil, rw); !ok {
+		t.Fatalf("rewrite mode must accept a character-deletion rewrite: %s", why)
 	}
 	// Even in rewrite mode, a KEEP id that vanished still fails the sanity gate.
-	if validateExtraction("nothing relevant", body, []string{"widget.c"}, rw) {
+	if ok, _ := validateExtraction("nothing relevant", body, []string{"widget.c"}, rw); ok {
 		t.Fatal("rewrite mode must still preserve KEEP identifiers (sanity gate)")
 	}
 }

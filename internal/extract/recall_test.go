@@ -111,3 +111,31 @@ func TestHarvestIdentifiersTrimsTrailingPunctuation(t *testing.T) {
 		t.Fatalf("a path was mangled: %q", got)
 	}
 }
+
+// TestHarvestSkipsOrdinaryEnglishWords guards the keep-set against the prose it is
+// harvested from. identRe matches any word of four or more letters, and the agent's recent
+// turns are prose — so "against", "including", "large" and "exactly" entered both the KEEP
+// list the model is told to preserve verbatim and the recall check that refuses any
+// reduction dropping one. MEASURED over 40 real captured tool outputs: 13 of 40 code-leg
+// calls were refused for "dropping" a common word, the largest single cause of rejection.
+func TestHarvestSkipsOrdinaryEnglishWords(t *testing.T) {
+	goal := "Please look at the large output again and check the dimension handling in " +
+		"sympy/matrices/common.py against test_col_insert; IndexError at line 86, build 4821."
+	got := HarvestIdentifiers(goal, 40)
+	set := map[string]bool{}
+	for _, g := range got {
+		set[g] = true
+	}
+	for _, want := range []string{"sympy/matrices/common.py", "test_col_insert", "IndexError", "4821"} {
+		if !set[want] {
+			t.Fatalf("a real reference was dropped: %q not in %v", want, got)
+		}
+	}
+	for _, prose := range []string{"large", "again", "check", "against", "handling", "Please"} {
+		if set[prose] {
+			t.Fatalf("the prose word %q was harvested as an identifier: it goes into the KEEP "+
+				"list and the recall check, and refuses good reductions for removing a noise "+
+				"line that happens to contain it", prose)
+		}
+	}
+}

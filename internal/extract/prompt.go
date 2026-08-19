@@ -93,16 +93,17 @@ Sandbox:
   re_sub(pattern, repl, s) -> s, re_findall(pattern, s) -> [str],
   re_split(pattern, s) -> [str], re_match(pattern, s) -> bool. RE2 syntax.
 - NO imports (no load()), NO I/O, NO network.
-STARLARK IS NOT PYTHON. These are the constructs models reach for that the sandbox
-REJECTS outright — a rejected program means your whole reply is discarded:
-- NO generator expressions. ` + "`any(k in ln for k in ids)`" + ` is a syntax error.
-  Write a list comprehension instead: ` + "`any([k in ln for k in ids])`" + `.
-- NO f-strings and no %-formatting. Use ` + "`str(x)`" + ` and ` + "`+`" + ` to build strings.
-- NO while loops, NO try/except, NO lambda with statements, NO ` + "`global`" + `/` + "`nonlocal`" + `.
-- NO set literals, NO ` + "`dict.setdefault`" + `, NO ` + "`sorted(key=...)`" + ` with a lambda closure
-  over a mutable local.
-- Strings have .strip()/.split()/.startswith()/.endswith()/.replace()/.lower(); lists
-  have .append(). Use ` + "`for`" + ` over a list, ` + "`if/elif/else`" + `, and plain function defs.
+STARLARK IS NOT PYTHON. The sandbox REJECTS these outright — a rejected program means
+your whole reply is discarded (each one verified against the real interpreter):
+- NO generator expressions: ` + "`any(k in ln for k in ids)`" + `, ` + "`\",\".join(str(i) for i in xs)`" + `.
+  Put the brackets in: ` + "`any([k in ln for k in ids])`" + `.
+- NO type annotations: ` + "`kept: list = []`" + ` is a syntax error. Write ` + "`kept = []`" + `.
+- NO f-strings: use ` + "`\"%d of %d\" % (a, b)`" + ` or ` + "`str(x) + \" ...\"`" + `.
+- NO set literals or set comprehensions: ` + "`{\"a\", \"b\"}`" + `, ` + "`{x for x in xs}`" + `. Use a list.
+- NO while loops, NO try/except, NO ` + "`global`" + `/` + "`nonlocal`" + `, NO ` + "`del`" + ` of a global.
+FINE (do not avoid these): list AND dict comprehensions, ` + "`%`" + ` formatting, lambda,
+` + "`sorted(key=...)`" + `, slices, enumerate/zip/min/max, dict .get/.pop/.setdefault, defs,
+` + "`if/elif/else`" + `, and the usual string/list methods.
 When in doubt write the dumb, explicit loop — a plain program that runs beats a clever
 one that does not.
 Rule for SOURCE-CODE FILES (a file read: imports + function/class defs). A large
@@ -166,32 +167,44 @@ keep failures and the summary line:
 EXAMPLE C (verbose install log) — collapse the "already satisfied" noise:
   lines = [ln for ln in INPUT.split("\n") if "already satisfied" not in ln]
   OUTPUT = "\n".join(lines)
-EXAMPLE D (source-code FILE READ; goal/KEEP mentions "parse_config") — skeleton:
-keep imports, every signature, and the relevant def; collapse each run of other body
-lines into one indented marker. Kept lines stay byte-identical (line numbers kept).
-  keep_ids = ["parse_config"]   # from KEEP / the goal
+EXAMPLE D (source-code FILE READ) — the skeleton rule above, as a loop; goal/KEEP
+mentions "parse_config":
   out = []
-  pending = 0    # consecutive elided body lines
-  indent = ""
+  pending = 0
   for ln in INPUT.split("\n"):
     s = ln.strip()
-    struct = ("def " in s or "class " in s or "func " in s or "function " in s or
-              s.startswith("import ") or s.startswith("from ") or s.startswith("@") or
-              s.endswith(":") or s.endswith("{"))
-    keep = s == "" or struct or any([k in ln for k in keep_ids])
-    if keep:
+    if (s == "" or s.endswith(":") or s.endswith("{") or "parse_config" in ln or
+        re_match("^(def |class |func |function |import |from |@)", s)):
       if pending > 0:
-        out.append(indent + "# ... " + str(pending) + " lines elided (call context_guru_expand) ...")
+        out.append("# ... " + str(pending) + " lines elided (call context_guru_expand) ...")
         pending = 0
       out.append(ln)
     else:
-      if pending == 0:
-        indent = ln[:len(ln) - len(s)]
       pending = pending + 1
-  if pending > 0:
-    out.append(indent + "# ... " + str(pending) + " lines elided (call context_guru_expand) ...")
   OUTPUT = "\n".join(out)
   SUMMARY = "skeleton: imports + signatures + parse_config kept; bodies elided"`
+
+// codeRepairPrompt is the user half of the ONE syntax-repair round-trip. The tool output
+// is deliberately NOT resent: the program is already written and only its syntax is wrong,
+// so the model needs its own program and the parser's complaint, nothing else — which is
+// what makes the retry cost a few hundred tokens instead of a second full call.
+const codeRepairPrompt = `The Starlark program you just wrote was REJECTED by the parser, so
+it produced nothing. Fix it and return the corrected program ONLY — no prose, no markdown
+fences, same task, same INPUT/OUTPUT/SUMMARY contract. Remember Starlark is not Python: no
+generator expressions, no type annotations, no f-strings, no set literals/comprehensions,
+no while, no try/except.
+
+PARSER ERROR (line:col are 3 lines below your program's own numbering, because your program
+runs inside a wrapper function):
+%s
+
+YOUR PROGRAM:
+%s`
+
+// repairUserPart renders the repair request for one rejected program.
+func repairUserPart(program, reason string) string {
+	return fmt.Sprintf(codeRepairPrompt, reason, program)
+}
 
 // --- Aggressiveness -------------------------------------------------------------
 //
@@ -321,31 +334,9 @@ EXAMPLE C (prose / documentation output) — keep only paragraphs mentioning the
   kept = [p for p in paras if any([t in p.lower() for t in terms])]
   OUTPUT = "\n\n".join(kept) + "\n\n# ... %d unrelated paragraphs elided (call context_guru_expand) ..." % (len(paras) - len(kept))
   SUMMARY = "doc: %d of %d paragraphs kept (auth/timeout)" % (len(kept), len(paras))
-EXAMPLE D (source-code FILE READ) — full skeleton: imports, signatures and KEEP-relevant
-bodies only; elide every other body over about 5 lines, one indented marker per run:
-  keep_ids = ["parse_config"]
-  out = []
-  pending = 0
-  indent = ""
-  for ln in INPUT.split("\n"):
-    s = ln.strip()
-    struct = ("def " in s or "class " in s or "func " in s or "function " in s or
-              s.startswith("import ") or s.startswith("from ") or s.startswith("@") or
-              s.endswith(":") or s.endswith("{"))
-    keep = s == "" or struct or any([k in ln for k in keep_ids])
-    if keep:
-      if pending > 0:
-        out.append(indent + "# ... " + str(pending) + " lines elided (call context_guru_expand) ...")
-        pending = 0
-      out.append(ln)
-    else:
-      if pending == 0:
-        indent = ln[:len(ln) - len(s)]
-      pending = pending + 1
-  if pending > 0:
-    out.append(indent + "# ... " + str(pending) + " lines elided (call context_guru_expand) ...")
-  OUTPUT = "\n".join(out)
-  SUMMARY = "skeleton: imports + signatures + parse_config kept, other bodies elided"`
+EXAMPLE D (source-code FILE READ) — the skeleton rule above, with the threshold lowered:
+elide EVERY body over about 5 lines that no KEEP id or goal term touches, one indented
+marker per run, imports and signatures kept byte-identical.`
 
 // maxGoalChars is the BACKSTOP on the conversational context a prompt carries. The caller
 // decides how much context to send (see the component's context: goal|recent|full) and
@@ -388,7 +379,7 @@ var PromptVersion = promptFingerprint()
 // semanticsVersion covers result-affecting changes OUTSIDE the prompt strings — the
 // validation gate (validateExtraction / extractionIsSane) and the sandbox contract. Bump it
 // when what gets ACCEPTED changes while the prompt text does not.
-const semanticsVersion = "s1"
+const semanticsVersion = "s2"
 
 // promptFingerprint hashes every prompt constant that can change what the model returns.
 // Add new prompt text here as it is introduced: anything omitted is invisible to the key.
@@ -396,7 +387,7 @@ func promptFingerprint() string {
 	h := sha256.New()
 	for _, part := range []string{
 		semanticsVersion,
-		codeContract, codeRules, codeDeletionRules, codeExample,
+		codeContract, codeRules, codeDeletionRules, codeExample, codeRepairPrompt,
 		aggroLow, aggroMedium, aggroHigh,
 		rules, example, sampleMarker,
 	} {

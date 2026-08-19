@@ -233,6 +233,33 @@ func cfgFingerprint(cfg Cfg) string {
 
 var identRe = regexp.MustCompile(`[A-Za-z_][\w./-]{3,}|\b\d{3,}\b`)
 
+// looksLikeAnIdentifier separates a REFERENCE the agent made from an ordinary English word.
+//
+// identRe matches any word of four or more letters, so harvesting from the agent's recent
+// turns — which are prose — collects "against", "including", "large", "exactly". Those then
+// enter the KEEP list the model is told to preserve verbatim AND the recall check that
+// refuses a reduction dropping any of them. MEASURED over 40 real captured tool outputs:
+// 13 of 40 code-leg calls were refused for "dropping" a common English word, the single
+// largest cause of rejection — a good compaction paid full price and was thrown away
+// because it removed a noise line containing the word "large".
+//
+// A real reference carries a mark prose does not: a separator (_ . / -), a digit, or an
+// inner capital (parse_config, src/api/users.py, test_col_insert, IndexError, sympy-1.11).
+// A bare run of lowercase letters is a word, and the surrounding transcript still holds it.
+func looksLikeAnIdentifier(s string) bool {
+	for i, r := range s {
+		switch {
+		case r == '_' || r == '.' || r == '/' || r == '-':
+			return true
+		case r >= '0' && r <= '9':
+			return true
+		case i > 0 && r >= 'A' && r <= 'Z':
+			return true
+		}
+	}
+	return false
+}
+
 // HarvestIdentifiers pulls distinctive identifiers (paths, symbols, ids, numbers)
 // from the agent's recent turns — the keep-set the extractor must retain.
 func HarvestIdentifiers(text string, cap int) []string {
@@ -246,7 +273,7 @@ func HarvestIdentifiers(text string, cap int) []string {
 		// identifier the agent actually named ended up protecting nothing: MEASURED, that is
 		// how a source-file read was reduced to a single character with the check satisfied.
 		m = strings.TrimRight(m, "./-")
-		if len(m) < 4 {
+		if len(m) < 4 || !looksLikeAnIdentifier(m) {
 			continue
 		}
 		if _, ok := idx[m]; ok {
@@ -357,18 +384,23 @@ func stripFences(s string) string {
 // --- sanity + validation gate ---
 
 func extractionIsSane(bodyText, resultText string, keepIDs []string, minKeepRatio float64) bool {
+	return insanityReason(bodyText, resultText, keepIDs, minKeepRatio) == ""
+}
+
+// insanityReason is extractionIsSane plus WHICH check refused, "" when none did.
+func insanityReason(bodyText, resultText string, keepIDs []string, minKeepRatio float64) string {
 	if resultText == "" {
-		return false
+		return "empty result"
 	}
 	bodyN, resN := tokens.Count(bodyText), tokens.Count(resultText)
 	switch strings.TrimSpace(resultText) {
 	case "", "[]", "{}", "null", `""`:
 		if bodyN > 0 {
-			return false
+			return "degenerate result"
 		}
 	}
 	if minKeepRatio > 0 && float64(resN) < minKeepRatio*float64(bodyN) {
-		return false
+		return "below the keep-ratio floor"
 	}
 	for _, kid := range keepIDs {
 		if len(kid) < 5 || !strings.ContainsFunc(kid, isLetter) {
@@ -395,9 +427,9 @@ func extractionIsSane(bodyText, resultText string, keepIDs []string, minKeepRati
 		if n > pervasiveIDOccurrences {
 			continue
 		}
-		return false
+		return "dropped a referenced identifier: " + kid
 	}
-	return true
+	return ""
 }
 
 // pervasiveIDOccurrences is where "the agent referenced this" stops meaning "this exact
@@ -409,18 +441,117 @@ func isLetter(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
-func validateExtraction(resultText, bodyText string, keepIDs []string, cfg Cfg) bool {
-	if !extractionIsSane(bodyText, resultText, keepIDs, cfg.MinKeepRatio) {
-		return false
+// validateExtraction is the acceptance gate. It returns WHY it refused, because
+// "rejected by the acceptance check" covers three unrelated failures — a keep-id the
+// reduction dropped, a degenerate stub, and (in rewrite mode) a result that is not
+// derived from the input at all — and they have different fixes.
+func validateExtraction(resultText, bodyText string, keepIDs []string, cfg Cfg) (bool, string) {
+	if why := insanityReason(bodyText, resultText, keepIDs, cfg.MinKeepRatio); why != "" {
+		return false, why
 	}
-	// Rewrite mode deliberately drops the lossless-projection proof (the caller
-	// accepted a lossy rewrite). Sanity + strictly-smaller (checked by the caller)
-	// still apply.
 	if cfg.Rewrite {
+		// Rewrite mode drops the exact projection proof — the caller accepted a lossy
+		// rewrite, and the prompt's own examples strip columns and add elision markers, so
+		// a strict subsequence check would refuse the thing we asked for. What it must NOT
+		// accept is a result that does not DERIVE from the input: a paraphrase, a
+		// renumbered file, an invented value. Nothing checked that at all, in the shipped
+		// default, and the only backstop was that the original stays recoverable via
+		// context_guru_expand — at the cost of an agent turn.
+		//
+		// So: measure how much of the result is character-for-character traceable to the
+		// input (0.2 ms) and refuse a result that mostly is not. Elision markers, which the
+		// model is told to add, are excluded from the measurement rather than tolerated as
+		// slack, so the floor can be strict without penalising a well-marked reduction.
+		if r := derivationRatio(resultText, bodyText); r < minDerivationRatio {
+			return false, fmt.Sprintf("not derived from the input (%.0f%% traceable)", 100*r)
+		}
+		return true, ""
+	}
+	if !IsContained(parseBody(resultText), parseBody(bodyText)) {
+		return false, "not a subsequence of the input"
+	}
+	return true, ""
+}
+
+// minDerivationRatio is the floor on how much of a rewritten result must be traceable to
+// the input, character for character, in order.
+//
+// It is a CALIBRATION KNOB, not a law: measured over 40 real captured tool outputs the
+// accepted reductions sit at 100% (a filter deletes; it does not retype), while the mode
+// this catches — a paraphrase or an invented value — lands far below. 0.9 leaves room for
+// a rewrite that genuinely retypes a little (a collapsed count, a reflowed prefix) without
+// leaving room to invent a whole record. Raise it toward 1.0 if fabrication is ever seen
+// passing; lower it only with a measurement showing good reductions being refused.
+const minDerivationRatio = 0.9
+
+// derivationRatio is the fraction of the result's bytes that can be matched, IN ORDER,
+// against the body — i.e. how much of the result is a character subsequence of the input,
+// with partial credit. 1.0 means "obtainable by deleting characters" (the deletion-only
+// guarantee); a paraphrase, a renumbered line or a fabricated record cannot match and
+// drags the fraction down in proportion to how much was invented.
+//
+// Lines the model was ASKED to add — the elision markers naming what went — are dropped
+// before the comparison, so a heavily marked reduction is not mistaken for a fabricated
+// one. Single pass over both strings.
+func derivationRatio(result, body string) float64 {
+	var b strings.Builder
+	b.Grow(len(result))
+	for _, ln := range strings.Split(result, "\n") {
+		if isElisionMarker(ln) {
+			continue
+		}
+		b.WriteString(ln)
+	}
+	res := b.String()
+	if len(res) == 0 {
+		return 1 // nothing but markers: the keep-set and never-worse checks govern
+	}
+	// An UNMATCHED result byte must not consume the body cursor — otherwise a single
+	// inserted character (a colon the model added) sends the scan to the end of the body
+	// and the rest of a perfectly derived result reads as fabricated. So each byte is
+	// looked for from the cursor forward, and only a hit advances it.
+	//
+	// ponytail: bounded lookahead + early exit keep this linear-ish. A derived byte sits
+	// near its predecessor, so scanning past scanWindow bytes for one character means the
+	// result was reordered, which is exactly what should not pass. Widen the window if a
+	// real reduction is ever measured to be refused for reordering it did not do.
+	const scanWindow = 4096
+	budget := int(float64(len(res)) * (1 - minDerivationRatio)) // unmatched bytes we can afford
+	matched, missed, j := 0, 0, 0
+	for i := 0; i < len(res); i++ {
+		k, end := j, j+scanWindow
+		if end > len(body) {
+			end = len(body)
+		}
+		for k < end && body[k] != res[i] {
+			k++
+		}
+		if k < end {
+			matched++
+			j = k + 1
+			continue
+		}
+		if missed++; missed > budget {
+			break // cannot reach the floor any more; stop paying for the proof
+		}
+	}
+	return float64(matched) / float64(len(res))
+}
+
+// isElisionMarker reports whether a line is one of the "N lines elided" notes the prompt
+// asks for (or the recovery marker itself) rather than content from the input.
+func isElisionMarker(ln string) bool {
+	t := strings.TrimSpace(ln)
+	if t == "" {
 		return true
 	}
-	return IsContained(parseBody(resultText), parseBody(bodyText))
+	return strings.Contains(t, "elided") || strings.Contains(t, expandToolName) || strings.Contains(t, markerOpen)
 }
+
+// expandToolName is the recovery tool the markers name. Duplicated as a plain string
+// rather than imported: internal/extract must not depend on the component layer that
+// registers the tool.
+const expandToolName = "context_guru_expand"
 
 // intersectAllowed filters order to the allowed set (non-empty), preserving order.
 // Empty allowed means no filtering.
@@ -542,7 +673,9 @@ func RunExtractionDetail(ctx context.Context, body, goal string, keepIDs []strin
 			// syntax, a step/time/memory limit, a non-string OUTPUT). They have opposite
 			// fixes, and reporting them alike hid a 92% syntax-rejection rate for months.
 			if why == "" {
-				why = "no usable program or reply"
+				// The program ran and assigned OUTPUT = "". Distinct from every other
+				// cause: the model DID answer and the sandbox DID accept it.
+				why = "program produced an empty OUTPUT"
 			}
 			reasons = append(reasons, name+": "+why)
 			continue
@@ -550,11 +683,8 @@ func RunExtractionDetail(ctx context.Context, body, goal string, keepIDs []strin
 			reasons = append(reasons, name+": result not smaller")
 			continue
 		}
-		if !validateExtraction(cand, body, keepIDs, cfg) {
-			// Either the recall check (a keep-list identifier present in the body and absent
-			// from the result, or a degenerate empty result) or, in deletion-only mode, the
-			// containment proof.
-			reasons = append(reasons, name+": rejected by the acceptance check")
+		if ok, why := validateExtraction(cand, body, keepIDs, cfg); !ok {
+			reasons = append(reasons, name+": acceptance check: "+why)
 			continue
 		}
 		return cand, sum, name, ""

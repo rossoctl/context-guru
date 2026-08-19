@@ -58,7 +58,8 @@ FAILED tests/test_matrices.py::test_col_insert - IndexError: Index out of range
 	}
 	src = stripFences(src)
 	out := execStarlark(ctx, body, src)
-	ok := out != "" && out != body && validateExtraction(out, body, keep, DefaultCfg())
+	okv, _ := validateExtraction(out, body, keep, DefaultCfg())
+	ok := out != "" && out != body && okv
 	t.Logf("\n----- MODEL-WRITTEN STARLARK FILTER -----\n%s\n", src)
 	t.Logf("\n----- RESULT -----\nbefore=%d tokens (%d lines)  after=%d tokens (%d lines)  accepted(contained+sane+smaller)=%v\n\n--- AFTER (first 25 lines) ---\n%s\n",
 		tokens.Count(body), strings.Count(body, "\n")+1,
@@ -102,7 +103,8 @@ func TestLiveExtractCodeJSON(t *testing.T) {
 	}
 	src = stripFences(src)
 	out := execStarlark(ctx, body, src)
-	ok := out != "" && out != body && validateExtraction(out, body, keep, DefaultCfg())
+	okv, _ := validateExtraction(out, body, keep, DefaultCfg())
+	ok := out != "" && out != body && okv
 	t.Logf("\n----- MODEL-WRITTEN STARLARK FILTER -----\n%s\n", src)
 	t.Logf("\n----- RESULT -----\nbefore=%d tokens (%d records)  after=%d tokens  accepted=%v\n\n--- AFTER ---\n%s\n",
 		tokens.Count(body), len(recs), tokens.Count(out), ok, out)
@@ -149,7 +151,8 @@ func TestLiveExtractRewriteSummary(t *testing.T) {
 	out, summary := execStarlarkSummary(ctx, body, src)
 	cfg := DefaultCfg()
 	cfg.Rewrite = true
-	ok := out != "" && out != body && validateExtraction(out, body, keep, cfg)
+	okv, _ := validateExtraction(out, body, keep, cfg)
+	ok := out != "" && out != body && okv
 	t.Logf("\n----- PROGRAM -----\n%s\n----- RESULT -----\nbefore=%d tok after=%d tok accepted=%v\nSUMMARY=%q\n--- AFTER ---\n%s\n",
 		src, tokens.Count(body), tokens.Count(out), ok, summary, out)
 	if !ok {

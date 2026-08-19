@@ -142,10 +142,12 @@ fixes — fix the prompt, retry the call, stop calling — reported identically.
 defect 1 survived: the component looked like it was being ignored when it was being answered
 and then thrown away.
 
-The reason now escapes to the call record and into the dashboard: `program rejected: <the
-sandbox error>`, `model call failed: <status>`, `OUTPUT was not a string`, `program returned
-no (OUTPUT, SUMMARY) pair`. The first thing this bought was a `status 401` in a test harness,
-visible immediately instead of after an afternoon.
+The reason now escapes to the call record and into the dashboard, as one slug per cause:
+`syntax error: <the parser's message>`, `truncated reply: …`, `empty reply`, `program produced
+an empty OUTPUT`, `runtime error: …`, `model call failed: <status>`, `result not smaller`, and
+`acceptance check: <which check>`. The first thing this bought was a `status 401` in a test
+harness, visible immediately instead of after an afternoon; the second was the measurement
+below, which found the real dominant failure hiding inside the acceptance bucket.
 
 ### 3. The economic gate under-priced its own calls by 21–31×
 
@@ -187,6 +189,90 @@ leaves the per-turn and per-session caps as the only brake. The gate was right a
 overridden by configuration. The advisory is recorded per call so the counterfactual is
 visible, but no code change can rescue an operator from switching the brake off — if you set
 `fire_on: size`, read the `economic_gate_advisory` gate count and the net column.
+
+## Accuracy of the code leg, measured (August 2026)
+
+Basis: **40 real tool outputs** captured from Claude Code traffic (`/home/vpcuser/cg-research/bench`
++ SWE-bench proxy captures, 563–15,473 tokens each), replayed through the code leg alone —
+`strategy: code`, no deterministic fallback, `rewrite: true`, `aggressiveness: medium`,
+compactor `claude-haiku-4-5`, real gateway. Reproduce with
+`CG_DIAG=1 CG_DIAG_CORPUS=<dir> go test ./internal/extract/ -run TestDiagCodeLegCorpus -v`.
+
+| | before | after |
+|---|---|---|
+| accepted | **15/40 (38%)** | **27/40 (68%)** |
+| tokens removed over the corpus | 27,680 (20.6%) | **61,240 (45.6%)** |
+| our own spend | $0.3061 | $0.2972 |
+| spend per accepted extraction | $0.0204 | **$0.0110** |
+
+Rejections, by cause — the slugs are new, and the breakdown is the whole point:
+
+| cause | before | after |
+|---|---|---|
+| `acceptance check` | 12 | **1** |
+| `result not smaller` | 10 | 5 |
+| `program produced an empty OUTPUT` | 2 | 4 |
+| `syntax error` / `truncated reply` / `runtime error` | 1 | 0 / 1 / 1 |
+| `model call failed` (transient gateway) | 0 | 1 |
+
+What actually moved the number:
+
+1. **The keep-set was full of English words.** `HarvestIdentifiers` matches any word of four
+   or more letters, and it harvests from the agent's recent turns — which are prose. So
+   `against`, `including`, `large`, `exactly`, `credits` entered both the KEEP list the model
+   is told to preserve verbatim and the recall check that refuses any reduction dropping one.
+   **13 of 40 calls were refused for "dropping" a common English word** — a good compaction,
+   paid for in full and thrown away because it removed a noise line containing the word
+   "large". A reference now has to carry a mark prose does not: a separator, a digit, or an
+   inner capital (`parse_config`, `src/api/users.py`, `IndexError`, `sympy-1.11`). This was
+   invisible until the acceptance bucket was split, and it is the single largest lever here.
+2. **The Starlark contract said things that are not true.** Verified against the real
+   interpreter: `%`-formatting, `dict.setdefault`, `sorted(key=…)`, lambda and **dict**
+   comprehensions all work, and the block forbade all of them — fixed overhead on every call,
+   pushing the model into contortions for nothing. The two forms that actually killed calls in
+   production were not named at all: a **type annotation** (`kept: list = []` — the recorded
+   `extract.star:4:7: got ':', want newline`) and a **set comprehension**. Both are now named,
+   the false bans are gone, and `TestTheContractOnlyBansWhatTheSandboxActuallyRejects` checks
+   every claim in both directions against the interpreter.
+3. **One repair round-trip on a syntax error.** The parser's message is actionable on its own,
+   so the rejected program and the error go back for exactly one correction — without the tool
+   output, since fixing syntax needs the program and not the data. Measured: 2 attempts, 2
+   recovered, ≈$0.004 marginal per attempt. It pays at the cold-turn valuation of a removed
+   token ($3.75/MTok) and is about break-even at the fresh rate; it does not pay if the removed
+   tokens would only ever have been billed as cache reads. Kept on, bounded to one retry.
+4. **Truncation is no longer reported as a syntax error.** A reply cut off at the output cap
+   leaves an incomplete program that fails with whatever error the cut produced. Detected from
+   the source (unbalanced brackets or an unterminated string — a complete program always
+   balances), so "raise the reply budget" stops looking like "fix the prompt".
+
+**Prompt size.** Example D in the aggressiveness blocks restated the source-file skeleton rule
+that `codeContract` already gives in prose (327 tok in medium, a near-verbatim second copy at
+299 tok in high). Both are cut to the loop alone / one sentence: the preamble goes 1,893 → 1,798
+tokens at `medium` and 1,973 → 1,778 at `high` (the shared contract grew 52 tokens for the
+corrected Starlark facts, so `low` goes 1,547 → 1,599). This buys **money, not latency** —
+measured, prompt build is 0.089 ms against a 1,812 ms p50 gateway floor on an 8-token call.
+
+### The result derives from the input, and that is now checked
+
+In the shipped default (`rewrite: true`) **nothing** verified the relationship between the
+result and the input: the containment proof is deletion-only, `MinKeepRatio` is 0, and a
+pervasive keep-id is exempt. A paraphrase, a renumbered file read or an invented value passed,
+and the only real protection was that the original stays recoverable via `context_guru_expand`
+— at the cost of an agent turn.
+
+The choice made here is **not** to default `rewrite: false` (that would refuse the column
+strips and elision markers the prompt asks for, and the measured deletion-only leg is a weaker
+compactor) but to require the result to **derive** from the input: the fraction of the result's
+bytes matchable in order against the body, with the elision markers the model was told to add
+excluded, must be ≥ 0.9. Measured over the corpus, **every accepted reduction scored 1.00**
+(0.93 and 0.97 in one earlier run) — a filter deletes, it does not retype — so the floor costs
+0 acceptances and 0.2 ms, while a reordered paraphrase or a fabricated value lands far below
+it. It is a calibration knob, not a law; the number is in `minDerivationRatio`.
+
+Still unmitigated: a reduction that drops a record the agent needed next but keeps every
+harvested id (harm #1 — recoverable via expand, at a turn), and a cross-session cache hit
+derived toward a different goal (harm #10 — recoverability is gated, correctness is not
+re-verified).
 
 ## How it works
 
@@ -467,8 +553,11 @@ call was worth its price on a caching backend.
 ## Lossiness
 
 Lossy but reversible — the original is stashed and recovered via `context_guru_expand` /
-`GET /expand`. The default `rewrite: true` mode is unverified (sanity + strictly-smaller only);
-`rewrite: false` gives the verified deletion-only (character-subsequence) guarantee.
+`GET /expand`. The default `rewrite: true` mode is verified only to the extent that the result
+must DERIVE from the input (≥90% of it traceable, in order, to the body; see above) plus sanity
+and strictly-smaller; `rewrite: false` gives the full deletion-only (character-subsequence)
+guarantee. The one-line SUMMARY spliced next to the marker is clipped to 120 runes, because an
+over-long one used to abandon the whole reduction rather than truncate.
 
 ## Configuration
 
