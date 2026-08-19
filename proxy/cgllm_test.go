@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
 	"github.com/rossoctl/context-guru/config"
@@ -294,5 +295,48 @@ func TestOurOwnSpendCountsTheCacheTiersToo(t *testing.T) {
 		t.Errorf("cg_llm_cost_usd = %.6f, want %.6f. Counting only fresh input and output "+
 			"gives %.6f, which is %.1fx too LOW on a call whose prompt was cached",
 			got, want, freshOnly, want/freshOnly)
+	}
+}
+
+// TestTheCallersAuthSchemeSurvivesIntoOurOwnCalls pins the bug that made `model.source:
+// incoming` — the DEFAULT — fail 401 on every extraction call for a whole class of caller.
+//
+// Claude Code given ANTHROPIC_AUTH_TOKEN authenticates with `Authorization: Bearer <token>`.
+// incomingModel rebuilt the client with the credential but WITHOUT the scheme, so the
+// Anthropic client fell back to its x-api-key default and re-sent a bearer token in the wrong
+// header. Reproduced on a real cold-cache sweep: two calls fired correctly and both came back
+// `status 401`, reported as "no usable program or reply".
+func TestTheCallersAuthSchemeSurvivesIntoOurOwnCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name, header, value, want string
+	}{
+		{"bearer in Authorization", "Authorization", "Bearer sk-caller-abc123456", "bearer"},
+		{"a non-bearer Authorization scheme still uses that header", "Authorization", "Apikey sk-caller-abc123456", "bearer"},
+		{"x-api-key keeps the client default", "x-api-key", "sk-caller-abc123456", ""},
+		{"no credential at all", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
+			if tc.header != "" {
+				r.Header.Set(tc.header, tc.value)
+			}
+			if got := CallerAuthScheme(r); got != tc.want {
+				t.Fatalf("CallerAuthScheme = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	// And it must reach the client incomingModel builds, not just be computable.
+	h := &Handler{opts: Options{}}
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
+	r.Header.Set("Authorization", "Bearer sk-caller-abc123456")
+	m := h.incomingModel(bschemas.Anthropic, upstream{base: "https://gw.example"},
+		[]byte(`{"model":"claude-haiku-4-5"}`), r)
+	a, ok := m.(cheapmodel.Anthropic)
+	if !ok {
+		t.Fatalf("incomingModel returned %T, want cheapmodel.Anthropic", m)
+	}
+	if a.AuthScheme != "bearer" {
+		t.Fatalf("the built client would send the caller's bearer token as %q", a.AuthScheme)
 	}
 }

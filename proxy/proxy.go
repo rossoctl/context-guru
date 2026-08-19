@@ -688,8 +688,14 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		return nil
 	}
 	key := CallerKey(r)
+	// The scheme belongs to the CALLER's credential, so it is captured before any fallback
+	// to a server-held key below (which is presented the operator's way, not the caller's).
+	scheme := CallerAuthScheme(r)
 	if up.setKey != nil {
 		key = ""
+	}
+	if key == "" {
+		scheme = ""
 	}
 	switch provider {
 	case bschemas.Anthropic:
@@ -699,7 +705,7 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		if key == "" {
 			return nil
 		}
-		return cheapmodel.Anthropic{BaseURL: up.base, Model: model, APIKey: key, Client: h.client}
+		return cheapmodel.Anthropic{BaseURL: up.base, Model: model, APIKey: key, AuthScheme: scheme, Client: h.client}
 	case bschemas.OpenAI:
 		if key == "" {
 			key = h.serverKey(h.opts.OpenAIKey)

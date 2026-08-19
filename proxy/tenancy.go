@@ -259,6 +259,34 @@ func TokenFromRequest(r *http.Request) string {
 	return ""
 }
 
+// CallerAuthScheme reports HOW the caller presented the credential CallerKey returns, so a
+// component that reuses it presents it the same way. "bearer" when it arrived in
+// Authorization; "" — the Anthropic client's x-api-key default — for the api-key slots.
+//
+// Without this the credential was reused in the wrong slot. A caller authenticating with
+// `Authorization: Bearer <token>` (which is what Claude Code does when it is given
+// ANTHROPIC_AUTH_TOKEN rather than ANTHROPIC_API_KEY) had its token re-sent as `x-api-key`
+// on every extraction call, and a gateway that authenticates with bearer tokens answered
+// 401 to all of them. `model.source: incoming` is the DEFAULT, so for that whole class of
+// caller extract_llm could never make a single successful call — silently, because the
+// failure was reported as "no usable program or reply".
+//
+// It returns the scheme of the SAME header CallerKey picks, so the two cannot disagree.
+func CallerAuthScheme(r *http.Request) string {
+	for _, h := range authHeaders {
+		if v := headerCredential(r.Header.Get(h)); v != "" && !tenant.LooksLikeToken(v) {
+			if h == "Authorization" {
+				// Bearer is the only Authorization scheme our client can emit. A caller using
+				// some other one (BobShell sends `Apikey <key>`) is still better served by the
+				// right HEADER with a different scheme than by the wrong header entirely.
+				return "bearer"
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
 // CallerKey returns the caller's OWN provider credential — the first auth slot that
 // holds something which is not one of our tokens. "" means the caller presented no
 // credential of their own.
