@@ -315,6 +315,18 @@ break a prefix another tenant is keeping warm — so the lift is deliberately no
 predicate firings in one session is a thin basis; a deployment enabling this should watch
 `cache_miss_reason` and `frozen_flips` on its own traffic first.
 
+**The predictor is trusted, and the outcome is not checked — state that, because it is the real
+ceiling here.** Every request's recorded `usage` says after the fact whether `cache_read` was 0, so a
+wrong prediction is *observable* but nothing feeds it back: the component acts on the prediction and
+never learns that the session's last cold reading was wrong. The price of one false positive is the
+whole suffix re-written at the cache-write rate against an upside priced at the cache-read rate —
+roughly **12.5:1 against**, per token, before counting the re-anchor. That is the entire reason for
+the default, and it is also why the honest upgrade path is *outcome*-driven rather than a better
+clock: record per session whether the previous cold prediction came back with `cache_read = 0`, and
+stop trusting the predictor for that session when it did not. The recorder already has the number
+(`dash/event.go`), so this is plumbing, not new measurement — but it is not built, and until it is,
+"cold" here means "the clock says so", checked against 4 real firings in one session.
+
 **It cannot widen the `MaxCachedIdx < 0` hole.** A compaction reset opens the boundary to -1 on
 turns that then cache-HIT, and there `TailOnly` already returns true for every index — the lift adds
 nothing, because `TailOnlyCold` is a pure widening that only fires when the component opted in *and*
