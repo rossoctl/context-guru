@@ -2002,7 +2002,11 @@ type abVariant struct {
 	SpentUSD        float64 `json:"spent_usd"`
 	SavedUSD        float64 `json:"saved_usd"`
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
-	Incomplete      int64   `json:"incomplete_rows"`
+	// CacheSavedUSD folds the prompt-cache saving into the comparison too. Without it an
+	// A/B between a shallow and a deep pipeline reads the deep one as the winner on
+	// compaction savings alone, while the cache it destroyed is where the money went.
+	CacheSavedUSD float64 `json:"cache_saved_usd"`
+	Incomplete    int64   `json:"incomplete_rows"`
 	// Components is per-component acted/reverted/saved, folded across this variant's
 	// accounts.
 	Components []abComponent `json:"components"`
@@ -2090,6 +2094,7 @@ func (h *Handler) ctlVariants(w http.ResponseWriter, r *http.Request) {
 			v.SpentUSD += g.SpentUSD
 			v.SavedUSD += g.SavedUSD
 			v.BaselineCostUSD += g.BaselineCostUSD
+			v.CacheSavedUSD += g.CacheSavedUSD
 			v.Incomplete += g.Incomplete
 		}
 		// Per-component rows are only available per tenant, so they are folded one account

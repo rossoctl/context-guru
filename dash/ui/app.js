@@ -4690,6 +4690,7 @@ async function loadVariants() {
       el('th', {}, 'Variant'), el('th', {}, 'Accounts'), el('th', {}, 'Requests'),
       el('th', {}, 'Tokens in → out'), el('th', {}, 'Saved'), el('th', {}, 'Spent'),
       el('th', {}, 'Spent / request'), el('th', {}, 'Saved (est.)'),
+      el('th', {}, 'Cache saved'),
       el('th', {}, 'Unpriced'))));
   const body = el('tbody');
   for (const v of rows) {
@@ -4719,6 +4720,10 @@ async function loadVariants() {
         el('span', { class: 'denom' }, 'not per task')),
       el('td', {}, usd(v.saved_usd),
         el('span', { class: 'denom' }, 'counterfactual')),
+      // Beside it, because an arm that compacts deeper can win on the column above while
+      // losing more than that on the prefix cache it destroyed.
+      el('td', {}, usd(v.cache_saved_usd),
+        el('span', { class: 'denom' }, 'prompt cache')),
       // Rows the provider priced for nobody. Where this approaches the request count, the
       // money columns on this row are unknown rather than small.
       el('td', {}, num(v.incomplete_rows),
