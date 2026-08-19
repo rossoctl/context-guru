@@ -10,6 +10,8 @@
 package offload
 
 import (
+	"bytes"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -39,7 +41,7 @@ type Skeleton struct {
 
 type skeletonConfig struct {
 	MinTokens  int    `yaml:"min_tokens"`
-	MarkerMode string `yaml:"marker_mode"` // full (default) | summary | off
+	MarkerMode string `yaml:"marker_mode"` // full only (see newSkeleton)
 }
 
 func newSkeleton(raw []byte) (components.Component, error) {
@@ -49,7 +51,19 @@ func newSkeleton(raw []byte) (components.Component, error) {
 			return nil, err
 		}
 	}
-	return &Skeleton{minTokens: cfg.MinTokens, mode: parseMarkerMode(cfg.MarkerMode)}, nil
+	// Unlike every other Offload, skeleton refuses the irreversible marker modes.
+	// What it drops is CODE BODIES from a file the agent is reading — and unlike a
+	// masked command output, an unrecoverable body is not merely "information the
+	// agent must re-fetch": the agent cannot tell an elided body from an empty one,
+	// so it edits or rewrites the file against a body that never existed. summary
+	// and off leave no stash, so they turn the one lossy component whose loss is
+	// dangerous into a permanent one. Fail loudly at config time rather than run
+	// unrecoverably; the key stays accepted so an existing `marker_mode: full`
+	// config still loads (config.LoadBytes rejects unknown keys).
+	if mode := parseMarkerMode(cfg.MarkerMode); mode != markerFull {
+		return nil, fmt.Errorf("skeleton: marker_mode %q is unrecoverable (elided code bodies could never be restored); only \"full\" is supported", cfg.MarkerMode)
+	}
+	return &Skeleton{minTokens: cfg.MinTokens, mode: markerFull}, nil
 }
 
 func (Skeleton) Name() string                 { return "skeleton" }
@@ -69,6 +83,14 @@ var fenceLang = map[string]string{
 }
 
 func (s *Skeleton) Offload(req *schemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
+	// No stash, no skeleton. effectiveMode degrades full to off when the store cannot
+	// persist, which for every other Offload just means "this drop is irreversible" —
+	// for skeleton it would mean permanently elided code bodies with nothing to expand
+	// back. Decline the whole pass instead (the sibling offloaders still run).
+	if effectiveMode(c, s.mode) != markerFull {
+		rep.Skipped = true
+		return nil, nil
+	}
 	var keys []string
 	emitted := 0
 	for i := range req.Input {
@@ -198,11 +220,24 @@ func isDeclKind(parentKind string) bool {
 		strings.Contains(parentKind, "constructor")
 }
 
-// placeholder preserves a brace-delimited body's outer braces so the skeleton
-// stays syntactically suggestive; otherwise elides to an ellipsis.
+// placeholder replaces one elided body. Two properties matter more than brevity:
+//
+//   - It keeps the body's LINE COUNT (the elided newlines are re-emitted), so every
+//     line after it still sits at its original line number. Otherwise a skeleton and
+//     the file on disk disagree about positions, and an agent that read a line number
+//     from a grep/stack trace and then edited "line 412" edits the wrong line. Runs of
+//     newlines are near-free to tokenize; the marker-inclusive never-worse guard in
+//     tryMark still drops the rewrite if they cost more than the body.
+//   - It is a SYNTAX ERROR in every supported language, so a skeleton written back to
+//     disk fails loudly instead of silently stubbing the file out. A bare "…" is not:
+//     it is valid Python (Ellipsis), so `def f(): …` would compile and quietly turn an
+//     elided body into an empty one. ⟪cg⟫ (expand's placeholder sentinel, so
+//     expand.HasPlaceholder also recognizes an echoed block) cannot be an identifier
+//     in any of them.
 func placeholder(seg []byte) string {
+	nl := strings.Repeat("\n", bytes.Count(seg, []byte{'\n'}))
 	if len(seg) >= 2 && seg[0] == '{' && seg[len(seg)-1] == '}' {
-		return "{ … }"
+		return "{ … }" + nl
 	}
-	return "…"
+	return "… " + expand.SummaryMarker + nl
 }
