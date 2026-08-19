@@ -418,3 +418,51 @@ func TestSplitIsReportedAgainstCachesplit(t *testing.T) {
 		t.Error("cachesplit reported work on a request with nothing to split")
 	}
 }
+
+// The split must be reported to EVERY consumer of a component report, not only to the
+// dashboard.
+//
+// The first version of this fix amended the report after `pipe.Run` returned — which was too
+// late: the pipeline emits each report to the metrics aggregator as it goes, so /stats and the
+// Prometheus component counters kept saying `cachesplit` skipped while the dashboard said it
+// mutated. Two surfaces disagreeing about the same fact is the bug this project has a
+// dedicated test for elsewhere; here the flag is set on the Ctx BEFORE the run instead, so the
+// report is right at its source and there is only one version of the truth.
+func TestSplitIsReportedToTheMetricsEmitterToo(t *testing.T) {
+	full, _, _ := blockWithGitTail(6000)
+	emitted := map[string]components.Report{}
+	pipe := pipeWithEmitter(t, "pipeline: [cachesplit]\n", emitterFunc(func(rep components.Report) {
+		emitted[rep.Component] = rep
+	}))
+
+	BodyOpts(context.Background(), pipe, store.NewMemory(store.Options{}), Opts{
+		Provider: bschemas.Anthropic, Body: sysBody(textBlock(full, true)), Session: "s-emit",
+	})
+	rep, ok := emitted["cachesplit"]
+	if !ok {
+		t.Fatal("no cachesplit report reached the emitter")
+	}
+	if rep.Skipped {
+		t.Error("the emitter — and so /stats and cg_component_runs_total — was told the split " +
+			"did not run, on a request where it did")
+	}
+}
+
+// emitterFunc adapts a function to components.Emitter; only Component is of interest here.
+type emitterFunc func(components.Report)
+
+func (f emitterFunc) Component(rep components.Report) { f(rep) }
+func (emitterFunc) Run(components.RunReport)          {}
+
+func pipeWithEmitter(t *testing.T, yaml string, e components.Emitter) *components.Pipeline {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := cfg.Build(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}

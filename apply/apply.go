@@ -444,6 +444,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// provider's cap of four counts them all (issue #32, defect 2).
 		ExistingBreakpoints: bps.Total(),
 		Mode:                mode,
+		// Set BEFORE the run, so cachesplit's own report is right at the source and every
+		// consumer of it agrees. Amending the report afterwards fixed the dashboard and
+		// left /stats and the Prometheus component counters still saying "skipped",
+		// because the pipeline emits each report to them as it goes.
+		SystemSplit: systemSplit,
 	}
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
 	tr.Breakpoints = bps
@@ -477,26 +482,6 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// here was pure duplicate work on every request, for a path only summarize takes.
 
 	rr := pipe.Run(chat, c)
-	// The volatile-tail split happened HERE, not in the component, because it edits the
-	// top-level `system` array that components never see — so `cachesplit`'s own Reformat
-	// unconditionally reports Skipped, and every report of it read "declined" even on the
-	// requests where the split fired. Two consequences, both wrong: the components table
-	// said the measured −34.1%-cost mechanism never ran, and the dashboard's
-	// cache_saved_protected_usd — the share of prompt-cache savings landing on requests
-	// where a component of ours placed the prefix — was structurally $0.00 on every
-	// deployment, because `mutated` is derived from `skipped`.
-	//
-	// Recording it where the fact is known: the marker component cannot know, and apply can.
-	if rr != nil && systemSplit {
-		for i := range rr.Components {
-			if rr.Components[i].Component == "cachesplit" {
-				// Not Acted: the split saves no content tokens, it moves them out of the
-				// hashed prefix. Mutated-without-acted is exactly how cacheinject already
-				// reads, and the dashboard has a verdict for it.
-				rr.Components[i].Skipped = false
-			}
-		}
-	}
 	tr.Run = rr
 	if debug && rr != nil {
 		logDecisions(lg, rr)

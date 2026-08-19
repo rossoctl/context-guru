@@ -319,8 +319,20 @@ func (Cachesplit) Name() string { return "cachesplit" }
 
 func (Cachesplit) Enabled(*components.Ctx) bool { return true }
 
-// Reformat is intentionally a no-op — see the type doc. The split happens in apply.
-func (Cachesplit) Reformat(_ *schemas.BifrostChatRequest, rep *components.Report, _ *components.Ctx) error {
-	rep.Skipped = true
+// Reformat is intentionally a no-op — see the type doc. The split happens in apply, which
+// reports it here through Ctx.SystemSplit.
+//
+// That flag is the whole reason this method is not a bare `rep.Skipped = true`. Every
+// consumer of a component report — /stats, the Prometheus component counters, the
+// dashboard's components table, and the dashboard's attribution of prompt-cache savings —
+// answers "did this component do anything?" from Skipped. Reporting it unconditionally made
+// the measured -34.1%-cost mechanism read "declined" on the requests where it had just run,
+// and made the share of cache savings attributable to our own prefix placement structurally
+// $0.00 on every deployment.
+//
+// It is Mutated but never Acted: the split removes no content tokens, it moves them out of
+// the hashed prefix. cacheinject reads the same way, and the dashboard has a verdict for it.
+func (Cachesplit) Reformat(_ *schemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) error {
+	rep.Skipped = c == nil || !c.SystemSplit
 	return nil
 }
