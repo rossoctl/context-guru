@@ -30,6 +30,10 @@ func init() { components.Register("toon", newToon) }
 //	[2]{id,name}:
 //	1,Alice
 //	2,Bob
+//
+// The array is rarely at the top level of a tool result: it usually sits inside a
+// tool-runner envelope's string field (see descendEnvelope and encodeTOONIn), which is
+// why toon looked inert on real traffic.
 type Toon struct{ minTokens int }
 
 type toonConfig struct {
@@ -67,8 +71,19 @@ func (t *Toon) Reformat(req *schemas.BifrostChatRequest, rep *components.Report,
 		}
 		toon, ok := encodeTOON(content)
 		if !ok {
-			rep.Gate("not_uniform_object_array")
-			continue
+			// The array is usually not at the top level: of the measured large
+			// low-reduction blobs, 673/673 carry their payload JSON-escaped inside a
+			// string field of a tool-runner envelope, and 537 of those (2,098,762
+			// tokens, 89% of the mass) hold a repeated-record array in there. That is
+			// what `not_uniform_object_array` was really reporting at 72.8%.
+			var why string
+			if toon, why = descendEnvelope(content, encodeTOONIn); why != "" {
+				if why == "envelope_not_object" {
+					why = "not_uniform_object_array" // no table, and no envelope to open
+				}
+				rep.Gate(why)
+				continue
+			}
 		}
 		if schema.TextTokens(toon) >= schema.TextTokens(content) {
 			rep.Gate("already_dense")
@@ -81,6 +96,50 @@ func (t *Toon) Reformat(req *schemas.BifrostChatRequest, rep *components.Report,
 		rep.Skipped = true
 	}
 	return nil
+}
+
+// encodeTOONIn encodes the payload found inside an envelope string field. Two shapes
+// occur in the measured traffic: the payload IS the record array, or the array is a
+// field of a wrapper object — {"total":50,...,"tasks":[{...} x50]}, the `stdout` case.
+// In the second shape the TOON text replaces the array as a JSON *string* value, so
+// the payload still parses as JSON for the agent. Descent stops here: two levels
+// counting the string field, no unbounded walk.
+func encodeTOONIn(inner string) (string, bool) {
+	if out, ok := encodeTOON(inner); ok {
+		return out, true
+	}
+	trimmed := strings.TrimSpace(inner)
+	if trimmed == "" || trimmed[0] != '{' {
+		return "", false
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+		return "", false
+	}
+	acted := false
+	for k, raw := range obj {
+		if len(raw) == 0 || raw[0] != '[' {
+			continue // only an array can be a TOON table; siblings stay byte-exact
+		}
+		out, ok := encodeTOON(string(raw))
+		if !ok {
+			continue
+		}
+		repl, err := marshalJSON(out)
+		if err != nil || len(repl) >= len(raw) {
+			continue
+		}
+		obj[k] = repl
+		acted = true
+	}
+	if !acted {
+		return "", false
+	}
+	out, err := marshalJSON(obj)
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
 }
 
 // encodeTOON renders a JSON array of uniform scalar-valued objects as TOON.
