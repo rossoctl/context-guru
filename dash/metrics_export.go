@@ -78,11 +78,15 @@ type TenantMetricRow struct {
 	CacheSavedUSD float64
 	// CachesplitSavedUSD is the prefix-cache saving that is ours (see Overview).
 	CachesplitSavedUSD float64
-	CGLatencyMs        float64
-	UpstreamMs         float64
-	Sessions           int64
-	ArchivedCount      int64
-	ArchivedBytes      int64
+	// CachesplitHistoricalUSD is the same saving on requests written before it could be
+	// measured per request, valued on read. Filled by the host, which holds the rates —
+	// TenantMetrics itself cannot price anything.
+	CachesplitHistoricalUSD float64
+	CGLatencyMs             float64
+	UpstreamMs              float64
+	Sessions                int64
+	ArchivedCount           int64
+	ArchivedBytes           int64
 }
 
 // TenantMetrics rolls up per-tenant traffic since `since` (epoch ms), for the

@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"math"
@@ -479,4 +480,77 @@ func TestTailChangeIsPerSessionAndSurvivesARestart(t *testing.T) {
 	if _, _, _, changed := rec2.ObserveSplit("t", "t:s", "m", now+7, tailA); !changed {
 		t.Error("a real change after a restart was missed")
 	}
+}
+
+// The pre-instrumentation window: requests written before the split's size and tail could be
+// recorded price at $0.00, which on the page is indistinguishable from "the component did
+// nothing". This values them on READ — nothing stored, nothing rewritten — and the test pins
+// both halves: what it credits, and the four things it refuses to credit.
+func TestHistoricalSplitValuationIsReadOnlyAndConservative(t *testing.T) {
+	db := openTestDB(t)
+	const stable = 5697
+	mk := func(id int64, sess string, ts int64, model string, read, write int64, stableTok int) *Event {
+		e := &Event{TS: ts, SessionID: sess, Model: model, TokensBefore: 100, TokensAfter: 100,
+			FreshInput: 10, CacheRead: read, CacheWrite: write, OutputTokens: 20,
+			SplitStableTokens: stableTok}
+		e.Price(ibmSonnet, true)
+		return e
+	}
+	evs := []*Event{
+		// The measured row that teaches us this model's stable half.
+		mk(1, "s-new", 5000, "aws/claude-sonnet-5", 54_304, 1_000, stable),
+		// Qualifies: pre-instrumentation, session-first, read covers the half, write does not.
+		mk(2, "s-a", 1000, "aws/claude-sonnet-5", 54_304, 1_000, 0),
+		// Same session, second request: mid-session, so it needs a tail hash it does not have.
+		mk(3, "s-a", 1100, "aws/claude-sonnet-5", 55_000, 900, 0),
+		// Session-first but the write is big enough to have re-created the stable half.
+		mk(4, "s-b", 1200, "aws/claude-sonnet-5", 54_304, stable+1, 0),
+		// Session-first but no cache read at all — the overwhelming real case.
+		mk(5, "s-c", 1300, "aws/claude-sonnet-5", 0, 55_000, 0),
+		// A model whose stable half was never measured: not valued, and counted as uncovered.
+		mk(6, "s-d", 1400, "some/unmeasured-model", 54_304, 1_000, 0),
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	h, err := db.CachesplitHistoricalUSD(Filter{TenantAll: true}, staticPricer{ibmSonnet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := float64(stable) * (ibmSonnet.CacheWrite - ibmSonnet.CacheRead)
+	if h.Requests != 1 {
+		t.Errorf("credited %d requests, want exactly the one that qualifies", h.Requests)
+	}
+	if got := h.USD; got < want-1e-9 || got > want+1e-9 {
+		t.Errorf("valued at %.10f, want one session start's worth %.10f", got, want)
+	}
+	if h.Uncovered != 1 {
+		t.Errorf("uncovered = %d, want the one model with no measured stable half", h.Uncovered)
+	}
+	// Read-only: not one stored row may have changed. This is the property that makes the
+	// figure safe to compute over other people's history.
+	var stored float64
+	if err := db.sql.QueryRow(`SELECT COALESCE(SUM(cachesplit_saved_usd),0) FROM requests
+		WHERE split_stable_tokens = 0`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 0 {
+		t.Errorf("the valuation wrote %v into history; it must only ever read", stored)
+	}
+	// And it is absent, not zero, when there are no rates: an unpriced number must never read
+	// as "saved nothing".
+	if none, err := db.CachesplitHistoricalUSD(Filter{TenantAll: true}, nil); err != nil || none.USD != 0 || none.Requests != 0 {
+		t.Errorf("with no pricer: %+v (%v)", none, err)
+	}
+}
+
+// staticPricer prices every model the same, which is what a test wants and what production must
+// never do.
+type staticPricer struct{ p modelinfo.Price }
+
+func (s staticPricer) Price(_ context.Context, model string) (modelinfo.Price, bool) {
+	if model == "some/unmeasured-model" {
+		return modelinfo.Price{}, false
+	}
+	return s.p, true
 }

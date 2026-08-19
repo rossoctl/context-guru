@@ -183,6 +183,24 @@ split**: requests it ran on · snapshot had moved · served from cache). A small
 counts beside it is indistinguishable from a broken component; that is not hypothetical, it is
 what happened while the figure was gated on the session's first request and read ~$0.
 
+**The pre-instrumentation window is valued on read, never stored.** The two facts the live
+figure needs — the size of the half the split moved and the identity of the tail it moved off —
+are recorded per request only since the instrumentation shipped, so every earlier row prices at
+$0.00, which on the page is indistinguishable from "the component did nothing". So the API
+computes a second figure, `cachesplit_historical`, over exactly those rows, and the tile
+**Before we recorded it** shows it. Nothing in history is rewritten: it is recomputed from the
+stored rows on every query.
+
+What makes that legitimate rather than a guess is that the stable half is a property of the
+*agent's system prompt*, not of the request, and it is measurably constant — per model on this
+deployment the recorded minimum and maximum are the same number. `DB.CachesplitSizeSpread`
+reports both so that gets checked rather than assumed. Three limits, all under-crediting: only
+the session's **first** request (a mid-session credit needs the tail hash those rows lack), only
+models whose stable half was actually measured (no median stands in for a model nobody has run),
+and the same read/write test as the live path. It is therefore a floor on a floor. In Grafana it
+is `cg_tenant_cachesplit_historical_usd`, and the *Prefix-cache saved this month* stat adds it to
+the measured one.
+
 **For some accounts it does nothing at all**, and the counts say so. Three of this deployment's
 larger accounts have `cachesplit` running on 125, 1,035 and 1,972 requests and **acting on none
 of them** — their system prompt carries no volatile tail for it to split, either because the big
@@ -204,6 +222,13 @@ wrong in. The independent evidence that the mechanism works is the A/B: **−34.
 
 They are **added**, never nested: `total_saved_usd = net_saved_usd + cachesplit_saved_usd`.
 Both are ours and the token sets are disjoint.
+
+Every figure above is a *difference against a baseline*. The number on the invoice is separate
+and now has its own Grafana stat, **Total cost of all requests**
+(`cg_tenant_total_cost_usd` = `cg_tenant_cost_usd` + `cg_tenant_cg_llm_cost_usd`): the provider's
+billed cost for the traffic plus context-guru's own compaction-model spend, with no
+counterfactual in it. A deployment where the second term is a large fraction of the first is
+paying too much to compact, and the Components tab says which component.
 
 **`cache_saved_usd` is not a saving of ours and is not on the page.** It is what the
 *provider's* prompt cache saved over paying the fresh rate for the same tokens — typically

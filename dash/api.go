@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // API serves the dashboard: the JSON endpoints, the SSE stream, and the embedded
@@ -27,6 +29,8 @@ type API struct {
 	// single-tenant: there is no consent layer, so the operator's flag is the whole
 	// decision. Supplied by the host in hosted mode.
 	tenantCapture func(tenantID string) bool
+	// pricer values the pre-instrumentation split figure on read. nil = that figure is omitted.
+	pricer modelinfo.Pricer
 }
 
 // NewAPI builds the HTTP surface for a recorder. Malformed CIDRs are skipped with
@@ -72,6 +76,12 @@ func (a *API) SetWhoami(fn func(*http.Request) any) { a.whoami = fn }
 // setting the reader should go and turn on — when the operator's service-wide gate was
 // the thing that was off. Left nil in single-tenant mode, where there is no second gate.
 func (a *API) SetTenantCapture(fn func(tenantID string) bool) { a.tenantCapture = fn }
+
+// SetPricer supplies the model rates, which the DB layer deliberately does not hold: the
+// pre-instrumentation split figure is the one number that has to be priced at READ time, because
+// the rows it values were written before there was anything to price. nil leaves that figure
+// absent rather than zero — an unpriced number must not read as "nothing was saved".
+func (a *API) SetPricer(p modelinfo.Pricer) { a.pricer = p }
 
 // Who has to act when there is no transcript to show. This is a SEPARATE axis from the
 // transcript state, deliberately: the state answers "why is this panel empty" and the
@@ -589,6 +599,13 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Best-effort, and omitted rather than zeroed when it cannot be computed: a figure the
+	// dashboard cannot value must read as absent, never as "saved nothing".
+	if a.pricer != nil {
+		if h, err := a.rec.DB().CachesplitHistoricalUSD(f, a.pricer); err == nil {
+			o.CachesplitHistorical = &h
+		}
 	}
 	writeJSON(w, o)
 }

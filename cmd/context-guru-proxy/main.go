@@ -455,7 +455,7 @@ func main() {
 		// off — with no request rows there is nothing to price a cap against and nothing
 		// to roll up per tenant.
 		Spend:          spendChecker(rec),
-		TenantMetrics:  tenantMetrics(rec),
+		TenantMetrics:  tenantMetrics(rec, priceResolver(windows)),
 		Version:        buildinfo.Version,
 		PresetNames:    config.PresetNames(),
 		ComponentNames: components.Names(),
@@ -502,6 +502,14 @@ func main() {
 			return oc.Build(emitter)
 		},
 	})
+
+	// Rates for the one figure that has to be priced on READ: what the volatile-tail split
+	// earned on requests written before there was any per-request split size to price. Set
+	// whether or not this is a hosted deployment — a single-tenant dashboard has the same
+	// history and the same question about it.
+	if rec != nil {
+		h.API().SetPricer(priceResolver(windows))
+	}
 
 	// One identity resolver for both halves of the dashboard: the read routes (dash)
 	// and the write routes (control plane) must never disagree about who the caller is.
@@ -613,19 +621,39 @@ func spendChecker(rec *dash.Recorder) proxy.SpendChecker {
 // tenantMetrics adapts the recorder's per-tenant rollup for the Prometheus exporter.
 // The two row types are structurally identical but declared in different packages
 // (dash must not import proxy), so this converts.
-func tenantMetrics(rec *dash.Recorder) proxy.TenantMetricsSource {
+func tenantMetrics(rec *dash.Recorder, prices modelinfo.Pricer) proxy.TenantMetricsSource {
 	if rec == nil {
 		return nil
 	}
-	return tenantMetricsAdapter{rec}
+	return tenantMetricsAdapter{rec: rec, prices: prices}
 }
 
-type tenantMetricsAdapter struct{ rec *dash.Recorder }
+type tenantMetricsAdapter struct {
+	rec *dash.Recorder
+	// prices values the pre-instrumentation split figure, which is the one number here that
+	// has to be priced on read. nil = that metric reports 0.
+	prices modelinfo.Pricer
+}
 
 func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRow, error) {
 	rows, err := a.rec.DB().TenantMetrics(since)
 	if err != nil {
 		return nil, err
+	}
+	// The pre-instrumentation split figure, per tenant, priced here because this is the layer
+	// that holds the rates. One query per tenant rather than one for all of them: the figure is
+	// scoped by tenant everywhere else it appears, and a shared query would have to be
+	// re-grouped anyway. Best-effort — a tenant it cannot value reports 0 for that metric only.
+	hist := map[string]float64{}
+	if a.prices != nil {
+		for _, r := range rows {
+			h, err := a.rec.DB().CachesplitHistoricalUSD(
+				dash.Filter{Since: since, Tenant: r.TenantID}, a.prices)
+			if err != nil {
+				break
+			}
+			hist[r.TenantID] = h.USD
+		}
 	}
 	out := make([]proxy.TenantMetricRow, 0, len(rows))
 	for _, r := range rows {
@@ -636,7 +664,8 @@ func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRo
 			FreshInput: r.FreshInput, OutputTokens: r.OutputTokens,
 			CostUSD: r.CostUSD, BaselineUSD: r.BaselineUSD, CGLLMCostUSD: r.CGLLMCostUSD,
 			CacheSavedUSD: r.CacheSavedUSD, CachesplitSavedUSD: r.CachesplitSavedUSD,
-			CGLatencyMs: r.CGLatencyMs, UpstreamMs: r.UpstreamMs, Sessions: r.Sessions,
+			CachesplitHistoricalUSD: hist[r.TenantID],
+			CGLatencyMs:             r.CGLatencyMs, UpstreamMs: r.UpstreamMs, Sessions: r.Sessions,
 			ArchivedCount: r.ArchivedCount, ArchivedBytes: r.ArchivedBytes,
 		})
 	}

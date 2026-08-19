@@ -441,8 +441,8 @@
    },
    "gridPos": {
     "h": 5,
-    "w": 4,
-    "x": 0,
+    "w": 3,
+    "x": 12,
     "y": 7
    },
    "targets": [
@@ -504,8 +504,8 @@
    },
    "gridPos": {
     "h": 5,
-    "w": 4,
-    "x": 4,
+    "w": 3,
+    "x": 6,
     "y": 7
    },
    "targets": [
@@ -568,8 +568,8 @@
    },
    "gridPos": {
     "h": 5,
-    "w": 4,
-    "x": 8,
+    "w": 3,
+    "x": 15,
     "y": 7
    },
    "targets": [
@@ -647,8 +647,8 @@
    },
    "gridPos": {
     "h": 5,
-    "w": 4,
-    "x": 12,
+    "w": 3,
+    "x": 18,
     "y": 7
    },
    "targets": [
@@ -2951,18 +2951,18 @@
    }
   },
   {
-   "id": 41,
+   "id": 43,
    "type": "stat",
-   "title": "Prefix-cache saved this month",
-   "description": "What context-guru's volatile-tail split saved: counted only where the split ran, the environment snapshot had MOVED since that session's previous request, and the provider then read at least the stable half from cache while writing less than it. The amount is the stable half, not the request's whole cache_read -- a cachesplit-off control arm still read 45,805 tokens, because the agent's other breakpoints match regardless. Priced against a cache MISS (creation rate, 1.25x fresh) because those tokens carry cache_control. EXPECT IT TO BE SMALL on interactive traffic: Claude Code captures its environment block once per session (measured: one distinct tail hash across nine turns and four commits), and a new session finds the previous prefix already expired unless it started inside the provider's 5-minute TTL (measured: 1,105 of 1,127 session starts read zero from cache). The regime where this pays is back-to-back sessions -- which is what the SWE-bench A/B measured at -34.1% cost. The provider's own total cache saving is cg_tenant_cache_saved_usd, a diagnostic.",
+   "title": "Total cost of all requests",
+   "description": "What every request through this proxy cost IN TOTAL: the provider's billed cost for the traffic plus context-guru's own compaction-model spend. The bill, with no counterfactual in it -- the savings panels beside this one are all differences against a baseline, this is the number on the invoice. cg_tenant_cost_usd is the provider half and cg_tenant_cg_llm_cost_usd is ours; a deployment where the second is a large fraction of the first is paying too much to compact.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
    },
    "gridPos": {
     "h": 5,
-    "w": 4,
-    "x": 16,
+    "w": 3,
+    "x": 0,
     "y": 7
    },
    "targets": [
@@ -2972,9 +2972,67 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "sum(cg_tenant_cachesplit_saved_usd)",
+     "expr": "sum(cg_tenant_cost_usd) + sum(cg_tenant_cg_llm_cost_usd)",
      "editorMode": "code",
-     "legendFormat": "Prefix-cache saved this month",
+     "legendFormat": "Total cost"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "currencyUSD",
+     "decimals": 2,
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 41,
+   "type": "stat",
+   "title": "Prefix-cache saved this month",
+   "description": "What context-guru's volatile-tail split saved: counted only where the split ran, the environment snapshot had MOVED since that session's previous request, and the provider then read at least the stable half from cache while writing less than it. The amount is the stable half, not the request's whole cache_read -- a cachesplit-off control arm still read 45,805 tokens, because the agent's other breakpoints match regardless. Priced against a cache MISS (creation rate, 1.25x fresh) because those tokens carry cache_control. EXPECT IT TO BE SMALL on interactive traffic: Claude Code captures its environment block once per session (measured: one distinct tail hash across nine turns and four commits), and a new session finds the previous prefix already expired unless it started inside the provider's 5-minute TTL (measured: 1,105 of 1,127 session starts read zero from cache). The regime where this pays is back-to-back sessions -- which is what the SWE-bench A/B measured at -34.1% cost. The provider's own total cache saving is cg_tenant_cache_saved_usd, a diagnostic. This stat ADDS cg_tenant_cachesplit_historical_usd: the same saving on requests written before it could be measured per request, valued on read from the model's measured stable half and never stored. Only the session's FIRST request of each of those, because crediting a mid-session turn needs a tail hash those rows do not carry -- so it is a floor on a floor.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 3,
+    "x": 9,
+    "y": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "sum(cg_tenant_cachesplit_saved_usd) + sum(cg_tenant_cachesplit_historical_usd)",
+     "editorMode": "code",
+     "legendFormat": "Prefix-cache saved",
      "instant": true,
      "range": false
     }
@@ -3021,8 +3079,8 @@
    },
    "gridPos": {
     "h": 5,
-    "w": 4,
-    "x": 20,
+    "w": 3,
+    "x": 3,
     "y": 7
    },
    "targets": [
@@ -3032,7 +3090,7 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "sum(cg_tenant_baseline_cost_usd) - sum(cg_tenant_cost_usd) - sum(cg_tenant_cg_llm_cost_usd) + sum(cg_tenant_cachesplit_saved_usd)",
+     "expr": "sum(cg_tenant_baseline_cost_usd) - sum(cg_tenant_cost_usd) - sum(cg_tenant_cg_llm_cost_usd) + sum(cg_tenant_cachesplit_saved_usd) + sum(cg_tenant_cachesplit_historical_usd)",
      "editorMode": "code",
      "legendFormat": "Total avoided this month",
      "instant": true,

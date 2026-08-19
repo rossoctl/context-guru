@@ -590,9 +590,16 @@ function renderTiles(o) {
     // What was here before was the provider's whole cache saving ("Prompt-cache savings")
     // plus the subset that merely co-occurred with our components. On the traffic that
     // measured this, 23x larger — and neither of them a thing we did.
-    tile('cachesplit-saved', 'Prefix-cache savings', costKnown ? usd(o.cachesplit_saved_usd) : 'unknown',
-      num(o.split_credited) + ' of ' + num(o.split_tail_moved) + ' moved-snapshot turns',
-      costKnown && o.cachesplit_saved_usd > 0 ? 'good' : ''),
+    // Measured + the pre-instrumentation window, added, because the question "what has this
+    // component earned" is about the whole history and the split of it into measured and
+    // valued-on-read is an implementation detail of when we started recording. The
+    // decomposition is one group down, and the historical half is absent (not zero) when it
+    // could not be priced.
+    tile('cachesplit-saved', 'Prefix-cache savings',
+      costKnown ? usd(o.cachesplit_saved_usd + histUSD(o)) : 'unknown',
+      num(o.split_credited) + ' of ' + num(o.split_tail_moved) + ' moved-snapshot turns'
+        + (histRequests(o) ? ' + ' + num(histRequests(o)) + ' earlier' : ''),
+      costKnown && (o.cachesplit_saved_usd + histUSD(o)) > 0 ? 'good' : ''),
   ]));
 
   // Why the figure above is the size it is. Without these three counts a small number is
@@ -614,6 +621,14 @@ function renderTiles(o) {
     tile('split-hit-rate', 'Of moved snapshots', o.split_tail_moved > 0
       ? pct((100 * o.split_credited) / o.split_tail_moved) : '—',
       'kept out of the write tier'),
+    // The pre-instrumentation window, valued on read and never stored. Its own tile so the
+    // measured figure above is never confused with an estimate — and "—" when it could not be
+    // priced, because an unpriced number must not read as "saved nothing".
+    tile('split-historical', 'Before we recorded it',
+      o.cachesplit_historical ? usd(o.cachesplit_historical.usd) : '—',
+      o.cachesplit_historical
+        ? num(o.cachesplit_historical.requests) + ' session starts, valued on read'
+        : 'no rates for these models'),
   ]));
 
   host.appendChild(tileGroup('Billed tokens', 'the four tiers the provider charges on', [
@@ -965,6 +980,11 @@ async function loadUsage() {
     emptyState(dayHost, 'Could not load daily usage', err.message, { error: true });
   }
 }
+
+/** histUSD and histRequests read the pre-instrumentation split figure, which the API OMITS
+ *  rather than zeroes when it cannot price it — so every read of it has to tolerate absence. */
+function histUSD(o) { return (o.cachesplit_historical || {}).usd || 0; }
+function histRequests(o) { return (o.cachesplit_historical || {}).requests || 0; }
 
 /** syncDimPicker fills the dimension picker from what the SERVER says it can group by,
  *  so the options can never name a dimension the query would reject. */
