@@ -437,30 +437,58 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 // ComponentRow is one component's economics across the filtered window — the view
 // that makes "which components earn their place" obvious without reading a doc.
 type ComponentRow struct {
-	Component      string  `json:"component"`
-	Kind           string  `json:"kind"`
-	Runs           int64   `json:"runs"`
-	Acted          int64   `json:"acted"`
-	Mutated        int64   `json:"mutated"`
-	Reverted       int64   `json:"reverted"`
-	Skipped        int64   `json:"skipped"`
-	SavedGross     int64   `json:"saved_gross"`
-	SavedUnique    int64   `json:"saved_unique"`
-	OvercountRatio float64 `json:"overcount_ratio"`
+	Component string `json:"component"`
+	Kind      string `json:"kind"`
+	Runs      int64  `json:"runs"`
+	Acted     int64  `json:"acted"`
+	// Acted is the stored `acted` flag: mutated AND removed at least one token
+	// (Event.FromTrace). ActedTokens is the same figure under a name that says so, and
+	// ActedStructural is the rest of `mutated` — runs that changed the request without
+	// removing anything, which is the whole point of a component like cachesplit (it moves a
+	// cache breakpoint) or cacheinject (it places one). Reported apart because one number
+	// could not carry both: cachesplit mutated 1,805 requests on production traffic and
+	// "acted" on 0 of them, so its act rate was permanently 0% and painted red, which is the
+	// same class of bug that was already fixed for the Prometheus counters.
+	ActedTokens     int64   `json:"acted_tokens"`
+	ActedStructural int64   `json:"acted_structural"`
+	Mutated         int64   `json:"mutated"`
+	Reverted        int64   `json:"reverted"`
+	Skipped         int64   `json:"skipped"`
+	SavedGross      int64   `json:"saved_gross"`
+	SavedUnique     int64   `json:"saved_unique"`
+	OvercountRatio  float64 `json:"overcount_ratio"`
 	// SavedUSD is what this component's removals were worth over the window, in dollars,
 	// summed from the per-request figures priced at write time (CompRow.SavedUSD). The sum
 	// over turns IS the amortization: value realized turn by turn as a frozen reduction
 	// replays, not a projection from one turn.
 	SavedUSD float64 `json:"saved_usd"`
+	// SavedUSDEstimated is the same figure for rows written BEFORE saved_usd existed, valued
+	// on read from the tokens and tiers those rows do carry (DB.EstimateComponentSavedUSD).
+	// Kept apart from SavedUSD so a stored dollar and an estimated one are never added
+	// silently; the view adds them and says it did. EstimatedRows is how many component rows
+	// are behind it, UnpricedRows how many removed tokens but could not be valued at all
+	// (no rate for the model, or the request's own accounting was incomplete) — counted
+	// rather than valued at zero, because "unknown" and "worthless" are different claims.
+	SavedUSDEstimated     float64 `json:"saved_usd_estimated"`
+	SavedUSDEstimatedRows int64   `json:"saved_usd_estimated_rows"`
+	SavedUSDUnpricedRows  int64   `json:"saved_usd_unpriced_rows"`
 	// NetUSD is SavedUSD − LLMCostUSD: the honest verdict on this component, and the number
 	// the view must render instead of a bare cost. Negative is a real outcome and is shown
 	// as one — a component underwater over the window says so here.
-	NetUSD          float64 `json:"net_usd"`
-	DurationMsTotal float64 `json:"duration_ms_total"`
-	DurationMsAvg   float64 `json:"duration_ms_avg"`
-	Errors          int64   `json:"errors"`
-	// ActRate is acted/runs: how often the component finds anything to do.
-	ActRate float64 `json:"act_rate"`
+	//
+	// NetUSDWithEstimate is the same verdict once the pre-column history is valued. It equals
+	// NetUSD exactly when nothing needed estimating, and it is the figure the view shows —
+	// judging extract_llm on its full spend against six rows of its saving is not a verdict.
+	NetUSD             float64 `json:"net_usd"`
+	NetUSDWithEstimate float64 `json:"net_usd_with_estimate"`
+	DurationMsTotal    float64 `json:"duration_ms_total"`
+	DurationMsAvg      float64 `json:"duration_ms_avg"`
+	Errors             int64   `json:"errors"`
+	// ActRate is acted/runs: how often the component removes anything. ActRateStructural is
+	// the structural half over the same denominator — see ActedStructural for why a single
+	// rate was a lie for the placement components.
+	ActRate           float64 `json:"act_rate"`
+	ActRateStructural float64 `json:"act_rate_structural"`
 	// LLM-call economics, from the recorded per-call rows. Zero for every deterministic
 	// component, which is the point: only the components that SPEND can be net-negative,
 	// and until now the components view had no dollars in it at all, so it judged an
@@ -514,9 +542,14 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 		if c.SavedUnique > 0 {
 			c.OvercountRatio = float64(c.SavedGross) / float64(c.SavedUnique)
 		}
+		c.ActedTokens = c.Acted
+		if c.ActedStructural = c.Mutated - c.Acted; c.ActedStructural < 0 {
+			c.ActedStructural = 0
+		}
 		if c.Runs > 0 {
 			c.DurationMsAvg = c.DurationMsTotal / float64(c.Runs)
 			c.ActRate = float64(c.Acted) / float64(c.Runs)
+			c.ActRateStructural = float64(c.ActedStructural) / float64(c.Runs)
 		}
 		out = append(out, &c)
 	}
@@ -560,6 +593,9 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	// net is just its saving; only a component that calls a model can come out negative.
 	for _, c := range out {
 		c.NetUSD = c.SavedUSD - c.LLMCostUSD
+		// Equal to NetUSD until DB.EstimateComponentSavedUSD has run, so a caller with no
+		// rates never sees an empty field where a verdict should be.
+		c.NetUSDWithEstimate = c.NetUSD
 	}
 	// Gate totals, summed in SQL with json_each rather than by decoding a map per row in
 	// Go: a filtered window is hundreds of thousands of component rows and the gate map is

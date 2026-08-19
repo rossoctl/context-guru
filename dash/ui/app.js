@@ -616,7 +616,16 @@ function renderTiles(o) {
     tile('saved-usd', 'Net dollars saved', costKnown ? usd(o.net_saved_usd) : 'unknown',
       'baseline − actual − our spend', costKnown ? (o.net_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-unique', 'Tokens saved (unique)', compact(o.saved_unique),
-      'each compaction once', 'accent'),
+      compact(o.replay_tokens) + ' re-earned on later turns', 'accent'),
+    // Risk beside value, at the SAME altitude, because on this traffic it is 22x larger than
+    // the savings two tiles to the left and it used to sit below the fold as a diagnostic
+    // paragraph. It is subtracted from nothing (mutation is not randomly assigned; see the
+    // note under the cache-miss chart) — but a page that shows a $7 saving in 48-point type
+    // and a $157 exposure in a folded footnote is not honest about which number is bigger.
+    tile('prefix-change-exposure', 'Prefix-change exposure',
+      costKnown ? usd(o.prefix_change_cost_all_usd) : 'unknown',
+      num(o.prefix_change_requests_all) + ' turns re-billed · not netted',
+      o.prefix_change_cost_all_usd > 0 ? 'bad' : ''),
     tile('requests', 'Requests', num(o.requests), num(o.sessions) + ' sessions'),
   ], 'headline'));
 
@@ -630,8 +639,26 @@ function renderTiles(o) {
     // gross-minus-restores and made a 10k number look like an arithmetic error.
     tile('saved-adjusted', 'Saved (unique − restores)', compact(o.saved_adjusted),
       compact(o.expand_tokens) + ' asked back', o.saved_adjusted < 0 ? 'bad' : ''),
-    tile('overcount', 'Overcount ratio', o.overcount_ratio ? o.overcount_ratio.toFixed(1) + '×' : '—',
-      'gross ÷ unique'),
+    // Was "Overcount ratio · gross ÷ unique", i.e. the replay presented as a discount
+    // against us. It is the opposite: a reduction frozen at turn N is still absent from every
+    // later turn the agent re-sends, so it is EARNED again on each of them — and that replay
+    // is already priced per turn into baseline_cost_usd and into every component's saved_usd,
+    // at the tier each turn actually paid. Same arithmetic, correct direction.
+    tile('overcount', 'Each reduction re-earned', o.overcount_ratio ? o.overcount_ratio.toFixed(1) + '×' : '—',
+      'gross ÷ unique · already priced in'),
+  ]));
+
+  // The replay, and the ceiling on it. Both were absent: the realized figure was labelled as
+  // an over-count, and how much replay the cache-safety freeze forgoes had no number at all.
+  host.appendChild(tileGroup('Amortization', 'what the freeze forgoes', [
+    tile('replay-realized', 'Replay realized', compact(o.replay_tokens),
+      'reductions re-earned on later turns'),
+    tile('replay-projected', 'Replay ceiling', compact(o.replay_projected_tokens),
+      'if each survived to end of session'),
+    tile('replay-pct', 'Of that ceiling', o.replay_projected_tokens
+      ? pct(o.replay_realized_pct, 1) : '—',
+      compact(o.frozen_tokens) + ' tok frozen for cache safety',
+      o.replay_projected_tokens && o.replay_realized_pct < 25 ? 'bad' : ''),
   ]));
 
   host.appendChild(tileGroup('Cost', costKnown ? 'billed, and the counterfactual' : 'no priced requests in this window', [
@@ -662,11 +689,57 @@ function renderTiles(o) {
       costKnown && (o.cachesplit_saved_usd + histUSD(o)) > 0 ? 'good' : ''),
   ]));
 
+  // The bill, split by the tier it was charged on, and the only defensible denominator for a
+  // compaction percentage. There were no cost columns here at all — only token counts — so
+  // "0.28% of spend" was silently divided by a bill that is two-thirds OUTPUT tokens, which no
+  // input-side transformation can reach. Absent, not zeroed, when the rates are unknown.
+  if (o.tier_costs) {
+    const t = o.tier_costs;
+    const addrPct = t.total_usd > 0 ? (100 * t.addressable_usd) / t.total_usd : null;
+    host.appendChild(tileGroup('Addressable spend', 'the part of the bill compaction can reach', [
+      tile('addressable', 'Addressable spend', usd(t.addressable_usd),
+        addrPct === null ? 'input side (derived)' : 'input side · ' + pct(addrPct, 0)
+          + ' of the bill, derived', 'accent'),
+      tile('saved-of-addressable', 'Saved, of addressable',
+        t.addressable_usd > 0 ? pct((100 * o.total_saved_usd) / t.addressable_usd, 2) : '—',
+        'not of the whole bill', o.total_saved_usd < 0 ? 'bad' : ''),
+      tile('cost-output', 'Output tokens cost', usd(t.output_usd),
+        'nothing here is reachable'),
+      // The reconciliation. These four tiers are priced at TODAY's rates while cost_usd was
+      // priced when each request was served, so the two disagree by whatever the rates moved
+      // over the window. Showing both is the only way a reader can tell a rate change from an
+      // arithmetic error, and hiding the derived total would have been the dishonest option.
+      // The reconciliation, and it is load-bearing rather than decorative. These four tiers
+      // are priced at TODAY's rates over tokens billed at whatever the rate was then, so a
+      // gateway price change inside the window makes the split drift from the bill. Measured
+      // on production: two distinct rate regimes per model, so the drift is real and it is
+      // ~15%. A split that disagrees with the bill by more than a rounding error must SAY it
+      // is an estimate; the alternative is a reader treating "8% of the bill is output" as a
+      // measurement when it is a derivation.
+      tile('tier-reconcile', 'At today\'s rates', usd(t.total_usd),
+        'billed ' + usd(t.stored_usd)
+          + (t.stored_usd > 0 && Math.abs(t.total_usd - t.stored_usd) / t.stored_usd > 0.05
+            ? ' · ' + pct((100 * (t.total_usd - t.stored_usd)) / t.stored_usd, 0) + ' rate drift'
+            : '')
+          + (t.uncovered_requests ? ' · ' + num(t.uncovered_requests) + ' unpriced' : ''),
+        t.stored_usd > 0 && Math.abs(t.total_usd - t.stored_usd) / t.stored_usd > 0.05 ? 'bad' : ''),
+    ]));
+  }
+
   // Why the figure above is the size it is. Without these three counts a small number is
   // indistinguishable from a broken component — which is exactly what happened: gated on the
   // session's first request it read ~$0, and the reason (1,105 of 1,127 session starts had no
   // cache to hit) was invisible.
-  host.appendChild(tileGroup('Prefix split', 'the turns behind the saving above', [
+  // The honest framing of a $0.03 figure. The credit fires only when the environment snapshot
+  // MOVED, and on real Claude Code traffic it does not move within a session — one distinct
+  // tail hash across the 257 turns of the largest measured session, because the snapshot is
+  // captured once per process. So the mechanism is verified and its measured value on this
+  // traffic is ~$0. The −34.1% that the A/B measured was CROSS-SESSION reuse, which this
+  // per-request credit condition cannot see, and inventing a number for it here would be
+  // worse than reporting the zero.
+  host.appendChild(tileGroup('Prefix split',
+    'mechanism verified; the credit only fires when the snapshot MOVES, and it does not move '
+    + 'within a session — the A/B measured cross-session reuse, which this cannot see', [
     // "acted on", not "ran on": the component runs on every request and does nothing on most.
     // Three of this deployment's largest accounts have it running on 125, 1,035 and 1,972
     // requests and acting on NONE of them — their system prompts carry no volatile tail to
@@ -674,10 +747,25 @@ function renderTiles(o) {
     // it is a fact about their prompt, not a fault.
     tile('split-requests', 'Requests it acted on', num(o.split_requests),
       o.split_requests === 0 ? 'no volatile tail to split' : ''),
+    // ONE definition of "moved", shared with the write path: differs from the last non-zero
+    // tail hash recorded for the session, and a session with no earlier one counts as moved.
+    // This tile used to compare against the previous ROW's hash including 0 — where 0 means
+    // "nothing was split on that turn" — while the credit used a map that only remembered
+    // non-zero hashes, so the page read 844 acted / 314 moved / 3 credited and looked broken.
     tile('split-tail-moved', 'Snapshot had moved', num(o.split_tail_moved),
       'the turns it can earn on'),
     tile('split-credited', 'Served from cache', num(o.split_credited),
       'the turns it did earn on'),
+    // The reconciliation, and it is not decoration. A credited turn the recomputation does not
+    // call moved was credited because the write-time map had FORGOTTEN a session it had seen
+    // (proxy restart, or eviction) and read a first sighting where there was none. On the
+    // stored corpus that is all three of them. The write path no longer does this, so a gap
+    // here means pre-fix rows are still inside the window — not that the recount is wrong.
+    tile('split-credited-moved', 'Credited and moved', num(o.split_credited_moved),
+      o.split_credited > o.split_credited_moved
+        ? num(o.split_credited - o.split_credited_moved) + ' credited before the write-path fix'
+        : 'the two definitions agree',
+      o.split_credited > o.split_credited_moved ? 'bad' : ''),
     tile('split-hit-rate', 'Of moved snapshots', o.split_tail_moved > 0
       ? pct((100 * o.split_credited) / o.split_tail_moved) : '—',
       'kept out of the write tier'),
@@ -691,11 +779,16 @@ function renderTiles(o) {
         : 'no rates for these models'),
   ]));
 
+  // Tokens AND what each tier cost. The cost half was missing entirely, which is why the one
+  // fact that explains every small percentage on this page — most of the bill is output —
+  // could only be inferred by dividing columns by hand.
+  const tc = o.tier_costs;
   host.appendChild(tileGroup('Billed tokens', 'the four tiers the provider charges on', [
-    tile('cache-read', 'Cache reads', compact(o.cache_read)),
-    tile('cache-write', 'Cache writes', compact(o.cache_write), '~11.5× a read'),
-    tile('fresh-input', 'Fresh input', compact(o.fresh_input)),
-    tile('output', 'Output tokens', compact(o.output_tokens)),
+    tile('cache-read', 'Cache reads', compact(o.cache_read), tc ? usd(tc.cache_read_usd) : null),
+    tile('cache-write', 'Cache writes', compact(o.cache_write),
+      tc ? usd(tc.cache_write_usd) + ' · ~11.5× a read' : '~11.5× a read'),
+    tile('fresh-input', 'Fresh input', compact(o.fresh_input), tc ? usd(tc.fresh_usd) : null),
+    tile('output', 'Output tokens', compact(o.output_tokens), tc ? usd(tc.output_usd) : null),
   ]));
 
   host.appendChild(tileGroup('Latency and safety', 'the price of compaction', [
@@ -770,10 +863,25 @@ function renderSafety(o) {
   // more. One hue throughout, because five hues would imply five plotted series;
   // the one row that is a genuine PENALTY rather than a price gets the status colour.
   barRows($('#safety'), [
+    // The benefit half, in dollars. This row has always PROMISED it in prose — "its benefit is
+    // the cache reads it preserved" — and never computed it, so 396.5M frozen tokens sat here
+    // as a cost with no counterpart. Two figures, because one would have been ambiguous: what
+    // the frozen prefix was billed as at the read rate, and what re-creating it at the write
+    // rate instead would have added. The second is the freeze's actual purchase.
     { label: 'Frozen for cache safety', value: s.frozen_tokens || 0, display: compact(s.frozen_tokens) + ' tok',
-      formula: 'bought ' + compact(o.cache_read) + ' cheap cache reads',
-      desc: 'Compaction we deliberately did NOT do on the already-cached prefix. The benefit ' +
-            'is the ' + compact(o.cache_read) + ' cache-read tokens that stayed cheap; the cost is this.' },
+      formula: s.priced
+        ? 'billed ' + usd(s.frozen_read_usd) + ' as reads · avoided ' + usd(s.frozen_write_risk_usd)
+          + ' of re-creation'
+        : 'unpriced — no rates for these models',
+      desc: 'Compaction we deliberately did NOT do on the already-cached prefix, because '
+            + 'rewriting a cached prefix re-bills the whole suffix at the creation rate. '
+            + (s.priced
+              ? 'Those ' + compact(s.frozen_tokens) + ' tokens were billed as cache reads for '
+                + usd(s.frozen_read_usd) + '; re-creating them instead would have added '
+                + usd(s.frozen_write_risk_usd) + ', which is what the freeze bought. The cost '
+                + 'is the compaction not done — see the amortization ceiling above.'
+              : 'The benefit cannot be priced in this window: no rates for these models. '
+                + 'Reported as unpriced rather than as zero.') },
     { label: 'Restored after offload', value: s.restored_tokens || 0, display: compact(s.restored_tokens) + ' tok',
       color: 'var(--bad)', formula: 'paid for twice',
       desc: 'Content we removed and the model asked back for — a premature offload, paid for twice.' },
@@ -802,13 +910,19 @@ function renderSafety(o) {
 function renderPrefixChangeCost(o) {
   const n = $('#prefix-change-note');
   if (!n) return;
-  const v = o.prefix_change_cost_usd;
-  n.hidden = !v;
-  if (!v) return;
+  const v = o.prefix_change_cost_usd, all = o.prefix_change_cost_all_usd;
+  // Shown whenever EITHER figure exists. It used to hide on the conditional one alone, so a
+  // window with a large prefix-change bill and no mutation adjacent to it said nothing at all.
+  n.hidden = !v && !all;
+  if (n.hidden) return;
   clear(n);
-  n.appendChild(el('strong', { text: 'Diagnostic, not netted: ' + usd(v) }));
+  n.appendChild(el('strong', { text: 'Diagnostic, not netted: ' + usd(all)
+    + ' over ' + num(o.prefix_change_requests_all) + ' turns' }));
   n.appendChild(document.createTextNode(
-    ' was billed on turns whose cache missed with prefix_change directly after a turn we '
+    ' re-billed a whole prompt on a changed prefix — the failure mode this project exists to '
+    + 'avoid, and larger than every saving on this page. Of that, ' + usd(v) + ' over '
+    + num(o.prefix_change_requests) + ' turns'
+    + ' was billed on turns whose cache missed directly after a turn we '
     + 'mutated. That is where "we rewrote history and the next turn re-billed the whole '
     + 'prompt" is a live hypothesis — but components act on exactly the long, churny turns '
     + 'most likely to break a prefix by themselves, so this is a correlation. It is '
@@ -857,8 +971,17 @@ async function loadOverview() {
       prefix_change: 'prefix change', unknown: 'unknown', '': 'no cache data',
     }, 'Every request carries a cache attribution once one has been captured in this window.');
     renderPrefixChangeCost(o);
+    // "below every trigger" is gone. The label named components.Trigger, which is not
+    // consulted in that decision at all — and it was believed: it was reported upward as
+    // "$744.62 of spend was gated by the trigger" and cost an investigation to disprove. The
+    // real cause is that every deployed component rewrites `role == tool` content and nothing
+    // else, so a request with no tool output has nothing any of them can touch. The legacy
+    // slug is mapped to the same words as its replacement so one history reads as one cause.
     renderDistribution('#reasons', o.uncompressed, {
-      '': 'compacted', bypassed: 'bypassed by header', below_trigger: 'below every trigger',
+      '': 'compacted', bypassed: 'bypassed by header',
+      no_tool_output: 'no tool output to rewrite',
+      no_candidate: 'no candidate in the eligible tail',
+      below_trigger: 'no candidate in the eligible tail (pre-rename)',
       cache_frozen: 'frozen for cache safety', found_nothing: 'nothing to remove',
       reverted: 'all components reverted', no_messages: 'no messages',
     }, 'Nothing was skipped — every captured request in this window was compacted.');
@@ -888,21 +1011,29 @@ function renderSeries(buckets) {
     }
     return;
   }
-  // Cumulative cost: the headline chart. The area between the lines is the money.
+  // Cumulative NET SAVING, not the two cost lines it is the difference of.
+  //
+  // This used to draw baseline and actual and tell the reader "the area between the lines is
+  // the money". On real traffic those lines are 0.28% apart, so there was no visible area and
+  // the caption described something the chart could not show. The saving itself is the series
+  // worth plotting: it starts at zero, so its own scale is the scale of the money, and it
+  // crosses below zero exactly when our own spend overtakes what compaction avoided — which is
+  // the one event this chart should make impossible to miss. The two cost totals are still on
+  // the page, as tiles, where a number that differs in the third decimal belongs.
   let cumBase = 0, cumAct = 0;
-  const base = [], act = [];
+  const saved = [];
   for (const b of buckets) {
     cumBase += b.baseline_cost_usd;
     cumAct += b.cost_usd + b.cg_llm_cost_usd;
-    base.push([b.ts, cumBase]);
-    act.push([b.ts, cumAct]);
+    saved.push([b.ts, cumBase - cumAct]);
   }
   const anyCost = cumBase > 0 || cumAct > 0;
   if (anyCost) {
     lineChart($('#chart-cost'), [
-      { name: 'Without context-guru (cumulative)', color: SERIES[1], points: base },
-      { name: 'With context-guru (incl. our own spend)', color: SERIES[0], points: act, area: true },
-    ], { band: true, yFmt: usd, tipFmt: usd, label: 'cumulative cost with and without context-guru' });
+      { name: 'Cumulative net saving (baseline − billed − our own spend)',
+        color: SERIES[0], points: saved, area: true },
+    ], { yFmt: usd, tipFmt: usd,
+      label: 'cumulative net saving; below zero means context-guru cost more than it saved' });
   } else {
     emptyState($('#chart-cost'), 'No priced requests yet',
       'Cost needs provider usage data (all four token tiers) and a known model price. Token charts below still work.');
@@ -955,7 +1086,9 @@ function verdict(c) {
     // a frozen reduction replaying across a session is already in it) minus llm_cost_usd.
     // The browser used to compute this from a hardcoded rate table AND from calls-only
     // savings, which both mispriced it and threw away ~93% of the realized value.
-    const net = c.net_usd || 0;
+    // The figure the TABLE shows, estimate included. Judging a component's spend against the
+    // six rows of its saving that happen to postdate a column is not a verdict.
+    const net = c.net_usd_with_estimate || 0;
     if (net < -0.01) return ['underwater ' + usd(net), 'missing'];
     if (net <= 0) return ['break-even', 'partial'];
     return ['net ' + usd(net), 'complete'];
@@ -968,7 +1101,9 @@ function verdict(c) {
   if (c.duration_ms_total > 1000 && c.duration_ms_total / c.saved_unique > 0.01) {
     return ['expensive for its yield', 'partial'];
   }
-  if (c.act_rate < 0.02) return ['rarely fires', 'partial'];
+  // Both halves, or a component that only ever moves a cache breakpoint is "rarely fires"
+  // on every workload — which is what cachesplit read, on 1,805 requests it mutated.
+  if (c.act_rate + (c.act_rate_structural || 0) < 0.02) return ['rarely fires', 'partial'];
   return ['earning its place', 'complete'];
 }
 
@@ -1097,13 +1232,20 @@ function gateSummary(gates) {
  * COMPONENT_SORT is one field per column of the components table, in column order. null is
  * a column with nothing orderable in it (the gate summary, the verdict prose).
  */
-const COMPONENT_SORT = ['component', 'kind', 'runs', 'acted', 'act_rate', 'reverted',
+const COMPONENT_SORT = ['component', 'kind', 'runs', 'acted_tokens', 'acted_structural',
+  'act_rate', 'reverted',
   'saved_unique', 'saved_gross', 'overcount_ratio', 'duration_ms_total', 'duration_ms_avg',
-  'llm_calls', 'llm_cost_usd', 'saved_usd', 'net_usd', 'errors', null, null];
+  'llm_calls', 'llm_cost_usd', 'saved_usd', 'net_usd_with_estimate', 'errors', null, null];
+
+/** compSaved is a component's dollar saving over the window: the figure stored per request
+ *  plus the read-time valuation of the rows written before that column existed. Added here
+ *  rather than server-side so the two halves stay separable in the API — and the tooltip on
+ *  every cell says how much of it is which. */
+function compSaved(c) { return (c.saved_usd || 0) + (c.saved_usd_estimated || 0); }
 
 async function loadComponents() {
   const body = clear($('#components-body'));
-  loadingRows(body, 18);
+  loadingRows(body, 19);
   try {
     const { components: raw } = await api('components');
     // /api/components has no LIMIT — every component that ran in the window is in this
@@ -1112,7 +1254,7 @@ async function loadComponents() {
     syncSortHeads('[data-testid=components-table]', COMPONENT_SORT);
     clear(body);
     if (!components.length) {
-      tableMessage(body, 18, 'No component runs captured',
+      tableMessage(body, 19, 'No component runs captured',
         'Run some traffic through the proxy with a non-empty pipeline.');
       emptyState($('#chart-comp'), 'No component data',
         'This chart fills in once a component has saved something.');
@@ -1124,7 +1266,14 @@ async function loadComponents() {
         el('td', {}, el('code', { text: c.component })),
         el('td', { text: c.kind || '—' }),
         el('td', { class: 'num', text: num(c.runs) }),
-        el('td', { class: 'num', text: num(c.acted) }),
+        // Two columns, because "acted" meant "removed tokens" and a component whose whole job
+        // is where a cache breakpoint goes therefore read 0 acted / 0.0% forever and painted
+        // red. cachesplit mutated 1,805 requests on measured traffic and "acted" on none.
+        el('td', { class: 'num', text: num(c.acted_tokens) }),
+        el('td', {
+          class: 'num', title: 'mutated the request without removing tokens — cache placement, '
+            + 'markers, breakpoints. Not a failure to act.',
+        }, num(c.acted_structural) || '—'),
         el('td', { class: 'num', text: pct(c.act_rate * 100, 1) }),
         el('td', { class: 'num', text: num(c.reverted) }),
         el('td', { class: 'num', text: compact(c.saved_unique) }),
@@ -1138,11 +1287,25 @@ async function loadComponents() {
         // worth over the window — summed per turn, so a frozen reduction replaying across a
         // session is already amortized into it — and net_usd is the verdict. Both from the
         // server, priced at the model this deployment actually bills.
-        el('td', { class: 'num', text: usd(c.saved_usd) }),
+        // saved_usd is stored per request; saved_usd_estimated is the same arithmetic applied
+        // on READ to the rows written before that column existed. Without the second half this
+        // column showed $0.00 for every component over all history predating the last restart
+        // — 6 populated rows out of 100,579 on production — and the most-read tab in the
+        // dashboard therefore said the product was worthless. The dagger says how much of the
+        // figure is valued rather than recorded; it is never silently merged.
         el('td', {
-          class: 'num' + (c.net_usd < 0 ? ' warn-text' : ''),
-          title: 'saved ' + usd(c.saved_usd) + ' − own LLM cost ' + usd(c.llm_cost_usd || 0),
-        }, usd(c.net_usd)),
+          class: 'num',
+          title: c.saved_usd_estimated
+            ? usd(c.saved_usd) + ' recorded + ' + usd(c.saved_usd_estimated) + ' valued on read '
+              + 'over ' + num(c.saved_usd_estimated_rows) + ' rows written before the column existed'
+              + (c.saved_usd_unpriced_rows
+                ? ' · ' + num(c.saved_usd_unpriced_rows) + ' rows unpriceable' : '')
+            : 'recorded per request',
+        }, usd(compSaved(c)) + (c.saved_usd_estimated ? '†' : '')),
+        el('td', {
+          class: 'num' + (c.net_usd_with_estimate < 0 ? ' warn-text' : ''),
+          title: 'saved ' + usd(compSaved(c)) + ' − own LLM cost ' + usd(c.llm_cost_usd || 0),
+        }, usd(c.net_usd_with_estimate)),
         el('td', { class: 'num', text: num(c.errors) }),
         el('td', {}, gateSummary(c.gates)),
         el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext }))));
@@ -1161,7 +1324,7 @@ async function loadComponents() {
     })), { emptyDetail: 'No component saved any content tokens in this window.' });
   } catch (err) {
     if (aborted(err)) return;
-    tableMessage(body, 18, 'Could not load components', String(err.message || err), { error: true });
+    tableMessage(body, 19, 'Could not load components', String(err.message || err), { error: true });
   }
 }
 

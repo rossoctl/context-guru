@@ -575,3 +575,182 @@ func TestPrefixChangeCostIsAnObservationNotADebt(t *testing.T) {
 		}
 	}
 }
+
+// TestPreColumnComponentRowsAreValuedNotZeroed is the fix for the loudest complaint this
+// dashboard has had: "I don't see numbers that represent our value".
+//
+// request_components.saved_usd is an additive column. It arrived with a restart, so every row
+// written before that restart reads exactly 0.00 — measured on production, 6 populated rows of
+// 100,579, which made the most-read tab report $0.00 for `format` over 483,697 tokens removed
+// and a flat −$17.48 for extract_llm (its whole spend against six rows of its saving). The
+// write path was never broken; there was simply no read-time fallback, unlike the one
+// split_stable_tokens already had.
+//
+// The estimate is only legitimate if it is the SAME arithmetic as the write path over the same
+// inputs, so that is what this asserts: price an event, keep the figures, blank the column the
+// way history has it blanked, and require the read path to reproduce them to the cent. It runs
+// over all three billing tiers, because the whole subtlety is that a replayed reduction is
+// worth the tier the request actually paid.
+func TestPreColumnComponentRowsAreValuedNotZeroed(t *testing.T) {
+	for _, tc := range tierCases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			e := perComponentEvent(tc.read, tc.write, tc.fresh)
+			e.Price(ibmOpus, true)
+			if err := db.insertBatch([]*Event{e}); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]float64{}
+			for _, c := range e.Components {
+				want[c.Component] = c.SavedUSD
+			}
+			// Exactly how history looks: the rows are there, the column is not.
+			if _, err := db.sql.Exec(`UPDATE request_components SET saved_usd = 0`); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := db.Components(Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range rows {
+				if r.SavedUSD != 0 {
+					t.Fatalf("%s: stored figure survived the blanking", r.Component)
+				}
+			}
+			if err := db.EstimateComponentSavedUSD(Filter{}, staticPricer{ibmOpus}, rows); err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range rows {
+				// A component that removed nothing is worth $0, and must be left at $0 with
+				// no estimated rows behind it: a valuation that invents value for an inert
+				// component is the failure mode this whole change has to avoid.
+				if want[r.Component] == 0 {
+					if r.SavedUSDEstimated != 0 || r.SavedUSDEstimatedRows != 0 {
+						t.Errorf("%s removed nothing and was valued at %.10f over %d rows",
+							r.Component, r.SavedUSDEstimated, r.SavedUSDEstimatedRows)
+					}
+					continue
+				}
+				if math.Abs(r.SavedUSDEstimated-want[r.Component]) > 1e-12 {
+					t.Errorf("%s valued on read at %.10f, want the write path's %.10f — the "+
+						"estimate is only defensible while it is the same arithmetic",
+						r.Component, r.SavedUSDEstimated, want[r.Component])
+				}
+				if r.SavedUSDEstimatedRows != 1 {
+					t.Errorf("%s: %d rows behind the estimate, want 1", r.Component, r.SavedUSDEstimatedRows)
+				}
+				// The verdict has to move with it, or the tab still judges a component's
+				// whole spend against a saving of zero.
+				if wantNet := r.SavedUSD + r.SavedUSDEstimated - r.LLMCostUSD; math.Abs(r.NetUSDWithEstimate-wantNet) > 1e-12 {
+					t.Errorf("%s net_usd_with_estimate = %.10f, want %.10f",
+						r.Component, r.NetUSDWithEstimate, wantNet)
+				}
+			}
+		})
+	}
+}
+
+// TestUnpricedRowsAreCountedNotValued: a row whose request was never priced must be reported
+// as uncovered, never valued at zero. "We cannot say" and "it was worth nothing" are the two
+// answers this dashboard is not allowed to confuse — an unpriced figure that reads as $0.00 is
+// the exact defect being fixed, reintroduced from the other side.
+func TestUnpricedRowsAreCountedNotValued(t *testing.T) {
+	db := openTestDB(t)
+	e := perComponentEvent(80_000, 0, 10)
+	e.Price(modelinfo.Price{}, false) // no usage data: partial accounting, nothing priced
+	if e.TokenAccounting == AccountingComplete {
+		t.Fatal("fixture is priced; this test needs an unpriced request")
+	}
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Components(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EstimateComponentSavedUSD(Filter{}, staticPricer{ibmOpus}, rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.SavedUSDEstimated != 0 {
+			t.Errorf("%s: an unpriced request was valued at %.10f", r.Component, r.SavedUSDEstimated)
+		}
+		if r.SavedGross > 0 && r.SavedUSDUnpricedRows == 0 {
+			t.Errorf("%s removed %d tokens on an unpriced request and reports no uncovered rows",
+				r.Component, r.SavedGross)
+		}
+	}
+}
+
+// TestAmnesiaIsNotAMovedSnapshot pins the write half of the single "moved" definition.
+//
+// The tail map is process-scoped and pruned by age, so a restart or an eviction leaves a
+// mid-session request looking like a first sighting. Crediting that as a moved snapshot is how
+// the only three credited requests on the production corpus were paid: a faithful
+// recomputation calls none of them moved, because their tail had not in fact changed.
+func TestAmnesiaIsNotAMovedSnapshot(t *testing.T) {
+	r, err := NewRecorder(Options{DBPath: filepath.Join(t.TempDir(), "a.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, _, _, changed := r.ObserveSplit("", "s1", "m", 1000, 0xAA); !changed {
+		t.Error("a session's genuinely first request has nothing to match and must count as moved")
+	}
+	if _, _, _, changed := r.ObserveSplit("", "s1", "m", 2000, 0xAA); changed {
+		t.Error("an unchanged tail was reported as moved")
+	}
+	if _, _, _, changed := r.ObserveSplit("", "s1", "m", 3000, 0xBB); !changed {
+		t.Error("a changed tail was not reported as moved")
+	}
+	// Amnesia: the tail is forgotten, the session is not. This is a restart mid-session.
+	r.mu.Lock()
+	delete(r.lastTail, "s1")
+	r.mu.Unlock()
+	if _, _, _, changed := r.ObserveSplit("", "s1", "m", 4000, 0xBB); changed {
+		t.Error("a session we have SEEN but whose tail we forgot was credited as a moved " +
+			"snapshot; that is amnesia, not a move, and it pays credit for nothing")
+	}
+}
+
+// TestProviderCacheSavingIsNeverOurs is a structural guard on the single most dangerous number
+// on this page.
+//
+// `cache_saved_usd` is what the PROVIDER's prompt cache saved — $3,339.18 on the production
+// corpus — and it sits one column away from context-guru's own $7.07. Surfacing it as "what
+// context-guru saved" would overstate the product by ~470x, and the agent places most of those
+// breakpoints itself. Two properties keep that from happening by accident rather than by
+// remembering: the server must never add it into a saving, and the page must never render it
+// without naming whose mechanism it is.
+func TestProviderCacheSavingIsNeverOurs(t *testing.T) {
+	// A window whose provider cache saved a fortune and whose compaction saved nothing must
+	// still report nothing. TotalSavedUSD is the only figure the headline calls "avoided".
+	o := &Overview{CacheSavedUSD: 3339.18, NetSavedUSD: 0, CachesplitSavedUSD: 0}
+	o.TotalSavedUSD = o.NetSavedUSD + o.CachesplitSavedUSD
+	if o.TotalSavedUSD != 0 {
+		t.Fatalf("total_saved_usd = %.2f with no saving of ours; the provider's cache leaked "+
+			"into our headline", o.TotalSavedUSD)
+	}
+	// And every place the page renders it says whose it is. Checked over a window of lines
+	// rather than one, because the label is often on the line after the value.
+	for _, name := range []string{"ui/app.js", "ui/index.html"} {
+		b, err := uiFS.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(string(b), "\n")
+		for i, ln := range lines {
+			// cachesplit_saved_usd IS ours and contains the same substring.
+			if !strings.Contains(ln, "cache_saved_usd") || strings.Contains(ln, "cachesplit_saved_usd") {
+				continue
+			}
+			lo, hi := max(0, i-3), min(len(lines), i+4)
+			ctx := strings.ToLower(strings.Join(lines[lo:hi], "\n"))
+			if !strings.Contains(ctx, "provider") {
+				t.Errorf("%s:%d renders cache_saved_usd without naming the provider: %s\n"+
+					"That figure is ~470x our own saving and it is not ours.",
+					name, i+1, strings.TrimSpace(ln))
+			}
+		}
+	}
+}

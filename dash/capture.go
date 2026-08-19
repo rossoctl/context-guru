@@ -482,7 +482,23 @@ func (r *Recorder) ObserveSplit(tenant, session, model string, now int64, tailHa
 	}
 	if tailHash != 0 {
 		prevTail, had := r.lastTail[session]
-		tailChanged = !had || prevTail != tailHash
+		switch {
+		case had:
+			tailChanged = prevTail != tailHash
+		case !seenSession:
+			// Genuinely the first request of this session: nothing to match, so it counts as
+			// moved. This is the same rule the read-time recomputation applies (see the SQL
+			// in Overview, splitMoved), and the two now count the same thing.
+			tailChanged = true
+		default:
+			// We have SEEN this session but do not remember its tail: this map is
+			// process-scoped and pruned by age, so a proxy restart or an eviction lands here
+			// mid-session. That is amnesia, not a moved snapshot, and treating it as one paid
+			// real credit for nothing — measured, all three credited requests on the
+			// production corpus were this case, and a faithful recomputation calls none of
+			// them moved. Refusing the credit is the only safe direction.
+			tailChanged = false
+		}
 		r.lastTail[session] = tailHash
 	}
 	r.lastSeen[session] = now

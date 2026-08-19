@@ -994,6 +994,19 @@ func TestUINeverShowsABareCost(t *testing.T) {
 		{SessionRow{}, "in_flight", "a young session's incomplete amortization would read as a verdict"},
 		{SessionRow{}, "tenant_id", "a manager's service-wide list would be unattributable"},
 		{Overview{}, "prefix_change_cost_usd", "the largest figure on the corpus would be invisible"},
+		// The value pass. Every one of these is the missing half of a pair that already
+		// shipped: a component dollar column populated on 6 rows of 100,579, a saving
+		// divided by a bill that is mostly output tokens, a freeze shown as a cost with no
+		// benefit, a replay shown only as a discount, and an exposure larger than every
+		// saving on the page rendered as a folded footnote.
+		{ComponentRow{}, "saved_usd_estimated", "the components tab would show $0.00 for all history predating the column"},
+		{ComponentRow{}, "net_usd_with_estimate", "the verdict would judge a component's whole spend against six rows of its saving"},
+		{ComponentRow{}, "acted_structural", "a component whose job is cache placement would read 0% act rate forever"},
+		{Overview{}, "replay_projected_tokens", "the headroom the cache freeze forgoes would have no number"},
+		{Overview{}, "prefix_change_cost_all_usd", "the whole exposure of the failure mode would stay below the fold"},
+		{Overview{}, "split_credited_moved", "credit paid on a forgotten session would be indistinguishable from a moved snapshot"},
+		{SafetyCost{}, "frozen_write_risk_usd", "the freeze would keep being shown as a cost with no counterpart"},
+		{TierCosts{}, "addressable_usd", "savings would keep being divided by output tokens nothing can touch"},
 	} {
 		rt := reflect.TypeOf(c.v)
 		if !hasTag(c.v, c.field) {

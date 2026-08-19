@@ -555,6 +555,34 @@ func (h *Handler) renderMetrics() string {
 		promLine(&b, "cg_archive_sessions_total", "", float64(h.rec.ArchivedSessionCount()))
 		promHeader(&b, "cg_archive_bytes_total", "Bytes stored in cold storage.", "counter")
 		promLine(&b, "cg_archive_bytes_total", "", float64(h.rec.ArchivedBytes()))
+		// --- the value of the thing --------------------------------------------
+		//
+		// Until these four existed /metrics could plot every input to the question "is this
+		// proxy worth running" and not the answer: tokens, ratios, latency, cache outcomes,
+		// and exactly one component's net value in dollars. The dashboard could show it and
+		// Grafana could not. Month to date, from the store, matching the per-tenant window
+		// below so a service-wide panel and a per-tenant one can never disagree.
+		now := time.Now().UTC()
+		monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+		if v, err := h.rec.ValueMetrics(monthStart); err != nil {
+			// Never silently: a family that vanishes reads as "no traffic" in Grafana.
+			slog.Warn("context-guru: value metrics query failed; the dollar series are absent from this scrape",
+				"err", err)
+		} else {
+			promHeader(&b, "cg_baseline_cost_usd", monthToDateCaveat(
+				"What this month's traffic would have cost with nothing removed: the billed cost plus the removed tokens priced at the tier each request actually paid. Subtract cg_saved_usd to get the bill."), "gauge")
+			promLine(&b, "cg_baseline_cost_usd", "", v.BaselineUSD)
+			promHeader(&b, "cg_saved_usd", monthToDateCaveat(
+				"Provider spend compaction avoided this month: baseline minus billed. BEFORE context-guru's own model spend — use cg_net_saved_usd for the verdict."), "gauge")
+			promLine(&b, "cg_saved_usd", "", v.SavedUSD)
+			promHeader(&b, "cg_net_saved_usd", monthToDateCaveat(
+				"cg_saved_usd minus what context-guru's own compaction models cost. GOES NEGATIVE when a configuration spends more than it saves; that is a real outcome and this series reports it rather than clamping at zero. This is the number to alert on."), "gauge")
+			promLine(&b, "cg_net_saved_usd", "", v.NetSavedUSD)
+			promHeader(&b, "cg_frozen_tokens_total", monthToDateCaveat(
+				"Content tokens cache-aware compaction deliberately left alone because they sat inside the provider's already-cached prefix. The headroom, and usually the explanation for a small cg_saved_usd: rewriting a cached prefix costs more than the tokens it removes, so this is a cost paid on purpose. DO NOT read a low value as \"the cache is cold, it is safe to rewrite deep history\". Zero here means OUR OWN prefix tracker was reset (a restart, an evicted entry), not that the provider dropped anything: measured, 3,092 such requests still cache-HIT for 404,376,878 cache-read tokens, and acting on that reading was worth about -$708 on sonnet-5 against +$0.62 of upside."), "gauge")
+			promLine(&b, "cg_frozen_tokens_total", "", float64(v.FrozenTokens))
+		}
+
 		promHeader(&b, "cg_archive_configured", "1 when cold storage is configured and reachable.", "gauge")
 		// RemoteReachable, not RemoteName: the name is now reported for a CONFIGURED
 		// remote even when the boot probe failed (so the dashboard can distinguish "not

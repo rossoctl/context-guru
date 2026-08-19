@@ -229,32 +229,45 @@ func TestUncompressedReasonBuckets(t *testing.T) {
 	cases := []struct {
 		name string
 		tr   apply.Trace
-		want string
+		// tools is Meta.Tools, filled before FromTrace on the real path. It is what splits
+		// "nothing mutated" into a request that COULD not carry a tool_result and one that
+		// could and held nothing any component recognised.
+		tools int
+		want  string
 	}{
-		{"bypassed", apply.Trace{Bypassed: true}, ReasonBypassed},
-		{"no run", apply.Trace{}, ReasonNoMessages},
-		{"no messages", apply.Trace{Messages: 0, Run: &components.RunReport{}}, ReasonNoMessages},
-		{"nothing triggered", apply.Trace{Messages: 3, Run: &components.RunReport{
+		{"bypassed", apply.Trace{Bypassed: true}, 0, ReasonBypassed},
+		{"no run", apply.Trace{}, 0, ReasonNoMessages},
+		{"no messages", apply.Trace{Messages: 0, Run: &components.RunReport{}}, 0, ReasonNoMessages},
+		// Nothing mutated, and the request declared no tools — so it cannot have carried a
+		// tool_result, which is the only content any deployed component rewrites. This used to
+		// be reported as ReasonBelowTrigger, which named a mechanism that is not consulted in
+		// the decision at all; see the constants for what that label cost.
+		{"no tool output", apply.Trace{Messages: 3, Run: &components.RunReport{
 			TokensBefore: 100, TokensAfter: 100,
 			Components: []components.Report{{Component: "extract", Skipped: true}},
-		}}, ReasonBelowTrigger},
+		}}, 0, ReasonNoToolOutput},
+		{"tools present, no candidate", apply.Trace{Messages: 3, Run: &components.RunReport{
+			TokensBefore: 100, TokensAfter: 100,
+			Components: []components.Report{{Component: "extract", Skipped: true}},
+		}}, 12, ReasonNoCandidate},
 		{"all frozen", apply.Trace{Messages: 3, CacheAware: true, AttemptedTokens: 0,
 			Run: &components.RunReport{TokensBefore: 100, TokensAfter: 100,
-				Components: []components.Report{{Component: "extract"}}}}, ReasonAllFrozen},
+				Components: []components.Report{{Component: "extract"}}}}, 0, ReasonAllFrozen},
 		{"all reverted", apply.Trace{Messages: 3, Run: &components.RunReport{
 			TokensBefore: 100, TokensAfter: 100,
 			Components: []components.Report{{Component: "extract", Reverted: true}},
-		}}, ReasonReverted},
+		}}, 0, ReasonReverted},
 		{"ran, found nothing", apply.Trace{Messages: 3, AttemptedTokens: 100,
 			Run: &components.RunReport{TokensBefore: 100, TokensAfter: 100,
-				Components: []components.Report{{Component: "extract"}}}}, ReasonNoSavings},
+				Components: []components.Report{{Component: "extract"}}}}, 0, ReasonNoSavings},
 		{"compacted", apply.Trace{Messages: 3, AttemptedTokens: 100,
 			Run: &components.RunReport{TokensBefore: 100, TokensAfter: 50,
-				Components: []components.Report{{Component: "extract", TokensBefore: 100, TokensAfter: 50}}}}, ""},
+				Components: []components.Report{{Component: "extract", TokensBefore: 100, TokensAfter: 50}}}}, 0, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var e Event
+			e.Tools = tc.tools
 			e.FromTrace(tc.tr, nil)
 			if e.UncompressedReason != tc.want {
 				t.Errorf("reason = %q; want %q", e.UncompressedReason, tc.want)

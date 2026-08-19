@@ -84,7 +84,11 @@
         <option value="">Compacted or not</option>
         <option value="compacted">Compacted</option>
         <option value="bypassed">Not: bypassed</option>
-        <option value="below_trigger">Not: below trigger</option>
+        <option value="no_tool_output">Not: no tool output</option>
+        <option value="no_candidate">Not: no candidate found</option>
+        <!-- Rows written before "below_trigger" was renamed. Kept so an existing bookmark and
+             an old row are still reachable; the label says what it really meant. -->
+        <option value="below_trigger">Not: no candidate found (pre-rename)</option>
         <option value="cache_frozen">Not: frozen for cache safety</option>
         <option value="found_nothing">Not: found nothing</option>
         <option value="reverted">Not: reverted</option>
@@ -243,8 +247,14 @@
   </div>
 
   <div class="panel">
-    <h2>Cumulative cost</h2>
-    <p class="note">Shaded area = money saved.</p>
+    <h2>Cumulative net saving</h2>
+    <!-- This panel used to plot baseline and billed cost as two lines and call the area
+         between them the money. On real traffic they are a fraction of a percent apart, so
+         there was no visible area and the caption described something the chart could not
+         show. Plotting the difference puts the money on its own axis, and makes the crossing
+         below zero — our own spend overtaking what compaction avoided — impossible to miss. -->
+    <p class="note">Baseline &minus; billed &minus; our own model spend, accumulated. Below zero
+      means context-guru cost more than it saved.</p>
     <details class="why">
       <summary>How the baseline is priced</summary>
       <p>The baseline prices the <strong>unique</strong> tokens we removed at the cache-write
@@ -396,6 +406,7 @@
       <table class="tbl" data-testid="components-table">
         <thead><tr>
           <th>Component</th><th>Kind</th><th class="num">Runs</th><th class="num">Acted</th>
+          <th class="num">Structural</th>
           <th class="num">Act rate</th><th class="num">Reverted</th>
           <th class="num">Unique saved</th><th class="num">Gross saved</th><th class="num">Overcount</th>
           <th class="num">Own latency</th><th class="num">Avg ms</th>

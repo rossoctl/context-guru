@@ -142,3 +142,39 @@ func (d *DB) TenantMetrics(since int64) ([]TenantMetricRow, error) {
 	}
 	return out, rows.Err()
 }
+
+// ValueMetrics is the deployment-wide value of compaction, for Prometheus. Not per tenant:
+// these four are the numbers an operator alerts and reports on, and there was no dollar
+// series at all — /metrics exported tokens, ratios, latency, cache outcomes and one
+// component's net value, so Grafana could plot everything about this proxy EXCEPT whether it
+// was worth running. cg_extract_net_value_usd was the only dollar figure on the endpoint.
+type ValueMetrics struct {
+	// SavedUSD is baseline − billed: what compaction avoided, before our own spend.
+	// NetSavedUSD subtracts CGLLMCostUSD, so it goes NEGATIVE when we spend more than we
+	// save, which is a real outcome and the series reports it as one.
+	CostUSD      float64
+	BaselineUSD  float64
+	CGLLMCostUSD float64
+	SavedUSD     float64
+	NetSavedUSD  float64
+	// FrozenTokens is content cache-aware compaction deliberately left alone — the
+	// headroom, and the number that explains a small SavedUSD.
+	FrozenTokens int64
+}
+
+// ValueMetrics rolls up the value figures since `since` (epoch ms). Read-only.
+func (r *Recorder) ValueMetrics(since int64) (ValueMetrics, error) {
+	var v ValueMetrics
+	if r == nil || r.db == nil {
+		return v, nil
+	}
+	err := r.db.sql.QueryRow(`SELECT COALESCE(SUM(cost_usd),0), COALESCE(SUM(baseline_cost_usd),0),
+		COALESCE(SUM(cg_llm_cost_usd),0), COALESCE(SUM(frozen_tokens),0)
+		FROM requests WHERE ts >= ?`, since).Scan(&v.CostUSD, &v.BaselineUSD, &v.CGLLMCostUSD, &v.FrozenTokens)
+	if err != nil {
+		return v, err
+	}
+	v.SavedUSD = v.BaselineUSD - v.CostUSD
+	v.NetSavedUSD = v.SavedUSD - v.CGLLMCostUSD
+	return v, nil
+}

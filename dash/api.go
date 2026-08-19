@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -203,7 +204,7 @@ type route struct {
 
 // routes is the single mounted route table, read by Mount and by the scoping test.
 func (a *API) routes() []route {
-	return []route{
+	rs := []route{
 		{"GET /dashboard", scopePublic, func(w http.ResponseWriter, r *http.Request) {
 			// One canonical URL: /dashboard and /dashboard/ must not be two pages.
 			http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
@@ -227,6 +228,10 @@ func (a *API) routes() []route {
 		{"GET /api/archive/{session}", scopeTenant, a.archivedSession},
 		{"GET /api/events", scopeTenant, a.events},
 	}
+	// The tool/MCP/skill inventory's route, declared beside its handler in toolapi.go and
+	// appended here rather than mounted separately: this table is what the scoping test walks,
+	// so a route mounted around it would be a route whose scope nothing checks.
+	return append(rs, a.toolRoutes()...)
 }
 
 // Mount registers every dashboard route on a mux under the given prefix
@@ -624,6 +629,11 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		if h, err := a.rec.DB().CachesplitHistoricalUSD(f, a.pricer); err == nil {
 			o.CachesplitHistorical = &h
 		}
+		// The bill split by tier, and with it the addressable share and the safety panel's
+		// benefit half. Same rule: absent when it cannot be priced, never a zeroed bill.
+		if t, err := a.rec.DB().TierCosts(f, a.pricer); err == nil {
+			o.SetTiers(t)
+		}
 	}
 	writeJSON(w, o)
 }
@@ -755,6 +765,17 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Value the rows whose saved_usd predates the column, into their own field. Without this
+	// the most-read tab in the dashboard reports $0.00 for every component over all history
+	// that predates the last restart — measured, 6 populated rows out of 100,579.
+	if a.pricer != nil {
+		if err := a.rec.DB().EstimateComponentSavedUSD(f, a.pricer, rows); err != nil {
+			// Best effort, like every other read-time valuation: the stored figures are
+			// already in `rows` and a failed estimate must not cost the caller the tab.
+			slog.Warn("context-guru: component saved_usd estimate failed; pre-column rows read $0.00",
+				"err", err)
+		}
 	}
 	writeJSON(w, map[string]any{"components": rows})
 }

@@ -60,6 +60,26 @@ type Overview struct {
 	SavedAdjusted  int64   `json:"saved_adjusted"`
 	OvercountRatio float64 `json:"overcount_ratio"`
 
+	// The replay, named as what it is.
+	//
+	// ReplayTokens is SavedGross − SavedUnique: the reductions this window RE-EARNED, because
+	// a reduction frozen at turn N is still absent from the transcript on every later turn the
+	// agent re-sends it. It is the same quantity OvercountRatio expresses as a multiple, and
+	// it was previously presented only that way — as an "overcount", i.e. as a discount
+	// against us. It is the opposite: it is where most of the realized dollar value comes
+	// from (~93% on measured traffic), and it is already priced into BaselineCostUSD and into
+	// every component's saved_usd, per turn, at the tier that turn actually paid.
+	//
+	// ReplayProjectedTokens is the ceiling: every unique reduction multiplied by the number of
+	// later turns in its OWN session, i.e. what the replay would have come to had each
+	// reduction survived to the end of its session. ReplayRealizedPct is the fraction of that
+	// ceiling actually collected — 5.4% on production traffic. The gap is not an accounting
+	// error, it is the cache-safety freeze declining to compact the cached prefix, and it is
+	// the largest single piece of headroom this dashboard can point at. It had no field.
+	ReplayTokens          int64   `json:"replay_tokens"`
+	ReplayProjectedTokens int64   `json:"replay_projected_tokens"`
+	ReplayRealizedPct     float64 `json:"replay_realized_pct"`
+
 	AttemptedTokens int64 `json:"attempted_tokens"`
 	FrozenTokens    int64 `json:"frozen_tokens"`
 
@@ -96,9 +116,27 @@ type Overview struct {
 	// priced — absent, not zero. See DB.CachesplitHistoricalUSD.
 	CachesplitHistorical *CachesplitHistorical `json:"cachesplit_historical,omitempty"`
 
-	SplitRequests  int64 `json:"split_requests"`
-	SplitTailMoved int64 `json:"split_tail_moved"`
-	SplitCredited  int64 `json:"split_credited"`
+	// ONE definition of "moved", used here and at the write site (Recorder.ObserveSplit): the
+	// tail moved if this request's tail hash differs from the most recent PREVIOUS tail hash
+	// recorded for the session, and a session with no previously recorded tail counts as moved
+	// because there was nothing there to match. The read-time recomputation used to compare
+	// against the previous ROW's hash including 0 — and 0 means "nothing was split on that
+	// turn", not "the tail was zero" — while the write-time map only ever remembered non-zero
+	// hashes. The two therefore counted different things and the page showed 844 acted / 314
+	// moved / 3 credited, which reads as broken arithmetic. Under the single definition the
+	// same corpus is 844 / 16 / 3.
+	//
+	// SplitCreditedMoved is the reconciliation: the credited requests that the recomputation
+	// also calls moved. It is 0 on the stored corpus, and that is a finding rather than a
+	// rounding difference — the write-time map is process-scoped, so a proxy restart or a
+	// session-eviction made three mid-session turns look like first sightings and they were
+	// credited for a snapshot that had not moved. The write path no longer does that (a
+	// session we have SEEN but whose tail we have forgotten is not a move), so from here on
+	// the two counts agree by construction. The stored $0.03 is left exactly as recorded.
+	SplitRequests      int64 `json:"split_requests"`
+	SplitTailMoved     int64 `json:"split_tail_moved"`
+	SplitCredited      int64 `json:"split_credited"`
+	SplitCreditedMoved int64 `json:"split_credited_moved"`
 	// TotalSavedUSD is our two savings together: compaction's, less our own spend, plus
 	// the prefix components'. Both are ours and the token sets are disjoint.
 	TotalSavedUSD float64 `json:"total_saved_usd"`
@@ -116,7 +154,18 @@ type Overview struct {
 	// a prefix for reasons of their own; and prefix_change already loses ties to ttl_expiry, so
 	// this bucket is not even a clean partition of causes. Subtracting it from net would book a
 	// correlation as a debt. Settling it needs the A/B, not a bigger query.
-	PrefixChangeCost float64 `json:"prefix_change_cost_usd"`
+	//
+	// PrefixChangeRequests is how many turns are behind it, which was missing — a dollar
+	// figure with no denominator cannot be sized. PrefixChangeCostAll / RequestsAll are the
+	// UNCONDITIONAL prefix_change bucket: every turn whose cache missed on a changed prefix,
+	// whether or not we had just mutated anything. That is the whole exposure of the failure
+	// mode this project exists to avoid — $156.55 over 214 requests on production, against
+	// $7.10 of savings on the same page — and it was buried below the fold. It belongs at the
+	// same altitude as the savings, and un-netted, for exactly the reason above.
+	PrefixChangeCost        float64 `json:"prefix_change_cost_usd"`
+	PrefixChangeRequests    int64   `json:"prefix_change_requests"`
+	PrefixChangeCostAll     float64 `json:"prefix_change_cost_all_usd"`
+	PrefixChangeRequestsAll int64   `json:"prefix_change_requests_all"`
 
 	CGLatencyMsAvg float64 `json:"cg_latency_ms_avg"`
 	UpstreamMsAvg  float64 `json:"upstream_ms_avg"`
@@ -139,6 +188,12 @@ type Overview struct {
 	// means we did.
 	Uncompressed map[string]int64 `json:"uncompressed"`
 
+	// Tiers is the bill split by the tier the provider charged on, priced at read time
+	// because nothing stores per-tier cost. It carries AddressableUSD — the input side, the
+	// only part of a bill an input-side transformation can ever reach. Absent (nil) when no
+	// rates were available; a percentage against a bill we could not split must not be shown.
+	Tiers *TierCosts `json:"tier_costs,omitempty"`
+
 	Denominators []Denominator   `json:"denominators"`
 	Waterfall    []WaterfallStep `json:"waterfall"`
 	// SafetyCost reports what our own safety mechanisms cost, beside what they
@@ -150,7 +205,18 @@ type Overview struct {
 type SafetyCost struct {
 	// FrozenTokens is content cache-aware compaction deliberately left alone. Its
 	// benefit is the cache reads it preserved; its cost is compaction not done.
-	FrozenTokens int64 `json:"frozen_tokens"`
+	//
+	// FrozenReadUSD and FrozenWriteRiskUSD are that benefit, in dollars, which this panel
+	// promised in prose and never computed: what the frozen prefix was billed as at the
+	// cache-READ rate, and what re-creating it at the write rate instead would have added.
+	// Both are absent (0 with Priced false) when no rates were available. Until now the
+	// 396.5M frozen tokens on production were displayed as a cost with no counterpart at all.
+	FrozenTokens       int64   `json:"frozen_tokens"`
+	FrozenReadUSD      float64 `json:"frozen_read_usd"`
+	FrozenWriteRiskUSD float64 `json:"frozen_write_risk_usd"`
+	// Priced is false when the frozen figures could not be valued, so the UI shows "—"
+	// rather than a benefit of zero for a mechanism whose benefit is simply unpriced.
+	Priced bool `json:"priced"`
 	// RestoredTokens is content we offloaded and the model asked back for — a
 	// premature offload, paid for twice.
 	RestoredTokens int64 `json:"restored_tokens"`
@@ -162,6 +228,17 @@ type SafetyCost struct {
 	CGLatencyMsTotal float64 `json:"cg_latency_ms_total"`
 	Description      string  `json:"description"`
 }
+
+// splitMoved is the ONE definition of "the volatile tail moved", in SQL. It matches
+// Recorder.ObserveSplit's in-process test: differs from the last non-zero tail hash recorded
+// for this session, and a session with no earlier non-zero hash counts as moved. Written once
+// and referenced twice so the count and its reconciliation cannot drift apart.
+const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
+	AND r.split_tail_hash <> COALESCE((
+		SELECT p.split_tail_hash FROM requests p
+		WHERE p.session_id = r.session_id AND p.split_tail_hash <> 0
+		  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
+		ORDER BY p.ts DESC, p.id DESC LIMIT 1), r.split_tail_hash + 1)`
 
 // Overview computes the headline aggregates for the filtered window.
 func (d *DB) Overview(f Filter) (*Overview, error) {
@@ -190,11 +267,17 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		-- one. Recomputable from the table on purpose, so the money can be audited without
 		-- trusting the write path.
 		COALESCE(SUM(CASE WHEN r.split_stable_tokens > 0 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN r.split_stable_tokens > 0 AND r.split_tail_hash <> COALESCE((
-			SELECT p.split_tail_hash FROM requests p
-			WHERE p.session_id = r.session_id AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
-			ORDER BY p.ts DESC, p.id DESC LIMIT 1), 0) THEN 1 ELSE 0 END),0),
+		-- "Moved", one definition, shared with the write path. The previous hash is the last
+		-- NON-ZERO one in the session: 0 means nothing was split on that turn, so comparing
+		-- against it counted every first split as a move and then again on the next turn.
+		-- No previous non-zero hash at all still counts as moved -- there was nothing to
+		-- match -- which is why the sentinel is this row's own hash plus one rather than 0.
+		COALESCE(SUM(CASE WHEN `+splitMoved+` THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.cachesplit_saved_usd > 0 THEN 1 ELSE 0 END),0),
+		-- The reconciliation: credited AND moved under that one definition. A gap means the
+		-- write-time map had forgotten a session it had in fact seen (restart, eviction) and
+		-- read a first sighting where there was none. See Overview.SplitCreditedMoved.
+		COALESCE(SUM(CASE WHEN r.cachesplit_saved_usd > 0 AND `+splitMoved+` THEN 1 ELSE 0 END),0),
 		-- The prefix-change diagnostic (Overview.PrefixChangeCost): what the turns cost where
 		-- the cache missed on a changed prefix AND the session's previous turn had mutated
 		-- something. Derived, never stored, and never netted off — see the field's comment for
@@ -205,6 +288,16 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 				WHERE p.session_id = r.session_id AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 				ORDER BY p.ts DESC, p.id DESC LIMIT 1)
 		) THEN r.cost_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' AND EXISTS (
+			SELECT 1 FROM request_components c WHERE c.mutated = 1 AND c.request_id = (
+				SELECT p.id FROM requests p
+				WHERE p.session_id = r.session_id AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
+				ORDER BY p.ts DESC, p.id DESC LIMIT 1)
+		) THEN 1 ELSE 0 END),0),
+		-- The whole prefix_change bucket, unconditional: the total exposure of the failure
+		-- mode, not only the part adjacent to one of our own mutations.
+		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' THEN r.cost_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' THEN 1 ELSE 0 END),0),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0),
 		COALESCE(SUM(CASE WHEN r.uncompressed_reason <> '' THEN 1 ELSE 0 END),0),
@@ -214,7 +307,9 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.AttemptedTokens, &o.FrozenTokens, &o.FreshInput, &o.CacheRead, &o.CacheWrite,
 		&o.OutputTokens, &o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD,
 		&o.CachesplitSavedUSD, &o.SplitRequests, &o.SplitTailMoved, &o.SplitCredited,
-		&o.PrefixChangeCost, &cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
+		&o.SplitCreditedMoved,
+		&o.PrefixChangeCost, &o.PrefixChangeRequests, &o.PrefixChangeCostAll, &o.PrefixChangeRequestsAll,
+		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal)
 	if err != nil {
 		return nil, err
@@ -224,6 +319,23 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.SavedAdjusted = o.SavedUnique - int64(o.ExpandTokens)
 	if o.SavedUnique > 0 {
 		o.OvercountRatio = float64(o.SavedGross) / float64(o.SavedUnique)
+	}
+	if o.ReplayTokens = o.SavedGross - o.SavedUnique; o.ReplayTokens < 0 {
+		o.ReplayTokens = 0
+	}
+	// The ceiling on that replay: every unique reduction times the number of later turns in
+	// its own session. A correlated count off the (session_id, ts) index, ~80 ms over 14k
+	// requests, and only over rows that removed something. Not filtered by the window's
+	// component clause any differently from the rest of this function — same predicate, so
+	// the numerator and the ceiling always describe the same rows.
+	if err := d.sql.QueryRow(`SELECT COALESCE(SUM(r.saved_unique * (
+			SELECT COUNT(*) FROM requests p WHERE p.session_id = r.session_id
+			  AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id)))),0)
+		FROM requests r WHERE `+cond+` AND r.saved_unique > 0`, args...).Scan(&o.ReplayProjectedTokens); err != nil {
+		return nil, err
+	}
+	if o.ReplayProjectedTokens > 0 {
+		o.ReplayRealizedPct = float64(o.ReplayTokens) / float64(o.ReplayProjectedTokens) * 100
 	}
 	if o.Requests > 0 {
 		o.ExpandRate = float64(o.Expands) / float64(o.Requests)
@@ -262,15 +374,38 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.SafetyCost.RestoredTokens = o.ExpandTokens
 	o.SafetyCost.RevertedRuns = o.Reverts
 	o.SafetyCost.CGLLMCostUSD = o.CGLLMCostUSD
+	// The freeze's own caveat, on the payload rather than only in a comment: frozen == 0 is
+	// not evidence the provider's cache is cold. It means OUR tracker was reset (restart,
+	// evicted entry) — 3,092 such requests on the production corpus still cache-HIT, for
+	// 404.4M cache-read tokens. Anyone reading a low frozen fraction as permission to rewrite
+	// deep history is reading it backwards, and priced on sonnet-5 that is worth about -$708
+	// against +$0.62 of upside.
 	o.SafetyCost.Description = "What context-guru's own protective mechanisms cost, " +
 		"shown beside what they bought: cache-aware freezing forgoes compaction on the " +
 		"already-cached prefix (its benefit is the cache reads it preserved), restored " +
 		"tokens are offloads the model asked back for, reverted runs are the never-worse " +
-		"guard firing, and the LLM cost is context-guru's own model spend."
+		"guard firing, and the LLM cost is context-guru's own model spend. A LOW frozen " +
+		"figure is not evidence the provider's cache is cold: zero means our own prefix " +
+		"tracker was reset, not that the provider dropped anything — measured, 3,092 such " +
+		"requests still hit cache for 404.4M read tokens."
 
 	o.Denominators = o.denominators()
 	o.Waterfall = o.waterfall()
 	return o, nil
+}
+
+// SetTiers attaches the read-time per-tier costing and the two figures that depend on it:
+// the safety panel's benefit half, which the panel has always described in prose and never
+// had a number for. Called by the API layer, which holds the rates — DB.Overview deliberately
+// cannot price anything, so that a rate change never rewrites a stored row.
+func (o *Overview) SetTiers(t *TierCosts) {
+	if t == nil {
+		return
+	}
+	o.Tiers = t
+	o.SafetyCost.FrozenReadUSD = t.FrozenReadUSD
+	o.SafetyCost.FrozenWriteRiskUSD = t.FrozenWriteRiskUSD
+	o.SafetyCost.Priced = true
 }
 
 // denominators builds the labelled savings ratios. Each one names its divisor.
@@ -285,10 +420,21 @@ func (o *Overview) denominators() []Denominator {
 		newInput = o.FreshInput + o.CacheWrite + o.SavedUnique
 	}
 	ds := []Denominator{
-		denom("attempted", "of what we tried to compact", o.SavedUnique, o.AttemptedTokens,
-			"Unique savings ÷ the tokens compaction was ALLOWED to touch this turn (the "+
-				"uncached tail when cache-aware). Answers 'are we good when we have something "+
-				"to work with?' Excludes the frozen prefix we deliberately never touched."),
+		// GROSS over attempted, not unique over attempted. Both sides of this ratio are now
+		// per-turn quantities: attempted_tokens is what compaction was allowed to touch on
+		// each turn, re-counted every turn, so the numerator has to be the saving counted the
+		// same way. Dividing a numerator deduplicated ACROSS turns by a denominator recounted
+		// on every turn is a basis mismatch, and it made this ratio 13x too small (0.140%
+		// where the same-basis figure is 1.838% on production traffic) — the one bar on the
+		// page whose job is to answer "are we any good when we do have something to work
+		// with" was the one reading closest to zero. unique_whole below is still there for
+		// the conservative view.
+		denom("attempted", "gross, of what we tried to compact", o.SavedGross, o.AttemptedTokens,
+			"GROSS savings ÷ the tokens compaction was ALLOWED to touch this turn (the "+
+				"uncached tail when cache-aware). Both sides are per-turn quantities — the "+
+				"denominator is re-counted every turn, so the numerator is too. Answers 'are "+
+				"we good when we have something to work with?' Excludes the frozen prefix we "+
+				"deliberately never touched."),
 		denom("new_input", "of new provider-billed input", o.SavedUnique, newInput,
 			"Unique savings ÷ (fresh input + cache writes + what we removed). The most "+
 				"honest economic ratio: it does not recount transcript history that the "+
