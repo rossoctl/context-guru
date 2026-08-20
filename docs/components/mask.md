@@ -34,9 +34,16 @@ Lossy but reversible — masked outputs are stashed and recovered via `context_g
 
 ## When it shines
 
-Long agent trajectories where old tool results are unlikely to matter. In the `agent` preset it is
-the biggest lever (~27% content-token savings, no reward loss — see
-[RESULTS.md](../RESULTS.md)).
+Long agent trajectories where old tool results are unlikely to matter, **on non-caching traffic**.
+
+!!! danger "`mask` is not the `agent` preset's biggest lever, and never was"
+    This page used to claim ~27% content-token savings for `mask`. That number belongs to
+    **`extract_llm`** — some of the team call its LLM trimming of large file reads the "programming
+    masker", and the name collision put the figure here. Three things settle it: the arm that
+    produced the number (`codesmart`) contains **no `mask`**;
+    [comparison.md](../results/comparison.md#per-component--per-compressor) attributes the savings
+    to `extract_llm` + `extract` + `cmdfilter`/`dedup` and never mentions `mask`; and `mask` is
+    structurally incapable of it on caching traffic (below).
 
 ## When it's inert
 
@@ -62,9 +69,12 @@ measuring [`coref`](coref.md).
     cannot **create** the first one at depth. So `mask` earns its savings on the turns before the
     prefix is cached, then coasts.
 
-    **The published 12.5% / 27.5% figures therefore straddle a behaviour change** (the tail gate
-    commit) and should not be read as measurements of the current component on caching traffic.
-    Re-measuring them is outstanding.
+    An earlier version of this box said the published 12.5% / 27.5% figures "straddle a behaviour
+    change". That was too generous to `mask`: **those figures were never `mask`'s at all** (see the
+    box above). The geometry here is the mechanism that makes the misattribution impossible to
+    sustain — a component whose candidate and permitted sets are disjoint on every caching request
+    cannot be any preset's biggest lever on caching traffic. What `mask` actually saves there has
+    never been measured, and the honest number is currently unknown.
 
     This is also the cleanest statement of why [`coref`](coref.md) is shaped the way it is: it is
     the only offloader that *deliberately ignores* `TailOnly`, because on a long session all the

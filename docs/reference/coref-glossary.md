@@ -181,7 +181,8 @@ of the request for 40–60 turns of headroom — and Tier-1 matching finds only 
 !!! danger "The gate is measuring the wrong thing, and the right thing is unmeasured"
     `min_batch_frac` asks "is my cut large relative to the request?". The question that matters is
     "**does my cut change the outcome?**" — because `coref` is the only component paying a prefix
-    rewrite, while `mask` and friends do 12–27% from the cache-safe tail for free. So `coref` should
+    rewrite, while `extract_llm` does its measured ~27% from the cache-safe tail for free (a figure
+    long miscredited to `mask`, which is structurally inert there). So `coref` should
     cut **only when it is decisive**: not when the pipeline is already under the threshold (the prize
     is won, a rewrite buys nothing), and not when even `coref` cannot get it under (the agent
     compacts anyway, so we pay the write *and* eat the compaction).

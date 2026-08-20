@@ -225,9 +225,11 @@ The dashboard does not replace any of these — it captures out of band from
 
 ## Benchmarks
 
-For the full per-component SWE-bench evaluation — where `mask` delivers ~27%
-content-token savings with no reward loss, and how the `/stats` within-run metric is
-derived — see [Benchmarks](../RESULTS.md). To view a harness run in the dashboard, point
+For the full per-component SWE-bench evaluation — where **`extract_llm`** delivers ~27%
+content-token savings with no reward loss (this was previously miscredited to `mask`; see
+[comparison.md](../results/comparison.md#per-component--per-compressor), which attributes the
+savings to `extract_llm` + `extract` + `cmdfilter`/`dedup` and never mentions `mask`), and how the
+`/stats` within-run metric is derived — see [Benchmarks](../RESULTS.md). To view a harness run in the dashboard, point
 `--dashboard-bench-dirs` at its jobs root: each run's `summary.json` + `rows-<arm>.json`
 is ingested, with cost-vs-reward per arm and per-task drill-down.
 

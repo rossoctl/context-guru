@@ -441,7 +441,8 @@ set — a gate no traffic can clear is an off switch that looks like a threshold
 
 **What the gate should ask instead.** `coref` never runs alone, and it is the only component that
 pays a prefix rewrite — `mask`, `extract` and `cmdfilter` all work in the uncached tail and are
-cache-safe (`mask` alone measured 12.5% on SWE-bench, 27.5% on Terminal-Bench). So the deferral
+cache-safe (`extract_llm`'s tail pass measured 12.5% on SWE-bench, 27.5% on Terminal-Bench —
+figures long miscredited to `mask`, which is inert behind the tail gate). So the deferral
 prize is mostly earned by the components that pay nothing for it, and `coref` is a marginal
 contributor paying the most. Its gate should therefore not ask "is my cut large?" but "**does my
 cut change the outcome?**":

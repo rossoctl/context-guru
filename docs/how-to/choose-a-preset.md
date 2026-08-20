@@ -118,10 +118,15 @@ Tuned for long agentic sessions (e.g. Claude Code on SWE-bench) where the domina
 transcript of old tool outputs re-sent every turn.
 
 - **Fits:** long-running agents with a growing transcript.
-- **Caveat:** **`mask` is the biggest lever here** — age-based GC of tool outputs older than
-  `keep_recent`. In the SWE-bench sweep it delivered ~27% mean content-token savings (up to 93.5%
-  on a long session) with no reward loss ([Benchmarks](../RESULTS.md)). Order matters: lossless
-  first, then offload old-then-large, cache last.
+- **Caveat:** **`extract_llm` is the biggest lever here**, not `mask`. The ~27% mean content-token
+  saving from the SWE-bench sweep (up to 93.5% on a long session, no reward loss —
+  [Benchmarks](../RESULTS.md)) came from `extract_llm`'s LLM trimming of large file reads, which
+  some of the team call the "programming masker" — which is how the number got attached to `mask`
+  in these docs. The arm that produced it (`codesmart`) contains **no `mask`**.
+  On a caching backend note two things: `mask` is
+  [structurally inert](../components/mask.md#when-its-inert), and `extract_llm` is **disabled by
+  default** (`allow_on_caching_backend` unset = false) and restricted to the uncached **tail** when
+  enabled. Order matters: lossless first, then offload old-then-large, cache last.
 
 ### `general` — `[format, toon, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, cachesplit]`
 The recommended all-round pipeline: the reward-neutral levers of `agent` plus the situational

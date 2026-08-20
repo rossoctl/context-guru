@@ -33,8 +33,8 @@ Presets (`config/config.go`), verbatim: **`codesmart`** (the proxy default)
 `[format, dedup, failed_run, cmdfilter, smartcrush, extract, extract_llm, cachesplit]` ·
 `coding` `[format, skeleton, cmdfilter, cachesplit]` · `mcp` `[format, smartcrush, cachesplit]` ·
 **`agent`** `[format, dedup, failed_run, mask, extract, extract_llm, cachesplit]` — for long agentic
-sessions; `mask` is the biggest lever there (~27–30% content-token savings, no reward loss — see
-[RESULTS.md](RESULTS.md)) ·
+sessions; **`extract_llm`** is the biggest lever there (~27% content-token savings, no reward loss —
+see [RESULTS.md](RESULTS.md)); that figure was long miscredited to `mask` ·
 **`general`** `[format, toon, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, cachesplit]`
 — the recommended all-round pipeline: the reward-neutral levers of `agent` plus the situational
 shrinkers (`toon`/`cmdfilter`/`collapse`) that cost nothing when they don't fire. `balanced` is
@@ -310,9 +310,13 @@ after (older):  [older tool output masked; starts: 700 701 def __rmul__(self, m)
 ```
 
 - **Config:** `keep_recent` (3), `min_tokens` (100), `keep_head_chars` (96). **Shines:** long agent
-  trajectories where old tool results are unlikely to matter (top lever on terminal/code traffic: 27.5%
-  on Terminal-Bench, 12.5% on SWE-bench; scales down to ~4% on small structured customer-service outputs).
-  **Inert:** ≤ `keep_recent` tool outputs, small outputs.
+  trajectories where old tool results are unlikely to matter — **on non-caching traffic only**.
+  **Inert:** ≤ `keep_recent` tool outputs, small outputs, and *structurally on every caching
+  request* — see [the geometry](components/mask.md#when-its-inert).
+  **The 27.5% / 12.5% figures previously credited here were never `mask`'s**: they belong to
+  `extract_llm`, whose LLM trimming of large file reads some of the team call the "programming
+  masker". `mask` was not in the arm that produced them (`codesmart` has no `mask`), and it could
+  not have been — behind the tail gate its candidate and permitted sets are disjoint.
 - **`keep_head_chars`** leaves a one-line head-peek of the hidden output inside the marker (see above) so
   the model knows *what* was masked without a blind `expand` round-trip — evidence showed a bare marker on
   a masked source-file read forces needless expands. Set `0` for the opaque marker (≈2pp more savings).
