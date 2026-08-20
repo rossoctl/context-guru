@@ -133,9 +133,14 @@ real names like `context-guru`) is bounded at ~6 points of *under*-reporting rat
 
 **What has to happen next**, in order:
 
-1. Re-run `coref.py` over `capture-tb` / `capture-swe` / `capture-swebench` on the eval box. The spread
-   above is the reason: with `unreferenced` ranging 21-70% by workload, the only corpus that can size the
-   win for the shipped presets is the one the acceptance criteria are written against.
+1. ~~Re-run `coref.py` over `capture-tb` / `capture-swe` / `capture-swebench` on the eval box.~~
+   **Done** — [eval-box measurement](../results/coref-evalbox.md). `unreferenced` is **28%** on
+   `capture-swebench` (50 sessions, 433 outputs), the best measured and double the interactive
+   figure, confirming §8's claim that SWE-bench is the Tier-1-rich substrate. Two findings came with
+   it: a session-key collision in `coref.py` was silently discarding 98% of that capture (fixed —
+   `metadata.user_id` carries the real session id), and the corpus is **too shallow to test
+   deferral at all** (peak request 12.6k against a 167k threshold). `capture-tb` and `capture-swe`
+   turn out to be smoke captures (6 and 2 outputs), so only one of the three supports a claim.
 2. Then, and only on that corpus, flip `cut_closed` on. `open_reps: 3` is the conservative setting;
    `closed_dist` is inert and should stay at its default.
 3. `observe` mode on real traffic to read `expand` rate — the precision inner loop from §4 — before any
@@ -148,8 +153,8 @@ agent's own compaction is reachable at all.~~ **Done** — [reachability](../res
 deficit term, which makes 20–60 turns of headroom affordable where the density pass had 0/19. The
 deferral gate is therefore worth building, but it should gate on *fire early*, not just on batch size.
 
-Until step 1, the component's `closed`-cut defaults remain placeholders with a measured basis on the
-wrong corpus, which is why they are off rather than on.
+`cut_closed` nonetheless **stays off**: it is 20% of mass on `capture-swebench` and 0% on LOCA, so
+the workload spread that made it undefendable is unchanged by having the right corpus.
 
 ## What the held-out experiment removed from this list
 

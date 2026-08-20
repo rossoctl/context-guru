@@ -322,6 +322,22 @@ def main():
             # tool_result, and those collide: 31 segments grouped down to 24, silently
             # discarding the rest, because only the largest member of a group is analyzed.
             key = r.get("conv")
+            # A REAL capture carries the agent's own session id in metadata.user_id (the
+            # Anthropic clients pack {device_id, account_uuid, session_id} in there). Prefer it:
+            # the first-user-message fallback below is catastrophically wrong on benchmark
+            # traffic, where every task's instruction opens with the SAME long preamble. On
+            # capture-swebench.jsonl the 200-char prefix has 19 distinct values and the top one
+            # covers 1,771 of 1,795 requests -- so 18 of 19 groups held nothing but stray
+            # single-message calls, and because only the largest member of a group is analyzed,
+            # the measurement silently reported ONE session's worth of data. The session id
+            # recovers 50 sessions from the same file.
+            if key is None:
+                md = (r["body"].get("metadata") or {}).get("user_id")
+                if md:
+                    try:
+                        key = (json.loads(md) or {}).get("session_id") or md
+                    except (ValueError, TypeError):
+                        key = md
             if key is None:
                 for m in r["body"].get("messages", []):
                     if m.get("role") == "user":

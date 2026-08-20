@@ -177,6 +177,7 @@ nav:
       - "Co-reference density (measurement)": results/coref-density.md
       - "Co-reference selection (experiment)": results/coref-selection-experiment.md
       - "Co-reference reachability (measurement)": results/coref-reachability.md
+      - "Co-reference on the eval box": results/coref-evalbox.md
       - "SWE-bench Verified: per-arm detail":
           - baseline: results/baseline.md
           - context-guru: results/context-guru.md

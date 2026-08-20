@@ -27,12 +27,19 @@ python3 deploy/harbor/runlog_capture.py /tmp/loca.jsonl --label loca         ...
 python3 deploy/harbor/coref.py /tmp/uh.jsonl window=32000 fire_frac=0.6 sweep=1
 ```
 
-!!! warning "None of this is the eval-box corpus"
+!!! warning "None of this is the eval-box corpus — which has since been measured, and is *smaller*"
     §8's acceptance criteria are written against `capture-swe` / `capture-tb` (SWE-bench Verified and
     Terminal-Bench, cache-read-dominated, the incumbent regression floor). Those captures live on the eval
     box and were not reachable. What is measured here is real agent traffic from three *other* workloads.
     It answers §7's questions with data instead of argument, and it turns out to answer them
     **differently per workload** — which is a stronger reason to re-run on the eval box, not a weaker one.
+
+    **That re-run has since happened** ([eval-box measurement](coref-evalbox.md)), and it reverses the
+    apology in this box. `capture-swebench` is 50 **shallow** sessions (433 outputs, peak request
+    12,607 tokens), and `capture-tb` / `capture-swe` turn out to be smoke captures of 6 and 2 outputs.
+    The three corpora on this page are **larger and deeper** than the corpus they defer to. Read
+    `capture-swebench` as the most *relevant* corpus and these as the most *substantial* — neither is
+    sufficient alone.
 
 ## The headline: reference density is a property of the workload
 
