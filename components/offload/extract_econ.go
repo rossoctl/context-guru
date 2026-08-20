@@ -63,8 +63,13 @@ import (
 // tokenValue is the dollars-per-token a SAVED token is worth, and the reason the gate
 // exists. Both rates are per single token (not per million).
 type tokenValue struct {
+	// perToken is what a saved token is worth on each REPLAY turn — every turn after the
+	// one the compaction is first applied on.
 	perToken float64
-	cached   bool // true when priced at the cache-read rate
+	// firstToken is what it is worth on the turn the compaction IS applied, which is a
+	// different rate on a caching backend and was previously conflated with perToken.
+	firstToken float64
+	cached     bool // true when replays are priced at the cache-read rate
 }
 
 // Default agent-model rates (claude-sonnet-5 class, $3/$15 per MTok, cache read 0.1x).
@@ -73,17 +78,57 @@ type tokenValue struct {
 const (
 	agentFreshPerMTok     = 3.00
 	agentCacheReadPerMTok = 0.30 // 0.1x fresh, the standard Anthropic cache-read multiplier
+	// 1.25x fresh, the standard Anthropic cache-WRITE multiplier. Needed because the turn a
+	// compaction is applied on is not a cache-read turn — see savedTokenValue.
+	agentCacheWritePerMTok = 3.75
 )
 
-// savedTokenValue prices one saved token for THIS request. When the request goes to a
-// prompt-caching backend, content the agent re-sends every turn is already in the cached
-// prefix, so removing it saves the cache-read rate — the 10x haircut that sinks the
-// component's economics.
+// savedTokenValue prices one saved token for THIS request, distinguishing the turn the
+// compaction is APPLIED on from the turns it is REPLAYED on. Those are different rates on
+// a caching backend, and conflating them undervalued the component by ~3.3x.
+//
+// The old version priced every saved token at the cache-read rate whenever the request was
+// cache-aware, reasoning that "content the agent re-sends every turn is already in the
+// cached prefix". That is true of a REPLAY turn and false of the turn the cut is made —
+// and for extract_llm it is false in the only place the component can act at all. When
+// cache-aware it is confined to the TAIL (see the TailOnly check in extract_llm.go), and
+// tail content is by definition new this turn: it has never been cached, so on this turn
+// it is billed as a cache-WRITE (1.25x fresh) or as plain fresh input if it falls after the
+// last cache_control breakpoint — either way 10-12.5x the cache-read rate it was assigned.
+//
+// Confirmed on live traffic rather than argued: a real SWE-bench trial reported 52,561
+// cache_creation tokens against 746,047 cache_read across 18 turns. New tail content is
+// cache-CREATED every turn; it is not read.
+//
+// The correction matters because the ~30,500 tokens/output break-even quoted in
+// evaluateGate — the stated justification for disabling this component on caching backends
+// by default — was computed with the old pricing. Directly recomputed against a flat
+// $0.00766 haiku call cost and the 0.12 default ratio:
+//
+//	recurring   (reuses=6): 30,397 -> 11,550 tokens/output  (2.63x)
+//	first sight (reuses=4): 42,556 -> 12,900 tokens/output  (3.30x)
+//
+// That does not rescue small-output workloads — SWE-bench's largest measured tool output is
+// 2,760 tokens, still an order of magnitude short — so the shipping VERDICT for those is
+// unchanged even though the number was wrong. It matters on large-output workloads: on
+// LOCA-bench captures the eligible set goes from 7 to 31 of 1,639 outputs.
+//
+// One consequence worth knowing before tuning: because the applied turn now dominates the
+// sum, RECURRENCE is a much weaker lever than the old pricing implied — it multiplies the
+// expected saving by 1.12x, not 1.40x.
+//
+// The non-caching path is unchanged by construction: firstToken == perToken == fresh, so
+// the total stays (1 + reuses) x fresh exactly as before.
 func savedTokenValue(c *components.Ctx) tokenValue {
 	if c != nil && c.CacheAware {
-		return tokenValue{perToken: agentCacheReadPerMTok / 1_000_000, cached: true}
+		return tokenValue{
+			perToken:   agentCacheReadPerMTok / 1_000_000,
+			firstToken: agentCacheWritePerMTok / 1_000_000,
+			cached:     true,
+		}
 	}
-	return tokenValue{perToken: agentFreshPerMTok / 1_000_000, cached: false}
+	fresh := agentFreshPerMTok / 1_000_000
+	return tokenValue{perToken: fresh, firstToken: fresh, cached: false}
 }
 
 // priorCallCost is a last-resort per-call cost estimate (~the Terminal-Bench average).
@@ -188,7 +233,9 @@ func expectedReuses(seenBefore bool, turnsSoFar int) float64 {
 
 // evaluateGate decides whether one candidate output is worth an extraction call.
 //
-// expected saving = tokens we expect to remove x (1 + expected future reuses) x per-token value
+// expected saving = tokens we expect to remove x (first-turn value + expected future
+// reuses x replay value). The two rates differ on a caching backend: the turn the cut is
+// made is a cache-write (or fresh input), only later turns are cache-reads.
 // expected cost   = observed mean cost of one extraction call
 //
 // Allow only when saving strictly exceeds cost. Every suppression carries a reason.
@@ -198,7 +245,9 @@ func evaluateGate(sizeTokens int, ratio float64, val tokenValue, cost float64,
 	expectedRemoved := float64(sizeTokens) * ratio
 	reuses := expectedReuses(seenBefore, turnsSoFar)
 	// The compaction is applied on this turn AND replayed on each expected future turn.
-	saving := expectedRemoved * (1 + reuses) * val.perToken
+	// Applied once at firstToken, then replayed at perToken. On a non-caching backend the
+	// two rates are equal and this is identical to the old (1 + reuses) x perToken.
+	saving := expectedRemoved * (val.firstToken + reuses*val.perToken)
 
 	d := gateDecision{expSaving: saving, expCost: cost}
 	// Hard decline on a caching backend unless explicitly forced. This is the SHIPPING

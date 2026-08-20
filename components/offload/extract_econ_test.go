@@ -43,9 +43,17 @@ func TestGatePermitsOnNonCachingBackend(t *testing.T) {
 		t.Fatalf("non-caching backend must permit a %d-token output: saving=$%.5f cost=$%.5f",
 			size, fresh.expSaving, fresh.expCost)
 	}
-	// The 10x rate difference must show up in the valuation, not just the verdict.
-	if ratio := fresh.expSaving / cached.expSaving; math.Abs(ratio-10) > 0.01 {
-		t.Fatalf("fresh tokens must be worth 10x cached ones, got %.3fx", ratio)
+	// The rate difference must show up in the valuation, not just the verdict — but it is
+	// ~3x, not 10x, and the difference is the point of the first-turn split.
+	//
+	// 10x is the ratio between a cache-READ and fresh input, so it is the right factor for a
+	// REPLAY turn. It is wrong for the turn the cut is applied on: that content is new, so it
+	// is billed as a cache-write ($3.75/MTok) which is actually DEARER than fresh input
+	// ($3.00). Blended over reuses=4 the totals are 15.00 vs 4.95 per MTok => 3.03x. An
+	// assertion of 10x here was pinning the old conflation of the two rates.
+	if ratio := fresh.expSaving / cached.expSaving; math.Abs(ratio-3.0303) > 0.01 {
+		t.Fatalf("fresh/cached total saving must be ~3.03x (applied turn is a cache-write, "+
+			"only replays take the 10x haircut), got %.4fx", ratio)
 	}
 }
 
@@ -54,10 +62,18 @@ func TestGatePermitsOnNonCachingBackend(t *testing.T) {
 // 82/103 across sessions, so this is the common case, not an edge case.
 func TestGatePermitsHighReuseContent(t *testing.T) {
 	val := savedTokenValue(&components.Ctx{CacheAware: true})
-	// 34000 tokens: above the ~30.5k cached-RECURRING break-even, below the ~42.6k
-	// cached-once one. This size is the gate's whole thesis in one fixture — recurrence is
-	// what tips an otherwise-losing call into profit, so the SAME size goes both ways.
-	size := 34000
+	// 12000 tokens: above the cached-RECURRING break-even (~11,550) and below the
+	// cached-once one (~12,900). This size is the gate's whole thesis in one fixture —
+	// recurrence is what tips an otherwise-losing call into profit, so the SAME size goes
+	// both ways.
+	//
+	// It used to be 34000, against break-evens of ~30.5k and ~42.6k. Correcting the applied
+	// turn from the cache-read rate to the cache-write rate moved both down ~2.6-3.3x AND
+	// narrowed the gap between them: recurrence now multiplies the saving by 1.12x rather
+	// than 1.40x, because the applied turn dominates the sum. So the window this fixture has
+	// to sit in is ~11,550-12,900 — genuinely tight, and the reason the bound is asserted
+	// here rather than left implicit.
+	size := 12000
 	once := evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size), false, 5, false, true)
 	recur := evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size), true, 5, false, true)
 
@@ -91,17 +107,20 @@ func TestBreakEvenSizesMatchTheDocumentedVerdict(t *testing.T) {
 	}
 	cachedRecur := breakEven(true, true)
 	freshRecur := breakEven(false, true)
-	if cachedRecur < 26_000 || cachedRecur > 35_000 {
-		t.Errorf("cached+recurring break-even = %d tokens, expected ~30,500 "+
+	if cachedRecur < 10_000 || cachedRecur > 13_500 {
+		t.Errorf("cached+recurring break-even = %d tokens, expected ~11,600 "+
 			"(docs/components/extract_llm.md states this figure)", cachedRecur)
 	}
 	if freshRecur < 1_400 || freshRecur > 2_400 {
 		t.Errorf("fresh+recurring break-even = %d tokens, expected ~1,800", freshRecur)
 	}
-	// The gap is WIDER than the bare 10x rate haircut, because cost stops growing once the
-	// prompt hits the shown-content cap while value keeps scaling with output size.
-	if ratio := float64(cachedRecur) / float64(freshRecur); ratio < 12 || ratio > 30 {
-		t.Errorf("cached/fresh break-even ratio = %.1fx, expected ~20x", ratio)
+	// The gap used to be ~20x — WIDER than the bare 10x rate haircut, because cost stops
+	// growing once the prompt hits the shown-content cap while value keeps scaling. Pricing
+	// the APPLIED turn as a cache-write rather than a cache-read cut it to ~6.4x: the applied
+	// turn is billed at nearly the fresh rate in both regimes, so only the replay turns still
+	// take the haircut.
+	if ratio := float64(cachedRecur) / float64(freshRecur); ratio < 5 || ratio > 8 {
+		t.Errorf("cached/fresh break-even ratio = %.1fx, expected ~6.4x", ratio)
 	}
 }
 
@@ -413,5 +432,77 @@ func TestTooSlowToExplore(t *testing.T) {
 	// The #37 shape: 17.8s across 2 calls.
 	if !tooSlowToExplore(17800.0/2, 2) {
 		t.Error("PR #37's measured latency must stop exploration")
+	}
+}
+
+// --- First-turn vs replay pricing (the tail is not a cache-read) ---------------
+
+// The turn a compaction is APPLIED on is not a cache-read turn. When cache-aware,
+// extract_llm can only act on the TAIL, and tail content has never been cached — on that
+// turn it is billed as a cache-write (or fresh input), 10-12.5x the cache-read rate. The
+// old pricing charged every turn at cache-read and so undervalued the component ~3.3x.
+//
+// This pins the arithmetic rather than the conclusion: the ratio between the two formulas
+// is what the shipping decision (disabled on caching backends, justified by a ~30,500
+// tok/output break-even) rests on.
+func TestCachedSavingPricesTheAppliedTurnAsAWrite(t *testing.T) {
+	val := savedTokenValue(&components.Ctx{CacheAware: true})
+	if val.firstToken <= val.perToken {
+		t.Fatalf("applied turn must be worth MORE than a replay turn on a caching backend: "+
+			"first=%v replay=%v", val.firstToken, val.perToken)
+	}
+	if got, want := val.firstToken*1e6, agentCacheWritePerMTok; got != want {
+		t.Errorf("applied turn priced at $%.2f/MTok, want the cache-write rate $%.2f", got, want)
+	}
+	if got, want := val.perToken*1e6, agentCacheReadPerMTok; got != want {
+		t.Errorf("replay turn priced at $%.2f/MTok, want the cache-read rate $%.2f", got, want)
+	}
+
+	// The correction's size, at the default first-sight reuse prior (4).
+	const reuses = 4.0
+	old := (1 + reuses) * agentCacheReadPerMTok
+	corrected := agentCacheWritePerMTok + reuses*agentCacheReadPerMTok
+	if ratio := corrected / old; ratio < 3.0 || ratio > 3.6 {
+		t.Errorf("correction is %.2fx; expected ~3.3x — if the rates changed, re-derive the "+
+			"break-even quoted in evaluateGate and savedTokenValue before editing this bound", ratio)
+	}
+}
+
+// The non-caching path must be BYTE-identical to the old single-rate formula. The fix is
+// meant to change the cached case only, and this is the guard that keeps a future edit from
+// silently repricing every non-caching workload the published numbers came from.
+func TestNonCachingPricingIsUnchangedByTheFirstTurnSplit(t *testing.T) {
+	val := savedTokenValue(&components.Ctx{CacheAware: false})
+	if val.firstToken != val.perToken {
+		t.Fatalf("non-caching: both rates must be fresh input; first=%v replay=%v",
+			val.firstToken, val.perToken)
+	}
+	for _, reuses := range []float64{3, 4, 6} {
+		oldWay := (1 + reuses) * val.perToken
+		newWay := val.firstToken + reuses*val.perToken
+		if oldWay != newWay {
+			t.Errorf("reuses=%v: non-caching saving changed (%v -> %v)", reuses, oldWay, newWay)
+		}
+	}
+}
+
+// A cached output that the OLD pricing suppressed and the CORRECTED pricing permits: the
+// whole point of the fix. Sized between the two break-evens (~9.2k corrected, ~30.5k old).
+func TestCorrectedPricingPermitsMidSizedCachedOutput(t *testing.T) {
+	const size = 20000 // above the corrected break-even, below the old one
+	cost := callCost(cheapmodel.HaikuPricing(), size)
+	val := savedTokenValue(&components.Ctx{CacheAware: true})
+
+	removed := float64(size) * defaultCompressionRatio
+	oldSaving := removed * (1 + 4) * val.perToken            // the pre-fix formula
+	newSaving := removed * (val.firstToken + 4*val.perToken) // what the gate computes now
+
+	if !(oldSaving < cost) {
+		t.Skipf("fixture no longer straddles the break-even (old saving $%.5f vs cost $%.5f); "+
+			"resize it rather than deleting this test", oldSaving, cost)
+	}
+	if !(newSaving > cost) {
+		t.Fatalf("corrected pricing still cannot pay for a %d-token cached output: "+
+			"saving=$%.5f cost=$%.5f", size, newSaving, cost)
 	}
 }

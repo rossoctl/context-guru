@@ -35,28 +35,55 @@ understated.
     way — neither is within two orders of magnitude of paying for $3.26 — and the gate reasons
     with the *more generous* rate, so the shipped decline is the conservative one.
 
-The reason is arithmetic, not implementation quality. A request to a caching backend is
-~99.95% cached, so a token removed from a cached region saves the **cache-read** rate
-(`$0.30/MTok`), not the fresh-input rate (`$3/MTok`) — a **10× haircut**. An extraction call
-costing ~$0.012 must therefore remove a *lot* of tokens to break even:
+The reason is arithmetic, not implementation quality. A token removed from a **cached region**
+saves the cache-read rate (`$0.30/MTok`), not the fresh-input rate (`$3/MTok`) — a **10×
+haircut** — and an extraction call costing ~$0.012 must remove a lot of tokens to break even.
 
-| Backend | Content | Break-even output size |
-|---|---|---|
-| Caching | seen once | **~42,600 tokens** |
-| Caching | recurring (amortized over replays) | **~30,500 tokens** |
-| Non-caching | seen once | ~3,400 tokens |
-| Non-caching | recurring | **~1,800 tokens** |
+!!! warning "Corrected: the applied turn is not a cache-read turn"
+    The figures below were recomputed. The original table priced *every* turn at the cache-read
+    rate, which is right for a **replay** turn and wrong for the turn the cut is actually made.
+    When cache-aware, `extract_llm` is confined to the **tail** — content that arrived this turn
+    and has never been cached. On that turn it is billed as a cache-**write** (`$3.75/MTok`, i.e.
+    *dearer* than fresh input) or as plain fresh input if it falls past the last `cache_control`
+    breakpoint. Either way it is 10–12.5× the rate it was assigned.
 
-The caching figures are why the component is now **off by default on caching backends**: no
-realistic tool output reaches 30,500 tokens, so the gate would only ever be declining.
+    Confirmed on live traffic rather than argued: a real SWE-bench trial reported **52,561
+    `cache_creation` tokens** against 746,047 cache-read across 18 turns. New tail content is
+    cache-*created* every turn.
+
+    So the saving is `removed × (first-turn rate + reuses × cache-read rate)`, not
+    `removed × (1 + reuses) × cache-read rate`.
+
+| Backend | Content | Break-even, as first published | **Corrected** |
+|---|---|---|---|
+| Caching | seen once | ~42,600 tokens | **~12,900** |
+| Caching | recurring (amortized over replays) | ~30,500 tokens | **~11,600** |
+| Non-caching | seen once | ~3,400 tokens | ~3,400 *(unchanged)* |
+| Non-caching | recurring | ~1,800 tokens | ~1,800 *(unchanged)* |
+
+The non-caching rows are unchanged by construction — with one rate, `first + r×rate` is exactly
+`(1+r)×rate`.
+
+**The verdict for small-output workloads survives the correction**, which is why the component
+stays off by default on caching backends: SWE-bench's largest measured tool output is **2,760
+tokens**, still ~4× below even the corrected break-even, so the gate would still only ever be
+declining. What changes is large-output workloads — on LOCA-bench captures the eligible set goes
+from **7 to 31** of 1,639 outputs.
+
+Two consequences worth knowing before tuning. The cached/non-caching break-even ratio falls from
+~20× to **~6.4×**, because the applied turn is billed at nearly the fresh rate in both regimes and
+only replays take the haircut. And **recurrence is a much weaker lever** than the original
+arithmetic implied — it multiplies the expected saving by **1.12×, not 1.40×**, because the applied
+turn now dominates the sum.
 
 These use the **measured** compression ratio, and that measurement is the uncomfortable part: on
 real captures an accepted extraction removed only **31–254 tokens per call** on outputs of
 400–2,000 tokens — an actual ratio around **0.10–0.12**, not the ~0.45 one might assume. The model
 declines to cut aggressively, and correctly so: its contract is recall-first.
 
-Most tool outputs are nowhere near 30,500 tokens — in one measured Terminal-Bench capture the
-**largest** tool output was 2,053 tokens, ~15× below the cached break-even. That is why the same
+Most tool outputs are nowhere near the break-even — in one measured Terminal-Bench capture the
+**largest** tool output was 2,053 tokens, ~5.7× below the corrected cached figure (~15× below the
+figure as originally published). That is why the same
 component **wins on a non-caching backend and loses on a caching one**, and why the fix is not
 "compress harder" but "decide per call". Since #28 the [economic gate](#economics) makes that
 decision automatically, so the component is safe to leave enabled — it simply declines to spend
