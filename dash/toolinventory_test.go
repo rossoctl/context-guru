@@ -589,3 +589,153 @@ func TestToolAPIScope(t *testing.T) {
 		}
 	}
 }
+
+// A SESSION ID IS CLIENT-SUPPLIED, so two accounts can present the same one — by accident or
+// deliberately. Every key in this feature must therefore lead with tenant_id. Without it the
+// three failures below are all reachable by an account that guesses or reuses another's
+// session id, and none of them surfaces as an error:
+//
+//   - tool_uses upserts `calls = calls + excluded.calls`, so one account's invocations are
+//     ADDED to another account's row: a cross-account write, and the writer's own usage is
+//     recorded under the wrong tenant.
+//   - tool_declarations inserts ON CONFLICT DO NOTHING, so the second account's declarations
+//     are silently DISCARDED and its inventory reads as never captured.
+//   - the GC trigger deletes by session, so a purge would take the other account's rows with
+//     it — or, because the WHEN clause still sees the other account's requests, would leave
+//     the purged account's tool names on disk.
+//
+// This is the shape of the known archived_sessions.session_id defect, which is why it has a
+// test of its own rather than a comment.
+func TestInventoryKeysAreTenantScoped(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "d.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	const shared = "same-session-id"
+	decls := []Decl{{Kind: KindTool, Name: "Read", Tokens: 100}}
+	write := func(tenant string, calls int, fp uint64) {
+		t.Helper()
+		w := &invWriter{db: db, seen: map[string]*invSession{}}
+		if err := w.write([]invMsg{{tenant: tenant, session: shared, ts: 1, inv: &Inventory{
+			Digest: "same-digest", Decls: decls,
+			Used: []Used{{Name: "Read", Calls: calls}}, UseFingerprint: fp,
+		}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("t1", 3, 7)
+	write("t2", 500, 9)
+
+	for tenant, want := range map[string]int{"t1": 3, "t2": 500} {
+		var calls int
+		if err := db.sql.QueryRow(`SELECT calls FROM tool_uses
+			WHERE tenant_id = ? AND session_id = ?`, tenant, shared).Scan(&calls); err != nil {
+			t.Fatalf("%s has no tool_uses row of its own: %v", tenant, err)
+		}
+		if calls != want {
+			t.Errorf("%s calls = %d, want %d: the upsert crossed accounts", tenant, calls, want)
+		}
+		var n int
+		if err := db.sql.QueryRow(`SELECT COUNT(*) FROM tool_declarations
+			WHERE tenant_id = ? AND session_id = ?`, tenant, shared).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != len(decls) {
+			t.Errorf("%s has %d declaration rows, want %d: its inventory was discarded as a "+
+				"conflict with the other account's", tenant, n, len(decls))
+		}
+	}
+
+	// The GC trigger removes the purged account's rows and only those, even though the other
+	// account still holds request rows for the same session id.
+	if _, err := db.sql.Exec(`INSERT INTO requests(ts, tenant_id, session_id)
+		VALUES (1,'t1',?), (2,'t2',?)`, shared, shared); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.Exec(`DELETE FROM requests WHERE tenant_id = 't2'`); err != nil {
+		t.Fatal(err)
+	}
+	var gone, kept int
+	if err := db.sql.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM tool_declarations WHERE tenant_id='t2'),
+		(SELECT COUNT(*) FROM tool_declarations WHERE tenant_id='t1')`).Scan(&gone, &kept); err != nil {
+		t.Fatal(err)
+	}
+	if gone != 0 {
+		t.Errorf("a purged account kept %d declaration rows: its tool names outlived its "+
+			"request rows because another account shares the session id", gone)
+	}
+	if kept == 0 {
+		t.Error("the purge deleted the OTHER account's inventory")
+	}
+}
+
+// maxDeclSet bounds a cost the CALLER chooses: the scan BPE-tokenizes every element of
+// `tools` on the request goroutine, and a body may be 32 MiB (proxy.maxRequestBytes).
+// Measured cold: 187 ms per MB, 2.05 s at 16 MB — per DISTINCT set, so varying the set on
+// every request defeats the memo and pays it every time. Above the bound there is no
+// inventory, which the report renders as "not captured".
+func TestOversizeDeclarationSetIsNotScanned(t *testing.T) {
+	big := strings.Repeat("x", maxDeclSet)
+	body := []byte(`{"tools":[{"name":"Read","description":"` + big + `"}]}`)
+	if inv := ScanInventory("anthropic", body); inv != nil {
+		t.Fatalf("scanned a %d-byte declaration set: the per-request cost is caller-chosen",
+			len(body))
+	}
+	// The real shape is unaffected.
+	if inv := ScanInventory("anthropic", []byte(`{"tools":[{"name":"Read"}]}`)); inv == nil {
+		t.Fatal("a normal catalogue is no longer scanned")
+	}
+}
+
+// The design basis for storing this table under tenant scoping rather than under the
+// content-capture consent flag is that it holds IDENTIFIERS. A skill name is charset-checked
+// by skillEntryName, but a tool or MCP-server name is read straight off `tools[].name` before
+// the provider has validated anything — so the bound and the credential scrub are what make
+// the claim true rather than a hope about well-behaved clients.
+func TestDeclarationNamesAreIdentifiersNotContent(t *testing.T) {
+	secret := "sk-ant-api03-" + strings.Repeat("Zt7QwLm4", 4)
+	sentence := strings.Repeat("a whole sentence of user text ", 20)
+	body := []byte(`{"tools":[
+		{"name":` + quote(t, secret) + `},
+		{"name":` + quote(t, sentence) + `},
+		{"name":` + quote(t, "mcp__"+sentence+"__x") + `}],
+		"messages":[{"role":"assistant","content":[
+			{"type":"tool_use","name":` + quote(t, secret) + `}]}]}`)
+	inv := ScanInventory("anthropic", body)
+	if inv == nil {
+		t.Fatal("no inventory")
+	}
+	for _, d := range inv.Decls {
+		if len(d.Name) > maxDeclName || len(d.Server) > maxDeclName {
+			t.Errorf("unbounded name/server stored: %d/%d bytes", len(d.Name), len(d.Server))
+		}
+		if strings.Contains(d.Name, secret) || strings.Contains(d.Server, secret) {
+			t.Error("a credential-shaped declaration name reached the row unscrubbed")
+		}
+	}
+	for _, u := range inv.Used {
+		if len(u.Name) > maxDeclName {
+			t.Errorf("unbounded used name stored: %d bytes", len(u.Name))
+		}
+		if strings.Contains(u.Name, secret) {
+			t.Error("a credential-shaped tool_use name reached the row unscrubbed")
+		}
+	}
+	// A real name is untouched, or the inventory no longer matches what the filter removes.
+	inv = ScanInventory("anthropic", []byte(`{"tools":[{"name":"mcp__github__create_issue"}]}`))
+	if inv == nil || inv.Decls[0].Name != "mcp__github__create_issue" ||
+		inv.Decls[0].Server != "github" {
+		t.Fatalf("a legitimate name was altered: %+v", inv)
+	}
+}
+
+func quote(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}

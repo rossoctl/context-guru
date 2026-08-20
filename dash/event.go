@@ -281,6 +281,13 @@ func (e *Event) Redact() {
 		e.Extractions[i].Before = RedactContent(e.Extractions[i].Before, e.ContentCap)
 		e.Extractions[i].After = RedactContent(e.Extractions[i].After, e.ContentCap)
 		e.Extractions[i].Summary = RedactContent(e.Extractions[i].Summary, e.ContentCap)
+		// And the REJECTION slug, which is the one field here that is stored whether or not
+		// the account consented to content capture. It is not always a slug: the
+		// "model call failed" leg carries the upstream error verbatim (cheapmodel clips a
+		// non-2xx body into the message), so a gateway that echoes the presented credential
+		// in a 401 would put it on disk and on a dashboard row. Cap 0: this is a short
+		// diagnostic, so it is scrubbed but never truncated.
+		e.Extractions[i].Rejection = RedactContent(e.Extractions[i].Rejection, 0)
 	}
 }
 

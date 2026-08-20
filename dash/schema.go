@@ -367,7 +367,12 @@ CREATE TABLE IF NOT EXISTS tool_declarations (
   server     TEXT    NOT NULL DEFAULT '',   -- MCP server half of mcp__<server>__<tool>
   tokens     INTEGER NOT NULL DEFAULT 0,    -- BPE cost of carrying this declaration
   ts         INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (session_id, digest, kind, name)
+  -- tenant_id LEADS the key. A session id is CLIENT-SUPPLIED, so two accounts can present
+  -- the same one (by accident or on purpose), and a key without the tenant makes the second
+  -- account's rows collide with the first's: ON CONFLICT DO NOTHING silently discards them,
+  -- so one account's inventory disappears and the other's weights stand in for it. The same
+  -- shape as archived_sessions.session_id, which is why it is not repeated here.
+  PRIMARY KEY (tenant_id, session_id, digest, kind, name)
 );
 CREATE INDEX IF NOT EXISTS idx_tooldecl_tenant ON tool_declarations(tenant_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_tooldecl_name   ON tool_declarations(name);
@@ -386,7 +391,10 @@ CREATE TABLE IF NOT EXISTS tool_uses (
   calls      INTEGER NOT NULL DEFAULT 0,
   first_ts   INTEGER NOT NULL DEFAULT 0,
   last_ts    INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (session_id, name, skill)
+  -- tenant_id LEADS the key, as on tool_declarations: without it the upsert below
+  -- (calls = calls + excluded.calls) ADDS one account's call counts to another account's
+  -- row whenever a session id is shared, which is a cross-account write.
+  PRIMARY KEY (tenant_id, session_id, name, skill)
 );
 CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts DESC);
 
@@ -409,11 +417,20 @@ const additiveDDL2 = `
 --
 -- A trigger, not a table, so this stays inside the additive rule: it creates a new
 -- object and alters nothing about the shape of the requests table.
+--
+-- Every clause is scoped by TENANT as well as by session, because a session id is
+-- client-supplied and two accounts can present the same one. Unscoped, the trigger is wrong
+-- in both directions: it would delete another account's inventory, and it would DECLINE to
+-- delete this account's (the WHEN clause still sees the other account's request rows), so a
+-- purged tenant's tool names would outlive its request rows.
 CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
-WHEN NOT EXISTS (SELECT 1 FROM requests WHERE session_id = OLD.session_id)
+WHEN NOT EXISTS (SELECT 1 FROM requests
+  WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
 BEGIN
-  DELETE FROM tool_declarations WHERE session_id = OLD.session_id;
-  DELETE FROM tool_uses         WHERE session_id = OLD.session_id;
+  DELETE FROM tool_declarations
+    WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id;
+  DELETE FROM tool_uses
+    WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id;
 END;
 `
 

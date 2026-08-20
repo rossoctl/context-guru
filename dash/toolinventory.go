@@ -115,12 +115,33 @@ var declSeed = maphash.MakeSeed()
 // the tokenizer's own cache and cleared wholesale past the cap: a working set of live
 // sessions re-fills in one request each, and the alternative (an LRU) is bookkeeping
 // for a map whose churn is a handful of entries a day.
+//
+// declBytes bounds it in BYTES as well as in entries, because an entry's size is
+// attacker-chosen: the names come off the request body, and a caller may send a 32 MiB
+// one (proxy.maxRequestBytes). An entry cap alone therefore bounds nothing that matters
+// — 4,096 x 32 MiB is not a ceiling — so the cap that is actually enforced is the total.
 var (
 	declMu    sync.Mutex
 	declCache = map[uint64][]Decl{}
+	declBytes int
 )
 
-const declCacheCap = 4096
+const (
+	declCacheCap = 4096
+	// declCacheBytes is the whole memo's ceiling. The measured real catalogue is ~90 KB of
+	// declarations, so this holds hundreds of genuine sets and no hostile one.
+	declCacheBytes = 32 << 20
+	// maxDeclSet is the largest `tools` array this will read at all. Above it the request
+	// gets NO inventory, which the report already renders as "not captured" — the one
+	// honest answer, and the reason this can be a hard refusal rather than a partial scan.
+	//
+	// The bound exists because the scan BPE-tokenizes every element on the REQUEST
+	// goroutine, so its cost is linear in the array's bytes and the caller picks them:
+	// measured cold, 1 MB of tools costs 187 ms and 16 MB costs 2.05 s, per distinct set,
+	// and a caller that varies the set defeats the memo on every request. 256 KiB is ~3x
+	// the real catalogue and ~45 ms of worst-case cold scan.
+	maxDeclSet = 256 << 10
+)
 
 // ScanInventory reads one request's declared inventory and used set off the raw body.
 // Returns nil when the request declares no tools at all — an agent that uses none has
@@ -134,6 +155,9 @@ func ScanInventory(provider string, body []byte) *Inventory {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.IsArray() || tools.Get("#").Int() == 0 {
 		return nil
+	}
+	if len(tools.Raw) > maxDeclSet {
+		return nil // see maxDeclSet: not an inventory we will spend a request's CPU on
 	}
 	region := skillRegion(body)
 	// One digest over both halves of the declaration set: a tool added and a skill added
@@ -154,15 +178,26 @@ func ScanInventory(provider string, body []byte) *Inventory {
 			decls = append(decls, skillDecls(skillsText(body))...)
 		}
 		declMu.Lock()
-		if len(declCache) >= declCacheCap {
-			declCache = map[uint64][]Decl{}
+		if len(declCache) >= declCacheCap || declBytes >= declCacheBytes {
+			declCache, declBytes = map[uint64][]Decl{}, 0
 		}
 		declCache[digest] = decls
+		declBytes += declsSize(decls)
 		declMu.Unlock()
 	}
 	inv := &Inventory{Digest: strconv.FormatUint(digest, 16), Decls: decls}
 	inv.Used, inv.UseFingerprint = usedFrom(provider, body)
 	return inv
+}
+
+// declsSize is what retaining one memoized set costs, near enough for a cap: the strings
+// plus the struct. Only the strings can be large, and only they are attacker-sized.
+func declsSize(decls []Decl) int {
+	n := 0
+	for _, d := range decls {
+		n += len(d.Kind) + len(d.Name) + len(d.Server) + 48
+	}
+	return n
 }
 
 // declsFrom classifies every element of the tools array and measures what it costs to
@@ -192,9 +227,9 @@ func declsFrom(provider string, tools gjson.Result) []Decl {
 		case name == "":
 			continue // malformed element: no name to attribute anything to
 		}
-		d := Decl{Kind: kind, Name: name, Tokens: tokens.Count(t.Raw)}
+		d := Decl{Kind: kind, Name: identName(name), Tokens: tokens.Count(t.Raw)}
 		if server, _, ok := SplitMCPName(name); ok {
-			d.Kind, d.Server = KindMCPTool, server
+			d.Kind, d.Server = KindMCPTool, identName(server)
 		}
 		// A tool declared with defer_loading is advertised but NOT sent to the model, so
 		// charging its schema to the request would double-count tool search.
@@ -205,6 +240,31 @@ func declsFrom(provider string, tools gjson.Result) []Decl {
 	}
 	return out
 }
+
+// identName is the gate that keeps this table a table of IDENTIFIERS, which is the whole
+// basis for storing it under tenant scoping rather than under the content-capture consent
+// flag. A skill name is charset-checked by skillEntryName, but a TOOL or MCP-SERVER name is
+// whatever the client put in `tools[].name` — this package reads the body BEFORE the provider
+// validates anything, so nothing upstream has yet enforced the 128-character identifier the
+// API documents. Unbounded and unscrubbed, that field would accept a sentence of user text,
+// or a credential pasted out of an environment dump, into a column no consent gate covers and
+// a manager can read.
+//
+// Truncate rather than drop: the row's TOKEN WEIGHT is what the unused-declaration report
+// prices, and discarding an oddly-named declaration would silently understate what a session
+// carries — the direction that matters, since the same figures authorise removing things.
+func identName(s string) string {
+	if len(s) > maxDeclName {
+		// ToValidUTF8 because the cut is at a BYTE offset and may land inside a rune; a
+		// half-rune in a text column is a different kind of bug to chase later.
+		s = strings.ToValidUTF8(s[:maxDeclName], "")
+	}
+	// Cap 0: scrub the credential shapes without truncating an identifier.
+	return RedactContent(s, 0)
+}
+
+// maxDeclName is the API's own documented limit for a tool name, so nothing real is lost.
+const maxDeclName = 128
 
 // SplitMCPName splits an MCP tool name into its server and tool halves.
 // `mcp__<server>__<tool>`, non-greedy on the server: real tool names contain `__`
@@ -391,9 +451,9 @@ func usedFrom(provider string, body []byte) ([]Used, uint64) {
 		if name == "" {
 			return
 		}
-		u := Used{Name: name, Skill: skill}
+		u := Used{Name: identName(name), Skill: skill}
 		if server, _, ok := SplitMCPName(name); ok {
-			u.Server = server
+			u.Server = identName(server)
 		}
 		byKey[u]++
 	}
@@ -574,7 +634,7 @@ func (w *invWriter) write(batch []invMsg) error {
 	useStmt, err := tx.Prepare(`INSERT INTO tool_uses(
 		tenant_id, session_id, name, server, skill, calls, first_ts, last_ts
 	) VALUES (?,?,?,?,?,?,?,?)
-	ON CONFLICT(session_id, name, skill) DO UPDATE SET
+	ON CONFLICT(tenant_id, session_id, name, skill) DO UPDATE SET
 		calls = calls + excluded.calls, last_ts = excluded.last_ts`)
 	if err != nil {
 		return err

@@ -154,9 +154,19 @@ func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeToolFilterDoc answers with the read route's document, so one shape serves both.
+//
+// The document is built for the caller's OWN account, and that has to be forced: the
+// dashboard's scope helper defaults a MANAGER to the whole service, so the document it would
+// otherwise return describes every tenant's traffic and reads the removal list of tenant ""
+// — which does not exist, so a successful, audited save would answer `enabled:false` with an
+// empty exclusion list and the switch would repaint as though nothing had happened. `tenant=me`
+// is that helper's own way back to own-only, so this reuses the one parameter that moves the
+// scope rather than adding a second entry point beside it.
 func (h *Handler) writeToolFilterDoc(w http.ResponseWriter, r *http.Request, id string) {
 	if h.api != nil {
-		if doc, err := h.api.ToolFilterDocument(r); err == nil {
+		own := r.Clone(r.Context())
+		own.URL.RawQuery = "tenant=me"
+		if doc, err := h.api.ToolFilterDocument(own); err == nil {
 			writeJSON(w, http.StatusOK, doc)
 			return
 		}

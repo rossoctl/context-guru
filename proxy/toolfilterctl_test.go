@@ -156,3 +156,30 @@ func asStrings(v any) []string {
 	}
 	return out
 }
+
+// WITH A DASHBOARD WIRED, the answer to a save comes from dash rather than from this
+// package's fallback — and dash defaults a MANAGER to the whole service, whose removal list
+// is tenant ""'s and does not exist. So the document has to be forced to the caller's own
+// scope, or a save that succeeded and was audited answers "the control is unavailable and
+// nothing is excluded" and the switch repaints as though it had failed.
+//
+// ctlFixture cannot see this: it has no dashboard, so h.api is nil and the fallback runs.
+func TestToolFilterAnswersInTheCallersOwnScope(t *testing.T) {
+	f := newMgrFixture(t)
+	f.h.API().SetToolFilterState(f.h.DashToolFilter())
+	w, _ := f.signUp(t, "boss@ibm.com", "l")
+	jar := w.Result().Cookies()
+
+	w, out := f.do(t, "POST", "/api/toolfilter",
+		`{"kind":"tool","name":"Workflow","action":"exclude"}`, jar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("exclude = %d %s", w.Code, w.Body)
+	}
+	if en, _ := out["enabled"].(bool); !en {
+		t.Errorf("a successful save answered enabled=false, so the control reports itself "+
+			"unavailable right after it worked: %v", out)
+	}
+	if !hasExcluded(out, "Workflow") {
+		t.Errorf("the answer to a successful save does not list the exclusion: %v", out)
+	}
+}
