@@ -193,10 +193,32 @@ NEVER for a given session, so every input to this decision is session-invariant:
 
 - the removal list is configuration;
 - the prose region is the `system` blocks minus the environment snapshot `cachesplit` already
-  isolates as volatile, plus the first message — which is exactly the text
-  `schema.SessionHead` feeds to `session.Scoped`, so if it changed we would be looking at a
-  different session by this codebase's own definition. (A commit subject in the git snapshot
-  naming a tool must not veto its removal; `TestFilterIgnoresTheVolatileSnapshot` pins that.)
+  isolates as volatile, plus the first message. (A commit subject in the git snapshot naming a
+  tool must not veto its removal; `TestFilterIgnoresTheVolatileSnapshot` pins that.)
+
+  **This one is not actually session-invariant, and that is a known open hazard.** The
+  argument used to be that the region is exactly the text `schema.SessionHead` feeds to
+  `session.Scoped`, so a change to it would already be a different session. That only holds
+  when the session id is *derived*: Claude Code sends an explicit one (`metadata.user_id`),
+  which wins in `explicitSession`, so the region can move while the session id does not.
+  Measured on a real 35-request Claude Code session (`bench/long.jsonl`), `messages.0` changed
+  twice — the agent's own auto-compaction rewrites the first user turn into a conversation
+  summary, taking the region from 32,512 to 53,752 bytes — and `system[0]` changed once (its
+  `x-anthropic-billing-header` `cc_version`).
+
+  The prose-referenced *set* did not change on any of the four interactive captures, so this
+  is latent rather than a live regression, and `TestFilterProseSetStableOverCapture` is the
+  guard that fails if it ever does. But a compaction summary is model-written prose that names
+  tools, so a summary mentioning a filtered name puts its declaration back for that turn and
+  re-anchors `tools` — the one block a client-side compaction otherwise leaves cached (19.8%
+  of an interactive request, 59.2% on SWE-bench). Closing it needs either a session-keyed
+  monotone keep-set (once referenced, always kept) or a region that excludes `messages.0`, and
+  each trades something: the first adds store state to a prefix transform, the second makes
+  the gate less conservative for a tool named only in the user's own first message.
+
+- `tool_choice` is read per request (`forcedToolName`) and is the same shape of hazard.
+  Harmless in practice — nothing an account would put on the removal list is a tool a later
+  turn forces — but it is not session-invariant either.
 - the output preserves input order and re-uses each kept element's raw bytes, so removing
   nothing is byte-identical to the input. `TestFilterDeclarationsByteStable` re-runs itself in
   child processes, because map iteration and the maphash seed are re-randomized per process

@@ -50,9 +50,30 @@ package apply
 //
 //   - the remove list is configuration, read once per request from the built pipeline;
 //   - the prose region is the system blocks (minus the environment snapshot cachesplit
-//     already isolates as volatile) plus the first message. That is not a convenient
-//     choice: it is exactly the text schema.SessionHead feeds to session.Scoped, so if it
-//     changed we would be looking at a different session by this package's own definition;
+//     already isolates as volatile) plus the first message.
+//
+//     This is the WEAK link and it is not session-invariant, contrary to what this comment
+//     used to claim. The claim was that the region is the text schema.SessionHead feeds to
+//     session.Scoped, so a change to it would already be a different session. That only
+//     holds when the session id is DERIVED; Claude Code sends an explicit one
+//     (metadata.user_id), which wins in explicitSession, so the region can move while the
+//     session id does not. MEASURED on a real 35-request Claude Code session
+//     (cg-research/bench/long.jsonl): `messages.0` changed twice — the agent's own
+//     auto-compaction rewrites the first user message into a conversation SUMMARY, taking
+//     the region from 32,512 to 53,752 bytes — and `system[0]` changed once (its
+//     x-anthropic-billing-header cc_version). The prose-referenced SET happened not to
+//     change on any of the four interactive captures, which is why this is latent rather
+//     than a live regression; but a summary is model-written prose that names tools, so a
+//     summary mentioning a filtered name puts its declaration BACK for that turn and
+//     re-anchors `tools` — the one block a client-side compaction otherwise preserves
+//     (19.8% of an interactive request, 59.2% on SWE-bench). Fixing it needs either a
+//     session-keyed monotone keep-set or a region that excludes `messages.0`, and both are
+//     trade-offs rather than one-liners. TestFilterProseSetStableOverCapture is the guard;
+//     see docs/how-to/declaration-removal.md;
+//
+//   - `tool_choice` is read per request (forcedToolName) and is likewise not
+//     session-invariant. Harmless in practice — nothing an account would put on the remove
+//     list is a tool a later turn forces — but it is the same shape of hazard;
 //   - the output preserves input order and re-uses each kept element's raw bytes, so a
 //     removal of nothing is byte-identical to the input and no map iteration can reorder
 //     anything. TestFilterDeclarationsByteStable pins it across processes.

@@ -1,6 +1,8 @@
 package apply
 
 import (
+	"bufio"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
@@ -225,4 +227,69 @@ func TestFilterProseWordBoundary(t *testing.T) {
 			t.Errorf("proseReferenced(%q, %q) = %v, want %v", tc.prose, tc.name, got, tc.want)
 		}
 	}
+}
+
+// TestFilterProseSetStableOverCapture is the guard for the one input to the removal
+// decision that is NOT session-invariant: the prose region (see the file comment, §3).
+//
+// The region includes `messages.0`, and Claude Code rewrites that message mid-session —
+// its auto-compaction replaces the first user turn with a model-written conversation
+// SUMMARY. On the four interactive captures on this box the set of prose-referenced
+// declarations happens not to change, so the filter's output is stable; this test asserts
+// exactly that, per capture, so the day a summary starts naming a filtered tool it fails
+// here instead of silently re-anchoring `tools` on the compaction turn.
+//
+// Skipped unless CONTEXT_GURU_CAPTURE names a readable capture:
+//
+//	CONTEXT_GURU_CAPTURE=/home/vpcuser/cg-research/bench/long.jsonl \
+//	  go test ./apply -run FilterProseSetStableOverCapture -v
+func TestFilterProseSetStableOverCapture(t *testing.T) {
+	path := os.Getenv("CONTEXT_GURU_CAPTURE")
+	if path == "" {
+		t.Skip("set CONTEXT_GURU_CAPTURE to a capture of one session to run this")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Skip(err)
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 1<<28)
+	var declared []string
+	prev, regionLens := "", map[int]bool{}
+	for i := 0; sc.Scan(); i++ {
+		var rec struct{ Body json.RawMessage }
+		if json.Unmarshal(sc.Bytes(), &rec) != nil || len(rec.Body) == 0 {
+			continue
+		}
+		if declared == nil {
+			gjson.GetBytes(rec.Body, "tools").ForEach(func(_, tv gjson.Result) bool {
+				if n := declName(tv); n != "" {
+					declared = append(declared, n)
+				}
+				return true
+			})
+			if declared == nil {
+				continue
+			}
+		}
+		region := proseRegion(rec.Body)
+		regionLens[len(region)] = true
+		var hits []string
+		for _, n := range declared {
+			if proseReferenced(region, n) {
+				hits = append(hits, n)
+			}
+		}
+		key := strings.Join(hits, ",")
+		if i > 0 && prev != "" && key != prev {
+			t.Errorf("request %d: the prose-referenced set changed mid-session, so the "+
+				"filter's `tools` output flips and re-anchors the prefix\n was: %s\n now: %s",
+				i, prev, key)
+		}
+		prev = key
+	}
+	// Not an assertion, a reminder: the region itself DOES move (that is the latent hazard),
+	// and this records by how many distinct sizes on this capture.
+	t.Logf("%d distinct prose-region sizes over the capture", len(regionLens))
 }
