@@ -192,6 +192,11 @@ nav:
           - context-guru: results/terminal-bench-context-guru.md
           - headroom: results/terminal-bench-headroom.md
           - rtk: results/terminal-bench-rtk.md
+  - Experiment log:
+      - Overview: experiments/README.md
+      - "captures — iter001": experiments/captures/iter001/results.md
+      - "LOCA — iter001 (retracted)": experiments/loca/iter001/results.md
+      - "LOCA — iter002": experiments/loca/iter002/results.md
   - Proposals:
       - "Co-reference-aware compaction": proposals/coref-compaction.md
       - "…implementation status": proposals/coref-implementation.md
