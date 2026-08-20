@@ -1,88 +1,126 @@
-# `coref` on LOCA-bench — the first time it has acted on real traffic
+# Deferring summarization on LOCA-bench
 
-[Component gating](component-gating.md) established that SWE-bench and Terminal-Bench have tool
-outputs an order of magnitude below the thresholds these components need, leaving **LOCA-bench as
-the only benchmark in the set where anything can fire**. This is that run.
+Does paying a cache-write to compact the full request body **defer the summarization** an agent
+otherwise has to run when its context fills? That is the largest claimed win in
+[the proposal](../proposals/coref-compaction.md), and this is the first end-to-end measurement of it.
 
-It is the first measurement in which `coref` actually acts on real captured traffic rather than
-being scored offline. It cost **$0** (deterministic arms only) and the result is **not favourable**.
+**Result: yes, and by a lot — 72% fewer summarizations.** But not for the reason the design
+predicted, and the measurement found a design error worth more than the number.
 
-Substrate: the 9 deepest real request bodies from the LOCA capture (one per conversation), 3.34 MB,
-tool-output mass 4,940–232,505 tokens per request. Replayed through the proxy's `/compact` endpoint,
-cache-aware (`CACHE_MODE=on`).
+Total spend: **~$0.16** across five arms.
+
+## Setup
+
+LOCA-bench, because [component gating](component-gating.md) established it is the only benchmark in
+the set whose tool outputs clear these components' thresholds *and* whose requests reach real context
+pressure (median 52,027 tokens, max 233,288 — SWE-bench never exceeds 46,405).
+
+**Sequential replay.** LOCA traffic is append-only, so turn *k* of a conversation is reconstructed as
+`messages[0:k]` of its final request, cut at assistant boundaries: **197 turns across 9
+conversations**, replayed in order under a stable per-conversation session id so `MaxCachedIdx`
+advances turn by turn as it does in production.
+
+!!! warning "This supersedes an earlier version of this page, which was wrong"
+    The first run sent **one request per conversation** (the deepest). Every request was therefore a
+    cold first turn with `MaxCachedIdx = -1`, so the tail gate never engaged. That inflated `mask` to
+    52.3% — essentially its non-tail figure — and produced a "`mask` removes 8.3× more than `coref`"
+    comparison that was an artifact of the setup. It also reported **zero `closed`** outputs on LOCA,
+    which the sequential replay shows is false (25 of them): `closed` requires a reference that has
+    since gone stale, which cannot exist when every request is turn 1.
+
+**`summarize` is wired at a 60,000-token context max and runs last**, mimicking an agent compacting
+when full. It therefore fires only when compaction failed to keep the turn under the max, which makes
+**firings the deferral measurement**.
 
 ## Result
 
-| arm | requests it acted on | tokens saved | request shrink |
-|---|---|---|---|
-| **`mask`** (age-based, ignores references) | **9/9** | **402,135** | **52.3%** |
-| **`coref`** (shipped defaults, `min_tokens: 300`) | **2/9** | **48,532** | **6.5%** |
-| `coref` + `cut_closed: true` | 2/9 | 48,532 | 6.5% — **identical** |
+| arm | pipeline | **summarizer firings** | vs baseline | request shrink |
+|---|---|---|---|---|
+| **S1** | `summarize` alone | **71** | — | 64.6% |
+| **S2** | `codesmart` − `extract_llm` | **46** | **−35%** | 58.2% |
+| **S3** | + **tail** `extract_llm` | **46** | **+0** | 58.2% |
+| **S4** | + `coref` | **20** | **−72%** | 45.6% |
+| **S4b** | + `extract_llm` **prefix reach** | **20** | −72% | 45.6% |
 
-Per-request, `coref` acted on two: 46.6% and 11.2%. The other seven were left byte-identical.
+Shrink *falls* as firings fall, and that is the correct direction: `summarize` is the largest single
+shrinker, so deferring it removes its contribution. Shrink is not the objective here — firings are.
 
-**`mask` removes 8.3× more than `coref` does.**
+Three findings, in order of how much they matter.
 
-## Why: on LOCA almost everything is still live
+## 1. Deferral works, and it is `coref` that does it — **measured**
 
-Classification across the 148 outputs that cleared the 300-token floor (292 fell below it):
+**72% fewer summarizations.** `coref` acted 28 times, removing 1,008,646 tokens, and that alone took
+firings from 46 to 20. This is the first clearly positive end-to-end result for this line of work.
 
-| verdict | outputs | |
+The deterministic pipeline gets a third of the way there (71 → 46) for free. **The tail
+`extract_llm` lever adds exactly nothing** (S2 and S3 are byte-identical), consistent with every
+other measurement of it on this corpus.
+
+## 2. The fold engages correctly and contributes nothing — **measured**
+
+`allow_cached_prefix` demonstrably worked. The gate counters are the proof:
+
+| gate | S4 (prefix reach off) | S4b (on) |
 |---|---|---|
-| **`open`** — referenced recently or ≥3 times | **142 (96%)** | keep |
-| `opaque` — introduced nothing trackable | 6 | never cut |
-| `closed` | **0** | — |
-| `unreferenced` — cut | ~17 | the 48,532 tokens |
+| `cached_prefix` | 6,597 | **gone** |
+| `cached_prefix_above_floor` | 279 | **gone** |
+| `prefix_still_referenced` | — | **6,519** |
+| `economic_gate` | 25 | **103** |
 
-**96% of eligible outputs are `open`.** LOCA's agents reference their tool results immediately and
-repeatedly, so the reference detector — working correctly — reports that there is almost nothing
-safe to remove.
+The blanket refusal is replaced by the index pre-filter, which rejected **6,519 prefix candidates for
+free**; the economic gate then declined what survived. And the outcome is **byte-identical** to S4 —
+same 20 firings, same 45.6%, `extract_llm acted=0`.
 
-This is the same signature [the density pass](coref-density.md#and-loca-behaves-exactly-as-8-predicted)
-found on the LOCA trajectories, reproduced here through a completely different path (live pipeline
-rather than offline scoring): references are *immediate-and-repeated* or invisible, never
-"taken once and abandoned".
+Two reasons. 98.8% of prefix candidates are still referenced (matching the 96% `open` share). And the
+handful that pass cannot clear break-even.
 
-### `cut_closed` is inert on LOCA, not merely low-yield
+## 3. The pre-filter selects the wrong class — **a design error, and the useful result**
 
-The `cut_closed` arm is byte-for-byte identical to the default because **there are zero `closed`
-outputs**. The knob that was held back for a corpus that could justify it turns out to have no
-effect on the corpus where the component can otherwise act at all. That settles a question the
-density pass could only bound: `cut_closed`'s 0% on LOCA is structural, not a sampling artifact.
+The deeper problem is not yield. **For the `unreferenced` class, dropping strictly dominates
+trimming.** The pre-filter hands `extract_llm` only content the index has shown nothing ever used —
+and for that content a model call can at best preserve *part* of what is already spent, while paying
+a call and a cache-write. `coref` removes it outright for free. There is no work for the model to do
+in the class it is allowed to see.
 
-## The experiment this sharpens
+The class where trimming belongs is **`closed`** — referenced once, long ago; the value was taken and
+the remainder is chaff. That content is still partly live, so deciding what to keep genuinely needs
+judgement:
 
-`mask` removes **353,603 tokens that `coref` classifies as still live**. Exactly one question
-decides which component is right, and it is the question that has never been asked:
+| class | who should act | why |
+|---|---|---|
+| `unreferenced` | **`coref` — drop** | provably spent; a call could only preserve less |
+| **`closed`** | **`extract_llm` — trim** | partly live; needs judgement |
+| `open` / `opaque` | neither | still in use, or no evidence |
 
-> **Does `mask`'s extra cutting cost reward on LOCA?**
+The sequential replay makes this testable for the first time: it surfaced **`class_closed: 25`**,
+where the earlier one-request setup structurally could not produce any. Repointing the pre-filter
+from `unreferenced` to `closed` is a one-line change and is the obvious next experiment.
 
-- If `mask` is reward-neutral there, `coref`'s caution is buying nothing and the component's whole
-  premise fails on this workload — the only one where it can act.
-- If `mask` loses reward, the 353,603-token gap is precisely the damage `coref` exists to prevent,
-  and *that* is the product.
+## Also: the biggest lever is lossless, and it is none of these components
 
-This is a far cheaper and sharper question than the reward-parity arm originally planned for
-SWE-bench, and it is well-posed because both arms are deterministic: same corpus, same requests,
-no sampling.
+| component | firings | tokens saved |
+|---|---|---|
+| **`format`** (lossless JSON repack) | 119 | **1,266,088** |
+| `coref` | 28 | 1,008,646 |
+| `dedup` | 54 | 15,546 |
+| `extract_llm` | **0** | **0** |
+
+`format` recovers more than `coref` does, losslessly and for free. Every lossy component here is
+competing for what is left after it.
 
 ## Caveats
 
-- **n = 9 requests, one per conversation.** Enough to show the direction and the mechanism; not a
-  calibration.
-- **No reward.** Nothing here says whether either arm's cuts are safe. That is the whole point of
-  the question above.
-- **Deepest-request-only.** The capture emits size-only records for non-final turns, so only the
-  final request per conversation carries a full body. A real session would fire `coref` once at a
-  threshold crossing, not on the deepest request in isolation.
-- **LOCA is the adverse corpus for this detector** by design — Tier-2/3 heavy, which the proposal
-  predicted. A poor result here is not evidence about Tier-1-rich long-horizon traffic, and no
-  benchmark in the set provides that (SWE-bench is Tier-1-rich but its outputs are tiny).
-- One measurement mistake worth recording: an earlier probe ran `[mask, coref, extract]` together and
-  reported `coref` doing nothing. `mask` ran first and replaced every output with a short marker, so
-  `coref` then saw only sub-floor content. That is the `skipReduce` first-refusal interaction
-  [documented in the proposal](../proposals/coref-compaction.md#5-hard-constraints-the-codebase-imposes),
-  observed live — and a reminder that these arms must be run **one component at a time**.
+- **No reward.** Nothing here says the 20-vs-71 tradeoff preserved task success. That remains the
+  gate, and it is not answerable from replay.
+- **9 conversations, 197 turns.** Direction and mechanism, not calibration.
+- **Turns are reconstructed prefixes**, valid because LOCA is append-only, but each `/compact` call is
+  independent — a real session would carry the *compacted* transcript forward, so effects that
+  compound across turns are not captured.
+- **The 60,000-token max is a choice**, made because it fires often enough to measure (66 of 197
+  turns exceed it). Claude Code's real threshold is ~167,000, which only 2 of 197 turns reach.
+- **The summarizer is cheap here because of freeze/replay** — 71 firings cost 17 model calls. An agent
+  whose transcript actually changes after each summary would pay more.
 
 See also: [component gating](component-gating.md) · [density](coref-density.md) ·
-[eval box](coref-evalbox.md) · [the proposal](../proposals/coref-compaction.md)
+[eval box](coref-evalbox.md) · [reachability](coref-reachability.md) ·
+[the proposal](../proposals/coref-compaction.md)
