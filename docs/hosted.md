@@ -612,12 +612,30 @@ Every new tenant starts on `codesmart` minus the LLM extractor (and minus `codes
 blind `collapse`):
 
 ```yaml
-pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
+pipeline: [format, toon, textclean, dedup, cmdfilter, extract, cachesplit]
 components:
   extract:
     min_tokens: 400
 mode: sync
 ```
+
+`textclean` was added on 2026-08-20 and is the reason to re-read this section if you last
+saw it earlier. It strips ANSI escapes and carriage-return redraws from tool output, which
+is display noise your agent never saw rendered — so it is **lossless**, needs no marker, no
+stash and no minimum size, and is a pure function of the content, meaning it produces the
+same bytes on every turn and never invalidates your prompt cache. It exists because
+`format` and `toon` only understand JSON, and 1,724 of 1,748 distinct tool outputs measured
+on this service are not JSON. Measured saving on that corpus: −17,219 tokens, 1.73%, at zero
+upstream spend.
+
+**Whether this reached you** depends on one thing: an account with an EMPTY config tracks
+the server default and picked this up at the restart, with nothing to do. An account that
+has ever saved its own config on the settings page keeps exactly what it saved — including a
+config that happens to be identical to the old default. That is deliberate (a saved config
+is a choice, and this service does not rewrite choices), but it does mean the upgrade is not
+automatic for everyone. To take it: either add `textclean` to your own pipeline after
+`toon`, or press **Track the server default**, which hands you this document and every
+future improvement to it.
 
 `failed_run` used to be in that list and is not any more. It acted **zero** times on every
 workload measured here — 251 requests on one account (843 ms spent scanning), and 28.8 s on

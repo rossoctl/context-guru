@@ -109,12 +109,41 @@ const (
 // acted ZERO times while spending real wall clock scanning every request for superseded
 // failures (843 ms across 251 requests on one account, 28.8 s on the Terminal-Bench arm).
 // A component that has never once fired on agentic traffic is latency with a name.
-const DefaultConfigYAML = `pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
+//
+// textclean is here because it is the cheapest thing in the catalogue that actually
+// fires. It is a Reformat, so it is LOSSLESS — no marker, no stash, no floor, a pure
+// function of the content and therefore byte-stable across turns and restarts, which is
+// the same cache posture as `format`. It handles the shape `format` and `toon` never see:
+// 1,724 of 1,748 distinct tool outputs measured on this box are not JSON. Measured
+// −17,219 tokens = 1.73% of the capture corpus, at no upstream spend and no cache churn,
+// which is why it is safe to turn on for everyone rather than offer as an opt-in.
+// Ordered after toon per the pipeline's "lossless repack first" rule, so every downstream
+// component's token counts are honest (see config.presets["general"]).
+const DefaultConfigYAML = `pipeline: [format, toon, textclean, dedup, cmdfilter, extract, cachesplit]
 components:
   extract:
     min_tokens: 400
 mode: sync
 `
+
+// supersededDefaults are the exact literals DefaultConfigYAML has previously held, newest
+// first. A tenant whose stored config matches one of these byte-for-byte is running an old
+// server default rather than a configuration they chose, so it is safe to identify — which
+// is the one thing the absence of this list made impossible (see the note on migrations).
+//
+// Recorded here at the commit that supersedes each value, while it is still known to be
+// exactly what Register wrote, because after that commit ships the knowledge is gone. It is
+// a record, not a mechanism: nothing rewrites a stored config on the strength of it. A
+// sweep, if one is ever wanted, gets to be a separate and reversible decision.
+var supersededDefaults = []string{
+	// Superseded 2026-08-20 by the addition of textclean.
+	`pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
+components:
+  extract:
+    min_tokens: 400
+mode: sync
+`,
+}
 
 // Tenant is one user of the service.
 type Tenant struct {
@@ -1071,7 +1100,8 @@ const stampInUseAccounts = `
 // previous defaults were never recorded anywhere — no constant, no schema row, and
 // this package predates its first commit — so the match list would be a guess.
 // A guess that misses does nothing; a guess that hits deletes a configuration
-// somebody chose. Existing rows therefore keep exactly what they have, and the
+// somebody chose. supersededDefaults below is that list, started at the first commit
+// that could honestly contribute to it. Existing rows therefore keep exactly what they have, and the
 // settings page offers "Track the server default" as a one-click, audited way out,
 // pointing out when a saved config is identical to the current default. If a future
 // change to DefaultConfigYAML wants to sweep tracking tenants forward, add the
