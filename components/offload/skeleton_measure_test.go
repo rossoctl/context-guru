@@ -183,9 +183,12 @@ func rebuildLast(t *testing.T, file string) *bschemas.BifrostChatRequest {
 }
 
 // removedDollars prices removed tokens on THIS corpus. A removed token is worth 0.209x a
-// fresh one ($0.6265/MTok) because the corpus is 90.54% cache_read — pricing at 1.0x
+// fresh one ($0.412/MTok) because the corpus is ~90% cache_read — pricing at 1.0x
 // would overstate every figure here by ~4.8x.
-const perMTok = 0.6265
+// 0.209x fresh, at the $2.00/MTok this gateway actually billed the capture corpus. An earlier
+// value of 0.6265 applied the same multiplier to Anthropic's $3.00 list rate, which overstated
+// every dollar below by ~1.26x. Rankings were unaffected; absolute figures were not.
+const perMTok = 0.412
 
 func removedDollars(tok int) float64 { return float64(tok) / 1e6 * perMTok }
 

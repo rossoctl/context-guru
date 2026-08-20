@@ -40,12 +40,17 @@ const (
 // the two directly is a unit error, and it was silently costing every haiku call its cache.
 // MEASURED 2026-08-19 against the gateway, same bytes both sides:
 //
-//	preamble+context, claude-haiku-4-5:  3,682 o200k  ->  4,412 billed  (1.20x)
+//	preamble+context, claude-haiku-4-5:  3,673 o200k  ->  4,217 billed  (1.148x)
+//	same shape, re-measured 2026-08-20:   6,143 o200k  ->  7,077 billed  (1.152x)
 //	preamble only,    aws/claude-sonnet-5: 1,893 o200k ->  2,956 billed  (1.56x)
 //
 // The 3,682-o200k prefix CACHED (write=4,412 then read=4,412) while the unconverted
 // comparison (3,682 < 4,096) withheld the breakpoint — a cache the provider was willing to
-// grant, declined on arithmetic. 1.20x is the haiku figure, and haiku-class is the family
+// grant, declined on arithmetic. 1.20x is kept as the DIVISOR deliberately: it is looser than
+// the 1.148-1.152x actually measured, so the derived floor (4096/1.20 = 3413 o200k) sits below
+// the true one (4096/1.152 = 3555) and the breakpoint is offered slightly early rather than
+// withheld. A too-tight divisor would reintroduce the bug this comment exists to explain.
+// haiku-class is the family
 // carrying the 4,096 floor, so it is the right conversion here; it is also the smaller of
 // the two, so it never claims a cache we have evidence would be refused.
 //

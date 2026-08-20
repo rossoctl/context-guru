@@ -471,6 +471,13 @@ stays cache-stable.
 
 ### The sweep no longer forces `context: full` — measured before/after
 
+> **Corrected 2026-08-20.** An earlier version of this section presented the whole
+> -$0.039 -> +$0.020 turnaround as the effect of dropping the forced `context: full`.
+> Independent re-measurement on the fixed code shows `full` is ALSO net-positive
+> (+$0.0119, accepting 3/3), so the keep-list fix in `HarvestIdentifiers` carries most of
+> the change on its own and dropping the force adds roughly +$0.005. The before/after
+> below spans two independent changes; do not attribute it to one.
+
 It used to, on the argument that judging what an old message may lose requires knowing what
 happened since. The argument does not survive measurement, and removing that one line is the
 largest single change to this component's economics.
@@ -491,7 +498,7 @@ flips between identical runs** (`bench/BASELINE.md`):
 | | calls | prompt tok/call | our spend | tokens removed | accepted | net (see below) |
 |---|---|---|---|---|---|---|
 | **before** (`full` forced) | 1 | 36,686 | $0.0385–0.0396 | **0** | 0/3 runs | **−$0.0385…−$0.0396** |
-| **after** (`recent`) | 2 | 18,657 + 13,101 | $0.0344–0.0366 | 92,948–95,944 | 3/3 runs | **+$0.0195…+$0.0217** |
+| **after** (`recent`) | 2 | 18,657 + 13,101 | $0.0344–0.0366 | 87,812–95,944 | 3/3 runs | **+$0.0157…+$0.0212** (n=6, median +$0.0172) |
 
 The same candidate (15,473 tokens) went from a 36,686-token prompt rejected by the acceptance
 check on all three runs, to an 18,657-token prompt accepted on all three, removing 14,438 tokens.
@@ -503,7 +510,7 @@ larger one**, and it is the keep-list effect above, now visible because the cont
     `removed` (95,944) exceeds `attempted` (27,189), i.e. most of it is history the provider had
     already cached. Priced honestly instead:
 
-    * **16,100–16,829 tokens** were removed *uniquely, on `ttl_expiry` turns* — the sweep's own
+    * **14,568–16,829 tokens** were removed *uniquely, on `ttl_expiry` turns* — the sweep's own
       work, correctly valued at the cache-creation rate ($2.50/MTok) = **$0.0403–0.0421**;
     * the remaining ~79,000 are that reduction **replayed** on later warm turns of the same
       session, which would have been billed as cache reads ($0.20/MTok) = **$0.0158**.

@@ -281,7 +281,7 @@ func TestLedgerBiggestMisses(t *testing.T) {
 // It is not the fresh-input rate. The captured corpus is 90.54% cache_read, and a provider
 // bills cache_read at 0.1x fresh and cache_write at 1.25x — so the blend is
 // 0.9054*0.1 + 0.0946*1.25 = 0.2088 of fresh. At Sonnet's $3/Mtok input that is
-// $0.6265/Mtok. Quoting the fresh rate instead would overstate every number below by 4.8x,
+// $0.412/Mtok. Quoting the fresh rate instead would overstate every number below by 4.8x,
 // which is the convention error this repo refuses (docs/results, cg-measurement-conventions).
 const ledgerPrice = 3.0 / 1e6 * (0.9054*0.1 + 0.0946*1.25)
 
