@@ -36,8 +36,13 @@ package apply
 // is known to leave a coherent instruction. This code therefore takes the conservative half
 // of "strip a declaration and its prose together, or neither": a declaration whose name
 // appears in the prose is KEPT, whatever the configuration says. proseReferenced is that
-// gate. On the real Claude Code catalogue it keeps 9 of 24 tools and clears the other 15 —
-// including every one of the never-used items that carries real weight.
+// gate. Measured over the four interactive captures on this box
+// (cg-research/bench/{short,long,mixed,cold}.jsonl, 70 requests, one session each): the real
+// Claude Code catalogue is 31 tools and the gate keeps 6 of them — Agent, Bash, Edit, Read,
+// Skill, Write — clearing the other 25, including every one of the never-used items that
+// carries real weight. On the harness corpora (/tmp/cg-runs/capture-{tb,swebench}.jsonl,
+// 1,844 requests, 53 sessions) the catalogue is 24 tools and it keeps those 6 plus
+// TaskCreate.
 //
 // # 3. Determinism, because `tools` renders at position 0
 //
@@ -46,34 +51,49 @@ package apply
 // expensive way: gate a prefix transform on a per-turn condition and it re-anchors on EVERY
 // turn. The only safe shapes are ALWAYS and NEVER for a given session.
 //
-// So every input to the decision is session-invariant:
+// So every input to the decision is session-invariant, with one bounded exception named
+// below (`tool_choice`):
 //
 //   - the remove list is configuration, read once per request from the built pipeline;
-//   - the prose region is the system blocks (minus the environment snapshot cachesplit
-//     already isolates as volatile) plus the first message.
+//   - the prose region is the system blocks ONLY, minus the environment snapshot cachesplit
+//     already isolates as volatile and minus the billing-header block. It is
+//     session-invariant because of what it leaves OUT, not "by construction".
 //
-//     This is the WEAK link and it is not session-invariant, contrary to what this comment
-//     used to claim. The claim was that the region is the text schema.SessionHead feeds to
-//     session.Scoped, so a change to it would already be a different session. That only
-//     holds when the session id is DERIVED; Claude Code sends an explicit one
-//     (metadata.user_id), which wins in explicitSession, so the region can move while the
-//     session id does not. MEASURED on a real 35-request Claude Code session
+//     The old argument was that the region is the text schema.SessionHead feeds to
+//     session.Scoped, so a change to it would already be a different session. That is FALSE:
+//     it only holds when the session id is DERIVED, and Claude Code sends an explicit one
+//     (metadata.user_id), which wins in explicitSession, so the region could move while the
+//     session id did not. MEASURED on a real 35-request Claude Code session
 //     (cg-research/bench/long.jsonl): `messages.0` changed twice — the agent's own
 //     auto-compaction rewrites the first user message into a conversation SUMMARY, taking
 //     the region from 32,512 to 53,752 bytes — and `system[0]` changed once (its
-//     x-anthropic-billing-header cc_version). The prose-referenced SET happened not to
-//     change on any of the four interactive captures, which is why this is latent rather
-//     than a live regression; but a summary is model-written prose that names tools, so a
-//     summary mentioning a filtered name puts its declaration BACK for that turn and
-//     re-anchors `tools` — the one block a client-side compaction otherwise preserves
-//     (19.8% of an interactive request, 59.2% on SWE-bench). Fixing it needs either a
-//     session-keyed monotone keep-set or a region that excludes `messages.0`, and both are
-//     trade-offs rather than one-liners. TestFilterProseSetStableOverCapture is the guard;
-//     see docs/how-to/declaration-removal.md;
+//     x-anthropic-billing-header cc_version). A summary is MODEL-WRITTEN prose that names
+//     tools, so one naming a filtered tool would put its declaration BACK for that turn and
+//     re-anchor `tools` — the one block a client-side compaction otherwise preserves (19.8%
+//     of an interactive request, 59.2% on SWE-bench).
 //
-//   - `tool_choice` is read per request (forcedToolName) and is likewise not
-//     session-invariant. Harmless in practice — nothing an account would put on the remove
-//     list is a tool a later turn forces — but it is the same shape of hazard;
+//     So `messages.0` is no longer scanned unless its role is `system`/`developer` (the
+//     OpenAI dialect keeps its system prompt there, and dropping it would leave those
+//     requests with no prose gate at all), and the billing-header block is skipped. The
+//     cost is that the gate is less conservative: a tool described ONLY in the user's own
+//     first message can now be stripped. MEASURED over all six corpora — 1,914 requests, 57
+//     sessions, the interactive captures plus capture-tb and capture-swebench — the number of
+//     declarations prose-referenced only via `messages.0` and not via any system block is
+//     ZERO, so on real traffic the loosening removes nothing extra and the kept set above is
+//     unchanged. That is the trade the alternative (a session-keyed monotone keep-set) loses:
+//     it would give a prefix transform mutable state, and the filter runs BEFORE
+//     session.Scoped resolves an id, so there is not even a key to hang it on; and state lost
+//     to a process restart flips the set back, which is the bug again.
+//     TestFilterRemovedSetSurvivesCompaction and TestFilterProseSetStableOverCapture are the
+//     guards; see docs/how-to/declaration-removal.md;
+//
+//   - `tool_choice` is read per request (forcedToolName) and is the one input still NOT
+//     session-invariant. It is not fixable without the state the bullet above rejects: a
+//     forced declaration cannot be removed (that is a 400), and whether a turn forces it is
+//     the client's choice. Bounded rather than fixed: a client can only force a tool it
+//     declared, so the flip needs an account to remove a name its client forces on some
+//     turns and not others; measured over those 1,914 requests, 0 carried a `tool_choice`
+//     that names a tool at all;
 //   - the output preserves input order and re-uses each kept element's raw bytes, so a
 //     removal of nothing is byte-identical to the input and no map iteration can reorder
 //     anything. TestFilterDeclarationsByteStable pins it across processes.
@@ -280,17 +300,30 @@ func pendingCallFor(body []byte, names, servers map[string]bool) bool {
 	return hit
 }
 
-// proseRegion is the text a prose reference to a tool may live in: every `system` block up
-// to the environment snapshot prefixsplit.go already classifies as volatile, plus the first
-// message. Session-invariant by construction — see the file comment.
+// proseRegion is the text a prose reference to a tool may live in: every `system` block, less
+// three exclusions. All three are excluded for ONE reason — a region that moves mid-session
+// lets the gate flip, and a flipped gate re-anchors `tools` (file comment, §3):
 //
-// The volatile tail is excluded rather than scanned because it is a git/directory snapshot
-// that changes between turns: a commit subject containing a tool's name would otherwise
-// flip the decision mid-session, which is the one thing this filter must never do.
+//   - the environment snapshot prefixsplit.go classifies as volatile, because it is a
+//     git/directory snapshot that changes between turns and a commit subject containing a
+//     tool's name would otherwise decide whether that tool is filtered;
+//   - the billing-header block, which is a header Claude Code passes through the body rather
+//     than prose, and whose cc_version changes when the client self-updates mid-session;
+//   - `messages.0` when it is the USER turn, which Claude Code's auto-compaction rewrites
+//     into a model-written conversation summary that names tools.
+//
+// The last exclusion is by ROLE, not by position, because the OpenAI dialect has no top-level
+// `system` at all — its system prompt IS messages[0], with role "system" (or "developer").
+// That block is the same hand-written class of text as an Anthropic `system` block and is
+// scanned; dropping it wholesale would leave every OpenAI-dialect request with an EMPTY prose
+// region, which is not a determinism fix but a silent removal of the gate.
+//
+// What is left is the agent's own hand-written instructions, which do not change within a
+// session. That is measured, not assumed: see the file comment and the two guard tests.
 func proseRegion(body []byte) string {
 	var b strings.Builder
 	add := func(txt string) {
-		if txt == "" {
+		if txt == "" || strings.HasPrefix(txt, billingHeaderBlock) {
 			return
 		}
 		b.WriteString(stableHalf(txt))
@@ -305,17 +338,28 @@ func proseRegion(body []byte) string {
 			return true
 		})
 	}
-	first := gjson.GetBytes(body, "messages.0.content")
-	if first.Type == gjson.String {
-		add(first.String())
-	} else {
-		first.ForEach(func(_, blk gjson.Result) bool {
-			add(blk.Get("text").String())
-			return true
-		})
+	// The OpenAI dialect's system prompt, and only that: any other role on messages[0] is the
+	// user turn a compaction summary replaces.
+	switch gjson.GetBytes(body, "messages.0.role").String() {
+	case "system", "developer":
+		first := gjson.GetBytes(body, "messages.0.content")
+		if first.Type == gjson.String {
+			add(first.String())
+		} else {
+			first.ForEach(func(_, blk gjson.Result) bool {
+				add(blk.Get("text").String())
+				return true
+			})
+		}
 	}
 	return b.String()
 }
+
+// billingHeaderBlock prefixes the pseudo-system block Claude Code uses to smuggle a header
+// through the request body ("x-anthropic-billing-header: cc_version=...; cc_entrypoint=...").
+// It is system[0] on every capture on this box, it is not prose, and its cc_version moves
+// mid-session — so proseRegion skips the whole block rather than trusting it.
+const billingHeaderBlock = "x-anthropic-billing-header:"
 
 // stableHalf drops the environment snapshot from a block, using the same markers the
 // volatile-tail split uses — one definition of "volatile", shared, because two would drift.
@@ -334,7 +378,7 @@ func stableHalf(txt string) string {
 
 // proseReferenced reports whether name occurs in prose as a WORD. A substring test would
 // keep `Read` alive on the word "already"; an identifier-boundary test is what makes the
-// gate discriminating enough to be useful (15 of 24 real tools clear it) instead of
+// gate discriminating enough to be useful (25 of 31 real tools clear it) instead of
 // refusing everything.
 func proseReferenced(prose, name string) bool {
 	if name == "" {

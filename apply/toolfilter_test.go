@@ -229,15 +229,61 @@ func TestFilterProseWordBoundary(t *testing.T) {
 	}
 }
 
-// TestFilterProseSetStableOverCapture is the guard for the one input to the removal
-// decision that is NOT session-invariant: the prose region (see the file comment, §3).
+// removalDecisions replays one request through the real filter with EVERY declared tool on
+// the removal list, and reports the decision the filter reached for each name: true = the
+// declaration was removed, false = something kept it. Deriving it from filterDeclarations'
+// own output rather than from proseReferenced is the point — this is the decision that lands
+// on the wire.
 //
-// The region includes `messages.0`, and Claude Code rewrites that message mid-session —
-// its auto-compaction replaces the first user turn with a model-written conversation
-// SUMMARY. On the four interactive captures on this box the set of prose-referenced
-// declarations happens not to change, so the filter's output is stable; this test asserts
-// exactly that, per capture, so the day a summary starts naming a filtered tool it fails
-// here instead of silently re-anchoring `tools` on the compaction turn.
+// Returns ok=false for a request the filter deliberately passes through whole (a pending call
+// for a removed name), which is not a decision about any name. See the call site.
+func removalDecisions(body []byte) (dec map[string]bool, ok bool) {
+	var declared []string
+	gjson.GetBytes(body, "tools").ForEach(func(_, tv gjson.Result) bool {
+		if n := declName(tv); n != "" {
+			declared = append(declared, n)
+		}
+		return true
+	})
+	if len(declared) == 0 {
+		return nil, false
+	}
+	names, servers := removeSets(declared)
+	if pendingCallFor(body, names, servers) {
+		return nil, false
+	}
+	out, _, n := filterDeclarations(body, declared)
+	if n == 0 {
+		return nil, false
+	}
+	survived := map[string]bool{}
+	gjson.GetBytes(out, "tools").ForEach(func(_, tv gjson.Result) bool {
+		survived[declName(tv)] = true
+		return true
+	})
+	dec = make(map[string]bool, len(declared))
+	for _, nm := range declared {
+		dec[nm] = !survived[nm]
+	}
+	return dec, true
+}
+
+// TestFilterProseSetStableOverCapture is the PROOF of the property the whole file is arranged
+// around, on real traffic rather than by argument: for a given session, the removal decision
+// for a declaration NEVER changes after the first request it appears in.
+//
+// It used to be a guard for the hazard instead of a proof of the fix. The prose region
+// included `messages.0`, which Claude Code's auto-compaction rewrites into a model-written
+// conversation summary (measured on bench/long.jsonl: 32,512 -> 53,752 bytes mid-session),
+// and `system[0]`, whose billing-header cc_version drifts. proseRegion now excludes both, so
+// this asserts stability of the decision itself, per session, over every capture — including
+// the multi-session harness captures, where sessions are separated the same way the proxy
+// separates them.
+//
+// Requests the filter passes through whole because of a pending call for a removed name are
+// not decisions and are counted, not asserted on: that skip is unreachable in the steady
+// state (the model never saw the declaration, so it cannot have called it) but is very much
+// reachable when replaying a capture that was never filtered.
 //
 // Skipped unless CONTEXT_GURU_CAPTURE names a readable capture:
 //
@@ -246,7 +292,7 @@ func TestFilterProseWordBoundary(t *testing.T) {
 func TestFilterProseSetStableOverCapture(t *testing.T) {
 	path := os.Getenv("CONTEXT_GURU_CAPTURE")
 	if path == "" {
-		t.Skip("set CONTEXT_GURU_CAPTURE to a capture of one session to run this")
+		t.Skip("set CONTEXT_GURU_CAPTURE to a capture to run this")
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -255,41 +301,144 @@ func TestFilterProseSetStableOverCapture(t *testing.T) {
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 1<<28)
-	var declared []string
-	prev, regionLens := "", map[int]bool{}
+	type seen struct {
+		first  map[string]bool
+		region string
+		at     int
+	}
+	sessions := map[string]*seen{}
+	regionLens := map[int]bool{}
+	requests, decided, skipped := 0, 0, 0
 	for i := 0; sc.Scan(); i++ {
 		var rec struct{ Body json.RawMessage }
 		if json.Unmarshal(sc.Bytes(), &rec) != nil || len(rec.Body) == 0 {
 			continue
 		}
-		if declared == nil {
-			gjson.GetBytes(rec.Body, "tools").ForEach(func(_, tv gjson.Result) bool {
-				if n := declName(tv); n != "" {
-					declared = append(declared, n)
-				}
-				return true
-			})
-			if declared == nil {
+		requests++
+		regionLens[len(proseRegion(rec.Body))] = true
+		dec, ok := removalDecisions(rec.Body)
+		if !ok {
+			skipped++
+			continue
+		}
+		decided++
+		sid := explicitSession("", rec.Body)
+		s := sessions[sid]
+		if s == nil {
+			sessions[sid] = &seen{first: dec, region: proseRegion(rec.Body), at: i}
+			continue
+		}
+		// The sharper property, and the one the fix actually installs: the region itself no
+		// longer moves within a session, so no gate computed from it can flip. Asserted as
+		// well as the decision because a region that moved and happened not to change any
+		// decision is the exact state this file was in before.
+		if r := proseRegion(rec.Body); r != s.region {
+			t.Errorf("session %s request %d: the prose region moved (%d -> %d bytes) since "+
+				"request %d", sid, i, len(s.region), len(r), s.at)
+		}
+		for nm, removed := range dec {
+			was, known := s.first[nm]
+			if !known {
+				s.first[nm] = removed // a declaration the client only started sending later
 				continue
 			}
-		}
-		region := proseRegion(rec.Body)
-		regionLens[len(region)] = true
-		var hits []string
-		for _, n := range declared {
-			if proseReferenced(region, n) {
-				hits = append(hits, n)
+			if was != removed {
+				t.Errorf("session %s request %d: the removal decision for %q flipped "+
+					"%v -> %v since request %d, so `tools` re-anchors on this turn",
+					sid, i, nm, was, removed, s.at)
 			}
 		}
-		key := strings.Join(hits, ",")
-		if i > 0 && prev != "" && key != prev {
-			t.Errorf("request %d: the prose-referenced set changed mid-session, so the "+
-				"filter's `tools` output flips and re-anchors the prefix\n was: %s\n now: %s",
-				i, prev, key)
-		}
-		prev = key
 	}
-	// Not an assertion, a reminder: the region itself DOES move (that is the latent hazard),
-	// and this records by how many distinct sizes on this capture.
-	t.Logf("%d distinct prose-region sizes over the capture", len(regionLens))
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if decided == 0 {
+		t.Fatalf("no request in %s yielded a removal decision; the test proved nothing", path)
+	}
+	// The region size moving is the hazard this fix removed the teeth from; log it so the
+	// numbers in the file comment stay checkable.
+	t.Logf("%d requests, %d decided, %d passed through whole, %d sessions, "+
+		"%d distinct prose-region sizes", requests, decided, skipped, len(sessions), len(regionLens))
+}
+
+// TestFilterRemovedSetSurvivesCompaction is the same property as a committed regression, on
+// the three things measured to move mid-session while the session id does not. No capture on
+// this box exhibits the flip — the compaction summaries there happen to name only tools the
+// gate already keeps — so the hostile version is synthesized here: a summary that names every
+// removable tool by hand, which is exactly what a model writing "I used the CronCreate tool
+// to..." produces.
+func TestFilterRemovedSetSurvivesCompaction(t *testing.T) {
+	remove := []string{"CronCreate", "Workflow", "mcp__ctx7"}
+	base, baseTok, baseN := filterDeclarations([]byte(bodyFixture), remove)
+	if baseN != 4 {
+		t.Fatalf("fixture removed %d declarations, want 4; the test would prove nothing", baseN)
+	}
+	baseTools := gjson.GetBytes(base, "tools").Raw
+
+	// A compaction summary naming every removable tool, in the first user message.
+	const summary = "This session is being continued from a previous conversation. Summary: " +
+		"I used the CronCreate tool to schedule the job, then the Workflow tool, then " +
+		"mcp__ctx7__resolve and mcp__ctx7__query to look up the docs."
+	compacted := strings.Replace(bodyFixture,
+		`{"role":"user","content":[{"type":"text","text":"hello"}]}`,
+		`{"role":"user","content":[{"type":"text","text":`+jsonQuote(summary)+`}]}`, 1)
+	// A billing-header pseudo-system block whose cc_version drifts, as system[0] — and which
+	// in the drifted turn happens to contain a tool name, the shape that would veto a removal
+	// if the block were scanned as prose.
+	withHdr := func(ver string) string {
+		return strings.Replace(compacted, `"system":[`,
+			`"system":[{"type":"text","text":`+
+				jsonQuote("x-anthropic-billing-header: cc_version="+ver+"; cc_entrypoint=claude-vscode;")+`},`, 1)
+	}
+	for _, tc := range []struct{ name, body string }{
+		{"compaction summary names every removable tool", compacted},
+		{"summary + billing header", withHdr("2.1.236.c73")},
+		{"summary + drifted billing header", withHdr("2.1.236.339")},
+		{"summary + billing header naming a tool", withHdr("2.1.236.Workflow")},
+	} {
+		out, tok, n := filterDeclarations([]byte(tc.body), remove)
+		if n != baseN || tok != baseTok {
+			t.Errorf("%s: removed %d declarations / %d tokens, want %d / %d — the removal set "+
+				"moved mid-session and `tools` re-anchors", tc.name, n, tok, baseN, baseTok)
+		}
+		if got := gjson.GetBytes(out, "tools").Raw; got != baseTools {
+			t.Errorf("%s: `tools` is not byte-identical to the first request's\n got %s\nwant %s",
+				tc.name, got, baseTools)
+		}
+	}
+}
+
+// TestFilterProseGateReadsAnOpenAISystemMessage: the OpenAI dialect has no top-level
+// `system` — its system prompt is messages[0] with role "system". Excluding `messages.0` for
+// determinism must not throw that away, or every OpenAI-dialect request loses the prose gate
+// entirely and the filter starts stripping declarations whose prose survives. The role, not
+// the position, is what distinguishes it from the user turn a compaction summary replaces.
+func TestFilterProseGateReadsAnOpenAISystemMessage(t *testing.T) {
+	const tools = `"tools":[{"type":"function","function":{"name":"Read"}},` +
+		`{"type":"function","function":{"name":"CronCreate"}}],`
+	const prose = "You are an agent. Prefer dedicated tools over Bash when one fits (Read)."
+	sysMsg := `{` + tools + `"messages":[{"role":"system","content":` + jsonQuote(prose) + `},` +
+		`{"role":"user","content":"hi"}]}`
+	if _, _, n := filterDeclarations([]byte(sysMsg), []string{"Read"}); n != 0 {
+		t.Error("stripped a tool named in the OpenAI dialect's system message")
+	}
+	if _, _, n := filterDeclarations([]byte(sysMsg), []string{"CronCreate"}); n != 1 {
+		t.Error("the gate refused a removal it should have allowed")
+	}
+	// The same text in a USER turn is not consulted: that is the slot a compaction summary
+	// lands in.
+	userMsg := `{` + tools + `"messages":[{"role":"user","content":` + jsonQuote(prose) + `}]}`
+	if _, _, n := filterDeclarations([]byte(userMsg), []string{"Read"}); n != 1 {
+		t.Error("a user turn still vetoes a removal, so a compaction summary can flip the set")
+	}
+}
+
+// jsonQuote keeps the fixtures above readable without pulling encoding/json into the string
+// building; it is only ever fed literals from this file.
+func jsonQuote(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }

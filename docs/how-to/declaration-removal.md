@@ -70,8 +70,12 @@ Our proxy can *see* that prose but cannot safely *edit* it — it is hand-writte
 sentences name several tools at once, so there is no span whose removal is known to leave a
 coherent instruction. So the rule is the conservative half of "strip a declaration and its
 prose together, or neither": **a declaration mentioned in the prose is kept, whatever the
-configuration says.** On the real Claude Code catalogue that gate keeps 9 of 24 tools and
-clears the other 15 — including every never-used item that carries real weight.
+configuration says.** Measured over the four interactive captures on this box
+(`bench/{short,long,mixed,cold}.jsonl`, 70 requests): the real Claude Code catalogue is
+**31 tools and the gate keeps 6** — `Agent`, `Bash`, `Edit`, `Read`, `Skill`, `Write` — clearing
+the other 25, including every never-used item that carries real weight. On the harness corpora
+(`capture-tb.jsonl`, `capture-swebench.jsonl`, 1,844 requests) the catalogue is 24 tools and it
+keeps those 6 plus `TaskCreate`.
 
 Also kept, always: the tool `tool_choice` forces (removing it would turn a forced call into a
 400), provider-side tools declared by `type` rather than by a schema, and the last remaining
@@ -189,36 +193,53 @@ production first — a window of 66 mid-session tool-set shrinks returned 64x HT
 
 A prefix transform that fires on some turns of a session and not others re-anchors on **every
 one of them**. A sibling proved that the expensive way. The only safe shapes are ALWAYS and
-NEVER for a given session, so every input to this decision is session-invariant:
+NEVER for a given session, so every input to this decision is session-invariant — with one
+bounded exception, `tool_choice`, called out below:
 
 - the removal list is configuration;
-- the prose region is the `system` blocks minus the environment snapshot `cachesplit` already
-  isolates as volatile, plus the first message. (A commit subject in the git snapshot naming a
-  tool must not veto its removal; `TestFilterIgnoresTheVolatileSnapshot` pins that.)
+- the prose region is the `system` blocks **only**, minus the environment snapshot
+  `cachesplit` already isolates as volatile, minus the billing-header block, and no longer
+  including the first message. It is session-invariant because of what it leaves *out*, not
+  "by construction". (A commit subject in the git snapshot naming a tool must not veto its
+  removal; `TestFilterIgnoresTheVolatileSnapshot` pins that.)
 
-  **This one is not actually session-invariant, and that is a known open hazard.** The
-  argument used to be that the region is exactly the text `schema.SessionHead` feeds to
-  `session.Scoped`, so a change to it would already be a different session. That only holds
-  when the session id is *derived*: Claude Code sends an explicit one (`metadata.user_id`),
-  which wins in `explicitSession`, so the region can move while the session id does not.
-  Measured on a real 35-request Claude Code session (`bench/long.jsonl`), `messages.0` changed
-  twice — the agent's own auto-compaction rewrites the first user turn into a conversation
-  summary, taking the region from 32,512 to 53,752 bytes — and `system[0]` changed once (its
-  `x-anthropic-billing-header` `cc_version`).
+  The old argument — that the region is exactly the text `schema.SessionHead` feeds to
+  `session.Scoped`, so a change to it would already be a different session — was **false**. It
+  only holds when the session id is *derived*: Claude Code sends an explicit one
+  (`metadata.user_id`), which wins in `explicitSession`, so the region could move while the
+  session id did not. Measured on a real 35-request Claude Code session (`bench/long.jsonl`),
+  `messages.0` changed twice — the agent's own auto-compaction rewrites the first user turn
+  into a conversation summary, taking the region from 32,512 to 53,752 bytes — and `system[0]`
+  changed once (its `x-anthropic-billing-header` `cc_version`). A compaction summary is
+  *model-written* prose that names tools, so one naming a filtered tool would put its
+  declaration back for that turn and re-anchor `tools` — the one block a client-side compaction
+  otherwise leaves cached (19.8% of an interactive request, 59.2% on SWE-bench).
 
-  The prose-referenced *set* did not change on any of the four interactive captures, so this
-  is latent rather than a live regression, and `TestFilterProseSetStableOverCapture` is the
-  guard that fails if it ever does. But a compaction summary is model-written prose that names
-  tools, so a summary mentioning a filtered name puts its declaration back for that turn and
-  re-anchors `tools` — the one block a client-side compaction otherwise leaves cached (19.8%
-  of an interactive request, 59.2% on SWE-bench). Closing it needs either a session-keyed
-  monotone keep-set (once referenced, always kept) or a region that excludes `messages.0`, and
-  each trades something: the first adds store state to a prefix transform, the second makes
-  the gate less conservative for a tool named only in the user's own first message.
+  So the region now excludes both — `messages.0` by **role**, not by position: the OpenAI
+  dialect has no top-level `system` and keeps its system prompt in `messages[0]` with role
+  `system`, so that block is still scanned (`TestFilterProseGateReadsAnOpenAISystemMessage`).
+  Dropping it wholesale would not be a determinism fix, it would silently remove the gate for
+  every OpenAI-dialect request. Of the two candidate fixes, this is the one that adds no
+  state: a session-keyed monotone keep-set would give a prefix transform mutable state, and the
+  filter runs *before* `session.Scoped` resolves an id, so there is not even a key to hang it
+  on — while state lost to a process restart flips a name back, which is the bug again. What it
+  costs is conservatism: a tool described **only** in the user's own first message can now be
+  stripped. Measured over all six corpora (1,914 requests, 57 sessions), the number of
+  declarations prose-referenced only via `messages.0` and not via any `system` block is
+  **zero**, so the loosening removes nothing extra on real traffic and the kept set above is
+  unchanged. `TestFilterProseSetStableOverCapture` now proves the region is byte-identical
+  within every one of those sessions, and that the per-name removal decision never flips;
+  `TestFilterRemovedSetSurvivesCompaction` is the committed regression, with a synthesized
+  summary that names every removable tool (no real capture exhibits the flip — their summaries
+  happen to name only tools the gate already keeps).
 
-- `tool_choice` is read per request (`forcedToolName`) and is the same shape of hazard.
-  Harmless in practice — nothing an account would put on the removal list is a tool a later
-  turn forces — but it is not session-invariant either.
+- `tool_choice` is read per request (`forcedToolName`) and is the one input still **not**
+  session-invariant. It is not fixable without the state the bullet above rejects: a forced
+  declaration cannot be removed (that is a 400), and whether a turn forces it is the client's
+  choice. Bounded rather than fixed: a client can only force a tool it declared, so a flip
+  needs an account to remove a name its client forces on some turns and not others. Measured
+  over those 1,914 requests, **0** carried a `tool_choice` naming a tool at all.
+
 - the output preserves input order and re-uses each kept element's raw bytes, so removing
   nothing is byte-identical to the input. `TestFilterDeclarationsByteStable` re-runs itself in
   child processes, because map iteration and the maphash seed are re-randomized per process
