@@ -95,7 +95,7 @@ type corefConfig struct {
 }
 
 func newCoref(raw []byte) (components.Component, error) {
-	cfg := corefConfig{MinTokens: 300, ClosedDist: 12, OpenReps: 3}
+	cfg := corefConfig{MinTokens: 300, ClosedDist: corefClosedDistDefault, OpenReps: corefOpenRepsDefault}
 	if len(raw) > 0 {
 		if err := yaml.Unmarshal(raw, &cfg); err != nil {
 			return nil, err
@@ -106,7 +106,7 @@ func newCoref(raw []byte) (components.Component, error) {
 		minTokens:       cfg.MinTokens,
 		closedDist:      cfg.ClosedDist,
 		openReps:        cfg.OpenReps,
-		minLaterTurns:   8,
+		minLaterTurns:   corefMinLaterDefault,
 		cutUnreferenced: true,
 		cutClosed:       false,
 		rewriteBudget:   3,
@@ -141,10 +141,6 @@ func newCoref(raw []byte) (components.Component, error) {
 
 func (Coref) Name() string                 { return "coref" }
 func (Coref) Enabled(*components.Ctx) bool { return true }
-
-// cacheWriteX is one cache-write in cache-read-equivalents: ($2.50 - $0.20) / $0.20 on
-// Anthropic's published per-MTok prices. Shared with deploy/harbor/coref.py.
-const cacheWriteX = 11.5
 
 // plannedCut is one accepted candidate, held until the whole batch clears its gates —
 // nothing is stashed or rewritten before then, so a batch that fails a gate leaves the
@@ -365,9 +361,6 @@ func (cf *Coref) planCuts(req *bschemas.BifrostChatRequest, rep *components.Repo
 // window is unknown — same convention as every fraction-based threshold here: an
 // unresolvable threshold imposes no constraint rather than silently disabling the pass.
 func (cf *Coref) breakEvenTurns(req *bschemas.BifrostChatRequest, plan []plannedCut, c *components.Ctx) (need, have int, ok bool) {
-	if c.CtxWindow <= 0 {
-		return 0, 0, true
-	}
 	saved := 0
 	shallowest := len(req.Input)
 	for _, p := range plan {
@@ -376,53 +369,10 @@ func (cf *Coref) breakEvenTurns(req *bschemas.BifrostChatRequest, plan []planned
 			shallowest = p.idx
 		}
 	}
-	if saved <= 0 {
-		return 0, 0, false
-	}
-	// The rewritten span: from the shallowest mutated index up to the last message the
-	// provider already holds. Unknown boundary => assume the whole transcript is cached,
-	// which is the conservative direction (it over-states the cost, never under-states it).
-	end := len(req.Input) - 1
-	if c.CacheAware && c.MaxCachedIdx >= 0 && c.MaxCachedIdx < end {
-		end = c.MaxCachedIdx
-	}
-	rewritten := 0
-	for j := shallowest; j <= end && j < len(req.Input); j++ {
-		rewritten += schema.TextTokens(schema.MessageText(req.Input[j]))
-	}
-	rewritten -= saved // the cut mass is not part of what gets written back
-
-	need = int(math.Ceil(cacheWriteX * float64(rewritten) / float64(saved)))
-	have = estimateTurnsRemaining(schema.MessagesTokens(req), modelTurns(req), c.CtxWindow)
-	return need, have, need <= have
-}
-
-// estimateTurnsRemaining projects how many more turns fit before the request reaches the
-// model's window, assuming the transcript keeps growing at the average rate it has so
-// far. Crude on purpose: T only has to be right to an order of magnitude to separate
-// "this rewrite pays for itself" from "this rewrite is charity", and every cheaper proxy
-// (elapsed turns, observed step rate) is the same shape of guess.
-func estimateTurnsRemaining(reqTokens, turns, window int) int {
-	if window <= 0 || turns <= 0 || reqTokens <= 0 || reqTokens >= window {
-		return 0
-	}
-	perTurn := reqTokens / turns
-	if perTurn <= 0 {
-		return 0
-	}
-	return (window - reqTokens) / perTurn
-}
-
-// modelTurns counts assistant messages — the closest thing in a request to "steps taken",
-// which is the unit the growth rate is per.
-func modelTurns(req *bschemas.BifrostChatRequest) int {
-	n := 0
-	for i := range req.Input {
-		if req.Input[i].Role == bschemas.ChatMessageRoleAssistant {
-			n++
-		}
-	}
-	return n
+	// The arithmetic itself lives in prefix_econ.go, shared with extract_llm's
+	// allow_cached_prefix path so the two components cannot price the same cache-write
+	// differently.
+	return prefixRewritePays(req, saved, shallowest, c)
 }
 
 // flattenForCoref projects a request onto the neutral message list internal/coref

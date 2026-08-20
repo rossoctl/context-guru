@@ -15,6 +15,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
@@ -136,6 +137,11 @@ type ExtractLLM struct {
 	// allowCached permits extraction on prompt-caching backends. Default FALSE — see
 	// extractLLMConfig.AllowOnCachingBackend for why the default ships disabled there.
 	allowCached bool
+	// allowPrefix lets this component reach the provider's already-cached prefix, paying a
+	// cache-write for it. See extractLLMConfig.AllowCachedPrefix.
+	allowPrefix bool
+	// prefixMinLater is the opportunity floor applied to prefix candidates only.
+	prefixMinLater int
 	// pricing prices the extraction model's tokens for the gate's cost side (#28 D).
 	pricing cheapmodel.Pricing
 	// ratios learns this workload's real compression ratio instead of assuming one.
@@ -259,6 +265,30 @@ type extractLLMConfig struct {
 	// defensible default. Set true if your outputs are genuinely huge; the gate's
 	// economics then decide each call as normal.
 	AllowOnCachingBackend *bool `yaml:"allow_on_caching_backend"`
+	// AllowCachedPrefix lets extraction reach content the provider has ALREADY CACHED,
+	// rather than only the uncached tail. Unset = FALSE, because doing so deliberately
+	// breaks the prefix hash and forces a cache-write of the suffix — the one cost every
+	// other offloader refuses to pay (see prefix_econ.go).
+	//
+	// This is the "full body" reach. The tail restriction is not a safety property of the
+	// model call, it is a cache-cost property, so lifting it is legitimate as long as the
+	// cost is PRICED — which is why enabling this also switches on two extra gates that do
+	// not apply to tail work:
+	//
+	//  1. the co-reference index as an eligibility pre-filter, so the component never pays
+	//     a model call to look at prefix content a cheap deterministic pass can already
+	//     show is still referenced; and
+	//  2. the S*T > 11.5*W break-even from prefix_econ.go, so a prefix rewrite has to be
+	//     repaid by the turns remaining in the session.
+	//
+	// The division of labour is the point: the index looks BACKWARD (what has already been
+	// referenced and is therefore spent) and the model looks FORWARD (how much of what
+	// remains will still be needed). Neither sees what the other sees.
+	AllowCachedPrefix *bool `yaml:"allow_cached_prefix"`
+	// PrefixMinLaterTurns is the opportunity floor for prefix candidates, mirroring
+	// coref's: an output with fewer model turns after it has not yet HAD a chance to be
+	// referenced, so absence of references says nothing about it.
+	PrefixMinLaterTurns *int `yaml:"prefix_min_later_turns"`
 	// EconomicGate opts out of the expected-value gate (#28 D). Unset = ON (the default):
 	// only call the LLM when the expected saving exceeds the expected call cost, priced
 	// from real model rates and the cache-awareness of the traffic. Set false to restore
@@ -320,6 +350,19 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	if cfg.AllowOnCachingBackend != nil {
 		allowCached = *cfg.AllowOnCachingBackend
 	}
+	// Prefix reach is off unless asked for, and asking for it implies the caching backend
+	// is in play at all — there is no cached prefix to reach otherwise.
+	allowPrefix := false
+	if cfg.AllowCachedPrefix != nil {
+		allowPrefix = *cfg.AllowCachedPrefix
+	}
+	if allowPrefix {
+		allowCached = true
+	}
+	prefixMinLater := corefMinLaterDefault // the same floor coref applies
+	if cfg.PrefixMinLaterTurns != nil {
+		prefixMinLater = *cfg.PrefixMinLaterTurns
+	}
 	return &ExtractLLM{
 		minTokens: cfg.MinTokens, strategy: cfg.Strategy,
 		modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(),
@@ -327,6 +370,7 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 		llmEveryN: cfg.LLMEveryN, llmMaxPerReq: cfg.LLMMaxPerReq,
 		skipFileReads: cfg.SkipFileReads, llmSeen: map[string]int{},
 		minTokensSet: explicit, gate: gate, allowCached: allowCached,
+		allowPrefix: allowPrefix, prefixMinLater: prefixMinLater,
 		pricing:    cheapmodel.PricingFromEnv(),
 		prevTokens: map[string]int{}, modelName: cfg.Model.Model,
 		modelMaxInput: cfg.ModelMaxInput,
@@ -474,6 +518,31 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		content string
 		id      string
 	}
+	// PREFIX ELIGIBILITY — the backward-looking half of the full-body pass.
+	//
+	// Reaching the cached prefix costs a cache-write, so the component must not pay a model
+	// call to discover that prefix content is still in use. The co-reference index answers
+	// that deterministically and for free: an output is eligible only if it introduced
+	// identifiers AND no later model turn carried any of them forward. Anything still
+	// referenced (open), or that the index cannot see into at all (opaque), is left alone
+	// without a call.
+	//
+	// Indexed from the PRISTINE request for the same reason coref does it: an earlier
+	// replay would have removed identifiers from the exclusion sets and silently
+	// reclassified unrelated outputs.
+	prefixSpent := map[int]bool{}
+	if e.allowPrefix && c.CacheAware {
+		for _, r := range coref.Index(flattenForCoref(req), floor, schema.TextTokens) {
+			if coref.Classify(r, corefClosedDistDefault, corefOpenRepsDefault, e.prefixMinLater) == coref.Unreferenced {
+				prefixSpent[r.Idx] = true
+			}
+		}
+	}
+	// Prefix candidates are tracked separately: their rewrite has to clear break-even as a
+	// BATCH (one write serves all of them), which cannot be decided per candidate.
+	prefixIdx := []int{}
+	prefixExpSaved := 0.0
+
 	var cands []cand
 	skipFR := false
 	if e.skipFileReads != nil {
@@ -531,13 +600,22 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			dbgMaxSz = sz
 		}
 		if c.CacheAware && !c.TailOnly(i) {
-			dbgTail++
-			if sz >= floor {
-				dbgBigTailBlocked++ // a large output we skipped ONLY because it's not in the tail
-				rep.Gate("cached_prefix_above_floor")
+			if !e.allowPrefix {
+				dbgTail++
+				if sz >= floor {
+					dbgBigTailBlocked++ // large, skipped ONLY because it's not in the tail
+					rep.Gate("cached_prefix_above_floor")
+				}
+				rep.Gate("cached_prefix")
+				continue
 			}
-			rep.Gate("cached_prefix")
-			continue
+			// Prefix reach is on. The co-reference index is the cheapest gate there is, so
+			// it goes first: no model call, no economics, nothing, for content a free
+			// deterministic pass can already show is still in use.
+			if !prefixSpent[i] {
+				rep.Gate("prefix_still_referenced")
+				continue
+			}
 		}
 		// CROSS-SESSION reuse (#28 C), deliberately placed AFTER the tail gate — the
 		// invariant TestGlobalCacheHitIsNotSplicedAtDepth exists to protect. An extraction is
@@ -643,6 +721,11 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			}
 			metrics.RecordExtractionReason(d.reason)
 		}
+		if e.allowPrefix && c.CacheAware && !c.TailOnly(i) {
+			// Eligibility was decided at the tail gate; record it for the batch break-even.
+			prefixIdx = append(prefixIdx, i)
+			prefixExpSaved += float64(sz) * ratio
+		}
 		cands = append(cands, cand{i, content, id})
 	}
 	if debugExtractLLM && len(tools) > 0 {
@@ -665,6 +748,45 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// running them concurrently (bounded) keeps a turn's cost to ~one call's wall time —
 	// so parallel beats a single-call batch on tokens AND latency. Each output fails open
 	// independently (a miss leaves that one verbatim).
+	// PREFIX BREAK-EVEN — one cache-write serves the whole prefix batch, so it is priced
+	// once, on the batch, exactly as coref prices its pass. Expected (not realised) saving,
+	// because the model has not run yet; that is the same estimate the economic gate above
+	// already reasons with.
+	if len(prefixIdx) > 0 {
+		shallowest := prefixIdx[0]
+		for _, i := range prefixIdx {
+			if i < shallowest {
+				shallowest = i
+			}
+		}
+		need, have, ok := prefixRewritePays(req, int(prefixExpSaved), shallowest, c)
+		if !ok {
+			// Drop the prefix candidates and keep any tail ones: the tail costs no write, so
+			// a failed prefix batch must not suppress work that was already free.
+			keep := cands[:0]
+			inPrefix := map[int]bool{}
+			for _, i := range prefixIdx {
+				inPrefix[i] = true
+			}
+			for _, cd := range cands {
+				if !inPrefix[cd.i] {
+					keep = append(keep, cd)
+				}
+			}
+			cands = keep
+			rep.Gate("prefix_rewrite_not_repaid")
+			if debugExtractLLM {
+				slog.Info("cg.debug.extract_llm.prefix", "decision", "decline",
+					"needTurns", need, "haveTurns", have, "expSaved", int(prefixExpSaved),
+					"shallowest", shallowest, "candidates", len(prefixIdx))
+			}
+		} else if debugExtractLLM {
+			slog.Info("cg.debug.extract_llm.prefix", "decision", "allow",
+				"needTurns", need, "haveTurns", have, "expSaved", int(prefixExpSaved),
+				"candidates", len(prefixIdx))
+		}
+	}
+
 	if len(cands) > 0 {
 		type outT struct{ projected, summary string }
 		out := make([]outT, len(cands))
