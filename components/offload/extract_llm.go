@@ -3,6 +3,7 @@ package offload
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"regexp"
@@ -142,6 +143,8 @@ type ExtractLLM struct {
 	allowPrefix bool
 	// prefixMinLater is the opportunity floor applied to prefix candidates only.
 	prefixMinLater int
+	// prefixClasses are the co-reference verdicts eligible for prefix work.
+	prefixClasses map[coref.Class]bool
 	// pricing prices the extraction model's tokens for the gate's cost side (#28 D).
 	pricing cheapmodel.Pricing
 	// ratios learns this workload's real compression ratio instead of assuming one.
@@ -289,6 +292,26 @@ type extractLLMConfig struct {
 	// coref's: an output with fewer model turns after it has not yet HAD a chance to be
 	// referenced, so absence of references says nothing about it.
 	PrefixMinLaterTurns *int `yaml:"prefix_min_later_turns"`
+	// PrefixClasses selects which co-reference verdicts become prefix candidates. Default
+	// ["unreferenced", "closed"], and the choice is a real trade-off rather than a tuning
+	// detail:
+	//
+	//   unreferenced — the index found no later EXACT reuse. That is not "unused": the index
+	//     matches identifiers, so a value the model summed, converted or reworded leaves no
+	//     substring behind (tiers 2 and 3). Handing this class to the model is therefore not
+	//     asking it to trim, it is asking it to VETO — to notice an implicit reference the
+	//     index structurally cannot see. It yields little when the index was right, and it is
+	//     the only mechanism available for catching when it was wrong.
+	//
+	//   closed — referenced once or twice, long ago. Something WAS taken out of it, and an
+	//     exact matcher cannot tell "took the value, rest is chaff" from "took an ANCHOR and
+	//     still needs the payload it points at". That ambiguity is why coref's cut_closed
+	//     ships off, and it is exactly a judgement call: a model can read the output, see the
+	//     reference was a name or an id, and keep the payload a blind cut would lose.
+	//
+	// So closed is where trimming earns its call, and unreferenced is where a veto might.
+	// Which of those is worth paying for is an experimental question, hence a list.
+	PrefixClasses []string `yaml:"prefix_classes"`
 	// EconomicGate opts out of the expected-value gate (#28 D). Unset = ON (the default):
 	// only call the LLM when the expected saving exceeds the expected call cost, priced
 	// from real model rates and the cache-awareness of the traffic. Set false to restore
@@ -360,6 +383,26 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 		allowCached = true
 	}
 	prefixMinLater := corefMinLaterDefault // the same floor coref applies
+	prefixClasses := map[coref.Class]bool{coref.Unreferenced: true, coref.Closed: true}
+	if len(cfg.PrefixClasses) > 0 {
+		prefixClasses = map[coref.Class]bool{}
+		for _, n := range cfg.PrefixClasses {
+			switch cls := coref.Class(strings.ToLower(strings.TrimSpace(n))); cls {
+			case coref.Unreferenced, coref.Closed:
+				prefixClasses[cls] = true
+			case coref.Open, coref.Opaque:
+				// Refused rather than honoured. `open` is content a later turn demonstrably
+				// still uses and `opaque` is content the index cannot see into at all — for
+				// neither is there evidence of being spent, so admitting them would turn the
+				// pre-filter into "consider everything" and lose the one property that makes
+				// prefix reach affordable.
+				return nil, fmt.Errorf("extract_llm: prefix_classes may not include %q: it is "+
+					"not evidence of spent content", cls)
+			default:
+				return nil, fmt.Errorf("extract_llm: unknown prefix_classes entry %q", n)
+			}
+		}
+	}
 	if cfg.PrefixMinLaterTurns != nil {
 		prefixMinLater = *cfg.PrefixMinLaterTurns
 	}
@@ -371,8 +414,9 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 		skipFileReads: cfg.SkipFileReads, llmSeen: map[string]int{},
 		minTokensSet: explicit, gate: gate, allowCached: allowCached,
 		allowPrefix: allowPrefix, prefixMinLater: prefixMinLater,
-		pricing:    cheapmodel.PricingFromEnv(),
-		prevTokens: map[string]int{}, modelName: cfg.Model.Model,
+		prefixClasses: prefixClasses,
+		pricing:       cheapmodel.PricingFromEnv(),
+		prevTokens:    map[string]int{}, modelName: cfg.Model.Model,
 		modelMaxInput: cfg.ModelMaxInput,
 	}, nil
 }
@@ -533,7 +577,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	prefixSpent := map[int]bool{}
 	if e.allowPrefix && c.CacheAware {
 		for _, r := range coref.Index(flattenForCoref(req), floor, schema.TextTokens) {
-			if coref.Classify(r, corefClosedDistDefault, corefOpenRepsDefault, e.prefixMinLater) == coref.Unreferenced {
+			cls := coref.Classify(r, corefClosedDistDefault, corefOpenRepsDefault, e.prefixMinLater)
+			if e.prefixClasses[cls] {
 				prefixSpent[r.Idx] = true
 			}
 		}

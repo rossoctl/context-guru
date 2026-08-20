@@ -124,3 +124,43 @@ func TestFailedPrefixBatchDoesNotSuppressTailWork(t *testing.T) {
 		t.Fatalf("tail work must survive a declined prefix batch; gates=%v", rep.Gates)
 	}
 }
+
+// prefix_classes decides what the model is even asked about, so the two classes it may name
+// are asserted, and the two it may not are REFUSED at construction rather than silently
+// widening the pre-filter to "consider everything" — which would destroy the only property
+// that makes prefix reach affordable.
+func TestPrefixClassesRejectsClassesThatAreNotEvidenceOfSpentContent(t *testing.T) {
+	for _, bad := range []string{"open", "opaque"} {
+		if _, err := newExtractLLM([]byte("allow_cached_prefix: true\nprefix_classes: [" + bad + "]\n")); err == nil {
+			t.Errorf("prefix_classes: [%s] must be refused: it is not evidence of spent content", bad)
+		}
+	}
+	if _, err := newExtractLLM([]byte("prefix_classes: [nonsense]\n")); err == nil {
+		t.Error("an unknown prefix_classes entry must be refused, not ignored")
+	}
+	for _, good := range []string{"unreferenced", "closed", "unreferenced, closed"} {
+		if _, err := newExtractLLM([]byte("prefix_classes: [" + good + "]\n")); err != nil {
+			t.Errorf("prefix_classes: [%s] must be accepted: %v", good, err)
+		}
+	}
+}
+
+// Narrowing to `closed` alone must actually narrow: the fixture's unreferenced output stops
+// being a candidate, so the model is not consulted about it. This is the knob the LOCA replay
+// needs, where handing the model `unreferenced` content bought nothing.
+func TestPrefixClassesClosedOnlyExcludesUnreferenced(t *testing.T) {
+	m := &silentModel{}
+	e := newPrefixComponent(t, m,
+		"allow_cached_prefix: true\nprefix_classes: [closed]\nmodel_max_input_tokens: 400000\n")
+	req := corefReq() // its only spent output is UNREFERENCED, never closed
+	var rep components.Report
+	if _, err := e.Offload(req, &rep, prefixCtx(len(req.Input))); err != nil {
+		t.Fatal(err)
+	}
+	if m.calls != 0 {
+		t.Fatalf("closed-only must not consult the model about unreferenced content, got %d calls", m.calls)
+	}
+	if rep.Gates["prefix_still_referenced"] == 0 {
+		t.Fatalf("the unreferenced output should now be filtered out; gates=%v", rep.Gates)
+	}
+}
