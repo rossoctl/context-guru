@@ -3,7 +3,18 @@
 **Date:** 2026-08-21
 **Config:** `cg_64k_75` (LOCA, 64k context dial, `aws-claude-sonnet-5`), 12 workers
 **Arms planned:** `s1-off` (no CG) · `s1-format` (deterministic only) · `s1-coref` (`format`+`coref`)
-**Arms run:** `s1-format` (complete, n=15, $113.83) · `s1-coref` (killed at checkpoint, n=14)
+**Arms run:** `s1-format` (complete, **n=75**, $113.83) · `s1-coref` (killed at checkpoint, **n=62**)
+
+!!! warning "Corrected by [iteration 010](../iter010/PREREGISTRATION.md) — every n and cost below was wrong by 5×"
+    `state0`…`state4` are the **5 seeds**, and this iteration read `state0` only. So each arm ran
+    **75** configs, not 15, and cost **$1.52 per run**, not $7.59. Re-paired across all seeds, stage 1
+    gives **48 usable pairs with 11 discordant (7 favouring `coref`, 4 favouring `format`,
+    McNemar p≈0.55)** — not the "1 discordant in 10, p=1.00" stated below — and the true `format`
+    solve rate is **33.3%**, not 20%. The `group_by_seed` claim below is also false: it groups for
+    *reporting*, and all 75 configs execute either way. **The stopping decision still stands** (the
+    shim bug was real and the arms were contaminated), but the power argument that accompanied it does
+    not. Corrected numbers are in iteration 010's amendment; the wrong ones are left visible below
+    rather than edited away, per this log's retraction convention.
 **Spend:** ~$215 (arm 2's cost is real but unrecorded — killed before its summary was written)
 **Status:** **stopped deliberately at the checkpoint**, per the standing instruction to stop and
 re-evaluate rather than run all arms to completion.
@@ -47,12 +58,13 @@ on. A component-caused failure would not behave that way.
 
 Measured, not assumed:
 
-- **Cost:** $7.59 per task per arm.
+- **Cost:** ~~$7.59 per task per arm~~ → **$1.52 per run** (75 runs, not 15). *Superseded.*
 - **Base solve rate:** `format` solved **2 of 10** clean tasks (20%). Accuracy is **binary** (every
   value is exactly 0.0 or 1.0) — there is no continuous score to recover extra power from.
-- **Grouping:** `group_by_seed` defaults to `True` and is **not exposed as a CLI flag** (it is a
-  parameter of `run_claude_api` that the Typer wrapper does not surface). This is what collapsed 75
-  tasks to 15 runs. Reaching n=75 requires patching LOCA's source — and would cost 5× per arm.
+- ~~**Grouping:** `group_by_seed` collapsed 75 tasks to 15 runs; reaching n=75 requires patching
+  LOCA's source and would cost 5× per arm.~~ **FALSE.** It is indeed not exposed as a CLI flag, but it
+  groups for *reporting* only — all 75 configs execute regardless, as iteration 008 demonstrates
+  (unpatched, 75 configs, 75 evals). No patch is needed and there is no 5× cost.
 - **Discordance:** 1 discordant pair in 10 clean pairs, in coref's favour. Exact McNemar **p = 1.00**.
 
 Required pairs for a *superiority* claim at the observed ~10% discordance rate:
@@ -112,7 +124,7 @@ Two things checked after the arms were stopped, both of which change the next mo
 
 **The agent is already Sonnet 5.** Run directories read `aws-claude-sonnet-5`, so the 20% base solve
 rate *is* Sonnet's. There is no Haiku→Sonnet upgrade available; the only step up is Opus, which
-raises the $7.59/task figure. Separately, `extract_llm` is configured `model: {source: config}` —
+raises the per-run cost (corrected: $1.52, not $7.59). Separately, `extract_llm` is configured `model: {source: config}` —
 it inherits the request's model, so it is Sonnet 5 too, and Haiku is the *untried, cheaper* option
 there rather than a starting point. Stage 1's arms were `[format, coref]` with no `extract_llm` at
 all, so no model knob could have affected these numbers.

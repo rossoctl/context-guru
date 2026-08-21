@@ -6,7 +6,14 @@
 this is a matched comparison: identical tasks, smaller data volume.
 **Path:** LOCA → `repair_shim.py` (**fixed**) → benchmark gateway. **No context-guru in the path**,
 deliberately — this measures the band, not a component.
-**Cost:** $85.10 ($5.67/task) · **Result: the band was the problem.**
+**Cost:** $85.10 (**$1.13 per run**, 75 runs) · **Result: the band was the problem.**
+
+!!! warning "n and cost corrected by [iteration 010](../iter010/PREREGISTRATION.md)"
+    This ran **75** configs (15 tasks × 5 seeds), not 15 — `state0`…`state4` are the seeds and only
+    `state0` was read. The headline conclusion is unchanged and in fact firmer: over all 75 runs the
+    32k solve rate is **52.7%** (vs the 53% measured on `state0` alone), against **33.3%** at 64k.
+    But per-run cost is **$1.13**, not $5.67, so every dollar figure below overstates by ~5×, and the
+    `group_by_seed` caveat is wrong — no patch is needed to reach n=75.
 
 ## Result
 
@@ -14,7 +21,7 @@ deliberately — this measures the band, not a component.
 |---|---|---|
 | **solve rate** | **53%** (8/15) | 25% (3/12) |
 | errors | **0/15** | 3/15 |
-| cost/task | **$5.67** | $7.59 |
+| cost/**run** | **$1.13** | $1.52 |
 
 Per task, 32k solved four that 64k did not (`CanvasArrangeExam`, `CourseAssistant`, `SetConfCrDdl`,
 `UpdateMaterialInventory`), lost one (`ExcelMarketResearch`), and cleanly ran all three that 64k
@@ -28,7 +35,7 @@ errored on.
    directions.
 2. **The shim fix is confirmed on live traffic.** 0 errors in 15 tasks, against 3 in 15 at 64k
    through the broken shim. This is independent of the isolated two-process test.
-3. **It is also cheaper** — $5.67 vs $7.59 per task, because the smaller data volume means shorter
+3. **It is also cheaper** — $1.13 vs $1.52 per run, because the smaller data volume means shorter
    trajectories.
 
 ## The band still has compaction pressure

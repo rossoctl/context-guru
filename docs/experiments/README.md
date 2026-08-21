@@ -25,8 +25,8 @@ traced back to the bytes that produced it).
 | [loca/iter004b](loca/iter004b/results.md) | 2026-08-21 | Same, `summarize` removed | **Reward parity: per-task outcomes byte-identical to baseline**, 17.1% removed, 31% cheaper, 0 model calls | ✅ |
 | [loca/iter005](loca/iter005/results.md) | 2026-08-21 | Deferral on live traffic; `summarize` chained in its own proxy | **Blocked — three shape defects in `summarize`, each masking the next; it 400s on every use** | ⚠️ → fixes `80e95d5`, `0971a32`, `2d6902d` |
 | [loca/iter006](loca/iter006/results.md) | 2026-08-21 | Stage 1 ablation: `off` / `format` / `+coref`, 75 tasks @64k | Launched; see `iter007` for its outcome | → iter007 |
-| [loca/iter007](loca/iter007/results.md) | 2026-08-21 | Stage 1 checkpoint: `format` (n=15) + `coref` (n=14), then stopped | **Stopped.** HTML 400s root-caused to my *own* replay shim (chunked bodies dropped), not `format`/LOCA. Benchmark can't power a reward comparison: $7.59/task, 20% base solve rate, binary accuracy, 1/10 discordant → p=1.00. `coref` acted on 4.2% of requests (~981k tokens) | ~$215, shim fixed |
-| [loca/iter008](loca/iter008/results.md) | 2026-08-21 | 32k band headroom probe, matched 15 tasks, no CG in path | **The band was the problem.** 32k solves **53%** vs 64k's 25%, with **0/15 errors** (confirms the shim fix live) and cheaper at $5.67/task. Still 45-56k peak contexts, so pressure remains | $85.10 |
+| [loca/iter007](loca/iter007/results.md) | 2026-08-21 | Stage 1 checkpoint: `format` (n=**75**) + `coref` (n=**62**), then stopped | **Stopped** — correctly, for the shim bug: HTML 400s root-caused to my *own* replay shim (chunked bodies dropped), not `format`/LOCA. `coref` acted on 4.2% of requests (~981k tokens). ⚠️ Its power argument is **retracted** by iter010: n and cost were wrong 5× (state0-only reads); re-paired it gives 48 pairs, 11 discordant, 7:4 for `coref` | ~$215, shim fixed |
+| [loca/iter008](loca/iter008/results.md) | 2026-08-21 | 32k band headroom probe, matched 15 tasks × 5 seeds, no CG in path | **The band was the problem.** Over all 75 runs 32k solves **52.7%** vs 64k's **33.3%**, with **0 errors** (confirms the shim fix live) at **$1.13/run**. Still 45-56k peak contexts, so pressure remains | $85.10 |
 | [loca/iter009](loca/iter009/results.md) | 2026-08-21 | Re-score the selection experiment: floor symmetry + deterministic Tier-2 ground truth | **Merged stays refuted.** Floor symmetry moves live-kept 0-2pts (overrides 6-23/885); Tier-2 widening (408→473 referenced) raises every arm's false-drop and does not close the 36pt gap. `cut_unreferenced`'s error floor revised **11% → 21-24%** | **$0** |
 
 ## Before designing an arm
@@ -56,6 +56,11 @@ capability, and a table of rig traps that each produced a valid-looking wrong nu
   for opposite responses.
 - **State power in the design, not the caveats.** An arm that cannot detect the effect it is looking
   for should say so before it runs.
+- **Check what a results glob actually matches before quoting an n.** `tasks/*/state0/eval.json`
+  read 15 of 75 completed runs across two iterations, because `state0`…`state4` are seeds. It
+  understated n by 5× and overstated cost per run by 5×, and nothing about the output looked wrong
+  (`loca/iter010` amendment 1). Count the files, compare against the config length, and reconcile the
+  two before drawing an economic conclusion from either.
 - **Count the headroom before counting n.** Harm can only show on tasks that currently pass;
   improvement only on tasks that currently fail. At 64k the entire harm signal had to come from 3
   tasks, so no n was going to help. Binary-outcome sensitivity peaks at a 50% base rate, which is

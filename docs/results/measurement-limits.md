@@ -150,8 +150,10 @@ Two consequences for design:
 ### The affordable version of the claim, priced
 
 Superiority on a binary reward is the expensive claim; **bounding harm is the cheap one, and is
-usually what is actually being asked.** Measured on LOCA at $7.59 per task per arm
-([iteration 007](../experiments/loca/iter007/results.md)):
+usually what is actually being asked.** Priced below at $7.59 per task per arm, which was **wrong by
+5×** — the true figure is **$1.52 per run** ([iteration 010](../experiments/loca/iter010/PREREGISTRATION.md)
+amendment 1). Divide every dollar figure in this table by ~5; the *ratios* between rows, which are the
+point, are unaffected:
 
 | pairs | cost (2 arms) | upper 95% bound on harm if 0 tasks harmed |
 |---|---|---|
@@ -257,7 +259,7 @@ baseline ($22.64 vs $21.34): model calls plus pipeline overhead outweighed the s
 |---|---|---|---|---|---|
 | SWE-bench Verified | **no** (max 46k) | **no** (max 2,760 tok) | binary, n=500 | **yes** | ruled out for compaction; **right for the TTL question** |
 | Terminal-Bench 2.0 | no (~6k) | no (max 1,906) | binary, n=89 | yes | ruled out |
-| **LOCA-bench** | **yes** (dial 8k→256k) | **yes** (max 59,857) | deterministic but **binary**, and n=75 is **n=15 by default** (see below) | **no** | the only viable vehicle *for savings*; cannot power reward |
+| **LOCA-bench** | **yes** (dial 8k→256k) | **yes** (max 59,857) | deterministic but **binary**; n=75 runs, but only **15 independent tasks** (5 seeds each) | **no** | viable for savings; reward limited by 15 clusters, not by n |
 | UltraHorizon | yes (200k+) | yes | **LLM-judged** | ? | noise we cannot afford; no licence |
 | Claude Code transcripts | yes | yes | **none** | yes | no reward → cannot gate |
 
@@ -288,11 +290,20 @@ buy more pairs at 64k or to move the agent to a larger model.
 
 ### Two properties of LOCA that cap what any reward arm here can conclude
 
-**`group_by_seed` silently divides your n by five.** It defaults to `True` and is **not exposed as a
-CLI flag** — it is a parameter of `run_claude_api` that the Typer wrapper does not surface. A "75-task"
-config therefore runs **15** tasks. Reaching n=75 means patching LOCA's source *and* paying 5× per arm.
+**~~`group_by_seed` silently divides your n by five.~~ FALSE — and the real trap is the opposite one.**
+It defaults to `True` and is genuinely not exposed as a CLI flag, but it groups for *reporting* only:
+**all 75 configs execute either way.** The actual trap is on the reading side — `state0`…`state4` are
+the 5 seeds, so globbing `tasks/*/state0/eval.json` silently reads 15 of 75 completed runs and
+**overstates per-run cost by 5×**. That is what iterations 007 and 008 did
+([iteration 010](../experiments/loca/iter010/PREREGISTRATION.md) amendment 1).
 
-**The 64k base solve rate is ~20%, and accuracy is binary.** `format` solved 2 of 10 clean tasks; every
+**What actually limits reward power here is 15 independent tasks, not n.** 75 runs are 5 seeds of 15
+tasks, so they are clustered: extra seeds buy precision *within* a task and do not add independent
+observations. Any harm bound must be quoted on the task-clustered end (~≤18% at zero events), and
+tightening it needs more distinct tasks, which LOCA's 32k set does not have.
+
+**The 64k base solve rate is ~33%, and accuracy is binary.** (Measured over all 75 runs; the "20%"
+first reported came from reading `state0` only.) Every
 accuracy value is exactly 0.0 or 1.0, so there is no partial-credit signal to recover power from. A 20%
 ceiling means most tasks fail for reasons no context-management component can affect — they cannot
 register improvement *or* degradation, so they consume budget while contributing nothing but a tie.
