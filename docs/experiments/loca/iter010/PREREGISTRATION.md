@@ -201,3 +201,26 @@ The CG proxy's own `copyHeaders` was also read and correctly strips `Transfer-En
 content-length it set, the forwarded headers (credentials stripped), and the response head for any
 ≥400 (`65f5962`). Armed for iteration 011's 225 runs. Attribution will come from the captured
 request, not from further argument.
+
+## Where the extra errors come from — localised to the proxy hop, cause still unknown
+
+Comparing [iteration 008](../iter008/results.md) (shim → gateway, **no CG**) against iteration 010's
+arm 1 (shim → **CG `[format]`** → gateway) on the identical 75 task+seed runs:
+
+| | no CG | CG + `format` |
+|---|---|---|
+| HTML-400 errors | **1**/75 | **6**/75 |
+| solved (of 68 usable pairs) | 36 | 33 |
+
+So the proxy hop costs roughly **5 extra failures per 75 runs**, which localises the second cause to
+CG rather than the shim. That sits awkwardly with the code reading: `copyHeaders` correctly strips
+`Transfer-Encoding`, `Content-Length`, `Connection`, `Keep-Alive` and `Host`, and the body is set via
+`strings.NewReader` so Go computes a correct length. Something not yet found is responsible.
+
+Note this comparison is **not controlled** — different runs at different times, and the only
+difference is the presence of an entire hop — so it locates the problem without explaining it. Left
+to the armed capture rather than to further argument.
+
+**If it is a genuine CG defect it matters beyond this rig**, because it would mean the proxy
+occasionally makes a request the provider's front end rejects. That would be a product bug, not a
+measurement artifact, and is the reason it is being chased rather than worked around.
