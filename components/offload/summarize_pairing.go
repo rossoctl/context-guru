@@ -53,3 +53,49 @@ func dropOrphanedToolResults(msgs []bschemas.ChatMessage) ([]bschemas.ChatMessag
 	}
 	return out, dropped
 }
+
+// summarizeSpan picks the span to summarize so that it NEVER cuts inside a tool exchange,
+// and reports how many head messages to preserve.
+//
+// The naive boundaries — preserve msgs[0], summarize msgs[1 : len-keepLast] — are pure
+// arithmetic and know nothing about tool pairing, which produced two separate provider
+// rejections on live traffic:
+//
+//	400 messages.N.content.M: unexpected `tool_use_id` found in `tool_result` blocks
+//	    — the kept tail began with a tool_result whose tool_use was inside the span
+//	400 messages.N: `tool_use` ids were found without `tool_result` blocks immediately after
+//	    — msgs[0] was an assistant tool_use whose result was inside the span
+//
+// Both are the same mistake seen from either side, so both are fixed by one rule: **a tool
+// exchange is atomic**. Review put it best — an unanswered call means the agent is still
+// waiting on that tool, so summarize after it completes, not through it.
+//
+// Two adjustments implement that:
+//
+//   - END is advanced forward past any tool messages the kept tail would begin with, so the
+//     exchange is summarized WHOLE rather than split. Advancing (rather than retreating)
+//     keeps the call and its result on the same side of the boundary without ever keeping
+//     LESS context than asked for.
+//   - The HEAD is dropped when msgs[0] is an assistant message carrying tool calls, because
+//     its results necessarily lie inside the span. msgs[0] is preserved to retain the
+//     conversation's identity — its system prompt or opening user turn — and an assistant
+//     tool-call message is neither, so nothing is lost by folding it into the summary.
+//
+// Returns headCount (0 or 1), start, end. A caller that gets end <= start should skip.
+func summarizeSpan(msgs []bschemas.ChatMessage, keepLast int) (headCount, start, end int) {
+	headCount = 1
+	if len(msgs) > 0 && msgs[0].Role == bschemas.ChatMessageRoleAssistant &&
+		msgs[0].ChatAssistantMessage != nil && len(msgs[0].ChatAssistantMessage.ToolCalls) > 0 {
+		headCount = 0 // preserving it would leave its calls unanswered
+	}
+	start = headCount
+	end = len(msgs) - keepLast
+	if end > len(msgs) {
+		end = len(msgs)
+	}
+	// Advance past a tail that would begin mid-exchange.
+	for end < len(msgs) && msgs[end].Role == bschemas.ChatMessageRoleTool {
+		end++
+	}
+	return headCount, start, end
+}

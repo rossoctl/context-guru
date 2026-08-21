@@ -141,3 +141,60 @@ func TestDropOrphanedToolResults(t *testing.T) {
 		t.Errorf("repair removed %d messages, want 1", len(orphaned)-len(got))
 	}
 }
+
+// THE THIRD REGRESSION, and the one that showed the first two shared a root cause
+//
+// Review's question was the right one: an unanswered `tool_use` means the agent is still
+// waiting on that tool, so summarize AFTER the exchange completes rather than through it.
+// Both earlier pairing defects were the same mistake seen from either side, caused by
+// boundaries chosen arithmetically:
+//
+//	msgs[0] preserved while its results sit in the span  -> unanswered call
+//	tail starting on a tool_result whose call is in span -> orphaned result
+//
+// summarizeSpan makes a tool exchange atomic, which fixes both without inventing content.
+func TestSummarizeSpanNeverCutsInsideAToolExchange(t *testing.T) {
+	asst := func(id string) bschemas.ChatMessage {
+		return bschemas.ChatMessage{Role: bschemas.ChatMessageRoleAssistant,
+			ChatAssistantMessage: &bschemas.ChatAssistantMessage{
+				ToolCalls: []bschemas.ChatAssistantMessageToolCall{{ID: &id}}}}
+	}
+	res := func(id string) bschemas.ChatMessage {
+		m := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleTool,
+			ChatToolMessage: &bschemas.ChatToolMessage{ToolCallID: &id}}
+		schema.SetMessageText(&m, "out "+id)
+		return m
+	}
+
+	// The kept tail must never BEGIN on a tool message: end advances past the exchange.
+	msgs := []bschemas.ChatMessage{
+		sysMsg("system"), userMsg("go"),
+		asst("t1"), res("t1"), asst("t2"), res("t2"),
+	}
+	for keep := 1; keep <= 4; keep++ {
+		headCount, start, end := summarizeSpan(msgs, keep)
+		if end < len(msgs) && msgs[end].Role == bschemas.ChatMessageRoleTool {
+			t.Errorf("keepLast=%d: tail begins on a tool message at %d — orphans its result", keep, end)
+		}
+		if start != headCount {
+			t.Errorf("keepLast=%d: start %d must equal headCount %d", keep, start, headCount)
+		}
+	}
+
+	// A head that is an assistant tool-call message must NOT be preserved: its results are
+	// inside the span, so keeping it would leave the call unanswered.
+	headIsCall := []bschemas.ChatMessage{asst("t9"), res("t9"), userMsg("next"), userMsg("more")}
+	headCount, start, _ := summarizeSpan(headIsCall, 1)
+	if headCount != 0 {
+		t.Errorf("an assistant tool-call head must not be preserved, got headCount=%d", headCount)
+	}
+	if start != 0 {
+		t.Errorf("start must follow headCount, got %d", start)
+	}
+
+	// A normal head (system prompt) IS preserved — the identity the head exists for.
+	headCount, _, _ = summarizeSpan(msgs, 2)
+	if headCount != 1 {
+		t.Errorf("a system-prompt head must be preserved, got headCount=%d", headCount)
+	}
+}
