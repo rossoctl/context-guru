@@ -19,7 +19,10 @@ traced back to the bytes that produced it).
 |---|---|---|---|---|
 | [captures/iter001](captures/iter001/results.md) | 2026-08-20 | Component gating on `capture-swebench`, tail vs non-tail | The tail gate costs `mask` 93% of its effect and `failed_run` all of it; `extract_llm` cannot fire on SWE-bench at all | ✅ |
 | [loca/iter001](loca/iter001/results.md) | 2026-08-20 | First LOCA replay, one request per conversation | `mask` 52.3% vs `coref` 6.5% | ⚠️ **retracted** — cold-start artifact |
-| [loca/iter002](loca/iter002/results.md) | 2026-08-20 | Sequential LOCA replay, 197 turns, 5 arms, summarizer at a context max | **Deferral works: 72% fewer summarizations**, delivered by `coref` | ✅ |
+| [loca/iter002](loca/iter002/results.md) | 2026-08-20 | Sequential LOCA replay, 197 turns, 5 arms, summarizer at a context max | Deferral: 72% fewer summarizations, delivered by `coref` | ⚠️ **config invalid** — the pipeline 400s in production (iter004) |
+| [loca/iter003](loca/iter003/results.md) | 2026-08-20/21 | LOCA reward integration; band characterisation | 8K saturates at 1.0, 128k collapses to 0.0, 64k partial. Three rig bugs, two mine | ✅ |
+| [loca/iter004](loca/iter004/results.md) | 2026-08-21 | Reward, 3 arms × 12 tasks @64k | **Invalid as a reward test** — every error tracked a `summarize` firing. But the **fold acted for the first time** | ⚠️ |
+| [loca/iter004b](loca/iter004b/results.md) | 2026-08-21 | Same, `summarize` removed | **Reward parity: per-task outcomes byte-identical to baseline**, 17.1% removed, 31% cheaper, 0 model calls | ✅ |
 
 ## Conventions
 
