@@ -55,6 +55,14 @@ capability, and a table of rig traps that each produced a valid-looking wrong nu
   for opposite responses.
 - **State power in the design, not the caveats.** An arm that cannot detect the effect it is looking
   for should say so before it runs.
+- **Count the headroom before counting n.** Harm can only show on tasks that currently pass;
+  improvement only on tasks that currently fail. At 64k the entire harm signal had to come from 3
+  tasks, so no n was going to help. Binary-outcome sensitivity peaks at a 50% base rate, which is
+  why 32k (53%) measures for less money than 64k (25%) — see
+  [measurement-limits §1](../results/measurement-limits.md).
+- **"The benchmark cannot do X" is a hypothesis about your configuration.** It was stated as a fact
+  about LOCA, then disproved by a matched run on the *same 15 tasks* at a different data volume:
+  25% → 53% (`loca/iter008`). That $85 run saved several hundred dollars of underpowered arms.
 - **Suspect your own harness before the thing under test.** Three HTML 400s were attributed to a
   component, then to the benchmark, and were caused by a body-framing bug in the replay shim
   (`loca/iter007`). The tell was there in the data: the arm with *more* components had *fewer*

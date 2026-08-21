@@ -13,6 +13,71 @@ Read this before designing an arm or believing a number.
 Reward on LOCA is **binary per task**, so a paired comparison uses McNemar's exact test on
 discordant pairs. That test is brutal at small n.
 
+### Headroom: n is not the only thing that limits detection
+
+Before any n calculation, ask how many tasks are *able* to show the effect at all. Direction matters,
+and the two pools are disjoint:
+
+- **Harm can only appear on tasks that currently pass.** A task that already fails cannot be broken
+  visibly — it fails either way.
+- **Improvement can only appear on tasks that currently fail.** A task that already passes cannot
+  pass more.
+
+Measured pools, from the matched 15-task comparison in
+[iteration 008](../experiments/loca/iter008/results.md):
+
+| band | pass → **can show harm** | fail → **can show gain** |
+|---|---|---|
+| 64k | **3** (of 12 clean) | 9 |
+| 32k | **8** (of 15) | 7 |
+
+At 64k the whole harm signal had to come from **three tasks**. At a 10% harm rate that is 0.3
+expected visible events, which is why [iteration 007](../experiments/loca/iter007/results.md) could
+bound harm only at ≤26% — there was almost nothing for harm to act on. Nor were the 9 failing tasks
+useful: they failed under `format` alone, which is **lossless**, so they fail for reasons no
+compaction component can influence. They cost full price and return a tie.
+
+**Why ~50% is the optimum rather than merely "better".** For a binary outcome the available variance
+is `p(1-p)`, maximal at `p = 0.5`:
+
+| base rate | p(1-p) |
+|---|--:|
+| 0.25 | 0.19 |
+| **0.53** | **0.25** |
+| 1.00 | 0 |
+
+For the *same* underlying effect, the observable signal is largest near 50%. The whole band table in
+section 6 is this one fact:
+
+| band | rate | failure mode |
+|---|---|---|
+| 8k | 100% | **ceiling** — only harm can appear, improvement is invisible |
+| **32k** | **53%** | both pools populated |
+| 64k | 25% | near-**floor** — harm pool nearly empty |
+| 128k | ~0% | **floor** — nothing passes, so nothing can degrade |
+
+This bites hardest on the two-sided claim below. If deferring a wipe can *raise* accuracy, that needs
+a pool of currently-failing-but-recoverable tasks — and at a 25% base rate the large failing pool was
+mostly tasks failing for unrelated reasons.
+
+### The headroom limit was ours, not the benchmark's
+
+Worth recording as a reasoning error, not just a result. The conclusion drawn at 64k was "LOCA lacks
+the headroom for this" — a claim about the *benchmark*. The 32k run used the **identical 15 tasks**,
+same classes and seeds, differing only in data volume (600 games / 6 teams instead of 1200 / 8), and
+scored 53%.
+
+Same benchmark, same tasks, one config knob, **25% → 53%**. The limitation was a property of the
+chosen configuration that had been generalised into a property of the benchmark. That is the same
+shape as the three rig artifacts in section 7 (chunked bodies, EAGAIN, the 128k "collapse"): each
+looked like a fact about the world and was a fact about the setup.
+
+**Standing rule: treat "the benchmark cannot do X" as a hypothesis about your own configuration until
+a matched run says otherwise.** A matched run is cheap — this one cost $85 and saved several hundred.
+
+(Caveat kept visible: the 64k figure is 3/12 because three tasks errored on the broken shim, so its
+true rate carries some uncertainty. The 25%-vs-53% gap is far too wide for that to account for.)
+
 [iteration 004b](../experiments/loca/iter004b/results.md), 12 tasks:
 
 | comparison | gained | lost | discordant | p |
