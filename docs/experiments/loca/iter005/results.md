@@ -141,9 +141,12 @@ each revealed only by fixing the last, is a signal about the component's readine
 chores. A fourth patch written at speed would more likely add a fourth defect than reach a working
 state.
 
-One further error in 005c was *not* of this family and is unexplained: a raw
+One further error in 005c was *not* of this family: a raw
 `<html><body><h1>400 Bad request</h1>` with no Anthropic error body, so it did not come from the
-model API. Recorded, not diagnosed.
+model API. **Diagnosed in [iteration 007](../iter007/results.md): it was a bug in my own replay
+shim, not in any component.** The shim read request bodies from `content-length` only, so any
+request the client sent with `Transfer-Encoding: chunked` was forwarded with an *empty* body and
+with both framing headers set at once. Recorded here as closed.
 
 ## Status of the deferral claim
 

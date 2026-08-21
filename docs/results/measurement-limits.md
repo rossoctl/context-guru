@@ -53,6 +53,24 @@ in this work. Still n=12, but qualitatively unlike a 4-vs-5 split.
 because failing to find an effect is not finding its absence. Every reward statement here should be
 read as **unmeasured**, not confirmed.
 
+### The affordable version of the claim, priced
+
+Superiority on a binary reward is the expensive claim; **bounding harm is the cheap one, and is
+usually what is actually being asked.** Measured on LOCA at $7.59 per task per arm
+([iteration 007](../experiments/loca/iter007/results.md)):
+
+| pairs | cost (2 arms) | upper 95% bound on harm if 0 tasks harmed |
+|---|---|---|
+| 10 | $152 | ≤ 26% — worthless |
+| 20 | $304 | ≤ 14% |
+| 40 | $607 | ≤ 7% |
+| 60 | $911 | ≤ 5% |
+| 100 | $1,518 | ≤ 3% |
+
+Compare the superiority cost at the observed ~10% discordance rate: 119 pairs at a realistic 80/20
+split, i.e. **$1,800**, to detect an effect nobody claimed. **The margin must be declared before the
+run and the budget chosen to buy it** — otherwise the run silently purchases the top row.
+
 ### Contrast: token measurements are near-exact
 
 Component savings (`format` at 92–99% of total, `extract_llm` 38 firings/494k tokens, `coref` 61/638k)
@@ -145,7 +163,7 @@ baseline ($22.64 vs $21.34): model calls plus pipeline overhead outweighed the s
 |---|---|---|---|---|---|
 | SWE-bench Verified | **no** (max 46k) | **no** (max 2,760 tok) | binary, n=500 | **yes** | ruled out for compaction; **right for the TTL question** |
 | Terminal-Bench 2.0 | no (~6k) | no (max 1,906) | binary, n=89 | yes | ruled out |
-| **LOCA-bench** | **yes** (dial 8k→256k) | **yes** (max 59,857) | **deterministic, n=75** | **no** | the only viable vehicle |
+| **LOCA-bench** | **yes** (dial 8k→256k) | **yes** (max 59,857) | deterministic but **binary**, and n=75 is **n=15 by default** (see below) | **no** | the only viable vehicle *for savings*; cannot power reward |
 | UltraHorizon | yes (200k+) | yes | **LLM-judged** | ? | noise we cannot afford; no licence |
 | Claude Code transcripts | yes | yes | **none** | yes | no reward → cannot gate |
 
@@ -158,8 +176,24 @@ LOCA band behaviour, measured:
 | band | runs | baseline accuracy | usable |
 |---|---|---|---|
 | 8K (`debug`) | yes | **1.0** saturated | regression control only; only `format` fires |
-| **64k** | **yes** | **1/3 partial** | **the only band with pressure *and* headroom** |
+| **64k** | **yes** | **20% (2/10 clean tasks)** | pressure yes, headroom **thin** — see below |
 | 128k | yes (needs the pairing shim) | **0.0** collapsed | zero floor measures nothing at feasible n |
+
+### Two properties of LOCA that cap what any reward arm here can conclude
+
+**`group_by_seed` silently divides your n by five.** It defaults to `True` and is **not exposed as a
+CLI flag** — it is a parameter of `run_claude_api` that the Typer wrapper does not surface. A "75-task"
+config therefore runs **15** tasks. Reaching n=75 means patching LOCA's source *and* paying 5× per arm.
+
+**The 64k base solve rate is ~20%, and accuracy is binary.** `format` solved 2 of 10 clean tasks; every
+accuracy value is exactly 0.0 or 1.0, so there is no partial-credit signal to recover power from. A 20%
+ceiling means most tasks fail for reasons no context-management component can affect — they cannot
+register improvement *or* degradation, so they consume budget while contributing nothing but a tie.
+Trajectories were 9–53 tool calls, well short of the ~106 ceiling, and the agent terminated on its own:
+these are genuine task failures, not truncation.
+
+Together these are why [iteration 007](../experiments/loca/iter007/results.md) was stopped rather than
+completed.
 
 ## 7. Rig traps that produced valid-looking wrong numbers
 
@@ -185,3 +219,25 @@ and a transparency assertion on the `off` arm (0 saved, no component acted).
 See also: [the proposal](../proposals/coref-compaction.md) ·
 [experiment log](../experiments/README.md) ·
 [selection experiment](coref-selection-experiment.md)
+
+### Untracked scratch tooling is the least-reviewed code in the measurement path
+
+`repair_shim.py` — an ~80-line HTTP hop between LOCA and the gateway, living only in `/tmp` on the
+eval box, never committed, never reviewed, never tested — silently dropped the body of every request
+the client happened to send with `Transfer-Encoding: chunked`, and forwarded `chunked` together with
+`Content-Length: 0`. Result: intermittent `400 Bad request` HTML that was attributed first to a
+component under test and then to the benchmark, across two iterations.
+
+Two structural lessons, not one:
+
+1. **Error counts that move opposite to the amount of machinery indict the harness.** The arm running
+   `format`+`coref` produced *one* such error; the arm running only `format` produced *three*, and
+   succeeded on none of the three tasks the other arm passed. No component-caused defect has that
+   shape. That signal was in the data before the root cause was found.
+2. **A permissive component will hide a protocol violation until it reaches a strict one.** A local
+   Python echo server accepted the contradictory framing with a 200. Only the real gateway rejected
+   it. Testing the shim against a lenient stand-in would have "passed."
+
+The shim is scratch tooling by necessity (it repairs bodies for replay), but everything in the
+measurement path deserves the same suspicion as the thing being measured — and it is the code *not*
+in the repo that gets none.

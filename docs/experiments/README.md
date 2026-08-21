@@ -24,7 +24,8 @@ traced back to the bytes that produced it).
 | [loca/iter004](loca/iter004/results.md) | 2026-08-21 | Reward, 3 arms × 12 tasks @64k | **Invalid as a reward test** — every error tracked a `summarize` firing. But **`extract_llm` acted for the first time** (prefix reach) | ⚠️ |
 | [loca/iter004b](loca/iter004b/results.md) | 2026-08-21 | Same, `summarize` removed | **Reward parity: per-task outcomes byte-identical to baseline**, 17.1% removed, 31% cheaper, 0 model calls | ✅ |
 | [loca/iter005](loca/iter005/results.md) | 2026-08-21 | Deferral on live traffic; `summarize` chained in its own proxy | **Blocked — three shape defects in `summarize`, each masking the next; it 400s on every use** | ⚠️ → fixes `80e95d5`, `0971a32`, `2d6902d` |
-| [loca/iter006](loca/iter006/results.md) | 2026-08-21 | Stage 1 ablation: `off` / `format` / `+coref`, 75 tasks @64k | *running* — asks what `coref` adds over **lossless**, not over passthrough | ⏳ |
+| [loca/iter006](loca/iter006/results.md) | 2026-08-21 | Stage 1 ablation: `off` / `format` / `+coref`, 75 tasks @64k | Launched; see `iter007` for its outcome | → iter007 |
+| [loca/iter007](loca/iter007/results.md) | 2026-08-21 | Stage 1 checkpoint: `format` (n=15) + `coref` (n=14), then stopped | **Stopped.** HTML 400s root-caused to my *own* replay shim (chunked bodies dropped), not `format`/LOCA. Benchmark can't power a reward comparison: $7.59/task, 20% base solve rate, binary accuracy, 1/10 discordant → p=1.00. `coref` acted on 4.2% of requests (~981k tokens) | ~$215, shim fixed |
 
 ## Before designing an arm
 
@@ -53,3 +54,11 @@ capability, and a table of rig traps that each produced a valid-looking wrong nu
   for opposite responses.
 - **State power in the design, not the caveats.** An arm that cannot detect the effect it is looking
   for should say so before it runs.
+- **Suspect your own harness before the thing under test.** Three HTML 400s were attributed to a
+  component, then to the benchmark, and were caused by a body-framing bug in the replay shim
+  (`loca/iter007`). The tell was there in the data: the arm with *more* components had *fewer*
+  errors. When error counts move opposite to the amount of machinery, look at the transport.
+- **Choose the endpoint the budget can afford.** Savings are continuous and cheap to measure to high
+  precision; reward is binary and expensive. Superiority on a binary outcome at a 20% base rate costs
+  4–20× what bounding harm costs, and bounding harm is usually the actual claim — so state a
+  non-inferiority margin up front and buy that (`loca/iter007`).
