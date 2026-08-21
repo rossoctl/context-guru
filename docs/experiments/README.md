@@ -31,3 +31,7 @@ traced back to the bytes that produced it).
 - **Cost is always stated**, even when it is $0, because "free" is a property worth knowing.
 - **Every arm names its binary.** A stale binary silently produced a null result in
   `loca/iter002`; recording the build is the cheapest guard against repeating that.
+- **Replay is not validation.** `/compact` runs the pipeline and returns the body *without
+  forwarding upstream*, so no provider ever checks it. Replay can tell you what a component
+  removes; it **cannot** tell you the result is a valid request. `loca/iter005` found a shipped
+  component that 400s on every use, invisible to every replay-based measurement here.
