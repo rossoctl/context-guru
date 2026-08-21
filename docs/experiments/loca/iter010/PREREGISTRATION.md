@@ -144,3 +144,60 @@ does not have.
 was a verification check rather than an outcome, no reward comparison from the amended design existed
 when it was written, and it moves n in the direction that makes the pre-registered test *harder* to
 pass by luck.
+
+---
+
+# AMENDMENT 2 — intent-to-treat added, because errors are NOT independent of the arm
+
+**Written while arm 2 was still running, before any reward comparison had been computed.**
+
+The pre-registration above says errored runs are *"excluded, not counted as failures"*. That assumed
+transport errors are independent of the pipeline. **They are measurably not.**
+
+| run | pipeline | HTML-400 errors |
+|---|---|---|
+| 64k `s1-format` | `[format]` | **10** |
+| 64k `s1-coref` | `[format, coref]` | 4 |
+| 32k `s2-format` | `[format]` | **6/75** |
+| 32k `s2-coref` | `[format, coref]` | **0/46** (in progress) |
+
+The arm with *more* compaction errors *less*, consistently, in both bands. The mechanism is plausible:
+`coref` shrinks the largest requests, so it avoids whatever fails at size.
+
+**Why this breaks pairwise exclusion.** If the treatment prevents the failure, excluding those pairs
+discards exactly the cases where the treatment helped most — biasing the comparison **against**
+`coref`. Exclusion is not the neutral choice here; it is the anti-treatment choice.
+
+**So both readings are now reported**, and neither is chosen after the fact:
+
+- **per-protocol** (errored pairs excluded) — as originally pre-registered;
+- **intent-to-treat** (an errored run counts as unsolved) — because from the user's point of view a
+  request that fails did not solve the task, whichever layer failed.
+
+ITT is the conservative reading for a *harm* claim and the honest one for a *benefit* claim. Both
+appear in `deploy/harbor/reward_pairs.py` output, always, so whichever is more flattering cannot be
+quoted alone.
+
+**This is a deviation from the pre-registration and is logged as one.** The trigger was a measurement
+(error counts by arm), not an outcome; no reward comparison for iteration 010 existed when it was
+written.
+
+## The HTML-400 cause: three hypotheses tested, three refuted
+
+Recorded so they are not retested. The error is `400 Bad request / Your browser sent an invalid
+request` — raw HTML, no Anthropic error body.
+
+| hypothesis | test | verdict |
+|---|---|---|
+| chunked bodies dropped by the shim | isolated echo-server test; fixed and verified both framings | **real, fixed — but the error survives it** (1/75 with no proxy, 6/75 with one) |
+| a hard request-size limit returning 400 | 50KB / 200KB / 400KB through direct, proxy-only, and shim+proxy | **refuted.** 50KB and 200KB pass everywhere; 400KB **times out** on all three paths *including direct to the gateway* — size causes timeouts, not 400s |
+| a timeout poisons a pooled keep-alive connection, so the next request looks malformed | time out a 500KB request through the proxy, then send 4 small ones | **refuted.** All four returned 200 |
+
+The CG proxy's own `copyHeaders` was also read and correctly strips `Transfer-Encoding`,
+`Content-Length`, `Connection`, `Keep-Alive` and `Host`, and it sets the body via
+`strings.NewReader`, so Go computes a correct length. Framing is not obviously wrong there.
+
+**Stopped guessing and instrumented instead:** the shim now records the exact body length, the
+content-length it set, the forwarded headers (credentials stripped), and the response head for any
+≥400 (`65f5962`). Armed for iteration 011's 225 runs. Attribution will come from the captured
+request, not from further argument.

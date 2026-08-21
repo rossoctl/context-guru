@@ -145,6 +145,43 @@ def main():
     print(f"task-clustered ({n_tasks} tasks): net-harmed={t_harm}  net-gained={t_gain}  "
           f"p={mcnemar_exact(t_harm, t_gain):.3f}")
 
+    # ---- INTENT-TO-TREAT ----------------------------------------------------------------
+    # Pairwise exclusion of transport failures is NOT neutral here, and the direction matters.
+    # Measured: the format-only arm errors more than format+coref (6/75 vs 0/46 at 32k; 10 vs 4
+    # at 64k). The mechanism is plausible and points one way -- coref shrinks the largest requests,
+    # so it avoids whatever fails at size. If the treatment PREVENTS the failure, then excluding
+    # those pairs discards exactly the cases where the treatment helped most, biasing the
+    # comparison AGAINST it.
+    #
+    # So an intent-to-treat reading is reported alongside: a run that errored did not solve its
+    # task, from the user's point of view, whichever layer failed. ITT is the conservative choice
+    # for a harm claim and the honest one for a benefit claim, which is why both appear rather
+    # than whichever flatters.
+    #
+    # This DEVIATES from the pre-registration, which said errors are "excluded, not counted as
+    # failures". The deviation is recorded rather than quietly applied: the reason is that errors
+    # were assumed independent of the arm and are now measured not to be.
+    itt = []
+    for k in keys:
+        itt.append((k, A[k][0] == "success" and A[k][1] == SOLVED,
+                    B[k][0] == "success" and B[k][1] == SOLVED))
+    i_harm = sum(1 for _, x, y in itt if x and not y)
+    i_gain = sum(1 for _, x, y in itt if y and not x)
+    print(f"\nINTENT-TO-TREAT (errors count as unsolved, n={len(itt)}):")
+    print(f"  solved: baseline={sum(1 for _,x,_ in itt if x)}  treatment={sum(1 for _,_,y in itt if y)}"
+          f"   harm={i_harm}  gain={i_gain}  McNemar p={mcnemar_exact(i_harm, i_gain):.3f}")
+    i_per_task = defaultdict(lambda: [0, 0])
+    for k, x, y in itt:
+        if x and not y:
+            i_per_task[k[0]][0] += 1
+        elif y and not x:
+            i_per_task[k[0]][1] += 1
+    ith = sum(1 for h, g in i_per_task.values() if h > g)
+    itg = sum(1 for h, g in i_per_task.values() if g > h)
+    n_t_itt = len({k[0] for k, _, _ in itt})
+    print(f"  task-clustered ({n_t_itt} tasks): net-harmed={ith} net-gained={itg} "
+          f"p={mcnemar_exact(ith, itg):.3f}   harm bound <= {100*cp_upper(ith, n_t_itt):.0f}%")
+
     print("\nNON-INFERIORITY -- upper 95% bound on the harm rate:")
     print(f"  pair level   (optimistic, n={len(usable)}): "
           f"{100*cp_upper(len(harm), len(usable)):.0f}%  [{len(harm)} harm events]")
