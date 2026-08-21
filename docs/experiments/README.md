@@ -27,6 +27,7 @@ traced back to the bytes that produced it).
 | [loca/iter006](loca/iter006/results.md) | 2026-08-21 | Stage 1 ablation: `off` / `format` / `+coref`, 75 tasks @64k | Launched; see `iter007` for its outcome | → iter007 |
 | [loca/iter007](loca/iter007/results.md) | 2026-08-21 | Stage 1 checkpoint: `format` (n=15) + `coref` (n=14), then stopped | **Stopped.** HTML 400s root-caused to my *own* replay shim (chunked bodies dropped), not `format`/LOCA. Benchmark can't power a reward comparison: $7.59/task, 20% base solve rate, binary accuracy, 1/10 discordant → p=1.00. `coref` acted on 4.2% of requests (~981k tokens) | ~$215, shim fixed |
 | [loca/iter008](loca/iter008/results.md) | 2026-08-21 | 32k band headroom probe, matched 15 tasks, no CG in path | **The band was the problem.** 32k solves **53%** vs 64k's 25%, with **0/15 errors** (confirms the shim fix live) and cheaper at $5.67/task. Still 45-56k peak contexts, so pressure remains | $85.10 |
+| [loca/iter009](loca/iter009/results.md) | 2026-08-21 | Re-score the selection experiment: floor symmetry + deterministic Tier-2 ground truth | **Merged stays refuted.** Floor symmetry moves live-kept 0-2pts (overrides 6-23/885); Tier-2 widening (408→473 referenced) raises every arm's false-drop and does not close the 36pt gap. `cut_unreferenced`'s error floor revised **11% → 21-24%** | **$0** |
 
 ## Before designing an arm
 
@@ -60,6 +61,11 @@ capability, and a table of rig traps that each produced a valid-looking wrong nu
   tasks, so no n was going to help. Binary-outcome sensitivity peaks at a 50% base rate, which is
   why 32k (53%) measures for less money than 64k (25%) — see
   [measurement-limits §1](../results/measurement-limits.md).
+- **A metric change that makes the story more interesting deserves an audit before it is believed.**
+  A Tier-2 matcher that collapsed paths onto their stem reported the index's false-drop tripling
+  (11% → 53%). It was an artifact: the key `yaml` matched 42 distinct identifiers, so any later YAML
+  mention scored as reuse of a different file (`loca/iter009`). Audit which inputs a new rule actually
+  fires on, and put the conservative default on the side of the expensive error.
 - **"The benchmark cannot do X" is a hypothesis about your configuration.** It was stated as a fact
   about LOCA, then disproved by a matched run on the *same 15 tasks* at a different data volume:
   25% → 53% (`loca/iter008`). That $85 run saved several hundred dollars of underpowered arms.

@@ -118,9 +118,15 @@ evidence supplier and move the verdict into the model's prompt.
 
 ### 4. `cut_unreferenced` is not the "free safe cut" it ships as — **measured**
 
-It has an **11% false-drop rate**: outputs dormant at `F` that the agent used later. "Unreferenced"
-is a claim about the past, and the future contradicts it one time in nine. Since ground truth is
-Tier-1 exact matching only, **11% is a lower bound**.
+It has an **11% false-drop rate** under Tier-1 exact ground truth: outputs dormant at `F` that the
+agent used later. "Unreferenced" is a claim about the past, and the future contradicts it one time in
+nine.
+
+**Revised upward to 21–24%** by [iteration 009](../experiments/loca/iter009/results.md), which widened
+ground truth with deterministic normalization (numeric reformatting, case, substring; the 24% figure
+additionally allows path-basename matching and is an upper bound). So the "free safe cut" is roughly
+**twice as lossy as first published**, and since Tier-3 semantic reuse is still invisible, even 21% is
+a lower bound.
 
 It is **not a boundary artifact**, which was the first thing to check:
 
@@ -256,12 +262,22 @@ operational damage rate.
 - **No reward, no benchmark.** Decision quality on captured traffic only. The proposal's own
   acceptance criteria put reward first, and nothing here touches it.
 - **Ground truth is Tier-1 exact matching**, so it cannot see transformed or semantic reuse. Every
-  false-drop figure is a **lower bound**, for every arm.
+  false-drop figure is a **lower bound**, for every arm. **Partly quantified**
+  ([iteration 009](../experiments/loca/iter009/results.md)): widening it with deterministic
+  normalization (numeric reformatting, case, substring) moves referenced candidates 408 → **473**
+  (+16%) and raises every arm's false-drop — `cut_unreferenced`'s goes **11% → 21%**, see finding 4.
+  The gap between the index and the best model arm does not narrow; it slightly widens. The
+  deterministic slice of Tier-2 turns out to be nearly empty, so closing this bias properly needs a
+  judge, which reintroduces the noise that ruled out UltraHorizon
+  ([measurement-limits §6](measurement-limits.md)). The bound is tighter, not removed.
 - **One firing point** (`F` = 60% of model turns). A real pass fires at a threshold crossing, at
   varying depth with varying future remaining.
 - **An asymmetry that flatters the deterministic arms:** `min_later_turns` is a hard structural guard
-  present only in them. Model arms received `later_turns` as information with no enforced floor. A
-  floor-symmetric re-run is cheap and has not been done.
+  present only in them. Model arms received `later_turns` as information with no enforced floor.
+  **Now done** ([iteration 009](../experiments/loca/iter009/results.md), $0, no new model calls): it
+  changes almost nothing. The floor overrides only 6–23 of 885 decisions per arm and moves live-kept
+  by 0–2 points; removing it from the deterministic arms costs them one point. The asymmetry was a
+  reasonable suspicion and is not the explanation for the gap.
 - **`n = 7` compaction events** for finding 10, from 4 sessions, one contributing 3.
 - **The Claude Code corpus is read linearly out of a tree-structured transcript**, so abandoned
   `--resume`/edit branches are present. Measured contamination is small — exact-duplicate tool
@@ -284,8 +300,9 @@ sandboxed filter, not free-text; selection cannot replace a summarizer.
 **Not settled — and each needs a different instrument:** whether any of this improves *reward*;
 whether recovery via `expand` actually fires often enough to make a 30% recoverable false-drop
 preferable to a 20% permanent one; how often the agent's own compaction is reachable at all
-(`modes.Tracker` reset detection, free, still not run); and whether a floor-symmetric comparison
-narrows the gap between the index and the bulk arm.
+(`modes.Tracker` reset detection, free, still not run); ~~and whether a floor-symmetric comparison
+narrows the gap between the index and the bulk arm~~ — **answered: it does not**
+([iteration 009](../experiments/loca/iter009/results.md)).
 
 See also: [co-reference density](coref-density.md) · [the proposal](../proposals/coref-compaction.md)
 · [implementation status](../proposals/coref-implementation.md)
