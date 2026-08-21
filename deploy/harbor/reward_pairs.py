@@ -109,8 +109,19 @@ def main():
     harm = [k for k, x, y in usable if x and not y]      # baseline solved, treatment did not
     gain = [k for k, x, y in usable if y and not x]
 
+    # Per-arm error counts, because ASYMMETRIC errors are a confound and not a nuisance.
+    # Pairwise exclusion is only unbiased if the two arms fail at the same rate for reasons
+    # unrelated to the treatment. At 32k the HTML-400 transport failure occurred 1/75 with no
+    # CG proxy in the path and 6/75 with one, so error rate is NOT independent of the pipeline
+    # and the symmetry has to be shown rather than assumed.
+    a_err = sum(1 for k in keys if A[k][0] != "success")
+    b_err = sum(1 for k in keys if B[k][0] != "success")
     print(f"\ncommon={len(keys)}  usable={len(usable)}  errored={errored} "
-          f"(errors are excluded, not counted as failures)")
+          f"(excluded pairwise, not counted as failures)")
+    print(f"   errors by arm: baseline={a_err}  treatment={b_err}"
+          + ("   -- BALANCED, pairwise exclusion is defensible"
+             if abs(a_err - b_err) <= max(2, 0.25 * max(a_err, b_err, 1))
+             else "   -- !! ASYMMETRIC: exclusion may bias the comparison; treat as a confound"))
     print(f"both-pass={n11}  both-fail={n00}  HARM={len(harm)}  GAIN={len(gain)}  "
           f"discordant={len(harm)+len(gain)}")
     print(f"solve rate: baseline={sum(1 for _,x,_ in usable if x)}/{len(usable)}  "

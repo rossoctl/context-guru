@@ -33,8 +33,20 @@ errored on.
    it is near the *optimum* for detecting change: sensitivity to both improvement and degradation is
    maximal at a 50% base rate. The 64k band was starving every reward arm of headroom in both
    directions.
-2. **The shim fix is confirmed on live traffic.** 0 errors in 15 tasks, against 3 in 15 at 64k
-   through the broken shim. This is independent of the isolated two-process test.
+2. ~~**The shim fix is confirmed on live traffic.** 0 errors in 15 tasks…~~ **RETRACTED.** That read
+   `state0` only. Over all 75 runs this arm had **1** HTML-400 error, not 0, so the fix **reduced but
+   did not eliminate** the failure. [Iteration 010](../iter010/PREREGISTRATION.md)'s first arm — same
+   band, same fixed shim, but **with the CG proxy in the path** — had **6/75**. Current state of the
+   evidence:
+
+   | run | shim | CG in path | HTML-400 errors |
+   |---|---|---|---|
+   | 64k `s1-format` | buggy | yes | 12/75 |
+   | 32k, this run | fixed | **no** | **1/75** |
+   | 32k, iter010 arm 1 | fixed | yes | **6/75** |
+
+   So a second cause survives the shim fix, and the CG proxy's presence multiplies its rate ~6×.
+   Under investigation; it is not yet attributed.
 3. **It is also cheaper** — $1.13 vs $1.52 per run, because the smaller data volume means shorter
    trajectories.
 
