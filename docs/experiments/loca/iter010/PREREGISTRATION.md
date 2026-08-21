@@ -87,3 +87,60 @@ different and legitimate reason.
 - **`cut_unreferenced` carries a 21–24% false-drop floor** ([iter009](../iter009/results.md)). If the
   primary shows no harm despite that, the most likely explanation is `expand` recovery or the agent
   not needing the dropped content — both worth stating rather than claiming the floor is wrong.
+
+---
+
+# AMENDMENT 1 — n raised from 30 to 75 (written before the run; nothing had completed)
+
+**Trigger:** a verification check on the first 5 evals of arm 1, before the arm was allowed to spend.
+The arm was stopped at 5 evals (~$0 recorded) and this amendment written before relaunching.
+
+**What the check found — three of this experiment's premises were wrong.**
+
+`state0`…`state4` in a LOCA output directory are **the 5 seeds**. Every run reported in iterations
+007 and 008 read `state0` only, so every "n=15" was 15 observations out of **75 that were actually
+executed and paid for**:
+
+| run | as reported | corrected |
+|---|---|---|
+| 32k baseline (iter008) | n=15, 53%, $5.67/task | **n=75, 52.7%, $1.13/run** |
+| 64k `s1-format` (iter007) | n=15, 25%, $7.59/task | **n=75, 33.3%, $1.52/run** |
+| 64k `s1-coref` (iter007) | n=14 | **n=62** |
+
+And the premise this experiment's sizing rested on — *"`group_by_seed` collapses 75 configs into 15
+runs"* — **is false**. It groups for *reporting*; all 75 configs execute either way. iteration 008
+proves it: unpatched, 75 configs, 75 evals. The `run_claude_api.py` patch was therefore unnecessary
+and **has been reverted**, so this run uses the stock tool.
+
+**Consequences for the plan as pre-registered above:**
+
+1. **Cost was overstated ~5×.** The full 5-seed, 2-arm experiment costs **~$170**, not $850. The
+   approved $340 covers it twice.
+2. **n=30 would discard 60% of the data for no saving.** Raising to the full 75 configs per arm is
+   strictly more information at less than the approved budget.
+3. **Discordance is ~23%, not the ~10% assumed.** Re-pairing stage 1 across all seeds gives **48
+   usable pairs, 11 discordant (7 favouring `coref`, 4 favouring `format`, McNemar p≈0.55)** — not
+   the "1 discordant in 10, p=1.00" reported in iteration 007. Direction favours `coref`; the test is
+   not significant and is not claimed to be.
+
+**Amended design:** both arms on the full `final_32k_set_config.json` (75 configs = 15 tasks × 5
+seeds). Everything else above — arms, band, endpoints, two-sidedness, stopping rule, threats — stands
+unchanged.
+
+**Amended bound:**
+
+| assumption | effective n | bound if 0 harm events |
+|---|---|---|
+| pairs independent (optimistic) | 75 | ≤ 4% |
+| **task is the unit (conservative, quotable)** | **15** | **≤ 18%** |
+
+**The conservative end barely moves, and that is the honest headline.** It is driven by the number of
+independent *tasks* (15), not the number of seeds. Extra seeds buy precision *within* a task, not more
+independent tasks. So this amendment buys a better point estimate and a better-powered McNemar, **not
+a materially tighter harm bound.** Tightening that end needs more distinct tasks, which LOCA's 32k set
+does not have.
+
+**Why this is an amendment and not a post-hoc choice:** it is committed before the run, the trigger
+was a verification check rather than an outcome, no reward comparison from the amended design existed
+when it was written, and it moves n in the direction that makes the pre-registered test *harder* to
+pass by luck.
