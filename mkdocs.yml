@@ -178,6 +178,7 @@ nav:
       - "Co-reference selection (experiment)": results/coref-selection-experiment.md
       - "Co-reference reachability (measurement)": results/coref-reachability.md
       - "Co-reference on the eval box": results/coref-evalbox.md
+      - "What can and cannot be measured": results/measurement-limits.md
       - "What actually fires (component gating)": results/component-gating.md
       - "coref on LOCA-bench": results/coref-loca.md
       - "SWE-bench Verified: per-arm detail":
@@ -201,6 +202,7 @@ nav:
       - "LOCA — iter004 (reward @64k)": experiments/loca/iter004/results.md
       - "LOCA — iter004b (reward, clean)": experiments/loca/iter004b/results.md
       - "LOCA — iter005 (deferral; summarize bug)": experiments/loca/iter005/results.md
+      - "LOCA — iter006 (stage 1 ablation)": experiments/loca/iter006/results.md
   - Proposals:
       - "Co-reference-aware compaction": proposals/coref-compaction.md
       - "…implementation status": proposals/coref-implementation.md
