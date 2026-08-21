@@ -213,6 +213,27 @@ class Handler(BaseHTTPRequestHandler):
             data, status, hdrs = e.read(), e.code, dict(e.headers)
         except Exception as e:
             data, status, hdrs = json.dumps({"error": str(e)}).encode(), 502, {}
+
+        # FAILURE CAPTURE. The `400 Bad request / Your browser sent an invalid request` HTML error
+        # survived the chunked-body fix: 1 occurrence in 75 runs with no proxy in the path, 6 in 75
+        # with one. It is intermittent and rare, so the only way to attribute it is to record the
+        # request that caused it AT THE MOMENT it fails -- reconstructing afterwards is what made
+        # this take three iterations. Body goes to a side file, not stderr, because it is large and
+        # stderr is the run log.
+        if status >= 400:
+            try:
+                snap = {"status": status, "path": self.path, "body_bytes": len(raw),
+                        "sent_content_length": str(len(raw)),
+                        "req_headers": {k: v for k, v in self.headers.items()
+                                        if k.lower() not in ("authorization", "x-api-key")},
+                        "resp_head": data[:400].decode("utf-8", "replace"),
+                        "resp_headers": {k: v for k, v in hdrs.items()},
+                        "upstream": UPSTREAM}
+                with open(os.environ.get("SHIM_FAILLOG", "/tmp/cg-loca/shim-failures.jsonl"),
+                          "a") as fh:
+                    fh.write(json.dumps(snap) + "\n")
+            except Exception:
+                pass    # diagnostics must never break the run
         self.send_response(status)
         self.send_header("content-type", hdrs.get("Content-Type", "application/json"))
         self.send_header("content-length", str(len(data)))
