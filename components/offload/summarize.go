@@ -224,7 +224,24 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	}
 
 	summaryText := summaryWrapper(summary, key, mode)
-	summaryMsg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleSystem}
+	// USER, not system. The summary is injected context, and Anthropic will not accept a
+	// system-role message in the middle of `messages`: system content belongs in the
+	// top-level `system` field, and a system role inside the array must precede an
+	// assistant message or end it. This component emits [msgs[0], summary, tail...], so
+	// when msgs[0] is itself the system prompt — the normal case — a system-role summary
+	// lands at index 1 and the provider rejects the whole request:
+	//
+	//	400 messages.1: role 'system' must precede an 'assistant' message or end the array
+	//
+	// Measured on live LOCA-bench traffic: every task that triggered a summarization failed
+	// this way, including in an arm with NO other component enabled, so it is this
+	// component's own output and not a pipeline interaction. It went unnoticed because
+	// every prior measurement replayed through /compact, which never forwards upstream and
+	// therefore never has the body validated by a provider.
+	//
+	// A user-role message carrying the summary is both valid and conventional — it is what
+	// Claude Code's own compaction does.
+	summaryMsg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&summaryMsg, summaryText)
 
 	// Checkpoint: this summary subsumes the leading span (len(span) messages from
@@ -277,7 +294,10 @@ func (s *Summarize) tryReuse(c *components.Ctx, msgs []bschemas.ChatMessage, sta
 			c.Store.Put(cp.Key, b)
 		}
 	}
-	summaryMsg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleSystem}
+	// USER for the same reason as the fresh-summary path above: a system role at index 1
+	// is rejected by the provider. The replayed checkpoint must match that shape exactly,
+	// or a replayed turn would emit different bytes from the turn that created it.
+	summaryMsg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&summaryMsg, cp.SummaryMsg)
 	out := make([]bschemas.ChatMessage, 0, 2+(len(msgs)-boundary))
 	out = append(out, msgs[0], summaryMsg)
