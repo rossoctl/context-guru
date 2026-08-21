@@ -106,6 +106,28 @@ Superiority on reward was always the wrong primary endpoint. Two endpoints, corr
 The honest statement of what stage 1 bought: **n=10 pairs bounds harm at ≤26%** — too wide to be
 worth anything. The margin has to be declared *before* the run, and the budget chosen to buy it.
 
+## Addendum — the model knobs, and the band table
+
+Two things checked after the arms were stopped, both of which change the next move.
+
+**The agent is already Sonnet 5.** Run directories read `aws-claude-sonnet-5`, so the 20% base solve
+rate *is* Sonnet's. There is no Haiku→Sonnet upgrade available; the only step up is Opus, which
+raises the $7.59/task figure. Separately, `extract_llm` is configured `model: {source: config}` —
+it inherits the request's model, so it is Sonnet 5 too, and Haiku is the *untried, cheaper* option
+there rather than a starting point. Stage 1's arms were `[format, coref]` with no `extract_llm` at
+all, so no model knob could have affected these numbers.
+
+**The 32k and 96k bands were never measured.** Both probes failed with
+`[Errno 11] write could not complete without blocking` — EAGAIN from my own pipe handling — with
+`messages: 0`, before the agent ran. The 128k band's reported zero floor was collected during the
+broken-shim window and is equally unestablished. So "64k is the only viable band" rested on one
+measured point between a saturated 8k and two rows that are rig artifacts.
+
+Since solve rate falls from 1.0 at 8k to 0.20 at 64k, an intermediate band plausibly has both
+pressure and headroom, and **the thin-headroom problem may be an artifact of band choice rather than
+a property of LOCA.** Measuring 32k on the fixed rig is the cheapest next step and should come before
+buying more pairs at 64k or moving to a larger agent model.
+
 ## Carried forward
 
 - Stage-1 numbers are **not** reportable as a reward comparison: contaminated by the shim bug, and

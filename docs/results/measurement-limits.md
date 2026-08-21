@@ -171,13 +171,26 @@ baseline ($22.64 vs $21.34): model calls plus pipeline overhead outweighed the s
 (adverse to an exact-match detector); SWE-bench is Tier-1-rich but short. So a null result on LOCA
 **cannot be generalised**, and that limit should be stated in advance rather than discovered.
 
-LOCA band behaviour, measured:
+LOCA band behaviour — **three of these five rows were never actually measured:**
 
 | band | runs | baseline accuracy | usable |
 |---|---|---|---|
 | 8K (`debug`) | yes | **1.0** saturated | regression control only; only `format` fires |
-| **64k** | **yes** | **20% (2/10 clean tasks)** | pressure yes, headroom **thin** — see below |
-| 128k | yes (needs the pairing shim) | **0.0** collapsed | zero floor measures nothing at feasible n |
+| 32k | **never measured** | — | probe died in the rig, not the band |
+| **64k** | **yes** | **20% (2/10 clean tasks)** | pressure yes, headroom **thin** |
+| 96k | **never measured** | — | same rig failure as 32k |
+| 128k | attempted | reported **0.0** / errors | **suspect** — collected during the broken-shim window |
+
+All three bad rows were my rig, not the benchmark. The 32k and 96k probes died with
+`[Errno 11] write could not complete without blocking` — the EAGAIN pipe trap in the table below —
+with `messages: 0`, i.e. before the agent ever ran. The 128k row was collected while
+`repair_shim.py` was silently dropping chunked bodies, so its zero floor is not established.
+
+**Consequence for design:** "64k is the only band with pressure *and* headroom" was never tested
+against its neighbours. Solve rate falls from 1.0 at 8k to 0.20 at 64k, so an intermediate band
+plausibly has both, and the headroom problem in section 1 may be an artifact of having picked 64k.
+Measuring 32k on the fixed rig is the cheapest available move, and should precede any decision to
+buy more pairs at 64k or to move the agent to a larger model.
 
 ### Two properties of LOCA that cap what any reward arm here can conclude
 
