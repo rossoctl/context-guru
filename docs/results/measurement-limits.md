@@ -53,6 +53,35 @@ in this work. Still n=12, but qualitatively unlike a 4-vs-5 split.
 because failing to find an effect is not finding its absence. Every reward statement here should be
 read as **unmeasured**, not confirmed.
 
+### The effect is two-sided: compaction can *raise* accuracy, not only risk it
+
+The non-inferiority framing below is necessary but incomplete, and taking it as the whole story
+understates what compaction can do.
+
+"coref can only harm accuracy" is true against a baseline that keeps the **full** context. That is
+not the baseline in any run here. LOCA's native trimmer **drops whole messages** once a request
+outgrows its limit — that is precisely why `loca_repair_shim.py` has to repair `tool_use`/`tool_result`
+pairing at all. So at any band where the trimmer fires, **the baseline is itself lossy**, and
+selective removal that keeps what is still referenced can preserve *more* usable context than a blunt
+drop. That is a mechanism for coref to be **better**, not merely not-worse.
+
+**The same argument applies to summarization, and that is the core of the deferral claim.** Replacing
+a blunt context wipe with `summarize` does not remove the phenomenon — a summary is lossy too, and
+lossy in a way that is arguably *worse* for co-reference: a trim removes messages wholesale, so what
+is gone is at least knowable, whereas a summary paraphrases exact identifiers into prose, silently
+corrupting the literal tokens Tier-1 matching depends on. Summarizing early therefore destroys
+exactly what selective removal would have kept, which is why deferring it is expected to help rather
+than merely cost less.
+
+Two consequences for design:
+
+1. **Use a two-sided test, not a one-sided harm bound.** A two-sided test has more power at the same
+   n, and a one-sided non-inferiority frame cannot register a gain even when one occurs.
+2. **The baseline arm must be named precisely.** "vs baseline" is ambiguous between *full context*
+   (where only harm is possible) and *lossy default trim or summary* (where gain is possible). These
+   are different experiments with different expected signs, and conflating them makes any result
+   uninterpretable.
+
 ### The affordable version of the claim, priced
 
 Superiority on a binary reward is the expensive claim; **bounding harm is the cheap one, and is

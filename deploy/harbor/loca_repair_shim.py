@@ -120,6 +120,14 @@ def repair_tool_pairing(messages: list) -> tuple[list, int]:
     return out, repairs
 
 
+# Lifted VERBATIM from forever/http_utils.py (HOP_BY_HOP | {host, content-length}), plus
+# accept-encoding for the urllib reason documented at the use site.
+_HOP_BY_HOP = frozenset({
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailer", "trailers", "transfer-encoding", "upgrade",
+})
+_REQUEST_STRIP = _HOP_BY_HOP | {"host", "content-length", "accept-encoding"}
+
 UPSTREAM = os.environ.get("SHIM_UPSTREAM", "http://localhost:4200/anthropic")
 _repairs = 0
 _requests = 0
@@ -185,12 +193,17 @@ class Handler(BaseHTTPRequestHandler):
                                     if "/anthropic" in self.path else UPSTREAM + self.path,
                                     data=raw, method="POST")
         for k, v in self.headers.items():
-            # transfer-encoding MUST be dropped: this hop always re-frames with an explicit
-            # content-length, and forwarding `chunked` alongside it is a protocol violation --
-            # a real web server answers "400 Your browser sent an invalid request" while a
-            # permissive one accepts it, which is exactly how this hid until it hit a gateway.
-            if k.lower() not in ("host", "content-length", "connection", "accept-encoding",
-                                 "transfer-encoding"):
+            # Hop-by-hop + transport-owned headers, lifted VERBATIM from forever's
+            # forever/http_utils.py REQUEST_STRIP (= HOP_BY_HOP | {host, content-length}) so the
+            # two rigs cannot drift -- the same reason repair_tool_pairing is copied verbatim.
+            # My original ad-hoc list had four entries and omitted transfer-encoding, which is
+            # what produced the empty-body 400s; see the HISTORY note above.
+            #
+            # DEVIATION, deliberate: accept-encoding is end-to-end and forever forwards it. This
+            # hop strips it because urllib does not transparently decompress, so forwarding
+            # `gzip` would relay compressed bytes as though they were plain. forever needs no
+            # such deviation because httpx handles content-coding for it.
+            if k.lower() not in _REQUEST_STRIP:
                 req.add_header(k, v)
         req.add_header("content-length", str(len(raw)))
         try:

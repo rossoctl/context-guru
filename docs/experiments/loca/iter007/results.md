@@ -128,6 +128,24 @@ pressure and headroom, and **the thin-headroom problem may be an artifact of ban
 a property of LOCA.** Measuring 32k on the fixed rig is the cheapest next step and should come before
 buying more pairs at 64k or moving to a larger agent model.
 
+## Checked and dismissed: the broken terminal MCP is not the cause of the 20%
+
+`cli-mcp-server` fails to start in every run here — `AttributeError: 'Server' object has no
+attribute 'list_tools'` — and LOCA logs `Failed to list tools from mounted server
+'FastMCPProxy-MCP_terminal-*': Connection closed` (30 occurrences in `s1-format`, 29 in `s1-coref`,
+92 of 181 terminal mounts in the 32k probe). Given three prior rig artifacts in one day, the obvious
+hypothesis was a fourth: tasks failing because a tool was missing.
+
+**It does not hold, and the check is worth recording so it is not repeated.** In the 64k arm the
+agent called `canvas_*`, `google_cloud_bigquery_run_query`, `python_execute`, `filesystem_*`,
+`email_get_emails`, `google_sheet_get_sheet_data`, `pdf_tools_read_pdf_pages`, `snowflake_write_query`
+and `woocommerce_*` — and issued **zero** terminal calls across every task, with **no** step
+observation referencing the terminal failure. These tasks do not use the terminal server; its failure
+to register is startup noise.
+
+So the 20% base solve rate stands as a real property of the 64k band, not a rig artifact. Recorded as
+a caveat worth fixing for tasks that *would* need a shell, not as an explanation of these numbers.
+
 ## Carried forward
 
 - Stage-1 numbers are **not** reportable as a reward comparison: contaminated by the shim bug, and
