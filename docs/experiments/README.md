@@ -26,6 +26,7 @@ traced back to the bytes that produced it).
 | [loca/iter005](loca/iter005/results.md) | 2026-08-21 | Deferral on live traffic; `summarize` chained in its own proxy | **Blocked — three shape defects in `summarize`, each masking the next; it 400s on every use** | ⚠️ → fixes `80e95d5`, `0971a32`, `2d6902d` |
 | [loca/iter006](loca/iter006/results.md) | 2026-08-21 | Stage 1 ablation: `off` / `format` / `+coref`, 75 tasks @64k | Launched; see `iter007` for its outcome | → iter007 |
 | [loca/iter007](loca/iter007/results.md) | 2026-08-21 | Stage 1 checkpoint: `format` (n=15) + `coref` (n=14), then stopped | **Stopped.** HTML 400s root-caused to my *own* replay shim (chunked bodies dropped), not `format`/LOCA. Benchmark can't power a reward comparison: $7.59/task, 20% base solve rate, binary accuracy, 1/10 discordant → p=1.00. `coref` acted on 4.2% of requests (~981k tokens) | ~$215, shim fixed |
+| [loca/iter008](loca/iter008/results.md) | 2026-08-21 | 32k band headroom probe, matched 15 tasks, no CG in path | **The band was the problem.** 32k solves **53%** vs 64k's 25%, with **0/15 errors** (confirms the shim fix live) and cheaper at $5.67/task. Still 45-56k peak contexts, so pressure remains | $85.10 |
 
 ## Before designing an arm
 
