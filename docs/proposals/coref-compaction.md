@@ -660,6 +660,56 @@ component at any aggression setting.** `coref` is a deferral play, permanently. 
 framing is that it buys 5–30% more turns before the summarizer runs, and its case rests on
 whether those turns are worth a cache-write.
 
+### Two design notes from review, neither implemented
+
+**1. The MERGED call — what "fold" actually means, and what was built instead.**
+
+Review's proposal is that the co-reference *reasoning* belongs **inside `extract_llm`'s prompt**,
+not beside it. The argument is economic and it is strong: Tier-2 (transformed) and Tier-3 (semantic)
+references are invisible to exact matching by construction, Tier-1 carries a measured **11%
+false-drop**, and *a model call is already being made* to decide what to trim. The marginal cost of
+adding "…and consider whether later turns referred back to this, including in paraphrase" to a
+prompt that is already being sent is approximately **zero**. One call, both jobs.
+
+What is implemented (`allow_cached_prefix`) is **not that**. It uses the index as an *eligibility
+gate* — the index decides which prefix outputs are candidates, then the model decides how much of
+each to keep. Two sequential mechanisms; the deadness judgement stays deterministic and stays
+Tier-1-blind.
+
+The distinction matters because it is easy to think the merged design has already been refuted. It
+has not. [The selection experiment](../results/coref-selection-experiment.md) refuted
+**model-as-decider** — eight arms where the model judged deadness from content plus evidence, best
+of them 58% live-kept against the index's 95%, and no intersection or union beating the index alone.
+That is a different question. It never tested *adding a criterion to a call already being paid for*,
+and the economic objection that ran through it — that calls cost money the saving cannot repay —
+does not apply when the call happens regardless. The nearest data point is the intersection arm:
+**96% live-kept at 8% removed**, marginally safer than the index alone at lower yield. Suggestive,
+not damning.
+
+So the merged design is **untested**, and testing it is a prompt change plus passing the reference
+evidence alongside the content — not new machinery.
+
+**2. A cache rewrite is sometimes already free, and §4 never accounts for it.**
+
+`S × T > 11.5 × W` prices a cache-write that the mutation *causes*. But when the provider's cache has
+already expired, the prefix is re-written on the next turn **regardless** — so at that moment a
+prefix mutation costs nothing incremental, and no break-even test is needed at all. A component that
+can never justify a rewrite could act for free whenever the gap between turns exceeds the cache TTL:
+a slow tool, a queue, a human thinking between turns.
+
+Measured on LOCA (`deploy/harbor/cache_opportunity.py`, direct from per-step
+`cache_read_input_tokens`): **zero such moments**. That is a property of the benchmark rather than an
+answer — LOCA drives local mock MCP servers, so turns land seconds apart and a 5-minute TTL never
+lapses. The workloads where it would appear are the slow-tool ones: SWE-bench container builds and
+`pytest` runs, Terminal-Bench, anything with a human in the loop. Note the irony that SWE-bench was
+[ruled out](../results/component-gating.md) for having tool outputs too small for these components,
+yet its slow tools may make it the right vehicle for *this* question.
+
+**Deferred deliberately, to be examined on a different benchmark.** Acting on it needs TTL state at
+*decision* time, and the provider reports cache usage in the **response** — after the decision — so
+it would have to be inferred from the previous turn's usage plus elapsed wall-clock. That is a design
+question with a real failure mode (guess wrong and you pay 11.5× believing it was free), not a patch.
+
 ### The hypothesis this proposal should be tested against
 
 Everything above narrows the claim to one testable sentence, which is what §8's acceptance
