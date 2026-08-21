@@ -286,6 +286,51 @@ own prefix** (11.5× a read — exactly the mistake this workstream exists to av
 the compaction model to the agent model**. Re-open only if a provider prices in-context follow-up
 questions at a flat rate.
 
+## Reaching the cached prefix (`allow_cached_prefix`)
+
+When cache-aware, this component is normally confined to the **uncached tail**: mutating the cached
+prefix breaks the provider's prefix hash and forces a cache-write of everything after it. That
+restriction is a cache-**cost** property, not a safety property of the model call — and on measured
+traffic the mass sits where it cannot reach. On LOCA captures, `cached_prefix_above_floor` showed
+large outputs skipped for no reason other than being in the prefix.
+
+`allow_cached_prefix` (default **false**) lifts it. Because the cost is real, enabling it switches on
+two gates the tail path does not have:
+
+1. **The co-reference index as a free eligibility pre-filter.** A prefix output is a candidate only
+   if it introduced identifiers and no later model turn carried any forward. It runs *first*, ahead
+   of the model and economic gates, so no call is ever paid to look at content a deterministic pass
+   can already clear.
+2. **The `S × T > 11.5 × W` break-even**, applied to the prefix **batch** — one cache-write serves all
+   of it, so it cannot be decided per candidate.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `allow_cached_prefix` | `false` | Permit extraction on content the provider has already cached, paying a cache-write for it. |
+| `prefix_classes` | `[unreferenced, closed]` | Which co-reference verdicts become prefix candidates. `open`/`opaque` are **refused at construction** — neither is evidence of spent content, and admitting them would turn the pre-filter into "consider everything". |
+| `prefix_min_later_turns` | 8 | Opportunity floor for prefix candidates, mirroring `coref`'s: an output with fewer model turns after it has not yet *had* a chance to be referenced. |
+
+**Why `prefix_classes` is a list rather than a constant** — the two classes ask the model different
+questions, and which is worth paying for is an experimental question:
+
+- **`closed`** (referenced once or twice, long ago) is where **trimming** earns its call. An exact
+  matcher cannot tell "took the value, rest is chaff" from "took an **anchor** and still needs the
+  payload it points at" — the ambiguity that keeps `coref`'s `cut_closed` off by default. A model can
+  read the output, see the reference was a name or id, and keep the payload a blind cut would lose.
+- **`unreferenced`** is where a **veto** might. The index found no later *exact* reuse, which is not
+  "unused": a value the model summed, converted or reworded leaves no substring behind (tiers 2 and
+  3). Handing this class to the model asks it to notice an implicit reference the index structurally
+  cannot see. It yields little when the index was right and is the only mechanism for catching when
+  it was wrong.
+
+!!! note "This is not the *merged* design"
+    The above uses the index as a **gate** and leaves the deadness judgement deterministic and
+    Tier-1-blind. Review's proposal is different — put the co-reference reasoning **inside this
+    component's prompt**, so one already-paid call does both jobs. That design is **untested**, and
+    is *not* what [the selection experiment](../results/coref-selection-experiment.md) refuted (that
+    refuted model-*as-decider*). See
+    [the proposal's design notes](../proposals/coref-compaction.md#two-design-notes-from-review-neither-implemented).
+
 ## Metrics
 
 `/stats` gains an `extract` block (purely additive — every pre-existing field keeps its name, so

@@ -689,6 +689,19 @@ not damning.
 So the merged design is **untested**, and testing it is a prompt change plus passing the reference
 evidence alongside the content — not new machinery.
 
+**Naming, fixed here to stop the two being conflated.** "Fold" was used loosely for both and is
+retired:
+
+| name | what it is | status |
+|---|---|---|
+| **merged** | co-reference reasoning **inside** `extract_llm`'s prompt; one call, both jobs | **not implemented, untested** |
+| **prefix reach with an index gate** | `allow_cached_prefix`: index selects candidates, model trims them | implemented, measured |
+
+The measured arms in [iterations 004–005](../experiments/README.md) exercised the *second*, and
+several of them additionally ran `coref` as a standalone component in the same pipeline — so those
+numbers cannot separate the gate from standalone dropping. [Iteration 006](../experiments/loca/iter006/results.md)
+isolates `coref` against `format`-only for that reason.
+
 **2. A cache rewrite is sometimes already free, and §4 never accounts for it.**
 
 `S × T > 11.5 × W` prices a cache-write that the mutation *causes*. But when the provider's cache has

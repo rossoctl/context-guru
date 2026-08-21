@@ -50,6 +50,41 @@ recovered via `context_guru_expand` / `GET /expand`.
 | `include_tool_calls` | `false` | `false` → tool outputs masked in the summarized trajectory. |
 | `resummarize_tokens` | 6000 | Tail growth that triggers rolling the checkpoint forward. |
 | `model.source` | `incoming` | LLM source: `incoming` (proxied model+key) or `config` (cheap model). |
+
+!!! danger "This component could not send a valid Anthropic request until 2026-08-21"
+    `summarize` had **three independent message-shape defects**, each masking the next, all found by
+    running [LOCA-bench](../experiments/loca/iter005/results.md) against a real API — never by tests
+    or by replay, because `/compact` returns the rewritten body **without forwarding upstream**, so
+    no provider ever validated it.
+
+    | defect | provider response | fixed by |
+    |---|---|---|
+    | summary emitted as a **`system`-role** message at index 1 | `400 messages.1: role 'system' must precede an 'assistant' message or end the array` | emit it as a **user** message, as Claude Code's own compaction does |
+    | `tool_result` blocks kept whose `tool_use` was deleted | `400 …unexpected tool_use_id found in tool_result blocks` | `dropOrphanedToolResults` |
+    | `tool_use` blocks kept whose `tool_result` was deleted | `400 …tool_use ids were found without tool_result blocks immediately after` | **`summarizeSpan`** — see below |
+
+    The last two are the same mistake from either side, and both came from boundaries chosen by
+    arithmetic (`msgs[1 : len−keepLast]`) that knew nothing about tool pairing. The root fix is one
+    rule: **a tool exchange is atomic.** `summarizeSpan` advances `end` past any tool messages the
+    kept tail would begin with, so an exchange is summarized whole rather than split; and it drops
+    the preserved head when `msgs[0]` is an assistant tool-call message, because that message's
+    results necessarily lie inside the span and the head exists to carry the conversation's
+    *identity* (its system prompt or opening user turn), which a tool call is not.
+
+    Review framed it best: an unanswered `tool_use` means the agent is still **waiting** on that
+    tool, so summarize *after* the exchange completes, not through it. That needs no synthetic
+    `[tool result unavailable]` placeholder — which would be a second fiction on top of the summary.
+
+    Guarded by `schema.ValidateShape` plus an all-presets test that fails on the pre-fix code in
+    0.07s. **Any component that deletes messages needs this invariant**; `coref` does not, because it
+    rewrites a tool message's text in place and never removes a message.
+
+!!! warning "Run it alone"
+    `summarize` restructures the transcript and changes the message count, so another component's
+    in-place edits can race `apply`'s rebuild. Two experiment iterations
+    ([004](../experiments/loca/iter004/results.md), 005) were invalidated by ignoring this. If a
+    pipeline needs both compaction and summarization, chain **two proxies** — a compaction pipeline
+    in front of a summarize-only one — which is also the deployable shape.
 | `trigger` | — | Gates the first summary: `min_request_tokens`, `min_messages`. |
 
 ## When it shines
