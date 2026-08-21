@@ -29,6 +29,8 @@ traced back to the bytes that produced it).
 | [loca/iter008](loca/iter008/results.md) | 2026-08-21 | 32k band headroom probe, matched 15 tasks × 5 seeds, no CG in path | **The band was the problem.** Over all 75 runs 32k solves **52.7%** vs 64k's **33.3%**, with **0 errors** (confirms the shim fix live) at **$1.13/run**. Still 45-56k peak contexts, so pressure remains | $85.10 |
 | [loca/iter009](loca/iter009/results.md) | 2026-08-21 | Re-score the selection experiment: floor symmetry + deterministic Tier-2 ground truth | **Merged stays refuted.** Floor symmetry moves live-kept 0-2pts (overrides 6-23/885); Tier-2 widening (408→473 referenced) raises every arm's false-drop and does not close the 36pt gap. `cut_unreferenced`'s error floor revised **11% → 21-24%** | **$0** |
 | [loca/iter010](loca/iter010/results.md) | 2026-08-21 | First live reward measurement: `format` vs `format`+`coref`, 32k, n=75/arm, pre-registered | **No reward effect either way** — task-clustered 4 harm / 4 gain, p=1.000, harm bound ≤51% (the ≤10% target needed zero harm events). **23% of pairs flipped** with no direction. `coref` adds ~1pp removal (6.8% of requests) and cost **rose** $93→$98. Errors 6→0 | $191.03 |
+| [loca/iter011](loca/iter011/results.md) | 2026-08-21 | Deferral experiment, 3 arms pre-registered | **Aborted at arm 1** — 28/75 runs invalid. Root-caused to `apply.rebuildCountChanged` dropping the body message holding **parallel** `tool_result`s; `summarize` exonerated by test. Saved ~$180 | ~$8 |
+| [loca/iter012](loca/iter012/results.md) | 2026-08-21 | The fold (`+extract_llm` full-body) vs lossless, 32k, n=75 | **`savings_pct` is inflated 3–8×.** Unique-token ordering *inverts*: fold removes **5.26M** vs lossless **6.98M**. Components cannibalise each other. Apparent $ saving is trajectory noise, not compaction. Reward 3 harm/6 gain, p=0.51 | $89.52 |
 
 ## Before designing an arm
 
@@ -52,6 +54,13 @@ capability, and a table of rig traps that each produced a valid-looking wrong nu
 - **Pre-register the reading.** For anything with arms, commit the design *and* how each outcome will
   be interpreted **before** the numbers exist (`loca/iter004`, `loca/iter006`). Cheap insurance, and
   it is what stopped a +1-task difference at n=12 being written up as an improvement.
+- **Quote unique savings, never `savings_pct`, for anything non-deterministic.** The same removed
+  content is re-credited on every turn that replays a frozen rewrite, inflating `coref` by 4–8× and
+  `extract_llm` by 2.8× while `format` (deterministic, in place) stays at exactly 1× (`loca/iter012`).
+  The two numbers even *order the arms differently*.
+- **Per-arm benchmark cost cannot price a component.** Two arms differing by one component came out
+  $4.57 more expensive and $3.71 cheaper in successive iterations, both dominated by how long the
+  agent's own path happened to run. Attribute cost from the token counters, never from the bill.
 - **Report three yield numbers, not one** — eligible, acted, and refused-for-economics. A single
   figure cannot distinguish "nothing left to remove" from "economically throttled", and those call
   for opposite responses.
