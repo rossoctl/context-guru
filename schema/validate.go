@@ -94,12 +94,28 @@ func ValidateShape(msgs []schemas.ChatMessage) []ShapeViolation {
 				ids = append(ids, *tc.ID)
 			}
 		}
-		// Every call must be answered by the very next message.
+		// Every call must be answered before any non-tool message intervenes.
+		//
+		// PARALLEL CALLS. One assistant message may carry several tool_use blocks, and Anthropic
+		// requires every result in the single user message that follows. bifrost's schema, though,
+		// represents each result as its OWN role=tool message, so the wire's one-user-message maps
+		// to a RUN of consecutive tool messages here. Inspecting only msgs[i+1] therefore reported
+		// a violation on every ordinary parallel exchange -- the second call always looked
+		// unanswered:
+		//
+		//	messages.1 [answered-tool-use] ... without `tool_result` blocks immediately after: call_b
+		//
+		// which is indistinguishable from the real defect being hunted, and would have made this
+		// validator useless precisely where it was needed. Scanning the whole run of consecutive
+		// tool messages is the representation-correct reading; the invariant is unchanged, because
+		// the run must still be contiguous -- any other role in between ends it.
 		answered := map[string]bool{}
-		if i+1 < len(msgs) {
-			n := msgs[i+1]
-			if n.Role == schemas.ChatMessageRoleTool && n.ChatToolMessage != nil &&
-				n.ChatToolMessage.ToolCallID != nil {
+		for j := i + 1; j < len(msgs); j++ {
+			n := msgs[j]
+			if n.Role != schemas.ChatMessageRoleTool {
+				break
+			}
+			if n.ChatToolMessage != nil && n.ChatToolMessage.ToolCallID != nil {
 				answered[*n.ChatToolMessage.ToolCallID] = true
 			}
 		}

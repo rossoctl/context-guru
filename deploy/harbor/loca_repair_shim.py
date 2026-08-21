@@ -206,6 +206,35 @@ class Handler(BaseHTTPRequestHandler):
             if k.lower() not in _REQUEST_STRIP:
                 req.add_header(k, v)
         req.add_header("content-length", str(len(raw)))
+
+        # CORRELATION. The capture hop on the far side of context-guru records what the proxy SENT;
+        # this side records what it RECEIVED. Joining them by a stamped sequence number is what turns
+        # "summarize emitted an unanswered call" into "and here is the input it was given" -- the step
+        # that three rounds of reading the source failed to establish. copyHeaders in the proxy
+        # forwards unknown headers, so the id survives the hop.
+        with _lock:
+            globals()["_seq"] = globals().get("_seq", 0) + 1
+            seq = globals()["_seq"]
+        req.add_header("x-cg-rig-seq", str(seq))
+        if os.environ.get("SHIM_DIGEST"):
+            try:
+                pl = json.loads(raw)
+                dig = []
+                for i, m in enumerate(pl.get("messages") or []):
+                    c = m.get("content")
+                    blocks = c if isinstance(c, list) else []
+                    uses = [b.get("id") for b in blocks
+                            if isinstance(b, dict) and b.get("type") == "tool_use"]
+                    res = [b.get("tool_use_id") for b in blocks
+                           if isinstance(b, dict) and b.get("type") == "tool_result"]
+                    dig.append({"i": i, "role": m.get("role"),
+                                "n_use": len(uses), "n_res": len(res),
+                                "use": uses[:4], "res": res[:4]})
+                with open(os.environ["SHIM_DIGEST"], "a") as fh:
+                    fh.write(json.dumps({"seq": seq, "n_messages": len(dig),
+                                         "body_bytes": len(raw), "digest": dig}) + "\n")
+            except Exception:
+                pass
         try:
             with urllib.request.urlopen(req, timeout=900) as r:
                 data, status, hdrs = r.read(), r.status, dict(r.headers)

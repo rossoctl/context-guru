@@ -97,6 +97,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(raw)
                 snap = {"status": status, "body_bytes": len(raw),
+                        # Stamped by loca_repair_shim.py so this record can be joined to the
+                        # request the proxy was GIVEN, not just the one it produced.
+                        "rig_seq": self.headers.get("x-cg-rig-seq"),
                         "n_messages": len(payload.get("messages") or []),
                         "system_present": "system" in payload,
                         "digest": digest(payload),
