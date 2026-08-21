@@ -106,14 +106,69 @@ Two independent gaps, and the second is structural:
   arms took different trajectories (260 vs 286 requests), so raw counts are not comparable. Per
   request they are 1.54% and 1.05%, and with a broken baseline neither means anything.
 
+## Iterations 005b and 005c: two fixes, a third defect, and a deliberate stop
+
+Fixing the system-role defect did not unblock the experiment. It let `summarize` act more often,
+which surfaced the next violation — and then the next.
+
+| attempt | fix applied | task errors | new failure |
+|---|---|--:|---|
+| 005 | — | 3 | `messages.1: role 'system' must precede…` |
+| 005b | user-role summary (`80e95d5`) | **5** | `messages.0.content.2: unexpected tool_use_id in tool_result blocks` |
+| 005c | + drop orphaned results (`0971a32`) | 3 | `messages.1: tool_use ids without tool_result blocks immediately after` |
+
+Each defect **masked the next**. While the system-role bug fired, `summarize` barely got to act;
+fixing it raised the error count to 5, which looked like a regression and was really the component
+finally running far enough to break differently.
+
+The three are one family — **`summarize` does not maintain the provider's message-shape
+invariants**:
+
+1. a `system`-role message spliced mid-array;
+2. `tool_result` blocks kept whose `tool_use` was deleted (orphaned results);
+3. `tool_use` blocks kept whose `tool_result` was deleted (unanswered calls) — the converse of (2),
+   arising because `msgs[0]` is preserved verbatim and its results may sit inside the removed span.
+
+Both fixes are real, tested, and worth keeping. **They do not make `summarize` usable.** (3) needs
+phase 2 of a pairing repair — synthesising a placeholder result, or declining to preserve an
+unanswered call — and I explicitly argued *against* synthesising when writing (2), on the grounds
+that a fake result is "a second lie on top of the summary". That reasoning was wrong on the
+decisive point: **an invalid request is worse than an imperfect one.** It is still a design decision
+rather than a patch, and it needs to be made deliberately.
+
+**So I stopped rather than attempt a third fix in the same session.** Three defects in one component,
+each revealed only by fixing the last, is a signal about the component's readiness, not a queue of
+chores. A fourth patch written at speed would more likely add a fourth defect than reach a working
+state.
+
+One further error in 005c was *not* of this family and is unexplained: a raw
+`<html><body><h1>400 Bad request</h1>` with no Anthropic error body, so it did not come from the
+model API. Recorded, not diagnosed.
+
+## Status of the deferral claim
+
+**Unmeasurable until `summarize` maintains message-shape invariants.** That is the honest position.
+The claim itself remains plausible — [iteration 002](../iter002/results.md) showed the *mechanism*
+(compaction reduces how often a context max is reached) on replayed traffic — but no valid live
+measurement exists, and the component the claim depends on cannot currently send a request a
+provider will accept.
+
+`coref` and `extract_llm` are **not** implicated in any of this. They ran clean in every arm, and the
+arms containing neither of them failed identically.
+
 ## Next levers
 
-1. **iteration 005b** — the same three arms on the fixed binary. Yields the deferral figure and
-   reward together.
-2. **Audit the other `/compact`-only results** for schema validity, now that replay is known to be
+1. **Give `summarize` a real pairing-repair pass**, both directions, as a deliberate design step:
+   decide what an unanswered preserved call becomes. Until then the component should arguably be
+   marked unusable on providers that enforce pairing.
+2. **A schema-validity test that does not need a provider.** All three defects are checkable
+   statically against Anthropic's documented rules — system position, results answered, calls
+   answered. A validator run over pipeline output in tests would have caught every one, and would
+   close the replay blind spot without requiring live traffic for every measurement.
+3. **Audit the other `/compact`-only results** for schema validity, now that replay is known to be
    blind to it.
-3. `summarize`'s interaction with `cachesplit` (which edits the top-level `system` field) is
-   untested and adjacent to this defect.
+4. `summarize`'s interaction with `cachesplit` (which edits the top-level `system` field) is
+   untested and adjacent to defect (1).
 
 ## Artifacts
 
