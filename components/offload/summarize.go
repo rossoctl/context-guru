@@ -255,6 +255,11 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	out := make([]bschemas.ChatMessage, 0, 2+s.keepLast)
 	out = append(out, msgs[0], summaryMsg)
 	out = append(out, msgs[end:]...)
+	// Removing a span can orphan the tail's leading tool_result blocks; a provider rejects
+	// the whole request if it does. See dropOrphanedToolResults.
+	if repaired, n := dropOrphanedToolResults(out); n > 0 {
+		out = repaired
+	}
 	req.Input = out
 	if key != "" {
 		return []string{key}, nil
@@ -302,6 +307,11 @@ func (s *Summarize) tryReuse(c *components.Ctx, msgs []bschemas.ChatMessage, sta
 	out := make([]bschemas.ChatMessage, 0, 2+(len(msgs)-boundary))
 	out = append(out, msgs[0], summaryMsg)
 	out = append(out, msgs[boundary:]...)
+	// Removing a span can orphan the tail's leading tool_result blocks; a provider rejects
+	// the whole request if it does. See dropOrphanedToolResults.
+	if repaired, n := dropOrphanedToolResults(out); n > 0 {
+		out = repaired
+	}
 	if cp.Key != "" {
 		return out, []string{cp.Key}, true
 	}

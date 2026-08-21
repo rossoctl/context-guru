@@ -80,3 +80,64 @@ func roleList(msgs []bschemas.ChatMessage) string {
 	}
 	return b.String()
 }
+
+// THE SECOND REGRESSION, found only after the first was fixed
+//
+// summarize replaces a span with one summary message, so the kept tail can begin part-way
+// through a tool exchange — its leading `tool_result` blocks answer `tool_use` blocks that
+// were just deleted. Anthropic rejects the whole request:
+//
+//	400 messages.0.content.2: unexpected `tool_use_id` found in `tool_result` blocks
+//
+// Measured on live LOCA-bench traffic: 5 of 12 tasks failed this way once the system-role
+// defect was fixed and summarize could finally act at all.
+//
+// This is an invariant for any component that DELETES messages. coref does not need it —
+// it rewrites a tool message's text in place and never removes a message, so pairing holds
+// by construction.
+func TestDropOrphanedToolResults(t *testing.T) {
+	call := func(id string) bschemas.ChatMessage {
+		m := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleAssistant,
+			ChatAssistantMessage: &bschemas.ChatAssistantMessage{
+				ToolCalls: []bschemas.ChatAssistantMessageToolCall{{ID: &id}},
+			}}
+		return m
+	}
+	result := func(id string) bschemas.ChatMessage {
+		m := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleTool,
+			ChatToolMessage: &bschemas.ChatToolMessage{ToolCallID: &id}}
+		schema.SetMessageText(&m, "output for "+id)
+		return m
+	}
+
+	// A well-formed history must pass through untouched — the repair has to be idempotent
+	// and must never drop a result whose call is present, even at a distance (a summary can
+	// legitimately sit between a call and its result).
+	ok := []bschemas.ChatMessage{userMsg("go"), call("t1"), result("t1"), call("t2"), result("t2")}
+	got, n := dropOrphanedToolResults(ok)
+	if n != 0 || len(got) != len(ok) {
+		t.Errorf("well-formed history must be unchanged, dropped %d (%d -> %d)", n, len(ok), len(got))
+	}
+
+	// The summarize shape: the span holding call("t1") was replaced by a summary, so the
+	// tail's result("t1") is orphaned and must go, while result("t2") stays.
+	orphaned := []bschemas.ChatMessage{
+		userMsg("go"),
+		userMsg("SUMMARY: earlier work, including a call whose result follows"),
+		result("t1"), // its call was deleted
+		call("t2"), result("t2"),
+	}
+	got, n = dropOrphanedToolResults(orphaned)
+	if n != 1 {
+		t.Fatalf("expected exactly 1 orphaned result dropped, got %d", n)
+	}
+	for _, m := range got {
+		if m.Role == bschemas.ChatMessageRoleTool && m.ChatToolMessage != nil &&
+			m.ChatToolMessage.ToolCallID != nil && *m.ChatToolMessage.ToolCallID == "t1" {
+			t.Error("orphaned tool_result for t1 survived the repair")
+		}
+	}
+	if len(got) != len(orphaned)-1 {
+		t.Errorf("repair removed %d messages, want 1", len(orphaned)-len(got))
+	}
+}
