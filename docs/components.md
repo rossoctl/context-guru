@@ -53,7 +53,8 @@ Terminal-Bench replay) ·
 `agentdiet` `[format, agentdiet, cachesplit]` (a published-method **baseline** for A/B, run without
 our own offloaders so its effect is attributable — see [agentdiet](components/agentdiet.md)).
 
-**The lossless trio leads every working preset.** `format`, `textclean` and `searchfold` all
+**The lossless trio leads every working preset** (`mcp` takes only `format` + `textclean` — it
+serves JSON list endpoints with no search output to fold). `format`, `textclean` and `searchfold` all
 verify-then-adopt, so there is no risk argument for omitting one, and running them first makes every
 downstream token count honest. Two of the three used to be missing: `textclean` shipped in `general`
 alone while 49.6% of corpus messages carry ANSI, and `searchfold` shipped in NO preset at all.

@@ -163,3 +163,23 @@ func TestToonIsInNoPreset(t *testing.T) {
 		}
 	}
 }
+
+// linecap must sit immediately before cachesplit in every preset that runs it. The mechanism
+// is asserted in components/offload (TestLinecapYieldsToAnEarlierOffloader), but the mistake
+// that actually happened was an ORDERING one: every Offload leaves a marker and every Offload
+// skips marker-bearing content, so a modest reducer ahead of a drastic one takes its candidate
+// away. Measured on `general` over 1,795 real captured requests, linecap 7th saved 5,524,476
+// tokens — worse than the 5,556,801 with no linecap at all — against 5,811,621 placed last.
+func TestLinecapRunsLastAmongTheOffloaders(t *testing.T) {
+	for name, pipeline := range presets {
+		for i, c := range pipeline {
+			if c != "linecap" {
+				continue
+			}
+			if i != len(pipeline)-2 || pipeline[len(pipeline)-1] != "cachesplit" {
+				t.Errorf("preset %q runs linecap at %d of %v; it must be immediately before "+
+					"cachesplit, or it steals candidates from the heavier offloaders", name, i, pipeline)
+			}
+		}
+	}
+}

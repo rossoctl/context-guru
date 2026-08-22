@@ -138,7 +138,8 @@ func (c *Config) applyPreset() error {
 // Build time as a clear error.
 //
 // The LOSSLESS TRIO — format, textclean, searchfold — leads every preset that does any
-// deterministic work. All three verify-then-adopt (format re-parses, textclean compares
+// deterministic work, except that `mcp` takes only format + textclean: it serves JSON list
+// endpoints, which carry no search output for searchfold to fold. All three verify-then-adopt (format re-parses, textclean compares
 // informative lines, searchfold checks its own inverse byte-for-byte) so they cannot lose
 // content, and running them first makes every downstream token count honest.
 // Measured on 2026-08 production traffic before this change:

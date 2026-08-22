@@ -255,3 +255,40 @@ func trunc(s string) string {
 	}
 	return s
 }
+
+// The shape gate must be a NECESSARY condition, not a guess: if it excludes anything the fold
+// would actually have changed, it silently costs tokens. Checked against every real captured
+// search output rather than argued.
+func TestShapeGateAdmitsEveryFoldableCapture(t *testing.T) {
+	admitted, folded := 0, 0
+	for _, c := range loadCaptures(t) {
+		gate := mayCarryPathPrefix(c.Out)
+		if gate {
+			admitted++
+		}
+		if FoldSearchOutput(c.Out) != c.Out {
+			folded++
+			if !gate {
+				t.Errorf("the gate excluded output the fold DOES change: %q", trunc(c.Cmd))
+			}
+		}
+	}
+	t.Logf("%d captures: %d admitted by the gate, %d actually fold", len(loadCaptures(t)), admitted, folded)
+	if folded == 0 {
+		t.Fatal("no capture folds; this test proves nothing")
+	}
+}
+
+// And it must actually exclude something, or it is dead weight on the hot path.
+func TestShapeGateRejectsProseAndBuildLogs(t *testing.T) {
+	for _, s := range []string{
+		"all tests passed\nnothing to report here\n",
+		"error: expected semicolon\nnote: consider adding one\n",
+		"Compiling serde v1.0\nFinished dev profile\n",
+		"",
+	} {
+		if mayCarryPathPrefix(s) {
+			t.Errorf("gate admitted unfoldable content %q", s)
+		}
+	}
+}

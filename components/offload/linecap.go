@@ -252,12 +252,6 @@ func neverTruncate(line string) bool { return neverTruncateRe.MatchString(line) 
 // read as a diff at all.
 var diffShaped = regexp.MustCompile(`(?m)^(diff --git |@@ |Index: |--- |\+\+\+ )`)
 
-// lineNum strips the digits out of every `:N:`-style group so two lines that differ ONLY
-// in a line number are never treated as the same line. `pkg/a.go:12:  undefined: x` and
-// `pkg/a.go:87:  undefined: x` are two findings, and a count of two is not the same
-// information as two locations.
-var lineNum = regexp.MustCompile(`:\d+`)
-
 // collapseScatteredDups keeps the FIRST occurrence of each distinct line in its original
 // position, annotates it with the total count, and drops the rest. It is the non-adjacent
 // case: extract's collapseObviousNoise already folds adjacent repeats, measured at 63

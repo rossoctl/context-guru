@@ -21,7 +21,8 @@ taken exactly from the `presets` map in `config/config.go`.
 | `agentdiet` | `format` → `agentdiet` → `cachesplit` | A **comparable baseline**, not a recommendation: the published [AgentDiet](../components/agentdiet.md) method ([arXiv:2509.23586](https://arxiv.org/abs/2509.23586)) at its tuned hyperparameters, for A/B'ing against our own reducers. One cheap-model reflection per turn on the step that just aged past `delay_steps`. Carries no other offloader on purpose — they would reduce the same tool outputs first and leave nothing to attribute. |
 
 !!! info "The lossless trio, `toon`'s retirement, and `linecap` (August 2026)"
-    `format` → `textclean` → `searchfold` now leads every preset that does deterministic work.
+    `format` → `textclean` → `searchfold` now leads every preset that does deterministic work
+    (`mcp` takes only the first two — it serves JSON list endpoints with no search output to fold).
     All three verify-then-adopt — `format` re-parses, `textclean` compares informative lines,
     `searchfold` checks its own inverse byte-for-byte — so there is no risk argument for omitting
     one, and running them first makes every downstream token count honest. Two were missing:

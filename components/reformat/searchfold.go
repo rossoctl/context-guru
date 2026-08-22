@@ -52,9 +52,13 @@ func init() { components.Register("searchfold", newSearchfold) }
 // without a repeated prefix.
 //
 // This is the general rule for a self-verifying fold: attempt it, keep it if the inverse
-// reproduces the input and the result is smaller. A cheap SHAPE pre-check is still worth it
-// where one exists (`format`'s not_json_shaped is a one-byte test guarding a full parse);
-// a pre-check that has to reconstruct request STRUCTURE is not.
+// reproduces the input and the result is smaller. What it does NOT license is attempting it on
+// content that cannot possibly fold — each fold splits and rebuilds the whole string before
+// `adopt` compares lengths, so there is no early exit and an attempt costs a full pass
+// (measured on non-foldable output: 275 µs at 24 KB, 1.73 ms at 240 KB, 8.16 ms at 1.2 MB). So
+// a cheap SHAPE pre-check still earns its keep, the way `format`'s not_json_shaped does — see
+// mayCarryPathPrefix. What does not earn its keep is a pre-check that has to reconstruct
+// request STRUCTURE, which is what the command pairing this replaced did.
 type Searchfold struct{ minTokens int }
 
 type searchfoldConfig struct {
@@ -88,6 +92,10 @@ func (f *Searchfold) Reformat(req *schemas.BifrostChatRequest, rep *components.R
 			rep.Gate("below_min_tokens")
 			continue
 		}
+		if !mayCarryPathPrefix(content) {
+			rep.Gate("no_path_shape")
+			continue
+		}
 		out := FoldSearchOutput(content)
 		if out == content {
 			rep.Gate("no_repeated_prefix")
@@ -100,6 +108,26 @@ func (f *Searchfold) Reformat(req *schemas.BifrostChatRequest, rep *components.R
 		rep.Skipped = true
 	}
 	return nil
+}
+
+// mayCarryPathPrefix is the one-pass shape gate: every fold here factors out a repeated PATH
+// prefix, and a path prefix shows up as either a directory separator or a `:<digit>` line
+// reference. Content with neither cannot fold, whatever produced it.
+//
+// A necessary condition for all three folds, not a guess: foldHitPath and foldHitDir group
+// `path:line:text` rows, and foldPathList factors a parent directory out of bare paths. A list
+// of bare filenames in one directory has no common prefix to factor, so it is correctly
+// excluded. TestShapeGateAdmitsEveryFoldableCapture checks that against the real corpus.
+func mayCarryPathPrefix(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' {
+			return true
+		}
+		if s[i] == ':' && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 // FoldSearchOutput returns the smallest of the candidate folds whose inverse
