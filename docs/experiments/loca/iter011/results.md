@@ -177,3 +177,41 @@ substantive changes to this package already landed tonight without review. Stack
 change to the byte-losslessness machinery raises the risk of a fourth defect more than it lowers the
 risk of this one. A likely fix is to match assistant messages by their tool-call id set — as tool
 messages now are — and to **decline the rebuild** rather than fresh-marshal anything body-derived.
+
+## Arm 1 (`[format, summarize]`) — 94.7% "savings", 63% MORE money, same solves
+
+Gate passed: **4 failures of 75**, against 28 before the fixes.
+
+| | `[format]` (iter010) | `[format, summarize]` |
+|---|---|---|
+| solved | 33 / 69 clean (47.8%) | **33 / 71 clean (46.5%)** |
+| **total cost** | **$93.23** | **~$152.09** ($148.89 LOCA + $3.20 CG calls) — **+63%** |
+| requests | 2,362 | 2,613 |
+| mean pre-compaction request | **~12.2k tokens** | **~141k tokens** — **11.5×** |
+| reported `savings_pct` | 24.2% | **94.7%** (349.6M of 369.0M) |
+| `summarize` unique saved | — | **129.0M** of 288.2M reported (**2.23× overcount**) |
+| `compaction_resets` | — | **777** |
+
+**This is the sharpest demonstration yet that removing tokens is not saving money.** `summarize`
+reports removing 94.7% of all tokens and costs **63% more** for the **same number of solved tasks**.
+
+**The mechanism is not the expand loop.** That was the obvious hypothesis — the marker invites the
+model to call `cg_expand`, restoring the span and regrowing context — and it is **not supported**:
+`expand` appears just **twice** in the whole run log.
+
+What the counters do show is that the *trajectories diverged enormously*: mean pre-compaction request
+size is **11.5× larger** than the lossless arm's on the identical tasks and band. A plausible reading,
+**not established here**, is that lossy summarisation makes the agent redo work — re-reading files and
+re-querying tools it can no longer see — so total context grows even as each individual request is
+smaller. `cache_write=2.3M` against `fresh_input=59.4M` and `cache_read=53.9M` is consistent with the
+prefix being invalidated repeatedly, billing fresh where the lossless arm billed cache reads.
+
+**Two cautions on the 94.7%.** First, `tokens_before` = 369M is a *counterfactual* — it assumes the
+same trajectory would have occurred without compaction, and the trajectory is exactly what changed.
+Second, `summarize`'s own overcount ratio is **2.23×**, so its unique contribution is 129M, not 288M.
+Both push the honest figure well below the headline.
+
+**Bearing on the deferral question:** if this holds in arms 2 and 3, it strengthens rather than weakens
+the case for *deferring* summarisation — a summary here is not merely lossy, it appears to be actively
+expensive. Whether `coref` and the fold reduce `summarize`'s firing rate, and whether cost falls with
+it, is precisely what the remaining arms measure.
