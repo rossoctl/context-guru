@@ -410,7 +410,7 @@ type useRow struct {
 // own tenant_id, and a scoping bug in one place should not be enough to cross accounts.
 func (d *DB) scopedDecls(f Filter, where string, args []any) ([]declRow, error) {
 	q := `SELECT d.session_id, d.kind, d.name, d.server, MAX(d.tokens),
-		MAX(CASE WHEN d.text_gz IS NOT NULL THEN 1 ELSE 0 END)
+		MAX(CASE WHEN ` + declHasText + ` THEN 1 ELSE 0 END)
 		FROM tool_declarations d WHERE d.session_id IN
 		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
 	a := append([]any{}, args...)

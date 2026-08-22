@@ -87,9 +87,14 @@ body, in the same place the request's metadata is already read.
 * **Usage.** Every `tool_use` block of the last tool-using turn (`tool_calls` in the
   OpenAI dialect), and for the `Skill` tool the `skill` argument — the only place a skill
   invocation is identifiable.
-* **The text of each region**, in `text_gz` — a tool's whole JSON element, a skill's listing
-  entry, the listing itself, and the system prompt on a `kind='system_prompt'` marker row —
-  **but only under transcript-capture consent**. See below.
+* **The text of each region** — a tool's whole JSON element, a skill's listing entry, the
+  listing itself, and the system prompt on a `kind='system_prompt'` marker row — **but only
+  under transcript-capture consent**. See below. The bytes live in `declaration_text`, one row
+  per distinct text, and the declaration row points at them with `text_hash`: this table's
+  grain is one row per (session x declaration), so storing the text on the row wrote the same
+  `Bash` schema once per session that carried it — measured at 328,236 rows holding 225 distinct
+  blobs, 254 MiB, growing 250 MB a day. The old `text_gz` column is retained and still read for
+  rows written before the split.
 * **Never a message of the conversation.** This reads the request's *preamble*: its `tools`
   array, its `system` prompt, and the skills listing that arrives in a `{"role":"system"}`
   reminder. Nothing a user or the model said in the transcript itself is touched.
@@ -106,9 +111,9 @@ stored.
 
 The **text** is a different class of data and gets the stricter gate. A tool schema is whatever
 an SDK author wrote; a system prompt is whatever the user, their CLAUDE.md, or something they
-pasted wrote. So `text_gz` rides the same pair that governs `request_content.before_gz` — the
+pasted wrote. So the text rides the same pair that governs `request_content.before_gz` — the
 operator's `--dashboard-content` **and** the tenant's own opt-in — carried per message on
-`RecordInventory(..., text bool)`. Without it the row is still written and the column is
+`RecordInventory(..., text bool)`. Without it the row is still written and `text_hash` is
 `NULL`, so an account that declined transcript capture keeps the whole inventory feature and
 loses only the ability to read the text.
 

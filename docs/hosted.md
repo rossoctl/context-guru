@@ -442,6 +442,7 @@ deploy/service/box-setup.sh install   # rclone (falls back to a user-local insta
 deploy/service/box-setup.sh token     # prints the browser step, which cannot be automated
 deploy/service/box-setup.sh paste     # write a token obtained elsewhere, from stdin
 deploy/service/box-setup.sh verify    # write, read back, compare, delete
+deploy/service/box-setup.sh park FILE # move ONE retained artefact to Box, by hand
 ```
 
 The OAuth step needs a browser and this host is headless, so `token` prints two exact
@@ -460,6 +461,20 @@ instead of archiving.
 The nightly control-database backup needs no separate step: `install` lays down
 `context-guru-backup.{service,timer}` and its script, and `start` enables the timer
 alongside the service. `install.sh status` shows when it last ran and when it runs next.
+
+`park` is for **retained artefacts** — a pruned copy of the metrics database, a pre-deploy
+snapshot, an old backup — and it is deliberately manual: it prints what it is about to do,
+asks, uploads with `rclone copyto`, stats the object back and compares its SIZE, and only then
+removes the local file. Nothing schedules it, and it refuses a live database (`cg.db`,
+`cg-control.db`, or any file with a `-wal` beside it) — a live SQLite file has commits in its
+write-ahead log that the main file does not, so parking it would upload a torn copy and delete
+the complete one. Whether an artefact is still needed is a judgement call, which is exactly why
+this is a command an operator runs and not a rule the service applies.
+
+The **metrics database itself does not need cold storage.** Its bulk was duplicated prompt
+text — the same tool schema stored once per session that declared it — and that is now stored
+once (`declaration_text`, see [the dashboard's tables](dashboard.md)). Session archival to Box
+is still there for history you want off local disk; there is nothing to build for size.
 
 ## Deploying somewhere that is not IBM
 

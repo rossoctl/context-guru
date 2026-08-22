@@ -421,6 +421,16 @@ CREATE TABLE IF NOT EXISTS tool_declarations (
   -- an account that has not opted in, both read NULL, and the report counts them rather
   -- than rendering either as a prompt with nothing in it.
   text_gz    BLOB,
+  -- text_hash points at declaration_text, where the bytes above now live: the grain of this
+  -- table is one row per (session x declaration), so text_gz stored the same tool schema once
+  -- per session that carried it — 254 MiB of 225 distinct blobs, measured. NULL still means
+  -- "not stored", exactly as it does for text_gz.
+  --
+  -- text_gz is retained and still READ (see declTextCol) for the rows written before the split
+  -- and for whatever the backfill has not reached. It is no longer written. Dropping it would
+  -- rewrite this table, which is not a thing to do to a live 650 MB database for a column that
+  -- costs nothing while empty.
+  text_hash  TEXT,
   -- tenant_id LEADS the key. A session id is CLIENT-SUPPLIED, so two accounts can present
   -- the same one (by accident or on purpose), and a key without the tenant makes the second
   -- account's rows collide with the first's: ON CONFLICT DO NOTHING silently discards them,
@@ -451,6 +461,35 @@ CREATE TABLE IF NOT EXISTS tool_uses (
   PRIMARY KEY (tenant_id, session_id, name, skill)
 );
 CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts DESC);
+
+-- One row per DISTINCT piece of stored prompt text, keyed by its content hash.
+--
+-- tool_declarations has one row per (session x declaration), so the text of a declaration
+-- was written afresh for every session that carried it: measured on the live database, 328,236
+-- rows held 254 MiB of text that was 225 distinct texts — a duplication factor of 1,459, and
+-- 250 MB of growth a day for facts that were already stored. The bytes live here once and the
+-- declaration row points at them.
+--
+-- hash is a sha256 of the text AFTER scrubbing and capping (see declText), so it is the
+-- identity of exactly what is stored and nothing else. NOT tool_declarations.digest, which
+-- is a maphash of the whole declaration SET under a per-process seed: it identifies neither
+-- one declaration nor the same set across a restart (4,035 digests for 239 declarations).
+--
+-- NO tenant_id, and that is not an oversight. The key IS the content, so a row is reachable
+-- only through a declaration row the reader is already scoped to (see declTextJoin), and two
+-- accounts that share a row share bytes that are equal by construction — nothing about either
+-- account is inferable from it, and no count or hash is served. It does mean a shared row must
+-- outlive one account's purge, which is the trap any future reference counting would fall into.
+--
+-- Nothing deletes from here. A row is at most 12.7 KB and the table is bounded by the number
+-- of distinct declaration texts the deployment has ever seen (225 in 5.3 days), not by
+-- traffic — so the GC trigger that removes a session's declarations may orphan a row, and
+-- reference counting to reclaim 0.2 MB would be a second eviction path to get wrong.
+CREATE TABLE IF NOT EXISTS declaration_text (
+  hash    TEXT PRIMARY KEY,
+  text_gz BLOB    NOT NULL,
+  ts      INTEGER NOT NULL DEFAULT 0
+);
 
 `
 
@@ -515,6 +554,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "keepalive_pings", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "keepalive_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	{"tool_declarations", "text_gz", "BLOB"},
+	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
 }

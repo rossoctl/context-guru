@@ -58,15 +58,44 @@ func recWithInventory(t *testing.T, inv *Inventory, withText bool) *DB {
 
 // textRows counts the stored / unstored split straight off the table, because that is the
 // fact the gate is about and every read path derives its answer from it.
+//
+// Through declHasText, the same fragment the read paths use, so a test cannot keep passing by
+// asking about a column the reader has stopped looking at — which is what happened when the
+// text moved to declaration_text.
 func textRows(t *testing.T, db *DB) (rows, withText int) {
 	t.Helper()
 	err := db.sql.QueryRow(`SELECT COUNT(*),
-		SUM(CASE WHEN text_gz IS NOT NULL THEN 1 ELSE 0 END) FROM tool_declarations`).
-		Scan(&rows, &withText)
+		COALESCE(SUM(CASE WHEN `+declHasText+` THEN 1 ELSE 0 END), 0)
+		FROM tool_declarations d`).Scan(&rows, &withText)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return rows, withText
+}
+
+// storedTexts is every piece of prompt text the database holds, read THROUGH the join the
+// reveal uses. Any test that asserts about what reached disk goes through here: reading the
+// declaration row's own blob would assert about a column nothing serves any more.
+func storedTexts(t *testing.T, db *DB) []string {
+	t.Helper()
+	rows, err := db.sql.Query(`SELECT ` + declTextCol + ` FROM tool_declarations d ` +
+		declTextJoin + ` WHERE ` + declHasText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var gz []byte
+		if err := rows.Scan(&gz); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, gunzipText(gz))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func TestPromptTextIsStoredOnlyWithContentConsent(t *testing.T) {
@@ -227,24 +256,14 @@ func TestStoredPromptTextIsScrubbedAndCapped(t *testing.T) {
 		[]string{tool("Bash", "call it with "+secret)}, skillsReminder))
 	db := recWithInventory(t, inv, true)
 
-	rows, err := db.sql.Query(`SELECT text_gz FROM tool_declarations WHERE text_gz IS NOT NULL`)
-	if err != nil {
-		t.Fatal(err)
+	texts := storedTexts(t, db)
+	if len(texts) == 0 {
+		t.Fatal("no text rows to check")
 	}
-	defer rows.Close()
-	n := 0
-	for rows.Next() {
-		var gz []byte
-		if err := rows.Scan(&gz); err != nil {
-			t.Fatal(err)
-		}
-		n++
-		if got := gunzipText(gz); strings.Contains(got, secret) {
+	for _, got := range texts {
+		if strings.Contains(got, secret) {
 			t.Fatalf("a credential reached disk in stored prompt text: %q", got)
 		}
-	}
-	if n == 0 {
-		t.Fatal("no text rows to check")
 	}
 
 	// The cap, on the one field a caller sizes. Only just over it: the scan BPE-tokenizes
@@ -253,21 +272,12 @@ func TestStoredPromptTextIsScrubbedAndCapped(t *testing.T) {
 	big := ScanInventory("anthropic", sysBody(t, strings.Repeat("x", 80<<10),
 		[]string{tool("Bash", strings.Repeat("y", 80<<10))}, skillsReminder))
 	db2 := recWithInventory(t, big, true)
-	rows2, err := db2.sql.Query(`SELECT text_gz FROM tool_declarations WHERE text_gz IS NOT NULL`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows2.Close()
-	for rows2.Next() {
-		var gz []byte
-		if err := rows2.Scan(&gz); err != nil {
-			t.Fatal(err)
-		}
+	for _, got := range storedTexts(t, db2) {
 		// The cap plus RedactContent's own truncation marker, which it appends after
 		// cutting — the same overshoot request_content.before_gz has, and the marker is the
 		// point: a silently shortened prompt would read as the whole prompt.
-		if got := len(gunzipText(gz)); got > maxDeclTextBytes+64 {
-			t.Errorf("stored region is %d bytes, over the %d cap", got, maxDeclTextBytes)
+		if len(got) > maxDeclTextBytes+64 {
+			t.Errorf("stored region is %d bytes, over the %d cap", len(got), maxDeclTextBytes)
 		}
 	}
 }

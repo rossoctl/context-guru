@@ -230,6 +230,11 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		r.wg.Add(1)
 		go r.archiveLoop()
 	}
+	// And the one-time prompt-text backfill, on its own goroutine for the same reason. It is
+	// unconditional and needs no flag: it is a no-op (one indexed query) on a database that has
+	// nothing left to move, which after the first run is every start. See dedupetext.go.
+	r.wg.Add(1)
+	go r.dedupeLoop()
 	return r, nil
 }
 

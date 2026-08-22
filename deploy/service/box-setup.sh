@@ -10,6 +10,7 @@
 #   ./box-setup.sh token     print the exact commands for the browser step
 #   ./box-setup.sh paste     write a token you obtained elsewhere into the config
 #   ./box-setup.sh verify    prove the remote works end to end
+#   ./box-setup.sh park FILE  move one retained artefact to Box and delete the local copy
 #
 # Nothing here touches a secret except `paste`, which reads the token from stdin so it
 # never lands in shell history, and writes it 0600.
@@ -166,11 +167,58 @@ Then confirm the proxy agrees, in its log:
 EOF
 }
 
+cmd_park() {
+  local file="${1:-}"
+  [ -n "$file" ] || { no "usage: $0 park /path/to/file"; exit 2; }
+  [ -f "$file" ] || { no "not a file: $file"; exit 2; }
+  command -v rclone >/dev/null 2>&1 || { no "rclone is not installed"; exit 1; }
+
+  # This is for RETAINED ARTEFACTS — a pruned copy, a pre-deploy snapshot, an old backup —
+  # and never for a database something is using. A live SQLite file has commits in its -wal
+  # that the main file does not, so parking it uploads a torn copy and then deletes the
+  # only complete one.
+  case "$(basename "$file")" in
+    cg.db|cg-control.db) no "$file is a LIVE database, not an artefact"; exit 2 ;;
+  esac
+  for side in -wal -shm; do
+    [ -e "${file}${side}" ] && { no "${file}${side} exists: something is using $file"; exit 2; }
+  done
+
+  local name size remote_size reply
+  name="$(basename "$file")"
+  size="$(stat -c %s "$file")"
+  say "Parking $file (${size} bytes) at ${BASE}/artefacts/${name}"
+  printf 'This DELETES the local copy once Box confirms the size. Continue? [y/N] '
+  read -r reply
+  case "$reply" in y|Y|yes) ;; *) no "nothing was uploaded"; exit 1 ;; esac
+
+  # copyto, not rcat: the artefacts are hundreds of megabytes and this streams the file
+  # rather than reading it into memory first.
+  rclone --config "$RCLONE_CONFIG_PATH" copyto "$file" "${BASE}/artefacts/${name}"
+  ok "uploaded"
+  # Stat the object back and compare the SIZE before deleting anything. A transfer that
+  # returned 0 is not proof: a truncated upload and a remote that accepted and dropped the
+  # body both look like success from here. This is the same rule dash/archive.go applies
+  # (putVerified) to every session it migrates.
+  remote_size="$(rclone --config "$RCLONE_CONFIG_PATH" lsjson --stat "${BASE}/artefacts/${name}" \
+      | tr ',' '\n' | sed -n 's/.*"Size":[[:space:]]*\([0-9-]*\).*/\1/p' | head -1)"
+  if [ "$remote_size" != "$size" ]; then
+    no "Box reports ${remote_size:-no} bytes, local is ${size} — KEEPING the local copy"
+    exit 1
+  fi
+  ok "Box confirms ${remote_size} bytes"
+  rm -f -- "$file"
+  ok "removed the local copy"
+  echo "  Fetch it back with:"
+  echo "    rclone --config $RCLONE_CONFIG_PATH copyto ${BASE}/artefacts/${name} $file"
+}
+
 case "${1:-check}" in
   check)   cmd_check ;;
   install) cmd_install ;;
   token)   cmd_token ;;
   paste)   cmd_paste ;;
   verify)  cmd_verify ;;
-  *) echo "usage: $0 {check|install|token|paste|verify}" >&2; exit 2 ;;
+  park)    shift; cmd_park "$@" ;;
+  *) echo "usage: $0 {check|install|token|paste|verify|park FILE}" >&2; exit 2 ;;
 esac

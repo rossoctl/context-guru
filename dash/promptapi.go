@@ -123,6 +123,22 @@ func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, view)
 }
 
+// The three fragments every read of stored prompt text is built from, in one place because
+// the wrong one in one query is a silent wrong answer rather than an error.
+//
+// The bytes live in declaration_text, keyed by content hash, since the same tool schema is
+// declared by every session that carries it. text_gz on the declaration row is the LEGACY
+// location: it is still read (COALESCE below) because rows written before the split, and rows
+// the backfill has not reached yet, hold their text there and must render identically. It is
+// no longer written, and it is not dropped — see dedupeDeclarationText.
+const (
+	declTextJoin = `LEFT JOIN declaration_text t ON t.hash = d.text_hash`
+	declTextCol  = `COALESCE(t.text_gz, d.text_gz)`
+	// declHasText needs no join: a hash on the row means the bytes are there, which is the
+	// invariant the backfill maintains by never clearing text_gz before the blob is stored.
+	declHasText = `(d.text_hash IS NOT NULL OR d.text_gz IS NOT NULL)`
+)
+
 // PromptViewFor returns the most recently captured prefix in scope whose text was stored,
 // falling back to the most recent one at all so the caller still learns the WEIGHTS when
 // the text is absent.
@@ -142,7 +158,7 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 	// 4,192 where the report's PromptStat said 309, and two coverage figures 13x apart on one
 	// page with nothing connecting them is how a dashboard loses a reader's trust for good.
 	tq := `SELECT COUNT(*), SUM(txt) FROM (
-		SELECT MAX(CASE WHEN d.text_gz IS NOT NULL THEN 1 ELSE 0 END) txt
+		SELECT MAX(CASE WHEN ` + declHasText + ` THEN 1 ELSE 0 END) txt
 		FROM tool_declarations d WHERE d.session_id IN ` + sub
 	ta := append([]any{}, args...)
 	if !f.TenantAll {
@@ -164,7 +180,7 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 	// Which set to show: the newest that HAS text, else the newest at all. Two clauses of
 	// one ORDER BY rather than two queries, so "has text" always wins a tie on ts.
 	pq := `SELECT d.tenant_id, d.session_id, d.digest, MAX(d.ts) ts,
-		MAX(CASE WHEN d.text_gz IS NOT NULL THEN 1 ELSE 0 END) txt
+		MAX(CASE WHEN ` + declHasText + ` THEN 1 ELSE 0 END) txt
 		FROM tool_declarations d WHERE d.session_id IN ` + sub
 	pa := append([]any{}, args...)
 	if !f.TenantAll {
@@ -188,8 +204,9 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 	// (the reason tenant_id leads this table's primary key), and in a manager's service-wide
 	// view an unpinned read would splice two accounts' prompts into one panel: two system
 	// prompts, one heading, no way to tell whose.
-	rq := `SELECT kind, name, server, tokens, text_gz FROM tool_declarations
-		WHERE tenant_id = ? AND session_id = ? AND digest = ?`
+	rq := `SELECT d.kind, d.name, d.server, d.tokens, ` + declTextCol + `
+		FROM tool_declarations d ` + declTextJoin + `
+		WHERE d.tenant_id = ? AND d.session_id = ? AND d.digest = ?`
 	ra := []any{tenant, session, digest}
 	rs, err := d.sql.Query(rq, ra...)
 	if err != nil {

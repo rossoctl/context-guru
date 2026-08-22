@@ -42,12 +42,7 @@ func newContentFixture(t *testing.T, principal func(*http.Request) (Principal, b
 	f.rec.RecordInventory("tenant-a", "tenant-a:sess", time.Now().UnixMilli(), inv, true)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		var withText int
-		err := f.rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM tool_declarations
-			WHERE text_gz IS NOT NULL`).Scan(&withText)
-		if err != nil {
-			t.Fatal(err)
-		}
+		_, withText := textRows(t, f.rec.DB())
 		if withText > 0 {
 			return f
 		}

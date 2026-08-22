@@ -37,6 +37,9 @@ package dash
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"hash/maphash"
 	"strconv"
 	"strings"
@@ -577,6 +580,14 @@ type invWriter struct {
 	// seen dedupes at the writer, where it is single-threaded and needs no lock:
 	// session -> the digests already written and the last usage turn already counted.
 	seen map[string]*invSession
+	// storedText is the content hashes already committed to declaration_text. Without it every
+	// session that declares Bash re-issues an INSERT carrying the whole schema for the
+	// conflict to discard — 45 per session, ~87k over the measured corpus, each binding a
+	// kilobyte or two. Only hashes from a COMMITTED transaction go in (see write), because a
+	// memo that remembers a rolled-back insert would point later rows at bytes that are not
+	// there. Safe because nothing deletes from declaration_text; a future GC there would have
+	// to invalidate this.
+	storedText map[string]bool
 }
 
 type invSession struct {
@@ -594,9 +605,13 @@ type invSession struct {
 }
 
 const (
-	invQueue    = 512
-	invMaxSeen  = 4096
-	invFlushGap = 2 * time.Second
+	invQueue   = 512
+	invMaxSeen = 4096
+	// invMaxStoredText bounds invWriter.storedText. The measured deployment has 225 distinct
+	// declaration texts across every session it has ever seen, so this is not a cap anything
+	// real reaches; it exists because the key is derived from client-supplied text.
+	invMaxStoredText = 4096
+	invFlushGap      = 2 * time.Second
 )
 
 // invWriters holds one writer per Recorder, created on first use. A package-level map
@@ -687,12 +702,43 @@ func (w *invWriter) write(batch []invMsg) error {
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
 
 	declStmt, err := tx.Prepare(`INSERT INTO tool_declarations(
-		tenant_id, session_id, digest, kind, name, server, tokens, ts, text_gz
+		tenant_id, session_id, digest, kind, name, server, tokens, ts, text_hash
 	) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`)
 	if err != nil {
 		return err
 	}
 	defer declStmt.Close()
+	// The text itself, ONCE per distinct blob. text_gz on the declaration row is left NULL from
+	// here on: that grain is one row per (session x declaration), so the same Bash schema was
+	// written once per session carrying it — 254 MiB of text that was 225 distinct texts, on the
+	// live database. ON CONFLICT DO NOTHING because the second session to declare a tool has
+	// nothing to add, and because that is what makes this idempotent under a retried batch.
+	textStmt, err := tx.Prepare(`INSERT INTO declaration_text(hash, text_gz, ts)
+	VALUES (?,?,?) ON CONFLICT DO NOTHING`)
+	if err != nil {
+		return err
+	}
+	defer textStmt.Close()
+	// storeText writes the blob and returns the key to file the declaration row under, or a
+	// NULL key when consent withheld the text. Ordered blob-first inside the transaction, so
+	// no committed state ever names a hash whose bytes are not there.
+	//
+	// fresh collects what THIS transaction inserted and is folded into the writer's memo only
+	// after the commit below.
+	fresh := map[string]bool{}
+	storeText := func(text string, allowed bool, ts int64) (sql.NullString, error) {
+		h, gz := declText(text, allowed)
+		if h == "" {
+			return sql.NullString{}, nil
+		}
+		if !w.storedText[h] && !fresh[h] {
+			if _, err := textStmt.Exec(h, gz, ts); err != nil {
+				return sql.NullString{}, err
+			}
+			fresh[h] = true
+		}
+		return sql.NullString{String: h, Valid: true}, nil
+	}
 	useStmt, err := tx.Prepare(`INSERT INTO tool_uses(
 		tenant_id, session_id, name, server, skill, calls, first_ts, last_ts
 	) VALUES (?,?,?,?,?,?,?,?)
@@ -708,8 +754,12 @@ func (w *invWriter) write(batch []invMsg) error {
 		if !st.digests[m.inv.Digest] {
 			st.digests[m.inv.Digest] = true
 			for _, d := range m.inv.Decls {
+				h, err := storeText(d.Text, m.text, m.ts)
+				if err != nil {
+					return err
+				}
 				if _, err := declStmt.Exec(m.tenant, m.session, m.inv.Digest,
-					d.Kind, d.Name, d.Server, d.Tokens, m.ts, declText(d.Text, m.text)); err != nil {
+					d.Kind, d.Name, d.Server, d.Tokens, m.ts, h); err != nil {
 					return err
 				}
 			}
@@ -727,9 +777,12 @@ func (w *invWriter) write(batch []invMsg) error {
 		if sp := m.inv.System; sp != nil && !st.sysHashes[m.inv.Digest+"/"+sp.Hash] {
 			if len(st.sysHashes) < maxSessionSystemRows {
 				st.sysHashes[m.inv.Digest+"/"+sp.Hash] = true
+				h, err := storeText(sp.Text, m.text, m.ts)
+				if err != nil {
+					return err
+				}
 				if _, err := declStmt.Exec(m.tenant, m.session, m.inv.Digest,
-					KindSystemPrompt, sp.Hash, "", sp.Tokens, m.ts,
-					declText(sp.Text, m.text)); err != nil {
+					KindSystemPrompt, sp.Hash, "", sp.Tokens, m.ts, h); err != nil {
 					return err
 				}
 			}
@@ -745,7 +798,23 @@ func (w *invWriter) write(batch []invMsg) error {
 			}
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for h := range fresh {
+		w.rememberText(h)
+	}
+	return nil
+}
+
+// rememberText records that a blob is on disk. Bounded and cleared wholesale exactly like
+// invWriter.seen: a re-warm costs one conflicting INSERT per distinct text, and an LRU costs
+// bookkeeping forever. Handles a nil map so every construction site of invWriter is unchanged.
+func (w *invWriter) rememberText(hash string) {
+	if w.storedText == nil || len(w.storedText) >= invMaxStoredText {
+		w.storedText = map[string]bool{}
+	}
+	w.storedText[hash] = true
 }
 
 // maxSessionSystemRows bounds how many system-prompt rows one session may record, across every
@@ -766,14 +835,22 @@ const maxDeclTextBytes = 64 << 10
 // the handler returns, and anything expensive there is paid by the next real request on the
 // connection. Secrets still never reach disk — this runs before the INSERT.
 //
-// Returns nil, not an empty blob, when text may not be stored: NULL is the "not stored"
-// state the read side counts, and an empty string would render as a prompt with nothing in
-// it.
-func declText(s string, allowed bool) []byte {
+// Returns "", nil when text may not be stored: a NULL text_hash is the "not stored" state
+// the read side counts, and an empty string would render as a prompt with nothing in it.
+//
+// The hash is over the SCRUBBED, CAPPED text — what is actually stored — so it is the
+// identity of the bytes declaration_text holds and of nothing else. sha256, not the
+// tokenizer's maphash: this one is persisted as a key, so it must be stable across
+// processes (maphash is seeded per process) and collision-resistant (a 64-bit key over a
+// growing corpus is not, and a collision here serves one tenant's text under another's
+// declaration).
+func declText(s string, allowed bool) (string, []byte) {
 	if !allowed || s == "" {
-		return nil
+		return "", nil
 	}
-	return gzipText(RedactContent(s, maxDeclTextBytes))
+	scrubbed := RedactContent(s, maxDeclTextBytes)
+	sum := sha256.Sum256([]byte(scrubbed))
+	return hex.EncodeToString(sum[:]), gzipText(scrubbed)
 }
 
 // session returns the writer's dedup state for a session. Bounded the same way the
