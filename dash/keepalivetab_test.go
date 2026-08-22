@@ -555,16 +555,21 @@ func TestRecommendationPayloadCarriesNoPointEstimate(t *testing.T) {
 // K = 1 is never recommended: one ping reaches about 4.7 minutes, which is inside the free TTL,
 // and it is -$71 service-wide.
 func TestRecommendationNeverSuggestsOnePing(t *testing.T) {
-	for _, n := range []int{25, 40, 80} {
-		for _, gap := range []float64{400, 700, 1200, 5000} {
-			fx := newKAFixture(t, kaSpread(t, n, gap, 1.0)...)
-			rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if rec.MaxPings == 1 || rec.AltMaxPings == 1 {
-				t.Errorf("n=%d gap=%g recommended K=1", n, gap)
-			}
+	// Four cases, one per region of the input space rather than the full cross product: a gap
+	// inside K=1's own reach, one only K=2 reaches, one only K=3 reaches, and one nothing
+	// reaches. Twelve fixtures cost eight seconds under -race on a package already close to the
+	// default test timeout, and added no region.
+	for _, tc := range []struct {
+		n   int
+		gap float64
+	}{{25, 400}, {40, 700}, {25, 1100}, {30, 5000}} {
+		fx := newKAFixture(t, kaSpread(t, tc.n, tc.gap, 1.0)...)
+		rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.MaxPings == 1 || rec.AltMaxPings == 1 {
+			t.Errorf("n=%d gap=%g recommended K=1", tc.n, tc.gap)
 		}
 	}
 }
