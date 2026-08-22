@@ -506,25 +506,60 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// in its own session. A correlated count off the (session_id, ts) index, ~80 ms over 14k
 	// requests, and only over rows that removed something.
 	//
-	// `p.keepalive = 0` is load-bearing and was missing: the inner count had NO predicate at
-	// all, so a keep-alive ping counted as a later turn that could replay the reduction. It
-	// cannot — a ping is a verbatim resend of a prefix the agent already sent, it carries no
-	// new transcript, and PR #86's whole invariant is that a ping is not a turn. On a fixture
-	// with three pings this inflated the ceiling from 30 to 70 tokens and dragged
-	// replay_realized_pct down with it, which reads as compaction realising less of its value
-	// than it does. Found by TestPingRowsStayOutOfAgentAggregates, which compares the whole
-	// Overview key by key rather than the aggregates somebody thought of.
+	// Computed as ALL later turns minus the later PINGS, in two statements, rather than as one
+	// count with `p.keepalive = 0` inside it. The predicate belongs there logically — a ping is
+	// a verbatim resend of a prefix the agent already sent, it carries no new transcript, and
+	// PR #86's invariant is that a ping is not a turn — but `keepalive` is not in
+	// idx_requests_session, so putting it in the correlated subquery turns an index-only count
+	// into a row fetch per candidate. Measured: 231 ms to 277 ms on the 10,000-row perf
+	// fixture, and 10.6 s to 15.3 s of that same test under -race, which is enough to blow its
+	// budget on a loaded box. The correction below is driven from the PING side instead, which
+	// is a tiny population — one linear pass plus an index lookup per ping — and costs exactly
+	// nothing on a deployment where the mechanism has never run.
 	//
-	// The inner count is still not scoped to the window or the tenant. That is a separate
-	// (much smaller) inconsistency with the comment this one used to make: session ids are
-	// `tenant:uuid` so a cross-tenant collision is not reachable, and the ceiling is
-	// deliberately about the session's whole life rather than the filtered slice of it.
+	// The bug this fixes: the inner count had NO predicate at all, so a ping counted as a later
+	// turn that could replay the reduction. On a fixture with three pings it inflated the
+	// ceiling from 30 to 70 tokens and dragged replay_realized_pct down with it, which reads as
+	// compaction realising less of its value than it does. Found by
+	// TestPingRowsStayOutOfAgentAggregates, which compares the whole Overview key by key rather
+	// than the aggregates somebody thought of.
+	//
+	// Neither statement is scoped to the window or the tenant on its INNER side, and they agree
+	// about that, which is what matters: session ids are `tenant:uuid` so a cross-tenant
+	// collision is not reachable, and the ceiling is deliberately about the session's whole life
+	// rather than the filtered slice of it.
 	if err := d.sql.QueryRow(`SELECT COALESCE(SUM(r.saved_unique * (
 			SELECT COUNT(*) FROM requests p WHERE p.session_id = r.session_id
-			  AND p.keepalive = 0
 			  AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id)))),0)
 		FROM requests r WHERE `+cond+` AND r.saved_unique > 0`, args...).Scan(&o.ReplayProjectedTokens); err != nil {
 		return nil, err
+	}
+	// The correction, and it is GATED so that it costs nothing where there is nothing to
+	// correct. Two gates, both cheap: the `IN` set is materialised once and is empty on a
+	// deployment that has never pinged (so every row fails a hash lookup and the correlated
+	// count is never evaluated), and the outer `EXISTS` skips even that. Pings are ~1% of rows
+	// and concentrated in a handful of sessions, so where the set is non-empty it is small.
+	var anyPing int64
+	if err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests WHERE keepalive = 1)`).Scan(
+		&anyPing); err != nil {
+		return nil, err
+	}
+	if anyPing != 0 {
+		// Driven from the PING side: one pass to find the pings, then ONE indexed sum per ping
+		// over the earlier rows of its own session. That is O(pings x session) rather than a
+		// second full pass over the filtered rows, and pings are ~1% of rows.
+		var inflation int64
+		if err := d.sql.QueryRow(`SELECT COALESCE(SUM((
+				SELECT COALESCE(SUM(r.saved_unique),0) FROM requests r
+				  WHERE r.session_id = p.session_id AND r.saved_unique > 0
+				    AND (r.ts < p.ts OR (r.ts = p.ts AND r.id < p.id))
+				    AND `+cond+`)),0)
+			FROM requests p WHERE p.keepalive = 1`, args...).Scan(&inflation); err != nil {
+			return nil, err
+		}
+		if o.ReplayProjectedTokens -= inflation; o.ReplayProjectedTokens < 0 {
+			o.ReplayProjectedTokens = 0
+		}
 	}
 	if o.ReplayProjectedTokens > 0 {
 		o.ReplayRealizedPct = float64(o.ReplayTokens) / float64(o.ReplayProjectedTokens) * 100

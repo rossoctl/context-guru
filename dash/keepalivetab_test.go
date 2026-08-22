@@ -163,6 +163,63 @@ func TestPingRowsStayOutOfAgentAggregates(t *testing.T) {
 	}
 }
 
+// The replay CEILING counts later AGENT turns, not later pings — and the correction is gated so
+// it costs nothing where there is nothing to correct.
+//
+// Two assertions in one test because they constrain each other. The inner count originally had NO
+// predicate at all, so a ping counted as a later turn that could replay a reduction; it cannot,
+// since a ping is a verbatim resend carrying no new transcript. But `keepalive` is not in
+// idx_requests_session, so the obvious fix (`AND p.keepalive = 0` inside the correlated count)
+// turned an index-only count into a row fetch per candidate and cost 20% of Overview's whole
+// runtime — 44% under -race, enough to blow the perf test's budget on a loaded box. The shipped
+// form corrects from the PING side and is skipped entirely when nothing has pinged.
+func TestTheReplayCeilingCountsAgentTurnsNotPings(t *testing.T) {
+	// One session, three reducing agent turns, and in the second fixture a ping sitting between
+	// the second and the third. The ceiling must not notice the ping.
+	base := kaAgent(1_000_000, "s1", 0.10)
+	base.SavedUnique = 10
+	evs := []*Event{
+		base,
+		kaAgent(1_100_000, "s1", 0.10), kaAgent(1_200_000, "s1", 0.10),
+	}
+	without := newKAFixture(t, evs...)
+	with := newKAFixture(t, append(append([]*Event(nil), evs...),
+		kaPing(1_150_000, "s1", 0.01, 50_000, 0))...)
+	f := Filter{TenantAll: true}
+	a, err := without.db.Overview(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := with.db.Overview(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every row in this fixture reduces by 10 (mkEvent's before/after), so the ceiling is
+	// 10x2 + 10x1 + 10x0 = 30: each reduction times the later turns that could replay IT.
+	if a.ReplayProjectedTokens != 30 {
+		t.Fatalf("the ceiling is %d without any ping; want 10 x (2 + 1 + 0) = 30",
+			a.ReplayProjectedTokens)
+	}
+	if b.ReplayProjectedTokens != a.ReplayProjectedTokens {
+		t.Errorf("a ping changed the replay ceiling: %d -> %d. A ping is a verbatim resend of a "+
+			"prefix the agent already sent; it carries no new transcript, so it cannot replay a "+
+			"reduction, and counting it makes compaction read as realising less of its value than "+
+			"it does.", a.ReplayProjectedTokens, b.ReplayProjectedTokens)
+	}
+	// The correction cannot over-subtract, either: a ping BEFORE the reducing turn inflates
+	// nothing, so it must not be deducted.
+	early := newKAFixture(t, append(append([]*Event(nil), evs...),
+		kaPing(900_000, "s1", 0.01, 50_000, 0))...)
+	c, err := early.db.Overview(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ReplayProjectedTokens != a.ReplayProjectedTokens {
+		t.Errorf("a ping BEFORE the reduction changed the ceiling: %d -> %d; only LATER rows can "+
+			"replay it", a.ReplayProjectedTokens, c.ReplayProjectedTokens)
+	}
+}
+
 // The headline takes the keep-alive's NET and not its gross, so a window where the pings cost
 // more than they saved makes the total go DOWN.
 //
