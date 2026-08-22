@@ -826,3 +826,65 @@ func TestUnkeyedFlagClearsOnceRowsDedup(t *testing.T) {
 		t.Error("three agreeing rows are not enough to call a component's unique fabricated")
 	}
 }
+
+// TestUniqueHasThreeStatesNotTwo pins the reason the boolean was not enough.
+//
+// Measured on production: 892 of 908 (session, component) pairs carry fewer than 20 rows, so in
+// a session drawer — the view users actually drill into — a boolean flag is off and a fabricated
+// figure renders identically to a real measurement. And a MIXED window (some rows deduped, some
+// not) is off too, while part of its dollars are still fabricated. Both need their own answer.
+func TestUniqueHasThreeStatesNotTwo(t *testing.T) {
+	// rows = turns to write, dedupFrom = the turn index from which unique starts differing.
+	mk := func(t *testing.T, rows, dedupFrom int) *ComponentRow {
+		t.Helper()
+		db := openTestDB(t)
+		for i := 0; i < rows; i++ {
+			uniq := 1000
+			if i >= dedupFrom {
+				uniq = 0
+			}
+			insertReq(t, db, &Event{
+				TS: int64(1000 + i), SessionID: "s1", Model: "m1", TenantID: "t1",
+				TokensBefore: 10000, TokensAfter: 9000,
+				FreshInput: 10, CacheRead: 50000, TokenAccounting: AccountingComplete,
+				Components: []CompRow{{Component: "textclean", Kind: "reformat", Acted: true,
+					Mutated: true, SavedGross: 1000, SavedUnique: uniq}},
+			})
+		}
+		out, err := db.Components(Filter{TenantAll: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.DecomposeComponentSavedUSD(Filter{TenantAll: true}, handPrice, out); err != nil {
+			t.Fatal(err)
+		}
+		return out[0]
+	}
+
+	// 25 rows, none dedup -> confident: not a measurement.
+	if c := mk(t, 25, 25); !c.UniqueUnkeyed || c.UniqueRows != 25 || c.UniqueDiffRows != 0 {
+		t.Errorf("fabricated case: unkeyed=%v rows=%d diff=%d, want true/25/0",
+			c.UniqueUnkeyed, c.UniqueRows, c.UniqueDiffRows)
+	}
+	// 5 rows, none dedup -> the 98.2% case. The flag must be OFF, and the counts must still be
+	// there so the UI can say "too few rows to tell" instead of implying a measurement.
+	c := mk(t, 5, 5)
+	if c.UniqueUnkeyed {
+		t.Error("five rows is not enough to call a figure fabricated")
+	}
+	if c.UniqueRows != 5 || c.UniqueDiffRows != 0 {
+		t.Errorf("too-few case must still report its evidence: rows=%d diff=%d, want 5/0",
+			c.UniqueRows, c.UniqueDiffRows)
+	}
+	// Any dedup at all means the component reports content keys, which is what is being
+	// tested — so this is MEASURED, not "partly" anything. A row where unique equals gross is
+	// the normal first sighting of new content and every healthy component has some.
+	m := mk(t, 25, 10)
+	if m.UniqueUnkeyed {
+		t.Error("a window where rows deduped is not fabricated")
+	}
+	if m.UniqueDiffRows == 0 {
+		t.Errorf("rows did dedup, so diff must be nonzero: diff=%d of rows=%d",
+			m.UniqueDiffRows, m.UniqueRows)
+	}
+}

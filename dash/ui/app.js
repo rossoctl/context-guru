@@ -2004,8 +2004,13 @@ function renderNetReconcile(components) {
   // replay multiple of exactly 1.00, and on measured traffic it is 77% of the bar below. It is
   // not repriced here, because "these are surely replays" is an inference and not a
   // measurement either; it is disclosed, which is what the page can honestly do about it.
-  const unkeyed = priced.filter((c) => c.unique_unkeyed);
+  const unkeyed = priced.filter((c) => uniqueState(c) === 'fabricated');
   const unkeyedUSD = unkeyed.reduce((n, c) => n + c.saved_usd_first_removal, 0);
+  // The states that are not confident either way. Reported separately and not added to the
+  // figure above: "we cannot tell" is a different claim from "this is not a measurement", and
+  // over a narrow window (a single session, an hour) it is the usual answer.
+  const unsure = priced.filter((c) => uniqueState(c) === 'unknown');
+  const unsureUSD = unsure.reduce((n, c) => n + c.saved_usd_first_removal, 0);
   barRows($('#net-reconcile-bars') || host.appendChild(el('div', { id: 'net-reconcile-bars' })), [
     { label: 'Credited once per piece of content', value: first, max: Math.max(decomp, 0.0001),
       display: usd(first),
@@ -2040,6 +2045,17 @@ function renderNetReconcile(components) {
         el('span', {}, 'It is shown rather than adjusted: repricing on an inference would be '
           + 'the same mistake pointing the other way. These components need a '
           + 'content-derived fingerprint before either number is a measurement.'))));
+  }
+
+  if (unsureUSD > 0) {
+    host.appendChild(el('div', { class: 'state', 'data-testid': 'net-unsure' },
+      el('div', { class: 'state-body' },
+        el('strong', {}, usd(unsureUSD) + ' more cannot be judged in this window'),
+        el('span', {}, unsure.map((c) => c.component + ' (' + num(c.unique_diff_rows) + '/'
+          + num(c.unique_rows) + ' rows deduped)').join(', ')),
+        el('span', {}, 'Too few rows to tell either way. Widen the time range to resolve it — '
+          + 'on a single session or a single hour this is the normal answer, and it is reported '
+          + 'rather than rounded to "measured" or to "fabricated".'))));
   }
 
   // The sign flip, named, for every component where it happens. This is the whole point.
@@ -2116,6 +2132,37 @@ function llmCostTitle(c) {
     + '. The gateway figure is shown because it is what the invoice is denominated in.';
 }
 
+/**
+ * uniqueState is the three-way answer to "is this component's `unique` a measurement?".
+ *
+ * A boolean could not say it: below the row floor "nothing deduped" is not a finding, and 98.2%
+ * of per-session windows are below it — so a session drawer rendered a fabricated figure exactly
+ * like a real one. That third state is "we cannot tell yet", and it is the common answer on any
+ * narrow window.
+ *
+ * There is deliberately NO "partly measured" state keyed on the PROPORTION of rows that deduped.
+ * A row where unique equals gross is the normal first sighting of new content, so every healthy
+ * component has some — `differ < rows` is true of all of them, and treating it as partial
+ * fabrication would put a permanent caveat on correct figures. Any dedup at all means the
+ * component reports content keys, which is the thing being tested.
+ */
+function uniqueState(c) {
+  const rows = c.unique_rows || 0;
+  if (!rows) return 'none';
+  if ((c.unique_diff_rows || 0) > 0) return 'measured';
+  return c.unique_unkeyed ? 'fabricated' : 'unknown';
+}
+
+const UNIQUE_NOTE = {
+  fabricated: 'NOT a deduplicated figure: no row in this window deduped, so every turn\'s saving '
+    + 'is counted as new. Equal to gross by construction.',
+  unknown: 'Too few rows to tell. Nothing here deduped, but that is not yet evidence either '
+    + 'way — widen the range to find out.',
+  measured: 'content that genuinely never reached the provider, deduped by content key',
+  none: '',
+};
+const UNIQUE_MARK = { fabricated: '*', unknown: '?', measured: '', none: '' };
+
 /** compSaved is a component's dollar saving over the window: the figure stored per request
  *  plus the read-time valuation of the rows written before that column existed. Added here
  *  rather than server-side so the two halves stay separable in the API — and the tooltip on
@@ -2159,16 +2206,16 @@ async function loadComponents() {
         // without it the column reads as "this component never repeated a removal", which is a
         // measurement it did not make.
         el('td', {
-          class: 'num' + (c.unique_unkeyed ? ' warn-text' : ''),
-          title: c.unique_unkeyed
-            ? 'NOT a deduplicated figure: this component reports no content fingerprint, so '
-              + 'every turn\'s saving is counted as new. Equal to gross by construction.'
-            : 'content that genuinely never reached the provider, deduped by content key',
-        }, compact(c.saved_unique) + (c.unique_unkeyed ? '*' : '')),
+          class: 'num' + (uniqueState(c) === 'measured' || uniqueState(c) === 'none'
+            ? '' : ' warn-text'),
+          title: UNIQUE_NOTE[uniqueState(c)]
+            + (c.unique_rows ? ' (' + num(c.unique_diff_rows) + ' of '
+              + num(c.unique_rows) + ' rows deduped)' : ''),
+        }, compact(c.saved_unique) + UNIQUE_MARK[uniqueState(c)]),
         el('td', { class: 'num', text: compact(c.saved_gross) }),
         el('td', {
           class: 'num',
-          title: c.unique_unkeyed
+          title: uniqueState(c) === 'fabricated'
             ? 'Exactly 1.0 by construction, not by measurement — see the unique column.' : '',
         }, c.overcount_ratio ? c.overcount_ratio.toFixed(1) + '×' : '—'),
         el('td', { class: 'num', text: dur(c.duration_ms_total) }),

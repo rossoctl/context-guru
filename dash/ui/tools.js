@@ -144,8 +144,8 @@ function renderHeadline(host, rep) {
     // The number this page exists for. Deliberately the only 'bad' tile: three red tiles
     // in a row is a page shouting, and shouting is what gets a dashboard ignored.
     tile('inv-unused', 'Never invoked', num(t.unused_tokens),
-      pct(t.unused_pct) + ' of every prompt, re-read ' + t.requests_per_session.toFixed(0)
-      + '× per session', t.unused_pct >= 25 ? 'bad' : ''),
+      pct(t.unused_pct) + ' of every prompt, re-read ' + t.requests_per_session.toFixed(1)
+      + '× in an average session of any length', t.unused_pct >= 25 ? 'bad' : ''),
     tile('inv-avoidable', 'Avoidable — projected',
       t.priced ? usd(t.unused_usd) : num(t.unused_reads) + ' tok',
       t.priced ? 'if none of it had been carried' : 'no dollar: some models here are unpriced'),
@@ -243,9 +243,18 @@ function renderCoverage(host, rep) {
   box.appendChild(el('details', { class: 'why' },
     el('summary', {}, 'How a token weight becomes a dollar, and at which tier'),
     el('p', {}, 'A declaration is written once into the prompt and then RE-READ by every '
-      + 'later turn of the session — ' + (rep.totals.requests_per_session || 0).toFixed(1)
-      + ' requests per session here. The token counts on this page are those re-reads, not '
-      + 'the one-off size.'),
+      + 'later turn of the session. The token counts on this page are those re-reads, not the '
+      + 'one-off size.'),
+    // Two populations, both named. They differ by ~40x on real traffic and used to sit on one
+    // page with nothing connecting them: the mean counts every tool-bearing session including
+    // one-request sidechains, the weighted figure describes the session a typical REQUEST
+    // belongs to, which is where the re-reads actually are.
+    el('p', {}, 'Averaged over every tool-bearing session in scope that is '
+      + (rep.totals.requests_per_session || 0).toFixed(1) + ' requests. But the session a '
+      + 'typical REQUEST belongs to runs for '
+      + (rep.totals.requests_per_session_typical || 0).toFixed(0) + ' turns — most sessions are '
+      + 'one-request sidechains, so the plain average is not what carrying a declaration costs. '
+      + 'The per-session projection below uses the second figure and says so.'),
     el('p', {}, 'Each re-read is priced at the tier that request actually paid: cache read '
       + 'for a hit, cache CREATION for the turn that wrote the prefix, and full input rate '
       + 'for a turn with no cache at all. It is not all valued at the cache-read rate, which '

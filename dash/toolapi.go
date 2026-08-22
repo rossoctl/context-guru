@@ -184,10 +184,12 @@ type ToolTotals struct {
 	UnusedReads int64   `json:"unused_reads"`
 	UnusedUSD   float64 `json:"unused_usd"`
 	Priced      bool    `json:"priced"`
-	// RequestsPerSession is the re-read multiplier the figures above rest on. It is a MEAN over
-	// every session in scope, which includes one-request sidechains, so it understates the
-	// multiplier for a working session — RequestsPerSessionMedian is the honest "typical
-	// session" figure and is the one a per-session projection should quote.
+	// RequestsPerSession is a MEAN over every TOOL-BEARING session in scope, captured or not,
+	// while Median and Typical below are over the CAPTURED ones only — a different and smaller
+	// population. That is deliberate (this one answers "how many requests does a session make",
+	// those answer "how long is a session we can price"), but it means the three must never be
+	// printed together without naming which population each describes: on real traffic they read
+	// 3.9, 1 and 150.6. Every UI site that quotes one says so.
 	RequestsPerSession       float64 `json:"requests_per_session"`
 	RequestsPerSessionMedian int     `json:"requests_per_session_median"`
 	// RequestsPerSessionTypical is the REQUEST-WEIGHTED mean: how many turns the session that
@@ -532,9 +534,6 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 			rep.Totals.UnusedPct = 100 * float64(usum) / float64(dsum)
 		}
 	}
-	if rep.Coverage.Sessions > 0 {
-		rep.Totals.RequestsPerSession = float64(rep.Coverage.Requests) / float64(rep.Coverage.Sessions)
-	}
 	// The MEDIAN session length, over the sessions that actually carried an inventory.
 	//
 	// The mean above is dragged toward 1 by short sidechain sessions (a title generation, a
@@ -542,6 +541,9 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 	// declaration for a whole session costs. The median is what "a typical session" means, and
 	// a per-session projection has to say WHICH it used — so both are reported and the UI names
 	// the one it multiplied by.
+	if rep.Coverage.Sessions > 0 {
+		rep.Totals.RequestsPerSession = float64(rep.Coverage.Requests) / float64(rep.Coverage.Sessions)
+	}
 	if lens := sessionLengths(sessions, captured); len(lens) > 0 {
 		sort.Ints(lens)
 		rep.Totals.RequestsPerSessionMedian = lens[len(lens)/2]

@@ -511,7 +511,15 @@ type ComponentRow struct {
 	// it reports no content keys and MarkUnique therefore returns its saving in full every
 	// turn. True for every reformatter. See DecomposeComponentSavedUSD for why this is
 	// flagged rather than repriced.
+	// UniqueRows / UniqueDiffRows are the evidence behind the flag, and they exist because the
+	// boolean cannot express two states that matter. Below the row floor "nothing deduped" is
+	// not a finding — and 98.2% of per-session windows are below it, so a session drawer
+	// rendered a fabricated figure identically to a measured one. And a MIXED population reads
+	// as fully measured through the boolean while part of its dollars are still fabricated,
+	// which is the state the reformatter fix passes through.
 	UniqueUnkeyed   bool    `json:"unique_unkeyed"`
+	UniqueRows      int64   `json:"unique_rows"`
+	UniqueDiffRows  int64   `json:"unique_diff_rows"`
 	DurationMsTotal float64 `json:"duration_ms_total"`
 	DurationMsAvg   float64 `json:"duration_ms_avg"`
 	Errors          int64   `json:"errors"`

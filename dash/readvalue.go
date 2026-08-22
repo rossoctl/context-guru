@@ -261,7 +261,8 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 		// would be the same mistake in the other direction. The reformatters need a
 		// content-derived key; until they have one the honest report is "we cannot say".
 		const minRowsToJudge = 20
-		c.UniqueUnkeyed = seen[c.Component] >= minRowsToJudge && differ[c.Component] == 0
+		c.UniqueRows, c.UniqueDiffRows = seen[c.Component], differ[c.Component]
+		c.UniqueUnkeyed = c.UniqueRows >= minRowsToJudge && c.UniqueDiffRows == 0
 	}
 	return nil
 }
