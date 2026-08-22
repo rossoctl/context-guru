@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -158,6 +159,76 @@ func (l *Limiter) Acquire(tenantID string) (release func(), err error) {
 		}
 	}
 	return func() {}, nil
+}
+
+// AcquireSpare is Acquire for traffic that is OURS rather than the agent's: it succeeds only
+// out of the tenant's slack, leaving reserveFrac of both bounds untouched.
+//
+// The idle keep-alive needs this. A ping is a real request against the tenant's rate and
+// concurrency budget, and the requirement is that it never crowd out a request an agent is
+// waiting on. Refusing rather than queueing is half of that — a queued ping sits in front of
+// real traffic — but with a fixed-window counter refusing at the limit is not enough either:
+// a ping that takes the last request of the minute has already displaced whatever arrives
+// next. So a ping is only allowed while the tenant is comfortably inside its bounds, and is
+// simply skipped otherwise. Skipping costs one idle span's refresh; displacing costs an agent
+// a 429 it did not earn.
+//
+// reserveFrac <= 0 makes this identical to Acquire.
+func (l *Limiter) AcquireSpare(tenantID string, reserveFrac float64) (release func(), err error) {
+	if l == nil || (l.lim.RequestsPerMinute <= 0 && l.lim.Concurrent <= 0) {
+		return func() {}, nil
+	}
+	t := l.forTenant(tenantID)
+
+	if l.lim.RequestsPerMinute > 0 {
+		limit := reserved(l.lim.RequestsPerMinute, reserveFrac)
+		t.mu.Lock()
+		now := time.Now()
+		if w := now.Truncate(time.Minute); w.After(t.windowStart) {
+			t.windowStart, t.count = w, 0
+		}
+		if t.count >= limit {
+			t.mu.Unlock()
+			// NOT counted as a refusal: nobody was refused. A skipped ping is our own
+			// decision not to spend a tenant's budget, and publishing it as a rate-limit
+			// event would make a healthy account look throttled on its own dashboard.
+			return func() {}, errNoSpare
+		}
+		t.count++
+		t.mu.Unlock()
+	}
+
+	if t.inFlight != nil {
+		// Best-effort headroom: a racing real request may take the slot between this check
+		// and the send, in which case the ping simply loses the race and is skipped.
+		if len(t.inFlight) >= reserved(cap(t.inFlight), reserveFrac) {
+			return func() {}, errNoSpare
+		}
+		select {
+		case t.inFlight <- struct{}{}:
+			return func() { <-t.inFlight }, nil
+		default:
+			return func() {}, errNoSpare
+		}
+	}
+	return func() {}, nil
+}
+
+// errNoSpare says a tenant had no slack for a request of ours. Deliberately not a
+// statusError: nothing is being returned to a caller, and this is not a failure.
+var errNoSpare = errors.New("no spare capacity for a background request")
+
+// reserved is the bound minus its reserved share, floored at 1 so a limit of 1 still permits
+// the occasional background request rather than none ever.
+func reserved(limit int, frac float64) int {
+	if frac <= 0 {
+		return limit
+	}
+	n := limit - int(float64(limit)*frac+0.5)
+	if n < 1 {
+		n = 1
+	}
+	return n
 }
 
 // AcquireCheapModel takes a slot on the process-wide compaction-model semaphore,

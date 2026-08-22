@@ -4213,6 +4213,37 @@ function loadSettings() {
         'Saving rebuilds your pipeline and discards frozen compaction decisions, so the ' +
         'next turn will not be cache-warm.')));
 
+    // Idle keep-alive consent. Its own consent control, beside the transcript one, for the
+    // same reason: it is a thing done with the user's property that they have to agree to.
+    // Here it is their MONEY rather than their code, and the copy says what it buys, what it
+    // costs, and where to see both — a mechanism that spends on its own initiative is only
+    // acceptable if the person paying can read the ledger.
+    const ka = el('input', { type: 'checkbox', id: 'set-keepalive', 'data-testid': 'set-keepalive' });
+    ka.checked = !!(cfg.cache && cfg.cache.keepalive);
+    // Editable under the same condition as the rest of the configuration document, because
+    // that is where it is STORED: PUT /api/me answers 403 to a non-manager sending `config`,
+    // and drawing an enabled box whose value the server discards is worse than not drawing
+    // it. The ledger on Overview is visible to everyone regardless, which is the half that
+    // matters for someone whose key is being spent.
+    ka.disabled = inherited || !mgr;
+    if (mgr) host.appendChild(el('div', { class: 'field' },
+      el('label', { class: 'comp', for: 'set-keepalive' }, ka,
+        el('span', { class: 'comp-name' },
+          'Keep my prompt cache warm while I am away')),
+      el('p', { class: 'hint' },
+        'Spends a small amount to avoid a much larger cache-recreation charge. After '
+        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 280)) + 's idle, up to '
+        + (((cfg.cache && cfg.cache.keepalive_max_pings) || 2)) + ' minimal requests re-read '
+        + 'your cached prompt so the provider refreshes its 5-minute lifetime for free. '
+        + 'Billed to your own key.'),
+      whyBlock('What it costs and what it saves',
+        'A cache read costs 0.1x base input; re-creating a lapsed prefix costs 1.25x, so one '
+        + 'ping buys back about 11.5 of itself. On this service\u2019s traffic, requests that '
+        + 'resumed after the 5-minute window cost 8.5x a request that hit, and they were 23.6% '
+        + 'of all spend. It is off by default because it is your money and nobody asked for it '
+        + 'to be spent. Every ping is a row on your Requests tab marked keep-alive with its own '
+        + 'cost, and the Overview ledger shows pings, ping cost, misses avoided and the net.')));
+
     // Content capture consent.
     const cap = el('input', {
       type: 'checkbox', id: 'set-capture', 'data-testid': 'set-capture',
@@ -4727,7 +4758,16 @@ async function saveSettings() {
     // component's own default takes over, which is the same thing an absent key means — so
     // the page must not invent one. A component present with an empty object is how a
     // cleared block is expressed; a component absent from it entirely is left untouched.
-    body.config = { pipeline: ordered, mode: $('#set-mode').value, components: cfgState || {} };
+    // cache carries the account's own consent, so it is sent whenever the form drew the
+    // control — the tuning fields are omitted, which leaves the document's own values (or the
+    // defaults) alone rather than freezing today's numbers into every saved document.
+    body.config = {
+      pipeline: ordered, mode: $('#set-mode').value, components: cfgState || {},
+      cache: {
+        keepalive: !!($('#set-keepalive') || {}).checked,
+        head_ttl_1h: !!((account.tenant.effective_config || {}).cache || {}).head_ttl_1h,
+      },
+    };
   }
   try {
     const out = await ctl('/api/me', { method: 'PUT', body: JSON.stringify(body) });

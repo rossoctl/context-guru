@@ -116,6 +116,21 @@ type Overview struct {
 	// priced — absent, not zero. See DB.CachesplitHistoricalUSD.
 	CachesplitHistorical *CachesplitHistorical `json:"cachesplit_historical,omitempty"`
 
+	// The idle keep-alive's ledger. Four numbers, and they belong together: a mechanism that
+	// spends the caller's money to avoid a larger charge is only defensible if both sides are
+	// on the same page, and either alone is misleading. KeepAlivePings is how many pings were
+	// sent, KeepAlivePingUSD what they cost, KeepAliveSavedUSD the re-creations they avoided,
+	// and KeepAliveNetUSD the difference — which is the only one of the four worth a decision.
+	//
+	// KeepAliveMissesAvoided is the count behind the saving: real requests that resumed after
+	// an idle gap wider than the provider's lifetime and were served from cache anyway. On
+	// this traffic such a request would otherwise have cost 8.5x what it did.
+	KeepAlivePings         int64   `json:"keepalive_pings"`
+	KeepAlivePingUSD       float64 `json:"keepalive_ping_usd"`
+	KeepAliveSavedUSD      float64 `json:"keepalive_saved_usd"`
+	KeepAliveNetUSD        float64 `json:"keepalive_net_usd"`
+	KeepAliveMissesAvoided int64   `json:"keepalive_misses_avoided"`
+
 	// ONE definition of "moved", used here and at the write site (Recorder.ObserveSplit): the
 	// tail moved if this request's tail hash differs from the most recent PREVIOUS tail hash
 	// recorded for the session, and a session with no previously recorded tail counts as moved
@@ -301,7 +316,15 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0),
 		COALESCE(SUM(CASE WHEN r.uncompressed_reason <> '' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(r.cg_latency_ms),0)
+		COALESCE(SUM(r.cg_latency_ms),0),
+		-- The keep-alive ledger, both sides of it. The pings are rows like any other, marked
+		-- so they can be told from agent traffic and priced from their own cost_usd; the
+		-- saving is the per-request credit the write path computed while it still had the
+		-- session's gap and the ping's own refreshed-token count in hand.
+		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0),
+		COALESCE(SUM(r.keepalive_saved_usd),0),
+		COALESCE(SUM(CASE WHEN r.keepalive_saved_usd > 0 THEN 1 ELSE 0 END),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.FreshInput, &o.CacheRead, &o.CacheWrite,
@@ -310,7 +333,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.SplitCreditedMoved,
 		&o.PrefixChangeCost, &o.PrefixChangeRequests, &o.PrefixChangeCostAll, &o.PrefixChangeRequestsAll,
 		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
-		&o.SafetyCost.CGLatencyMsTotal)
+		&o.SafetyCost.CGLatencyMsTotal,
+		&o.KeepAlivePings, &o.KeepAlivePingUSD, &o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided)
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +365,11 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		o.ExpandRate = float64(o.Expands) / float64(o.Requests)
 	}
 	o.NetSavedUSD = o.BaselineCostUSD - o.CostUSD - o.CGLLMCostUSD
+	// The keep-alive's net, and the one number a decision rests on. Not folded into
+	// TotalSavedUSD: the pings' own cost is already inside CostUSD (they are rows), so adding
+	// the saving without the cost would double-count the good half of a mechanism whose whole
+	// question is whether the two halves net out.
+	o.KeepAliveNetUSD = o.KeepAliveSavedUSD - o.KeepAlivePingUSD
 	o.TotalSavedUSD = o.NetSavedUSD + o.CachesplitSavedUSD
 
 	for name, col := range map[string]string{
@@ -496,6 +525,21 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"MISS, which is what the counterfactual actually is: those tokens carry " +
 				"cache_control, so a miss bills them as creation at 1.25x fresh, not at 1x. A " +
 				"floor — a stable prefix serves a whole session and this counts one request of it."},
+		{Key: "keepalive_ping", Label: "Keep-alive pings", DeltaUSD: o.KeepAlivePingUSD,
+			Description: "What the idle keep-alive SPENT: one minimal request per idle span, " +
+				"re-reading a session's cached prefix so the provider refreshes its 5-minute " +
+				"lifetime for free. This is the caller's own money, spent while nobody was at the " +
+				"keyboard, which is why it is a line of its own and why the mechanism is opt-in. " +
+				"Every ping is a row, priced from its own usage — no estimate."},
+		{Key: "keepalive_saved", Label: "Keep-alive savings", DeltaUSD: -o.KeepAliveSavedUSD,
+			Description: "The prefix re-creations those pings avoided. Counted only on a request " +
+				"that resumed after a gap wider than the provider's lifetime, was served from " +
+				"cache anyway, read more than it wrote, and had a ping of ours during the gap; " +
+				"credited at most the tokens that ping actually refreshed. Priced against a cache " +
+				"MISS, because those tokens carry cache_control and a miss bills them as creation " +
+				"at 1.25x rather than 1x. A ceiling rather than a floor, and the one figure here " +
+				"that is: the provider's cache is keyed on content, so another session sending the " +
+				"same prefix would have refreshed it for nothing."},
 		{Key: "total_saved", Label: "Total cost avoided", DeltaUSD: o.TotalSavedUSD, Total: true,
 			Description: "Net compaction savings plus prefix-cache savings. Two disjoint token " +
 				"sets, both ours, so nothing is counted twice. It is not the cost of a fully " +

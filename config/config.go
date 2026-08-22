@@ -32,6 +32,138 @@ type Config struct {
 	Mode string `yaml:"mode"`
 	// Observe tunes observe mode's off-path measurement; ignored in sync mode.
 	Observe ObserveConfig `yaml:"observe"`
+	// Cache holds the provider prompt-cache policies the HOST applies between and
+	// around requests, which no component can reach: keeping an idle session's cached
+	// prefix alive, and which TTL tier its breakpoints ask for. Both default to off.
+	Cache CacheConfig `yaml:"cache"`
+}
+
+// CacheConfig is the `cache:` block: provider prompt-cache policy that lives above the
+// pipeline.
+//
+// It is not a component and could not be. A component runs while a request is in flight,
+// and the expensive event here happens when NO request is in flight — a session goes idle,
+// its cached prefix lapses, and the next turn re-bills the whole prefix at the creation
+// rate. Measured on this service over 19,805 requests: 742 such requests (3.7% of traffic)
+// cost $741.07, which is 23.6% of all spend, at $0.9987 each against $0.1178 for a request
+// that hit — an 8.5x penalty. $584.83 of it sits in misses whose idle gap was under an hour.
+//
+// Every field is off or zero by default. KeepAlive spends the caller's money without the
+// caller asking, so it is opt-in per account, capped, and reported per ping.
+type CacheConfig struct {
+	// KeepAlive turns on the idle keep-alive: for a session that has been idle
+	// IdleSeconds, re-read its cached prefix once so the provider refreshes the TTL.
+	//
+	// Off by default and deliberately so. A ping is a real upstream request that costs
+	// real money on the caller's own credential — small money (a cache read is 0.1x base
+	// input where re-creating the prefix is 1.25x, so the saving:ping ratio is 11.5:1),
+	// but money the caller did not ask to spend. That is a consent decision, not a
+	// default.
+	KeepAlive bool `yaml:"keepalive"`
+	// KeepAliveIdleSeconds is X: how long a session must be idle before the first ping.
+	// 0 = DefaultKeepAliveIdle (280).
+	//
+	// 280 rather than 240 is measured, not tuned by feel. The provider's default lifetime
+	// is 5 minutes and "the lifetime is measured from the start of the request that writes
+	// or reads the cache entry, not from the end of its response", so the budget is 300s
+	// from the previous request's START. Simulated over the production window: X=240 wastes
+	// 175 pings on gaps that would have hit anyway, X=280 wastes 39, and the net moves from
+	// +$135.38 to +$170.08.
+	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
+	// KeepAliveMaxPings is K: the most pings one idle span may send. 0 =
+	// DefaultKeepAliveMaxPings (2).
+	//
+	// K is the main control on the one waste this mechanism cannot avoid — a session that
+	// has ENDED looks exactly like one that is thinking. Session-final waste scales
+	// linearly in K (measured: 3,891 sessions x K pings), so the net peaks early and
+	// collapses: K=2 nets +$170.08, K=3 +$162.56, K=12 +$27.99, K=20 −$99.72.
+	KeepAliveMaxPings int `yaml:"keepalive_max_pings"`
+	// KeepAliveMaxUSDPerSession caps what pings may cost one session. 0 =
+	// DefaultKeepAliveMaxUSD.
+	//
+	// A cap rather than trust: the per-ping cost is 0.1x the prefix, so a 400k-token
+	// session pings at ~$0.15 and a runaway would be visible only on the bill. With K=2
+	// the cap is normally slack; it is the backstop for a configuration that raises K.
+	KeepAliveMaxUSDPerSession float64 `yaml:"keepalive_max_usd_per_session"`
+
+	// HeadTTL1h asks for the ONE-HOUR tier on the request's HEAD breakpoints (`tools` and
+	// `system`) while leaving the trailing message breakpoint at 5 minutes — the provider's
+	// documented mixed-TTL shape, in the order it requires (1h entries must precede 5m
+	// ones, and the head precedes the messages by construction).
+	//
+	// Off by default for a measured reason, and NOT the one people expect. A blanket 1h TTL
+	// loses money: the 2.0x write premium falls on every cache-creating request (14,499 of
+	// them, −$773.00) while the benefit lands on 290 (+$754.66), net −$18.34. Re-labelling
+	// only the head fixes that arithmetic — the premium is paid on 769 head-write events
+	// instead — and simulates net positive at every head share, +$20.19 at f=0.10 to
+	// +$60.56 at f=0.30.
+	//
+	// It is still off, because on THIS deployment the tier does not arrive. LiteLLM's
+	// Bedrock transform drops the `ttl` field before the request leaves (its
+	// `_remove_ttl_from_cache_control`, upstream issues #19848 / #20326), and Bedrock's own
+	// 1h support covers the Claude 4.5 family rather than the Opus 5 / 4.8 / Sonnet 5 this
+	// service runs. Zero 1h writes appear in 19,805 production requests. So this ships
+	// implemented, verifiable and off: Usage.CacheWrite1h is what says whether flipping it
+	// on did anything, and until that column is nonzero the honest projection is $0.
+	HeadTTL1h bool `yaml:"head_ttl_1h"`
+	// HeadTTLMinTokens gates the 1h head on the request's own size. 0 =
+	// DefaultHeadTTLMinTokens (50,000).
+	//
+	// A dollar filter, not a probability filter, and that distinction is the whole result.
+	// Gating 1h on the best available predictor of a long gap leaves the net unchanged
+	// (−$18.32 against −$18.34 blanket) because the premium and the benefit scale with the
+	// SAME cache_write on the same requests, so multiplying both by a probability cannot
+	// flip the sign. Gating on size does flip it (+$48.81): it excludes small-prefix
+	// requests that pay the premium and can never produce a large miss.
+	HeadTTLMinTokens int `yaml:"head_ttl_min_tokens"`
+}
+
+// Keep-alive and head-TTL defaults. Named constants because the same numbers are asserted
+// in tests and quoted in the settings page, and three copies of 280 is how one of them
+// becomes 240.
+const (
+	DefaultKeepAliveIdle     = 280
+	DefaultKeepAliveMaxPings = 2
+	DefaultKeepAliveMaxUSD   = 0.25
+	DefaultHeadTTLMinTokens  = 50000
+)
+
+// Resolved returns the block with every zero replaced by its default, so callers never
+// repeat the fallbacks. Disabled flags are left alone: `enabled: false` with a tuned
+// interval is a legitimate parked configuration.
+func (c CacheConfig) Resolved() CacheConfig {
+	if c.KeepAliveIdleSeconds <= 0 {
+		c.KeepAliveIdleSeconds = DefaultKeepAliveIdle
+	}
+	if c.KeepAliveMaxPings <= 0 {
+		c.KeepAliveMaxPings = DefaultKeepAliveMaxPings
+	}
+	if c.KeepAliveMaxUSDPerSession <= 0 {
+		c.KeepAliveMaxUSDPerSession = DefaultKeepAliveMaxUSD
+	}
+	if c.HeadTTLMinTokens <= 0 {
+		c.HeadTTLMinTokens = DefaultHeadTTLMinTokens
+	}
+	return c
+}
+
+// validate rejects a cache block that would misbehave rather than accepting it and
+// degrading quietly. An idle interval at or past the provider's 5-minute lifetime cannot
+// refresh anything — the entry is gone before the ping fires — and it is the one mistake
+// here that turns a saving into a pure cost, because the ping then WRITES at 1.25x instead
+// of reading at 0.1x.
+func (c CacheConfig) validate() error {
+	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 ||
+		c.KeepAliveMaxUSDPerSession < 0 {
+		return fmt.Errorf("config: cache: negative values are not meaningful")
+	}
+	if c.KeepAliveIdleSeconds >= 300 {
+		return fmt.Errorf("config: cache: keepalive_idle_seconds must be under 300 "+
+			"(the provider's 5-minute lifetime runs from the previous request's START, "+
+			"so a later ping re-creates the entry at 1.25x instead of refreshing it at 0.1x); got %d",
+			c.KeepAliveIdleSeconds)
+	}
+	return nil
 }
 
 // ObserveConfig is the `observe:` block.
@@ -71,6 +203,9 @@ func LoadBytes(b []byte) (*Config, error) {
 	}
 	if _, err := c.OperatingMode(); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
+	}
+	if err := c.Cache.validate(); err != nil {
+		return nil, err
 	}
 	return &c, nil
 }

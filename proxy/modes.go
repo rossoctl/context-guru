@@ -46,7 +46,12 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 		Provider: r.provider, Body: r.body, Session: r.session, Tenant: r.tn.ID, Bypass: r.bypassed,
 		Models: r.models, Window: r.window, CacheMode: h.opts.CacheMode,
 		SelfRates: r.rates,
-		Mode:      mode, Tracker: h.tracker,
+		// The mixed-TTL head, from this tenant's own cache policy. Off for every account
+		// unless opted in; see apply/headttl.go for why it is off even then on this
+		// deployment (the gateway strips the ttl field before the provider sees it).
+		HeadTTL1h:        r.tn.Cache.HeadTTL1h,
+		HeadTTLMinTokens: r.tn.Cache.HeadTTLMinTokens,
+		Mode:             mode, Tracker: h.tracker,
 	})
 	added := time.Since(start)
 	if res.Body == nil {

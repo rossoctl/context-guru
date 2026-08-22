@@ -95,6 +95,7 @@ nav:
       - When your agent compacts: how-to/agent-compaction.md
       - Measuring savings: how-to/measure-savings.md
       - Stop carrying unused tools: how-to/declaration-removal.md
+      - Keep an idle prompt cache warm: how-to/cache-keepalive.md
   - Components:
       - Overview: components.md
       - Choose a preset: how-to/choose-a-preset.md

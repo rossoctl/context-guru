@@ -14,6 +14,20 @@ type Usage struct {
 	CacheRead  int64
 	CacheWrite int64
 	Output     int64
+	// CacheWrite1h is the part of CacheWrite the provider billed at the ONE-HOUR write
+	// tier, from `usage.cache_creation.ephemeral_1h_input_tokens`. Zero on every response
+	// that wrote only 5-minute entries, which on this deployment is all of them.
+	//
+	// It is here for two reasons, and both are about not being lied to. A 1h write costs
+	// 2.0x base input where a 5m write costs 1.25x, so pricing a 1h write as a 5m one
+	// understates that request by 0.75x of its whole written prefix. And it is the ONLY
+	// signal that a requested `ttl: "1h"` was HONOURED. A provider that does not support the
+	// tier for that model downgrades it silently: a normal 200 with a normal-looking
+	// `cache_creation_input_tokens` and nothing to distinguish it from a granted 1h entry.
+	// Measured live on this gateway: aws/claude-haiku-4-5 returned 36,251 of 36,574 written
+	// tokens at the 1h tier, aws/claude-sonnet-5 returned 0 of 48,212. Absent-or-zero here,
+	// with a 1h breakpoint on the wire, means the request was downgraded.
+	CacheWrite1h int64
 	// StopReason is the provider's terminal reason for this response, normalized across
 	// dialects (see responseStopReason). It rides on Usage because it comes off the same
 	// buffered/sniffed response bytes and reaches the dashboard by the same path — a
@@ -54,6 +68,10 @@ func parseUsage(body []byte) (Usage, bool) {
 		out.Output = u.Get("output_tokens").Int()
 		out.CacheRead = u.Get("cache_read_input_tokens").Int()
 		out.CacheWrite = u.Get("cache_creation_input_tokens").Int()
+		// The per-TTL split, when the provider reports one. `cache_creation_input_tokens`
+		// is the total across both tiers, so this is a SUBSET of CacheWrite and never an
+		// addition to it.
+		out.CacheWrite1h = u.Get("cache_creation.ephemeral_1h_input_tokens").Int()
 	case u.Get("prompt_tokens").Exists(): // OpenAI
 		prompt := u.Get("prompt_tokens").Int()
 		out.Output = u.Get("completion_tokens").Int()
@@ -107,6 +125,7 @@ func parseSSEUsage(raw []byte) (Usage, bool) {
 			out.FreshInput = max64(out.FreshInput, one.FreshInput)
 			out.CacheRead = max64(out.CacheRead, one.CacheRead)
 			out.CacheWrite = max64(out.CacheWrite, one.CacheWrite)
+			out.CacheWrite1h = max64(out.CacheWrite1h, one.CacheWrite1h)
 			out.Output = max64(out.Output, one.Output)
 		}
 	}
