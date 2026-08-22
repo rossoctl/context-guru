@@ -151,15 +151,35 @@ expense.
 
 ## What is held in memory, and for how long
 
-To ping a session the proxy keeps that session's last request body, and — where the
-upstream is caller-pays, which is the default — the caller's own provider credential. There
-is no alternative: the ping happens when no request is in flight, so nothing else can
-authenticate it, and pinging on the operator's key would bill the wrong party.
+To ping a session the proxy keeps that session's last request body, and — where the upstream
+is caller-pays, which is the default — the caller's own provider credential. There is no
+alternative: the ping happens when no request is in flight, so nothing else can authenticate
+it, and pinging on the operator's key would bill the wrong party.
 
-It is bounded on every axis: opt-in per account, memory only, never logged or persisted,
-dropped the moment the next request arrives, and retired by the policy itself after at most
-`(K+1) × X` — about 14 minutes at the defaults. Total held bodies are capped at 128 MiB
-across 512 sessions, and a single body over 8 MiB is not held at all.
+Seven controls, because this is the one place the service holds a caller's credential beyond
+the life of a request:
+
+| control | what it does |
+|---|---|
+| **Hard deadline** | `time.AfterFunc` at `(K+1) × X` ≈ 14 min. A *scheduled* deadline, not a check inside a loop: a process with no traffic still releases on time. |
+| **Eager release** | dropped the moment the next request arrives, the gate refuses, the span is exhausted, or the process shuts down — whichever comes first. |
+| **Zeroized** | the bytes are overwritten, not just dereferenced. A dropped `[]byte` sits in the heap until a collection that may never come. |
+| **Masked at rest** | XORed under a random per-process key, so the idle hold contains no working credential. |
+| **Consent per request** | re-read from the tenancy on every request. Turning the setting off retires what is already held on the account's next request; a session that goes quiet is dropped by the deadline. |
+| **Audit row per ping** | every use is a durable `requests` row: tenant, session, timestamp, cost, and whether it read or wrote. |
+| **Kill switch** | `CONTEXT_GURU_KEEPALIVE=off` stops *retention*, not merely pinging — nothing is held at all. |
+
+Bounded on volume too: 128 MiB across at most 512 sessions, and a single body over 8 MiB is
+not held.
+
+**What the masking does and does not buy.** A heap or core dump, a crash report, a
+`/proc/<pid>/mem` read or a `strings` pass over a snapshot yields masked bytes rather than a
+working key — the accidental-capture class, which is the realistic one. It does **not** stop
+an attacker with code execution in this process: the mask is in the same address space. It is
+obfuscation at rest, not encryption. And the credential is necessarily plaintext for the
+duration of the ping itself, because `net/http`'s header map holds strings and a Go string
+cannot be overwritten — so the window is one request instead of the whole idle hold, which is
+the part that was worth closing.
 
 ## Related
 

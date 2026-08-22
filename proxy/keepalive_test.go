@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +16,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/metrics"
 	"github.com/tidwall/gjson"
 )
 
@@ -411,62 +415,162 @@ func TestArriveCancelsAndReports(t *testing.T) {
 	}
 }
 
-// The credential rule, both directions. On a caller-pays upstream the caller's own key is
-// what a ping must present, and it is retained; where the operator holds a key nothing is
-// retained at all. Our own context-guru token is never retained in either case.
+// The credential rules, all of them. This is the hardening bar the retention had to clear
+// before it could ship, and each subtest is one line of it.
 func TestCredentialRetentionRules(t *testing.T) {
-	t.Run("caller pays: the caller's key is held, our token is not", func(t *testing.T) {
-		k, _, clock := testKeeper(t, Limits{})
-		tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
-		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
-		r.Header.Set("Authorization", "Bearer sk-caller-secret")
-		r.Header.Add("x-api-key", "cg_live_0123456789abcdef0123456789abcdef")
-		// Twice, and with a prefix over the floor: the gate refuses a session's first request
-		// and a small prefix, and the subject here is the credential rather than the gate.
-		for i := 0; i < 2; i++ {
-			k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
-				upstream{base: "http://up", path: "/v1/messages"},
-				r, bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
-		}
+	const caller = "Bearer sk-caller-secret"
 
-		k.mu.Lock()
-		defer k.mu.Unlock()
-		e := k.live[kaKey("t1", "s")]
-		if e == nil {
-			t.Fatal("session not tracked")
-		}
-		if got := e.hdr.Get("Authorization"); got != "Bearer sk-caller-secret" {
-			t.Errorf("Authorization = %q; a caller-pays ping has no other credential", got)
-		}
-		if got := e.hdr.Get("x-api-key"); got != "" {
-			t.Errorf("retained a context-guru token in an auth slot: %q", got)
-		}
-	})
-	t.Run("server key: nothing is retained", func(t *testing.T) {
+	held := func(t *testing.T, up upstream) (*keeper, *kaEntry, *testClock) {
+		t.Helper()
 		k, _, clock := testKeeper(t, Limits{})
 		tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
 		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
-		r.Header.Set("Authorization", "Bearer sk-caller-secret")
-		up := upstream{base: "http://up", path: "/v1/messages",
-			setKey: func(h http.Header) { h.Set("x-api-key", "operator") }}
+		r.Header.Set("Authorization", caller)
+		r.Header.Add("x-api-key", "cg_live_0123456789abcdef0123456789abcdef")
+		// Twice, and over the prefix floor: the gate refuses a session's first request, and the
+		// subject here is the credential rather than the gate.
 		for i := 0; i < 2; i++ {
 			k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody), up, r,
 				bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 		}
-
 		k.mu.Lock()
-		defer k.mu.Unlock()
 		e := k.live[kaKey("t1", "s")]
+		k.mu.Unlock()
+		return k, e, clock
+	}
+
+	t.Run("caller pays: the credential is held MASKED, never plaintext", func(t *testing.T) {
+		_, e, _ := held(t, upstream{base: "http://up", path: "/v1/messages"})
 		if e == nil {
 			t.Fatal("session not tracked")
 		}
+		var auth *maskedHeader
+		for i := range e.auth {
+			if strings.EqualFold(e.auth[i].name, "Authorization") {
+				auth = &e.auth[i]
+			}
+			// Our own token is not a provider credential and must never be retained.
+			if bytes.Contains(unmasked(e.auth[i].val), []byte("cg_live_")) {
+				t.Error("retained a context-guru token as a provider credential")
+			}
+		}
+		if auth == nil {
+			t.Fatal("no Authorization retained; a caller-pays ping has no other credential")
+		}
+		// The bytes AT REST must not contain the credential — that is what a heap dump or a
+		// string scan over a core file would see.
+		if bytes.Contains(auth.val, []byte("sk-caller-secret")) {
+			t.Error("the credential is sitting in memory in plaintext")
+		}
+		// And it must still be recoverable, or the ping cannot authenticate.
+		if got := string(unmasked(auth.val)); got != caller {
+			t.Errorf("unmasking gave %q, want the caller's own credential back", got)
+		}
+	})
+
+	t.Run("server key: nothing is retained", func(t *testing.T) {
+		_, e, _ := held(t, upstream{base: "http://up", path: "/v1/messages",
+			setKey: func(h http.Header) { h.Set("x-api-key", "operator") }})
+		if e == nil {
+			t.Fatal("session not tracked")
+		}
+		if len(e.auth) != 0 {
+			t.Errorf("retained %d auth headers although the operator holds the key", len(e.auth))
+		}
 		for _, slot := range authHeaders {
 			if v := e.hdr.Get(slot); v != "" {
-				t.Errorf("retained %s=%q although the operator holds the key", slot, v)
+				t.Errorf("retained %s=%q in the plain header set", slot, v)
 			}
 		}
 	})
-	t.Run("stop drops every held body and credential", func(t *testing.T) {
+
+	t.Run("release ZEROIZES rather than dropping the reference", func(t *testing.T) {
+		k, e, _ := held(t, upstream{base: "http://up", path: "/v1/messages"})
+		if e == nil {
+			t.Fatal("session not tracked")
+		}
+		// Keep our own handles on the exact buffers, so the assertion is about the BYTES and not
+		// about whether the struct still points at them.
+		body, cred := e.body, e.auth[0].val
+		if len(body) == 0 || len(cred) == 0 {
+			t.Fatal("nothing held to release")
+		}
+		k.retire(kaKey("t1", "s"))
+		for _, b := range [][]byte{body, cred} {
+			for i := range b {
+				if b[i] != 0 {
+					t.Fatalf("released buffer still holds data at byte %d; a dump taken now "+
+						"would still yield it", i)
+					return
+				}
+			}
+		}
+		if got := k.Stats().Live; got != 0 {
+			t.Errorf("%d sessions still tracked after retirement", got)
+		}
+	})
+
+	t.Run("the hard deadline fires with no other activity", func(t *testing.T) {
+		// A real scheduled deadline, not a sweep check: nothing else runs in this subtest, no
+		// request arrives, no sweep is called, and the material must still be gone.
+		k, _, clock := testKeeper(t, Limits{})
+		pol := kaPolicy()
+		pol.Idle = 20 * time.Millisecond // deadline is (K+1) x Idle = 60ms
+		tn := &Tenancy{ID: "t1", Cache: pol}
+		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+		r.Header.Set("Authorization", caller)
+		for i := 0; i < 2; i++ {
+			k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+				upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
+				"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+		}
+		if k.Stats().Live != 1 {
+			t.Fatal("nothing held to expire")
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for k.Stats().Live != 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if got := k.Stats().Live; got != 0 {
+			t.Fatalf("%d sessions still held past the hard deadline with nothing else running", got)
+		}
+	})
+
+	t.Run("withdrawn consent retires what is already held", func(t *testing.T) {
+		k, _, clock := testKeeper(t, Limits{})
+		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+		r.Header.Set("Authorization", caller)
+		on := &Tenancy{ID: "t1", Cache: kaPolicy()}
+		for i := 0; i < 2; i++ {
+			k.record(on, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+				upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
+				"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+		}
+		if k.Stats().Live != 1 {
+			t.Fatal("nothing held to revoke")
+		}
+		// The account turns the setting off. Its very next request must drop the hold — a stale
+		// flag from when the hold began must never be able to extend it.
+		off := &Tenancy{ID: "t1", Cache: CachePolicy{}}
+		k.record(off, "s", clock.now().Add(3*time.Second), []byte(kaBody),
+			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
+			"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+		if got := k.Stats().Live; got != 0 {
+			t.Fatalf("%d sessions still held after consent was withdrawn", got)
+		}
+	})
+
+	t.Run("the kill switch stops RETENTION, not just pinging", func(t *testing.T) {
+		t.Setenv("CONTEXT_GURU_KEEPALIVE", "off")
+		k, _, clock := testKeeper(t, Limits{})
+		recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+		if got := k.Stats().Live; got != 0 {
+			t.Fatalf("held %d sessions with the kill switch set; a switch that keeps the "+
+				"material while refusing to use it is the worst of both", got)
+		}
+	})
+
+	t.Run("Stop drops every held body and credential", func(t *testing.T) {
 		k, _, clock := testKeeper(t, Limits{})
 		k.start()
 		recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
@@ -475,6 +579,32 @@ func TestCredentialRetentionRules(t *testing.T) {
 			t.Fatalf("%d sessions still held after Stop", got)
 		}
 	})
+}
+
+// syncBuffer is a log sink a background goroutine may write while the test reads it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// unmasked returns a plaintext COPY, so a test can assert on the value without disturbing the
+// masked buffer the keeper is holding.
+func unmasked(b []byte) []byte {
+	out := append([]byte(nil), b...)
+	xorMask(out)
+	return out
 }
 
 // The memory bound. Holding one body per live session is what makes a ping possible; holding
@@ -594,4 +724,77 @@ func waitSkipped(t *testing.T, k *keeper, n int64) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("skipped = %d after 2s, want %d", k.skipped.Load(), n)
+}
+
+// Item 6 of the hardening bar: the retained credential and the retained request body must be
+// unreachable from every output surface. The body matters as much as the key — it holds the
+// user's whole conversation.
+//
+// Debug logging is ON, because that is the realistic leak path: production runs at debug and
+// produces roughly 8x the line volume, so a leak that only appears there is a leak that only
+// appears in production.
+func TestRetainedMaterialReachesNoOutputSurface(t *testing.T) {
+	const cred = "sk-caller-DO-NOT-LEAK-9f3a"
+	const secretInBody = "MY-PRIVATE-SOURCE-CODE-MARKER"
+
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	agg := metrics.NewAggregator()
+	h := New(nil, nil, agg, Options{})
+	defer h.Close()
+	k := h.keeper
+	clock := &testClock{at: time.Now()}
+	k.now = clock.now
+	fs := &fakeSender{}
+	k.send = fs.send
+
+	body := strings.Replace(kaBody, `"text":"hi"`, `"text":"`+secretInBody+`"`, 1)
+	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	r.Header.Set("Authorization", "Bearer "+cred)
+	for i := 0; i < 2; i++ {
+		k.record(tn, "leaky", clock.now().Add(time.Duration(i)*time.Second), []byte(body),
+			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
+			"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+	}
+	if k.Stats().Live != 1 {
+		t.Fatal("nothing retained, so nothing is being tested")
+	}
+	// Drive a ping and a panic-recovery path, so the log carries whatever those emit.
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+
+	surfaces := map[string]string{}
+	rec := httptest.NewRecorder()
+	h.stats(rec, httptest.NewRequest(http.MethodGet, "/stats", nil))
+	surfaces["/stats"] = rec.Body.String()
+	rec = httptest.NewRecorder()
+	h.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	surfaces["/metrics"] = rec.Body.String()
+	// The keeper's own snapshot, which /stats embeds and a future consumer might render alone.
+	surfaces["KeepAliveStats"] = fmt.Sprintf("%+v", k.Stats())
+	// A panic trace over the held entry: a struct dumped into an error message is the classic
+	// accidental disclosure, and %+v on a keeper entry must not spell out either secret.
+	k.mu.Lock()
+	surfaces["entry %+v"] = fmt.Sprintf("%+v", *k.live[kaKey("t1", "leaky")])
+	k.mu.Unlock()
+	surfaces["log sink (debug)"] = logs.String()
+
+	for name, out := range surfaces {
+		if out == "" && name != "log sink (debug)" {
+			t.Errorf("%s produced no output, so this assertion proves nothing", name)
+		}
+		if strings.Contains(out, cred) {
+			t.Errorf("%s LEAKS the retained credential", name)
+		}
+		if strings.Contains(out, secretInBody) {
+			t.Errorf("%s LEAKS the retained request body", name)
+		}
+	}
+	if !strings.Contains(logs.String(), "keep-alive ping") {
+		t.Error("the debug log carries no keep-alive line, so the leak check never saw this path")
+	}
 }

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"io"
 	"log/slog"
@@ -84,6 +85,46 @@ import (
 // after `tool_use`, a 6.7x lift, and 83.7% of the recoverable dollars sit behind it. Stopping
 // there would discard most of the value the mechanism exists to capture.
 
+// credMask obscures a retained credential while it is idle in memory.
+//
+// Be precise about what this buys, because it is easy to oversell. A heap or core dump, a crash
+// report, a `/proc/<pid>/mem` read or a stray `strings` over a snapshot yields masked bytes
+// instead of a working key — that is the accidental-capture class, and it is the realistic one.
+// It does NOT stop an attacker with code execution in this process: the mask is right here in
+// the same address space. It is obfuscation at rest, not encryption.
+//
+// The credential is unavoidably plaintext for the duration of the ping itself: net/http's header
+// map holds strings, and a Go string cannot be overwritten. So the window is one request rather
+// than the whole idle hold, which is the part that was worth closing.
+var credMask = func() []byte {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic("context-guru: no entropy for the keep-alive credential mask: " + err.Error())
+	}
+	return b
+}()
+
+// xorMask masks or unmasks in place — XOR is its own inverse, so one function does both.
+func xorMask(b []byte) {
+	for i := range b {
+		b[i] ^= credMask[i%len(credMask)]
+	}
+}
+
+// zero overwrites a buffer. Dropping the reference is not enough: the bytes sit in the heap
+// until a collection that may never come, and a dump taken in between still has them.
+func zero(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
+// maskedHeader is one auth header held masked. The NAME is not a secret; the value is.
+type maskedHeader struct {
+	name string
+	val  []byte
+}
+
 // CachePolicy is one tenant's resolved cache policy — the host-level half of the cache
 // story, which no component can reach.
 //
@@ -162,8 +203,11 @@ type kaEntry struct {
 	// The prefix hash covers this content, which is why the ping must resend it verbatim.
 	body []byte
 	up   upstream
-	// hdr is the minimal header set the ping needs, and — when the upstream is caller-pays
-	// — the caller's provider credential.
+	// hdr is the minimal NON-SECRET header set the ping needs (content type, API version, beta
+	// flags). The credential never goes in here — see auth.
+	hdr http.Header
+	// auth is the caller's provider credential, held MASKED (see credMask), and only when the
+	// upstream is caller-pays.
 	//
 	// THIS IS THE ONE PLACE THIS SERVICE HOLDS A CALLER'S CREDENTIAL BEYOND THE LIFE OF A
 	// REQUEST, and it is a deliberate, bounded, opt-in decision rather than an oversight.
@@ -171,11 +215,12 @@ type kaEntry struct {
 	// a key, so every request is authenticated with the caller's own key and there is no
 	// server-held credential a between-requests ping could use. Without retention the
 	// mechanism cannot exist here at all. It is held in memory only, never logged, never
-	// persisted, never in a command line, dropped the moment the session is evicted or the
-	// span ends, and held for at most MaxPings x Idle plus one sweep. When the upstream DOES
-	// name a key (up.setKey != nil) nothing is retained: the credential is read from the
-	// environment at call time, exactly as on the request path.
-	hdr                         http.Header
+	// persisted, never in a command line, MASKED while idle, ZEROIZED on every release path, and
+	// bounded by a hard deadline of (MaxPings+1) x Idle that fires whether or not anything else
+	// in this process is awake. When the upstream DOES name a key (up.setKey != nil) nothing is
+	// retained at all: the credential is read from the environment at call time, exactly as on
+	// the request path.
+	auth                        []maskedHeader
 	provider                    bschemas.ModelProvider
 	model, route, preset, agent string
 	pol                         CachePolicy
@@ -198,6 +243,12 @@ type kaEntry struct {
 	// stopped means this session will not be pinged again: a ping wrote instead of reading,
 	// or the upstream refused in a way that repeating cannot fix.
 	stopped bool
+	// timer is the HARD retention deadline. A scheduled deadline rather than a check inside the
+	// sweep, because the requirement is that a quiet process still drops the credential on
+	// time: with no request and no other activity the sweep is the only thing that would ever
+	// look, and coupling a security bound to a liveness loop is how a hold silently becomes
+	// unbounded. time.AfterFunc fires regardless.
+	timer *time.Timer
 }
 
 // due reports whether this TRACKED entry should be pinged now. Timing, K and the stop flag
@@ -340,11 +391,27 @@ func (k *keeper) Stop() {
 	k.turns = map[string]int{}
 }
 
-// clear drops an entry's body and credential. Called on every removal path, because the two
-// things this holds are the two things it must not hold longer than it needs to.
+// clear ZEROIZES an entry's body and credential and cancels its retention deadline. Called on
+// every removal path — the next request arriving, the gate refusing, retirement, eviction,
+// shutdown — because the two things this holds are the two things it must not hold a moment
+// longer than it needs to.
+//
+// Overwriting rather than dropping the reference is the point: a dropped []byte sits in the heap
+// until a collection that may never come, and a dump taken in between still yields it. The body
+// is a keeper-owned COPY precisely so it can be overwritten without corrupting a slice something
+// else still reads.
 func (e *kaEntry) clear() {
+	zero(e.body)
 	e.body = nil
+	for i := range e.auth {
+		zero(e.auth[i].val)
+	}
+	e.auth = nil
 	e.hdr = nil
+	if e.timer != nil {
+		e.timer.Stop()
+		e.timer = nil
+	}
 }
 
 func kaKey(tenant, session string) string { return tenant + "\x00" + session }
@@ -391,11 +458,25 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 	if status < 200 || status >= 300 {
 		return
 	}
+	key := kaKey(tn.ID, session)
+	// The kill switch stops RETENTION, not merely pinging. A switch that left bodies and
+	// credentials accumulating while refusing to use them would be the worst of both.
+	if keepAliveDisabled() {
+		k.retire(key)
+		return
+	}
+	// Consent is re-read from the tenancy on EVERY request rather than trusted from when the
+	// hold began, and withdrawing it retires what is already held. The tenancy is re-resolved
+	// per request and its cache is keyed on the configuration document, so an account that turns
+	// the setting off stops being retained on its very next request; anything held for a session
+	// that goes quiet instead is dropped by the hard deadline below, within (K+1)x X.
 	pol := tn.Cache
 	if !pol.on() {
+		k.retire(key)
 		return
 	}
 	if len(body) > maxKeepAliveBodyBytes {
+		k.retire(key)
 		k.skipped.Add(1)
 		return
 	}
@@ -403,9 +484,11 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 	// request actually established or read an entry. A request that wrote and read nothing
 	// has no prefix worth a ping.
 	if !cacheAwareProvider(provider) {
+		k.retire(key)
 		return
 	}
 	if usageOK && u.CacheRead == 0 && u.CacheWrite == 0 {
+		k.retire(key)
 		return
 	}
 	// Thinking, and the one shape that cannot be pinged. The ping's whole correctness rests
@@ -419,22 +502,29 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 	// Measured exposure of refusing these: of the 357 addressable misses in the production
 	// window, 17 had a predecessor with thinking enabled, worth $14.29 of $732 — 2.0%.
 	if gjson.GetBytes(body, "thinking.type").String() == "enabled" {
+		k.retire(key)
 		k.skipped.Add(1)
 		return
 	}
 	model := gjson.GetBytes(body, "model").String()
+	// A keeper-OWNED copy, not the slice serve just used. It costs one allocation per tracked
+	// session — and tracked sessions are gated down to a handful — in exchange for being able to
+	// overwrite the bytes on release without corrupting anything else that might still read
+	// them. Zeroizing a shared slice is the kind of cleverness that produces a mystery bug in a
+	// month, and the earlier zero-copy retention was a micro-optimisation in the wrong place.
+	owned := append([]byte(nil), body...)
 	// What the provider billed for this request's prefix, in its own units — the size of the
 	// entry a ping would refresh. Both the gate and the projected cost read it, so a request
 	// that reported no usage is not pingable: without it there is no honest estimate of either.
 	prefix := u.CacheRead + u.CacheWrite
+	hdr, auth := pingHeaders(r, up)
 	e := &kaEntry{
-		tenant: tn.ID, session: session, startedAt: startedAt, body: body, up: up,
+		tenant: tn.ID, session: session, startedAt: startedAt, body: owned, up: up,
 		provider: provider, model: model, route: route, preset: tn.Preset,
 		agent: r.UserAgent(), pol: pol, prefix: prefix,
 		pingUSD: k.projectedPingUSD(model, prefix),
-		hdr:     pingHeaders(r, up),
+		hdr:     hdr, auth: auth,
 	}
-	key := kaKey(tn.ID, session)
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	// The turn count outlives the entry, which is dropped on the next request's arrival. It is
@@ -458,7 +548,12 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 		return
 	}
 	k.live[key] = e
-	k.bytes += int64(len(body))
+	k.bytes += int64(len(owned))
+	// The hard deadline. (K+1) x Idle is the longest the policy could ever still want this
+	// entry: K pings each restarting the clock, plus one final Idle to notice the last one
+	// bought nothing. After that there is no legitimate use, so the material goes whether or not
+	// anything else in this process is awake.
+	e.timer = time.AfterFunc(time.Duration(e.pol.MaxPings+1)*e.pol.Idle, func() { k.retire(key) })
 	k.evictLocked()
 }
 
@@ -479,6 +574,21 @@ func (k *keeper) projectedPingUSD(model string, prefix int64) float64 {
 		return 0
 	}
 	return float64(prefix)*price.CacheRead + price.Output
+}
+
+// retire releases one session's held material now: zeroized, deadline cancelled, entry gone.
+// Idempotent and safe on a session that was never tracked, which is what lets every refusal path
+// call it unconditionally.
+func (k *keeper) retire(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e, ok := k.live[key]
+	if !ok {
+		return
+	}
+	k.bytes -= int64(len(e.body))
+	e.clear()
+	delete(k.live, key)
 }
 
 // evictLocked enforces both bounds by dropping the entries whose deadline is furthest away
@@ -514,11 +624,11 @@ func (k *keeper) sweep(now time.Time) int {
 	k.mu.Lock()
 	var due []pingJob
 	for key, e := range k.live {
-		// Retire a span that can do nothing more. Without this an entry sits in the map until
-		// eviction pressure removes it, which on a quiet deployment is never — and what it
-		// sits there holding is a request body and, on a caller-pays upstream, the caller's
-		// provider credential. So the hold is bounded by the POLICY (at most (K+1) x X, about
-		// 14 minutes at the defaults) rather than by how busy the box happens to be.
+		// EAGER release of a span that can do nothing more, so material goes as soon as it is
+		// useless rather than at the outer deadline. The GUARANTEE is kaEntry.timer, which fires
+		// on schedule whether or not this loop is running; this is the earlier of the two, and
+		// having both is deliberate — a security bound must not depend on a liveness loop, and a
+		// liveness loop should not wait for the security bound.
 		if e.stopped || e.pings >= e.pol.MaxPings || !e.pingable() {
 			if !now.Before(e.startedAt.Add(e.pol.Idle)) {
 				k.bytes -= int64(len(e.body))
@@ -543,7 +653,11 @@ func (k *keeper) sweep(now time.Time) int {
 		// started twice.
 		e.startedAt = now
 		e.pings++
-		due = append(due, pingJob{e: e, raw: e.body, hdr: e.hdr.Clone(), up: e.up,
+		auth := make([]maskedHeader, len(e.auth))
+		for i, a := range e.auth {
+			auth[i] = maskedHeader{name: a.name, val: append([]byte(nil), a.val...)}
+		}
+		due = append(due, pingJob{e: e, raw: e.body, hdr: e.hdr.Clone(), auth: auth, up: e.up,
 			tenant: e.tenant, session: e.session, ping: e.pings})
 	}
 	k.mu.Unlock()
@@ -562,8 +676,11 @@ type pingJob struct {
 	// raw is the recorded request's bytes. The ping's own body is derived from it in fire,
 	// outside the keeper's lock: the rewrite copies the whole body, and a large one under the
 	// map lock would stall every arriving request on this proxy.
-	raw             []byte
-	hdr             http.Header
+	raw []byte
+	hdr http.Header
+	// auth is this ping's copy of the masked credential, unmasked only inside sendPing and
+	// zeroized there — so the plaintext window is one request rather than the whole idle hold.
+	auth            []maskedHeader
 	up              upstream
 	tenant, session string
 	ping            int
@@ -573,6 +690,13 @@ type pingJob struct {
 // waiting on this, so there is nobody to return an error to and nothing that a retry could
 // help. A failed ping is logged, counted, and forgotten.
 func (k *keeper) fire(j pingJob) {
+	// The job carries its own copy of the masked credential, so it owns the wipe. Deferred so
+	// the limiter refusal, the pingBody failure and a panic all release it.
+	defer func() {
+		for i := range j.auth {
+			zero(j.auth[i].val)
+		}
+	}()
 	// The tenant's own limits apply, and a ping only ever uses SLACK. Refusing rather than
 	// queueing is the requirement: a queued ping would sit in front of a real request the
 	// agent IS waiting on. AcquireSpare reserves headroom so a ping cannot consume the last
@@ -728,7 +852,7 @@ func pingBody(body []byte) ([]byte, bool) {
 // the fewer of a caller's headers this holds for ten minutes the better. `anthropic-beta` is
 // carried because a beta header can change how the body is interpreted, and a ping that is
 // interpreted differently is not the same request.
-func pingHeaders(r *http.Request, up upstream) http.Header {
+func pingHeaders(r *http.Request, up upstream) (http.Header, []maskedHeader) {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	for _, name := range []string{"Anthropic-Version", "Anthropic-Beta"} {
@@ -737,17 +861,27 @@ func pingHeaders(r *http.Request, up upstream) http.Header {
 		}
 	}
 	if up.setKey != nil {
-		return h // a server-held key is injected at call time; nothing to retain
+		return h, nil // a server-held key is injected at call time; nothing to retain
 	}
-	// Caller-pays: the credential is the caller's own, and without it there is no ping. Only
-	// the auth slots, and only after our own token has been scrubbed out of them.
+	// Caller-pays: the credential is the caller's own, and without it there is no ping. Only the
+	// auth slots, only after our own token has been scrubbed out of them, and MASKED — so the
+	// idle hold contains no working credential for a dump or a string scan to find.
+	slots := http.Header{}
 	for _, name := range authHeaders {
 		for _, v := range r.Header.Values(name) {
-			h.Add(name, v)
+			slots.Add(name, v)
 		}
 	}
-	scrubToken(h)
-	return h
+	scrubToken(slots)
+	var out []maskedHeader
+	for name, vs := range slots {
+		for _, v := range vs {
+			b := []byte(v)
+			xorMask(b)
+			out = append(out, maskedHeader{name: name, val: b})
+		}
+	}
+	return h, out
 }
 
 // sendPing performs the upstream round trip. Bounded by its own timeout: a ping has no
@@ -766,6 +900,14 @@ func (k *keeper) sendPing(j pingJob, body []byte) (Usage, int, error) {
 	}
 	for name, vs := range j.hdr {
 		req.Header[name] = append([]string(nil), vs...)
+	}
+	// Unmask the credential as late as possible and wipe the buffer immediately. The value
+	// necessarily becomes a Go string once it is in the header map, and a string cannot be
+	// overwritten — so this bounds the plaintext to this request rather than eliminating it.
+	for _, a := range j.auth {
+		xorMask(a.val)
+		req.Header.Add(a.name, string(a.val))
+		zero(a.val)
 	}
 	setUpstreamAuth(req.Header, j.up)
 	resp, err := k.h.client.Do(req)
