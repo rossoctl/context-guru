@@ -1,0 +1,72 @@
+# extract_llm — the configuration to apply to osher.elhadad@ibm.com (087fecf4e9e6404d)
+# and itay.nakash@ibm.com (c49629b8de4e252a) ONLY.
+#
+# Apply through the supported control-plane path, NOT with SQL:
+#   PATCH /api/tenants/087fecf4e9e6404d  {"config_yaml": "<this file>"}
+#   PATCH /api/tenants/c49629b8de4e252a  {"config_yaml": "<this file>"}
+# (manager cookie required; tenant.Registry.Update validates the document and writes an
+#  audit row per changed field. The proxy re-reads the tenant row per request and the
+#  tenancy cache is keyed on the document, so it takes effect on the next request —
+#  DefaultCacheTTL bounds the staleness of an external edit at 30 s. No restart.)
+#
+# Every key here exists in BOTH the currently deployed binary and this branch, so the
+# document is valid before the binary ships. The honest order is still binary first:
+# `cold_cache.max_calls` is the only brake on the sweep and the old binary's default is
+# unlimited, which is why it is set explicitly below.
+pipeline: [format, toon, textclean, dedup, cmdfilter, extract_llm, extract, cachesplit]
+components:
+  extract_llm:
+    # WHERE: cold turns only. A saved token is worth the cache-WRITE rate on a TTL-expired
+    # turn and the cache-READ rate on a warm one -- 12.5x apart. Measured warm break-even is
+    # ~112,800 candidate tokens and the largest tool output that can exist on this traffic is
+    # 7,399 (claude-cli truncates every tool result near 30,000 chars), so the warm path
+    # cannot pay and stays off. Production agreed independently: the same saved tokens at the
+    # warm rate were worth $0.017 against $0.6039 of spend, ROI 0.03x.
+    per_output: false
+
+    cold_cache:
+      enabled: true
+      # WHAT: 3,000 tokens is 9.0% of messages but 35.4% of the mutable mass, at 4,139
+      # tok/msg. It is the floor at which the well-compressing classes clear break-even:
+      # ls -l pays from ~1,400, markdown from ~3,500, multi-file bundles from ~3,900.
+      # Below it the gate would be refusing most of what it selects.
+      min_tokens: 3000
+      # HOW MANY: one llmConcurrency round. The sweep does not draw on llm_max_per_request /
+      # llm_max_per_session by design (the two paths have opposite economics), so this is its
+      # ONLY brake -- and the deployed binary defaults it to unlimited. MEASURED: one request
+      # made 27 calls against a tenant cap of 2, spent $0.229 and added 76.6 s to a turn
+      # whose upstream took 33.5 s.
+      max_calls: 4
+
+    # min_tokens and trigger are a NO-OP with per_output: false -- the sweep overwrites the
+    # floor with cold_cache.min_tokens and the warm path never reaches a model. Set to the
+    # same values anyway so the recorded gate labels agree with the floor in force, and so
+    # the document still says what it means if per_output is ever turned on.
+    min_tokens: 3000
+    trigger:
+      min_request_tokens: 20000
+    llm_max_per_request: 4
+    llm_max_per_session: 40
+    llm_every_n_requests: 1
+
+    # COST PER CALL: the single biggest lever. Production sent 3,785 prompt tokens to compress
+    # a 2,700-token candidate; most of the difference was context_messages: 7. Two also shrinks
+    # the keep-list harvested from the same window, and "dropped a referenced identifier" was
+    # 28 of 31 production rejections -- so the cheaper prompt and the higher acceptance rate
+    # are one change.
+    context: recent
+    context_messages: 2
+
+    # `code` (the model writes a Starlark filter) is the only strategy that produced real
+    # extractions: all 37 of its accepted results, and none of the 4,000-character
+    # truncations. `deterministic` won 25 times in production and every one of those 25 was a
+    # silent cap truncation -- so it is NOT the safe choice it looked like. It stays available
+    # as the fallback leg, where it now returns a line-aligned, marked window.
+    strategy: code
+    aggressiveness: medium
+    economic_gate: true
+    fire_on: pressure
+    allow_on_caching_backend: true
+    model:
+      model: claude-haiku-4-5
+      source: incoming
