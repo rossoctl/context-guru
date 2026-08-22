@@ -103,8 +103,9 @@ func TestKeepAliveOnProductionSnapshot(t *testing.T) {
 				r.pings, r.pingUSD, r.converted, r.savedUSD, r.savedUSD-r.pingUSD,
 				(r.savedUSD-r.pingUSD)/r.totalUSD*100, r.totalUSD)
 			t.Logf("  addressable misses %d worth $%.2f | wasted pings (gap would have hit) %d worth $%.2f"+
-				" | skipped by a gate %d | sessions holding state at end %d",
-				r.addressable, r.addressableUSD, r.wastedPings, r.wastedUSD, r.skipped, r.liveAtEnd)
+				" | skipped by a gate %d | live sessions: peak %d of %d bound, %d at end",
+				r.addressable, r.addressableUSD, r.wastedPings, r.wastedUSD, r.skipped,
+				r.peakLive, maxKeepAliveSessions, r.liveAtEnd)
 			t.Logf("  per session: %d pinged | %d net positive | %d net NEGATIVE costing $%.2f in total"+
 				" | worst single session $%.4f",
 				r.sessions, r.sessionsWinning, r.sessionsLosing, -r.losingUSD, r.worstSessionUSD)
@@ -117,7 +118,7 @@ func TestKeepAliveOnProductionSnapshot(t *testing.T) {
 
 type replayResult struct {
 	pings, converted, addressable, wastedPings, skipped int64
-	liveAtEnd                                           int
+	liveAtEnd, peakLive                                 int
 	wroteInsteadOfRead                                  int64
 	pingUSD, savedUSD, addressableUSD, wastedUSD        float64
 	totalUSD                                            float64
@@ -226,6 +227,9 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanke
 		}
 		simNow = at
 
+		if n := k.Stats().Live; n > out.peakLive {
+			out.peakLive = n
+		}
 		pings, _ := k.arrive(r.tenant, r.session)
 		e := entries[r.session]
 		addressable := r.reason == "ttl_expiry" && r.cacheWrite > 0

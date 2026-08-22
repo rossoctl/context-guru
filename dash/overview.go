@@ -131,6 +131,13 @@ type Overview struct {
 	KeepAliveNetUSD        float64 `json:"keepalive_net_usd"`
 	KeepAliveMissesAvoided int64   `json:"keepalive_misses_avoided"`
 
+	// CacheWrite1h is how many written tokens the provider billed at the ONE-HOUR tier. It is
+	// the verification path for the mixed-TTL head: asking for `ttl: "1h"` on a model that does
+	// not support it returns a normal 200 with the tokens on the 5-minute tier, so this is the
+	// only thing that distinguishes granted from silently downgraded. Zero on this deployment,
+	// and expected to be — see apply/headttl.go.
+	CacheWrite1h int64 `json:"cache_write_1h"`
+
 	// ONE definition of "moved", used here and at the write site (Recorder.ObserveSplit): the
 	// tail moved if this request's tail hash differs from the most recent PREVIOUS tail hash
 	// recorded for the session, and a session with no previously recorded tail counts as moved
@@ -330,7 +337,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		-- (Filter.WithKeepAlive) so the request count and every average stay agent-only — so it
 		-- has its own query below.
 		COALESCE(SUM(r.keepalive_saved_usd),0),
-		COALESCE(SUM(CASE WHEN r.keepalive_saved_usd > 0 THEN 1 ELSE 0 END),0)
+		COALESCE(SUM(CASE WHEN r.keepalive_saved_usd > 0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(r.cache_write_1h),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.FreshInput, &o.CacheRead, &o.CacheWrite,
@@ -340,7 +348,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.PrefixChangeCost, &o.PrefixChangeRequests, &o.PrefixChangeCostAll, &o.PrefixChangeRequestsAll,
 		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal,
-		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided)
+		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h)
 	if err != nil {
 		return nil, err
 	}

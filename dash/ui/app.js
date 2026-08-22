@@ -687,6 +687,17 @@ function renderTiles(o) {
       num(o.split_credited) + ' of ' + num(o.split_tail_moved) + ' moved-snapshot turns'
         + (histRequests(o) ? ' + ' + num(histRequests(o)) + ' earlier' : ''),
       costKnown && (o.cachesplit_saved_usd + histUSD(o)) > 0 ? 'good' : ''),
+    // The keep-alive's net, with both halves in the subtitle. Shown only once it has done
+    // something: a row of zeroes on a deployment nobody opted into reads as a broken feature.
+    // The net is what a decision rests on, so it is the number on the tile — presenting the
+    // saving alone would be exactly the half-truth this ledger exists to prevent.
+    (o.keepalive_pings || o.keepalive_saved_usd)
+      ? tile('keepalive-net', 'Keep-alive net',
+        costKnown ? usd(o.keepalive_net_usd) : 'unknown',
+        num(o.keepalive_pings) + ' pings ' + usd(o.keepalive_ping_usd) + ' · '
+          + num(o.keepalive_misses_avoided) + ' misses avoided ' + usd(o.keepalive_saved_usd),
+        costKnown ? (o.keepalive_net_usd < 0 ? 'bad' : 'good') : '')
+      : null,
   ]));
 
   // The bill, split by the tier it was charged on, and the only defensible denominator for a
@@ -1437,7 +1448,13 @@ async function loadRequests() {
         el('td', { class: 'num', text: compact(e.cache_read) + ' / ' + compact(e.cache_write) }),
         el('td', { class: 'num', text: e.token_accounting === 'complete' ? usd(e.cost_usd) : '—' }),
         el('td', { class: 'num', text: ms(e.cg_latency_ms) }),
-        el('td', {}, el('span', { class: 'pill ' + (e.cache_miss_reason || 'neutral'), text: e.cache_miss_reason || '—' })),
+        // A keep-alive ping is not agent traffic, and the consent copy promises it is
+        // identifiable here. Without the badge the row reads as a mysterious one-token request
+        // the user did not make, which is worse than not showing it at all.
+        el('td', {}, e.keepalive
+          ? el('span', { class: 'pill neutral', title: 'a keep-alive ping context-guru sent to '
+              + 'refresh this session\u2019s cached prompt', text: 'keep-alive' })
+          : el('span', { class: 'pill ' + (e.cache_miss_reason || 'neutral'), text: e.cache_miss_reason || '—' })),
         el('td', {}, el('span', { class: 'pill ' + e.token_accounting, text: e.token_accounting }))));
     }
     $('#req-page').textContent = `${num(page.requests.length)} shown of ${num(page.total)} matching`;
@@ -4244,6 +4261,12 @@ function loadSettings() {
         + 'of all spend. It is off by default because it is your money and nobody asked for it '
         + 'to be spent. Every ping is a row on your Requests tab marked keep-alive with its own '
         + 'cost, and the Overview ledger shows pings, ping cost, misses avoided and the net. '
+        + 'It also RETAINS, in memory only, your provider key and that session\u2019s last '
+        + 'request \u2014 which includes its conversation content \u2014 for the length of the '
+        + 'idle gap, up to about 14 minutes, because a request sent between your requests has '
+        + 'nothing else to authenticate or replay. That is separate from the transcript-storage '
+        + 'consent below, which is about writing content to DISK; this is held in memory, '
+        + 'masked, overwritten on release, and never persisted. '
         + 'Be aware of the shape: it is a small tax on most of the sessions it touches, funding '
         + 'a large rebate on a few. Measured over 5 days of this service\u2019s traffic, 34 of '
         + '119 pinged sessions came out ahead and the worst single session paid $2.42 for '

@@ -46,9 +46,10 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 		Provider: r.provider, Body: r.body, Session: r.session, Tenant: r.tn.ID, Bypass: r.bypassed,
 		Models: r.models, Window: r.window, CacheMode: h.opts.CacheMode,
 		SelfRates: r.rates,
-		// The mixed-TTL head, from this tenant's own cache policy. Off for every account
-		// unless opted in; see apply/headttl.go for why it is off even then on this
-		// deployment (the gateway strips the ttl field before the provider sees it).
+		// The mixed-TTL head, from this tenant's own cache policy. Off for every account unless
+		// opted in; see apply/headttl.go for why it is off even then — the ttl field reaches the
+		// provider, but Bedrock grants the 1h tier only for the Claude 4.5 family and silently
+		// downgrades the models this service actually runs.
 		HeadTTL1h:        r.tn.Cache.HeadTTL1h,
 		HeadTTLMinTokens: r.tn.Cache.HeadTTLMinTokens,
 		Mode:             mode, Tracker: h.tracker,

@@ -586,9 +586,18 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	// the provider's mechanism and the agent places most of the breakpoints itself. It earns
 	// its place by being the number that COLLAPSES when a compaction pipeline rewrites deep
 	// history, which is the failure this project has to be able to see.
-	e.CacheSavedUSD = float64(e.CacheRead) * (p.Input - p.CacheRead)
-	if e.CacheSavedUSD < 0 {
-		e.CacheSavedUSD = 0 // a provider whose cache reads cost MORE than fresh input saved nothing
+	//
+	// NOT on a keep-alive ping. A ping's whole job is to read the prefix, so it reports a large
+	// cache_read and would book ~$0.13 of "provider cache saving" per 48k ping against $0.0073
+	// of real cost — a fabricated saving on a figure PR #83 puts on the page, and at production
+	// ping volumes it is on the order of a thousand dollars. The counterfactual is the tell:
+	// without the keep-alive that ping does not exist, so there is no unbatched-fresh-input
+	// alternative for it to have saved anything against.
+	if !e.KeepAlive {
+		e.CacheSavedUSD = float64(e.CacheRead) * (p.Input - p.CacheRead)
+		if e.CacheSavedUSD < 0 {
+			e.CacheSavedUSD = 0 // a provider whose cache reads cost MORE than fresh input saved nothing
+		}
 	}
 	e.CachesplitSavedUSD = e.cachesplitSavedUSD(p)
 	e.KeepAliveSavedUSD = e.keepaliveSavedUSD(p)

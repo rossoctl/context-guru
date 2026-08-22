@@ -46,8 +46,16 @@ database cannot be replayed against the proxy. Show it once, at registration.
 **Provider keys belong to the caller.** Your agent sends its own key in
 `Authorization` / `x-api-key` / `x-goog-api-key`, and the proxy **forwards it
 unchanged** — your traffic, your provider account, your invoice. The service holds no
-provider credential of its own and stores none: the key is read off the request and
-dropped.
+provider credential of its own: the key is read off the request and dropped.
+
+**One exception, and only if you switch it on.** The idle prompt-cache keep-alive
+(`cache.keepalive`, off by default) sends a request *between* your requests, when none is
+in flight — so for opted-in accounts it must retain your key, and the last request's body,
+for the length of the idle gap. Held in memory only, masked at rest, overwritten on
+release, never logged or persisted, and bounded by a hard deadline of about 14 minutes.
+Every use is a dashboard row you can audit. If you have not enabled it, nothing is
+retained and the paragraph above holds unchanged. See
+[Keep an idle prompt cache warm](how-to/cache-keepalive.md).
 
 That is why identity moved to a header of its own. `x-context-guru-token` carries the
 `cg_live_…` token, and `copyHeaders` strips every `x-context-guru-*` header before

@@ -74,6 +74,13 @@ var headTTLPaths = [...]string{"tools", "system"}
 // sign. Gating on SIZE does change it (+$48.81 measured), because it excludes the
 // small-prefix requests that pay a premium and can never produce a large miss.
 //
+// ponytail: the gate is evaluated per request, so a session growing across the threshold starts
+// asking for 1h mid-conversation and a compaction can take it back — the head is then re-labelled
+// and, because this never STRIPS an existing ttl, a request can carry 1h while its neighbours do
+// not. Harmless while this is off and while the provider downgrades it anyway (a differing ttl
+// does not change the prefix hash, so neither direction costs a cache miss); if it is ever
+// switched on for real, latch the decision per session instead of recomputing it.
+//
 // The size is estimated as len(body)/4 rather than counted. This runs before any byte offset
 // into the body is taken and therefore before anything has been tokenized, and a BPE pass
 // over a whole request to decide a coarse 50,000-token threshold would cost more than the

@@ -3,6 +3,7 @@ package proxy
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -180,6 +181,36 @@ func (l *Limiter) AcquireSpare(tenantID string, reserveFrac float64) (release fu
 	}
 	t := l.forTenant(tenantID)
 
+	// CONCURRENCY FIRST, then the rate window. The reverse order charged the tenant's
+	// per-minute budget for pings it then refused on concurrency: ten refused pings consumed
+	// ten of a hundred requests a minute, and it fired precisely when the tenant was busiest
+	// and the refusals most likely. The rate counter is only incremented once the request is
+	// certain to be sent.
+	release = func() {}
+	if t.inFlight != nil {
+		// The slot is taken under the tenant's lock together with the headroom test, so two
+		// pings cannot both read "there is room" and then both take the last spare slot. The
+		// earlier version tested len() outside any lock and raced pings against each other as
+		// well as against real traffic.
+		t.mu.Lock()
+		spare := reserved(cap(t.inFlight), reserveFrac)
+		if len(t.inFlight) >= spare {
+			t.mu.Unlock()
+			// NOT counted as a refusal: nobody was refused. A skipped ping is our own decision
+			// not to spend a tenant's budget, and publishing it as a rate-limit event would make
+			// a healthy account look throttled on its own dashboard.
+			return func() {}, errNoSpare
+		}
+		select {
+		case t.inFlight <- struct{}{}:
+			release = func() { <-t.inFlight }
+		default:
+			t.mu.Unlock()
+			return func() {}, errNoSpare
+		}
+		t.mu.Unlock()
+	}
+
 	if l.lim.RequestsPerMinute > 0 {
 		limit := reserved(l.lim.RequestsPerMinute, reserveFrac)
 		t.mu.Lock()
@@ -189,44 +220,33 @@ func (l *Limiter) AcquireSpare(tenantID string, reserveFrac float64) (release fu
 		}
 		if t.count >= limit {
 			t.mu.Unlock()
-			// NOT counted as a refusal: nobody was refused. A skipped ping is our own
-			// decision not to spend a tenant's budget, and publishing it as a rate-limit
-			// event would make a healthy account look throttled on its own dashboard.
+			release() // give the concurrency slot straight back; this ping is not being sent
 			return func() {}, errNoSpare
 		}
 		t.count++
 		t.mu.Unlock()
 	}
-
-	if t.inFlight != nil {
-		// Best-effort headroom: a racing real request may take the slot between this check
-		// and the send, in which case the ping simply loses the race and is skipped.
-		if len(t.inFlight) >= reserved(cap(t.inFlight), reserveFrac) {
-			return func() {}, errNoSpare
-		}
-		select {
-		case t.inFlight <- struct{}{}:
-			return func() { <-t.inFlight }, nil
-		default:
-			return func() {}, errNoSpare
-		}
-	}
-	return func() {}, nil
+	return release, nil
 }
 
 // errNoSpare says a tenant had no slack for a request of ours. Deliberately not a
 // statusError: nothing is being returned to a caller, and this is not a failure.
 var errNoSpare = errors.New("no spare capacity for a background request")
 
-// reserved is the bound minus its reserved share, floored at 1 so a limit of 1 still permits
-// the occasional background request rather than none ever.
+// reserved is how much of a bound background traffic may use: the bound minus its reserved
+// share, rounded so the reservation is never less than one.
+//
+// Floored at ZERO, not at one. A floor of one meant that at Concurrent: 1 a ping was allowed to
+// take the only slot and a real request arriving behind it got a 429 — the exact outcome
+// "a ping must never crowd out a real request" forbids. A tenant whose whole budget is one
+// in-flight request has no slack, and the honest answer is that it is never pinged.
 func reserved(limit int, frac float64) int {
 	if frac <= 0 {
 		return limit
 	}
-	n := limit - int(float64(limit)*frac+0.5)
-	if n < 1 {
-		n = 1
+	n := limit - int(math.Ceil(float64(limit)*frac))
+	if n < 0 {
+		n = 0
 	}
 	return n
 }

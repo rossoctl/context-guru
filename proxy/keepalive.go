@@ -43,10 +43,13 @@ import (
 //	 entry, not from the end of its response."
 //
 // So a cache READ refreshes the lifetime, and a read costs 0.1x base input where re-creating
-// the prefix costs 1.25x. One ping buys back one re-creation at 11.5:1. Simulated over the
-// production window at the shipped defaults: 9,234 pings costing $125.29 convert 182 misses
-// worth $295.37, net **+$170.08**, which is 5.42% of spend and 17.5x everything the whole
-// transformation pipeline delivered over the same window ($9.72).
+// the prefix costs 1.25x. One ping buys back one re-creation at 11.5:1.
+//
+// Replayed over the production window THROUGH THIS CODE (TestKeepAliveOnProductionSnapshot) at
+// the shipped defaults: 912 pings costing $90.76 convert 148 of 357 addressable misses worth
+// $215.84, net **+$125.08** — 3.98% of spend, and 12.9x everything the whole transformation
+// pipeline delivered over the same window ($9.72). Every figure here comes from that replay, so
+// a policy change that moves the number moves this comment too.
 //
 // # Why it is host-level and not a component
 //
@@ -73,10 +76,14 @@ import (
 //     rather than pinged again.
 //  2. **Pinging a session that has ENDED is pure waste.** It is not detectable: only 290 of
 //     3,891 session-final requests (7.5%) end with `end_turn`, the other 3,476 end
-//     mid-tool-loop and look exactly like an active session. K is therefore the control, and
-//     it is why the default is 2 — session-final waste scales linearly in K (measured
-//     3,891 sessions x K pings, $18.30 at K=2) so the net peaks early and collapses: +$170.08
-//     at K=2, +$162.56 at K=3, +$27.99 at K=12, −$99.72 at K=20.
+//     mid-tool-loop and look exactly like an active session. K is therefore the control, and it
+//     is why the default is small: the marginal ping's yield falls while its cost does not, so
+//     the net flattens and then collapses — +$125.08 at K=2, +$130.80 at K=3, +$85.28 at K=1,
+//     +$58.35 at K=12.
+//
+//     K=2 and K=3 are a TIE on money (the $5 between them is inside the run-to-run wobble), so
+//     the default is 2 for the request-volume reason and not a dollar reason: it sends 26% fewer
+//     pings on a gateway path that returned 180 HTTP 429s in the same window.
 //
 // A note on what this deliberately does NOT do: it does not stop pinging a session whose last
 // response ended with `end_turn`. That reads like a session-end signal and is the opposite.
@@ -826,9 +833,12 @@ func (k *keeper) record1(j pingJob, u Usage, status int, ms float64) float64 {
 // invalidate the prefix — the model, the tools, `tool_choice`, the thinking parameters, any
 // system or message content — is left exactly as it was sent.
 //
-// max_tokens is 1, not 0: 0 is the documented pre-warm form but is rejected alongside
-// streaming and thinking, and a rejected ping is a wasted round trip. 1 is accepted
-// everywhere and generates one token.
+// max_tokens is 1 rather than 0. The reason is NOT that 0 is rejected alongside streaming and
+// thinking — this ping sets `stream: false` and refuses thinking-enabled sessions, so neither
+// applies to it. It is that 1 is the value every backend on this path accepts without
+// negotiation, and the difference is one output token: $0.0000076 on sonnet against the
+// $0.0073 the read itself costs, i.e. a tenth of a percent. Not worth a compatibility risk on
+// the one request that must not fail for a surprising reason.
 //
 // stream is false so the response is one small JSON body with its usage block in it, rather
 // than an SSE stream this would have to read to the end to price.

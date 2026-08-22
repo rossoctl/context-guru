@@ -192,3 +192,29 @@ func TestPingsAreVisibleAsRowsAndExcludedFromAggregates(t *testing.T) {
 		t.Errorf("%d rows flagged keepalive in the list, want 1", pings)
 	}
 }
+
+// A ping reads the whole prefix by design, so every figure derived from `cache_read` has to
+// exclude it or the mechanism credits itself. `cache_saved_usd` is the one that bites: it is a
+// headline figure elsewhere on the page, and at production ping volumes an unguarded ping row
+// fabricates it on the order of a thousand dollars.
+func TestPingsDoNotCreditProviderCacheSavings(t *testing.T) {
+	ping := &Event{TS: 1, SessionID: "s", Model: "aws/claude-sonnet-5", KeepAlive: true,
+		CacheRead: 48_576, OutputTokens: 1}
+	ping.Price(ibmSonnet, true)
+	if ping.CacheSavedUSD != 0 {
+		t.Errorf("a ping booked $%.4f of provider cache saving; without the keep-alive that "+
+			"request does not exist, so there is nothing it saved against", ping.CacheSavedUSD)
+	}
+	// It still costs what it costs — the guard must suppress the phantom saving, not the spend.
+	if ping.CostUSD <= 0 {
+		t.Error("the ping's own cost was suppressed too")
+	}
+	// And an identical AGENT request still earns the credit, so the guard is on the ping and not
+	// on the shape of the row.
+	agent := &Event{TS: 1, SessionID: "s", Model: "aws/claude-sonnet-5",
+		CacheRead: 48_576, OutputTokens: 1}
+	agent.Price(ibmSonnet, true)
+	if agent.CacheSavedUSD <= 0 {
+		t.Error("an ordinary cache hit lost its provider-cache diagnostic")
+	}
+}

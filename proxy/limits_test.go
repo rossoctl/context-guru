@@ -107,3 +107,61 @@ func contains(hay, needle string) bool {
 		return false
 	})()
 }
+
+// A ping must never crowd out a real request, and the two ways that promise was broken are
+// both cheap to assert.
+func TestAcquireSpareLeavesRealTrafficAlone(t *testing.T) {
+	t.Run("a refused ping does not spend the rate window", func(t *testing.T) {
+		// Concurrency of 1 means no slack at all, so every ping is refused — and must cost the
+		// tenant nothing. The earlier order incremented the minute counter first and never gave
+		// it back, so ten refused pings ate ten of a hundred requests a minute, precisely when
+		// the tenant was busiest.
+		l := NewLimiter(Limits{RequestsPerMinute: 10, Concurrent: 1})
+		for i := 0; i < 10; i++ {
+			if rel, err := l.AcquireSpare("t", 0.25); err == nil {
+				rel()
+				t.Fatalf("ping %d was allowed with no spare concurrency", i)
+			}
+		}
+		// The tenant's own budget must be untouched: ten real requests still fit.
+		for i := 0; i < 10; i++ {
+			rel, err := l.Acquire("t")
+			if err != nil {
+				t.Fatalf("real request %d was refused after %d refused pings: %v", i, 10, err)
+			}
+			rel()
+		}
+	})
+
+	t.Run("a ping never takes the last slot", func(t *testing.T) {
+		// Nothing is in flight, so this is the case the old test missed: with a budget of one,
+		// taking the only slot IS crowding out whatever arrives next.
+		l := NewLimiter(Limits{Concurrent: 1})
+		if rel, err := l.AcquireSpare("t", 0.25); err == nil {
+			rel()
+			t.Error("a ping took the tenant's only concurrency slot on an idle limiter")
+		}
+		// With room for four, one ping may use one and three stay free for real traffic.
+		l4 := NewLimiter(Limits{Concurrent: 4})
+		rel, err := l4.AcquireSpare("t", 0.25)
+		if err != nil {
+			t.Fatalf("a ping was refused with three spare slots: %v", err)
+		}
+		defer rel()
+		for i := 0; i < 3; i++ {
+			r, err := l4.Acquire("t")
+			if err != nil {
+				t.Fatalf("real request %d refused while a ping held one of four slots: %v", i, err)
+			}
+			defer r()
+		}
+	})
+
+	t.Run("reserved floors at zero", func(t *testing.T) {
+		for _, tc := range []struct{ limit, want int }{{1, 0}, {2, 1}, {4, 3}, {16, 12}, {100, 75}} {
+			if got := reserved(tc.limit, 0.25); got != tc.want {
+				t.Errorf("reserved(%d) = %d, want %d", tc.limit, got, tc.want)
+			}
+		}
+	})
+}

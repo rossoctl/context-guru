@@ -67,16 +67,20 @@ type CacheConfig struct {
 	// is 5 minutes and "the lifetime is measured from the start of the request that writes
 	// or reads the cache entry, not from the end of its response", so the budget is 300s
 	// from the previous request's START. Simulated over the production window: X=240 wastes
-	// 175 pings on gaps that would have hit anyway, X=280 wastes 39, and the net moves from
-	// +$135.38 to +$170.08.
+	// 111 pings on gaps that would have hit anyway, X=280 wastes 53, and the net moves from
+	// +$94.85 to +$125.08.
 	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
 	// KeepAliveMaxPings is K: the most pings one idle span may send. 0 =
 	// DefaultKeepAliveMaxPings (2).
 	//
-	// K is the main control on the one waste this mechanism cannot avoid — a session that
-	// has ENDED looks exactly like one that is thinking. Session-final waste scales
-	// linearly in K (measured: 3,891 sessions x K pings), so the net peaks early and
-	// collapses: K=2 nets +$170.08, K=3 +$162.56, K=12 +$27.99, K=20 −$99.72.
+	// K is the main control on the one waste this mechanism cannot avoid — a session that has
+	// ENDED looks exactly like one that is thinking. The marginal ping's yield falls while its
+	// cost does not, so the net flattens and then collapses: K=1 nets +$85.28, K=2 +$125.08,
+	// K=3 +$130.80, K=12 +$58.35.
+	//
+	// K=2 and K=3 TIE on money — the $5 between them is inside the run-to-run wobble — so the
+	// default is 2 for the request-volume reason rather than a dollar one: 26% fewer pings on a
+	// gateway path that returned 180 HTTP 429s over the same window.
 	KeepAliveMaxPings int `yaml:"keepalive_max_pings"`
 	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
 	// DefaultKeepAliveMaxUSDPerPing.
@@ -94,9 +98,9 @@ type CacheConfig struct {
 	// request). 0 = DefaultKeepAliveMinPrefix.
 	//
 	// This is the gate that makes the policy deployable rather than merely profitable.
-	// Combined with skipping a session's FIRST request, it sends 8.7x fewer pings (1,060
-	// against 9,234 over the production window) for 3.3% less money, because what it drops is
-	// the near-free pings on tiny prefixes. That matters twice over: those 8,000 requests are
+	// Combined with skipping a session's FIRST request, it sends 9.8x fewer pings (912 against
+	// 8,915 over the production window) for 1.7% less money, because what it drops is the
+	// near-free pings on tiny prefixes. That matters twice over: those 8,000 requests are
 	// real load on a gateway that already returned 180 HTTP 429s in the same window, and the
 	// gate leaves 3,748 of 3,891 sessions untouched entirely — which is the fairness answer as
 	// well as the efficiency one.
@@ -114,13 +118,16 @@ type CacheConfig struct {
 	// instead — and simulates net positive at every head share, +$20.19 at f=0.10 to
 	// +$60.56 at f=0.30.
 	//
-	// It is still off, because on THIS deployment the tier does not arrive. LiteLLM's
-	// Bedrock transform drops the `ttl` field before the request leaves (its
-	// `_remove_ttl_from_cache_control`, upstream issues #19848 / #20326), and Bedrock's own
-	// 1h support covers the Claude 4.5 family rather than the Opus 5 / 4.8 / Sonnet 5 this
-	// service runs. Zero 1h writes appear in 19,805 production requests. So this ships
-	// implemented, verifiable and off: Usage.CacheWrite1h is what says whether flipping it
-	// on did anything, and until that column is nonzero the honest projection is $0.
+	// It is still off, because on the models that carry this service's spend the tier does not
+	// arrive. Measured live, one request each with the head labelled 1h:
+	// aws/claude-haiku-4-5 was GRANTED (ephemeral_1h_input_tokens 36,251 of 36,574 written),
+	// aws/claude-sonnet-5 was silently downgraded (0 of 48,212, and an otherwise normal 200).
+	// So the ttl field DOES reach the provider — Haiku honouring it proves that — and it is
+	// Bedrock's model coverage that refuses: the Claude 4.5 family, not the Opus 5 / 4.8 /
+	// Sonnet 5 this service runs. Zero 1h writes appear in 19,805 production requests, which is
+	// the same fact from the billing side. So this ships implemented, verifiable and off:
+	// Usage.CacheWrite1h is what says whether flipping it on did anything, and while that is
+	// zero on a model the honest projection for it is $0.
 	HeadTTL1h bool `yaml:"head_ttl_1h"`
 	// HeadTTLMinTokens gates the 1h head on the request's own size. 0 =
 	// DefaultHeadTTLMinTokens (50,000).

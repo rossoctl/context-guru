@@ -154,7 +154,18 @@ expense.
 To ping a session the proxy keeps that session's last request body, and — where the upstream
 is caller-pays, which is the default — the caller's own provider credential. There is no
 alternative: the ping happens when no request is in flight, so nothing else can authenticate
-it, and pinging on the operator's key would bill the wrong party.
+it or supply the byte-identical prefix a cache read requires, and pinging on the operator's
+key would bill the wrong party.
+
+**The body is conversation content, and enabling the keep-alive is what consents to holding
+it.** It is up to 8 MiB of that session's last request — system prompt, tools, and the
+message history — held for the length of the idle gap. This is deliberately *not* covered by
+the transcript-storage consent, which is a different promise about a different thing: that
+one governs writing content to **disk**, where a manager can read it and a retention window
+applies. This is memory only, masked, overwritten on release, never persisted, and gone
+within about 14 minutes. It cannot be reduced further — the prefix hash covers the whole
+`tools` → `system` → `messages` sequence, so a ping that trimmed the body would miss the
+cache and cost 12.5x instead of saving 11.5x, which is the mechanism inverted.
 
 Seven controls, because this is the one place the service holds a caller's credential beyond
 the life of a request:
