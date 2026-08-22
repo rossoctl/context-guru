@@ -128,6 +128,11 @@ type ExtractLLM struct {
 	mu            sync.Mutex
 	llmSeen       map[string]int // session -> count of qualifying (LLM-eligible) requests
 
+	// selectionMode picks HOW the model decides. "" (default) = the per-output trim loop.
+	// "merged" = ONE bulk adjudication carrying the co-reference criterion; see
+	// extract_llm_merged.go, and note the prior is negative -- the per-output form of the
+	// merged idea is refuted and the deterministic index beat every model arm measured.
+	selectionMode string
 	// minTokensSet records whether the operator pinned min_tokens / trigger explicitly.
 	// When they did, their threshold governs (backward compatibility). When they did not,
 	// the derived pressure-based trigger is the default — no per-workload tuning (#28 E).
@@ -321,6 +326,18 @@ type extractLLMConfig struct {
 	// static table cannot name (a self-hosted id like `qwen3-coder-30b`, or a gateway alias
 	// that hides the real model). Unset = resolved per model, see (*ExtractLLM).inputLimit.
 	ModelMaxInput int `yaml:"model_max_input_tokens"`
+	// SelectionMode chooses the decision shape. Unset (default) = per-output trimming, one call
+	// per output. "merged" = a single BULK adjudication over all candidates together, carrying the
+	// co-reference evidence in the prompt, so one call makes both the backward-looking and
+	// forward-looking judgement.
+	//
+	// The default is not a preference, it is a measurement. Per-output merged judgement is REFUTED
+	// (6% live-kept, inside the drop-everything null model's error bar), bulk is the only model
+	// shape that worked (58%), and the free deterministic index still beat both (95% at 11%
+	// false-drop). See docs/results/coref-selection-experiment.md and
+	// docs/experiments/loca/iter009/results.md. `merged` exists to test REWARD, which no
+	// decision-quality experiment can speak to.
+	SelectionMode string `yaml:"selection_mode"`
 	// SkipFileReads controls whether line-numbered source-file dumps are left verbatim.
 	// Tri-state: unset = AUTO (skip when the request is prompt-cached, reduce otherwise);
 	// true = always skip; false = always reduce. Rationale (measured, SWE-bench 50):
@@ -406,6 +423,15 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	if cfg.PrefixMinLaterTurns != nil {
 		prefixMinLater = *cfg.PrefixMinLaterTurns
 	}
+	switch strings.ToLower(strings.TrimSpace(cfg.SelectionMode)) {
+	case "", "merged":
+	default:
+		// Reject at construction rather than silently falling back: a mistyped selection_mode
+		// would otherwise run the DEFAULT shape while the operator believed they were measuring
+		// the merged one, and the arms are indistinguishable from the outside. 15 of this repo's
+		// 23 components parse their own YAML non-strictly, so a typo here is otherwise invisible.
+		return nil, fmt.Errorf("extract_llm: selection_mode %q is not one of \"\" (per-output) or \"merged\"", cfg.SelectionMode)
+	}
 	return &ExtractLLM{
 		minTokens: cfg.MinTokens, strategy: cfg.Strategy,
 		modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(),
@@ -417,7 +443,7 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 		prefixClasses: prefixClasses,
 		pricing:       cheapmodel.PricingFromEnv(),
 		prevTokens:    map[string]int{}, modelName: cfg.Model.Model,
-		modelMaxInput: cfg.ModelMaxInput,
+		modelMaxInput: cfg.ModelMaxInput, selectionMode: strings.ToLower(strings.TrimSpace(cfg.SelectionMode)),
 	}, nil
 }
 
@@ -835,6 +861,27 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	if len(cands) > 0 {
 		type outT struct{ projected, summary string }
 		out := make([]outT, len(cands))
+
+		// MERGED MODE: one bulk adjudication instead of one call per output. It fills the same
+		// `out` slots, so phase 3 below -- freeze, marker, store, never-worse, every counter -- is
+		// shared verbatim. Only the decision differs, which is what makes the two arms comparable.
+		if e.selectionMode == "merged" {
+			in := make([]mergedInput, 0, len(cands))
+			for _, cd := range cands {
+				in = append(in, mergedInput{Idx: cd.i, Content: cd.content, ID: cd.id})
+			}
+			// ONE call for the whole batch -- that is the entire point of the merged shape, and
+			// hoisting it out of the loop is load-bearing rather than stylistic: per-candidate
+			// calls would be the per-output design that measured 6% live-kept.
+			dec := e.adjudicateMerged(req, rep, c, in, goal, model)
+			for k := range cands {
+				if d, ok := dec[cands[k].i]; ok {
+					out[k] = outT{d.Projected, d.Summary}
+				}
+			}
+			goto splice
+		}
+		{
 		sem := make(chan struct{}, llmConcurrency)
 		var wg sync.WaitGroup
 		for k := range cands {
@@ -904,6 +951,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			}(k)
 		}
 		wg.Wait()
+		}
+	splice:
 		for k := range cands { // Phase 3 (serial): freeze + splice.
 			if out[k].projected == "" {
 				continue
