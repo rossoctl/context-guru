@@ -343,7 +343,37 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// retained message's ORIGINAL raw bytes (byte-lossless, incl. Anthropic
 	// tool_result) and marshaling only genuinely new messages (the summary).
 	if len(chat.Input) != len(norm) {
-		nb, ok := rebuildCountChanged(body, msgsRaw.Array(), normPre, slots, chat.Input)
+		// Write Anthropic tool_result text rewrites into the BODY before rebuilding.
+		//
+		// A synthetic role=tool message cannot be marshaled into an Anthropic request — the
+		// provider answers `messages: Unexpected role "tool"`. The rebuild below emits a message
+		// verbatim only when it byte-matches its pre-pipeline form, so a tool message whose text a
+		// component rewrote (format rewrites hundreds per run) would fall through to a fresh
+		// marshal and produce exactly that rejection. Measured live: 12 of 39 runs, immediately
+		// after the tool-call-id fix stopped these messages from being silently deleted — one
+		// defect had been masking the other.
+		//
+		// The write-back is the same mechanism the equal-count path uses (sjson at the block's
+		// exact path), applied here first so the rebuild only ever has to decide which messages
+		// to keep, never how to serialize one.
+		pre := body
+		for i := range norm {
+			if i >= len(slots) || slots[i].kind != anthropicToolText {
+				continue
+			}
+			id := norm[i].ChatToolMessage
+			if id == nil || id.ToolCallID == nil {
+				continue
+			}
+			newText, found := toolTextByID(chat.Input, *id.ToolCallID)
+			if !found || newText == slots[i].preText {
+				continue
+			}
+			if nb, err := sjson.SetBytes(pre, slots[i].path, newText); err == nil {
+				pre = nb
+			}
+		}
+		nb, ok := rebuildCountChanged(pre, gjson.GetBytes(pre, "messages").Array(), normPre, slots, norm, chat.Input)
 		if !ok && systemSplit {
 			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
 			return res
@@ -763,7 +793,18 @@ func jsonEqual(a, b []byte) bool {
 // normalized message (a survivor) is emitted as its ORIGINAL body raw bytes
 // (byte-lossless); genuinely new messages (the summary) are marshaled fresh.
 // Fail-open (returns body,false) if any survivor can't be mapped to the body.
-func rebuildCountChanged(body []byte, orig []gjson.Result, normPre [][]byte, slots []slot, out []bschemas.ChatMessage) ([]byte, bool) {
+// toolTextByID finds the post-pipeline text of the synthetic tool message answering id.
+func toolTextByID(msgs []bschemas.ChatMessage, id string) (string, bool) {
+	for i := range msgs {
+		tm := msgs[i].ChatToolMessage
+		if tm != nil && tm.ToolCallID != nil && *tm.ToolCallID == id {
+			return schema.MessageText(msgs[i]), true
+		}
+	}
+	return "", false
+}
+
+func rebuildCountChanged(body []byte, orig []gjson.Result, normPre [][]byte, slots []slot, norm, out []bschemas.ChatMessage) ([]byte, bool) {
 	// The rebuild emits ONLY slot-mapped messages, so a body message normalize skipped
 	// (unparseable — it has no slot) would be silently DELETED from the forwarded
 	// request. Deleting a message is an ALTERED request, not a fail-open one, so decline
@@ -790,10 +831,23 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, normPre [][]byte, slo
 			return body, false
 		}
 		matched := -1
-		for k := range normPre {
+		// A synthetic Anthropic tool message is matched by tool_call_id, NOT by bytes: its text may
+		// have been rewritten by a component, and that rewrite has already been written into the
+		// body above. Byte-matching it would fail and send it down the fresh-marshal path, which
+		// emits `role: "tool"` and is rejected outright by Anthropic.
+		if tm := out[i].ChatToolMessage; tm != nil && tm.ToolCallID != nil {
+			for k := range norm {
+				ntm := norm[k].ChatToolMessage
+				if !used[k] && ntm != nil && ntm.ToolCallID != nil &&
+					*ntm.ToolCallID == *tm.ToolCallID {
+					matched = k
+					break
+				}
+			}
+		}
+		for k := 0; matched < 0 && k < len(normPre); k++ {
 			if !used[k] && bytes.Equal(mb, normPre[k]) {
 				matched = k
-				break
 			}
 		}
 		if matched < 0 {
