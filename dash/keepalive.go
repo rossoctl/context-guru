@@ -6,6 +6,8 @@ import (
 	"math"
 	"math/rand"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -458,20 +460,23 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// Axis labels are read by a person, so they are ROUNDED. %g on 580/60 renders
+	// "9.666666666666666m", which is what the first live render of this panel showed.
 	secs := func(v float64) string {
-		if v >= 3600 {
-			return fmt.Sprintf("%gh", v/3600)
+		switch {
+		case v >= 3600:
+			return trimZero(v/3600) + "h"
+		case v >= 60:
+			return trimZero(v/60) + "m"
+		default:
+			return trimZero(v) + "s"
 		}
-		if v >= 60 {
-			return fmt.Sprintf("%gm", v/60)
-		}
-		return fmt.Sprintf("%gs", v)
 	}
 	toks := func(v float64) string {
 		if v >= 1000 {
-			return fmt.Sprintf("%gk", v/1000)
+			return trimZero(v/1000) + "k"
 		}
-		return fmt.Sprintf("%g", v)
+		return trimZero(v)
 	}
 	for i, label := range bandLabels(gapEdges, secs) {
 		out.GapBands = append(out.GapBands, Band{Label: label, N: gapN[i], USD: gapUSD[i],
@@ -877,27 +882,55 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 	return out, nil
 }
 
-// AccountMedianPrefix is the account's own median billed prefix at a lapsed entry, which is what
-// the calculator prefills when no session is selected. 0 when it has no addressable expiry.
-func (d *DB) AccountMedianPrefix(f Filter) (int64, error) {
+// AccountMedianPrefix is the account's own median billed prefix at a lapsed entry, and the model
+// most of those lapses were on. What the calculator prefills when no session is selected.
+//
+// The MODEL matters as much as the size: a rate belongs to a model, and without one the panel
+// reported "not priced" on a deployment whose price list was perfectly good. The modal model of
+// this account's own expiries is an honest answer to "what would this cost me"; a blended
+// average across models is not, and is the defect class this project has hit five times.
+// Returns 0 and "" when the account has no addressable expiry.
+func (d *DB) AccountMedianPrefix(f Filter) (int64, string, error) {
 	aCond, aArgs := addressable(f)
-	rows, err := d.sql.Query(aCond+` SELECT COALESCE(prev_prefix,0) FROM addressable`, aArgs...)
+	rows, err := d.sql.Query(aCond+` SELECT COALESCE(prev_prefix,0), model FROM addressable`, aArgs...)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	defer rows.Close()
 	var xs []float64
+	byModel := map[string]int{}
 	for rows.Next() {
 		var v float64
-		if err := rows.Scan(&v); err != nil {
-			return 0, err
+		var m sql.NullString
+		if err := rows.Scan(&v, &m); err != nil {
+			return 0, "", err
 		}
 		xs = append(xs, v)
+		if m.String != "" {
+			byModel[m.String]++
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return int64(pctlF(xs, 0.50)), nil
+	// Ties broken by name, so the same window gives the same answer twice.
+	var best string
+	for _, m := range sortedStrings(byModel) {
+		if best == "" || byModel[m] > byModel[best] {
+			best = m
+		}
+	}
+	return int64(pctlF(xs, 0.50)), best, nil
+}
+
+// sortedStrings is the keys of a map in a stable order.
+func sortedStrings[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // LastBilledPrefix is one session's most recent billed prefix and model, from AGENT rows only.
@@ -1060,10 +1093,24 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 		return v
 	}
 	lo, hi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings) })
-	if lo <= 0 && hi >= 0 {
-		out.Refused = fmt.Sprintf("your own history cannot tell this apart from zero: over %d "+
-			"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, which includes "+
-			"no change at all", out.N, out.Sessions, lo, hi)
+	// Condition 3, and it is a ONE-SIDED test. An interval that spans zero cannot tell the
+	// effect from nothing; an interval entirely BELOW zero is worse than inconclusive — this
+	// account's own gaps say the mechanism would cost it money — and both are refusals. The
+	// two-sided reading of "excludes zero" would have recommended a policy whose own 90%
+	// interval was -$39 to -$5, which is what the first live look at this route produced: an
+	// account whose median idle gap is 57 minutes has almost nothing inside any coverage worth
+	// having, so it pays for pings and converts nothing.
+	if lo <= 0 {
+		if hi < 0 {
+			out.Refused = fmt.Sprintf("your own history says this would COST you money: over %d "+
+				"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, entirely "+
+				"below zero. Your idle gaps are mostly too long for any setting worth having to "+
+				"reach", out.N, out.Sessions, lo, hi)
+		} else {
+			out.Refused = fmt.Sprintf("your own history cannot tell this apart from zero: over %d "+
+				"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, which "+
+				"includes no change at all", out.N, out.Sessions, lo, hi)
+		}
 		return out, nil
 	}
 	out.IdleSeconds, out.MaxPings = recIdleSeconds, recMaxPings
@@ -1165,4 +1212,11 @@ func (d *DB) spansBySession(f Filter) (map[string][]float64, error) {
 		out[s] = append(out[s], g)
 	}
 	return out, rows.Err()
+}
+
+// trimZero renders a number to at most one decimal place and drops a trailing ".0", so a band
+// edge reads as "9.7m" rather than "9.666666666666666m" and as "5m" rather than "5.0m".
+func trimZero(v float64) string {
+	s := strconv.FormatFloat(v, 'f', 1, 64)
+	return strings.TrimSuffix(s, ".0")
 }

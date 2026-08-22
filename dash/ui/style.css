@@ -1293,3 +1293,6 @@ pre.yaml {
    panel's own table view rather than by making a div a button. */
 .bar-row.clickable { cursor: pointer; }
 .bar-row.clickable:hover .bar-track { outline: 2px solid var(--accent-soft); }
+/* Exactly zero draws NOTHING. .bar-fill carries a 2px min-width so a very small value stays
+   visible, and on a histogram with empty bands that nub read as "a little" rather than "none". */
+.bar-fill.zero { min-width: 0; }

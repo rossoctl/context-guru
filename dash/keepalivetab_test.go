@@ -490,6 +490,39 @@ func TestRecommendationRefusesWhenTheIntervalCrossesZero(t *testing.T) {
 	}
 }
 
+// An interval that sits entirely BELOW zero is a refusal, not a recommendation.
+//
+// Found by looking at the page: the first live render of this route produced "Suggested: 280 s,
+// 2 pings — expected -$38.63 to -$4.54", because the two-sided reading of "the interval excludes
+// zero" admits an account the mechanism would simply cost money. An account whose idle gaps are
+// mostly an hour long has nothing inside any coverage worth having.
+func TestRecommendationRefusesAnIntervalEntirelyBelowZero(t *testing.T) {
+	// 30 expiries whose gaps are far past any coverage at X=280 (2.8 hours), on sessions that
+	// nevertheless have plenty of idle spans to be pinged through. Cost with no conversion.
+	fx := newKAFixture(t, kaSpread(t, 30, 10_000, 2.0)...)
+	rec, err := fx.db.KeepAliveRecommend(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.N < recMinMisses || rec.Requests < recMinRequests {
+		t.Fatalf("the fixture does not clear conditions 1 and 2: n=%d requests=%d",
+			rec.N, rec.Requests)
+	}
+	if rec.Refused == "" {
+		t.Errorf("an account this policy would cost money got a recommendation: %d/%d pings, "+
+			"$%.2f to $%.2f", rec.IdleSeconds, rec.MaxPings, rec.LoUSD, rec.HiUSD)
+	}
+	if rec.MaxPings != 0 || rec.LoUSD != 0 || rec.HiUSD != 0 {
+		t.Error("a refusal carried a recommendation anyway")
+	}
+	// And the refusal SAYS which way: "cannot tell it apart from zero" and "this would cost you
+	// money" are different findings and only one of them is actionable.
+	if !strings.Contains(rec.Refused, "COST") {
+		t.Errorf("the refusal does not say the mechanism would cost this account money: %q",
+			rec.Refused)
+	}
+}
+
 // The wire carries NO point estimate. Not a zero, not an omitted field with a name — the field
 // does not exist, because a field that exists gets rendered.
 func TestRecommendationPayloadCarriesNoPointEstimate(t *testing.T) {

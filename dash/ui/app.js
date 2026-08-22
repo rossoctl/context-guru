@@ -506,7 +506,7 @@ function barRows(host, rows, opts = {}) {
     },
       el('div', { class: 'bar-label', text: r.label }),
       el('div', { class: 'bar-track' }, el('div', {
-        class: 'bar-fill' + (r.value < 0 ? ' neg' : ''),
+        class: 'bar-fill' + (r.value < 0 ? ' neg' : '') + (r.value === 0 ? ' zero' : ''),
         style: 'width:' + width + '%' + (r.color ? ';background:' + r.color : ''),
       })),
       el('div', { class: 'bar-val' + (r.available === false ? ' na' : ''), text: r.display }));
@@ -7602,7 +7602,9 @@ async function loadKASessions() {
       el('td', { class: 'num' }, s.saved_usd ? usd(s.saved_usd) : '—'),
       el('td', { class: 'num ' + (net < 0 ? 'bad-text' : net > 0 ? 'good-text' : '') },
         s.pings || s.saved_usd ? usd(net) : '—'),
-      el('td', { class: 'num' }, compact(s.last_prefix)),
+      // 0 here means the last request reported no usage at all, which is an absence rather than
+      // a prompt of no size — and it is also the reason such a session cannot be priced.
+      el('td', { class: 'num' }, s.last_prefix > 0 ? compact(s.last_prefix) : '—'),
       el('td', {}, el('button', {
         class: 'ghost small', 'data-testid': 'ka-arm-' + s.session_id,
         onclick: () => armSession(s),
@@ -7610,13 +7612,17 @@ async function loadKASessions() {
   }
   // The concentration, and the fact that it does not transfer. Both, in one sentence: a table
   // sorted by cost invites exactly the inference the split-half test refutes.
-  const top = kaState.sessions.slice(0, 8).reduce((a, s) => a + s.expiry_usd, 0);
+  // The concentration is only a finding when there is something to concentrate: "the top 7 of
+  // these hold $81.40 of $81.40" is a tautology, and it is what the first live render said.
   const all = kaState.sessions.reduce((a, s) => a + s.expiry_usd, 0);
-  $('#ka-sessions-note').textContent =
-    `The top ${Math.min(8, kaState.sessions.length)} of these hold ${usd(top)} of ${usd(all)}. ` +
-    'That concentration is real and it does NOT transfer forward: sessions are ephemeral ' +
-    '(median lifetime about zero hours), so this is a description of the past and not a list ' +
-    'to act on next week.';
+  const lead = kaState.sessions.length > 8
+    ? `The top 8 of these hold ${usd(kaState.sessions.slice(0, 8).reduce((a, s) => a + s.expiry_usd, 0))}`
+      + ` of ${usd(all)}. That concentration is real and it does NOT transfer forward: `
+    : `${usd(all)} of cache expiries across ${kaState.sessions.length} of your sessions. `
+      + 'Where it concentrates does NOT transfer forward: ';
+  $('#ka-sessions-note').textContent = lead +
+    'sessions are ephemeral (median lifetime about zero hours), so this is a description of the ' +
+    'past and not a list to act on next week.';
 }
 
 /**
@@ -7888,7 +7894,14 @@ async function loadKACalc() {
   // Reach and cost side by side, so the flattening is visible: on our own traffic K=1→K=2 takes
   // reach from 30% to 51% of the recoverable dollars and K=3, K=4 add 6 and 4 points, while
   // ping count keeps climbing.
-  barRows(host, c.rows.map((r) => ({
+  //
+  // Its OWN container: barRows clears the host it is given, and passing the panel's host wiped
+  // the ladder table above it. The page looked plausible — a bar per rung, all the numbers
+  // present — and the table it replaced was simply absent, which is precisely why this was found
+  // by opening the page and not by reading the code.
+  const share = el('div');
+  host.appendChild(share);
+  barRows(share, c.rows.map((r) => ({
     label: 'K=' + r.max_pings + (r.current ? ' (current)' : ''),
     value: r.share_of_addressable_pct, max: 100,
     display: pct(r.share_of_addressable_pct, 1) + ' · ' + num(r.pings) + ' pings',
@@ -7922,8 +7935,15 @@ async function loadKARecommend() {
   }
   clear(host);
   if (rec.refused) {
-    host.appendChild(el('div', { class: 'banner warn', 'data-testid': 'ka-refused' },
-      el('div', {}, el('strong', {}, 'Not enough history to recommend. '), rec.refused, '.'),
+    // Two different refusals, and only one of them is about thin history: "your own gaps are
+    // too long for this to reach" is a finding, not a shortage of data, and it is a `bad` banner
+    // rather than a `warn` one because it is telling somebody not to switch this on.
+    const wouldCost = rec.refused.indexOf('COST') >= 0;
+    host.appendChild(el('div', { class: 'banner ' + (wouldCost ? 'bad' : 'warn'),
+      'data-testid': 'ka-refused' },
+      el('div', {}, el('strong', {},
+        wouldCost ? 'This would not pay for itself on your traffic. ' : 'Not enough history to recommend. '),
+      rec.refused, '.'),
       el('div', { class: 'small' },
         `For scale: measured over 357 cache expiries across this whole service, the 90% `
         + `interval on this policy is ${usd(rec.service_lo_usd)} to ${usd(rec.service_hi_usd)}. `

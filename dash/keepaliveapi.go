@@ -109,12 +109,18 @@ func (a *API) keepAliveCalc(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if prefix <= 0 {
-		p, err := db.AccountMedianPrefix(f)
+		p, m, err := db.AccountMedianPrefix(f)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		prefix, source = p, "account_median"
+		// The account's own most-used model on those expiries, not a blend and not a default:
+		// without it the panel reported "not priced" on a deployment whose price list was fine,
+		// simply because nothing had named a model. Still refuses to invent a rate.
+		if model == "" {
+			model = m
+		}
 	}
 	out, err := db.KeepAliveCalc(f, x, prefix, model, a.priceFn(r), k)
 	if err != nil {
