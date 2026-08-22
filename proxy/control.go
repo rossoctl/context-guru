@@ -1266,6 +1266,12 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 		ctlErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// This is the route the Settings checkbox posts to, so it is the PRIMARY
+	// consent-withdrawal path for the keep-alive: unticking the box arrives here, not at
+	// ctlPatchTenant. `record` re-reads the policy per request and the hard deadline caps the
+	// hold either way, but the path a user is most likely to take should not be the one relying
+	// on the backstop.
+	h.keeper.forget(t.ID)
 	updated, err := h.registry().Get(t.ID)
 	if err != nil {
 		ctlErr(w, http.StatusInternalServerError, "saved, but could not re-read the account")

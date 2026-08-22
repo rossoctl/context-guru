@@ -910,7 +910,15 @@ func TestRetainedBodyIsMaskedAtRest(t *testing.T) {
 	fs.mu.Lock()
 	sent := append([]byte(nil), fs.calls[0].body...)
 	fs.mu.Unlock()
-	if !bytes.Contains(sent, []byte(marker)) {
-		t.Error("the ping sent something other than the recorded prefix")
+	// BYTE-IDENTICAL, not merely marker-bearing: a single corrupted byte anywhere else in the
+	// prefix still contains the marker, and that byte is a 1.25x write instead of a 0.1x
+	// refresh. This is the assertion that actually guards the mask round trip.
+	want, ok := pingBody([]byte(body))
+	if !ok {
+		t.Fatal("pingBody refused the fixture")
+	}
+	if !bytes.Equal(sent, want) {
+		t.Errorf("the ping's bytes differ from the recorded prefix (%d sent vs %d expected)",
+			len(sent), len(want))
 	}
 }

@@ -172,9 +172,13 @@ const (
 	// maxKeepAliveSessions bounds the tracked sessions. Same order as modes.Tracker's own
 	// bound, and reached only by a deployment with that many opted-in sessions idle at once.
 	maxKeepAliveSessions = 512
-	// maxKeepAliveBytes bounds the total request bodies held for replay. A 200k-token
-	// Claude Code body is under 1 MiB, so this is roughly 130 concurrent large sessions
-	// before the oldest are dropped.
+	// maxKeepAliveBytes bounds the total request bodies held for replay.
+	//
+	// THIS is the binding ceiling, not maxKeepAliveSessions — tune this one. A gated session
+	// carries at least a 20k-token prefix, so ~100 KB to 1 MiB of body, and 128 MiB therefore
+	// binds around 130 large sessions: well before the 512-session count. The replay reports a
+	// peak of 11 live sessions, but it drives ~350-byte synthetic bodies, so it exercises the
+	// count bound and says nothing about this one.
 	maxKeepAliveBytes = 128 << 20
 	// maxKeepAliveTurnKeys bounds the per-session turn counter. Larger than the session bound
 	// because it holds one int rather than a body, and it has to outlive the entry.

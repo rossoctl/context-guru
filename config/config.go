@@ -74,13 +74,23 @@ type CacheConfig struct {
 	// DefaultKeepAliveMaxPings (2).
 	//
 	// K is the main control on the one waste this mechanism cannot avoid — a session that has
-	// ENDED looks exactly like one that is thinking. The marginal ping's yield falls while its
-	// cost does not, so the net flattens and then collapses: K=1 nets +$85.28, K=2 +$125.08,
-	// K=3 +$130.80, K=12 +$58.35.
+	// ENDED looks exactly like one that is thinking.
 	//
-	// K=2 and K=3 TIE on money — the $5 between them is inside the run-to-run wobble — so the
-	// default is 2 for the request-volume reason rather than a dollar one: 26% fewer pings on a
-	// gateway path that returned 180 HTTP 429s over the same window.
+	// 2 rather than 3, and NOT as a dollars-for-volume trade: the dollars are not real. K=3's
+	// +$5.72 over the 4.47-day window is $1.28/day against a bootstrap CI of [$95, $237] and a
+	// 1.4x split-half swing — statistically indistinguishable. What K=3 costs IS measurable:
+	// +34% pings (1,226 against 912) onto a gateway path that returned 180 HTTP 429s in the same
+	// window; the worst single session goes −$2.42 to −$3.63, 50% worse, with total losses +41%,
+	// against a promise to save money and not raise anyone's bill while 85 of 119 pinged sessions
+	// already lose; and the credential hold window grows 33%, 14 to 18.7 minutes.
+	//
+	// The decisive one: K=3's extra value comes from pings FURTHER from the last real request,
+	// which is exactly where the ping-onto-a-dead-entry failure lives — the single mode that
+	// inverts the feature from saving 11.5x to paying 12.5x.
+	//
+	// If K=3's dollars are ever wanted, the lever is the prefix floor rather than K:
+	// KeepAliveMinPrefixTokens at 50,000 with K=2 gives +$125.12 on 908 pings — the same money
+	// for fewer requests, a shorter hold, and no extra exposure to the dead-entry mode.
 	KeepAliveMaxPings int `yaml:"keepalive_max_pings"`
 	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
 	// DefaultKeepAliveMaxUSDPerPing.
