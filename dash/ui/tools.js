@@ -953,7 +953,11 @@ function skillsPanel(host, rep) {
     return;
   }
   panel.appendChild(el('p', { class: 'note' },
-    'Skills are declared as prose in the system prompt, and the listing is ONE indivisible '
+    // NOT "in the system prompt". The listing arrives as prose in an injected system-ROLE
+    // message, which is a different region of the prefix — and now that the panel above shows
+    // the two as separate regions, saying otherwise here makes the page contradict itself.
+    'Skills are declared as prose in an injected system message — a separate region of the '
+    + 'prefix from your system prompt — and the listing is ONE indivisible '
     + 'block: it is waste only in a session that invoked no skill at all.'));
   if (s.state === 'unknown') {
     panel.appendChild(el('div', { class: 'state blocked', 'data-testid': 'inv-skills-unknown' },
