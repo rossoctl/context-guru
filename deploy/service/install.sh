@@ -263,6 +263,25 @@ cmd_preflight() {
   [ -x "$BIN_DST" ] && ok "binary $BIN_DST" || { no "binary $BIN_DST missing"; bad=1; }
   [ -x /usr/local/bin/context-guru-start ] && ok "start wrapper" || { no "/usr/local/bin/context-guru-start missing"; bad=1; }
   [ -d "$STATE" ] && ok "state dir $STATE" || { no "state dir $STATE missing"; bad=1; }
+
+  # Runtime dependencies of the NIGHTLY BACKUP, checked here because its own failure mode
+  # is invisible: context-guru-backup.sh is a oneshot triggered by a timer, so a missing
+  # tool exits 127 at 03:17 every morning and the only evidence is a journal line. That is
+  # exactly what happened on the first deployment — the script wanted the `sqlite3` CLI,
+  # which is not in a minimal RHEL install, and the control database went unbacked-up.
+  # Only checked when the backup script is actually installed.
+  if [ -x /usr/local/bin/context-guru-backup.sh ] || [ -f /etc/systemd/system/context-guru-backup.timer ]; then
+    if command -v python3 >/dev/null 2>&1; then
+      ok "python3 (nightly control-db backup)"
+    else
+      no "python3 missing — the nightly control-db backup cannot take a snapshot"; bad=1
+    fi
+    if command -v rclone >/dev/null 2>&1; then
+      ok "rclone (nightly control-db backup)"
+    else
+      no "rclone missing — the nightly control-db backup cannot upload; run box-setup.sh"; bad=1
+    fi
+  fi
   [ -f "$ETC/upstreams.yaml" ] && ok "allow-list $ETC/upstreams.yaml" || { no "$ETC/upstreams.yaml missing"; bad=1; }
 
   # The example ships placeholder hosts. Starting with those means every request 502s.

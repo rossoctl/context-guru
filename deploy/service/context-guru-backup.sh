@@ -6,9 +6,17 @@
 # pressure it archives itself to Box session by session, and anything it loses beyond
 # that is reconstructible from nothing that matters.
 #
-# Uses `sqlite3 .backup`, not `cp`. Copying a live SQLite file while the service is
-# writing yields a torn snapshot that may not open at all — and a backup you discover
+# Uses SQLite's ONLINE BACKUP api, not `cp`. Copying a live SQLite file while the service
+# is writing yields a torn snapshot that may not open at all — and a backup you discover
 # is unreadable at restore time is worse than no backup, because you stopped worrying.
+#
+# Driven through python3's sqlite3 module rather than the `sqlite3` CLI. The CLI is NOT
+# part of a minimal RHEL install and was absent on the first host this ran on, so the
+# timer failed every night with `sqlite3: command not found` (exit 127) and the control
+# database — tenants, token hashes, per-tenant config, the audit trail — went unbacked-up
+# with no symptom except a line in the journal nobody reads. python3 is already a hard
+# requirement of install.sh and of the proxy's own helper scripts, and
+# Connection.backup() is the same online-backup API the CLI's `.backup` calls.
 #
 # Restore:
 #   systemctl stop context-guru
@@ -34,11 +42,24 @@ TMP="$(mktemp -t cg-control-backup-XXXXXX.db)"
 chmod 600 "$TMP"
 trap 'rm -f "$TMP" "$TMP-wal" "$TMP-shm"' EXIT
 
-# .backup takes a consistent snapshot of a live database, WAL included.
-sqlite3 "$CONTROL_DB" ".backup '$TMP'"
+# A consistent snapshot of a live database, WAL included.
+if ! python3 -c '
+import sqlite3, sys
+src, dst = sqlite3.connect(sys.argv[1]), sqlite3.connect(sys.argv[2])
+src.backup(dst)
+dst.close(); src.close()
+' "$CONTROL_DB" "$TMP"; then
+  echo "backup: could not snapshot $CONTROL_DB — REFUSING to upload" >&2
+  exit 1
+fi
 # Prove it opens and the tenant table is intact before shipping it anywhere. A backup
-# that is verified only at restore time is a backup nobody has verified.
-COUNT="$(sqlite3 "$TMP" 'SELECT COUNT(*) FROM tenants' 2>/dev/null || echo FAIL)"
+# that is verified only at restore time is a backup nobody has verified. Read-only, and
+# through a second connection, so this checks the FILE rather than the handle that wrote it.
+COUNT="$(python3 -c '
+import sqlite3, sys
+c = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+print(c.execute("SELECT COUNT(*) FROM tenants").fetchone()[0])
+' "$TMP" 2>/dev/null || echo FAIL)"
 if [ "$COUNT" = "FAIL" ]; then
   echo "backup: the snapshot does not open or has no tenants table — REFUSING to upload" >&2
   exit 1
