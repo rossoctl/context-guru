@@ -249,17 +249,19 @@ func (d *DB) windowDays(cond string, args []any) float64 {
 // Band is one bucket of an ORDERED histogram: idle-gap bands, prefix-size bands, hour bins.
 //
 // Label carries the meaning and the order is the data — a bar chart of these must preserve it
-// and must not sort by size, because the order IS what the reader is reading. Since/Until make
-// each bar a drill-down into the requests behind it.
+// and must not sort by size, because the order IS what the reader is reading.
+//
+// Deliberately NO since/until here. These bands bucket by GAP LENGTH, by PREFIX SIZE and by HOUR
+// OF DAY — none of which is a time range, so a bar's drill-down is `reason=ttl_expiry` plus the
+// window already on screen and nothing more. A pair of fields that no band could ever populate
+// would be two zeroes on the wire that something eventually renders as a date.
 type Band struct {
 	Label string  `json:"label"`
 	N     int64   `json:"n"`
 	USD   float64 `json:"usd"`
 	// Beyond marks the bands the CURRENT policy's coverage cannot reach, which the chart draws
 	// in the de-emphasis gray beyond the coverage rule.
-	Beyond bool  `json:"beyond,omitempty"`
-	Since  int64 `json:"since,omitempty"`
-	Until  int64 `json:"until,omitempty"`
+	Beyond bool `json:"beyond,omitempty"`
 }
 
 // DayPoint is one day of the "how often, and what did it cost" series.
