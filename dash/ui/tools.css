@@ -187,4 +187,5 @@
    wraps the long MCP names. The text INSIDE each region keeps a readable measure of its own,
    from .inv-text-pre. */
 details.why > .inv-prompt-regions { max-width: none; }
-.inv-prompt-regions { display: grid; }
+/* The prose inside it keeps a readable measure; only the region LIST goes full width. */
+.inv-prompt-regions > p { max-width: 78ch; }

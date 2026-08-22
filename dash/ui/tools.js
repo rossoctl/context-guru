@@ -1480,7 +1480,7 @@ function renderPromptPanel(host, rep) {
     // different quantities, and sharing a key would have given them one explanation that was
     // false for whichever tile the reader was looking at.
     tiles.push(tile('inv-declared-set', 'Declarations', num(rep.totals.declared_set_tokens) + ' tok',
-      prefix ? pct(100 * rep.totals.declared_set_tokens / prefix, 0) + ' of the prefix' : ''));
+      prefix ? pct(100 * rep.totals.declared_set_tokens / prefix, 1) + ' of the prefix' : ''));
   }
   panel.appendChild(el('div', { class: 'tiles' }, ...tiles));
 
@@ -1498,7 +1498,7 @@ function renderPromptPanel(host, rep) {
   const det = el('details', { class: 'why', 'data-testid': 'inv-prompt-reveal' },
     el('summary', {}, 'Read the whole thing, region by region'));
   det.addEventListener('toggle', () => { if (det.open) loadPrompt(); });
-  const body = el('div');
+  const body = el('div', { class: 'inv-prompt-regions' });
   det.appendChild(body);
   const paint = () => {
     clear(body);
@@ -1522,8 +1522,7 @@ function renderPromptPanel(host, rep) {
       + num(v.tokens) + ' tokens across ' + num((v.regions || []).length) + ' regions, captured '
       + when(v.ts) + '. Ordered heaviest first, which is NOT the order the model reads them in: '
       + 'the array order a client sends its tools in is not recorded.'));
-    const regions = body.appendChild(el('div', { class: 'inv-prompt-regions' }));
-    for (const r of v.regions || []) regions.appendChild(promptRegion(r));
+    for (const r of v.regions || []) body.appendChild(promptRegion(r));
   };
   det.addEventListener('toggle', paint);
   promptWaiters.push(() => { if (det.open) paint(); });
