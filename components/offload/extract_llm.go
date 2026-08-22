@@ -1136,6 +1136,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 					// this not run" without re-deriving the class. This is the counter the
 					// content prefilter is visible through: no separate gate, because the
 					// decision is the same expected-saving comparison as every other.
+					// Cardinality stays bounded by code (one constant prefix x the ten
+					// classes in contentclass.go), which is what promexport's gate-label
+					// series assumes.
 					rep.Gate("low_yield_content_class:" + cls)
 				}
 				if dbg {
