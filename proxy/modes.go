@@ -45,7 +45,7 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 	res := apply.BodyOpts(r.ctx, r.tn.Pipe, r.tn.Store, apply.Opts{
 		Provider: r.provider, Body: r.body, Session: r.session, Tenant: r.tn.ID, Bypass: r.bypassed,
 		Models: r.models, Window: r.window, CacheMode: h.opts.CacheMode,
-		SelfRates: r.rates,
+		SelfRates: r.rates, RatesFor: h.ratesFor(r.ctx),
 		// The mixed-TTL head, from this tenant's own cache policy. Off for every account unless
 		// opted in; see apply/headttl.go for why it is off even then — the ttl field reaches the
 		// provider, but Bedrock grants the 1h tier only for the Claude 4.5 family and silently
@@ -145,8 +145,8 @@ func (h *Handler) observe(r *reqInfo) {
 			// and it cannot touch an enforced request, because observe mode's enforced
 			// path never calls BodyOpts at all. Read compaction_resets in observe mode as
 			// "resets plus off-path reordering", not as a compaction count.
-			SelfRates: r.rates,
-			Tracker:   h.tracker,
+			SelfRates: r.rates, RatesFor: h.ratesFor(r.ctx),
+			Tracker: h.tracker,
 			// h.shadow, not the live store: see Handler.shadow. The live store must stay
 			// clean (a real request must never replay a decision that was never enforced),
 			// but the frozen decisions still have to accumulate across turns or the

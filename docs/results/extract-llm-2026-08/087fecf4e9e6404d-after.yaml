@@ -1,0 +1,71 @@
+# extract_llm — configuration for tenant 087fecf4e9e6404d.
+#
+# APPLY ONLY AFTER THE NEW BINARY IS DEPLOYED. See the PR body: `cold_cache.max_calls`
+# has a different DEFAULT in the two binaries (unlimited before, 4 after), so this
+# document sets it explicitly and is valid under both — but old-code-plus-new-config is a
+# combination no measurement covers.
+#
+# This is the tenant's COMPLETE document, derived from its current one with only the
+# extract_llm block changed. Everything else — the pipeline, mode, and the other
+# components' settings — is preserved byte-for-byte, because config_yaml is replaced
+# wholesale and a partial document would silently drop the rest.
+#
+# Changed from the current configuration:
+#   cold_cache.min_tokens   1000   -> 3000    the floor where the well-compressing
+#                                            classes clear break-even (ls -l ~1,400,
+#                                            markdown ~3,500, bundles ~3,900)
+#   cold_cache.max_calls    unset  -> 4       the sweep's ONLY brake; one llmConcurrency
+#                                            round. Unset meant UNLIMITED: one production
+#                                            request made 27 calls against a cap of 2,
+#                                            spent $0.229 and added 76.6 s to a turn whose
+#                                            upstream took 33.5 s.
+#   context_messages        7      -> 2       the biggest lever on per-call cost: 3,785
+#                                            prompt tokens to compress a 2,700-token
+#                                            candidate, most of it the conversation.
+#   min_tokens              500    -> 3000    a NO-OP under per_output: false (the sweep
+#                                            overwrites the floor) — set so the recorded
+#                                            gate labels match the floor in force.
+#   trigger.min_request_tokens 500 -> 20000
+#   llm_max_per_request     20     -> 4       also a no-op on the cold path, kept coherent
+#   llm_max_per_session     80     -> 40
+#
+# Deliberately UNCHANGED: per_output: false (the warm path cannot pay — break-even is
+# ~112,800 candidate tokens against a 7,399-token ceiling; production ROI was 0.03x),
+# strategy: code (the only strategy that produced real extractions; all 25 `deterministic`
+# wins in production were silent truncations), and this tenant's own
+# allow_on_caching_backend value, which is irrelevant while per_output is false.
+components:
+  extract:
+    min_tokens: 400
+  extract_llm:
+    aggressiveness: medium
+    allow_on_caching_backend: true
+    cold_cache:
+      enabled: true
+      min_tokens: 3000
+      max_calls: 4
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 4
+    llm_max_per_session: 40
+    min_tokens: 3000
+    model:
+      model: claude-haiku-4-5
+      source: incoming
+    per_output: false
+    strategy: code
+    trigger:
+      min_request_tokens: 20000
+mode: sync
+pipeline:
+  - format
+  - toon
+  - dedup
+  - cmdfilter
+  - extract_llm
+  - extract
+  - cachesplit
+  - textclean

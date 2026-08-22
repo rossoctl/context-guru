@@ -63,9 +63,12 @@ func completeSplit(ctx context.Context, model Model, system []string, user strin
 
 // Cfg configures extraction.
 type Cfg struct {
-	Mode               string  // auto | single | rlm | deterministic
-	Floor              int     // token floor; rlm kicks in at max(floor*4, 8000) in auto
-	MinKeepRatio       float64 // 0 disables the blunt ratio backstop (keep-set check governs)
+	Mode  string // auto | single | rlm | deterministic
+	Floor int    // token floor; rlm kicks in at max(floor*4, 8000) in auto
+	// MinKeepRatio is the fraction of the body the result must still contain. 0 disables the
+	// blunt ratio backstop and leaves only the keep-set check, which is not enough on its own:
+	// see minKeepRatioFloor for the live failure that proved it.
+	MinKeepRatio       float64
 	AllowDeterministic bool
 	MaxChars           int // deterministic projection window
 	// AllowedStrategies, when non-empty, restricts strategyOrder to these strategy names
@@ -92,9 +95,34 @@ type Cfg struct {
 	Aggressiveness Aggressiveness
 }
 
+// minKeepRatioFloor is the fraction of a body an extraction must still contain to be an
+// extraction rather than a deletion.
+//
+// The keep-ratio backstop existed and was DEAD: DefaultCfg never set MinKeepRatio, so
+// insanityReason's check was unreachable for every caller. FOUND LIVE on a cold sweep through
+// the proxy, and it is the worst failure in the corpus: a 7,414-token Go source file came back as
+// the 23 characters `# … 463 lines elided …` — the entire file gone — and it passed every check.
+// Not empty, not degenerate, no keep-id dropped (the keep-list is small by design), and the
+// derivation check EXCLUDES elision markers, so stripping them left an empty string and the
+// function returned a perfect 1.0 for it. A result made only of markers is vacuously derived from
+// anything.
+//
+// 0.05 is calibrated on the PRE-CHANGE production corpus: over its 62 accepted calls the reduction
+// histogram had zero entries above 75% removed and the largest removal kept 9.5%. That corpus no
+// longer bounds the behaviour — the first accepted call of the post-change measurement removed 87.4%
+// and kept 12.6%, outside the range the floor was fitted to. 12.6% still clears 5%, but the margin
+// is thinner than "rejects nothing that has ever legitimately happened" implies, so read the claim
+// as "nothing in the old corpus" rather than "nothing".
+//
+// Re-check against the next production window rather than treating this as settled. Raise it only
+// with a measurement showing real reductions being refused; lower it only if a workload of genuinely
+// uniform lists is shown to need it.
+const minKeepRatioFloor = 0.05
+
 // DefaultCfg mirrors the reference prototype's ExtractCfg defaults.
 func DefaultCfg() Cfg {
-	return Cfg{Mode: "auto", Floor: 3000, AllowDeterministic: true, MaxChars: sampleChars}
+	return Cfg{Mode: "auto", Floor: 3000, AllowDeterministic: true, MaxChars: sampleChars,
+		MinKeepRatio: minKeepRatioFloor}
 }
 
 var wsRe = regexp.MustCompile(`\s+`)
@@ -392,14 +420,19 @@ func insanityReason(bodyText, resultText string, keepIDs []string, minKeepRatio 
 	if resultText == "" {
 		return "empty result"
 	}
-	bodyN, resN := tokens.Count(bodyText), tokens.Count(resultText)
+	bodyN := tokens.Count(bodyText)
 	switch strings.TrimSpace(resultText) {
 	case "", "[]", "{}", "null", `""`:
 		if bodyN > 0 {
 			return "degenerate result"
 		}
 	}
-	if minKeepRatio > 0 && float64(resN) < minKeepRatio*float64(bodyN) {
+	// Markers are NOT kept content. derivationRatio already strips them; counting them here
+	// let 21 markers plus ONE surviving line — 0.36% of a 280-line body — clear the 5% floor,
+	// which is the same hole this floor exists to close, one step diluted. The two checks have
+	// to agree about what a marker is, and the honest answer is "ours, not the input's".
+	if kept := tokens.Count(stripElisionMarkers(resultText)); minKeepRatio > 0 &&
+		float64(kept) < minKeepRatio*float64(bodyN) {
 		return "below the keep-ratio floor"
 	}
 	for _, kid := range keepIDs {
@@ -538,6 +571,20 @@ func derivationRatio(result, body string) float64 {
 	return float64(matched) / float64(len(res))
 }
 
+// stripElisionMarkers drops the marker lines, so a check asking "how much of the input survived"
+// is not answered by our own annotations.
+func stripElisionMarkers(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, ln := range strings.Split(s, "\n") {
+		if !isElisionMarker(ln) {
+			b.WriteString(ln)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 // isElisionMarker reports whether a line is one of the "N lines elided" notes the prompt
 // asks for (or the recovery marker itself) rather than content from the input.
 func isElisionMarker(ln string) bool {
@@ -666,6 +713,19 @@ func RunExtractionDetail(ctx context.Context, body, goal string, keepIDs []strin
 		case "deterministic":
 			cand = resultToText(DeterministicProject(deterministicInput(body), keepIDs, cfg.MaxChars))
 		}
+		// SAY WHAT WAS DROPPED, before the size check so the markers are inside the
+		// budget the never-inflate gate enforces. Only in rewrite mode: deletion-only
+		// mode proves the result is a subsequence of the input, and a marker is not.
+		//
+		// THE COST OF THAT, stated because this file otherwise reads as if marking were
+		// universal: with rewrite:false there is no marker, so a contiguous window just
+		// under MaxChars is accepted with nothing showing the gap. capTruncated still
+		// refuses one AT the cap and IsContained still proves the result is a real
+		// subsequence, so nothing is fabricated — but the reader is not told what went.
+		// Deletion-only mode trades the gap notice for the containment proof.
+		if cfg.Rewrite {
+			cand = markElisions(cand, body)
+		}
 		switch {
 		case cand == "":
 			// No usable candidate. `why` says WHICH of the several very different causes it
@@ -681,6 +741,26 @@ func RunExtractionDetail(ctx context.Context, body, goal string, keepIDs []strin
 			continue
 		case tokens.Count(cand) >= base:
 			reasons = append(reasons, name+": result not smaller")
+			continue
+		case capTruncated(cand, body, cfg.MaxChars):
+			// A contiguous slice of the input at the character cap, with nothing saying
+			// content was dropped. MEASURED in production: 25 of 62 accepted results were
+			// exactly 4,000 characters with an empty summary, 15 of them a byte-for-byte
+			// prefix cut ending mid-line, and they supplied 53% of all reported savings.
+			// One of them turned four `ls -l` listings into two with no marker and a
+			// syntactically broken final row. That is not an extraction and it must not be
+			// counted as one; a windowed reduction that names its gaps is accepted above.
+			reasons = append(reasons, name+": truncated at the character cap")
+			continue
+		case cfg.MaxChars == 0 && isLineWindow(cand, body):
+			// The caller withheld the window for this content (see the component's
+			// minWindowRatio), so a contiguous run of the body's lines is refused from ANY
+			// strategy rather than only from the deterministic projection. `head -n` is a
+			// truncation whatever produced it, and a marker makes it honest without making
+			// it an extraction. FOUND LIVE: a grep result came back as its first 37 of 158
+			// lines with an elision note, accepted, on content where every line is a
+			// distinct fact.
+			reasons = append(reasons, name+": a contiguous window is not a reduction of this content")
 			continue
 		}
 		if ok, why := validateExtraction(cand, body, keepIDs, cfg); !ok {

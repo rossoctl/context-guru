@@ -65,6 +65,11 @@ const (
 	FrozenPrefix = "cg:frz:" // mask / failed_run freeze decisions
 	ResultPrefix = "cg:res:" // extract_llm's replayed result (projection + summary, one key)
 	LenPrefix    = "cg:len:" // apply's prev-turn message count (the MaxCachedIdx boundary)
+	// XResultPrefix is extract_llm's CROSS-session result namespace. Pinned for the same
+	// reason ResultPrefix is: every entry is a model call already paid for, and the store's
+	// default cap is 1,000 entries shared with the unpinned expand stashes — which are the
+	// large payloads, so they evict the cheap keys that would have avoided a call.
+	XResultPrefix = "cg:xres:"
 	// TTLPrefix and SeenPrefix are apply's two cold-decision records. Losing either makes a
 	// WARM prefix read cold, which is the cache-destructive direction: TTLPrefix narrows a
 	// session that asked for the 1h tier back to 5m, and SeenPrefix drops the evidence that
@@ -78,7 +83,7 @@ const (
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
-var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, TTLPrefix, SeenPrefix}
+var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {

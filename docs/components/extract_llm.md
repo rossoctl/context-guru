@@ -42,32 +42,79 @@ costing ~$0.012 must therefore remove a *lot* of tokens to break even:
 
 | Backend | Content | Break-even output size |
 |---|---|---|
-| Caching | seen once | **~56,400 tokens** |
-| Caching | recurring (amortized over replays) | **~40,300 tokens** |
-| Non-caching | seen once | ~5,600 tokens |
+| Caching, WARM | seen once | **~56,400 tokens** |
+| Caching, WARM | recurring (amortized over replays) | **~40,300 tokens** |
+| Caching, COLD (TTL expired) | recurring, per content class | **1,000-3,900 tokens** |
 | Non-caching | recurring | **~3,100 tokens** |
 
-!!! warning "These figures were 30% optimistic until 2026-08-19"
-    They read ~42,600 / ~30,500 / ~3,400 / ~1,800, and the difference is entirely two
-    mis-measured constants in the *cost* half. `preambleTokens` was `1463` against a measured
-    **1,893** o200k tokens for the assembled prefix (29% low), and the whole estimate was
-    counted in `o200k_base` while being priced per **provider** token — measured markup
-    **1.29x** on `claude-haiku-4-5` (identical bytes: 6,396 o200k billed as 8,222) and 1.65x on
-    `aws/claude-sonnet-5`. Together they under-stated every call's cost by ~35%, in the
-    denominator of every allow/suppress decision. Both are now derived from a dated measurement
-    and pinned by `TestBreakEvenSizesMatchTheDocumentedVerdict`. **The component did not get
-    worse; the number was wrong in the direction that lets the gate spend.**
+!!! warning "The value half was corrected on 2026-08-22, and one of those corrections was itself wrong"
+    The **rate** fix stands: a replayed removal is a cache-READ token, not a cache-write one -- 12.5x
+    cheaper -- so `tokenValue` carries both rates and the gate computes
+    `removed x (perToken + reuses x repeatPerToken)`. On a WARM turn both rates ARE the read rate, so
+    this leaves the two figures above untouched; it moves only the COLD break-even.
 
-The caching figures are why the component is now **off by default on caching backends**: no
-realistic tool output reaches 40,300 tokens, so the gate would only ever be declining.
+    The **count** fix was wrong and is reverted. The reuse priors were briefly changed from 6/3/4 to
+    1.5/0.3/0.6 on a figure of 1.59x, derived as `saved_gross/saved_unique` over only the 13 requests
+    that made calls. That is not an amortization figure: `saved_unique` is 46,380 whether summed over
+    those 13 rows or all 1,770 -- every unique removal accrues on a calling turn by definition -- so
+    restricting the numerator while keeping that denominator subtracts every replay by construction.
+    The replays are in the other 1,757 rows (2,408,593 gross against the same 46,380 unique), and
+    **per session** the realized multiplier is 4.0, 4.4, 8.0, 12.0, 79.9, 215.0 -- median 12.0,
+    minimum 4.0. So 6/3/4 is conservative and inside the observed range, while 0.6 sat below every
+    observation. The claim that accompanied it -- that claude-cli drops old turns so a removal is not
+    carried forward -- is contradicted by the same ledger: 416 rows are pure replays.
+
+    Pinned by `TestBreakEvenSizesMatchTheDocumentedVerdict`, `TestReusePriorMatchesTheMeasuredLedger`
+    and `TestColdTurnPricesReplaysAtTheReadRate`.
+
+The warm figures are why the component is **off by default on caching backends** and why
+`per_output: false` is the right setting on a prompt-caching agent: the agent truncates every
+tool result near 30,000 characters, so **the largest output that can exist is ~7,399 tokens** —
+5x below the warm break-even. The gate would only ever be declining. Independently confirmed
+on production: the same saved tokens valued at the warm cache-read rate were worth **$0.017
+against $0.6039 of spend, ROI 0.03x**.
+
+**Where it does pay is the cold turn.** On a TTL-expired turn the whole transcript is re-billed
+at 1.25x fresh, so a removed token is worth 12.5x more, and break-even lands *inside* the
+reachable size range — but only for content that actually compresses. See
+[content classes](#content-classes).
+
+### Content classes {: #content-classes }
+
+The gate used to price every candidate with one compression ratio learned across all kinds of
+tool output at once. Measured over 9,763 captured messages, that pooling is why it could not
+tell a paying call from a losing one — the classes span 23x:
+
+| class | measured reduction | cold break-even | reachable under the ~7,399-token ceiling? |
+|---|---|---|---|
+| `ls -l` listing | 65.5% | ~1,000 tok | yes, comfortably |
+| markdown doc | 36.2% | ~2,200 tok | yes |
+| multi-file bundle | 34.6% | ~2,300 tok | yes |
+| source code | 29.9% | ~3,000 tok | yes |
+| `Read` w/ line numbers | 29.2% | ~3,100 tok | yes |
+| YAML config | 26.1% | ~3,900 tok | yes |
+| ANSI-coloured CLI output | 8.0% | ~14,600 tok | **no** |
+| grep / rg output | 6.7% | ~17,500 tok | **no** |
+| JSON blob | 2.8% | ~41,700 tok | **no** |
+| test/eval result log | 1.5% | ~77,800 tok | **no** |
+
+JSON blobs and ANSI CLI output are **31% of the reachable token mass in the two classes that
+compress worst**, which is the direct cause of the flat size-versus-yield relation the corpus
+shows (r = −0.10 between candidate size and reduction ratio). **Raising a size floor selects
+for exactly the material that cannot pay.** So the class's own measured ratio is handed to the
+economic gate in place of the pooled one and the existing expected-saving comparison does the
+rest — no new threshold and no list of banned classes. Unrecognised content keeps
+using the learned ratio. Refusals are counted as `low_yield_content_class:<class>`.
 
 These use the **measured** compression ratio, and that measurement is the uncomfortable part: on
 real captures an accepted extraction removed only **31–254 tokens per call** on outputs of
 400–2,000 tokens — an actual ratio around **0.10–0.12**, not the ~0.45 one might assume. The model
 declines to cut aggressively, and correctly so: its contract is recall-first.
 
-Most tool outputs are nowhere near 40,300 tokens — in one measured Terminal-Bench capture the
-**largest** tool output was 2,053 tokens, ~15× below the cached break-even. That is why the same
+Most tool outputs are nowhere near the warm break-even — in one measured Terminal-Bench capture
+the **largest** tool output was 2,053 tokens, and across 19,805 production requests the largest
+that exists at all is 7,399, because the agent truncates every tool result near 30,000
+characters. That is why the same
 component **wins on a non-caching backend and loses on a caching one**, and why the fix is not
 "compress harder" but "decide per call". The [economic gate](#economics) makes that
 decision automatically, so the component is safe to leave enabled — it simply declines to spend
@@ -367,7 +414,7 @@ a source-file read. It changes what the model is **asked** for and never what is
 the verbatim-preservation rule, the strictly-smaller rule and (in `rewrite: false`) the
 subsequence proof are identical at every level.
 
-**`context`** is `goal` | `recent` (default) | `full`, with `context_messages` (7) as the N for
+**`context`** is `goal` | `recent` (default) | `full`, with `context_messages` (2) as the N for
 `recent`. The model is asked to reduce one output "toward what the agent needs next", so what it
 is told about the conversation is the whole basis of that judgement. `goal` carries the task and
 the latest turn; `recent` adds every user turn plus the last N non-tool messages, which is what
@@ -711,12 +758,13 @@ over-long one used to abandon the whole reduction rather than truncate.
 | `cold_cache.enabled` | `false` | Sweep the whole transcript on a turn whose prompt cache has expired. See [Cold-cache sweep](#cold-cache-sweep). |
 | `cold_cache.min_tokens` | 1000 | Per-output floor for the sweep — lower than the everyday one, because on that turn every candidate is re-billed at the write rate anyway. |
 | `cold_cache.min_idle_seconds` | 0 | Demand MORE idle time than the provider TTL implies. Raises the bar, never lowers it. |
-| `cold_cache.max_calls` | 0 | Cap model calls in one sweep (0 = unlimited). |
+| `cold_cache.max_calls` | 4 | Cap model calls in one sweep (`-1` = unlimited). The sweep deliberately does not draw on `llm_max_per_request` / `llm_max_per_session`, so this is its ONLY brake — and it used to default to unlimited. MEASURED: one production request made **27 calls** against a tenant whose `llm_max_per_request` was 2, spent $0.229 and added 76.6 s to a turn whose upstream took 33.5 s. The default is now one `llmConcurrency` round, past which calls serialize and latency grows multiplicatively for a linear gain. |
 | `fire_on` | `pressure` | `pressure` = the derived context-pressure trigger. `size` = fire whenever a candidate clears `min_tokens`, and demote the economic gate **and** the caching-backend guard to advisory. |
 | `llm_max_per_session` | 0 | Cap model calls for the whole session (0 = unlimited). The per-request cap cannot bound a long session: 2 calls x 300 turns is 600 calls. |
 | `aggressiveness` | `medium` | `low` \| `medium` \| `high` — the compaction target, taught with worked examples. |
 | `context` | `recent` | How much conversation the prompt carries: `goal` \| `recent` \| `full`. |
-| `context_messages` | 7 | N for `context: recent`. |
+| `context_messages` | 2 | N for `context: recent`. **The biggest lever on per-call cost**: production sent 3,785 prompt tokens to compress a 2,700-token candidate at 7, so the candidate was a third of the call. Cutting it also shrinks the keep-list harvested from the same window, which is what "dropped a referenced identifier" rejections are counted against (28 of 31 production rejections) — so the cheaper prompt and the higher acceptance rate are one change. It trades away our own prefix cache on requests making MANY calls (see `cold_cache.max_calls`). |
+| `max_chars` | 4000 | Window for the model-free deterministic projection. The window is line-aligned and names what it dropped; a result that hits the cap with nothing saying so is refused whatever this is set to. |
 | `marker_mode` | `full` | How the recovery marker is emitted: `full` \| `summary` \| `off`. |
 
 ### Context guard

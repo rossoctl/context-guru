@@ -671,6 +671,21 @@ func (h *Handler) selfRates(ctx context.Context, model string) components.TokenR
 	}
 }
 
+// ratesFor hands the pipeline the operator's rate card as a lookup, so a component that
+// compacts with a model OTHER than the request's own can price its own spend from the same
+// card the invoice is computed from.
+//
+// selfRates answers "what does the request's model cost"; this answers "what does THIS model
+// cost", which is the question a component naming a cheap model has. Without it the component
+// falls back to CHEAP_MODEL_PRICE_* (haiku LIST rates), which is a different card from the one
+// the dashboard prices with — measured 32% apart on the same 93 calls.
+func (h *Handler) ratesFor(ctx context.Context) func(string) components.TokenRates {
+	if h.opts.Prices == nil {
+		return nil
+	}
+	return func(model string) components.TokenRates { return h.selfRates(ctx, model) }
+}
+
 // incomingModel builds an LLM client that reuses the proxied request's own model
 // and the route's upstream, so a NeedsModel component can call the same backend the
 // request targets.

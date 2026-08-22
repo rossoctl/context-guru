@@ -260,9 +260,29 @@ const (
 	ctxFull   contextMode = "full"
 )
 
-// defaultContextMessages is the N for `recent`. Seven is enough to hold a tool call, its
-// result and the reasoning either side of it without carrying a whole session.
-const defaultContextMessages = 7
+// defaultContextMessages is the N for `recent`.
+//
+// It was 7, on the reasoning that seven messages hold a tool call, its result and the
+// reasoning either side of it. MEASURED on production extraction calls, seven was most of
+// what the calls cost: 3,785 prompt tokens to compress a 2,700-token candidate, so the
+// candidate was a third of the call and the rendered conversation was most of the rest. At
+// $0.00649 a call the break-even yield was 763 tokens against an observed 474 — the component
+// could not pay for itself at that price, and no threshold fixes a per-call cost.
+//
+// Two is the smallest context that still names the task: the agent's last request and the
+// step before it. It also shrinks the keep-list harvested from the same window, which is what
+// "dropped a referenced identifier" rejections are counted against — 28 of 31 production
+// rejections. Fewer required identifiers means more reductions can pass, so the cheaper
+// prompt and the higher acceptance rate are the same change.
+//
+// THE ONE THING THIS TRADES AWAY, because it is not obvious: the rendered conversation is
+// also what lifts our own prompt prefix over the provider's minimum cacheable size (1,893
+// preamble tokens against a 3,413-token floor on haiku-class models), so a small context can
+// cost the prefix cache on our own calls. That is only a loss when a request makes MANY
+// calls — the write is amortized over the readers. Measured break-even is ~5 calls per
+// request; defaultColdMaxCalls bounds a sweep at 4, below it, which is why these two
+// defaults belong together.
+const defaultContextMessages = 2
 
 // Per-mode byte budgets. `recent` gets more room than a bare goal because it carries
 // several turns; `full` gets a large one because its whole purpose is completeness, and

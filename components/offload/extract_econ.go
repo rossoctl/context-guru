@@ -64,7 +64,20 @@ import (
 // exists. Both rates are per single token (not per million).
 type tokenValue struct {
 	perToken float64
-	cached   bool // true when priced at the cache-read rate
+	// repeatPerToken is what the SAME token is worth on a LATER turn, where it would have
+	// been served from the provider's prompt cache rather than entering it. Splitting the two
+	// is what stopped the gate crediting a replay at the rate of a first removal: on a cold
+	// turn perToken is the cache-WRITE rate (1.25x fresh) and every subsequent realization of
+	// that same removal is a cache-READ token (0.1x fresh) — 12.5x apart. Pricing the whole
+	// amortized stream at the write rate over-credited every cold-turn call by ~12x.
+	repeatPerToken float64
+	cached         bool // true when priced at the cache-read rate
+	// cold is true on a TTL-expired turn, where perToken is the cache-WRITE rate. Both cold
+	// and non-caching turns report cached:false — for opposite reasons — so the flag exists to
+	// keep the two apart in the reason ledger. Without it every cold sweep was labelled
+	// "allow: non-caching backend", which is the string an operator reads to answer "why did
+	// this run"; 16 of 93 production calls carried it.
+	cold bool
 }
 
 // Default agent-model rates (claude-sonnet-5 class, $3/$15 per MTok, cache read 0.1x).
@@ -126,12 +139,17 @@ func savedTokenValue(c *components.Ctx) tokenValue {
 		// whole prefix is about to be re-written at 1.25x fresh, so a token removed here is
 		// the most valuable token there is — not the least. Reporting it as `cached` would
 		// hand the gate the 10x haircut that (correctly) suppresses warm-turn calls.
+		//
+		// The REPEAT rate is the read rate either way: once this turn has re-written the
+		// prefix, the turns that replay this removal are warm ones.
 		if c.ColdCache {
-			return tokenValue{perToken: write, cached: false}
+			return tokenValue{perToken: write, repeatPerToken: read, cached: false, cold: true}
 		}
-		return tokenValue{perToken: read, cached: true}
+		return tokenValue{perToken: read, repeatPerToken: read, cached: true}
 	}
-	return tokenValue{perToken: fresh, cached: false}
+	// No caching backend: every turn re-sends at the fresh rate, so a replay is worth as
+	// much as the first removal.
+	return tokenValue{perToken: fresh, repeatPerToken: fresh, cached: false}
 }
 
 // priorCallCost is a last-resort per-call cost estimate (~the Terminal-Bench average).
@@ -246,22 +264,43 @@ type gateDecision struct {
 // expectedReuses estimates how many future turns this compaction will be re-applied on.
 // This is what makes extraction ever worthwhile under caching: the reduction is frozen and
 // replayed on every subsequent turn (see state.go's freeze/reapply), so one call's saving
-// is collected repeatedly. Recurrence is the strongest available signal — content the
-// system has seen before in ANY session is likely to be seen again.
+// is collected repeatedly.
 //
-// ponytail: a flat prior per recurrence class, not a fitted model. Two observations
-// (seen-before, request-position) capture most of the signal; upgrade to a per-session
-// decay fit if the benchmark shows the estimate is what's mispricing calls.
+// MEASURED, per session, over the six production sessions that produced a removal:
+// saved_gross/saved_unique = 4.0, 4.4, 8.0, 12.0, 79.9, 215.0 — min 4.0, median 12.0. Removals
+// visibly persist: one session carried a single removal across 217 rows. So 6/3/4 is conservative
+// against the median and inside the observed range, which is where a prior belongs.
+//
+// A CORRECTION WORTH KEEPING, because the wrong version was briefly shipped here and the
+// arithmetic looked convincing: these were changed to 1.5/0.3/0.6 on a figure of 1.59x derived as
+// saved_gross/saved_unique over only the 13 requests that MADE CALLS. That is not an amortization
+// figure. saved_unique is 46,380 whether you sum over those 13 rows or all 1,770 — every unique
+// removal accrues on a calling turn by definition — so restricting the numerator to calling turns
+// while keeping that denominator subtracts every replay by construction. 1.59x measures "what a
+// calling turn realizes relative to its own new removals", which is a different question and is
+// always near 1. The replays live in the other 1,757 rows (2,408,593 gross against the same
+// 46,380 unique).
+//
+// The claim that accompanied it — that claude-cli drops old turns so a removal is not carried
+// forward — is contradicted by the same ledger: 416 rows are pure replays (gross > 0, unique = 0).
+//
+// The OTHER half of that change was right and stays: a replayed removal is a cache-READ token,
+// not a cache-write one. See tokenValue.repeatPerToken. Pricing 6 replays at the read rate adds
+// 0.6x the write rate, so the amortization is real but modest — which is why the rate split
+// mattered more than the count did.
+//
+// ponytail: a flat prior per recurrence class, not a fitted model, anchored on the per-session
+// distribution rather than an aggregate that a few long sessions dominate (max 215 against a
+// median of 12). Upgrade to a per-session decay fit only if a measurement shows the estimate is
+// still what misprices calls.
 func expectedReuses(seenBefore bool, turnsSoFar int) float64 {
 	if seenBefore {
-		// Recurred at least once already; the measured cross-session recurrence rate was
-		// 82/103 (~80%), so expect several more replays.
-		return 6
+		return 6 // already recurred once, so at or above the observed median
 	}
 	if turnsSoFar >= 20 {
 		return 3 // late in a long session: fewer turns remain to amortize over
 	}
-	return 4
+	return 4 // the observed minimum
 }
 
 // evaluateGate decides whether one candidate output is worth an extraction call.
@@ -275,8 +314,15 @@ func evaluateGate(sizeTokens int, ratio float64, val tokenValue, cost float64,
 
 	expectedRemoved := float64(sizeTokens) * ratio
 	reuses := expectedReuses(seenBefore, turnsSoFar)
-	// The compaction is applied on this turn AND replayed on each expected future turn.
-	saving := expectedRemoved * (1 + reuses) * val.perToken
+	// The compaction is applied on this turn at THIS turn's rate, and replayed on each
+	// expected future turn at the rate a re-sent token would have been billed at THERE. On a
+	// cold turn those are the cache-write and cache-read rates, 12.5x apart, and collapsing
+	// them onto one rate is what made a replay look as valuable as a first removal.
+	repeat := val.repeatPerToken
+	if repeat <= 0 {
+		repeat = val.perToken // an unset repeat rate must not read as free amortization
+	}
+	saving := expectedRemoved * (val.perToken + reuses*repeat)
 
 	d := gateDecision{expSaving: saving, expCost: cost}
 	// Hard decline on a caching backend unless explicitly forced. This is the SHIPPING
@@ -311,6 +357,13 @@ func evaluateGate(sizeTokens int, ratio float64, val tokenValue, cost float64,
 	switch {
 	case seenBefore:
 		d.reason = "allow: recurring content, amortized over reuses"
+	case val.cold:
+		// NOT "non-caching backend". Both regimes report cached:false — a cold turn because
+		// its tokens are worth the cache-WRITE rate, a non-caching backend because they are
+		// worth the fresh rate — so selecting on !cached labelled every cold sweep as a
+		// backend without a cache. MEASURED: 16 of 93 production calls carried that string, in
+		// the ledger an operator reads to answer "why did this run".
+		d.reason = "allow: cold cache, whole transcript re-billed at the write rate"
 	case !val.cached:
 		d.reason = "allow: non-caching backend, saved tokens at full rate"
 	default:

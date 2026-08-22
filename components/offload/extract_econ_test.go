@@ -109,6 +109,19 @@ func TestBreakEvenSizesMatchTheDocumentedVerdict(t *testing.T) {
 	if freshRecur < 2_500 || freshRecur > 3_800 {
 		t.Errorf("fresh+recurring break-even = %d tokens, expected ~3,100", freshRecur)
 	}
+	// These figures survived a round trip worth recording, because the arithmetic looked
+	// convincing in both directions. They were briefly moved to ~112,800 / ~11,300 on a reuse
+	// prior of 1.5 derived from saved_gross/saved_unique over only the requests that MADE CALLS —
+	// which is not an amortization figure at all (saved_unique is identical over those rows and
+	// over all rows, so restricting the numerator subtracts every replay by construction). The
+	// per-session measurement is 4.0-215.0, median 12.0, so 6/3/4 is conservative and inside the
+	// range. See expectedReuses.
+	//
+	// On a WARM turn the removal and its replays are both cache reads, so pricing them separately
+	// (tokenValue.repeatPerToken, added in the same change) leaves these two numbers untouched —
+	// which is why they came back to exactly where they were. The rate split only moves the COLD
+	// break-even, where a write is 12.5x a read.
+	//
 	// The gap is WIDER than the bare 10x rate haircut, because cost stops growing once the
 	// prompt hits the shown-content cap while value keeps scaling with output size.
 	if ratio := float64(cachedRecur) / float64(freshRecur); ratio < 12 || ratio > 30 {
@@ -451,7 +464,7 @@ func TestANamedCompactionModelIsNotPricedAsTheAgent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := &ExtractLLM{modelSource: "incoming", modelName: tc.modelName,
 				pricing: cheapmodel.HaikuPricing()}
-			got := e.pricingFor(components.Ctx{SelfRates: agentRates})
+			got, _ := e.pricingFor(components.Ctx{SelfRates: agentRates})
 			isAgent := got.InputPerMTok == agentRates.Input*1e6
 			if isAgent != tc.wantAgent {
 				t.Errorf("input rate $%.2f/MTok: agent-priced=%v, want %v (agent is $%.2f, "+

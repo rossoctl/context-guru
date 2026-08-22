@@ -25,6 +25,21 @@ var (
 	xGrossSaved atomic.Int64 // tokens removed (unique, first application only)
 	xLatencyMs  atomic.Int64 // cumulative wall time in extraction calls
 	xLookups    atomic.Int64 // result-cache lookups (hits + misses), for the hit rate
+	// xValueNano is the realized dollar value of what was removed, in nanodollars, recorded
+	// BY THE COMPONENT at the rate each removal was actually worth.
+	//
+	// It exists because the alternative — tokens x a constant rate chosen from the cache MODE
+	// — was wrong by an order of magnitude in the one regime this component runs in. /stats
+	// priced every saved token at the cache-READ rate and counted it once, while the component
+	// itself values a cold-turn token at the cache-WRITE rate (12.5x more) and collects it
+	// again on each replay. MEASURED: 44,073 tokens reported as $0.0132 of value against
+	// $0.8291 of spend — a 63x loss — where the honest figure over the same data is between
+	// 1.4x and 7.5x underwater. A metric that overstates a loss by 12x is as unusable as one
+	// that hides it: both make the fix unattributable.
+	//
+	// Nanodollars so the accumulator can stay atomic; a call's value is ~1e-5 USD, so an
+	// int64 of nanodollars holds ~9e9 USD of headroom.
+	xValueNano atomic.Int64
 
 	xReasonMu sync.Mutex
 	xReasons  = map[string]int64{} // trigger/suppression reason -> count
@@ -122,6 +137,20 @@ func RecordExtractionSaving(tokens int) {
 	}
 }
 
+// RecordExtractionValue notes the dollars one removal was worth, priced by the component at
+// the rate that removal was actually billed at — the cache-write rate on a cold turn for the
+// first application, the cache-read rate for each later replay of the frozen result.
+//
+// Called at BOTH sites deliberately: crediting only the first application under-reports by
+// however much the replay is worth, and crediting the replays at the first application's rate
+// over-reports by 12.5x. The component is the only layer that knows which regime a request
+// was in, so it is the layer that prices it.
+func RecordExtractionValue(usd float64) {
+	if usd > 0 {
+		xValueNano.Add(int64(usd * 1e9))
+	}
+}
+
 // ExtractStats is the extraction economics block served inside /stats. It is ADDITIVE:
 // every pre-existing /stats field keeps its name and meaning, because deploy/harbor/*.py
 // parses them.
@@ -175,7 +204,13 @@ func ExtractSnapshot(cost, perSavedTokenUSD float64, cacheWrite, cacheRead int64
 	lookups := xLookups.Load()
 	hits := xCacheHits.Load()
 	gross := xGrossSaved.Load()
+	// The component's own realized valuation wins where it has one: it knows each removal's
+	// regime and counts the replays. perSavedTokenUSD stays the fallback for a host that
+	// records nothing (library users, /compact), where one flat rate is all there is.
 	grossValue := float64(gross) * perSavedTokenUSD
+	if v := xValueNano.Load(); v > 0 {
+		grossValue = float64(v) / 1e9
+	}
 
 	s := ExtractStats{
 		Calls: calls, CallsAvoided: hits, CallsSuppressed: xSuppressed.Load(),
