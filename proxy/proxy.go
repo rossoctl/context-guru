@@ -1239,14 +1239,27 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// from its first block, so its peek is flushed and the rest streams. See
 			// ssepeek.go for the measurement that motivates this and the limit it accepts.
 			//
-			// Non-Anthropic dialects skip the peek and stream unconditionally: AggregateSSE
-			// only reconstructs the Anthropic event stream, so for anything else the
-			// buffered path below reaches `writeRaw` and replays the bytes verbatim. It was
-			// paying the full latency for an inspection that never happened.
-			br := bufio.NewReader(resp.Body)
-			head, verdict := peekSSE(br, expand.ToolName)
-			if provider != bschemas.Anthropic {
-				verdict = sseStreamable
+			// Non-Anthropic dialects stream with NO peek at all, and the test has to come
+			// FIRST. sseLineVerdict only decides on content_block_start / message_stop /
+			// error, and no OpenAI-shaped event carries a type it recognises — so peeking
+			// such a stream decides nothing and runs to EOF or the 64 KB bound. Measured: an
+			// OpenAI-shaped 200-chunk stream of 11,614 bytes was 100% consumed. Overriding
+			// the verdict afterwards therefore fixed the label and not the behaviour: the
+			// client's first byte still arrived after the last upstream byte, and because
+			// sseBuffered stayed false, RecordSSE filed a time-to-LAST-byte value into the
+			// streamed bucket — the exact mislabelling sse_ttfb_ms_avg_buffered documents,
+			// reintroduced on another path and dragging the streamed average down invisibly.
+			//
+			// There is nothing to inspect anyway: AggregateSSE only reconstructs the
+			// Anthropic event stream, so for any other dialect the buffered path below
+			// reaches `writeRaw` and replays the bytes verbatim.
+			var br io.Reader = resp.Body
+			verdict := sseStreamable
+			var head []byte
+			if provider == bschemas.Anthropic {
+				pr := bufio.NewReader(resp.Body)
+				head, verdict = peekSSE(pr, expand.ToolName)
+				br = pr
 			}
 			if verdict == sseStreamable {
 				sse = true

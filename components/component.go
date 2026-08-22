@@ -211,11 +211,13 @@ type Ctx struct {
 	// ColdCache is true when this session has been idle longer than the provider's prompt
 	// cache TTL, so the cached prefix CacheAware exists to protect is certainly gone.
 	//
-	// It is deliberately INFORMATION, not an automatic lifting of the tail gate. Every
-	// offloader could safely rewrite the whole transcript on such a turn, but flipping
-	// TailOnly here would change what mask, failed_run and collapse do on live traffic the
-	// moment this shipped — including for deployments that asked for none of it. So the
-	// gate stays where it is and a component opts in (see extract_llm's cold_cache).
+	// It is INFORMATION, not a global lifting of the tail gate: the gate stays where it is
+	// and each component opts in. mask, failed_run and collapse opt in BY DEFAULT since
+	// 2026-08 (their replacements are pure functions of (content, config), which is what
+	// makes a decision taken at depth re-derivable on every later warm turn); readlifecycle
+	// and skeleton do not, because theirs are not. `cold_cache: false` restores the gate per
+	// component. See coldCacheDefault in components/offload for the measurement that flipped
+	// it — 90.8% of the context was being frozen on turns whose cache had already expired.
 	//
 	// False means "warm, or unknown". A new session, an evicted tracker entry and the first
 	// turn after a restart all read false: acting on a fabricated idle time would invalidate
@@ -311,11 +313,14 @@ func (c *Ctx) TailOnly(i int) bool {
 // TailOnlyCold is TailOnly with the depth restriction lifted on a turn whose prompt cache
 // is provably gone (ColdCache), for a component that opted in.
 //
-// The opt-in is per component and off by default. When ColdCache is right there is no
-// prefix to disturb, so acting at depth is free by construction — but when it is WRONG the
-// component flips content the provider is still holding and forces a cache-write of the
-// whole suffix at 1.25x the fresh rate. A missed cold turn only forgoes a saving, so the
-// asymmetry decides the default. See docs/design.md.
+// The opt-in is per component. It defaults ON for the three whose replacement is a pure
+// function of (content, config) — mask, failed_run, collapse — and OFF for the two whose is
+// not. When ColdCache is right there is no prefix to disturb, so acting at depth is free by
+// construction; when it is WRONG the component flips content the provider is still holding
+// and forces a cache-write of the whole suffix at 1.25x the fresh rate, where a missed cold
+// turn only forgoes a saving. That asymmetry is why the DETECTION is conservative rather
+// than why the default is off: see cacheIsCold, sessionTTL and the alias clock in
+// apply/apply.go, and docs/design.md.
 //
 // Only safe for a component whose replacement is a pure function of (content, config) —
 // the same property repairLostFreeze requires — because the decision it makes at depth is

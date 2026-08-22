@@ -127,3 +127,32 @@ func TestSSENamesExpandTool(t *testing.T) {
 		t.Fatal("a plain text chunk must not be counted")
 	}
 }
+
+// A non-Anthropic SSE response must be streamed with NO peek at all, and this is a test about
+// BYTES CONSUMED, not about the verdict. sseLineVerdict only decides on content_block_start /
+// message_stop / error, and no OpenAI-shaped event carries a type it recognises — so peeking
+// such a stream decides nothing and drains it to EOF. Overriding the verdict afterwards fixed
+// the label and left the behaviour: the client's first byte still arrived after the last
+// upstream byte, filed into the STREAMED bucket as a time-to-last-byte value.
+func TestOpenAIDialectPeekWouldDrainTheWholeStream(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 200; i++ {
+		sb.WriteString(`data: {"id":"c","object":"chat.completion.chunk","choices":[{"index":0,` +
+			`"delta":{"content":"token ` + strings.Repeat("x", 20) + `"}}]}` + "\n\n")
+	}
+	sb.WriteString("data: [DONE]\n\n")
+	stream := sb.String()
+
+	head, v := peek(t, stream)
+	// The verdict is right and useless: what matters is that the peek ate everything.
+	if v != sseStreamable {
+		t.Fatalf("verdict %v", v)
+	}
+	if len(head) < len(stream) {
+		t.Fatalf("peek consumed %d of %d bytes — if this ever becomes partial the guard in "+
+			"serve() may look unnecessary; it is not, it is what keeps the peek off this path",
+			len(head), len(stream))
+	}
+	t.Logf("peek consumed %d of %d bytes (100%%) — which is why serve() tests the provider "+
+		"BEFORE peeking rather than overriding the verdict after", len(head), len(stream))
+}

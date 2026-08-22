@@ -99,7 +99,7 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 		// output verbatim is what destroys it.
 		//
 		// The one place the depth restriction lifts wholesale is a turn whose cache has
-		// provably expired (cold_cache, off by default): there is no cached prefix left to
+		// provably expired (cold_cache, ON by default): there is no cached prefix left to
 		// flip, so the freeze below simply establishes the decision a turn earlier than the
 		// tail would have.
 		if !c.TailOnlyCold(i, m.coldCache) && !repairLostFreeze(c, m.Name(), content) {

@@ -866,3 +866,71 @@ func TestExpandRoundTrip(t *testing.T) {
 		t.Fatalf("stats not recorded: %+v", snap)
 	}
 }
+
+// A marker-bearing OPENAI SSE response must reach the client as a stream. The
+// continuation loop cannot act on this dialect at all (AggregateSSE reconstructs only the
+// Anthropic event stream, so the buffered path just replays the bytes verbatim), so there
+// is nothing to inspect and nothing to withhold — yet it was buffered anyway, and then,
+// once the peek was added, still fully consumed by a peek that no OpenAI event can decide.
+// The upstream blocks before its tail, so a proxy that reads the whole body cannot answer.
+func TestOpenAISSEStreamsThrough(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(`data: {"choices":[{"delta":{"content":"first"}}]}` + "\n\n"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
+		w.Write([]byte(`data: {"choices":[{"delta":{"content":"last"}}]}` + "\n\n" + "data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	var bb bytes.Buffer
+	enc := json.NewEncoder(&bb)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(map[string]any{
+		"model":    "gpt-x",
+		"stream":   true,
+		"tools":    []map[string]any{{"type": "function", "function": map[string]any{"name": "Bash", "parameters": map[string]any{"type": "object"}}}},
+		"messages": []map[string]any{{"role": "user", "content": "look at <<cg:HASH>>"}},
+	})
+	resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(bb.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	buf := make([]byte, 4096)
+	n, rerr := resp.Body.Read(buf)
+	first := string(buf[:n])
+	close(release)
+	if n == 0 {
+		t.Fatalf("first read returned no bytes: %v", rerr)
+	}
+	if !strings.Contains(first, "first") {
+		t.Fatalf("expected the first chunk, got %q", first)
+	}
+	if strings.Contains(first, "last") {
+		t.Fatal("the OpenAI SSE response was read in full before the client saw a byte")
+	}
+	rest, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(rest), "last") {
+		t.Fatalf("stream did not complete, tail=%q", rest)
+	}
+
+	// And the counters must say streamed, not file a time-to-last-byte into that bucket.
+	var snap metrics.Snapshot
+	stresp, _ := http.Get(srv.URL + "/stats")
+	json.NewDecoder(stresp.Body).Decode(&snap)
+	stresp.Body.Close()
+	if snap.SSEStreamed != 1 || snap.SSEBuffered != 0 {
+		t.Fatalf("want one streamed, zero buffered: %+v", snap)
+	}
+}

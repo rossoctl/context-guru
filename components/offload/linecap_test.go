@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
@@ -264,5 +265,63 @@ func TestLinecapYieldsToAnEarlierOffloader(t *testing.T) {
 	}
 	if gates["marker_or_kept_verbatim"] == 0 {
 		t.Fatalf("want marker_or_kept_verbatim, got %v", gates)
+	}
+}
+
+// The class TestNeverTruncateAllowList could not catch: every line there puts the actionable
+// token at the HEAD, where a head-preserving cut never touches it. These put it at the TAIL,
+// which is where real diagnostics put it — and a head-only cut destroyed all of them.
+//
+// The allow-list is now defence in depth rather than the thing correctness rests on: cutting
+// the middle keeps both ends whether or not a pattern happens to match.
+func TestCapKeepsATrailingReference(t *testing.T) {
+	filler := strings.Repeat("plain filler output line\n", 40)
+	for _, tc := range []struct {
+		name, line, must string
+	}{
+		{"tsc resolve error, path at the end",
+			"TS2345: Argument of type '{ id: number; nm: string; }' is not assignable to parameter of type " +
+				strings.Repeat("'SomeVeryLongGenericWrapper<Partial<Props>>' ", 12) + "src/components/Widget.tsx:42:11",
+			"src/components/Widget.tsx:42:11"},
+		{"node cannot-find-module, two paths at the end",
+			"Cannot find module " + strings.Repeat("x", 500) + " imported from /srv/app/node_modules/.pnpm/pkg/dist/index.mjs",
+			"/srv/app/node_modules/.pnpm/pkg/dist/index.mjs"},
+		{"json log line with file/line keys last",
+			`{"level":"error","msg":"` + strings.Repeat("y", 520) + `","file":"internal/db/pool.go","line":214}`,
+			`"line":214`},
+		{"indented cargo diagnostic, defeats an anchored ^path:line",
+			"  " + strings.Repeat("z", 600) + "  --> src/main.rs:5:9", "src/main.rs:5:9"},
+		{"tab-indented go stack frame",
+			"\t" + strings.Repeat("w", 600) + "\t/usr/local/go/src/net/http/server.go:2136 +0x4b", "server.go:2136"},
+		{"a long absolute path with no line number at all",
+			strings.Repeat("q", 600) + " /srv/app/pkg/handler/very/deep/path/file.go", "very/deep/path/file.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := runLinecap(t, newLinecapT(t, "collapse_duplicate_lines: false\n"),
+				filler+tc.line+"\n"+filler)
+			if !strings.Contains(got, tc.must) {
+				t.Errorf("the cap destroyed the only actionable token %q", tc.must)
+			}
+		})
+	}
+}
+
+// The budget is a budget: head + marker + tail must never exceed the cap, or the "cap" grows
+// the line it was meant to shrink and the never-worse guard is doing all the work.
+func TestClipMiddleHonoursTheBudget(t *testing.T) {
+	for _, n := range []int{1, 2, 5, 11, 12, 20, 100, 500} {
+		for _, in := range []string{strings.Repeat("a", 2000), strings.Repeat("é", 2000)} {
+			got := clipMiddle(in, n)
+			if r := len([]rune(got)); r > n {
+				t.Fatalf("cap %d produced %d runes", n, r)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("cap %d cut a rune in half", n)
+			}
+		}
+	}
+	// Under the cap, untouched.
+	if got := clipMiddle("short line", 500); got != "short line" {
+		t.Fatalf("a line under the cap was rewritten: %q", got)
 	}
 }

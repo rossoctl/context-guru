@@ -176,7 +176,7 @@ func (lc *Linecap) rewrite(content string) (string, int) {
 			if len(l) <= lc.maxLineChars || neverTruncate(l) {
 				continue
 			}
-			if t := dsl.TruncateRunes(l, lc.maxLineChars); t != l {
+			if t := clipMiddle(l, lc.maxLineChars); t != l {
 				lines[i] = t
 				folds++
 			}
@@ -191,6 +191,40 @@ func (lc *Linecap) rewrite(content string) (string, int) {
 		}
 	}
 	return strings.Join(lines, "\n"), folds
+}
+
+// clipMiddle caps a line by cutting its MIDDLE, keeping both ends.
+//
+// A head-only cut (dsl.TruncateRunes, which the DSL filters use) destroys the one token the
+// agent needs whenever the reference sits at the END of the line — and in real diagnostics it
+// usually does: `... error TS2345: Argument of type ... is not assignable ... Widget.tsx:42:11`,
+// `Cannot find module '...' imported from '...'`, a JSON log line whose "file"/"line" keys
+// come after the message. Measured on three such lines at 709, 631 and 666 chars: head-only
+// dropped the path from all three.
+//
+// Keeping both ends removes the allow-list from the critical path. neverTruncate below still
+// runs, but it is now defence in depth rather than the thing correctness rests on — which
+// matters because an allow-list's completeness cannot be verified, and every diagnostic format
+// that does not match one of its patterns was silently unprotected.
+//
+// The budget is honoured exactly: head + marker + tail never exceeds n runes.
+func clipMiddle(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	const marker = "...[cut]..."
+	if n < 3 {
+		return string(r[:n]) // no room even for an ellipsis; the budget still binds
+	}
+	if n <= len(marker) {
+		return dsl.TruncateRunes(s, n) // room for one end and an ellipsis, not for two ends
+	}
+	budget := n - len([]rune(marker))
+	// Two thirds to the head (the message), one third to the tail (the reference).
+	head := budget * 2 / 3
+	tail := budget - head
+	return string(r[:head]) + marker + string(r[len(r)-tail:])
 }
 
 // neverTruncate is the allow-list: a line matching it survives any cap intact. Without it

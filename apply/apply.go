@@ -445,7 +445,28 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			var prevAt int64
 			maxCachedIdx, prevAt = o.Tracker.TurnAt(sessionID, len(norm), nowMs)
 			maxCachedIdx--
-			coldCache = cacheIsCold(prevAt, nowMs, cacheTTL(provider, body))
+			// The idle clock is per SESSION ID; the provider's prompt cache is keyed on
+			// CONTENT. When those disagree the clock can go stale while the provider's entry
+			// stays warm, and a stale-but-plausible prevAt is the one shape that reads COLD
+			// wrongly — which is the expensive direction (a rewritten live prefix costs a
+			// cache-write of the whole suffix at 1.25x fresh).
+			//
+			// It disagrees whenever one conversation reaches us under two ids: an explicit
+			// header present on some turns and absent on others resolves to the header on
+			// one turn and to sha256(system+firstUser) on the next (session.Scoped), so
+			// turns under id B keep the provider entry warm while id A's clock ages. Three
+			// of thirteen production tenants send both id shapes.
+			//
+			// So the alias's clock counts too, and we take the LATER of the two. Conservative
+			// by construction: a later touch can only make us read WARM. Skipped when the
+			// alias IS the session id (no explicit header) — recording the same key twice
+			// would read back the timestamp just written and never see any idle time at all.
+			if alias := session.Scoped(o.Tenant, "", sys, firstUser); alias != sessionID {
+				if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
+					prevAt = aliasAt
+				}
+			}
+			coldCache = cacheIsCold(prevAt, nowMs, sessionTTL(st, sessionID, cacheTTL(provider, body)))
 			if prevAt > 0 && nowMs > prevAt {
 				idleMs = nowMs - prevAt
 			}
@@ -820,6 +841,54 @@ func cacheIsCold(prevAtMs, nowMs int64, ttl time.Duration) bool {
 		return false
 	}
 	return time.Duration(nowMs-prevAtMs)*time.Millisecond >= ttl+coldMargin
+}
+
+// aliasSeen records activity against a content-derived session id and returns when that id
+// was last seen, or 0 if never. It is the second clock the cold decision consults.
+//
+// Deliberately NOT the Tracker: TurnAt runs the transcript length through modes.Boundary,
+// which counts a compaction reset, so recording a second key per request double-counted that
+// metric. This needs only a timestamp, and the store already holds per-session state.
+//
+// ponytail: degrades to 0 on a store that cannot persist, which just restores the old
+// single-clock behaviour. Move it into the Tracker (with a read-only accessor) if the alias
+// clock ever needs the boundary too.
+func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
+	if st == nil || nowMs <= 0 {
+		return 0
+	}
+	k := "cg:seen:" + alias
+	var prev int64
+	if b, ok := st.Get(k); ok {
+		prev, _ = strconv.ParseInt(string(b), 10, 64)
+	}
+	st.Put(k, []byte(strconv.FormatInt(nowMs, 10)))
+	return prev
+}
+
+// sessionTTL is cacheTTL widened to the LONGEST lifetime this session has ever asked for.
+//
+// cacheTTL reads the TTL out of THIS request, so a client that marks `ttl: "1h"` on one turn
+// and a bare `ephemeral` on the next would have its hour-long prefix judged cold after six
+// minutes — a false cold reading on a prefix the provider is still holding. Once a session
+// has asked for the extended tier, every later cold judgment for it uses that tier.
+//
+// Monotonic, so it only ever makes us read WARM, which is the safe direction. Unobserved on
+// today's traffic (0 of 1,868 captured requests carry a ttl field, and none of the ~5,000
+// behind cacheTTL's own comment do) — but the proxy is growing a mechanism that adds 1h
+// marks itself, and this is the guard that keeps that from turning into a false cold read.
+func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration {
+	if st == nil {
+		return ttl
+	}
+	k := "cg:ttl:" + session
+	if b, ok := st.Get(k); ok {
+		if prev, err := time.ParseDuration(string(b)); err == nil && prev > ttl {
+			return prev
+		}
+	}
+	st.Put(k, []byte(ttl.String()))
+	return ttl
 }
 
 // hasCacheBreakpoint reports whether the request carries a REAL prompt-cache

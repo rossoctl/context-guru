@@ -214,3 +214,71 @@ func tmsgT(text string) bschemas.ChatMessage {
 	return bschemas.ChatMessage{Role: bschemas.ChatMessageRoleTool,
 		Content: &bschemas.ChatMessageContent{ContentStr: &t}}
 }
+
+// The two false-cold paths docs/design.md warned about, both of which produce a POPULATED,
+// PLAUSIBLE, STALE prevAt — the one shape TestColdSweepCannotFireOnTheMinus708Case does not
+// reach, since all six of its rows are variants of "the tracker came back empty or too
+// recent". Both are the expensive direction: a live prefix rewritten at depth costs a
+// cache-write of the whole suffix at 1.25x fresh.
+
+// Path 1: the TTL is read out of THIS request, so a session that asked ttl:"1h" once and
+// sends a bare ephemeral mark afterwards would be judged cold at six minutes.
+func TestSessionTTLRemembersTheLongestLifetimeAsked(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	// Turn 1 asks for the extended tier.
+	if got := sessionTTL(st, "s", time.Hour); got != time.Hour {
+		t.Fatalf("turn 1 = %v, want 1h", got)
+	}
+	// Turn 2 sends a bare ephemeral mark. The prefix may still be held for an hour.
+	if got := sessionTTL(st, "s", 5*time.Minute); got != time.Hour {
+		t.Fatalf("turn 2 = %v, want 1h — this is the false-cold read", got)
+	}
+	// And a 20-minute idle gap must therefore NOT read cold.
+	const now = int64(1_000_000_000)
+	if cacheIsCold(now-ms(20*time.Minute), now, sessionTTL(st, "s", 5*time.Minute)) {
+		t.Fatal("read COLD on a prefix the provider may hold for an hour")
+	}
+	// A session that never asked for it keeps the short TTL, so the sweep still works.
+	if got := sessionTTL(st, "other", 5*time.Minute); got != 5*time.Minute {
+		t.Fatalf("unrelated session = %v, want 5m", got)
+	}
+	if !cacheIsCold(now-ms(20*time.Minute), now, sessionTTL(st, "other", 5*time.Minute)) {
+		t.Fatal("a genuinely cold 5m session stopped being swept")
+	}
+}
+
+// Path 2: one conversation reaching us under two session ids. An explicit header present on
+// some turns and absent on others resolves to the header on one turn and to
+// sha256(system+firstUser) on the next, so turns under id B keep the provider's
+// content-keyed entry warm while id A's clock ages past the TTL.
+func TestAliasSessionClockKeepsAWarmPrefixWarm(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	tr := modes.NewTracker(0)
+	const sys, firstUser = "you are a helpful agent", "please fix the failing test"
+	explicit := session.Scoped("t", "client-supplied-id", sys, firstUser)
+	alias := session.Scoped("t", "", sys, firstUser)
+	if explicit == alias {
+		t.Fatal("fixture broken: the two ids must differ for this to be the aliased case")
+	}
+	base := int64(1_700_000_000_000)
+	// Turn 1 under the explicit id.
+	tr.TurnAt(explicit, 10, base)
+	aliasSeen(st, alias, base)
+	// Turn 2, three minutes later, under the ALIAS — this is what keeps the provider warm.
+	aliasSeen(st, alias, base+ms(3*time.Minute))
+	// Turn 3, seven minutes after turn 1, back under the explicit id. Its own clock says
+	// seven minutes idle, which is past 5m + the margin: the old code read COLD here.
+	now := base + ms(7*time.Minute)
+	_, prevAt := tr.TurnAt(explicit, 14, now)
+	if !cacheIsCold(prevAt, now, 5*time.Minute) {
+		t.Fatal("fixture broken: the un-aliased clock must read cold, or this proves nothing")
+	}
+	// With the alias's clock folded in, the later of the two wins and the turn reads WARM.
+	aliasAt := aliasSeen(st, alias, now)
+	if aliasAt > prevAt {
+		prevAt = aliasAt
+	}
+	if cacheIsCold(prevAt, now, 5*time.Minute) {
+		t.Fatal("read COLD while another id had touched the same prefix 4 minutes ago")
+	}
+}
