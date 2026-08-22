@@ -192,11 +192,20 @@ type Overview struct {
 	SSEStreamRows    int64 `json:"sse_stream_rows"`
 	CacheTTLRecorded int64 `json:"cache_ttl_recorded"`
 
+	// Both averages come from the SAME ttfb_ms column but they are NOT the same measurement,
+	// and that is why they are named apart rather than blended.
+	//
+	// On a streamed response ttfb_ms is a real time-to-first-byte. On a buffered one
+	// proxy.go leaves sseFirstByte zero and msSince falls back to time.Now(), so the value is
+	// the TOTAL response time — which is also, for a buffered response, the moment the client
+	// receives anything at all, because nothing is written until the whole response has
+	// arrived. So the figure is the right one to show; calling it a "time to first byte"
+	// alongside the streamed one is what would be wrong, and the UI names it as the total.
 	SSEStreamed        int64   `json:"sse_streamed"`
 	SSEBuffered        int64   `json:"sse_buffered"`
 	SSEBufferedPct     float64 `json:"sse_buffered_pct"`
 	TTFBMsAvgStreamed  float64 `json:"ttfb_ms_avg_streamed"`
-	UpstreamMsAvgBuffd float64 `json:"upstream_ms_avg_buffered"`
+	TotalMsAvgBuffered float64 `json:"total_ms_avg_buffered"`
 	// CacheTTL buckets requests by the prompt-cache lifetime tier they ASKED for:
 	// ephemeral_5m, ephemeral_1h, or "" for a body that carried no cache_control. Newly
 	// captured — every row written before the column exists reads "", which is why the UI
@@ -219,6 +228,25 @@ type Overview struct {
 	// removed content keeps being re-sent, and a reset is where that stops. 1,364 of them on
 	// measured traffic against a replay ceiling built by assuming none.
 	CompactionResets int64 `json:"compaction_resets"`
+	// EstimatorDivergence is the MEDIAN per-request ratio of provider-billed input to our own
+	// tokens_before, over the requests where nothing was compacted — i.e. where the two are
+	// measuring the same prompt and should agree.
+	//
+	// It is here because the divergence is the central honesty problem with every token figure
+	// on this page, and a ratio of sums hides it. Measured on 12,882 uncompacted production
+	// rows: ratio-of-sums 2.87x, but the MEDIAN per-request ratio is 3.38x (p25 2.43, p75 4.64,
+	// p90 6.80). The median is the right one to show, because the question a reader has is "how
+	// wrong is the number in front of me", not "how wrong is the corpus in aggregate".
+	//
+	// The gap is mostly SCOPE rather than tokenizer error: tokens_before is
+	// schema.MessagesTokens, which counts message TEXT only — no system prompt, no tool
+	// declarations, no JSON envelope — while the provider bills all of it. Dollars are
+	// unaffected: they come from the provider's own reported usage.
+	//
+	// EstimatorDivergenceRows is the population, so a ratio over four requests is not read as a
+	// fact about the deployment. Zero rows leaves the ratio at 0 and the UI shows nothing.
+	EstimatorDivergence     float64 `json:"estimator_divergence"`
+	EstimatorDivergenceRows int64   `json:"estimator_divergence_rows"`
 	// BilledInputTokens is fresh + cache reads + cache writes: the input the PROVIDER counted.
 	// It is here to be compared with TokensBefore, which is what our own tokenizer counted
 	// over message text only — a different unit, roughly a third the size, and the reason no
@@ -387,9 +415,11 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(CASE WHEN r.sse_buffered = 0 AND r.ttfb_ms > 0 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.sse_buffered = 1 THEN 1 ELSE 0 END),0),
 		AVG(CASE WHEN r.sse_buffered = 0 AND r.ttfb_ms > 0 THEN r.ttfb_ms END),
-		-- For a buffered response the whole upstream round-trip IS the wait before the first
-		-- byte, so that is the honest comparison against a streamed TTFB.
-		AVG(CASE WHEN r.sse_buffered = 1 THEN r.upstream_ms END),
+		-- The same column on the buffered population, where it holds the TOTAL response time
+		-- rather than a first-byte time (proxy.go leaves the first-byte instant zero and
+		-- msSince falls back to now). For a buffered response those coincide from the client's
+		-- point of view, since nothing is written until the whole response has arrived.
+		AVG(CASE WHEN r.sse_buffered = 1 AND r.ttfb_ms > 0 THEN r.ttfb_ms END),
 		-- Breakpoint placement by location, and the requests behind it.
 		COALESCE(SUM(r.cache_bp_system),0), COALESCE(SUM(r.cache_bp_tools),0),
 		COALESCE(SUM(r.cache_bp_messages),0), COALESCE(SUM(r.cache_bp_blocks),0),
@@ -419,7 +449,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		return nil, err
 	}
 	o.CGLatencyMsAvg, o.UpstreamMsAvg = cgAvg.Float64, upAvg.Float64
-	o.TTFBMsAvgStreamed, o.UpstreamMsAvgBuffd = ttfbAvg.Float64, upBufAvg.Float64
+	o.TTFBMsAvgStreamed, o.TotalMsAvgBuffered = ttfbAvg.Float64, upBufAvg.Float64
 	if n := o.SSEStreamed + o.SSEBuffered; n > 0 {
 		o.SSEBufferedPct = float64(o.SSEBuffered) / float64(n) * 100
 	}
@@ -475,6 +505,29 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 			  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 			ORDER BY p.ts DESC, p.id DESC LIMIT 1)`, args...).Scan(&o.CompactionResets); err != nil {
 		return nil, err
+	}
+	// The estimator check, on the only population where the two counts are comparable: requests
+	// where nothing was removed, so tokens_before and the provider's billed input describe the
+	// same prompt. A median rather than a mean, and rather than a ratio of sums, because a
+	// handful of enormous requests otherwise dominate and the figure stops describing a typical
+	// row. Computed with OFFSET over an ordered ratio, the same shape as DB.percentile — which
+	// takes a bare column name and so cannot express this ratio.
+	const ratioPop = ` AND r.tokens_before = r.tokens_after AND r.tokens_before > 0
+		AND r.token_accounting = 'complete' AND r.fresh_input + r.cache_read + r.cache_write > 0`
+	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+ratioPop,
+		args...).Scan(&o.EstimatorDivergenceRows); err != nil {
+		return nil, err
+	}
+	if o.EstimatorDivergenceRows > 0 {
+		var med sql.NullFloat64
+		if err := d.sql.QueryRow(`SELECT
+			CAST(r.fresh_input + r.cache_read + r.cache_write AS REAL) / r.tokens_before AS ratio
+			FROM requests r WHERE `+cond+ratioPop+`
+			ORDER BY ratio ASC LIMIT 1 OFFSET ?`,
+			append(append([]any(nil), args...), o.EstimatorDivergenceRows/2)...).Scan(&med); err != nil {
+			return nil, err
+		}
+		o.EstimatorDivergence = med.Float64
 	}
 	if o.Requests > 0 {
 		o.ExpandRate = float64(o.Expands) / float64(o.Requests)

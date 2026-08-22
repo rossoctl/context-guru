@@ -144,9 +144,12 @@ type Event struct {
 	// model or an account, and gone on restart. Persisting the pair makes it a fact about a
 	// request like every other on this row.
 	//
-	// TTFBMs is 0 on a non-streamed response and on a buffered one, where the client's first
-	// byte IS the whole write — see proxy.go, which is deliberate and is why the two are
-	// stored together rather than as one average.
+	// TTFBMs is 0 on a non-streamed response. On a BUFFERED one it is the total response time,
+	// not a first-byte time: proxy.go leaves the first-byte instant zero and msSince falls back
+	// to time.Now(). That is the right number for a buffered response — nothing is written to
+	// the client until the whole response has arrived, so the client's first byte and its last
+	// byte are the same moment — but it is a different measurement from the streamed figure,
+	// which is why the flag is stored beside it and the two are never averaged together.
 	SSEBuffered bool    `json:"sse_buffered"`
 	TTFBMs      float64 `json:"ttfb_ms"`
 	// FilteredDeclTokens is what the declaration filter stopped carrying on this request —

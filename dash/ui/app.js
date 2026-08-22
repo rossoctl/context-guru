@@ -876,6 +876,19 @@ const TILE_INFO = {
       + 'be read against the other. Every DOLLAR figure on this page uses this side, so the '
       + 'money is not affected by the gap.',
   },
+  'estimator-divergence': {
+    what: 'How far our own token counter falls below what the provider actually billed, on a '
+      + 'typical request. This is the honesty check for every token figure on this page.',
+    how: 'Measured only on requests where context-guru removed nothing — there, our count and '
+      + "the provider's describe the same prompt and should agree. The figure is the MEDIAN of "
+      + 'the per-request ratios, not a ratio of totals, because a handful of enormous requests '
+      + 'would otherwise dominate and the number would stop describing a typical row.',
+    catch: 'Most of this gap is SCOPE, not a broken tokenizer: our counter measures message '
+      + 'text only, while the provider also bills the system prompt, every tool definition and '
+      + 'the JSON structure around each message. Treat every token count on this page as a '
+      + 'lower bound on billed tokens, and roughly this far below one. The DOLLAR figures are '
+      + "unaffected — they come from the provider's own reported usage, not from this counter.",
+  },
   'attempted-tokens': {
     what: 'The part of each conversation compaction was actually allowed to rewrite.',
     how: 'The uncached tail of the request when running cache-aware; the whole request when '
@@ -914,18 +927,22 @@ const TILE_INFO = {
   },
   'ttfb-streamed': {
     what: 'How long a user waits before the first text appears, when streaming works.',
-    how: 'Measured from the start of the request to the first byte written to the client, '
-      + 'averaged over responses that really did stream.',
+    how: 'A real measurement: from the start of the request to the first byte actually written '
+      + 'to the client, averaged over responses that really did stream.',
   },
   'ttfb-buffered': {
     what: 'How long a user waits before ANY text appears when the response was buffered '
       + 'instead of streamed.',
-    how: 'The whole upstream round-trip, because on a buffered response nothing reaches the '
-      + 'client until the response is complete — so the round-trip IS the wait.',
-    catch: 'On measured traffic this is roughly 21 seconds longer than the streamed path, on '
-      + 'about a third of responses. That is around 140× more user-visible delay than '
-      + 'context-guru itself adds, and it is the biggest latency lever on this page — but it '
-      + 'is a property of how the response is handled, not of compaction.',
+    how: 'The whole response time. On a buffered response nothing is written to the client '
+      + 'until the entire response has arrived, so there is no earlier moment to measure — the '
+      + 'first thing the user sees and the last are the same instant.',
+    catch: 'This is NOT a time-to-first-byte in the way the tile beside it is, and it is '
+      + 'deliberately not labelled as one: the two are different measurements and comparing '
+      + 'them as a like-for-like pair would be wrong. What IS comparable is the experience — '
+      + 'on measured traffic a buffered response leaves the user staring at nothing for about '
+      + '21 seconds longer, on roughly a third of responses. That is far more user-visible '
+      + 'delay than compaction itself adds, though it is a property of how the response is '
+      + 'handled rather than of compaction.',
   },
 
   // ── amortization ──────────────────────────────────────────────────────────
@@ -1032,9 +1049,12 @@ const TILE_INFO = {
   'split-requests': {
     what: 'Requests where the prompt actually got split into a stable and a volatile half.',
     how: 'Counted from the requests where the split component changed something.',
-    catch: 'The component runs on every request and does nothing on most of them. Zero here '
-      + 'with a large run count on the Components tab means these prompts have no volatile '
-      + 'tail to separate — a fact about the prompt, not a fault.',
+    catch: 'This component MOVES tokens out of the expensive cache-creation tier rather than '
+      + 'removing any, so on the Components tab it correctly reports zero "acted" (which counts '
+      + 'removed tokens) alongside a large "structural" count. That is not a broken component '
+      + 'and not a component doing nothing — the structural column is its real fire count. '
+      + 'Separately, zero HERE with a large run count means these prompts carry no volatile '
+      + 'tail to separate, which is a fact about the prompt rather than a fault.',
   },
   'split-tail-moved': {
     what: 'Of those, the turns where the volatile part had actually changed — the only '
@@ -1239,6 +1259,16 @@ function renderTiles(o) {
       o.tokens_before > 0
         ? (o.billed_input_tokens / o.tokens_before).toFixed(1) + '× our count'
         : 'fresh + cache reads + writes'),
+    // The check itself, as a figure rather than a footnote. A ratio of sums (the tile to the
+    // left) is dominated by the largest requests; this is the median per-request ratio over the
+    // only population where the two counts describe the SAME prompt — requests where nothing
+    // was removed. It is the honest answer to "how wrong is the number in front of me".
+    tile('estimator-divergence', 'Our estimate runs low by',
+      o.estimator_divergence ? o.estimator_divergence.toFixed(2) + '×' : '—',
+      o.estimator_divergence_rows
+        ? 'median over ' + num(o.estimator_divergence_rows) + ' uncompacted requests'
+        : 'no comparable requests in this window',
+      o.estimator_divergence > 1.5 ? 'bad' : ''),
     tile('saved-gross', 'Saved (gross)', compact(o.saved_gross), 'recounts re-sent history'),
     // The label has to name the UNIQUE calculation, which dominates this figure, and not
     // only the restore subtraction, which is usually zero: sitting between "Saved (gross)
@@ -1433,13 +1463,19 @@ function renderTiles(o) {
       sseKnown ? num(o.sse_buffered) + ' of ' + num(o.sse_buffered + o.sse_streamed) + ' streamed responses'
         : num(o.sse_stream_rows) + ' streaming requests predate this capture',
       sseKnown && o.sse_buffered_pct > 10 ? 'bad' : ''),
-    tile('ttfb-streamed', 'First byte, streamed', sseKnown ? ms(o.ttfb_ms_avg_streamed) : '—',
-      'the good path'),
-    tile('ttfb-buffered', 'First byte, buffered', sseKnown ? ms(o.upstream_ms_avg_buffered) : '—',
-      sseKnown && o.ttfb_ms_avg_streamed > 0 && o.upstream_ms_avg_buffered > 0
-        ? '+' + ms(o.upstream_ms_avg_buffered - o.ttfb_ms_avg_streamed) + ' of extra waiting'
-        : 'nothing arrives until the whole response does',
-      sseKnown && o.upstream_ms_avg_buffered > o.ttfb_ms_avg_streamed * 2 ? 'bad' : ''),
+    tile('ttfb-streamed', 'Time to first byte, streamed', sseKnown ? ms(o.ttfb_ms_avg_streamed) : '—',
+      'measured first byte · the good path'),
+    // NOT called a "time to first byte". On a buffered response there is no earlier byte to
+    // measure — the value is the whole response time — so labelling it as a TTFB beside the
+    // streamed figure would present two different measurements as one comparable pair. It is
+    // still the honest number for what a user experiences, because nothing reaches them until
+    // the response is complete.
+    tile('ttfb-buffered', 'Wait for the whole response, buffered',
+      sseKnown ? ms(o.total_ms_avg_buffered) : '—',
+      sseKnown && o.ttfb_ms_avg_streamed > 0 && o.total_ms_avg_buffered > 0
+        ? ms(o.total_ms_avg_buffered - o.ttfb_ms_avg_streamed) + ' longer before anything appears'
+        : 'nothing appears until the whole response arrives',
+      sseKnown && o.total_ms_avg_buffered > o.ttfb_ms_avg_streamed * 2 ? 'bad' : ''),
   ]));
 
   host.appendChild(tileGroup('Latency and safety', 'the price of compaction', [

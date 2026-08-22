@@ -496,3 +496,99 @@ func hasSub(s, sub string) bool {
 	}
 	return false
 }
+
+// TestEstimatorDivergenceIsAMedianOverComparableRows pins the honesty check on the token unit.
+//
+// tokens_before is schema.MessagesTokens — message TEXT only, counted locally — while the
+// provider bills the system prompt, the tool declarations and the JSON envelope too. On
+// production the median per-request ratio is 3.38x. Two things have to be right or the figure
+// lies: it must be measured only where the two counts describe the SAME prompt (nothing
+// removed), and it must be a MEDIAN, because a ratio of sums is dominated by the largest
+// requests and reads much lower (2.87x on the same corpus).
+func TestEstimatorDivergenceIsAMedianOverComparableRows(t *testing.T) {
+	db := openTestDB(t)
+	// Five comparable rows with ratios 2, 3, 4, 5, 6 -> median 4.
+	for i, mult := range []int64{2, 3, 4, 5, 6} {
+		insertReq(t, db, &Event{
+			TS: int64(1000 + i), SessionID: "s1", Model: "m1", TenantID: "t1",
+			TokensBefore: 1000, TokensAfter: 1000, // nothing removed: comparable
+			CacheRead: 1000 * mult, FreshInput: 0, TokenAccounting: AccountingComplete,
+		})
+	}
+	// One enormous row that COMPACTED something. It must be excluded: the two counts no longer
+	// describe the same prompt, and its size would swamp a ratio of sums.
+	insertReq(t, db, &Event{
+		TS: 2000, SessionID: "s1", Model: "m1", TenantID: "t1",
+		TokensBefore: 1000000, TokensAfter: 900000,
+		CacheRead: 50000000, TokenAccounting: AccountingComplete,
+	})
+	o, err := db.Overview(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.EstimatorDivergenceRows != 5 {
+		t.Errorf("rows = %d, want 5 (the compacted row is not comparable and must be excluded)",
+			o.EstimatorDivergenceRows)
+	}
+	nearEq(t, "median divergence", o.EstimatorDivergence, 4)
+	// A ratio of sums over the same five rows would be 20000/5000 = 4 as well, so prove the
+	// median is doing the work: skew the population and the two must part.
+	insertReq(t, db, &Event{
+		TS: 3000, SessionID: "s2", Model: "m1", TenantID: "t1",
+		TokensBefore: 100000, TokensAfter: 100000,
+		CacheRead: 10000000, TokenAccounting: AccountingComplete, // ratio 100
+	})
+	o2, err := db.Overview(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sumRatio := float64(o2.BilledInputTokens) / float64(o2.TokensBefore)
+	if o2.EstimatorDivergence >= sumRatio {
+		t.Errorf("median %.2f must be BELOW the ratio-of-sums %.2f once one huge row is present; "+
+			"if they track each other the median is not being computed",
+			o2.EstimatorDivergence, sumRatio)
+	}
+}
+
+// TestBufferedAndStreamedLatencyAreNeverBlended pins that the two response-latency figures stay
+// apart.
+//
+// They come from the same ttfb_ms column and are NOT the same measurement: on a streamed
+// response it is a real time-to-first-byte, on a buffered one proxy.go leaves the first-byte
+// instant zero and msSince falls back to now, so the value is the TOTAL response time. Averaging
+// the two populations together would report the healthiest number for exactly the requests
+// having the worst experience.
+func TestBufferedAndStreamedLatencyAreNeverBlended(t *testing.T) {
+	db := openTestDB(t)
+	insertReq(t, db, &Event{
+		TS: 1000, SessionID: "s1", Model: "m1", TenantID: "t1",
+		TokensBefore: 100, TokensAfter: 100, CacheRead: 100,
+		TokenAccounting: AccountingComplete, TTFBMs: 800, SSEBuffered: false,
+	})
+	insertReq(t, db, &Event{
+		TS: 2000, SessionID: "s1", Model: "m1", TenantID: "t1",
+		TokensBefore: 100, TokensAfter: 100, CacheRead: 100,
+		TokenAccounting: AccountingComplete, TTFBMs: 29000, SSEBuffered: true,
+	})
+	// A non-streamed row: no TTFB at all, and it must not drag either average toward zero.
+	insertReq(t, db, &Event{
+		TS: 3000, SessionID: "s1", Model: "m1", TenantID: "t1",
+		TokensBefore: 100, TokensAfter: 100, CacheRead: 100,
+		TokenAccounting: AccountingComplete, TTFBMs: 0, SSEBuffered: false,
+	})
+	o, err := db.Overview(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.SSEStreamed != 1 || o.SSEBuffered != 1 {
+		t.Fatalf("streamed/buffered = %d/%d, want 1/1", o.SSEStreamed, o.SSEBuffered)
+	}
+	nearEq(t, "streamed first byte", o.TTFBMsAvgStreamed, 800)
+	nearEq(t, "buffered total", o.TotalMsAvgBuffered, 29000)
+	nearEq(t, "buffered share", o.SSEBufferedPct, 50)
+	// Coverage: rows that carry neither fact predate the capture and must be countable, so the
+	// UI can say "not recorded yet" instead of showing a 0% buffered rate over old history.
+	if o.SSERecorded != 2 {
+		t.Errorf("SSERecorded = %d, want 2 (the non-streamed row carries neither fact)", o.SSERecorded)
+	}
+}

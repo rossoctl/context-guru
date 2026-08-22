@@ -119,8 +119,10 @@ CREATE TABLE IF NOT EXISTS requests (
   -- Whether the client's stream was BUFFERED instead of streamed through, and the measured
   -- time to its first byte. A third of streamed responses are buffered and those wait ~21 s
   -- longer to start — far more user-visible delay than the pipeline itself adds, and until
-  -- now visible only as a counter on /stats that reset on restart. ttfb_ms is 0 on a buffered
-  -- or non-streamed response, where there is no first byte before the whole write.
+  -- now visible only as a counter on /stats that reset on restart. ttfb_ms is 0 on a
+  -- non-streamed response; on a BUFFERED one it is the TOTAL response time rather than a
+  -- first-byte time, because nothing reaches the client until the whole response has arrived.
+  -- Never average the two populations together.
   sse_buffered       INTEGER NOT NULL DEFAULT 0,
   ttfb_ms            REAL    NOT NULL DEFAULT 0,
   cg_latency_ms      REAL    NOT NULL DEFAULT 0,
