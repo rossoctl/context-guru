@@ -111,7 +111,7 @@ CUSTOM_CONFIGS = {
         # deterministic extract then strips ANSI/noise on the smaller outputs the LLM left
         # untouched. (When extract ran first it marked outputs so extract_llm skipped them
         # via HasPlaceholder → the LLM never fired.)
-        "pipeline: [format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]\n"
+        "pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]\n"
         "components:\n"
         "  extract:\n"
         "    min_tokens: 400\n"  # deterministic, zero-latency: catches obvious noise every step
@@ -150,7 +150,7 @@ CUSTOM_CONFIGS = {
     "cacheonly": "pipeline: [cacheinject]\n",
     # conservative deterministic-only (no LLM, no mask): safe control
     "codesafe": (
-        "pipeline: [format, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]\n"
+        "pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]\n"
         "components:\n"
         "  collapse:\n"
         "    max_tokens: 3000\n"

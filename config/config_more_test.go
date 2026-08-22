@@ -114,3 +114,52 @@ func TestNewStoreNonNil(t *testing.T) {
 		t.Fatal("NewStore returned nil")
 	}
 }
+
+// The lossless trio leads every preset that does deterministic work. All three
+// verify-then-adopt, so there is no risk argument for leaving one out — and both
+// omissions this asserts against were real: textclean shipped in `general` alone while
+// half of all corpus messages carried ANSI, and searchfold shipped in NO preset at all,
+// fully written and round-trip verified, folding nothing.
+func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
+	// off/summarize/agentdiet are excluded BY DESIGN: off is the A-B control, summarize
+	// restructures the transcript alone, and agentdiet reproduces a published baseline
+	// whose whole claim is what ONE reflection achieves — stacking folds beside it would
+	// reduce the same outputs first and there would be nothing left to attribute.
+	exempt := map[string]bool{"off": true, "summarize": true, "agentdiet": true}
+	for name, pipeline := range presets {
+		if exempt[name] {
+			continue
+		}
+		has := map[string]bool{}
+		for _, c := range pipeline {
+			has[c] = true
+		}
+		for _, want := range []string{"format", "textclean"} {
+			if !has[want] {
+				t.Errorf("preset %q is missing the lossless fold %q: %v", name, want, pipeline)
+			}
+		}
+		// searchfold needs tool-output traffic to fold; `mcp` carries none worth folding.
+		if name != "mcp" && !has["searchfold"] {
+			t.Errorf("preset %q is missing searchfold: %v", name, pipeline)
+		}
+	}
+}
+
+// toon acted 0 times on 5,752 production requests and converted 0 candidates in 11.67M
+// measured tokens, at 1.53 ms + one TextTokens call per tool message. It stays REGISTERED
+// (tabular traffic can opt in) but no preset may pay for it by default.
+func TestToonIsInNoPreset(t *testing.T) {
+	for name, pipeline := range presets {
+		for _, c := range pipeline {
+			if c == "toon" {
+				t.Errorf("preset %q still ships toon: %v", name, pipeline)
+			}
+		}
+	}
+	for name, doc := range presetConfigs {
+		if strings.Contains(doc, "toon") {
+			t.Errorf("rich preset %q still ships toon", name)
+		}
+	}
+}

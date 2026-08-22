@@ -136,19 +136,35 @@ func (c *Config) applyPreset() error {
 // presets map a name to a default pipeline (component names in run order). The
 // referenced components are registered by P1+; an unknown name surfaces at
 // Build time as a clear error.
+//
+// The LOSSLESS TRIO — format, textclean, searchfold — leads every preset that does any
+// deterministic work. All three verify-then-adopt (format re-parses, textclean compares
+// informative lines, searchfold checks its own inverse byte-for-byte) so they cannot lose
+// content, and running them first makes every downstream token count honest.
+// Measured on 2026-08 production traffic before this change:
+//   - textclean was in `general` ALONE, on 5,734 of 19,775 requests, while 49.6% of corpus
+//     messages carry ANSI and it had zero false positives across 861 acting requests.
+//   - searchfold was written, tested, round-trip verified — and in ZERO presets. 22,014
+//     tokens on the measured sample went unfolded because nothing ran it.
+//
+// `toon` is RETIRED from every preset (the component and its tests stay, so anyone with
+// tabular traffic can enable it explicitly). Production: `not_uniform_object_array`
+// 234,437, `below_min_tokens` 64,831, **acted 0 of 5,752 requests**, and an independent
+// sweep found 0 convertible candidates in 11.67M tokens. It was costing 1.53 ms and a
+// TextTokens call per tool message to convert nothing.
 var presets = map[string][]string{
 	"off":        {}, // passthrough: no components (baseline / A-B control)
-	"safe":       {"format", "cachesplit"},
-	"balanced":   {"format", "dedup", "failed_run", "cmdfilter", "cachesplit"},
-	"aggressive": {"format", "dedup", "failed_run", "cmdfilter", "smartcrush", "extract", "extract_llm", "cachesplit"},
-	// coding: deterministic only. It named `skeleton` until 2026-08 — which is behind the
+	"safe":       {"format", "textclean", "searchfold", "cachesplit"},
+	"balanced":   {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "cachesplit"},
+	"aggressive": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "smartcrush", "extract", "extract_llm", "cachesplit"},
+	// coding: deterministic only, no model calls. It named `skeleton` until 2026-08 — which is behind the
 	// `cg_skeleton` build tag and therefore NOT registered in a normal binary, so
 	// `preset: coding` failed to build with `unknown component "skeleton"` for every user
 	// who selected it. TestEveryPresetBuilds now makes that class of breakage impossible.
 	// The substitutes are the components measured to actually act on Claude Code traffic
 	// (see docs/results/measured-2026-08.md).
-	"coding": {"format", "toon", "dedup", "cmdfilter", "extract", "cachesplit"},
-	"mcp":    {"format", "smartcrush", "cachesplit"},
+	"coding": {"format", "textclean", "searchfold", "dedup", "cmdfilter", "extract", "cachesplit"},
+	"mcp":    {"format", "textclean", "smartcrush", "cachesplit"},
 	// agent: tuned for long agentic sessions (e.g. Claude Code on SWE-bench),
 	// where the dominant cost is the transcript of tool outputs (file reads)
 	// re-sent every turn. mask (drop old tool outputs) is the biggest lever
@@ -156,11 +172,11 @@ var presets = map[string][]string{
 	// eval-containers SWE-bench sweep (see docs/RESULTS.md); extract + failed_run
 	// + dedup add relevance/supersession/dup wins; cachesplit keeps the shared system
 	// prefix cacheable. Order: lossless first, then offload old-then-large, cache last.
-	"agent": {"format", "dedup", "failed_run", "mask", "extract", "extract_llm", "cachesplit"},
+	"agent": {"format", "textclean", "searchfold", "dedup", "failed_run", "mask", "extract", "extract_llm", "cachesplit"},
 	// general: the recommended all-round pipeline, safe+effective for any agent/
-	// benchmark. Ordered by pipeline semantics: lossless repack first (format, toon,
-	// textclean — textclean is the plain-text one, and plain text is what most tool
-	// output is: 1,724 of 1,748 distinct outputs in the captures measured here)
+	// benchmark. Ordered by pipeline semantics: the lossless trio first (format,
+	// textclean, searchfold — textclean is the plain-text one, and plain text is what most
+	// tool output is: 1,724 of 1,748 distinct outputs in the captures measured here)
 	// so downstream token counts are honest; cheap structural offloaders next (dedup,
 	// failed_run, cmdfilter); age-based mask; relevance-based extract; the blind
 	// head/tail collapse as the last-resort catch-all for anything still oversized;
@@ -170,7 +186,7 @@ var presets = map[string][]string{
 	// levers that proved reward-neutral in the benchmark sweeps without stacking the
 	// two overlapping old-context reducers (mask is the one kept; summarize
 	// is its own preset — see docs/components.md redundancy notes).
-	"general": {"format", "toon", "textclean", "dedup", "failed_run", "cmdfilter", "mask", "extract", "extract_llm", "collapse", "cachesplit"},
+	"general": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "mask", "extract", "extract_llm", "collapse", "cachesplit"},
 	// summarize restructures the whole transcript (changes the message count) — run
 	// it alone so no other component's in-place edits race apply's rebuild.
 	"summarize": {"summarize"},
@@ -185,14 +201,15 @@ var presets = map[string][]string{
 	// recommended defaults (codesmart is the proxy default). Their tuned per-component
 	// settings live in presetConfigs; the name-lists here keep PresetPipeline (used by
 	// /compact?preset=) resolving them.
-	"codesmart": {"format", "toon", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "cachesplit"},
-	"codesafe":  {"format", "dedup", "failed_run", "cmdfilter", "extract", "collapse", "cachesplit"},
+	"codesmart": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "cachesplit"},
+	"codesafe":  {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract", "collapse", "cachesplit"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
 // per-component settings a bare pipeline name-list cannot express. Derived from the
 // SWE-bench study (deploy/harbor/swebench.py), but NOT identical to it any more — the
-// study's arm predates `toon` and used `cacheinject` where this uses `cachesplit`. The
+// study's arm used `cacheinject` where this uses `cachesplit`, and the lossless trio
+// (textclean, searchfold) has since replaced the never-firing `toon`. The
 // comment used to claim "kept verbatim", which was false and load-bearing: it is what a
 // reader relies on when deciding whether the published numbers describe the shipped
 // default. They describe an ancestor of it. Treat any preset change as a reason to
@@ -207,7 +224,7 @@ var presets = map[string][]string{
 //
 // Component defaults are left untouched, so general/agent/aggressive are unaffected.
 var presetConfigs = map[string]string{
-	"codesmart": `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]
+	"codesmart": `pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]
 components:
   extract:
     min_tokens: 400
@@ -220,7 +237,7 @@ components:
       min_request_tokens: 3000
     llm_every_n_requests: 1
     llm_max_per_request: 4`,
-	"codesafe": `pipeline: [format, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]
+	"codesafe": `pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]
 components:
   collapse:
     max_tokens: 3000`,
