@@ -490,6 +490,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		CtxWindow:    o.Window,
 		ModelName:    gjson.GetBytes(body, "model").String(),
 		SelfRates:    o.SelfRates,
+		RatesFor:     o.RatesFor,
 		CacheAware:   cacheAware,
 		ColdCache:    coldCache,
 		IdleMs:       idleMs,

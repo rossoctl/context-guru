@@ -228,6 +228,20 @@ type Ctx struct {
 	// SelfRates are the per-token rates for the model a component would call itself — the
 	// incoming model's, since that is what `source: incoming` uses. Zero when unknown.
 	SelfRates TokenRates
+	// RatesFor resolves the operator's rate card for ANY model id, not just the incoming
+	// one. nil, or a zero return, means "not on the card" and the component must fall back.
+	//
+	// It exists because a component that names its own cheap model (`model.model:
+	// claude-haiku-4-5`) could not price it: SelfRates covers the request's model and nothing
+	// reached the host's price table, so the economic gate spent against the built-in haiku
+	// LIST rates while the dashboard priced the same call from the operator's card. MEASURED
+	// on this deployment: `cheap_model_price_unconfigured` was recorded on 1,770 of 1,770
+	// requests, so every allow/suppress decision in the window was made against the wrong
+	// card, and the same 93 calls were booked at $0.7946 in extraction_calls.cost_usd against
+	// $0.6039 in requests.cg_llm_cost_usd — 32% apart, for one set of calls. Two numbers for
+	// one invoice is not a rounding difference; it is a component and a dashboard disagreeing
+	// about whether a configuration pays.
+	RatesFor func(model string) TokenRates
 	// IdleMs is how long this session was idle before this request, in milliseconds; 0 when
 	// there is no previous turn on record. Carried alongside ColdCache so a component can
 	// demand MORE idle time than the provider TTL implies, and so the figure can be

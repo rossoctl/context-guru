@@ -41,6 +41,10 @@ type Opts struct {
 	// `model.source: incoming` — i.e. the request's own model. Supplied by the host, which is
 	// the only layer with a Pricer. Zero means unknown and the component falls back.
 	SelfRates components.TokenRates
+	// RatesFor resolves the operator's rate card for a NAMED model, so a component that
+	// compacts with a model other than the request's own can price its own calls from the
+	// same card the bill is computed from. nil means unavailable; the component falls back.
+	RatesFor func(model string) components.TokenRates
 
 	// Mode is the operating mode. Empty means components.ModeSync, so a caller that does
 	// not know about modes gets exactly today's behavior.
