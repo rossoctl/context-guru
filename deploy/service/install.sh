@@ -54,6 +54,30 @@ need_root() {
   [ "$(id -u)" = 0 ] || { echo "run this with sudo" >&2; exit 1; }
 }
 
+# Does the SERVICE find this tool? Not "does preflight find it": install.sh runs under
+# sudo, whose secure_path on RHEL is /sbin:/bin:/usr/sbin:/usr/bin and excludes
+# /usr/local/bin — which is where rclone is installed. So `command -v rclone` here
+# reported it missing while the nightly backup unit, which inherits systemd's PATH
+# (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin), had been uploading to Box
+# successfully for weeks. A preflight that cries wolf gets ignored, so resolve the tool
+# against the PATH the unit will actually run with. Falling back to our own PATH keeps
+# the old behaviour if systemd cannot be asked.
+# The key_env variables the allow-list CONFIGURES. Comments are stripped first, and not
+# only whole-comment lines: the shipped upstreams.yaml DOCUMENTS the feature with
+# `key_env: SOME_VAR` in a paragraph of prose, and reading that as configuration made
+# preflight demand a credential for a variable nobody had configured — on every host,
+# since the comment ships with the file. sed rather than grep -o so an allow-list that
+# names none (the normal case, caller-pays) is not a pipeline failure.
+configured_key_envs() {
+  sed -nE 's/#.*//; s/.*key_env:[[:space:]]*([A-Z0-9_]+).*/\1/p' "$1" 2>/dev/null | sort -u
+}
+
+in_service_path() {
+  local p
+  p=$(systemctl show-environment 2>/dev/null | sed -n 's/^PATH=//p' | head -1)
+  PATH="${p:-$PATH}" command -v "$1" >/dev/null 2>&1
+}
+
 # ── install ─────────────────────────────────────────────────────────────────
 cmd_install() {
   need_root
@@ -271,12 +295,12 @@ cmd_preflight() {
   # which is not in a minimal RHEL install, and the control database went unbacked-up.
   # Only checked when the backup script is actually installed.
   if [ -x /usr/local/bin/context-guru-backup.sh ] || [ -f /etc/systemd/system/context-guru-backup.timer ]; then
-    if command -v python3 >/dev/null 2>&1; then
+    if in_service_path python3; then
       ok "python3 (nightly control-db backup)"
     else
       no "python3 missing — the nightly control-db backup cannot take a snapshot"; bad=1
     fi
-    if command -v rclone >/dev/null 2>&1; then
+    if in_service_path rclone; then
       ok "rclone (nightly control-db backup)"
     else
       no "rclone missing — the nightly control-db backup cannot upload; run box-setup.sh"; bad=1
@@ -312,7 +336,7 @@ cmd_preflight() {
       no "credential for $env expected at $CREDS/$dashed — missing or empty"
       missing=1
     fi
-  done < <(grep -oE 'key_env:[[:space:]]*[A-Z0-9_]+' "$ETC/upstreams.yaml" 2>/dev/null | awk '{print $2}' | sort -u)
+  done < <(configured_key_envs "$ETC/upstreams.yaml")
   [ "$missing" = 0 ] || bad=1
 
   if [ -f "$DROPIN/10-credentials.conf" ]; then
