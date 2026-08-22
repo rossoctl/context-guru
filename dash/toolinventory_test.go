@@ -366,9 +366,9 @@ func TestRecordInventoryEndToEnd(t *testing.T) {
 	}
 	inv := ScanInventory("anthropic", ccBody(t, []string{tool("Bash", "b")}, skillsReminder,
 		[]map[string]any{{"name": "Bash", "input": map[string]any{}}}))
-	rec.RecordInventory("t1", "s1", 1000, inv)
-	rec.RecordInventory("t1", "", 1000, inv) // no session: nothing to key on, dropped
-	rec.RecordInventory("t1", "s2", 1000, nil)
+	rec.RecordInventory("t1", "s1", 1000, inv, true)
+	rec.RecordInventory("t1", "", 1000, inv, true) // no session: nothing to key on, dropped
+	rec.RecordInventory("t1", "s2", 1000, nil, true)
 	db := rec.DB()
 	deadline := time.Now().Add(5 * time.Second)
 	for {

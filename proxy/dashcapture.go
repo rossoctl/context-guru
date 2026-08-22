@@ -417,11 +417,16 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		}
 		e.ContentCap = contentCap
 	}
-	// The declared/used inventory goes to its own tables, keyed by session: NOT under the
-	// content gate, because these are identifiers of the caller's own configuration rather
-	// than transcript text (see dash/toolinventory.go), and NOT on the Event, because the
-	// rows are per session and deduped by declaration-set digest rather than one set per
-	// request. Same discipline as Record: a non-blocking send, nothing else here.
-	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv)
+	// The declared/used inventory goes to its own tables, keyed by session: the NAMES and
+	// token weights are NOT under the content gate, because they are identifiers of the
+	// caller's own configuration rather than transcript text (see dash/toolinventory.go),
+	// and they are not on the Event, because the rows are per session and deduped by
+	// declaration-set digest rather than one set per request.
+	//
+	// The declaration TEXT is a different class of data — a tool schema and a system prompt
+	// are whatever the caller wrote, up to and including something they pasted — so it rides
+	// the same captureContent decision as the transcript, and the writer stores NULL for it
+	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
+	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent)
 	c.rec.Record(e)
 }

@@ -57,6 +57,14 @@ const (
 	// keeps a failed parse from reading as "this session declared no skills": with
 	// state=unknown there are no KindSkill rows and the reader must say so.
 	KindSkillListing = "skill_listing"
+	// KindSystemPrompt is ONE marker row per distinct system prompt a session carried: name
+	// is a hash of the text, tokens is its measured BPE cost, and text_gz holds the prompt
+	// itself when consent allows. It is not a declaration, and it lives in this table
+	// anyway because it is the same THING as far as every consumer is concerned — a region
+	// of the prefix every request re-reads, keyed by session, evicted by the same trigger,
+	// scoped by the same tenant_id. A second table would have bought a second eviction path
+	// to forget about.
+	KindSystemPrompt = "system_prompt"
 )
 
 // Skill-listing parse states, stored in the marker row's Server column.
@@ -85,6 +93,18 @@ type Decl struct {
 	Name   string `json:"name"`
 	Server string `json:"server,omitempty"`
 	Tokens int    `json:"tokens"`
+	// Text is the declaration's OWN slice of the prompt: a tool's whole JSON element, a
+	// skill's listing entry, the listing itself for the marker row. It is what the reader
+	// has to see to judge a token weight — "4,723 tokens" is not a fact anybody can act on
+	// until they can read the 4,723 tokens.
+	//
+	// It is the one field here that is CONTENT rather than an identifier, so it is the one
+	// field gated on transcript-capture consent. The gate is NOT applied in this file: the
+	// text is read on the request path (it is already in the body) and dropped by the
+	// WRITER when consent is absent, exactly as extraction_calls drops its before/after
+	// while keeping its metrics. Applying it here instead would poison declCache, whose
+	// entries are shared by every tenant that declares the same set.
+	Text string `json:"text,omitempty"`
 }
 
 // Used is one invoked capability: a tool name, or the Skill tool plus the skill it
@@ -103,6 +123,12 @@ type Inventory struct {
 	Digest string
 	Decls  []Decl
 	Used   []Used
+	// System is the top-level system prompt this request carried, or nil when it had none.
+	// Kept OFF Decls because it is not a declaration and, more importantly, because Decls is
+	// memoized by a digest that does not cover the system prompt — a shared cache entry
+	// holding one tenant's system text and served to another is a disclosure, not a bug to
+	// find later.
+	System *SystemPrompt
 	// UseFingerprint identifies the turn Used came from. Claude Code resends the whole
 	// transcript, so consecutive requests usually show the SAME last tool-using turn;
 	// the writer skips a repeat rather than counting those calls again per resend.
@@ -186,6 +212,7 @@ func ScanInventory(provider string, body []byte) *Inventory {
 		declMu.Unlock()
 	}
 	inv := &Inventory{Digest: strconv.FormatUint(digest, 16), Decls: decls}
+	inv.System = scanSystem(body)
 	inv.Used, inv.UseFingerprint = usedFrom(provider, body)
 	return inv
 }
@@ -195,7 +222,7 @@ func ScanInventory(provider string, body []byte) *Inventory {
 func declsSize(decls []Decl) int {
 	n := 0
 	for _, d := range decls {
-		n += len(d.Kind) + len(d.Name) + len(d.Server) + 48
+		n += len(d.Kind) + len(d.Name) + len(d.Server) + len(d.Text) + 48
 	}
 	return n
 }
@@ -227,7 +254,7 @@ func declsFrom(provider string, tools gjson.Result) []Decl {
 		case name == "":
 			continue // malformed element: no name to attribute anything to
 		}
-		d := Decl{Kind: kind, Name: identName(name), Tokens: tokens.Count(t.Raw)}
+		d := Decl{Kind: kind, Name: identName(name), Tokens: tokens.Count(t.Raw), Text: t.Raw}
 		if server, _, ok := SplitMCPName(name); ok {
 			d.Kind, d.Server = KindMCPTool, identName(server)
 		}
@@ -358,8 +385,9 @@ func skillDecls(text string) []Decl {
 	if j := strings.Index(body, reminderEnd); j >= 0 {
 		body = body[:j]
 	}
+	listing := skillsHeader + body
 	marker := Decl{Kind: KindSkillListing, Server: SkillsUnknown,
-		Tokens: tokens.Count(skillsHeader + body)}
+		Tokens: tokens.Count(listing), Text: listing}
 	out := []Decl{marker}
 	// Entries are line-anchored `- name: description`, each running to the next such
 	// line. A description containing its own "\n- " line would truncate that entry's
@@ -370,8 +398,9 @@ func skillDecls(text string) []Decl {
 		if name == "" {
 			return
 		}
+		entry := strings.Join(lines[start:end], "\n")
 		out = append(out, Decl{Kind: KindSkill, Name: name,
-			Tokens: tokens.Count(strings.Join(lines[start:end], "\n"))})
+			Tokens: tokens.Count(entry), Text: entry})
 	}
 	for n, ln := range lines {
 		if nm, ok := skillEntryName(ln); ok {
@@ -507,6 +536,11 @@ type invMsg struct {
 	tenant, session string
 	ts              int64
 	inv             *Inventory
+	// text is whether this request's PROMPT TEXT may be stored: the operator's
+	// --dashboard-content AND this tenant's own opt-in, decided by the caller (see
+	// proxy.captureContentFor) and carried per message rather than read here, because a
+	// tenant can toggle its consent between two requests of the same session.
+	text bool
 }
 
 // invWriter serializes inventory writes off the request path.
@@ -533,6 +567,15 @@ type invWriter struct {
 type invSession struct {
 	digests map[string]bool
 	lastFP  uint64
+	// sysHashes are the system prompts already written for this session, and sysN how many
+	// have been. Both bounded by maxSessionSystemRows: a system prompt normally holds still
+	// for a whole session, but it is CLIENT text and may carry a clock — Claude Code's own
+	// carries the date — so a caller that varies it every request would otherwise write one
+	// multi-kilobyte blob per request.
+	//
+	// ponytail: a hard per-session cap, first-N-wins. If a client legitimately needs its
+	// later prompts recorded, this becomes "keep the newest N" and the read side sorts by ts.
+	sysHashes map[string]bool
 }
 
 const (
@@ -550,7 +593,11 @@ var invWriters sync.Map // *Recorder -> *invWriter
 // RecordInventory hands one request's declared/used inventory to the inventory writer.
 // Safe on a nil Recorder and from any goroutine, never blocks, never fails: a full
 // queue drops and counts, exactly like Record.
-func (r *Recorder) RecordInventory(tenant, session string, ts int64, inv *Inventory) {
+// text says whether the prompt TEXT this inventory carries may be stored. False strips it
+// and keeps every measurement: the token weights, the names and the usage counts are
+// identifiers and operational metrics, and an account that declined transcript capture must
+// not lose the whole inventory feature as the price of that choice.
+func (r *Recorder) RecordInventory(tenant, session string, ts int64, inv *Inventory, text bool) {
 	if r == nil || inv == nil || session == "" {
 		return
 	}
@@ -564,7 +611,7 @@ func (r *Recorder) RecordInventory(tenant, session string, ts int64, inv *Invent
 		}
 	}
 	select {
-	case w.(*invWriter).ch <- invMsg{tenant: tenant, session: session, ts: ts, inv: inv}:
+	case w.(*invWriter).ch <- invMsg{tenant: tenant, session: session, ts: ts, inv: inv, text: text}:
 	default:
 		r.dropped.Add(1)
 	}
@@ -625,8 +672,8 @@ func (w *invWriter) write(batch []invMsg) error {
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
 
 	declStmt, err := tx.Prepare(`INSERT INTO tool_declarations(
-		tenant_id, session_id, digest, kind, name, server, tokens, ts
-	) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`)
+		tenant_id, session_id, digest, kind, name, server, tokens, ts, text_gz
+	) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`)
 	if err != nil {
 		return err
 	}
@@ -647,7 +694,20 @@ func (w *invWriter) write(batch []invMsg) error {
 			st.digests[m.inv.Digest] = true
 			for _, d := range m.inv.Decls {
 				if _, err := declStmt.Exec(m.tenant, m.session, m.inv.Digest,
-					d.Kind, d.Name, d.Server, d.Tokens, m.ts); err != nil {
+					d.Kind, d.Name, d.Server, d.Tokens, m.ts, declText(d.Text, m.text)); err != nil {
+					return err
+				}
+			}
+		}
+		// The system prompt, under the same gate for its TEXT and never for its size. It
+		// is written outside the digest branch because the two vary independently: a
+		// session can change its system prompt without touching a single declaration.
+		if sp := m.inv.System; sp != nil && !st.sysHashes[sp.Hash] {
+			if len(st.sysHashes) < maxSessionSystemRows {
+				st.sysHashes[sp.Hash] = true
+				if _, err := declStmt.Exec(m.tenant, m.session, m.inv.Digest,
+					KindSystemPrompt, sp.Hash, "", sp.Tokens, m.ts,
+					declText(sp.Text, m.text)); err != nil {
 					return err
 				}
 			}
@@ -666,6 +726,33 @@ func (w *invWriter) write(batch []invMsg) error {
 	return tx.Commit()
 }
 
+// maxSessionSystemRows bounds how many distinct system prompts one session may record. See
+// invSession.sysHashes: the text is client-supplied and may carry a clock.
+const maxSessionSystemRows = 4
+
+// maxDeclTextBytes caps one stored region. The measured real catalogue's largest tool
+// element is ~19 KB; 64 KiB leaves room for a much larger one and still bounds a hostile
+// declaration, and the cap is applied AFTER scrubbing so a credential near the end cannot
+// survive by being truncated into place (see RedactContent).
+const maxDeclTextBytes = 64 << 10
+
+// declText is the consent gate and the scrubber, on the WRITER goroutine.
+//
+// Both halves are here rather than at the scan for the same reason Event.Redact is on the
+// writer: redaction is a handful of regexes over multi-kilobyte blobs, finish() runs before
+// the handler returns, and anything expensive there is paid by the next real request on the
+// connection. Secrets still never reach disk — this runs before the INSERT.
+//
+// Returns nil, not an empty blob, when text may not be stored: NULL is the "not stored"
+// state the read side counts, and an empty string would render as a prompt with nothing in
+// it.
+func declText(s string, allowed bool) []byte {
+	if !allowed || s == "" {
+		return nil
+	}
+	return gzipText(RedactContent(s, maxDeclTextBytes))
+}
+
 // session returns the writer's dedup state for a session. Bounded the same way the
 // tokenizer's cache is: cleared wholesale past the cap, because a re-warm costs one
 // conflicting INSERT per live session and an LRU costs bookkeeping forever.
@@ -676,7 +763,112 @@ func (w *invWriter) session(id string) *invSession {
 	if len(w.seen) >= invMaxSeen {
 		w.seen = map[string]*invSession{}
 	}
-	st := &invSession{digests: map[string]bool{}}
+	st := &invSession{digests: map[string]bool{}, sysHashes: map[string]bool{}}
 	w.seen[id] = st
 	return st
+}
+
+// ── the system prompt itself ────────────────────────────────────────────────
+
+// SystemPrompt is the top-level system prompt one request carried.
+//
+// It is here rather than in the request row for the same reason the declarations are: it is
+// constant for a whole session and a per-request copy would be ~65 identical multi-kilobyte
+// blobs saying the same thing. It is measured even when its TEXT may not be stored, because
+// "your system prompt is 12,400 tokens" is an operational figure about the caller's own
+// configuration, and the composition of the prompt is unreadable without it — a page that
+// shows tool weights and omits the largest single region of the prefix is not showing the
+// composition of anything.
+type SystemPrompt struct {
+	// Hash identifies the text, and is what the writer dedups on. Not a cryptographic
+	// digest and not treated as one: it exists to answer "is this the text we already
+	// stored for this session".
+	Hash string
+	// Tokens is the whole prompt's BPE cost, measured, not estimated.
+	Tokens int
+	// Text is the unescaped prompt. Content, and gated on consent by the writer — see
+	// Decl.Text for why the gate is not applied on this side.
+	Text string
+}
+
+// maxSystemPrompt is the largest system prompt this will read at all. Above it the request
+// contributes no system row, which the UI renders as not-captured rather than as an empty
+// prompt. The bound exists for the same reason maxDeclSet does: the scan BPE-tokenizes the
+// whole thing on a miss and the caller chooses its size.
+const maxSystemPrompt = 512 << 10
+
+var (
+	sysMu    sync.Mutex
+	sysCache = map[uint64]*SystemPrompt{}
+	sysBytes int
+)
+
+// scanSystem reads the request's top-level system prompt, memoized by a hash of its own
+// raw JSON.
+//
+// Keyed by CONTENT, which is what makes a cache shared by every tenant safe here: a hit
+// means the bytes were identical, so nothing crosses from one caller to another. (The same
+// argument declCache rests on — and the reason the system prompt is not folded INTO
+// declCache, whose key covers only the tools and the skills listing.)
+//
+// One hash of the raw system JSON per request on a hit, which is the common case: the system
+// prompt is stable for a whole session, so a session pays the extraction and the tokenizer
+// once. Both dialects are covered by reading `system` — Anthropic's blocks or bare string.
+// OpenAI has no top-level system prompt at all (it is a role=system message), so an OpenAI
+// request simply has none, and the UI says so rather than inventing one.
+func scanSystem(body []byte) *SystemPrompt {
+	raw := gjson.GetBytes(body, "system")
+	if !raw.Exists() || len(raw.Raw) == 0 || len(raw.Raw) > maxSystemPrompt {
+		return nil
+	}
+	var h maphash.Hash
+	h.SetSeed(declSeed)
+	h.WriteString(raw.Raw)
+	key := h.Sum64()
+
+	sysMu.Lock()
+	sp, hit := sysCache[key]
+	sysMu.Unlock()
+	if hit {
+		return sp
+	}
+	text := systemTextOf(raw)
+	if text == "" {
+		return nil
+	}
+	sp = &SystemPrompt{Hash: strconv.FormatUint(key, 16), Tokens: tokens.Count(text), Text: text}
+	sysMu.Lock()
+	if len(sysCache) >= declCacheCap || sysBytes >= declCacheBytes {
+		sysCache, sysBytes = map[uint64]*SystemPrompt{}, 0
+	}
+	sysCache[key] = sp
+	sysBytes += len(text) + 64
+	sysMu.Unlock()
+	return sp
+}
+
+// systemTextOf unescapes the system prompt: a bare string, or the concatenated text of the
+// block array. Blocks are joined with a blank line because that is how they read to the
+// model as one prompt, and a reader comparing the panel with their own CLAUDE.md needs the
+// boundaries to be visible rather than glued.
+func systemTextOf(raw gjson.Result) string {
+	if raw.Type == gjson.String {
+		return raw.String()
+	}
+	if !raw.IsArray() {
+		return ""
+	}
+	var b strings.Builder
+	raw.ForEach(func(_, blk gjson.Result) bool {
+		t := blk.Get("text")
+		if !t.Exists() {
+			return true
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(t.String())
+		return true
+	})
+	return b.String()
 }

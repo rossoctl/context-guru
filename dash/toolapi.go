@@ -60,6 +60,12 @@ type ToolStat struct {
 	SharePct float64 `json:"share_pct"`
 	// Removal is how to stop carrying it, in the form the user can act on. See RemovalFor.
 	Removal Removal `json:"removal"`
+	// HasText is whether this capability's own slice of the prompt was STORED and can be
+	// read (see /api/prompt). False is a third state, not an empty one: a row written
+	// before the column existed and a row written by an account that has not opted in to
+	// content capture both land here, and the UI must say which rather than showing a
+	// capability whose text looks empty.
+	HasText bool `json:"has_text"`
 }
 
 // ModelRate is one model this scope actually ran on, with the two rates that decide what
@@ -203,6 +209,29 @@ type ToolTotals struct {
 	DeclaredSetTokens int `json:"declared_set_tokens"`
 }
 
+// PromptStat is the system prompt's own place in the prefix, plus how much of the prefix
+// this scope can actually SHOW.
+//
+// It exists because the Inventory page decomposes "what every request carries" and the
+// system prompt is normally the largest single region of it. Leaving it out made the
+// composition a composition of the tools array only, which reads as a complete answer and
+// is not one.
+type PromptStat struct {
+	// Tokens is the largest system prompt any captured session in scope carried, and
+	// Sessions how many recorded one at all. The MAX rather than a mean: the question is
+	// "how big is the thing I would be reading", and a mean over sessions with and without
+	// a prompt answers nothing.
+	Tokens   int `json:"tokens"`
+	Sessions int `json:"sessions"`
+	// Rows / TextRows is the coverage count, the pattern cache_ttl already uses: how many
+	// declaration rows are in scope, and how many of them stored their prompt text. A row
+	// written before the column existed and a row written without content consent are both
+	// absent from TextRows, so a UI can say "not recorded yet" instead of showing a
+	// capability whose text looks empty. NEVER a fabricated default.
+	Rows     int `json:"rows"`
+	TextRows int `json:"text_rows"`
+}
+
 // ToolReport is the whole answer for one scope.
 type ToolReport struct {
 	Coverage ToolCoverage `json:"coverage"`
@@ -217,6 +246,8 @@ type ToolReport struct {
 	// SelfRemoved is what the account stopped declaring partway through the window — savings
 	// the user made themselves, which no other measurement on this dashboard could see.
 	SelfRemoved []SelfRemoval `json:"self_removed,omitempty"`
+	// Prompt is the system prompt's weight and how much of the prefix can be shown as text.
+	Prompt PromptStat `json:"prompt"`
 }
 
 // sessionLengths is the per-session request count over the CAPTURED sessions only, which is
@@ -361,6 +392,10 @@ func (d *DB) ToolReportFor(f Filter, price func(string) (modelinfo.Price, bool))
 type declRow struct {
 	session, kind, name, server string
 	tokens                      int
+	// hasText is whether ANY session stored this name's prompt text. MAX over the group
+	// rather than a per-session answer: the question the UI asks of a name is "can I read
+	// this one", and one stored copy is enough to answer yes.
+	hasText bool
 }
 type useRow struct {
 	session, name, skill string
@@ -371,7 +406,8 @@ type useRow struct {
 // predicate is applied to THIS table as well as to the subquery: the rows carry their
 // own tenant_id, and a scoping bug in one place should not be enough to cross accounts.
 func (d *DB) scopedDecls(f Filter, where string, args []any) ([]declRow, error) {
-	q := `SELECT d.session_id, d.kind, d.name, d.server, MAX(d.tokens)
+	q := `SELECT d.session_id, d.kind, d.name, d.server, MAX(d.tokens),
+		MAX(CASE WHEN d.text_gz IS NOT NULL THEN 1 ELSE 0 END)
 		FROM tool_declarations d WHERE d.session_id IN
 		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
 	a := append([]any{}, args...)
@@ -388,9 +424,11 @@ func (d *DB) scopedDecls(f Filter, where string, args []any) ([]declRow, error) 
 	var out []declRow
 	for rows.Next() {
 		var r declRow
-		if err := rows.Scan(&r.session, &r.kind, &r.name, &r.server, &r.tokens); err != nil {
+		var hasText int
+		if err := rows.Scan(&r.session, &r.kind, &r.name, &r.server, &r.tokens, &hasText); err != nil {
 			return nil, err
 		}
+		r.hasText = hasText == 1
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -462,6 +500,22 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		if sc == nil {
 			continue // not in scope (defensive: the query joined on scope)
 		}
+		rep.Prompt.Rows++
+		if dr.hasText {
+			rep.Prompt.TextRows++
+		}
+		if dr.kind == KindSystemPrompt {
+			// NOT a declaration: it is the prompt the declarations sit in front of. Counting
+			// its tokens in declTok would inflate declared_set_tokens by the largest region
+			// on the page and drive every share_pct below 100% of the wrong whole — and
+			// counting it as a never-invoked "tool" named by its own hash would put it at the
+			// top of the removal list, which is the worst possible advice this page could give.
+			if dr.tokens > rep.Prompt.Tokens {
+				rep.Prompt.Tokens = dr.tokens
+			}
+			rep.Prompt.Sessions++
+			continue
+		}
 		if dr.kind == KindSkillListing {
 			skillsSeen = true
 			listingTok += dr.tokens
@@ -490,6 +544,7 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		if dr.tokens > st.Tokens {
 			st.Tokens = dr.tokens
 		}
+		st.HasText = st.HasText || dr.hasText
 		st.SessionsDeclared++
 		declTok[dr.session] += dr.tokens
 		calls := usedIn[dr.session][k]
@@ -724,6 +779,9 @@ func (a *API) toolRoutes() []route {
 		// saved, and what is safe to offer next. scopeTenant like the report it reads. The
 		// WRITE half is the control plane's (POST /api/toolfilter) — see dash/toolsuggest.go.
 		{"GET /api/toolfilter", scopeTenant, a.toolFilterDoc},
+		// The prompt TEXT behind those weights — the one route here that serves content, and
+		// so the one gated on transcript-capture consent as well as on scope. See promptapi.go.
+		{"GET /api/prompt", scopeTenant, a.prompt},
 	}
 }
 

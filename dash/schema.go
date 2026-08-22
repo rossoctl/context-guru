@@ -409,6 +409,18 @@ CREATE TABLE IF NOT EXISTS tool_declarations (
   server     TEXT    NOT NULL DEFAULT '',   -- MCP server half of mcp__<server>__<tool>
   tokens     INTEGER NOT NULL DEFAULT 0,    -- BPE cost of carrying this declaration
   ts         INTEGER NOT NULL DEFAULT 0,
+  -- text_gz is the declaration's own slice of the prompt, gzipped: the tool's JSON
+  -- element, the skill's listing entry, the whole listing on the marker row, the whole
+  -- system prompt on a kind='system_prompt' row.
+  --
+  -- This is the ONE column in this table that is CONTENT rather than an identifier, and it
+  -- is therefore the one column written only under transcript-capture consent — the
+  -- operator's --dashboard-content AND the tenant's own opt-in, the same pair that gates
+  -- request_content.before_gz. NULL means "not stored", which is a THIRD state next to
+  -- "empty" and "absent": a row written before this column existed, and a row written by
+  -- an account that has not opted in, both read NULL, and the report counts them rather
+  -- than rendering either as a prompt with nothing in it.
+  text_gz    BLOB,
   -- tenant_id LEADS the key. A session id is CLIENT-SUPPLIED, so two accounts can present
   -- the same one (by accident or on purpose), and a key without the tenant makes the second
   -- account's rows collide with the first's: ON CONFLICT DO NOTHING silently discards them,
@@ -502,6 +514,7 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "keepalive", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "keepalive_pings", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "keepalive_saved_usd", "REAL NOT NULL DEFAULT 0"},
+	{"tool_declarations", "text_gz", "BLOB"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
 }
