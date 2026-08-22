@@ -630,6 +630,6 @@ func init() {
 		// `marker_mode: full` document still loads.
 		{Key: "marker_mode", Type: components.FieldEnum, Default: "full", Options: []string{"full"},
 			Hint: "full only. summary and off leave no stash, which would make the one lossy component whose loss is dangerous permanently lossy."},
-		coldCacheField(),
+		coldCacheFieldDefault(false), // not a pure function of (content, config): see coldCacheDefault
 	})
 }

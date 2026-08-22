@@ -136,3 +136,29 @@ func TestBypassedTurnStillRefreshesTheIdleClock(t *testing.T) {
 }
 
 func ms(d time.Duration) int64 { return int64(d / time.Millisecond) }
+
+// frozen_tokens is what cache safety cost us, so it must read the same gate the
+// components read — including the cold lift. Before this, `attemptedTokens` called
+// TailOnly and reported a cold turn's whole prefix as frozen even though every
+// deterministic offloader was free to rewrite it: 742 production `ttl_expiry` requests
+// reported 38.4M frozen tokens (90.8% of their context) for a cache that had expired.
+func TestAttemptedTokensCountsTheWholePrefixOnAColdTurn(t *testing.T) {
+	tmsg := func(text string) bschemas.ChatMessage {
+		t := text
+		return bschemas.ChatMessage{Role: bschemas.ChatMessageRoleTool,
+			Content: &bschemas.ChatMessageContent{ContentStr: &t}}
+	}
+	msgs := []bschemas.ChatMessage{tmsg("first tool output here"), tmsg("second tool output here"),
+		tmsg("third tool output here")}
+	warm := &components.Ctx{CacheAware: true, MaxCachedIdx: 1}
+	cold := &components.Ctx{CacheAware: true, MaxCachedIdx: 1, ColdCache: true}
+
+	gotWarm, gotCold := attemptedTokens(msgs, warm), attemptedTokens(msgs, cold)
+	all := attemptedTokens(msgs, &components.Ctx{})
+	if gotWarm >= all {
+		t.Fatalf("warm attempted=%d must be less than the whole transcript (%d) — the tail gate is the point", gotWarm, all)
+	}
+	if gotCold != all {
+		t.Fatalf("cold attempted=%d, want the whole transcript %d: nothing is frozen for cache safety on a turn whose cache has expired", gotCold, all)
+	}
+}

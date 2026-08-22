@@ -892,10 +892,26 @@ func putLen(st store.Store, session string, n int) {
 // was allowed to touch this turn (Ctx.TailOnly). With cache-awareness off it is
 // the whole request; with it on it is the uncached tail, and the difference is
 // what cache safety cost us in foregone compaction.
+// attemptedTokens is the eligible denominator: the tokens the depth gate let
+// age/supersession offloaders touch on this request. frozen_tokens is the rest — the
+// price of cache safety, reported next to its benefit.
+//
+// It reads the GATE, which means it must read the cold lift too. Ctx.TailOnlyCold lets an
+// opted-in component act at any depth once the prompt cache has provably expired, and the
+// deterministic offloaders (mask, failed_run, collapse) opt in by default — so on a cold
+// turn nothing is frozen for cache safety and counting the prefix as frozen made the
+// biggest lever in the system invisible on its own dashboard: 742 `ttl_expiry` requests
+// reported 38.4M frozen tokens (90.8% of their context) on turns where there was no cache
+// left to protect.
+//
+// ponytail: reads Ctx.ColdCache rather than asking each component whether it opted in. A
+// deployment that sets `cold_cache: false` on every offloader therefore over-reports
+// `attempted` (under-reports `frozen`) on cold turns only. Plumb the pipeline's resolved
+// opt-in set into Ctx if that config ever needs an exact number.
 func attemptedTokens(norm []bschemas.ChatMessage, c *components.Ctx) int {
 	n := 0
 	for i := range norm {
-		if c.TailOnly(i) {
+		if c.TailOnlyCold(i, c.ColdCache) {
 			n += schema.TextTokens(schema.MessageText(norm[i]))
 		}
 	}
