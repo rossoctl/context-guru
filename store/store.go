@@ -70,12 +70,20 @@ const (
 	// default cap is 1,000 entries shared with the unpinned expand stashes — which are the
 	// large payloads, so they evict the cheap keys that would have avoided a call.
 	XResultPrefix = "cg:xres:"
+	// TTLPrefix and SeenPrefix are apply's two cold-decision records. Losing either makes a
+	// WARM prefix read cold, which is the cache-destructive direction: TTLPrefix narrows a
+	// session that asked for the 1h tier back to 5m, and SeenPrefix drops the evidence that
+	// another session id touched the same content-keyed entry. Both are refreshed on every
+	// turn, so the sliding TTL keeps an active session's records alive; the pin is only
+	// against LRU pressure from a busy proxy.
+	TTLPrefix  = "cg:ttl:"  // longest cache lifetime this session has ever asked for
+	SeenPrefix = "cg:seen:" // last activity under a content-derived session id
 )
 
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
-var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix}
+var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {

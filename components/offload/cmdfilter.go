@@ -115,14 +115,40 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 			rep.Gate("empty")
 			continue
 		}
+		// Size FIRST, ahead of everything that hashes the message. skipReduce SHA-256s the
+		// whole content and scans it for a placeholder; the memo below hashes it too. The
+		// min_size test is a length comparison, so putting it first spares both for the ~21
+		// messages per request that were about to be rejected as too small anyway.
+		//
+		// Behaviour-neutral in both directions: a sub-min_size message is declined either
+		// way (only the gate label differs), and a frozen rewrite can only exist for content
+		// that already passed this floor once — the agent re-sends the same original bytes,
+		// so the same length gives the same verdict.
+		if len(content) < f.minSize {
+			rep.Gate("below_min_size") // marker would often cost more than the saving
+			continue
+		}
+		// Replay a previously-frozen rewrite for this content before doing any matching
+		// work. This is the per-message memo, keyed on the CONTENT hash rather than
+		// on the message index, and it is what stops the whole transcript being re-filtered
+		// every turn: duration was linear in transcript size (3.23 ms below 50 messages,
+		// 42.95 ms at 500+) because this loop redid every message on every turn.
+		//
+		// Keyed on content, not position, because the requirement is byte identity with
+		// what the provider's prefix already holds — an index says nothing about that, and
+		// an earlier component in the pipeline can change what sits at a given index.
+		// reapplyFrozen also re-Puts the stashed original for every marker in the
+		// replacement, so the expand loop keeps working across turns, and it declines
+		// content the agent has expanded (kept-verbatim).
+		if fk, _, ok := reapplyFrozen(c, f.Name(), m); ok {
+			changed++
+			keys = append(keys, fk...)
+			continue
+		}
 		if skipReduce(c, content) {
 			// marker-bearing (a filter rule could drop the marker line and orphan the
 			// stash) or expanded by the agent — leave it verbatim
 			rep.Gate("marker_or_kept_verbatim")
-			continue
-		}
-		if len(content) < f.minSize {
-			rep.Gate("below_min_size") // marker would often cost more than the saving
 			continue
 		}
 		key := selectorKey(content)
@@ -182,6 +208,7 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 			rep.Irreversible = true
 		}
 		schema.SetMessageText(m, newText)
+		freeze(c, f.Name(), content, newText) // memoize: later turns replay these bytes
 		if fs := c.Stats(); fs != nil {
 			fs.FilterAct(filt.Family(), filt.Name, stashKey, before-after)
 		}
@@ -251,17 +278,30 @@ func notTextShape(key string) bool { return nonTextBlock.MatchString(key) }
 
 // selectorKey is the string a filter's match regex is tested against: the first few
 // non-empty, trimmed lines of the tool output, newline-joined.
+//
+// It scans forward instead of splitting. strings.Split allocated a string header for
+// every line of a possibly 300 KB output in order to keep six of them, and this runs on
+// every tool message of every turn — 21+ times per request on real traffic.
 func selectorKey(content string) string {
-	var head []string
-	for _, line := range strings.Split(content, "\n") {
-		if s := strings.TrimSpace(line); s != "" {
-			head = append(head, s)
-			if len(head) == selectorHeadLines {
-				break
-			}
+	var b strings.Builder
+	n := 0
+	for len(content) > 0 && n < selectorHeadLines {
+		line := content
+		if i := strings.IndexByte(content, '\n'); i >= 0 {
+			line, content = content[:i], content[i+1:]
+		} else {
+			content = ""
 		}
+		if line = strings.TrimSpace(line); line == "" {
+			continue
+		}
+		if n > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+		n++
 	}
-	return strings.Join(head, "\n")
+	return b.String()
 }
 
 // matchKey is the string a filter's match regex is tested against: the output-shape
@@ -281,8 +321,21 @@ func matchKey(tc schema.ToolCall, shape string) string {
 	if i := strings.IndexByte(cmd, '\n'); i >= 0 {
 		cmd = cmd[:i] // a heredoc/multi-line command: its first line is the selector
 	}
-	return "$ " + cmd + "\n" + shape
+	// And bound it. This is where the 188 ms worst-case came from: ToolCall.Command()
+	// falls back to `Name + " " + Args` for a tool with no `command` argument (Write,
+	// Edit, MultiEdit, NotebookEdit), so `Args` — an entire serialized argument object,
+	// including a whole file's contents — became the head of the key. The newline cut
+	// above does not bound it, because a JSON string never contains a LITERAL newline
+	// (it is escaped as two characters). A 200 KB Write payload therefore got scanned by
+	// every filter in the registry.
+	//
+	// No real command banner is anywhere near this long, so the cut costs no matching
+	// reach: a filter keyed on `^\$ ` is looking at the program name and its flags.
+	return "$ " + clipRunes(cmd, maxCmdKeyLen) + "\n" + shape
 }
+
+// maxCmdKeyLen bounds the `$ <command>` half of a match key. See matchKey.
+const maxCmdKeyLen = 200
 
 // recoveryHint types the hint by WHAT was lost. A clean contiguous tail cut is
 // cheaply recoverable — the agent can re-read from the cut point instead of pulling

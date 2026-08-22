@@ -58,8 +58,9 @@ type failedRunConfig struct {
 	MinTokens  int    `yaml:"min_tokens"`
 	MarkerMode string `yaml:"marker_mode"` // full (default) | summary | off
 	// ColdCache lets a NEW collapse act at any depth on a turn whose prompt cache has
-	// provably expired (see components.Ctx.TailOnlyCold). Off by default.
-	ColdCache bool `yaml:"cold_cache"`
+	// provably expired (see components.Ctx.TailOnlyCold). ON by default; see
+	// coldCacheDefault.
+	ColdCache *bool `yaml:"cold_cache"`
 }
 
 func newFailedRun(raw []byte) (components.Component, error) {
@@ -67,7 +68,8 @@ func newFailedRun(raw []byte) (components.Component, error) {
 	if err := components.Decode(raw, &cfg); err != nil {
 		return nil, err
 	}
-	return &FailedRun{minTokens: cfg.MinTokens, mode: parseMarkerMode(cfg.MarkerMode), coldCache: cfg.ColdCache}, nil
+	return &FailedRun{minTokens: cfg.MinTokens, mode: parseMarkerMode(cfg.MarkerMode),
+		coldCache: coldCacheDefault(cfg.ColdCache)}, nil
 }
 
 func (FailedRun) Name() string                 { return "failed_run" }
@@ -151,7 +153,7 @@ func (fr *FailedRun) Offload(req *schemas.BifrostChatRequest, rep *components.Re
 		// the provider already holds the collapsed bytes for this run, so re-deriving them
 		// (deterministic) preserves its cache, while leaving the run verbatim is what
 		// forces the suffix re-write.
-		// cold_cache (off by default) lifts the depth restriction on a turn whose cache has
+		// cold_cache (ON by default) lifts the depth restriction on a turn whose cache has
 		// provably expired. That is the ONE case where this component's own use case — fail,
 		// edit for several turns, re-run — is reachable at depth for free: by the turn the
 		// re-run arrives the failed run is deep in the prefix, so on a warm turn collapsing

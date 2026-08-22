@@ -79,10 +79,10 @@ func failedRunReq(body string) *bschemas.BifrostChatRequest {
 	}}
 }
 
-// The regression that matters: with ColdCache FALSE, opting in must change nothing at all.
-// Same store, same messages, byte-identical output — whether or not cold_cache is set.
+// The regression that matters: on a WARM turn the cold_cache setting must change nothing at
+// all. Same store, same messages, byte-identical output — whichever way it is set.
 func TestColdCacheOffIsByteIdentical(t *testing.T) {
-	for i, off := range coldComponents(t, "") {
+	for i, off := range coldComponents(t, "cold_cache: false\n") {
 		on := coldComponents(t, "cold_cache: true\n")[i]
 		body := off.body
 		if off.name == "failed_run" {
@@ -113,10 +113,12 @@ func TestColdCacheOffIsByteIdentical(t *testing.T) {
 	}
 }
 
-// A cold turn with the opt-in OFF must also be byte-identical to today: the lift is per
-// component, never global.
-func TestColdTurnWithoutOptInStaysTailGated(t *testing.T) {
-	for _, cc := range coldComponents(t, "") {
+// The escape hatch. `cold_cache: false` must restore the tail restriction on a cold turn:
+// the lift is per component and an operator who wants none of it gets none. Without this
+// the *bool in the config would be indistinguishable from a plain bool that ignores the
+// setting, which is exactly the bug a defaults flip invites.
+func TestColdCacheFalseKeepsTheTailGateOnAColdTurn(t *testing.T) {
+	for _, cc := range coldComponents(t, "cold_cache: false\n") {
 		if cc.name == "failed_run" {
 			req := failedRunReq(cc.body)
 			var rep components.Report
@@ -141,9 +143,18 @@ func TestColdTurnWithoutOptInStaysTailGated(t *testing.T) {
 	}
 }
 
-// With the opt-in ON and the cache provably cold, depth stops mattering.
+// With the opt-in ON and the cache provably cold, depth stops mattering. Runs the empty
+// config too, because that is the DEFAULT since 2026-08 and the whole point of the change:
+// on `ttl_expiry` turns production was freezing 90.8% of the context (38.4M of 42.3M
+// tokens) to protect a prompt cache that had already expired.
 func TestColdCacheLiftsDepthWhenOptedIn(t *testing.T) {
-	for _, cc := range coldComponents(t, "cold_cache: true\n") {
+	for _, optIn := range []string{"cold_cache: true\n", ""} {
+		t.Run("optin="+optIn, func(t *testing.T) { coldLiftsDepth(t, optIn) })
+	}
+}
+
+func coldLiftsDepth(t *testing.T, optIn string) {
+	for _, cc := range coldComponents(t, optIn) {
 		if cc.name == "failed_run" {
 			req := failedRunReq(cc.body)
 			var rep components.Report
@@ -166,7 +177,13 @@ func TestColdCacheLiftsDepthWhenOptedIn(t *testing.T) {
 // on a COLD turn must be replayed byte-identically on every later WARM turn, or the very
 // next request flips it back to full inside the provider's fresh cache.
 func TestColdDecisionStaysFrozenOnLaterWarmTurns(t *testing.T) {
-	for _, cc := range coldComponents(t, "cold_cache: true\n") {
+	for _, optIn := range []string{"cold_cache: true\n", ""} {
+		t.Run("optin="+optIn, func(t *testing.T) { coldFrozenOnWarm(t, optIn) })
+	}
+}
+
+func coldFrozenOnWarm(t *testing.T, optIn string) {
+	for _, cc := range coldComponents(t, optIn) {
 		if cc.name == "failed_run" {
 			continue // covered by the pair-shaped case below
 		}

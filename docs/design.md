@@ -265,8 +265,8 @@ expired** there is no prefix left to protect — the whole transcript is being r
 creation at 1.25x the fresh rate regardless of what we do — so restricting a deterministic
 offloader to the tail buys nothing on exactly the most expensive turns there are.
 
-`mask`, `failed_run` and `collapse` therefore take a `cold_cache` option (default **off**). When
-it is set and `Ctx.ColdCache` is true, `Ctx.TailOnlyCold` lifts the depth restriction for **new**
+`mask`, `failed_run` and `collapse` therefore take a `cold_cache` option, **on by default** since
+2026-08. When it is set and `Ctx.ColdCache` is true, `Ctx.TailOnlyCold` lifts the depth restriction for **new**
 decisions; the decision is then frozen and replayed byte-for-byte on every later warm turn, so the
 new prefix is as cache-stable as one established in the tail. Everything else is unchanged: the
 never-worse, `skipReduce` and kept-verbatim guards still apply, and with `cold_cache` unset — or on
@@ -277,23 +277,50 @@ requirement `repairLostFreeze` has, because the bytes decided at depth on a cold
 re-derivable on every warm turn that follows. That is why the option exists on these three and
 not on `extract_llm`, which has its own sampled-output sweep instead.
 
-**Why the default is off.** The two errors are not symmetric. A missed cold turn only forgoes a
-saving; a *wrong* cold reading makes the component rewrite a prefix the provider is still holding
-and forces a cache-write of the whole suffix at 1.25x fresh — 12.5x the cache-read price it was
-paying. Detection is deliberately conservative (TTL read out of the request, one-hour outer bound
-for providers that declare none, a minute of margin, and "no previous turn on record" reads WARM),
-but two paths can still fabricate coldness, and neither is instrumented today:
+**Why the default is ON, and what stops it being wrong.** It used to be off. Production said the
+gate was declining on exactly the turns worth acting on: across 742 `ttl_expiry` requests we
+attempted 3.87M tokens of 42.27M and **froze 38.40M — 90.8% of the context** — to protect a cache
+that had already expired, on turns where a cache miss costs 8.5x a hit ($0.9987/req against
+$0.1178). `cold_start` turns run the same components and attempt 99.6%, so the machinery was never
+the problem. Measured on a forced TTL expiry: frozen 83.0% → 0%, and the frozen decision keeps
+every later warm turn lighter.
 
-- a client that asks for `ttl: "1h"` on one turn and a bare `ephemeral` mark on the next — the TTL
-  is read from **this** request, so the prefix would be judged cold at six minutes while the
-  provider holds it for an hour;
-- a prefix touched under a different session id than the one the idle clock is kept under
-  (`session.Scoped` falls back to a `system + first user` hash), which leaves our `prevAt` stale
-  while the provider's entry stays warm.
+The two errors are still not symmetric, and that now shapes the DETECTION rather than the default.
+A missed cold turn only forgoes a saving; a *wrong* cold reading makes the component rewrite a
+prefix the provider is still holding and forces a cache-write of the whole suffix at 1.25x fresh —
+12.5x the cache-read price it was paying. `proxy/promexport.go` records what that costs when it is
+systematic: 3,092 requests whose own prefix tracker had been reset still cache-HIT for 404,376,878
+cache-read tokens, and acting on that reading was worth about **−$708** on sonnet-5 against +$0.62
+of upside. So every input to the decision is an upper bound, and the three ways coldness could be
+fabricated are each closed:
 
-Both are rare on real Claude Code traffic — every one of ~5,000 captured requests carries a bare
-`ephemeral` mark — and both are the expensive direction, which is the whole reason an operator has
-to ask for this rather than inherit it.
+- **no previous turn on record reads WARM** — a restart, an evicted tracker entry and a brand-new
+  session all decline themselves. This is the −$708 case, and it is the one the guard was always
+  built for (`TestColdSweepCannotFireOnTheMinus708Case`).
+- **a client that asks `ttl: "1h"` on one turn and a bare `ephemeral` mark on the next** would have
+  had its hour-long prefix judged cold at six minutes, because `cacheTTL` reads the TTL out of
+  *this* request. `sessionTTL` now widens it to the longest lifetime the session has ever asked
+  for, monotonically, so the estimate can only move toward WARM. Read under **both** ids and
+  widened to the longer, mirroring the clock, because the two guards have to compose: a record
+  keyed under one id only is invisible to a turn arriving under the other, which falls back to
+  the 5m tier — path (a) reached through the door path (b) opens. Both ids are needed, not just
+  the content one: the alias splits when a session header comes and goes, and it also moves when
+  the agent compacts its own context, which an explicit id survives. Unobserved on today's
+  traffic (0 of 1,868 captured requests carry a `ttl` field) but live the moment anything adds
+  1h marks.
+- **a prefix touched under a different session id than the idle clock is kept under.** The clock is
+  per session id; the provider's cache is keyed on CONTENT. One conversation reaches us under two
+  ids whenever an explicit header is present on some turns and absent on others — the header wins
+  on one turn, `sha256(system + firstUser)` on the next (`session.Scoped`) — and three of thirteen
+  production tenants send both id shapes. The cold decision therefore also reads the **alias**
+  clock — the id `session.Scoped` would derive with no header — and takes the LATER of the two
+  timestamps, so a touch under either id keeps both warm. It is consulted on **every** turn,
+  including the header-less ones where the alias *is* the session id: skipping those closed only
+  half the path, and left the mirror open (header turns refresh the entry, the header-less turn
+  then reads cold with a fresh timestamp sitting unread in the store —
+  `TestAliasClockIsReadOnHeaderlessTurnsToo` drives four turns through `BodyOpts` and fails on
+  that). Both records are pinned against LRU eviction (`store.TTLPrefix`, `store.SeenPrefix`),
+  because losing either makes a warm prefix read cold.
 
 **What "cold" was actually verified to mean.** Note that the dashboard's `ttl_expiry` bucket cannot
 be used to check this: `Event.AttributeCache` only reaches it when `cache_read == 0`, so it agrees
@@ -406,9 +433,12 @@ of per-request percentages. It also reports:
 - `discarded_changes` (per component) / `top_discarded` — changes the writeback layer threw away.
   Before this existed, a mutated-then-discarded component was indistinguishable from a working
   Reformat, which is how the `cacheinject` bug survived two benchmark studies;
-- `sse_streamed` / `sse_buffered` / `sse_buffered_pct` and `sse_ttfb_ms_avg` /
-  `sse_ttfb_ms_avg_buffered` — streaming health: how many SSE responses had to be buffered whole to
-  be inspected for an expand call, and what that cost. The `_buffered` average is
+- `sse_streamed` / `sse_buffered` / `sse_buffered_pct` / `sse_expand_after_stream` and
+  `sse_ttfb_ms_avg` / `sse_ttfb_ms_avg_buffered` — streaming health: how many SSE responses
+  opened with an expand call and so had to be buffered whole for the continuation loop to
+  inspect (a bounded peek at the first content block decides; everything else streams), what
+  that cost, and how many streamed responses named the expand tool anyway — the peek's own
+  price. The `_buffered` average is
   time-to-*last*-byte by construction, so it is not comparable to `sse_ttfb_ms_avg`;
 - `frozen_hits` / `frozen_misses` / `frozen_dropped` / `frozen_repaired` / `frozen_flips` — the
   cache-write cost line (see [Freeze lifetime](#freeze-lifetime-and-which-way-to-fail));

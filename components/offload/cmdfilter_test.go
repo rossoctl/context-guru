@@ -589,3 +589,65 @@ func quote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// The 188 ms worst case. ToolCall.Command() falls back to `Name + " " + Args` for a tool
+// with no `command` argument, so a 200 KB Write payload became the head of the match key
+// and every filter in the registry scanned all of it. A JSON string never contains a
+// LITERAL newline, so the newline cut above the clip does not bound it.
+func TestMatchKeyBoundsTheCommandHalf(t *testing.T) {
+	huge := strings.Repeat("a", 200_000)
+	tc := schema.ToolCall{Name: "Write", Args: `{"file_path":"/x/a.go","content":"` + huge + `"}`}
+	key := matchKey(tc, "some output shape")
+	if len(key) > maxCmdKeyLen+len("$ ")+len("\nsome output shape")+8 {
+		t.Fatalf("match key is %d bytes; an unbounded args blob is what every filter then scans", len(key))
+	}
+	// The clip must not cost matching reach: the program name and its flags survive.
+	tc = schema.ToolCall{Name: "Bash", Args: `{"command":"rg -n --hidden foo /src"}`}
+	if key := matchKey(tc, "shape"); !strings.HasPrefix(key, "$ rg -n --hidden foo /src\n") {
+		t.Fatalf("a real command must survive intact, got %q", key)
+	}
+}
+
+// The per-message memo. cmdfilter re-derived every message's rewrite on every turn, which
+// is why its duration was linear in transcript size. It now freezes the decision keyed on
+// the CONTENT hash and replays it — and the replay must be byte-identical, because the
+// point of it is agreement with the bytes the provider's prefix already holds.
+func TestCmdfilterReplaysItsRewriteByteIdenticallyAcrossTurns(t *testing.T) {
+	f := newFilterComp(t, "")
+	st := store.NewMemory(store.Options{})
+	body := "debug1: Reading configuration data /etc/ssh/ssh_config\n" +
+		strings.Repeat("debug1: Connecting to host port 22 with some verbose banner text\n", 40) +
+		"Welcome to Ubuntu 22.04.3 LTS\n"
+
+	var first string
+	for turn := 0; turn < 12; turn++ {
+		// The agent re-sends the ORIGINAL every turn, at DEPTH after the first.
+		req := &schemas.BifrostChatRequest{Provider: schemas.Anthropic,
+			Input: []schemas.ChatMessage{cmdToolMsg(body), cmdToolMsg("tail")}}
+		c := &components.Ctx{Ctx: context.Background(), Session: "s", Store: st,
+			CacheAware: true, MaxCachedIdx: 0}
+		rep := &components.Report{}
+		if _, err := f.Offload(req, rep, c); err != nil {
+			t.Fatal(err)
+		}
+		got := schema.MessageText(req.Input[0])
+		if turn == 0 {
+			if got == body {
+				t.Skip("fixture did not match any builtin filter; the memo has nothing to replay")
+			}
+			first = got
+			continue
+		}
+		if got != first {
+			t.Fatalf("turn %d replayed different bytes than turn 0 — that flips the "+
+				"representation inside the cached prefix:\n want %.120q\n got  %.120q", turn, first, got)
+		}
+	}
+	// And the stash the marker names must still resolve after all those turns, or the
+	// expand loop breaks on exactly the content the memo kept alive.
+	for _, k := range expand.ParseMarkers(first) {
+		if _, ok := st.Get(k); !ok {
+			t.Fatalf("stash %s went missing across the replays; expand would fail", k)
+		}
+	}
+}

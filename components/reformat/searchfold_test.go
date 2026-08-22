@@ -149,28 +149,44 @@ func TestFrozenPrefixIsByteStable(t *testing.T) {
 	}
 }
 
-// TestRoutesByCommand proves deliverable 1 pays off here: the same blob is folded
-// when a `grep` call produced it and left alone when `cat` did.
-func TestRoutesByCommand(t *testing.T) {
-	out := "src/a.go:1:x\nsrc/a.go:2:y\nsrc/b.go:3:z\n" + strings.Repeat("src/c.go:9:padding padding\n", 40)
+// The pre-gate this replaces routed by the producing COMMAND: fold `grep` output, skip
+// `cat`/`pytest` output. Measured on 1,795 real captured requests it lost on both axes —
+// 234,722 tokens folded with the gate against 333,764 without, at 1.174 ms/request against
+// 0.509 — because the pairing says which command ran, not what its output looks like, and
+// resolving one json.Unmarshals a whole argument object per tool message.
+//
+// So the contract is now: the fold is attempted on every tool output and routes by CONTENT.
+// The same blob folds whichever command produced it, and output with no repeated path
+// prefix comes back untouched whichever command produced it. Losslessness does the safety
+// work: adopt() only keeps a fold whose inverse reproduces the input byte for byte.
+func TestRoutesByContentNotByCommand(t *testing.T) {
+	hits := "src/a.go:1:x\nsrc/a.go:2:y\nsrc/b.go:3:z\n" + strings.Repeat("src/c.go:9:padding padding\n", 40)
+	plain := "package main\n\n" + strings.Repeat("\tfmt.Println(\"some ordinary source line\")\n", 40)
 	for _, tc := range []struct {
 		cmd  string
+		out  string
 		fold bool
 	}{
-		{"grep -rn foo src", true},
-		{"cd /x && rg -n foo | head -50", true},
-		{"git grep -n foo", true},
-		{"cat src/a.go", false},
-		{"python -m pytest -q", false},
+		{"grep -rn foo src", hits, true},
+		{"cd /x && rg -n foo | head -50", hits, true},
+		{"git grep -n foo", hits, true},
+		// The gate declined these. The output is the same path-prefixed hit list, and the
+		// fold is lossless, so declining it was 99,042 tokens of pure loss.
+		{"cat search-results.txt", hits, true},
+		{"python -m pytest -q", hits, true},
+		{"make check 2>&1 | tee out.log", hits, true},
+		// And output with nothing to fold stays byte-identical regardless of command.
+		{"grep -rn foo src", plain, false},
+		{"cat src/a.go", plain, false},
 	} {
 		var msgs []schemas.ChatMessage
-		msgs = append(msgs, toolMsgWithCall(&msgs, tc.cmd, out))
+		msgs = append(msgs, toolMsgWithCall(&msgs, tc.cmd, tc.out))
 		req := &schemas.BifrostChatRequest{Input: msgs}
 		sf := &Searchfold{minTokens: 50}
 		if err := sf.Reformat(req, &components.Report{}, nil); err != nil {
 			t.Fatal(err)
 		}
-		changed := schema.MessageText(req.Input[len(req.Input)-1]) != out
+		changed := schema.MessageText(req.Input[len(req.Input)-1]) != tc.out
 		if changed != tc.fold {
 			t.Errorf("%q: folded=%v want %v", tc.cmd, changed, tc.fold)
 		}
@@ -238,4 +254,41 @@ func trunc(s string) string {
 		return s[:60] + "…"
 	}
 	return s
+}
+
+// The shape gate must be a NECESSARY condition, not a guess: if it excludes anything the fold
+// would actually have changed, it silently costs tokens. Checked against every real captured
+// search output rather than argued.
+func TestShapeGateAdmitsEveryFoldableCapture(t *testing.T) {
+	admitted, folded := 0, 0
+	for _, c := range loadCaptures(t) {
+		gate := mayCarryPathPrefix(c.Out)
+		if gate {
+			admitted++
+		}
+		if FoldSearchOutput(c.Out) != c.Out {
+			folded++
+			if !gate {
+				t.Errorf("the gate excluded output the fold DOES change: %q", trunc(c.Cmd))
+			}
+		}
+	}
+	t.Logf("%d captures: %d admitted by the gate, %d actually fold", len(loadCaptures(t)), admitted, folded)
+	if folded == 0 {
+		t.Fatal("no capture folds; this test proves nothing")
+	}
+}
+
+// And it must actually exclude something, or it is dead weight on the hot path.
+func TestShapeGateRejectsProseAndBuildLogs(t *testing.T) {
+	for _, s := range []string{
+		"all tests passed\nnothing to report here\n",
+		"error: expected semicolon\nnote: consider adding one\n",
+		"Compiling serde v1.0\nFinished dev profile\n",
+		"",
+	} {
+		if mayCarryPathPrefix(s) {
+			t.Errorf("gate admitted unfoldable content %q", s)
+		}
+	}
 }
