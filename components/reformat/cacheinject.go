@@ -53,7 +53,7 @@ const (
 // is never made worse), then spends only the leftover slots.
 //
 // 1h TTL is deliberately never used. It costs 2.0x instead of 1.25x to write and
-// only pays when p = P(gap > 5 min) exceeds (2.0−1.25)/(1−0.1) = 83.3%. Measured
+// only pays when p = P(gap > 5 min) exceeds (2.0−1.25)/(1.25−0.1) = 65.2%. Measured
 // over 1,905 real agent turns: p = 0.00% (median gap 7.6 s, max 75 s). 1h is for
 // human-in-the-loop sessions, not for an autonomous agent loop.
 type Cacheinject struct {
@@ -61,7 +61,14 @@ type Cacheinject struct {
 	//
 	// Leave it at 5m unless the deployment shape demands otherwise. By rule 2, a 1h
 	// write costs 2.0x instead of 1.25x and only pays when p = P(the entry lapses
-	// before its next reuse) exceeds (2.0-1.25)/(1-0.1) = 83.3%. Two things make p
+	// before its next reuse) exceeds (2.0-1.25)/(1.25-0.1) = 65.2%.
+	//
+	// The denominator is the 5m WRITE rate minus the read rate, not 1 minus the read rate.
+	// A lapsed entry does not re-bill at the fresh 1.0x: those tokens still carry
+	// cache_control, so the provider CREATES a new entry at 1.25x. Production ttl_expiry
+	// rows show it directly — cache_write averages 178,793 against fresh_input 1,712. The
+	// documented figure was 83.3%, wrong by 18 points; the conclusion is unchanged. Two
+	// things make p
 	// small in practice: agent turns are seconds apart (measured median 7.6 s over
 	// 1,905 real turns), and every READ refreshes the TTL for free — so a shared
 	// prefix touched by any session at least once per 5 minutes never lapses. On the

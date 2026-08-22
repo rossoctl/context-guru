@@ -44,6 +44,18 @@ type Filter struct {
 	Effort     string
 	Thinking   string
 	StopReason string
+	// WithKeepAlive includes keep-alive PING rows. Off by default, and that default is the
+	// point: a ping is a request context-guru sent on the user's behalf while they were away,
+	// not traffic their agent produced. Counted in an aggregate it silently inflates the
+	// request count, drags every per-request average towards a ~1-token response, and makes an
+	// account's own traffic statistics wrong.
+	//
+	// Set it only where a ping IS the subject: the request LIST (the rows are the audit trail
+	// and must be visible, badged by the `keepalive` column) and the keep-alive ledger itself.
+	// Money is a deliberate exception handled elsewhere — a ping is real spend on the caller's
+	// key, so DB.TenantSpend and the Prometheus cost series include it; the exclusion here is
+	// about counts and averages, not about pretending the money was not spent.
+	WithKeepAlive bool
 	// Q is a free-text match against session id and model.
 	Q string
 }
@@ -53,9 +65,16 @@ type Filter struct {
 func (f Filter) where() (string, []any) {
 	var conds []string
 	var args []any
+	// One line, one place: every reporting query in this package routes through here, so
+	// excluding pings once fixes the overview, the buckets, the per-model groups, the facets,
+	// the session list and the read-value queries together. Patching them one at a time is how
+	// the next aggregate added would quietly count pings again.
 	add := func(cond string, v ...any) {
 		conds = append(conds, cond)
 		args = append(args, v...)
+	}
+	if !f.WithKeepAlive {
+		conds = append(conds, "r.keepalive = 0")
 	}
 	if !f.TenantAll {
 		add("r.tenant_id = ?", f.Tenant)
@@ -103,7 +122,9 @@ const requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider,
 	r.status, r.bypassed, r.cache_aware, r.messages, r.tokens_before, r.tokens_after,
 	r.attempted_tokens, r.frozen_tokens, r.saved_unique, r.fresh_input, r.cache_read,
 	r.cache_write, r.output_tokens, r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd,
-	r.cache_saved_usd, r.cachesplit_saved_usd, r.split_stable_tokens, r.cg_latency_ms, r.upstream_ms, r.expands, r.expand_tokens, r.reverts,
+	r.cache_saved_usd, r.cachesplit_saved_usd, r.split_stable_tokens,
+	r.cache_write_1h, r.keepalive, r.keepalive_pings, r.keepalive_saved_usd,
+	r.cg_latency_ms, r.upstream_ms, r.expands, r.expand_tokens, r.reverts,
 	r.token_accounting, r.cache_miss_reason, r.uncompressed_reason,
 	r.reasoning_effort, r.thinking_mode, r.thinking_budget, r.temperature, r.top_p,
 	r.max_tokens, r.stream, r.tool_choice, r.tools, r.system_blocks,
@@ -111,19 +132,21 @@ const requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider,
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
-	var byp, ca, stream int
+	var byp, ca, stream, keepAlive int
 	var temp, topP sql.NullFloat64
 	err := rows.Scan(&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
 		&e.CacheWrite, &e.OutputTokens, &e.CostUSD, &e.BaselineCostUSD, &e.CGLLMCostUSD,
 		&e.CacheSavedUSD, &e.CachesplitSavedUSD, &e.SplitStableTokens,
+		&e.CacheWrite1h, &keepAlive, &e.KeepAlivePings, &e.KeepAliveSavedUSD,
 		&e.CGLatencyMs, &e.UpstreamMs, &e.Expands, &e.ExpandTokens, &e.Reverts,
 		&e.TokenAccounting, &e.CacheMissReason, &e.UncompressedReason,
 		&e.ReasoningEffort, &e.ThinkingMode, &e.ThinkingBudget, &temp, &topP,
 		&e.MaxTokens, &stream, &e.ToolChoice, &e.Tools, &e.SystemBlocks,
 		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason)
 	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
+	e.KeepAlive = keepAlive != 0
 	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one
 	// that set nothing must not read the same on the row.
 	if temp.Valid {
@@ -149,6 +172,11 @@ type Page struct {
 // keyset is O(limit) at any depth and cannot skip or duplicate a row when new
 // requests arrive mid-browse.
 func (d *DB) Requests(f Filter, before int64, limit int) (*Page, error) {
+	// The LIST shows pings. They are the audit trail for money spent on the caller's behalf
+	// while nobody was at the keyboard, so hiding them here would defeat the reason the rows
+	// exist; each carries `keepalive` so the UI can badge it. The aggregates above the list
+	// still exclude them — see Filter.WithKeepAlive.
+	f.WithKeepAlive = true
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}

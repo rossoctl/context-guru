@@ -135,3 +135,60 @@ func TestOneHourWriteIsPricedAtItsOwnTier(t *testing.T) {
 		t.Errorf("1h/5m cost ratio = %.3f, expected ~1.6 on a fully-1h write", r)
 	}
 }
+
+// A ping is a request WE made on the user's behalf, not traffic their agent sent. Counted into
+// an aggregate it inflates the request count, drags every per-request average towards a
+// one-token response, and makes an account's own traffic statistics wrong. It must still be
+// visible as a row, because it is the audit trail for money spent while nobody was watching.
+func TestPingsAreVisibleAsRowsAndExcludedFromAggregates(t *testing.T) {
+	db := openTestDB(t)
+	agent := &Event{TS: 1000, SessionID: "s", Model: "aws/claude-sonnet-5",
+		TokensBefore: 90_000, TokensAfter: 90_000, CacheRead: 48_576, OutputTokens: 500}
+	agent.Price(ibmSonnet, true)
+	ping := &Event{TS: 2000, SessionID: "s", Model: "aws/claude-sonnet-5", KeepAlive: true,
+		CacheRead: 48_576, OutputTokens: 1}
+	ping.Price(ibmSonnet, true)
+	if err := db.insertBatch([]*Event{agent, ping}); err != nil {
+		t.Fatal(err)
+	}
+
+	o, err := db.Overview(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Requests != 1 {
+		t.Errorf("Overview counted %d requests; the ping is not agent traffic", o.Requests)
+	}
+	if o.OutputTokens != 500 {
+		t.Errorf("output_tokens = %d, want 500 — the ping's single token must not move an average",
+			o.OutputTokens)
+	}
+	// Both halves of the ledger, and they must come from the two different populations.
+	if o.KeepAlivePings != 1 {
+		t.Errorf("keepalive_pings = %d, want 1", o.KeepAlivePings)
+	}
+	if o.KeepAlivePingUSD <= 0 {
+		t.Error("the ping cost nothing; a ledger that hides the spend is the thing this exists to prevent")
+	}
+	if got, want := o.KeepAliveNetUSD, o.KeepAliveSavedUSD-o.KeepAlivePingUSD; got != want {
+		t.Errorf("net = %.6f, want saved-ping = %.6f", got, want)
+	}
+
+	// The row list SHOWS it, flagged, so the spend is auditable.
+	page, err := db.Requests(Filter{TenantAll: true}, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Requests) != 2 {
+		t.Fatalf("the request list returned %d rows; the ping must be visible", len(page.Requests))
+	}
+	pings := 0
+	for _, r := range page.Requests {
+		if r.KeepAlive {
+			pings++
+		}
+	}
+	if pings != 1 {
+		t.Errorf("%d rows flagged keepalive in the list, want 1", pings)
+	}
+}

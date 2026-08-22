@@ -158,6 +158,8 @@ cache:
 	// is a legitimate parked configuration and must not read as enabled.
 	if got := (CacheConfig{}).Resolved(); got.KeepAliveIdleSeconds != DefaultKeepAliveIdle ||
 		got.KeepAliveMaxPings != DefaultKeepAliveMaxPings ||
+		got.KeepAliveMinPrefixTokens != DefaultKeepAliveMinPrefix ||
+		got.KeepAliveMaxUSDPerPing != DefaultKeepAliveMaxUSDPerPing ||
 		got.HeadTTLMinTokens != DefaultHeadTTLMinTokens {
 		t.Errorf("Resolved() defaults = %+v", got)
 	}

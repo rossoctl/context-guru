@@ -248,6 +248,13 @@ type SafetyCost struct {
 // Recorder.ObserveSplit's in-process test: differs from the last non-zero tail hash recorded
 // for this session, and a session with no earlier non-zero hash counts as moved. Written once
 // and referenced twice so the count and its reconciliation cannot drift apart.
+// withKeepAlive returns f with ping rows included. A named helper rather than an inline field
+// set, so the two places that legitimately see pings are greppable.
+func withKeepAlive(f Filter) Filter {
+	f.WithKeepAlive = true
+	return f
+}
+
 const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
 	AND r.split_tail_hash <> COALESCE((
 		SELECT p.split_tail_hash FROM requests p
@@ -317,12 +324,11 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0),
 		COALESCE(SUM(CASE WHEN r.uncompressed_reason <> '' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.cg_latency_ms),0),
-		-- The keep-alive ledger, both sides of it. The pings are rows like any other, marked
-		-- so they can be told from agent traffic and priced from their own cost_usd; the
-		-- saving is the per-request credit the write path computed while it still had the
-		-- session's gap and the ping's own refreshed-token count in hand.
-		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0),
+		-- The SAVING half of the keep-alive ledger: the per-request credit the write path
+		-- computed while it still had the session's gap and the ping's own refreshed-token
+		-- count in hand. The COST half cannot be summed here — this query excludes ping rows
+		-- (Filter.WithKeepAlive) so the request count and every average stay agent-only — so it
+		-- has its own query below.
 		COALESCE(SUM(r.keepalive_saved_usd),0),
 		COALESCE(SUM(CASE WHEN r.keepalive_saved_usd > 0 THEN 1 ELSE 0 END),0)
 		FROM requests r WHERE `+cond, args...).Scan(
@@ -334,7 +340,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.PrefixChangeCost, &o.PrefixChangeRequests, &o.PrefixChangeCostAll, &o.PrefixChangeRequestsAll,
 		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal,
-		&o.KeepAlivePings, &o.KeepAlivePingUSD, &o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided)
+		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided)
 	if err != nil {
 		return nil, err
 	}
@@ -365,10 +371,22 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		o.ExpandRate = float64(o.Expands) / float64(o.Requests)
 	}
 	o.NetSavedUSD = o.BaselineCostUSD - o.CostUSD - o.CGLLMCostUSD
+	// The COST half, over the same window and the same filters but with ping rows included.
+	// A second query rather than a CASE in the first, because the first deliberately cannot see
+	// them: one predicate, one meaning.
+	kaCond, kaArgs := withKeepAlive(f).where()
+	if err := d.sql.QueryRow(`SELECT
+		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
+		FROM requests r WHERE `+kaCond, kaArgs...).Scan(
+		&o.KeepAlivePings, &o.KeepAlivePingUSD); err != nil {
+		return nil, err
+	}
 	// The keep-alive's net, and the one number a decision rests on. Not folded into
-	// TotalSavedUSD: the pings' own cost is already inside CostUSD (they are rows), so adding
-	// the saving without the cost would double-count the good half of a mechanism whose whole
-	// question is whether the two halves net out.
+	// TotalSavedUSD: presenting a saving without the spend that bought it is exactly the
+	// dishonesty this ledger exists to prevent, and CostUSD above no longer carries the pings
+	// (they are excluded from the agent-traffic aggregate), so the two halves are only
+	// comparable here.
 	o.KeepAliveNetUSD = o.KeepAliveSavedUSD - o.KeepAlivePingUSD
 	o.TotalSavedUSD = o.NetSavedUSD + o.CachesplitSavedUSD
 

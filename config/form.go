@@ -86,12 +86,13 @@ type Form struct {
 
 // CacheForm is the settings page's view of the `cache:` block.
 type CacheForm struct {
-	KeepAlive                 bool    `json:"keepalive"`
-	KeepAliveIdleSeconds      int     `json:"keepalive_idle_seconds,omitempty"`
-	KeepAliveMaxPings         int     `json:"keepalive_max_pings,omitempty"`
-	KeepAliveMaxUSDPerSession float64 `json:"keepalive_max_usd_per_session,omitempty"`
-	HeadTTL1h                 bool    `json:"head_ttl_1h"`
-	HeadTTLMinTokens          int     `json:"head_ttl_min_tokens,omitempty"`
+	KeepAlive                bool    `json:"keepalive"`
+	KeepAliveIdleSeconds     int     `json:"keepalive_idle_seconds,omitempty"`
+	KeepAliveMaxPings        int     `json:"keepalive_max_pings,omitempty"`
+	KeepAliveMaxUSDPerPing   float64 `json:"keepalive_max_usd_per_ping,omitempty"`
+	KeepAliveMinPrefixTokens int     `json:"keepalive_min_prefix_tokens,omitempty"`
+	HeadTTL1h                bool    `json:"head_ttl_1h"`
+	HeadTTLMinTokens         int     `json:"head_ttl_min_tokens,omitempty"`
 }
 
 // ExtractLLMForm is the RECOMMENDED prefill for the compaction-model component — a policy
@@ -253,9 +254,10 @@ func ParseForm(doc string) (Form, error) {
 func cacheForm(c CacheConfig) *CacheForm {
 	return &CacheForm{
 		KeepAlive: c.KeepAlive, KeepAliveIdleSeconds: c.KeepAliveIdleSeconds,
-		KeepAliveMaxPings:         c.KeepAliveMaxPings,
-		KeepAliveMaxUSDPerSession: c.KeepAliveMaxUSDPerSession,
-		HeadTTL1h:                 c.HeadTTL1h, HeadTTLMinTokens: c.HeadTTLMinTokens,
+		KeepAliveMaxPings:        c.KeepAliveMaxPings,
+		KeepAliveMaxUSDPerPing:   c.KeepAliveMaxUSDPerPing,
+		KeepAliveMinPrefixTokens: c.KeepAliveMinPrefixTokens,
+		HeadTTL1h:                c.HeadTTL1h, HeadTTLMinTokens: c.HeadTTLMinTokens,
 	}
 }
 
@@ -321,9 +323,10 @@ func ApplyForm(doc string, f Form) (string, error) {
 		cb["keepalive"] = f.Cache.KeepAlive
 		cb["head_ttl_1h"] = f.Cache.HeadTTL1h
 		for k, v := range map[string]int{
-			"keepalive_idle_seconds": f.Cache.KeepAliveIdleSeconds,
-			"keepalive_max_pings":    f.Cache.KeepAliveMaxPings,
-			"head_ttl_min_tokens":    f.Cache.HeadTTLMinTokens,
+			"keepalive_idle_seconds":      f.Cache.KeepAliveIdleSeconds,
+			"keepalive_max_pings":         f.Cache.KeepAliveMaxPings,
+			"keepalive_min_prefix_tokens": f.Cache.KeepAliveMinPrefixTokens,
+			"head_ttl_min_tokens":         f.Cache.HeadTTLMinTokens,
 		} {
 			if v > 0 {
 				cb[k] = v
@@ -331,10 +334,10 @@ func ApplyForm(doc string, f Form) (string, error) {
 				delete(cb, k)
 			}
 		}
-		if f.Cache.KeepAliveMaxUSDPerSession > 0 {
-			cb["keepalive_max_usd_per_session"] = f.Cache.KeepAliveMaxUSDPerSession
+		if f.Cache.KeepAliveMaxUSDPerPing > 0 {
+			cb["keepalive_max_usd_per_ping"] = f.Cache.KeepAliveMaxUSDPerPing
 		} else {
-			delete(cb, "keepalive_max_usd_per_session")
+			delete(cb, "keepalive_max_usd_per_ping")
 		}
 	}
 
@@ -480,9 +483,10 @@ func (f Form) validate() error {
 	if f.Cache != nil {
 		if err := (CacheConfig{
 			KeepAlive: f.Cache.KeepAlive, KeepAliveIdleSeconds: f.Cache.KeepAliveIdleSeconds,
-			KeepAliveMaxPings:         f.Cache.KeepAliveMaxPings,
-			KeepAliveMaxUSDPerSession: f.Cache.KeepAliveMaxUSDPerSession,
-			HeadTTL1h:                 f.Cache.HeadTTL1h, HeadTTLMinTokens: f.Cache.HeadTTLMinTokens,
+			KeepAliveMaxPings:        f.Cache.KeepAliveMaxPings,
+			KeepAliveMaxUSDPerPing:   f.Cache.KeepAliveMaxUSDPerPing,
+			KeepAliveMinPrefixTokens: f.Cache.KeepAliveMinPrefixTokens,
+			HeadTTL1h:                f.Cache.HeadTTL1h, HeadTTLMinTokens: f.Cache.HeadTTLMinTokens,
 		}).validate(); err != nil {
 			return err
 		}

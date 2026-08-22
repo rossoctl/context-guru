@@ -73,16 +73,32 @@ func TestKeepAliveOnProductionSnapshot(t *testing.T) {
 		time.UnixMilli(rows[0].ts).UTC().Format(time.RFC3339),
 		time.UnixMilli(rows[len(rows)-1].ts).UTC().Format(time.RFC3339))
 
-	// Every arm the PR quotes, from the same decision function. X and K are the only knobs.
-	for _, arm := range []struct{ idle, maxPings int }{
-		{280, 2}, {280, 1}, {280, 3}, {240, 2}, {280, 12},
+	// Every arm the PR quotes, from the same decision function. The blanket arms set
+	// MinPrefixTokens 0 and are run with the first-request gate lifted, so the gate's effect is
+	// visible as the difference between two rows of the same table rather than asserted.
+	for _, arm := range []struct {
+		idle, maxPings, minPrefix int
+		blanket                   bool
+	}{
+		{280, 2, 20000, false}, // SHIPPED
+		{280, 2, 0, true},
+		{280, 1, 20000, false},
+		{280, 3, 20000, false},
+		{240, 2, 20000, false},
+		{280, 12, 20000, false},
+		{280, 2, 50000, false},
 	} {
 		arm := arm
-		t.Run(fmt.Sprintf("X=%ds_K=%d", arm.idle, arm.maxPings), func(t *testing.T) {
+		name := fmt.Sprintf("X=%ds_K=%d_prefix>=%dk", arm.idle, arm.maxPings, arm.minPrefix/1000)
+		if arm.blanket {
+			name = fmt.Sprintf("X=%ds_K=%d_BLANKET", arm.idle, arm.maxPings)
+		}
+		t.Run(name, func(t *testing.T) {
 			r := replay(t, rows, table, CachePolicy{
 				KeepAlive: true, Idle: time.Duration(arm.idle) * time.Second,
-				MaxPings: arm.maxPings, MaxUSDPerSession: 0.25,
-			})
+				MaxPings: arm.maxPings, MaxUSDPerPing: 0.25,
+				MinPrefixTokens: arm.minPrefix,
+			}, arm.blanket)
 			t.Logf("pings %d  ping $%.2f  converted %d  saved $%.2f  NET $%+.2f (%.2f%% of $%.2f)",
 				r.pings, r.pingUSD, r.converted, r.savedUSD, r.savedUSD-r.pingUSD,
 				(r.savedUSD-r.pingUSD)/r.totalUSD*100, r.totalUSD)
@@ -116,11 +132,20 @@ type replayResult struct {
 }
 
 // replay drives the shipped keeper over the snapshot's timeline.
-func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy) replayResult {
+func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanket bool) replayResult {
 	t.Helper()
 	var out replayResult
 	h := &Handler{opts: Options{Prices: table}, limiter: NewLimiter(Limits{})}
 	k := newKeeper(h)
+	// The blanket arms lift the first-request gate by pre-seeding every session's turn counter,
+	// which is the only way to compare "gated" against "blanket" through the SAME code path.
+	seedTurn := func(key string) {
+		if blanket {
+			k.mu.Lock()
+			k.turns[key]++
+			k.mu.Unlock()
+		}
+	}
 	// Inline dispatch: a five-day replay must be deterministic, and a goroutine per ping would
 	// need synchronising against the clock the test is driving.
 	k.dispatch = k.fire
@@ -245,6 +270,7 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy) replay
 			tn = &Tenancy{ID: r.tenant, Cache: pol}
 			tenancies[r.tenant] = tn
 		}
+		seedTurn(kaKey(r.tenant, r.session))
 		k.record(tn, r.session, at, body, up, req, providerOf(r.provider), "/v1/messages",
 			http.StatusOK, Usage{CacheRead: r.cacheRead, CacheWrite: r.cacheWrite}, usageOK)
 	}

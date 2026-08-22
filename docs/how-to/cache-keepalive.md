@@ -49,23 +49,37 @@ cache:
   keepalive: true
   keepalive_idle_seconds: 280          # X — must be under 300
   keepalive_max_pings: 2               # K
-  keepalive_max_usd_per_session: 0.25
+  keepalive_min_prefix_tokens: 20000   # the gate
+  keepalive_max_usd_per_ping: 0.25
 ```
 
-`X = 280` and `K = 2` are the measured optimum, not defaults picked by feel:
+These are the measured optimum, not defaults picked by feel. Replayed through the shipped
+decision function over the production window:
 
-| X | K | pings | ping cost | misses converted | saving | **net** |
-|---:|---:|---:|---:|---:|---:|---:|
-| 280 | 1 | 4,775 | $70.35 | 105 | $161.45 | +$91.10 |
-| **280** | **2** | **8,967** | **$109.08** | **159** | **$243.09** | **+$134.01** |
-| 280 | 3 | 12,191 | $122.22 | 175 | $256.64 | +$134.43 |
-| 240 | 2 | 9,303 | $122.53 | 140 | $208.83 | +$86.29 |
-| 280 | 12 | 34,064 | $147.60 | 185 | $264.26 | +$116.66 |
+| policy | pings | ping cost | converted | saving | **net** |
+|---|---:|---:|---:|---:|---:|
+| **X=280 K=2, gated (shipped)** | **912** | **$90.76** | **148** | **$215.84** | **+$125.08** |
+| X=280 K=2, blanket (no gate) | 8,915 | $93.79 | 153 | $221.05 | +$127.26 |
+| X=280 K=1, gated | 536 | $53.51 | 96 | $138.80 | +$85.28 |
+| X=280 K=3, gated | 1,226 | $121.33 | 174 | $252.13 | +$130.80 |
+| X=240 K=2, gated | 1,012 | $102.19 | 134 | $197.03 | +$94.85 |
+| X=280 K=12, gated | 3,307 | $311.78 | 253 | $370.12 | +$58.35 |
+
+**The gate is the whole reason this is deployable: 9.8× fewer pings for 1.7% less money.**
+What it drops is the near-free pings on tiny prefixes — ping cost is bimodal, p50 $0.0004
+against a p99 of $0.2275 — so 8,000 requests of real gateway load disappear and almost none
+of the value does. On a path that already returned 180 HTTP 429s in the same window, that
+matters as much as the dollars.
 
 `X = 280` beats 240 because it wastes fewer pings on gaps that would have hit anyway. `K`
 peaks at 2–3 and falls away after: a session that has *ended* looks exactly like one that
 is thinking, so every additional ping is spent partly on sessions that will never come
-back.
+back. K=2 ships because K=2 and K=3 are within noise here while K=2 sends 26% fewer
+requests.
+
+**Never use a per-session ping cap.** It truncates exactly the long large-prefix sessions
+holding the value: capping the window's pings per session at 20 drops the net to $92.34,
+and at 10 to $54.04. The guard that works is the per-*ping* cost budget above.
 
 ## What it will not do
 
@@ -91,6 +105,12 @@ the keyboard. The Overview ledger carries both halves:
 | Keep-alive savings | the prefix re-creations they avoided |
 | `keepalive_misses_avoided` | how many requests resumed past the lifetime and hit anyway |
 
+Ping rows are **excluded from every other aggregate** (`Filter.WithKeepAlive`). A ping is a
+request we made on the user's behalf, not traffic their agent sent, so counting it would
+inflate the request count and drag every per-request average towards a one-token response.
+They are still listed on the Requests tab, flagged, because that list is the audit trail.
+Spend figures do include them: the money was really spent on the caller's key.
+
 The saving is credited only where a ping of ours preceded the request, the gap exceeded the
 provider's lifetime, the provider read more than it wrote, and the amount is capped at the
 tokens that ping actually refreshed. It is a **ceiling**, not a floor: the provider's cache
@@ -99,19 +119,23 @@ entry for free.
 
 ## The honest downside
 
-The mechanism is a lottery with a strongly positive expectation and a losing median. Over
-the production window at `X=280, K=2`:
+**The policy is a very small tax on almost every session it touches, funding a large rebate
+for a few dozen.** Over the production window:
 
-- 3,812 sessions were pinged.
-- **37 came out ahead**, and 3,775 came out behind.
-- The 3,775 losing sessions lost **$13.10 between them** — an average of $0.0035 each.
-- The **worst single session lost $0.95**: a large prefix, two pings, and a session that
-  never resumed.
+| policy | sessions touched | losing money | worst session | total losses | winners |
+|---|--:|--:|--:|--:|--:|
+| blanket X=280 K=2 | 3,809 | **3,773 (99.1%)** | −$0.95 | −$13.10 | 36 |
+| **gated (shipped)** | **119** | **85 (71.4%)** | **−$2.42** | **−$13.59** | **34** |
+
+The gate does not make the tax rarer per session touched — it makes it fall on 119 sessions
+instead of 3,809, leaving the other 3,690 untouched entirely. That is the fairness argument,
+and it is independent of the dollars: a session that is never pinged cannot lose.
 
 Sessions that lose are short ones and abandoned ones. Sessions that win are long ones with
 large prefixes and human-paced gaps. An account whose work is many brief sessions should
-leave this off; the per-tenant simulation found the keep-alive positive for 10 of 13
-tenants and never worse than −$0.53 for the other three.
+leave this off. Given this shape, the opt-in default and the per-account ledger are not
+optional: a user has to be able to see that they are one of the ~70% paying the tax rather
+than one of the few collecting the rebate, and turn it off.
 
 ## Operator kill switch
 

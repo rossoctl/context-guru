@@ -98,8 +98,15 @@ type CachePolicy struct {
 	Idle time.Duration
 	// MaxPings is K: the most pings one idle span may send. Zero disables.
 	MaxPings int
-	// MaxUSDPerSession caps what pings may cost one session.
-	MaxUSDPerSession float64
+	// MaxUSDPerPing refuses a ping whose projected cost exceeds this. PER PING, because ping
+	// cost is bimodal (p50 $0.0004, p99 $0.2275, max $0.3780) while a per-SESSION budget
+	// truncates exactly the long large-prefix sessions holding the value — capping the
+	// window's pings per session at 20 drops the net from +$164 to $92.34.
+	MaxUSDPerPing float64
+	// MinPrefixTokens is the billed-prefix floor (the previous request's cache_read +
+	// cache_write) a session must reach before it is pinged. With the first-request skip this
+	// sends 8.7x fewer pings for 3.3% less money.
+	MinPrefixTokens int
 	// HeadTTL1h asks for the one-hour tier on the head breakpoints; HeadTTLMinTokens gates
 	// it on request size. Passed through to apply.Opts — see apply/headttl.go.
 	HeadTTL1h        bool
@@ -121,6 +128,9 @@ const (
 	// Claude Code body is under 1 MiB, so this is roughly 130 concurrent large sessions
 	// before the oldest are dropped.
 	maxKeepAliveBytes = 128 << 20
+	// maxKeepAliveTurnKeys bounds the per-session turn counter. Larger than the session bound
+	// because it holds one int rather than a body, and it has to outlive the entry.
+	maxKeepAliveTurnKeys = 20000
 	// maxKeepAliveBodyBytes refuses to hold a single body larger than this. A body this big
 	// is a multi-million-token request whose ping would itself cost real money, and holding
 	// one would spend a fifth of the whole budget on one session.
@@ -136,9 +146,16 @@ const (
 type kaEntry struct {
 	tenant, session string
 	// startedAt is when the last upstream request on this session STARTED — a real request
-	// or a ping, whichever was later. The provider's lifetime runs from there, not from the
-	// end of the response, so a slow turn eats its own budget and this is the only anchor
-	// that reflects that.
+	// or a ping, whichever was later.
+	//
+	// DO NOT "SIMPLIFY" THIS TO THE RESPONSE'S COMPLETION TIME. It is the single decision in
+	// this file that flips the sign of the whole feature. The provider's lifetime runs from
+	// request start, so an anchor at completion silently spends the response's own duration
+	// out of the 20 s of margin X leaves: `upstream_ms` is p50 8.9 s, p75 17.5 s, p90 33.4 s,
+	// so roughly 21% of first pings would land after the entry had already expired — and a
+	// ping onto a dead entry pays a 1.25x WRITE, the exact cost it exists to avoid. Simulated
+	// over the production window, that one change takes X=280 from **+$164.46 to −$241.99**,
+	// with ping cost tripling to $408.85.
 	startedAt time.Time
 	// body is the exact bytes last sent upstream. Retained, not copied: after serve returns
 	// nothing else references the slice, so holding it costs the bytes and no allocation.
@@ -163,7 +180,17 @@ type kaEntry struct {
 	model, route, preset, agent string
 	pol                         CachePolicy
 	pings                       int
-	// spent is what this session's pings have cost so far, against pol.MaxUSDPerSession.
+	// turn is how many requests this session sent BEFORE the one that established this entry.
+	// 0 means the session's first request, which the gate skips.
+	turn int
+	// prefix is what the previous request billed (cache_read + cache_write) — the size of the
+	// entry a ping would refresh, and therefore the input to both the gate and the cost guard.
+	prefix int64
+	// pingUSD is the projected cost of one ping on that prefix, from the model's own read
+	// rate. Checked against pol.MaxUSDPerPing before anything is sent.
+	pingUSD float64
+	// spent is what this session's pings have cost so far. Reported, never a cap — see
+	// CachePolicy.MaxUSDPerPing for why the guard is per ping.
 	spent float64
 	// refreshed is what the last ping read from cache. It is the ceiling on what the next
 	// real request may credit to this mechanism — see dash.Event.keepaliveSavedUSD.
@@ -173,10 +200,38 @@ type kaEntry struct {
 	stopped bool
 }
 
-// due reports whether this entry should be pinged now.
+// due reports whether this TRACKED entry should be pinged now. Timing, K and the stop flag
+// only: every policy gate is applied at record time instead, so an entry that exists is by
+// construction one we intend to ping.
+//
+// That split is not cosmetic. A gate evaluated here would leave un-pingable sessions sitting in
+// the map holding a request body and a caller credential until memory pressure evicted them —
+// measured on the production replay, the map saturated at its 512-session bound and the
+// eviction then threw away the entries that were about to pay, cutting conversions from 153 to
+// 69. Gating at record keeps nothing we will not use.
 func (e *kaEntry) due(now time.Time) bool {
 	return !e.stopped && e.pol.on() && e.pings < e.pol.MaxPings &&
 		!now.Before(e.startedAt.Add(e.pol.Idle))
+}
+
+// pingable reports whether this session is worth holding state for at all. Every condition is
+// known when the request finishes, which is why it is checked there.
+//
+//   - **Not the session's FIRST request** (turn >= 1). Single-request sessions are 79% of the
+//     pings and 0.9% of the value: nothing has accumulated for a second turn to hit, and most
+//     never send one. A cheap filter, NOT a claim that later turns miss more often — P(the next
+//     request is an addressable TTL miss) is flat at 2.24% from turn 0, 2.33% at turn 5, 2.47%
+//     at turn 20, 2.29% at turn 100.
+//   - **A billed prefix worth protecting**, in the provider's own units.
+//   - **A projected ping cost inside budget.** Ping cost is bimodal (p50 $0.0004, p99 $0.2275,
+//     max $0.3780), so the outlier to refuse is one ping and not a session's total.
+//
+// Deliberately NOT gated on the previous turn's `stop_reason`. `end_turn` looks like a
+// session-end signal and is the opposite — P(gap > 300s) is 37.15% after it against 0.74%
+// after `tool_use`, and 83.7% of the recoverable dollars sit behind it.
+func (e *kaEntry) pingable() bool {
+	return e.turn >= 1 && e.prefix >= int64(e.pol.MinPrefixTokens) &&
+		(e.pol.MaxUSDPerPing <= 0 || e.pingUSD <= e.pol.MaxUSDPerPing)
 }
 
 // keeper runs the keep-alive. One goroutine per handler, one map, one lock.
@@ -193,6 +248,15 @@ type keeper struct {
 	mu    sync.Mutex
 	live  map[string]*kaEntry
 	bytes int64
+	// turns counts requests seen per session, so the first-request gate survives the entry's
+	// own lifecycle: an entry is dropped the moment the next request arrives, and retired by
+	// policy a few minutes later, while "has this session sent a request before?" has to
+	// outlive both.
+	//
+	// ponytail: a plain map with a size bound and no per-key expiry. It holds one int per
+	// session id and is cleared wholesale at the bound; give it an LRU only if session churn
+	// is ever shown to cost real pings.
+	turns map[string]int
 
 	// send performs one ping. A field so tests can drive the whole policy — timing, caps,
 	// limits, the write-instead-of-read guard — without a network.
@@ -223,7 +287,7 @@ func keepAliveDisabled() bool {
 
 func newKeeper(h *Handler) *keeper {
 	k := &keeper{h: h, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, now: time.Now}
+		live: map[string]*kaEntry{}, turns: map[string]int{}, now: time.Now}
 	k.send = k.sendPing
 	k.dispatch = func(j pingJob) { go k.fire(j) }
 	return k
@@ -273,6 +337,7 @@ func (k *keeper) Stop() {
 		delete(k.live, key)
 	}
 	k.bytes = 0
+	k.turns = map[string]int{}
 }
 
 // clear drops an entry's body and credential. Called on every removal path, because the two
@@ -357,22 +422,63 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 		k.skipped.Add(1)
 		return
 	}
+	model := gjson.GetBytes(body, "model").String()
+	// What the provider billed for this request's prefix, in its own units — the size of the
+	// entry a ping would refresh. Both the gate and the projected cost read it, so a request
+	// that reported no usage is not pingable: without it there is no honest estimate of either.
+	prefix := u.CacheRead + u.CacheWrite
 	e := &kaEntry{
 		tenant: tn.ID, session: session, startedAt: startedAt, body: body, up: up,
-		provider: provider, model: gjson.GetBytes(body, "model").String(),
-		route: route, preset: tn.Preset,
-		agent: r.UserAgent(), pol: pol,
-		hdr: pingHeaders(r, up),
+		provider: provider, model: model, route: route, preset: tn.Preset,
+		agent: r.UserAgent(), pol: pol, prefix: prefix,
+		pingUSD: k.projectedPingUSD(model, prefix),
+		hdr:     pingHeaders(r, up),
 	}
+	key := kaKey(tn.ID, session)
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if prev, ok := k.live[kaKey(tn.ID, session)]; ok {
+	// The turn count outlives the entry, which is dropped on the next request's arrival. It is
+	// incremented for EVERY request, including the ones the gate then refuses to track — that is
+	// what lets a session's second request be recognised as such.
+	k.turns[key]++
+	e.turn = k.turns[key] - 1
+	if len(k.turns) > maxKeepAliveTurnKeys {
+		k.turns = map[string]int{key: k.turns[key]}
+	}
+	// Drop any previous entry either way: it is stale now, and if the gate refuses this request
+	// its body and credential must not be left behind.
+	if prev, ok := k.live[key]; ok {
 		k.bytes -= int64(len(prev.body))
 		prev.clear()
+		delete(k.live, key)
 	}
-	k.live[kaKey(tn.ID, session)] = e
+	if !e.pingable() {
+		k.skipped.Add(1)
+		e.clear() // hold no body and no credential for a session we will not ping
+		return
+	}
+	k.live[key] = e
 	k.bytes += int64(len(body))
 	k.evictLocked()
+}
+
+// projectedPingUSD is what one ping on this prefix will cost: the prefix at the model's own
+// cache-read rate, plus the single output token. Computed at record time so the guard can
+// refuse an expensive ping BEFORE sending it rather than reporting it afterwards.
+//
+// Zero when the model is not priced, which lets the ping through — refusing to protect a cache
+// because a price list is incomplete would be the wrong failure, and the spend still lands on
+// its own dashboard row either way.
+func (k *keeper) projectedPingUSD(model string, prefix int64) float64 {
+	p := k.h.opts.Prices
+	if p == nil || model == "" || prefix <= 0 {
+		return 0
+	}
+	price, ok := p.Price(context.Background(), model)
+	if !ok || price.Zero() {
+		return 0
+	}
+	return float64(prefix)*price.CacheRead + price.Output
 }
 
 // evictLocked enforces both bounds by dropping the entries whose deadline is furthest away
@@ -413,7 +519,7 @@ func (k *keeper) sweep(now time.Time) int {
 		// sits there holding is a request body and, on a caller-pays upstream, the caller's
 		// provider credential. So the hold is bounded by the POLICY (at most (K+1) x X, about
 		// 14 minutes at the defaults) rather than by how busy the box happens to be.
-		if e.stopped || e.pings >= e.pol.MaxPings {
+		if e.stopped || e.pings >= e.pol.MaxPings || !e.pingable() {
 			if !now.Before(e.startedAt.Add(e.pol.Idle)) {
 				k.bytes -= int64(len(e.body))
 				e.clear()
@@ -422,11 +528,6 @@ func (k *keeper) sweep(now time.Time) int {
 			continue
 		}
 		if !e.due(now) {
-			continue
-		}
-		if e.pol.MaxUSDPerSession > 0 && e.spent >= e.pol.MaxUSDPerSession {
-			e.stopped = true
-			k.skipped.Add(1)
 			continue
 		}
 		// Everything the ping needs, taken HERE under the lock. Nothing outside it may read the

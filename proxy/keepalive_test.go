@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,8 +12,14 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/tidwall/gjson"
 )
+
+// fixedPrice prices every model the same, so a cost guard can be tested without a price file.
+type fixedPrice struct{ p modelinfo.Price }
+
+func (f fixedPrice) Price(context.Context, string) (modelinfo.Price, bool) { return f.p, true }
 
 // A body shaped like the traffic this mechanism exists for: Claude Code's layout, two
 // `system` breakpoints and one on the last content block, which is 54.2% of production
@@ -97,11 +104,21 @@ func (f *fakeSender) send(j pingJob, body []byte) (Usage, int, error) {
 }
 
 func kaPolicy() CachePolicy {
-	return CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2, MaxUSDPerSession: 0.25}
+	return CachePolicy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2,
+		MaxUSDPerPing: 0.25, MinPrefixTokens: 20000}
 }
 
-// recordOne registers one finished request with the keeper.
+// recordOne registers one finished request with the keeper, on a session that has already
+// sent one — because the gate skips a session's FIRST request and every timing test below is
+// about the span AFTER a real turn.
 func recordOne(t *testing.T, k *keeper, pol CachePolicy, body string, at time.Time, up upstream) {
+	t.Helper()
+	recordTurn(t, k, pol, body, at.Add(-time.Second), up)
+	recordTurn(t, k, pol, body, at, up)
+}
+
+// recordTurn registers exactly one request, without pre-seeding a turn.
+func recordTurn(t *testing.T, k *keeper, pol CachePolicy, body string, at time.Time, up upstream) {
 	t.Helper()
 	tn := &Tenancy{ID: "t1", Cache: pol}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
@@ -222,28 +239,6 @@ func TestPingNeverUsesTheLastConcurrencySlot(t *testing.T) {
 	}
 }
 
-// The per-session spend cap is a backstop for a raised K, and it must stop the session
-// rather than merely skip one ping.
-func TestSpendCapStopsTheSession(t *testing.T) {
-	k, _, clock := testKeeper(t, Limits{})
-	pol := kaPolicy()
-	pol.MaxPings, pol.MaxUSDPerSession = 10, 0.01
-	recordOne(t, k, pol, kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
-
-	k.mu.Lock()
-	for _, e := range k.live {
-		e.spent = 0.02 // as two pings on a large prefix would have left it
-	}
-	k.mu.Unlock()
-
-	if n := k.sweep(clock.advance(281 * time.Second)); n != 0 {
-		t.Fatalf("fired %d pings past the session spend cap", n)
-	}
-	if k.skipped.Load() == 0 {
-		t.Error("the cap refusal was not counted; a silent cap is indistinguishable from a bug")
-	}
-}
-
 // Fail open and quiet: a transport error is logged, counted and forgotten. It must not panic,
 // must not retry inside the sweep, and must still count against K so a broken upstream cannot
 // be pinged forever.
@@ -322,6 +317,77 @@ func TestDisabledPolicyHoldsNothing(t *testing.T) {
 	}
 }
 
+// The gate: a session's FIRST request is never pinged, and a prefix below the floor is never
+// pinged. Together these drop 8.7x the pings for 3.3% of the money, which is what makes the
+// policy deployable rather than merely profitable.
+func TestGateSkipsFirstRequestAndSmallPrefixes(t *testing.T) {
+	t.Run("the session's first request is not pinged", func(t *testing.T) {
+		k, _, clock := testKeeper(t, Limits{})
+		recordTurn(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+		if n := k.sweep(clock.advance(281 * time.Second)); n != 0 {
+			t.Fatalf("pinged a single-request session (%d); those are 79%% of pings and 0.9%% of the value", n)
+		}
+	})
+	t.Run("the second request is", func(t *testing.T) {
+		k, _, clock := testKeeper(t, Limits{})
+		recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+		if n := k.sweep(clock.advance(281 * time.Second)); n != 1 {
+			t.Fatalf("did not ping a session on its second turn (%d)", n)
+		}
+	})
+	t.Run("a prefix below the floor is not pinged", func(t *testing.T) {
+		k, _, clock := testKeeper(t, Limits{})
+		tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
+		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+		for i := 0; i < 2; i++ {
+			// 19,999 billed tokens: one short of the 20,000 floor.
+			k.record(tn, "small", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+				upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
+				"/v1/messages", http.StatusOK, Usage{CacheRead: 19_999}, true)
+		}
+		if n := k.sweep(clock.advance(281 * time.Second)); n != 0 {
+			t.Fatalf("pinged a session whose billed prefix is under the floor (%d)", n)
+		}
+	})
+}
+
+// The per-ping cost guard. Ping cost is bimodal — p50 $0.0004 against a p99 of $0.2275 and a
+// max of $0.3780 — so the outlier to refuse is an individual ping, not a session's total.
+func TestPerPingCostGuard(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	k.h.opts.Prices = fixedPrice{modelinfo.Price{Input: 3.8e-6, Output: 19e-6,
+		CacheRead: 3.8e-7, CacheWrite: 4.75e-6}}
+	pol := kaPolicy()
+	pol.MaxUSDPerPing = 0.05
+	tn := &Tenancy{ID: "t1", Cache: pol}
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	// 400k billed tokens at opus's read rate is $0.152 a ping — over the $0.05 guard. Refused
+	// at RECORD time, which is also the security-relevant answer: no body and no credential is
+	// held for a session we have already decided not to ping.
+	big := func(tn *Tenancy, i int) {
+		k.record(tn, "big", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
+			"/v1/messages", http.StatusOK, Usage{CacheRead: 400_000}, true)
+	}
+	big(tn, 0)
+	big(tn, 1)
+	if got := k.Stats().Live; got != 0 {
+		t.Fatalf("held %d sessions whose projected ping exceeds the budget", got)
+	}
+	if n := k.sweep(clock.advance(281 * time.Second)); n != 0 {
+		t.Fatalf("sent %d pings above the per-ping budget", n)
+	}
+	// The same traffic under a budget that allows it IS pinged, so the refusal above is the
+	// guard and not some other gate.
+	pol.MaxUSDPerPing = 0.5
+	big(&Tenancy{ID: "t1", Cache: pol}, 2)
+	// 300s, not 281s: the clock has already moved on, so the new entry's own deadline is 280s
+	// after ITS record time rather than after the start of the test.
+	if n := k.sweep(clock.advance(300 * time.Second)); n != 1 {
+		t.Fatalf("did not ping once the budget allowed it (%d)", n)
+	}
+}
+
 // A real request cancels the pending ping and reports what the span's pings did, and the
 // entry — with its body and its credential — is dropped at that moment.
 func TestArriveCancelsAndReports(t *testing.T) {
@@ -355,8 +421,13 @@ func TestCredentialRetentionRules(t *testing.T) {
 		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 		r.Header.Set("Authorization", "Bearer sk-caller-secret")
 		r.Header.Add("x-api-key", "cg_live_0123456789abcdef0123456789abcdef")
-		k.record(tn, "s", clock.now(), []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"},
-			r, bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 1}, true)
+		// Twice, and with a prefix over the floor: the gate refuses a session's first request
+		// and a small prefix, and the subject here is the credential rather than the gate.
+		for i := 0; i < 2; i++ {
+			k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+				upstream{base: "http://up", path: "/v1/messages"},
+				r, bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+		}
 
 		k.mu.Lock()
 		defer k.mu.Unlock()
@@ -378,8 +449,10 @@ func TestCredentialRetentionRules(t *testing.T) {
 		r.Header.Set("Authorization", "Bearer sk-caller-secret")
 		up := upstream{base: "http://up", path: "/v1/messages",
 			setKey: func(h http.Header) { h.Set("x-api-key", "operator") }}
-		k.record(tn, "s", clock.now(), []byte(kaBody), up, r, bschemas.Anthropic, "/v1/messages",
-			http.StatusOK, Usage{CacheRead: 1}, true)
+		for i := 0; i < 2; i++ {
+			k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody), up, r,
+				bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+		}
 
 		k.mu.Lock()
 		defer k.mu.Unlock()

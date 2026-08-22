@@ -4235,14 +4235,19 @@ function loadSettings() {
         + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 280)) + 's idle, up to '
         + (((cfg.cache && cfg.cache.keepalive_max_pings) || 2)) + ' minimal requests re-read '
         + 'your cached prompt so the provider refreshes its 5-minute lifetime for free. '
-        + 'Billed to your own key.'),
+        + 'Only on sessions with a large enough cached prompt to be worth it, and never on a '
+        + 'session\u2019s first request. Billed to your own key.'),
       whyBlock('What it costs and what it saves',
         'A cache read costs 0.1x base input; re-creating a lapsed prefix costs 1.25x, so one '
         + 'ping buys back about 11.5 of itself. On this service\u2019s traffic, requests that '
         + 'resumed after the 5-minute window cost 8.5x a request that hit, and they were 23.6% '
         + 'of all spend. It is off by default because it is your money and nobody asked for it '
         + 'to be spent. Every ping is a row on your Requests tab marked keep-alive with its own '
-        + 'cost, and the Overview ledger shows pings, ping cost, misses avoided and the net.')));
+        + 'cost, and the Overview ledger shows pings, ping cost, misses avoided and the net. '
+        + 'Be aware of the shape: it is a small tax on most of the sessions it touches, funding '
+        + 'a large rebate on a few. Measured over 5 days of this service\u2019s traffic, 34 of '
+        + '119 pinged sessions came out ahead and the worst single session paid $2.42 for '
+        + 'nothing. Watch your own ledger and switch it off if you are not one of the winners.')));
 
     // Content capture consent.
     const cap = el('input', {

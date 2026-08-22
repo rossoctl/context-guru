@@ -78,13 +78,29 @@ type CacheConfig struct {
 	// linearly in K (measured: 3,891 sessions x K pings), so the net peaks early and
 	// collapses: K=2 nets +$170.08, K=3 +$162.56, K=12 +$27.99, K=20 −$99.72.
 	KeepAliveMaxPings int `yaml:"keepalive_max_pings"`
-	// KeepAliveMaxUSDPerSession caps what pings may cost one session. 0 =
-	// DefaultKeepAliveMaxUSD.
+	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
+	// DefaultKeepAliveMaxUSDPerPing.
 	//
-	// A cap rather than trust: the per-ping cost is 0.1x the prefix, so a 400k-token
-	// session pings at ~$0.15 and a runaway would be visible only on the bill. With K=2
-	// the cap is normally slack; it is the backstop for a configuration that raises K.
-	KeepAliveMaxUSDPerSession float64 `yaml:"keepalive_max_usd_per_session"`
+	// PER PING and not per session, which is the opposite of the obvious design and is
+	// measured. Ping cost is bimodal — p50 $0.0004, mean $0.0084, p99 $0.2275, max $0.3780 —
+	// because 45.7% of pings fire on single-request sessions with ~1k-token prefixes, so the
+	// variance to guard is between pings and not between sessions. A per-SESSION budget, by
+	// contrast, truncates exactly the long large-prefix sessions that hold the value: capping
+	// the window's pings per session at 20 drops the net from +$164 to $92.34, and at 10 to
+	// $54.04. So the guard bounds the outlier ping and never the productive session.
+	KeepAliveMaxUSDPerPing float64 `yaml:"keepalive_max_usd_per_ping"`
+	// KeepAliveMinPrefixTokens is the billed-prefix floor a session must reach before it is
+	// pinged at all, in the provider's own units (cache_read + cache_write of the previous
+	// request). 0 = DefaultKeepAliveMinPrefix.
+	//
+	// This is the gate that makes the policy deployable rather than merely profitable.
+	// Combined with skipping a session's FIRST request, it sends 8.7x fewer pings (1,060
+	// against 9,234 over the production window) for 3.3% less money, because what it drops is
+	// the near-free pings on tiny prefixes. That matters twice over: those 8,000 requests are
+	// real load on a gateway that already returned 180 HTTP 429s in the same window, and the
+	// gate leaves 3,748 of 3,891 sessions untouched entirely — which is the fairness answer as
+	// well as the efficiency one.
+	KeepAliveMinPrefixTokens int `yaml:"keepalive_min_prefix_tokens"`
 
 	// HeadTTL1h asks for the ONE-HOUR tier on the request's HEAD breakpoints (`tools` and
 	// `system`) while leaving the trailing message breakpoint at 5 minutes — the provider's
@@ -122,10 +138,11 @@ type CacheConfig struct {
 // in tests and quoted in the settings page, and three copies of 280 is how one of them
 // becomes 240.
 const (
-	DefaultKeepAliveIdle     = 280
-	DefaultKeepAliveMaxPings = 2
-	DefaultKeepAliveMaxUSD   = 0.25
-	DefaultHeadTTLMinTokens  = 50000
+	DefaultKeepAliveIdle          = 280
+	DefaultKeepAliveMaxPings      = 2
+	DefaultKeepAliveMaxUSDPerPing = 0.25
+	DefaultKeepAliveMinPrefix     = 20000
+	DefaultHeadTTLMinTokens       = 50000
 )
 
 // Resolved returns the block with every zero replaced by its default, so callers never
@@ -138,8 +155,11 @@ func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveMaxPings <= 0 {
 		c.KeepAliveMaxPings = DefaultKeepAliveMaxPings
 	}
-	if c.KeepAliveMaxUSDPerSession <= 0 {
-		c.KeepAliveMaxUSDPerSession = DefaultKeepAliveMaxUSD
+	if c.KeepAliveMaxUSDPerPing <= 0 {
+		c.KeepAliveMaxUSDPerPing = DefaultKeepAliveMaxUSDPerPing
+	}
+	if c.KeepAliveMinPrefixTokens <= 0 {
+		c.KeepAliveMinPrefixTokens = DefaultKeepAliveMinPrefix
 	}
 	if c.HeadTTLMinTokens <= 0 {
 		c.HeadTTLMinTokens = DefaultHeadTTLMinTokens
@@ -154,7 +174,7 @@ func (c CacheConfig) Resolved() CacheConfig {
 // of reading at 0.1x.
 func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 ||
-		c.KeepAliveMaxUSDPerSession < 0 {
+		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
 	}
 	if c.KeepAliveIdleSeconds >= 300 {
