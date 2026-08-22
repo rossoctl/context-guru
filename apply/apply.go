@@ -470,10 +470,19 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			//
 			// Reading a key we also write is safe: aliasSeen reads BEFORE it writes and runs
 			// once per request, so the value is the previous turn's, never this one's.
-			if aliasAt := aliasSeen(st, session.Scoped(o.Tenant, "", sys, firstUser), nowMs); aliasAt > prevAt {
+			//
+			// BOTH records are keyed by the alias, and that is the point: the provider keys its
+			// cache on CONTENT, so every fact we keep about that cache's lifetime has to be
+			// keyed the same way or it splits across our ids. Keying the TTL by sessionID while
+			// the clock was keyed by content left a 1h grant recorded under the explicit id and
+			// invisible to the header-less turn, which then judged an hour-long prefix at the
+			// 5m tier — the varying-TTL path, reopened one id over. That was masked until the
+			// clock fix above: before it, such a turn had no record at all and declined itself.
+			alias := session.Scoped(o.Tenant, "", sys, firstUser)
+			if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
 				prevAt = aliasAt
 			}
-			coldCache = cacheIsCold(prevAt, nowMs, sessionTTL(st, sessionID, cacheTTL(provider, body)))
+			coldCache = cacheIsCold(prevAt, nowMs, sessionTTL(st, alias, cacheTTL(provider, body)))
 			if prevAt > 0 && nowMs > prevAt {
 				idleMs = nowMs - prevAt
 			}
@@ -875,12 +884,17 @@ func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
 	return prev
 }
 
-// sessionTTL is cacheTTL widened to the LONGEST lifetime this session has ever asked for.
+// sessionTTL is cacheTTL widened to the LONGEST lifetime this PREFIX has ever asked for.
 //
 // cacheTTL reads the TTL out of THIS request, so a client that marks `ttl: "1h"` on one turn
 // and a bare `ephemeral` on the next would have its hour-long prefix judged cold after six
-// minutes — a false cold reading on a prefix the provider is still holding. Once a session
-// has asked for the extended tier, every later cold judgment for it uses that tier.
+// minutes — a false cold reading on a prefix the provider is still holding. Once a prefix has
+// asked for the extended tier, every later cold judgment for it uses that tier.
+//
+// The caller keys this by the CONTENT-derived alias, not by the session id, for the same
+// reason the idle clock is: the provider keys its cache on content, so a record keyed per
+// session id splits across the ids one conversation arrives under and the turn that needs it
+// cannot see it.
 //
 // Monotonic, so it only ever makes us read WARM, which is the safe direction. Unobserved on
 // today's traffic (0 of 1,868 captured requests carry a ttl field, and none of the ~5,000

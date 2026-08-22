@@ -300,8 +300,11 @@ fabricated are each closed:
 - **a client that asks `ttl: "1h"` on one turn and a bare `ephemeral` mark on the next** would have
   had its hour-long prefix judged cold at six minutes, because `cacheTTL` reads the TTL out of
   *this* request. `sessionTTL` now widens it to the longest lifetime the session has ever asked
-  for, monotonically, so the estimate can only move toward WARM. Unobserved on today's traffic
-  (0 of 1,868 captured requests carry a `ttl` field) but live the moment anything adds 1h marks.
+  for, monotonically, so the estimate can only move toward WARM. Keyed by the same
+  content-derived alias as the clock, because the provider keys its cache on content: a record
+  keyed per session id splits across the ids one conversation arrives under, and the turn that
+  needs it cannot see it. Unobserved on today's traffic (0 of 1,868 captured requests carry a
+  `ttl` field) but live the moment anything adds 1h marks.
 - **a prefix touched under a different session id than the idle clock is kept under.** The clock is
   per session id; the provider's cache is keyed on CONTENT. One conversation reaches us under two
   ids whenever an explicit header is present on some turns and absent on others — the header wins

@@ -344,3 +344,90 @@ func (s coldSpy) Reformat(_ *bschemas.BifrostChatRequest, _ *components.Report, 
 	*s.seen = append(*s.seen, c.ColdCache)
 	return nil
 }
+
+// Path 1 through the REAL call site, and it is the case my alias fix UNMASKED: before that
+// fix the header-less turn had prevAt == 0 and declined itself under the "no record reads
+// warm" rule, so the TTL keying never got reached. With a populated alias clock it does, and a
+// TTL record keyed per session id is invisible to the turn that needs it.
+//
+// Both shapes the residual takes. Each ends with a bare-ephemeral, header-less turn over a
+// prefix the provider may still be holding for an hour.
+func TestSessionTTLIsKeyedByContentNotBySessionID(t *testing.T) {
+	body1h := []byte(`{"model":"claude-sonnet-5","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"fix the failing test",` +
+		`"cache_control":{"type":"ephemeral","ttl":"1h"}}]},{"role":"user","content":"more"}]}`)
+	bodyBare := []byte(`{"model":"claude-sonnet-5","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"fix the failing test",` +
+		`"cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"more"}]}`)
+	base := time.Unix(1_700_000_000, 0)
+
+	for _, tc := range []struct {
+		name  string
+		turns []struct {
+			at     time.Time
+			header string
+			body   []byte
+		}
+	}{
+		{"the 1h grant was recorded under the explicit id", []struct {
+			at     time.Time
+			header string
+			body   []byte
+		}{
+			{base, "cc-abc", body1h},
+			{base.Add(5 * time.Minute), "cc-abc", body1h},
+			{base.Add(20 * time.Minute), "", bodyBare},
+		}},
+		{"and with the header arriving mid-conversation", []struct {
+			at     time.Time
+			header string
+			body   []byte
+		}{
+			{base, "", bodyBare},
+			{base.Add(2 * time.Minute), "cc-abc", body1h},
+			{base.Add(30 * time.Minute), "", bodyBare},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cold []bool
+			pipe := components.NewPipeline([]components.Component{coldSpy{&cold}}, nil)
+			st, tr := store.NewMemory(store.Options{PinPrefixes: store.DefaultPinPrefixes}), modes.NewTracker(0)
+			for _, turn := range tc.turns {
+				BodyOpts(context.Background(), pipe, st, Opts{
+					Provider: bschemas.Anthropic, Body: turn.body, Session: turn.header,
+					Tracker: tr, Now: turn.at,
+				})
+			}
+			if last := len(cold) - 1; last < 0 || cold[last] {
+				t.Fatalf("the final turn read COLD on a prefix the provider may hold for an "+
+					"hour (ColdCache per turn: %v) — the 1h grant has to be keyed the way the "+
+					"provider keys its cache, on content", cold)
+			}
+		})
+	}
+}
+
+// And the guards must not have jammed the sweep warm: a prefix that only ever asked for the
+// 5m tier still reads cold after a real gap, whichever id the turns arrive under.
+func TestColdSweepStillFiresOnAFiveMinuteTierPrefix(t *testing.T) {
+	var cold []bool
+	pipe := components.NewPipeline([]components.Component{coldSpy{&cold}}, nil)
+	st, tr := store.NewMemory(store.Options{PinPrefixes: store.DefaultPinPrefixes}), modes.NewTracker(0)
+	body := []byte(`{"model":"claude-sonnet-5","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"fix the failing test",` +
+		`"cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"more"}]}`)
+	base := time.Unix(1_700_000_000, 0)
+	for _, turn := range []struct {
+		at     time.Time
+		header string
+	}{{base, "cc-abc"}, {base.Add(9 * time.Minute), ""}} {
+		BodyOpts(context.Background(), pipe, st, Opts{
+			Provider: bschemas.Anthropic, Body: body, Session: turn.header,
+			Tracker: tr, Now: turn.at,
+		})
+	}
+	if len(cold) != 2 || !cold[1] {
+		t.Fatalf("a genuine 9-minute gap on the 5m tier stopped reading cold (%v); the guards "+
+			"are only allowed to move the estimate toward warm, not to disable the sweep", cold)
+	}
+}

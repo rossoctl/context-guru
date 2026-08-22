@@ -208,6 +208,10 @@ func (lc *Linecap) rewrite(content string) (string, int) {
 // that does not match one of its patterns was silently unprotected.
 //
 // The budget is honoured exactly: head + marker + tail never exceeds n runes.
+//
+// ponytail: a token in the MIDDLE third is still lost (head-only lost it too, so this is a
+// ceiling and not a regression). Widen the tail share, or make the cut skip the run containing
+// the last path-like token, if middle-of-line references ever show up in real output.
 func clipMiddle(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
@@ -234,6 +238,10 @@ func clipMiddle(s string, n int) string {
 // is. Each pattern names a class of thing the agent must be able to act on: a file
 // reference, a source location, an error, a test outcome, an exit status, a diff line, a
 // hunk header, a URL.
+// ponytail: `^\S+:\d+` matches any SPACE-FREE line containing `:<digit>` anywhere, so a
+// JSON log line is exempt by accident rather than by intent. Harmless — the exemptions are
+// now defence in depth on top of clipMiddle, not the thing correctness rests on — but do not
+// read this list as precise.
 var neverTruncateRe = regexp.MustCompile(
 	`^\S+:\d+` + // path:line and path:line:col references
 		`|^\s*(File "|at )` + // Python and JVM/JS stack frames
