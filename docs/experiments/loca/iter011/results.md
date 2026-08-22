@@ -147,3 +147,33 @@ A 5-task probe **cannot** verify this fix: its trajectories are too shallow to m
 `min_messages` and span floor, so it never fires even with the trigger lowered to 5,000 tokens. Arm 1
 of the real experiment is therefore the verification, run behind a hard gate — more than 5 failures
 and arms 2 and 3 are cancelled — so a failed fix costs one arm rather than three.
+
+## A THIRD defect, same family, found in the clean run — documented, not fixed
+
+The re-run's arm 1 shows 2 failures in 38 runs, and **neither is the pairing bug**:
+
+| count | error |
+|---|---|
+| 1 | the still-unattributed `<html>400 Bad request` transport fault (6/75 in [iteration 010](../iter010/results.md)) |
+| 1 | **new:** `messages.7.content.1.thinking: each thinking block must contain thinking` |
+
+**Root cause hypothesis, same as the tool-call defect:** `bschemas.ChatContentBlock`'s type enum is
+`text` / `image_url` / `input_audio` / `file` / `refusal`. It cannot represent a `thinking` block any
+more than it can a `tool_use` one. So **any path that re-marshals an assistant message instead of
+emitting its original raw bytes silently drops the thinking content**, and the provider rejects the
+empty block.
+
+In `rebuildCountChanged` that path is reached whenever a body-derived message fails to byte-match its
+pre-pipeline form — the `matched < 0` branch, which exists for genuinely new messages (the summary)
+and cannot currently tell them apart from a modified survivor.
+
+**The general shape of all three defects is one fact:** bifrost's schema is a lossy model of an
+Anthropic request, so *correctness depends on never re-serialising a message that came from the body*.
+Two of the three defects are instances of that rule being broken; the third (`ValidateShape` blindness)
+is the same gap in the checker.
+
+**Deliberately not fixed now.** It is rare (1 in 38), it does not block the experiment, and two
+substantive changes to this package already landed tonight without review. Stacking a third unreviewed
+change to the byte-losslessness machinery raises the risk of a fourth defect more than it lowers the
+risk of this one. A likely fix is to match assistant messages by their tool-call id set — as tool
+messages now are — and to **decline the rebuild** rather than fresh-marshal anything body-derived.
