@@ -115,8 +115,21 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 			rep.Gate("empty")
 			continue
 		}
+		// Size FIRST, ahead of everything that hashes the message. skipReduce SHA-256s the
+		// whole content and scans it for a placeholder; the memo below hashes it too. The
+		// min_size test is a length comparison, so putting it first spares both for the ~21
+		// messages per request that were about to be rejected as too small anyway.
+		//
+		// Behaviour-neutral in both directions: a sub-min_size message is declined either
+		// way (only the gate label differs), and a frozen rewrite can only exist for content
+		// that already passed this floor once — the agent re-sends the same original bytes,
+		// so the same length gives the same verdict.
+		if len(content) < f.minSize {
+			rep.Gate("below_min_size") // marker would often cost more than the saving
+			continue
+		}
 		// Replay a previously-frozen rewrite for this content before doing any matching
-		// work at all. This is the per-message memo, keyed on the CONTENT hash rather than
+		// work. This is the per-message memo, keyed on the CONTENT hash rather than
 		// on the message index, and it is what stops the whole transcript being re-filtered
 		// every turn: duration was linear in transcript size (3.23 ms below 50 messages,
 		// 42.95 ms at 500+) because this loop redid every message on every turn.
@@ -130,16 +143,6 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 		if fk, _, ok := reapplyFrozen(c, f.Name(), m); ok {
 			changed++
 			keys = append(keys, fk...)
-			continue
-		}
-		// Size FIRST, then skipReduce. skipReduce SHA-256s the whole message (and scans
-		// it for a placeholder) and the min_size test is a length comparison, so the
-		// original order hashed the ~21 messages per request that were about to be
-		// rejected as too small anyway. Reordering is behaviour-neutral — a sub-min_size
-		// message is declined either way, only the gate label differs — and halves the
-		// hashing per request.
-		if len(content) < f.minSize {
-			rep.Gate("below_min_size") // marker would often cost more than the saving
 			continue
 		}
 		if skipReduce(c, content) {
