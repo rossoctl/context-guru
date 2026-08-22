@@ -32,19 +32,19 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | [`agentdiet`](components/agentdiet.md) | Offload (LLM) | useless/redundant/**expired** content in the step that just aged past the delay | via expand | a step above `min_step_tokens`, `delay_steps` turns back | `delay_steps` (2), `context_steps` (1), `min_step_tokens` (500), `min_saved_tokens` (400), `max_keep_ratio` (0.8), `model.source` |
 
 Presets (`config/config.go`), verbatim: **`codesmart`** (the proxy default)
-`[format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, extract_llm, extract, cachesplit]` ·
+`[format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, linecap, cachesplit]` ·
 **`codesafe`**
-`[format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, extract, collapse, cachesplit]`
+`[format, textclean, searchfold, dedup, failed_run, cmdfilter, extract, collapse, linecap, cachesplit]`
 (deterministic-only) · `off` `[]` · `safe` `[format, textclean, searchfold, cachesplit]` · `balanced`
 `[format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, cachesplit]` · `aggressive`
-`[format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, smartcrush, extract, extract_llm, cachesplit]` ·
-`coding` `[format, textclean, searchfold, dedup, cmdfilter, linecap, extract, cachesplit]` ·
+`[format, textclean, searchfold, dedup, failed_run, cmdfilter, smartcrush, extract, extract_llm, linecap, cachesplit]` ·
+`coding` `[format, textclean, searchfold, dedup, cmdfilter, extract, linecap, cachesplit]` ·
 `mcp` `[format, textclean, smartcrush, cachesplit]` ·
 **`agent`** `[format, textclean, searchfold, dedup, failed_run, mask, extract, extract_llm, cachesplit]` —
 for long agentic sessions; `mask` is the biggest lever there (~27–30% content-token savings, no reward
 loss — see [RESULTS.md](RESULTS.md)) ·
 **`general`**
-`[format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, mask, extract, extract_llm, collapse, cachesplit]`
+`[format, textclean, searchfold, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, linecap, cachesplit]`
 — the recommended all-round pipeline: the reward-neutral levers of `agent` plus the situational
 shrinkers (`cmdfilter`/`linecap`/`collapse`) that cost nothing when they don't fire. `balanced` is
 **not** recommended for agentic traffic — it omits `mask`, so it barely helps (6% vs 31% in the
@@ -332,6 +332,13 @@ before:  resolving dependency graph for module   after:  resolving dependency gr
   visible and is rendered *after* the cap, so the cap cannot eat it.
 - Duplicates collapse **before** the cap, so a dropped duplicate is not also charged as a capped
   line — the other order double-counts the same tokens.
+- **It runs last among the offloaders**, and that position is measured. Every offload leaves a
+  marker and every offload skips marker-bearing content (`skipReduce`), so a *modest* reducer ahead
+  of a *drastic* one steals its candidates. On `general` over 1,795 real captured requests: 7th in
+  the pipeline it saved 5,524,476 tokens — **worse than the 5,556,801 with no `linecap` at all**,
+  because it took 39,335 tokens off messages `collapse` would have taken 76,554 off, and its marker
+  then made `mask`/`extract`/`collapse` decline those messages outright. Last, it saves
+  **5,811,621 (+1.33 pp over the baseline)**.
 - **Config:** `max_line_chars` (500; 0 disables), `collapse_duplicate_lines` (true), `min_size`
   (400), `marker_mode`. **Lossiness:** whole-blob (`LossWhole`) — reversible via expand.
   **Measured** on 1,795 real captured requests: acts on 735, **171,473 tokens**, 1.41 ms/request.

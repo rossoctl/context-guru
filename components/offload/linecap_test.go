@@ -234,3 +234,35 @@ func TestDupCollapseRunsBeforeTheCap(t *testing.T) {
 		t.Fatalf("want the surviving copy annotated (x10), got:\n%.300q", out)
 	}
 }
+
+// Placement. Every Offload leaves a marker and every Offload skips marker-bearing content
+// (skipReduce, so nothing double-reduces and no stash is orphaned) — so a MODEST reducer
+// placed ahead of a DRASTIC one steals its candidates outright. Measured on 1,795 real
+// captured requests with `general`: linecap 7th saved 5,524,476 tokens, which is WORSE than
+// the 5,556,801 with no linecap at all, because it took 39,335 tokens off messages collapse
+// would have taken 76,554 off. Last, it saves 5,811,621.
+//
+// So the invariant is a property of the component, not of one preset: linecap must not
+// consume a message a heavier offloader would have taken. This asserts the mechanism —
+// linecap declines content that already carries a marker — which is what makes running it
+// last correct and running it early harmful.
+func TestLinecapYieldsToAnEarlierOffloader(t *testing.T) {
+	body := strings.Repeat("verbose repeated build progress line for the module\n", 30) +
+		strings.Repeat("q", 900) + "\n"
+	lc := newLinecapT(t, "")
+
+	// Alone, it acts.
+	if got, _ := runLinecap(t, lc, body); got == body {
+		t.Fatal("fixture does not trigger linecap at all")
+	}
+	// After another offloader has marked the message, it must not touch it — otherwise it
+	// would double-reduce and could cut the marker line that names the earlier stash.
+	marked := "[older tool output masked] <<cg:" + strings.Repeat("b", 64) + ">>"
+	got, gates := runLinecap(t, lc, marked+"\n"+body)
+	if got != marked+"\n"+body {
+		t.Fatalf("linecap rewrote a message another offloader had already marked:\n%.200q", got)
+	}
+	if gates["marker_or_kept_verbatim"] == 0 {
+		t.Fatalf("want marker_or_kept_verbatim, got %v", gates)
+	}
+}

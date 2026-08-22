@@ -128,7 +128,7 @@ CUSTOM_CONFIGS = {
     # proxy_tokens_before == proxy_tokens_after in the summary.
     "cacheonly": "pipeline: [cacheinject]\n",
     "codesmart": (
-        "pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, extract_llm, extract, cachesplit]\n"
+        "pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, linecap, cachesplit]\n"
         "components:\n"
         "  extract:\n"
         "    min_tokens: 400\n"
@@ -155,7 +155,7 @@ CUSTOM_CONFIGS = {
     # cost and cache-write, not on saved_tokens alone — the whole question is whether the
     # tokens it removes are worth the cache rewrite that removing them forces.
     "codesmart_llm": (
-        "pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, extract_llm, extract, cachesplit]\n"
+        "pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, linecap, cachesplit]\n"
         "components:\n"
         "  extract:\n"
         "    min_tokens: 400\n"

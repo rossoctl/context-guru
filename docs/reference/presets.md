@@ -7,16 +7,16 @@ taken exactly from the `presets` map in `config/config.go`.
 
 | Preset | Ordered pipeline | When to use |
 |---|---|---|
-| `codesmart` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `linecap` → `extract_llm` → `extract` → `cachesplit` | **The default.** The SWE-bench-winning cache-aware config: structural offloaders + a cheap-model relevance-trimmer (`extract_llm`, routed to `CHEAP_MODEL`, gated so most turns make no model call) + deterministic `extract`. `extract_llm` no-ops (→ deterministic) when no cheap model is configured. **Changed 2026-08:** the lossless trio replaced `toon`, which acted 0 times on 5,752 production requests, and `linecap` was added. Re-measure before quoting the published SWE-bench numbers against it. |
-| `codesafe` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `linecap` → `extract` → `collapse` → `cachesplit` | `codesmart` minus the LLM pass — **deterministic-only, zero model calls by policy**. The safe control / the choice when you don't want an LLM on the hot path. |
+| `codesmart` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `extract_llm` → `extract` → `linecap` → `cachesplit` | **The default.** The SWE-bench-winning cache-aware config: structural offloaders + a cheap-model relevance-trimmer (`extract_llm`, routed to `CHEAP_MODEL`, gated so most turns make no model call) + deterministic `extract`. `extract_llm` no-ops (→ deterministic) when no cheap model is configured. **Changed 2026-08:** the lossless trio replaced `toon`, which acted 0 times on 5,752 production requests, and `linecap` was added. Re-measure before quoting the published SWE-bench numbers against it. |
+| `codesafe` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `extract` → `collapse` → `linecap` → `cachesplit` | `codesmart` minus the LLM pass — **deterministic-only, zero model calls by policy**. The safe control / the choice when you don't want an LLM on the hot path. |
 | `off` | *(empty)* | Passthrough — no components. The baseline / A-B control. |
 | `safe` | `format` → `textclean` → `searchfold` → `cachesplit` | Lossless only: repack JSON compactly and split the volatile system tail so the shared prefix stays cacheable. Zero risk of dropping content. |
 | `balanced` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `linecap` → `cachesplit` | Lossless repack + conservative offloads (dedupe, drop superseded/failed runs, filter command noise) + the cache split. **Not recommended for agentic traffic** — it omits `mask`, the biggest lever there. |
-| `aggressive` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `linecap` → `smartcrush` → `extract` → `extract_llm` → `cachesplit` | `balanced` plus `smartcrush` (crush long homogeneous arrays), deterministic `extract` (noise collapse), and `extract_llm` (cheap-model relevance trim) for deeper savings. |
-| `coding` | `format` → `textclean` → `searchfold` → `dedup` → `cmdfilter` → `linecap` → `extract` → `cachesplit` | Coding agents, deterministic only: the components measured to actually act on real Claude Code traffic. **Changed 2026-08** — it previously named `skeleton` and therefore could not start on a normal build; see below. |
+| `aggressive` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `smartcrush` → `extract` → `extract_llm` → `linecap` → `cachesplit` | `balanced` plus `smartcrush` (crush long homogeneous arrays), deterministic `extract` (noise collapse), and `extract_llm` (cheap-model relevance trim) for deeper savings. |
+| `coding` | `format` → `textclean` → `searchfold` → `dedup` → `cmdfilter` → `extract` → `linecap` → `cachesplit` | Coding agents, deterministic only: the components measured to actually act on real Claude Code traffic. **Changed 2026-08** — it previously named `skeleton` and therefore could not start on a normal build; see below. |
 | `mcp` | `format` → `textclean` → `smartcrush` → `cachesplit` | Tool/MCP servers returning long homogeneous JSON arrays (list endpoints, search hits). |
 | `agent` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `mask` → `extract` → `extract_llm` → `cachesplit` | Long agentic sessions (e.g. Claude Code on SWE-bench) where re-sent tool outputs dominate cost. `mask` is the biggest lever — ~27% content-token savings with no task-reward loss (see [Benchmarks](../RESULTS.md)). |
-| `general` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `linecap` → `mask` → `extract` → `extract_llm` → `collapse` → `cachesplit` | The recommended all-round pipeline: the reward-neutral levers of `agent` plus the situational shrinkers (`cmdfilter` / `linecap` / `collapse`) that cost nothing when they don't fire. |
+| `general` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `mask` → `extract` → `extract_llm` → `collapse` → `linecap` → `cachesplit` | The recommended all-round pipeline: the reward-neutral levers of `agent` plus the situational shrinkers (`cmdfilter` / `linecap` / `collapse`) that cost nothing when they don't fire. |
 | `summarize` | `summarize` | Long trajectories where the transcript itself is the cost. **Runs alone** — it restructures the whole transcript (changes the message count), so no other component's in-place edits race the rebuild. |
 | `agentdiet` | `format` → `agentdiet` → `cachesplit` | A **comparable baseline**, not a recommendation: the published [AgentDiet](../components/agentdiet.md) method ([arXiv:2509.23586](https://arxiv.org/abs/2509.23586)) at its tuned hyperparameters, for A/B'ing against our own reducers. One cheap-model reflection per turn on the step that just aged past `delay_steps`. Carries no other offloader on purpose — they would reduce the same tool outputs first and leave nothing to attribute. |
 
@@ -34,10 +34,17 @@ taken exactly from the `presets` map in `config/config.go`.
     tokens — at 1.53 ms and one `TextTokens` call per tool message. The component and its tests
     stay, so tabular traffic can enable it by hand.
 
-    [`linecap`](../components.md#linecap) is new and runs after `cmdfilter`: a 500-char per-line
-    cap with a never-truncate allow-list, plus a non-adjacent duplicate-line collapse. It is the
-    answer to why 939 lines of per-command filters have matched two filters in production — the
-    value in tool output is not per-command.
+    [`linecap`](../components.md#linecap) is new: a 500-char per-line cap with a never-truncate
+    allow-list, plus a non-adjacent duplicate-line collapse. It is the answer to why 939 lines of
+    per-command filters have matched two filters in production — the value in tool output is not
+    per-command.
+
+    It runs **last** among the offloaders, and that position is measured. Every offload leaves a
+    marker and every offload skips marker-bearing content, so a *modest* reducer ahead of a
+    *drastic* one steals its candidates. On `general` over 1,795 real captured requests: linecap
+    7th saved 5,524,476 tokens — **worse than the 5,556,801 with no linecap at all**, because it
+    took 39,335 tokens off messages `collapse` would have taken 76,554 off. Placed last it saves
+    **5,811,621 (+1.33 pp)**.
 
 !!! note "`coding` changed in August 2026"
     It used to be `format → skeleton → cmdfilter → cachesplit`, and because
