@@ -10,9 +10,9 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | Component | Kind | What it drops | Recoverable | Fires on | Key config (default) |
 |---|---|---|---|---|---|
 | `format` | Reformat | nothing (compacts JSON) | n/a (lossless) | pretty-printed JSON tool output | `min_tokens` (50) |
-| `toon` | Reformat | nothing (re-encodes JSON arrays as TOON) | n/a (lossless) | uniform flat JSON object-arrays | `min_tokens` (50) |
+| `toon` | Reformat | nothing (re-encodes JSON arrays as TOON) | n/a (lossless) | uniform flat JSON object-arrays; **opt-in, RETIRED from every preset 2026-08** — 0 acts in 5,752 production requests, 0 convertible candidates in 11.67M measured tokens, at 1.53 ms + a `TextTokens` call per tool message | `min_tokens` (50) |
 | `textclean` | Reformat | nothing (strips ANSI + `\r` redraws) | n/a (lossless) | plain-text tool output with terminal control | `min_tokens` (50) |
-| `searchfold` | Reformat | nothing (folds the repeated path prefix out of search output) | n/a (lossless, exact inverse) | `rg`/`grep -rn`/`find`/`ls -1` output; **opt-in, in no preset** | `min_tokens` (50) |
+| `searchfold` | Reformat | nothing (folds the repeated path prefix out of search output) | n/a (lossless, exact inverse) | any tool output with a repeated path prefix — routed by CONTENT, attempted everywhere, kept only when its own inverse round-trips; **in every preset** since 2026-08 | `min_tokens` (50) |
 | `toolschema` | Reformat | nothing (strips JSON-Schema annotation keywords from `tools`) | n/a (lossless) | any request carrying tool schemas; **opt-in, in no preset** — it re-anchors the cached prefix once, see the break-even | — (no config) |
 | `toolfilter` | Reformat | the tool/MCP declarations the account listed in `remove` (82.7% of a session's declared tokens are never invoked) | yes — delete the name from `remove` (re-anchors the prefix once) | any request carrying declarations; **opt-in, in no preset** — it never removes a name the account did not list, and keeps any name still described in the system prompt's prose, see [declaration-removal](how-to/declaration-removal.md) | `remove` (empty) |
 | `cacheinject` | Reformat | nothing (adds `cache_control`) | n/a (lossless) | Anthropic-family requests; **opt-in, in no preset** — placement is unmeasured | `ttl` (5m) |
@@ -20,34 +20,52 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | `skeleton` | Offload | function/method bodies | via expand | fenced ` ```lang ` code blocks and raw file dumps (`Read`/`cat`/`sed -n`); **behind the `cg_skeleton` build tag, needs CGO, in no preset, and must not be enabled** — it removes 0 tokens per live turn because every `Read` is the newest of its path, and the guards that make it safe are what make it worthless, see the measurement | `min_tokens` (80) |
 | `dedup` | Offload | later byte-identical tool outputs | via expand | repeated identical outputs | `min_tokens` (100) |
 | `readlifecycle` | Offload | file `Read` bodies the transcript proves are stale (file edited later) or superseded (re-read later) | via expand | `Read` results in an editing session; **opt-in, in no preset** — 0 tokens warm, a third of a *cold* request, see the break-even | `min_tokens` (100), `stale`, `superseded`, `bash_edits`, `stale_at_depth`, `cold_cache` |
-| `collapse` | Offload | middle of an oversized output | via expand | any large tool output (fallback) | `max_tokens` (2000), `head_lines` (20), `tail_lines` (20) |
-| `failed_run` | Offload | earlier superseded test/build runs | via expand | ≥2 run-like outputs | `min_tokens` (100) |
+| `collapse` | Offload | middle of an oversized output | via expand | any large tool output (fallback) | `max_tokens` (2000), `head_lines` (20), `tail_lines` (20), `cold_cache` (**true**) |
+| `failed_run` | Offload | earlier superseded test/build runs | via expand | ≥2 run-like outputs | `min_tokens` (100), `cold_cache` (**true**) |
 | `cmdfilter` | Offload | lines per declarative DSL filter | via expand | output matching a filter | `filters` ([]), `disable_builtins` (false), `min_size` (400) |
+| `linecap` | Offload | the tail of any line over 500 chars, and every NON-adjacent repeat of a line (first copy annotated `(xN)`) | via expand | any tool output ≥ `min_size`; command-agnostic, so it fires where per-command filters do not | `max_line_chars` (500), `collapse_duplicate_lines` (true), `min_size` (400) |
 | `extract` | Offload | obvious noise (repeated lines/blocks, blank runs, progress bars) | via expand | any large output | `min_tokens` (300), `trigger` |
 | `extract_llm` | Offload (LLM) | query-irrelevant content via an LLM-written sandboxed filter | via expand | large output in a large request | `strategy` (code), `model.source`, `trigger`, `rewrite`, `skip_file_reads` |
 | `smartcrush` | Offload | middle items of a JSON array | via expand | JSON-array tool output | `min_items` (5), `min_tokens` (200), `keep_first` (3), `keep_last` (2) |
-| `mask` | Offload | older tool outputs (age-based) | via expand | more than `keep_recent` outputs | `keep_recent` (3), `min_tokens` (100), `keep_head_chars` (96) |
+| `mask` | Offload | older tool outputs (age-based) | via expand | more than `keep_recent` outputs | `keep_recent` (3), `min_tokens` (100), `keep_head_chars` (96), `cold_cache` (**true**) |
 | `summarize` | Offload (LLM) | the middle of the transcript → one summary | via expand | long trajectories | `summary_level` (regular), `keep_last` (3), `min_tokens` (500), `resummarize_tokens` (6000), `model.source`, `trigger` |
 | [`agentdiet`](components/agentdiet.md) | Offload (LLM) | useless/redundant/**expired** content in the step that just aged past the delay | via expand | a step above `min_step_tokens`, `delay_steps` turns back | `delay_steps` (2), `context_steps` (1), `min_step_tokens` (500), `min_saved_tokens` (400), `max_keep_ratio` (0.8), `model.source` |
 
 Presets (`config/config.go`), verbatim: **`codesmart`** (the proxy default)
-`[format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]` · **`codesafe`**
-`[format, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]` (deterministic-only) ·
-`off` `[]` · `safe` `[format, cachesplit]` · `balanced`
-`[format, dedup, failed_run, cmdfilter, cachesplit]` · `aggressive`
-`[format, dedup, failed_run, cmdfilter, smartcrush, extract, extract_llm, cachesplit]` ·
-`coding` `[format, toon, dedup, cmdfilter, extract, cachesplit]` · `mcp` `[format, smartcrush, cachesplit]` ·
-**`agent`** `[format, dedup, failed_run, mask, extract, extract_llm, cachesplit]` — for long agentic
-sessions; `mask` is the biggest lever there (~27–30% content-token savings, no reward loss — see
-[RESULTS.md](RESULTS.md)) ·
-**`general`** `[format, toon, textclean, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, cachesplit]`
+`[format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, extract_llm, extract, cachesplit]` ·
+**`codesafe`**
+`[format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, extract, collapse, cachesplit]`
+(deterministic-only) · `off` `[]` · `safe` `[format, textclean, searchfold, cachesplit]` · `balanced`
+`[format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, cachesplit]` · `aggressive`
+`[format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, smartcrush, extract, extract_llm, cachesplit]` ·
+`coding` `[format, textclean, searchfold, dedup, cmdfilter, linecap, extract, cachesplit]` ·
+`mcp` `[format, textclean, smartcrush, cachesplit]` ·
+**`agent`** `[format, textclean, searchfold, dedup, failed_run, mask, extract, extract_llm, cachesplit]` —
+for long agentic sessions; `mask` is the biggest lever there (~27–30% content-token savings, no reward
+loss — see [RESULTS.md](RESULTS.md)) ·
+**`general`**
+`[format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, mask, extract, extract_llm, collapse, cachesplit]`
 — the recommended all-round pipeline: the reward-neutral levers of `agent` plus the situational
-shrinkers (`toon`/`cmdfilter`/`collapse`) that cost nothing when they don't fire. `balanced` is
+shrinkers (`cmdfilter`/`linecap`/`collapse`) that cost nothing when they don't fire. `balanced` is
 **not** recommended for agentic traffic — it omits `mask`, so it barely helps (6% vs 31% in the
 Terminal-Bench replay) ·
 `summarize` `[summarize]` (run alone — it restructures the whole transcript) ·
 `agentdiet` `[format, agentdiet, cachesplit]` (a published-method **baseline** for A/B, run without
 our own offloaders so its effect is attributable — see [agentdiet](components/agentdiet.md)).
+
+**The lossless trio leads every working preset.** `format`, `textclean` and `searchfold` all
+verify-then-adopt, so there is no risk argument for omitting one, and running them first makes every
+downstream token count honest. Two of the three used to be missing: `textclean` shipped in `general`
+alone while 49.6% of corpus messages carry ANSI, and `searchfold` shipped in NO preset at all.
+`toon` is retired from all of them — it acted 0 times on 5,752 production requests.
+
+**Cold turns sweep at depth.** `mask`, `failed_run` and `collapse` default to `cold_cache: true`:
+on a turn whose prompt cache has provably expired there is no cached prefix to protect, and
+production was freezing 90.8% of the context (38.4M of 42.3M tokens across 742 `ttl_expiry`
+requests) to protect a cache that was already gone — on exactly the turns where a removed token is
+worth ~12.5x a warm-turn one. Set `cold_cache: false` per component to restore the tail restriction.
+It is **not** defaulted on for `readlifecycle` or `skeleton`, whose replacements are not pure
+functions of (content, config).
 
 Every preset that touches caching carries `cachesplit`, never `cacheinject` — see
 [Presets](reference/presets.md).
@@ -120,9 +138,9 @@ after:   [2]{id,name}:
 ### `searchfold`
 Folds the repeated path prefix out of search output — `rg`/`grep -rn` hit lists and
 `find`/`ls -1`/`rg -l` path lists — by emitting each path (or its parent directory) once as a
-heading with the rows beneath it. Routing is by COMMAND, not by shape: the request pairs each
-tool result with the call that produced it (`schema.ToolCalls`), so `grep` output is folded and
-`cat`/build/test output is never looked at.
+heading with the rows beneath it. Routing is by **content**: the fold is attempted on every tool
+output and kept only when it round-trips, because the fold self-verifies so a misroute costs CPU
+and never correctness.
 
 ```
 before:  pkg/a.go:12:foo      after:   pkg/a.go
@@ -140,10 +158,17 @@ line is ever dropped, so there is nothing to stash and no marker.
 
 - **Config:** `min_tokens` (50). **Lossiness:** none. **Measured** on 466 real captured
   search-command outputs (Terminal-Bench + SWE-bench): it fires on 81 of them and takes those from
-  21,088 to 14,410 tokens (**−31.7%**), which is −7.0% across all search-command output and ~1.2% of
-  all captured tool-output bytes. Small in absolute terms because real agent traffic is dominated by
-  single-file `grep -n` (no path prefix to fold) and by `Read`; it is in no preset for that reason.
+  21,088 to 14,410 tokens (**−31.7%**), which is −7.0% across all search-command output.
   **Inert:** single-file `grep -n`, prose, already-grouped output.
+
+  It used to pre-gate on the producing command, and that gate was measured a strict loss on 1,795
+  real captured requests: 234,722 tokens folded with it against **333,764 without**, at 1.174
+  ms/request against 0.509. It declined 29,737 candidate messages, 99,042 tokens of which had
+  exactly the repeated path prefix this folds — the pairing says which command *ran*, not what its
+  output looks like, and resolving one `json.Unmarshal`s a whole argument object per tool message.
+  The general rule for a self-verifying fold: attempt it, keep what round-trips. A cheap *shape*
+  pre-check still earns its keep (`format`'s `not_json_shaped` is a one-byte test guarding a full
+  parse); one that has to reconstruct request *structure* does not.
 
 ### `cacheinject`
 Places Anthropic `cache_control: {type: ephemeral}` breakpoints at the positions that minimise
@@ -272,6 +297,46 @@ after:   <failures + summary, passing noise stripped, ≤80 lines> <<cg:…>> [f
   command/log output (test runners, package managers, build tools). **Inert:** output whose selector
   matches no filter (logged in `cmdfilter_selector_misses`), output under `min_size`, or where
   filtering doesn't shrink it.
+
+### `linecap`
+**Deterministic, command-agnostic.** The two output rules that do not need a command signature: a
+per-line character cap, and a collapse of **non-adjacent** repeated lines.
+
+This exists because per-command filters do not pay. `cmdfilter` ships 939 lines of them and
+production has matched exactly two (`ssh`, `uv-sync`; `no_filter_match` 164,865); sixteen further
+rtk command signatures — pytest, apt, npm, pip, go test, cargo, tsc, eslint, mypy, ruff, docker,
+kubectl, make, gcc, git log, ps — were replayed against 9,763 real messages and **every one matched
+zero**. These two rules fire on the same corpus for 1.75M tokens, **20.3% of everything shipped**.
+
+```
+before:  resolving dependency graph for module   after:  resolving dependency graph for module  (x30)
+         step 1 done                                     step 1 done
+         resolving dependency graph for module            step 2 done
+         step 2 done                                      …
+         <a 2,000-char minified blob>                     <the first 497 chars>... <<cg:…>>
+```
+
+- **Cap:** 500 chars, from the measured sweep (tokens removed / messages touched): @200
+  2,031,381/2,742 · @300 1,606,241/2,520 · **@500 1,105,387/1,337** · @1000 745,350/862. 500 takes
+  54% of @200's tokens while touching *half* as many messages, and an untouched message is one whose
+  bytes stay stable for the provider's cache.
+- **Never-truncate allow-list:** a line carrying a file path, a source location (`path:line[:col]`),
+  a stack frame, an error/exception/traceback, a test verdict, an exit status, a diff marker, a hunk
+  header or a URL survives **any** cap intact. Those lines are long for the same reason the noise is,
+  and they are the ones the agent has to act on. This is what makes a generic cap deployable.
+- **Duplicate collapse** is the non-adjacent case (649,330 tokens); `extract`'s `collapseObviousNoise`
+  already handles adjacent repeats and was measured at **63 tokens** of remaining value. Guards: skip
+  diff-shaped blobs entirely (two identical `+ return nil` lines are two distinct edits), never
+  collapse lines that differ only in a source location (two findings, not one repeated), never under
+  8 trimmed chars, never the first or last 3 lines (banner + summary). The `(xN)` keeps the elision
+  visible and is rendered *after* the cap, so the cap cannot eat it.
+- Duplicates collapse **before** the cap, so a dropped duplicate is not also charged as a capped
+  line — the other order double-counts the same tokens.
+- **Config:** `max_line_chars` (500; 0 disables), `collapse_duplicate_lines` (true), `min_size`
+  (400), `marker_mode`. **Lossiness:** whole-blob (`LossWhole`) — reversible via expand.
+  **Measured** on 1,795 real captured requests: acts on 735, **171,473 tokens**, 1.41 ms/request.
+  **Inert:** output under `min_size`, output with no over-long or repeated lines, marker-bearing
+  content.
 
 ### `extract`
 **Deterministic, no-LLM.** Collapses only *obvious, provably redundant* noise: consecutively repeated

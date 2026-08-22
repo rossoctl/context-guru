@@ -17,8 +17,22 @@ import (
 //	sse_ttfb_ms_avg           7,918 ms
 //	sse_ttfb_ms_avg_buffered 28,998 ms             -> ~21 SECONDS of extra time to first byte
 //
-// against a whole-pipeline cg_added_ms_avg of 154 ms. Compaction's real latency cost was
-// ~140x what the per-component timings say, and invisible in them.
+// against a whole-pipeline cg_added_ms_avg of 154 ms.
+//
+// Read that production gap carefully, because it is confounded and this comment used to
+// over-claim from it: the buffered set is later-in-session, larger-prefix, longer-generating
+// requests (buffering starts at the first offload), so most of the 21 s is what those
+// responses take to generate, not what buffering added. What buffering definitely adds is
+// holding an entire response in memory and forbidding the client any early byte — measured
+// end to end on this box, 23 of 30 real streaming responses were buffered before this change
+// and 0 of 30 after, on byte-identical request bodies.
+//
+// And the honest negative result: on the IBM gateway this deployment talks to, the client
+// sees NO time-to-first-byte improvement, because that gateway does not stream either.
+// Measured with no proxy in the path at all — straight client to gateway, `stream: true` —
+// ttfb/wall was 1.000 on 6 of 6 turns. Our first byte cannot precede theirs. So this change
+// removes context-guru's own contribution to the problem and pays off on an upstream that
+// streams; it does not fix that upstream.
 //
 // So decide from the FRONT of the stream instead. In the Anthropic dialect the first
 // content_block_start arrives early and names the block's type and, for a tool_use, the
