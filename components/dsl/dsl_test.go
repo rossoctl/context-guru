@@ -104,3 +104,90 @@ func TestStripKeepMutuallyExclusive(t *testing.T) {
 		t.Fatal("expected compile error for strip+keep together")
 	}
 }
+
+// The union gate is a pre-filter, so the ONLY thing that can go wrong is an
+// under-match: a key some filter would have matched that the gate rejects, which turns a
+// filter into a silent no-op. This asserts the gate never changes Match's answer, over
+// the pattern shapes that actually appear in the builtins and in user filters — and it is
+// the test that catches the real bug this optimisation shipped with first, a gate built
+// without (?m) that rejected every `^`-anchored filter as soon as the key carried a
+// leading `$ <command>` line.
+func TestUnionGateNeverChangesMatchsAnswer(t *testing.T) {
+	const doc = `
+schema_version: 1
+filters:
+  anchored:
+    match: '^=+ test session starts'
+    strip_lines_matching: [' PASSED']
+  command:
+    match: '^\$ (rg|grep)\s'
+    strip_lines_matching: ['^Binary file ']
+  nocase:
+    match: '(?i)^error:'
+    strip_lines_matching: ['^\s+at ']
+  alternation:
+    match: 'Compiling|Downloading|Fetching'
+    strip_lines_matching: ['^\s*Compiling ']
+  endanchored:
+    match: 'bytes written$'
+    strip_lines_matching: ['^wrote ']
+  dollarcost:
+    match: '^\$\$\$'
+    strip_lines_matching: ['^x']
+`
+	var r Registry
+	if err := r.Load([]byte(doc)); err != nil {
+		t.Fatal(err)
+	}
+	if r.gate == nil {
+		t.Fatal("no union gate was built, so this test proves nothing")
+	}
+	keys := []string{
+		"=== test session starts ===\nplatform linux",
+		"$ python -m pytest -q\n=== test session starts ===\nplatform linux", // the (?m) case
+		"$ rg -n foo /src\n/src/a.go:1:foo",
+		"$ grep -rn foo /src\nBinary file /src/a.bin matches",
+		"ERROR: could not resolve\n    at frame",
+		"error: could not resolve\n    at frame",
+		"$ cat x\nerror: could not resolve",
+		"   Compiling serde v1.0.0",
+		"$ cargo build\n   Downloading crates",
+		"wrote out.bin\n4096 bytes written",
+		"$$$ weird",
+		"", // empty key
+		"just some prose with nothing special in it",
+		"$ cat /x/a.txt\njust some prose",
+		"a\nb\nc\nd\ne\nf",
+	}
+	for _, key := range keys {
+		gated := r.Match(key)
+		saved := r.gate
+		r.gate = nil
+		plain := r.Match(key) // the same ordered scan, with no pre-filter at all
+		r.gate = saved
+		gn, pn := "<nil>", "<nil>"
+		if gated != nil {
+			gn = gated.Name
+		}
+		if plain != nil {
+			pn = plain.Name
+		}
+		if gn != pn {
+			t.Errorf("key %q: gated match %s, ungated %s — the gate changed the answer", key, gn, pn)
+		}
+	}
+}
+
+// A filter with an empty match cannot exist (Compile rejects it), but a registry that
+// somehow held one would be gated by a pattern that matches everything — so buildGate
+// declines to build a gate at all rather than build a useless one. Asserted through the
+// only reachable path: a registry with no filters has no gate and still answers nil.
+func TestEmptyRegistryHasNoGate(t *testing.T) {
+	var r Registry
+	if r.gate != nil {
+		t.Fatal("an unloaded registry must have no gate")
+	}
+	if got := r.Match("anything at all"); got != nil {
+		t.Fatalf("empty registry matched %s", got.Name)
+	}
+}

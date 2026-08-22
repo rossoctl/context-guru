@@ -147,6 +147,13 @@ func (c *Config) applyPreset() error {
 //   - searchfold was written, tested, round-trip verified — and in ZERO presets. 22,014
 //     tokens on the measured sample went unfolded because nothing ran it.
 //
+// `linecap` runs directly after `cmdfilter`, and it is the answer to why cmdfilter's 939
+// lines of per-command filters have matched exactly two filters in production: the value in
+// tool output is not per-command, it is a per-line cap and a duplicate-line collapse, which
+// need no command signature. Measured 20.3% of all shipped tokens on the same corpus where
+// sixteen rtk command signatures matched zero messages. It runs after cmdfilter so a
+// specific filter still gets first refusal on any output it recognizes.
+//
 // `toon` is RETIRED from every preset (the component and its tests stay, so anyone with
 // tabular traffic can enable it explicitly). Production: `not_uniform_object_array`
 // 234,437, `below_min_tokens` 64,831, **acted 0 of 5,752 requests**, and an independent
@@ -155,15 +162,15 @@ func (c *Config) applyPreset() error {
 var presets = map[string][]string{
 	"off":        {}, // passthrough: no components (baseline / A-B control)
 	"safe":       {"format", "textclean", "searchfold", "cachesplit"},
-	"balanced":   {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "cachesplit"},
-	"aggressive": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "smartcrush", "extract", "extract_llm", "cachesplit"},
+	"balanced":   {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "linecap", "cachesplit"},
+	"aggressive": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "linecap", "smartcrush", "extract", "extract_llm", "cachesplit"},
 	// coding: deterministic only, no model calls. It named `skeleton` until 2026-08 — which is behind the
 	// `cg_skeleton` build tag and therefore NOT registered in a normal binary, so
 	// `preset: coding` failed to build with `unknown component "skeleton"` for every user
 	// who selected it. TestEveryPresetBuilds now makes that class of breakage impossible.
 	// The substitutes are the components measured to actually act on Claude Code traffic
 	// (see docs/results/measured-2026-08.md).
-	"coding": {"format", "textclean", "searchfold", "dedup", "cmdfilter", "extract", "cachesplit"},
+	"coding": {"format", "textclean", "searchfold", "dedup", "cmdfilter", "linecap", "extract", "cachesplit"},
 	"mcp":    {"format", "textclean", "smartcrush", "cachesplit"},
 	// agent: tuned for long agentic sessions (e.g. Claude Code on SWE-bench),
 	// where the dominant cost is the transcript of tool outputs (file reads)
@@ -186,7 +193,7 @@ var presets = map[string][]string{
 	// levers that proved reward-neutral in the benchmark sweeps without stacking the
 	// two overlapping old-context reducers (mask is the one kept; summarize
 	// is its own preset — see docs/components.md redundancy notes).
-	"general": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "mask", "extract", "extract_llm", "collapse", "cachesplit"},
+	"general": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "linecap", "mask", "extract", "extract_llm", "collapse", "cachesplit"},
 	// summarize restructures the whole transcript (changes the message count) — run
 	// it alone so no other component's in-place edits race apply's rebuild.
 	"summarize": {"summarize"},
@@ -201,8 +208,8 @@ var presets = map[string][]string{
 	// recommended defaults (codesmart is the proxy default). Their tuned per-component
 	// settings live in presetConfigs; the name-lists here keep PresetPipeline (used by
 	// /compact?preset=) resolving them.
-	"codesmart": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "cachesplit"},
-	"codesafe":  {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract", "collapse", "cachesplit"},
+	"codesmart": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "linecap", "extract_llm", "extract", "cachesplit"},
+	"codesafe":  {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "linecap", "extract", "collapse", "cachesplit"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
@@ -224,7 +231,7 @@ var presets = map[string][]string{
 //
 // Component defaults are left untouched, so general/agent/aggressive are unaffected.
 var presetConfigs = map[string]string{
-	"codesmart": `pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]
+	"codesmart": `pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, extract_llm, extract, cachesplit]
 components:
   extract:
     min_tokens: 400
@@ -237,7 +244,7 @@ components:
       min_request_tokens: 3000
     llm_every_n_requests: 1
     llm_max_per_request: 4`,
-	"codesafe": `pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]
+	"codesafe": `pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, extract, collapse, cachesplit]
 components:
   collapse:
     max_tokens: 3000`,

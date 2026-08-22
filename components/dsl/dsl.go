@@ -245,7 +245,7 @@ func Apply(c *Compiled, input string) (string, Lossiness) {
 	if c.def.TruncateLinesAt != nil {
 		n := *c.def.TruncateLinesAt
 		for i, l := range lines {
-			if t := truncateRunes(l, n); t != l {
+			if t := TruncateRunes(l, n); t != l {
 				lines[i] = t
 				loss = LossWhole
 			}
@@ -279,10 +279,14 @@ func Apply(c *Compiled, input string) (string, Lossiness) {
 	return out, loss
 }
 
-// truncateRunes caps a line at n runes, marking the cut with an ellipsis that fits
+// TruncateRunes caps a line at n runes, marking the cut with an ellipsis that fits
 // INSIDE the budget (so the result is never longer than n). Ported from rtk's
 // utils::truncate.
-func truncateRunes(s string, n int) string {
+//
+// Exported because the generic per-line cap in the `linecap` component applies the same
+// rule outside this package, and a second copy of "the ellipsis has to fit inside the
+// budget" is the kind of subtlety that drifts.
+func TruncateRunes(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
 		return s
@@ -355,6 +359,9 @@ func (c *Compiled) Family() string {
 type Registry struct {
 	filters []*Compiled
 	names   map[string]struct{}
+	// gate is the alternation of every loaded filter's match pattern: one RE2 pass that
+	// answers "could ANY filter match this key". See Match.
+	gate *regexp.Regexp
 }
 
 // Load parses a YAML filter document and appends its filters to the registry.
@@ -403,11 +410,58 @@ func (r *Registry) Load(b []byte) error {
 		}
 		return r.filters[i].Name < r.filters[j].Name
 	})
+	r.buildGate()
 	return nil
 }
 
+// buildGate compiles the union of every filter's match pattern into ONE regex, so the
+// common case — no filter matches — costs a single RE2 pass instead of one per filter.
+//
+// The registry is a linear scan of every match pattern, and on real traffic it MISSES for
+// 21 of the ~43 candidate messages per request: those 21 must each fail all 26 patterns
+// before the miss can be reported, which is 550 full-registry evaluations per request. RE2
+// compiles an alternation into a single automaton, so the gate answers the same question
+// in one pass (rtk does this with regex::RegexSet).
+//
+// Priority order is untouched: a gate HIT still runs the ordered scan to find WHICH filter
+// matched, so the winner is exactly the one the pre-gate code would have picked. If the
+// union fails to compile (a pattern with a construct that does not survive grouping) the
+// gate is left nil and Match falls back to the plain scan — same answers, old speed.
+func (r *Registry) buildGate() {
+	r.gate = nil
+	if len(r.filters) == 0 {
+		return
+	}
+	pats := make([]string, 0, len(r.filters))
+	for _, c := range r.filters {
+		// An empty pattern matches everything, so a registry containing one can never be
+		// gated out — skip the gate entirely rather than build one that always hits.
+		if c.def.Match == "" {
+			return
+		}
+		// (?m:...), matching Compile: the selector spans several lines, so `^`/`$` in a
+		// filter pattern mean start/end of A LINE. A gate built without the flag treats
+		// them as start/end of the whole key and misses every filter anchored at `^`
+		// whenever the key carries a `$ <command>` prefix line — a silent under-match,
+		// which is the one failure mode a pre-gate must not have. The per-pattern scope
+		// also keeps a pattern's own inline flags from leaking into its neighbours.
+		pats = append(pats, "(?m:"+c.def.Match+")")
+	}
+	gate, err := regexp.Compile(strings.Join(pats, "|"))
+	if err != nil {
+		return // fail open: no gate, plain scan
+	}
+	r.gate = gate
+}
+
 // Match returns the first filter whose match regex matches key, or nil.
+//
+// The union gate short-circuits the miss (see buildGate); on a hit the ordered scan runs
+// exactly as before, so priority still decides the winner.
 func (r *Registry) Match(key string) *Compiled {
+	if r.gate != nil && !r.gate.MatchString(key) {
+		return nil
+	}
 	for _, c := range r.filters {
 		if c.match.MatchString(key) {
 			return c
