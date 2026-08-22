@@ -119,6 +119,7 @@ nav:
           - extract_llm: components/extract_llm.md
           - smartcrush: components/smartcrush.md
           - mask: components/mask.md
+          - prefixpin: components/prefixpin.md
           - summarize: components/summarize.md
           - agentdiet: components/agentdiet.md
       - The DSL filter engine:
