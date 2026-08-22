@@ -345,20 +345,27 @@ func (s coldSpy) Reformat(_ *bschemas.BifrostChatRequest, _ *components.Report, 
 	return nil
 }
 
-// Path 1 through the REAL call site, and it is the case my alias fix UNMASKED: before that
-// fix the header-less turn had prevAt == 0 and declined itself under the "no record reads
-// warm" rule, so the TTL keying never got reached. With a populated alias clock it does, and a
-// TTL record keyed per session id is invisible to the turn that needs it.
+// The two guards have to COMPOSE, not just each close its own path. The clock guard is
+// alias-aware; a TTL record keyed under one id only is invisible to a turn arriving under the
+// other, so it falls back to the 5m tier and can declare cold on a prefix held for an hour —
+// path (a) reached through the door path (b) opens. This was also masked before the clock fix:
+// such a turn used to have prevAt == 0 and decline itself under the "no record reads warm"
+// rule, so the TTL comparison was never reached at all.
 //
-// Both shapes the residual takes. Each ends with a bare-ephemeral, header-less turn over a
-// prefix the provider may still be holding for an hour.
-func TestSessionTTLIsKeyedByContentNotBySessionID(t *testing.T) {
+// Every direction the flip can happen in, each ending on a turn whose own id has never seen
+// the 1h mark. The last two are the ones a single key cannot cover from either side.
+func TestSessionTTLComposesAcrossBothIDs(t *testing.T) {
 	body1h := []byte(`{"model":"claude-sonnet-5","messages":[` +
 		`{"role":"user","content":[{"type":"text","text":"fix the failing test",` +
 		`"cache_control":{"type":"ephemeral","ttl":"1h"}}]},{"role":"user","content":"more"}]}`)
 	bodyBare := []byte(`{"model":"claude-sonnet-5","messages":[` +
 		`{"role":"user","content":[{"type":"text","text":"fix the failing test",` +
 		`"cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"more"}]}`)
+	// Post-compaction: the agent replaced its transcript head with a summary, so
+	// sha256(system+firstUser) — and therefore the alias — is a different id entirely.
+	bodyCompacted := []byte(`{"model":"claude-sonnet-5","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"[summary] we were fixing a test",` +
+		`"cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"continue"}]}`)
 	base := time.Unix(1_700_000_000, 0)
 
 	for _, tc := range []struct {
@@ -386,6 +393,38 @@ func TestSessionTTLIsKeyedByContentNotBySessionID(t *testing.T) {
 			{base, "", bodyBare},
 			{base.Add(2 * time.Minute), "cc-abc", body1h},
 			{base.Add(30 * time.Minute), "", bodyBare},
+		}},
+		// The reverse: recorded under the ALIAS, then arriving under the explicit id. An
+		// alias-only key cannot serve this one, which is why the pair is read rather than
+		// either id being picked as canonical.
+		{"recorded header-less, then the header appears", []struct {
+			at     time.Time
+			header string
+			body   []byte
+		}{
+			{base, "", body1h},
+			{base.Add(20 * time.Minute), "cc-abc", bodyBare},
+		}},
+		{"and back and forth across both ids", []struct {
+			at     time.Time
+			header string
+			body   []byte
+		}{
+			{base, "cc-abc", body1h},
+			{base.Add(2 * time.Minute), "", bodyBare},
+			{base.Add(25 * time.Minute), "cc-abc", bodyBare},
+		}},
+		// The case the ALIAS alone cannot serve, and the reason both keys are read rather than
+		// the content hash being picked as canonical: the agent compacts its own context, so
+		// the transcript head changes and sha256(system+firstUser) moves with it. An explicit
+		// id survives that (see metaSessionKeys); the derived one does not.
+		{"the agent compacts its context, moving the alias", []struct {
+			at     time.Time
+			header string
+			body   []byte
+		}{
+			{base, "cc-abc", body1h},
+			{base.Add(20 * time.Minute), "cc-abc", bodyCompacted},
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -470,19 +470,27 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			//
 			// Reading a key we also write is safe: aliasSeen reads BEFORE it writes and runs
 			// once per request, so the value is the previous turn's, never this one's.
-			//
-			// BOTH records are keyed by the alias, and that is the point: the provider keys its
-			// cache on CONTENT, so every fact we keep about that cache's lifetime has to be
-			// keyed the same way or it splits across our ids. Keying the TTL by sessionID while
-			// the clock was keyed by content left a 1h grant recorded under the explicit id and
-			// invisible to the header-less turn, which then judged an hour-long prefix at the
-			// 5m tier — the varying-TTL path, reopened one id over. That was masked until the
-			// clock fix above: before it, such a turn had no record at all and declined itself.
 			alias := session.Scoped(o.Tenant, "", sys, firstUser)
 			if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
 				prevAt = aliasAt
 			}
-			coldCache = cacheIsCold(prevAt, nowMs, sessionTTL(st, alias, cacheTTL(provider, body)))
+			// The TTL record is read under BOTH ids too, and the two guards have to compose or
+			// each one just opens a door for the other: a prefix that recorded the 1h tier under
+			// one id and then arrives under the other looked up a key never written, fell back
+			// to 5m, and could declare cold on a prefix held for an hour — path (a) reached
+			// through the door path (b) opens. Both widenings are monotone toward WARM, so
+			// composing them cannot make the cold test more willing to fire.
+			//
+			// Under both rather than under the alias alone, because neither id is reliable by
+			// itself: the alias splits when the header comes and goes, and it ALSO changes when
+			// the agent compacts its own context (metaSessionKeys survives that, the derived
+			// sha256(system+firstUser) does not — see explicitSession). Passing the already
+			// widened ttl into the second call converges the two records as a side effect.
+			ttl := sessionTTL(st, sessionID, cacheTTL(provider, body))
+			if a := sessionTTL(st, alias, ttl); a > ttl {
+				ttl = a
+			}
+			coldCache = cacheIsCold(prevAt, nowMs, ttl)
 			if prevAt > 0 && nowMs > prevAt {
 				idleMs = nowMs - prevAt
 			}
@@ -891,10 +899,10 @@ func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
 // minutes — a false cold reading on a prefix the provider is still holding. Once a prefix has
 // asked for the extended tier, every later cold judgment for it uses that tier.
 //
-// The caller keys this by the CONTENT-derived alias, not by the session id, for the same
-// reason the idle clock is: the provider keys its cache on content, so a record keyed per
-// session id splits across the ids one conversation arrives under and the turn that needs it
-// cannot see it.
+// The caller reads it under BOTH the session id and the content-derived alias and takes the
+// longer, mirroring what it does with the idle clock, because neither id alone survives
+// everything: the alias splits when a session header comes and goes, and it changes when the
+// agent compacts its own context, which an explicit id survives.
 //
 // Monotonic, so it only ever makes us read WARM, which is the safe direction. Unobserved on
 // today's traffic (0 of 1,868 captured requests carry a ttl field, and none of the ~5,000

@@ -67,7 +67,8 @@ func TestNeverTruncateAllowList(t *testing.T) {
 	}
 }
 
-// The cap itself: an unprotected over-long line loses its tail and says so.
+// The cap itself: an unprotected over-long line loses its MIDDLE and says so. (It lost its
+// tail until clipMiddle — which is what destroyed the file reference on real diagnostics.)
 func TestCapTruncatesAnUnprotectedLongLine(t *testing.T) {
 	long := strings.Repeat("noise", 400) // 2,000 chars, nothing actionable in it
 	body := strings.Repeat("plain filler output line\n", 40) + long + "\n"
@@ -75,7 +76,7 @@ func TestCapTruncatesAnUnprotectedLongLine(t *testing.T) {
 	if strings.Contains(got, long) {
 		t.Fatal("a 2,000-char noise line survived the 500-char cap")
 	}
-	if !strings.Contains(got, "...") {
+	if !strings.Contains(got, "...[cut]...") {
 		t.Fatal("an intra-line cut must be marked; a silent mid-line cut reads as corrupted output")
 	}
 	// Reversible: the marker names the expand tool, so the full line is recoverable.
