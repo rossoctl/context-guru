@@ -162,3 +162,55 @@ func TestAttemptedTokensCountsTheWholePrefixOnAColdTurn(t *testing.T) {
 		t.Fatalf("cold attempted=%d, want the whole transcript %d: nothing is frozen for cache safety on a turn whose cache has expired", gotCold, all)
 	}
 }
+
+// THE -$708 CASE, named so nobody has to rediscover it.
+//
+// proxy/promexport.go records a measured verdict on acting when frozen_tokens reads zero:
+// 3,092 requests whose OWN prefix tracker had been reset (a restart, an evicted entry)
+// still cache-HIT for 404,376,878 cache-read tokens, and treating that reading as "the
+// cache is cold, deep history is safe to rewrite" was worth about -$708 on sonnet-5
+// against +$0.62 of upside.
+//
+// The cold sweep is a different claim, and this is where the difference lives: a reset
+// tracker has no previous turn on record, cacheIsCold answers FALSE for it, and the sweep
+// cannot fire. The -$708 outcome needs a WARM cache misread as cold; ColdCache only reads
+// true when a recorded previous turn is older than the provider TTL plus a margin.
+//
+// Every row here is a way the tracker can come back empty or wrong. All must answer warm.
+func TestColdSweepCannotFireOnTheMinus708Case(t *testing.T) {
+	const now = int64(1_000_000_000)
+	ttl := 5 * time.Minute
+	for _, tc := range []struct {
+		name   string
+		prevAt int64
+	}{
+		{"process restart: no previous turn on record", 0},
+		{"evicted tracker entry: same, reported as absent", 0},
+		{"a corrupt/negative timestamp", -1},
+		{"a first turn recorded in the future (clock skew)", now + 60_000},
+		{"a long-lived session whose provider cache is warm", now - ms(2*time.Minute)},
+		{"idle past the TTL but inside the safety margin", now - ms(5*time.Minute+30*time.Second)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if cacheIsCold(tc.prevAt, now, ttl) {
+				t.Fatal("read COLD; this is the reading that cost -$708 — a warm provider " +
+					"cache rewritten at depth forces a cache-write of the whole suffix at 1.25x")
+			}
+			// And the accounting must agree: a warm turn still reports its prefix frozen,
+			// so the dashboard cannot be read as "we swept this".
+			c := &components.Ctx{CacheAware: true, MaxCachedIdx: 1,
+				ColdCache: cacheIsCold(tc.prevAt, now, ttl)}
+			msgs := []bschemas.ChatMessage{tmsgT("one output here"), tmsgT("two output here"),
+				tmsgT("three output here")}
+			if attemptedTokens(msgs, c) == attemptedTokens(msgs, &components.Ctx{}) {
+				t.Fatal("a warm turn reported its whole transcript as attempted")
+			}
+		})
+	}
+}
+
+func tmsgT(text string) bschemas.ChatMessage {
+	t := text
+	return bschemas.ChatMessage{Role: bschemas.ChatMessageRoleTool,
+		Content: &bschemas.ChatMessageContent{ContentStr: &t}}
+}
