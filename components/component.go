@@ -361,10 +361,16 @@ type Report struct {
 	TokensBefore int
 	TokensAfter  int
 	DurationMs   float64
-	CacheKeys    []string // set by Offload components (one per stashed original)
-	Skipped      bool     // component ran but chose not to act
-	Reverted     bool     // pipeline reverted it (error/panic/never-worse)
-	Irreversible bool     // Offload dropped content on purpose without stashing (marker_mode summary/off)
+	// CacheKeys are this run's content-derived dedup keys. An Offload sets them itself,
+	// one per stashed original (they double as the store keys the expand loop resolves). A
+	// Reformat stashes nothing, so the PIPELINE fills them from the pre-fold text of each
+	// message it rewrote — without that, every Reformat took metrics' keyless fallback and
+	// reported SavedUnique == Saved by construction (overcount_ratio 1.0 for
+	// format/textclean/toon/searchfold, against a measured token replay of 10x-95x).
+	CacheKeys    []string
+	Skipped      bool // component ran but chose not to act
+	Reverted     bool // pipeline reverted it (error/panic/never-worse)
+	Irreversible bool // Offload dropped content on purpose without stashing (marker_mode summary/off)
 	Err          error
 	// ChangedIdx are the req.Input indices this component modified, filled by the
 	// pipeline. The writeback layer uses them to attribute a discarded change back to

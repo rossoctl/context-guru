@@ -1,6 +1,8 @@
 package components
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"reflect"
 
@@ -150,9 +152,43 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 		// it in the revert branches above would charge a rolled-back component for a
 		// discard it never caused.
 		rep.ChangedIdx = changedIdx(before, req.Input)
+		if rep.Kind == "reformat" {
+			rep.CacheKeys = reformatKeys(before, rep.ChangedIdx)
+		}
 		resync(snap, req.Input, rep.ChangedIdx)
 	}
 	return rep
+}
+
+// reformatKeys gives a Reformat the content-derived dedup keys an Offload gets for free
+// from its stashes: one per message it rewrote, hashed over that message's text BEFORE
+// the fold.
+//
+// Without them every Reformat run took metrics' keyless fallback (`SavedUnique += saved`,
+// metrics/metrics.go), so SavedUnique was *defined* equal to Saved and
+// overcount_ratio came out 1.0 by construction for format/textclean/toon/searchfold —
+// read as "every token these remove is new money" when the truth is the opposite: an
+// idempotent in-place fold re-folds the SAME message on every later turn, so its saving
+// is re-counted per turn. Measured replay on the captured corpus: format 10.17x,
+// textclean 95.29x. Only the first removal is new money, exactly as for an Offload.
+//
+// Keys are hashed over `before`, not the rewritten text, so the same tool output re-sent
+// next turn maps to the same key however the fold re-renders it — and they are
+// namespaced away from the store's stash keys because nothing is stashed here: a
+// Reformat is lossless, these exist only to be counted.
+func reformatKeys(before []schemas.ChatMessage, changed []int) []string {
+	if len(changed) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(changed))
+	for _, i := range changed {
+		if i < 0 || i >= len(before) {
+			continue
+		}
+		sum := sha256.Sum256([]byte(schema.MessageText(before[i])))
+		keys = append(keys, "cg:fold:"+hex.EncodeToString(sum[:]))
+	}
+	return keys
 }
 
 // resync brings the run's snapshot back in step with a component's surviving output,

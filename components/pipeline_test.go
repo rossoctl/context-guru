@@ -209,3 +209,55 @@ func TestRevertAfterASurvivingChangeKeepsThatChange(t *testing.T) {
 		t.Fatalf("revert discarded the earlier surviving change: %q", got)
 	}
 }
+
+// TestReformatGetsContentDerivedCacheKeys: a Reformat stashes nothing, so before this it
+// took metrics' keyless fallback (SavedUnique += saved, unconditionally) and its
+// overcount_ratio was 1.0 by construction — reported as "every token it removes is new
+// money" for the four folds. The pipeline now derives one key per rewritten message from
+// its PRE-fold text, so the same tool output re-sent on a later turn maps to the same key
+// and dedups exactly the way an Offload's stash keys do.
+func TestReformatGetsContentDerivedCacheKeys(t *testing.T) {
+	const text = "hello      world   foo"
+	var first []string
+	for turn := 0; turn < 3; turn++ {
+		req := reqWith(text) // the agent re-sends the ORIGINAL every turn
+		rr := NewPipeline([]Component{shrink{}}, nil).Run(req, testCtx())
+		keys := rr.Components[0].CacheKeys
+		if len(keys) != 1 {
+			t.Fatalf("turn %d: want 1 dedup key for 1 rewritten message, got %v", turn, keys)
+		}
+		if turn == 0 {
+			first = keys
+			continue
+		}
+		if keys[0] != first[0] {
+			t.Fatalf("turn %d key %q != turn 0 key %q — a re-fold of the same content must "+
+				"dedup, or SavedUnique re-counts it per turn", turn, keys[0], first[0])
+		}
+	}
+}
+
+// A Reformat that declines must claim no keys: an empty run credits nothing, and a key
+// here would poison the seen-set for content it never touched.
+func TestDecliningReformatClaimsNoCacheKeys(t *testing.T) {
+	req := reqWith("nothing to shrink")
+	rr := NewPipeline([]Component{shrink{}}, nil).Run(req, testCtx())
+	if got := rr.Components[0].CacheKeys; len(got) != 0 {
+		t.Fatalf("unchanged reformat claimed keys %v", got)
+	}
+}
+
+// Two different messages folded in one run get two keys, so metrics' proportional
+// attribution (saved * newKeys / len(keys)) has the right denominator.
+func TestReformatKeysAreOnePerRewrittenMessage(t *testing.T) {
+	a, b := "aaa      aaa", "bbb      bbb"
+	req := &schemas.BifrostChatRequest{Input: []schemas.ChatMessage{
+		{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &a}},
+		{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: &b}},
+	}}
+	rr := NewPipeline([]Component{shrink{}}, nil).Run(req, testCtx())
+	keys := rr.Components[0].CacheKeys
+	if len(keys) != 2 || keys[0] == keys[1] {
+		t.Fatalf("want 2 distinct keys for 2 folded messages, got %v", keys)
+	}
+}
