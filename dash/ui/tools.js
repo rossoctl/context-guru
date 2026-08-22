@@ -1393,7 +1393,7 @@ function promptTextReveal(t) {
       body.appendChild(el('pre', { class: 'inv-snippet inv-text-pre', text: reg.text }));
       return;
     }
-    body.appendChild(notCapturedState(el('div')));
+    notCapturedState(body);
   };
   det.addEventListener('toggle', paint);
   // Re-render on the shared fetch completing, which is why paint is a listener and not a
@@ -1436,8 +1436,8 @@ function notCapturedState(host) {
   return emptyState(host, 'Not recorded for this one',
     'The token weight is exact and the text was not stored for this row — it was written before '
     + 'this capture, or its session predates your account\'s opt-in. '
-    + (v.text_rows ? num(v.text_rows) + ' of ' + num(v.rows) + ' rows in this window do have '
-      + 'their text.' : ''));
+    + (v.text_rows ? num(v.text_rows) + ' of ' + num(v.rows) + ' declarations in this window '
+      + 'do have their text.' : ''));
 }
 
 /**
