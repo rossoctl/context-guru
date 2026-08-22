@@ -7633,8 +7633,15 @@ async function loadKASessions() {
  * number: how long this service may hold the credential, and what the pings can cost at worst.
  */
 async function armSession(s) {
-  const hours = prompt('Keep this session warm for how many hours? (0.25 to 12, and it is ' +
-    'lost if the service restarts)', '1');
+  // The credential hold is stated BEFORE the act, not after it. (K+1)×X is arithmetic on the two
+  // integers the reader just chose — not money, so computing it here breaks no rule — and it is
+  // the number the Settings copy promises ("up to about 14 minutes"), which an override changes.
+  // The worst-case SPEND comes back from the server, which owns every dollar on this page.
+  const hold = ((kaState.k + 1) * kaState.x) / 60;
+  const hours = prompt('Keep this session warm for how many hours?\n\n'
+    + `At ${kaState.x}s idle and ${kaState.k} pings, your provider credential may be held for `
+    + `up to ${hold.toFixed(0)} minutes at a time ((K+1) × X). Between 0.25 and 12 hours, and it `
+    + 'is cleared if the service restarts.', '1');
   if (hours === null) return;
   const h = parseFloat(hours);
   if (!isFinite(h) || h <= 0 || h > 12) { alert('Between 0.25 and 12 hours.'); return; }
