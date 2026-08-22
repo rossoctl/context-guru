@@ -56,6 +56,14 @@
   --s2: #d95926;  /* orange — the comparison/baseline series */
   --s3: #199e70;  /* aqua   — the third measure */
   --s4: #9457d9;  /* violet — the fourth, rarely needed */
+  /* De-emphasis gray. NOT a fifth series step and never used as one: it is the
+     "this part is context, not a choice" fill, for the segment of a part-to-whole
+     chart the reader must NOT act on. Deliberately low-chroma so it recedes behind
+     s1..s4, and dark enough to clear 3:1 against --bg-raised (3.68:1) so the segment
+     is still a visible mark rather than a gap in the bar. It is exempt from the
+     categorical chroma floor by role, so do not feed it to the palette validator
+     alongside the series steps — it would fail a check it is not subject to. */
+  --s-mute: #7c8695;
 
   /* ── geometry ────────────────────────────────────────────────────────── */
   --r-sm: 4px;
@@ -104,6 +112,8 @@
     --bad: #ef6f63; --bad-soft: #351815;
     --info: #6ba3ec; --info-soft: #13223a;
     --s1: #4a90e2; --s2: #d9703c; --s3: #1ba676; --s4: #9a68d6;
+    /* Stepped for the dark surface rather than flipped: 4.59:1 against --bg-raised. */
+    --s-mute: #7a8496;
     --shadow-pop: 0 1px 2px rgb(0 0 0 / 50%), 0 10px 28px rgb(0 0 0 / 40%);
   }
 }
@@ -118,6 +128,7 @@
   --bad: #ef6f63; --bad-soft: #351815;
   --info: #6ba3ec; --info-soft: #13223a;
   --s1: #4a90e2; --s2: #d9703c; --s3: #1ba676; --s4: #9a68d6;
+  --s-mute: #7a8496;
   --shadow-pop: 0 1px 2px rgb(0 0 0 / 50%), 0 10px 28px rgb(0 0 0 / 40%);
 }
 
@@ -1236,7 +1247,12 @@ pre.yaml {
   display: flex; gap: 2px; height: 26px; width: 100%;
   border-radius: var(--r-sm); overflow: hidden; background: var(--bg-sunken);
 }
-.share-seg { display: block; height: 100%; min-width: 2px; }
+/* A 2px gap in the SURFACE colour separates touching segments — the mark spec's rule, and
+   the reason it matters here: without it two adjacent fills of similar lightness read as one
+   segment, which is precisely the misread a part-to-whole chart must not permit. A gap, never
+   a border drawn around the mark. The last segment has none, so the bar still ends flush. */
+.share-seg { display: block; height: 100%; min-width: 2px; box-shadow: 2px 0 0 var(--bg-raised); }
+.share-seg:last-child { box-shadow: none; }
 .share-seg:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
 .share-seg:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .share-legend { margin-top: var(--sp-2); flex-wrap: wrap; }

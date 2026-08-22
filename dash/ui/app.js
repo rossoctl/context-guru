@@ -626,13 +626,19 @@ function stackedShare(host, rows, opts = {}) {
     return;
   }
   const fmt = opts.format || compact;
+  // A row may name its OWN fill, and one use of that is load-bearing rather than cosmetic:
+  // the segment a reader must not act on takes the de-emphasis gray instead of a categorical
+  // slot, so hue means "this is a choice" and gray means "this is context". Without it the
+  // only way to draw five parts was to cycle SERIES, which asserts that part 5 is the same
+  // thing as part 1.
+  const hue = (r, i) => r.color || SERIES[i % SERIES.length];
   const track = el('div', { class: 'share-track', 'data-testid': opts.testid || null });
   rows.forEach((r, i) => {
     const share = (100 * Math.max(0, r.value)) / total;
     if (share <= 0) return;
     const seg = el('span', {
       class: 'share-seg',
-      style: 'width:' + share.toFixed(3) + '%;background:' + SERIES[i % SERIES.length],
+      style: 'width:' + share.toFixed(3) + '%;background:' + hue(r, i),
       // The hover layer is not optional on an HTML chart: a 0.4%-wide segment is unreadable
       // and unlabellable, and the tooltip is the only way it can still be identified.
       title: r.label + ': ' + fmt(r.value) + ' (' + pct(share, 1) + ')'
@@ -647,7 +653,7 @@ function stackedShare(host, rows, opts = {}) {
   rows.forEach((r, i) => {
     if (r.value <= 0) return;
     legend.appendChild(el('span', {},
-      el('i', { style: 'background:' + SERIES[i % SERIES.length] }),
+      el('i', { style: 'background:' + hue(r, i) }),
       r.label + ' ',
       el('b', { text: fmt(r.value) }),
       el('span', { class: 'share-pct', text: ' ' + pct((100 * r.value) / total, 1) })));

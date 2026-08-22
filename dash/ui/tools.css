@@ -45,11 +45,17 @@
  * tooltip.
  */
 .cg-items { display: grid; gap: var(--sp-1); margin-top: var(--sp-3); }
+/* The row is a <div>, not a <label>: a Copy button inside a label is a button that toggles the
+   checkbox when you click it. So the pointer cursor belongs to the inner .cg-item-main label,
+   which is the part that really does toggle — a whole row that looks clickable and is not is a
+   worse affordance than one that never claimed to be. */
 .cg-item {
   display: grid; grid-template-columns: auto 1fr; gap: var(--sp-1) var(--sp-2);
   align-items: baseline; padding: var(--sp-2); margin-left: calc(var(--sp-2) * -1);
-  border-radius: var(--r-sm); cursor: pointer; font-size: var(--t-body);
+  border-radius: var(--r-sm); font-size: var(--t-body);
 }
+.cg-item-main { cursor: pointer; }
+.cg-item.cg-fixed .cg-item-main { cursor: default; }
 .cg-item:hover { background: var(--bg-hover); }
 .cg-item > input { margin: 0; grid-row: 1; }
 /* Everything after the checkbox lines up under the first line's text, so a three-line row
@@ -72,7 +78,6 @@
 .cg-item.cg-off { background: var(--good-soft); }
 .cg-item.cg-off .cg-item-name { text-decoration: line-through; text-decoration-thickness: 1px; }
 /* Not removable from here (a provider-side tool). Inert, and it says why in .comp-warn. */
-.cg-item.cg-fixed { cursor: default; }
 .cg-item.cg-fixed:hover { background: none; }
 .cg-item.cg-fixed .cg-item-name { color: var(--fg-muted); }
 
@@ -125,3 +130,61 @@
 .inv-builtins[open] > summary { margin-bottom: var(--sp-3); }
 .pill.bad { background: var(--bad-soft); color: var(--bad); }
 .pill.warn { background: var(--warn-soft); color: var(--warn); }
+
+/* ── removal groups ─────────────────────────────────────────────────────────
+ * The actionable list is grouped by what ONE action removes, so a group is a card with a
+ * cost, a command and its members — not a heading over more rows. The command is the reason
+ * the group exists, so it is never smaller or fainter than the name above it.
+ */
+.inv-groups { display: grid; gap: var(--sp-3); margin-top: var(--sp-3); }
+.inv-group {
+  border: 1px solid var(--border-soft); border-radius: var(--r);
+  padding: var(--sp-3); background: var(--bg-raised);
+  display: grid; gap: var(--sp-2);
+}
+.inv-group-head {
+  display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4);
+  align-items: baseline; justify-content: space-between;
+}
+.inv-group-id { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: baseline; }
+.inv-group-name { font-weight: 600; font-size: var(--t-lead); }
+.inv-group-cost { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.inv-group-usd { font-weight: 600; font-variant-numeric: tabular-nums; }
+/* Inside a group the member rows are the DETAIL, so they sit back from the card edge and
+   lose the hover affordance of a top-level row. */
+.inv-group .cg-items { margin-top: 0; padding-left: var(--sp-2); border-left: 2px solid var(--border-soft); }
+@media (max-width: 560px) {
+  .inv-group-cost { align-items: flex-start; }
+}
+
+/* ── prompt text ────────────────────────────────────────────────────────────
+ * A wall of text by nature, so it is bounded and scrolls inside itself rather than pushing
+ * the rest of the page down. Pre-wrap, not pre: a system prompt has real paragraphs in it and
+ * horizontal scrolling through prose is unreadable — a tool's JSON is the one that wants
+ * horizontal room, and it gets it from the same box because the lines are short.
+ */
+.inv-text { margin-top: var(--sp-1); }
+.inv-text-pre { max-height: 26em; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+.inv-text-body { margin-top: var(--sp-2); }
+/* One region of the prefix. The system prompt gets the accent edge because it is the region
+   the others sit beside, and a reader scanning for it should not have to read names. */
+.inv-region {
+  border: 1px solid var(--border-soft); border-radius: var(--r-sm);
+  padding: var(--sp-2); margin-top: var(--sp-2); background: var(--bg-raised);
+}
+.inv-region > summary {
+  cursor: pointer; display: flex; flex-wrap: wrap; gap: var(--sp-2);
+  align-items: baseline;
+}
+.inv-region-name { font-weight: 600; }
+.inv-region-sys { border-left: 3px solid var(--s4); }
+.inv-region[open] > summary { margin-bottom: var(--sp-2); }
+/* A group of one: the evidence and the text reveal, without a second copy of the name. */
+.inv-solo { display: grid; gap: var(--sp-1); }
+
+/* The region list is a LIST, not prose, so it does not want the 78ch measure `details.why`
+   puts on its body — a row of name / kind / weight in a 78ch column wastes half the screen and
+   wraps the long MCP names. The text INSIDE each region keeps a readable measure of its own,
+   from .inv-text-pre. */
+details.why > .inv-prompt-regions { max-width: none; }
+.inv-prompt-regions { display: grid; }

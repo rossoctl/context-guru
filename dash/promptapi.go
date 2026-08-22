@@ -109,13 +109,20 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 	// Coverage first and over the WHOLE scope: it is the honest denominator for anything
 	// the reader concludes from the one session below.
 	sub := `(SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
-	tq := `SELECT COUNT(*), SUM(CASE WHEN d.text_gz IS NOT NULL THEN 1 ELSE 0 END)
+	// Counted the SAME WAY the report counts it: one per (session, kind, name, server), not one
+	// per raw row. The table holds a row per DIGEST as well, so a session that changed its
+	// declaration set mid-way has several rows saying the same thing — raw rows came out at
+	// 4,192 where the report's PromptStat said 309, and two coverage figures 13x apart on one
+	// page with nothing connecting them is how a dashboard loses a reader's trust for good.
+	tq := `SELECT COUNT(*), SUM(txt) FROM (
+		SELECT MAX(CASE WHEN d.text_gz IS NOT NULL THEN 1 ELSE 0 END) txt
 		FROM tool_declarations d WHERE d.session_id IN ` + sub
 	ta := append([]any{}, args...)
 	if !f.TenantAll {
 		tq += ` AND d.tenant_id = ?`
 		ta = append(ta, f.Tenant)
 	}
+	tq += ` GROUP BY d.session_id, d.kind, d.name, d.server)`
 	var rows, textRows *int
 	if err := d.sql.QueryRow(tq, ta...).Scan(&rows, &textRows); err != nil {
 		return nil, err

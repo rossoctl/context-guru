@@ -224,7 +224,10 @@ type PromptStat struct {
 	Tokens   int `json:"tokens"`
 	Sessions int `json:"sessions"`
 	// Rows / TextRows is the coverage count, the pattern cache_ttl already uses: how many
-	// declaration rows are in scope, and how many of them stored their prompt text. A row
+	// DECLARATIONS are in scope — one per (session, kind, name), matching how scopedDecls
+	// groups them — and how many of them stored their prompt text. PromptView counts the
+	// same way, deliberately: the raw table has a row per declaration-set digest too, and the
+	// two figures came out 13x apart when one counted rows and the other counted declarations. A row
 	// written before the column existed and a row written without content consent are both
 	// absent from TextRows, so a UI can say "not recorded yet" instead of showing a
 	// capability whose text looks empty. NEVER a fabricated default.
