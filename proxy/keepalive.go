@@ -624,9 +624,13 @@ func (k *keeper) retire(key string) {
 // the stronger invariant explicitly (tenant.TestDeleteCascadesEveryCredential), and the keeper is
 // a credential store that cascade did not know about.
 //
-// ponytail: called from the three control-plane paths that revoke authority; a fourth would have
-// to remember. Move it inside TenantSource.Forget if revoke and disable ever start invalidating
-// the cached tenancy too, which would make one hook cover all of them.
+// ponytail: called from the four control-plane paths that end a hold's authority or its consent;
+// a fifth would have to remember. Delete, revoke-token and disable end AUTHORITY — the credential
+// stops working. PUT /api/me ends CONSENT — the credential still works and the hold is still
+// authorized, but permission to use it is gone; that distinction is why ctlRevokeSession is
+// deliberately not in the set (a browser cookie is neither). Move this inside TenantSource.Forget
+// if revoke and disable ever start invalidating the cached tenancy too, which would make one hook
+// cover all of them.
 func (k *keeper) forget(tenantID string) {
 	if k == nil {
 		return
