@@ -122,3 +122,28 @@ Re-verified with a diagnostic-only trigger (`min_request_tokens: 5000` instead o
 component is forced to act. **This is the same failure as iteration 012's vacuous baseline-reuse
 check**: a check that cannot fail is not evidence, and both were written by the same reasoning — asking
 "did the run come back clean?" instead of "would this have detected the problem?"
+
+## Re-run with both fixes: verified on live traffic
+
+The fix landed in two stages, because the first unmasked the second.
+
+| stage | arm-1 failure rate | failure mode |
+|---|---|---|
+| pre-fix | **28/75 (37%)** | `tool_use` ids without `tool_result` — results all deleted |
+| after fix 1 (`62126f4`, tool-call ids) | 13/39 (33%) | **different**: `messages: Unexpected role "tool"` |
+| after fix 2 (`caf32d7`, role leak) | **0/16 (0%)** | none |
+
+Fix 1 stopped `dropOrphanedToolResults` deleting every result. Those surviving synthetic `role=tool`
+messages then reached the rebuild, which had never had to serialize one — and while the results were
+being deleted, nothing could. **One defect had been masking the other.**
+
+**The verification is not vacuous, and was checked for that specifically.** In the clean run
+`summarize` is firing hard — **316 component log entries**, up to **39,313 tokens removed in a single
+request** — with **zero** `Unexpected role` or pairing errors reaching the wire. That check exists
+because two earlier "clean" verifications this session proved nothing: one where `summarize` never
+fired, and one comparing a reused baseline against itself.
+
+A 5-task probe **cannot** verify this fix: its trajectories are too shallow to meet `summarize`'s
+`min_messages` and span floor, so it never fires even with the trigger lowered to 5,000 tokens. Arm 1
+of the real experiment is therefore the verification, run behind a hard gate — more than 5 failures
+and arms 2 and 3 are cancelled — so a failed fix costs one arm rather than three.
