@@ -1,0 +1,38 @@
+# The CURRENT configuration for tenant c49629b8de4e252a, as read from the control-plane snapshot,
+# recorded so the change is reviewable and reversible.
+components:
+  extract:
+    min_tokens: 100
+  extract_llm:
+    aggressiveness: medium
+    allow_on_caching_backend: false
+    cold_cache:
+      enabled: true
+      min_tokens: 1000
+    context: recent
+    context_messages: 7
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 2
+    llm_max_per_session: 20
+    min_tokens: 1000
+    model:
+      model: claude-haiku-4-5
+      source: incoming
+    per_output: false
+    strategy: code
+    trigger:
+      min_request_tokens: 1000
+  mode: sync
+mode: sync
+pipeline:
+  - format
+  - toon
+  - dedup
+  - cmdfilter
+  - extract_llm
+  - extract
+  - cachesplit
+  - textclean
+  - toolfilter

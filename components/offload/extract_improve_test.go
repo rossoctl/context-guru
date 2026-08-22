@@ -140,7 +140,7 @@ func TestContentClassRecognisesRealShapes(t *testing.T) {
 	cases := []struct{ want, body string }{
 		{"json_blob", `{"runs":[{"id":1,"status":"ok"},{"id":2,"status":"fail"}]}`},
 		{"grep_output", "scripts/submit-run.sh:316: timeout_sec=900\nscripts/lib/common.sh:42: set -e\n"},
-		{"ls_listing", "total 48\ndrwxr-xr-x  4 itayn staff 128 Aug 21 09:10 runs\n"},
+		{"ls_listing", "total 48\ndrwxr-xr-x  4 alice staff 128 Aug 21 09:10 runs\n"},
 		{"ansi_cli_output", "\x1b[32mPASS\x1b[0m building module\nlinking\n"},
 		{"read_with_line_numbers", "   1\timport json\n   2\timport sys\n   3\t\n   4\tdef main():\n"},
 		{"markdown_doc", "# Title\n\n- first\n- second\n- third\n\nsome prose here\n"},

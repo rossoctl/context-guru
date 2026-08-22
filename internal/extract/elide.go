@@ -166,7 +166,7 @@ func isLineWindow(text, body string) bool {
 // windowLines cuts a line-aligned window of at most maxChars characters around the first
 // matching term and names what it dropped on either side.
 //
-// Line-aligned because a mid-line cut is the specific failure mode: `-rw-r--r--@ 1 itayn
+// Line-aligned because a mid-line cut is the specific failure mode: `-rw-r--r--@ 1 alice
 // staff 1498 Aug ` is not a shorter truth, it is a broken record. The markers are what make
 // the remainder readable as a fragment rather than as the whole output.
 func windowLines(text string, terms []string, maxChars int) string {

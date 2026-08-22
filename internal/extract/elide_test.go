@@ -13,7 +13,7 @@ import (
 func TestCapTruncationIsRejectedWithItsOwnReason(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 400; i++ {
-		fmt.Fprintf(&b, "-rw-r--r--@ 1 itayn staff %d Aug 21 09:%02d run-%04d.json\n", 1498+i, i%60, i)
+		fmt.Fprintf(&b, "-rw-r--r--@ 1 alice staff %d Aug 21 09:%02d run-%04d.json\n", 1498+i, i%60, i)
 	}
 	body := b.String()
 	cfg := DefaultCfg()
@@ -38,7 +38,7 @@ SUMMARY = ""`}
 func TestMarkedWindowIsAccepted(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 400; i++ {
-		fmt.Fprintf(&b, "-rw-r--r--@ 1 itayn staff %d Aug 21 09:%02d run-%04d.json\n", 1498+i, i%60, i)
+		fmt.Fprintf(&b, "-rw-r--r--@ 1 alice staff %d Aug 21 09:%02d run-%04d.json\n", 1498+i, i%60, i)
 	}
 	body := b.String()
 	cfg := DefaultCfg()

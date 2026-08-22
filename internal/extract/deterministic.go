@@ -57,7 +57,7 @@ func truncateValue(value any, maxChars int) any {
 // extractTextWindow cuts a bounded window of a text body around the first matching term.
 //
 // It is LINE-ALIGNED and MARKED (windowLines), because the unaligned unmarked version was a
-// silent data loss: a mid-line cut of an `ls -l` listing produced `-rw-r--r--@ 1 itayn staff
+// silent data loss: a mid-line cut of an `ls -l` listing produced `-rw-r--r--@ 1 alice staff
 // 1498 Aug ` as its final record and dropped two of four directories with nothing to say so.
 // A window is a legitimate reduction only when the reader can see it is a window — otherwise
 // capTruncated refuses it downstream, which is the backstop for any strategy that cuts
