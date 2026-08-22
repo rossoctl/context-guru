@@ -114,10 +114,11 @@ type Aggregator struct {
 	// stream to inspect it for an expand call. Buffering is the only thing that stops a
 	// stream being a stream, so counting it makes that cost visible instead of inferred
 	// (it used to be unconditional and unmeasured — issue #26).
-	sseTTFBMs    float64
-	sseTTFBMsBuf float64
-	sseStreamed  int64
-	sseBuffered  int64
+	sseTTFBMs     float64
+	sseTTFBMsBuf  float64
+	sseStreamed   int64
+	sseBuffered   int64
+	sseExpandLate int64
 	// Mode dimension (#31). Enforced requests are counted per mode; observe-mode results
 	// are kept in PHYSICALLY separate fields with their own serialized names, so no query
 	// over the enforced rollups can accidentally include a hypothetical.
@@ -497,6 +498,22 @@ func (a *Aggregator) RecordSSE(ttfbMs float64, buffered bool) {
 	a.mu.Unlock()
 }
 
+// RecordSSEExpandAfterStream notes a response the bounded SSE peek streamed through that
+// nevertheless named the expand tool — a call the continuation loop would have intercepted
+// had the whole stream been buffered, so the client got the model's raw tool_use instead.
+//
+// This is the peek's price, and it is measured rather than argued: the peek trades away
+// interception of an expand call that arrives after the response's first content block, in
+// exchange for not delaying ~33% of responses by ~21 seconds. If this counter is a
+// meaningful fraction of sse_streamed, the trade is wrong and the fix is the SSE splice
+// described in proxy/ssepeek.go. It is an UPPER bound: a model that writes the tool's name
+// in prose is counted too.
+func (a *Aggregator) RecordSSEExpandAfterStream() {
+	a.mu.Lock()
+	a.sseExpandLate++
+	a.mu.Unlock()
+}
+
 func (a *Aggregator) Run(r components.RunReport) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -609,6 +626,9 @@ type Snapshot struct {
 	// requests", not as a latency to compare against sse_ttfb_ms_avg.
 	SSETTFBMsAvgBuf float64 `json:"sse_ttfb_ms_avg_buffered"`
 	SSEBufferedPct  float64 `json:"sse_buffered_pct"`
+	// SSEExpandAfterStream counts streamed responses that named the expand tool anyway —
+	// the bounded peek's cost. See Aggregator.RecordSSEExpandAfterStream.
+	SSEExpandAfterStream int64 `json:"sse_expand_after_stream"`
 	// Freeze-replay health — the cache-WRITE cost line. A frozen decision replayed
 	// (frozen_hits) keeps an already-cached message byte-identical. A decision the store
 	// DROPS (frozen_dropped: TTL expiry / pin cap) would flip that message's
@@ -803,12 +823,13 @@ func (a *Aggregator) Snapshot() Snapshot {
 		AddedLatencyMsAvg: addedAvg, UpstreamMsAvg: upAvg, UpstreamMsAvgBypassed: upAvgByp,
 		SSEStreamed: a.sseStreamed, SSEBuffered: a.sseBuffered,
 		SSETTFBMsAvg: ttfb, SSETTFBMsAvgBuf: ttfbBuf, SSEBufferedPct: bufPct,
-		CmdfilterFamilies: copyFilterStats(a.filterFam),
-		CmdfilterFilters:  copyFilterStats(a.filterName),
-		CmdfilterMisses:   topMisses(a.filterMiss, 20),
-		Mode:              string(mode),
-		SyncEnforced:      a.syncRequests,
-		FreshInputTokens:  a.freshInput, CacheReadTokens: a.cacheRead,
+		SSEExpandAfterStream: a.sseExpandLate,
+		CmdfilterFamilies:    copyFilterStats(a.filterFam),
+		CmdfilterFilters:     copyFilterStats(a.filterName),
+		CmdfilterMisses:      topMisses(a.filterMiss, 20),
+		Mode:                 string(mode),
+		SyncEnforced:         a.syncRequests,
+		FreshInputTokens:     a.freshInput, CacheReadTokens: a.cacheRead,
 		CacheWriteTokens: a.cacheWrite, OutputTokens: a.outputTok,
 		AttemptedTokens: a.attempted, FrozenTokens: a.frozen,
 		SavingsPctAttempted: attemptedPct, SavingsPctNewInput: newInputPct,

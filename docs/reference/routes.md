@@ -107,13 +107,23 @@ expand rounds waited for all of them.
 | Field | Meaning |
 |---|---|
 | `sse_streamed` | Streaming responses passed straight through — the fast path. |
-| `sse_buffered` | Streaming responses read in full before the client saw a byte, because the request carried a marker that might produce an expand call. |
+| `sse_buffered` | Streaming responses read in full before the client saw a byte, because the response **opened with a call to the expand tool** and had to be intercepted. |
 | `sse_buffered_pct` | `buffered / (streamed + buffered) × 100`. |
 | `sse_ttfb_ms_avg` | Real time-to-first-byte, streamed-through requests only. |
 | `sse_ttfb_ms_avg_buffered` | Time-to-**last**-byte by construction — a buffered response is read in full before the client is written to, so its first byte cannot precede the buffer completing. Read it as "what buffering cost these requests", **not** as a latency comparable to `sse_ttfb_ms_avg`. |
+| `sse_expand_after_stream` | Streamed responses that named the expand tool anyway — a call the loop would have intercepted had the whole stream been buffered. The bounded peek's price, measured. An **upper** bound: a model that writes the tool's name in prose is counted too. |
 
-A high `sse_buffered_pct` on traffic that never expands is the regression to watch: the marker
-check used to match the expand tool's own description and so buffered **every** stream.
+A high `sse_buffered_pct` on traffic that never expands is the regression to watch. It has had
+two causes. The marker check once matched the expand tool's own description, so **every**
+stream was buffered (issue #26). After that, buffering was chosen whenever the expand tool was
+*advertised* — which is from the first offload onward — so a third of all responses were
+buffered and waited ~21 s extra for a first byte. Both are fixed: a streaming response is now
+inspected with a **bounded peek** at its first content block, and only a response that opens
+with the expand call is withheld.
+
+`sse_expand_after_stream` is the counter that keeps that trade honest. If it is a meaningful
+fraction of `sse_streamed`, the peek is letting real expand calls through and the fix is to
+splice the continuation into the live stream instead (see `proxy/ssepeek.go`).
 
 ### Freeze-replay health
 

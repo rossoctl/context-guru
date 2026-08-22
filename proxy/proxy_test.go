@@ -392,6 +392,17 @@ func TestExpandSSELoop(t *testing.T) {
 	if !strings.Contains(string(final), "done") {
 		t.Fatalf("client should receive the final streamed answer, got %s", final)
 	}
+	// The counters have to say what happened: round 1 opened with the expand call, so it
+	// was buffered, and sse_buffered is sticky for the whole client request even though
+	// round 2 streamed. If this ever reads streamed=1/buffered=0 the peek has started
+	// letting real expand calls through, which is the failure this whole path guards.
+	var snap metrics.Snapshot
+	stresp, _ := http.Get(srv.URL + "/stats")
+	json.NewDecoder(stresp.Body).Decode(&snap)
+	stresp.Body.Close()
+	if snap.SSEBuffered != 1 || snap.SSEStreamed != 0 {
+		t.Fatalf("a response OPENING with the expand call must still be buffered: %+v", snap)
+	}
 }
 
 // TestExpandPartialResolutionWellFormed guards the malformed-continuation bug:
@@ -572,14 +583,27 @@ func TestMarkerFreeSSEStreamsThrough(t *testing.T) {
 	}
 }
 
-// TestMarkerBearingSSEIsBuffered is the other half of the contract: when the request
-// really does carry a marker (in its HTML-escaped wire form, which is how markers
-// actually arrive), buffering is correct and must still happen — otherwise a real
-// expand call would stream past uninspected.
-func TestMarkerBearingSSEIsBuffered(t *testing.T) {
+// TestMarkerBearingSSEStreamsWhenItOpensWithText is the half of the contract that
+// CHANGED. A marker-bearing request advertises the expand tool, and every such response
+// used to be buffered whole so a lone expand call could be intercepted — which meant that
+// from the first offload onward every response in the session lost streaming. Production:
+// 33.4% of responses buffered, sse_ttfb_ms_avg_buffered 28,998 ms against 7,918 ms
+// streamed, ~21 seconds of extra time to first byte.
+//
+// A response that OPENS with a text block cannot be intercepted from its first block, so
+// the bounded peek flushes and streams. The upstream here blocks before its tail, so a
+// buffering proxy cannot answer at all — the "last" assertion is what tells the two apart.
+func TestMarkerBearingSSEStreamsWhenItOpensWithText(t *testing.T) {
+	release := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Write([]byte(sseHead + sseTail))
+		w.Write([]byte(sseHead))
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
+		w.Write([]byte(sseTail))
 	}))
 	defer upstream.Close()
 
@@ -593,18 +617,43 @@ func TestMarkerBearingSSEIsBuffered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !strings.Contains(string(out), "first") || !strings.Contains(string(out), "last") {
-		t.Fatalf("normal answer must be replayed verbatim: %q", out)
+	defer resp.Body.Close()
+
+	buf := make([]byte, 4096)
+	n, rerr := resp.Body.Read(buf)
+	first := string(buf[:n])
+	close(release)
+	if n == 0 {
+		t.Fatalf("first read returned no bytes: %v", rerr)
+	}
+	// The peek stops AT the content_block_start it decided on and flushes there, so that
+	// event is what proves the response streamed: it reached the client while the upstream
+	// was still blocked on `release`.
+	if !strings.Contains(first, "content_block_start") {
+		t.Fatalf("expected the flushed peek, got %q", first)
+	}
+	if strings.Contains(first, "last") {
+		t.Fatal("a marker-bearing SSE response that opens with TEXT was buffered whole; " +
+			"the peek exists so it is not")
+	}
+	rest, _ := io.ReadAll(resp.Body)
+	whole := first + string(rest)
+	for _, want := range []string{"first", "last", "message_stop"} {
+		if !strings.Contains(whole, want) {
+			t.Fatalf("the streamed response lost %q; peek + remainder must be the whole "+
+				"stream byte-for-byte:\n%q", want, whole)
+		}
 	}
 
 	var snap metrics.Snapshot
 	st, _ := http.Get(srv.URL + "/stats")
 	json.NewDecoder(st.Body).Decode(&snap)
 	st.Body.Close()
-	if snap.SSEBuffered != 1 || snap.SSEStreamed != 0 {
-		t.Fatalf("a marker-bearing SSE request must still be buffered for inspection: %+v", snap)
+	if snap.SSEStreamed != 1 || snap.SSEBuffered != 0 {
+		t.Fatalf("want one streamed, zero buffered: %+v", snap)
+	}
+	if snap.SSEExpandAfterStream != 0 {
+		t.Fatalf("a plain text answer must not be counted as a late expand call: %+v", snap)
 	}
 }
 

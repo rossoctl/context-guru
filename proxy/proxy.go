@@ -11,6 +11,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1230,17 +1231,52 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			}
 			return
 		}
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		var respBody []byte
 		if isSSE {
+			// A bounded peek instead of buffering the whole stream. Only a response that
+			// OPENS with a call to the expand tool has to be withheld from the client; a
+			// response that opens with thinking, text or another tool cannot be intercepted
+			// from its first block, so its peek is flushed and the rest streams. See
+			// ssepeek.go for the measurement that motivates this and the limit it accepts.
+			//
+			// Non-Anthropic dialects skip the peek and stream unconditionally: AggregateSSE
+			// only reconstructs the Anthropic event stream, so for anything else the
+			// buffered path below reaches `writeRaw` and replays the bytes verbatim. It was
+			// paying the full latency for an inspection that never happened.
+			br := bufio.NewReader(resp.Body)
+			head, verdict := peekSSE(br, expand.ToolName)
+			if provider != bschemas.Anthropic {
+				verdict = sseStreamable
+			}
+			if verdict == sseStreamable {
+				sse = true
+				lg.Debug("cg.sse_peek", "round", round, "verdict", "streamed",
+					"peek_bytes", len(head))
+				first, u, ok := h.streamFrom(w, resp, head, br)
+				if !sseBuffered {
+					sseFirstByte = first
+				}
+				if ok {
+					usage, usageOK = u, true
+				} else {
+					usage.StopReason = u.StopReason // as on the other stream path
+				}
+				return
+			}
+			rest, _ := io.ReadAll(br)
+			respBody = append(head, rest...)
+			resp.Body.Close()
 			// Buffered: the client sees nothing until the whole stream has arrived, so its
 			// first byte lands no earlier than the write on whichever path we return from.
 			sse, sseBuffered, sseFirstByte = true, true, time.Time{}
 			// The one decision on this path that costs a user something they can feel — a
-			// stream stopped being a stream — so it says WHY: the expand tool is advertised
-			// on the outgoing request, so a lone expand call has to be intercepted.
-			lg.Debug("cg.sse_buffered", "round", round, "reason", "expand_tool_advertised",
+			// stream stopped being a stream — so it says WHY: this response opens with a
+			// call to the expand tool, which has to be intercepted.
+			lg.Debug("cg.sse_buffered", "round", round, "reason", "opens_with_expand_call",
 				"bytes", len(respBody))
+		} else {
+			respBody, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
 		}
 		if u, ok := responseUsage(resp.Header.Get("Content-Type"), respBody); ok {
 			usage, usageOK = u, true
@@ -1367,27 +1403,52 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 // It also returns the instant the client got its first byte (zero if the body was
 // empty), which is the SSE TTFB accounting in serve.
 func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (firstByte time.Time, u Usage, ok bool) {
+	return h.streamFrom(w, resp, nil, resp.Body)
+}
+
+// streamFrom is stream with a head already read off the body — the bytes a bounded SSE
+// peek consumed before it could decide (see ssepeek.go). The head is written and flushed
+// first, so the client's first byte is that write, and body supplies the remainder.
+//
+// It also watches the bytes going past for the expand tool's name, because a response the
+// peek let through may still turn out to contain a call the continuation loop would have
+// intercepted. That count is the honest price of the peek and belongs on /stats, not in a
+// comment.
+func (h *Handler) streamFrom(w http.ResponseWriter, resp *http.Response, head []byte, body io.Reader) (firstByte time.Time, u Usage, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	flush, _ := w.(http.Flusher)
 	sn := newSniffer(h.rec != nil || h.agg != nil)
+	namedExpand := false
+	emit := func(p []byte) {
+		if firstByte.IsZero() {
+			firstByte = time.Now()
+		}
+		w.Write(p)
+		sn.write(p)
+		if len(head) > 0 && !namedExpand && sseNamesExpandTool(p, expand.ToolName) {
+			namedExpand = true
+		}
+		if flush != nil {
+			flush.Flush()
+		}
+	}
+	if len(head) > 0 {
+		emit(head)
+	}
 	buf := make([]byte, 16*1024)
 	for {
-		n, rerr := resp.Body.Read(buf)
+		n, rerr := body.Read(buf)
 		if n > 0 {
-			if firstByte.IsZero() {
-				firstByte = time.Now()
-			}
-			w.Write(buf[:n])
-			sn.write(buf[:n])
-			if flush != nil {
-				flush.Flush()
-			}
+			emit(buf[:n])
 		}
 		if rerr != nil {
 			break
 		}
+	}
+	if namedExpand && h.agg != nil {
+		h.agg.RecordSSEExpandAfterStream()
 	}
 	u, ok = responseUsage(resp.Header.Get("Content-Type"), sn.bytes())
 	return firstByte, u, ok

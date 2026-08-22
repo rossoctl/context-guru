@@ -406,9 +406,12 @@ of per-request percentages. It also reports:
 - `discarded_changes` (per component) / `top_discarded` — changes the writeback layer threw away.
   Before this existed, a mutated-then-discarded component was indistinguishable from a working
   Reformat, which is how the `cacheinject` bug survived two benchmark studies;
-- `sse_streamed` / `sse_buffered` / `sse_buffered_pct` and `sse_ttfb_ms_avg` /
-  `sse_ttfb_ms_avg_buffered` — streaming health: how many SSE responses had to be buffered whole to
-  be inspected for an expand call, and what that cost. The `_buffered` average is
+- `sse_streamed` / `sse_buffered` / `sse_buffered_pct` / `sse_expand_after_stream` and
+  `sse_ttfb_ms_avg` / `sse_ttfb_ms_avg_buffered` — streaming health: how many SSE responses
+  opened with an expand call and so had to be buffered whole for the continuation loop to
+  inspect (a bounded peek at the first content block decides; everything else streams), what
+  that cost, and how many streamed responses named the expand tool anyway — the peek's own
+  price. The `_buffered` average is
   time-to-*last*-byte by construction, so it is not comparable to `sse_ttfb_ms_avg`;
 - `frozen_hits` / `frozen_misses` / `frozen_dropped` / `frozen_repaired` / `frozen_flips` — the
   cache-write cost line (see [Freeze lifetime](#freeze-lifetime-and-which-way-to-fail));

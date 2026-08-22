@@ -71,6 +71,7 @@ var statsGoldenTopLevel = []string{
 	"savings_pct_new_input",
 	"sse_buffered",
 	"sse_buffered_pct",
+	"sse_expand_after_stream",
 	"sse_streamed",
 	"sse_ttfb_ms_avg",
 	"sse_ttfb_ms_avg_buffered",
