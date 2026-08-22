@@ -163,8 +163,14 @@ var (
 
 const (
 	declCacheCap = 4096
-	// declCacheBytes is the whole memo's ceiling. The measured real catalogue is ~90 KB of
-	// declarations, so this holds hundreds of genuine sets and no hostile one.
+	// declCacheBytes is one memo's ceiling. The "~90 KB catalogue, hundreds of sets" it was
+	// written for was the old TEXT-FREE accounting; declsSize now counts len(d.Text) too, so a
+	// real deployment's declaration text is measured in tens of MB and this cap is reached.
+	// That is fine: past it the memo clears WHOLESALE, not LRU, and a clear costs one cold
+	// scan (~1 ms) per distinct set afterwards — a few hundred of those across days.
+	//
+	// sysCache uses this as its OWN independent ceiling, so the two memos together bound at
+	// 64 MB, not 32.
 	declCacheBytes = 32 << 20
 	// maxDeclSet is the largest `tools` array this will read at all. Above it the request
 	// gets NO inventory, which the report already renders as "not captured" — the one
@@ -853,11 +859,14 @@ func scanSystem(body []byte) *SystemPrompt {
 	if hit {
 		return sp
 	}
+	// A nil is memoized for a system field with no text in it — "system": [], or blocks with
+	// no text field. It is the same empty array on every request of that client's session, and
+	// returning early without storing made the negative pay the gjson walk on the request
+	// goroutine forever. The read above already returns a stored nil as a hit.
 	text := systemTextOf(raw)
-	if text == "" {
-		return nil
+	if text != "" {
+		sp = &SystemPrompt{Hash: strconv.FormatUint(key, 16), Tokens: tokens.Count(text), Text: text}
 	}
-	sp = &SystemPrompt{Hash: strconv.FormatUint(key, 16), Tokens: tokens.Count(text), Text: text}
 	sysMu.Lock()
 	if len(sysCache) >= declCacheCap || sysBytes >= declCacheBytes {
 		sysCache, sysBytes = map[uint64]*SystemPrompt{}, 0
