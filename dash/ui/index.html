@@ -232,6 +232,20 @@
 
 <!-- ── Overview ───────────────────────────────────────────────────────────── -->
 <section class="view" id="view-overview">
+  <!-- The freshness bar. This page used to repaint itself every ten seconds, which made
+       every figure on it unreadable and every open explanation close under the reader.
+       Now it refreshes when the reader asks, or when the SSE stream says a request was
+       actually captured AND nobody is mid-interaction — so the page has to SAY how old
+       what you are reading is, which the always-repainting version never had to. -->
+  <div class="refresh-bar">
+    <button id="refresh-now" class="btn" data-testid="refresh-now">Refresh</button>
+    <span id="refresh-age" class="refresh-age" data-testid="refresh-age" aria-live="polite"></span>
+    <label class="refresh-every">Auto
+      <select id="refresh-every" data-testid="refresh-every"
+              title="Automatic refresh only happens when a request has actually been captured, and never while you are typing, selecting text or reading an open explanation."></select>
+    </label>
+  </div>
+
   <!-- renderTiles() builds the grouped tile grids in here: a headline row of the three
        numbers that answer "is this working", then one labelled group per subject. Twenty
        tiles in one flat grid is twenty things of equal importance, i.e. no hierarchy. -->
@@ -385,6 +399,21 @@
       </table>
     </div>
   </div>
+
+  <!-- The prompt cache, in detail. 90% of all input on real traffic is a cache READ, which is
+       the single fact that explains why every saving on this dashboard is small — and none of
+       the detail behind it was on any tab. Breakpoint placement in particular has been
+       recorded per request since the placement work and was readable only one request at a
+       time in a drawer, so "which of my prompts protect the right prefix" could not be asked
+       above a single request. -->
+  <div class="panel">
+    <h2>Prompt cache</h2>
+    <p class="note">Where the money actually is. Cache reads cost about a tenth of full rate
+      and cache writes about 11.5&times; a read, so which tier your tokens land in matters far
+      more than how many of them there are.</p>
+    <div id="cache-detail" data-testid="cache-detail"></div>
+    <div id="cache-miss-detail" data-testid="cache-miss-detail"></div>
+  </div>
 </section>
 
 <!-- ── Components ─────────────────────────────────────────────────────────── -->
@@ -399,6 +428,19 @@
         <dt>Overcount</dt><dd>gross ÷ unique — how inflated the gross figure is</dd>
         <dt>Own latency</dt><dd>wall time this component spent on the hot path</dd>
         <dt>LLM calls / cost</dt><dd>model calls this component made itself, and what they cost — blank for every deterministic component</dd>
+        <dt>Net $</dt><dd><strong>the amortized verdict.</strong> Everything this component's
+          removals were worth across every turn they stayed removed for, minus its own LLM
+          spend. This is the honest answer to &ldquo;has this component paid for itself?&rdquo;</dd>
+        <dt>Net $ per turn</dt><dd><strong>the same verdict with the repeat business
+          excluded</strong> &mdash; each piece of content credited once instead of on every
+          later turn it stayed absent from. This is what the proxy's own
+          <code>/stats</code> endpoint reports, and it answers a different question:
+          &ldquo;did this turn's work pay for itself?&rdquo; The two can have
+          <strong>opposite signs</strong>, which is not a contradiction and not a bug &mdash;
+          see the reconciliation panel below the table.</dd>
+        <dt>Replay ×</dt><dd>how many times over the amortized figure exceeds the per-turn one.
+          It is much SMALLER than the Overcount column, because a repeat removal is priced at
+          the cheap cache-read rate while a first removal enters at the cache-write rate.</dd>
         <dt>Verdict</dt><dd>those unique savings weighed against that cost. For a component that makes LLM calls it is stated in dollars: what its calls removed, valued at the rate those tokens would have been billed at, minus what the calls cost</dd>
       </dl>
     </details>
@@ -412,11 +454,18 @@
           <th class="num">Own latency</th><th class="num">Avg ms</th>
           <th class="num">LLM calls</th><th class="num">LLM cost</th>
           <th class="num">Saved $</th><th class="num">Net $</th>
+          <th class="num">Net $ per turn</th><th class="num">Replay ×</th>
           <th class="num">Errors</th><th>Why declined</th><th>Verdict</th>
         </tr></thead>
         <tbody id="components-body"></tbody>
       </table>
     </div>
+    <!-- The two verdicts, reconciled. This dashboard and the proxy's /stats endpoint report
+         OPPOSITE SIGNS for the same component, and until now neither surface admitted the
+         other existed: a reader here saw extract_llm green and positive, an operator running
+         `curl /stats` saw it as a net loss. One arithmetic step separates them, and it is
+         printed here rather than left for somebody to rediscover. -->
+    <div id="net-reconcile" class="panel sub" data-testid="net-reconcile" hidden></div>
   </div>
   <div class="panel">
     <h2>Unique savings by component</h2>
@@ -641,8 +690,20 @@
 </section>
 
 <section class="view" id="view-config" hidden>
+  <!-- YOUR configuration first. The complaint this answers: a change saved on the Settings
+       page never appeared here, because this tab only ever rendered the PROXY PROCESS's
+       startup-resolved config while Settings writes the ACCOUNT's document — two different
+       documents, in two different databases. The tab was correct about a thing nobody asked
+       about. So the account's own effective configuration is now the primary panel and the
+       process's is secondary and labelled as such. -->
+  <div class="panel" id="config-account-panel" hidden>
+    <h2>Your account's configuration</h2>
+    <p class="note">What actually compacts <em>your</em> traffic. This is the document the
+      Settings page writes, so a change saved there shows up here.</p>
+    <div id="config-account-body" data-testid="config-account-body"></div>
+  </div>
   <div class="panel">
-    <h2>Effective configuration</h2>
+    <h2 id="config-server-title">Effective configuration</h2>
     <p class="note">Resolved, not as typed: preset expanded, defaults filled, overrides
       applied.</p>
     <div id="config-body" data-testid="config-body"></div>

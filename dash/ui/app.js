@@ -160,6 +160,12 @@ function modeLabel(m) {
 const state = {
   view: 'overview',
   filter: {},
+  // loadedAt is when the rollups on screen were fetched, and dirty is whether the server
+  // has captured a request since. Together they are the whole freshness contract of a page
+  // that no longer repaints itself every ten seconds: the reader can always see how old
+  // what they are looking at is, and whether refreshing would change it. See initRefresh.
+  loadedAt: 0,
+  dirty: false,
   // The time range, Grafana's model: `from` and `to` are each EITHER a relative token
   // ('now-6h', 'now') or an absolute epoch-ms number. 0 means unbounded, which is what
   // "All time" is. Keeping a relative window relative is the whole point — the old
@@ -514,10 +520,31 @@ function barRows(host, rows, opts = {}) {
  * `label` to carry the accessible name a visible word would otherwise have provided.
  */
 function whyBlock(summary, text, label) {
-  return el('details', { class: 'why' },
-    el('summary', { text: summary, 'aria-label': label || null, title: label || null }),
-    el('p', { text: text }));
+  // The key is what lets an OPEN explanation survive a repaint. Every disclosure on the
+  // page is built inside a host that gets cleared and rebuilt, so without this an open
+  // <details> closes under the reader on every refresh. The accessible name is the natural
+  // key: it is stable across rebuilds and unique per disclosure, and it needs no call site
+  // to invent an id. See openWhy / rememberDisclosures.
+  const key = 'why:' + (label || summary || text.slice(0, 40));
+  return el('details', {
+    class: 'why', 'data-why': key, open: openWhy.has(key) ? 'open' : null,
+    ontoggle: (ev) => { if (ev.currentTarget.open) openWhy.add(key); else openWhy.delete(key); },
+  },
+  el('summary', { text: summary, 'aria-label': label || null, title: label || null }),
+  el('p', { text: text }));
 }
+
+/**
+ * openWhy remembers which explanations the reader has opened, by key, for the lifetime of
+ * the page.
+ *
+ * It is a Set rather than a per-host snapshot because the disclosures are rebuilt by six
+ * different renderers into five different hosts, and a reader who opens "Why this
+ * denominator" and then changes a filter is still reading it. Restoring `open` at build
+ * time (above) rather than after the fact means the element is never briefly collapsed,
+ * so nothing reflows.
+ */
+const openWhy = new Set();
 
 /**
  * SERIES_SPENT / SERIES_SAVED are the two categorical slots of the spent-against-saved
@@ -573,12 +600,582 @@ function pairedBars(host, rows, opts = {}) {
     el('span', {}, el('i', { style: 'background:' + SERIES_SAVED }), opts.bLabel || 'Saved')));
 }
 
+/**
+ * stackedShare draws ONE horizontal bar divided into its parts, to scale.
+ *
+ * Chosen against the form heuristic rather than by habit: the data's job here is
+ * part-to-whole over a handful of named categories, and the heuristic's answer for that is a
+ * stacked bar — horizontal, because the category names are long ("messages", "ephemeral_1h",
+ * "mcp__plugin_context7_context7"). A pie was rejected for the usual reason (angles cannot be
+ * compared, and it needs a legend to say anything); a treemap was rejected because it earns
+ * its keep only past a dozen-odd parts and reads worse than a bar below that.
+ *
+ * Colours are the design system's fixed categorical order (SERIES), which is already validated
+ * for the lightness band, chroma floor, adjacent CVD separation and surface contrast in both
+ * themes. Four steps is the whole set, so a caller with more than four parts must fold the
+ * tail into "other" — passing a fifth colour is not an option this function offers, because a
+ * fifth invented hue is how a validated palette stops being one.
+ *
+ * rows: [{label, value, note}] — already ordered and already folded to <= 4.
+ */
+function stackedShare(host, rows, opts = {}) {
+  clear(host);
+  const total = rows.reduce((n, r) => n + Math.max(0, r.value), 0);
+  if (!total) {
+    emptyState(host, opts.empty || 'Nothing to show yet', opts.emptyDetail || '');
+    return;
+  }
+  const fmt = opts.format || compact;
+  const track = el('div', { class: 'share-track', 'data-testid': opts.testid || null });
+  rows.forEach((r, i) => {
+    const share = (100 * Math.max(0, r.value)) / total;
+    if (share <= 0) return;
+    const seg = el('span', {
+      class: 'share-seg',
+      style: 'width:' + share.toFixed(3) + '%;background:' + SERIES[i % SERIES.length],
+      // The hover layer is not optional on an HTML chart: a 0.4%-wide segment is unreadable
+      // and unlabellable, and the tooltip is the only way it can still be identified.
+      title: r.label + ': ' + fmt(r.value) + ' (' + pct(share, 1) + ')'
+        + (r.note ? ' — ' + r.note : ''),
+    });
+    track.appendChild(seg);
+  });
+  host.appendChild(track);
+  // A legend is always present for two or more parts, and each entry carries its own value —
+  // so identity never rests on hue alone, which is the accessibility floor for this chart.
+  const legend = el('div', { class: 'legend share-legend' });
+  rows.forEach((r, i) => {
+    if (r.value <= 0) return;
+    legend.appendChild(el('span', {},
+      el('i', { style: 'background:' + SERIES[i % SERIES.length] }),
+      r.label + ' ',
+      el('b', { text: fmt(r.value) }),
+      el('span', { class: 'share-pct', text: ' ' + pct((100 * r.value) / total, 1) })));
+  });
+  host.appendChild(legend);
+  if (opts.note) host.appendChild(el('p', { class: 'hint', text: opts.note }));
+}
+
+/**
+ * renderCacheDetail is the Usage tab's prompt-cache panel: the tier split, WHERE the
+ * breakpoints sit, which TTL tier was asked for, and why the cache missed.
+ *
+ * Placement is the point, and it is the half that was missing. Four columns have recorded it
+ * per request since the placement work landed, and they were readable one request at a time in
+ * a drawer — so "which of my prompts protect the right prefix" could not be asked at all. The
+ * provider caps a request at four breakpoints and its automatic caching consumes one slot, so
+ * two prompts with the same COUNT and different locations are not remotely the same prompt.
+ */
+function renderCacheDetail(o) {
+  const host = $('#cache-detail');
+  if (!host) return;
+  clear(host);
+
+  // 1. The tier split — the one number that explains every small percentage on this dashboard.
+  host.appendChild(el('h3', {}, 'What the provider billed, by tier'));
+  const inputTotal = o.cache_read + o.cache_write + o.fresh_input;
+  stackedShare(host.appendChild(el('div')), [
+    { label: 'Cache reads', value: o.cache_read, note: 'about a tenth of full rate' },
+    { label: 'Cache writes', value: o.cache_write, note: 'about 11.5x a read' },
+    { label: 'Fresh input', value: o.fresh_input, note: 'full rate' },
+  ], { testid: 'cache-tier-share',
+    note: inputTotal > 0
+      ? 'Cache reads are ' + pct((100 * o.cache_read) / inputTotal, 1) + ' of all input. That '
+        + 'is why component savings are small: a token removed from an already-cached region '
+        + 'is worth the read rate, and almost everything we could remove is in one.'
+      : '' });
+
+  // 2. Placement BY LOCATION. Aggregated for the first time.
+  const bp = o.breakpoints || {};
+  const bpTotal = (bp.system || 0) + (bp.tools || 0) + (bp.messages || 0) + (bp.blocks || 0);
+  host.appendChild(el('h3', {}, 'Where the cache breakpoints sit'));
+  if (!bpTotal) {
+    emptyState(host.appendChild(el('div')), 'No breakpoints recorded in this window',
+      'These requests carried no prompt-cache breakpoints, or predate the placement capture.');
+  } else {
+    stackedShare(host.appendChild(el('div')), [
+      { label: 'system', value: bp.system || 0, note: 'protects the whole prompt after it' },
+      { label: 'tools', value: bp.tools || 0, note: 'protects the tool declarations' },
+      { label: 'messages', value: bp.messages || 0, note: 'protects transcript history' },
+      { label: 'blocks', value: bp.blocks || 0, note: 'inside a single content block' },
+    ], { testid: 'cache-bp-share', format: num,
+      note: 'Counted over ' + num(bp.requests) + ' requests that carried at least one. '
+        + 'The provider caps a request at FOUR breakpoints and its own automatic caching '
+        + 'consumes one of those slots, so where they sit decides how much prefix is '
+        + 'protected — a count alone cannot answer that.' });
+    if (bp.modal) {
+      host.appendChild(el('p', { class: 'hint', 'data-testid': 'cache-bp-modal' },
+        'Most common placement: ' + bp.modal + ' — on ' + num(bp.modal_requests) + ' requests ('
+        + pct((100 * bp.modal_requests) / Math.max(1, o.requests), 0) + '). Reported as the '
+        + 'most common rather than an average, because an average across locations describes '
+        + 'no real prompt: 1.5 breakpoints in a system block is not a thing any request did.'));
+    }
+  }
+
+  // 3. The TTL tier. Newly captured, so coverage is stated before any share is.
+  host.appendChild(el('h3', {}, 'Which cache lifetime was requested'));
+  const ttl = o.cache_ttl || {};
+  if (!o.cache_ttl_recorded) {
+    emptyState(host.appendChild(el('div')), 'Not recorded for these requests yet',
+      'The prompt-cache TTL tier is newly captured. The pipeline always computed it — it '
+      + 'decides when a cache is treated as cold — but it was never stored, so nothing could '
+      + 'group by it and a 1-hour prompt was priced at the 5-minute write rate. These fill in '
+      + 'from the next request through the proxy. Showing a 100% share of "no caching" over '
+      + 'history would be reporting the absence of a measurement as a measurement.');
+  } else {
+    stackedShare(host.appendChild(el('div')), [
+      { label: 'ephemeral_5m', value: ttl.ephemeral_5m || 0, note: "Anthropic's default tier" },
+      { label: 'ephemeral_1h', value: ttl.ephemeral_1h || 0, note: 'the extended tier, written at a premium' },
+      { label: 'no caching asked for', value: ttl[''] || 0, note: 'body carried no cache_control' },
+    ], { testid: 'cache-ttl-share', format: num,
+      note: 'Recorded on ' + num(o.cache_ttl_recorded) + ' of ' + num(o.requests)
+        + ' requests in this window. "No caching asked for" is a third answer and is never '
+        + 'folded into the 5-minute tier: an uncached request is not a 5-minute one.' });
+  }
+
+  // 4. Why the cache missed, and what each miss cost. The distribution already exists on
+  // Overview; what is new here is that a miss is priced.
+  host.appendChild(el('h3', {}, 'Why the cache missed'));
+  renderDistribution('#cache-miss-detail', o.cache_miss, {
+    hit: 'hit', cold_start: 'cold start (not a failure)', ttl_expiry: 'TTL expiry',
+    prefix_change: 'prefix change', unknown: 'unknown', '': 'no cache data',
+  }, 'Every request carries an attribution once one has been captured.');
+}
+
 // ── overview ───────────────────────────────────────────────────────────────
+
+/**
+ * TILE_INFO is the plain-English explanation of every headline figure, keyed by the tile's
+ * own key.
+ *
+ * It is a TABLE rather than an argument on tile() so that adding an explanation costs one
+ * entry and no call-site churn, and — more importantly — so the whole set can be read side
+ * by side. Forty explanations written one at a time next to their call sites drift into
+ * forty different voices and forty different levels of honesty; read as a block it is
+ * obvious when one of them is dodging.
+ *
+ * Three rules, because the point of this table is that the reader can TRUST it:
+ *
+ *   1. Say what it is before saying how it is computed, in words a reader who has never
+ *      seen this codebase can follow. "Tokens the provider never had to read" first;
+ *      `SUM(saved_unique)` second, if at all.
+ *   2. Name the catch. Every figure on this page has one — a denominator that is not what
+ *      you would guess, a unit that is not billed tokens, a number that is a ceiling
+ *      rather than a forecast. The explanation is the only place the catch fits, and an
+ *      explanation that omits it is worse than no explanation, because it is trusted.
+ *   3. Never describe a number the code does not compute. Every entry here was written
+ *      against the expression behind it, and where the two disagreed the CODE was fixed
+ *      or the label changed — see the cache-split description, which had drifted a whole
+ *      condition away from the gate that computes it.
+ */
+const TILE_INFO = {
+  // ── headline ──────────────────────────────────────────────────────────────
+  'total-saved-usd': {
+    what: 'The money context-guru avoided in total, after paying for itself. This is the '
+      + 'one number to look at if you only look at one.',
+    how: 'Two savings added together. First, what compaction avoided: what this traffic '
+      + 'would have cost had we removed nothing, minus what it actually cost, minus what '
+      + "context-guru's own model calls cost. Second, what the prefix-cache split avoided. "
+      + 'The two touch different tokens, so adding them does not count anything twice.',
+    catch: "It can be NEGATIVE, and it is shown in red when it is — that means context-guru "
+      + 'spent more on its own model calls than it saved you. Nothing here is hidden when '
+      + 'the answer is unflattering.',
+  },
+  'saved-usd': {
+    what: 'What compaction alone avoided, after paying for the model calls context-guru '
+      + 'made to do the compacting.',
+    how: 'Baseline cost − actual cost − our own LLM cost. The baseline is what the very '
+      + 'same requests would have been billed if context-guru had removed nothing.',
+    catch: 'It differs from "Total dollars avoided" only by the prefix-cache saving, which '
+      + 'is usually cents. Two large dollar figures side by side look like a contradiction '
+      + 'and are not — one just includes a second, smaller mechanism.',
+  },
+  'saved-unique': {
+    what: 'Content that genuinely never reached the model provider — counted once, no '
+      + 'matter how many turns it stayed absent for.',
+    how: 'Each piece of removed content is fingerprinted. The first time we remove it, it '
+      + 'counts here. When the agent re-sends it on the next turn and we remove it again, '
+      + 'it does not count again — that repeat is the "re-earned" figure in the sub-line.',
+    catch: 'This is measured with a local tokenizer over MESSAGE TEXT only, so it is NOT a '
+      + 'count of tokens the provider billed. See "Tokens before" for the size of that gap. '
+      + 'The DOLLAR figures on this page do not have this problem: they come from the '
+      + "provider's own reported usage.",
+  },
+  'prefix-change-exposure': {
+    what: 'Money spent re-sending whole prompts because the cached prefix changed and the '
+      + "provider's cache missed. This is the failure this project exists to avoid.",
+    how: 'The actual billed cost of every request whose cache missed with the reason '
+      + '"prefix change", added up.',
+    catch: 'This is NOT subtracted from the savings above, and it is not a bill '
+      + 'context-guru ran up. Prompts change prefix for many reasons of their own. It sits '
+      + 'here at full size because on this traffic it is far LARGER than the savings, and '
+      + 'showing a small saving in big type while hiding a bigger exposure in a footnote '
+      + 'would not be honest. Deciding how much of it is our fault needs a controlled '
+      + 'experiment, not a bigger query.',
+  },
+  requests: {
+    what: 'How much traffic every other number on this page is computed over.',
+    how: 'Captured requests in the selected time range and filters, and how many distinct '
+      + 'agent sessions they came from.',
+    catch: 'Only requests that went through this proxy AND were captured are here.',
+  },
+
+  // ── content tokens ────────────────────────────────────────────────────────
+  'tokens-before': {
+    what: 'How big the conversation was when it arrived, before context-guru removed '
+      + 'anything.',
+    how: 'The text of every message in the request, measured with the tokenizer built into '
+      + 'context-guru.',
+    catch: 'This is NOT the number of input tokens the provider bills. It counts message '
+      + 'TEXT only — it leaves out the system prompt, the tool definitions, and the JSON '
+      + 'structure around every message — and it uses our own tokenizer rather than the '
+      + "provider's. Measured on requests where we removed nothing, it comes to roughly a "
+      + 'third of the input the provider actually billed. Use it to compare token figures '
+      + 'on this page with each other; use "Billed tokens" below to compare against a bill.',
+  },
+  'tokens-after': {
+    what: 'How big the conversation was when we sent it on, after removals.',
+    how: 'The same measurement as "Tokens before", taken after the pipeline ran.',
+    catch: 'Same unit, same caveat: message text measured locally, not billed tokens.',
+  },
+  'saved-gross': {
+    what: 'Every removal we made, counted on every turn we made it.',
+    how: 'Tokens before − tokens after, added up across all requests.',
+    catch: 'This DOUBLE-COUNTS on purpose, and it is the least useful of the three token '
+      + 'figures on its own. The agent re-sends its whole conversation each turn, so the '
+      + 'same removal is made again and counted again. On this traffic the same content is '
+      + 'removed dozens of times. "Saved (unique)" is the honest count of content; this '
+      + 'figure is only meaningful once each repeat is priced at what that turn actually '
+      + 'paid, which is what the cost figures do.',
+  },
+  'saved-adjusted': {
+    what: 'Unique savings, minus content we removed and then had to fetch back because the '
+      + 'model asked for it.',
+    how: 'Tokens saved (unique) − tokens restored.',
+    catch: 'Its label names the restore subtraction, but the unique calculation is what '
+      + 'dominates it — restores are usually zero. It is not "gross minus restores".',
+  },
+  overcount: {
+    what: 'How many times, on average, each removal is re-earned. A removal made on turn 5 '
+      + 'is still absent from turns 6, 7, 8… so the agent never pays for it again on any of '
+      + 'them.',
+    how: 'Gross savings ÷ unique savings.',
+    catch: 'This is a good thing, not a measurement error, and it is already fully priced '
+      + 'into every dollar figure on this page — each repeat is valued at the cheap '
+      + 'cache-read rate the turn actually paid, not at the full rate. A high number here '
+      + 'means one removal kept paying off. It does NOT mean any dollar figure is inflated.',
+  },
+
+  'billed-input': {
+    what: 'The input the PROVIDER counted and charged for, across the same requests.',
+    how: "Fresh input + cache reads + cache writes, from the provider's own reported usage.",
+    catch: 'Compare this with "Tokens before" beside it: they are DIFFERENT UNITS and this one '
+      + 'is about three times larger. Ours counts message text with our own tokenizer; the '
+      + 'provider also bills the system prompt, every tool definition and the JSON structure '
+      + 'around each message. Neither is wrong, but a percentage computed from one must never '
+      + 'be read against the other. Every DOLLAR figure on this page uses this side, so the '
+      + 'money is not affected by the gap.',
+  },
+  'attempted-tokens': {
+    what: 'The part of each conversation compaction was actually allowed to rewrite.',
+    how: 'The uncached tail of the request when running cache-aware; the whole request when '
+      + 'there is no cache to protect.',
+    catch: 'This is the denominator of the headline savings percentage, and it had no tile '
+      + 'until now — so the percentage could not be sized by anyone reading it.',
+  },
+  'frozen-tokens': {
+    what: 'Content we deliberately did NOT touch, because it is already in the provider\'s '
+      + 'cache and rewriting it would cost far more than the removal saves.',
+    how: 'Everything before the cache boundary: tokens before, minus the attempted tokens '
+      + 'beside this tile.',
+    catch: 'This is the single biggest limit on what this product can do — around half of all '
+      + 'context is off-limits for exactly this reason. It is a deliberate choice, not a '
+      + 'failure: rewriting a cached prefix makes the provider re-charge creation price for '
+      + 'everything after it. It is also where the remaining opportunity is, if a safe way to '
+      + 'reach it is ever found.',
+  },
+  'compaction-resets': {
+    what: 'Turns that arrived SMALLER than the previous turn of the same conversation — the '
+      + 'agent reset or compacted its own context.',
+    how: 'Counted from the requests themselves: this turn\'s arriving size is less than the '
+      + 'previous turn\'s in the same session.',
+    catch: 'This is the honest bound on the "Replay ceiling" two tiles left. That ceiling '
+      + 'assumes every removal survives to the end of its session; each reset is a place '
+      + 'where one did not. Derived here rather than counted by the proxy, so it respects '
+      + 'the time range and filters like everything else on this page.',
+  },
+  'sse-buffered': {
+    what: 'How often a streaming response was held back and delivered all at once, so the user '
+      + 'saw nothing until it had entirely finished.',
+    how: 'Counted per response, against all streamed responses.',
+    catch: 'Reads "not recorded yet" over history: this is newly captured, and every earlier '
+      + 'row defaults to zero — which would look like a measurement of "never buffered" if it '
+      + 'were shown as 0%.',
+  },
+  'ttfb-streamed': {
+    what: 'How long a user waits before the first text appears, when streaming works.',
+    how: 'Measured from the start of the request to the first byte written to the client, '
+      + 'averaged over responses that really did stream.',
+  },
+  'ttfb-buffered': {
+    what: 'How long a user waits before ANY text appears when the response was buffered '
+      + 'instead of streamed.',
+    how: 'The whole upstream round-trip, because on a buffered response nothing reaches the '
+      + 'client until the response is complete — so the round-trip IS the wait.',
+    catch: 'On measured traffic this is roughly 21 seconds longer than the streamed path, on '
+      + 'about a third of responses. That is around 140× more user-visible delay than '
+      + 'context-guru itself adds, and it is the biggest latency lever on this page — but it '
+      + 'is a property of how the response is handled, not of compaction.',
+  },
+
+  // ── amortization ──────────────────────────────────────────────────────────
+  'replay-realized': {
+    what: 'How much of our removals kept paying off on later turns — the repeat business.',
+    how: 'Gross savings − unique savings: every re-removal of content we had already '
+      + 'removed once.',
+    catch: 'This is where most of the dollar value on this page comes from — about 92% of '
+      + 'it on this traffic. It is real, but each unit is cheap: a token kept out of an '
+      + 'already-cached prompt is worth the cache-read rate, roughly a tenth of full price.',
+  },
+  'replay-projected': {
+    what: 'The most the repeat business COULD have come to, if every removal had stayed '
+      + 'gone for the rest of its session.',
+    how: 'Each unique removal multiplied by the number of turns that came after it in its '
+      + 'own session.',
+    catch: 'A CEILING, not a forecast or a target. Nothing is expected to reach it: the '
+      + 'cache-safety freeze deliberately stops us touching the already-cached part of a '
+      + 'prompt, and long conversations get reset. The gap between this and the realized '
+      + 'figure is the honest size of the remaining opportunity.',
+  },
+  'replay-pct': {
+    what: 'How much of that ceiling we actually collected.',
+    how: 'Realized repeat savings ÷ the ceiling above.',
+    catch: 'A low number here is mostly NOT waste — it is the cost of playing safe. '
+      + 'Rewriting a part of the prompt the provider has already cached would make the '
+      + 'provider re-charge full price for everything after it, which costs far more than '
+      + 'the removal saves. The frozen-token figure in the sub-line is how much we left '
+      + 'alone for exactly that reason.',
+  },
+
+  // ── cost ──────────────────────────────────────────────────────────────────
+  'cost-baseline': {
+    what: 'What this traffic would have cost with context-guru doing nothing at all.',
+    how: "Start from what was actually billed, then add back what we removed. Content "
+      + 'removed for the first time is added back at the rate it would have entered the '
+      + 'prompt at; content we removed again on a later turn is added back at the rate '
+      + 'THAT turn actually paid — usually the cheap cache-read rate, or the expensive '
+      + 'cache-creation rate on a turn whose cache had expired.',
+    catch: 'This is a counterfactual, so it cannot be checked against an invoice. What CAN '
+      + 'be checked is "Actual cost", and it is priced from the usage numbers the provider '
+      + 'itself reported for each request.',
+  },
+  'cost-actual': {
+    what: 'What this traffic actually cost — the bill.',
+    how: "The four token tiers the provider reported for every request (fresh input, cache "
+      + 'reads, cache writes, output), each at that model’s price when the request ran.',
+    catch: 'Requests whose model had no known price are excluded rather than counted as '
+      + 'free; the count of those is on the "At today’s rates" tile.',
+  },
+  'cost-cg': {
+    what: "What context-guru's own model calls cost you. Compacting with an LLM is not "
+      + 'free, and this is the bill for it.',
+    how: 'The cost of every extraction and summarisation call context-guru made, priced '
+      + 'from the gateway’s own rates.',
+    catch: 'This is already subtracted from every net and total on this page. On some '
+      + 'component configurations it EXCEEDS what the compaction saved — check the '
+      + "Components tab, which shows each component's net separately.",
+  },
+  'cachesplit-saved': {
+    what: 'Money saved by splitting the prompt so that the stable part stays cached when '
+      + 'the volatile part changes.',
+    how: 'Summed over the requests where the split ran, the snapshot had actually MOVED '
+      + 'since that session’s previous request, and the provider then read at least the '
+      + 'stable half from its cache instead of re-creating it. Valued against what a cache '
+      + 'miss would have cost.',
+    catch: 'A floor, and a small one on this traffic. The credit can only fire when the '
+      + 'environment snapshot moves mid-session, and on real Claude Code traffic it '
+      + 'does not — it is captured once per process. The mechanism works; there is simply '
+      + 'almost nothing for it to earn on here.',
+  },
+
+  // ── addressable spend ─────────────────────────────────────────────────────
+  addressable: {
+    what: 'The part of the bill any input-side tool could possibly reduce.',
+    how: 'The input tiers only — fresh input, cache reads and cache writes — priced at '
+      + "today's rates.",
+    catch: 'Most of a typical bill is OUTPUT tokens, which nothing context-guru does can '
+      + 'touch. This is the only defensible denominator for a savings percentage; dividing '
+      + 'by the whole bill would flatter or damn us for the size of the model’s replies.',
+  },
+  'saved-of-addressable': {
+    what: 'Our savings as a share of the part of the bill we could actually reach.',
+    how: 'Total dollars avoided ÷ addressable spend.',
+    catch: 'Deliberately not "% of your bill", which would be a smaller and less honest '
+      + 'number, computed against spend no input-side change can affect.',
+  },
+  'cost-output': {
+    what: "What the model's replies cost. Nothing context-guru does can reduce this.",
+    how: 'Output tokens at today’s rate for each model.',
+    catch: 'Shown precisely so the percentages on this page can be read in proportion: if '
+      + 'this is most of your bill, even perfect compaction is a small percentage of it.',
+  },
+  'tier-reconcile': {
+    what: 'A consistency check between the four-tier breakdown above and the bill.',
+    how: 'The tier split is priced at TODAY’s rates; the billed figure was priced when '
+      + 'each request ran. The two are shown together.',
+    catch: 'They disagree by however much prices moved during the window, and a gap over 5% '
+      + 'is flagged in red. A gap is a RATE CHANGE, not an arithmetic error — showing both '
+      + 'is the only way to tell those apart.',
+  },
+
+  // ── prefix split ──────────────────────────────────────────────────────────
+  'split-requests': {
+    what: 'Requests where the prompt actually got split into a stable and a volatile half.',
+    how: 'Counted from the requests where the split component changed something.',
+    catch: 'The component runs on every request and does nothing on most of them. Zero here '
+      + 'with a large run count on the Components tab means these prompts have no volatile '
+      + 'tail to separate — a fact about the prompt, not a fault.',
+  },
+  'split-tail-moved': {
+    what: 'Of those, the turns where the volatile part had actually changed — the only '
+      + 'turns the split can possibly earn anything on.',
+    how: "This request's tail fingerprint differs from the last one recorded for the "
+      + 'session. A session with none recorded yet counts as moved.',
+  },
+  'split-credited': {
+    what: 'Of those, the turns where the provider really did serve the stable half from '
+      + 'cache instead of re-creating it — the turns it did earn on.',
+    how: 'The request read at least as many tokens from cache as the stable half it moved.',
+  },
+  'split-credited-moved': {
+    what: 'A cross-check that the credited turns and the moved turns agree.',
+    how: 'The credited turns that a fresh recount also calls moved.',
+    catch: 'A gap means old rows are still in the window: a proxy restart used to make a '
+      + 'mid-session turn look like a first sighting, and it was credited for a snapshot '
+      + 'that had not moved. That is fixed at the write path, so a gap is history, not a '
+      + 'live miscount.',
+  },
+  'split-hit-rate': {
+    what: 'How often, when the snapshot moved, the split actually kept the stable half out '
+      + 'of the expensive cache-creation tier.',
+    how: 'Credited turns ÷ moved-snapshot turns.',
+  },
+  'split-historical': {
+    what: 'What the split earned before we started recording it per request.',
+    how: 'Valued when this page loads, from the session starts in that earlier period. It '
+      + 'is never stored.',
+    catch: 'Kept as its own tile so it is never confused with the measured figure. It reads '
+      + '"—" rather than "$0" when those models had no known rates, because an unpriced '
+      + 'number must not look like a zero.',
+  },
+
+  // ── billed tokens ─────────────────────────────────────────────────────────
+  'cache-read': {
+    what: 'Input the provider served out of its own prompt cache, at roughly a tenth of '
+      + 'full price.',
+    how: "The provider's own reported usage for every request, added up.",
+    catch: 'On this traffic this is about 90% of all input — which is the single fact that '
+      + 'explains why every saving on this page is small. A token removed from an '
+      + 'already-cached region only saves a tenth of the rate, and almost everything we '
+      + 'could remove is in one.',
+  },
+  'cache-write': {
+    what: 'Input the provider had to READ and then store in its cache, at a premium over '
+      + 'full price.',
+    how: "The provider's own reported usage, priced at that model's cache-creation rate.",
+    catch: 'This is the expensive tier — roughly 11.5× a cache read. Anything that makes a '
+      + 'cached prefix change pushes tokens from the read tier into this one, which is why '
+      + 'the freeze exists.',
+  },
+  'fresh-input': {
+    what: 'Input that was neither cached nor cached-for-later — billed at full price.',
+    how: "The provider's own reported usage.",
+    catch: 'Usually a small share, and the only tier where a removal is worth full price.',
+  },
+  output: {
+    what: "Tokens the model generated. Usually the largest part of the bill.",
+    how: "The provider's own reported usage.",
+    catch: 'Nothing context-guru does affects this. It is here so the savings percentages '
+      + 'can be read against the size of the bill they are a percentage of.',
+  },
+
+  // ── latency and safety ────────────────────────────────────────────────────
+  'cg-latency': {
+    what: 'How much time context-guru itself added to each request.',
+    how: 'Wall-clock time inside the proxy, averaged, with the 95th percentile beside it.',
+    catch: 'Compare it against upstream latency next door — on this traffic it is a rounding '
+      + 'error by comparison. If you are chasing slowness, the buffered-response figure is '
+      + 'a much bigger lever.',
+  },
+  'upstream-latency': {
+    what: 'How long the model provider took to answer, once we had sent the request.',
+    how: 'Wall-clock time waiting on the upstream, averaged, with the 95th percentile.',
+    catch: "Not something context-guru controls, and it dwarfs our own added time.",
+  },
+  expands: {
+    what: 'Times we removed something and the model asked for it back, so we had to fetch '
+      + 'it — content paid for twice.',
+    how: 'Counted per request, with the share of requests affected and the tokens involved.',
+    catch: 'Added to the actual cost side and never subtracted from the baseline, so it '
+      + 'makes the savings look WORSE rather than better. Any number above zero is shown in '
+      + 'red on purpose.',
+  },
+  reverts: {
+    what: 'Times a component made a request bigger instead of smaller and was rolled back.',
+    how: 'Counted whenever the never-worse guard fired.',
+    catch: 'A revert is the safety net working, not a failure. Its cost is the wasted time '
+      + 'of the attempt, which is in the latency figure.',
+  },
+  passthroughs: {
+    what: 'Requests that went through untouched.',
+    how: 'Requests where nothing was removed, for any reason.',
+    catch: 'Mostly not a miss. The chart below breaks down why — the commonest reason by '
+      + 'far is that the request contained no tool output, and every deployed component '
+      + 'only rewrites tool output.',
+  },
+};
+
+/**
+ * tile renders one figure, and — when TILE_INFO has an entry for its key — an "i" that
+ * discloses what the figure means.
+ *
+ * The disclosure is a native <details>, which is the same mechanism the denominators and
+ * the waterfall already use: focusable, keyboard-operable and screen-reader-announced for
+ * free, no JS, and collapsed so the prose costs nothing until it is wanted. It goes
+ * through whyBlock's key registry too, so an explanation the reader has opened stays open
+ * across a refresh instead of closing under them.
+ */
 function tile(key, label, value, sub, cls) {
+  const info = TILE_INFO[key];
+  // The disclosure is the tile's LAST child, not a child of the label row. A <details>
+  // inside the label's flex row gets its prose squeezed into whatever width is left beside
+  // the label; as the last child of the tile's own column it simply grows downward. It also
+  // means the "i" is in the same place on every tile, which is what makes it findable.
   return el('div', { class: 'tile ' + (cls || ''), 'data-testid': 'tile-' + key },
     el('div', { class: 'k', text: label }),
     el('div', { class: 'v', 'data-testid': 'tile-' + key + '-value', text: value }),
-    sub ? el('div', { class: 's', text: sub }) : null);
+    sub ? el('div', { class: 's', text: sub }) : null,
+    info ? tileInfo(key, label, info) : null);
+}
+
+/**
+ * tileInfo is the "i" affordance. The visible glyph is a real <summary>, so it is a
+ * button as far as the keyboard and assistive technology are concerned without any
+ * role/tabindex being asserted by hand.
+ */
+function tileInfo(key, label, info) {
+  const k = 'tile:' + key;
+  return el('details', {
+    class: 'tile-why', 'data-why': k, 'data-testid': 'tile-' + key + '-info',
+    open: openWhy.has(k) ? 'open' : null,
+    ontoggle: (ev) => { if (ev.currentTarget.open) openWhy.add(k); else openWhy.delete(k); },
+  },
+  el('summary', { 'aria-label': 'What is "' + label + '"?', title: 'What is "' + label + '"?' }, 'i'),
+  el('div', { class: 'tile-why-body' },
+    el('p', { text: info.what }),
+    info.how ? el('p', {}, el('strong', {}, 'How it is worked out: '), info.how) : null,
+    info.catch ? el('p', { class: 'tile-why-catch' },
+      el('strong', {}, 'Worth knowing: '), info.catch) : null));
 }
 
 /** tileGroup renders one labelled band of tiles. */
@@ -629,9 +1226,19 @@ function renderTiles(o) {
     tile('requests', 'Requests', num(o.requests), num(o.sessions) + ' sessions'),
   ], 'headline'));
 
-  host.appendChild(tileGroup('Content tokens', 'three ways to count the same removal', [
+  host.appendChild(tileGroup('Content tokens',
+    'our own count, over message text only — NOT billed tokens; see "Provider-billed input"', [
     tile('tokens-before', 'Tokens before', compact(o.tokens_before)),
     tile('tokens-after', 'Tokens after', compact(o.tokens_after)),
+    // The unit check, and it belongs in this group rather than a footnote. Every token figure
+    // to the left is our own tokenizer over message TEXT — no system prompt, no tool schemas,
+    // no JSON envelope — and the provider bills a superset with its own tokenizer. Measured on
+    // this corpus the two differ by 3.2x. Without this tile beside them, four token counts and
+    // a "% saved" invite being read against an invoice they are not denominated in.
+    tile('billed-input', 'Provider-billed input', compact(o.billed_input_tokens),
+      o.tokens_before > 0
+        ? (o.billed_input_tokens / o.tokens_before).toFixed(1) + '× our count'
+        : 'fresh + cache reads + writes'),
     tile('saved-gross', 'Saved (gross)', compact(o.saved_gross), 'recounts re-sent history'),
     // The label has to name the UNIQUE calculation, which dominates this figure, and not
     // only the restore subtraction, which is usually zero: sitting between "Saved (gross)
@@ -659,6 +1266,25 @@ function renderTiles(o) {
       ? pct(o.replay_realized_pct, 1) : '—',
       compact(o.frozen_tokens) + ' tok frozen for cache safety',
       o.replay_projected_tokens && o.replay_realized_pct < 25 ? 'bad' : ''),
+    // The ceiling above assumes a session runs to its end with every removal intact. This is
+    // how often that assumption breaks, and it is why the ceiling is a ceiling.
+    tile('compaction-resets', 'Context resets', num(o.compaction_resets),
+      o.requests ? pct((100 * o.compaction_resets) / o.requests, 1) + ' of turns' : ''),
+  ]));
+
+  // What compaction was ALLOWED to touch, and what it was forbidden from touching. The two
+  // absolutes behind the page's headline ratio: the numerator has had a tile since the
+  // beginning and neither denominator did, so "1.7% of what we tried to compact" could not be
+  // sized by anyone reading it. The frozen figure is the more interesting of the two — at ~48%
+  // of attempted it is the single largest constraint on this product, and it was a sub-line.
+  host.appendChild(tileGroup('What compaction could reach', 'the cost of cache safety', [
+    tile('attempted-tokens', 'Attempted', compact(o.attempted_tokens),
+      'the uncached tail we may rewrite'),
+    tile('frozen-tokens', 'Frozen for cache safety', compact(o.frozen_tokens),
+      o.attempted_tokens + o.frozen_tokens > 0
+        ? pct((100 * o.frozen_tokens) / (o.attempted_tokens + o.frozen_tokens), 0)
+          + ' of the context is off-limits'
+        : '', 'accent'),
   ]));
 
   host.appendChild(tileGroup('Cost', costKnown ? 'billed, and the counterfactual' : 'no priced requests in this window', [
@@ -669,10 +1295,13 @@ function renderTiles(o) {
     tile('cost-cg', 'Our own LLM cost', costKnown ? usd(o.cg_llm_cost_usd) : 'unknown',
       'extract_llm, summarize'),
     // The cache saving this project claims, and the only one. Three conditions per request:
-    // the volatile-tail split ran, the provider then READ that prefix from cache, and it was
-    // the session's FIRST request — the one that would have missed. And the amount is the
-    // stable half the split moved, not the whole cache_read: the cachesplit-off control arm
-    // still read 45,805 tokens, so only the 8,499-token difference was ever ours.
+    // the volatile-tail split ran, the provider then READ that prefix from cache, and the
+    // snapshot had MOVED since this session's previous request — the turn that would otherwise
+    // have missed. (This comment said "the session's FIRST request" long after that gate was
+    // replaced, as did the waterfall description and the schema comment. Event.cachesplitSavedUSD
+    // is the authority.) And the amount is the stable half the split moved, not the whole
+    // cache_read: the cachesplit-off control arm still read 45,805 tokens, so only the
+    // 8,499-token difference was ever ours.
     //
     // What was here before was the provider's whole cache saving ("Prompt-cache savings")
     // plus the subset that merely co-occurred with our components. On the traffic that
@@ -789,6 +1418,28 @@ function renderTiles(o) {
       tc ? usd(tc.cache_write_usd) + ' · ~11.5× a read' : '~11.5× a read'),
     tile('fresh-input', 'Fresh input', compact(o.fresh_input), tc ? usd(tc.fresh_usd) : null),
     tile('output', 'Output tokens', compact(o.output_tokens), tc ? usd(tc.output_usd) : null),
+  ]));
+
+  // The streaming split. `sse_recorded === 0` over a window that HAS streaming requests means
+  // the columns are newer than the rows — reported as "not recorded yet", never as 0%, because
+  // a history of defaults must not read as a measurement. This is the largest user-visible
+  // latency on the page when it is populated: ~21 s of extra wait on a third of responses,
+  // against the 154 ms the pipeline itself adds two tiles to the left.
+  const sseKnown = o.sse_recorded > 0;
+  host.appendChild(tileGroup('Response streaming',
+    sseKnown ? 'where the user-visible time actually goes'
+      : 'newly captured — these fill in from the next streamed response', [
+    tile('sse-buffered', 'Responses buffered', sseKnown ? pct(o.sse_buffered_pct, 1) : 'not recorded yet',
+      sseKnown ? num(o.sse_buffered) + ' of ' + num(o.sse_buffered + o.sse_streamed) + ' streamed responses'
+        : num(o.sse_stream_rows) + ' streaming requests predate this capture',
+      sseKnown && o.sse_buffered_pct > 10 ? 'bad' : ''),
+    tile('ttfb-streamed', 'First byte, streamed', sseKnown ? ms(o.ttfb_ms_avg_streamed) : '—',
+      'the good path'),
+    tile('ttfb-buffered', 'First byte, buffered', sseKnown ? ms(o.upstream_ms_avg_buffered) : '—',
+      sseKnown && o.ttfb_ms_avg_streamed > 0 && o.upstream_ms_avg_buffered > 0
+        ? '+' + ms(o.upstream_ms_avg_buffered - o.ttfb_ms_avg_streamed) + ' of extra waiting'
+        : 'nothing arrives until the whole response does',
+      sseKnown && o.upstream_ms_avg_buffered > o.ttfb_ms_avg_streamed * 2 ? 'bad' : ''),
   ]));
 
   host.appendChild(tileGroup('Latency and safety', 'the price of compaction', [
@@ -957,11 +1608,23 @@ function renderLive() {
   }
 }
 
-async function loadOverview() {
-  loadingState($('#tiles'), 4);
+async function loadOverview(opts = {}) {
+  // The skeleton is for the FIRST paint, where there is nothing on screen and the reader
+  // needs to see that something is coming. On a repaint it was actively harmful: it
+  // replaced the whole tile column with four short rows, so the document shrank, the
+  // browser clamped the scroll offset, and anyone reading below the tiles was thrown back
+  // up the page. A repaint now swaps the tiles in place — the numbers change and nothing
+  // moves. `silent` is implicit rather than a caller's flag: having data already IS the
+  // condition, so no call site has to remember.
+  const first = !state.overview;
+  if (first) loadingState($('#tiles'), 4);
+  const scroll = window.scrollY;
   try {
     const [o, s] = await Promise.all([api('stats'), api('series', { bucket: bucketFor() })]);
     state.overview = o;
+    state.loadedAt = Date.now();
+    state.dirty = false;
+    $('#refresh-now').classList.remove('has-new');
     renderTiles(o);
     renderDenominators(o);
     renderWaterfall(o);
@@ -989,8 +1652,16 @@ async function loadOverview() {
       complete: 'exact (all four tiers)', partial: 'estimated', missing: 'unmeasured',
     }, 'Fills in from the first captured request: every row is counted as exact, estimated or unmeasured.');
     renderSeries(s.buckets || []);
+    paintFreshness();
+    // Restore the offset after the repaint. Even swapping in place, a group that gained or
+    // lost a tile changes the document height by a row, and the reader should not have to
+    // find their place again because a number rolled over.
+    if (!first && window.scrollY !== scroll) window.scrollTo({ top: scroll });
   } catch (err) {
     if (aborted(err)) return;
+    // An error on a REPAINT must not destroy a page that is still perfectly readable —
+    // the old code replaced the tiles with an error state, so one blip wiped the numbers.
+    if (!first) { markDirty(); return; }
     errorState($('#tiles'), 'Could not load statistics', err);
   }
 }
@@ -1117,6 +1788,7 @@ const DIM_LABELS = {
   reasoning_effort: 'reasoning effort', thinking_mode: 'thinking mode',
   stop_reason: 'stop reason', tool_choice: 'tool choice',
   cache_miss_reason: 'cache outcome', cache_breakpoints: 'cache_control breakpoints',
+  cache_bp_location: 'breakpoint placement', cache_ttl: 'cache lifetime asked for',
   stream: 'streaming',
 };
 
@@ -1128,10 +1800,16 @@ async function loadUsage() {
   try {
     // Per-day bars need no endpoint of their own: the series is bucketed in SQL from the
     // raw timestamp, so a day-wide bucket is a query parameter.
-    const [{ buckets }, bd] = await Promise.all([
+    //
+    // /api/stats comes along for the cache panel. It is the same aggregate Overview already
+    // fetches and it honours the same filters, so asking for it here keeps the cache detail
+    // consistent with the rest of the page instead of inventing a second endpoint.
+    const [{ buckets }, bd, o] = await Promise.all([
       api('series', { bucket: DAY_MS }),
       api('breakdown', { dim: state.dim }),
+      api('stats'),
     ]);
+    renderCacheDetail(o);
     pairedBars(dayHost, (buckets || []).map((b) => ({
       label: new Date(b.ts).toISOString().slice(0, 10),
       note: num(b.requests) + ' requests · ' + compact(b.tokens_before) + ' → ' + compact(b.tokens_after) + ' tokens',
@@ -1235,7 +1913,112 @@ function gateSummary(gates) {
 const COMPONENT_SORT = ['component', 'kind', 'runs', 'acted_tokens', 'acted_structural',
   'act_rate', 'reverted',
   'saved_unique', 'saved_gross', 'overcount_ratio', 'duration_ms_total', 'duration_ms_avg',
-  'llm_calls', 'llm_cost_usd', 'saved_usd', 'net_usd_with_estimate', 'errors', null, null];
+  'llm_calls', 'llm_cost_usd', 'saved_usd', 'net_usd_with_estimate',
+  'net_usd_first_removal', 'replay_multiple', 'errors', null, null];
+
+/**
+ * renderNetReconcile prints the two verdicts side by side, and the one step between them.
+ *
+ * It exists because the same component is green here and red in an operator's terminal. The
+ * panel names both figures, names which question each answers, and — the part that makes it
+ * a reconciliation rather than a disclaimer — prints the CROSS-CHECK: the decomposition is
+ * computed by different code from the same rows than the stored figure is, so if the two
+ * disagree by more than rounding, one of them is broken and this says so instead of picking
+ * a winner.
+ */
+function renderNetReconcile(components) {
+  const host = $('#net-reconcile');
+  if (!host) return;
+  // Only the components that actually spend money can flip sign, and they are the only ones
+  // the reconciliation is interesting for. With none of them present the panel is noise.
+  const spenders = components.filter((c) => (c.llm_cost_usd || 0) > 0);
+  const priced = components.filter((c) => c.saved_usd_decomposed > 0);
+  host.hidden = !priced.length;
+  if (host.hidden) return;
+  clear(host);
+  host.appendChild(el('h2', {}, 'Two verdicts, reconciled'));
+
+  const amort = components.reduce((n, c) => n + compSaved(c), 0);
+  const decomp = priced.reduce((n, c) => n + c.saved_usd_decomposed, 0);
+  const first = priced.reduce((n, c) => n + c.saved_usd_first_removal, 0);
+  const replay = priced.reduce((n, c) => n + c.saved_usd_replay, 0);
+  const llm = components.reduce((n, c) => n + (c.llm_cost_usd || 0), 0);
+
+  host.appendChild(el('p', { class: 'note' },
+    'Every dollar on this tab can be counted two ways, and they answer different questions. '
+    + 'Both are below. Neither is the "real" one.'));
+
+  barRows($('#net-reconcile-bars') || host.appendChild(el('div', { id: 'net-reconcile-bars' })), [
+    { label: 'Credited once per piece of content', value: first, max: Math.max(decomp, 0.0001),
+      display: usd(first),
+      formula: 'minus ' + usd(llm) + ' of our own LLM spend = ' + usd(first - llm) + ' net',
+      desc: 'Each piece of removed content valued ONCE, at the cache-write rate it would have '
+        + 'entered the prompt at. This answers "did the work of removing it pay for itself?" '
+        + "It is the figure the proxy's own /stats endpoint reports, and it is the "
+        + 'conservative one.' },
+    { label: 'Credited on every turn it stayed removed', value: decomp, max: Math.max(decomp, 0.0001),
+      color: SERIES_SAVED, display: usd(decomp),
+      formula: 'minus ' + usd(llm) + ' of our own LLM spend = ' + usd(decomp - llm) + ' net',
+      desc: 'The same removals, plus ' + usd(replay) + ' for every later turn they were still '
+        + 'absent from. The agent re-sends its whole transcript each turn, so content removed '
+        + 'at turn 5 is genuinely still absent at turns 6, 7, 8… and each of those turns was '
+        + 'billed less because of it. This answers "has this component paid for itself across '
+        + 'the sessions it ran in?" It is the figure the tiles on this page show.' },
+  ], { descSummary: 'What this counts' });
+
+  // The sign flip, named, for every component where it happens. This is the whole point.
+  const flips = spenders.filter((c) => (c.net_usd_with_estimate > 0) !== (c.net_usd_first_removal > 0));
+  if (flips.length) {
+    const box = el('div', { class: 'state', 'data-testid': 'net-flip' },
+      el('div', { class: 'state-body' },
+        el('strong', {}, flips.length === 1 ? 'One component changes verdict between the two'
+          : flips.length + ' components change verdict between the two')));
+    for (const c of flips) {
+      box.querySelector('.state-body').appendChild(el('span', {},
+        c.component + ': ' + usd(c.net_usd_with_estimate) + ' amortized, but '
+        + usd(c.net_usd_first_removal) + ' per turn — it spends ' + usd(c.llm_cost_usd)
+        + ' and its first removals are only worth ' + usd(c.saved_usd_first_removal)
+        + '. It is only ahead because those removals kept paying off on '
+        + c.replay_multiple.toFixed(1) + '× as much later traffic. Both are true. Which one '
+        + 'you should act on depends on whether that later traffic is going to keep happening.'));
+    }
+    host.appendChild(box);
+  }
+
+  // The cross-check. Two code paths, same rows: a gap is a bug, not a nuance.
+  const drift = amort > 0 ? Math.abs(decomp - amort) / amort : 0;
+  host.appendChild(el('p', { class: 'hint' + (drift > 0.02 ? ' warn-text' : '') },
+    drift > 0.02
+      ? 'Cross-check FAILED: the two halves come to ' + usd(decomp) + ' but the recorded '
+        + 'figure is ' + usd(amort) + ' (' + pct(drift * 100, 1) + ' apart). These are '
+        + 'computed by different code from the same rows, so one of them is wrong. Treat both '
+        + 'columns as suspect until this reads clean.'
+      : 'Cross-check: the two halves add to ' + usd(decomp) + ', against ' + usd(amort)
+        + ' recorded. Same rows, different code — so their agreement is evidence, not a '
+        + 'tautology.'));
+}
+
+/**
+ * llmCostGap is the fractional disagreement between the two prices recorded for the same
+ * model calls: the gateway's rate list, and the component's own. Zero when only one of them
+ * exists. 2% is the threshold for marking the cell — below that it is rounding.
+ */
+function llmCostGap(c) {
+  const g = c.llm_cost_gateway_usd || 0, r = c.llm_cost_reported_usd || 0;
+  if (g <= 0 || r <= 0) return 0;
+  return Math.abs(g - r) / g > 0.02 ? (r - g) / g : 0;
+}
+
+function llmCostTitle(c) {
+  const gap = llmCostGap(c);
+  const base = 'Priced from the gateway rate list this deployment bills against — the same '
+    + 'source as "Our own LLM cost" on Overview, so the two tabs agree.';
+  if (!gap) return base;
+  return base + ' NOTE: ' + c.component + ' priced these same calls at '
+    + usd(c.llm_cost_reported_usd) + ' itself, which is ' + pct(Math.abs(gap) * 100, 0)
+    + (gap > 0 ? ' HIGHER' : ' LOWER') + ' than the gateway\'s ' + usd(c.llm_cost_gateway_usd)
+    + '. The gateway figure is shown because it is what the invoice is denominated in.';
+}
 
 /** compSaved is a component's dollar saving over the window: the figure stored per request
  *  plus the read-time valuation of the rows written before that column existed. Added here
@@ -1245,7 +2028,7 @@ function compSaved(c) { return (c.saved_usd || 0) + (c.saved_usd_estimated || 0)
 
 async function loadComponents() {
   const body = clear($('#components-body'));
-  loadingRows(body, 19);
+  loadingRows(body, COMPONENT_SORT.length);
   try {
     const { components: raw } = await api('components');
     // /api/components has no LIMIT — every component that ran in the window is in this
@@ -1254,7 +2037,7 @@ async function loadComponents() {
     syncSortHeads('[data-testid=components-table]', COMPONENT_SORT);
     clear(body);
     if (!components.length) {
-      tableMessage(body, 19, 'No component runs captured',
+      tableMessage(body, COMPONENT_SORT.length, 'No component runs captured',
         'Run some traffic through the proxy with a non-empty pipeline.');
       emptyState($('#chart-comp'), 'No component data',
         'This chart fills in once a component has saved something.');
@@ -1282,7 +2065,15 @@ async function loadComponents() {
         el('td', { class: 'num', text: dur(c.duration_ms_total) }),
         el('td', { class: 'num', text: ms(c.duration_ms_avg) }),
         el('td', { class: 'num', text: c.llm_calls ? num(c.llm_calls) : '—' }),
-        el('td', { class: 'num', text: c.llm_calls ? usd(c.llm_cost_usd) : '—' }),
+        // ONE price for our own model calls, on every tab. This cell used to show the
+        // component's self-reported figure while Overview showed the proxy's gateway-priced
+        // one — 31.6% apart on measured traffic, with nothing saying which to believe. The
+        // gateway figure is what the invoice is denominated in, so it is what shows, and the
+        // gap is named in the tooltip rather than hidden by the choice.
+        el('td', {
+          class: 'num',
+          title: !c.llm_calls ? '' : llmCostTitle(c),
+        }, c.llm_calls ? usd(c.llm_cost_usd) + (llmCostGap(c) ? '‡' : '') : '—'),
         // A cost never travels alone. saved_usd is what this component's removals were
         // worth over the window — summed per turn, so a frozen reduction replaying across a
         // session is already amortized into it — and net_usd is the verdict. Both from the
@@ -1304,12 +2095,38 @@ async function loadComponents() {
         }, usd(compSaved(c)) + (c.saved_usd_estimated ? '†' : '')),
         el('td', {
           class: 'num' + (c.net_usd_with_estimate < 0 ? ' warn-text' : ''),
-          title: 'saved ' + usd(compSaved(c)) + ' − own LLM cost ' + usd(c.llm_cost_usd || 0),
+          title: 'AMORTIZED verdict: saved ' + usd(compSaved(c)) + ' across every turn those '
+            + 'removals stayed removed for, − own LLM cost ' + usd(c.llm_cost_usd || 0)
+            + '. The per-turn column beside this one is the same verdict without the repeat '
+            + 'business, and it can have the opposite sign.',
         }, usd(c.net_usd_with_estimate)),
+        // The same verdict with replay excluded — the number /stats reports. It is here
+        // BESIDE the amortized one, not instead of it, because the two answer different
+        // questions and a component can be genuinely positive on one and negative on the
+        // other. Showing only whichever is flattering is the failure mode this column exists
+        // to prevent.
+        el('td', {
+          class: 'num' + (c.net_usd_first_removal < 0 ? ' warn-text' : ''),
+          title: 'PER-TURN verdict: each piece of content credited ONCE at the rate it would '
+            + 'have entered the prompt at (' + usd(c.saved_usd_first_removal || 0) + ') − own '
+            + 'LLM cost ' + usd(c.llm_cost_usd || 0) + '. This is what the proxy\'s /stats '
+            + 'endpoint reports.',
+        }, c.saved_gross ? usd(c.net_usd_first_removal) : '—'),
+        el('td', {
+          class: 'num',
+          title: c.replay_multiple > 1
+            ? usd(c.saved_usd_replay || 0) + ' of the amortized figure is repeat business, at '
+              + 'the cache-read rate. Compare the Overcount column: far more tokens are '
+              + 're-removed than this multiple suggests, because each repeat is worth about a '
+              + 'tenth of a first removal.'
+            : 'Every removal this component made was of content it had not removed before, so '
+              + 'there is no repeat business to amortize.',
+        }, c.replay_multiple ? c.replay_multiple.toFixed(1) + '×' : '—'),
         el('td', { class: 'num', text: num(c.errors) }),
         el('td', {}, gateSummary(c.gates)),
         el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext }))));
     }
+    renderNetReconcile(components);
     // One measure (unique tokens saved) across up to twelve components: a magnitude
     // comparison, so ONE hue. Colouring bar N by N implied each component was a
     // different series and repainted them all whenever a filter changed the order.
@@ -1324,7 +2141,7 @@ async function loadComponents() {
     })), { emptyDetail: 'No component saved any content tokens in this window.' });
   } catch (err) {
     if (aborted(err)) return;
-    tableMessage(body, 19, 'Could not load components', String(err.message || err), { error: true });
+    tableMessage(body, COMPONENT_SORT.length, 'Could not load components', String(err.message || err), { error: true });
   }
 }
 
@@ -2671,7 +3488,67 @@ function renderTree(v, key) {
   return el('div', {}, el('div', { class: 'k', text: key }), el('div', { class: 'v', text: String(v) }));
 }
 
+/**
+ * renderTenantConfig draws the account's OWN effective configuration — the document the
+ * Settings page writes — above the process's.
+ *
+ * This is the fix for "a change made on the Settings page does not appear in the Config tab".
+ * The cause was not staleness or caching: /api/config serves the configuration THIS PROXY
+ * PROCESS resolved from --preset/--config at startup, and Settings writes the tenant's
+ * config_yaml into a different database entirely. A tenant edit could never appear there, by
+ * construction. The control plane already resolves and serves the true answer as
+ * `effective_config` / `effective_config_yaml` on /api/me, and the Settings page already
+ * fetches it — so this needs no new server route, only the right document on the page.
+ *
+ * Resolution is a CHOICE of one whole document, not a merge: an account whose config_yaml is
+ * blank follows the hosted default, and an account with its own follows that one. So "which
+ * values are overrides" is answered honestly at document level — this account either has its
+ * own document or it does not — rather than by diffing two trees key-by-key and inventing a
+ * per-key provenance the server does not actually have.
+ */
+function renderTenantConfig() {
+  const panel = $('#config-account-panel');
+  if (!panel) return;
+  const t = account.tenant;
+  // Only hosted deployments have a second document to disagree with. On a single-tenant
+  // proxy the process config IS the answer, and a second panel saying so would be noise.
+  panel.hidden = !account.hosted || !t;
+  if (panel.hidden) {
+    $('#config-server-title').textContent = 'Effective configuration';
+    return;
+  }
+  // With an account document on screen, the panel below is demoted in its own title rather
+  // than only in a note — a reader scanning headings has to be able to tell them apart.
+  $('#config-server-title').textContent = "This proxy process's configuration";
+  const host = clear($('#config-account-body'));
+  const own = !!(t.config_yaml && t.config_yaml.trim());
+  host.appendChild(el('div', { class: 'state' + (own ? '' : ' blocked'), 'data-testid': 'config-provenance' },
+    el('div', { class: 'state-body' },
+      el('strong', {}, own ? 'This account runs its own configuration'
+        : 'This account follows the hosted default'),
+      el('span', {}, own
+        ? 'Every value below comes from the document saved on your Settings page. It '
+          + 'overrides the hosted default entirely — the two are not merged, so nothing here '
+          + 'is inherited.'
+        : 'You have not saved a configuration of your own, so every value below is the '
+          + 'hosted default. Saving anything on the Settings page replaces this whole '
+          + 'document rather than overriding single keys.'),
+      el('span', {}, 'The panel below this one is what the proxy PROCESS resolved at startup. '
+        + 'It is a different document and it is not what compacted your traffic.'))));
+  if (t.effective_config) {
+    host.appendChild(renderTree(t.effective_config));
+  } else if (t.effective_config_yaml) {
+    // No parsed form from an older server: show the document verbatim rather than nothing.
+    host.appendChild(el('pre', { class: 'yaml', text: t.effective_config_yaml }));
+  } else {
+    emptyState(host, 'No configuration reported for this account',
+      'This server did not return an effective configuration. The panel below is the '
+      + 'process configuration, which may not be what ran on your requests.');
+  }
+}
+
 async function loadConfig() {
+  renderTenantConfig();
   const host = clear($('#config-body'));
   loadingState(host, 3);
   renderLogsHelp();
@@ -2683,8 +3560,11 @@ async function loadConfig() {
     clear(host);
     // The caveat that matters stays in the layout; the server's full explanation folds.
     host.appendChild(el('p', { class: 'note', 'data-testid': 'config-scope', text:
-      'Scope: ' + (cfg.scope || 'server') + ' — what this PROXY runs, not necessarily what ' +
-      'compacted your traffic.' }));
+      'Scope: ' + (cfg.scope || 'server') + ' — what this PROXY PROCESS resolved at startup'
+      + (account.hosted
+        ? ". NOT your account's configuration: yours is in the panel above, and it is the "
+          + 'one that compacted your traffic.'
+        : ', which on this single-tenant deployment is also what every request ran through.') }));
     if (cfg.description) host.appendChild(whyBlock('Why those can differ', cfg.description));
     host.appendChild(renderTree(cfg.config || cfg));
   } catch (err) {
@@ -3307,7 +4187,10 @@ function connectLive() {
     lastEventID = Math.max(lastEventID, e.id || 0);
     state.live.unshift(e);
     if (state.live.length > 60) state.live.length = 60;
+    // The feed itself is append-only and cheap, so it always paints. The ROLLUPS are what
+    // cost a query and a full repaint, so this only records that they are now behind.
     if (state.view === 'overview') renderLive();
+    markDirty();
   });
 }
 
@@ -3407,19 +4290,124 @@ function init() {
     checkCapture();
     connectLive();
   });
-  // Poll the aggregates: SSE carries individual rows, but a rollup must be
-  // recomputed server-side, and 10 s is well under a human's patience.
-  //
-  // Both pollers stop while the gate is up. Without that check they kept firing behind
-  // the login form — and after a sign-out — so a page left sitting on the gate produced
-  // a 401 every ten seconds forever.
-  const gated = () => !$('#gate').hidden;
-  // A window whose `to` is absolute cannot gain rows, so repolling it is pure waste — and
-  // on a wide manager scope it is a full-corpus aggregate every ten seconds for no new data.
+  initRefresh();
+  setInterval(() => { if (!gated() && !busyReading()) { loadFacets(); checkCapture(); } }, 30000);
+}
+
+// ── refresh: manual, event-driven, and out of the reader's way ──────────────
+//
+// This replaced a bare `setInterval(loadOverview, 10000)`, which repainted the headline
+// every ten seconds whether or not anything had changed. Every figure on Overview is a
+// server-side rollup, so a repaint clears and rebuilds ~40 tiles, six bar panels and five
+// SVG charts — collapsing open explanations, dropping a hovered tooltip and clamping the
+// scroll offset while somebody was reading. Three separate changes fix that, and the first
+// one is the important one:
+//
+//  1. REFRESH ONLY WHEN THE DATA CHANGED. The page already holds an EventSource on
+//     /api/events that fires per captured request (connectLive). That stream IS the
+//     "something changed" hint, so it costs nothing to use: an event sets `state.dirty`,
+//     and the timer is a no-op unless it is set. An idle deployment now issues zero
+//     aggregate queries instead of 8,640 a day.
+//  2. A LONGER, CONFIGURABLE INTERVAL with the choice remembered, because "how fresh do I
+//     need this" is a property of the reader's task, not of the page.
+//  3. A PAUSE WHILE READING, because a refresh the reader did not ask for is only
+//     acceptable when they are not mid-sentence.
+//
+// The manual button is what makes all three safe: any automatic policy can be wrong, and
+// the reader always has an unambiguous way to say "now".
+
+/** REFRESH_CHOICES are the offered intervals, in ms. 0 is manual-only. */
+const REFRESH_CHOICES = [['0', 'Manual only'], ['60000', 'Every minute'],
+  ['300000', 'Every 5 minutes'], ['900000', 'Every 15 minutes']];
+const REFRESH_DEFAULT = 300000;
+
+/** refreshMs is the reader's remembered choice. 5 minutes by default, not 10 seconds. */
+function refreshMs() {
+  // The stored value is read as a STRING first and only then converted, because Number(null)
+  // is 0, not NaN — so treating an absent preference as a number made "never stored" and
+  // "explicitly set to manual" the same state, and every first-time reader got manual-only.
+  const raw = localStorage.getItem('cg-refresh');
+  if (raw === null) return REFRESH_DEFAULT;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? v : REFRESH_DEFAULT;
+}
+
+const gated = () => !$('#gate').hidden;
+
+/**
+ * busyReading is the interaction guard: true when a repaint would interrupt somebody.
+ *
+ * Five states, all cheap to test and all of them cases where the old poller actively
+ * destroyed work: a focused control (the filter bar, the search box), an open explanation,
+ * a live text selection, an open drawer, and a window that is not even frontmost. The
+ * checks are scoped to #main so focus in the header's theme button does not freeze the
+ * page forever.
+ */
+function busyReading() {
+  if (!document.hasFocus()) return true;
+  const a = document.activeElement;
+  if (a && a !== document.body && $('#main').contains(a)) return true;
+  if ($('#view-overview details[open]')) return true;
+  if (!$('#drawer').hidden) return true;
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed && String(sel).trim()) return true;
+  return false;
+}
+
+/** markDirty records that the server has data the page has not shown yet. */
+function markDirty() {
+  state.dirty = true;
+  const b = $('#refresh-now');
+  if (b) b.classList.add('has-new');
+  paintFreshness();
+}
+
+/**
+ * paintFreshness writes the "last updated" line. It ticks every second so the reader can
+ * see the number is a live age rather than a timestamp that might be hours stale — which
+ * is the actual question a manual-refresh page has to answer, and the one the old
+ * always-repainting page never had to.
+ */
+function paintFreshness() {
+  const n = $('#refresh-age');
+  if (!n) return;
+  if (!state.loadedAt) { n.textContent = ''; return; }
+  const secs = Math.max(0, Math.round((Date.now() - state.loadedAt) / 1000));
+  const age = secs < 60 ? secs + 's ago'
+    : secs < 3600 ? Math.round(secs / 60) + 'm ago'
+      : Math.round(secs / 3600) + 'h ago';
+  n.textContent = 'Updated ' + age + (state.dirty ? ' · new data available' : '');
+  n.classList.toggle('has-new', state.dirty);
+}
+
+function initRefresh() {
+  const sel = $('#refresh-every');
+  for (const [v, label] of REFRESH_CHOICES) {
+    sel.appendChild(el('option', { value: v, text: label,
+      selected: String(refreshMs()) === v ? 'selected' : null }));
+  }
+  sel.addEventListener('change', (ev) => {
+    localStorage.setItem('cg-refresh', ev.currentTarget.value);
+    paintFreshness();
+  });
+  $('#refresh-now').addEventListener('click', () => {
+    $('#refresh-now').classList.remove('has-new');
+    loadOverview();
+  });
+  setInterval(paintFreshness, 1000);
+  // One timer at a fixed short tick, testing the reader's interval itself — so changing
+  // the interval takes effect immediately instead of after the old one elapses.
   setInterval(() => {
-    if (state.view === 'overview' && !gated() && state.to === 'now') loadOverview();
-  }, 10000);
-  setInterval(() => { if (!gated()) { loadFacets(); checkCapture(); } }, 30000);
+    const every = refreshMs();
+    if (!every || gated() || state.view !== 'overview' || state.to !== 'now') return;
+    // A window whose `to` is absolute cannot gain rows, so repolling it is pure waste.
+    // `dirty` is the same argument applied to a window that CAN: no captured request means
+    // no changed rollup, and the SSE stream already tells us.
+    if (!state.dirty) return;
+    if (busyReading()) return; // try again on the next tick; the button is always available
+    if (Date.now() - state.loadedAt < every) return;
+    loadOverview();
+  }, 5000);
 }
 
 document.addEventListener('DOMContentLoaded', init);

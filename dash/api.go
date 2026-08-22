@@ -775,6 +775,13 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 	// the most-read tab in the dashboard reports $0.00 for every component over all history
 	// that predates the last restart — measured, 6 populated rows out of 100,579.
 	if a.pricer != nil {
+		// Both read-time valuations, in order: the estimate fills history that predates the
+		// saved_usd column, the decomposition splits every priced row into its first-removal
+		// and replay halves so the two opposite-signed verdicts can be shown together.
+		if err := a.rec.DB().DecomposeComponentSavedUSD(f, a.pricer, rows); err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		if err := a.rec.DB().EstimateComponentSavedUSD(f, a.pricer, rows); err != nil {
 			// Best effort, like every other read-time valuation: the stored figures are
 			// already in `rows` and a failed estimate must not cost the caller the tab.

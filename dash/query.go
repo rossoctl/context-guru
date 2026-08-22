@@ -481,9 +481,29 @@ type ComponentRow struct {
 	// judging extract_llm on its full spend against six rows of its saving is not a verdict.
 	NetUSD             float64 `json:"net_usd"`
 	NetUSDWithEstimate float64 `json:"net_usd_with_estimate"`
-	DurationMsTotal    float64 `json:"duration_ms_total"`
-	DurationMsAvg      float64 `json:"duration_ms_avg"`
-	Errors             int64   `json:"errors"`
+	// The two halves the dollar figure above is made of, valued on read over every priced
+	// row — see DB.DecomposeComponentSavedUSD for why this is not decoration.
+	//
+	// SavedUSDFirstRemoval is each piece of content priced ONCE, at the cache-write rate it
+	// would have entered the prompt at. SavedUSDReplay is every later turn that same content
+	// stayed absent for, at the tier those turns actually paid. NetUSDFirstRemoval is the
+	// first figure less this component's own LLM spend, and it is the verdict the proxy's
+	// /stats endpoint reports — the one that reads NEGATIVE for extract_llm while the
+	// amortized verdict reads positive. ReplayMultiple is the factor between them, i.e. the
+	// single number that explains the sign flip.
+	//
+	// SavedUSDDecomposed is their sum, and it exists to be COMPARED with
+	// SavedUSD+SavedUSDEstimated: the two are computed by different code from the same rows,
+	// so a gap between them is a bug in one of them and the UI says so rather than picking a
+	// winner silently.
+	SavedUSDFirstRemoval float64 `json:"saved_usd_first_removal"`
+	SavedUSDReplay       float64 `json:"saved_usd_replay"`
+	SavedUSDDecomposed   float64 `json:"saved_usd_decomposed"`
+	NetUSDFirstRemoval   float64 `json:"net_usd_first_removal"`
+	ReplayMultiple       float64 `json:"replay_multiple"`
+	DurationMsTotal      float64 `json:"duration_ms_total"`
+	DurationMsAvg        float64 `json:"duration_ms_avg"`
+	Errors               int64   `json:"errors"`
 	// ActRate is acted/runs: how often the component removes anything. ActRateStructural is
 	// the structural half over the same denominator — see ActedStructural for why a single
 	// rate was a lie for the placement components.
@@ -493,11 +513,17 @@ type ComponentRow struct {
 	// component, which is the point: only the components that SPEND can be net-negative,
 	// and until now the components view had no dollars in it at all, so it judged an
 	// expensive component on tokens and latency and could never say "underwater".
-	LLMCalls        int64   `json:"llm_calls"`
-	LLMCallsCold    int64   `json:"llm_calls_cold"`
-	LLMCallsAcc     int64   `json:"llm_calls_accepted"`
-	LLMCostUSD      float64 `json:"llm_cost_usd"`
-	LLMLatencyMsAvg float64 `json:"llm_latency_ms_avg"`
+	LLMCalls     int64 `json:"llm_calls"`
+	LLMCallsCold int64 `json:"llm_calls_cold"`
+	LLMCallsAcc  int64 `json:"llm_calls_accepted"`
+	// LLMCostUSD is the figure every verdict on this row is computed from, and it is the
+	// GATEWAY-priced one — see the query for why the dashboard used to carry two.
+	// LLMCostGatewayUSD and LLMCostReportedUSD are the two sources kept separable so the UI
+	// can show the gap rather than quietly pick a side.
+	LLMCostUSD         float64 `json:"llm_cost_usd"`
+	LLMCostGatewayUSD  float64 `json:"llm_cost_gateway_usd"`
+	LLMCostReportedUSD float64 `json:"llm_cost_reported_usd"`
+	LLMLatencyMsAvg    float64 `json:"llm_latency_ms_avg"`
 	// LLMSavedTokens is what the CALLS removed, which is not the same as SavedUnique: the
 	// component's savings also include frozen results replayed with no call at all, and on
 	// measured traffic that replay is ~93% of its realized value.
@@ -587,6 +613,56 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 		c.LLMCostUSD, c.LLMLatencyMsAvg, c.LLMSavedTokens = cost.Float64, lat.Float64, saved
 	}
 	if err := xrows.Err(); err != nil {
+		return nil, err
+	}
+	// The SAME spend, priced the other way, because this dashboard used to report it twice at
+	// two different numbers.
+	//
+	// extraction_calls.cost_usd (above) is what the COMPONENT priced its own call at, from the
+	// public model map. requests.cg_llm_cost_usd is what the PROXY priced the identical call at
+	// from the operator's configured rate list (MODEL_PRICES) — the gateway's own rates, which
+	// are what the invoice is denominated in. On measured traffic the two are 31.6% apart
+	// ($0.79 against $0.60) and the Components tab showed one while Overview showed the other,
+	// so the same 93 model calls had two prices on two tabs of one page and nothing said which
+	// to believe. The gateway figure is the one that reconciles with the bill, so it is the one
+	// the verdict is computed from, and the component's own figure is kept beside it as the
+	// discrepancy it is.
+	//
+	// Apportioned by cost share rather than assigned whole, because a request could in
+	// principle carry calls from two components. Measured on the current corpus: none does —
+	// every request with calls has exactly one calling component — so today this is exact
+	// rather than approximate. Written as a share anyway so it stays correct if that changes.
+	iq := `WITH per AS (
+			SELECT x.request_id AS rid, x.component AS comp, SUM(x.cost_usd) AS ccost
+			FROM extraction_calls x GROUP BY 1, 2
+		), tot AS (SELECT rid, SUM(ccost) AS tcost FROM per GROUP BY 1)
+		SELECT per.comp,
+			SUM(r.cg_llm_cost_usd * CASE WHEN tot.tcost > 0 THEN per.ccost / tot.tcost ELSE 0 END)
+		FROM per JOIN tot ON tot.rid = per.rid JOIN requests r ON r.id = per.rid
+		WHERE ` + cond + ` GROUP BY 1`
+	irows, err := d.sql.Query(iq, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer irows.Close()
+	for irows.Next() {
+		var name string
+		var cost sql.NullFloat64
+		if err := irows.Scan(&name, &cost); err != nil {
+			return nil, err
+		}
+		if c, ok := byName[name]; ok {
+			c.LLMCostGatewayUSD = cost.Float64
+			c.LLMCostReportedUSD = c.LLMCostUSD
+			// The verdict follows the invoice. Where the gateway priced nothing at all (an
+			// unpriced cg model) the component's own figure is all there is, so it stands
+			// rather than being replaced by a zero.
+			if c.LLMCostGatewayUSD > 0 {
+				c.LLMCostUSD = c.LLMCostGatewayUSD
+			}
+		}
+	}
+	if err := irows.Err(); err != nil {
 		return nil, err
 	}
 	// The verdict, once both halves are in. A deterministic component spends nothing, so its
@@ -787,7 +863,19 @@ var breakdownDims = map[string]string{
 	"cache_miss_reason": "r.cache_miss_reason",
 	"cache_breakpoints": "CASE WHEN r.mode = '" + ModeObserve + "' THEN '' ELSE " +
 		"CAST(r.cache_bp_system + r.cache_bp_tools + r.cache_bp_messages + r.cache_bp_blocks AS TEXT) END",
-	"stream": "CASE WHEN r.stream <> 0 THEN 'stream' ELSE 'unary' END",
+	// The same four columns as a PLACEMENT rather than a count, because the count collapses
+	// the only interesting thing about them. "3 breakpoints" is one group whether they sit in
+	// the system block (protecting the whole prompt after it) or scattered through the
+	// messages (protecting almost nothing), and those are opposite prompts with opposite cache
+	// economics. Same observe-mode guard as above and for the same reason.
+	"cache_bp_location": "CASE WHEN r.mode = '" + ModeObserve + "' THEN '' ELSE " +
+		"'system=' || r.cache_bp_system || ' tools=' || r.cache_bp_tools || " +
+		"' messages=' || r.cache_bp_messages || ' blocks=' || r.cache_bp_blocks END",
+	// Which cache lifetime the request asked for. '' is a real third answer (no cache_control
+	// at all) and, on rows written before the column existed, also the default — which is why
+	// Overview reports a coverage count beside every TTL figure.
+	"cache_ttl": "r.cache_ttl",
+	"stream":    "CASE WHEN r.stream <> 0 THEN 'stream' ELSE 'unary' END",
 }
 
 // BreakdownDims lists the valid dimensions, sorted, for the API's error message and the

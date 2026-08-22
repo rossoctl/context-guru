@@ -90,9 +90,12 @@ CREATE TABLE IF NOT EXISTS requests (
   -- our saving.
   cache_saved_usd    REAL    NOT NULL DEFAULT 0,
   -- What OUR volatile-tail split saved: nonzero only where the split ran on the request, the
-  -- provider read at least that much from cache while writing less, and it was the session's
-  -- first request — the one that would have missed. Priced against a cache MISS (creation
-  -- rate), not fresh input. See Event.cachesplitSavedUSD.
+  -- provider read at least that much from cache while writing less, and the snapshot had MOVED
+  -- since this session's previous request (Event.TailChanged) — the turn that would otherwise
+  -- have missed. Priced against a cache MISS (creation rate), not fresh input.
+  -- See Event.cachesplitSavedUSD, which is the authority on the condition; the
+  -- session's-first-request test it once used was REPLACED because it reported ~$0, and three
+  -- descriptions of this column went on stating it for a while after.
   cachesplit_saved_usd REAL  NOT NULL DEFAULT 0,
   -- The size of the prefix half cachesplit moved the breakpoint onto: the numerator of the
   -- column above, stored so a dollar figure can be checked against a token count.
@@ -108,6 +111,18 @@ CREATE TABLE IF NOT EXISTS requests (
   -- saving for a request the filter had declined to touch. 0 therefore means "nothing was
   -- removed here", which is the honest reading on every row that predates the feature.
   filtered_decl_tokens INTEGER NOT NULL DEFAULT 0,
+  -- Which prompt-cache TTL TIER this request asked for: 'ephemeral_5m', 'ephemeral_1h', or ''
+  -- for a body carrying no cache_control at all. The pipeline always computed this and threw
+  -- it away, so nothing could group by it and a 1h prompt was priced at the 5m write rate.
+  -- '' is a THIRD answer, never folded into 5m: an uncached request is not a 5-minute one.
+  cache_ttl          TEXT    NOT NULL DEFAULT '',
+  -- Whether the client's stream was BUFFERED instead of streamed through, and the measured
+  -- time to its first byte. A third of streamed responses are buffered and those wait ~21 s
+  -- longer to start — far more user-visible delay than the pipeline itself adds, and until
+  -- now visible only as a counter on /stats that reset on restart. ttfb_ms is 0 on a buffered
+  -- or non-streamed response, where there is no first byte before the whole write.
+  sse_buffered       INTEGER NOT NULL DEFAULT 0,
+  ttfb_ms            REAL    NOT NULL DEFAULT 0,
   cg_latency_ms      REAL    NOT NULL DEFAULT 0,
   upstream_ms        REAL    NOT NULL DEFAULT 0,
   expands            INTEGER NOT NULL DEFAULT 0,
@@ -453,6 +468,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "split_stable_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "split_tail_hash", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
+	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
 }

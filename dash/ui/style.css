@@ -1169,3 +1169,81 @@ button.destructive:disabled { opacity: 0.45; cursor: not-allowed; filter: none; 
    Stretch it, and cap the controls the same way the settings page does. */
 #drawer-body .field textarea { width: 100%; }
 #drawer-body .field input[type=text], #drawer-body .field input[type=number] { width: 100%; }
+
+/* ── the freshness bar ──────────────────────────────────────────────────────
+   Overview used to repaint every ten seconds. It does not any more, so the page has to
+   say how old what you are reading is — an always-repainting page never had to. */
+.refresh-bar {
+  display: flex; align-items: center; gap: var(--sp-3);
+  margin-bottom: var(--sp-3); flex-wrap: wrap;
+}
+.refresh-age { color: var(--fg-faint); font-size: var(--t-small); font-variant-numeric: tabular-nums; }
+/* "New data available" is a state worth noticing but not worth alarming about: the status
+   ink, no background, no motion. Motion in a corner of a dashboard is read as an error. */
+.refresh-age.has-new { color: var(--info); font-weight: 600; }
+.refresh-every { display: flex; align-items: center; gap: var(--sp-2); color: var(--fg-muted); font-size: var(--t-small); }
+/* The button carries the same signal as the text, because a reader whose attention is on
+   the numbers will see the control they are about to press before they read the label. */
+#refresh-now.has-new { border-color: var(--info); color: var(--info); font-weight: 600; }
+
+/* ── the per-tile "i" ───────────────────────────────────────────────────────
+   Native <details>, so it is keyboard-operable and announced without a single role or
+   tabindex asserted by hand. The glyph is the summary itself. */
+/* The tile is a column, so the disclosure is its last row and simply grows downward.
+   Same position on every tile: that is what makes a 15px glyph findable at all. */
+.tile-why { margin-top: auto; padding-top: var(--sp-2); }
+.tile-why > summary {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; border-radius: 50%; cursor: pointer;
+  border: 1px solid var(--border); color: var(--fg-faint);
+  font-size: 10px; font-weight: 700; font-style: italic; line-height: 1;
+  list-style: none; user-select: none; flex: none;
+}
+.tile-why > summary::-webkit-details-marker { display: none; }
+.tile-why > summary::marker { content: ''; }
+.tile-why > summary:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.tile-why > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tile-why[open] > summary { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+/* The prose sits BELOW the whole tile rather than in a floating layer: a tooltip cannot be
+   read at leisure, cannot be selected or copied, and is unreachable on a touch screen. It
+   pushes the row, which is honest — an open explanation is a thing occupying the page. */
+.tile-why-body {
+  margin-top: var(--sp-2); padding-top: var(--sp-2);
+  border-top: 1px solid var(--border-soft);
+  font-size: var(--t-small); font-weight: 400; line-height: 1.5;
+  color: var(--fg-muted); white-space: normal; text-transform: none; letter-spacing: normal;
+}
+.tile-why-body p { margin: 0 0 var(--sp-2); }
+.tile-why-body p:last-child { margin-bottom: 0; }
+/* The catch is the half a reader most needs and most easily skips, so it is tinted — the
+   warning ink, not the error ink: these are caveats, not faults. */
+.tile-why-catch { color: var(--warn); }
+/* A configuration document shown verbatim, for the older-server path where no parsed form
+   came back. Monospace and scrollable rather than reflowed: YAML's indentation is its
+   meaning, so wrapping it would change what it says. */
+pre.yaml {
+  font-family: var(--mono); font-size: var(--t-small); line-height: 1.5;
+  background: var(--bg-sunken); border: 1px solid var(--border-soft);
+  border-radius: var(--r); padding: var(--sp-3); margin: 0;
+  overflow-x: auto; white-space: pre;
+}
+
+/* ── the stacked share bar ───────────────────────────────────────────────────
+   Part-to-whole over a few named categories, to scale. The 2px gap between segments is the
+   design-system spacer, not decoration: without it two adjacent fills read as one, which is
+   exactly the misreading a stacked bar exists to prevent. */
+.share-track {
+  display: flex; gap: 2px; height: 26px; width: 100%;
+  border-radius: var(--r-sm); overflow: hidden; background: var(--bg-sunken);
+}
+.share-seg { display: block; height: 100%; min-width: 2px; }
+.share-seg:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
+.share-seg:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+.share-legend { margin-top: var(--sp-2); flex-wrap: wrap; }
+/* The value wears text ink, never the series colour — the swatch beside it carries identity. */
+.share-legend b { color: var(--fg); font-variant-numeric: tabular-nums; }
+.share-pct { color: var(--fg-faint); font-variant-numeric: tabular-nums; }
+#cache-detail h3, #inv-composition h3 {
+  font-size: var(--t-body); margin: var(--sp-4) 0 var(--sp-2); color: var(--fg);
+}
+#cache-detail h3:first-child { margin-top: 0; }

@@ -126,6 +126,29 @@ type Event struct {
 	// it seeds the per-session comparison across a restart, and it lets the whole figure be
 	// recomputed from the table rather than trusted.
 	SplitTailHash uint64 `json:"split_tail_hash"`
+	// CacheTTL is the prompt-cache lifetime tier this request ASKED for — "ephemeral_5m",
+	// "ephemeral_1h", or "" for a body that carried no cache_control at all. The pipeline has
+	// always computed this (it is an input to cold-cache attribution) and then discarded it,
+	// so nothing downstream could say which tier a prompt used: the strings did not appear in
+	// the source at all, and a 1h prompt was priced at the 5m write rate because there was
+	// nothing to price it differently by. Where a breakpoint SITS is already recorded
+	// (CacheBP*); how long it was meant to live was the missing half.
+	CacheTTL string `json:"cache_ttl"`
+	// SSEBuffered and TTFBMs are the response-side latency the dashboard could not see.
+	//
+	// A third of streamed responses on measured traffic are BUFFERED rather than streamed
+	// through — the client sees nothing until the whole response has arrived — and those wait
+	// about 21 seconds longer for their first byte (29.0 s against 7.9 s). That is two orders
+	// of magnitude more user-visible delay than anything the pipeline itself adds, and it was
+	// visible only as a process-lifetime counter on /stats: unfilterable, unattributable to a
+	// model or an account, and gone on restart. Persisting the pair makes it a fact about a
+	// request like every other on this row.
+	//
+	// TTFBMs is 0 on a non-streamed response and on a buffered one, where the client's first
+	// byte IS the whole write — see proxy.go, which is deliberate and is why the two are
+	// stored together rather than as one average.
+	SSEBuffered bool    `json:"sse_buffered"`
+	TTFBMs      float64 `json:"ttfb_ms"`
 	// FilteredDeclTokens is what the declaration filter stopped carrying on this request —
 	// the token weight of the `tools` elements it removed under the account's opt-in list.
 	//
@@ -399,6 +422,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.CacheBPMessages = tr.Breakpoints.Messages
 	e.CacheBPBlocks = tr.Breakpoints.Blocks
 	e.SplitStableTokens, e.SplitTailHash = tr.SplitStableTokens, tr.SplitTailHash
+	e.CacheTTL = tr.CacheTTL
 	e.FilteredDeclTokens = tr.FilteredDeclTokens
 	if tr.Bypassed {
 		e.Mode = ModeBypass

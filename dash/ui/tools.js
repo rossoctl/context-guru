@@ -163,10 +163,18 @@ function renderHeadline(host, rep) {
 function gauge(t) {
   const total = t.declared_tokens || 1;
   const unusedPct = Math.min(100, 100 * t.unused_tokens / total);
+  // "Every prompt this account sends" was the heading here, and nobody could tell what it
+  // meant — it reads as a count of prompts, or as a claim about all traffic, and it is
+  // neither. What the bar shows is the weight of the tool schemas, MCP tool schemas and
+  // skills listing that ride along on EVERY request of a session, split by whether anything
+  // ever called them. So the heading says that, and the sub-line says what the number is
+  // averaged over instead of only its unit.
   const box = el('div', { class: 'panel cg-gauge', 'data-testid': 'inv-gauge' },
     el('div', { class: 'cg-gauge-head' },
-      el('h2', {}, 'Every prompt this account sends'),
-      el('span', { class: 'section-note', text: num(t.declared_tokens) + ' declared tokens' })),
+      el('h2', {}, 'What every request carries before you type anything'),
+      el('span', { class: 'section-note', text: num(t.declared_tokens)
+        + ' tokens of tool and skill declarations, per request, averaged over the sessions '
+        + 'whose inventory was captured' })),
     el('div', { class: 'cg-gauge-track' },
       el('span', {
         class: 'cg-seg cg-used', style: 'width:' + (100 - unusedPct).toFixed(2) + '%',
@@ -257,8 +265,14 @@ function renderCoverage(host, rep) {
  * session captured this morning look identical unless the row says which it is.
  */
 function renderUnused(host, rep) {
+  // Built-ins and provider tools are excluded here and listed in their own collapsed section
+  // at the end of the page. They dominate this list by weight and they are the one group where
+  // acting on "never invoked" is a mistake — a built-in that went uncalled for fifty sessions
+  // is doing its job by being there on the fifty-first. Leaving them in made the actionable
+  // list mostly un-actionable.
   const rows = rep.tools.concat(rep.skills.skills || [])
-    .filter((t) => !t.sessions_used && t.sessions_declared > 0);
+    .filter((t) => !t.sessions_used && t.sessions_declared > 0
+      && !t.builtin && t.kind !== 'server_tool');
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-unused-panel' },
     el('h2', {}, 'Declared by every session, invoked by none'),
     el('p', { class: 'note' }, rows.length
@@ -455,9 +469,10 @@ function tsortable(table, keys, onSort) {
 function toolTable(host, rep) {
   const panel = el('div', { class: 'panel' },
     el('h2', {}, 'Every declaration, by weight'),
-    el('p', { class: 'note' }, 'Sorted by what it cost to carry unused. '
+    el('p', { class: 'note' }, 'Everything you added, sorted by what it cost to carry unused. '
       + '"Read for nothing" is this item\'s size times the requests that re-read it in the '
-      + 'sessions that never called it.'));
+      + "sessions that never called it. Claude Code's own tools are in their own section at "
+      + 'the end of this page.'));
   const table = el('table', { class: 'tbl', 'data-testid': 'inv-tools-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Name'), el('th', {}, 'Kind'),
@@ -469,12 +484,16 @@ function toolTable(host, rep) {
   panel.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
   host.appendChild(panel);
   tsortable(table, TOOL_COLS, () => renderTools());
-  if (!rep.tools.length) {
+  const listed = rep.tools.filter((x) => !x.builtin && x.kind !== 'server_tool');
+  if (!listed.length) {
     tableMessage(body, 8, 'No declarations captured',
       'Nothing in this scope recorded what it declared.');
     return;
   }
-  for (const t of sortRows(rep.tools, tools.sort, tools.dir)) {
+  // Same exclusion as the actionable list: the agent's own tools have their own section at
+  // the end of the page, so this table is the things a reader can actually decide about.
+  for (const t of sortRows(rep.tools.filter((x) => !x.builtin && x.kind !== 'server_tool'),
+    tools.sort, tools.dir)) {
     body.appendChild(el('tr', { class: t.sessions_used ? '' : 'cg-row-unused' },
       el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: t.name })),
       el('td', {}, kindPill(t), t.server ? el('span', { class: 'cg-item-srv', text: t.server }) : null),
@@ -587,6 +606,293 @@ function skillsPanel(host, rep) {
   panel.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
 }
 
+/**
+ * renderComposition answers "who owns the system prompt", as one bar drawn to scale.
+ *
+ * FORM. The data's job is part-to-whole across a handful of named groups, and the form
+ * heuristic's answer for that is a stacked bar — horizontal, because the names are long. A
+ * treemap was the intuitive choice and is the wrong one here: it earns its keep when there are
+ * dozens of comparable parts and a hierarchy worth navigating, and with four groups it is a
+ * harder-to-read bar. A pie was rejected for the usual reason — angle comparison is the least
+ * accurate encoding there is, and it needs a legend to say anything at all.
+ *
+ * The FOUR groups are also the removability groups, which is what makes this chart actionable
+ * rather than decorative: MCP tools and skills are things a user adds and can drop, built-ins
+ * are things they must not, and provider tools are not theirs to control. Colour therefore
+ * follows a real property of the entity and not its rank, so a filter that changes the sizes
+ * never repaints the meaning.
+ */
+function renderComposition(host, rep) {
+  const all = (rep.tools || []).concat(rep.skills.skills || []);
+  const sum = (f) => all.filter(f).reduce((n, t) => n + t.tokens, 0);
+  const mcp = sum((t) => t.kind === 'mcp_tool');
+  const provider = sum((t) => t.kind === 'server_tool');
+  const builtin = sum((t) => t.builtin);
+  const client = sum((t) => t.kind === 'tool' && !t.builtin);
+  const skills = sum((t) => t.kind === 'skill') + (rep.skills.listing_tokens || 0);
+
+  const panel = el('div', { class: 'panel', id: 'inv-composition', 'data-testid': 'inv-composition' },
+    el('h2', {}, 'Who owns your system prompt'),
+    el('p', { class: 'note' }, 'Every declaration you carry, grouped by whether it is yours to '
+      + 'remove. ' + num(rep.totals.declared_set_tokens) + ' tokens in total — the whole that '
+      + 'each share below is a part of.'));
+  host.appendChild(panel);
+
+  // Four groups, so four categorical steps and no fifth invented hue. `client` and `builtin`
+  // are folded into one segment only when one of them is empty, which is the honest way to
+  // stay inside a validated four-step palette.
+  const groups = [
+    { label: 'MCP tools (yours — removable)', value: mcp },
+    { label: 'Skills, incl. the listing (yours — removable)', value: skills },
+    { label: 'Other client tools (whatever agent sent these)', value: client },
+    { label: "Claude Code built-ins (do not remove)", value: builtin + provider },
+  ].filter((g) => g.value > 0);
+  stackedShare(panel.appendChild(el('div')), groups, {
+    testid: 'inv-share', format: num,
+    note: 'Drawn to scale. The first two groups are the ones worth acting on; the last is the '
+      + 'agent\'s own equipment and removing any of it breaks the agent rather than slimming it.',
+  });
+
+  // The per-item detail: ONE measure across many long-named categories, so one hue, not
+  // twelve. Twelve colours here would assert twelve different things are being plotted.
+  const top = all.filter((t) => t.tokens > 0 && !t.builtin)
+    .sort((a, b) => b.tokens - a.tokens).slice(0, 12);
+  if (top.length) {
+    panel.appendChild(el('h3', {}, 'The heaviest removable declarations'));
+    barRows(panel.appendChild(el('div', { 'data-testid': 'inv-heaviest' })), top.map((t) => ({
+      label: t.name,
+      value: t.tokens,
+      display: num(t.tokens) + ' tok  ' + pct(t.share_pct, 1),
+      formula: (t.sessions_used ? num(t.calls) + ' calls in ' + num(t.sessions_used)
+        + ' of ' + num(t.sessions_declared) + ' sessions' : 'never invoked in '
+        + num(t.sessions_declared) + ' session' + (t.sessions_declared === 1 ? '' : 's')),
+    })));
+  }
+}
+
+/**
+ * renderRemovalValue is "what would I actually save", per model and across a session.
+ *
+ * Two figures, because they differ by two orders of magnitude and quoting either alone
+ * misleads in a different direction:
+ *
+ *   - The FIRST request pays the cache-CREATION rate for the declaration, once.
+ *   - Every later turn of the session re-reads it at the cache-READ rate, about a tenth as
+ *     much each — but there are ~150 of them, so this is where the money is.
+ *
+ * Per model, because the rates differ by 2.5x across the models this account actually ran on,
+ * and one blended figure would belong to none of them.
+ */
+function renderRemovalValue(host, rep) {
+  const models = (rep.models || []).filter((m) => m.priced);
+  const panel = el('div', { class: 'panel', 'data-testid': 'inv-removal-value' },
+    el('h2', {}, 'What removing something is worth'),
+    el('p', { class: 'note' }, 'Per 1,000 tokens of declarations dropped. Prices differ per '
+      + 'model, so this is per model rather than blended.'));
+  host.appendChild(panel);
+  if (!models.length) {
+    emptyState(panel.appendChild(el('div')), 'No priced models in this window',
+      'These sessions ran on models with no known rates, so a token weight cannot be turned '
+      + 'into a dollar figure. The token columns are still exact.');
+    return;
+  }
+  // The session multiplier, named, with the statistic it is. This has to be explicit: the
+  // median session here is ONE request and the plain mean under four, because most sessions
+  // are one-request sidechains — so either of those would say carrying a declaration costs
+  // about one re-read, when the sessions the money is in run to ~150 turns.
+  const turns = rep.totals.requests_per_session_typical || rep.totals.requests_per_session || 1;
+  panel.appendChild(el('div', { class: 'state', 'data-testid': 'inv-session-basis' },
+    el('div', { class: 'state-body' },
+      el('strong', {}, 'Session length used: ' + turns.toFixed(0) + ' requests'),
+      el('span', {}, 'Measured from this account\'s own history, not assumed. It is the '
+        + 'request-weighted average — how many turns the session that a TYPICAL REQUEST '
+        + 'belongs to runs for.'),
+      el('span', {}, 'The plain average session here is '
+        + (rep.totals.requests_per_session || 0).toFixed(1) + ' requests and the median is '
+        + num(rep.totals.requests_per_session_median) + ', because most sessions are '
+        + 'one-request sidechains — a title generation, a single tool call. Projecting a '
+        + 'per-session cost from either of those would understate it by about 40×, so the '
+        + 'weighted figure is the one used here and this panel says so.'))));
+
+  const table = el('table', { class: 'tbl' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Model'),
+      el('th', { class: 'num' }, 'Requests'),
+      el('th', { class: 'num', title: 'The declaration enters the prompt at the cache-creation rate, once.' },
+        'First request'),
+      el('th', { class: 'num', title: 'Every later turn re-reads it at the cache-read rate.' },
+        'Full session (' + turns.toFixed(0) + ' turns)'))));
+  const body = el('tbody');
+  for (const m of models) {
+    const first = 1000 * m.cache_write_usd_per_token;
+    const session = first + 1000 * m.cache_read_usd_per_token * Math.max(0, turns - 1);
+    body.appendChild(el('tr', {},
+      el('td', {}, el('code', { text: m.model })),
+      el('td', { class: 'num', text: num(m.requests) }),
+      el('td', { class: 'num', text: usd(first) }),
+      el('td', { class: 'num', text: usd(session) })));
+  }
+  table.appendChild(body);
+  panel.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
+  panel.appendChild(el('p', { class: 'hint' },
+    'To value one item, multiply by its token weight ÷ 1,000. The heaviest removable '
+    + 'declaration in this scope is '
+    + num(Math.max(0, ...((rep.tools || []).filter((t) => !t.builtin).map((t) => t.tokens))))
+    + ' tokens.'));
+}
+
+/**
+ * renderBuiltins is the built-in tools, LAST on the page, collapsed, behind a warning.
+ *
+ * They are here because they are a real and large share of the prompt and hiding that would be
+ * dishonest. They are collapsed and warned about because they are the one group on this page
+ * where acting on the number is a mistake: removing Read or Bash does not slim the agent, it
+ * removes a capability the model is expected to have, and everything that depended on it fails.
+ * The page's whole job is to make waste easy to act on, which is exactly why the not-waste has
+ * to be made hard to act on in the same breath.
+ */
+function renderBuiltins(host, rep) {
+  const rows = (rep.tools || []).filter((t) => t.builtin || t.kind === 'server_tool');
+  if (!rows.length) return;
+  const tok = rows.reduce((n, t) => n + t.tokens, 0);
+  const det = el('details', { class: 'panel inv-builtins', 'data-testid': 'inv-builtins' },
+    el('summary', {},
+      el('span', { class: 'inv-builtins-title' }, "The agent's own tools — " + num(rows.length)
+        + ' items, ' + num(tok) + ' tokens'),
+      el('span', { class: 'section-note' }, 'expand only if you know why you are here')));
+  det.appendChild(el('div', { class: 'state blocked', 'data-testid': 'inv-builtins-danger' },
+    el('div', { class: 'state-body' },
+      el('strong', {}, 'Removing any of these will break the agent'),
+      el('span', {}, 'These are Claude Code\'s own tools and the provider\'s. They are '
+        + 'not unused capacity you are wasting money on — they are the equipment the model is '
+        + 'expected to have, and a session missing one does not degrade gracefully: anything '
+        + 'that needed it simply fails.'),
+      el('span', {}, 'They are listed because they are ' + pct(100 * tok
+        / Math.max(1, rep.totals.declared_set_tokens), 0) + ' of what you carry and pretending '
+        + 'otherwise would be dishonest. Acting on that number is almost always the wrong call.'),
+      el('span', {}, 'A low "never invoked" count here is normal and is NOT a reason to remove '
+        + 'one: a tool that goes uncalled for fifty sessions is doing its job by being '
+        + 'available on the fifty-first.'))));
+  const table = el('table', { class: 'tbl' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Tool'), el('th', {}, 'Kind'), el('th', { class: 'num' }, 'Tokens'),
+      el('th', { class: 'num' }, 'Share'), el('th', { class: 'num' }, 'Sessions used'),
+      el('th', {}, 'If you really must'))));
+  const body = el('tbody');
+  for (const t of rows.slice().sort((a, b) => b.tokens - a.tokens)) {
+    body.appendChild(el('tr', {},
+      el('td', {}, el('code', { text: t.name })),
+      el('td', {}, kindPill(t)),
+      numTd(t.tokens),
+      el('td', { class: 'num', text: pct(t.share_pct, 1) }),
+      el('td', { class: 'num' }, t.sessions_used
+        ? num(t.sessions_used) : el('span', { class: 'pill missing' }, 'never')),
+      el('td', {}, removalCell(t))));
+  }
+  table.appendChild(body);
+  det.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
+  host.appendChild(det);
+}
+
+/**
+ * removalCell is the exact thing a user runs, per item, in the form its kind actually needs.
+ *
+ * Four different mechanisms, and getting them wrong is worse than saying nothing, so the
+ * server decides which applies (see dash/toolremoval.go) and this only renders it. The one
+ * semantic worth repeating at every call site: the snippets use the BARE tool name, because a
+ * scoped permission rule blocks the call and leaves the declaration in the prompt — i.e. saves
+ * exactly nothing, which is the opposite of what a reader of this page wants.
+ */
+function removalCell(t) {
+  const r = t.removal || {};
+  const wrap = el('div', { class: 'inv-removal' });
+  if (r.danger) wrap.appendChild(el('span', { class: 'pill bad', title: r.note }, 'breaks the agent'));
+  if (!r.command && !r.settings) {
+    wrap.appendChild(el('span', { class: 'hint', text: r.effect || 'No known mechanism.' }));
+    if (r.note) wrap.appendChild(whyBlock('Why not', r.note, 'Why ' + t.name + ' cannot be removed here'));
+    return wrap;
+  }
+  if (r.command) wrap.appendChild(copyBox(r.command, 'Run this'));
+  if (r.settings) {
+    wrap.appendChild(copyBox(r.settings, 'Add to ' + (r.settings_path || 'settings.json')));
+  }
+  wrap.appendChild(whyBlock('What this does', (r.effect || '') + (r.note ? ' ' + r.note : ''),
+    'What removing ' + t.name + ' does'));
+  return wrap;
+}
+
+/**
+ * copyBox renders a copy-pasteable snippet with a button that copies it.
+ *
+ * The text is SELECTABLE regardless, and the button is an addition rather than the only route:
+ * the clipboard API is unavailable over plain HTTP on some browsers and silently rejects in
+ * others, so a copy affordance that is the only way to get the text is a dead end. On failure
+ * it says so rather than pretending it worked.
+ */
+function copyBox(text, label) {
+  const btn = el('button', { class: 'btn small', type: 'button' }, 'Copy');
+  btn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = 'Copied';
+    } catch (_) {
+      btn.textContent = 'Select it manually';
+    }
+    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+  });
+  return el('div', { class: 'inv-copy' },
+    el('div', { class: 'inv-copy-head' }, el('span', { class: 'section-note', text: label }), btn),
+    el('pre', { class: 'inv-snippet', text: text }));
+}
+
+/**
+ * renderSelfRemoved credits the reductions the USER made themselves.
+ *
+ * Every other measurement here is about content context-guru removed. When somebody reads this
+ * page, removes an MCP server and stops carrying 4,000 tokens a request, no component ran and
+ * no filter fired — so the saving registered nowhere at all, and the product got no credit for
+ * the one outcome it most wants to cause. This finds it by treating the inventory as the time
+ * series it is: present in the early sessions, absent from the later ones.
+ *
+ * It is never added into the filter's realized savings, because an account that removed a
+ * server locally AND has it on the server-side filter list would be credited twice for one
+ * reduction. Overlapping rows are marked and left for the reader.
+ */
+function renderSelfRemoved(host, rep) {
+  const rows = rep.self_removed || [];
+  if (!rows.length) return;
+  const panel = el('div', { class: 'panel', 'data-testid': 'inv-self-removed' },
+    el('h2', {}, 'You removed these yourself'),
+    el('p', { class: 'note' }, num(rows.length) + ' declaration'
+      + (rows.length === 1 ? '' : 's') + ' stopped appearing partway through this window. That '
+      + 'is a real reduction and it is credited here — no component removed it, so it appears '
+      + 'in no other figure on this dashboard.'));
+  host.appendChild(panel);
+  const table = el('table', { class: 'tbl' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Item'), el('th', { class: 'num' }, 'Was costing'),
+      el('th', { class: 'num' }, 'Sessions since'), el('th', { class: 'num' }, 'Avoided since'),
+      el('th', {}, 'Evidence'))));
+  const body = el('tbody');
+  for (const r of rows) {
+    body.appendChild(el('tr', {},
+      el('td', {}, el('code', { text: r.name })),
+      el('td', { class: 'num', text: num(r.tokens) + ' tok/req' }),
+      numTd(r.sessions_after),
+      el('td', { class: 'num' }, money(r.avoided_usd, r.priced)),
+      el('td', {}, r.sessions_after < 3
+        ? el('span', { class: 'pill missing', title: 'Only ' + num(r.sessions_after)
+          + ' sessions have run since it was last seen, so this may simply be a session that '
+          + 'did not need it rather than a removal.' }, 'weak — too few sessions')
+        : el('span', { title: 'Declared in ' + num(r.sessions_before) + ' sessions, then absent '
+          + 'from the ' + num(r.sessions_after) + ' that followed.' },
+        num(r.sessions_before) + ' → 0')),
+      r.overlap ? el('td', {}, el('span', { class: 'pill warn' }, 'also server-side filtered')) : null));
+  }
+  table.appendChild(body);
+  panel.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
+}
+
 // ── load + render ──────────────────────────────────────────────────────────
 
 function renderTools() {
@@ -595,13 +901,21 @@ function renderTools() {
   if (!rep) return;
   renderHeadline(host, rep);
   if (rep.coverage.captured) {
+    // Composition first: "who owns the prompt" is the question the page exists for, and it
+    // was answerable only by reading a sortable table.
+    renderComposition(host, rep);
+    renderRemovalValue(host, rep);
     renderUnused(host, rep);
+    renderSelfRemoved(host, rep);
     renderRealized(host);
     toolTable(host, rep);
     serverTable(host, rep);
     skillsPanel(host, rep);
   }
   renderCoverage(host, rep);
+  // Built-ins LAST, collapsed, behind the danger warning. Deliberately after the coverage
+  // panel: nothing above it should invite reading these as a saving.
+  if (rep.coverage.captured) renderBuiltins(host, rep);
 }
 
 /**

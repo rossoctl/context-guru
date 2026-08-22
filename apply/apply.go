@@ -191,6 +191,9 @@ type Trace struct {
 	// split by location. Observational, and free: the pipeline already counts them to
 	// respect the provider's cap of four.
 	Breakpoints Breakpoints
+	// CacheTTL is the prompt-cache lifetime tier this request asked for: "ephemeral_5m",
+	// "ephemeral_1h", or "" when the body carried no cache_control at all. See ttlTier.
+	CacheTTL string
 	// SplitTailHash identifies the VOLATILE half the split moved the breakpoint off. Compared
 	// against the same session's previous request to decide whether the snapshot moved, which
 	// is the turn on which the split is worth anything: with the block unsplit, a moved
@@ -509,6 +512,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	}
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
 	tr.Breakpoints = bps
+	// The cache TTL TIER this request asked for. cacheTTL() has always computed it — it is
+	// an input to cold-cache attribution — and then discarded it, so the dashboard could
+	// not say which tier any prompt used and the 1h write price could not be applied. It is
+	// free to carry: the structural scan has already run by here.
+	tr.CacheTTL = ttlTier(provider, body)
 	tr.SplitStableTokens, tr.SplitTailHash = splitStableTokens, splitTailHash
 	tr.FilteredDeclTokens, tr.FilteredDecls = filteredTokens, filteredDecls
 	// The eligible (attempted) denominator: what age/supersession offloaders were
@@ -766,6 +774,38 @@ func cacheTTL(provider bschemas.ModelProvider, body []byte) time.Duration {
 		return anthropicDefaultTTL
 	default:
 		return extendedTTL
+	}
+}
+
+// TTL tier names, as the provider names them. These are the strings the dashboard stores and
+// groups by, so they are the provider's own vocabulary rather than ours.
+const (
+	TTLEphemeral5m = "ephemeral_5m"
+	TTLEphemeral1h = "ephemeral_1h"
+)
+
+// ttlTier names the cache lifetime this request asked for, or "" when it asked for no
+// caching at all. It is cacheTTL's answer as a LABEL: the duration is what the cold-cache
+// decision needs, and the label is what the dashboard needs, and deriving both from the same
+// structural scan is what keeps them from disagreeing.
+//
+// The empty answer matters and is not folded into 5m: a request with no cache_control anywhere
+// is not a 5-minute-TTL request, it is an uncached one, and a breakpoint histogram that
+// counted it as 5m would report caching on traffic that does none.
+func ttlTier(provider bschemas.ModelProvider, body []byte) string {
+	if !hasCacheBreakpoint(body) {
+		return ""
+	}
+	if bodyAsksExtendedTTL(body) {
+		return TTLEphemeral1h
+	}
+	switch provider {
+	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+		return TTLEphemeral5m
+	default:
+		// Every other backend's cache, where it has one, is not on Anthropic's 5-minute
+		// clock — cacheTTL already treats it as the long tier, and so does this.
+		return TTLEphemeral1h
 	}
 }
 

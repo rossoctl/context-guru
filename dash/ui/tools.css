@@ -98,3 +98,30 @@
   .cg-item { grid-template-columns: auto 1fr; }
   .cg-item-weight, .cg-item-usd { flex: 1 0 100%; }
 }
+
+/* ── the removal snippet ─────────────────────────────────────────────────────
+   The text is always selectable; the Copy button is an addition, never the only route, because
+   the clipboard API is unavailable or silently refused in enough contexts that a copy-only
+   affordance is a dead end. */
+.inv-removal { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 260px; }
+.inv-copy { border: 1px solid var(--border-soft); border-radius: var(--r-sm); overflow: hidden; }
+.inv-copy-head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+  padding: 2px var(--sp-2); background: var(--bg-sunken);
+}
+.inv-snippet {
+  font-family: var(--mono); font-size: var(--t-micro); line-height: 1.45;
+  margin: 0; padding: var(--sp-2); white-space: pre; overflow-x: auto;
+  background: var(--bg-raised); color: var(--fg); user-select: all;
+}
+
+/* ── built-ins: present, and deliberately awkward ────────────────────────────
+   Collapsed by default and warned about. This is the one group on the page where acting on the
+   number is a mistake, so it gets the opposite of an inviting affordance. */
+.inv-builtins > summary {
+  cursor: pointer; display: flex; align-items: baseline; gap: var(--sp-3); flex-wrap: wrap;
+}
+.inv-builtins-title { font-weight: 600; font-size: var(--t-body); }
+.inv-builtins[open] > summary { margin-bottom: var(--sp-3); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }

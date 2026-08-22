@@ -37,7 +37,10 @@ type capture struct {
 	status    int
 	expands   int
 	expandTok int
-	trace     apply.Trace
+	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
+	sseTTFBMs   float64
+	sseBuffered bool
+	trace       apply.Trace
 	// llm is THIS request's own cheap-model usage, accumulated by the compaction
 	// clients running under the request's context (see llmCtx). It replaces a delta of
 	// the process-global counters, which charged a row for whatever any OTHER tenant
@@ -271,6 +274,22 @@ func (c *capture) noteExpand(tokens int) {
 // been written, so nothing here is on the client's critical path. usage may be
 // zero-valued with ok=false, in which case the row is marked partial and left
 // unpriced rather than priced as free.
+// observeSSE records the response-side streaming facts, which arrive in proxy.go's terminal
+// defer alongside the aggregator's own RecordSSE. They are set rather than passed to finish()
+// because finish() already carries five arguments and these are about the RESPONSE, not the
+// capture's own bookkeeping.
+//
+// ttfbMs is 0 on a buffered response by construction: the client's first byte IS the whole
+// write, so there is no earlier moment to measure. That is why the flag is stored beside the
+// duration instead of the two being averaged into one number — an average over both would
+// report a healthy TTFB for exactly the requests that had the worst one.
+func (c *capture) observeSSE(ttfbMs float64, buffered bool) {
+	if c == nil {
+		return
+	}
+	c.sseTTFBMs, c.sseBuffered = ttfbMs, buffered
+}
+
 func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, contentCap, contentMax int) {
 	if c == nil {
 		return
@@ -291,6 +310,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// from. Present even when `usage` was not (see Usage.StopReason).
 	e.StopReason = usage.StopReason
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
+	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output

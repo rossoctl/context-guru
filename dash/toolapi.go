@@ -21,6 +21,7 @@ package dash
 
 import (
 	"database/sql"
+	"log/slog"
 	"net/http"
 	"sort"
 
@@ -47,6 +48,74 @@ type ToolStat struct {
 	// must not read as "this cost nothing".
 	UnusedUSD float64 `json:"unused_usd"`
 	Priced    bool    `json:"priced"`
+	// Builtin marks one of Claude Code's OWN tools. Derived on read from a name allowlist
+	// (see IsBuiltinTool), because the stored taxonomy cannot tell them from a user's own
+	// client-side tools — both are KindTool. It exists so the UI can put them in their own
+	// section, behind an expand, with a warning: they are the one group here that must NOT
+	// look like a tidy saving, because removing one breaks the agent rather than slimming it.
+	Builtin bool `json:"builtin"`
+	// SharePct is this declaration's share of everything the account declares per request —
+	// the "who owns the system prompt" number, which is the question the page is really
+	// answering and which no column carried.
+	SharePct float64 `json:"share_pct"`
+	// Removal is how to stop carrying it, in the form the user can act on. See RemovalFor.
+	Removal Removal `json:"removal"`
+}
+
+// ModelRate is one model this scope actually ran on, with the two rates that decide what
+// removing a declaration is worth.
+//
+// It is a LIST because the answer genuinely differs per model and the page was collapsing
+// them: the same 4,000-token declaration is worth an order of magnitude more on an expensive
+// model than a cheap one, and an account running both has no single answer. FirstRequestUSD
+// per token is the cache-WRITE rate (the tier a declaration enters the prompt at); the
+// per-session figure is dominated by the cache-READ rate, because that is what every later
+// turn of the session pays to carry it again.
+type ModelRate struct {
+	Model string `json:"model"`
+	// Requests and Sessions are the weight behind this model, so a rate that applies to four
+	// requests is not read as though it applied to the whole scope.
+	Requests int `json:"requests"`
+	Sessions int `json:"sessions"`
+	// CacheWriteUSDPerToken / CacheReadUSDPerToken are the two rates, per single token.
+	CacheWriteUSDPerToken float64 `json:"cache_write_usd_per_token"`
+	CacheReadUSDPerToken  float64 `json:"cache_read_usd_per_token"`
+	Priced                bool    `json:"priced"`
+}
+
+// SelfRemoval is a capability that STOPPED being declared partway through the window — the
+// user acted on it.
+//
+// This is a saving the product caused and it was being thrown away. Once somebody removes an
+// MCP server, the declaration is simply absent from later sessions: no component ran, no
+// filter fired, and every measurement on this dashboard is about content we removed, so the
+// reduction registered nowhere. Crediting it needs no new capture, only the observation that
+// the inventory is a time series and this name is present in the early part and absent from
+// the late part.
+//
+// It is kept SEPARATE from the tool-filter's realized savings and never added to them, because
+// the two can describe the same tokens: an account that removed a server locally AND has it in
+// its server-side filter list would otherwise be credited twice for one reduction. Overlap is
+// reported rather than resolved silently — see Overlap.
+type SelfRemoval struct {
+	Kind   string `json:"kind"`
+	Name   string `json:"name"`
+	Server string `json:"server,omitempty"`
+	// Tokens is what it weighed on each request that still carried it.
+	Tokens int `json:"tokens"`
+	// LastSeen / SessionsBefore / SessionsAfter are the evidence. SessionsAfter is how many
+	// sessions ran after the last one that declared it — the claim is only as strong as that
+	// number, and one session proves nothing, so the UI shows it beside every row.
+	LastSeen       int64 `json:"last_seen"`
+	SessionsBefore int   `json:"sessions_before"`
+	SessionsAfter  int   `json:"sessions_after"`
+	// AvoidedReads is Tokens x the requests in the later sessions that would have re-read it.
+	AvoidedReads int64   `json:"avoided_reads"`
+	AvoidedUSD   float64 `json:"avoided_usd"`
+	Priced       bool    `json:"priced"`
+	// Overlap is true when this name is ALSO on the account's server-side filter list, so the
+	// same reduction may already be counted as a realized filter saving. Reported, not netted.
+	Overlap bool `json:"overlap"`
 }
 
 // ServerStat rolls a whole MCP server up: an MCP server is what a user adds or removes,
@@ -115,8 +184,21 @@ type ToolTotals struct {
 	UnusedReads int64   `json:"unused_reads"`
 	UnusedUSD   float64 `json:"unused_usd"`
 	Priced      bool    `json:"priced"`
-	// RequestsPerSession is the re-read multiplier the figures above rest on.
-	RequestsPerSession float64 `json:"requests_per_session"`
+	// RequestsPerSession is the re-read multiplier the figures above rest on. It is a MEAN over
+	// every session in scope, which includes one-request sidechains, so it understates the
+	// multiplier for a working session — RequestsPerSessionMedian is the honest "typical
+	// session" figure and is the one a per-session projection should quote.
+	RequestsPerSession       float64 `json:"requests_per_session"`
+	RequestsPerSessionMedian int     `json:"requests_per_session_median"`
+	// RequestsPerSessionTypical is the REQUEST-WEIGHTED mean: how many turns the session that
+	// a typical request belongs to actually runs for. This is the multiplier a "cost across a
+	// full session" projection must use — see the comment where it is computed for why the
+	// mean and the median both answer a different question and both understate it badly.
+	RequestsPerSessionTypical float64 `json:"requests_per_session_typical"`
+	// DeclaredSetTokens is the summed weight of everything declared, once — the whole that
+	// every SharePct is a part of. DeclaredTokens above is a per-session MEAN and is a
+	// different quantity; the two were conflated and produced shares over 100%.
+	DeclaredSetTokens int `json:"declared_set_tokens"`
 }
 
 // ToolReport is the whole answer for one scope.
@@ -126,6 +208,64 @@ type ToolReport struct {
 	Tools    []ToolStat   `json:"tools"`
 	Servers  []ServerStat `json:"servers"`
 	Skills   SkillStat    `json:"skills"`
+	// Models is every model this scope ran on, with its cache-write and cache-read rates, so
+	// "what would removing this save me" can be answered per model instead of at one blended
+	// rate that describes none of them.
+	Models []ModelRate `json:"models"`
+	// SelfRemoved is what the account stopped declaring partway through the window — savings
+	// the user made themselves, which no other measurement on this dashboard could see.
+	SelfRemoved []SelfRemoval `json:"self_removed,omitempty"`
+}
+
+// sessionLengths is the per-session request count over the CAPTURED sessions only, which is
+// the population every other figure on this report is averaged over.
+func sessionLengths(sessions map[string]*sessionCost, captured map[string]bool) []int {
+	out := make([]int, 0, len(captured))
+	for id := range captured {
+		if sc := sessions[id]; sc != nil {
+			if n := sc.requests(); n > 0 {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// modelRates collapses the per-session costs into one row per model.
+func modelRates(sessions map[string]*sessionCost) []ModelRate {
+	by := map[string]*ModelRate{}
+	for _, sc := range sessions {
+		if sc.model == "" {
+			continue
+		}
+		m := by[sc.model]
+		if m == nil {
+			m = &ModelRate{Model: sc.model}
+			by[sc.model] = m
+		}
+		m.Sessions++
+		m.Requests += sc.requests()
+		if sc.priced && !m.Priced {
+			m.CacheWriteUSDPerToken, m.CacheReadUSDPerToken = sc.price.CacheWrite, sc.price.CacheRead
+			m.Priced = true
+		}
+	}
+	out := make([]ModelRate, 0, len(by))
+	for _, m := range by {
+		out = append(out, *m)
+	}
+	return out
+}
+
+// sortModelRates puts the model that carried the most requests first: that is the one an
+// account's numbers are mostly about, and a rate list ordered by name buries it.
+func sortModelRates(m []ModelRate) {
+	sort.Slice(m, func(i, j int) bool {
+		if m[i].Requests != m[j].Requests {
+			return m[i].Requests > m[j].Requests
+		}
+		return m[i].Model < m[j].Model
+	})
 }
 
 // sessionCost is one session's re-read multiplier, split by the tier each request was
@@ -134,6 +274,10 @@ type sessionCost struct {
 	reads, writes, fresh int
 	price                modelinfo.Price
 	priced               bool
+	// model is the first model seen for the session, matching the rule the price follows:
+	// a session that used two models keeps the first, because a blended rate over one token
+	// count belongs to no model. Recorded so the report can group rates BY model.
+	model string
 }
 
 // requests is how many times this session re-read its declarations.
@@ -178,6 +322,9 @@ func (d *DB) ToolReportFor(f Filter, price func(string) (modelinfo.Price, bool))
 			sessions[id] = sc
 		}
 		sc.reads, sc.writes, sc.fresh = sc.reads+reads, sc.writes+writes, sc.fresh+fresh
+		if sc.model == "" {
+			sc.model = model
+		}
 		if price != nil {
 			// A session that used two models keeps the FIRST priced one: mixing rates across
 			// a single token count would produce a figure that belongs to no model.
@@ -388,6 +535,43 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 	if rep.Coverage.Sessions > 0 {
 		rep.Totals.RequestsPerSession = float64(rep.Coverage.Requests) / float64(rep.Coverage.Sessions)
 	}
+	// The MEDIAN session length, over the sessions that actually carried an inventory.
+	//
+	// The mean above is dragged toward 1 by short sidechain sessions (a title generation, a
+	// single tool call), so quoting it as "an average session" understates what carrying a
+	// declaration for a whole session costs. The median is what "a typical session" means, and
+	// a per-session projection has to say WHICH it used — so both are reported and the UI names
+	// the one it multiplied by.
+	if lens := sessionLengths(sessions, captured); len(lens) > 0 {
+		sort.Ints(lens)
+		rep.Totals.RequestsPerSessionMedian = lens[len(lens)/2]
+		// The REQUEST-WEIGHTED mean session length, and it is the one a per-session projection
+		// must use.
+		//
+		// Neither of the two obvious statistics answers the question. On real traffic most
+		// sessions are one-request sidechains (a title generation, a single tool call), so the
+		// median session is 1 request and the plain mean is under 4 — and quoting either as
+		// "an average session" would say that carrying a declaration costs about one re-read,
+		// when the sessions where the money actually goes run to dozens of turns.
+		//
+		// The question is not "how long is a session" but "how long is the session that a
+		// given REQUEST belongs to", because that is where the repeated re-reads are. That is
+		// sum(n^2)/sum(n): each session weighted by how many requests it contributes. It is
+		// the same correction as the classic class-size paradox, and it is why this number is
+		// an order of magnitude above the median rather than a bug.
+		var n, nsq int64
+		for _, v := range lens {
+			n += int64(v)
+			nsq += int64(v) * int64(v)
+		}
+		if n > 0 {
+			rep.Totals.RequestsPerSessionTypical = float64(nsq) / float64(n)
+		}
+	}
+	// The models this scope ran on, each with the two rates that decide what a removal is
+	// worth. A list, because the answer differs per model by an order of magnitude and the
+	// report was collapsing them into one number that belonged to no model.
+	rep.Models = modelRates(sessions)
 
 	for _, st := range stats {
 		rep.Totals.UnusedReads += st.UnusedReads
@@ -418,10 +602,46 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		rep.Skills.ListingTokens = listingTok / listingSessions
 	}
 
+	sortModelRates(rep.Models)
 	rep.Servers = serverRollup(rep.Tools)
 	sortStats(rep.Tools)
 	sortStats(rep.Skills.Skills)
+	// Classification, share and removal advice, applied to every row once the list is final.
+	// On READ rather than at capture: the built-in/user-added split is a name allowlist that
+	// will gain entries as Claude Code does, and re-capturing history to learn a new name is
+	// not a thing anyone can do. See IsBuiltinTool.
+	// The share denominator is the sum of every declaration's own weight, INCLUDING the skills
+	// listing — i.e. a real whole that the parts add up to.
+	//
+	// It is deliberately not Totals.DeclaredTokens, which is a mean over captured sessions and
+	// was the first thing tried: sessions here range from a 2-tool sidechain to a full
+	// inventory, so the mean is far smaller than a single large declaration and shares came out
+	// at 650%. A percentage over 100 is not a rounding problem, it is proof the denominator is
+	// not the whole the numerator is part of.
+	whole := rep.Skills.ListingTokens
+	for _, t := range rep.Tools {
+		whole += t.Tokens
+	}
+	annotate(rep.Tools, whole)
+	annotate(rep.Skills.Skills, whole)
+	rep.Totals.DeclaredSetTokens = whole
 	return rep
+}
+
+// annotate fills the three read-time fields on a row: whether it is a built-in, its share of
+// the declared prompt, and how to stop carrying it.
+//
+// declared is the summed weight of the whole declared set. Zero leaves SharePct at 0 rather
+// than dividing — a share of an unknown whole is not 100%.
+func annotate(rows []ToolStat, declared int) {
+	for i := range rows {
+		t := &rows[i]
+		t.Builtin = IsBuiltinTool(t.Kind, t.Name)
+		if declared > 0 {
+			t.SharePct = 100 * float64(t.Tokens) / float64(declared)
+		}
+		t.Removal = RemovalFor(t.Kind, t.Name, t.Server)
+	}
 }
 
 // usedSkill reports how many skill invocations a session made.
@@ -522,10 +742,30 @@ func (a *API) tools(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	rep, err := a.rec.DB().ToolReportFor(f, a.priceFn(r))
+	price := a.priceFn(r)
+	rep, err := a.rec.DB().ToolReportFor(f, price)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "could not read the tool inventory")
 		return
+	}
+	// Credit for what the USER removed themselves. Best-effort and non-fatal: it is an
+	// addition to the report, so a deployment where it fails still gets the inventory rather
+	// than an error page. Needs a pricer to put a dollar on, and the token counts stand
+	// without one.
+	if price != nil {
+		// The account's own server-side removal list, so a reduction that the tool filter is
+		// ALREADY credited for can be marked as overlapping instead of counted twice.
+		filtered := map[string]bool{}
+		for _, n := range a.toolFilterState(f.Tenant).Removed {
+			filtered[n] = true
+		}
+		sr, err := a.rec.DB().SelfRemovals(f, price, filtered)
+		if err != nil {
+			// Non-fatal, but never silent: swallowing this returned an empty list that was
+			// indistinguishable from "the account removed nothing", which is a claim.
+			slog.Warn("dash: self-removal credit unavailable", "err", err)
+		}
+		rep.SelfRemoved = sr
 	}
 	writeJSON(w, rep)
 }
@@ -555,4 +795,205 @@ func (d *DB) countInventoryRows() (decls, uses int64, err error) {
 		err = nil
 	}
 	return decls, uses, err
+}
+
+// SelfRemovals finds declarations the account STOPPED carrying partway through the window.
+//
+// This is the one saving this dashboard causes and could not see. Every other measurement here
+// is about content a component removed; when a user reads this page, runs `claude mcp remove`
+// and stops carrying 4,000 tokens on every request, no component ran and no filter fired, so
+// the reduction landed in no figure anywhere. The product got no credit for the outcome it most
+// wants to cause.
+//
+// The method needs no new capture, only the observation that tool_declarations is a TIME SERIES
+// keyed by session: a name that appears in the early sessions of a window and in none of the
+// late ones stopped being declared. What makes that a claim rather than a guess is the number of
+// sessions that ran AFTERWARDS without it — one proves nothing (a session may simply not have
+// needed it), a dozen is strong. That count is returned on every row and the UI shows it, rather
+// than a threshold being applied here and the weak rows silently dropped.
+//
+// Deliberately NOT netted into the declaration filter's realized savings: an account that both
+// removed a server locally and has it on its server-side filter list would otherwise be credited
+// twice for one reduction. Rows in that position are marked Overlap and left for the reader.
+func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), filtered map[string]bool) ([]SelfRemoval, error) {
+	where, args := f.where()
+	// Session ordering comes from the requests table (the declarations carry a ts, but one per
+	// digest, not per session start), so "before" and "after" mean the same thing here as
+	// everywhere else on the page.
+	q := `WITH sess AS (
+			SELECT r.session_id AS sid, MIN(r.ts) AS started, COUNT(*) AS reqs,
+				SUM(CASE WHEN r.cache_read > 0 THEN 1 ELSE 0 END) AS reads,
+				SUM(CASE WHEN r.cache_read = 0 AND r.cache_write > 0 THEN 1 ELSE 0 END) AS writes,
+				SUM(CASE WHEN r.cache_read = 0 AND r.cache_write = 0 THEN 1 ELSE 0 END) AS fresh,
+				MIN(r.model) AS model
+			FROM requests r WHERE ` + where + ` AND r.tools > 0 GROUP BY 1)
+		SELECT d.kind, d.name, d.server, MAX(d.tokens), MAX(s.started),
+			COUNT(DISTINCT d.session_id)
+		FROM tool_declarations d JOIN sess s ON s.sid = d.session_id`
+	a := append([]any{}, args...)
+	if !f.TenantAll {
+		q += ` WHERE d.tenant_id = ?`
+		a = append(a, f.Tenant)
+	}
+	q += ` GROUP BY d.kind, d.name, d.server`
+	rows, err := d.sql.Query(q, a...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type cand struct {
+		kind, name, server string
+		tokens             int
+		lastSeen           int64
+		before             int
+	}
+	var cands []cand
+	for rows.Next() {
+		var c cand
+		if err := rows.Scan(&c.kind, &c.name, &c.server, &c.tokens, &c.lastSeen, &c.before); err != nil {
+			return nil, err
+		}
+		// ONLY MCP tools and skills are eligible, and that is a correctness restriction rather
+		// than a scoping choice.
+		//
+		// The first version of this considered every declaration and confidently reported that
+		// the account had "removed" Bash, Agent, TodoWrite and Monitor — because sessions
+		// legitimately declare DIFFERENT inventories. A sidechain request (a title generation, a
+		// single tool call) declares two tools; a working session declares forty. So a name
+		// being absent from a later session is not evidence that anything was removed, and over
+		// a corpus that is mostly short sessions it is evidence of nothing at all.
+		//
+		// MCP tools and skills are the items the question is actually about — they are what a
+		// user adds and drops — and they come with a usable control: a later session either
+		// carries MCP tools at all, or carries a skills listing at all, and only such a session
+		// can testify about a missing one. See the cohort test below, which is the other half of
+		// this fix; neither half works alone.
+		if c.kind != KindMCPTool && c.kind != KindSkill {
+			continue
+		}
+		cands = append(cands, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// The sessions that ran after each candidate was last declared, and what they would have
+	// paid to keep carrying it. One pass over the session list rather than a query per
+	// candidate: the list is a few thousand rows and there can be hundreds of candidates.
+	// Each later session's cohort: whether it declared ANY MCP tool, and whether it carried a
+	// skills listing. This is what makes a later session able to testify. A session that
+	// declared no MCP tools cannot be evidence that one particular MCP tool was removed — it is
+	// evidence that this session was not an MCP session.
+	type sessRow struct {
+		started              int64
+		reads, writes, fresh int
+		model                string
+		hasMCP, hasSkills    bool
+	}
+	// The cohort flags come from a SEPARATE query, not a join onto the request aggregate.
+	//
+	// Joining tool_declarations onto requests multiplies every request row by the number of
+	// declarations in its session, so the SUMs below counted each request dozens of times and
+	// the avoided-cost figures came out at $456 for a 142-token skill — larger than this
+	// deployment's entire measured savings. A fanned-out join under an aggregate is silent and
+	// the result is merely implausible rather than an error, which is exactly why the sanity
+	// check ("is this number bigger than the whole bill?") is worth doing on any new figure.
+	crows, err := d.sql.Query(`SELECT d.session_id,
+			MAX(CASE WHEN d.kind = '`+KindMCPTool+`' THEN 1 ELSE 0 END),
+			MAX(CASE WHEN d.kind IN ('`+KindSkill+`','`+KindSkillListing+`') THEN 1 ELSE 0 END)
+		FROM tool_declarations d
+		WHERE d.session_id IN (SELECT r.session_id FROM requests r WHERE `+where+` AND r.tools > 0)
+		GROUP BY 1`, args...)
+	if err != nil {
+		return nil, err
+	}
+	cohortBySession := map[string]struct{ mcp, skills bool }{}
+	for crows.Next() {
+		var sid string
+		var mcp, sk int
+		if err := crows.Scan(&sid, &mcp, &sk); err != nil {
+			crows.Close()
+			return nil, err
+		}
+		cohortBySession[sid] = struct{ mcp, skills bool }{mcp == 1, sk == 1}
+	}
+	crows.Close()
+	if err := crows.Err(); err != nil {
+		return nil, err
+	}
+	srows, err := d.sql.Query(`SELECT r.session_id, MIN(r.ts),
+			SUM(CASE WHEN r.cache_read > 0 THEN 1 ELSE 0 END),
+			SUM(CASE WHEN r.cache_read = 0 AND r.cache_write > 0 THEN 1 ELSE 0 END),
+			SUM(CASE WHEN r.cache_read = 0 AND r.cache_write = 0 THEN 1 ELSE 0 END),
+			MIN(r.model)
+		FROM requests r WHERE `+where+` AND r.tools > 0 GROUP BY r.session_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer srows.Close()
+	var sess []sessRow
+	for srows.Next() {
+		var s sessRow
+		var sid string
+		if err := srows.Scan(&sid, &s.started, &s.reads, &s.writes, &s.fresh, &s.model); err != nil {
+			return nil, err
+		}
+		c := cohortBySession[sid]
+		s.hasMCP, s.hasSkills = c.mcp, c.skills
+		sess = append(sess, s)
+	}
+	if err := srows.Err(); err != nil {
+		return nil, err
+	}
+
+	var out []SelfRemoval
+	for _, c := range cands {
+		r := SelfRemoval{
+			Kind: c.kind, Name: c.name, Server: c.server,
+			Tokens: c.tokens, LastSeen: c.lastSeen, SessionsBefore: c.before,
+			Overlap: filtered[c.name] || (c.server != "" && filtered[c.server]),
+		}
+		priced := true
+		for _, s := range sess {
+			if s.started <= c.lastSeen {
+				continue // ran before or alongside the last sighting: proves nothing
+			}
+			// The cohort test. Only a session of the same KIND can testify: one that carries MCP
+			// tools can say a particular MCP tool is gone, and one that carries a skills listing
+			// can say a particular skill is gone. Without this the count is dominated by short
+			// sessions that never declared anything of the sort.
+			if c.kind == KindMCPTool && !s.hasMCP {
+				continue
+			}
+			if c.kind == KindSkill && !s.hasSkills {
+				continue
+			}
+			r.SessionsAfter++
+			n := int64(s.reads + s.writes + s.fresh)
+			r.AvoidedReads += int64(c.tokens) * n
+			p, ok := price(s.model)
+			if !ok || p.Zero() {
+				priced = false
+				continue
+			}
+			// Each avoided re-read valued at the tier that request actually paid — the same
+			// rule the rest of this file prices by, so the two figures are comparable.
+			r.AvoidedUSD += float64(c.tokens) * (float64(s.reads)*p.CacheRead +
+				float64(s.writes)*p.CacheWrite + float64(s.fresh)*p.Input)
+		}
+		// Fewer than three qualifying later sessions is not a claim worth making. One or two
+		// comparable sessions without an item is as easily a session that did not load it as a
+		// removal, and a row that says "removed!" on that basis is the same mistake as the
+		// built-ins version of this analysis. The UI still marks anything under a dozen as weak.
+		if r.SessionsAfter < 3 {
+			continue
+		}
+		r.Priced = priced
+		out = append(out, r)
+	}
+	// Biggest claim first, and the UI shows the evidence beside each one.
+	sort.Slice(out, func(i, j int) bool { return out[i].AvoidedReads > out[j].AvoidedReads })
+	if len(out) > 25 {
+		out = out[:25]
+	}
+	return out, nil
 }
