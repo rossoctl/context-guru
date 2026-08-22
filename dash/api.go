@@ -236,7 +236,10 @@ func (a *API) routes() []route {
 	// The tool/MCP/skill inventory's route, declared beside its handler in toolapi.go and
 	// appended here rather than mounted separately: this table is what the scoping test walks,
 	// so a route mounted around it would be a route whose scope nothing checks.
-	return append(rs, a.toolRoutes()...)
+	rs = append(rs, a.toolRoutes()...)
+	// The keep-alive tab's reads, declared beside their handlers in keepaliveapi.go and
+	// appended here for the same reason: this table is what both scoping tests walk.
+	return append(rs, a.keepAliveRoutes()...)
 }
 
 // Mount registers every dashboard route on a mux under the given prefix

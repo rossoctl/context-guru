@@ -324,6 +324,10 @@ type keeper struct {
 	// session id and is cleared wholesale at the bound; give it an LRU only if session churn
 	// is ever shown to cost real pings.
 	turns map[string]int
+	// overrides is the per-session manual keep-alive, keyed like live. In memory only and
+	// deliberately so — an authorization to spend that silently survives a restart is worse
+	// than one that does not. See keepaliveoverride.go.
+	overrides map[string]sessionOverride
 
 	// send performs one ping. A field so tests can drive the whole policy — timing, caps,
 	// limits, the write-instead-of-read guard — without a network.
@@ -354,7 +358,8 @@ func keepAliveDisabled() bool {
 
 func newKeeper(h *Handler) *keeper {
 	k := &keeper{h: h, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, now: time.Now}
+		live: map[string]*kaEntry{}, turns: map[string]int{},
+		overrides: map[string]sessionOverride{}, now: time.Now}
 	k.send = k.sendPing
 	k.dispatch = func(j pingJob) { go k.fire(j) }
 	return k
@@ -405,6 +410,9 @@ func (k *keeper) Stop() {
 	}
 	k.bytes = 0
 	k.turns = map[string]int{}
+	// The overrides go with everything else: they are authorizations to spend, and the process
+	// they authorized is ending.
+	k.overrides = map[string]sessionOverride{}
 }
 
 // clear ZEROIZES an entry's body and credential and cancels its retention deadline. Called on
@@ -497,6 +505,13 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 	// the setting off stops being retained on its very next request; anything held for a session
 	// that goes quiet instead is dropped by the hard deadline below, within (K+1)x X.
 	pol := tn.Cache
+	// A per-session manual override, if one is armed and unexpired. The ONE hook this feature
+	// has in the request path: everything below reads `pol` and neither knows nor cares where
+	// it came from. An override may switch the mechanism ON for a session whose account default
+	// is off — that is the point of it, and the arming request is the consent act — but it may
+	// not widen the per-ping cost guard, and it cannot reach around the kill switch or the
+	// no-audit-sink refusal above.
+	pol = k.overrideFor(tn.ID, session, pol)
 	if !pol.on() {
 		k.retire(key)
 		return
@@ -647,6 +662,10 @@ func (k *keeper) forget(tenantID string) {
 		delete(k.live, key)
 		delete(k.turns, key)
 	}
+	// Per-session overrides go too. This is the path a Settings save takes, so unticking the
+	// account-wide box must not leave armed sessions pinging on the strength of an
+	// authorization the account has just withdrawn.
+	k.forgetOverrides(tenantID)
 }
 
 // evictLocked enforces both bounds by dropping the entries whose deadline is furthest away
@@ -680,6 +699,10 @@ func (k *keeper) sweep(now time.Time) int {
 		return 0
 	}
 	k.mu.Lock()
+	// Expired overrides go on the same 2 s tick, so the map cannot grow on the strength of
+	// authorizations nobody withdrew. overrideFor treats an expired one as absent regardless,
+	// so this is hygiene rather than correctness.
+	k.expireOverridesLocked(now)
 	var due []pingJob
 	for key, e := range k.live {
 		// EAGER release of a span that can do nothing more, so material goes as soon as it is

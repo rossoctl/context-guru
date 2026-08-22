@@ -399,6 +399,16 @@ type SessionRow struct {
 	//
 	// Derived from MAX(ts), not stored: nothing about it is a fact about the request.
 	InFlight bool `json:"in_flight"`
+	// The idle keep-alive's ledger for this session. The count and the cost come from a SECOND
+	// grouped query with withKeepAlive — the aggregate above deliberately cannot see ping rows,
+	// because a ping counted as a turn inflates Turns and drags every average on the row towards
+	// a one-token response. The credit half is on the agent row that benefited, so it is summed
+	// by the first query. Net is the only one of the four worth a decision, and it is the one
+	// the Sessions table shows.
+	KeepAlivePings    int64   `json:"keepalive_pings"`
+	KeepAlivePingUSD  float64 `json:"keepalive_ping_usd"`
+	KeepAliveSavedUSD float64 `json:"keepalive_saved_usd"`
+	KeepAliveNetUSD   float64 `json:"keepalive_net_usd"`
 }
 
 // cacheTTLMs is one provider prompt-cache TTL, the horizon inside which a session's next
@@ -424,7 +434,11 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 		SUM(r.cost_usd), SUM(r.baseline_cost_usd), SUM(r.cg_llm_cost_usd),
 		SUM(r.expands), SUM(r.expand_tokens), SUM(r.reverts),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
-		SUM(CASE WHEN r.token_accounting <> 'complete' THEN 1 ELSE 0 END)
+		SUM(CASE WHEN r.token_accounting <> 'complete' THEN 1 ELSE 0 END),
+		-- The keep-alive's SAVING half, which lives on the real request that benefited. The COST
+		-- half cannot be summed here: this query excludes ping rows, and that exclusion is what
+		-- keeps Turns and every average on the row agent-only. It has its own query below.
+		COALESCE(SUM(r.keepalive_saved_usd),0)
 		FROM requests r WHERE ` + cond + `
 		GROUP BY r.session_id ORDER BY MAX(r.ts) DESC LIMIT ? OFFSET ?`
 	rows, err := d.sql.Query(q, append(args, limit, offset)...)
@@ -444,7 +458,7 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 			&s.CacheRead, &s.CacheWrite, &s.OutputTokens, &s.FreshInput,
 			&s.CostUSD, &s.BaselineCostUSD, &s.CGLLMCostUSD,
 			&s.Expands, &s.ExpandTokens, &s.Reverts,
-			&s.CGLatencyMs, &s.UpstreamMs, &s.Incomplete); err != nil {
+			&s.CGLatencyMs, &s.UpstreamMs, &s.Incomplete, &s.KeepAliveSavedUSD); err != nil {
 			return nil, 0, err
 		}
 		s.TenantID = tenant.String
@@ -457,9 +471,51 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
+	// The COST half, over the same window and filters but with ping rows included, joined in Go
+	// by session id. The same two-query pattern DB.Overview uses, and for the same reason: one
+	// predicate, one meaning.
+	if len(out) > 0 {
+		kaCond, kaArgs := withKeepAlive(f).where()
+		pings, err := d.pingsBySession(kaCond, kaArgs)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, s := range out {
+			if p, ok := pings[s.SessionID]; ok {
+				s.KeepAlivePings, s.KeepAlivePingUSD = p.n, p.usd
+			}
+			s.KeepAliveNetUSD = s.KeepAliveSavedUSD - s.KeepAlivePingUSD
+		}
+	}
 	var total int64
 	err = d.sql.QueryRow(`SELECT COUNT(DISTINCT r.session_id) FROM requests r WHERE `+cond, args...).Scan(&total)
 	return out, total, err
+}
+
+// pingCount is one session's ping count and ping spend.
+type pingCount struct {
+	n   int64
+	usd float64
+}
+
+// pingsBySession groups the ping rows by session. The caller passes a filter that INCLUDES them.
+func (d *DB) pingsBySession(cond string, args []any) (map[string]pingCount, error) {
+	rows, err := d.sql.Query(`SELECT r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
+		FROM requests r WHERE `+cond+` AND r.keepalive = 1 GROUP BY 1`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]pingCount{}
+	for rows.Next() {
+		var s string
+		var p pingCount
+		if err := rows.Scan(&s, &p.n, &p.usd); err != nil {
+			return nil, err
+		}
+		out[s] = p
+	}
+	return out, rows.Err()
 }
 
 // ComponentRow is one component's economics across the filtered window — the view

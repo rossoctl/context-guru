@@ -72,7 +72,7 @@ type ctlRoute struct {
 
 // ctlRoutes is the single mounted route table, read by MountControl and by the scope test.
 func (h *Handler) ctlRoutes() []ctlRoute {
-	return []ctlRoute{
+	rs := []ctlRoute{
 		{"POST /api/register", ctlPublic, h.ctlRegister},
 		{"POST /api/login", ctlPublic, h.ctlLogin},
 		{"POST /api/verify", ctlPublic, h.ctlVerify},
@@ -115,6 +115,10 @@ func (h *Handler) ctlRoutes() []ctlRoute {
 		// in this table — a proxy token cannot open the dashboards.
 		{"GET /api/authz/grafana", ctlManager, h.ctlAuthzGrafana},
 	}
+	// The keep-alive's write half, declared beside its handlers in keepalivectl.go and appended
+	// here for the same reason the dashboard's are: this table is what gate enforces and what
+	// TestEveryControlRouteEnforcesItsScope walks.
+	return append(rs, h.keepAliveCtlRoutes()...)
 }
 
 // grafanaUserHeader carries the authorized manager's address from this endpoint to
@@ -1221,9 +1225,25 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 		// form would post whatever the fallback happened to see — and with no YAML box on
 		// that page, over an already-broken document. The account editor still takes a
 		// document, which is where this gets fixed.
-		if cur, _ := config.ParseForm(current); cur.ParseError != "" {
+		cur, _ := config.ParseForm(current)
+		if cur.ParseError != "" {
 			ctlErr(w, http.StatusConflict, "your stored configuration does not load ("+cur.ParseError+
 				"), so it cannot be edited as fields; a manager must repair it on the account page")
+			return
+		}
+		// A stale page must not SAVE. PipelineKnown (config/form.go) stops such a save
+		// dropping a component the client could not see; it cannot stop one ADDING a
+		// component back, because from the server's side an addition is indistinguishable
+		// from a deliberate one. So the page states the pipeline it rendered from, and a
+		// mismatch means the document moved underneath it — which is exactly what re-added
+		// `toon` to an operator's pipeline while dropping `linecap`.
+		//
+		// nil is accepted: an older cached bundle does not send it, and refusing every save
+		// from one would break the settings page for as long as that bundle lives in a cache.
+		// PipelineKnown is then the only defence, which is the safe direction.
+		if in.Config.PipelineBase != nil && !sameNames(in.Config.PipelineBase, cur.Pipeline) {
+			ctlErr(w, http.StatusConflict, "your configuration changed since this page loaded; "+
+				"reload before saving")
 			return
 		}
 		doc, err := config.ApplyForm(current, *in.Config)
@@ -2266,4 +2286,19 @@ func hasString(list []string, s string) bool {
 func atoi64(s string) int64 {
 	n, _ := strconv.ParseInt(s, 10, 64)
 	return n
+}
+
+// sameNames compares two component lists as ORDERED sequences. Order is part of a pipeline's
+// meaning — the same names in a different order is a different configuration — so this is a
+// plain element-wise comparison and not a set test.
+func sameNames(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

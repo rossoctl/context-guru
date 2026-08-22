@@ -57,7 +57,31 @@ type Form struct {
 	// not enablement, and reading "no block" as "off" silently removed components from
 	// bare-preset accounts on save.
 	Pipeline []string `json:"pipeline"`
-	Mode     string   `json:"mode"`
+	// PipelineKnown lists the component names the CLIENT rendered a control for. Any name in
+	// the STORED pipeline that is not in this list is preserved at its original index,
+	// whatever Pipeline says — so removing a component is an act a client has to CLAIM, and a
+	// client that cannot see one cannot take it out.
+	//
+	// It exists because a save silently reverted an operator's pipeline: `linecap` was
+	// dropped and `toon` re-added. The server never knew either name — the pipeline is a
+	// wholesale write of whatever the browser rebuilt out of its checkbox grid — so a stale
+	// render or a cached bundle whose /api/options predated a component produces exactly that
+	// diff, and the server had no way to tell it from a deliberate removal. Now it does.
+	//
+	// Empty or absent means "this client declared nothing", and then NOTHING may be removed.
+	// That is the safe direction for an old bundle and for a hand-rolled API client: both can
+	// still add and reorder.
+	PipelineKnown []string `json:"pipeline_known,omitempty"`
+	// PipelineBase is the pipeline the page RENDERED from. A mismatch against the stored
+	// document means the document moved under the page, and the save is refused with a 409 —
+	// which is what stops a stale page ADDING a component back. Preserving the unmodelled
+	// only defends against dropping.
+	//
+	// nil is accepted (an older bundle does not send it) and then PipelineKnown is the only
+	// defence, which is again the safe direction. Checked at the HTTP layer, where the stored
+	// document is: see proxy.Handler.ctlUpdateMe.
+	PipelineBase []string `json:"pipeline_base,omitempty"`
+	Mode         string   `json:"mode"`
 	// Cache is the `cache:` block — host-level prompt-cache policy (the idle keep-alive and
 	// the mixed-TTL head), which is not a component and so has no descriptor to be drawn
 	// from. nil means the form does not state it and ApplyForm leaves the document's own
@@ -67,6 +91,12 @@ type Form struct {
 	// has nothing to say about the cache" are different instructions, and with a value type
 	// every save from a page that had not drawn the control would switch a tenant's
 	// keep-alive off.
+	//
+	// Reachable only from a direct Go or API caller, in practice. ParseForm's strict path
+	// always fills it in (cacheForm is unconditional), and its loose path leaves it nil but
+	// also sets ParseError — which the save route answers with a 409 before ApplyForm is ever
+	// called. So the nil branch in ApplyForm is a contract for library callers, not a state
+	// the settings page can produce.
 	Cache *CacheForm `json:"cache,omitempty"`
 	// Components holds, per component name, the DOTTED key paths that component's block
 	// actually states — `{"extract_llm": {"cold_cache.min_tokens": 800}}`. Only keys the
@@ -352,6 +382,11 @@ func ApplyForm(doc string, f Form) (string, error) {
 
 	pipeline := append([]string(nil), f.Pipeline...)
 	pipeline = applyExtractLLMCoupling(pipeline, f.Components["extract_llm"])
+	// Before the component loop, not after: a preserved component is ON, and the loop below
+	// CLEARS the declared keys of anything it reads as switched off. Resolving the pipeline
+	// once, here, is what stops a save preserving a component in the run order while deleting
+	// the block that configures it.
+	pipeline = preserveUnmodelled(was, pipeline, f.Pipeline, f.PipelineKnown)
 
 	comps := child(m, "components")
 	for name, decls := range components.AllFields() {
@@ -438,6 +473,45 @@ func applyExtractLLMCoupling(pipeline []string, vals map[string]any) []string {
 		return insertBefore(pipeline, name, "extract")
 	}
 	return pipeline
+}
+
+// preserveUnmodelled re-inserts every component the STORED pipeline ran that the posted one
+// does not mention AND the client did not declare a control for.
+//
+// This is the rule that makes a save unable to drop what the client cannot see. The posted
+// pipeline is a wholesale replacement built from a checkbox grid, so a name missing from it is
+// ambiguous: the operator may have unticked it, or the page may never have drawn a box for it
+// (a cached bundle whose /api/options predates the component) or may have drawn it from a
+// document that has since changed. `known` disambiguates — it is what the client says it drew —
+// and absence from `known` resolves the ambiguity in favour of the stored document.
+//
+// Position is preserved, not appended: a pipeline is an ORDER, and `linecap` reappearing at the
+// end is a different configuration from `linecap` where the operator put it. Each survivor goes
+// back at the index it held in `was`, which for the common case of one unmodelled component in
+// the middle restores the document exactly.
+//
+// A DECLARED removal still removes: a name in `known` and absent from `sent` is gone.
+//
+// `sent` is what the CLIENT posted and `resolved` is that after applyExtractLLMCoupling, and
+// the two are deliberately different arguments. The membership test is on `sent`, because this
+// rule is about what the client said; the insertion is into `resolved`, because that is the
+// pipeline being written. Testing membership on the resolved list instead would undo the
+// coupling's own removal of extract_llm — a SERVER decision, not a client omission — and put
+// a component back that its own constructor refuses to build.
+func preserveUnmodelled(was, resolved, sent, known []string) []string {
+	out := append([]string(nil), resolved...)
+	for i, name := range was {
+		if contains(out, name) || contains(sent, name) || contains(known, name) {
+			continue
+		}
+		// Clamped, because `was` may be longer than what is being written.
+		at := i
+		if at > len(out) {
+			at = len(out)
+		}
+		out = append(out[:at:at], append([]string{name}, out[at:]...)...)
+	}
+	return out
 }
 
 // normalize fills enum fields a caller left EMPTY with the component's own default, and
@@ -687,14 +761,26 @@ func delPath(m map[string]any, path string) {
 	}
 }
 
-// child returns m[key] as a map, creating it when absent and replacing it when it is
-// something else (a `components:` that decoded as nil because the key was written with no
-// body is the common case).
+// child returns m[key] as a map, creating it when absent — INSERTED INTO m — and replacing
+// it when it is something else (a `components:` that decoded as nil because the key was
+// written with no body is the common case).
+//
+// The insertion is the whole contract and it used to be missing: the function returned a
+// fresh detached map and left m untouched, so a caller that did not assign the result back
+// wrote its whole block into a throwaway. `components:` and setPath both happened to assign
+// it back and were fine; the `cache:` block did not, and a tenant switching the keep-alive on
+// for the first time — the one case where the key is absent — had their consent silently
+// discarded. Fixed here rather than at that one call site: the next block someone adds to
+// ApplyForm cannot repeat it. The three callers that do assign are unaffected, and the two
+// that prune an empty block (`components:` and each component's own) still prune it, so an
+// empty map created here does not reach the document.
 func child(m map[string]any, key string) map[string]any {
 	if sub, ok := m[key].(map[string]any); ok && sub != nil {
 		return sub
 	}
-	return map[string]any{}
+	sub := map[string]any{}
+	m[key] = sub
+	return sub
 }
 
 func contains(xs []string, v string) bool {

@@ -136,6 +136,11 @@ func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
 	// keeps an existing order untouched. An empty list leaves the pipeline entirely — a
 	// component with nothing to remove is a pass over every request for nothing.
 	f.Pipeline = withComponent(f.Pipeline, toolFilterComponent, len(names) > 0)
+	// This route models exactly one component, so it claims exactly one. Without the claim
+	// ApplyForm preserves anything the stored pipeline runs and this omission is not sent —
+	// which is the rule that stops a stale settings page dropping a component it cannot see,
+	// and would here stop an emptied removal list from taking toolfilter back out.
+	f.PipelineKnown = []string{toolFilterComponent}
 	doc, err := config.ApplyForm(current, f)
 	if err != nil {
 		// The message names the offending value; showing it beats "invalid".

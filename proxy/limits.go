@@ -68,6 +68,9 @@ type Limiter struct {
 	mu       sync.Mutex
 	tenants  *lru[*tenantLimiter]
 	cheapSem chan struct{}
+	// actions is the per-hour counter for deliberate acts (AllowAction), separate from
+	// tenants so a settings click cannot evict a live request counter.
+	actions *lru[*hourly]
 }
 
 // maxLimiterKeys bounds the live counters a limiter holds. Reached only by a
@@ -274,4 +277,49 @@ type SpendChecker interface {
 	// MonthToDateUSD returns what this tenant has spent since the start of the
 	// current calendar month.
 	MonthToDateUSD(tenantID string) (float64, error)
+}
+
+// hourly is one key's fixed-window counter for a deliberate ACT rather than for traffic.
+type hourly struct {
+	windowStart time.Time
+	count       int
+}
+
+// AllowAction rate-limits a deliberate act — arming a keep-alive override is the one caller —
+// on a per-hour fixed window, and returns an error naming when the caller may retry.
+//
+// Separate from Acquire because it is a different kind of limit on a different thing. Acquire
+// bounds request THROUGHPUT per minute and hands back a concurrency slot; this bounds how often
+// somebody may authorize a spend, has no concurrency half, and takes nothing that has to be
+// released. Sharing the per-minute window would have made "30 arms an hour" unexpressible and
+// would have charged a settings click against an agent's request budget.
+//
+// A fixed window for the same reason Acquire uses one: the refusal can say exactly when the
+// window resets, which a leaky bucket cannot. It is also its own map, so an arm cannot evict a
+// live tenantLimiter holding an in-flight semaphore.
+func (l *Limiter) AllowAction(key, what string, perHour int) error {
+	if l == nil || perHour <= 0 {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.actions == nil {
+		l.actions = newLRU[*hourly](maxLimiterKeys, nil)
+	}
+	h, ok := l.actions.get(key)
+	if !ok {
+		h = &hourly{}
+		l.actions.put(key, h)
+	}
+	now := time.Now()
+	if w := now.Truncate(time.Hour); w.After(h.windowStart) {
+		h.windowStart, h.count = w, 0
+	}
+	if h.count >= perHour {
+		retry := int(time.Until(h.windowStart.Add(time.Hour)).Seconds()) + 1
+		return statusError{http.StatusTooManyRequests, fmt.Sprintf(
+			"rate limit: %d %s per hour for this account; retry in %ds", perHour, what, retry)}
+	}
+	h.count++
+	return nil
 }

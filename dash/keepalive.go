@@ -1,0 +1,1168 @@
+package dash
+
+import (
+	"database/sql"
+	"fmt"
+	"math"
+	"math/rand"
+	"sort"
+	"time"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
+)
+
+// The keep-alive tab's read side: one ledger, one behavioural read, one session list, one
+// calculator and one recommendation — computed here, in Go and SQL, and never in the browser.
+//
+// # Why the arithmetic is on this side
+//
+// The browser has twice duplicated a table the server owns and drifted from it: the defaults
+// table (R8) and the regex pipeline writer. Money arithmetic is the worst case of that class,
+// so the UI on this tab posts inputs and renders answers. Nothing below is recomputed client
+// side.
+//
+// # The one rule none of this may break
+//
+// PR #86 excludes ping rows from every agent aggregate with a single predicate,
+// `r.keepalive = 0` in Filter.where(). A ping is a request context-guru sent while nobody was
+// at the keyboard, so counted in COUNT(*), SUM(cache_read) or AVG(upstream_ms) it makes an
+// account's own statistics wrong. That predicate does not change here. Where a ping IS the
+// subject, this file runs a SECOND query with withKeepAlive(f) and joins in Go — the same
+// pattern DB.Overview already uses for the cost half of the ledger. There is no CASE over
+// `keepalive` inside an agent-traffic aggregate anywhere in this file.
+//
+// # Addressability, and why it is not optional
+//
+// A `ttl_expiry` row with `cache_write = 0` is a PHANTOM: 385 of the 742 in the production
+// corpus are exactly that and every one of them is an HTTP 400. They wrote nothing, so there
+// was no prefix to protect and no charge a ping could have avoided. `cache_write > 0` is the
+// addressability test and it gates every count, every dollar and every percentile on this tab.
+
+// ttlTTL is the provider's default prompt-cache lifetime. The coverage arithmetic rests on it.
+const ttlTTL = 300 * time.Second
+
+// addressableCTE is the shared read used by the behaviour panels, the calculator's own history
+// and the recommendation. ONE definition, so the panels cannot disagree with each other about
+// how many expiries an account had — which is how two tiles on the same page come to report
+// different denominators.
+//
+// The gap is computed at READ time with LAG: there is no `since_last_ms` column, because
+// Event.SinceLastMs is transient and was never stored. Window functions are available
+// (modernc.org/sqlite v1.56.0) and `idx_requests_session(session_id, ts)` already covers the
+// partition.
+//
+// prev_prefix is the PREVIOUS request's billed prefix (`cache_read + cache_write`), which is
+// the size of the entry that lapsed. Not `tokens_before`, which is message text only and runs
+// a median 3.38x low.
+const addressableCTE = `WITH s AS (
+	SELECT r.tenant_id, r.session_id, r.ts, r.cost_usd, r.model, r.cache_miss_reason, r.cache_write,
+	       LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_ts,
+	       LAG(r.cache_read + r.cache_write) OVER
+	         (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_prefix
+	FROM requests r WHERE %s
+), addressable AS (
+	SELECT *, (ts - prev_ts) / 1000.0 AS gap_s FROM s
+	WHERE cache_miss_reason = 'ttl_expiry' AND cache_write > 0 AND prev_ts IS NOT NULL
+)`
+
+// addressable renders the CTE for one filter.
+func addressable(f Filter) (string, []any) {
+	cond, args := f.where()
+	return fmt.Sprintf(addressableCTE, cond), args
+}
+
+// KeepAliveCoverage is the "is this figure a measurement or an absence?" statement that
+// accompanies every number on the tab.
+//
+// It exists because `keepalive_pings` and `keepalive_saved_usd` arrived as ADDITIVE columns with
+// DEFAULT 0. On a row written before PR #86 a zero means NOT RECORDED, and rendering that as
+// "no pings" would be a fabricated measurement — the failure this project has hit repeatedly.
+// Three distinct states, never conflated: never ran, partially recorded, or plain figures.
+type KeepAliveCoverage struct {
+	// RecordedFrom is MIN(ts) of any row carrying a ping or a ping-derived credit. 0 means the
+	// keep-alive has never run on this account, which is not the same as having saved nothing.
+	RecordedFrom int64 `json:"keepalive_recorded_from"`
+	// RecordedRows is the rows at or after that instant, and Requests the rows in the window.
+	// RecordedRows < Requests is the partial state.
+	RecordedRows int64 `json:"keepalive_recorded_rows"`
+	Requests     int64 `json:"requests"`
+}
+
+// KeepAliveLedger is panel 1 and panel 2: the verdict, and the losing majority beside it.
+type KeepAliveLedger struct {
+	Pings         int64   `json:"pings"`
+	PingUSD       float64 `json:"ping_usd"`
+	MissesAvoided int64   `json:"misses_avoided"`
+	// SavedUSD is a CEILING, and every tile that shows it says so. The credit itself is exact
+	// arithmetic — see Event.keepaliveSavedUSD — but the provider's cache is keyed on CONTENT,
+	// so another session sending a byte-identical prefix would have refreshed the same entry
+	// for nothing. That confound cannot be measured from our side; it can only be declared.
+	SavedUSD float64 `json:"saved_usd"`
+	NetUSD   float64 `json:"net_usd"`
+	// The winner/loser split over the sessions the mechanism TOUCHED. 85 of 119 lose about a
+	// third of a cent service-wide, funding a large rebate on 34 — the panel states that in
+	// words, unconditionally, above the fold.
+	Sessions       int64   `json:"sessions_touched"`
+	Winners        int64   `json:"winners"`
+	Losers         int64   `json:"losers"`
+	WorstSession   string  `json:"worst_session"`
+	WorstNetUSD    float64 `json:"worst_net_usd"`
+	Addressable    int64   `json:"addressable_misses"`
+	AddressableUSD float64 `json:"addressable_usd"`
+	// PingsThatReadNothing is the operator's check on SavedUSD: a ping that read nothing
+	// refreshed nothing. PingsThatWrote is worse — it CREATED an entry, which costs 12.5x a
+	// read, and the keeper stops pinging that session.
+	PingsThatReadNothing int64 `json:"pings_that_read_nothing"`
+	PingsThatWrote       int64 `json:"pings_that_wrote"`
+	// BytesPerDay is what this account's own ping rows cost on disk, measured rather than
+	// assumed: 294 B of row plus ~103 B of index per ping. Here because per-session overrides
+	// are the mechanism by which somebody could raise it.
+	PingsPerDay float64 `json:"pings_per_day"`
+	BytesPerDay float64 `json:"bytes_per_day"`
+	KeepAliveCoverage
+}
+
+// bytesPerPingRow is one ping row's measured footprint: 294 B in `requests` plus ~103 B of
+// index, from dbstat over the production snapshot. Rounded up to 400.
+const bytesPerPingRow = 400
+
+// KeepAliveLedger computes the ledger for one filtered window.
+func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
+	var o KeepAliveLedger
+	// The SAVING half and the coverage, over agent traffic only — the credit lives on the real
+	// request that benefited, never on the ping.
+	cond, args := f.where()
+	var from sql.NullInt64
+	if err := d.sql.QueryRow(`SELECT
+		COALESCE(SUM(r.keepalive_saved_usd),0),
+		COALESCE(SUM(CASE WHEN r.keepalive_saved_usd > 0 THEN 1 ELSE 0 END),0),
+		COUNT(*)
+		FROM requests r WHERE `+cond, args...).Scan(
+		&o.SavedUSD, &o.MissesAvoided, &o.Requests); err != nil {
+		return nil, err
+	}
+	// The COST half, with ping rows included. A second query and not a CASE: one predicate,
+	// one meaning.
+	kaCond, kaArgs := withKeepAlive(f).where()
+	if err := d.sql.QueryRow(`SELECT
+		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.keepalive = 1 AND r.cache_read = 0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.keepalive = 1 AND r.cache_write > r.cache_read THEN 1 ELSE 0 END),0),
+		MIN(CASE WHEN r.keepalive = 1 OR r.keepalive_pings > 0 OR r.keepalive_saved_usd > 0
+			THEN r.ts END)
+		FROM requests r WHERE `+kaCond, kaArgs...).Scan(
+		&o.Pings, &o.PingUSD, &o.PingsThatReadNothing, &o.PingsThatWrote, &from); err != nil {
+		return nil, err
+	}
+	o.NetUSD = o.SavedUSD - o.PingUSD
+	o.RecordedFrom = from.Int64
+	if o.RecordedFrom > 0 {
+		if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+` AND r.ts >= ?`,
+			append(append([]any(nil), args...), o.RecordedFrom)...).Scan(&o.RecordedRows); err != nil {
+			return nil, err
+		}
+	}
+	// The winner/loser split, per session, over the sessions the mechanism touched. Two
+	// grouped queries joined in Go for the same reason as above: the credit is on agent rows
+	// and the cost is on ping rows, and one aggregate cannot honestly see both.
+	saved, err := d.sumBySession(cond, args, "r.keepalive_saved_usd", "r.keepalive_saved_usd > 0")
+	if err != nil {
+		return nil, err
+	}
+	spent, err := d.sumBySession(kaCond, kaArgs, "r.cost_usd", "r.keepalive = 1")
+	if err != nil {
+		return nil, err
+	}
+	nets := map[string]float64{}
+	for s, v := range saved {
+		nets[s] += v
+	}
+	for s, v := range spent {
+		nets[s] -= v
+	}
+	for s, net := range nets {
+		o.Sessions++
+		switch {
+		case net > 0:
+			o.Winners++
+		case net < 0:
+			o.Losers++
+		}
+		if net < o.WorstNetUSD {
+			o.WorstNetUSD, o.WorstSession = net, s
+		}
+	}
+	// What is still on the table: the addressable expiries in this window, and their bill.
+	aCond, aArgs := addressable(f)
+	if err := d.sql.QueryRow(aCond+`
+		SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM addressable`, aArgs...).Scan(
+		&o.Addressable, &o.AddressableUSD); err != nil {
+		return nil, err
+	}
+	// Ping rate and its footprint on disk, over the window's own span. Nothing here stores
+	// text: for contrast a sibling feature put 264.7 MB on disk in a day by duplicating it.
+	if days := d.windowDays(kaCond, kaArgs); days > 0 {
+		o.PingsPerDay = float64(o.Pings) / days
+		o.BytesPerDay = o.PingsPerDay * bytesPerPingRow
+	}
+	return &o, nil
+}
+
+// sumBySession groups one column by session under an extra predicate.
+func (d *DB) sumBySession(cond string, args []any, col, extra string) (map[string]float64, error) {
+	rows, err := d.sql.Query(`SELECT r.session_id, COALESCE(SUM(`+col+`),0) FROM requests r
+		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]float64{}
+	for rows.Next() {
+		var s string
+		var v float64
+		if err := rows.Scan(&s, &v); err != nil {
+			return nil, err
+		}
+		out[s] = v
+	}
+	return out, rows.Err()
+}
+
+// windowDays is the span the rows actually cover, in days. Derived from the data and not from
+// the filter: a filter may be unbounded, and dividing by a window nobody has any rows in would
+// report a rate per day of traffic that did not happen.
+func (d *DB) windowDays(cond string, args []any) float64 {
+	var lo, hi sql.NullInt64
+	if err := d.sql.QueryRow(`SELECT MIN(r.ts), MAX(r.ts) FROM requests r WHERE `+cond,
+		args...).Scan(&lo, &hi); err != nil {
+		return 0
+	}
+	if !lo.Valid || !hi.Valid || hi.Int64 <= lo.Int64 {
+		return 0
+	}
+	return float64(hi.Int64-lo.Int64) / 86400000.0
+}
+
+// Band is one bucket of an ORDERED histogram: idle-gap bands, prefix-size bands, hour bins.
+//
+// Label carries the meaning and the order is the data — a bar chart of these must preserve it
+// and must not sort by size, because the order IS what the reader is reading. Since/Until make
+// each bar a drill-down into the requests behind it.
+type Band struct {
+	Label string  `json:"label"`
+	N     int64   `json:"n"`
+	USD   float64 `json:"usd"`
+	// Beyond marks the bands the CURRENT policy's coverage cannot reach, which the chart draws
+	// in the de-emphasis gray beyond the coverage rule.
+	Beyond bool  `json:"beyond,omitempty"`
+	Since  int64 `json:"since,omitempty"`
+	Until  int64 `json:"until,omitempty"`
+}
+
+// DayPoint is one day of the "how often, and what did it cost" series.
+type DayPoint struct {
+	Day        string  `json:"day"`
+	TS         int64   `json:"ts"`
+	Misses     int64   `json:"misses"`
+	USD        float64 `json:"usd"`
+	Requests   int64   `json:"requests"`
+	AllUSD     float64 `json:"all_usd"`
+	SharePct   float64 `json:"share_pct"`
+	MissRatePc float64 `json:"miss_rate_pct"`
+}
+
+// AccountGaps is panel 3d: how long between one account's own TTL expiries.
+//
+// Reported PER ACCOUNT and never blended. There is no service-wide "usually": per-account means
+// run 0.64 h to 6.56 h with maxima to 30 h, so a single mean across a 10x spread would be a
+// number that describes nobody.
+type AccountGaps struct {
+	Tenant   string  `json:"tenant"`
+	N        int64   `json:"n"`
+	MeanHrs  float64 `json:"mean_hours"`
+	MedHrs   float64 `json:"median_hours"`
+	MaxHrs   float64 `json:"max_hours"`
+	Coverage bool    `json:"has_gaps"`
+}
+
+// KeepAliveBehaviour is panels 3a–3e.
+type KeepAliveBehaviour struct {
+	Daily []DayPoint `json:"daily"`
+	// GapBands is the idle-gap histogram with FIXED edges, so the shape is comparable between
+	// accounts and between windows. The edge at 580 s is not arbitrary: it is the shipped
+	// policy's own coverage at X=280, K=1.
+	GapBands    []Band        `json:"gap_bands"`
+	PrefixBands []Band        `json:"prefix_bands"`
+	HourBins    []Band        `json:"hour_bins"`
+	Gaps        []AccountGaps `json:"account_gaps"`
+	// PrefixP10/P50/P90 in tokens, over the lapsed entries. p50 is 292,527 on the corpus and
+	// 347 of 356 are past 20k — which is the measured reason the shipped `prefix >= 20k` gate
+	// costs almost nothing, and the panel says so.
+	PrefixP10 int64 `json:"prefix_p10"`
+	PrefixP50 int64 `json:"prefix_p50"`
+	PrefixP90 int64 `json:"prefix_p90"`
+	// GapP10/P50/P90 in seconds.
+	GapP10 float64 `json:"gap_p10"`
+	GapP50 float64 `json:"gap_p50"`
+	GapP90 float64 `json:"gap_p90"`
+	// CoverageSeconds is K*X + TTL under the policy the bands are drawn against, which is what
+	// the threshold rule on the chart marks.
+	CoverageSeconds float64 `json:"coverage_seconds"`
+	AboveTwentyK    int64   `json:"prefix_above_20k"`
+	Addressable     int64   `json:"addressable_misses"`
+	Phantom         int64   `json:"phantom_ttl_rows"`
+	KeepAliveCoverage
+}
+
+// gapEdges are the idle-gap bands' fixed edges in seconds. The last is unbounded.
+var gapEdges = []float64{0, 300, 580, 600, 1800, 3600, 14400}
+
+// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 is the shipped gate.
+var prefixEdges = []float64{0, 20000, 50000, 100000, 200000, 400000, 800000}
+
+// bandLabels renders the edge list as human labels, with a unit formatter.
+func bandLabels(edges []float64, unit func(float64) string) []string {
+	out := make([]string, 0, len(edges))
+	for i, lo := range edges {
+		if i == len(edges)-1 {
+			out = append(out, "> "+unit(lo))
+			continue
+		}
+		out = append(out, unit(lo)+"–"+unit(edges[i+1]))
+	}
+	return out
+}
+
+// bandOf places a value in the edge list.
+func bandOf(edges []float64, v float64) int {
+	for i := len(edges) - 1; i >= 0; i-- {
+		if v >= edges[i] {
+			return i
+		}
+	}
+	return 0
+}
+
+// KeepAliveBehaviour computes the behavioural panels for one window.
+//
+// coverageSeconds is the policy the gap bands are marked against (K*X + TTL); 0 falls back to
+// the shipped default's 860 s.
+func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBehaviour, error) {
+	if coverageSeconds <= 0 {
+		coverageSeconds = 2*280 + ttlTTL.Seconds()
+	}
+	out := &KeepAliveBehaviour{CoverageSeconds: coverageSeconds,
+		Daily: []DayPoint{}, Gaps: []AccountGaps{}}
+	aCond, aArgs := addressable(f)
+	cond, args := f.where()
+
+	// 3a: per day, and the SHARE of that day's whole bill, because a count with no
+	// denominator cannot be sized.
+	all := map[string]struct {
+		n   int64
+		usd float64
+	}{}
+	rows, err := d.sql.Query(`SELECT date(r.ts/1000,'unixepoch'), COUNT(*), COALESCE(SUM(r.cost_usd),0)
+		FROM requests r WHERE `+cond+` GROUP BY 1`, args...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var day string
+		var n int64
+		var usd float64
+		if err := rows.Scan(&day, &n, &usd); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		all[day] = struct {
+			n   int64
+			usd float64
+		}{n, usd}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows, err = d.sql.Query(aCond+`
+		SELECT date(ts/1000,'unixepoch'), MIN(ts), COUNT(*), COALESCE(SUM(cost_usd),0)
+		FROM addressable GROUP BY 1 ORDER BY 1`, aArgs...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var p DayPoint
+		if err := rows.Scan(&p.Day, &p.TS, &p.Misses, &p.USD); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if a, ok := all[p.Day]; ok {
+			p.Requests, p.AllUSD = a.n, a.usd
+			if a.usd > 0 {
+				p.SharePct = 100 * p.USD / a.usd
+			}
+			if a.n > 0 {
+				p.MissRatePc = 100 * float64(p.Misses) / float64(a.n)
+			}
+		}
+		out.Daily = append(out.Daily, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// 3b/3e: the two band histograms and the 24 hour bins, from one pass over `addressable`.
+	// Percentiles come from the same read, so the bands and the p50 beside them cannot
+	// disagree.
+	gapN := make([]int64, len(gapEdges))
+	gapUSD := make([]float64, len(gapEdges))
+	preN := make([]int64, len(prefixEdges))
+	preUSD := make([]float64, len(prefixEdges))
+	hourN := make([]int64, 24)
+	hourUSD := make([]float64, 24)
+	var gaps, prefixes []float64
+	rows, err = d.sql.Query(aCond+`
+		SELECT gap_s, COALESCE(prev_prefix,0), cost_usd,
+		       CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER)
+		FROM addressable`, aArgs...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var gap, prefix, usd float64
+		var hour int
+		if err := rows.Scan(&gap, &prefix, &usd, &hour); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out.Addressable++
+		gi := bandOf(gapEdges, gap)
+		gapN[gi]++
+		gapUSD[gi] += usd
+		pi := bandOf(prefixEdges, prefix)
+		preN[pi]++
+		preUSD[pi] += usd
+		if hour >= 0 && hour < 24 {
+			hourN[hour]++
+			hourUSD[hour] += usd
+		}
+		gaps = append(gaps, gap)
+		prefixes = append(prefixes, prefix)
+		if prefix >= 20000 {
+			out.AboveTwentyK++
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	secs := func(v float64) string {
+		if v >= 3600 {
+			return fmt.Sprintf("%gh", v/3600)
+		}
+		if v >= 60 {
+			return fmt.Sprintf("%gm", v/60)
+		}
+		return fmt.Sprintf("%gs", v)
+	}
+	toks := func(v float64) string {
+		if v >= 1000 {
+			return fmt.Sprintf("%gk", v/1000)
+		}
+		return fmt.Sprintf("%g", v)
+	}
+	for i, label := range bandLabels(gapEdges, secs) {
+		out.GapBands = append(out.GapBands, Band{Label: label, N: gapN[i], USD: gapUSD[i],
+			Beyond: gapEdges[i] >= coverageSeconds})
+	}
+	for i, label := range bandLabels(prefixEdges, toks) {
+		out.PrefixBands = append(out.PrefixBands, Band{Label: label, N: preN[i], USD: preUSD[i]})
+	}
+	for h := 0; h < 24; h++ {
+		out.HourBins = append(out.HourBins, Band{
+			Label: fmt.Sprintf("%02d", h), N: hourN[h], USD: hourUSD[h]})
+	}
+	out.GapP10, out.GapP50, out.GapP90 = pctlF(gaps, 0.10), pctlF(gaps, 0.50), pctlF(gaps, 0.90)
+	out.PrefixP10 = int64(pctlF(prefixes, 0.10))
+	out.PrefixP50 = int64(pctlF(prefixes, 0.50))
+	out.PrefixP90 = int64(pctlF(prefixes, 0.90))
+
+	// The phantoms, named rather than silently dropped: a reader comparing this panel with the
+	// cache-miss breakdown on Usage will see two different `ttl_expiry` counts, and the
+	// difference has to be explicable.
+	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+`
+		AND r.cache_miss_reason = 'ttl_expiry' AND r.cache_write = 0`, args...).Scan(
+		&out.Phantom); err != nil {
+		return nil, err
+	}
+
+	// 3d: gaps BETWEEN expiries, per account.
+	rows, err = d.sql.Query(aCond+`, e AS (
+		SELECT tenant_id, (ts - LAG(ts) OVER (PARTITION BY tenant_id ORDER BY ts)) / 3600000.0 AS h
+		FROM addressable)
+		SELECT tenant_id, COUNT(h), AVG(h), MAX(h) FROM e WHERE h IS NOT NULL GROUP BY 1
+		ORDER BY 2 DESC`, aArgs...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var g AccountGaps
+		var n int64
+		var mean, max sql.NullFloat64
+		if err := rows.Scan(&g.Tenant, &n, &mean, &max); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		g.N, g.MeanHrs, g.MaxHrs, g.Coverage = n, mean.Float64, max.Float64, n > 0
+		out.Gaps = append(out.Gaps, g)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// The median per account, in a second pass. Exact rather than interpolated, for the reason
+	// DB.percentile is: sorting a few hundred floats is free and an estimate here would be a
+	// number nobody can reproduce.
+	for i := range out.Gaps {
+		g := &out.Gaps[i]
+		var hs []float64
+		r2, err := d.sql.Query(aCond+`, e AS (
+			SELECT tenant_id, (ts - LAG(ts) OVER (PARTITION BY tenant_id ORDER BY ts)) / 3600000.0 AS h
+			FROM addressable)
+			SELECT h FROM e WHERE h IS NOT NULL AND tenant_id = ?`,
+			append(append([]any(nil), aArgs...), g.Tenant)...)
+		if err != nil {
+			return nil, err
+		}
+		for r2.Next() {
+			var h float64
+			if err := r2.Scan(&h); err != nil {
+				r2.Close()
+				return nil, err
+			}
+			hs = append(hs, h)
+		}
+		r2.Close()
+		if err := r2.Err(); err != nil {
+			return nil, err
+		}
+		g.MedHrs = pctlF(hs, 0.50)
+	}
+
+	cov, err := d.keepAliveCoverage(f)
+	if err != nil {
+		return nil, err
+	}
+	out.KeepAliveCoverage = *cov
+	return out, nil
+}
+
+// keepAliveCoverage answers "is a zero here a measurement or an absence?" for one window.
+func (d *DB) keepAliveCoverage(f Filter) (*KeepAliveCoverage, error) {
+	var c KeepAliveCoverage
+	cond, args := f.where()
+	kaCond, kaArgs := withKeepAlive(f).where()
+	var from sql.NullInt64
+	if err := d.sql.QueryRow(`SELECT MIN(CASE WHEN r.keepalive = 1 OR r.keepalive_pings > 0
+		OR r.keepalive_saved_usd > 0 THEN r.ts END) FROM requests r WHERE `+kaCond,
+		kaArgs...).Scan(&from); err != nil {
+		return nil, err
+	}
+	c.RecordedFrom = from.Int64
+	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond, args...).Scan(
+		&c.Requests); err != nil {
+		return nil, err
+	}
+	if c.RecordedFrom > 0 {
+		if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+` AND r.ts >= ?`,
+			append(append([]any(nil), args...), c.RecordedFrom)...).Scan(&c.RecordedRows); err != nil {
+			return nil, err
+		}
+	}
+	return &c, nil
+}
+
+// pctlF is an exact percentile over an in-memory slice, nearest-rank. Sorts a copy.
+func pctlF(xs []float64, p float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	s := append([]float64(nil), xs...)
+	sort.Float64s(s)
+	i := int(float64(len(s)-1) * p)
+	return s[i]
+}
+
+// KeepAliveSessionRow is one row of panel 3f / panel 5: a session, what its expiries cost, and
+// whether an override is armed on it.
+type KeepAliveSessionRow struct {
+	SessionID string `json:"session_id"`
+	TenantID  string `json:"tenant_id"`
+	Turns     int64  `json:"turns"`
+	Last      int64  `json:"last"`
+	Model     string `json:"model"`
+	// LastPrefix is the last billed prefix (cache_read + cache_write) on this session — the
+	// number the calculator prefills from, because per-ping cost is bimodal and a service-wide
+	// average would answer a question nobody asked.
+	LastPrefix int64   `json:"last_prefix"`
+	Expiries   int64   `json:"expiries"`
+	ExpiryUSD  float64 `json:"expiry_usd"`
+	Pings      int64   `json:"pings"`
+	PingUSD    float64 `json:"ping_usd"`
+	SavedUSD   float64 `json:"saved_usd"`
+	NetUSD     float64 `json:"net_usd"`
+}
+
+// KeepAliveSessions lists the sessions this window's addressable expiries are concentrated in,
+// costliest first, with each one's own keep-alive ledger.
+//
+// The concentration is real and it does NOT transfer forward: the top 8 sessions hold $431 of
+// $734.75, and a list fitted on one half of the week earned $5.27 in the next half where the
+// plain account-wide rule earned $53.32. The panel says that above the table.
+func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	aCond, aArgs := addressable(f)
+	rows, err := d.sql.Query(aCond+`
+		SELECT session_id, MIN(tenant_id), COUNT(*), COALESCE(SUM(cost_usd),0)
+		FROM addressable WHERE session_id <> ''
+		GROUP BY session_id ORDER BY 4 DESC LIMIT ?`,
+		append(append([]any(nil), aArgs...), limit)...)
+	if err != nil {
+		return nil, err
+	}
+	out := []*KeepAliveSessionRow{}
+	byID := map[string]*KeepAliveSessionRow{}
+	for rows.Next() {
+		var s KeepAliveSessionRow
+		if err := rows.Scan(&s.SessionID, &s.TenantID, &s.Expiries, &s.ExpiryUSD); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, &s)
+		byID[s.SessionID] = &s
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return out, nil
+	}
+	// Turns, the last request and the last billed prefix — from AGENT rows, so a ping does not
+	// count as a turn or re-date the session.
+	cond, args := f.where()
+	for _, s := range out {
+		if err := d.sql.QueryRow(`SELECT COUNT(*), MAX(r.ts) FROM requests r
+			WHERE `+cond+` AND r.session_id = ?`,
+			append(append([]any(nil), args...), s.SessionID)...).Scan(&s.Turns, &s.Last); err != nil {
+			return nil, err
+		}
+		var prefix sql.NullInt64
+		var model sql.NullString
+		if err := d.sql.QueryRow(`SELECT r.cache_read + r.cache_write, r.model FROM requests r
+			WHERE `+cond+` AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
+			append(append([]any(nil), args...), s.SessionID)...).Scan(&prefix, &model); err != nil &&
+			err != sql.ErrNoRows {
+			return nil, err
+		}
+		s.LastPrefix, s.Model = prefix.Int64, model.String
+	}
+	// The keep-alive halves, each from its own query. Same two-query pattern as the overview.
+	saved, err := d.sumBySession(cond, args, "r.keepalive_saved_usd", "r.keepalive_saved_usd > 0")
+	if err != nil {
+		return nil, err
+	}
+	kaCond, kaArgs := withKeepAlive(f).where()
+	spent, err := d.sumBySession(kaCond, kaArgs, "r.cost_usd", "r.keepalive = 1")
+	if err != nil {
+		return nil, err
+	}
+	pings, err := d.countBySession(kaCond, kaArgs, "r.keepalive = 1")
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range out {
+		s.SavedUSD, s.PingUSD, s.Pings = saved[s.SessionID], spent[s.SessionID], pings[s.SessionID]
+		s.NetUSD = s.SavedUSD - s.PingUSD
+	}
+	return out, nil
+}
+
+// countBySession counts rows per session under an extra predicate.
+func (d *DB) countBySession(cond string, args []any, extra string) (map[string]int64, error) {
+	rows, err := d.sql.Query(`SELECT r.session_id, COUNT(*) FROM requests r
+		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var s string
+		var n int64
+		if err := rows.Scan(&s, &n); err != nil {
+			return nil, err
+		}
+		out[s] = n
+	}
+	return out, rows.Err()
+}
+
+// CoverageSeconds is the window one idle span's pings keep a cache entry alive for.
+//
+// K*X + TTL, and the trailing TTL is LOAD-BEARING: the last ping is itself a cache READ, and a
+// read refreshes the entry for the provider's full lifetime. Writing K*X instead is the single
+// error that made an earlier analysis of this mechanism wrong by a factor of 4.4, so
+// TestCoverageIncludesTheFinalPingsTTL exists to fail if anyone reintroduces it.
+func CoverageSeconds(idleSeconds float64, maxPings int) float64 {
+	if idleSeconds <= 0 || maxPings <= 0 {
+		return 0
+	}
+	return float64(maxPings)*idleSeconds + ttlTTL.Seconds()
+}
+
+// PingsPerSpan is how many pings one idle span of `gap` seconds attracts under (X, K).
+//
+// The first ping fires at X, each subsequent one X after the last, and K caps the count. A gap
+// no wider than X attracts none.
+func PingsPerSpan(gap, idleSeconds float64, maxPings int) int {
+	if gap <= idleSeconds || idleSeconds <= 0 || maxPings <= 0 {
+		return 0
+	}
+	n := int(math.Floor((gap-idleSeconds)/idleSeconds)) + 1
+	if n > maxPings {
+		n = maxPings
+	}
+	return n
+}
+
+// CalcRow is one rung of the K ladder.
+type CalcRow struct {
+	MaxPings int     `json:"max_pings"`
+	Coverage float64 `json:"coverage_seconds"`
+	// Convertible is the account's OWN addressable expiries whose idle gap falls inside
+	// coverage — a replay of its history, not a forecast, which the panel states in words.
+	Convertible    int64   `json:"convertible_misses"`
+	ConvertibleUSD float64 `json:"convertible_usd"`
+	SharePct       float64 `json:"share_of_addressable_pct"`
+	Pings          int64   `json:"pings"`
+	PingUSD        float64 `json:"ping_usd"`
+	SavedUSD       float64 `json:"saved_usd"`
+	NetUSD         float64 `json:"net_usd"`
+	Current        bool    `json:"current,omitempty"`
+}
+
+// KeepAliveCalc is the calculator's whole answer.
+type KeepAliveCalc struct {
+	IdleSeconds float64 `json:"idle_seconds"`
+	Prefix      int64   `json:"prefix_tokens"`
+	Model       string  `json:"model"`
+	// Priced false means the model has no rate on the operator's list. Then EVERY dollar field
+	// is omitted and the panel says "not priced". It does NOT fall back to a blended average:
+	// that is the defect class this project has hit five times.
+	Priced bool `json:"priced"`
+	// PingUSDEach is the cost of one ping on this prefix: prefix at the cache-READ rate plus
+	// the single output token. AvoidedUSDEach is what one converted miss is worth: the
+	// avoidable WRITE PREMIUM, (cache_write - cache_read) x prefix — not the whole miss.
+	PingUSDEach    float64   `json:"ping_usd_each,omitempty"`
+	AvoidedUSDEach float64   `json:"avoided_usd_each,omitempty"`
+	Addressable    int64     `json:"addressable_misses"`
+	AddressableUSD float64   `json:"addressable_usd"`
+	Rows           []CalcRow `json:"rows"`
+	// PrefixSource says where the prefill came from, so nobody reads a number as measured when
+	// it was typed: "session", "account_median" or "given".
+	PrefixSource string `json:"prefix_source,omitempty"`
+	KeepAliveCoverage
+}
+
+// KeepAliveCalc replays the account's own gaps against the K ladder at one idle interval.
+//
+// Everything is priced from the ROW'S OWN MODEL rates, per the operator's price list. The one
+// number that is not the account's own is the prefix, which the caller supplies — because
+// per-ping cost is bimodal (p50 $0.0004, p99 $0.2275) and there is no honest average of it.
+func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model string,
+	price func(string) (modelinfo.Price, bool), currentPings int) (*KeepAliveCalc, error) {
+	if idleSeconds <= 0 {
+		idleSeconds = 280
+	}
+	out := &KeepAliveCalc{IdleSeconds: idleSeconds, Prefix: prefix, Model: model, Rows: []CalcRow{}}
+	var p modelinfo.Price
+	if price != nil && model != "" {
+		if pr, ok := price(model); ok && !pr.Zero() {
+			p, out.Priced = pr, true
+		}
+	}
+	// The account's own spans and its own addressable gaps, one read each.
+	aCond, aArgs := addressable(f)
+	var gaps []float64
+	var usd []float64
+	rows, err := d.sql.Query(aCond+` SELECT gap_s, cost_usd FROM addressable`, aArgs...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var g, u float64
+		if err := rows.Scan(&g, &u); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		gaps = append(gaps, g)
+		usd = append(usd, u)
+		out.Addressable++
+		out.AddressableUSD += u
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// EVERY idle span, not only the ones that expired: the ping cost is paid on all of them,
+	// and counting only the spans that paid off is how a calculator flatters its own feature.
+	var spans []float64
+	cond, args := f.where()
+	rows, err = d.sql.Query(`WITH s AS (
+		SELECT (r.ts - LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts))
+		         / 1000.0 AS gap_s
+		FROM requests r WHERE `+cond+`)
+		SELECT gap_s FROM s WHERE gap_s IS NOT NULL AND gap_s > 0`, args...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var g float64
+		if err := rows.Scan(&g); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		spans = append(spans, g)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if out.Priced {
+		out.PingUSDEach = float64(prefix)*p.CacheRead + p.Output
+		out.AvoidedUSDEach = float64(prefix) * (p.CacheWrite - p.CacheRead)
+	}
+	for k := 1; k <= 4; k++ {
+		row := CalcRow{MaxPings: k, Coverage: CoverageSeconds(idleSeconds, k),
+			Current: k == currentPings}
+		for i, g := range gaps {
+			if g > idleSeconds && g <= row.Coverage {
+				row.Convertible++
+				row.ConvertibleUSD += usd[i]
+			}
+		}
+		if out.AddressableUSD > 0 {
+			row.SharePct = 100 * row.ConvertibleUSD / out.AddressableUSD
+		}
+		for _, g := range spans {
+			row.Pings += int64(PingsPerSpan(g, idleSeconds, k))
+		}
+		if out.Priced {
+			row.PingUSD = float64(row.Pings) * out.PingUSDEach
+			row.SavedUSD = float64(row.Convertible) * out.AvoidedUSDEach
+			row.NetUSD = row.SavedUSD - row.PingUSD
+		}
+		out.Rows = append(out.Rows, row)
+	}
+	cov, err := d.keepAliveCoverage(f)
+	if err != nil {
+		return nil, err
+	}
+	out.KeepAliveCoverage = *cov
+	return out, nil
+}
+
+// AccountMedianPrefix is the account's own median billed prefix at a lapsed entry, which is what
+// the calculator prefills when no session is selected. 0 when it has no addressable expiry.
+func (d *DB) AccountMedianPrefix(f Filter) (int64, error) {
+	aCond, aArgs := addressable(f)
+	rows, err := d.sql.Query(aCond+` SELECT COALESCE(prev_prefix,0) FROM addressable`, aArgs...)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var xs []float64
+	for rows.Next() {
+		var v float64
+		if err := rows.Scan(&v); err != nil {
+			return 0, err
+		}
+		xs = append(xs, v)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return int64(pctlF(xs, 0.50)), nil
+}
+
+// LastBilledPrefix is one session's most recent billed prefix and model, from AGENT rows only.
+// The number a person is shown before authorizing an override on that session.
+func (d *DB) LastBilledPrefix(f Filter, session string) (int64, string, error) {
+	cond, args := f.where()
+	var prefix sql.NullInt64
+	var model sql.NullString
+	err := d.sql.QueryRow(`SELECT r.cache_read + r.cache_write, r.model FROM requests r
+		WHERE `+cond+` AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
+		append(append([]any(nil), args...), session)...).Scan(&prefix, &model)
+	if err == sql.ErrNoRows {
+		return 0, "", nil
+	}
+	return prefix.Int64, model.String, err
+}
+
+// The recommendation's admission rule. All three must hold, and condition 3 does the work.
+const (
+	// recMinMisses is the addressable-expiry floor. Below it a bootstrap over sessions has
+	// nothing to resample and its interval is an artefact.
+	recMinMisses = 20
+	// recMinRequests is the traffic floor.
+	recMinRequests = 200
+	// recBootstrapDraws and recBootstrapAlpha are the interval: 2,000 resamples over SESSIONS
+	// (not over requests — the unit of correlation is the session), 90% two-sided.
+	recBootstrapDraws = 2000
+	recBootstrapAlpha = 0.05
+	// recRecoverableShare is the documented share of an addressable miss's billed cost that is
+	// the avoidable WRITE PREMIUM. Measured at 78.4% on the production corpus. Used only here,
+	// where a per-row model rate is not available for every row of a resample.
+	recRecoverableShare = 0.784
+)
+
+// KeepAliveRecommendation is either a recommendation with its interval and its n, or a refusal
+// with the count that caused it. Never both, and there is no point estimate on the wire AT ALL.
+//
+// The missing field is deliberate and it is the whole design of this payload. Every account in
+// the production corpus has a 90% interval whose relative half-width is at least 62%, and 5 of
+// 12 cross zero — the account with 89 addressable expiries cannot pin its own figure closer
+// than [+$9, +$48]. A `point_estimate` field would be rendered as a number by somebody, some
+// day, so it does not exist.
+type KeepAliveRecommendation struct {
+	// Refused is the reason, when there is one. Its presence is the branch.
+	Refused string `json:"refused,omitempty"`
+	// IdleSeconds and MaxPings are the recommendation. K = 1 is NEVER returned: one ping
+	// reaches about 4.7 minutes, inside the free TTL, and it is -$71 service-wide.
+	IdleSeconds int `json:"idle_seconds,omitempty"`
+	MaxPings    int `json:"max_pings,omitempty"`
+	// LoUSD/HiUSD is the 90% interval over a window like this one. A RANGE, always, and the UI
+	// renders it as "$lo – $hi" and never as a hero figure.
+	LoUSD float64 `json:"lo_usd,omitempty"`
+	HiUSD float64 `json:"hi_usd,omitempty"`
+	// N is the addressable expiries the interval rests on and Sessions how many sessions they
+	// came from. Shown beside the range, because a range without its n is not honest either.
+	N        int64 `json:"n"`
+	Sessions int64 `json:"sessions"`
+	Requests int64 `json:"requests"`
+	// AltMaxPings is offered only where the account's own convertible count rises by more than
+	// its bootstrap's own noise between K=2 and K=3. On the production corpus that is nobody,
+	// and the panel says K=2 and K=3 are a measured tie.
+	AltMaxPings int `json:"alt_max_pings,omitempty"`
+	// ServiceLoUSD/ServiceHiUSD is the service-wide interval, for scale in a refusal.
+	ServiceLoUSD float64 `json:"service_lo_usd,omitempty"`
+	ServiceHiUSD float64 `json:"service_hi_usd,omitempty"`
+	KeepAliveCoverage
+}
+
+// The shipped policy, which is also what is recommended when the rule admits an account.
+const (
+	recIdleSeconds = 280
+	recMaxPings    = 2
+)
+
+// The service-wide interval, for scale inside a refusal. Measured by the adjudicated bootstrap
+// over 357 addressable misses across the 4.47-day production window; quoted, not recomputed,
+// because it is a property of that measurement and not of the caller's filter.
+const (
+	serviceLoUSD = 95.0
+	serviceHiUSD = 237.0
+)
+
+// KeepAliveRecommend answers "what should I set?" — or refuses.
+func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
+	out := &KeepAliveRecommendation{ServiceLoUSD: serviceLoUSD, ServiceHiUSD: serviceHiUSD}
+	cov, err := d.keepAliveCoverage(f)
+	if err != nil {
+		return nil, err
+	}
+	out.KeepAliveCoverage = *cov
+	out.Requests = cov.Requests
+
+	// The account's own addressable expiries, grouped by session — the resampling unit.
+	aCond, aArgs := addressable(f)
+	rows, err := d.sql.Query(aCond+`
+		SELECT session_id, gap_s, cost_usd FROM addressable`, aArgs...)
+	if err != nil {
+		return nil, err
+	}
+	type miss struct {
+		gap, usd float64
+	}
+	bySession := map[string][]miss{}
+	for rows.Next() {
+		var s string
+		var m miss
+		if err := rows.Scan(&s, &m.gap, &m.usd); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		bySession[s] = append(bySession[s], m)
+		out.N++
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out.Sessions = int64(len(bySession))
+
+	if out.N < recMinMisses {
+		out.Refused = fmt.Sprintf("you have %d cache expiries large enough to act on in this "+
+			"window; below %d we cannot tell a real saving from noise", out.N, recMinMisses)
+		return out, nil
+	}
+	if out.Requests < recMinRequests {
+		out.Refused = fmt.Sprintf("this window holds %d of your requests; below %d there is not "+
+			"enough history for an interval to mean anything", out.Requests, recMinRequests)
+		return out, nil
+	}
+
+	// The per-session ping cost of the SAME policy, so the resample scores a net and not a
+	// saving. Ping cost is derived from the account's own median back-derived input rate,
+	// applied to the prefix that lapsed — the same simplification the adjudicated per-account
+	// bootstrap used, and it measures the SPREAD rather than competing with the shipped
+	// replay's own figure.
+	pingUSD, err := d.medianPingUSD(f)
+	if err != nil {
+		return nil, err
+	}
+	spans, err := d.spansBySession(f)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(bySession))
+	for s := range bySession {
+		keys = append(keys, s)
+	}
+	sort.Strings(keys) // deterministic draw order for a given seed
+	net := func(s string, k int) float64 {
+		cover := CoverageSeconds(recIdleSeconds, k)
+		var v float64
+		for _, m := range bySession[s] {
+			if m.gap > recIdleSeconds && m.gap <= cover {
+				v += m.usd * recRecoverableShare
+			}
+		}
+		for _, g := range spans[s] {
+			v -= float64(PingsPerSpan(g, recIdleSeconds, k)) * pingUSD
+		}
+		return v
+	}
+	lo, hi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings) })
+	if lo <= 0 && hi >= 0 {
+		out.Refused = fmt.Sprintf("your own history cannot tell this apart from zero: over %d "+
+			"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, which includes "+
+			"no change at all", out.N, out.Sessions, lo, hi)
+		return out, nil
+	}
+	out.IdleSeconds, out.MaxPings = recIdleSeconds, recMaxPings
+	out.LoUSD, out.HiUSD = lo, hi
+	// K=3 is offered only where it beats K=2 by more than this account's OWN noise — its
+	// interval has to clear K=2's entirely. Anything weaker than that is the comparison this
+	// project has got wrong five times: two numbers whose intervals overlap are a tie, and on
+	// the production corpus K=2 and K=3 ARE a tie for every account. The panel says so.
+	if lo3, _ := bootstrapCI(keys, func(s string) float64 { return net(s, 3) }); lo3 > hi {
+		out.AltMaxPings = 3
+	}
+	return out, nil
+}
+
+// bootstrapCI resamples the units WITH REPLACEMENT and returns the 90% interval of the total.
+//
+// The unit is the SESSION, not the request: expiries inside one session are not independent
+// draws — they share a prefix, a working pattern and an agent — so resampling requests would
+// report an interval several times too narrow. That is the specific error this project has been
+// bitten by five times, at a smaller scale each time.
+//
+// Deterministic: a fixed seed, so the same window gives the same interval twice. An interval
+// that moves when the page is refreshed is one nobody can act on.
+func bootstrapCI(units []string, value func(string) float64) (lo, hi float64) {
+	n := len(units)
+	if n == 0 {
+		return 0, 0
+	}
+	vals := make([]float64, n)
+	for i, u := range units {
+		vals[i] = value(u)
+	}
+	rng := rand.New(rand.NewSource(1))
+	totals := make([]float64, recBootstrapDraws)
+	for d := 0; d < recBootstrapDraws; d++ {
+		var sum float64
+		for i := 0; i < n; i++ {
+			sum += vals[rng.Intn(n)]
+		}
+		totals[d] = sum
+	}
+	sort.Float64s(totals)
+	at := func(p float64) float64 {
+		i := int(float64(len(totals)-1) * p)
+		return totals[i]
+	}
+	return at(recBootstrapAlpha), at(1 - recBootstrapAlpha)
+}
+
+// medianPingUSD is the account's own median cost of one ping on the prefix that lapses,
+// back-derived from what its requests actually paid. Used only by the bootstrap, which needs a
+// per-session cost and cannot carry a per-row model rate through a resample.
+func (d *DB) medianPingUSD(f Filter) (float64, error) {
+	aCond, aArgs := addressable(f)
+	// cost_usd on an addressable miss is dominated by the re-creation of prev_prefix at 1.25x
+	// base input, so cost/prefix/1.25 recovers the base rate and 0.1x of it is the read.
+	rows, err := d.sql.Query(aCond+`
+		SELECT cost_usd, COALESCE(prev_prefix,0) FROM addressable WHERE prev_prefix > 0`, aArgs...)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var xs []float64
+	for rows.Next() {
+		var usd, prefix float64
+		if err := rows.Scan(&usd, &prefix); err != nil {
+			return 0, err
+		}
+		if prefix > 0 && usd > 0 {
+			xs = append(xs, usd/1.25*0.1)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return pctlF(xs, 0.50), nil
+}
+
+// spansBySession is every idle span per session, for the ping-cost half of a replay.
+func (d *DB) spansBySession(f Filter) (map[string][]float64, error) {
+	cond, args := f.where()
+	rows, err := d.sql.Query(`WITH s AS (
+		SELECT r.session_id,
+		       (r.ts - LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts))
+		         / 1000.0 AS gap_s
+		FROM requests r WHERE `+cond+`)
+		SELECT session_id, gap_s FROM s WHERE gap_s IS NOT NULL AND gap_s > 0`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]float64{}
+	for rows.Next() {
+		var s string
+		var g float64
+		if err := rows.Scan(&s, &g); err != nil {
+			return nil, err
+		}
+		out[s] = append(out[s], g)
+	}
+	return out, rows.Err()
+}

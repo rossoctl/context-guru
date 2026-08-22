@@ -164,8 +164,11 @@ type Overview struct {
 	SplitTailMoved     int64 `json:"split_tail_moved"`
 	SplitCredited      int64 `json:"split_credited"`
 	SplitCreditedMoved int64 `json:"split_credited_moved"`
-	// TotalSavedUSD is our two savings together: compaction's, less our own spend, plus
-	// the prefix components'. Both are ours and the token sets are disjoint.
+	// TotalSavedUSD is our three savings together: compaction's, less our own spend; the
+	// prefix components'; and the keep-alive's NET, which is its saving minus what its pings
+	// cost. All three are ours and the token sets are disjoint. The keep-alive contributes its
+	// net rather than its gross because the ping spend is excluded from CostUSD — a ping is not
+	// agent traffic — so it has nowhere else in this walk to appear.
 	TotalSavedUSD float64 `json:"total_saved_usd"`
 	// PrefixChangeCost is a DIAGNOSTIC, not a cost subtracted from net.
 	//
@@ -499,13 +502,26 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	if o.ReplayTokens = o.SavedGross - o.SavedUnique; o.ReplayTokens < 0 {
 		o.ReplayTokens = 0
 	}
-	// The ceiling on that replay: every unique reduction times the number of later turns in
-	// its own session. A correlated count off the (session_id, ts) index, ~80 ms over 14k
-	// requests, and only over rows that removed something. Not filtered by the window's
-	// component clause any differently from the rest of this function — same predicate, so
-	// the numerator and the ceiling always describe the same rows.
+	// The ceiling on that replay: every unique reduction times the number of later AGENT turns
+	// in its own session. A correlated count off the (session_id, ts) index, ~80 ms over 14k
+	// requests, and only over rows that removed something.
+	//
+	// `p.keepalive = 0` is load-bearing and was missing: the inner count had NO predicate at
+	// all, so a keep-alive ping counted as a later turn that could replay the reduction. It
+	// cannot — a ping is a verbatim resend of a prefix the agent already sent, it carries no
+	// new transcript, and PR #86's whole invariant is that a ping is not a turn. On a fixture
+	// with three pings this inflated the ceiling from 30 to 70 tokens and dragged
+	// replay_realized_pct down with it, which reads as compaction realising less of its value
+	// than it does. Found by TestPingRowsStayOutOfAgentAggregates, which compares the whole
+	// Overview key by key rather than the aggregates somebody thought of.
+	//
+	// The inner count is still not scoped to the window or the tenant. That is a separate
+	// (much smaller) inconsistency with the comment this one used to make: session ids are
+	// `tenant:uuid` so a cross-tenant collision is not reachable, and the ceiling is
+	// deliberately about the session's whole life rather than the filtered slice of it.
 	if err := d.sql.QueryRow(`SELECT COALESCE(SUM(r.saved_unique * (
 			SELECT COUNT(*) FROM requests p WHERE p.session_id = r.session_id
+			  AND p.keepalive = 0
 			  AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id)))),0)
 		FROM requests r WHERE `+cond+` AND r.saved_unique > 0`, args...).Scan(&o.ReplayProjectedTokens); err != nil {
 		return nil, err
@@ -588,7 +604,12 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// (they are excluded from the agent-traffic aggregate), so the two halves are only
 	// comparable here.
 	o.KeepAliveNetUSD = o.KeepAliveSavedUSD - o.KeepAlivePingUSD
-	o.TotalSavedUSD = o.NetSavedUSD + o.CachesplitSavedUSD
+	// THE NET, never the gross. o.CostUSD excludes ping rows, so the pings' own spend appears
+	// nowhere else in this walk — adding KeepAliveSavedUSD here would present a saving without
+	// the spend that bought it, which is the exact dishonesty the ledger exists to prevent. The
+	// three addends are disjoint token sets: compaction's removals, the prefix split's stable
+	// half, and the entries the pings refreshed.
+	o.TotalSavedUSD = o.NetSavedUSD + o.CachesplitSavedUSD + o.KeepAliveNetUSD
 
 	for name, col := range map[string]string{
 		"accounting": "token_accounting", "cache_miss": "cache_miss_reason", "uncompressed": "uncompressed_reason",
@@ -760,8 +781,15 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"that is: the provider's cache is keyed on content, so another session sending the " +
 				"same prefix would have refreshed it for nothing."},
 		{Key: "total_saved", Label: "Total cost avoided", DeltaUSD: o.TotalSavedUSD, Total: true,
-			Description: "Net compaction savings plus prefix-cache savings. Two disjoint token " +
-				"sets, both ours, so nothing is counted twice. It is not the cost of a fully " +
+			Description: "Net compaction savings, plus prefix-cache savings, plus the idle " +
+				"keep-alive's NET — its savings minus what its pings cost. Three disjoint token " +
+				"sets, all ours, so nothing is counted twice: compaction's removals never reached " +
+				"the provider, the split moved a breakpoint over tokens that did, and the " +
+				"keep-alive refreshed entries that already existed. The keep-alive enters as a net " +
+				"because the pings' own spend is not in the billed-cost line above — ping rows are " +
+				"excluded from agent traffic — so this is the only place both halves are " +
+				"comparable, and its saving half is a CEILING (see Keep-alive savings). It is not " +
+				"the cost of a fully " +
 				"uncached world: the provider's own cache saved far more than this on the same " +
 				"traffic (cache_saved_usd, reported by the API as a diagnostic), and none of that " +
 				"is credited here."},

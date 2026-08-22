@@ -603,8 +603,14 @@ func TestSwitchingAComponentOffClearsItsDeclaredKeysAndNothingElse(t *testing.T)
 			if err != nil {
 				t.Fatalf("configuring every key at once failed: %v", err)
 			}
-			// Now switch it off: out of the pipeline, values still posted.
+			// Now switch it off: out of the pipeline, values still posted. The removal is
+			// DECLARED — PipelineKnown is what the client says it modelled, and a save may
+			// only remove what it claims to have drawn a control for (see
+			// preserveUnmodelled). This caller read the whole document, so it claims all of
+			// it; a client that claims nothing removes nothing, which is the case
+			// TestASaveFromAClientThatDeclaresNothingRemovesNothing covers.
 			off := mustParse(t, configured)
+			off.PipelineKnown = append([]string(nil), off.Pipeline...)
 			off.Pipeline = remove(off.Pipeline, name)
 			if name == "extract_llm" {
 				// The one component with a coupling: it is switched off by its two
@@ -672,8 +678,18 @@ func TestTheColdCacheKeysSurviveASaveThatDoesNotMentionThem(t *testing.T) {
 			t.Errorf("a plain re-save lost %q:\n%s", want, out)
 		}
 	}
-	if paths := changedPaths(t, osherDoc, out); len(paths) != 0 {
-		t.Errorf("re-saving an unchanged form moved %v", paths)
+	// The `cache:` block is the one thing a re-save MATERIALISES, and that is the point of
+	// Bug 1's fix: the two consent booleans are written explicitly, so an absent block stops
+	// being indistinguishable from a stored `false`. Before the fix they were written into a
+	// detached map and thrown away, which is how a first-time keep-alive opt-in was lost.
+	// Nothing else may move, and no tuning field may appear — writing zeroes for those would
+	// freeze today's defaults into the document (R3).
+	for _, path := range changedPaths(t, osherDoc, out) {
+		switch path {
+		case "cache.keepalive", "cache.head_ttl_1h":
+		default:
+			t.Errorf("re-saving an unchanged form moved %s", path)
+		}
 	}
 }
 
