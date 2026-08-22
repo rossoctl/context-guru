@@ -62,23 +62,41 @@ need_root() {
 # successfully for weeks. A preflight that cries wolf gets ignored, so resolve the tool
 # against the PATH the unit will actually run with. Falling back to our own PATH keeps
 # the old behaviour if systemd cannot be asked.
-# The key_env variables the allow-list CONFIGURES. Comments are stripped first, and not
-# only whole-comment lines: the shipped upstreams.yaml DOCUMENTS the feature with
-# `key_env: SOME_VAR` in a paragraph of prose, and reading that as configuration made
-# preflight demand a credential for a variable nobody had configured — on every host,
-# since the comment ships with the file. sed rather than grep -o so an allow-list that
-# names none (the normal case, caller-pays) is not a pipeline failure.
+# The key_env variables the allow-list CONFIGURES. A MISSED name is the dangerous
+# direction: the loader refuses to boot on a named variable that is unset, so preflight
+# would print PASSED and the service would then fail to start on the very credential this
+# checks — under Restart=always, as a crash loop. An invented name only costs a false ✗.
+# So every stage here exists to miss fewer names, and each was checked by diffing this
+# extraction against what config.LoadUpstreams actually demands.
 #
-# [^A-Z0-9_]* rather than [[:space:]]*, so a QUOTED value is read too. `key_env: "X"` and
-# `key_env: 'X'` are both legal YAML for a plain string field, and the loader refuses to
-# boot when a named variable is unset — so skipping the quoted form made preflight print
-# PASSED and the service then fail to start on the very credential this checks. A false
-# PASS in a credential check is worse than the false FAIL above it. The name is assumed
-# UPPERCASE, as every UPSTREAM_*_KEY is and as the credential-file mapping below already
-# assumes; a lowercase one extracts noise and FAILS rather than passing in silence, which
-# is the safe direction to be wrong in.
+# Comments go first, and not only whole-comment lines: the shipped upstreams.yaml
+# DOCUMENTS the feature with `key_env: SOME_VAR` in a paragraph of prose, and reading that
+# as configuration made preflight demand a credential nobody had configured — on every
+# host, since the comment ships with the file. `(^|[[:space:]])#` is what YAML calls a
+# comment, so a `#` inside a quoted scalar earlier on the line (a base_url with a
+# fragment) no longer erases the real key_env after it. Stripping before the tr matters:
+# a comma inside a comment would otherwise resurrect its tail.
+#
+# tr then puts each flow-mapped entry on its own line, because the substitution takes one
+# name per LINE: `upstreams: [{…, key_env: A}, {…, key_env: B}]` yielded only B without
+# it. The comma is what does the work, flow entries being comma-separated; the braces are
+# belt-and-braces and no input the loader accepts needs them.
+#
+# [^A-Z0-9_]* around the colon rather than [[:space:]]*, so a quoted VALUE and a quoted
+# KEY are both read — `key_env: "X"`, `key_env: 'X'` and `"key_env": X` are all legal YAML
+# for a plain string field. sed rather than grep -o so an allow-list that names none (the
+# normal case, caller-pays) is not a pipeline failure.
+#
+# Two shapes are knowingly unhandled, both of which miss rather than invent:
+#   - a block scalar, `key_env: >-` with the name on the next line. Silent. Closing it
+#     needs a real YAML parser, and nobody folds an environment variable name.
+#   - a lowercase or mixed-case name, since the credential mapping below assumes UPPERCASE
+#     as every UPSTREAM_*_KEY is. At least loud: it extracts noise (`_`), which matches no
+#     credential file and prints ✗.
+# If either ever has to be closed, use a parser. A fifth sed stage is not the answer.
 configured_key_envs() {
-  sed -nE 's/#.*//; s/.*key_env:[^A-Z0-9_]*([A-Z0-9_]+).*/\1/p' "$1" 2>/dev/null | sort -u
+  sed -E 's/(^|[[:space:]])#.*//' "$1" 2>/dev/null | tr ',{}' '\n\n\n' \
+    | sed -nE 's/.*key_env[^:A-Z0-9_]*:[^A-Z0-9_]*([A-Z0-9_]+).*/\1/p' | sort -u
 }
 
 in_service_path() {
