@@ -54,6 +54,15 @@ capability, and a table of rig traps that each produced a valid-looking wrong nu
 - **Pre-register the reading.** For anything with arms, commit the design *and* how each outcome will
   be interpreted **before** the numbers exist (`loca/iter004`, `loca/iter006`). Cheap insurance, and
   it is what stopped a +1-task difference at n=12 being written up as an improvement.
+- **A green test suite only covers the dialect its fixtures use.** Every unit test passed while 37% of
+  live Anthropic runs failed, because the fixtures hand-build messages in the OpenAI shape
+  (`ToolCalls` populated) and the wire dialect carries tool calls as `tool_use` content blocks that
+  bifrost cannot represent at all (`loca/iter011`). Assert on wire bodies in the dialect that actually
+  runs, not on the internal representation.
+- **Ask "would this check have failed?", not "did it come back clean?"** Two checks in one night could
+  not have detected what they were written for: a baseline-reuse validation that compared data to
+  itself (`loca/iter012`), and a fix verification that reported zero failures while the component under
+  test never fired (`loca/iter011`).
 - **Quote unique savings, never `savings_pct`, for anything non-deterministic.** The same removed
   content is re-credited on every turn that replays a frozen rewrite, inflating `coref` by 4–8× and
   `extract_llm` by 2.8× while `format` (deterministic, in place) stays at exactly 1× (`loca/iter012`).

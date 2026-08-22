@@ -17,11 +17,8 @@ The pre-registration named this exact case: *"`summarize` errors or emits invali
 iteration-005 failure recurred; fix, do not interpret."* So arms 2 and 3 were stopped rather than run
 at a 37% failure rate, saving roughly $180.
 
-**This is a fourth message-shape defect in `summarize`**, after the three fixed in
-[iteration 005](../iter005/results.md) (`80e95d5`, `0971a32`, `2d6902d`). It survived a dedicated
-schema validator (`schema.ValidateShape`, rules `system-position` / `answered-tool-use` /
-`paired-tool-result`) and a test asserting all 11 presets emit shape-valid requests — so the validator
-has a gap, or the test's fixtures do not reach the shape that breaks.
+~~**This is a fourth message-shape defect in `summarize`.**~~ **WRONG ATTRIBUTION — see the root cause
+below. `summarize` is not at fault**; the defect is in `apply`, and it is one cause with two faces.
 
 ## Two things the aborted arm did establish
 
@@ -72,3 +69,56 @@ kilobytes and are mostly irrelevant.
   component's shape handling.
 - Next: read the captured digest, fix the defect, extend `ValidateShape` and its test to cover the
   shape that escaped, rebuild, then re-run all three arms.
+
+## ROOT CAUSE (found, fixed, `62126f4`): bifrost cannot represent an Anthropic tool call
+
+Found by instrumenting the rebuild rather than reading it, after three rounds of source-reading failed
+to converge.
+
+**`bschemas.ChatContentBlock` has no `tool_use` type.** Its enum is `text` / `image_url` /
+`input_audio` / `file` / `refusal`. An Anthropic assistant turn carries its calls as `tool_use`
+**content blocks**, so after unmarshaling, the ids are simply *absent*. Everything that reasons about
+tool pairing saw an assistant message with **zero calls** on every Anthropic request.
+
+One cause, two defects:
+
+| defect | consequence |
+|---|---|
+| `dropOrphanedToolResults` builds its answerable set from `ToolCalls` alone | that set was **always empty** on Anthropic traffic, so **every** `tool_result` looked orphaned and the "repair" **deleted all of them**. The provider then rejected the request for the unanswered calls left behind. |
+| `schema.ValidateShape` was blind to the same ids | it could not see the breakage — which is why a test asserting **all 11 presets** emit shape-valid requests stayed green while 37% of live runs failed |
+
+The instrumented rebuild made it plain — `summarize`'s output contained **no tool messages at all**:
+
+```
+out[0] user      bi=0   EMIT     (head)
+out[1] user      NO-MATCH        (the summary)
+out[2] assistant bi=1   EMIT     ← declares pa_a, pb_a
+out[3] user      bi=17  EMIT     ("final question")
+```
+
+**Why every unit test passed while live traffic failed 28/75:** the offload tests hand-build
+`ChatMessage`s with `ToolCalls` populated — the *OpenAI*-shaped representation — so they never
+exercised the Anthropic path. The validator I had built to prevent exactly this class of bug was
+validating a dialect the rig does not use.
+
+**Fix:** `normalize` recovers the ids where the dialect is still known, rather than teaching every
+consumer about Anthropic. It deliberately marks such messages non-lossless — honest, since bifrost
+genuinely cannot round-trip them — which only makes the write-back guard more conservative. Full suite:
+24 packages, 0 failures.
+
+Also fixed on the way (`2ec2445`): `ValidateShape` rejected every ordinary **parallel** exchange,
+because it inspected only `msgs[i+1]` while bifrost splits one Anthropic results message into a run of
+`tool` messages. It emitted the *same error text* as the real defect, making it useless precisely where
+it was needed.
+
+## A verification that proved nothing, caught before it was believed
+
+The first live check of the fix reported **`captured failures: 0`** and looked like a clean pass. It
+was not: the same output showed `llm_calls=0` and no `[summarize]` line — **`summarize` never fired**,
+so zero failures said nothing about the fixed path. Trajectory length varies, and the earlier
+reproduction had happened to fire it twice.
+
+Re-verified with a diagnostic-only trigger (`min_request_tokens: 5000` instead of 30000) so the
+component is forced to act. **This is the same failure as iteration 012's vacuous baseline-reuse
+check**: a check that cannot fail is not evidence, and both were written by the same reasoning — asking
+"did the run come back clean?" instead of "would this have detected the problem?"
