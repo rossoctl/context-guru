@@ -127,12 +127,50 @@ func TestRewordedResultIsLeftAlone(t *testing.T) {
 // Markers are ours, not content, so a heavily marked reduction must still pass the
 // derivation check rather than reading as fabricated.
 func TestMarkedReductionPassesTheDerivationCheck(t *testing.T) {
-	body := strings.Repeat("alpha\nbravo\ncharlie\ndelta\n", 40)
-	marked := markElisions("alpha\ndelta", body)
+	// Keeps every fourth line, so the result clears the keep-ratio floor and the ONLY thing
+	// that could refuse it is the derivation check — which is what this pins.
+	lines := strings.Split(strings.TrimRight(strings.Repeat("alpha\nbravo\ncharlie\ndelta\n", 40), "\n"), "\n")
+	var kept []string
+	for i := 0; i < len(lines); i += 4 {
+		kept = append(kept, lines[i])
+	}
+	body := strings.Join(lines, "\n")
+	marked := markElisions(strings.Join(kept, "\n"), body)
+	if !strings.Contains(marked, "elided") {
+		t.Fatal("the fixture must actually be marked for this to test anything")
+	}
 	cfg := DefaultCfg()
 	cfg.Rewrite = true
 	if ok, why := validateExtraction(marked, body, nil, cfg); !ok {
 		t.Fatalf("a marked reduction must pass validation: %s\n%s", why, marked)
+	}
+}
+
+// A result made only of elision markers is vacuously "derived from" anything — stripping the
+// markers leaves an empty string and derivationRatio returns a perfect 1.0 for it. FOUND LIVE on
+// a cold sweep: a 7,414-token Go source file came back as the 23 characters
+// `# … 463 lines elided …`, the whole file gone, and it passed every acceptance check. The blunt
+// keep-ratio backstop existed for exactly this and was dead because DefaultCfg never set it.
+func TestATotalLossIsRefusedEvenWhenItIsHonestlyMarked(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 280; i++ {
+		fmt.Fprintf(&b, "\t%d\tfunc helper%d() error { return nil }\n", i+1, i)
+	}
+	body := b.String()
+	cfg := DefaultCfg()
+	cfg.Rewrite = true
+	if cfg.MinKeepRatio <= 0 {
+		t.Fatal("DefaultCfg must arm the keep-ratio backstop; it was dead for every caller")
+	}
+	if ok, why := validateExtraction("	# … 463 lines elided …", body, nil, cfg); ok {
+		t.Fatal("a marker-only result must be refused")
+	} else if !strings.Contains(why, "keep-ratio") {
+		t.Fatalf("want the keep-ratio refusal, got %q", why)
+	}
+	// The derivation check on its own does NOT catch it — that is why the backstop is needed.
+	if r := derivationRatio("	# … 463 lines elided …", body); r < 1 {
+		t.Fatalf("derivationRatio should score a marker-only result 1.0 (got %.2f); if this "+
+			"changes, re-check whether the keep-ratio floor is still the thing catching it", r)
 	}
 }
 

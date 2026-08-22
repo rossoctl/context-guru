@@ -63,9 +63,12 @@ func completeSplit(ctx context.Context, model Model, system []string, user strin
 
 // Cfg configures extraction.
 type Cfg struct {
-	Mode               string  // auto | single | rlm | deterministic
-	Floor              int     // token floor; rlm kicks in at max(floor*4, 8000) in auto
-	MinKeepRatio       float64 // 0 disables the blunt ratio backstop (keep-set check governs)
+	Mode  string // auto | single | rlm | deterministic
+	Floor int    // token floor; rlm kicks in at max(floor*4, 8000) in auto
+	// MinKeepRatio is the fraction of the body the result must still contain. 0 disables the
+	// blunt ratio backstop and leaves only the keep-set check, which is not enough on its own:
+	// see minKeepRatioFloor for the live failure that proved it.
+	MinKeepRatio       float64
 	AllowDeterministic bool
 	MaxChars           int // deterministic projection window
 	// AllowedStrategies, when non-empty, restricts strategyOrder to these strategy names
@@ -92,9 +95,29 @@ type Cfg struct {
 	Aggressiveness Aggressiveness
 }
 
+// minKeepRatioFloor is the fraction of a body an extraction must still contain to be an
+// extraction rather than a deletion.
+//
+// The keep-ratio backstop existed and was DEAD: DefaultCfg never set MinKeepRatio, so
+// insanityReason's check was unreachable for every caller. FOUND LIVE on a cold sweep through
+// the proxy, and it is the worst failure in the corpus: a 7,414-token Go source file came back as
+// the 23 characters `# … 463 lines elided …` — the entire file gone — and it passed every check.
+// Not empty, not degenerate, no keep-id dropped (the keep-list is small by design), and the
+// derivation check EXCLUDES elision markers, so stripping them left an empty string and the
+// function returned a perfect 1.0 for it. A result made only of markers is vacuously derived from
+// anything.
+//
+// 0.05 is calibrated on the production distribution rather than picked: over 62 accepted calls the
+// reduction ratio histogram has ZERO entries above 75% removed, and the single largest removal in
+// the corpus kept 9.5%. So a 5%-of-tokens floor rejects nothing that has ever legitimately
+// happened and catches total loss. Raise it only with a measurement showing real reductions being
+// refused; lower it only if a workload of genuinely uniform lists is shown to need it.
+const minKeepRatioFloor = 0.05
+
 // DefaultCfg mirrors the reference prototype's ExtractCfg defaults.
 func DefaultCfg() Cfg {
-	return Cfg{Mode: "auto", Floor: 3000, AllowDeterministic: true, MaxChars: sampleChars}
+	return Cfg{Mode: "auto", Floor: 3000, AllowDeterministic: true, MaxChars: sampleChars,
+		MinKeepRatio: minKeepRatioFloor}
 }
 
 var wsRe = regexp.MustCompile(`\s+`)
