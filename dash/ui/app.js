@@ -7429,7 +7429,12 @@ Object.assign(loaders, { feedback: loadFeedback });
 // to an entity and never to a rank.
 
 /** kaState holds the tab's loaded payloads, so a control redraw need not refetch. */
-const kaState = { ledger: null, behaviour: null, sessions: [], calc: null, armed: [], x: 280, k: 2 };
+const kaState = { ledger: null, behaviour: null, sessions: [], calc: null, armed: [], x: 280, k: 2,
+  // canArm is false on a single-tenant deployment, which mounts no control plane at all — so
+  // there is nothing to POST an arm to. Drawing the button anyway would put an affordance on the
+  // page whose only possible outcome is a 404, which is the same defect as a removal command
+  // rendered in the one place nobody should act on.
+  canArm: true };
 
 /** kaMuted is the de-emphasis gray for "outside the current coverage". Not a fifth series. */
 const KA_MUTED = 'var(--s-mute)';
@@ -7580,7 +7585,13 @@ async function loadKASessions() {
     tableMessage(body, 11, 'Could not read your sessions', e.message, { error: true });
     return;
   }
-  clear(body);
+  renderKASessions();
+}
+
+/** renderKASessions draws the concentration table. Separate from the fetch so it can be redrawn
+ *  once the control plane's absence is known, without the arm buttons. */
+function renderKASessions() {
+  const body = clear($('#ka-sessions-body'));
   const wide = wideScope();
   showScopeCol('[data-testid="ka-sessions-table"]', wide);
   if (!kaState.sessions.length) {
@@ -7605,10 +7616,12 @@ async function loadKASessions() {
       // 0 here means the last request reported no usage at all, which is an absence rather than
       // a prompt of no size — and it is also the reason such a session cannot be priced.
       el('td', { class: 'num' }, s.last_prefix > 0 ? compact(s.last_prefix) : '—'),
-      el('td', {}, el('button', {
-        class: 'ghost small', 'data-testid': 'ka-arm-' + s.session_id,
-        onclick: () => armSession(s),
-      }, 'Keep warm'))));
+      el('td', {}, kaState.canArm
+        ? el('button', {
+          class: 'ghost small', 'data-testid': 'ka-arm-' + s.session_id,
+          onclick: () => armSession(s),
+        }, 'Keep warm')
+        : null)));
   }
   // The concentration, and the fact that it does not transfer. Both, in one sentence: a table
   // sorted by cost invites exactly the inference the split-half test refutes.
@@ -7671,8 +7684,16 @@ async function loadKAArmed() {
   try {
     out = await ctl('/api/me/keepalive/sessions');
   } catch (e) {
-    // A single-tenant deployment has no control plane at all; that is not an error to show.
-    if (e.status === 404) { host.hidden = true; return; }
+    // A single-tenant deployment has no control plane at all; that is not an error to show — but
+    // it does mean the arm buttons in the table above cannot work, so the whole panel goes and
+    // the table is redrawn without them.
+    if (e.status === 404) {
+      kaState.canArm = false;
+      $('#view-keepalive').querySelectorAll('[data-ka-arm-panel]').forEach((n) => { n.hidden = true; });
+      host.hidden = true;
+      if (kaState.sessions.length) renderKASessions();
+      return;
+    }
     errorState(host, 'Could not read what is armed', e);
     return;
   }
