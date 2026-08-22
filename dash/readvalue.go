@@ -152,6 +152,9 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 	for _, c := range out {
 		by[c.Component] = c
 	}
+	// Rows scanned per component, and how many of them had unique differing from gross. This is
+	// what decides whether `unique` is a dedup measurement at all — see the flag below.
+	seen, differ := map[string]int64{}, map[string]int64{}
 	cond, args := f.where()
 	// Same clamps and the same three tier cases as EstimateComponentSavedUSD and
 	// Event.repeatRate, deliberately duplicated as constants rather than shared through a
@@ -166,7 +169,8 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
 		     ELSE 'fresh' END,
 		CASE WHEN c.saved_usd <> 0 THEN 1 ELSE 0 END,
-		COALESCE(SUM(`+uniq+`),0), COALESCE(SUM(`+gross+` - `+uniq+`),0)
+		COALESCE(SUM(`+uniq+`),0), COALESCE(SUM(`+gross+` - `+uniq+`),0),
+		COUNT(*), SUM(CASE WHEN c.saved_gross <> c.saved_unique THEN 1 ELSE 0 END)
 		FROM request_components c JOIN requests r ON r.id = c.request_id
 		WHERE `+cond+` AND c.saved_gross > 0 AND r.token_accounting = 'complete'
 		GROUP BY 1, 2, 3, 4`, args...)
@@ -177,10 +181,13 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 	for rows.Next() {
 		var name, model, tier string
 		var storedRow int
-		var unique, replay int64
-		if err := rows.Scan(&name, &model, &tier, &storedRow, &unique, &replay); err != nil {
+		var unique, replay, nRows, nDiff int64
+		if err := rows.Scan(&name, &model, &tier, &storedRow, &unique, &replay,
+			&nRows, &nDiff); err != nil {
 			return err
 		}
+		seen[name] += nRows
+		differ[name] += nDiff
 		c, ok := by[name]
 		if !ok {
 			continue
@@ -224,11 +231,23 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 		// Whether this component's `unique` is a DEDUP MEASUREMENT at all.
 		//
 		// Recorder.MarkUnique dedups on the content keys a component reports, and returns the
-		// full saving unchanged when there are none (dash/capture.go). Only Offload components
-		// ever set a key — the pipeline assigns CacheKeys solely on the Offload branch
-		// (components/pipeline.go) — so for a REFORMAT component saved_unique is identically
-		// saved_gross on every turn, by construction and not by measurement. Verified on the
-		// snapshot: 0 of 3,783 reformat rows differ, against 7,884 of 8,063 offload rows.
+		// full saving unchanged when there are none (dash/capture.go). A component that reports
+		// no key therefore has saved_unique identically equal to saved_gross on every turn, by
+		// construction and not by measurement. Measured on the snapshot: 0 of 3,783 reformatter
+		// rows differ, against 7,884 of 8,063 offload rows.
+		//
+		// DERIVED FROM THE ROWS, not from the component's kind. Keying it off
+		// `Kind == "reformat"` was the same answer today and the wrong answer soon: the
+		// reformatters are getting content-derived keys, and a kind-based flag could never
+		// clear — it would go on printing "NOT a deduplicated figure" over figures that had
+		// become real measurements, which is this dashboard's own worst failure mode, activated
+		// by somebody else's merge. Counting rows self-corrects: a window whose rows dedup is
+		// not flagged, a window of pre-fix rows still is, and neither depends on which
+		// components happen to set keys.
+		//
+		// The row floor is because a component with two rows that happen to agree is not
+		// evidence of anything. Below it the flag stays off: claiming a measurement is fake is
+		// the more damaging error of the two.
 		//
 		// That matters because this function prices `unique` at the CACHE-WRITE rate, 12.5x a
 		// read. For a reformatter that puts its entire saving in the expensive tier and reports
@@ -241,7 +260,8 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 		// certainly" is not a measurement either, and silently moving the money on an inference
 		// would be the same mistake in the other direction. The reformatters need a
 		// content-derived key; until they have one the honest report is "we cannot say".
-		c.UniqueUnkeyed = c.Kind == "reformat"
+		const minRowsToJudge = 20
+		c.UniqueUnkeyed = seen[c.Component] >= minRowsToJudge && differ[c.Component] == 0
 	}
 	return nil
 }

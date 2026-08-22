@@ -707,12 +707,19 @@ function renderRemovalValue(host, rep) {
       el('span', {}, 'Measured from this account\'s own history, not assumed. It is the '
         + 'request-weighted average — how many turns the session that a TYPICAL REQUEST '
         + 'belongs to runs for.'),
-      el('span', {}, 'The plain average session here is '
-        + (rep.totals.requests_per_session || 0).toFixed(1) + ' requests and the median is '
-        + num(rep.totals.requests_per_session_median) + ', because most sessions are '
-        + 'one-request sidechains — a title generation, a single tool call. Projecting a '
-        + 'per-session cost from either of those would understate it by about 40×, so the '
-        + 'weighted figure is the one used here and this panel says so.'))));
+      el('span', {}, 'The MEDIAN session over the same ' + num(rep.coverage.captured)
+        + ' sessions is only ' + num(rep.totals.requests_per_session_median)
+        + ' request' + (rep.totals.requests_per_session_median === 1 ? '' : 's')
+        + ', because most sessions are one-request sidechains — a title generation, a single '
+        + 'tool call. Projecting a per-session cost from the median would understate it by more '
+        + 'than an order of magnitude, so the weighted figure is the one used here.'),
+      // n, on the figure a dollar projection rests on. This project has concluded a difference
+      // from too few samples more than once; a basis panel is the place to stop doing that.
+      el('span', {}, 'Both figures are over the ' + num(rep.coverage.captured) + ' session'
+        + (rep.coverage.captured === 1 ? '' : 's') + ' whose inventory was captured'
+        + (rep.coverage.captured < 20
+          ? ' — a small sample, so treat the per-session column below as indicative rather '
+            + 'than measured.' : '.')))));
 
   const table = el('table', { class: 'tbl' },
     el('thead', {}, el('tr', {},

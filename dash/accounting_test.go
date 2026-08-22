@@ -656,14 +656,15 @@ func TestUnkeyedComponentsAreFlaggedNotRepriced(t *testing.T) {
 	db := openTestDB(t)
 	// Two components on the same warm turns: one Offload (keyed), one Reformat (keyless, so its
 	// unique equals its gross exactly as MarkUnique would leave it).
-	for i := 0; i < 3; i++ {
+	// 25 turns: above the row floor the flag needs before it will judge at all.
+	for i := 0; i < 25; i++ {
 		insertReq(t, db, &Event{
 			TS: int64(1000 + i), SessionID: "s1", Model: "m1", TenantID: "t1",
 			TokensBefore: 10000, TokensAfter: 8000,
 			FreshInput: 10, CacheRead: 50000, TokenAccounting: AccountingComplete,
 			Components: []CompRow{
 				{Component: "extract", Kind: "offload", Acted: true, Mutated: true,
-					SavedGross: 1000, SavedUnique: map[int]int{0: 1000}[i]},
+					SavedGross: 1000, SavedUnique: map[bool]int{true: 1000, false: 0}[i == 0]},
 				{Component: "textclean", Kind: "reformat", Acted: true, Mutated: true,
 					SavedGross: 1000, SavedUnique: 1000},
 			},
@@ -693,12 +694,12 @@ func TestUnkeyedComponentsAreFlaggedNotRepriced(t *testing.T) {
 	}
 	// Not repriced: the flagged component's whole saving is still at the write rate, exactly as
 	// the stored figures say. Flagging is a disclosure, not an adjustment.
-	nearEq(t, "keyless first removal", kl.SavedUSDFirstRemoval, 3000*1.25e-6)
+	nearEq(t, "keyless first removal", kl.SavedUSDFirstRemoval, 25*1000*1.25e-6)
 	nearEq(t, "keyless replay", kl.SavedUSDReplay, 0)
 	nearEq(t, "keyless replay multiple", kl.ReplayMultiple, 1)
 	// The keyed one behaves as before: 1,000 unique at the write rate, 2,000 replayed at read.
 	nearEq(t, "keyed first removal", keyed.SavedUSDFirstRemoval, 1000*1.25e-6)
-	nearEq(t, "keyed replay", keyed.SavedUSDReplay, 2000*1e-7)
+	nearEq(t, "keyed replay", keyed.SavedUSDReplay, 24*1000*1e-7)
 }
 
 // TestCrossCheckCoversOnlyStoredRows pins the fix for a cross-check that was near-tautological.
@@ -761,5 +762,67 @@ func TestEndConversationCannotBeRemoved(t *testing.T) {
 	}
 	if !hasSub(r.Effect, "Cannot be removed") {
 		t.Errorf("Effect must say it cannot be removed, got %q", r.Effect)
+	}
+}
+
+// TestUnkeyedFlagClearsOnceRowsDedup is the point of deriving the flag from rows rather than from
+// the component's kind.
+//
+// PR #89 gives the reformatters content-derived keys, so their saved_unique becomes a real dedup
+// measurement. A flag keyed off `Kind == "reformat"` could never notice: it would keep printing
+// "NOT a deduplicated figure" over figures that had become measurements — this dashboard's own
+// worst failure mode, triggered by somebody else's merge rather than by any change here.
+//
+// Same component, same kind, rows that dedup: the flag must be off.
+func TestUnkeyedFlagClearsOnceRowsDedup(t *testing.T) {
+	db := openTestDB(t)
+	for i := 0; i < 25; i++ {
+		insertReq(t, db, &Event{
+			TS: int64(1000 + i), SessionID: "s1", Model: "m1", TenantID: "t1",
+			TokensBefore: 10000, TokensAfter: 9000,
+			FreshInput: 10, CacheRead: 50000, TokenAccounting: AccountingComplete,
+			// Kind is still "reformat" — only the DATA changed, which is exactly the
+			// post-#89 situation.
+			Components: []CompRow{{Component: "textclean", Kind: "reformat", Acted: true,
+				Mutated: true, SavedGross: 1000, SavedUnique: map[bool]int{true: 1000, false: 0}[i == 0]}},
+		})
+	}
+	rows, err := db.Components(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DecomposeComponentSavedUSD(Filter{TenantAll: true}, handPrice, rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].UniqueUnkeyed {
+		t.Error("rows that dedup must clear the flag regardless of the component's kind — " +
+			"otherwise the warning outlives the defect it describes")
+	}
+	// And the money moves to where a real dedup measurement puts it: one first removal at the
+	// write rate, 24 replays at the read rate.
+	nearEq(t, "first removal", rows[0].SavedUSDFirstRemoval, 1000*1.25e-6)
+	nearEq(t, "replay", rows[0].SavedUSDReplay, 24*1000*1e-7)
+
+	// Below the row floor the flag stays OFF even with no differing rows: a handful of rows that
+	// happen to agree is not evidence, and calling a real measurement fake is the worse error.
+	db2 := openTestDB(t)
+	for i := 0; i < 3; i++ {
+		insertReq(t, db2, &Event{
+			TS: int64(1000 + i), SessionID: "s1", Model: "m1", TenantID: "t1",
+			TokensBefore: 10000, TokensAfter: 9000,
+			FreshInput: 10, CacheRead: 50000, TokenAccounting: AccountingComplete,
+			Components: []CompRow{{Component: "textclean", Kind: "reformat", Acted: true,
+				Mutated: true, SavedGross: 1000, SavedUnique: 1000}},
+		})
+	}
+	few, err := db2.Components(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db2.DecomposeComponentSavedUSD(Filter{TenantAll: true}, handPrice, few); err != nil {
+		t.Fatal(err)
+	}
+	if few[0].UniqueUnkeyed {
+		t.Error("three agreeing rows are not enough to call a component's unique fabricated")
 	}
 }

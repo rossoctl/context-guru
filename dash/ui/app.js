@@ -1987,7 +1987,6 @@ function renderNetReconcile(components) {
   clear(host);
   host.appendChild(el('h2', {}, 'Two verdicts, reconciled'));
 
-  const amort = components.reduce((n, c) => n + compSaved(c), 0);
   const decomp = priced.reduce((n, c) => n + c.saved_usd_decomposed, 0);
   const first = priced.reduce((n, c) => n + c.saved_usd_first_removal, 0);
   const replay = priced.reduce((n, c) => n + c.saved_usd_replay, 0);
