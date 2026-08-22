@@ -215,3 +215,71 @@ Both push the honest figure well below the headline.
 the case for *deferring* summarisation — a summary here is not merely lossy, it appears to be actively
 expensive. Whether `coref` and the fold reduce `summarize`'s firing rate, and whether cost falls with
 it, is precisely what the remaining arms measure.
+
+## ALL THREE ARMS — deferral is real, monotonic, and tracks cost
+
+**Cost: ~$372** for the three arms ($361.12 LOCA + $8.40 CG model calls).
+
+| arm | `summarize` fired | **per request** | mean request | total cost | solved | errors |
+|---|---|---|---|---|---|---|
+| `[format]` *(iteration 010)* | – | – | 12.2k | **$93.23** | 33 / 69 | 6 |
+| 1 `[format, summarize]` | 1,466 | **56.1%** | 141k | **$152.08** | 33 / 71 | 4 |
+| 2 `[format, coref, summarize]` | 805 | **42.3%** | 72.9k | **$125.00** | 32 / 75 | **0** |
+| 3 `[format, coref, extract_llm, summarize]` | 647 | **36.9%** | 99.3k | **$92.44** | **35 / 71** | 4 |
+
+### The deferral claim is supported — this is the headline
+
+**Each layer of selective compaction makes the blunt summariser fire less often, monotonically:
+56.1% → 42.3% → 36.9% of requests.** That is the mechanism the whole project was premised on, measured
+live for the first time, and it is not subtle — the fold cuts summarisation by **a third** relative to
+summarising alone.
+
+**Cost tracks deferral almost exactly:** $152.08 → $125.00 → $92.44. Less summarising, less money.
+
+**And the fold arm is best on every axis at once** — most tasks solved (35), lowest cost ($92.44),
+most deferral (36.9%). It is the only configuration in this entire body of work that beats the lossless
+baseline on cost *and* solves while removing substantially more content.
+
+### Four things that must be said against the headline
+
+**1. The cost margins over lossless are inside the noise.** $92.44 vs $93.23 is 0.8%, and
+[iteration 012](../iter012/results.md) established that per-arm LOCA cost cannot price a component —
+two arms differing by one component came out 4.9% apart in *opposite directions* across successive
+iterations, driven by trajectory length. The $152 → $92 *ordering* is large enough to believe; the
+final 0.8% is not.
+
+**2. No reward difference is detectable.** Paired, task-clustered:
+
+| comparison | harm | gain | p | bound |
+|---|---|---|---|---|
+| arm 1 → arm 2 | 3 | 2 | 1.000 | ≤44% |
+| arm 1 → arm 3 | 4 | 6 | 0.754 | ≤51% |
+
+Solve counts across all four configurations are 32–35 of 75 — indistinguishable. **Deferral buys cost,
+not accuracy**, on this evidence. Note arm 1 → arm 2 is confounded (4 errors vs 0, asymmetric), while
+arm 1 → arm 3 is balanced (4 vs 4) and therefore the cleaner comparison.
+
+**3. `summarize` is never NECESSARY at this band, which limits what this can mean.** Contexts run
+12–44k against Sonnet-5's 1M window, so nothing here is close to exhausting. The trigger
+(`min_request_tokens: 30000`) was chosen *specifically to make `summarize` fire*, so these arms measure
+**summarising when it is not needed** — which is why arm 1 is so much worse than lossless. The question
+originally asked — *does deferral pay when summarisation is genuinely forced?* — **cannot be answered
+here**, because these tasks never run out of context. That needs a band where context truly exhausts,
+and iteration 008 showed the 128k data is unreliable. **This is a limitation of the design chosen, not
+of the result.**
+
+**4. Mean request size is not monotonic** — 141k → 72.9k → 99.3k. The fold defers *most* while carrying
+*larger* requests than arm 2, so "defers more" and "smaller contexts" are not the same axis. Unexplained.
+
+### The overcounting caution, again
+
+Reported `savings_pct` reaches **94.7% / 88.1% / 92.1%**, and it should not be quoted. `summarize`'s
+overcount ratio is **2.23×**, and `tokens_before` (369M in arm 1) is a *counterfactual* assuming an
+unchanged trajectory — when the trajectory is exactly what changed. Unique contributions are far
+smaller, and `coref`'s is tiny throughout: **414,724** tokens in arm 2, **233,424** in arm 3.
+
+That last figure deserves emphasis. **`coref`'s own unique removal is ~0.2–0.4M tokens, yet its presence
+cut summarisation by 25% per request and cost by $27.** If that is causal, the value of `coref` is not
+the tokens it removes but the *summarisation it prevents* — a leverage effect no yield metric in this
+repo would ever have shown. It could equally be trajectory divergence; distinguishing them needs a
+design that holds trajectory fixed, which no arm here does.
