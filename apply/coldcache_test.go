@@ -282,3 +282,65 @@ func TestAliasSessionClockKeepsAWarmPrefixWarm(t *testing.T) {
 		t.Fatal("read COLD while another id had touched the same prefix 4 minutes ago")
 	}
 }
+
+// Path 2 through the REAL call site, which is where the previous version of this guard was
+// wrong: TestAliasSessionClockKeepsAWarmPrefixWarm calls aliasSeen directly and so never
+// exercised the `alias != sessionID` condition that skipped it on header-less turns.
+//
+// Four turns over one stable prefix, the session header present on turns 2 and 3 only — the
+// shape three of thirteen production tenants actually send. Turn 4's own tracker id was last
+// touched at turn 1, seven minutes earlier, so its private clock says COLD; the provider's
+// content-keyed entry was refreshed 60 seconds ago by turn 3.
+func TestAliasClockIsReadOnHeaderlessTurnsToo(t *testing.T) {
+	var cold []bool
+	pipe := components.NewPipeline([]components.Component{coldSpy{&cold}}, nil)
+	st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
+	body := []byte(`{"model":"claude-sonnet-5","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"fix the failing test","cache_control":{"type":"ephemeral"}}]},` +
+		`{"role":"user","content":"more"}]}`)
+	base := time.Unix(1_700_000_000, 0)
+
+	for _, turn := range []struct {
+		at     time.Time
+		header string
+	}{
+		{base, ""},                            // header-less
+		{base.Add(3 * time.Minute), "cc-abc"}, // header
+		{base.Add(6 * time.Minute), "cc-abc"}, // header — refreshes the provider's entry
+		{base.Add(7 * time.Minute), ""},       // header-less again: 7m on its OWN clock
+	} {
+		BodyOpts(context.Background(), pipe, st, Opts{
+			Provider: bschemas.Anthropic, Body: body, Session: turn.header,
+			Tracker: tr, Now: turn.at,
+		})
+	}
+	if len(cold) != 4 {
+		t.Fatalf("the pipeline ran %d times, want 4", len(cold))
+	}
+	if cold[3] {
+		t.Fatalf("turn 4 read COLD while the alias clock held a timestamp 60 seconds old "+
+			"(ColdCache per turn: %v) — a live prefix rewritten at depth costs a cache-write "+
+			"of the whole suffix at 1.25x fresh", cold)
+	}
+	// And the guard must not have jammed the sweep permanently warm: a genuine long gap on
+	// every identity still reads cold.
+	cold = nil
+	BodyOpts(context.Background(), pipe, st, Opts{
+		Provider: bschemas.Anthropic, Body: body, Tracker: tr,
+		Now: base.Add(40 * time.Minute),
+	})
+	if len(cold) != 1 || !cold[0] {
+		t.Fatalf("a genuine 33-minute gap stopped reading cold (%v)", cold)
+	}
+}
+
+// coldSpy records Ctx.ColdCache as the real pipeline hands it over, so the test observes the
+// decision apply actually made rather than re-deriving it.
+type coldSpy struct{ seen *[]bool }
+
+func (coldSpy) Name() string                 { return "coldspy" }
+func (coldSpy) Enabled(*components.Ctx) bool { return true }
+func (s coldSpy) Reformat(_ *bschemas.BifrostChatRequest, _ *components.Report, c *components.Ctx) error {
+	*s.seen = append(*s.seen, c.ColdCache)
+	return nil
+}

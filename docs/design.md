@@ -307,8 +307,14 @@ fabricated are each closed:
   ids whenever an explicit header is present on some turns and absent on others — the header wins
   on one turn, `sha256(system + firstUser)` on the next (`session.Scoped`) — and three of thirteen
   production tenants send both id shapes. The cold decision therefore also reads the **alias**
-  clock and takes the LATER of the two timestamps, so a touch under either id keeps both warm
-  (`TestAliasSessionClockKeepsAWarmPrefixWarm`).
+  clock — the id `session.Scoped` would derive with no header — and takes the LATER of the two
+  timestamps, so a touch under either id keeps both warm. It is consulted on **every** turn,
+  including the header-less ones where the alias *is* the session id: skipping those closed only
+  half the path, and left the mirror open (header turns refresh the entry, the header-less turn
+  then reads cold with a fresh timestamp sitting unread in the store —
+  `TestAliasClockIsReadOnHeaderlessTurnsToo` drives four turns through `BodyOpts` and fails on
+  that). Both records are pinned against LRU eviction (`store.TTLPrefix`, `store.SeenPrefix`),
+  because losing either makes a warm prefix read cold.
 
 **What "cold" was actually verified to mean.** Note that the dashboard's `ttl_expiry` bucket cannot
 be used to check this: `Event.AttributeCache` only reaches it when `cache_read == 0`, so it agrees

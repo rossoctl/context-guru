@@ -458,13 +458,20 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// of thirteen production tenants send both id shapes.
 			//
 			// So the alias's clock counts too, and we take the LATER of the two. Conservative
-			// by construction: a later touch can only make us read WARM. Skipped when the
-			// alias IS the session id (no explicit header) — recording the same key twice
-			// would read back the timestamp just written and never see any idle time at all.
-			if alias := session.Scoped(o.Tenant, "", sys, firstUser); alias != sessionID {
-				if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
-					prevAt = aliasAt
-				}
+			// by construction: a later touch can only make us read WARM.
+			//
+			// Consulted on EVERY turn, header-bearing or not. Skipping the turns where the
+			// alias IS the session id closed only half the path, and the half it left open is
+			// the same −$708 mechanism mirrored: the header-bearing turns keep the provider's
+			// content-keyed entry warm and write the alias clock, and the header-LESS turn —
+			// whose own tracker id no other turn touches — then read COLD with a fresh
+			// timestamp sitting unread in the store. Four turns, header present on 2 and 3:
+			// ColdCache came out [false false false TRUE] with the entry 60 s old.
+			//
+			// Reading a key we also write is safe: aliasSeen reads BEFORE it writes and runs
+			// once per request, so the value is the previous turn's, never this one's.
+			if aliasAt := aliasSeen(st, session.Scoped(o.Tenant, "", sys, firstUser), nowMs); aliasAt > prevAt {
+				prevAt = aliasAt
 			}
 			coldCache = cacheIsCold(prevAt, nowMs, sessionTTL(st, sessionID, cacheTTL(provider, body)))
 			if prevAt > 0 && nowMs > prevAt {
@@ -850,6 +857,8 @@ func cacheIsCold(prevAtMs, nowMs int64, ttl time.Duration) bool {
 // which counts a compaction reset, so recording a second key per request double-counted that
 // metric. This needs only a timestamp, and the store already holds per-session state.
 //
+// Pinned against LRU (store.SeenPrefix) because losing it makes a warm prefix read cold.
+//
 // ponytail: degrades to 0 on a store that cannot persist, which just restores the old
 // single-clock behaviour. Move it into the Tracker (with a read-only accessor) if the alias
 // clock ever needs the boundary too.
@@ -857,7 +866,7 @@ func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
 	if st == nil || nowMs <= 0 {
 		return 0
 	}
-	k := "cg:seen:" + alias
+	k := store.SeenPrefix + alias
 	var prev int64
 	if b, ok := st.Get(k); ok {
 		prev, _ = strconv.ParseInt(string(b), 10, 64)
@@ -881,7 +890,7 @@ func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration
 	if st == nil {
 		return ttl
 	}
-	k := "cg:ttl:" + session
+	k := store.TTLPrefix + session
 	if b, ok := st.Get(k); ok {
 		if prev, err := time.ParseDuration(string(b)); err == nil && prev > ttl {
 			return prev
