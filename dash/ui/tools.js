@@ -309,9 +309,17 @@ function renderHeadline(host, rep) {
       pct(100 - t.unused_pct) + ' of what you declare', used ? 'good' : ''),
     // The number this page exists for. Deliberately the only 'bad' tile: three red tiles
     // in a row is a page shouting, and shouting is what gets a dashboard ignored.
+    // The multiplier NAMES ITS POPULATION, because the page carries two of them and they
+    // differ by about 2x: this is the plain mean over every TOOL-BEARING session in scope,
+    // while the removal-value table below uses the REQUEST-WEIGHTED mean over the CAPTURED
+    // ones. Both are real and they answer different questions ("how long is a session" vs
+    // "how long is the session a typical request belongs to"). Two multipliers on one page
+    // with neither naming its denominator is how a reader concludes the page contradicts
+    // itself — and on production traffic the pair reads 3.9 against 150.6.
     tile('inv-unused', 'Never invoked', num(t.unused_tokens),
       pct(t.unused_pct) + ' of every prompt, re-read ' + t.requests_per_session.toFixed(1)
-      + '× in an average session of any length', t.unused_pct >= 25 ? 'bad' : ''),
+      + '× per session — the plain mean over all ' + num(c.sessions) + ' sessions here',
+      t.unused_pct >= 25 ? 'bad' : ''),
     tile('inv-avoidable', 'Avoidable — projected',
       t.priced ? usd(t.unused_usd) : num(t.unused_reads) + ' tok',
       t.priced ? 'if none of it had been carried' : 'no dollar: some models here are unpriced'),
@@ -1115,8 +1123,18 @@ function renderRemovalValue(host, rep) {
     el('div', { class: 'state-body' },
       el('strong', {}, 'Session length used: ' + turns.toFixed(0) + ' requests'),
       el('span', {}, 'Measured from this account\'s own history, not assumed. It is the '
-        + 'request-weighted average — how many turns the session that a TYPICAL REQUEST '
-        + 'belongs to runs for.'),
+        + 'request-weighted average over the ' + num(rep.coverage.captured) + ' CAPTURED '
+        + 'session' + (rep.coverage.captured === 1 ? '' : 's') + ' — how many turns the session '
+        + 'that a TYPICAL REQUEST belongs to runs for.'),
+      // The headline tile quotes a different multiplier over a different population, and the
+      // two are reconciled HERE, where the reader meets the second one — not left as an
+      // apparent contradiction for them to resolve.
+      el('span', {}, 'The "Never invoked" tile at the top quotes '
+        + rep.totals.requests_per_session.toFixed(1) + '× instead. That is the PLAIN mean over '
+        + 'all ' + num(rep.coverage.sessions) + ' tool-bearing sessions in scope, captured or '
+        + 'not. Neither figure is wrong: one answers "how long is a session", this one answers '
+        + '"how long is the session a typical request belongs to", and the second is the one a '
+        + 'per-session cost has to be projected from.'),
       // The explanation is CONDITIONAL on the median actually being small, because the
       // reason ("most sessions are one-request sidechains") is a fact about a particular
       // population and not about the statistic. Printed unconditionally it told a reader
