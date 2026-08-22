@@ -94,7 +94,9 @@ func versionFS(fsys fs.FS) (string, map[string][]byte) {
 			return "", nil
 		}
 		// Name and length go into the hash too, so renaming a file or moving bytes
-		// between two of them also changes the token.
+		// between two of them also changes the token. The length is what makes the
+		// concatenation injective — without it {"a": "b.js\x00xy"} and {"a": "",
+		// "b.js": "xy"} hash identically — so do not drop it as redundant.
 		fmt.Fprintf(sum, "%s\x00%d\x00", n, len(b))
 		sum.Write(b)
 		raw[n] = b
@@ -113,8 +115,16 @@ func versionFS(fsys fs.FS) (string, map[string][]byte) {
 	// ponytail: blind means blind — a quoted asset name that is NOT a URL is rewritten
 	// too (a JS string literal, a CSP nonce, the inside of a percent-encoded data URI),
 	// and that would fail silently. Today there is no collision: every quoted occurrence
-	// of an asset name across the five assets is a real reference. Match on the enclosing
-	// attribute if one ever appears.
+	// of an asset name across the five assets is a real reference, four in total.
+	//
+	// Do NOT narrow this to an enclosing HTML attribute. References do not all live in
+	// attributes: tools.js builds one in a JavaScript object literal, el('link', {href:
+	// 'tools.css'}), so an attribute match would silently stop versioning tools.css and
+	// hand it back its unversioned URL at max-age=3600 — the stale-stylesheet bug named
+	// at the top of this file, reintroduced. The blindness is load-bearing. If a
+	// collision ever does appear, make the failure LOUD rather than the match narrower:
+	// the rewrite count is knowable, and assetversion_test.go asserts it against the
+	// references it enumerates, so an unaccounted rewrite is a red test.
 	quoted := make([]string, 0, len(names))
 	for _, n := range names {
 		quoted = append(quoted, regexp.QuoteMeta(n))

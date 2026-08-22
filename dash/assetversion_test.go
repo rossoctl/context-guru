@@ -41,13 +41,15 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 	}
 
 	// Both entry points must work and must be versioned: the plain directory URL and
-	// the explicit filename.
+	// the explicit filename. Both serve the same markup, so `checked` — the number of
+	// local references found in it — is reused by the rewrite-count assertion below.
+	checked := 0
 	for _, entry := range []string{"/dashboard/", "/dashboard/index.html"} {
 		w := get(entry)
 		if cc := w.Header().Get("Cache-Control"); cc != "no-cache" {
 			t.Errorf("%s Cache-Control = %q; the HTML must not be cached, or it cannot hand out new asset URLs", entry, cc)
 		}
-		checked := 0
+		checked = 0
 		for _, mm := range localRef.FindAllStringSubmatch(w.Body.String(), -1) {
 			ref := mm[1]
 			if strings.HasPrefix(ref, "data:") || strings.HasPrefix(ref, "#") || strings.Contains(ref, "://") {
@@ -88,6 +90,20 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 	// text/plain is not executed.
 	if ct := js2.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
 		t.Errorf("app.js Content-Type = %q; want a javascript type", ct)
+	}
+
+	// Every rewrite has to be one this test knows about. The match in ui.go is
+	// deliberately blind to context — it has to be, because references live in an HTML
+	// attribute AND in a JS object literal — so a quoted asset name that is NOT a
+	// reference gets versioned too, silently. Totalling the rewrites and comparing them
+	// with the references enumerated above turns that into a red test: index.html's
+	// references, plus the one tools.js builds.
+	rewrites := 0
+	for _, b := range versionedUI {
+		rewrites += strings.Count(string(b), "?v="+assetVersion)
+	}
+	if want := checked + 1; rewrites != want {
+		t.Errorf("versionedUI rewrote %d references but this test accounts for %d — either a quoted asset name that is not a reference is being versioned, or a reference is no longer found", rewrites, want)
 	}
 }
 
@@ -133,10 +149,16 @@ func TestAssetVersionFollowsAssetBytes(t *testing.T) {
 		t.Errorf("re-versioning doubled up the tokens: %s", again["index.html"])
 	}
 
-	// The name and the length of every file go into the hash, not only the bytes. Two
-	// builds whose concatenated bytes are IDENTICAL must still get different tokens:
-	// a rename, and the same bytes split differently across two adjacent names. Hashing
-	// the bytes alone cannot tell either pair apart.
+	// The name of every file goes into the hash, not only the bytes. Two builds whose
+	// concatenated bytes are IDENTICAL must still get different tokens: a rename, and the
+	// same bytes split differently across two adjacent names. Hashing the bytes alone
+	// cannot tell either pair apart.
+	//
+	// Both pairs below are decided by the NUL-delimited NAME alone; neither exercises the
+	// %d length that ui.go also writes. The length is there for injectivity, not for these
+	// cases — without it {"a": "b.js\x00xy"} and {"a": "", "b.js": "xy"} hash the same —
+	// and closing that would need a third pair differing only in a length. Keep the
+	// length; it is not this test that justifies it.
 	ver := func(files fstest.MapFS) string {
 		v, _ := versionFS(files)
 		if v == "" {
