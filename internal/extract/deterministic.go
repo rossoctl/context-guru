@@ -54,50 +54,19 @@ func truncateValue(value any, maxChars int) any {
 	return value
 }
 
+// extractTextWindow cuts a bounded window of a text body around the first matching term.
+//
+// It is LINE-ALIGNED and MARKED (windowLines), because the unaligned unmarked version was a
+// silent data loss: a mid-line cut of an `ls -l` listing produced `-rw-r--r--@ 1 itayn staff
+// 1498 Aug ` as its final record and dropped two of four directories with nothing to say so.
+// A window is a legitimate reduction only when the reader can see it is a window — otherwise
+// capTruncated refuses it downstream, which is the backstop for any strategy that cuts
+// without saying so.
 func extractTextWindow(text string, terms []string, maxChars int) string {
-	runes := []rune(text)
-	if maxChars <= 0 || len(runes) <= maxChars {
+	if maxChars <= 0 || len([]rune(text)) <= maxChars {
 		return text
 	}
-	loweredRunes := []rune(strings.ToLower(text))
-	for _, term := range terms {
-		t := strings.TrimSpace(strings.ToLower(term))
-		if t == "" {
-			continue
-		}
-		// Index into the rune slice (not bytes) so the window math stays rune-aligned.
-		if idx := runeIndex(loweredRunes, []rune(t)); idx >= 0 {
-			start := idx - maxChars/4
-			if start < 0 {
-				start = 0
-			}
-			if start > len(runes)-maxChars {
-				start = len(runes) - maxChars
-			}
-			return string(runes[start : start+maxChars])
-		}
-	}
-	return string(runes[:maxChars])
-}
-
-// runeIndex returns the index (in runes) of the first occurrence of sub in s, or -1.
-func runeIndex(s, sub []rune) int {
-	if len(sub) == 0 {
-		return 0
-	}
-	for i := 0; i+len(sub) <= len(s); i++ {
-		match := true
-		for j := range sub {
-			if s[i+j] != sub[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
+	return windowLines(text, terms, maxChars)
 }
 
 func projectMapping(m map[string]any, terms map[string]struct{}, maxChars int) map[string]any {

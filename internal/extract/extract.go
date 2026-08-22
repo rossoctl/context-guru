@@ -666,6 +666,12 @@ func RunExtractionDetail(ctx context.Context, body, goal string, keepIDs []strin
 		case "deterministic":
 			cand = resultToText(DeterministicProject(deterministicInput(body), keepIDs, cfg.MaxChars))
 		}
+		// SAY WHAT WAS DROPPED, before the size check so the markers are inside the
+		// budget the never-inflate gate enforces. Only in rewrite mode: deletion-only
+		// mode proves the result is a subsequence of the input, and a marker is not.
+		if cfg.Rewrite {
+			cand = markElisions(cand, body)
+		}
 		switch {
 		case cand == "":
 			// No usable candidate. `why` says WHICH of the several very different causes it
@@ -681,6 +687,16 @@ func RunExtractionDetail(ctx context.Context, body, goal string, keepIDs []strin
 			continue
 		case tokens.Count(cand) >= base:
 			reasons = append(reasons, name+": result not smaller")
+			continue
+		case capTruncated(cand, body, cfg.MaxChars):
+			// A contiguous slice of the input at the character cap, with nothing saying
+			// content was dropped. MEASURED in production: 25 of 62 accepted results were
+			// exactly 4,000 characters with an empty summary, 15 of them a byte-for-byte
+			// prefix cut ending mid-line, and they supplied 53% of all reported savings.
+			// One of them turned four `ls -l` listings into two with no marker and a
+			// syntactically broken final row. That is not an extraction and it must not be
+			// counted as one; a windowed reduction that names its gaps is accepted above.
+			reasons = append(reasons, name+": truncated at the character cap")
 			continue
 		}
 		if ok, why := validateExtraction(cand, body, keepIDs, cfg); !ok {
