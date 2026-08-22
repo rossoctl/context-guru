@@ -283,3 +283,57 @@ cut summarisation by 25% per request and cost by $27.** If that is causal, the v
 the tokens it removes but the *summarisation it prevents* — a leverage effect no yield metric in this
 repo would ever have shown. It could equally be trajectory divergence; distinguishing them needs a
 design that holds trajectory fixed, which no arm here does.
+
+## RETRACTION of the economic magnitude: the summarize config was unrealistic
+
+Raised in review, and correct: **`resummarize_tokens: 6000` is far too small for this workload, and the
+first-summary trigger was ~30× too eager.**
+
+Measured, from this arm's own traffic:
+
+| single tool output | tokens |
+|---|---|
+| p50 | 192 |
+| **p90** | **6,419** |
+| max | 20,720 |
+
+**12% of individual tool outputs exceed 6,000 on their own**, and p90 sits *at* the threshold. So the
+un-summarised tail crosses it within a turn or two — which is why arm 1 produced **10 fresh summaries
+per run** (751 across 75 runs). It was not summarising once near a limit; it was re-summarising
+continuously.
+
+And the first trigger, `min_request_tokens: 30000`, was set against Sonnet-5's **1M** window — **3% of
+it**. Claude Code compacts near ~90%. **Arm 1 is therefore NOT the `/compact` analogue this document
+called it**; it is "summarise at 3% of the window, then re-summarise every 6k". The trigger was chosen
+from the observed size distribution *specifically to make `summarize` fire*, because at the 32k band
+contexts (12–44k) never approach a 1M window — and in forcing it to fire, a configuration nobody would
+deploy was built.
+
+**What is retracted:** the economic magnitude. Summarisation's **+63% cost penalty is largely an
+artifact of this configuration**, not a property of summarisation. The $152 → $125 → $92 ordering
+measures the cost of *over-eager resummarisation* and how much `coref` relieves it, and **does not
+transfer to a realistic deployment.**
+
+**What stands:** the deferral *mechanism* and its quantitative fit. `coref` removes ~2,490 tokens per
+request against a 6,000-token threshold — 41% of the rollforward budget — and produced **−42% fresh
+summaries** against a predicted −41%. Threshold leverage is real. But what it defers is over-eager
+resummarisation.
+
+Also under-weighted at first: in the summarize arm requests reached **769,874 tokens**, genuinely
+approaching the 1M window, against ~110k in the lossless arm. Summarisation did not merely cost more —
+it drove contexts *toward* exhaustion.
+
+### What a sound re-run requires (→ iteration 013)
+
+| knob | this run | corrected |
+|---|---|---|
+| declared context window | 1M (Sonnet-5's real window) | **128k**, via `MODEL_INFO_URL` (key `max_input_tokens`) |
+| enforcement of that window | **none** — requests reached 770k | LOCA `--clear-trigger-tokens 128000` + `--use-clear-tool-uses` |
+| first summary trigger | 30k = **3%** of window | **~100k = 78%** of 128k |
+| `resummarize_tokens` | **6,000** (= p90 of ONE tool output) | **~20,000**, so the tail must accumulate several outputs |
+| band | 32k (contexts 12–44k, never pressured) | **128k**, where contexts naturally approach the limit |
+
+The enforcement row matters most and was missing entirely here: with LOCA's clearing active the baseline
+becomes **genuinely lossy**, which is the case iteration 010 could not test at all — its shim reported
+`repairs=0`, meaning LOCA's trimmer never fired and the baseline kept everything. Only against a lossy
+baseline can selective compaction show a *gain* rather than at best breaking even.

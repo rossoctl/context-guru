@@ -40,6 +40,19 @@ statistical power actually available (reward at n=12 detects only 50pp effects; 
 schema defects, why a reported yield measures `coref`'s economic *throttle* rather than its
 capability, and a table of rig traps that each produced a valid-looking wrong number.
 
+## Terminology: "fold" is ambiguous in this log — read it carefully
+
+Two different things have both been called *the fold*, and conflating them has already caused one
+misreport:
+
+| term | meaning | status |
+|---|---|---|
+| **fold (pipeline sense)** — used in `loca/iter002`–`iter004`, `iter012`, `iter011` arm 3 | `extract_llm` **added as its own component** alongside `coref`, each acting separately in sequence | **measured** |
+| **merged / fold (single-call sense)** — the design proposed in discussion | the co-reference criterion carried **inside `extract_llm`'s own prompt**, so ONE model call makes both judgements | **NOT measured.** `loca/iter009` refuted only its *per-output* variant; **bulk adjudication is the surviving shape** and has never been run for reward |
+
+Prefer **"`+extract_llm` arm"** for the first and **"merged"** for the second. Any bare use of "fold"
+below predates this note and means the *pipeline* sense.
+
 ## Conventions
 
 - **Retractions stay.** A wrong run is deleted from the argument, never from the log — the
