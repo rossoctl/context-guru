@@ -80,8 +80,14 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 	}
 
 	// Versioned URLs are what make the hour of caching safe; keep it.
-	if cc := get("/dashboard/app.js?v=" + assetVersion).Header().Get("Cache-Control"); cc != "public, max-age=3600" {
+	js2 := get("/dashboard/app.js?v=" + assetVersion)
+	if cc := js2.Header().Get("Cache-Control"); cc != "public, max-age=3600" {
 		t.Errorf("app.js Cache-Control = %q; want public, max-age=3600", cc)
+	}
+	// http.ServeContent types the response from the name it is given; a script served as
+	// text/plain is not executed.
+	if ct := js2.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
+		t.Errorf("app.js Content-Type = %q; want a javascript type", ct)
 	}
 }
 
@@ -125,5 +131,40 @@ func TestAssetVersionFollowsAssetBytes(t *testing.T) {
 		"app.js":     {Data: []byte("let a = 2")},
 	}); strings.Count(string(again["index.html"]), "?v=") != 2 {
 		t.Errorf("re-versioning doubled up the tokens: %s", again["index.html"])
+	}
+
+	// The name and the length of every file go into the hash, not only the bytes. Two
+	// builds whose concatenated bytes are IDENTICAL must still get different tokens:
+	// a rename, and the same bytes split differently across two adjacent names. Hashing
+	// the bytes alone cannot tell either pair apart.
+	ver := func(files fstest.MapFS) string {
+		v, _ := versionFS(files)
+		if v == "" {
+			t.Fatal("versionFS computed no version")
+		}
+		return v
+	}
+	if a, b := ver(fstest.MapFS{"a.js": {Data: []byte("xy")}}),
+		ver(fstest.MapFS{"b.js": {Data: []byte("xy")}}); a == b {
+		t.Errorf("renaming the only asset left the version at %s", a)
+	}
+	if a, b := ver(fstest.MapFS{"a.js": {Data: []byte("xy")}, "b.js": {Data: []byte("")}}),
+		ver(fstest.MapFS{"a.js": {Data: []byte("x")}, "b.js": {Data: []byte("y")}}); a == b {
+		t.Errorf("moving a byte between two assets left the version at %s", a)
+	}
+
+	// An asset in a SUBDIRECTORY used to switch versioning off for everything: the old
+	// fs.Glob(fsys, "*") returned the directory as a name, reading it failed, and
+	// versionFS returned no assets — so the whole dashboard fell back to unversioned
+	// URLs at max-age=3600, which is the bug this file exists to prevent.
+	v, out := versionFS(fstest.MapFS{
+		"index.html":   {Data: []byte(`<script src="sub/extra.js"></script>`)},
+		"sub/extra.js": {Data: []byte("let a = 1")},
+	})
+	if v == "" {
+		t.Fatal("a subdirectory turned versioning off entirely")
+	}
+	if want := `"sub/extra.js?v=` + v + `"`; !strings.Contains(string(out["index.html"]), want) {
+		t.Errorf("a subdirectory asset was left unversioned, want %s in: %s", want, out["index.html"])
 	}
 }

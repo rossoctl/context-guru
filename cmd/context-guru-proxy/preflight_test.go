@@ -66,14 +66,28 @@ func TestPreflightReadsKeyEnvFromConfigNotComments(t *testing.T) {
     dialect: openai
     base_url: https://example.invalid
     key_env: UPSTREAM_OTHER_KEY  # one shared budget
+  - name: quoted
+    dialect: anthropic  # key_env: UPSTREAM_NEVER_CONFIGURED
+    key_env: "UPSTREAM_QUOTED_KEY"
+  - name: single
+    dialect: openai
+    key_env: 'UPSTREAM_SINGLE_KEY'
 `)...), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
+	// Every shape that the loader accepts has to be extracted. A quoted value that is
+	// NOT extracted is the dangerous direction: config/upstreams.go refuses to boot on an
+	// unset variable, so preflight would print PASSED and the service would then fail to
+	// start on exactly the credential this checks.
+	//
+	// UPSTREAM_NEVER_CONFIGURED is the other direction, on the same line as a real field:
+	// comments are stripped wherever they start, not only on whole-comment lines. The
+	// exact-match assertion below is what enforces it — an extra name fails the compare.
 	got := strings.Fields(installSH(t, `configured_key_envs "$1"`, yaml))
-	want := "UPSTREAM_GATEWAY_KEY UPSTREAM_OTHER_KEY"
+	want := "UPSTREAM_GATEWAY_KEY UPSTREAM_OTHER_KEY UPSTREAM_QUOTED_KEY UPSTREAM_SINGLE_KEY"
 	if strings.Join(got, " ") != want {
-		t.Errorf("configured_key_envs = %v; want [%s] — a commented key_env is prose, a real one is config", got, want)
+		t.Errorf("configured_key_envs = %v; want [%s] — a commented key_env is prose, a real one is config, quoted or not", got, want)
 	}
 
 	// An allow-list that configures none is the normal case (caller-pays), and must be
@@ -97,12 +111,20 @@ func TestPreflightResolvesToolsOnTheServicePATH(t *testing.T) {
 	// A tool that exists ONLY on the service's PATH — rclone's situation on the host.
 	svcBin := filepath.Join(dir, "svcbin")
 	fake := filepath.Join(dir, "fake")
-	for _, d := range []string{svcBin, fake} {
+	callerBin := filepath.Join(dir, "callerbin")
+	for _, d := range []string{svcBin, fake, callerBin} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := os.WriteFile(filepath.Join(svcBin, "cg-only-on-service-path"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// And a tool that exists only on the CALLER's PATH. This is the direction that
+	// produces a false PASS: sudo's secure_path carries /sbin and /bin, systemd's default
+	// PATH does not, so a tool found here that the unit cannot run must be reported
+	// MISSING. Asserting only that a present tool is found cannot catch that.
+	if err := os.WriteFile(filepath.Join(callerBin, "cg-only-on-caller-path"), []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// A stand-in systemctl that answers show-environment the way this host's does.
@@ -112,11 +134,15 @@ func TestPreflightResolvesToolsOnTheServicePATH(t *testing.T) {
 	}
 
 	// PATH here stands in for sudo's: the fake systemctl and the basics, NOT svcBin.
-	out := installSH(t, `export PATH="`+fake+`:/usr/bin:/bin"
+	out := installSH(t, `export PATH="`+fake+`:`+callerBin+`:/usr/bin:/bin"
+command -v cg-only-on-caller-path >/dev/null && echo caller-tool-is-runnable-here=yes || echo caller-tool-is-runnable-here=NO
 in_service_path cg-only-on-service-path && echo on-service-path=found || echo on-service-path=MISSED
+in_service_path cg-only-on-caller-path && echo caller-only=FOUND || echo caller-only=missing
 in_service_path cg-nowhere-at-all && echo nowhere=FOUND || echo nowhere=missing`,
 	)
-	for _, want := range []string{"on-service-path=found", "nowhere=missing"} {
+	// The first line keeps the third honest: without it, a typo in the tool name would
+	// also report caller-only=missing and the assertion would pass for the wrong reason.
+	for _, want := range []string{"caller-tool-is-runnable-here=yes", "on-service-path=found", "caller-only=missing", "nowhere=missing"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("want %q in:\n%s", want, out)
 		}

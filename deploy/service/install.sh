@@ -68,8 +68,17 @@ need_root() {
 # preflight demand a credential for a variable nobody had configured — on every host,
 # since the comment ships with the file. sed rather than grep -o so an allow-list that
 # names none (the normal case, caller-pays) is not a pipeline failure.
+#
+# [^A-Z0-9_]* rather than [[:space:]]*, so a QUOTED value is read too. `key_env: "X"` and
+# `key_env: 'X'` are both legal YAML for a plain string field, and the loader refuses to
+# boot when a named variable is unset — so skipping the quoted form made preflight print
+# PASSED and the service then fail to start on the very credential this checks. A false
+# PASS in a credential check is worse than the false FAIL above it. The name is assumed
+# UPPERCASE, as every UPSTREAM_*_KEY is and as the credential-file mapping below already
+# assumes; a lowercase one extracts noise and FAILS rather than passing in silence, which
+# is the safe direction to be wrong in.
 configured_key_envs() {
-  sed -nE 's/#.*//; s/.*key_env:[[:space:]]*([A-Z0-9_]+).*/\1/p' "$1" 2>/dev/null | sort -u
+  sed -nE 's/#.*//; s/.*key_env:[^A-Z0-9_]*([A-Z0-9_]+).*/\1/p' "$1" 2>/dev/null | sort -u
 }
 
 in_service_path() {

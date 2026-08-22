@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
-	"mime"
 	"net/http"
 	"path"
 	"regexp"
@@ -67,7 +66,21 @@ func versionAssets() (string, map[string][]byte) {
 // On any error it returns no assets, and the caller falls back to serving the embedded
 // files verbatim — unversioned is the old behaviour, a blank dashboard is not.
 func versionFS(fsys fs.FS) (string, map[string][]byte) {
-	names, err := fs.Glob(fsys, "*")
+	// WalkDir, not fs.Glob(fsys, "*"): Glob returns a SUBDIRECTORY as a name, fs.ReadFile
+	// on it errors, and the whole function then bails to "no assets" — one nested file
+	// would silently turn versioning off everywhere and bring the stale-asset bug back.
+	// Walking covers assets in subdirectories instead, at their slash-separated names,
+	// which is also what a reference to one looks like in the markup.
+	var names []string
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			names = append(names, p)
+		}
+		return nil
+	})
 	if err != nil || len(names) == 0 {
 		return "", nil
 	}
@@ -96,6 +109,12 @@ func versionFS(fsys fs.FS) (string, map[string][]byte) {
 	// alternation is built from the embedded directory itself, so an asset added later
 	// is covered the day it lands. A reference that already carries ?v= does not match
 	// (the closing quote no longer follows the name), so it is idempotent.
+	//
+	// ponytail: blind means blind — a quoted asset name that is NOT a URL is rewritten
+	// too (a JS string literal, a CSP nonce, the inside of a percent-encoded data URI),
+	// and that would fail silently. Today there is no collision: every quoted occurrence
+	// of an asset name across the five assets is a real reference. Match on the enclosing
+	// attribute if one ever appears.
 	quoted := make([]string, 0, len(names))
 	for _, n := range names {
 		quoted = append(quoted, regexp.QuoteMeta(n))
@@ -152,9 +171,6 @@ func uiHandler() http.Handler {
 			"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "+
 				"connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		if b, ok := versionedUI[name]; ok {
-			if ct := mime.TypeByExtension(path.Ext(name)); ct != "" {
-				w.Header().Set("Content-Type", ct)
-			}
 			// Every request of this build serves identical bytes. The ETag turns the
 			// no-cache HTML's revalidation into a 304 instead of a re-download.
 			w.Header().Set("ETag", `"`+assetVersion+`"`)
