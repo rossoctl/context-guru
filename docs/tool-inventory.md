@@ -87,17 +87,54 @@ body, in the same place the request's metadata is already read.
 * **Usage.** Every `tool_use` block of the last tool-using turn (`tool_calls` in the
   OpenAI dialect), and for the `Skill` tool the `skill` argument — the only place a skill
   invocation is identifiable.
-* **Never** a description, a prompt, or a message. Names and token counts only.
+* **The text of each region**, in `text_gz` — a tool's whole JSON element, a skill's listing
+  entry, the listing itself, and the system prompt on a `kind='system_prompt'` marker row —
+  **but only under transcript-capture consent**. See below.
+* **Never a message of the conversation.** This reads the request's *preamble*: its `tools`
+  array, its `system` prompt, and the skills listing that arrives in a `{"role":"system"}`
+  reminder. Nothing a user or the model said in the transcript itself is touched.
 
-### Consent: identifiers, not content
+### Consent: identifiers under scoping, text under content consent
 
-These rows are gated on **tenant scoping**, not on `capture_content`. A tool name, an MCP
-server name and a skill name are identifiers of the caller's own *configuration* — the
-same sensitivity class as `tool_choice`, which this store already keeps — and they are
-not the caller's transcript. Requiring transcript consent would deny the feature to the
-accounts that declined it, over data that is not their transcript. Every row carries
-`tenant_id`, every query filters on it, and the name charset is checked before it is
+The **names and token weights** are gated on **tenant scoping**, not on `capture_content`. A
+tool name, an MCP server name and a skill name are identifiers of the caller's own
+*configuration* — the same sensitivity class as `tool_choice`, which this store already keeps
+— and they are not the caller's transcript. Requiring transcript consent would deny the
+feature to the accounts that declined it, over data that is not their transcript. Every row
+carries `tenant_id`, every query filters on it, and the name charset is checked before it is
 stored.
+
+The **text** is a different class of data and gets the stricter gate. A tool schema is whatever
+an SDK author wrote; a system prompt is whatever the user, their CLAUDE.md, or something they
+pasted wrote. So `text_gz` rides the same pair that governs `request_content.before_gz` — the
+operator's `--dashboard-content` **and** the tenant's own opt-in — carried per message on
+`RecordInventory(..., text bool)`. Without it the row is still written and the column is
+`NULL`, so an account that declined transcript capture keeps the whole inventory feature and
+loses only the ability to read the text.
+
+Three properties of that gate worth stating, because each one is a way it could have been got
+wrong:
+
+1. It is applied on the **writer**, not at the scan. `declCache` entries are shared by every
+   tenant that declares the same set, so gating at the scan would either poison the memo or
+   serve one tenant's decision to another. The system prompt is kept out of `declCache`
+   entirely for the same reason and memoized by its own content hash instead — a hit there
+   means the bytes were identical, so nothing crosses between callers.
+2. The text is **scrubbed with the existing redactor and capped** (64 KiB) before the INSERT,
+   on the writer goroutine — `finish()` runs before the handler returns, so anything expensive
+   there is paid by the next real request on the connection.
+3. `NULL` is a **first-class state**, not an empty string. A row written before the column
+   existed and a row written without consent both read `NULL`, and the report carries an
+   explicit coverage count (`PromptStat.Rows` / `TextRows`) so the UI says *which* rather than
+   rendering a prompt that looks empty.
+
+System-prompt rows are capped at **4 per session**, across every declaration-set digest the
+session presents. The text is client-supplied and may carry a clock — Claude Code's own carries
+the date — so an uncapped writer would store one multi-kilobyte blob per request. The key
+includes the digest as well as the prompt's hash, because the read side selects one
+`(session, digest)` pair: keyed by session alone, a session that changed its tool set filed its
+system prompt under the first digest only, and a view landing on a later one showed a prefix
+with its largest region missing.
 
 ### Skill discovery fails safe
 
@@ -200,6 +237,49 @@ Two rules the payload enforces rather than leaves to the reader:
 * **An unpriced number is not free.** A model with no known rates leaves the token counts
   visible, `unused_usd` at 0 and `priced: false`, with the session counted in
   `coverage.unpriced_sessions`.
+
+## Reading the text: `GET /api/prompt`
+
+One session's prefix, decomposed into **regions** — the system prompt, the skills listing, and
+every tool schema, each with its measured weight, its share of that prefix, and its text. Its
+own route rather than more fields on `/api/tools`: the report is forty numbers and is fetched on
+every tab switch, while the text is tens of kilobytes for a real catalogue and the reason
+somebody opens the page is almost never to read a tool schema.
+
+```json
+{
+  "captured": true,
+  "session": "…", "ts": 1787338404761, "digest": "…",
+  "tokens": 36810, "rows": 318, "text_rows": 9,
+  "regions": [
+    {"kind": "system_prompt", "name": "<hash>", "tokens": 170, "share": 28.1,
+     "text": "You are Claude Code…", "has_text": true},
+    {"kind": "skill_listing", "name": "", "tokens": 105, "share": 17.4, "has_text": true},
+    {"kind": "tool", "name": "Read", "tokens": 76, "share": 12.6, "has_text": true}
+  ]
+}
+```
+
+Four properties it holds to:
+
+* **One session's, never an aggregate.** A prefix averaged over sessions is not a prefix
+  anybody sent, and a union of every name ever declared would carry two versions of the same
+  tool's schema. The response names which session and when.
+* **Heaviest first, with the system prompt pinned** — and it says so, because that is **not**
+  the order the model reads them in: the array order a client sent its tools in is not stored,
+  and claiming it were would be a fabrication.
+* **`captured: false` names the party who can change that** — `blocked_by` is `operator` when
+  `--dashboard-content` is off service-wide, `tenant` when the account has not opted in, and
+  absent when consent is fine and the rows simply predate the column. Telling a reader to enable
+  their own setting when the operator's is the one shut is the bug `captureState` exists to
+  prevent.
+* **The weights are served even when the text is not**, so the panel can say "12,400 tokens,
+  text not captured" instead of rendering nothing and looking broken.
+
+`rows` / `text_rows` count the same way `PromptStat` does — one per
+`(session, kind, name, server)`, matching how `scopedDecls` groups them. They did not at first:
+raw table rows came out at 4,192 where the report said 309, and two coverage figures 13x apart
+on one page with nothing connecting them is how a dashboard loses a reader for good.
 
 ## Not in this layer
 

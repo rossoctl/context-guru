@@ -16,15 +16,24 @@ package dash
 //     tenant_id) rather than on transcript-capture consent. Requiring consent would
 //     deny the feature to the accounts that declined transcript capture, over data that
 //     is not their transcript.
-//   - NEVER the description text, never a prompt, never a message. The listing that
-//     declares skills is read for names and measured for size; its prose is discarded
-//     on the request goroutine and never reaches the writer, let alone the disk.
+//   - The TEXT of each declaration — a tool's whole JSON element, a skill's listing entry,
+//     the listing itself, and the system prompt — but ONLY under transcript-capture consent:
+//     the operator's --dashboard-content AND the tenant's own opt-in, the same pair that
+//     gates request_content. This is a change from the original design, which stored no text
+//     at all: a page that says a capability costs 4,723 tokens a request and cannot show the
+//     4,723 tokens gives a figure nobody removes a tool schema on. The text is scrubbed with
+//     the redactor and size-capped, and without consent the column is NULL while every
+//     measurement above survives — see Decl.Text and declText.
+//   - NEVER a message of the conversation. The inventory reads the request's PREAMBLE (its
+//     tools array, its system prompt, the skills listing in a system-role reminder) and
+//     nothing a user or the model said in the transcript itself.
 //
 // Cost discipline. This runs on every request, so the hot path is: one structural
-// gjson scan of `tools`, two byte searches for the skills listing, one hash, one map
-// lookup — and on a hit (every request after a session's first) nothing else. All
-// tokenizing and all parsing happen once per distinct declaration SET, memoized by
-// its digest. See BenchmarkScanInventory for the measured per-request figure.
+// gjson scan of `tools`, two byte searches for the skills listing, one structural lookup and
+// one hash for the system prompt, and two map lookups — and on a hit (every request after a
+// session's first) nothing else. All tokenizing and all parsing happen once per distinct
+// declaration SET, memoized by its digest, and once per distinct system prompt, memoized by
+// its own content hash. See BenchmarkScanInventory for the measured per-request figures.
 
 import (
 	"bytes"
