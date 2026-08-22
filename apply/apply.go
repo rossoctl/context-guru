@@ -100,7 +100,15 @@ func logDecisions(lg *slog.Logger, rr *components.RunReport) {
 			"component", rep.Component, "kind", rep.Kind, "verdict", verdict,
 			"tokens_before", rep.TokensBefore, "tokens_after", rep.TokensAfter,
 			"saved", rep.Saved(), "duration_ms", rep.DurationMs,
-			"changed_msgs", len(rep.ChangedIdx), "stashed", len(rep.CacheKeys),
+			"changed_msgs", len(rep.ChangedIdx),
+		}
+		// "stashed" only for an Offload: a Reformat's CacheKeys are dedup keys over
+		// content it did NOT stash (see components.reformatKeys), and labelling those
+		// "stashed" would read as a reversibility claim the fold never makes.
+		if rep.Kind == "offload" {
+			attrs = append(attrs, "stashed", len(rep.CacheKeys))
+		} else {
+			attrs = append(attrs, "dedup_keys", len(rep.CacheKeys))
 		}
 		if len(rep.Gates) > 0 {
 			attrs = append(attrs, "gates", formatGates(rep.Gates))
@@ -216,6 +224,15 @@ type Trace struct {
 	FilteredDeclTokens int
 	// FilteredDecls is how many declarations went, for the component's own report.
 	FilteredDecls int
+	// HeadTTL1h says this request asked for the provider's ONE-HOUR cache tier on its head
+	// breakpoints (`tools`, `system`) while leaving the trailing message breakpoint at five
+	// minutes. False on every request unless the account opted in.
+	HeadTTL1h bool
+	// HeadTTLTokens is the size of the prefix that 1h entry covers — the numerator of the
+	// head share f, on which the whole mixed-TTL economics is linear. Measured rather than
+	// assumed, because f was the one input R4's simulation could not read off the database
+	// and had to parameterise.
+	HeadTTLTokens int
 	// Run is the pipeline's aggregate report (nil when the pipeline never ran).
 	Run *components.RunReport
 	// Changes lists each rewritten message's before/after text (clipped).
@@ -360,12 +377,23 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 	}
 
+	// Mixed TTL: ask for the one-hour tier on the head's existing breakpoints. Here for the
+	// third time for the same reason as the two rewrites above — it edits `tools` and
+	// `system`, top-level fields the pipeline never sees, and it must land before any byte
+	// offset into the body is taken. It adds no breakpoint, so it cannot breach the
+	// provider's cap of four. See headttl.go; off unless the host asks.
+	headTTL1h, headTTLTokens := false, 0
+	if !bypass && o.HeadTTL1h && o.HeadTTLMinTokens > 0 {
+		body, headTTL1h, headTTLTokens = upgradeHeadTTL(body, provider, o.HeadTTLMinTokens)
+	}
+	tr.HeadTTL1h, tr.HeadTTLTokens = headTTL1h, headTTLTokens
+
 	msgsRaw := gjson.GetBytes(body, "messages")
 	if !msgsRaw.Exists() || !msgsRaw.IsArray() {
 		// Assign rather than return a fresh Result: res already carries the trace fields
 		// set above, and a bypassed request that also lacks a messages array must still
 		// report itself as bypassed rather than as "no messages".
-		res.Body, res.Changed = body, toolSchema || filteredDecls > 0
+		res.Body, res.Changed = body, toolSchema || filteredDecls > 0 || headTTL1h
 		tr.FilteredDeclTokens, tr.FilteredDecls = filteredTokens, filteredDecls
 		return res
 	}
@@ -405,7 +433,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	msgs := msgsRaw.Array()
 	norm, slots := normalize(provider, msgs)
 	if len(norm) == 0 {
-		res.Body, res.Changed = body, systemSplit || toolSchema || filteredDecls > 0 // keep the envelope rewrites even with nothing to compact
+		res.Body, res.Changed = body, systemSplit || toolSchema || filteredDecls > 0 || headTTL1h // keep the envelope rewrites even with nothing to compact
 		tr.FilteredDeclTokens, tr.FilteredDecls = filteredTokens, filteredDecls
 		return res
 	}
@@ -440,7 +468,52 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			var prevAt int64
 			maxCachedIdx, prevAt = o.Tracker.TurnAt(sessionID, len(norm), nowMs)
 			maxCachedIdx--
-			coldCache = cacheIsCold(prevAt, nowMs, cacheTTL(provider, body))
+			// The idle clock is per SESSION ID; the provider's prompt cache is keyed on
+			// CONTENT. When those disagree the clock can go stale while the provider's entry
+			// stays warm, and a stale-but-plausible prevAt is the one shape that reads COLD
+			// wrongly — which is the expensive direction (a rewritten live prefix costs a
+			// cache-write of the whole suffix at 1.25x fresh).
+			//
+			// It disagrees whenever one conversation reaches us under two ids: an explicit
+			// header present on some turns and absent on others resolves to the header on
+			// one turn and to sha256(system+firstUser) on the next (session.Scoped), so
+			// turns under id B keep the provider entry warm while id A's clock ages. Three
+			// of thirteen production tenants send both id shapes.
+			//
+			// So the alias's clock counts too, and we take the LATER of the two. Conservative
+			// by construction: a later touch can only make us read WARM.
+			//
+			// Consulted on EVERY turn, header-bearing or not. Skipping the turns where the
+			// alias IS the session id closed only half the path, and the half it left open is
+			// the same −$708 mechanism mirrored: the header-bearing turns keep the provider's
+			// content-keyed entry warm and write the alias clock, and the header-LESS turn —
+			// whose own tracker id no other turn touches — then read COLD with a fresh
+			// timestamp sitting unread in the store. Four turns, header present on 2 and 3:
+			// ColdCache came out [false false false TRUE] with the entry 60 s old.
+			//
+			// Reading a key we also write is safe: aliasSeen reads BEFORE it writes and runs
+			// once per request, so the value is the previous turn's, never this one's.
+			alias := session.Scoped(o.Tenant, "", sys, firstUser)
+			if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
+				prevAt = aliasAt
+			}
+			// The TTL record is read under BOTH ids too, and the two guards have to compose or
+			// each one just opens a door for the other: a prefix that recorded the 1h tier under
+			// one id and then arrives under the other looked up a key never written, fell back
+			// to 5m, and could declare cold on a prefix held for an hour — path (a) reached
+			// through the door path (b) opens. Both widenings are monotone toward WARM, so
+			// composing them cannot make the cold test more willing to fire.
+			//
+			// Under both rather than under the alias alone, because neither id is reliable by
+			// itself: the alias splits when the header comes and goes, and it ALSO changes when
+			// the agent compacts its own context (metaSessionKeys survives that, the derived
+			// sha256(system+firstUser) does not — see explicitSession). Passing the already
+			// widened ttl into the second call converges the two records as a side effect.
+			ttl := sessionTTL(st, sessionID, cacheTTL(provider, body))
+			if a := sessionTTL(st, alias, ttl); a > ttl {
+				ttl = a
+			}
+			coldCache = cacheIsCold(prevAt, nowMs, ttl)
 			if prevAt > 0 && nowMs > prevAt {
 				idleMs = nowMs - prevAt
 			}
@@ -865,6 +938,61 @@ func cacheIsCold(prevAtMs, nowMs int64, ttl time.Duration) bool {
 	return time.Duration(nowMs-prevAtMs)*time.Millisecond >= ttl+coldMargin
 }
 
+// aliasSeen records activity against a content-derived session id and returns when that id
+// was last seen, or 0 if never. It is the second clock the cold decision consults.
+//
+// Deliberately NOT the Tracker: TurnAt runs the transcript length through modes.Boundary,
+// which counts a compaction reset, so recording a second key per request double-counted that
+// metric. This needs only a timestamp, and the store already holds per-session state.
+//
+// Pinned against LRU (store.SeenPrefix) because losing it makes a warm prefix read cold.
+//
+// ponytail: degrades to 0 on a store that cannot persist, which just restores the old
+// single-clock behaviour. Move it into the Tracker (with a read-only accessor) if the alias
+// clock ever needs the boundary too.
+func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
+	if st == nil || nowMs <= 0 {
+		return 0
+	}
+	k := store.SeenPrefix + alias
+	var prev int64
+	if b, ok := st.Get(k); ok {
+		prev, _ = strconv.ParseInt(string(b), 10, 64)
+	}
+	st.Put(k, []byte(strconv.FormatInt(nowMs, 10)))
+	return prev
+}
+
+// sessionTTL is cacheTTL widened to the LONGEST lifetime this PREFIX has ever asked for.
+//
+// cacheTTL reads the TTL out of THIS request, so a client that marks `ttl: "1h"` on one turn
+// and a bare `ephemeral` on the next would have its hour-long prefix judged cold after six
+// minutes — a false cold reading on a prefix the provider is still holding. Once a prefix has
+// asked for the extended tier, every later cold judgment for it uses that tier.
+//
+// The caller reads it under BOTH the session id and the content-derived alias and takes the
+// longer, mirroring what it does with the idle clock, because neither id alone survives
+// everything: the alias splits when a session header comes and goes, and it changes when the
+// agent compacts its own context, which an explicit id survives.
+//
+// Monotonic, so it only ever makes us read WARM, which is the safe direction. Unobserved on
+// today's traffic (0 of 1,868 captured requests carry a ttl field, and none of the ~5,000
+// behind cacheTTL's own comment do) — but the proxy is growing a mechanism that adds 1h
+// marks itself, and this is the guard that keeps that from turning into a false cold read.
+func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration {
+	if st == nil {
+		return ttl
+	}
+	k := store.TTLPrefix + session
+	if b, ok := st.Get(k); ok {
+		if prev, err := time.ParseDuration(string(b)); err == nil && prev > ttl {
+			return prev
+		}
+	}
+	st.Put(k, []byte(ttl.String()))
+	return ttl
+}
+
 // hasCacheBreakpoint reports whether the request carries a REAL prompt-cache
 // breakpoint — a structural cache_control / cachePoint field on a message, content
 // block, system block, or tool. This is deliberately structural (gjson path queries),
@@ -935,10 +1063,26 @@ func putLen(st store.Store, session string, n int) {
 // was allowed to touch this turn (Ctx.TailOnly). With cache-awareness off it is
 // the whole request; with it on it is the uncached tail, and the difference is
 // what cache safety cost us in foregone compaction.
+// attemptedTokens is the eligible denominator: the tokens the depth gate let
+// age/supersession offloaders touch on this request. frozen_tokens is the rest — the
+// price of cache safety, reported next to its benefit.
+//
+// It reads the GATE, which means it must read the cold lift too. Ctx.TailOnlyCold lets an
+// opted-in component act at any depth once the prompt cache has provably expired, and the
+// deterministic offloaders (mask, failed_run, collapse) opt in by default — so on a cold
+// turn nothing is frozen for cache safety and counting the prefix as frozen made the
+// biggest lever in the system invisible on its own dashboard: 742 `ttl_expiry` requests
+// reported 38.4M frozen tokens (90.8% of their context) on turns where there was no cache
+// left to protect.
+//
+// ponytail: reads Ctx.ColdCache rather than asking each component whether it opted in. A
+// deployment that sets `cold_cache: false` on every offloader therefore over-reports
+// `attempted` (under-reports `frozen`) on cold turns only. Plumb the pipeline's resolved
+// opt-in set into Ctx if that config ever needs an exact number.
 func attemptedTokens(norm []bschemas.ChatMessage, c *components.Ctx) int {
 	n := 0
 	for i := range norm {
-		if c.TailOnly(i) {
+		if c.TailOnlyCold(i, c.ColdCache) {
 			n += schema.TextTokens(schema.MessageText(norm[i]))
 		}
 	}

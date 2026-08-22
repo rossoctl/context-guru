@@ -186,3 +186,51 @@ func TestResponseUsagePicksTheParserByContentType(t *testing.T) {
 		t.Error("empty body reported usage")
 	}
 }
+
+// The per-TTL write breakdown. Without it a 1-hour write prices as a 5-minute one, which
+// understates the row by 0.75x of its whole written prefix — and it is also the only signal
+// that a requested ttl:"1h" was honoured rather than silently downgraded.
+//
+// Both fixtures are real responses from this gateway, one per verdict.
+func TestUsageReadsTheOneHourWriteTier(t *testing.T) {
+	granted := `{"usage":{"input_tokens":2,"output_tokens":32,"cache_read_input_tokens":0,
+		"cache_creation_input_tokens":36574,
+		"cache_creation":{"ephemeral_5m_input_tokens":323,"ephemeral_1h_input_tokens":36251}}}`
+	refused := `{"usage":{"input_tokens":2,"output_tokens":32,"cache_read_input_tokens":0,
+		"cache_creation_input_tokens":48212,
+		"cache_creation":{"ephemeral_5m_input_tokens":48212,"ephemeral_1h_input_tokens":0}}}`
+
+	u, ok := parseUsage([]byte(granted))
+	if !ok {
+		t.Fatal("granted fixture did not parse")
+	}
+	if u.CacheWrite != 36574 || u.CacheWrite1h != 36251 {
+		t.Errorf("granted: write=%d write_1h=%d, want 36574/36251", u.CacheWrite, u.CacheWrite1h)
+	}
+	if u.CacheWrite1h > u.CacheWrite {
+		t.Error("the 1h figure is a SUBSET of cache_write, never an addition to it")
+	}
+	u2, ok := parseUsage([]byte(refused))
+	if !ok {
+		t.Fatal("refused fixture did not parse")
+	}
+	if u2.CacheWrite != 48212 || u2.CacheWrite1h != 0 {
+		t.Errorf("refused: write=%d write_1h=%d, want 48212/0", u2.CacheWrite, u2.CacheWrite1h)
+	}
+	// A response with no breakdown at all — every pre-existing fixture — must read as zero
+	// rather than as missing usage.
+	u3, ok := parseUsage([]byte(`{"usage":{"input_tokens":5,"output_tokens":1,
+		"cache_creation_input_tokens":100}}`))
+	if !ok || u3.CacheWrite != 100 || u3.CacheWrite1h != 0 {
+		t.Errorf("no-breakdown response: ok=%v write=%d write_1h=%d", ok, u3.CacheWrite, u3.CacheWrite1h)
+	}
+	// And through the SSE path, where the tiers arrive in message_start. One LINE per event, so
+	// the payload has to be compact — a `data:` field with an embedded newline is two events.
+	sse := `event: message_start` + "\n" + `data: {"message":{"usage":{"input_tokens":2,` +
+		`"cache_creation_input_tokens":36574,"cache_creation":` +
+		`{"ephemeral_5m_input_tokens":323,"ephemeral_1h_input_tokens":36251}}}}` + "\n\n"
+	u4, ok := parseSSEUsage([]byte(sse))
+	if !ok || u4.CacheWrite1h != 36251 {
+		t.Errorf("sse: ok=%v write_1h=%d, want 36251", ok, u4.CacheWrite1h)
+	}
+}

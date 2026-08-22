@@ -104,6 +104,31 @@ CREATE TABLE IF NOT EXISTS requests (
   -- request to decide whether the snapshot MOVED, which is the turn the split is worth
   -- anything on. Stored so the figure survives a restart and can be recomputed from the table.
   split_tail_hash    INTEGER NOT NULL DEFAULT 0,
+  -- The idle keep-alive's three columns. keepalive marks a row that IS a ping — a request
+  -- context-guru sent on its own initiative, with no agent behind it — so every query that
+  -- reports agent traffic can exclude it and the ledger can price it. It is the audit trail
+  -- for a mechanism that spends the caller's money while they are away from the keyboard,
+  -- and without it that spend would be indistinguishable from the agent's own.
+  -- The part of cache_write the provider billed at the ONE-HOUR tier (a subset of it, from
+  -- usage.cache_creation.ephemeral_1h_input_tokens). Two jobs: cost_usd needs it, because a 1h
+  -- write is 2.0x base input where a 5m write is 1.25x and pricing one as the other understates
+  -- the row by 0.75x of its written prefix; and it is the only evidence that a requested
+  -- ttl:"1h" was honoured rather than silently downgraded, which on this gateway depends on the
+  -- model (granted on aws/claude-haiku-4-5, refused on aws/claude-sonnet-5).
+  cache_write_1h     INTEGER NOT NULL DEFAULT 0,
+  keepalive          INTEGER NOT NULL DEFAULT 0,
+  -- On a REAL request: how many pings preceded it during the idle span it just ended. It is
+  -- what makes the saving attributable — a request that hits after a 20-minute gap could
+  -- have been rescued by our ping or by any other session touching the same content, and
+  -- only this column tells the two apart.
+  keepalive_pings    INTEGER NOT NULL DEFAULT 0,
+  -- What the ping avoided on THIS row: its cache-read tokens priced at the difference
+  -- between the creation tier it would have paid and the read tier it did pay. Nonzero only
+  -- where a ping preceded it, the idle gap exceeded the provider lifetime, and the provider
+  -- read more than it wrote. Priced against a cache MISS, not fresh input, for the same
+  -- reason cachesplit_saved_usd is: those tokens carry cache_control, so a miss bills them
+  -- as creation at 1.25x rather than at 1.0x.
+  keepalive_saved_usd REAL   NOT NULL DEFAULT 0,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -473,6 +498,10 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "cache_write_1h", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "keepalive", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "keepalive_pings", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "keepalive_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
 }

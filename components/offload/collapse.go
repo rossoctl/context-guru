@@ -33,8 +33,9 @@ type collapseConfig struct {
 	TailLines  int     `yaml:"tail_lines"`
 	MarkerMode string  `yaml:"marker_mode"` // full (default) | summary | off
 	// ColdCache lets a NEW collapse act at any depth on a turn whose prompt cache has
-	// provably expired (see components.Ctx.TailOnlyCold). Off by default.
-	ColdCache bool `yaml:"cold_cache"`
+	// provably expired (see components.Ctx.TailOnlyCold). ON by default; see
+	// coldCacheDefault.
+	ColdCache *bool `yaml:"cold_cache"`
 }
 
 func newCollapse(raw []byte) (components.Component, error) {
@@ -43,7 +44,7 @@ func newCollapse(raw []byte) (components.Component, error) {
 		return nil, err
 	}
 	return &Collapse{maxTokens: cfg.MaxTokens, maxFrac: cfg.MaxFrac, headLines: cfg.HeadLines,
-		tailLines: cfg.TailLines, mode: parseMarkerMode(cfg.MarkerMode), coldCache: cfg.ColdCache}, nil
+		tailLines: cfg.TailLines, mode: parseMarkerMode(cfg.MarkerMode), coldCache: coldCacheDefault(cfg.ColdCache)}, nil
 }
 
 func (Collapse) Name() string                 { return "collapse" }

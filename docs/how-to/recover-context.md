@@ -72,12 +72,21 @@ Anthropic-only. A marker-bearing OpenAI *streaming* response is replayed raw (fa
 restoration does not fire on it. Non-streaming OpenAI and streaming Anthropic both work
 normally.
 
-**One request lost its streaming.** When a request carries no marker, the SSE response
-streams straight through with no added latency. When a marker *is* present the response has
-to be read in full and inspected, so time-to-first-byte becomes time-to-last-byte for that
-request. `/stats` reports the split: `sse_streamed`, `sse_buffered`, `sse_buffered_pct`,
-`sse_ttfb_ms_avg`, `sse_ttfb_ms_avg_buffered`. The last of those is time-to-*last*-byte by
-construction, so it is not comparable to `sse_ttfb_ms_avg`.
+**One request lost its streaming.** A streaming response is inspected with a **bounded
+peek**: the proxy buffers only up to the first `content_block_start`, and if that block is
+not a call to the expand tool it flushes the peek and streams the remainder. Only a response
+that *opens* with the expand call is read in full, and for that one time-to-first-byte
+becomes time-to-last-byte. `/stats` reports the split: `sse_streamed`, `sse_buffered`,
+`sse_buffered_pct`, `sse_ttfb_ms_avg`, `sse_ttfb_ms_avg_buffered`. The last of those is
+time-to-*last*-byte by construction, so it is not comparable to `sse_ttfb_ms_avg`.
+
+The peek's accepted limit: a response that opens with thinking or text and calls expand
+*later* streams through, so the client receives the model's raw expand `tool_use` instead of
+the proxy resolving it — the same outcome you already get when the model batches expand with
+another tool, or when no id resolves. `sse_expand_after_stream` counts it, so the rate is a
+number rather than an assumption. The trade is deliberate: buffering every advertised-tool
+response cost ~21 s of extra time-to-first-byte on a third of all responses, and the expand
+loop resolved 5 calls in 5,752 requests.
 
 **A page or message that merely quotes a marker counts as marker-bearing.** Marker matching
 accepts both the plain `<<cg:HASH>>` spelling and the HTML-escaped

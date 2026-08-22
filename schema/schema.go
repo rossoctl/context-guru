@@ -13,6 +13,7 @@ package schema
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -147,11 +148,24 @@ func MessageText(m schemas.ChatMessage) string {
 	if m.Content.ContentStr != nil {
 		return *m.Content.ContentStr
 	}
-	var s string
-	for _, blk := range m.Content.ContentBlocks {
-		s += BlockText(blk)
+	blocks := m.Content.ContentBlocks
+	// The common case, and free: one block means the block's own text, no copy at all.
+	if len(blocks) == 1 {
+		return BlockText(blocks[0])
 	}
-	return s
+	// `s += BlockText(blk)` reallocated and re-copied the accumulation on every block,
+	// which is O(n^2) in the message's own size. This is called for every tool message on
+	// every turn, ahead of any size gate, by several components.
+	n := 0
+	for _, blk := range blocks {
+		n += len(BlockText(blk))
+	}
+	var b strings.Builder
+	b.Grow(n)
+	for _, blk := range blocks {
+		b.WriteString(BlockText(blk))
+	}
+	return b.String()
 }
 
 // SetMessageText replaces a message's content with a single text string,

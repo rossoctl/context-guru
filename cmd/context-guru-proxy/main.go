@@ -483,11 +483,14 @@ func main() {
 		CheapModel:   cheapModelFromEnv(),        // static "config"-source LLM for NeedsModel components
 		InjectExpand: os.Getenv("INJECT_EXPAND"), // auto (default) | always | never
 		CacheMode:    os.Getenv("CACHE_MODE"),    // auto (default) | on | off — cache-aware compaction
-		Windows:      windows,                    // dynamic context-window resolver (fraction triggers)
-		Prices:       priceResolver(windows),     // per-token rates, so each captured request is priced at write time
-		Preset:       cfg.Preset,
-		Dashboard:    rec,  // nil unless --dashboard
-		Mode:         mode, // sync (default) | observe — explicit, never inferred
+		// The single-tenant host's own `cache:` block: the idle keep-alive and the mixed-TTL
+		// head. In hosted mode each tenant's document supplies this instead (buildTenantConfig).
+		Cache:     cachePolicy(cfg.Cache),
+		Windows:   windows,                // dynamic context-window resolver (fraction triggers)
+		Prices:    priceResolver(windows), // per-token rates, so each captured request is priced at write time
+		Preset:    cfg.Preset,
+		Dashboard: rec,  // nil unless --dashboard
+		Mode:      mode, // sync (default) | observe — explicit, never inferred
 		Observe: proxy.ObserveOptions{
 			MaxQueue: cfg.Observe.MaxQueue,
 			Workers:  cfg.Observe.Workers,
@@ -702,7 +705,40 @@ func buildTenantConfig(doc []byte, e components.Emitter) (proxy.BuiltConfig, err
 	if preset == "" {
 		preset = "custom" // an explicit pipeline list; labelled so the dashboard can group it
 	}
-	return proxy.BuiltConfig{Pipe: pipe, Store: cfg.NewStore(), Mode: mode, Preset: preset}, nil
+	return proxy.BuiltConfig{Pipe: pipe, Store: cfg.NewStore(), Mode: mode, Preset: preset,
+		Cache: cachePolicy(cfg.Cache)}, nil
+}
+
+// cachePolicy maps the configuration document's `cache:` block onto the proxy's own type.
+// The mapping lives here rather than in `proxy` for the reason ConfigBuilder exists: the
+// proxy package does not depend on the configuration loader.
+func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
+	// Resolve the defaults only when something is actually switched on. A parked block
+	// (`keepalive: false` with a tuned interval) must not come out looking enabled, and a
+	// zero HeadTTLMinTokens must stay zero so a host that never configured this asks for
+	// nothing rather than asking on every request.
+	if !c.KeepAlive && !c.HeadTTL1h {
+		return proxy.CachePolicy{}
+	}
+	r := c.Resolved()
+	return proxy.CachePolicy{
+		KeepAlive:        c.KeepAlive,
+		Idle:             time.Duration(r.KeepAliveIdleSeconds) * time.Second,
+		MaxPings:         r.KeepAliveMaxPings,
+		MaxUSDPerPing:    r.KeepAliveMaxUSDPerPing,
+		MinPrefixTokens:  r.KeepAliveMinPrefixTokens,
+		HeadTTL1h:        c.HeadTTL1h,
+		HeadTTLMinTokens: headTTLMin(c.HeadTTL1h, r.HeadTTLMinTokens),
+	}
+}
+
+// headTTLMin returns the size gate only when the policy is on, so `HeadTTLMinTokens > 0` is
+// the single condition apply has to test.
+func headTTLMin(on bool, n int) int {
+	if !on {
+		return 0
+	}
+	return n
 }
 
 // defaultUpstreams picks the first entry of each dialect as the default a newly

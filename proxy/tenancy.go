@@ -153,6 +153,9 @@ type Tenancy struct {
 	CaptureContent bool
 	// Upstream names, by dialect, into Options.Upstreams.
 	UpAnthropic, UpOpenAI, UpBob string
+	// Cache is this tenant's host-level prompt-cache policy: the idle keep-alive and the
+	// mixed-TTL head. Zero means both off, which is the default for every account.
+	Cache CachePolicy
 }
 
 // Upstream is one resolved entry of the server's allow-list.
@@ -408,6 +411,9 @@ type BuiltConfig struct {
 	Store  store.Store
 	Mode   components.Mode
 	Preset string
+	// Cache is the document's `cache:` block, resolved. Host-level prompt-cache policy the
+	// pipeline cannot express, because it acts between requests rather than during one.
+	Cache CachePolicy
 }
 
 // ConfigBuilder expands a tenant's configuration document into a runnable
@@ -624,7 +630,7 @@ func (s *TenantSource) build(t *tenant.Tenant, cfgDoc string) (*Tenancy, error) 
 		tn.Preset = "invalid"
 		return tn, nil
 	}
-	tn.Pipe, tn.Store, tn.Preset = built.Pipe, built.Store, built.Preset
+	tn.Pipe, tn.Store, tn.Preset, tn.Cache = built.Pipe, built.Store, built.Preset, built.Cache
 	if built.Mode != "" {
 		tn.Mode = built.Mode
 	}

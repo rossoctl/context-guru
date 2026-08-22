@@ -71,6 +71,7 @@ var statsGoldenTopLevel = []string{
 	"savings_pct_new_input",
 	"sse_buffered",
 	"sse_buffered_pct",
+	"sse_expand_after_stream",
 	"sse_streamed",
 	"sse_ttfb_ms_avg",
 	"sse_ttfb_ms_avg_buffered",
@@ -105,6 +106,11 @@ var statsGoldenComponent = []string{
 	"runs",
 	"saved_tokens",
 	"saved_tokens_unique",
+	// verdict reads the other three: a component that MUTATED without SAVING content tokens
+	// is doing its job (cachesplit moves tokens between billing tiers rather than removing
+	// them), and "acted: 0" beside "mutated: 755" has twice been filed as a bug against a
+	// mechanism that was working. Stating the reading is cheaper than explaining it again.
+	"verdict",
 }
 
 // harnessRequiredFields are the exact keys deploy/harbor reads. Listed separately

@@ -33,11 +33,32 @@ func init() { components.Register("searchfold", newSearchfold) }
 // the other in-place components (format, toon, cmdfilter) rely on — hence no TailOnly
 // gate, which would only make the FIRST turn's fold differ from later turns'.
 //
-// Routing is by COMMAND, not by shape: schema.ToolCalls says which call produced each
-// tool result, so `rg`/`grep`/`find` output is folded and `cat`/build/test output is
-// not looked at. When the request carries no pairing (an unmatched id, or a dialect
-// with no call in scope) the fold is attempted anyway — it is a no-op on output that
-// has no repeated path prefix, and the round-trip check makes attempting it safe.
+// Routing: none. The fold is ATTEMPTED on every tool output, and it self-verifies, so a
+// misroute costs CPU and never correctness.
+//
+// It used to pre-gate on the producing command (`rg`/`grep`/`find` folded, `cat`/build/test
+// skipped) via schema.ToolCalls. Measured on 1,795 real captured requests through /compact,
+// that gate was a strict loss on both axes it was supposed to trade between:
+//
+//	            tokens folded   unique   searchfold ms/request
+//	with gate         234,722    5,395                   1.174
+//	no gate           333,764    5,903                   0.509
+//
+// It declined 29,737 candidate messages, and 99,042 tokens' worth of them had exactly the
+// repeated path prefix this folds — the pairing says which command ran, not what its output
+// looks like, and agents pipe and redirect search output through everything. It was also the
+// more expensive path: resolving a pairing calls ToolCall.Command(), which json.Unmarshals
+// the whole argument object per tool message, where the fold itself exits on its first line
+// without a repeated prefix.
+//
+// This is the general rule for a self-verifying fold: attempt it, keep it if the inverse
+// reproduces the input and the result is smaller. What it does NOT license is attempting it on
+// content that cannot possibly fold — each fold splits and rebuilds the whole string before
+// `adopt` compares lengths, so there is no early exit and an attempt costs a full pass
+// (measured on non-foldable output: 275 µs at 24 KB, 1.73 ms at 240 KB, 8.16 ms at 1.2 MB). So
+// a cheap SHAPE pre-check still earns its keep, the way `format`'s not_json_shaped does — see
+// mayCarryPathPrefix. What does not earn its keep is a pre-check that has to reconstruct
+// request STRUCTURE, which is what the command pairing this replaced did.
 type Searchfold struct{ minTokens int }
 
 type searchfoldConfig struct {
@@ -56,7 +77,6 @@ func (Searchfold) Name() string                 { return "searchfold" }
 func (Searchfold) Enabled(*components.Ctx) bool { return true }
 
 func (f *Searchfold) Reformat(req *schemas.BifrostChatRequest, rep *components.Report, _ *components.Ctx) error {
-	pairs := schema.ToolCalls(req)
 	acted := false
 	for i := range req.Input {
 		m := &req.Input[i]
@@ -67,13 +87,13 @@ func (f *Searchfold) Reformat(req *schemas.BifrostChatRequest, rep *components.R
 			rep.Gate("non_text_blocks") // would be dropped by a text rewrite
 			continue
 		}
-		if tc, ok := pairs[i]; ok && !isSearchCommand(tc.Command()) {
-			rep.Gate("not_a_search_command")
-			continue
-		}
 		content := schema.MessageText(*m)
 		if schema.TextTokens(content) < f.minTokens {
 			rep.Gate("below_min_tokens")
+			continue
+		}
+		if !mayCarryPathPrefix(content) {
+			rep.Gate("no_path_shape")
 			continue
 		}
 		out := FoldSearchOutput(content)
@@ -90,25 +110,24 @@ func (f *Searchfold) Reformat(req *schemas.BifrostChatRequest, rep *components.R
 	return nil
 }
 
-// searchProgram matches the first word of a command (after any `cd x &&` / env
-// prefixes are ignored by scanning every word) that produces path-prefixed output.
-// `ls` is included for `ls -1`-style listings; a plain `ls` produces no paths and so
-// folds to nothing anyway.
-var searchProgram = regexp.MustCompile(`(^|[|;&(]\s*|\s)(rg|ag|ack|fd|find|ls|grep|egrep|fgrep|zgrep|git\s+grep|git\s+ls-files)\b`)
-
-// isSearchCommand reports whether a command line runs a search/list program anywhere
-// in its pipeline. Anywhere, not just at the head, because real agent traffic pipes
-// and chains constantly (`cd /x && grep -rn foo . | head -50`), and the tail of a
-// pipeline is what shapes the output.
-func isSearchCommand(cmd string) bool {
-	switch cmd {
-	case "", "Grep", "Glob":
-		return true // a bare tool name with no args, or the search tools themselves
+// mayCarryPathPrefix is the one-pass shape gate: every fold here factors out a repeated PATH
+// prefix, and a path prefix shows up as either a directory separator or a `:<digit>` line
+// reference. Content with neither cannot fold, whatever produced it.
+//
+// A necessary condition for all three folds, not a guess: foldHitPath and foldHitDir group
+// `path:line:text` rows, and foldPathList factors a parent directory out of bare paths. A list
+// of bare filenames in one directory has no common prefix to factor, so it is correctly
+// excluded. TestShapeGateAdmitsEveryFoldableCapture checks that against the real corpus.
+func mayCarryPathPrefix(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' {
+			return true
+		}
+		if s[i] == ':' && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
+			return true
+		}
 	}
-	if strings.HasPrefix(cmd, "Grep ") || strings.HasPrefix(cmd, "Glob ") {
-		return true
-	}
-	return searchProgram.MatchString(cmd)
+	return false
 }
 
 // FoldSearchOutput returns the smallest of the candidate folds whose inverse

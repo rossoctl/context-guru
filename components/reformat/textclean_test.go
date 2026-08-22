@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/schema"
 )
 
@@ -131,4 +132,61 @@ func TestTextCleanLeavesCleanOutputUntouched(t *testing.T) {
 	if _, ok := cleanText(in); ok {
 		t.Error("clean text reported as changed")
 	}
+}
+
+// THE DISPUTE THIS SETTLES. `format` and `textclean` were being priced as the pipeline's
+// best components on the strength of a 1.0 gross/unique ratio, read as "they rewrite in
+// place every turn and every removal is NEW money". The second half of that sentence does
+// not follow from the first — it is its opposite.
+//
+// The agent holds its own transcript and re-sends the ORIGINAL tool output on every turn
+// (our rewrites are wire-only; apply never mutates the client's copy). An in-place fold
+// therefore meets the same unfolded bytes again on turn 2, folds them again, and reports
+// the same saving again. That is what "byte-stable across turns" in this file's own doc
+// comment MEANS, and it is the definition of a re-counted saving, not of a new one.
+//
+// So: same content, ten consecutive turns, and the component reports a fresh saving every
+// time. Only the FIRST of those ten is money. Before the pipeline gave Reformats
+// content-derived dedup keys, metrics counted all ten.
+func TestInPlaceFoldReportsTheSameSavingOnEveryTurn(t *testing.T) {
+	built, err := newTextClean([]byte("min_tokens: 5\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := built.(components.Reformat)
+	// One tool output with ANSI colour in it — the thing textclean strips.
+	original := "\x1b[31mFAILED\x1b[0m tests/test_api.py::test_create\n" +
+		strings.Repeat("\x1b[2mdebug: some verbose line of output here\x1b[0m\n", 40)
+
+	var savings []int
+	for turn := 0; turn < 10; turn++ {
+		body := original // the agent re-sends the ORIGINAL, unfolded, every turn
+		req := &schemas.BifrostChatRequest{Input: []schemas.ChatMessage{
+			{Role: schemas.ChatMessageRoleTool,
+				Content: &schemas.ChatMessageContent{ContentStr: &body}},
+		}}
+		rep := components.Report{TokensBefore: schema.TextTokens(original)}
+		if err := tc.Reformat(req, &rep, nil); err != nil {
+			t.Fatal(err)
+		}
+		got := schema.MessageText(req.Input[0])
+		if got == original {
+			t.Fatalf("turn %d: fixture did not trigger the fold", turn)
+		}
+		savings = append(savings, schema.TextTokens(original)-schema.TextTokens(got))
+	}
+	for turn, s := range savings {
+		if s <= 0 {
+			t.Fatalf("turn %d reported no saving; the fixture or the fold changed", turn)
+		}
+		if s != savings[0] {
+			t.Fatalf("turn %d saved %d, turn 0 saved %d — the fold is not byte-stable, "+
+				"which is a DIFFERENT and worse bug: it would churn the cached prefix",
+				turn, s, savings[0])
+		}
+	}
+	// Ten identical savings on one message. Gross = 10x unique, and the gross figure is
+	// the one that used to be reported as "100% unique".
+	t.Logf("10 turns x %d tokens gross for %d tokens of real reduction (%dx replay)",
+		savings[0], savings[0], len(savings))
 }

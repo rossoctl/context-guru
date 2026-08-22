@@ -1354,6 +1354,17 @@ function renderTiles(o) {
       num(o.split_credited) + ' of ' + num(o.split_tail_moved) + ' moved-snapshot turns'
         + (histRequests(o) ? ' + ' + num(histRequests(o)) + ' earlier' : ''),
       costKnown && (o.cachesplit_saved_usd + histUSD(o)) > 0 ? 'good' : ''),
+    // The keep-alive's net, with both halves in the subtitle. Shown only once it has done
+    // something: a row of zeroes on a deployment nobody opted into reads as a broken feature.
+    // The net is what a decision rests on, so it is the number on the tile — presenting the
+    // saving alone would be exactly the half-truth this ledger exists to prevent.
+    (o.keepalive_pings || o.keepalive_saved_usd)
+      ? tile('keepalive-net', 'Keep-alive net',
+        costKnown ? usd(o.keepalive_net_usd) : 'unknown',
+        num(o.keepalive_pings) + ' pings ' + usd(o.keepalive_ping_usd) + ' · '
+          + num(o.keepalive_misses_avoided) + ' misses avoided ' + usd(o.keepalive_saved_usd),
+        costKnown ? (o.keepalive_net_usd < 0 ? 'bad' : 'good') : '')
+      : null,
   ]));
 
   // The bill, split by the tier it was charged on, and the only defensible denominator for a
@@ -2410,7 +2421,13 @@ async function loadRequests() {
         el('td', { class: 'num', text: compact(e.cache_read) + ' / ' + compact(e.cache_write) }),
         el('td', { class: 'num', text: e.token_accounting === 'complete' ? usd(e.cost_usd) : '—' }),
         el('td', { class: 'num', text: ms(e.cg_latency_ms) }),
-        el('td', {}, el('span', { class: 'pill ' + (e.cache_miss_reason || 'neutral'), text: e.cache_miss_reason || '—' })),
+        // A keep-alive ping is not agent traffic, and the consent copy promises it is
+        // identifiable here. Without the badge the row reads as a mysterious one-token request
+        // the user did not make, which is worse than not showing it at all.
+        el('td', {}, e.keepalive
+          ? el('span', { class: 'pill neutral', title: 'a keep-alive ping context-guru sent to '
+              + 'refresh this session\u2019s cached prompt', text: 'keep-alive' })
+          : el('span', { class: 'pill ' + (e.cache_miss_reason || 'neutral'), text: e.cache_miss_reason || '—' })),
         el('td', {}, el('span', { class: 'pill ' + e.token_accounting, text: e.token_accounting }))));
     }
     $('#req-page').textContent = `${num(page.requests.length)} shown of ${num(page.total)} matching`;
@@ -5379,6 +5396,48 @@ function loadSettings() {
         'Saving rebuilds your pipeline and discards frozen compaction decisions, so the ' +
         'next turn will not be cache-warm.')));
 
+    // Idle keep-alive consent. Its own consent control, beside the transcript one, for the
+    // same reason: it is a thing done with the user's property that they have to agree to.
+    // Here it is their MONEY rather than their code, and the copy says what it buys, what it
+    // costs, and where to see both — a mechanism that spends on its own initiative is only
+    // acceptable if the person paying can read the ledger.
+    const ka = el('input', { type: 'checkbox', id: 'set-keepalive', 'data-testid': 'set-keepalive' });
+    ka.checked = !!(cfg.cache && cfg.cache.keepalive);
+    // Editable under the same condition as the rest of the configuration document, because
+    // that is where it is STORED: PUT /api/me answers 403 to a non-manager sending `config`,
+    // and drawing an enabled box whose value the server discards is worse than not drawing
+    // it. The ledger on Overview is visible to everyone regardless, which is the half that
+    // matters for someone whose key is being spent.
+    ka.disabled = inherited || !mgr;
+    if (mgr) host.appendChild(el('div', { class: 'field' },
+      el('label', { class: 'comp', for: 'set-keepalive' }, ka,
+        el('span', { class: 'comp-name' },
+          'Keep my prompt cache warm while I am away')),
+      el('p', { class: 'hint' },
+        'Spends a small amount to avoid a much larger cache-recreation charge. After '
+        + (((cfg.cache && cfg.cache.keepalive_idle_seconds) || 280)) + 's idle, up to '
+        + (((cfg.cache && cfg.cache.keepalive_max_pings) || 2)) + ' minimal requests re-read '
+        + 'your cached prompt so the provider refreshes its 5-minute lifetime for free. '
+        + 'Only on sessions with a large enough cached prompt to be worth it, and never on a '
+        + 'session\u2019s first request. Billed to your own key.'),
+      whyBlock('What it costs and what it saves',
+        'A cache read costs 0.1x base input; re-creating a lapsed prefix costs 1.25x, so one '
+        + 'ping buys back about 11.5 of itself. On this service\u2019s traffic, requests that '
+        + 'resumed after the 5-minute window cost 8.5x a request that hit, and they were 23.6% '
+        + 'of all spend. It is off by default because it is your money and nobody asked for it '
+        + 'to be spent. Every ping is a row on your Requests tab marked keep-alive with its own '
+        + 'cost, and the Overview ledger shows pings, ping cost, misses avoided and the net. '
+        + 'It also RETAINS, in memory only, your provider key and that session\u2019s last '
+        + 'request \u2014 which includes its conversation content \u2014 for the length of the '
+        + 'idle gap, up to about 14 minutes, because a request sent between your requests has '
+        + 'nothing else to authenticate or replay. That is separate from the transcript-storage '
+        + 'consent below, which is about writing content to DISK; this is held in memory, '
+        + 'masked, overwritten on release, and never persisted. '
+        + 'Be aware of the shape: it is a small tax on most of the sessions it touches, funding '
+        + 'a large rebate on a few. Measured over 5 days of this service\u2019s traffic, 34 of '
+        + '119 pinged sessions came out ahead and the worst single session paid $2.42 for '
+        + 'nothing. Watch your own ledger and switch it off if you are not one of the winners.')));
+
     // Content capture consent.
     const cap = el('input', {
       type: 'checkbox', id: 'set-capture', 'data-testid': 'set-capture',
@@ -5893,7 +5952,16 @@ async function saveSettings() {
     // component's own default takes over, which is the same thing an absent key means — so
     // the page must not invent one. A component present with an empty object is how a
     // cleared block is expressed; a component absent from it entirely is left untouched.
-    body.config = { pipeline: ordered, mode: $('#set-mode').value, components: cfgState || {} };
+    // cache carries the account's own consent, so it is sent whenever the form drew the
+    // control — the tuning fields are omitted, which leaves the document's own values (or the
+    // defaults) alone rather than freezing today's numbers into every saved document.
+    body.config = {
+      pipeline: ordered, mode: $('#set-mode').value, components: cfgState || {},
+      cache: {
+        keepalive: !!($('#set-keepalive') || {}).checked,
+        head_ttl_1h: !!((account.tenant.effective_config || {}).cache || {}).head_ttl_1h,
+      },
+    };
   }
   try {
     const out = await ctl('/api/me', { method: 'PUT', body: JSON.stringify(body) });

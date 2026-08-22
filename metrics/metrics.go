@@ -114,10 +114,11 @@ type Aggregator struct {
 	// stream to inspect it for an expand call. Buffering is the only thing that stops a
 	// stream being a stream, so counting it makes that cost visible instead of inferred
 	// (it used to be unconditional and unmeasured — issue #26).
-	sseTTFBMs    float64
-	sseTTFBMsBuf float64
-	sseStreamed  int64
-	sseBuffered  int64
+	sseTTFBMs     float64
+	sseTTFBMsBuf  float64
+	sseStreamed   int64
+	sseBuffered   int64
+	sseExpandLate int64
 	// Mode dimension (#31). Enforced requests are counted per mode; observe-mode results
 	// are kept in PHYSICALLY separate fields with their own serialized names, so no query
 	// over the enforced rollups can accidentally include a hypothetical.
@@ -232,6 +233,20 @@ type compStat struct {
 	// Gates is the rejection histogram: gate name -> candidates declined by it, summed
 	// over every run. It is what turns "acted: 0" into a diagnosis — whether the
 	// component saw no candidates, or saw them and a specific guard refused.
+	// Verdict is the one-word reading of the three counters above, because two of them read
+	// as a contradiction to anyone who has not read the source. A component can MUTATE a
+	// request without SAVING a content token — cachesplit moves tokens out of a hashed
+	// prefix, cacheinject adds cache_control, toolschema rewrites annotations — and for
+	// those `acted: 0` beside `mutated: 755` has been read as a broken component and filed
+	// as a bug twice, most recently against a mechanism that was working exactly as
+	// designed. So the rollup states the reading rather than leaving it to be inferred:
+	//
+	//	acted    saved content tokens on at least one request
+	//	moved    changed requests but removed no content tokens — by design for cache
+	//	         components, whose value is which billing TIER a token lands in
+	//	skipped  ran and never changed anything (see the passthrough list)
+	//	idle     never ran
+	Verdict  string              `json:"verdict"`
 	Gates    map[string]int64    `json:"gates,omitempty"`
 	seenKeys map[string]struct{} // content keys already counted toward SavedUnique (not serialized)
 	// pending* hold the saving credited by this component's most recent fresh report,
@@ -254,6 +269,7 @@ func (cs compStat) forSnapshot() compStat {
 	if cs.SavedUnique > 0 {
 		cs.OvercountRatio = float64(cs.Saved) / float64(cs.SavedUnique)
 	}
+	cs.Verdict = cs.verdict()
 	cs.seenKeys = nil // never serialize the working set
 	if len(cs.Gates) > 0 {
 		g := make(map[string]int64, len(cs.Gates))
@@ -263,6 +279,21 @@ func (cs compStat) forSnapshot() compStat {
 		cs.Gates = g
 	}
 	return cs
+}
+
+// verdict reads the counters. See compStat.Verdict for why this exists rather than leaving
+// a consumer to compare acted against mutated.
+func (cs compStat) verdict() string {
+	switch {
+	case cs.Runs == 0:
+		return "idle"
+	case cs.Acted > 0:
+		return "acted"
+	case cs.Mutated > 0:
+		return "moved"
+	default:
+		return "skipped"
+	}
 }
 
 // addGates merges one report's gate histogram into the rollup.
@@ -497,6 +528,22 @@ func (a *Aggregator) RecordSSE(ttfbMs float64, buffered bool) {
 	a.mu.Unlock()
 }
 
+// RecordSSEExpandAfterStream notes a response the bounded SSE peek streamed through that
+// nevertheless named the expand tool — a call the continuation loop would have intercepted
+// had the whole stream been buffered, so the client got the model's raw tool_use instead.
+//
+// This is the peek's price, and it is measured rather than argued: the peek trades away
+// interception of an expand call that arrives after the response's first content block, in
+// exchange for not delaying ~33% of responses by ~21 seconds. If this counter is a
+// meaningful fraction of sse_streamed, the trade is wrong and the fix is the SSE splice
+// described in proxy/ssepeek.go. It is an UPPER bound: a model that writes the tool's name
+// in prose is counted too.
+func (a *Aggregator) RecordSSEExpandAfterStream() {
+	a.mu.Lock()
+	a.sseExpandLate++
+	a.mu.Unlock()
+}
+
 func (a *Aggregator) Run(r components.RunReport) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -609,6 +656,9 @@ type Snapshot struct {
 	// requests", not as a latency to compare against sse_ttfb_ms_avg.
 	SSETTFBMsAvgBuf float64 `json:"sse_ttfb_ms_avg_buffered"`
 	SSEBufferedPct  float64 `json:"sse_buffered_pct"`
+	// SSEExpandAfterStream counts streamed responses that named the expand tool anyway —
+	// the bounded peek's cost. See Aggregator.RecordSSEExpandAfterStream.
+	SSEExpandAfterStream int64 `json:"sse_expand_after_stream"`
 	// Freeze-replay health — the cache-WRITE cost line. A frozen decision replayed
 	// (frozen_hits) keeps an already-cached message byte-identical. A decision the store
 	// DROPS (frozen_dropped: TTL expiry / pin cap) would flip that message's
@@ -684,6 +734,12 @@ type Snapshot struct {
 	// exactly the gap noted in headroom's dashboard. Omitted when no pool is running, so
 	// a sync-only deployment shows no phantom queue.
 	ObserveQueue *QueueStats `json:"observe_queue,omitempty"`
+
+	// KeepAlive is the idle prompt-cache keep-alive's ledger, filled by the host (the
+	// mechanism lives in `proxy` because it acts between requests, which is above this
+	// layer). Omitted entirely when nothing has opted in, so a deployment that does not use
+	// it shows no field rather than a row of zeroes.
+	KeepAlive any `json:"keepalive,omitempty"`
 
 	// Provider-billed token tiers (W8), summed from response usage. ADDITIVE: the
 	// benchmark harnesses parse this payload, so fields are only ever added here,
@@ -803,12 +859,13 @@ func (a *Aggregator) Snapshot() Snapshot {
 		AddedLatencyMsAvg: addedAvg, UpstreamMsAvg: upAvg, UpstreamMsAvgBypassed: upAvgByp,
 		SSEStreamed: a.sseStreamed, SSEBuffered: a.sseBuffered,
 		SSETTFBMsAvg: ttfb, SSETTFBMsAvgBuf: ttfbBuf, SSEBufferedPct: bufPct,
-		CmdfilterFamilies: copyFilterStats(a.filterFam),
-		CmdfilterFilters:  copyFilterStats(a.filterName),
-		CmdfilterMisses:   topMisses(a.filterMiss, 20),
-		Mode:              string(mode),
-		SyncEnforced:      a.syncRequests,
-		FreshInputTokens:  a.freshInput, CacheReadTokens: a.cacheRead,
+		SSEExpandAfterStream: a.sseExpandLate,
+		CmdfilterFamilies:    copyFilterStats(a.filterFam),
+		CmdfilterFilters:     copyFilterStats(a.filterName),
+		CmdfilterMisses:      topMisses(a.filterMiss, 20),
+		Mode:                 string(mode),
+		SyncEnforced:         a.syncRequests,
+		FreshInputTokens:     a.freshInput, CacheReadTokens: a.cacheRead,
 		CacheWriteTokens: a.cacheWrite, OutputTokens: a.outputTok,
 		AttemptedTokens: a.attempted, FrozenTokens: a.frozen,
 		SavingsPctAttempted: attemptedPct, SavingsPctNewInput: newInputPct,

@@ -38,10 +38,20 @@ breakpoint the caller already set** — an agent that places its own is usually 
 optimum, and the provider's 4-breakpoint cap means a fifth is a 400.
 
 `5m` TTL by default. A `1h` write costs 2.0x instead of 1.25x and only pays when the chance of
-an entry lapsing before its next reuse exceeds 83.3%. Agent turns are seconds apart (measured
-median 7.6 s over 1,905 real turns) and every read refreshes the TTL for free, so set
-`ttl: 1h` only when reuse is genuinely sparse — a low-concurrency sweep with task starts more
-than 5 minutes apart, or a deployed agent handling a few sessions per hour.
+an entry lapsing before its next reuse exceeds **65.2%**, i.e. `(2.0 − 1.25) / (1.25 − 0.1)`.
+
+That denominator used to read `(1 − 0.1)`, giving 83.3%, and it was wrong by 18 points: it
+assumed a lapsed entry re-bills at the 1.0x FRESH rate. Measured, it re-bills as a 1.25x
+cache-CREATION — those tokens still carry `cache_control`, so the provider writes a new entry
+rather than charging fresh input. Production `ttl_expiry` rows say so directly: `cache_write`
+averages 178,793 against `fresh_input` 1,712. The conclusion does not move — agent turns are
+seconds apart (measured median 7.6 s over 1,905 real turns) and every read refreshes the TTL
+for free — so set `ttl: 1h` only when reuse is genuinely sparse: a low-concurrency sweep with
+task starts more than 5 minutes apart, or a deployed agent handling a few sessions per hour.
+
+On the IBM gateway that decision is currently moot for most models: measured live, the 1h tier
+is granted on `aws/claude-haiku-4-5` (36,251 of 36,574 written tokens) and silently downgraded
+to 5 minutes on `aws/claude-sonnet-5` (0 of 48,212). See `apply/headttl.go`.
 
 ## What placement is actually worth
 

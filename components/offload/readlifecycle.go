@@ -442,6 +442,6 @@ func init() {
 		{Key: "bash_edits", Type: components.FieldBool, Default: false,
 			Hint: "Also treat narrow shell write forms (> file, >> file, tee, sed -i, patch, truncate) as edits. Off by default: a false positive here deletes correct context."},
 		markerModeField(),
-		coldCacheField(),
+		coldCacheFieldDefault(false), // not a pure function of (content, config): see coldCacheDefault
 	})
 }

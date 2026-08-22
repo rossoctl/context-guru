@@ -53,6 +53,13 @@ type capture struct {
 	tenant string
 	// meta is the request's own metadata, read once off the pristine inbound body.
 	meta dash.Meta
+	// kaPings / kaRefreshed are what the idle keep-alive did during the span this request
+	// just ended: how many pings it sent, and how many tokens the last of them read from
+	// cache. Recorded on the request path because the keeper's per-session state is cleared
+	// the moment a real request arrives, so this is the only point at which both facts are
+	// still in hand.
+	kaPings     int
+	kaRefreshed int64
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
 	// weights) plus the tool calls of its last tool-using turn — nil when the request
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
@@ -258,6 +265,14 @@ func (c *capture) noteUpstream(ms float64, status int) {
 		c.upstream, c.status = ms, status
 	}
 }
+
+// noteKeepAlive records what the idle keep-alive did during the span this request ended.
+func (c *capture) noteKeepAlive(pings int, refreshed int64) {
+	if c != nil {
+		c.kaPings, c.kaRefreshed = pings, refreshed
+	}
+}
+
 func (c *capture) noteModel(model string) {
 	if c != nil {
 		c.model = model
@@ -314,6 +329,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
+	e.CacheWrite1h = usage.CacheWrite1h
 
 	// context-guru's own model spend attributable to THIS request: what this request's
 	// OWN sink recorded, never a delta of the process-wide counters. The delta was
@@ -348,6 +364,10 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// miss without blaming a prefix change (TTL wins ties).
 	e.AttributeCache(seenSession, seenModel, sinceMs, 5*60*1000, e.CacheWrite > 0)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
+	// The raw gap and what the keep-alive did during it. Both feed a dollar figure rather
+	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
+	e.SinceLastMs = sinceMs
+	e.KeepAlivePings, e.KeepAliveRefreshed = c.kaPings, c.kaRefreshed
 
 	var price modelinfo.Price
 	priced := false
