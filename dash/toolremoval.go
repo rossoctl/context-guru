@@ -183,7 +183,11 @@ func RemovalFor(kind, name, server string) Removal {
 			Command:      "claude --disallowedTools \"" + name + "\"",
 			Settings:     denySnippet(name),
 			SettingsPath: userSettings,
-			Effect:       "Removes the tool from the prompt entirely.",
+			// Hedged the way the Note is, and for the Note's reason: the flag and the deny rule
+			// are Claude Code's, and they do nothing to a declaration an unrelated SDK
+			// application assembled. Asserting the removal outright while the Note says to check
+			// the declarer first is the page contradicting itself on its own advice.
+			Effect: "Removes the tool from the prompt entirely — if Claude Code is what declares it.",
 			Note: "This is a client-side tool that is not one of Claude Code's built-ins, so it " +
 				"comes from whatever agent sent the request. Check what declares it before " +
 				"removing it.",

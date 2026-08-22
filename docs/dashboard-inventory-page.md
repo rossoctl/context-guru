@@ -20,7 +20,7 @@ the page belongs to the same design system rather than shipping a second one.
 |---|---|
 | **Headline tiles** | declared tokens per session, how many were invoked, how many never were, and the projected cost of the difference |
 | **Gauge** | one bar, two segments, drawn to scale: invoked against never-invoked |
-| **Who owns your system prompt** | the part-to-whole bar: every region of the prefix, coloured by whether it is yours to change |
+| **Who owns your system prompt** | the part-to-whole bar: every region of the prefix, coloured by whether it is yours to change. Headed *"Who owns what you carry in front of every request"* until a session in scope has recorded a system prompt, because until then the bar is declarations only |
 | **Your system prompt, and what shares it** | its size, the whole prefix, and the reveal that shows the actual text region by region |
 | **Carried by every request, never once called** | the actionable list — grouped by what ONE action removes, each group with the command that removes it |
 | **Realized by your removals** | what a removal *actually* avoided on requests that were really sent |

@@ -170,7 +170,10 @@ Object.assign(TILE_INFO, {
     what: 'Tokens you carried in every request of a session that never once called the thing '
       + 'they declare. This is the waste this page exists to find.',
     how: 'For each session, the summed weight of every capability it declared and did not '
-      + 'invoke — averaged over the captured sessions.',
+      + 'invoke — averaged over the captured sessions. The percentage beside it is a share of '
+      + 'the DECLARED tokens, not of the whole prefix: the system prompt is not a declaration '
+      + 'and is not in that denominator, so the same tokens are a smaller share of everything '
+      + 'a request actually carries. The prefix panel below gives that whole.',
     catch: 'Never-invoked is not the same as useless. A tool that goes uncalled for fifty '
       + 'sessions may be doing its job by being available on the fifty-first. The built-ins '
       + 'are excluded from the actionable list for exactly this reason.',
@@ -316,8 +319,14 @@ function renderHeadline(host, rep) {
     // "how long is the session a typical request belongs to"). Two multipliers on one page
     // with neither naming its denominator is how a reader concludes the page contradicts
     // itself — and on production traffic the pair reads 3.9 against 150.6.
+    //
+    // The share's denominator is DECLARED tokens, so it is a share of the declarations and
+    // not of the prompt. It read "of every prompt" while the prefix panel below says in as
+    // many words that the system prompt is not in that denominator — the same page naming two
+    // different wholes for one ratio, and erring in the direction that inflates it.
     tile('inv-unused', 'Never invoked', num(t.unused_tokens),
-      pct(t.unused_pct) + ' of every prompt, re-read ' + t.requests_per_session.toFixed(1)
+      pct(t.unused_pct) + ' of every declaration you carry, re-read '
+      + t.requests_per_session.toFixed(1)
       + '× per session — the plain mean over all ' + num(c.sessions) + ' sessions here',
       t.unused_pct >= 25 ? 'bad' : ''),
     tile('inv-avoidable', 'Avoidable — projected',
@@ -426,8 +435,12 @@ function renderCoverage(host, rep) {
     el('p', {}, 'Averaged over every tool-bearing session in scope that is '
       + (rep.totals.requests_per_session || 0).toFixed(1) + ' requests. But the session a '
       + 'typical REQUEST belongs to runs for '
-      + (rep.totals.requests_per_session_typical || 0).toFixed(0) + ' turns — most sessions are '
-      + 'one-request sidechains, so the plain average is not what carrying a declaration costs. '
+      + (rep.totals.requests_per_session_typical || 0).toFixed(0) + ' turns'
+      + (shortSessionsDominate(rep)
+        ? ' — most sessions are one-request sidechains, so the plain average is not what '
+          + 'carrying a declaration costs. '
+        : ', because request-weighting counts each session as many times as it made requests '
+          + 'and that is where the re-reads are. ')
       + 'The per-session projection below uses the second figure and says so.'),
     el('p', {}, 'Each re-read is priced at the tier that request actually paid: cache read '
       + 'for a hit, cache CREATION for the turn that wrote the prefix, and full input rate '
@@ -435,6 +448,23 @@ function renderCoverage(host, rep) {
       + 'would understate the cold turns, and not all at the fresh-input rate, which is the '
       + 'same tokens at roughly ten times the price. A figure quoted at one flat tier is a '
       + 'different number from the one here and should not be compared to it.')));
+}
+
+/**
+ * shortSessionsDominate is the ONE place the "most sessions are one-request sidechains"
+ * claim is decided.
+ *
+ * It is a claim about THIS account's population, not about the statistic: printed
+ * unconditionally it told a reader whose median was 244 requests that most of their sessions
+ * were single calls. Two callers seven hundred lines apart both make it, and they had already
+ * diverged once — the basis panel guarded, the coverage note not — so the condition lives
+ * here and neither caller owns a copy of it.
+ */
+function shortSessionsDominate(rep) {
+  const turns = rep.totals.requests_per_session_typical || rep.totals.requests_per_session || 1;
+  // Strict <, and undefined compares false: an older proxy that sends no median gets no
+  // claim about its population rather than the claim by default.
+  return rep.totals.requests_per_session_median < turns / 2;
 }
 
 // ── the control surface ────────────────────────────────────────────────────
@@ -1045,7 +1075,11 @@ function renderComposition(host, rep) {
 
   const panel = el('div', { class: 'panel', id: 'inv-composition', 'data-testid': 'inv-composition' },
     el('div', { class: 'section' },
-      el('h2', {}, 'Who owns your system prompt'),
+      // The heading names the system prompt, and with no system_prompt row in scope — the
+      // state every existing deployment is in on the day this ships — the bar below is
+      // declarations only. The bar's own note discloses that; the heading has to as well.
+      el('h2', {}, system ? 'Who owns your system prompt'
+        : 'Who owns what you carry in front of every request'),
       el('span', { class: 'section-note' }, num(whole) + ' tokens in front of every request')),
     el('p', { class: 'note' }, 'Everything that goes out before your conversation does, grouped '
       + 'by whether it is yours to remove. Coloured groups are choices you can change; the grey '
@@ -1144,7 +1178,7 @@ function renderRemovalValue(host, rep) {
       // population and not about the statistic. Printed unconditionally it told a reader
       // whose median was 244 requests that most of their sessions were single calls, which
       // is both false and a very odd thing for a page to say about the reader's own history.
-      el('span', {}, med < turns / 2
+      el('span', {}, shortSessionsDominate(rep)
         ? 'The MEDIAN session over the same ' + num(rep.coverage.captured) + ' session'
           + (rep.coverage.captured === 1 ? '' : 's') + ' is only ' + num(med) + ' request'
           + (med === 1 ? '' : 's') + ', because short sessions outnumber long ones — a title '
