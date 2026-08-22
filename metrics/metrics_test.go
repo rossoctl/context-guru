@@ -171,3 +171,36 @@ func TestSnapshotStaysBackwardCompatible(t *testing.T) {
 		}
 	}
 }
+
+// A cache component MUTATES without SAVING content tokens: cachesplit moves tokens out of a
+// hashed prefix rather than removing them, so its value is which billing TIER they land in.
+// "acted: 0" beside "mutated: 755" has been read as a broken component and filed as a bug
+// twice — most recently against a mechanism that had run 3,000 times and was working exactly
+// as designed. The rollup therefore states the reading instead of leaving it to be inferred.
+func TestComponentVerdictDistinguishesMovedFromSkipped(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		reports []components.Report
+		want    string
+	}{
+		{"never ran", nil, "idle"},
+		{"ran and always declined", []components.Report{{Component: "c", Skipped: true}}, "skipped"},
+		{"changed the request but removed no content tokens", []components.Report{
+			{Component: "c"}}, "moved"},
+		{"removed content tokens", []components.Report{
+			{Component: "c", TokensBefore: 100, TokensAfter: 40}}, "acted"},
+	} {
+		a := NewAggregator()
+		for _, r := range tc.reports {
+			a.Component(r)
+		}
+		snap := a.Snapshot()
+		got := "idle"
+		if cs, ok := snap.Components["c"]; ok {
+			got = cs.Verdict
+		}
+		if got != tc.want {
+			t.Errorf("%s: verdict = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

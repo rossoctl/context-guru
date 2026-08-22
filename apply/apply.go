@@ -213,6 +213,15 @@ type Trace struct {
 	FilteredDeclTokens int
 	// FilteredDecls is how many declarations went, for the component's own report.
 	FilteredDecls int
+	// HeadTTL1h says this request asked for the provider's ONE-HOUR cache tier on its head
+	// breakpoints (`tools`, `system`) while leaving the trailing message breakpoint at five
+	// minutes. False on every request unless the account opted in.
+	HeadTTL1h bool
+	// HeadTTLTokens is the size of the prefix that 1h entry covers — the numerator of the
+	// head share f, on which the whole mixed-TTL economics is linear. Measured rather than
+	// assumed, because f was the one input R4's simulation could not read off the database
+	// and had to parameterise.
+	HeadTTLTokens int
 	// Run is the pipeline's aggregate report (nil when the pipeline never ran).
 	Run *components.RunReport
 	// Changes lists each rewritten message's before/after text (clipped).
@@ -357,12 +366,23 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 	}
 
+	// Mixed TTL: ask for the one-hour tier on the head's existing breakpoints. Here for the
+	// third time for the same reason as the two rewrites above — it edits `tools` and
+	// `system`, top-level fields the pipeline never sees, and it must land before any byte
+	// offset into the body is taken. It adds no breakpoint, so it cannot breach the
+	// provider's cap of four. See headttl.go; off unless the host asks.
+	headTTL1h, headTTLTokens := false, 0
+	if !bypass && o.HeadTTL1h && o.HeadTTLMinTokens > 0 {
+		body, headTTL1h, headTTLTokens = upgradeHeadTTL(body, provider, o.HeadTTLMinTokens)
+	}
+	tr.HeadTTL1h, tr.HeadTTLTokens = headTTL1h, headTTLTokens
+
 	msgsRaw := gjson.GetBytes(body, "messages")
 	if !msgsRaw.Exists() || !msgsRaw.IsArray() {
 		// Assign rather than return a fresh Result: res already carries the trace fields
 		// set above, and a bypassed request that also lacks a messages array must still
 		// report itself as bypassed rather than as "no messages".
-		res.Body, res.Changed = body, toolSchema || filteredDecls > 0
+		res.Body, res.Changed = body, toolSchema || filteredDecls > 0 || headTTL1h
 		tr.FilteredDeclTokens, tr.FilteredDecls = filteredTokens, filteredDecls
 		return res
 	}
@@ -402,7 +422,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	msgs := msgsRaw.Array()
 	norm, slots := normalize(provider, msgs)
 	if len(norm) == 0 {
-		res.Body, res.Changed = body, systemSplit || toolSchema || filteredDecls > 0 // keep the envelope rewrites even with nothing to compact
+		res.Body, res.Changed = body, systemSplit || toolSchema || filteredDecls > 0 || headTTL1h // keep the envelope rewrites even with nothing to compact
 		tr.FilteredDeclTokens, tr.FilteredDecls = filteredTokens, filteredDecls
 		return res
 	}

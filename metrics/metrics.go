@@ -232,6 +232,20 @@ type compStat struct {
 	// Gates is the rejection histogram: gate name -> candidates declined by it, summed
 	// over every run. It is what turns "acted: 0" into a diagnosis — whether the
 	// component saw no candidates, or saw them and a specific guard refused.
+	// Verdict is the one-word reading of the three counters above, because two of them read
+	// as a contradiction to anyone who has not read the source. A component can MUTATE a
+	// request without SAVING a content token — cachesplit moves tokens out of a hashed
+	// prefix, cacheinject adds cache_control, toolschema rewrites annotations — and for
+	// those `acted: 0` beside `mutated: 755` has been read as a broken component and filed
+	// as a bug twice, most recently against a mechanism that was working exactly as
+	// designed. So the rollup states the reading rather than leaving it to be inferred:
+	//
+	//	acted    saved content tokens on at least one request
+	//	moved    changed requests but removed no content tokens — by design for cache
+	//	         components, whose value is which billing TIER a token lands in
+	//	skipped  ran and never changed anything (see the passthrough list)
+	//	idle     never ran
+	Verdict  string              `json:"verdict"`
 	Gates    map[string]int64    `json:"gates,omitempty"`
 	seenKeys map[string]struct{} // content keys already counted toward SavedUnique (not serialized)
 	// pending* hold the saving credited by this component's most recent fresh report,
@@ -254,6 +268,7 @@ func (cs compStat) forSnapshot() compStat {
 	if cs.SavedUnique > 0 {
 		cs.OvercountRatio = float64(cs.Saved) / float64(cs.SavedUnique)
 	}
+	cs.Verdict = cs.verdict()
 	cs.seenKeys = nil // never serialize the working set
 	if len(cs.Gates) > 0 {
 		g := make(map[string]int64, len(cs.Gates))
@@ -263,6 +278,21 @@ func (cs compStat) forSnapshot() compStat {
 		cs.Gates = g
 	}
 	return cs
+}
+
+// verdict reads the counters. See compStat.Verdict for why this exists rather than leaving
+// a consumer to compare acted against mutated.
+func (cs compStat) verdict() string {
+	switch {
+	case cs.Runs == 0:
+		return "idle"
+	case cs.Acted > 0:
+		return "acted"
+	case cs.Mutated > 0:
+		return "moved"
+	default:
+		return "skipped"
+	}
 }
 
 // addGates merges one report's gate histogram into the rollup.
@@ -684,6 +714,12 @@ type Snapshot struct {
 	// exactly the gap noted in headroom's dashboard. Omitted when no pool is running, so
 	// a sync-only deployment shows no phantom queue.
 	ObserveQueue *QueueStats `json:"observe_queue,omitempty"`
+
+	// KeepAlive is the idle prompt-cache keep-alive's ledger, filled by the host (the
+	// mechanism lives in `proxy` because it acts between requests, which is above this
+	// layer). Omitted entirely when nothing has opted in, so a deployment that does not use
+	// it shows no field rather than a row of zeroes.
+	KeepAlive any `json:"keepalive,omitempty"`
 
 	// Provider-billed token tiers (W8), summed from response usage. ADDITIVE: the
 	// benchmark harnesses parse this payload, so fields are only ever added here,

@@ -32,6 +32,175 @@ type Config struct {
 	Mode string `yaml:"mode"`
 	// Observe tunes observe mode's off-path measurement; ignored in sync mode.
 	Observe ObserveConfig `yaml:"observe"`
+	// Cache holds the provider prompt-cache policies the HOST applies between and
+	// around requests, which no component can reach: keeping an idle session's cached
+	// prefix alive, and which TTL tier its breakpoints ask for. Both default to off.
+	Cache CacheConfig `yaml:"cache"`
+}
+
+// CacheConfig is the `cache:` block: provider prompt-cache policy that lives above the
+// pipeline.
+//
+// It is not a component and could not be. A component runs while a request is in flight,
+// and the expensive event here happens when NO request is in flight — a session goes idle,
+// its cached prefix lapses, and the next turn re-bills the whole prefix at the creation
+// rate. Measured on this service over 19,805 requests: 742 such requests (3.7% of traffic)
+// cost $741.07, which is 23.6% of all spend, at $0.9987 each against $0.1178 for a request
+// that hit — an 8.5x penalty. $584.83 of it sits in misses whose idle gap was under an hour.
+//
+// Every field is off or zero by default. KeepAlive spends the caller's money without the
+// caller asking, so it is opt-in per account, capped, and reported per ping.
+type CacheConfig struct {
+	// KeepAlive turns on the idle keep-alive: for a session that has been idle
+	// IdleSeconds, re-read its cached prefix once so the provider refreshes the TTL.
+	//
+	// Off by default and deliberately so. A ping is a real upstream request that costs
+	// real money on the caller's own credential — small money (a cache read is 0.1x base
+	// input where re-creating the prefix is 1.25x, so the saving:ping ratio is 11.5:1),
+	// but money the caller did not ask to spend. That is a consent decision, not a
+	// default.
+	KeepAlive bool `yaml:"keepalive"`
+	// KeepAliveIdleSeconds is X: how long a session must be idle before the first ping.
+	// 0 = DefaultKeepAliveIdle (280).
+	//
+	// 280 rather than 240 is measured, not tuned by feel. The provider's default lifetime
+	// is 5 minutes and "the lifetime is measured from the start of the request that writes
+	// or reads the cache entry, not from the end of its response", so the budget is 300s
+	// from the previous request's START. Simulated over the production window: X=240 wastes
+	// 111 pings on gaps that would have hit anyway, X=280 wastes 53, and the net moves from
+	// +$94.85 to +$125.08.
+	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
+	// KeepAliveMaxPings is K: the most pings one idle span may send. 0 =
+	// DefaultKeepAliveMaxPings (2).
+	//
+	// K is the main control on the one waste this mechanism cannot avoid — a session that has
+	// ENDED looks exactly like one that is thinking.
+	//
+	// 2 rather than 3, and NOT as a dollars-for-volume trade: the dollars are not real. K=3's
+	// +$5.72 over the 4.47-day window is $1.28/day against a bootstrap CI of [$95, $237] and a
+	// 1.4x split-half swing — statistically indistinguishable. What K=3 costs IS measurable:
+	// +34% pings (1,226 against 912) onto a gateway path that returned 180 HTTP 429s in the same
+	// window; the worst single session goes −$2.42 to −$3.63, 50% worse, with total losses +41%,
+	// against a promise to save money and not raise anyone's bill while 85 of 119 pinged sessions
+	// already lose; and the credential hold window grows 33%, 14 to 18.7 minutes.
+	//
+	// The decisive one: K=3's extra value comes from pings FURTHER from the last real request,
+	// which is exactly where the ping-onto-a-dead-entry failure lives — the single mode that
+	// inverts the feature from saving 11.5x to paying 12.5x.
+	//
+	// If K=3's dollars are ever wanted, the lever is the prefix floor rather than K:
+	// KeepAliveMinPrefixTokens at 50,000 with K=2 gives +$125.12 on 908 pings — the same money
+	// for fewer requests, a shorter hold, and no extra exposure to the dead-entry mode.
+	KeepAliveMaxPings int `yaml:"keepalive_max_pings"`
+	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
+	// DefaultKeepAliveMaxUSDPerPing.
+	//
+	// PER PING and not per session, which is the opposite of the obvious design and is
+	// measured. Ping cost is bimodal — p50 $0.0004, mean $0.0084, p99 $0.2275, max $0.3780 —
+	// because 45.7% of pings fire on single-request sessions with ~1k-token prefixes, so the
+	// variance to guard is between pings and not between sessions. A per-SESSION budget, by
+	// contrast, truncates exactly the long large-prefix sessions that hold the value: capping
+	// the window's pings per session at 20 drops the net from +$164 to $92.34, and at 10 to
+	// $54.04. So the guard bounds the outlier ping and never the productive session.
+	KeepAliveMaxUSDPerPing float64 `yaml:"keepalive_max_usd_per_ping"`
+	// KeepAliveMinPrefixTokens is the billed-prefix floor a session must reach before it is
+	// pinged at all, in the provider's own units (cache_read + cache_write of the previous
+	// request). 0 = DefaultKeepAliveMinPrefix.
+	//
+	// This is the gate that makes the policy deployable rather than merely profitable.
+	// Combined with skipping a session's FIRST request, it sends 9.8x fewer pings (912 against
+	// 8,915 over the production window) for 1.7% less money, because what it drops is the
+	// near-free pings on tiny prefixes. That matters twice over: those 8,000 requests are
+	// real load on a gateway that already returned 180 HTTP 429s in the same window, and the
+	// gate leaves 3,748 of 3,891 sessions untouched entirely — which is the fairness answer as
+	// well as the efficiency one.
+	KeepAliveMinPrefixTokens int `yaml:"keepalive_min_prefix_tokens"`
+
+	// HeadTTL1h asks for the ONE-HOUR tier on the request's HEAD breakpoints (`tools` and
+	// `system`) while leaving the trailing message breakpoint at 5 minutes — the provider's
+	// documented mixed-TTL shape, in the order it requires (1h entries must precede 5m
+	// ones, and the head precedes the messages by construction).
+	//
+	// Off by default for a measured reason, and NOT the one people expect. A blanket 1h TTL
+	// loses money: the 2.0x write premium falls on every cache-creating request (14,499 of
+	// them, −$773.00) while the benefit lands on 290 (+$754.66), net −$18.34. Re-labelling
+	// only the head fixes that arithmetic — the premium is paid on 769 head-write events
+	// instead — and simulates net positive at every head share, +$20.19 at f=0.10 to
+	// +$60.56 at f=0.30.
+	//
+	// It is still off, because on the models that carry this service's spend the tier does not
+	// arrive. Measured live, one request each with the head labelled 1h:
+	// aws/claude-haiku-4-5 was GRANTED (ephemeral_1h_input_tokens 36,251 of 36,574 written),
+	// aws/claude-sonnet-5 was silently downgraded (0 of 48,212, and an otherwise normal 200).
+	// So the ttl field DOES reach the provider — Haiku honouring it proves that — and it is
+	// Bedrock's model coverage that refuses: the Claude 4.5 family, not the Opus 5 / 4.8 /
+	// Sonnet 5 this service runs. Zero 1h writes appear in 19,805 production requests, which is
+	// the same fact from the billing side. So this ships implemented, verifiable and off:
+	// Usage.CacheWrite1h is what says whether flipping it on did anything, and while that is
+	// zero on a model the honest projection for it is $0.
+	HeadTTL1h bool `yaml:"head_ttl_1h"`
+	// HeadTTLMinTokens gates the 1h head on the request's own size. 0 =
+	// DefaultHeadTTLMinTokens (50,000).
+	//
+	// A dollar filter, not a probability filter, and that distinction is the whole result.
+	// Gating 1h on the best available predictor of a long gap leaves the net unchanged
+	// (−$18.32 against −$18.34 blanket) because the premium and the benefit scale with the
+	// SAME cache_write on the same requests, so multiplying both by a probability cannot
+	// flip the sign. Gating on size does flip it (+$48.81): it excludes small-prefix
+	// requests that pay the premium and can never produce a large miss.
+	HeadTTLMinTokens int `yaml:"head_ttl_min_tokens"`
+}
+
+// Keep-alive and head-TTL defaults. Named constants because the same numbers are asserted
+// in tests and quoted in the settings page, and three copies of 280 is how one of them
+// becomes 240.
+const (
+	DefaultKeepAliveIdle          = 280
+	DefaultKeepAliveMaxPings      = 2
+	DefaultKeepAliveMaxUSDPerPing = 0.25
+	DefaultKeepAliveMinPrefix     = 20000
+	DefaultHeadTTLMinTokens       = 50000
+)
+
+// Resolved returns the block with every zero replaced by its default, so callers never
+// repeat the fallbacks. Disabled flags are left alone: `enabled: false` with a tuned
+// interval is a legitimate parked configuration.
+func (c CacheConfig) Resolved() CacheConfig {
+	if c.KeepAliveIdleSeconds <= 0 {
+		c.KeepAliveIdleSeconds = DefaultKeepAliveIdle
+	}
+	if c.KeepAliveMaxPings <= 0 {
+		c.KeepAliveMaxPings = DefaultKeepAliveMaxPings
+	}
+	if c.KeepAliveMaxUSDPerPing <= 0 {
+		c.KeepAliveMaxUSDPerPing = DefaultKeepAliveMaxUSDPerPing
+	}
+	if c.KeepAliveMinPrefixTokens <= 0 {
+		c.KeepAliveMinPrefixTokens = DefaultKeepAliveMinPrefix
+	}
+	if c.HeadTTLMinTokens <= 0 {
+		c.HeadTTLMinTokens = DefaultHeadTTLMinTokens
+	}
+	return c
+}
+
+// validate rejects a cache block that would misbehave rather than accepting it and
+// degrading quietly. An idle interval at or past the provider's 5-minute lifetime cannot
+// refresh anything — the entry is gone before the ping fires — and it is the one mistake
+// here that turns a saving into a pure cost, because the ping then WRITES at 1.25x instead
+// of reading at 0.1x.
+func (c CacheConfig) validate() error {
+	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 ||
+		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 {
+		return fmt.Errorf("config: cache: negative values are not meaningful")
+	}
+	if c.KeepAliveIdleSeconds >= 300 {
+		return fmt.Errorf("config: cache: keepalive_idle_seconds must be under 300 "+
+			"(the provider's 5-minute lifetime runs from the previous request's START, "+
+			"so a later ping re-creates the entry at 1.25x instead of refreshing it at 0.1x); got %d",
+			c.KeepAliveIdleSeconds)
+	}
+	return nil
 }
 
 // ObserveConfig is the `observe:` block.
@@ -71,6 +240,9 @@ func LoadBytes(b []byte) (*Config, error) {
 	}
 	if _, err := c.OperatingMode(); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
+	}
+	if err := c.Cache.validate(); err != nil {
+		return nil, err
 	}
 	return &c, nil
 }

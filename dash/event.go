@@ -104,6 +104,21 @@ type Event struct {
 	CacheRead    int64 `json:"cache_read"`
 	CacheWrite   int64 `json:"cache_write"`
 	OutputTokens int64 `json:"output_tokens"`
+	// CacheWrite1h is the part of CacheWrite the provider billed at the ONE-HOUR tier. A
+	// SUBSET of CacheWrite, never an addition to it.
+	//
+	// It exists because pricing a 1h write as a 5m one understates that request by 0.75x of
+	// its whole written prefix, and a cost that is wrong in the flattering direction is the
+	// dangerous direction — it argues for spending. Measured live on this gateway: a request
+	// asking for the 1h head on aws/claude-haiku-4-5 came back with 36,251 of 36,574 written
+	// tokens on the 1h tier, and without this column the row priced at $0.0348 against a real
+	// $0.0554.
+	//
+	// It is also the ONLY signal that a requested `ttl: "1h"` was honoured. The same request
+	// on aws/claude-sonnet-5 returned ephemeral_1h_input_tokens = 0 with an otherwise normal
+	// 200 — Bedrock's 1h support covers the Claude 4.5 family and not Sonnet 5 — so a silently
+	// downgraded request is indistinguishable from a granted one without this number.
+	CacheWrite1h int64 `json:"cache_write_1h"`
 
 	CostUSD         float64 `json:"cost_usd"`
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
@@ -135,6 +150,33 @@ type Event struct {
 	// query that reads them together rather than frozen into a second column that could
 	// disagree with them. See DB.DeclFilterSavings.
 	FilteredDeclTokens int `json:"filtered_decl_tokens"`
+
+	// KeepAlive marks a row that IS a keep-alive ping rather than agent traffic: a request
+	// context-guru sent on its own initiative, to re-read an idle session's cached prefix so
+	// the provider refreshes its lifetime. Its cost is real and lands in CostUSD like any
+	// other row's, which is the point — a mechanism that spends the caller's money while
+	// they are away from the keyboard has to be auditable to the cent, and a ping that did
+	// not appear as a row would be spend with no owner.
+	KeepAlive bool `json:"keepalive"`
+	// KeepAlivePings is, on a REAL request, how many pings preceded it during the idle span
+	// it just ended. It is what makes the saving below attributable rather than assumed: a
+	// request that hits after a twenty-minute gap could have been rescued by our ping or by
+	// any other session that happened to send byte-identical content, and only this
+	// distinguishes them.
+	KeepAlivePings int `json:"keepalive_pings"`
+	// KeepAliveRefreshed is what the last ping on this session actually read from cache —
+	// the tokens our ping demonstrably refreshed. Not persisted: it is the numerator's
+	// CEILING, and what gets stored is the credited dollars beside the cache_read they were
+	// computed from. See keepaliveSavedUSD for why the credit is the smaller of the two.
+	KeepAliveRefreshed int64 `json:"-"`
+	// KeepAliveSavedUSD is the cache re-creation this request avoided because a ping kept
+	// its prefix alive.
+	KeepAliveSavedUSD float64 `json:"keepalive_saved_usd"`
+	// SinceLastMs is the gap from this session's previous REAL request, in milliseconds.
+	// Not persisted — AttributeCache already turns it into cache_miss_reason — but the
+	// keep-alive credit needs the raw number: the whole claim is that the gap exceeded the
+	// provider's lifetime and the request hit anyway.
+	SinceLastMs int64 `json:"-"`
 
 	CGLatencyMs float64 `json:"cg_latency_ms"`
 	UpstreamMs  float64 `json:"upstream_ms"`
@@ -527,6 +569,16 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	}
 	e.TokenAccounting = AccountingComplete
 	e.CostUSD = p.Cost(e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens)
+	// The one-hour write premium. Price.Cost knows a single write rate — the 5-minute one, at
+	// 1.25x base input — so the tokens the provider billed at the 1-hour tier (2.0x) are short
+	// by the difference. Derived from the documented multiplier rather than from a second
+	// configured rate, because no gateway publishes one: 2.0x input, minus whatever the 5m
+	// write rate is, on exactly the tokens the response says were written at 1h.
+	if e.CacheWrite1h > 0 {
+		if premium := 2*p.Input - p.CacheWrite; premium > 0 {
+			e.CostUSD += float64(e.CacheWrite1h) * premium
+		}
+	}
 	e.BaselineCostUSD = e.CostUSD + e.baselineDeltaUSD(p)
 	// What the PROVIDER's prompt cache saved on this request: every cache-read token was
 	// billed at the read rate instead of the fresh rate it would have cost with no cache at
@@ -534,11 +586,21 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	// the provider's mechanism and the agent places most of the breakpoints itself. It earns
 	// its place by being the number that COLLAPSES when a compaction pipeline rewrites deep
 	// history, which is the failure this project has to be able to see.
-	e.CacheSavedUSD = float64(e.CacheRead) * (p.Input - p.CacheRead)
-	if e.CacheSavedUSD < 0 {
-		e.CacheSavedUSD = 0 // a provider whose cache reads cost MORE than fresh input saved nothing
+	//
+	// NOT on a keep-alive ping. A ping's whole job is to read the prefix, so it reports a large
+	// cache_read and would book ~$0.13 of "provider cache saving" per 48k ping against $0.0073
+	// of real cost — a fabricated saving on a figure PR #83 puts on the page, and at production
+	// ping volumes it is on the order of a thousand dollars. The counterfactual is the tell:
+	// without the keep-alive that ping does not exist, so there is no unbatched-fresh-input
+	// alternative for it to have saved anything against.
+	if !e.KeepAlive {
+		e.CacheSavedUSD = float64(e.CacheRead) * (p.Input - p.CacheRead)
+		if e.CacheSavedUSD < 0 {
+			e.CacheSavedUSD = 0 // a provider whose cache reads cost MORE than fresh input saved nothing
+		}
 	}
 	e.CachesplitSavedUSD = e.cachesplitSavedUSD(p)
+	e.KeepAliveSavedUSD = e.keepaliveSavedUSD(p)
 	// Per-component dollars, same rule and same rates as baselineDeltaUSD above: the unique
 	// part at the write rate it would have entered as, the re-sent remainder at the tier this
 	// request actually paid. Summed over a component's turns this IS the amortization — value
@@ -651,6 +713,78 @@ func (e *Event) cachesplitSavedUSD(p modelinfo.Price) float64 {
 	}
 	return float64(n) * delta
 }
+
+// keepaliveSavedUSD is the cache re-creation a keep-alive ping avoided on THIS request.
+//
+// The mechanism, and why it is worth this much: the provider's default cache lifetime is
+// five minutes, "measured from the start of the request that writes or reads the cache
+// entry, not from the end of its response". A session idle longer than that loses its whole
+// cached prefix, and the next turn re-bills every token of it at the creation rate. Measured
+// over 19,805 production requests: 742 such requests cost $741.07 — 23.6% of all spend — at
+// $0.9987 each against $0.1178 for a request that hit. Comparing each one against its own
+// counterfactual (the same tokens billed as a read) puts the penalty at 11.35x, of which
+// 91.2% is pure re-write.
+//
+// A cache READ refreshes the lifetime for free — "the cache is refreshed for no additional
+// cost each time the cached content is used" — so a ping that re-reads the prefix at 0.1x
+// buys back a re-creation at 1.25x. That 11.5:1 ratio is the whole economics, and it is why
+// this is the one cache lever worth more than everything the transformation pipeline
+// delivers.
+//
+// Four conditions, and each rules out a specific way of claiming money that is not ours:
+//
+//   - A ping actually happened on this session during the idle span this request ended
+//     (KeepAlivePings > 0). Without it, every long-gap hit in the deployment would be
+//     credited to a mechanism that was switched off.
+//   - The gap exceeded the provider's lifetime. Inside the lifetime the entry would have
+//     survived on its own and the ping changed nothing — those pings are the measured waste
+//     the policy accepts (53 of 912 at the shipped X=280s, K=2, gated), and they must not also be
+//     credited.
+//   - The provider read from cache and read MORE than it wrote. A request that re-created
+//     most of its prefix did not get rescued, whatever else it read.
+//   - The credit is the smaller of what the ping refreshed and what this request read. The
+//     ping's own response says exactly how many tokens were in the entry it touched, so
+//     crediting more than that would claim tokens our ping never kept alive.
+//
+// One confound remains and is not removable from a single row: the provider's cache is keyed
+// on CONTENT, so another session sending a byte-identical prefix inside the window would
+// have refreshed the same entry for free. This is therefore the CEILING of what the ping
+// earned on this row, and the counts beside it (pings sent, pings that read nothing) are what
+// an operator checks it against.
+//
+// Priced against a cache MISS rather than fresh input, for the same reason
+// cachesplitSavedUSD is: these tokens carry cache_control, so a miss bills them as creation
+// at 1.25x, not at 1.0x.
+func (e *Event) keepaliveSavedUSD(p modelinfo.Price) float64 {
+	if e.KeepAlive || e.KeepAlivePings <= 0 || e.CacheRead <= 0 {
+		return 0 // a ping never credits itself
+	}
+	if e.SinceLastMs <= providerCacheTTLMs {
+		return 0
+	}
+	if e.CacheWrite >= e.CacheRead {
+		return 0
+	}
+	n := e.CacheRead
+	if e.KeepAliveRefreshed > 0 && e.KeepAliveRefreshed < n {
+		n = e.KeepAliveRefreshed
+	}
+	miss := p.CacheWrite
+	if miss < p.Input {
+		miss = p.Input
+	}
+	delta := miss - p.CacheRead
+	if delta <= 0 {
+		return 0
+	}
+	return float64(n) * delta
+}
+
+// providerCacheTTLMs is the default ephemeral lifetime, and the same 5 minutes
+// dashcapture.go hands AttributeCache. One constant rather than two literals: the miss
+// classifier and the keep-alive credit have to agree about when an entry is gone, or a row
+// can read "hit" for a gap the credit calls short.
+const providerCacheTTLMs int64 = 5 * 60 * 1000
 
 // baselineDeltaUSD is what the removed content would have cost had it been sent:
 // the unique part as new input (cache-write rate), the re-sent remainder as a

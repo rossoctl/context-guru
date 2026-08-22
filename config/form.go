@@ -58,6 +58,16 @@ type Form struct {
 	// bare-preset accounts on save.
 	Pipeline []string `json:"pipeline"`
 	Mode     string   `json:"mode"`
+	// Cache is the `cache:` block — host-level prompt-cache policy (the idle keep-alive and
+	// the mixed-TTL head), which is not a component and so has no descriptor to be drawn
+	// from. nil means the form does not state it and ApplyForm leaves the document's own
+	// block alone, exactly as an absent component block does.
+	//
+	// A pointer rather than a value for that reason alone: `keepalive: false` and "this form
+	// has nothing to say about the cache" are different instructions, and with a value type
+	// every save from a page that had not drawn the control would switch a tenant's
+	// keep-alive off.
+	Cache *CacheForm `json:"cache,omitempty"`
 	// Components holds, per component name, the DOTTED key paths that component's block
 	// actually states — `{"extract_llm": {"cold_cache.min_tokens": 800}}`. Only keys the
 	// document really carries are present: an absent key means "the component's default",
@@ -72,6 +82,17 @@ type Form struct {
 	// and with the YAML box gone there is no other way to correct the document from the
 	// page. Fixing it needs the account editor, which still takes a document.
 	ParseError string `json:"parse_error,omitempty"`
+}
+
+// CacheForm is the settings page's view of the `cache:` block.
+type CacheForm struct {
+	KeepAlive                bool    `json:"keepalive"`
+	KeepAliveIdleSeconds     int     `json:"keepalive_idle_seconds,omitempty"`
+	KeepAliveMaxPings        int     `json:"keepalive_max_pings,omitempty"`
+	KeepAliveMaxUSDPerPing   float64 `json:"keepalive_max_usd_per_ping,omitempty"`
+	KeepAliveMinPrefixTokens int     `json:"keepalive_min_prefix_tokens,omitempty"`
+	HeadTTL1h                bool    `json:"head_ttl_1h"`
+	HeadTTLMinTokens         int     `json:"head_ttl_min_tokens,omitempty"`
 }
 
 // ExtractLLMForm is the RECOMMENDED prefill for the compaction-model component — a policy
@@ -186,6 +207,7 @@ func ParseForm(doc string) (Form, error) {
 	c, strictErr := LoadBytes([]byte(doc))
 	if strictErr == nil {
 		f.Pipeline, f.Mode = c.Pipeline, c.Mode
+		f.Cache = cacheForm(c.Cache)
 		// LoadBytes is strict about the top level but hands each component's block to its
 		// constructor as an opaque node, and THAT is where the strict check now lives. So a
 		// document with `min_tokns: 5000` under a component loads and does not build: the
@@ -223,6 +245,20 @@ func ParseForm(doc string) (Form, error) {
 	// that does not load" rather than draw them as fact and accept a save over them.
 	f.ParseError = strictErr.Error()
 	return f, nil
+}
+
+// cacheForm renders the loaded `cache:` block for the settings page. Always non-nil on a
+// document that loaded: the page draws an unchecked box for an absent block, and a save from
+// it then states `keepalive: false` explicitly, which is what the reader of the document
+// should see.
+func cacheForm(c CacheConfig) *CacheForm {
+	return &CacheForm{
+		KeepAlive: c.KeepAlive, KeepAliveIdleSeconds: c.KeepAliveIdleSeconds,
+		KeepAliveMaxPings:        c.KeepAliveMaxPings,
+		KeepAliveMaxUSDPerPing:   c.KeepAliveMaxUSDPerPing,
+		KeepAliveMinPrefixTokens: c.KeepAliveMinPrefixTokens,
+		HeadTTL1h:                c.HeadTTL1h, HeadTTLMinTokens: c.HeadTTLMinTokens,
+	}
 }
 
 // readBlocks pulls every DECLARED key each component's block actually states. Keys the
@@ -277,6 +313,32 @@ func ApplyForm(doc string, f Form) (string, error) {
 	}
 	if f.Mode != "" {
 		m["mode"] = f.Mode
+	}
+	// The cache block. Only the keys the form states, and only when it states any: writing
+	// zeroes for the tuning fields would freeze today's defaults into every document that
+	// ever visited the settings page, which is the same mistake prefilling component
+	// defaults was (R3 in the settings docs).
+	if f.Cache != nil {
+		cb := child(m, "cache")
+		cb["keepalive"] = f.Cache.KeepAlive
+		cb["head_ttl_1h"] = f.Cache.HeadTTL1h
+		for k, v := range map[string]int{
+			"keepalive_idle_seconds":      f.Cache.KeepAliveIdleSeconds,
+			"keepalive_max_pings":         f.Cache.KeepAliveMaxPings,
+			"keepalive_min_prefix_tokens": f.Cache.KeepAliveMinPrefixTokens,
+			"head_ttl_min_tokens":         f.Cache.HeadTTLMinTokens,
+		} {
+			if v > 0 {
+				cb[k] = v
+			} else {
+				delete(cb, k)
+			}
+		}
+		if f.Cache.KeepAliveMaxUSDPerPing > 0 {
+			cb["keepalive_max_usd_per_ping"] = f.Cache.KeepAliveMaxUSDPerPing
+		} else {
+			delete(cb, "keepalive_max_usd_per_ping")
+		}
 	}
 
 	// What the STORED document runs, so a component leaving the pipeline can be told apart
@@ -417,6 +479,17 @@ func (f *Form) normalize() {
 func (f Form) validate() error {
 	if f.Mode != "" && f.Mode != "sync" && f.Mode != "observe" {
 		return fmt.Errorf("config: mode %q is not sync or observe", f.Mode)
+	}
+	if f.Cache != nil {
+		if err := (CacheConfig{
+			KeepAlive: f.Cache.KeepAlive, KeepAliveIdleSeconds: f.Cache.KeepAliveIdleSeconds,
+			KeepAliveMaxPings:        f.Cache.KeepAliveMaxPings,
+			KeepAliveMaxUSDPerPing:   f.Cache.KeepAliveMaxUSDPerPing,
+			KeepAliveMinPrefixTokens: f.Cache.KeepAliveMinPrefixTokens,
+			HeadTTL1h:                f.Cache.HeadTTL1h, HeadTTLMinTokens: f.Cache.HeadTTLMinTokens,
+		}).validate(); err != nil {
+			return err
+		}
 	}
 	all := components.AllFields()
 	for _, name := range sortedKeys(f.Components) {

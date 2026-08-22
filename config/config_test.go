@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -135,5 +136,52 @@ func TestNoPresetEnablesCacheinjectByDefault(t *testing.T) {
 		if !found {
 			t.Errorf("preset %q lost the volatile-tail split", name)
 		}
+	}
+}
+
+// The `cache:` block, and the one mistake in it that turns a saving into a pure cost.
+func TestCacheBlockLoadsAndRejectsAnIdleThatCannotRefresh(t *testing.T) {
+	c, err := LoadBytes([]byte(`preset: off
+cache:
+  keepalive: true
+  keepalive_idle_seconds: 280
+  keepalive_max_pings: 2
+  head_ttl_1h: true
+`))
+	if err != nil {
+		t.Fatalf("a valid cache block did not load: %v", err)
+	}
+	if !c.Cache.KeepAlive || c.Cache.KeepAliveIdleSeconds != 280 || !c.Cache.HeadTTL1h {
+		t.Fatalf("cache block decoded wrong: %+v", c.Cache)
+	}
+	// Defaults are resolved on demand, not on load: `keepalive: false` with a tuned interval
+	// is a legitimate parked configuration and must not read as enabled.
+	if got := (CacheConfig{}).Resolved(); got.KeepAliveIdleSeconds != DefaultKeepAliveIdle ||
+		got.KeepAliveMaxPings != DefaultKeepAliveMaxPings ||
+		got.KeepAliveMinPrefixTokens != DefaultKeepAliveMinPrefix ||
+		got.KeepAliveMaxUSDPerPing != DefaultKeepAliveMaxUSDPerPing ||
+		got.HeadTTLMinTokens != DefaultHeadTTLMinTokens {
+		t.Errorf("Resolved() defaults = %+v", got)
+	}
+	if (CacheConfig{}).KeepAlive {
+		t.Error("the keep-alive is on by default; it spends the caller's money and must not be")
+	}
+
+	// An idle interval at or past the provider's 5-minute lifetime cannot refresh anything:
+	// the entry is gone before the ping fires, so the ping WRITES at 1.25x instead of reading
+	// at 0.1x. It is the one configuration that inverts the mechanism, so it is refused.
+	for _, idle := range []int{300, 301, 600} {
+		if _, err := LoadBytes([]byte(fmt.Sprintf(
+			"preset: off\ncache:\n  keepalive: true\n  keepalive_idle_seconds: %d\n", idle))); err == nil {
+			t.Errorf("keepalive_idle_seconds: %d was accepted; a ping after the lifetime "+
+				"re-creates the entry at 12.5x the cost of the read it was meant to be", idle)
+		}
+	}
+	if _, err := LoadBytes([]byte("preset: off\ncache:\n  keepalive_max_pings: -1\n")); err == nil {
+		t.Error("a negative max_pings was accepted")
+	}
+	// Unknown keys under `cache:` are typos and must be loud, like every other block.
+	if _, err := LoadBytes([]byte("preset: off\ncache:\n  keepalve: true\n")); err == nil {
+		t.Error("a misspelled cache key was accepted silently")
 	}
 }

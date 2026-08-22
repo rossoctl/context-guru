@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -158,6 +160,95 @@ func (l *Limiter) Acquire(tenantID string) (release func(), err error) {
 		}
 	}
 	return func() {}, nil
+}
+
+// AcquireSpare is Acquire for traffic that is OURS rather than the agent's: it succeeds only
+// out of the tenant's slack, leaving reserveFrac of both bounds untouched.
+//
+// The idle keep-alive needs this. A ping is a real request against the tenant's rate and
+// concurrency budget, and the requirement is that it never crowd out a request an agent is
+// waiting on. Refusing rather than queueing is half of that — a queued ping sits in front of
+// real traffic — but with a fixed-window counter refusing at the limit is not enough either:
+// a ping that takes the last request of the minute has already displaced whatever arrives
+// next. So a ping is only allowed while the tenant is comfortably inside its bounds, and is
+// simply skipped otherwise. Skipping costs one idle span's refresh; displacing costs an agent
+// a 429 it did not earn.
+//
+// reserveFrac <= 0 makes this identical to Acquire.
+func (l *Limiter) AcquireSpare(tenantID string, reserveFrac float64) (release func(), err error) {
+	if l == nil || (l.lim.RequestsPerMinute <= 0 && l.lim.Concurrent <= 0) {
+		return func() {}, nil
+	}
+	t := l.forTenant(tenantID)
+
+	// CONCURRENCY FIRST, then the rate window. The reverse order charged the tenant's
+	// per-minute budget for pings it then refused on concurrency: ten refused pings consumed
+	// ten of a hundred requests a minute, and it fired precisely when the tenant was busiest
+	// and the refusals most likely. The rate counter is only incremented once the request is
+	// certain to be sent.
+	release = func() {}
+	if t.inFlight != nil {
+		// The slot is taken under the tenant's lock together with the headroom test, so two
+		// pings cannot both read "there is room" and then both take the last spare slot. The
+		// earlier version tested len() outside any lock and raced pings against each other as
+		// well as against real traffic.
+		t.mu.Lock()
+		spare := reserved(cap(t.inFlight), reserveFrac)
+		if len(t.inFlight) >= spare {
+			t.mu.Unlock()
+			// NOT counted as a refusal: nobody was refused. A skipped ping is our own decision
+			// not to spend a tenant's budget, and publishing it as a rate-limit event would make
+			// a healthy account look throttled on its own dashboard.
+			return func() {}, errNoSpare
+		}
+		select {
+		case t.inFlight <- struct{}{}:
+			release = func() { <-t.inFlight }
+		default:
+			t.mu.Unlock()
+			return func() {}, errNoSpare
+		}
+		t.mu.Unlock()
+	}
+
+	if l.lim.RequestsPerMinute > 0 {
+		limit := reserved(l.lim.RequestsPerMinute, reserveFrac)
+		t.mu.Lock()
+		now := time.Now()
+		if w := now.Truncate(time.Minute); w.After(t.windowStart) {
+			t.windowStart, t.count = w, 0
+		}
+		if t.count >= limit {
+			t.mu.Unlock()
+			release() // give the concurrency slot straight back; this ping is not being sent
+			return func() {}, errNoSpare
+		}
+		t.count++
+		t.mu.Unlock()
+	}
+	return release, nil
+}
+
+// errNoSpare says a tenant had no slack for a request of ours. Deliberately not a
+// statusError: nothing is being returned to a caller, and this is not a failure.
+var errNoSpare = errors.New("no spare capacity for a background request")
+
+// reserved is how much of a bound background traffic may use: the bound minus its reserved
+// share, rounded so the reservation is never less than one.
+//
+// Floored at ZERO, not at one. A floor of one meant that at Concurrent: 1 a ping was allowed to
+// take the only slot and a real request arriving behind it got a 429 — the exact outcome
+// "a ping must never crowd out a real request" forbids. A tenant whose whole budget is one
+// in-flight request has no slack, and the honest answer is that it is never pinged.
+func reserved(limit int, frac float64) int {
+	if frac <= 0 {
+		return limit
+	}
+	n := limit - int(math.Ceil(float64(limit)*frac))
+	if n < 0 {
+		n = 0
+	}
+	return n
 }
 
 // AcquireCheapModel takes a slot on the process-wide compaction-model semaphore,

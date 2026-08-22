@@ -1266,6 +1266,12 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 		ctlErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// This is the route the Settings checkbox posts to, so it is the PRIMARY
+	// consent-withdrawal path for the keep-alive: unticking the box arrives here, not at
+	// ctlPatchTenant. `record` re-reads the policy per request and the hard deadline caps the
+	// hold either way, but the path a user is most likely to take should not be the one relying
+	// on the backstop.
+	h.keeper.forget(t.ID)
 	updated, err := h.registry().Get(t.ID)
 	if err != nil {
 		ctlErr(w, http.StatusInternalServerError, "saved, but could not re-read the account")
@@ -1313,6 +1319,11 @@ func (h *Handler) ctlRevokeToken(w http.ResponseWriter, r *http.Request) {
 		ctlErr(w, http.StatusNotFound, "no such live token")
 		return
 	}
+	// Revoking a token is an account saying "that credential is no longer mine to use". The
+	// keep-alive may be holding the PROVIDER key that arrived alongside it, so release it: the
+	// hard deadline would get there within minutes, but a revocation the user performed
+	// deliberately should not wait on a timer.
+	h.keeper.forget(t.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
@@ -1544,6 +1555,11 @@ func (h *Handler) ctlPatchTenant(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// A disabled account's agent is refused at the door, so anything the keep-alive is holding
+	// for it can never be legitimately used again. Unconditional rather than gated on
+	// in.Disabled: a configuration change also invalidates the held policy, and releasing a few
+	// sessions early costs one idle span's refresh.
+	h.keeper.forget(target)
 	updated, err := h.registry().Get(target)
 	if err != nil {
 		ctlErr(w, http.StatusInternalServerError, "saved, but could not re-read the tenant")
@@ -1922,8 +1938,12 @@ func (h *Handler) ctlDeleteTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The in-memory tenancy holds this account's pipeline and state store; nothing can
-	// authenticate as them now, so it is dead weight keyed by a live id.
+	// authenticate as them now, so it is dead weight keyed by a live id. The keep-alive keeper
+	// is the other in-memory holder, and the only one holding a CREDENTIAL — deletion has to
+	// reach it too, or the cascade this repo asserts (TestDeleteCascadesEveryCredential) has a
+	// gap the test cannot see.
 	h.opts.Tenants.Forget(target.ID)
+	h.keeper.forget(target.ID)
 	// Step 3: the tail. Best-effort by construction — the account is already gone, so
 	// there is nothing left to fail back to.
 	if tail, tErr := h.purgeTenantData(target.ID); tErr != nil {

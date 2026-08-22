@@ -49,6 +49,23 @@ type Opts struct {
 	// Mode is the operating mode. Empty means components.ModeSync, so a caller that does
 	// not know about modes gets exactly today's behavior.
 	Mode components.Mode
+	// HeadTTL1h asks for the provider's one-hour cache tier on the HEAD breakpoints
+	// (`tools`, `system`) while the trailing message breakpoint stays at five minutes —
+	// the documented mixed-TTL shape. Off by default; see headttl.go for the measured reason,
+	// which is that Bedrock grants the tier for the Claude 4.5 family and silently downgrades
+	// it for the Opus 5 / Sonnet 5 models this service actually runs.
+	//
+	// NOTE for anyone reading the cold-cache logic: setting this makes bodyAsksExtendedTTL
+	// true, so cacheTTL returns 1h and cacheIsCold becomes correspondingly permissive. That is
+	// the right behaviour when the tier is granted and a deliberate over-estimate when it is
+	// not (the safe direction — believing a cache is warm only forgoes an optimisation). It
+	// cannot affect anything today because this is off, but it is the one way this field
+	// touches shared behaviour.
+	HeadTTL1h bool
+	// HeadTTLMinTokens is the size gate on HeadTTL1h, in estimated tokens. 0 disables the
+	// upgrade entirely rather than defaulting, so a host that forgets to resolve its
+	// configuration asks for nothing instead of asking on every request.
+	HeadTTLMinTokens int
 	// Tracker, when set, owns the per-session cached-prefix boundary. Supplying it also
 	// removes the concurrent-turn race in the legacy read-then-deferred-write of prevLen.
 	// nil => the legacy store-backed path, unchanged for library callers and /compact.

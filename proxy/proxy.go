@@ -120,6 +120,9 @@ type Options struct {
 	// operating mode and which upstream the traffic goes to. nil keeps the
 	// single-tenant behaviour byte-identical to before tenancy existed.
 	Tenants *TenantSource
+	// Cache is the single-tenant host's prompt-cache policy (the idle keep-alive and the
+	// mixed-TTL head). In hosted mode each tenant's own `cache:` block is used instead.
+	Cache CachePolicy
 	// Upstreams is the operator's allow-list, by name, consulted only in hosted
 	// mode. A tenant selects a NAME; it can never supply a URL.
 	Upstreams map[string]Upstream
@@ -224,6 +227,10 @@ type Handler struct {
 	// 6-digit code is not a second factor and the argon2 verify is an amplifier.
 	pwLim   *Limiter
 	codeLim *Limiter
+	// keeper runs the idle prompt-cache keep-alive: the one cache mechanism that has to act
+	// BETWEEN requests, when no request is in flight and no component can run. Always
+	// present; it does nothing at all until a tenant opts in. See keepalive.go.
+	keeper *keeper
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
 	promCache promCache
@@ -277,8 +284,10 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	// is never consulted (tenancyFor goes to Options.Tenants); it exists so the
 	// request path has one shape.
 	h.static = &Tenancy{Preset: opts.Preset, Pipe: pipe, Store: st,
-		Shadow: h.shadow, Mode: h.mode()}
+		Shadow: h.shadow, Mode: h.mode(), Cache: opts.Cache}
 	h.limiter = NewLimiter(opts.Limits)
+	h.keeper = newKeeper(h)
+	h.keeper.start()
 	h.regLim = newAnonLimiter(Limits{RequestsPerMinute: registrationsPerMinute})
 	h.authLim = newAnonLimiter(Limits{RequestsPerMinute: authFailuresPerMinute})
 	h.pwLim = newAnonLimiter(Limits{RequestsPerMinute: passwordAttemptsPerMinute})
@@ -307,7 +316,13 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 // Close shuts down the off-path worker pool and waits briefly for its goroutines to exit,
 // so a host that builds and discards handlers (tests, a reload) leaks none. Safe on a
 // sync-mode handler and safe to call twice.
-func (h *Handler) Close() { h.pool.Stop() }
+func (h *Handler) Close() {
+	h.pool.Stop()
+	// The keeper holds request bodies and, on a caller-pays upstream, callers' provider
+	// credentials. Stopping it drops both, which is why this is not optional on a host that
+	// builds and discards handlers.
+	h.keeper.Stop()
+}
 
 // Mux wires the routes: chat proxying + health/stats/expand management.
 func (h *Handler) Mux() *http.ServeMux {
@@ -1042,6 +1057,14 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
 			cp.noteTrace(tr)
+			// A real request has arrived on this session: cancel any pending keep-alive
+			// (this request refreshes the entry itself, and a ping concurrent with it would
+			// be a second request against the tenant's budget for nothing), and pick up what
+			// the pings during the idle span it just ended actually did. Both facts are
+			// needed BEFORE the row is priced — the ping count and the tokens the last ping
+			// refreshed are inputs to a dollar figure, not just a label.
+			kaPings, kaRefreshed := h.keeper.arrive(tn.ID, tr.Session)
+			cp.noteKeepAlive(kaPings, kaRefreshed)
 			if h.agg != nil && !bypassed {
 				h.agg.RecordAddedLatency(addedMs)
 				h.agg.RecordEligibility(tr.AttemptedTokens, tr.FrozenTokens)
@@ -1069,7 +1092,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// emits it in a defer once the response is finished, so a request produces exactly
 		// one lifecycle line whichever way it ends — and the attrs are built here, once,
 		// rather than on the response path.
-		h.serve(w, r, provider, up, body, bypassed, cp, tn, lifecycleLogger(lg, tr, bypassed))
+		h.serve(w, r, provider, up, body, bypassed, cp, tn, tr.Session, lifecycleLogger(lg, tr, bypassed))
 	}
 }
 
@@ -1134,7 +1157,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // → /stats sse_streamed / sse_buffered). It previously matched the expand tool
 // description this proxy injects itself, so it was unconditionally true and the
 // zero-added-latency promise above never held for any request (issue #26).
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy, lg *slog.Logger) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy, session string, lg *slog.Logger) {
 	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
 	// it is advertised on the outgoing request. Those used to be different conditions —
 	// advertised when the request had tools, intercepted (for SSE) when it had markers —
@@ -1163,7 +1186,17 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// the one fact about a request an operator asks for first, and until now it reached
 	// the dashboard row and nothing else.
 	status, rounds, expanded := 0, 0, 0
+	// upStart of the LAST upstream round. The provider's cache lifetime "is measured from the
+	// start of the request that writes or reads the cache entry, not from the end of its
+	// response", so this — not the moment the response finished — is the instant the idle
+	// clock starts from.
+	var lastUpStart time.Time
 	defer func() {
+		// Hand the finished request to the keep-alive. Last, so `body` is the bytes that
+		// actually went upstream on the final round (an expand round rewrites it) and the
+		// prefix a ping would replay is the one the provider just hashed. Costs nothing when
+		// no tenant has opted in.
+		h.keeper.record(tn, session, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
 		if sse && h.agg != nil {
 			h.agg.RecordSSE(msSince(reqStart, sseFirstByte), sseBuffered)
 		}
@@ -1185,6 +1218,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	for round := 0; ; round++ {
 		rounds = round + 1
 		upStart := time.Now()
+		lastUpStart = upStart
 		resp, err := h.doUpstream(r, up, body)
 		if err != nil {
 			// LOG it, and record it on the captured row. An upstream failure used to be
@@ -1508,6 +1542,13 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// Cached-prefix restarts after an agent compaction. Same layering as the pool counters
 	// below: the counter lives in `modes`, so the host merges it here.
 	snap.CompactionResets = modes.CompactionResets()
+	// The idle keep-alive's ledger, same layering as the pool counters below: the mechanism
+	// lives in `proxy` because it acts between requests, so `metrics` cannot reach it. Only
+	// published once it has done something — a deployment where nobody opted in shows no
+	// field at all rather than a row of zeroes that reads as a broken feature.
+	if ka := h.keeper.Stats(); ka.Live > 0 || ka.Pings > 0 || ka.Skipped > 0 {
+		snap.KeepAlive = ka
+	}
 	// Off-path pool counters, same layering: the pool lives in `modes`, so `metrics` cannot
 	// read it and the host merges it here. Without this the observe-mode docs describe a
 	// `dropped` counter no consumer can reach — the pool tracked it correctly and nothing
