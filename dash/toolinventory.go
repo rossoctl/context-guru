@@ -567,10 +567,10 @@ type invWriter struct {
 type invSession struct {
 	digests map[string]bool
 	lastFP  uint64
-	// sysHashes are the system prompts already written for this session, and sysN how many
-	// have been. Both bounded by maxSessionSystemRows: a system prompt normally holds still
-	// for a whole session, but it is CLIENT text and may carry a clock — Claude Code's own
-	// carries the date — so a caller that varies it every request would otherwise write one
+	// sysHashes are the (digest, system-prompt hash) pairs already written for this session,
+	// bounded by maxSessionSystemRows: a system prompt normally holds still for a whole
+	// session, but it is CLIENT text and may carry a clock — Claude Code's own carries the
+	// date — so a caller that varies it every request would otherwise write one
 	// multi-kilobyte blob per request.
 	//
 	// ponytail: a hard per-session cap, first-N-wins. If a client legitimately needs its
@@ -702,9 +702,16 @@ func (w *invWriter) write(batch []invMsg) error {
 		// The system prompt, under the same gate for its TEXT and never for its size. It
 		// is written outside the digest branch because the two vary independently: a
 		// session can change its system prompt without touching a single declaration.
-		if sp := m.inv.System; sp != nil && !st.sysHashes[sp.Hash] {
+		// Keyed by DIGEST as well as by the prompt's own hash, because the read side picks one
+		// (session, digest) pair and shows its rows: with a per-session key, a session that
+		// changed its declaration set mid-way (measured: 34 of 135) would have its system
+		// prompt filed only under the FIRST digest, and a view that landed on a later one would
+		// render a prefix with the largest region silently missing while the tile above it
+		// reported a system prompt exists. One stable prompt across two digests is two rows,
+		// well inside the cap; a prompt that changes every request still hits it.
+		if sp := m.inv.System; sp != nil && !st.sysHashes[m.inv.Digest+"/"+sp.Hash] {
 			if len(st.sysHashes) < maxSessionSystemRows {
-				st.sysHashes[sp.Hash] = true
+				st.sysHashes[m.inv.Digest+"/"+sp.Hash] = true
 				if _, err := declStmt.Exec(m.tenant, m.session, m.inv.Digest,
 					KindSystemPrompt, sp.Hash, "", sp.Tokens, m.ts,
 					declText(sp.Text, m.text)); err != nil {
@@ -726,8 +733,9 @@ func (w *invWriter) write(batch []invMsg) error {
 	return tx.Commit()
 }
 
-// maxSessionSystemRows bounds how many distinct system prompts one session may record. See
-// invSession.sysHashes: the text is client-supplied and may carry a clock.
+// maxSessionSystemRows bounds how many system-prompt rows one session may record, across every
+// declaration-set digest it presents. See invSession.sysHashes: the text is client-supplied and
+// may carry a clock.
 const maxSessionSystemRows = 4
 
 // maxDeclTextBytes caps one stored region. The measured real catalogue's largest tool
@@ -813,7 +821,11 @@ var (
 //
 // One hash of the raw system JSON per request on a hit, which is the common case: the system
 // prompt is stable for a whole session, so a session pays the extraction and the tokenizer
-// once. Both dialects are covered by reading `system` — Anthropic's blocks or bare string.
+// once. Measured on the real corpus body (BenchmarkScanInventory): 22 us warm against the
+// whole warm scan's 212 us, and 208 us cold against its 1.18 ms — so this adds about a tenth
+// to a scan that is already a small fraction of a request, and pays the tokenizer once per
+// session rather than once per turn. Both dialects are covered by reading `system` —
+// Anthropic's blocks or bare string.
 // OpenAI has no top-level system prompt at all (it is a role=system message), so an OpenAI
 // request simply has none, and the UI says so rather than inventing one.
 func scanSystem(body []byte) *SystemPrompt {

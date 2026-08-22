@@ -228,6 +228,25 @@ func BenchmarkScanInventory(b *testing.B) {
 			ScanInventory("anthropic", body)
 		}
 	})
+	// The system-prompt scan on its own, warm and cold. It runs on EVERY request (the memo is
+	// keyed by the prompt's own content, so it is a hash plus a map lookup on a hit), and this
+	// file's whole discipline is that the per-request cost is a measured figure rather than an
+	// assumption. Reported separately so a change to it is visible without reading the total.
+	b.Run("system_warm", func(b *testing.B) {
+		scanSystem(body)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			scanSystem(body)
+		}
+	})
+	b.Run("system_cold", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			sysMu.Lock()
+			sysCache, sysBytes = map[uint64]*SystemPrompt{}, 0
+			sysMu.Unlock()
+			scanSystem(body)
+		}
+	})
 	b.Run("cold", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			declMu.Lock()

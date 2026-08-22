@@ -319,3 +319,71 @@ func seedRequest(t *testing.T, db *DB, tenant, session string) {
 		t.Fatal(err)
 	}
 }
+
+// TestSystemPromptIsRecordedForEveryDeclarationSet guards the gap between how the writer
+// dedups and how the reader selects.
+//
+// PromptViewFor picks ONE (session, digest) pair and shows its rows. The writer used to dedup
+// the system prompt per SESSION, so a session that changed its declaration set mid-way — 34 of
+// 135 production sessions do — filed its system prompt only under the FIRST digest, and a view
+// that landed on a later one rendered a prefix with the largest region silently missing while
+// the tile above it reported that a system prompt exists.
+func TestSystemPromptIsRecordedForEveryDeclarationSet(t *testing.T) {
+	rec, err := NewRecorder(Options{DBPath: filepath.Join(t.TempDir(), "d.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	const system = "You are Claude Code."
+	// The SAME system prompt under two different declaration sets, which is the ordinary case:
+	// a session that adds an MCP server keeps its system prompt.
+	sets := [][]string{
+		{tool("Bash", "run a command")},
+		{tool("Bash", "run a command"), tool("mcp__srv__thing", "an added server")},
+	}
+	var digests []string
+	for i, set := range sets {
+		inv := ScanInventory("anthropic", sysBody(t, system, set, skillsReminder))
+		if inv == nil {
+			t.Fatal("no inventory scanned")
+		}
+		digests = append(digests, inv.Digest)
+		rec.RecordInventory("t1", "s1", int64(1000+i), inv, true)
+	}
+	if digests[0] == digests[1] {
+		t.Fatal("the two declaration sets hashed the same; the fixture proves nothing")
+	}
+	db := rec.DB()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var n int
+		if err := db.sql.QueryRow(`SELECT COUNT(DISTINCT digest) FROM tool_declarations
+			WHERE kind = ?`, KindSystemPrompt).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n == len(sets) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of %d declaration sets recorded the session's system prompt; a view "+
+				"landing on the one without it would show a prefix missing its largest region",
+				n, len(sets))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// And whichever set the reader lands on serves a system region.
+	seedRequest(t, db, "t1", "s1")
+	v, err := db.PromptViewFor(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sys bool
+	for _, r := range v.Regions {
+		if r.Kind == KindSystemPrompt {
+			sys = true
+		}
+	}
+	if !sys {
+		t.Errorf("the selected prefix (digest %s) has no system region", v.Digest)
+	}
+}
