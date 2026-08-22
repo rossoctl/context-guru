@@ -738,7 +738,8 @@ func (e *Event) cachesplitSavedUSD(p modelinfo.Price) float64 {
 //     credited to a mechanism that was switched off.
 //   - The gap exceeded the provider's lifetime. Inside the lifetime the entry would have
 //     survived on its own and the ping changed nothing — those pings are the measured waste
-//     the policy accepts (39 of 9,234 at X=280s), and they must not also be credited.
+//     the policy accepts (53 of 912 at the shipped X=280s, K=2, gated), and they must not also be
+//     credited.
 //   - The provider read from cache and read MORE than it wrote. A request that re-created
 //     most of its prefix did not get rescued, whatever else it read.
 //   - The credit is the smaller of what the ping refreshed and what this request read. The

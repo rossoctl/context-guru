@@ -205,8 +205,13 @@ type kaEntry struct {
 	// over the production window, that one change takes X=280 from **+$164.46 to −$241.99**,
 	// with ping cost tripling to $408.85.
 	startedAt time.Time
-	// body is the exact bytes last sent upstream. Retained, not copied: after serve returns
-	// nothing else references the slice, so holding it costs the bytes and no allocation.
+	// body is the bytes last sent upstream, held MASKED under the same per-process key as the
+	// credential (see credMask). A keeper-owned copy, so it can be overwritten on release
+	// without corrupting a slice something else still reads.
+	//
+	// Masked for the reason the credential is, and the asymmetry decides it: a leaked key is
+	// rotatable, a leaked transcript is not. This is up to 8 MiB of the user's conversation, and
+	// XOR over it costs a memcpy-shaped pass on a path that runs a few hundred times a day.
 	// The prefix hash covers this content, which is why the ping must resend it verbatim.
 	body []byte
 	up   upstream
@@ -472,6 +477,16 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 		k.retire(key)
 		return
 	}
+	// NO AUDIT SINK, NO RETENTION. An audit control that --dashboard silently removes is not a
+	// control, and this is the one that makes the whole credential arrangement reviewable. Given
+	// the choice between an unconditional second sink and refusing to hold anything we cannot
+	// account for, this takes the second: it is three lines instead of a parallel writer, and it
+	// fails in the safe direction — a deployment with no recorder keeps none of a caller's
+	// credential and none of their conversation.
+	if k.h.rec == nil {
+		k.retire(key)
+		return
+	}
 	// Consent is re-read from the tenancy on EVERY request rather than trusted from when the
 	// hold began, and withdrawing it retires what is already held. The tenancy is re-resolved
 	// per request and its cache is keyed on the configuration document, so an account that turns
@@ -520,6 +535,7 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 	// them. Zeroizing a shared slice is the kind of cleverness that produces a mystery bug in a
 	// month, and the earlier zero-copy retention was a micro-optimisation in the wrong place.
 	owned := append([]byte(nil), body...)
+	xorMask(owned)
 	// What the provider billed for this request's prefix, in its own units — the size of the
 	// entry a ping would refresh. Both the gate and the projected cost read it, so a request
 	// that reported no usage is not pingable: without it there is no honest estimate of either.
@@ -598,6 +614,33 @@ func (k *keeper) retire(key string) {
 	delete(k.live, key)
 }
 
+// forget releases everything held for one tenant, for the paths that end an account's authority
+// rather than change its mind: deletion, token revocation, disablement. Consent withdrawal is
+// handled in record, and the hard deadline bounds anything that goes quiet — but this repo holds
+// the stronger invariant explicitly (tenant.TestDeleteCascadesEveryCredential), and the keeper is
+// a credential store that cascade did not know about.
+//
+// ponytail: called from the three control-plane paths that revoke authority; a fourth would have
+// to remember. Move it inside TenantSource.Forget if revoke and disable ever start invalidating
+// the cached tenancy too, which would make one hook cover all of them.
+func (k *keeper) forget(tenantID string) {
+	if k == nil {
+		return
+	}
+	prefix := tenantID + "\x00"
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for key, e := range k.live {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		k.bytes -= int64(len(e.body))
+		e.clear()
+		delete(k.live, key)
+		delete(k.turns, key)
+	}
+}
+
 // evictLocked enforces both bounds by dropping the entries whose deadline is furthest away
 // — the ones with the longest still to wait, and therefore the least imminent value.
 func (k *keeper) evictLocked() {
@@ -664,7 +707,11 @@ func (k *keeper) sweep(now time.Time) int {
 		for i, a := range e.auth {
 			auth[i] = maskedHeader{name: a.name, val: append([]byte(nil), a.val...)}
 		}
-		due = append(due, pingJob{e: e, raw: e.body, hdr: e.hdr.Clone(), auth: auth, up: e.up,
+		// An UNMASKED copy for this ping, zeroized by fire when it is done. The entry's own copy
+		// stays masked, so the long-lived hold never contains a readable transcript.
+		raw := append([]byte(nil), e.body...)
+		xorMask(raw)
+		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), auth: auth, up: e.up,
 			tenant: e.tenant, session: e.session, ping: e.pings})
 	}
 	k.mu.Unlock()
@@ -703,6 +750,7 @@ func (k *keeper) fire(j pingJob) {
 		for i := range j.auth {
 			zero(j.auth[i].val)
 		}
+		zero(j.raw) // the unmasked body copy this ping was handed
 	}()
 	// The tenant's own limits apply, and a ping only ever uses SLACK. Refusing rather than
 	// queueing is the requirement: a queued ping would sit in front of a real request the

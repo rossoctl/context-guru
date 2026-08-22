@@ -15,6 +15,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/tidwall/gjson"
@@ -59,7 +60,10 @@ func (c *testClock) advance(d time.Duration) time.Time {
 // testable without a network and without waiting 280 real seconds.
 func testKeeper(t *testing.T, lim Limits) (*keeper, *fakeSender, *testClock) {
 	t.Helper()
-	h := &Handler{opts: Options{}, limiter: NewLimiter(lim)}
+	// A recorder, because retention now REQUIRES an audit sink: an audit control that
+	// --dashboard removes is not a control, so with no recorder the keeper holds nothing. Tests
+	// about timing and policy need it present; TestNoAuditSinkMeansNoRetention clears it.
+	h := &Handler{opts: Options{}, limiter: NewLimiter(lim), rec: &dash.Recorder{}}
 	k := newKeeper(h)
 	clock := &testClock{at: time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)}
 	k.now = clock.now
@@ -742,8 +746,17 @@ func TestRetainedMaterialReachesNoOutputSurface(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	agg := metrics.NewAggregator()
-	h := New(nil, nil, agg, Options{})
+	// A REAL recorder on an in-memory database, wired through New() like the dashboard tests do.
+	// Retention requires an audit sink, and a recorder assigned after construction is only
+	// half-wired — /metrics would dereference its absent database. This also makes the surfaces
+	// under test the fully-wired ones a deployment actually serves.
+	sink, err := dash.NewRecorder(dash.Options{DBPath: ":memory:", BatchSize: 1,
+		FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	h := New(nil, nil, metrics.NewAggregator(), Options{Dashboard: sink})
 	defer h.Close()
 	k := h.keeper
 	clock := &testClock{at: time.Now()}
@@ -796,5 +809,108 @@ func TestRetainedMaterialReachesNoOutputSurface(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "keep-alive ping") {
 		t.Error("the debug log carries no keep-alive line, so the leak check never saw this path")
+	}
+}
+
+// The audit row is what makes the credential arrangement reviewable, so it cannot be optional.
+// An audit control that `--dashboard` silently removes is not a control: with no recorder there
+// is no per-ping record, so nothing is retained at all.
+func TestNoAuditSinkMeansNoRetention(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	k.h.rec = nil // as a deployment without --dashboard has it
+
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	if got := k.Stats().Live; got != 0 {
+		t.Fatalf("held %d sessions with no audit sink; a credential we cannot account for "+
+			"must not be held", got)
+	}
+}
+
+// Deletion, token revocation and disablement each end an account's authority, and the keeper is
+// a credential store the registry's cascade does not know about. tenant.TestDeleteCascadesEveryCredential
+// asserts the invariant on the registry's own stores; this is the same invariant for this one.
+func TestForgetReleasesOneTenantsMaterial(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	r.Header.Set("Authorization", "Bearer sk-caller-secret")
+	for _, id := range []string{"victim", "bystander"} {
+		tn := &Tenancy{ID: id, Cache: kaPolicy()}
+		for i := 0; i < 2; i++ {
+			k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(kaBody),
+				upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
+				"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+		}
+	}
+	if got := k.Stats().Live; got != 2 {
+		t.Fatalf("expected two tenants held, got %d", got)
+	}
+	k.mu.Lock()
+	body := k.live[kaKey("victim", "s")].body
+	cred := k.live[kaKey("victim", "s")].auth[0].val
+	k.mu.Unlock()
+
+	k.forget("victim")
+
+	if got := k.Stats().Live; got != 1 {
+		t.Errorf("after forgetting one tenant, %d sessions held; want the bystander's only", got)
+	}
+	k.mu.Lock()
+	_, victimGone := k.live[kaKey("victim", "s")]
+	_, bystander := k.live[kaKey("bystander", "s")]
+	k.mu.Unlock()
+	if victimGone {
+		t.Error("the forgotten tenant is still held")
+	}
+	if !bystander {
+		t.Error("forgetting one tenant released another tenant's material")
+	}
+	// And the bytes are gone, not just the map entry.
+	for name, b := range map[string][]byte{"body": body, "credential": cred} {
+		for i := range b {
+			if b[i] != 0 {
+				t.Fatalf("the forgotten tenant's %s still holds data at byte %d", name, i)
+			}
+		}
+	}
+	// The turn counter goes too, or a re-registered id inherits its predecessor's history.
+	k.mu.Lock()
+	_, turns := k.turns[kaKey("victim", "s")]
+	k.mu.Unlock()
+	if turns {
+		t.Error("the forgotten tenant's turn counter survived")
+	}
+}
+
+// The retained body is masked for the same reason the credential is, and the asymmetry is what
+// decides it: a leaked key is rotatable, a leaked transcript is not.
+func TestRetainedBodyIsMaskedAtRest(t *testing.T) {
+	const marker = "MY-PRIVATE-SOURCE-CODE-MARKER"
+	k, fs, clock := testKeeper(t, Limits{})
+	body := strings.Replace(kaBody, `"text":"hi"`, `"text":"`+marker+`"`, 1)
+	tn := &Tenancy{ID: "t1", Cache: kaPolicy()}
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	for i := 0; i < 2; i++ {
+		k.record(tn, "s", clock.now().Add(time.Duration(i)*time.Second), []byte(body),
+			upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic,
+			"/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
+	}
+	k.mu.Lock()
+	held := k.live[kaKey("t1", "s")].body
+	k.mu.Unlock()
+	if bytes.Contains(held, []byte(marker)) {
+		t.Error("the retained conversation is sitting in memory in plaintext")
+	}
+	if !bytes.Contains(unmasked(held), []byte(marker)) {
+		t.Fatal("unmasking did not recover the body, so the ping would send the wrong bytes")
+	}
+	// And the ping still sends the REAL prefix — masking must not corrupt what goes on the wire,
+	// or every ping writes a new entry at 12.5x instead of refreshing one at 0.1x.
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+	fs.mu.Lock()
+	sent := append([]byte(nil), fs.calls[0].body...)
+	fs.mu.Unlock()
+	if !bytes.Contains(sent, []byte(marker)) {
+		t.Error("the ping sent something other than the recorded prefix")
 	}
 }

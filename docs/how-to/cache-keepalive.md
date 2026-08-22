@@ -175,9 +175,10 @@ the life of a request:
 | **Hard deadline** | `time.AfterFunc` at `(K+1) × X` ≈ 14 min. A *scheduled* deadline, not a check inside a loop: a process with no traffic still releases on time. |
 | **Eager release** | dropped the moment the next request arrives, the gate refuses, the span is exhausted, or the process shuts down — whichever comes first. |
 | **Zeroized** | the bytes are overwritten, not just dereferenced. A dropped `[]byte` sits in the heap until a collection that may never come. |
-| **Masked at rest** | XORed under a random per-process key, so the idle hold contains no working credential. |
+| **Masked at rest** | the credential **and the body** are XORed under a random per-process key, so the idle hold contains neither a working credential nor a readable transcript. A leaked key is rotatable; a transcript is not. |
 | **Consent per request** | re-read from the tenancy on every request. Turning the setting off retires what is already held on the account's next request; a session that goes quiet is dropped by the deadline. |
-| **Audit row per ping** | every use is a durable `requests` row: tenant, session, timestamp, cost, and whether it read or wrote. |
+| **Audit row per ping** | every use is a durable `requests` row: tenant, session, timestamp, cost, and whether it read or wrote. **Unconditional**: with no dashboard recorder to write it, nothing is retained at all — an audit control a flag can switch off is not a control. |
+| **Purged on revocation** | account deletion, token revocation and disablement each release that tenant's held material immediately, rather than waiting for the deadline. |
 | **Kill switch** | `CONTEXT_GURU_KEEPALIVE=off` stops *retention*, not merely pinging — nothing is held at all. |
 
 Bounded on volume too: 128 MiB across at most 512 sessions, and a single body over 8 MiB is

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"net/http"
 	"net/http/httptest"
@@ -136,7 +137,9 @@ type replayResult struct {
 func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanket bool) replayResult {
 	t.Helper()
 	var out replayResult
-	h := &Handler{opts: Options{Prices: table}, limiter: NewLimiter(Limits{})}
+	// A recorder, because retention requires an audit sink. The zero value discards its events,
+	// which is what this replay wants: the decision function is under test, not the writer.
+	h := &Handler{opts: Options{Prices: table}, limiter: NewLimiter(Limits{}), rec: &dash.Recorder{}}
 	k := newKeeper(h)
 	// The blanket arms lift the first-request gate by pre-seeding every session's turn counter,
 	// which is the only way to compare "gated" against "blanket" through the SAME code path.
