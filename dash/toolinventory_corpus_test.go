@@ -233,6 +233,11 @@ func BenchmarkScanInventory(b *testing.B) {
 			declMu.Lock()
 			declCache = map[uint64][]Decl{}
 			declMu.Unlock()
+			// The SYSTEM prompt's memo too, or "cold" measures a cold declaration scan against
+			// a warm system scan and understates the one figure this benchmark exists to bound.
+			sysMu.Lock()
+			sysCache, sysBytes = map[uint64]*SystemPrompt{}, 0
+			sysMu.Unlock()
 			ScanInventory("anthropic", body)
 		}
 	})
