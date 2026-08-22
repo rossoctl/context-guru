@@ -497,7 +497,13 @@ function barRows(host, rows, opts = {}) {
   const wrap = el('div', { class: 'bars' });
   for (const r of rows) {
     const width = r.available === false ? 0 : Math.min(100, (Math.abs(r.value) / max) * 100);
-    const row = el('div', { class: 'bar-row' },
+    // title is the hover layer every bar on this dashboard should have had: an HTML chart IS
+    // interactive, and a bar whose exact value is only in the label column is a bar the reader
+    // has to trace across the panel. onclick makes a bar a drill-down where one exists.
+    const row = el('div', {
+      class: 'bar-row' + (r.onclick ? ' clickable' : ''), title: r.title || null,
+      onclick: r.onclick || null,
+    },
       el('div', { class: 'bar-label', text: r.label }),
       el('div', { class: 'bar-track' }, el('div', {
         class: 'bar-fill' + (r.value < 0 ? ' neg' : ''),
@@ -779,13 +785,107 @@ const TILE_INFO = {
   'total-saved-usd': {
     what: 'The money context-guru avoided in total, after paying for itself. This is the '
       + 'one number to look at if you only look at one.',
-    how: 'Two savings added together. First, what compaction avoided: what this traffic '
+    how: 'Three savings added together. First, what compaction avoided: what this traffic '
       + 'would have cost had we removed nothing, minus what it actually cost, minus what '
       + "context-guru's own model calls cost. Second, what the prefix-cache split avoided. "
-      + 'The two touch different tokens, so adding them does not count anything twice.',
-    catch: "It can be NEGATIVE, and it is shown in red when it is — that means context-guru "
+      + 'Third, the idle keep-alive\u2019s NET \u2014 what it avoided minus what its pings cost. '
+      + 'The three touch different tokens, so adding them does not count anything twice.',
+    catch: 'It can be NEGATIVE, and it is shown in red when it is \u2014 that means context-guru '
       + 'spent more on its own model calls than it saved you. Nothing here is hidden when '
-      + 'the answer is unflattering.',
+      + 'the answer is unflattering. The keep-alive contributes its NET, not its saving: the '
+      + 'pings it sent are real spend on your key, that spend is inside this figure, and it is '
+      + 'NOT in the billed-cost line above \u2014 a ping is not traffic your agent produced, so '
+      + 'it is excluded from the request count and every average. And the keep-alive\u2019s '
+      + 'saving half is a CEILING: the provider\u2019s cache is keyed on content, so another '
+      + 'session sending a byte-identical prompt would have refreshed the same entry for free.',
+  },
+  // ── Keep-alive tab ────────────────────────────────────────────────────────
+  // Every one of these carries the same two disclosures: the saving is a CEILING, and a zero
+  // may be an absence rather than a measurement.
+  'ka-position': {
+    what: 'Whether the idle keep-alive is ahead or behind on YOUR traffic over this window.',
+    how: 'Your own net: what the pings this service sent on your behalf cost, subtracted from '
+      + 'the prefix re-creations they avoided. "No pings yet" means it has not run for you, '
+      + 'which is different from having broken even.',
+    catch: 'Most sessions this mechanism touches LOSE a little. Across this service 34 of 119 '
+      + 'came out ahead and 85 paid about a third of a cent for nothing \u2014 the tax on the '
+      + 'many is how the rebate on the few is funded. A green verdict here is an average over '
+      + 'that spread, not a promise about your next session.',
+  },
+  'ka-net': {
+    what: 'What the keep-alive has actually earned you: the re-creations it avoided, minus the '
+      + 'pings that bought them.',
+    how: 'Both halves come from real rows. Every ping is its own dashboard row priced from its '
+      + 'own usage; every credit sits on the real request that resumed from a cache that would '
+      + 'otherwise have lapsed. Nothing here is an estimate or a model.',
+    catch: 'The saving half is a CEILING. The provider\u2019s cache is keyed on content, so if '
+      + 'another session had sent a byte-identical prompt during your idle gap, the same entry '
+      + 'would have been refreshed for nothing and our ping bought you no more than a warm '
+      + 'feeling. That confound cannot be measured from this side \u2014 the counts beside this '
+      + 'figure (pings sent, pings that read nothing) are what to check it against.',
+  },
+  'ka-pings': {
+    what: 'How many minimal requests this service sent on your behalf while you were away, and '
+      + 'what they cost.',
+    how: 'One row per ping, in your own request log, billed to your own credential and priced '
+      + 'from the usage the provider reported. Filter the Requests tab by keep-alive to read '
+      + 'them one at a time.',
+    catch: 'This is money spent while nobody was at the keyboard, which is why the mechanism is '
+      + 'opt-in and why this figure is beside the saving rather than behind it. Ping cost is '
+      + 'very uneven: about $0.0004 at the median and $0.23 at the 99th percentile, so an '
+      + 'average of them describes almost no ping.',
+  },
+  'ka-saved': {
+    what: 'The prefix re-creations those pings avoided \u2014 requests that resumed after a long '
+      + 'idle gap and were served from cache anyway.',
+    how: 'Credited only where all four hold: a ping of ours went out during the gap, the gap was '
+      + 'wider than the provider\u2019s five-minute lifetime, the provider then read more than '
+      + 'it wrote, and the credit is capped at the tokens that ping actually refreshed. Priced '
+      + 'at the WRITE PREMIUM \u2014 what a re-creation costs over a read \u2014 because those '
+      + 'tokens carry cache_control and a miss bills them at 1.25x rather than 1x.',
+    catch: 'A CEILING, and the only figure on this dashboard that is. The provider\u2019s cache '
+      + 'is content-keyed, so another session with the same prefix would have refreshed the '
+      + 'entry for free and we would have been paid for nothing. Read it with the ping counts '
+      + 'beside it, never on its own.',
+  },
+  'ka-addressable': {
+    what: 'What cache expiries are still costing you in this window \u2014 the money this '
+      + 'mechanism exists to go after.',
+    how: 'Requests whose cache missed because the entry had lapsed AND where the provider then '
+      + 'wrote a prefix a ping could have kept alive. Summed at what they were actually billed.',
+    catch: 'Not all of it is reachable. A ping keeps an entry alive for K\u00d7X + 300 seconds, '
+      + 'so an expiry after a four-hour gap is beyond any setting worth having. The ladder below '
+      + 'says what share each policy reaches. Expiries that wrote nothing are excluded '
+      + 'entirely \u2014 there was no prefix to protect.',
+  },
+  'ka-rowgrowth': {
+    what: 'What this mechanism adds to the dashboard database per day, in bytes.',
+    how: 'Your own ping rate over this window times the measured footprint of one ping row: '
+      + '294 bytes of row plus about 103 bytes of index. Nothing about a ping stores text.',
+    catch: 'Shown because keeping a session warm by hand is the one way you could raise it. Even '
+      + 'ungated, service-wide, this is under a megabyte a day.',
+  },
+  'ka-rec-range': {
+    what: 'What this policy would be worth over a window like the last one \u2014 as a RANGE, '
+      + 'because that is what the data supports.',
+    how: 'A bootstrap over your own SESSIONS: 2,000 resamples of the sessions that had a cache '
+      + 'expiry, replaying this policy over each one\u2019s real gaps, reported as the 90% '
+      + 'interval. Sessions rather than requests, because expiries inside one session are not '
+      + 'independent draws.',
+    catch: 'There is deliberately NO single number here, and none on the wire either. On this '
+      + 'service no account can pin its own figure closer than about a factor of two, and for '
+      + '5 of 12 accounts the interval includes zero \u2014 which is why a recommendation is '
+      + 'refused for those rather than rounded off. The direction is resolvable; the size is not.',
+  },
+  'ka-rec-policy': {
+    what: 'The idle interval and ping count suggested for this account.',
+    how: 'The shipped default, offered only when your own history can tell its effect apart '
+      + 'from zero: at least 20 addressable cache expiries, at least 200 requests, and a 90% '
+      + 'interval that excludes no-change.',
+    catch: 'One ping is never suggested \u2014 it reaches about 4.7 minutes, inside the free '
+      + 'lifetime, and it is $71 worse than nothing service-wide. Two and three pings are a '
+      + 'measured tie on our own traffic, so two is chosen for the lower request volume and not '
+      + 'for a dollar reason. Nothing is applied for you.',
   },
   'saved-usd': {
     what: 'What compaction alone avoided, after paying for the model calls context-guru '
@@ -1243,7 +1343,8 @@ function renderTiles(o) {
     // NOT in here — it was, under the label "compaction + provider cache", and a headline
     // number that mostly measures somebody else's mechanism is not a headline number.
     tile('total-saved-usd', 'Total dollars avoided', costKnown ? usd(o.total_saved_usd) : 'unknown',
-      'compaction + prefix cache', costKnown ? (o.total_saved_usd < 0 ? 'bad' : 'good') : ''),
+      'compaction + prefix cache + keep-alive',
+      costKnown ? (o.total_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-usd', 'Net dollars saved', costKnown ? usd(o.net_saved_usd) : 'unknown',
       'baseline − actual − our spend', costKnown ? (o.net_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-unique', 'Tokens saved (unique)', compact(o.saved_unique),
@@ -1365,11 +1466,7 @@ function renderTiles(o) {
     // The net is what a decision rests on, so it is the number on the tile — presenting the
     // saving alone would be exactly the half-truth this ledger exists to prevent.
     (o.keepalive_pings || o.keepalive_saved_usd)
-      ? tile('keepalive-net', 'Keep-alive net',
-        costKnown ? usd(o.keepalive_net_usd) : 'unknown',
-        num(o.keepalive_pings) + ' pings ' + usd(o.keepalive_ping_usd) + ' · '
-          + num(o.keepalive_misses_avoided) + ' misses avoided ' + usd(o.keepalive_saved_usd),
-        costKnown ? (o.keepalive_net_usd < 0 ? 'bad' : 'good') : '')
+      ? kaOverviewTile(o, costKnown)
       : null,
   ]));
 
@@ -2334,7 +2431,7 @@ function showScopeCol(tableSel, wide) {
 async function loadSessions() {
   const body = clear($('#sessions-body'));
   const wide = showScopeCol('[data-testid=sessions-table]', wideScope());
-  const cols = wide ? 14 : 13;
+  const cols = wide ? 15 : 14;
   loadingRows(body, cols);
   try {
     const { sessions, total } = await api('sessions', { limit: 25, offset: state.sessOffset });
@@ -2381,6 +2478,15 @@ async function loadSessions() {
             }, ' †')
             : null),
         el('td', { class: 'num', text: compact(s.cache_read) + ' / ' + compact(s.cache_write) }),
+        // The keep-alive's net for this session, from its own ping rows. Blank rather than $0
+        // where it never ran: a zero would read as "it broke even here", which it did not do.
+        el('td', {
+          class: 'num ' + (s.keepalive_net_usd < 0 ? 'bad-text' : s.keepalive_net_usd > 0 ? 'good-text' : ''),
+          title: s.keepalive_pings || s.keepalive_saved_usd
+            ? `${num(s.keepalive_pings)} pings cost ${usd(s.keepalive_ping_usd)}; `
+              + `${usd(s.keepalive_saved_usd)} of re-creations avoided (a ceiling)`
+            : 'the keep-alive did not run on this session',
+        }, s.keepalive_pings || s.keepalive_saved_usd ? usd(s.keepalive_net_usd) : '—'),
         el('td', { class: 'num', text: num(s.expands) }),
         el('td', { class: 'num', text: ms(s.cg_latency_ms_avg) }),
         el('td', { text: when(s.start) }),
@@ -2405,7 +2511,7 @@ async function loadSessions() {
 async function loadRequests() {
   const body = clear($('#requests-body'));
   const wide = showScopeCol('[data-testid=requests-table]', wideScope());
-  const cols = wide ? 14 : 13;
+  const cols = wide ? 15 : 14;
   loadingRows(body, cols, 6);
   try {
     const page = await api('requests', { limit: 50, before: state.reqCursor });
@@ -3819,6 +3925,7 @@ async function checkCapture() {
 const loaders = {
   overview: loadOverview, usage: loadUsage, components: loadComponents, sessions: loadSessions,
   requests: loadRequests, benchmarks: loadBenchmarks, config: loadConfig,
+  keepalive: loadKeepAlive,
 };
 
 /**
@@ -5444,6 +5551,36 @@ function loadSettings() {
         + '119 pinged sessions came out ahead and the worst single session paid $2.42 for '
         + 'nothing. Watch your own ledger and switch it off if you are not one of the winners.')));
 
+    // The withdrawal, for the principal who cannot tick the box.
+    //
+    // The box above is drawn only for a manager, because the setting is STORED in the
+    // configuration document and that document is manager-owned — so an account owner whose own
+    // key was being spent had no way to stop it from this page. Consent withdrawal must never
+    // be harder than consent, so turning it OFF is open to any principal on their own account
+    // and turning it ON is not. One-way, deliberately.
+    if (!mgr && cfg.cache && cfg.cache.keepalive) {
+      host.appendChild(el('div', { class: 'field' },
+        el('label', {}, 'Keep my prompt cache warm while I am away'),
+        el('p', { class: 'hint' },
+          'This is ', el('strong', {}, 'on'), ' for your account, set by a manager, and it '
+          + 'spends your own key while you are away. You can switch it off here — turning '
+          + 'it back on is a manager’s change, because the setting lives in the '
+          + 'configuration document. See the Keep-alive tab for what it has cost and avoided '
+          + 'on your traffic.'),
+        el('div', { class: 'actions' }, el('button', {
+          class: 'ghost', 'data-testid': 'set-keepalive-off',
+          onclick: async () => {
+            if (!confirm('Switch the keep-alive off for your account? Every armed session is '
+              + 'disarmed and anything held for you is released immediately.')) return;
+            try {
+              await ctl('/api/me/keepalive', { method: 'DELETE' });
+              alert('Switched off. Nothing further is held or pinged for this account.');
+              loadSettings();
+            } catch (e) { alert(e.message); }
+          },
+        }, 'Turn keep-alive off'))));
+    }
+
     // Content capture consent.
     const cap = el('input', {
       type: 'checkbox', id: 'set-capture', 'data-testid': 'set-capture',
@@ -5527,6 +5664,19 @@ function loadSettings() {
     // those does not quietly turn a tracking account into a frozen copy.
     host.appendChild(el('div', { class: 'actions' },
       el('button', { class: 'primary', 'data-testid': 'settings-save', onclick: saveSettings }, 'Save')));
+    // What a save DOES to the document, beside the button that does it. The page already warns
+    // that saving discards frozen compaction decisions; this is the other half, and it is here
+    // because an operator lost 36 comment lines to a save and had no way to know they would.
+    // Comment and key-order preservation is deliberately not built — it means rewriting the
+    // exact code whose two previous rewrites each shipped a data-loss bug — so the honest
+    // mitigation is to say so and to keep the prior document one button away.
+    host.appendChild(el('p', { class: 'hint', 'data-testid': 'settings-save-warning' },
+      'Saving rewrites your configuration document from these fields. ',
+      el('strong', {}, 'Comments and key order are not preserved'),
+      ' \u2014 the previous document is kept verbatim in the audit log below, with a button to '
+      + 'copy it back. A component this page does not draw a control for is left exactly where '
+      + 'it is, and a save from a page whose configuration has changed underneath it is refused '
+      + 'rather than applied.'));
   });
 
   loadTokens();
@@ -5930,6 +6080,10 @@ async function saveSettings() {
   status.textContent = 'saving…';
   const inherited = !!account.tenant.config_inherited;
   const prev = (account.tenant.effective_config || {}).pipeline || [];
+  // EVERY box in the grid, checked or not: this is what the page drew a control for, which is a
+  // different list from what is ticked. It is the claim the server needs in order to tell a
+  // deliberate removal from a component this bundle cannot see.
+  const drew = $$('#comp-grid input[type=checkbox]').map((c) => c.dataset.comp);
   const picked = new Set($$('#comp-grid input[type=checkbox]')
     .filter((c) => c.checked).map((c) => c.dataset.comp));
   // Keep the configured run order for everything still enabled; a newly ticked component is
@@ -5962,7 +6116,16 @@ async function saveSettings() {
     // control — the tuning fields are omitted, which leaves the document's own values (or the
     // defaults) alone rather than freezing today's numbers into every saved document.
     body.config = {
-      pipeline: ordered, mode: $('#set-mode').value, components: cfgState || {},
+      pipeline: ordered,
+      // What this page DREW a control for, and what it drew it FROM. Two lines, and they are
+      // what stop a save silently reverting a pipeline. The server preserves anything in the
+      // stored document that is absent from BOTH lists — so a component this bundle has never
+      // heard of (a cached app.js whose /api/options predates it) cannot be removed by
+      // omission — and refuses the save outright when the base disagrees with the stored
+      // document, which is what stops a stale render adding one back.
+      pipeline_known: drew,
+      pipeline_base: prev,
+      mode: $('#set-mode').value, components: cfgState || {},
       cache: {
         keepalive: !!($('#set-keepalive') || {}).checked,
         head_ttl_1h: !!((account.tenant.effective_config || {}).cache || {}).head_ttl_1h,
@@ -6025,13 +6188,33 @@ async function loadAudit() {
     if (!rows.length) { emptyState(host, 'No changes yet', 'Configuration edits are recorded here.'); return; }
     const tbl = el('table', { class: 'grid' },
       el('thead', {}, el('tr', {},
-        el('th', {}, 'When'), el('th', {}, 'Field'), el('th', {}, 'From'), el('th', {}, 'To'))));
+        el('th', {}, 'When'), el('th', {}, 'Field'), el('th', {}, 'From'), el('th', {}, 'To'),
+        el('th', {}, el('span', { class: 'vh' }, 'Row actions')))));
     const body = el('tbody');
     for (const e of rows.slice(0, 50)) {
       body.appendChild(el('tr', {},
         el('td', {}, when(e.at)), el('td', {}, el('code', {}, e.field)),
         el('td', { class: 'clip' }, e.before || '—'),
-        el('td', { class: 'clip' }, e.after || '—')));
+        el('td', { class: 'clip' }, e.after || '—'),
+        // The way back. Saving rewrites the configuration document from fields, so comments and
+        // key order do not survive it — an operator lost 36 comment lines to a save. The prior
+        // document is stored here VERBATIM, so recovering it is a button rather than a support
+        // request. No new storage: this row already holds the whole text.
+        el('td', {}, e.field === 'config_yaml' && e.before
+          ? el('button', {
+            class: 'ghost small', 'data-testid': 'audit-copy-before',
+            onclick: async () => {
+              try {
+                await navigator.clipboard.writeText(e.before);
+                alert('The document as it was before this save is on your clipboard, comments '
+                  + 'and key order included.');
+              } catch {
+                // A browser that refuses clipboard access still has to give the text up.
+                prompt('Copy the document as it was before this save:', e.before);
+              }
+            },
+          }, 'Copy the document as it was')
+          : null)));
     }
     tbl.appendChild(body);
     host.appendChild(tbl);
@@ -7223,3 +7406,588 @@ function renderFeedbackAnswers(host, rows) {
 // Registered here rather than in the shared Object.assign above, so this whole feature
 // is one appended block and the view table above stays untouched.
 Object.assign(loaders, { feedback: loadFeedback });
+
+// ── keep-alive ─────────────────────────────────────────────────────────────
+//
+// The tab that answers "is this thing costing me or saving me, and what should I set?".
+//
+// Three rules run through every renderer below, and each one is a defect this project has
+// already shipped once:
+//
+//   1. NO ARITHMETIC HERE. Every dollar figure is computed on the server, in Go, in one
+//      place. The browser has twice duplicated a table the server owns and drifted from it,
+//      and money is the worst case of that class. This file posts inputs and renders answers.
+//   2. EVERY HEADLINE IS A RANGE WITH ITS n, and the recommendation is REFUSED where the
+//      history is too thin. No account in our own corpus can pin its own figure closer than
+//      about a factor of two.
+//   3. THE SAVING IS A CEILING. The provider's cache is keyed on content, so another session
+//      sending a byte-identical prefix would have refreshed the same entry for nothing. Every
+//      tile carrying it says so.
+//
+// Forms: stat tiles, barRows, lineChart, the status bar, tables. No new chart library, no new
+// hue, no pie, no gauge — see the SERIES comment at the top of this file for why a hue belongs
+// to an entity and never to a rank.
+
+/** kaState holds the tab's loaded payloads, so a control redraw need not refetch. */
+const kaState = { ledger: null, behaviour: null, sessions: [], calc: null, armed: [], x: 280, k: 2 };
+
+/** kaMuted is the de-emphasis gray for "outside the current coverage". Not a fifth series. */
+const KA_MUTED = 'var(--s-mute)';
+
+async function loadKeepAlive() {
+  // Panels 1 and 2 first and from ONE request, so the verdict is on screen before any
+  // behavioural query runs. A slow window function must never delay the answer to
+  // "is this costing me money".
+  const host = clear($('#ka-tiles'));
+  loadingState(host, 2);
+  try {
+    kaState.ledger = await api('keepalive');
+    renderKAVerdict(kaState.ledger);
+    renderKADownside(kaState.ledger);
+  } catch (e) {
+    if (aborted(e)) return;
+    errorState(host, 'Could not read the keep-alive ledger', e);
+    return;
+  }
+  // The rest, each from its own request: one slow panel must not blank the others.
+  loadKASessions();
+  loadKABehaviour();
+  loadKACalc();
+  loadKAArmed();
+  loadKARecommend();
+}
+
+/**
+ * kaCoverage renders the three states of "is a zero here a measurement or an absence?".
+ *
+ * keepalive_pings and keepalive_saved_usd arrived as ADDITIVE columns defaulting to 0, so on a
+ * row written before them a zero means NOT RECORDED. Rendering that as "saved nothing" is a
+ * fabricated measurement, which is the failure this dashboard has hit repeatedly — hence three
+ * distinct states and never a blend of them.
+ */
+function renderKACoverage(o) {
+  const host = clear($('#ka-coverage'));
+  if (!o.keepalive_recorded_from) {
+    host.appendChild(el('div', { class: 'banner', 'data-testid': 'ka-never-ran' },
+      el('strong', {}, 'The keep-alive has not run on this account in this window. '),
+      'The figures below are what it would have had to work with, not a measurement of it. ' +
+      'Nothing here is a $0 saving — it is an absence.'));
+    return;
+  }
+  if (o.keepalive_recorded_rows < o.requests) {
+    host.appendChild(el('div', { class: 'banner warn', 'data-testid': 'ka-partial' },
+      `Recorded on ${num(o.keepalive_recorded_rows)} of ${num(o.requests)} requests in this ` +
+      `window — it started running ${when(o.keepalive_recorded_from)}. Rows before that carry ` +
+      'no keep-alive columns at all, so they are absent from these figures rather than zero.'));
+  }
+}
+
+/** renderKAVerdict is panel 1: a handful of headline numbers, as tiles. Not a bar chart of four
+ *  numbers — four values with different units are four figures, not a comparison. */
+function renderKAVerdict(o) {
+  renderKACoverage(o);
+  const host = clear($('#ka-tiles'));
+  const ran = !!o.keepalive_recorded_from;
+  const position = !ran || !o.pings ? 'No pings yet' : (o.net_usd < 0 ? 'Losing' : 'Winner');
+  const cls = position === 'Winner' ? 'good' : position === 'Losing' ? 'bad' : '';
+  host.appendChild(tileGroup(null, null, [
+    // The words are beside the colour, always: a status must never rest on hue alone.
+    tile('ka-position', 'Your position', position,
+      ran ? num(o.sessions_touched) + ' sessions touched' : 'nothing to judge yet', cls),
+    tile('ka-net', 'Keep-alive net', ran ? usd(o.net_usd) : '—',
+      'avoided − spent', ran ? (o.net_usd < 0 ? 'bad' : 'good') : ''),
+    tile('ka-pings', 'Pings sent', ran ? num(o.pings) : '—',
+      ran ? usd(o.ping_usd) + ' spent on your key' : 'none'),
+    tile('ka-saved', 'Re-creations avoided', ran ? usd(o.saved_usd) : '—',
+      ran ? num(o.misses_avoided) + ' requests rescued · a CEILING' : 'none',
+      ran && o.saved_usd > 0 ? 'good' : ''),
+    tile('ka-addressable', 'Still on the table', usd(o.addressable_usd),
+      num(o.addressable_misses) + ' cache expiries worth acting on', 'accent'),
+    tile('ka-rowgrowth', 'Ping rows on disk', o.pings_per_day > 0
+      ? compact(o.bytes_per_day) + 'B/day' : '—',
+      o.pings_per_day > 0 ? o.pings_per_day.toFixed(0) + ' pings/day × ~400 B' : 'no pings'),
+  ]));
+}
+
+/**
+ * renderKADownside is panel 2, and it renders UNCONDITIONALLY — including on a positive net.
+ *
+ * The status bar reuses the same three-state component the recommend question uses, for the
+ * same reason: winner/loser is a JUDGEMENT about a state, which is what --good/--bad are
+ * reserved for, and every segment is labelled in words below it.
+ */
+function renderKADownside(o) {
+  const host = clear($('#ka-split'));
+  const worst = clear($('#ka-worst'));
+  const panel = $('#ka-downside-panel');
+  panel.classList.remove('bad');
+  if (!o.sessions_touched) {
+    emptyState(host, 'This mechanism has not touched any of your sessions yet',
+      'The service-wide split above is what to expect if you switch it on.');
+    return;
+  }
+  const parts = [
+    ['winners', 'Came out ahead', o.winners, 'good'],
+    ['losers', 'Paid for nothing', o.losers, 'bad'],
+  ];
+  host.appendChild(el('div', { class: 'nps-head' },
+    el('span', { class: 'nps-score' + (o.net_usd < 0 ? ' bad' : ''), text: usd(o.net_usd) }),
+    el('span', { class: 'muted small', text:
+      `your own net across ${o.sessions_touched} touched session${o.sessions_touched === 1 ? '' : 's'}` })));
+  host.appendChild(el('div', { class: 'nps-bar' }, ...parts
+    .filter(([, , n]) => n > 0)
+    .map(([key, label, n, c]) => el('div', {
+      class: 'nps-seg ' + c, style: 'flex:' + n, 'data-testid': 'ka-' + key,
+      title: label + ': ' + n + ' sessions',
+    }))));
+  host.appendChild(el('div', { class: 'nps-legend' }, ...parts.map(([, label, n, c]) =>
+    el('span', {}, el('i', { class: 'sw ' + c }), `${label}: ${n}`))));
+  if (o.worst_net_usd < 0) {
+    worst.appendChild(el('p', { class: 'hint', 'data-testid': 'ka-worst-session' },
+      'Your worst session paid ', el('strong', {}, usd(-o.worst_net_usd)),
+      ' and got nothing back for it.'));
+  }
+  // A negative own net turns the panel into the refusal it should be, with the way out on it.
+  if (o.net_usd < 0) {
+    worst.appendChild(el('div', { class: 'banner bad', 'data-testid': 'ka-turn-off' },
+      el('div', {}, el('strong', {}, 'On your traffic this is costing you money. '),
+        'Over this window the pings cost ' + usd(o.ping_usd) + ' and avoided ' +
+        usd(o.saved_usd) + '.'),
+      el('button', {
+        class: 'ghost small', 'data-testid': 'ka-turn-off-btn',
+        onclick: async () => {
+          if (!confirm('Switch the keep-alive off for this account? Every armed session is ' +
+            'disarmed and anything held for you is released immediately.')) return;
+          try {
+            await ctl('/api/me/keepalive', { method: 'DELETE' });
+            alert('Switched off. Nothing further is held or pinged for this account.');
+            loadKeepAlive();
+          } catch (e) { alert(e.message); }
+        },
+      }, 'Turn keep-alive off')));
+  }
+}
+
+/** loadKASessions fills the concentration table, which doubles as the arm list. */
+async function loadKASessions() {
+  const body = $('#ka-sessions-body');
+  loadingRows(body, 11);
+  try {
+    const out = await api('keepalive/sessions');
+    kaState.sessions = out.sessions || [];
+  } catch (e) {
+    if (aborted(e)) return;
+    tableMessage(body, 11, 'Could not read your sessions', e.message, { error: true });
+    return;
+  }
+  clear(body);
+  const wide = wideScope();
+  showScopeCol('[data-testid="ka-sessions-table"]', wide);
+  if (!kaState.sessions.length) {
+    tableMessage(body, 11, 'No cache expiries worth acting on in this window',
+      'Nothing here has anything to keep warm.');
+    $('#ka-sessions-note').textContent = '';
+    return;
+  }
+  for (const s of kaState.sessions) {
+    const net = s.net_usd;
+    body.appendChild(el('tr', {},
+      el('td', {}, el('code', { class: 'clip', text: s.session_id })),
+      wide ? el('td', {}, s.tenant_id || '—') : el('td', { hidden: 'hidden' }),
+      el('td', { class: 'num' }, num(s.turns)),
+      el('td', { class: 'num' }, num(s.expiries)),
+      el('td', { class: 'num' }, usd(s.expiry_usd)),
+      el('td', { class: 'num' }, s.pings ? num(s.pings) : '—'),
+      el('td', { class: 'num' }, s.pings ? usd(s.ping_usd) : '—'),
+      el('td', { class: 'num' }, s.saved_usd ? usd(s.saved_usd) : '—'),
+      el('td', { class: 'num ' + (net < 0 ? 'bad-text' : net > 0 ? 'good-text' : '') },
+        s.pings || s.saved_usd ? usd(net) : '—'),
+      el('td', { class: 'num' }, compact(s.last_prefix)),
+      el('td', {}, el('button', {
+        class: 'ghost small', 'data-testid': 'ka-arm-' + s.session_id,
+        onclick: () => armSession(s),
+      }, 'Keep warm'))));
+  }
+  // The concentration, and the fact that it does not transfer. Both, in one sentence: a table
+  // sorted by cost invites exactly the inference the split-half test refutes.
+  const top = kaState.sessions.slice(0, 8).reduce((a, s) => a + s.expiry_usd, 0);
+  const all = kaState.sessions.reduce((a, s) => a + s.expiry_usd, 0);
+  $('#ka-sessions-note').textContent =
+    `The top ${Math.min(8, kaState.sessions.length)} of these hold ${usd(top)} of ${usd(all)}. ` +
+    'That concentration is real and it does NOT transfer forward: sessions are ephemeral ' +
+    '(median lifetime about zero hours), so this is a description of the past and not a list ' +
+    'to act on next week.';
+}
+
+/**
+ * armSession opens the arm dialog: the parameters, and the two numbers being authorized.
+ *
+ * A prompt() rather than a drawer, deliberately — the smallest thing that can state the
+ * expiry, take a confirmation and refuse a bad value. What it must NOT do is hide either
+ * number: how long this service may hold the credential, and what the pings can cost at worst.
+ */
+async function armSession(s) {
+  const hours = prompt('Keep this session warm for how many hours? (0.25 to 12, and it is ' +
+    'lost if the service restarts)', '1');
+  if (hours === null) return;
+  const h = parseFloat(hours);
+  if (!isFinite(h) || h <= 0 || h > 12) { alert('Between 0.25 and 12 hours.'); return; }
+  const body = {
+    session: s.session_id, idle_seconds: kaState.x, max_pings: kaState.k,
+    until: Date.now() + Math.round(h * 3600000),
+  };
+  try {
+    const out = await ctl('/api/me/keepalive/sessions',
+      { method: 'POST', body: JSON.stringify(body) });
+    const cost = out.priced
+      ? `at worst ${num(out.worst_case_pings)} pings costing ${usd(out.worst_case_usd)}`
+      : `at worst ${num(out.worst_case_pings)} pings — this model is not on the price list, ` +
+        'so the cost cannot be stated';
+    alert(`Armed until ${when(out.until)}.\n\n` +
+      `Your credential may be held for up to ${out.hold_minutes.toFixed(0)} minutes at a ` +
+      `time ((K+1) × X), and this authorization is ${cost}.\n\n` +
+      'It is cleared if the service restarts. The arm is recorded in your audit log.');
+    loadKAArmed();
+  } catch (e) { alert('Not armed: ' + e.message); }
+}
+
+/** loadKAArmed lists what is armed RIGHT NOW — the live policy, not a stored intention. */
+async function loadKAArmed() {
+  const host = clear($('#ka-armed'));
+  let out;
+  try {
+    out = await ctl('/api/me/keepalive/sessions');
+  } catch (e) {
+    // A single-tenant deployment has no control plane at all; that is not an error to show.
+    if (e.status === 404) { host.hidden = true; return; }
+    errorState(host, 'Could not read what is armed', e);
+    return;
+  }
+  host.hidden = false;
+  kaState.armed = out.armed || [];
+  host.appendChild(el('p', { class: 'hint' },
+    `At most ${out.max_hours} hours per session, and ${out.max_hold_minutes} minutes is the `
+    + 'ceiling on how long your credential may be held between pings. ',
+    el('strong', {}, 'Armed sessions are cleared if the service restarts'),
+    ' — an authorization to spend that silently outlived a restart would be worse than one '
+    + 'that does not. The arm itself is in your audit log permanently.'));
+  if (!kaState.armed.length) {
+    emptyState(host, 'Nothing is armed', 'Use "Keep warm" on a session above.');
+    return;
+  }
+  const tbl = el('table', { class: 'grid' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Session'), el('th', {}, 'Idle'), el('th', {}, 'Pings'),
+      el('th', {}, 'Credential hold'), el('th', {}, 'Armed until'),
+      el('th', {}, el('span', { class: 'vh' }, 'Row actions')))));
+  const tb = el('tbody');
+  for (const a of kaState.armed) {
+    tb.appendChild(el('tr', {},
+      el('td', {}, el('code', { class: 'clip' }, a.session)),
+      el('td', {}, a.idle_seconds + 's'),
+      el('td', {}, String(a.max_pings)),
+      el('td', {}, '≤ ' + a.hold_minutes.toFixed(0) + ' min'),
+      el('td', {}, when(a.until)),
+      el('td', {}, el('button', {
+        class: 'ghost small', 'data-testid': 'ka-disarm-' + a.session,
+        onclick: async () => {
+          try {
+            await ctl('/api/me/keepalive/sessions/' + encodeURIComponent(a.session),
+              { method: 'DELETE' });
+            loadKAArmed();
+          } catch (e) { alert(e.message); }
+        },
+      }, 'Disarm'))));
+  }
+  tbl.appendChild(tb);
+  host.appendChild(tbl);
+}
+
+/** loadKABehaviour fills panels 3a–3e. */
+async function loadKABehaviour() {
+  const misses = $('#ka-chart-misses');
+  loadingState(misses, 2);
+  let b;
+  try {
+    b = await api('keepalive/behaviour', { x: kaState.x, k: kaState.k });
+  } catch (e) {
+    if (aborted(e)) return;
+    errorState(misses, 'Could not read your expiry history', e);
+    return;
+  }
+  kaState.behaviour = b;
+  const days = (b.daily || []).map((d) => [d.ts, d.misses]);
+  const usdPts = (b.daily || []).map((d) => [d.ts, d.usd]);
+  // TWO charts. A count and a dollar figure share no scale, and a second y-axis is the single
+  // most common way a chart implies a relationship it has not measured.
+  lineChart(misses, [{ name: 'Cache expiries', color: SERIES[0], points: days, area: true }],
+    { yFmt: num, xFmt: whenAxis });
+  lineChart($('#ka-chart-usd'),
+    [{ name: 'What they cost', color: SERIES[0], points: usdPts, area: true }],
+    { yFmt: usd, xFmt: whenAxis });
+
+  // 3b: the gap bands, in EDGE ORDER — the order is the meaning, so they are never sorted by
+  // size — with everything beyond the current coverage in the de-emphasis gray.
+  $('#ka-gap-note').textContent =
+    `p10 ${b.gap_p10.toFixed(0)}s · p50 ${b.gap_p50.toFixed(0)}s · p90 ${b.gap_p90.toFixed(0)}s. ` +
+    `At ${kaState.x}s idle and ${kaState.k} ping${kaState.k === 1 ? '' : 's'} the cache stays ` +
+    `alive for ${b.coverage_seconds.toFixed(0)}s, so the greyed bands are the expiries this ` +
+    `policy cannot reach. ${num(b.phantom_ttl_rows)} further ttl_expiry rows wrote nothing and ` +
+    'are excluded: there was no prefix to protect.';
+  barRows($('#ka-gap-bands'), (b.gap_bands || []).map((g) => ({
+    label: g.label + (g.beyond ? ' (beyond coverage)' : ''),
+    value: g.n, display: num(g.n) + ' · ' + usd(g.usd),
+    color: g.beyond ? KA_MUTED : SERIES[0],
+    title: `${g.n} expiries costing ${usd(g.usd)}`,
+    onclick: () => { setFilter('reason', 'ttl_expiry'); go('requests'); },
+  })), { emptyDetail: 'No cache expiries in this window.' });
+  kaTable('#ka-gap-bands', 'Idle gap', b.gap_bands);
+
+  // 3e: prefix size, and the measured reason the 20k gate is nearly free.
+  const above = b.addressable_misses > 0
+    ? pct(100 * b.prefix_above_20k / b.addressable_misses, 0) : '—';
+  $('#ka-prefix-note').textContent =
+    `p10 ${compact(b.prefix_p10)} · p50 ${compact(b.prefix_p50)} · p90 ${compact(b.prefix_p90)} ` +
+    `tokens. ${above} of them were already past 20k, which is why the default "only sessions ` +
+    'with a large cached prompt" gate costs almost nothing.';
+  barRows($('#ka-prefix-bands'), (b.prefix_bands || []).map((g) => ({
+    label: g.label + ' tokens', value: g.n, display: num(g.n) + ' · ' + usd(g.usd),
+    color: SERIES[0], title: `${g.n} expiries costing ${usd(g.usd)}`,
+  })), { emptyDetail: 'No cache expiries in this window.' });
+  kaTable('#ka-prefix-bands', 'Cached prompt size', b.prefix_bands);
+
+  // 3c: 24 bins, in the VIEWER's own timezone with the offset stated. "What times of day" is
+  // a human question and a UTC-only axis answers a different one.
+  const offMin = -new Date().getTimezoneOffset();
+  const offLabel = 'UTC' + (offMin < 0 ? '−' : '+') +
+    String(Math.floor(Math.abs(offMin) / 60)).padStart(2, '0') +
+    ':' + String(Math.abs(offMin) % 60).padStart(2, '0');
+  $('#ka-hour-note').textContent =
+    `Bucketed by the hour the cache lapsed, labelled in your own timezone (${offLabel}). ` +
+    'Working-hours shaped on this service: the peak is about eight times the trough.';
+  const bins = (b.hour_bins || []).map((h) => {
+    const start = (Number(h.label) * 60 + offMin + 1440) % 1440;
+    const hh = String(Math.floor(start / 60)).padStart(2, '0');
+    const mm = String(start % 60).padStart(2, '0');
+    return { label: `${hh}:${mm}`, value: h.n, display: num(h.n) + ' · ' + usd(h.usd),
+      color: SERIES[0], title: `${h.n} expiries costing ${usd(h.usd)}`, sort: start };
+  }).sort((a, c) => a.sort - c.sort);
+  barRows($('#ka-hour-bins'), bins, { emptyDetail: 'No cache expiries in this window.' });
+
+  // 3d: per account, mean/median/max, never a single blended figure.
+  const gaps = clear($('#ka-account-gaps'));
+  if (!(b.account_gaps || []).length) {
+    emptyState(gaps, 'Not enough expiries to measure a gap between them',
+      'A gap needs two expiries on the same account.');
+  } else {
+    const tbl = el('table', { class: 'grid' },
+      el('thead', {}, el('tr', {}, el('th', {}, 'Account'), el('th', {}, 'Gaps'),
+        el('th', {}, 'Mean'), el('th', {}, 'Median'), el('th', {}, 'Longest'))));
+    const tb = el('tbody');
+    for (const g of b.account_gaps) {
+      tb.appendChild(el('tr', {}, el('td', {}, g.tenant || 'this account'),
+        el('td', {}, num(g.n)), el('td', {}, g.mean_hours.toFixed(2) + ' h'),
+        el('td', {}, g.median_hours.toFixed(2) + ' h'), el('td', {}, g.max_hours.toFixed(2) + ' h')));
+    }
+    tbl.appendChild(tb);
+    gaps.appendChild(tbl);
+  }
+}
+
+/** kaTable adds the table view of a band chart, as the existing panels do. */
+function kaTable(sel, dim, bands) {
+  const host = $(sel);
+  if (!bands || !bands.length) return;
+  const rows = bands.map((b) => el('tr', {}, el('td', {}, b.label),
+    el('td', { class: 'num' }, num(b.n)), el('td', { class: 'num' }, usd(b.usd))));
+  host.appendChild(el('details', { class: 'why' },
+    el('summary', {}, 'Table view'),
+    el('table', { class: 'grid' },
+      el('thead', {}, el('tr', {}, el('th', {}, dim), el('th', { class: 'num' }, 'Expiries'),
+        el('th', { class: 'num' }, 'Cost'))),
+      el('tbody', {}, ...rows))));
+}
+
+/** renderKACalcControls draws X, K and the prefix. Every value is sent to the server, which
+ *  owns the arithmetic; nothing below multiplies a dollar by anything. */
+function renderKACalcControls() {
+  const host = clear($('#ka-calc-controls'));
+  const x = el('input', { type: 'number', id: 'ka-x', min: '60', max: '290', step: '10',
+    value: String(kaState.x), 'data-testid': 'ka-x' });
+  const k = el('input', { type: 'number', id: 'ka-k', min: '1', max: '4', step: '1',
+    value: String(kaState.k), 'data-testid': 'ka-k' });
+  const apply = el('button', { class: 'ghost', 'data-testid': 'ka-calc-apply',
+    onclick: () => {
+      kaState.x = Math.max(60, Math.min(290, parseInt(x.value, 10) || 280));
+      kaState.k = Math.max(1, Math.min(4, parseInt(k.value, 10) || 2));
+      loadKACalc();
+      loadKABehaviour(); // the coverage rule on the gap bands moves with the policy
+    } }, 'Recalculate');
+  host.appendChild(el('div', { class: 'field-row' },
+    el('label', { for: 'ka-x' }, 'Idle seconds (X)'), x,
+    el('label', { for: 'ka-k' }, 'Max pings (K)'), k, apply));
+}
+
+/** loadKACalc renders the K ladder. */
+async function loadKACalc() {
+  renderKACalcControls();
+  const host = clear($('#ka-calc'));
+  loadingState(host, 3);
+  let c;
+  try {
+    c = await api('keepalive/calc', { x: kaState.x, k: kaState.k });
+  } catch (e) {
+    if (aborted(e)) return;
+    errorState(host, 'Could not compute the ladder', e);
+    return;
+  }
+  kaState.calc = c;
+  clear(host);
+  if (!c.prefix_tokens) {
+    emptyState(host, 'No cached prompt to compute against',
+      'This window holds no cache expiry of yours, so there is no real prefix to price a ping ' +
+      'on. A service-wide average would be misleading: per-ping cost runs from $0.0004 at the ' +
+      'median to $0.2275 at the 99th percentile.');
+    return;
+  }
+  const src = { session: 'the selected session’s last cached prompt',
+    account_median: 'your own median cached prompt at a lapse',
+    given: 'the size you gave' }[c.prefix_source] || 'a real cached prompt';
+  host.appendChild(el('p', { class: 'note' },
+    `Priced on ${compact(c.prefix_tokens)} tokens — ${src} — for `,
+    el('code', {}, c.model || 'an unnamed model'), '. ',
+    c.priced
+      ? `One ping costs ${usd(c.ping_usd_each)}; one rescued expiry avoids ` +
+        `${usd(c.avoided_usd_each)}, which is the WRITE PREMIUM and not the whole miss.`
+      : 'This model is not on the operator’s price list, so the counts below stand and ' +
+        'the dollar columns are blank. They are not zero.'));
+  const tbl = el('table', { class: 'grid', 'data-testid': 'ka-ladder' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Max pings (K)'), el('th', {}, 'Cache stays alive'),
+      el('th', { class: 'num' }, 'Your expiries inside it'),
+      el('th', { class: 'num' }, 'Their cost'), el('th', { class: 'num' }, 'Share of what is reachable'),
+      el('th', { class: 'num' }, 'Pings'), el('th', { class: 'num' }, 'Ping cost'),
+      el('th', { class: 'num' }, 'Net'))));
+  const tb = el('tbody');
+  for (const r of c.rows) {
+    // Emphasis by weight, not by a new hue: the current row is the accent, the rest recede.
+    tb.appendChild(el('tr', { class: r.current ? 'is-current' : 'muted-row',
+      'data-testid': 'ka-ladder-k' + r.max_pings },
+      el('td', {}, String(r.max_pings) + (r.current ? ' (current)' : '')),
+      el('td', {}, r.coverage_seconds.toFixed(0) + 's = ' + r.max_pings + '×' + kaState.x + ' + 300'),
+      el('td', { class: 'num' }, num(r.convertible_misses)),
+      el('td', { class: 'num' }, usd(r.convertible_usd)),
+      el('td', { class: 'num' }, pct(r.share_of_addressable_pct, 1)),
+      el('td', { class: 'num' }, num(r.pings)),
+      el('td', { class: 'num' }, c.priced ? usd(r.ping_usd) : 'not priced'),
+      el('td', { class: 'num ' + (c.priced && r.net_usd < 0 ? 'bad-text' : '') },
+        c.priced ? usd(r.net_usd) : 'not priced')));
+  }
+  tbl.appendChild(tb);
+  host.appendChild(tbl);
+  // Reach and cost side by side, so the flattening is visible: on our own traffic K=1→K=2 takes
+  // reach from 30% to 51% of the recoverable dollars and K=3, K=4 add 6 and 4 points, while
+  // ping count keeps climbing.
+  barRows(host, c.rows.map((r) => ({
+    label: 'K=' + r.max_pings + (r.current ? ' (current)' : ''),
+    value: r.share_of_addressable_pct, max: 100,
+    display: pct(r.share_of_addressable_pct, 1) + ' · ' + num(r.pings) + ' pings',
+    color: r.current ? 'var(--accent)' : KA_MUTED,
+    title: `${r.convertible_misses} of ${c.addressable_misses} expiries reachable`,
+  })), {});
+  host.appendChild(el('p', { class: 'hint' },
+    'A replay of your own past gaps, not a forecast — and it counts only expiries that were ' +
+    'addressable (the provider wrote a prefix that a ping could have refreshed). Reach grows ' +
+    'sharply from one ping to two and then flattens while ping cost keeps climbing, which is ' +
+    'why cost and reach are shown together and not reach alone.'));
+}
+
+/**
+ * loadKARecommend renders a RANGE with its n, or a refusal with the count that caused it.
+ *
+ * Never a hero number and never a gauge. Every account in our own corpus has a 90% interval
+ * whose relative half-width is at least 62%, and it crosses zero for 5 of 12 — so the honest
+ * sentence is "the direction is resolvable, the size is not", and it is on the page.
+ */
+async function loadKARecommend() {
+  const host = clear($('#ka-recommend'));
+  loadingState(host, 2);
+  let rec;
+  try {
+    rec = await api('keepalive/recommend');
+  } catch (e) {
+    if (aborted(e)) return;
+    errorState(host, 'Could not work out a recommendation', e);
+    return;
+  }
+  clear(host);
+  if (rec.refused) {
+    host.appendChild(el('div', { class: 'banner warn', 'data-testid': 'ka-refused' },
+      el('div', {}, el('strong', {}, 'Not enough history to recommend. '), rec.refused, '.'),
+      el('div', { class: 'small' },
+        `For scale: measured over 357 cache expiries across this whole service, the 90% `
+        + `interval on this policy is ${usd(rec.service_lo_usd)} to ${usd(rec.service_hi_usd)}. `
+        + 'Use the default (280 s idle, 2 pings) or arm a single session above and read your '
+        + 'own ledger.')));
+    return;
+  }
+  host.appendChild(tileGroup(null, null, [
+    // A RANGE as the tile's value. There is no point estimate on the wire to render.
+    tile('ka-rec-range', 'Expected over a window like this one',
+      usd(rec.lo_usd) + ' – ' + usd(rec.hi_usd),
+      `90% interval from ${num(rec.n)} expiries in ${num(rec.sessions)} sessions`,
+      rec.lo_usd > 0 ? 'good' : 'bad'),
+    tile('ka-rec-policy', 'Suggested', rec.idle_seconds + 's / ' + rec.max_pings + ' pings',
+      'on sessions past their first request with a cached prompt over 20k tokens', 'accent'),
+  ]));
+  host.appendChild(el('p', { class: 'note' },
+    'The direction is resolvable; the size is not — a window like this one cannot pin it ',
+    el('strong', {}, 'closer than about a factor of two'),
+    '. Watch your own ledger for a week before changing it.',
+    rec.alt_max_pings
+      ? ` ${rec.alt_max_pings} pings clears this account's own noise and is worth trying.`
+      : ' 2 pings and 3 pings are a measured tie on this history, so 2 is suggested for the ' +
+        'lower request volume rather than for a dollar reason.'));
+  host.appendChild(el('div', { class: 'actions' }, el('button', {
+    class: 'ghost', 'data-testid': 'ka-rec-apply',
+    onclick: () => {
+      // Fills the fields in and leaves them UNSAVED, the same pattern the component
+      // recommendations use. A recommendation whose own interval is 62% wide is not something
+      // a service should apply on somebody's behalf.
+      go('settings');
+      setTimeout(() => {
+        const idle = $('#cfg-cache-keepalive_idle_seconds');
+        const pings = $('#cfg-cache-keepalive_max_pings');
+        if (idle) idle.value = rec.idle_seconds;
+        if (pings) pings.value = rec.max_pings;
+        alert('Filled in on the Settings tab. Nothing is saved until you press Save there.');
+      }, 200);
+    },
+  }, 'Use these values in Settings')));
+  host.appendChild(el('p', { class: 'hint' },
+    'Nothing is ever applied for you. One ping is never suggested: it reaches about 4.7 ' +
+    'minutes, which is inside the free five-minute lifetime, and on this service it is $71 ' +
+    'worse than not running at all.'));
+}
+
+/**
+ * kaOverviewTile is the Overview's keep-alive tile: the net, both halves in the sub-line, and a
+ * way through to the tab that explains it.
+ *
+ * A separate function only because it is the one tile on that row that is a LINK. The net is the
+ * figure on the face of it — presenting the saving alone would be exactly the half-truth the
+ * ledger exists to prevent — and the sub-line carries the spend beside it.
+ */
+function kaOverviewTile(o, costKnown) {
+  const t = tile('keepalive-net', 'Keep-alive net',
+    costKnown ? usd(o.keepalive_net_usd) : 'unknown',
+    num(o.keepalive_pings) + ' pings ' + usd(o.keepalive_ping_usd) + ' · '
+      + num(o.keepalive_misses_avoided) + ' rescued ' + usd(o.keepalive_saved_usd)
+      + ' (a ceiling)',
+    costKnown ? (o.keepalive_net_usd < 0 ? 'bad' : 'good') : '');
+  t.appendChild(el('div', { class: 'actions' }, el('button', {
+    class: 'ghost small', 'data-testid': 'keepalive-net-open',
+    onclick: () => go('keepalive'),
+  }, 'Who won and who paid')));
+  return t;
+}

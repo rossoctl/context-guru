@@ -18,6 +18,7 @@
   <nav class="tabs" role="tablist" aria-label="Views">
     <button role="tab" class="tab" data-view="overview" data-testid="tab-overview" aria-selected="true">Overview</button>
     <button role="tab" class="tab" data-view="usage" data-testid="tab-usage">Usage</button>
+    <button role="tab" class="tab" data-view="keepalive" data-testid="tab-keepalive">Keep-alive</button>
     <button role="tab" class="tab" data-view="components" data-testid="tab-components" data-manager data-local-ok>Components</button>
     <button role="tab" class="tab" data-view="sessions" data-testid="tab-sessions">Sessions</button>
     <button role="tab" class="tab" data-view="requests" data-testid="tab-requests">Requests</button>
@@ -490,13 +491,120 @@
         <thead><tr>
           <th>Session</th><th data-scope-col hidden>Account</th><th>Model</th><th>Agent</th><th>Preset</th>
           <th class="num">Turns</th><th class="num">Before</th><th class="num">Saved (gross)</th>
-          <th class="num">Net saved $</th><th class="num">Cache r/w</th><th class="num">Expands</th>
+          <th class="num">Net saved $</th><th class="num">Cache r/w</th>
+          <th class="num">Keep-alive net</th><th class="num">Expands</th>
           <th class="num">CG ms</th><th>Started</th><th><span class="vh">Row actions</span></th>
         </tr></thead>
         <tbody id="sessions-body"></tbody>
       </table>
     </div>
     <div class="pager"><button id="sess-prev" class="ghost">Previous</button><span id="sess-page"></span><button id="sess-next" class="ghost">Next</button></div>
+  </div>
+</section>
+
+<!-- ── Keep-alive ──────────────────────────────────────────────────────────── -->
+<!-- The order of these panels is deliberate and it is not the order that sells the
+     feature: the VERDICT is first and the DOWNSIDE is second, above the calculator. 85 of
+     the 119 sessions this mechanism touched on our own traffic lost money, funding a large
+     rebate on 34, and the requirement is to save money rather than to raise the bill. A page
+     that led with the calculator would be selling. -->
+<section class="view" id="view-keepalive" hidden>
+  <div class="panel">
+    <h2>Verdict</h2>
+    <p class="note">What the idle keep-alive has spent on your traffic and what it has
+      avoided, over the window selected above. The <strong>net</strong> is the only one of
+      these four worth a decision.</p>
+    <div id="ka-coverage"></div>
+    <div id="ka-tiles"></div>
+  </div>
+
+  <div class="panel" id="ka-downside-panel">
+    <h2>Am I in the losing majority?</h2>
+    <!-- Unconditional. It renders on a positive net too, which is the point: the tax on the
+         many is how the rebate on the few is funded, and a reader deciding whether to leave
+         this on has to meet that fact whether or not their own number is green today. -->
+    <p class="note" data-testid="ka-downside-note">This mechanism is a small tax on most of
+      the sessions it touches, funding a large rebate on a few. Across this service
+      <strong>34 of 119</strong> pinged sessions came out ahead and the worst single session
+      paid <strong>$2.42</strong> for nothing.</p>
+    <div id="ka-split"></div>
+    <div id="ka-worst"></div>
+    <div class="tblwrap" tabindex="0">
+      <table class="tbl" data-testid="ka-sessions-table">
+        <thead><tr>
+          <th>Session</th><th data-scope-col hidden>Account</th><th class="num">Turns</th>
+          <th class="num">Expiries</th><th class="num">Expiry cost</th>
+          <th class="num">Pings</th><th class="num">Ping cost</th>
+          <th class="num">Avoided (ceiling)</th><th class="num">Net</th>
+          <th class="num">Last prefix</th><th><span class="vh">Row actions</span></th>
+        </tr></thead>
+        <tbody id="ka-sessions-body"></tbody>
+      </table>
+    </div>
+    <p class="hint" id="ka-sessions-note"></p>
+  </div>
+
+  <div class="panel">
+    <h2>Your TTL expiries</h2>
+    <p class="note">A cached prefix has a five-minute lifetime, and a session idle longer
+      loses it — the next turn re-bills every token at the cache-creation rate. These are
+      yours: how often, when, how far apart, and how big.</p>
+    <details class="why"><summary>Why some ttl_expiry rows are not counted here</summary>
+      <p>A <code>ttl_expiry</code> row that wrote nothing had no prefix to protect and no
+        charge a ping could have avoided. On this service 385 of 742 were exactly that, and
+        every one was an HTTP 400. They are counted apart, below the chart, so this panel's
+        total and the Usage tab's <code>ttl_expiry</code> count can be reconciled.</p></details>
+    <!-- Two charts, never two y-axes. A count and a dollar figure share no scale, and a
+         second y-axis is the single most common way a chart lies about correlation. -->
+    <div class="grid-2">
+      <div class="panel">
+        <h3>Expiries per day</h3>
+        <div id="ka-chart-misses" class="chart" data-testid="ka-chart-misses"></div>
+      </div>
+      <div class="panel">
+        <h3>What they cost, per day</h3>
+        <div id="ka-chart-usd" class="chart" data-testid="ka-chart-usd"></div>
+      </div>
+    </div>
+    <h3>Idle gap when the cache lapsed</h3>
+    <p class="note" id="ka-gap-note"></p>
+    <div id="ka-gap-bands" data-testid="ka-gap-bands"></div>
+    <h3>Cached prompt size when it lapsed</h3>
+    <p class="note" id="ka-prefix-note"></p>
+    <div id="ka-prefix-bands" data-testid="ka-prefix-bands"></div>
+    <h3>Time of day</h3>
+    <p class="note" id="ka-hour-note"></p>
+    <div id="ka-hour-bins" data-testid="ka-hour-bins"></div>
+    <h3>How long between expiries</h3>
+    <p class="note">Per account, never blended: on this service the per-account mean runs
+      from 0.64 h to 6.56 h with maxima past 30 h, so a single service-wide average would
+      describe nobody.</p>
+    <div id="ka-account-gaps" data-testid="ka-account-gaps"></div>
+  </div>
+
+  <div class="panel">
+    <h2>What would X and K buy me?</h2>
+    <p class="note">A replay of <em>your own past gaps</em>, not a forecast. Each rung keeps
+      the cache alive for <strong>K &times; X + 300 s</strong> — the last ping is itself a
+      cache read, and a read refreshes the lifetime for free, which is why the trailing
+      five minutes belong in the arithmetic.</p>
+    <div class="ka-calc-controls" id="ka-calc-controls"></div>
+    <div id="ka-calc" data-testid="ka-calc"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Keep one session warm</h2>
+    <p class="note" data-testid="ka-arm-note">Pick a session and keep its cache warm for a
+      stated time. This is a manual override for a session you are working in now, not a
+      strategy: chosen from history, session lists do not transfer — on this service's own
+      traffic, a list fitted on one half of a week earned <strong>$5.27</strong> in the next
+      half where the plain account-wide rule earned <strong>$53.32</strong>.</p>
+    <div id="ka-armed" data-testid="ka-armed"></div>
+  </div>
+
+  <div class="panel">
+    <h2>What should I set?</h2>
+    <div id="ka-recommend" data-testid="ka-recommend"></div>
   </div>
 </section>
 

@@ -182,6 +182,11 @@ code, kbd { font-family: var(--mono); font-size: 0.92em; }
   clip-path: inset(50%); white-space: nowrap; margin: -1px; padding: 0; border: 0;
 }
 .warn-text { color: var(--warn); }
+/* Sign colours for a signed figure in a table cell. A number's own colour is a status
+   judgement (this cost you / this saved you), which is what --good and --bad are for, and
+   every one of them sits beside a signed value so identity never rests on the hue. */
+.good-text { color: var(--good); }
+.bad-text  { color: var(--bad); }
 
 /* ── top bar ──────────────────────────────────────────────────────────── */
 .topbar {
@@ -1263,3 +1268,28 @@ pre.yaml {
   font-size: var(--t-body); margin: var(--sp-4) 0 var(--sp-2); color: var(--fg);
 }
 #cache-detail h3:first-child { margin-top: 0; }
+
+/* ── Keep-alive tab ──────────────────────────────────────────────────────────
+   Emphasis in the K-ladder table, by WEIGHT and ink rather than by a new hue: the row that
+   is in force is the accent, the alternatives recede. A fifth series colour would mean the
+   chart needs splitting, not a new colour. */
+.grid tr.is-current > td { color: var(--accent); font-weight: 600; }
+.grid tr.muted-row > td { color: var(--fg-muted); }
+/* The calculator's two inputs, on one row above the answer — the same place every other
+   filter on this dashboard lives. */
+.ka-calc-controls .field-row {
+  display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center;
+  margin-bottom: var(--sp-3);
+}
+.ka-calc-controls label { font-size: var(--t-small); color: var(--fg-muted); }
+.ka-calc-controls input[type=number] { width: 6.5em; }
+/* A signed headline beside the winner/loser bar reuses the score slot, with the loss
+   direction stated in ink as well as in the figure's own minus sign. */
+.nps-score.bad { color: var(--bad); }
+/* The downside panel's banner carries a button, so it is a row rather than a paragraph. */
+#ka-worst .banner { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; }
+#ka-worst .banner > div { flex: 1 1 22em; }
+/* A bar that drills through says so on hover, and it is keyboard-reachable through the
+   panel's own table view rather than by making a div a button. */
+.bar-row.clickable { cursor: pointer; }
+.bar-row.clickable:hover .bar-track { outline: 2px solid var(--accent-soft); }
