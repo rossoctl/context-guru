@@ -266,33 +266,41 @@ type gateDecision struct {
 // replayed on every subsequent turn (see state.go's freeze/reapply), so one call's saving
 // is collected repeatedly.
 //
-// THE PRIORS WERE 6/3/4 AND THEY WERE MEASURED WRONG BY ~4x. They were calibrated on a
-// cross-session RECURRENCE rate (82/103, i.e. how often the same content comes back at all),
-// which is a different quantity from how many turns a removal is actually realized on. The
-// component's own ledger answers the second question directly: over the 13 production requests
-// that made calls, saved_gross 73,911 against saved_unique 46,380 — a realized multiplier of
-// **1.59x**, i.e. 0.59 replays per removal, not 4 to 6. The cause is not mysterious: claude-cli
-// drops and compacts old turns, so an extracted message is not carried for the rest of the
-// session. A theorised model over the real remaining-turn counts (p50 20, p75 265) predicted
-// 2.6x-22.2x and over-credited the corpus by ~14x.
+// MEASURED, per session, over the six production sessions that produced a removal:
+// saved_gross/saved_unique = 4.0, 4.4, 8.0, 12.0, 79.9, 215.0 — min 4.0, median 12.0. Removals
+// visibly persist: one session carried a single removal across 217 rows. So 6/3/4 is conservative
+// against the median and inside the observed range, which is where a prior belongs.
 //
-// Combined with pricing every replay at the cache-WRITE rate (fixed in tokenValue), the old
-// priors over-credited a cold-turn call's expected saving by roughly 4.8x — which is precisely
-// how a component whose own accounting says it lost money kept being allowed to spend.
+// A CORRECTION WORTH KEEPING, because the wrong version was briefly shipped here and the
+// arithmetic looked convincing: these were changed to 1.5/0.3/0.6 on a figure of 1.59x derived as
+// saved_gross/saved_unique over only the 13 requests that MADE CALLS. That is not an amortization
+// figure. saved_unique is 46,380 whether you sum over those 13 rows or all 1,770 — every unique
+// removal accrues on a calling turn by definition — so restricting the numerator to calling turns
+// while keeping that denominator subtracts every replay by construction. 1.59x measures "what a
+// calling turn realizes relative to its own new removals", which is a different question and is
+// always near 1. The replays live in the other 1,757 rows (2,408,593 gross against the same
+// 46,380 unique).
 //
-// ponytail: a flat prior per recurrence class, not a fitted model, now anchored on the ledger
-// instead of on a proxy for it. Upgrade to a per-session decay fit only if a measurement shows
-// the estimate is still what misprices calls.
+// The claim that accompanied it — that claude-cli drops old turns so a removal is not carried
+// forward — is contradicted by the same ledger: 416 rows are pure replays (gross > 0, unique = 0).
+//
+// The OTHER half of that change was right and stays: a replayed removal is a cache-READ token,
+// not a cache-write one. See tokenValue.repeatPerToken. Pricing 6 replays at the read rate adds
+// 0.6x the write rate, so the amortization is real but modest — which is why the rate split
+// mattered more than the count did.
+//
+// ponytail: a flat prior per recurrence class, not a fitted model, anchored on the per-session
+// distribution rather than an aggregate that a few long sessions dominate (max 215 against a
+// median of 12). Upgrade to a per-session decay fit only if a measurement shows the estimate is
+// still what misprices calls.
 func expectedReuses(seenBefore bool, turnsSoFar int) float64 {
 	if seenBefore {
-		// Already recurred once, so it is the population the 1.59x was measured on and then
-		// some; the ledger's own high end rather than a fresh guess.
-		return 1.5
+		return 6 // already recurred once, so at or above the observed median
 	}
 	if turnsSoFar >= 20 {
-		return 0.3 // late in a long session: fewer turns remain to amortize over
+		return 3 // late in a long session: fewer turns remain to amortize over
 	}
-	return 0.6
+	return 4 // the observed minimum
 }
 
 // evaluateGate decides whether one candidate output is worth an extraction call.

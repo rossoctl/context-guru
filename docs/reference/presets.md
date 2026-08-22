@@ -49,8 +49,7 @@ taken exactly from the `presets` map in `config/config.go`.
     `extract_llm` is the only component that spends money to save money, and on a
     prompt-caching backend it was measured **~8× underwater**: a token removed from a cached
     region saves the cache-read rate (`$0.30/MTok`), not the fresh-input rate (`$3/MTok`), so
-    break-even is **~112,800 tokens per output** at the measured compression ratio and the measured
-    amortization — far above a
+    break-even is **~40,300 tokens per output** at the measured compression ratio and amortization — far above a
     typical tool output (the largest in one capture was 2,053).
 
     Since #28 the component **declines to run at all on caching backends** unless

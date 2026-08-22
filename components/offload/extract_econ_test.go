@@ -50,21 +50,20 @@ func TestGatePermitsOnNonCachingBackend(t *testing.T) {
 }
 
 // High-reuse (recurring) content is permitted even under caching, because the saving is
-// collected on every turn the frozen compaction is replayed.
+// collected on every turn the frozen compaction is replayed. Recurrence was measured at
+// 82/103 across sessions, so this is the common case, not an edge case.
 func TestGatePermitsHighReuseContent(t *testing.T) {
 	val := savedTokenValue(&components.Ctx{CacheAware: true})
-	// 120,000 tokens: above the ~112.8k cached-RECURRING break-even, below the cached-once
+	// 44,000 tokens: above the ~40.3k cached-RECURRING break-even, below the cached-once
 	// one. This size is the gate's whole thesis in one fixture — recurrence is what tips an
 	// otherwise-losing call into profit, so the SAME size goes both ways.
 	//
-	// It was 44,000 against a ~40.3k break-even until the amortization was measured against
-	// the component's own ledger: the reuse priors were 6/3/4 where the realized multiplier
-	// was 1.59x, and every replay was priced at the cache-WRITE rate where a replayed removal
-	// is a cache-READ token. Correcting both moved the cached break-even up 2.8x. Nothing
-	// about the component got worse; the number was 2.8x optimistic in the numerator of every
-	// decision, which is how a component its own accounting reports at a net loss kept being
-	// allowed to spend. See expectedReuses and tokenValue.repeatPerToken.
-	size := 120000
+	// It was 34,000 against a ~30.5k break-even until the prompt was measured: the analytic
+	// cost was built on preambleTokens = 1463 and no tokenizer markup, i.e. 3,663 o200k
+	// tokens priced as if they were the provider's, against a real 5,600. Correcting both
+	// (1,893 o200k x 1.29) moved the break-even up 32%. Nothing about the component got
+	// worse — the number was simply 35% optimistic, in the numerator of every decision.
+	size := 44000
 	once := evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size, 0), false, 5, false, true)
 	recur := evaluateGate(size, defaultCompressionRatio, val, callCost(cheapmodel.HaikuPricing(), size, 0), true, 5, false, true)
 
@@ -98,31 +97,35 @@ func TestBreakEvenSizesMatchTheDocumentedVerdict(t *testing.T) {
 	}
 	cachedRecur := breakEven(true, true)
 	freshRecur := breakEven(false, true)
-	// ~112,800 and ~11,300 on the MEASURED prompt (1,893 o200k preamble x 1.29 markup) AND
-	// the measured amortization (1.59x realized, replays at the cache-read rate). The previous
-	// ~40,300 / ~3,100 used reuse priors of 6/3/4 and priced every replay at the cache-write
-	// rate; both are corrected, and both moved the same way. Re-derive from the profile's
-	// prompt budget and the ledger, not from these literals.
-	//
-	// WHAT THIS NUMBER MEANS FOR THE PRODUCT, since it is easy to read as a regression: on a
-	// WARM prompt-cached turn the break-even candidate is now 112,800 tokens, and the largest
-	// tool output this workload can produce is 7,399 because the agent truncates every tool
-	// result near 30,000 characters. So the gate refuses every warm-turn call, which is the
-	// correct answer and the one the production ledger reached independently — the same tokens
-	// valued at the warm cache-read rate were worth $0.017 against $0.6039 of spend. The
-	// component pays on COLD turns, where a removed token is worth 12.5x more.
-	if cachedRecur < 100_000 || cachedRecur > 130_000 {
-		t.Errorf("cached+recurring break-even = %d tokens, expected ~112,800 "+
+	// ~40,300 and ~3,100 on the MEASURED prompt (1,893 o200k preamble x 1.29 real-token
+	// markup). The previous ~30,500 / ~1,800 were the same arithmetic over a preamble
+	// constant that was 29% low and no markup at all, so they under-stated call cost by ~35%
+	// and let the gate allow calls that could not pay. Re-derive from the profile's prompt
+	// budget, not from these literals, if the prompt text changes.
+	if cachedRecur < 35_000 || cachedRecur > 46_000 {
+		t.Errorf("cached+recurring break-even = %d tokens, expected ~40,300 "+
 			"(docs/components/extract_llm.md states this figure)", cachedRecur)
 	}
-	if freshRecur < 9_000 || freshRecur > 14_000 {
-		t.Errorf("fresh+recurring break-even = %d tokens, expected ~11,300", freshRecur)
+	if freshRecur < 2_500 || freshRecur > 3_800 {
+		t.Errorf("fresh+recurring break-even = %d tokens, expected ~3,100", freshRecur)
 	}
-	// The gap tracks the 10x cache-read haircut: with replays priced at the read rate in both
-	// regimes, the ratio is no longer inflated by cost saturation the way it was when a warm
-	// replay was credited at the write rate.
-	if ratio := float64(cachedRecur) / float64(freshRecur); ratio < 8 || ratio > 14 {
-		t.Errorf("cached/fresh break-even ratio = %.1fx, expected ~10x", ratio)
+	// These figures survived a round trip worth recording, because the arithmetic looked
+	// convincing in both directions. They were briefly moved to ~112,800 / ~11,300 on a reuse
+	// prior of 1.5 derived from saved_gross/saved_unique over only the requests that MADE CALLS —
+	// which is not an amortization figure at all (saved_unique is identical over those rows and
+	// over all rows, so restricting the numerator subtracts every replay by construction). The
+	// per-session measurement is 4.0-215.0, median 12.0, so 6/3/4 is conservative and inside the
+	// range. See expectedReuses.
+	//
+	// On a WARM turn the removal and its replays are both cache reads, so pricing them separately
+	// (tokenValue.repeatPerToken, added in the same change) leaves these two numbers untouched —
+	// which is why they came back to exactly where they were. The rate split only moves the COLD
+	// break-even, where a write is 12.5x a read.
+	//
+	// The gap is WIDER than the bare 10x rate haircut, because cost stops growing once the
+	// prompt hits the shown-content cap while value keeps scaling with output size.
+	if ratio := float64(cachedRecur) / float64(freshRecur); ratio < 12 || ratio > 30 {
+		t.Errorf("cached/fresh break-even ratio = %.1fx, expected ~20x", ratio)
 	}
 }
 
@@ -461,7 +464,7 @@ func TestANamedCompactionModelIsNotPricedAsTheAgent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := &ExtractLLM{modelSource: "incoming", modelName: tc.modelName,
 				pricing: cheapmodel.HaikuPricing()}
-			got := e.pricingFor(components.Ctx{SelfRates: agentRates})
+			got, _ := e.pricingFor(components.Ctx{SelfRates: agentRates})
 			isAgent := got.InputPerMTok == agentRates.Input*1e6
 			if isAgent != tc.wantAgent {
 				t.Errorf("input rate $%.2f/MTok: agent-priced=%v, want %v (agent is $%.2f, "+

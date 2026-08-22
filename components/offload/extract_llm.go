@@ -637,7 +637,11 @@ func looksLikeFileRead(content string) bool {
 // on the Components tab disagreed with the request row by exactly that factor, and a
 // configuration that pays read as one that loses money. When a model is named, its rates
 // govern.
-func (e *ExtractLLM) pricingFor(c components.Ctx) cheapmodel.Pricing {
+// It returns onCard so the caller needs only ONE rate-card lookup per request. That matters on the
+// request path: modelinfo.LiteLLM.Price takes a mutex, may refresh, and on a key that is not an exact
+// match falls back to an O(n) scan of every priced model — so asking twice for the same answer is a
+// real cost, not a style point.
+func (e *ExtractLLM) pricingFor(c components.Ctx) (p cheapmodel.Pricing, onCard bool) {
 	// A NAMED compaction model, priced from the operator's own card. This is the branch that
 	// used to fall through to CHEAP_MODEL_PRICE_* — i.e. to haiku LIST rates — and it is the
 	// common case, because naming a cheap model is the whole point of the config. The card is
@@ -646,23 +650,15 @@ func (e *ExtractLLM) pricingFor(c components.Ctx) cheapmodel.Pricing {
 	if e.modelName != "" {
 		if r := c.RatesFor; r != nil {
 			if rates := r(e.modelName); !rates.Zero() {
-				return ratesPricing(rates)
+				return ratesPricing(rates), true
 			}
 		}
-		return e.pricing
+		return e.pricing, false
 	}
 	if e.modelSource == "config" || c.SelfRates.Zero() {
-		return e.pricing
+		return e.pricing, false
 	}
-	return ratesPricing(c.SelfRates)
-}
-
-// cardPriced reports whether the operator's rate card can price the named compaction model.
-func (e *ExtractLLM) cardPriced(c components.Ctx) bool {
-	if e.modelName == "" || c.RatesFor == nil {
-		return false
-	}
-	return !c.RatesFor(e.modelName).Zero()
+	return ratesPricing(c.SelfRates), false
 }
 
 // ratesPricing converts the host's per-token card into cheapmodel's per-MTok form.
@@ -762,7 +758,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// agent's own model — so on a sonnet-class agent the fallback understates every call by
 	// about 3x, and the gate spends on that number. MEASURED on a real session: a call
 	// recorded at $0.0276 had cost about $0.083.
-	pricing := e.pricingFor(*c)
+	pricing, onCard := e.pricingFor(*c)
 	// SAY SO WHEN THE RATE CARD IS A GUESS. When a cheap model is named, its own rates govern
 	// (pricingFor), and those rates come from CHEAP_MODEL_PRICE_* — which is unset on this
 	// deployment, so the gate spends against haiku LIST ($1/$5 per MTok) while the dashboard
@@ -774,7 +770,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// and it is what the bill is computed from, so a hit there is not a guess. Before it was
 	// reachable this gate fired on every single request, which meant it named a real defect
 	// and yet carried no information about which requests it applied to.
-	if e.modelName != "" && !cheapmodel.PricingConfigured() && !e.cardPriced(*c) {
+	if e.modelName != "" && !cheapmodel.PricingConfigured() && !onCard {
 		rep.Gate("cheap_model_price_unconfigured")
 	}
 	// The model id actually used, for the record. `source: incoming` pins no name, so without
@@ -1074,6 +1070,10 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// OBSERVATION also means a suppressed candidate still counts as seen, which is
 		// correct: recurrence is a property of the content, not of what we decided to spend.
 		seenBefore := markSeenContent(c, id)
+		// Classify ONCE per candidate. It feeds two decisions — the gate's expected-yield ratio
+		// and whether the model-free window is offered at all — and it is ten regexes over the
+		// blob head, so asking twice per candidate is real work on the request path.
+		cls, clsRatio, clsOK := contentClass(content)
 		gateReason := "gate off"
 		if e.gate {
 			// Stop exploring once calls are observed to be slow: exploration spends wall
@@ -1102,9 +1102,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// listing that shrinks 65.5%, so it priced both at the same expected saving —
 			// and 31% of the reachable token mass in this workload sits in the two classes
 			// that compress worst. See contentclass.go for the table and its provenance.
-			candRatio, cls := ratio, ""
-			if name, r, ok := contentClass(content); ok {
-				candRatio, cls = r, name
+			candRatio := ratio
+			if clsOK {
+				candRatio = clsRatio
 			}
 			d := evaluateGate(sz, candRatio, val, callCost(pricing, sz, goalOverhead), seenBefore, turnsSoFar,
 				explore, e.allowCached)
@@ -1131,7 +1131,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				// /stats via RecordExtractionSuppressed, and a full sentence makes a
 				// poor histogram key.
 				rep.Gate("economic_gate")
-				if cls != "" {
+				if clsOK {
 					// WHICH content class was refused, so an operator can answer "why did
 					// this not run" without re-deriving the class. This is the counter the
 					// content prefilter is visible through: no separate gate, because the
@@ -1155,10 +1155,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// offered one: MaxChars 0 leaves the projection unable to shrink, so it fails the
 		// strictly-smaller check instead of returning a truncation. Carried per candidate
 		// because the class is a property of the content, not of the request.
-		noWindow := false
-		if _, r, ok := contentClass(content); ok && r < minWindowRatio {
-			noWindow = true
-		}
+		noWindow := clsOK && clsRatio < minWindowRatio
 		cands = append(cands, cand{i: i, content: content, id: id, gate: gateReason, noWindow: noWindow})
 	}
 	if dbg && len(tools) > 0 {

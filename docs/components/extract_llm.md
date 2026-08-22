@@ -42,42 +42,35 @@ costing ~$0.012 must therefore remove a *lot* of tokens to break even:
 
 | Backend | Content | Break-even output size |
 |---|---|---|
-| Caching, WARM | seen once | **~176,000 tokens** |
-| Caching, WARM | recurring (amortized over replays) | **~112,800 tokens** |
-| Caching, COLD (TTL expired) | recurring, per content class | **1,400–7,400 tokens** |
-| Non-caching | recurring | **~11,300 tokens** |
+| Caching, WARM | seen once | **~56,400 tokens** |
+| Caching, WARM | recurring (amortized over replays) | **~40,300 tokens** |
+| Caching, COLD (TTL expired) | recurring, per content class | **1,000-3,900 tokens** |
+| Non-caching | recurring | **~3,100 tokens** |
 
-!!! warning "The warm figures rose 2.8x on 2026-08-22, and the reason is the amortization"
-    They read ~56,400 / ~40,300 / ~3,100, and before that ~42,600 / ~30,500 / ~1,800. The
-    2026-08-19 correction fixed the *cost* half (`preambleTokens` 1463 → a measured **1,893**
-    o200k, plus the **1.29x** provider-token markup). This one fixes the *value* half, and it
-    was the larger error:
+!!! warning "The value half was corrected on 2026-08-22, and one of those corrections was itself wrong"
+    The **rate** fix stands: a replayed removal is a cache-READ token, not a cache-write one -- 12.5x
+    cheaper -- so `tokenValue` carries both rates and the gate computes
+    `removed x (perToken + reuses x repeatPerToken)`. On a WARM turn both rates ARE the read rate, so
+    this leaves the two figures above untouched; it moves only the COLD break-even.
 
-    * **The reuse priors were 6/3/4 where the ledger says 1.59x.** They had been calibrated on a
-      cross-session *recurrence* rate (82/103 — how often the same content comes back at all),
-      which is a different quantity from how many turns a removal is actually realized on. The
-      component's own production ledger answers that directly: `saved_gross` 73,911 against
-      `saved_unique` 46,380 over the 13 requests that made calls. claude-cli drops and compacts
-      old turns, so an extracted message is not carried for the rest of the session.
-    * **Every replay was priced at the cache-WRITE rate.** A replayed removal is a cache-READ
-      token — 12.5x cheaper. `tokenValue` now carries both rates.
+    The **count** fix was wrong and is reverted. The reuse priors were briefly changed from 6/3/4 to
+    1.5/0.3/0.6 on a figure of 1.59x, derived as `saved_gross/saved_unique` over only the 13 requests
+    that made calls. That is not an amortization figure: `saved_unique` is 46,380 whether summed over
+    those 13 rows or all 1,770 -- every unique removal accrues on a calling turn by definition -- so
+    restricting the numerator while keeping that denominator subtracts every replay by construction.
+    The replays are in the other 1,757 rows (2,408,593 gross against the same 46,380 unique), and
+    **per session** the realized multiplier is 4.0, 4.4, 8.0, 12.0, 79.9, 215.0 -- median 12.0,
+    minimum 4.0. So 6/3/4 is conservative and inside the observed range, while 0.6 sat below every
+    observation. The claim that accompanied it -- that claude-cli drops old turns so a removal is not
+    carried forward -- is contradicted by the same ledger: 416 rows are pure replays.
 
-    Together they over-stated expected value by ~4.8x on a cold turn, in the numerator of every
-    allow/suppress decision. Pinned by `TestBreakEvenSizesMatchTheDocumentedVerdict`,
-    `TestReusePriorMatchesTheMeasuredLedger` and `TestColdTurnPricesReplaysAtTheReadRate`.
-    **The component did not get worse; the number was wrong in the direction that lets the gate
-    spend, which is how a component whose own accounting reported a net loss kept spending.**
-
-    A defect in the *cost* half was fixed in the same change and moves the other way: the gate
-    was passed the window-fitting overhead (`extractPromptOverheadTokens = 2000`, itself "the
-    preamble plus keep-list, rounded") where `callCost` adds the preamble on its own, so the
-    1,893-token preamble was billed **twice** — a ~25% over-estimate of every call. The
-    observed-cost reconciliation hid it in steady state and not at all before the first call.
+    Pinned by `TestBreakEvenSizesMatchTheDocumentedVerdict`, `TestReusePriorMatchesTheMeasuredLedger`
+    and `TestColdTurnPricesReplaysAtTheReadRate`.
 
 The warm figures are why the component is **off by default on caching backends** and why
 `per_output: false` is the right setting on a prompt-caching agent: the agent truncates every
 tool result near 30,000 characters, so **the largest output that can exist is ~7,399 tokens** —
-15x below the warm break-even. The gate would only ever be declining. Independently confirmed
+5x below the warm break-even. The gate would only ever be declining. Independently confirmed
 on production: the same saved tokens valued at the warm cache-read rate were worth **$0.017
 against $0.6039 of spend, ROI 0.03x**.
 
@@ -94,23 +87,23 @@ tell a paying call from a losing one — the classes span 23x:
 
 | class | measured reduction | cold break-even | reachable under the ~7,399-token ceiling? |
 |---|---|---|---|
-| `ls -l` listing | 65.5% | ~1,400 tok | yes, comfortably |
-| markdown doc | 36.2% | ~3,500 tok | yes |
-| multi-file bundle | 34.6% | ~3,900 tok | yes |
-| source code | 29.9% | ~5,200 tok | marginal |
-| `Read` w/ line numbers | 29.2% | ~5,300 tok | marginal |
-| YAML config | 26.1% | ~6,000 tok | marginal |
-| ANSI-coloured CLI output | 8.0% | ~19,300 tok | **no** |
-| grep / rg output | 6.7% | ~23,100 tok | **no** |
-| JSON blob | 2.8% | ~55,100 tok | **no** |
-| test/eval result log | 1.5% | never | **no** |
+| `ls -l` listing | 65.5% | ~1,000 tok | yes, comfortably |
+| markdown doc | 36.2% | ~2,200 tok | yes |
+| multi-file bundle | 34.6% | ~2,300 tok | yes |
+| source code | 29.9% | ~3,000 tok | yes |
+| `Read` w/ line numbers | 29.2% | ~3,100 tok | yes |
+| YAML config | 26.1% | ~3,900 tok | yes |
+| ANSI-coloured CLI output | 8.0% | ~14,600 tok | **no** |
+| grep / rg output | 6.7% | ~17,500 tok | **no** |
+| JSON blob | 2.8% | ~41,700 tok | **no** |
+| test/eval result log | 1.5% | ~77,800 tok | **no** |
 
 JSON blobs and ANSI CLI output are **31% of the reachable token mass in the two classes that
 compress worst**, which is the direct cause of the flat size-versus-yield relation the corpus
 shows (r = −0.10 between candidate size and reduction ratio). **Raising a size floor selects
 for exactly the material that cannot pay.** So the class's own measured ratio is handed to the
 economic gate in place of the pooled one and the existing expected-saving comparison does the
-rest — no new threshold and no list of banned classes. Unrecognised content (plain prose) keeps
+rest — no new threshold and no list of banned classes. Unrecognised content keeps
 using the learned ratio. Refusals are counted as `low_yield_content_class:<class>`.
 
 These use the **measured** compression ratio, and that measurement is the uncomfortable part: on

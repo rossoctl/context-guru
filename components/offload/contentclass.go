@@ -93,6 +93,13 @@ const classHeadBytes = 1600
 //
 // Order matters and mirrors the analysis script: a line-numbered Read of a JSON file is a Read,
 // a grep hit inside a bundle is a bundle.
+//
+// THE FALLBACK IS EVIDENCE-BACKED, not a shrug: the unrecognised bucket is dominated by
+// `prose / other`, which the same measurement puts at 41.0% — the second-highest ratio of any class
+// and well clear of minWindowRatio. So unrecognised content is, on this workload, measured window-
+// TOLERANT, which is why the window is offered there rather than withheld. Deliberately no positive
+// `prose` regex: prose is defined by the structure it LACKS, so a pattern for it would be fragile in
+// exchange for a ratio the fallback already supplies.
 func contentClass(content string) (name string, ratio float64, ok bool) {
 	head := content
 	if len(head) > classHeadBytes {

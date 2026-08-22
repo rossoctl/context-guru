@@ -35,7 +35,8 @@ func TestBothCostPathsAgreeOnTheOperatorCard(t *testing.T) {
 		}
 	}}
 	const in, out, cw, cr int64 = 3785, 519, 988, 9265
-	component := e.pricingFor(c).Cost(in, out, cw, cr)
+	pr, onCard := e.pricingFor(c)
+	component := pr.Cost(in, out, cw, cr)
 	dashboard := gatewayCard.Cost(in, cr, cw, out)
 	if math.Abs(component-dashboard) > 1e-12 {
 		t.Fatalf("the two cost paths must price one call identically: component=$%.8f dashboard=$%.8f",
@@ -46,20 +47,22 @@ func TestBothCostPathsAgreeOnTheOperatorCard(t *testing.T) {
 	if list := cheapmodel.HaikuPricing().Cost(in, out, cw, cr); math.Abs(component-list) < 1e-9 {
 		t.Fatal("pricingFor still used the built-in list rates with a card available")
 	}
-	if e.cardPriced(c) != true {
-		t.Fatal("cardPriced must report that the named model is on the card")
+	if !onCard {
+		t.Fatal("pricingFor must report that the named model is on the card")
 	}
-	// With no card, the gate must SAY it is guessing rather than pretend.
-	if e.cardPriced(components.Ctx{}) {
-		t.Fatal("cardPriced must be false without a resolver")
+	// With no card, the gate must SAY it is guessing rather than pretend — and it must not ask
+	// the card twice per request to find out (one lookup, reported alongside the price).
+	if _, ok := e.pricingFor(components.Ctx{}); ok {
+		t.Fatal("pricingFor must report onCard=false without a resolver")
 	}
 }
 
-// The reuse prior is the component's own realized amortization, not a recurrence rate.
-// production ledger: saved_gross 73,911 / saved_unique 46,380 = 1.59x realized.
+// The reuse prior must sit inside the realized per-session amortization, which is 4.0 to 215.0
+// (median 12.0) over the six production sessions that produced a removal. A prior below 4.0 is
+// below every observation; see expectedReuses for the mis-derived 1.59x this pins against.
 func TestReusePriorMatchesTheMeasuredLedger(t *testing.T) {
-	if got := 1 + expectedReuses(false, 5); got < 1.2 || got > 2.0 {
-		t.Errorf("first-sight multiplier = %.2fx, ledger measured 1.59x", got)
+	if got := expectedReuses(false, 5); got < 4 || got > 12 {
+		t.Errorf("first-sight prior = %.1f, outside the observed 4.0-12.0 (min..median) band", got)
 	}
 	if expectedReuses(true, 5) <= expectedReuses(false, 5) {
 		t.Error("recurring content must still be valued above first sight")
@@ -113,8 +116,8 @@ func TestContentClassesGateOnExpectedYield(t *testing.T) {
 	}
 	// THE PREFILTER, as arithmetic rather than as a list of banned classes. These four cannot
 	// pay at ANY size this workload can produce, because the agent caps every tool result near
-	// 7,399 tokens: JSON needs 55,100 tokens to break even, grep 23,100, ANSI CLI output
-	// 19,300, and a test log never does. Together JSON and ANSI are 31% of the reachable mass.
+	// 7,399 tokens: JSON needs 41,700 tokens to break even, grep 17,500, ANSI CLI output
+	// 14,600 and a test log 77,800. Together JSON and ANSI are 31% of the reachable mass.
 	for _, cls := range []string{"json_blob", "test_result_log", "grep_output", "ansi_cli_output"} {
 		if allowedAt(cls, ceiling) {
 			t.Errorf("%s compresses too little to pay even at the %d-token ceiling", cls, ceiling)
@@ -127,7 +130,7 @@ func TestContentClassesGateOnExpectedYield(t *testing.T) {
 			t.Errorf("%s at 4,500 tokens should clear break-even", cls)
 		}
 	}
-	// A directory listing shrinks 65.5% and pays from 1,400 tokens; it is the one class that
+	// A directory listing shrinks 65.5% and pays from ~1,000 tokens; it is the one class that
 	// pays well inside the common size range.
 	if !allowedAt("ls_listing", 2000) {
 		t.Error("ls_listing should pay from ~1,400 tokens")

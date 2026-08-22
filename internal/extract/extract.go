@@ -107,11 +107,16 @@ type Cfg struct {
 // function returned a perfect 1.0 for it. A result made only of markers is vacuously derived from
 // anything.
 //
-// 0.05 is calibrated on the production distribution rather than picked: over 62 accepted calls the
-// reduction ratio histogram has ZERO entries above 75% removed, and the single largest removal in
-// the corpus kept 9.5%. So a 5%-of-tokens floor rejects nothing that has ever legitimately
-// happened and catches total loss. Raise it only with a measurement showing real reductions being
-// refused; lower it only if a workload of genuinely uniform lists is shown to need it.
+// 0.05 is calibrated on the PRE-CHANGE production corpus: over its 62 accepted calls the reduction
+// histogram had zero entries above 75% removed and the largest removal kept 9.5%. That corpus no
+// longer bounds the behaviour — the first accepted call of the post-change measurement removed 87.4%
+// and kept 12.6%, outside the range the floor was fitted to. 12.6% still clears 5%, but the margin
+// is thinner than "rejects nothing that has ever legitimately happened" implies, so read the claim
+// as "nothing in the old corpus" rather than "nothing".
+//
+// Re-check against the next production window rather than treating this as settled. Raise it only
+// with a measurement showing real reductions being refused; lower it only if a workload of genuinely
+// uniform lists is shown to need it.
 const minKeepRatioFloor = 0.05
 
 // DefaultCfg mirrors the reference prototype's ExtractCfg defaults.
@@ -415,14 +420,19 @@ func insanityReason(bodyText, resultText string, keepIDs []string, minKeepRatio 
 	if resultText == "" {
 		return "empty result"
 	}
-	bodyN, resN := tokens.Count(bodyText), tokens.Count(resultText)
+	bodyN := tokens.Count(bodyText)
 	switch strings.TrimSpace(resultText) {
 	case "", "[]", "{}", "null", `""`:
 		if bodyN > 0 {
 			return "degenerate result"
 		}
 	}
-	if minKeepRatio > 0 && float64(resN) < minKeepRatio*float64(bodyN) {
+	// Markers are NOT kept content. derivationRatio already strips them; counting them here
+	// let 21 markers plus ONE surviving line — 0.36% of a 280-line body — clear the 5% floor,
+	// which is the same hole this floor exists to close, one step diluted. The two checks have
+	// to agree about what a marker is, and the honest answer is "ours, not the input's".
+	if kept := tokens.Count(stripElisionMarkers(resultText)); minKeepRatio > 0 &&
+		float64(kept) < minKeepRatio*float64(bodyN) {
 		return "below the keep-ratio floor"
 	}
 	for _, kid := range keepIDs {
@@ -561,6 +571,20 @@ func derivationRatio(result, body string) float64 {
 	return float64(matched) / float64(len(res))
 }
 
+// stripElisionMarkers drops the marker lines, so a check asking "how much of the input survived"
+// is not answered by our own annotations.
+func stripElisionMarkers(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, ln := range strings.Split(s, "\n") {
+		if !isElisionMarker(ln) {
+			b.WriteString(ln)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 // isElisionMarker reports whether a line is one of the "N lines elided" notes the prompt
 // asks for (or the recovery marker itself) rather than content from the input.
 func isElisionMarker(ln string) bool {
@@ -692,6 +716,13 @@ func RunExtractionDetail(ctx context.Context, body, goal string, keepIDs []strin
 		// SAY WHAT WAS DROPPED, before the size check so the markers are inside the
 		// budget the never-inflate gate enforces. Only in rewrite mode: deletion-only
 		// mode proves the result is a subsequence of the input, and a marker is not.
+		//
+		// THE COST OF THAT, stated because this file otherwise reads as if marking were
+		// universal: with rewrite:false there is no marker, so a contiguous window just
+		// under MaxChars is accepted with nothing showing the gap. capTruncated still
+		// refuses one AT the cap and IsContained still proves the result is a real
+		// subsequence, so nothing is fabricated — but the reader is not told what went.
+		// Deletion-only mode trades the gap notice for the containment proof.
 		if cfg.Rewrite {
 			cand = markElisions(cand, body)
 		}
