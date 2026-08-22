@@ -670,6 +670,56 @@ func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bsch
 		if err := json.Unmarshal([]byte(m.Raw), &cm); err != nil {
 			continue // unparseable message — leave it in the body untouched
 		}
+		// Recover ANTHROPIC tool calls, which bifrost's schema cannot represent.
+		//
+		// An Anthropic assistant turn carries its calls as `tool_use` CONTENT BLOCKS, and
+		// bschemas.ChatContentBlock has no such type — its Type enum is text/image_url/
+		// input_audio/file/refusal — so the ids are simply absent from the unmarshaled message.
+		// Anything that reasons about tool pairing therefore saw an assistant message with ZERO
+		// calls on every Anthropic request, which produced two defects from one cause:
+		//
+		//   - dropOrphanedToolResults builds its answerable set from ToolCalls alone, so on
+		//     Anthropic traffic the set was always empty, EVERY tool_result looked orphaned, and
+		//     the "repair" deleted all of them. The provider then rejected the request for the
+		//     unanswered calls that remained. Measured live: 28 of 75 runs
+		//     (docs/experiments/loca/iter011/results.md).
+		//   - schema.ValidateShape was blind to the same ids, so it could not see the breakage —
+		//     which is why a test asserting all 11 presets emit shape-valid requests stayed green
+		//     while live Anthropic traffic failed.
+		//
+		// Populating ToolCalls here fixes the whole class at the point where the dialect is still
+		// known, rather than teaching each consumer about Anthropic. The ids are what pairing
+		// needs; arguments are carried for completeness. Note this deliberately makes the
+		// `lossless` check below FALSE for such messages, which is honest — bifrost genuinely
+		// cannot round-trip them — and it only makes the write-back guard more conservative.
+		if provider == bschemas.Anthropic && cm.Role == bschemas.ChatMessageRoleAssistant &&
+			m.Get("content").IsArray() {
+			var calls []bschemas.ChatAssistantMessageToolCall
+			for _, blk := range m.Get("content").Array() {
+				if blk.Get("type").String() != "tool_use" {
+					continue
+				}
+				id, name := blk.Get("id").String(), blk.Get("name").String()
+				if id == "" {
+					continue
+				}
+				idc, namec, args := id, name, blk.Get("input").Raw
+				calls = append(calls, bschemas.ChatAssistantMessageToolCall{
+					ID: &idc,
+					Function: bschemas.ChatAssistantMessageToolCallFunction{
+						Name: &namec, Arguments: args,
+					},
+				})
+			}
+			if len(calls) > 0 {
+				if cm.ChatAssistantMessage == nil {
+					cm.ChatAssistantMessage = &bschemas.ChatAssistantMessage{}
+				}
+				if len(cm.ChatAssistantMessage.ToolCalls) == 0 {
+					cm.ChatAssistantMessage.ToolCalls = calls
+				}
+			}
+		}
 		preMarshal, _ := json.Marshal(cm)
 		norm = append(norm, cm)
 		slots = append(slots, slot{
