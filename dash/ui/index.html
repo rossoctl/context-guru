@@ -272,7 +272,7 @@
     <details class="why">
       <summary>How the baseline is priced</summary>
       <p>The baseline prices the <strong>unique</strong> tokens we removed at the cache-write
-        rate they would have entered as (~11.5&times; a cache read on a prompt-caching
+        rate they would have entered as (~12.5&times; a cache read on a prompt-caching
         backend), and the re-sent remainder at the cache-read rate the provider would have
         served it from. Pricing gross savings as writes is how a dashboard overstates itself
         by its own overcount ratio — which is why dollar savings and token savings diverge so
@@ -409,7 +409,7 @@
   <div class="panel">
     <h2>Prompt cache</h2>
     <p class="note">Where the money actually is. Cache reads cost about a tenth of full rate
-      and cache writes about 11.5&times; a read, so which tier your tokens land in matters far
+      and cache writes about 12.5&times; a read, so which tier your tokens land in matters far
       more than how many of them there are.</p>
     <div id="cache-detail" data-testid="cache-detail"></div>
     <div id="cache-miss-detail" data-testid="cache-miss-detail"></div>
@@ -431,7 +431,7 @@
         <dt>Net $</dt><dd><strong>the amortized verdict.</strong> Everything this component's
           removals were worth across every turn they stayed removed for, minus its own LLM
           spend. This is the honest answer to &ldquo;has this component paid for itself?&rdquo;</dd>
-        <dt>Net $ per turn</dt><dd><strong>the same verdict with the repeat business
+        <dt>Net $ (counted once)</dt><dd><strong>the same verdict with the repeat business
           excluded</strong> &mdash; each piece of content credited once instead of on every
           later turn it stayed absent from. This is what the proxy's own
           <code>/stats</code> endpoint reports, and it answers a different question:
@@ -454,7 +454,7 @@
           <th class="num">Own latency</th><th class="num">Avg ms</th>
           <th class="num">LLM calls</th><th class="num">LLM cost</th>
           <th class="num">Saved $</th><th class="num">Net $</th>
-          <th class="num">Net $ per turn</th><th class="num">Replay ×</th>
+          <th class="num">Net $ (counted once)</th><th class="num">Replay ×</th>
           <th class="num">Errors</th><th>Why declined</th><th>Verdict</th>
         </tr></thead>
         <tbody id="components-body"></tbody>

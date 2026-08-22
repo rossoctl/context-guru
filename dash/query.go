@@ -501,9 +501,20 @@ type ComponentRow struct {
 	SavedUSDDecomposed   float64 `json:"saved_usd_decomposed"`
 	NetUSDFirstRemoval   float64 `json:"net_usd_first_removal"`
 	ReplayMultiple       float64 `json:"replay_multiple"`
-	DurationMsTotal      float64 `json:"duration_ms_total"`
-	DurationMsAvg        float64 `json:"duration_ms_avg"`
-	Errors               int64   `json:"errors"`
+	// SavedUSDDecomposedStored is the decomposition restricted to rows that carry a STORED
+	// saved_usd. It is the only part of the figure above that cross-checks against anything:
+	// for a row with saved_usd = 0 the stored side comes from EstimateComponentSavedUSD, which
+	// runs the identical formula, so agreement is arithmetic. The UI prints the covered
+	// fraction rather than presenting the whole comparison as evidence.
+	SavedUSDDecomposedStored float64 `json:"saved_usd_decomposed_stored"`
+	// UniqueUnkeyed marks a component whose saved_unique is not a dedup measurement, because
+	// it reports no content keys and MarkUnique therefore returns its saving in full every
+	// turn. True for every reformatter. See DecomposeComponentSavedUSD for why this is
+	// flagged rather than repriced.
+	UniqueUnkeyed   bool    `json:"unique_unkeyed"`
+	DurationMsTotal float64 `json:"duration_ms_total"`
+	DurationMsAvg   float64 `json:"duration_ms_avg"`
+	Errors          int64   `json:"errors"`
 	// ActRate is acted/runs: how often the component removes anything. ActRateStructural is
 	// the structural half over the same denominator — see ActedStructural for why a single
 	// rate was a lie for the placement components.

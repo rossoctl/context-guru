@@ -880,10 +880,12 @@ function renderSelfRemoved(host, rep) {
       el('td', { class: 'num', text: num(r.tokens) + ' tok/req' }),
       numTd(r.sessions_after),
       el('td', { class: 'num' }, money(r.avoided_usd, r.priced)),
-      el('td', {}, r.sessions_after < 3
+      // 12, not 3: the server already drops everything below 3, so a 3-threshold here never
+      // rendered. A dozen comparable sessions is what the copy has always claimed.
+      el('td', {}, r.sessions_after < 12
         ? el('span', { class: 'pill missing', title: 'Only ' + num(r.sessions_after)
-          + ' sessions have run since it was last seen, so this may simply be a session that '
-          + 'did not need it rather than a removal.' }, 'weak — too few sessions')
+          + ' comparable sessions have run since it was last seen, so this may simply be a run '
+          + 'of sessions that did not need it rather than a removal.' }, 'weak — few sessions')
         : el('span', { title: 'Declared in ' + num(r.sessions_before) + ' sessions, then absent '
           + 'from the ' + num(r.sessions_after) + ' that followed.' },
         num(r.sessions_before) + ' → 0')),

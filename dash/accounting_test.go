@@ -432,6 +432,14 @@ func TestBuiltinClassification(t *testing.T) {
 		{KindTool, "Read", true, "builtin"},
 		{KindTool, "Agent", true, "builtin"},
 		{KindTool, "TaskStop", true, "builtin"},
+		// Verified against a live Claude Code session, and previously missing — each was
+		// classified client_tool, kept out of the collapsed danger section and offered a
+		// removal command with no warning.
+		{KindTool, "Artifact", true, "builtin"},
+		{KindTool, "SendMessage", true, "builtin"},
+		{KindTool, "CronCreate", true, "builtin"},
+		{KindTool, "EnterWorktree", true, "builtin"},
+		{KindTool, "ExitWorktree", true, "builtin"},
 		// Not a real tool name — the thing people write when they mean Agent.
 		{KindTool, "Task", false, "client_tool"},
 		// Some other agent's own tool: removable, and must not be warned about as a built-in.
@@ -590,5 +598,168 @@ func TestBufferedAndStreamedLatencyAreNeverBlended(t *testing.T) {
 	// UI can say "not recorded yet" instead of showing a 0% buffered rate over old history.
 	if o.SSERecorded != 2 {
 		t.Errorf("SSERecorded = %d, want 2 (the non-streamed row carries neither fact)", o.SSERecorded)
+	}
+}
+
+// TestMarkUniqueCountsKeylessComponentsInFull is the test that was missing, and its absence is
+// why the fabricated `unique` for the reformatters went unnoticed.
+//
+// Both decomposition tests above set SavedUnique directly as an Event field, so they never reach
+// MarkUnique and cannot see that it returns the saving IN FULL when a component reports no
+// content keys. Only Offload components ever set one — the pipeline assigns CacheKeys solely on
+// the Offload branch — so for every reformatter `unique == gross` on every turn, by construction.
+//
+// That is not a bug in MarkUnique: with no key there is nothing to dedup against, and counting
+// the run once is the only defensible answer. The bug was reading the resulting 1.0x ratio as
+// "every removal was genuinely new content" and using it as evidence the decomposition is sound.
+func TestMarkUniqueCountsKeylessComponentsInFull(t *testing.T) {
+	// A real Recorder: MarkUnique writes into seenKeys, which NewRecorder allocates.
+	rec, err := NewRecorder(Options{DBPath: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rec.Close() }) //nolint:errcheck // test teardown
+
+	// A keyed component: the same content key on a later turn contributes nothing.
+	if got := rec.MarkUnique("t1", "extract", []string{"k1"}, 1000); got != 1000 {
+		t.Errorf("first sighting of a keyed removal = %d, want 1000", got)
+	}
+	if got := rec.MarkUnique("t1", "extract", []string{"k1"}, 1000); got != 0 {
+		t.Errorf("repeat of a keyed removal = %d, want 0 — the key was already seen", got)
+	}
+
+	// A KEYLESS component: full saving every time, so unique can never fall below gross and the
+	// overcount ratio is pinned at exactly 1.0 forever.
+	for turn := 1; turn <= 5; turn++ {
+		if got := rec.MarkUnique("t1", "textclean", nil, 328); got != 328 {
+			t.Errorf("turn %d of a keyless removal = %d, want 328 — MarkUnique cannot dedup "+
+				"without a key, so every turn counts in full", turn, got)
+		}
+	}
+
+	// Tenant namespacing still holds for keyed components: one account's key must not suppress
+	// another's identical content.
+	if got := rec.MarkUnique("t2", "extract", []string{"k1"}, 1000); got != 1000 {
+		t.Errorf("another tenant's identical key = %d, want 1000", got)
+	}
+}
+
+// TestUnkeyedComponentsAreFlaggedNotRepriced pins the reporting decision that follows from the
+// test above: a reformatter's dollar figure is marked as not-a-measurement, and is NOT moved to
+// a different rate on an inference.
+//
+// The stakes: with unique == gross the decomposition puts a reformatter's whole saving at the
+// cache-WRITE rate (12.5x a read) and reports a replay multiple of exactly 1.00. On measured
+// traffic that is 77% of the entire "credited once" figure, and it runs in the flattering
+// direction — onto the very verdict the decomposition exists to make conservative.
+func TestUnkeyedComponentsAreFlaggedNotRepriced(t *testing.T) {
+	db := openTestDB(t)
+	// Two components on the same warm turns: one Offload (keyed), one Reformat (keyless, so its
+	// unique equals its gross exactly as MarkUnique would leave it).
+	for i := 0; i < 3; i++ {
+		insertReq(t, db, &Event{
+			TS: int64(1000 + i), SessionID: "s1", Model: "m1", TenantID: "t1",
+			TokensBefore: 10000, TokensAfter: 8000,
+			FreshInput: 10, CacheRead: 50000, TokenAccounting: AccountingComplete,
+			Components: []CompRow{
+				{Component: "extract", Kind: "offload", Acted: true, Mutated: true,
+					SavedGross: 1000, SavedUnique: map[int]int{0: 1000}[i]},
+				{Component: "textclean", Kind: "reformat", Acted: true, Mutated: true,
+					SavedGross: 1000, SavedUnique: 1000},
+			},
+		})
+	}
+	rows, err := db.Components(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DecomposeComponentSavedUSD(Filter{TenantAll: true}, handPrice, rows); err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]*ComponentRow{}
+	for _, c := range rows {
+		by[c.Component] = c
+	}
+	kl, keyed := by["textclean"], by["extract"]
+	if kl == nil || keyed == nil {
+		t.Fatal("both components should be present")
+	}
+	if !kl.UniqueUnkeyed {
+		t.Error("a reformat component reports no content key, so its unique is not a dedup " +
+			"measurement and it must be flagged")
+	}
+	if keyed.UniqueUnkeyed {
+		t.Error("an offload component does set content keys and must NOT be flagged")
+	}
+	// Not repriced: the flagged component's whole saving is still at the write rate, exactly as
+	// the stored figures say. Flagging is a disclosure, not an adjustment.
+	nearEq(t, "keyless first removal", kl.SavedUSDFirstRemoval, 3000*1.25e-6)
+	nearEq(t, "keyless replay", kl.SavedUSDReplay, 0)
+	nearEq(t, "keyless replay multiple", kl.ReplayMultiple, 1)
+	// The keyed one behaves as before: 1,000 unique at the write rate, 2,000 replayed at read.
+	nearEq(t, "keyed first removal", keyed.SavedUSDFirstRemoval, 1000*1.25e-6)
+	nearEq(t, "keyed replay", keyed.SavedUSDReplay, 2000*1e-7)
+}
+
+// TestCrossCheckCoversOnlyStoredRows pins the fix for a cross-check that was near-tautological.
+//
+// EstimateComponentSavedUSD and DecomposeComponentSavedUSD run the IDENTICAL formula and their
+// queries differ only by `AND c.saved_usd = 0`. So for a row with no stored figure the two agree
+// by arithmetic, and on production almost every row is in that bucket — which made
+// "their agreement is evidence, not a tautology" false exactly where it mattered.
+// SavedUSDDecomposedStored is the part that is genuinely checked, and the UI prints the fraction.
+func TestCrossCheckCoversOnlyStoredRows(t *testing.T) {
+	db := openTestDB(t)
+	p, _ := handPrice.Price(context.Background(), "m1")
+	// One row priced at write time (stored), one left unpriced (estimated on read).
+	stored := &Event{
+		TS: 1000, SessionID: "s1", Model: "m1", TenantID: "t1",
+		TokensBefore: 10000, TokensAfter: 9000,
+		FreshInput: 10, CacheRead: 50000, OutputTokens: 10,
+		Components: []CompRow{{Component: "extract", Kind: "offload", Acted: true,
+			Mutated: true, SavedGross: 1000, SavedUnique: 1000}},
+	}
+	stored.Price(p, true)
+	insertReq(t, db, stored)
+	insertReq(t, db, &Event{
+		TS: 2000, SessionID: "s1", Model: "m1", TenantID: "t1",
+		TokensBefore: 10000, TokensAfter: 9000,
+		FreshInput: 10, CacheRead: 50000, TokenAccounting: AccountingComplete,
+		Components: []CompRow{{Component: "extract", Kind: "offload", Acted: true,
+			Mutated: true, SavedGross: 1000, SavedUnique: 1000}},
+	})
+	rows, err := db.Components(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DecomposeComponentSavedUSD(Filter{TenantAll: true}, handPrice, rows); err != nil {
+		t.Fatal(err)
+	}
+	c := rows[0]
+	if c.SavedUSDDecomposedStored <= 0 {
+		t.Fatal("the stored-row half of the decomposition should be nonzero")
+	}
+	if c.SavedUSDDecomposedStored >= c.SavedUSDDecomposed {
+		t.Errorf("stored-only %.9f must be strictly below the whole decomposition %.9f: half "+
+			"these rows carry no stored figure and are therefore not cross-checked at all",
+			c.SavedUSDDecomposedStored, c.SavedUSDDecomposed)
+	}
+	// And the checked half really does agree with what was stored.
+	nearEq(t, "stored-row cross-check", c.SavedUSDDecomposedStored, c.SavedUSD)
+}
+
+// TestEndConversationCannotBeRemoved pins the documented exception: a deny rule cannot drop this
+// tool while any other remains, so emitting the usual "removes it from the prompt entirely"
+// promise for it would be a false claim in a UI whose whole job is not making those.
+func TestEndConversationCannotBeRemoved(t *testing.T) {
+	r := RemovalFor(KindTool, "EndConversation", "")
+	if r.Command != "" || r.Settings != "" {
+		t.Errorf("no removal should be offered: command=%q settings=%q", r.Command, r.Settings)
+	}
+	if !r.Danger {
+		t.Error("still a built-in, so still marked dangerous")
+	}
+	if !hasSub(r.Effect, "Cannot be removed") {
+		t.Errorf("Effect must say it cannot be removed, got %q", r.Effect)
 	}
 }

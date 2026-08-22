@@ -512,11 +512,19 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	}
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
 	tr.Breakpoints = bps
-	// The cache TTL TIER this request asked for. cacheTTL() has always computed it — it is
-	// an input to cold-cache attribution — and then discarded it, so the dashboard could
-	// not say which tier any prompt used and the 1h write price could not be applied. It is
-	// free to carry: the structural scan has already run by here.
-	tr.CacheTTL = ttlTier(provider, body)
+	// The cache TTL TIER this request asked for. cacheTTL() has always computed it — it is an
+	// input to cold-cache attribution — and then discarded it, so the dashboard could not say
+	// which tier any prompt used and the 1h write price could not be applied.
+	//
+	// NOT free, and the first version of this claimed it was: ttlTier re-walks the body, and
+	// benchmarked at 3.9 ms on a 413 KB body against cg_added_ms_avg of 154 ms — about 2.5% of
+	// context-guru's own added latency, on every request. `bps` two lines up has already
+	// answered the "is there any breakpoint at all" half from its own scan, and a body with
+	// none cannot have asked for a TTL, so gating on it skips the walk entirely for exactly the
+	// requests where the answer is "" anyway.
+	if bps.Total() > 0 {
+		tr.CacheTTL = ttlTier(provider, body)
+	}
 	tr.SplitStableTokens, tr.SplitTailHash = splitStableTokens, splitTailHash
 	tr.FilteredDeclTokens, tr.FilteredDecls = filteredTokens, filteredDecls
 	// The eligible (attempted) denominator: what age/supersession offloaders were
@@ -792,6 +800,9 @@ const (
 // The empty answer matters and is not folded into 5m: a request with no cache_control anywhere
 // is not a 5-minute-TTL request, it is an uncached one, and a breakpoint histogram that
 // counted it as 5m would report caching on traffic that does none.
+// Callers gate on a nonzero breakpoint count, so the hasCacheBreakpoint walk is not repeated
+// here — but it stays as a guard for any future caller that has no count in hand, since
+// returning a tier for an uncached body would be worse than the scan it costs.
 func ttlTier(provider bschemas.ModelProvider, body []byte) string {
 	if !hasCacheBreakpoint(body) {
 		return ""

@@ -650,8 +650,8 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 // 7.5x, and that 7.5x is the claim this replaced.
 //
 // The counterfactual is a cache MISS, not fresh input: those tokens carry cache_control, so
-// a miss bills them as creation at 1.25x fresh, not at 1x. Hence CacheWrite - CacheRead, an
-// 11.5x-fresh spread rather than 9x. The max(CacheWrite, Input) floor covers a provider that
+// a miss bills them as creation at 1.25x fresh, not at 1x. Hence CacheWrite - CacheRead, a
+// 1.15x-fresh spread rather than 0.9x. The max(CacheWrite, Input) floor covers a provider that
 // charges no write premium, where a miss still costs at least the fresh rate.
 //
 // It is a FLOOR: a stable prefix serves a whole session while this counts one request of it,

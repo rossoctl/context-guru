@@ -676,7 +676,7 @@ function renderCacheDetail(o) {
   const inputTotal = o.cache_read + o.cache_write + o.fresh_input;
   stackedShare(host.appendChild(el('div')), [
     { label: 'Cache reads', value: o.cache_read, note: 'about a tenth of full rate' },
-    { label: 'Cache writes', value: o.cache_write, note: 'about 11.5x a read' },
+    { label: 'Cache writes', value: o.cache_write, note: 'about 12.5x a read' },
     { label: 'Fresh input', value: o.fresh_input, note: 'full rate' },
   ], { testid: 'cache-tier-share',
     note: inputTotal > 0
@@ -860,10 +860,12 @@ const TILE_INFO = {
       + 'is still absent from turns 6, 7, 8… so the agent never pays for it again on any of '
       + 'them.',
     how: 'Gross savings ÷ unique savings.',
-    catch: 'This is a good thing, not a measurement error, and it is already fully priced '
-      + 'into every dollar figure on this page — each repeat is valued at the cheap '
-      + 'cache-read rate the turn actually paid, not at the full rate. A high number here '
-      + 'means one removal kept paying off. It does NOT mean any dollar figure is inflated.',
+    catch: 'A high number here is not a measurement error — it means one removal kept paying '
+      + 'off, and each repeat is already priced at the cheap cache-read rate the turn actually '
+      + 'paid. But a ratio of exactly 1.0 does NOT mean every removal was new content: it also '
+      + 'happens when a component reports no content fingerprint at all, in which case there '
+      + 'is nothing to deduplicate against and the figure is not a measurement. Every '
+      + 'reformatter is currently in that position — the Components tab marks them.',
   },
 
   'billed-input': {
@@ -914,8 +916,10 @@ const TILE_INFO = {
       + 'previous turn\'s in the same session.',
     catch: 'This is the honest bound on the "Replay ceiling" two tiles left. That ceiling '
       + 'assumes every removal survives to the end of its session; each reset is a place '
-      + 'where one did not. Derived here rather than counted by the proxy, so it respects '
-      + 'the time range and filters like everything else on this page.',
+      + 'where one did not. Derived here rather than counted by the proxy, so it respects the '
+      + 'time range and filters like everything else on this page — and so it will NOT match '
+      + 'the compaction_resets counter on /stats, which counts a different window by a '
+      + 'different method.',
   },
   'sse-buffered': {
     what: 'How often a streaming response was held back and delivered all at once, so the user '
@@ -950,9 +954,10 @@ const TILE_INFO = {
     what: 'How much of our removals kept paying off on later turns — the repeat business.',
     how: 'Gross savings − unique savings: every re-removal of content we had already '
       + 'removed once.',
-    catch: 'This is where most of the dollar value on this page comes from — about 92% of '
-      + 'it on this traffic. It is real, but each unit is cheap: a token kept out of an '
-      + 'already-cached prompt is worth the cache-read rate, roughly a tenth of full price.',
+    catch: 'About 57% of the DOLLARS on this page — and 92% of the removed TOKENS. That gap '
+      + 'is the whole point: each repeat is worth roughly a tenth of a first removal, because '
+      + 'a token kept out of an already-cached prompt saves only the cache-read rate. Quoting '
+      + 'the token share as if it were the dollar share overstates this by about 1.6×.',
   },
   'replay-projected': {
     what: 'The most the repeat business COULD have come to, if every removal had stayed '
@@ -990,8 +995,11 @@ const TILE_INFO = {
     what: 'What this traffic actually cost — the bill.',
     how: "The four token tiers the provider reported for every request (fresh input, cache "
       + 'reads, cache writes, output), each at that model’s price when the request ran.',
-    catch: 'Requests whose model had no known price are excluded rather than counted as '
-      + 'free; the count of those is on the "At today’s rates" tile.',
+    catch: 'Requests whose model had no price when they ran are excluded rather than counted '
+      + 'as free — they are the "estimated" and "unmeasured" slices of the token-accounting '
+      + 'chart at the bottom of this page. That is a DIFFERENT population from the "unpriced" '
+      + 'count on the "At today’s rates" tile, which counts rows today’s rate list '
+      + 'cannot price. A row can be in either, or both.',
   },
   'cost-cg': {
     what: "What context-guru's own model calls cost you. Compacting with an LLM is not "
@@ -1103,7 +1111,7 @@ const TILE_INFO = {
     what: 'Input the provider had to READ and then store in its cache, at a premium over '
       + 'full price.',
     how: "The provider's own reported usage, priced at that model's cache-creation rate.",
-    catch: 'This is the expensive tier — roughly 11.5× a cache read. Anything that makes a '
+    catch: 'This is the expensive tier — roughly 12.5× a cache read. Anything that makes a '
       + 'cached prefix change pushes tokens from the read tier into this one, which is why '
       + 'the freeze exists.',
   },
@@ -1445,7 +1453,7 @@ function renderTiles(o) {
   host.appendChild(tileGroup('Billed tokens', 'the four tiers the provider charges on', [
     tile('cache-read', 'Cache reads', compact(o.cache_read), tc ? usd(tc.cache_read_usd) : null),
     tile('cache-write', 'Cache writes', compact(o.cache_write),
-      tc ? usd(tc.cache_write_usd) + ' · ~11.5× a read' : '~11.5× a read'),
+      tc ? usd(tc.cache_write_usd) + ' · ~12.5× a read' : '~12.5× a read'),
     tile('fresh-input', 'Fresh input', compact(o.fresh_input), tc ? usd(tc.fresh_usd) : null),
     tile('output', 'Output tokens', compact(o.output_tokens), tc ? usd(tc.output_usd) : null),
   ]));
@@ -1656,11 +1664,16 @@ async function loadOverview(opts = {}) {
   if (first) loadingState($('#tiles'), 4);
   const scroll = window.scrollY;
   try {
+    // Snapshotted BEFORE the fetch: an event that lands while the request is in flight is about
+    // data this response does not contain, so clearing the flag afterwards would drop it.
+    const wasDirty = state.dirty;
     const [o, s] = await Promise.all([api('stats'), api('series', { bucket: bucketFor() })]);
     state.overview = o;
     state.loadedAt = Date.now();
-    state.dirty = false;
-    $('#refresh-now').classList.remove('has-new');
+    if (state.dirty === wasDirty) {
+      state.dirty = false;
+      $('#refresh-now').classList.remove('has-new');
+    }
     renderTiles(o);
     renderDenominators(o);
     renderWaterfall(o);
@@ -1984,6 +1997,16 @@ function renderNetReconcile(components) {
     'Every dollar on this tab can be counted two ways, and they answer different questions. '
     + 'Both are below. Neither is the "real" one.'));
 
+  // The part of the "credited once" figure that is not a dedup measurement at all.
+  //
+  // MarkUnique returns a component's saving in full when it reports no content fingerprint, and
+  // only Offload components ever report one — so for a reformatter `unique` equals `gross` on
+  // every turn by construction. That puts its whole saving at the cache-WRITE rate with a
+  // replay multiple of exactly 1.00, and on measured traffic it is 77% of the bar below. It is
+  // not repriced here, because "these are surely replays" is an inference and not a
+  // measurement either; it is disclosed, which is what the page can honestly do about it.
+  const unkeyed = priced.filter((c) => c.unique_unkeyed);
+  const unkeyedUSD = unkeyed.reduce((n, c) => n + c.saved_usd_first_removal, 0);
   barRows($('#net-reconcile-bars') || host.appendChild(el('div', { id: 'net-reconcile-bars' })), [
     { label: 'Credited once per piece of content', value: first, max: Math.max(decomp, 0.0001),
       display: usd(first),
@@ -2002,6 +2025,24 @@ function renderNetReconcile(components) {
         + 'the sessions it ran in?" It is the figure the tiles on this page show.' },
   ], { descSummary: 'What this counts' });
 
+  if (unkeyedUSD > 0) {
+    host.appendChild(el('div', { class: 'state blocked', 'data-testid': 'net-unkeyed' },
+      el('div', { class: 'state-body' },
+        el('strong', {}, usd(unkeyedUSD) + ' of the "credited once" figure — '
+          + pct((100 * unkeyedUSD) / Math.max(first, 1e-12), 0)
+          + ' — is not a deduplicated measurement'),
+        el('span', {}, unkeyed.map((c) => c.component).join(', ')
+          + ' report no content fingerprint, so nothing can be deduplicated against and their '
+          + '"credited once" figure is simply their whole saving, re-counted every turn.'),
+        el('span', {}, 'That places all of it at the cache-write rate — 12.5× a cache read — '
+          + 'and gives them a replay multiple of exactly 1.00. Since the agent re-sends the '
+          + 'original bytes each turn, most of it is very probably replay that belongs at the '
+          + 'read rate, which would make these figures SMALLER.'),
+        el('span', {}, 'It is shown rather than adjusted: repricing on an inference would be '
+          + 'the same mistake pointing the other way. These components need a '
+          + 'content-derived fingerprint before either number is a measurement.'))));
+  }
+
   // The sign flip, named, for every component where it happens. This is the whole point.
   const flips = spenders.filter((c) => (c.net_usd_with_estimate > 0) !== (c.net_usd_first_removal > 0));
   if (flips.length) {
@@ -2012,7 +2053,7 @@ function renderNetReconcile(components) {
     for (const c of flips) {
       box.querySelector('.state-body').appendChild(el('span', {},
         c.component + ': ' + usd(c.net_usd_with_estimate) + ' amortized, but '
-        + usd(c.net_usd_first_removal) + ' per turn — it spends ' + usd(c.llm_cost_usd)
+        + usd(c.net_usd_first_removal) + ' counted once — it spends ' + usd(c.llm_cost_usd)
         + ' and its first removals are only worth ' + usd(c.saved_usd_first_removal)
         + '. It is only ahead because those removals kept paying off on '
         + c.replay_multiple.toFixed(1) + '× as much later traffic. Both are true. Which one '
@@ -2021,17 +2062,37 @@ function renderNetReconcile(components) {
     host.appendChild(box);
   }
 
-  // The cross-check. Two code paths, same rows: a gap is a bug, not a nuance.
-  const drift = amort > 0 ? Math.abs(decomp - amort) / amort : 0;
+  // The cross-check, and an honest account of how much of the figure it actually checks.
+  //
+  // Only rows carrying a STORED saved_usd are checked at all. For a row whose saved_usd is 0
+  // the stored side is supplied by the read-time estimator, which runs the IDENTICAL formula as
+  // the decomposition — so those rows agree by arithmetic, not by corroboration. Presenting the
+  // whole comparison as "evidence, not a tautology" was wrong: on production almost every row
+  // is in the estimated bucket, so the sentence was close to always false where it mattered.
+  const stored = components.reduce((n, c) => n + (c.saved_usd || 0), 0);
+  const stDecomp = priced.reduce((n, c) => n + (c.saved_usd_decomposed_stored || 0), 0);
+  const covered = decomp > 0 ? stDecomp / decomp : 0;
+  const drift = stored > 0 ? Math.abs(stDecomp - stored) / stored : 0;
+  const coverage = 'Genuinely cross-checked: ' + usd(stDecomp) + ' of ' + usd(decomp) + ' ('
+    + pct(covered * 100, 0) + '). The rest is valued on read by the same formula the '
+    + 'decomposition uses, so it agrees by arithmetic and corroborates nothing.';
   host.appendChild(el('p', { class: 'hint' + (drift > 0.02 ? ' warn-text' : '') },
-    drift > 0.02
-      ? 'Cross-check FAILED: the two halves come to ' + usd(decomp) + ' but the recorded '
-        + 'figure is ' + usd(amort) + ' (' + pct(drift * 100, 1) + ' apart). These are '
-        + 'computed by different code from the same rows, so one of them is wrong. Treat both '
-        + 'columns as suspect until this reads clean.'
-      : 'Cross-check: the two halves add to ' + usd(decomp) + ', against ' + usd(amort)
-        + ' recorded. Same rows, different code — so their agreement is evidence, not a '
-        + 'tautology.'));
+    !stored
+      ? 'Nothing here can be cross-checked: no row in this window carries a recorded '
+        + 'per-component dollar figure, so every figure above is valued on read.'
+      : drift > 0.02
+        // A gap is most often a RATE CHANGE, not an arithmetic error — the stored side was
+        // priced when each request ran and the decomposition prices on read. The sibling
+        // tier-reconcile tile has always said so; this one used to declare a bug instead.
+        ? 'Cross-check DISAGREES by ' + pct(drift * 100, 1) + ': ' + usd(stDecomp)
+          + ' decomposed against ' + usd(stored) + ' recorded, on the same rows. The likeliest '
+          + 'cause is a RATE CHANGE inside this window — the recorded figure was priced when '
+          + 'each request ran, this one is priced at today\'s rates — which is a real event on '
+          + 'this deployment, not an error. Check the "At today\'s rates" tile on Overview '
+          + 'first; only if that reads clean is one of these two computations wrong. ' + coverage
+        : 'Cross-check: ' + usd(stDecomp) + ' decomposed against ' + usd(stored)
+          + ' recorded on the same rows — different code, so their agreement is evidence. '
+          + coverage));
 }
 
 /**
@@ -2095,9 +2156,22 @@ async function loadComponents() {
         }, num(c.acted_structural) || '—'),
         el('td', { class: 'num', text: pct(c.act_rate * 100, 1) }),
         el('td', { class: 'num', text: num(c.reverted) }),
-        el('td', { class: 'num', text: compact(c.saved_unique) }),
+        // An unkeyed component's `unique` is identically its `gross`, so the cell is marked:
+        // without it the column reads as "this component never repeated a removal", which is a
+        // measurement it did not make.
+        el('td', {
+          class: 'num' + (c.unique_unkeyed ? ' warn-text' : ''),
+          title: c.unique_unkeyed
+            ? 'NOT a deduplicated figure: this component reports no content fingerprint, so '
+              + 'every turn\'s saving is counted as new. Equal to gross by construction.'
+            : 'content that genuinely never reached the provider, deduped by content key',
+        }, compact(c.saved_unique) + (c.unique_unkeyed ? '*' : '')),
         el('td', { class: 'num', text: compact(c.saved_gross) }),
-        el('td', { class: 'num', text: c.overcount_ratio ? c.overcount_ratio.toFixed(1) + '×' : '—' }),
+        el('td', {
+          class: 'num',
+          title: c.unique_unkeyed
+            ? 'Exactly 1.0 by construction, not by measurement — see the unique column.' : '',
+        }, c.overcount_ratio ? c.overcount_ratio.toFixed(1) + '×' : '—'),
         el('td', { class: 'num', text: dur(c.duration_ms_total) }),
         el('td', { class: 'num', text: ms(c.duration_ms_avg) }),
         el('td', { class: 'num', text: c.llm_calls ? num(c.llm_calls) : '—' }),
@@ -4215,7 +4289,14 @@ let lastEventID = 0;
 function connectLive() {
   const src = new EventSource('/api/events' + (lastEventID ? '?last_event_id=' + lastEventID : ''));
   const label = $('#live-label'), box = $('.live');
-  src.onopen = () => { box.className = 'live on'; label.textContent = 'live'; };
+  src.onopen = () => {
+    box.className = 'live on';
+    label.textContent = 'live';
+    // A reconnect means we were away, and the hub's replay ring is bounded — so anything that
+    // happened beyond it is gone and no `request` event will ever arrive for it. Having held a
+    // connection before is exactly the signal that a gap may exist.
+    if (lastEventID) markDirty();
+  };
   src.onerror = () => { box.className = 'live off'; label.textContent = 'reconnecting…'; };
   src.addEventListener('request', (ev) => {
     let e;
@@ -4380,7 +4461,10 @@ const gated = () => !$('#gate').hidden;
  * page forever.
  */
 function busyReading() {
-  if (!document.hasFocus()) return true;
+  // document.hasFocus() is deliberately NOT here. It was, as "the reader is not looking" — but a
+  // dashboard on a second monitor is exactly the case the old poller served, and gating on focus
+  // made it permanently stale while still printing an age. Nothing is being interrupted when
+  // nobody is interacting, which is the only thing this guard is for.
   const a = document.activeElement;
   if (a && a !== document.body && $('#main').contains(a)) return true;
   if ($('#view-overview details[open]')) return true;
@@ -4439,9 +4523,21 @@ function initRefresh() {
     // A window whose `to` is absolute cannot gain rows, so repolling it is pure waste.
     // `dirty` is the same argument applied to a window that CAN: no captured request means
     // no changed rollup, and the SSE stream already tells us.
-    if (!state.dirty) return;
     if (busyReading()) return; // try again on the next tick; the button is always available
-    if (Date.now() - state.loadedAt < every) return;
+    const age = Date.now() - state.loadedAt;
+    if (age < every) return;
+    // The staleness cap, and it is the honest half of this design.
+    //
+    // `dirty` is an OPTIMISATION, not a source of truth, and it can be missed three ways: the
+    // event hub's ring is capped so a client away long enough loses the gap; /api/events may be
+    // unavailable entirely (an older proxy, a reverse proxy that buffers SSE, a 403 on the
+    // scoped feed); and a request captured between issuing a fetch and clearing the flag is
+    // dropped. In all three the page would sit reading "Updated 3h ago" with no "new data"
+    // hint — which is not silence, it is a positive claim that nothing has changed.
+    //
+    // So past four intervals we refresh regardless. The idle-deployment claim survives intact:
+    // a genuinely idle deployment still does nothing until the cap, and then one query.
+    if (!state.dirty && age < every * 4) return;
     loadOverview();
   }, 5000);
 }

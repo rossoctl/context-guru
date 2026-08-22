@@ -38,13 +38,28 @@ package dash
 // there is no `Task` tool — the subagent spawner is `Agent`, and the task-list tools are
 // TaskCreate/TaskGet/TaskList/TaskOutput/TaskStop/TaskUpdate; and the tool displayed as
 // "Stop Task" is `TaskStop`. A rule written as a display label silently never matches.
+// HOW THIS IS KEPT CURRENT, because a wrong classification here gets pasted: every name is one
+// CLAUDE CODE itself declares, checked against a live session rather than harvested from
+// captured traffic. That distinction is the whole discipline of this list. A dashboard's
+// tool_declarations table also holds the tools of every OTHER agent that has been through the
+// proxy, and a name that merely looks built-in (DesignSync, Workflow, ScheduleWakeup on this
+// deployment) belongs to one of those — filing it here would hide a genuinely removable
+// declaration behind the danger warning and defeat the page.
+//
+// So the list errs toward EXCLUDING an unrecognised name. The cost of a false negative is that
+// one tool appears in the actionable list without a warning; the cost of a false positive is
+// that the page stops finding the savings it exists to find. When a new Claude Code tool
+// appears, add it here — a name absent from this list is reported as `client_tool`, which says
+// "check what declares this" rather than either "safe to remove" or "do not touch".
 var builtinTools = map[string]bool{
-	"Agent": true, "AskUserQuestion": true, "Bash": true, "BashOutput": true,
-	"Edit": true, "ExitPlanMode": true, "Glob": true, "Grep": true, "KillShell": true,
-	"LSP": true, "Monitor": true, "NotebookEdit": true, "PowerShell": true, "Read": true,
-	"Skill": true, "SlashCommand": true, "TaskCreate": true, "TaskGet": true,
-	"TaskList": true, "TaskOutput": true, "TaskStop": true, "TaskUpdate": true,
-	"TodoWrite": true, "WebFetch": true, "WebSearch": true, "Write": true,
+	"Agent": true, "Artifact": true, "AskUserQuestion": true, "Bash": true,
+	"BashOutput": true, "CronCreate": true, "CronDelete": true, "CronList": true,
+	"Edit": true, "EndConversation": true, "EnterWorktree": true, "ExitPlanMode": true,
+	"ExitWorktree": true, "Glob": true, "Grep": true, "KillShell": true, "LSP": true,
+	"Monitor": true, "NotebookEdit": true, "PowerShell": true, "Read": true,
+	"SendMessage": true, "Skill": true, "SlashCommand": true, "TaskCreate": true,
+	"TaskGet": true, "TaskList": true, "TaskOutput": true, "TaskStop": true,
+	"TaskUpdate": true, "TodoWrite": true, "WebFetch": true, "WebSearch": true, "Write": true,
 }
 
 // IsBuiltinTool reports whether a KindTool declaration is one of Claude Code's own.
@@ -133,6 +148,16 @@ func RemovalFor(kind, name, server string) Removal {
 			Note: "Denying a skill with `Skill(" + name + ")` instead would NOT save anything — a " +
 				"scoped rule blocks the call but leaves the entry in the prompt. Deleting " +
 				"`~/.claude/skills/" + name + "/` also works and is permanent.",
+		}
+	case name == "EndConversation":
+		// Documented exception: a deny rule cannot remove this one while any other tool
+		// remains, so the usual "removes it from the prompt" promise would be false.
+		return Removal{
+			Kind:   "builtin",
+			Effect: "Cannot be removed while any other tool remains.",
+			Danger: true,
+			Note: "Claude Code refuses to drop this tool unless it is the last one, so a deny " +
+				"rule for it saves nothing. Its weight is unavoidable.",
 		}
 	case IsBuiltinTool(kind, name):
 		return Removal{
