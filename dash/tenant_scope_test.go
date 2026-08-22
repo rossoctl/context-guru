@@ -67,8 +67,16 @@ func newScopeFixture(t *testing.T, principal func(*http.Request) (Principal, boo
 
 func (f *scopeFixture) get(t *testing.T, path string) (int, string) {
 	t.Helper()
+	// NOT loopback: the CIDR gate must not grant anything.
+	return f.getFrom(t, path, "10.9.9.9:1234")
+}
+
+// getFrom is get from a chosen peer address, for the content gate — whose whole subject is
+// which address asked.
+func (f *scopeFixture) getFrom(t *testing.T, path, remoteAddr string) (int, string) {
+	t.Helper()
 	r := httptest.NewRequest(http.MethodGet, path, nil)
-	r.RemoteAddr = "10.9.9.9:1234" // NOT loopback: the CIDR gate must not grant anything
+	r.RemoteAddr = remoteAddr
 	// The live feed never returns on its own. Cancelling up front still exercises the
 	// gate and the backlog replay, which is the part with a tenant boundary in it.
 	if strings.HasPrefix(path, "/api/events") {

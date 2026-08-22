@@ -181,7 +181,7 @@ The [dashboard](../dashboard.md) is **off by default**. Enabling it adds `/dashb
 | `--dashboard-content` / `DASHBOARD_CONTENT` | `false` | Capture before/after message text for the diff view. It stores arbitrary agent output on disk, scrubbed of known credential shapes and size-capped **before** storage — but content cannot be allowlisted the way headers and config keys are, so the safe default is off. In hosted mode this is only the **operator's** half of the decision: a tenant is registered with its own `capture_content` already **on**, so this flag is what keeps a new account's transcripts off disk. |
 | `--dashboard-content-cap` / `DASHBOARD_CONTENT_CAP` | `16384` | Maximum bytes stored per captured before/after blob. |
 | `--dashboard-queue` / `DASHBOARD_QUEUE` | `4096` | Capture-channel depth. A full channel **drops** events (counted, and shown in the UI) rather than delaying a request. |
-| `--dashboard-trusted-cidrs` / `DASHBOARD_TRUSTED_CIDRS` | — | Comma-separated CIDRs allowed to view per-request **content** and the effective config. Loopback always is; aggregates are open to everyone. |
+| `--dashboard-trusted-cidrs` / `DASHBOARD_TRUSTED_CIDRS` | — | Comma-separated CIDRs allowed to view per-request **content**, prompt text (tool schemas and the system prompt) and the effective config. Loopback always is; aggregates and token weights are open to everyone. |
 | `--dashboard-bench-dirs` / `DASHBOARD_BENCH_DIRS` | — | Comma-separated directories of benchmark runs (each with `summary.json` + `rows-*.json`) to ingest at startup. Re-ingesting replaces a run rather than duplicating it. |
 
 !!! note "Retention is bounded by age AND size"

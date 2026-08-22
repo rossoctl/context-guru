@@ -17,6 +17,13 @@ package dash
 // their own setting when the operator's is the one that is off is the bug captureState
 // exists to prevent.
 //
+// AND the same READ gate, which is a second gate and a separate one: consent decides whether
+// the text is on disk, a.trusted decides who may read it back. Single-tenant, scope() hands
+// Manager to every caller that can reach the port, so the address IS the gate — see the
+// handler. TestNoRouteServesContentTextFromAnUntrustedAddress walks the route table and holds
+// every content route to it, because this is the second content surface to be added on the
+// aggregates' side of that boundary.
+//
 // The fourth state is the one that has nothing to do with consent: a row written before
 // this column existed. Those read "not recorded yet" from an explicit coverage COUNT
 // (PromptStat.Rows / TextRows), never from a fabricated empty string — the same discipline
@@ -80,6 +87,16 @@ func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
+	// Content visibility, the SAME rule a.request applies to a transcript. Single-tenant
+	// keeps the CIDR gate: scope() above hands Manager to anybody who can reach the port,
+	// so without this the whole system prompt and every tool schema are readable by any
+	// caller of a proxy bound to 0.0.0.0. Hosted, ownership is the gate — scope() already
+	// pinned the filter to the caller's tenant, and a manager reads any account's content
+	// through the diff view already.
+	trusted := a.trusted(r)
+	if a.auth != nil {
+		trusted = true
+	}
 	view, err := a.rec.DB().PromptViewFor(f)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "could not read the prompt text")
@@ -91,6 +108,16 @@ func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
 		// written last week has text. Ordering it this way keeps the two answers apart.
 		if captured, blockedBy := a.captureState(f.Tenant); !captured {
 			view.BlockedBy = blockedBy
+		}
+	}
+	// Strip the text AFTER the blame above, so the answer to "why is this empty" stays the
+	// CONSENT state rather than being rewritten by the address. Only the text goes: the
+	// weights, the shares and the coverage count are not content, and withholding them
+	// would take the whole page from an operator whose gate this is — the same trade
+	// a.request makes when it serves a request row without its diff.
+	if !trusted {
+		for i := range view.Regions {
+			view.Regions[i].Text, view.Regions[i].HasText = "", false
 		}
 	}
 	writeJSON(w, view)

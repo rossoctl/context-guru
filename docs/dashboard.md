@@ -718,12 +718,18 @@ start.
 |---|---|
 | Aggregates, series, component and session rollups, request metrics | anyone who can reach the port |
 | Per-request **content** (the diff view) | loopback, or an explicit `--dashboard-trusted-cidrs` entry |
+| **Prompt text** — tool schemas, the skills listing, the system prompt (`/api/prompt`) | loopback, or a trusted CIDR |
 | Effective **configuration** | loopback, or a trusted CIDR |
 
 Aggregates are deliberately open: a proxy bound to `0.0.0.0` should still show its own
 numbers, and the point of this tool is observability. Content is gated because a
-transcript can carry a user's source code. There is **no** "disable observability in
-production" switch — for a tool whose value *is* observability, that would be backwards.
+transcript can carry a user's source code — and so is prompt text, for the same reason: a
+tool schema is whatever an SDK author wrote, and a system prompt is whatever the user, their
+`CLAUDE.md`, or something they pasted wrote. The token **weights** behind that text are
+aggregates and stay open, so the inventory page still works from any address.
+
+There is **no** "disable observability in production" switch — for a tool whose value *is*
+observability, that would be backwards.
 
 ### On a hosted instance
 

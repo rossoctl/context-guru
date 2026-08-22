@@ -341,12 +341,19 @@ server-side.
 |---|---|
 | Aggregates, series, session/component rollups, per-request **metrics** | anyone who can reach the port |
 | Per-request **content** (`/api/requests/{id}` content, the diff view) | loopback, or a `--dashboard-trusted-cidrs` entry |
+| **Prompt text** — each declaration's schema and the system prompt (`/api/prompt` `regions[].text`) | loopback, or a `--dashboard-trusted-cidrs` entry |
 | The **server's** effective configuration (`/api/config`) | loopback, or a trusted CIDR |
 
 Aggregates stay open on purpose: a proxy bound to `0.0.0.0` should still report its own
 numbers. Content is gated because a transcript can carry a user's source code. An
 untrusted caller still gets the metrics row, plus `content_visible: false` so the UI can
-say *why* the panel is empty rather than implying nothing changed.
+say *why* the panel is empty rather than implying nothing changed. `/api/prompt` behaves the
+same way: an untrusted caller keeps every region's token weight, share and the coverage
+count, and loses only `text` / `has_text`.
+
+`TestNoRouteServesContentTextFromAnUntrustedAddress` walks this mounted table and asserts
+the rule for every route, so a new content surface cannot be added on the aggregates' side
+of the line — which is exactly how `/api/prompt` first shipped.
 
 In **hosted** mode the gate is identity rather than address, and it is declared per route
 in the mounted table itself (`dash/api.go`) so a newly added route cannot skip the
