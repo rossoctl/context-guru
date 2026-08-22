@@ -698,6 +698,16 @@ func RunExtractionDetail(ctx context.Context, body, goal string, keepIDs []strin
 			// counted as one; a windowed reduction that names its gaps is accepted above.
 			reasons = append(reasons, name+": truncated at the character cap")
 			continue
+		case cfg.MaxChars == 0 && isLineWindow(cand, body):
+			// The caller withheld the window for this content (see the component's
+			// minWindowRatio), so a contiguous run of the body's lines is refused from ANY
+			// strategy rather than only from the deterministic projection. `head -n` is a
+			// truncation whatever produced it, and a marker makes it honest without making
+			// it an extraction. FOUND LIVE: a grep result came back as its first 37 of 158
+			// lines with an elision note, accepted, on content where every line is a
+			// distinct fact.
+			reasons = append(reasons, name+": a contiguous window is not a reduction of this content")
+			continue
 		}
 		if ok, why := validateExtraction(cand, body, keepIDs, cfg); !ok {
 			reasons = append(reasons, name+": acceptance check: "+why)

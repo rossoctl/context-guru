@@ -137,3 +137,50 @@ func TestMarkedReductionPassesTheDerivationCheck(t *testing.T) {
 }
 
 func tokensOf(s string) int { return len(s) / 4 }
+
+// The window rule must hold for EVERY strategy, not only the deterministic projection: a model
+// that replies with the first N whole lines of its input has truncated it, and an elision marker
+// makes that honest without making it an extraction. The caller withholds the window by setting
+// MaxChars to 0 for content whose class cannot support one.
+func TestAContiguousWindowIsRefusedFromAnyStrategyWhenWithheld(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 160; i++ {
+		fmt.Fprintf(&b, "./components/offload/extract_econ_test.go:%d:func TestSomething%d(t *testing.T) {\n", 100+i, i)
+	}
+	body := b.String()
+	head := strings.Join(strings.Split(body, "\n")[:37], "\n")
+
+	cfg := DefaultCfg()
+	cfg.Mode, cfg.Rewrite, cfg.AllowDeterministic = "code", true, false
+	// With the window allowed, a marked head IS accepted — that is the ls -l case.
+	cfg.MaxChars = 4000
+	if !isLineWindow(markElisions(head, body), body) {
+		t.Fatal("a head of whole lines must be recognised as a contiguous window")
+	}
+	if ok, why := validateExtraction(markElisions(head, body), body, nil, cfg); !ok {
+		t.Fatalf("a marked window must still pass validation when it is allowed: %s", why)
+	}
+
+	// With it withheld, the same result is refused, whatever produced it.
+	cfg.MaxChars = 0
+	out, _, strat, why := RunExtractionDetail(context.Background(), body, "find the tests", nil,
+		tokensOf(body), cfg, fixedModel{prog: `lines = INPUT.split("\n")
+OUTPUT = "\n".join(lines[:37])
+SUMMARY = "first 37 matches"`})
+	if strat != "none" || out != "" {
+		t.Fatalf("a withheld window must be refused from the code leg too: strategy=%q", strat)
+	}
+	if !strings.Contains(why, "contiguous window is not a reduction") {
+		t.Fatalf("want the window refusal, got %q", why)
+	}
+
+	// And a genuine selection with gaps is NOT a window, so it is unaffected.
+	lines := strings.Split(body, "\n")
+	var gapped []string
+	for i := 0; i < 60; i += 3 {
+		gapped = append(gapped, lines[i])
+	}
+	if isLineWindow(strings.Join(gapped, "\n"), body) {
+		t.Fatal("a selection with gaps must not be read as a contiguous window")
+	}
+}

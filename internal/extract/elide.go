@@ -118,6 +118,51 @@ func capTruncated(text, body string, maxChars int) bool {
 	return strings.Contains(body, text)
 }
 
+// isLineWindow reports whether text is a CONTIGUOUS run of body's lines — a window, marked or
+// not — rather than a selection with gaps.
+//
+// It is the general form of capTruncated: `head -n` and `sed -n '40,80p'` are truncations whatever
+// their character count, and adding an elision marker makes such a result honest without making it
+// an extraction. Whether a window is an acceptable reduction depends on the content: for a
+// directory listing it is (the elided rows are more of the same), for a `grep -n` result it is not
+// (every line is a distinct fact). The caller signals which by whether it allows a window at all
+// (Cfg.MaxChars), because the caller is the layer that knows the content class.
+//
+// Marker lines and blanks are ignored, so a result the model annotated is judged on its content.
+func isLineWindow(text, body string) bool {
+	var content []string
+	for _, ln := range strings.Split(text, "\n") {
+		if !isElisionMarker(ln) {
+			content = append(content, ln)
+		}
+	}
+	if len(content) < 2 {
+		return false // one line is not evidence of anything
+	}
+	bl := strings.Split(body, "\n")
+	// Find where the first content line sits, then require every following one to be the very
+	// next body line.
+	for start := 0; start < len(bl); start++ {
+		if bl[start] != content[0] {
+			continue
+		}
+		if start+len(content) > len(bl) {
+			return false
+		}
+		ok := true
+		for i, ln := range content {
+			if bl[start+i] != ln {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 // windowLines cuts a line-aligned window of at most maxChars characters around the first
 // matching term and names what it dropped on either side.
 //
