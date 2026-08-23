@@ -882,10 +882,13 @@ const TILE_INFO = {
     how: 'The shipped default, offered only when your own history can tell its effect apart '
       + 'from zero: at least 20 addressable cache expiries, at least 200 requests, and a 90% '
       + 'interval that excludes no-change.',
-    catch: 'One ping is never suggested \u2014 it reaches about 4.7 minutes, inside the free '
-      + 'lifetime, and it is $71 worse than nothing service-wide. Two and three pings are a '
-      + 'measured tie on our own traffic, so two is chosen for the lower request volume and not '
-      + 'for a dollar reason. Nothing is applied for you.',
+    catch: 'One ping is never suggested. Not because it loses money \u2014 it does not \u2014 '
+      + 'but because it reaches only 9.7 minutes against two pings\u2019 14.3 (K\u00d7280s plus '
+      + 'the 5-minute lifetime the last ping itself refreshes), for a cost that scales with the '
+      + 'pings sent. The K ladder above shows what each rung converts on YOUR OWN gaps; that is '
+      + 'the comparison to make, not a service-wide figure. Two and three pings are a measured '
+      + 'tie on our traffic, so two is chosen for the lower request volume and not for a dollar '
+      + 'reason. Nothing is applied for you.',
   },
   'saved-usd': {
     what: 'What compaction alone avoided, after paying for the model calls context-guru '
@@ -7429,7 +7432,8 @@ Object.assign(loaders, { feedback: loadFeedback });
 // to an entity and never to a rank.
 
 /** kaState holds the tab's loaded payloads, so a control redraw need not refetch. */
-const kaState = { ledger: null, behaviour: null, sessions: [], calc: null, armed: [], x: 280, k: 2,
+const kaState = { ledger: null, behaviour: null, sessions: [], calc: null, armed: [], live: null,
+  x: 280, k: 2,
   // canArm is false on a single-tenant deployment, which mounts no control plane at all — so
   // there is nothing to POST an arm to. Drawing the button anyway would put an affordance on the
   // page whose only possible outcome is a 404, which is the same defect as a removal command
@@ -7456,6 +7460,7 @@ async function loadKeepAlive() {
   }
   // The rest, each from its own request: one slow panel must not blank the others.
   loadKASessions();
+  loadKALive();
   loadKABehaviour();
   loadKACalc();
   loadKAArmed();
@@ -7616,7 +7621,11 @@ function renderKASessions() {
       // 0 here means the last request reported no usage at all, which is an absence rather than
       // a prompt of no size — and it is also the reason such a session cannot be priced.
       el('td', { class: 'num' }, s.last_prefix > 0 ? compact(s.last_prefix) : '—'),
-      el('td', {}, kaState.canArm
+      // Not drawn on another tenant's session. Arming keys on the AUTHENTICATED principal by
+      // design, so an override armed here against a foreign session id lands under the manager's
+      // own key and can never match a request — the route returns a cheerful 200 and nothing is
+      // kept warm. The affordance whose only outcome is a no-op does not belong on the page.
+      el('td', {}, kaState.canArm && mySession(s)
         ? el('button', {
           class: 'ghost small', 'data-testid': 'ka-arm-' + s.session_id,
           onclick: () => armSession(s),
@@ -7627,7 +7636,12 @@ function renderKASessions() {
   // sorted by cost invites exactly the inference the split-half test refutes.
   // The concentration is only a finding when there is something to concentrate: "the top 7 of
   // these hold $81.40 of $81.40" is a tautology, and it is what the first live render said.
-  const all = kaState.sessions.reduce((a, s) => a + s.expiry_usd, 0);
+  // The denominator is the ACCOUNT's addressable total, not the sum of the rows this page
+  // happens to be showing. The table is a page of 20, so summing it made the concentration read
+  // 66% where it is 58% and moved the figure whenever `limit` did — the same defect as the
+  // "$81.40 of $81.40" tautology, one step less degenerate: the numerator was fixed and the
+  // denominator was not. The account's total is already on the page, in "Still on the table".
+  const all = (kaState.ledger || {}).addressable_usd || 0;
   const lead = kaState.sessions.length > 8
     ? `The top 8 of these hold ${usd(kaState.sessions.slice(0, 8).reduce((a, s) => a + s.expiry_usd, 0))}`
       + ` of ${usd(all)}. That concentration is real and it does NOT transfer forward: `
@@ -7669,12 +7683,143 @@ async function armSession(s) {
       ? `at worst ${num(out.worst_case_pings)} pings costing ${usd(out.worst_case_usd)}`
       : `at worst ${num(out.worst_case_pings)} pings — this model is not on the price list, ` +
         'so the cost cannot be stated';
+    // Both guards in force, stated. The per-ping ceiling resolves to the service default on an
+    // account that configured none, and the prefix floor is whatever this override set — which
+    // may be lower than the account's, and 0 means every request on the session is pingable.
+    const guards = `No single ping may cost more than ${usd(out.max_usd_per_ping)}, and ` +
+      (out.min_prefix_tokens > 0
+        ? `only requests with a cached prompt over ${compact(out.min_prefix_tokens)} ` +
+          'tokens are pinged'
+        : 'there is NO prefix floor on this override, so every request on the session is pingable');
     alert(`Armed until ${when(out.until)}.\n\n` +
       `Your credential may be held for up to ${out.hold_minutes.toFixed(0)} minutes at a ` +
       `time ((K+1) × X), and this authorization is ${cost}.\n\n` +
+      guards + '.\n\n' +
       'It is cleared if the service restarts. The arm is recorded in your audit log.');
     loadKAArmed();
   } catch (e) { alert('Not armed: ' + e.message); }
+}
+
+/**
+ * loadKALive fills "Your sessions right now": one row per session whose provider cache entry
+ * has not lapsed yet.
+ *
+ * Its own request, and re-fetched rather than counted down in the browser, because the clock
+ * that matters is the SERVER'S. A countdown driven by the client's own clock reads "2 minutes
+ * left" on an entry that expired ten minutes ago whenever the two disagree, and the whole point
+ * of the panel is the number of seconds left.
+ */
+async function loadKALive() {
+  const body = $('#ka-live-body');
+  loadingRows(body, 11);
+  try {
+    kaState.live = await api('keepalive/live', { x: kaState.x, k: kaState.k });
+  } catch (e) {
+    if (aborted(e)) return;
+    tableMessage(body, 11, 'Could not read your live sessions', e.message, { error: true });
+    return;
+  }
+  renderKALive();
+}
+
+/**
+ * renderKALive draws the live table, the expiry warning above it, and the potential-saving
+ * sentence below it.
+ *
+ * Separate from the fetch for the reason renderKASessions is: the arm column has to be redrawn
+ * once the control plane's absence is known, without buttons that can only 404.
+ */
+function renderKALive() {
+  const live = kaState.live;
+  if (!live) return;
+  const body = clear($('#ka-live-body'));
+  const warn = clear($('#ka-live-warning'));
+  const wide = wideScope();
+  showScopeCol('[data-testid="ka-live-table"]', wide);
+  const rows = live.rows || [];
+  if (!rows.length) {
+    tableMessage(body, 11, 'No session of yours has a live cache entry',
+      'Every session in this window has been idle longer than its own prompt-cache lifetime, so '
+      + 'there is nothing left to keep warm. This is an ABSENCE, not a zero saving.');
+    $('#ka-live-hint').textContent = '';
+    return;
+  }
+  // The expiry warning. Every figure in it is the SERVER's, counted against the server's clock:
+  // the money at risk is the write premium those sessions would pay to re-create what they are
+  // about to lose, and this page does not add up dollars.
+  if (live.soon) {
+    warn.appendChild(el('div', { class: 'banner warn', 'data-testid': 'ka-live-expiring' },
+      el('strong', {}, `${num(live.soon)} of your ${num(rows.length)} live `
+        + `session${rows.length === 1 ? '' : 's'} expire${live.soon === 1 ? 's' : ''} within `
+        + `${Math.round(live.soon_seconds / 60)} minutes.`),
+      ' ',
+      live.soon_usd > 0
+        ? `Between them they would pay ${usd(live.soon_usd)} to re-create what they are about to lose`
+          + (live.soon_unpriced
+            ? `, excluding ${num(live.soon_unpriced)} with no rate on the price list`
+            : '')
+          + '. That is a CEILING on what arming them could save: it is only spent if the session '
+          + 'actually resumes after the entry has gone, and the provider’s cache is keyed on '
+          + 'content, so another session sending the same prefix would refresh it for nothing.'
+        : 'None of them has a rate on the operator’s price list, so what they would pay '
+          + 'cannot be stated — it is unknown, not zero.'));
+  }
+  for (const r of rows) {
+    const left = r.remaining_seconds;
+    const urgent = left <= live.soon_seconds;
+    body.appendChild(el('tr', {},
+      el('td', {}, el('code', { class: 'clip', text: r.session_id })),
+      wide ? el('td', {}, r.tenant_id || '—') : el('td', { hidden: 'hidden' }),
+      el('td', { class: 'num' }, num(r.turns)),
+      el('td', { class: 'num' }, r.prefix_tokens > 0 ? compact(r.prefix_tokens) : '—'),
+      // The tier the provider BILLED, which is the only honest source for what is in force.
+      el('td', {}, r.ttl_seconds >= 3600 ? '1 hour' : '5 minutes'),
+      el('td', { class: 'num ' + (urgent ? 'bad-text' : '') }, dur(left * 1000)),
+      el('td', { class: 'num' }, r.priced ? usd(r.ping_usd_each) : '—'),
+      el('td', { class: 'num' }, r.priced ? usd(r.miss_usd) : '—'),
+      // The number the whole panel exists to state: how many pings one lapse pays for.
+      el('td', { class: 'num' }, r.priced
+        ? el('span', { title: `${num(r.breakeven_pings)} pings at ${kaState.x}s bridge `
+            + `${r.breakeven_minutes.toFixed(0)} minutes of idle. With a 1-hour entry one lapse `
+            + `would pay for ${num(r.breakeven_1h_pings)}, bridging `
+            + `${r.breakeven_1h_minutes.toFixed(0)} minutes.` },
+          `${num(r.breakeven_pings)} · ${r.breakeven_minutes.toFixed(0)}m`)
+        : '—'),
+      el('td', { class: 'num' }, r.saved_usd || r.ping_usd
+        ? usd(r.saved_usd - r.ping_usd)
+        : '—'),
+      el('td', {}, kaState.canArm && mySession(r)
+        ? el('button', {
+          class: 'ghost small', 'data-testid': 'ka-live-arm-' + r.session_id,
+          onclick: () => armSession(r),
+        }, 'Keep warm')
+        : null)));
+  }
+  // Realised against potential, both from figures already on this page, and the difference
+  // between them named for what it is.
+  const led = kaState.ledger || {};
+  $('#ka-live-hint').textContent =
+    `Realised so far in this window: ${usd(led.saved_usd || 0)} of re-creations avoided against `
+    + `${usd(led.ping_usd || 0)} of pings, a net of ${usd(led.net_usd || 0)}. `
+    + `Still open: these ${num(rows.length)} sessions hold ${usd(live.potential_usd)} of write `
+    + 'premium that '
+    + 'a lapse would charge. Those two figures are not the same KIND of number — the first is '
+    + 'measured on requests that happened, the second is a ceiling on requests that may not, and '
+    + 'it is only earned by a session that resumes AFTER its entry would have gone. PINGS PER '
+    + 'LAPSE is the one to decide on: below it, arming is cheaper than the lapse it prevents.';
+}
+
+/**
+ * mySession answers "can the signed-in principal actually arm this row?".
+ *
+ * An override is stored under the ARMING principal's own tenant, which is the isolation the
+ * design wants and TestOverrideForAnotherTenantsSessionIdAddressesNothing proves. The
+ * consequence is that arming somebody else's session silently does nothing, so a manager's
+ * service-wide view must not offer it. On a single-tenant page every row is the caller's own.
+ */
+function mySession(r) {
+  const mine = (account.tenant || {}).id;
+  return !mine || !r.tenant_id || r.tenant_id === mine;
 }
 
 /** loadKAArmed lists what is armed RIGHT NOW — the live policy, not a stored intention. */
@@ -7692,6 +7837,7 @@ async function loadKAArmed() {
       $('#view-keepalive').querySelectorAll('[data-ka-arm-panel]').forEach((n) => { n.hidden = true; });
       host.hidden = true;
       if (kaState.sessions.length) renderKASessions();
+      renderKALive();
       return;
     }
     errorState(host, 'Could not read what is armed', e);
@@ -7856,6 +8002,7 @@ function renderKACalcControls() {
       kaState.k = Math.max(1, Math.min(4, parseInt(k.value, 10) || 2));
       loadKACalc();
       loadKABehaviour(); // the coverage rule on the gap bands moves with the policy
+      loadKALive();      // and so do the live panel's own reach figures
     } }, 'Recalculate');
   host.appendChild(el('div', { class: 'field-row' },
     el('label', { for: 'ka-x' }, 'Idle seconds (X)'), x,
@@ -7899,7 +8046,11 @@ async function loadKACalc() {
     el('thead', {}, el('tr', {},
       el('th', {}, 'Max pings (K)'), el('th', {}, 'Cache stays alive'),
       el('th', { class: 'num' }, 'Your expiries inside it'),
-      el('th', { class: 'num' }, 'Their cost'), el('th', { class: 'num' }, 'Share of what is reachable'),
+      el('th', { class: 'num' }, 'Their cost'),
+      // The value is convertible_usd / addressable_usd — a share of the DOLLARS, not of the
+      // expiry count, and the old label ("share of what is reachable") named neither.
+      el('th', { class: 'num', title: 'Their cost as a share of every addressable expiry’s cost '
+        + 'in this window' }, 'Share of those dollars'),
       el('th', { class: 'num' }, 'Pings'), el('th', { class: 'num' }, 'Ping cost'),
       el('th', { class: 'num' }, 'Net'))));
   const tb = el('tbody');
@@ -7937,6 +8088,12 @@ async function loadKACalc() {
     title: `${r.convertible_misses} of ${c.addressable_misses} expiries reachable`,
   })), {});
   host.appendChild(el('p', { class: 'hint' },
+    'PINGS is every ping the shipped policy would have sent over this window — gated as the ' +
+    'request path gates (past the session’s first request, cached prompt over 20k tokens) and ' +
+    'INCLUDING the pings a session’s last request attracts, because a live policy cannot know a ' +
+    'session has ended and sends its full K anyway. Counting only the gaps between two requests ' +
+    'under-counted by 6.4× on this service’s own traffic, which is enough to flip the sign of ' +
+    'NET. ' +
     'A replay of your own past gaps, not a forecast — and it counts only expiries that were ' +
     'addressable (the provider wrote a prefix that a ping could have refreshed). Reach grows ' +
     'sharply from one ping to two and then flattens while ping cost keeps climbing, which is ' +
@@ -7970,7 +8127,7 @@ async function loadKARecommend() {
     host.appendChild(el('div', { class: 'banner ' + (wouldCost ? 'bad' : 'warn'),
       'data-testid': 'ka-refused' },
       el('div', {}, el('strong', {},
-        wouldCost ? 'This would not pay for itself on your traffic. ' : 'Not enough history to recommend. '),
+        wouldCost ? 'This would not pay for itself on your traffic: ' : 'Not enough history to recommend: '),
       rec.refused, '.'),
       el('div', { class: 'small' },
         `For scale: measured over 357 cache expiries across this whole service, the 90% `
@@ -8013,9 +8170,11 @@ async function loadKARecommend() {
     },
   }, 'Use these values in Settings')));
   host.appendChild(el('p', { class: 'hint' },
-    'Nothing is ever applied for you. One ping is never suggested: it reaches about 4.7 ' +
-    'minutes, which is inside the free five-minute lifetime, and on this service it is $71 ' +
-    'worse than not running at all.'));
+    'Nothing is ever applied for you. One ping is never suggested because it reaches 9.7 ' +
+    'minutes where two reach 14.3 \u2014 K\u00d7280s plus the five-minute lifetime the last ' +
+    'ping itself refreshes, which is the K ladder\u2019s own COVERAGE column. One ping is not ' +
+    'a loss; it is a smaller win. Compare the rungs on your own gaps above rather than taking ' +
+    'a number from us.'));
 }
 
 /**

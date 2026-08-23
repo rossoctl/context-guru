@@ -544,6 +544,31 @@
     <p class="hint" id="ka-sessions-note"></p>
   </div>
 
+  <div class="panel" id="ka-live-panel">
+    <h2>Your sessions right now</h2>
+    <p class="note" data-testid="ka-live-note">Every session of yours whose prompt cache has not
+      lapsed yet: the lifetime <em>in force on it</em>, what is left of that lifetime, and what one
+      ping and one lapse would each cost on that session&rsquo;s own prefix. The lifetime is read
+      off the tier the provider BILLED, not off configuration &mdash; a <code>ttl: "1h"</code>
+      request on a model that does not support it comes back a normal 200 with a five-minute
+      entry. It runs from each request&rsquo;s START, so a response that streamed for four minutes
+      has already spent four minutes of its own entry&rsquo;s life.</p>
+    <div id="ka-live-warning" data-testid="ka-live-warning"></div>
+    <div class="scroll-x">
+      <table class="tbl" data-testid="ka-live-table">
+        <thead><tr>
+          <th>SESSION</th><th data-ka-live-scope hidden>TENANT</th>
+          <th class="num">TURNS</th><th class="num">PREFIX</th>
+          <th>TTL IN FORCE</th><th class="num">LEFT</th>
+          <th class="num">ONE PING</th><th class="num">ONE LAPSE</th>
+          <th class="num">PINGS PER LAPSE</th><th class="num">REALISED</th><th></th>
+        </tr></thead>
+        <tbody id="ka-live-body"></tbody>
+      </table>
+    </div>
+    <p class="hint" id="ka-live-hint"></p>
+  </div>
+
   <div class="panel">
     <h2>Your TTL expiries</h2>
     <p class="note">A cached prefix has a five-minute lifetime, and a session idle longer

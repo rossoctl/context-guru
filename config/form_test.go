@@ -684,12 +684,30 @@ func TestTheColdCacheKeysSurviveASaveThatDoesNotMentionThem(t *testing.T) {
 	// detached map and thrown away, which is how a first-time keep-alive opt-in was lost.
 	// Nothing else may move, and no tuning field may appear — writing zeroes for those would
 	// freeze today's defaults into the document (R3).
-	for _, path := range changedPaths(t, osherDoc, out) {
-		switch path {
-		case "cache.keepalive", "cache.head_ttl_1h":
-		default:
+	// EXACTLY those two paths, and both re-parse to FALSE. `changedPaths` compares names, not
+	// values, so a switch that merely permits the two names to move accepts three wrong documents:
+	// one where neither moved (Bug 1 still present, no cache block written), one where a third
+	// path moved as well, and one where a save flipped a consent boolean ON. The first and the
+	// third both passed the permissive form.
+	moved := changedPaths(t, osherDoc, out)
+	want := map[string]bool{"cache.keepalive": true, "cache.head_ttl_1h": true}
+	for _, path := range moved {
+		if !want[path] {
 			t.Errorf("re-saving an unchanged form moved %s", path)
 		}
+		delete(want, path)
+	}
+	for path := range want {
+		t.Errorf("a re-save did not materialise %s. That is Bug 1: the two consent booleans are "+
+			"written explicitly so an absent block stops being indistinguishable from a stored "+
+			"false, and without them a first-time keep-alive opt-in is silently lost", path)
+	}
+	// And they are written as FALSE. A save that turns somebody's keep-alive ON is the one
+	// direction this document may never move by itself.
+	back := mustParse(t, out)
+	if back.Cache.KeepAlive || back.Cache.HeadTTL1h {
+		t.Errorf("a plain re-save switched a consent boolean ON: keepalive=%v head_ttl_1h=%v",
+			back.Cache.KeepAlive, back.Cache.HeadTTL1h)
 	}
 }
 
