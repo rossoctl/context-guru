@@ -126,8 +126,6 @@ func (sp *sseSplicer) round(resp *http.Response) {
 // the round's whole event stream — forwarded and withheld together — because the
 // continuation loop reconstructs the assistant turn from all of it. withheld is the
 // deciding event and everything after it: the caller either answers it or hands it back.
-// An empty expandTool withholds nothing (the round cap: there is no continuation left to
-// run, so the events go to the client as they are).
 func (sp *sseSplicer) pass(body io.Reader, expandTool string) (whole, withheld []byte, found bool) {
 	br := bufio.NewReader(body)
 	var buf bytes.Buffer
@@ -252,9 +250,6 @@ func sseEventPayload(ev []byte) string {
 // startsExpandCall reports whether this event OPENS a call to the expand tool — the one
 // block a client must never receive, because only this proxy implements the tool.
 func startsExpandCall(ev []byte, expandTool string) bool {
-	if expandTool == "" {
-		return false
-	}
 	p := gjson.Parse(sseEventPayload(ev))
 	if p.Get("type").String() != "content_block_start" {
 		return false

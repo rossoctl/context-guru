@@ -1363,12 +1363,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			}
 			return
 		}
-		// Past the round cap there is no continuation left to run, so nothing is withheld:
-		// the round goes to the client whole.
-		stopAt := expand.ToolName
-		if round >= maxExpandRounds {
-			stopAt = ""
-		}
 		var respBody []byte
 		switch {
 		case isSSE && provider == bschemas.Anthropic:
@@ -1380,7 +1374,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			}
 			sp.round(resp)
 			var found bool
-			respBody, withheld, found = sp.pass(resp.Body, stopAt)
+			respBody, withheld, found = sp.pass(resp.Body, expand.ToolName)
 			resp.Body.Close()
 			switch {
 			case found && sp.blocks == 0:
@@ -1445,6 +1439,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			sp.handBack(withheld)
 		}
 		if round >= maxExpandRounds {
+			// The cap is reached, so this call cannot be answered — the client gets it, and
+			// bail is what counts that. Withholding first and handing back is the same bytes
+			// as streaming the round whole, and it is the only way the leak is visible.
 			bail()
 			return
 		}

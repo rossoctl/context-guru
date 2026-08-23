@@ -54,10 +54,6 @@ func TestStartsExpandCall(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}
-	// The round cap passes an empty tool name to withhold nothing.
-	if startsExpandCall([]byte(pkExpand()), "") {
-		t.Error("an empty tool name must withhold nothing")
-	}
 }
 
 // pass must never eat or duplicate input: what it forwarded plus what it withheld has to

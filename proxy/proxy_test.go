@@ -805,6 +805,11 @@ func TestExpandSSEMultiRoundCapped(t *testing.T) {
 	if snap.SSEBufferedPct != 100 {
 		t.Fatalf("buffered_pct must be a share of requests (want 100), got %v", snap.SSEBufferedPct)
 	}
+	// And the cap hands the client the model's own expand call, which is the one thing that
+	// must never be silent: it is the same leak as any other round the loop cannot answer.
+	if snap.SSEExpandAfterStream != 1 {
+		t.Fatalf("the round cap gives the client our own tool_use and must count it: %+v", snap)
+	}
 }
 
 // TestExpandSSEAggregateFailureReplaysRaw covers the fail-open path INSIDE
