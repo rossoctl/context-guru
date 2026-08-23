@@ -1047,7 +1047,14 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// marker that caused the call. Same gate as expand.Inject below: we repair exactly
 			// when we are rewriting this request at all.
 			if tn.Mode != components.ModeObserve && !bypassed {
-				body = h.repairExpandErrors(provider, body, tn, cp)
+				var repaired int
+				body, repaired = h.repairExpandErrors(provider, body, tn, cp)
+				if repaired > 0 {
+					// A rewrite of the client's own transcript must never be silent: this is
+					// the only line that says the response side failed to withhold the call
+					// and the request side caught it.
+					lg.Debug("cg.expand_repair", "restored", repaired)
+				}
 			}
 			var added time.Duration
 			body, added, tr = h.applyMode(&reqInfo{
@@ -1177,7 +1184,7 @@ const maxRequestBytes = 32 << 20 // 32 MiB
 // really are in this request, and on every later turn that re-sends the same transcript —
 // but NOT on the process-wide bounce counter, which counts expand CALLS, and repairing the
 // same stale error on ten later turns is one call, not ten.
-func (h *Handler) repairExpandErrors(provider bschemas.ModelProvider, body []byte, tn *Tenancy, cp *capture) []byte {
+func (h *Handler) repairExpandErrors(provider bschemas.ModelProvider, body []byte, tn *Tenancy, cp *capture) ([]byte, int) {
 	out, restored := expand.RepairToolResults(string(provider), body, func(hashID string) (string, bool) {
 		return expand.Resolve(tn.Store, hashID)
 	})
@@ -1185,7 +1192,7 @@ func (h *Handler) repairExpandErrors(provider bschemas.ModelProvider, body []byt
 		offload.MarkKeptVerbatim(tn.Store, orig)
 		cp.noteExpand(schema.TextTokens(orig))
 	}
-	return out
+	return out, len(restored)
 }
 
 var errNoUpstream = errors.New("no upstream configured")

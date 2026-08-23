@@ -608,36 +608,24 @@ func TestMarkerFreeSSEStreamsThrough(t *testing.T) {
 	// buffering proxy cannot return anything here at all — it deadlocks until the
 	// upstream's own 5s escape hatch fires, and then delivers head+tail in one go,
 	// which is what the "last" assertion below detects.
-	buf := make([]byte, 4096)
-	n, rerr := resp.Body.Read(buf)
-	first := string(buf[:n])
+	// The expand tool is advertised on every tools-bearing request (expand.InjectAuto is
+	// session-stable, so the tools array never changes shape mid-session), which means EVERY
+	// Anthropic stream is inspected. This assertion was weakened once, to "the peek ended at
+	// the first content_block_start", because a peek had to hold the deciding event before it
+	// could decide. Splicing decides per event, so the original and stronger claim is back:
+	// the model's first delta reaches the client while the upstream is still generating.
+	ch := sseChunks(resp.Body)
+	first, ok := collectUntil(ch, "first", 2*time.Second)
 	close(release)
-	if n == 0 {
-		t.Fatalf("first read returned no bytes: %v", rerr)
-	}
-	// The peek's boundary, asserted explicitly rather than assumed: the expand tool is now
-	// advertised on every tools-bearing request (expand.InjectAuto is session-stable, so the
-	// tools array never changes shape mid-session), which means EVERY Anthropic stream is
-	// peeked. What must still hold is that the peek ENDS at the first content_block_start and
-	// the remainder streams — not that the very first delta arrives in the first read, which
-	// is what this asserted while marker-free requests skipped the peek entirely.
-	if !strings.Contains(first, "content_block_start") {
-		t.Fatalf("first read did not reach the peek boundary, got %q", first)
+	if !ok {
+		t.Fatalf("marker-free SSE response was BUFFERED: the client received nothing until "+
+			"the upstream had finished (issue #26), got %q", first)
 	}
 	if strings.Contains(first, "last") {
-		t.Fatal("marker-free SSE response was BUFFERED: the client received the whole " +
-			"stream at once, after the upstream had finished (issue #26 — hasMarkers " +
-			"matched the expand tool description we inject ourselves)")
+		t.Fatal("the client received the upstream's tail before it was written")
 	}
-	rest, _ := io.ReadAll(resp.Body)
-	// Nothing may be DROPPED at the peek boundary: the first delta is behind it now, so it
-	// has to arrive in the remainder. A peek that swallowed it would still pass every
-	// assertion above.
-	whole := first + string(rest)
-	if !strings.Contains(whole, "first") {
-		t.Fatalf("the first delta was lost across the peek boundary, whole=%q", whole)
-	}
-	if !strings.Contains(string(rest), "last") {
+	rest := drain(ch)
+	if !strings.Contains(rest, "last") {
 		t.Fatalf("stream did not complete, tail=%q", rest)
 	}
 
