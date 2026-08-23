@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -268,5 +269,116 @@ func TestTheClientsNoSuchToolErrorNeverReachesTheModel(t *testing.T) {
 	// And the client's own tool result is untouched — it is not ours to rewrite.
 	if !strings.Contains(string(lastUpstream), "file1 file2") {
 		t.Fatalf("the client's own tool result was lost:\n%s", lastUpstream)
+	}
+}
+
+// Once the prefix is on the wire, EVERY way this request can end has to end with a complete
+// turn. A continuation round whose upstream call fails used to be a 502 — which was fine
+// while the response was buffered and nothing had been written, and is garbage appended to
+// the model's turn now that the prefix has already streamed.
+func TestAFailedContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
+	// atomic, unlike the counters in the tests above: the second round's connection is closed
+	// without a response, so there is no happens-before edge between the handler's write and
+	// the assertion's read.
+	var calls atomic.Int64
+	head, tail := leadThenExpand("text")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		if calls.Add(1) > 1 {
+			// Kill the connection without a response: doUpstream returns an error.
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			conn.Close()
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(head + tail))
+	}))
+	defer upstream.Close()
+
+	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+		strings.NewReader(string(anthropicSSEBody(t, "look at <<cg:HASH>> and finish"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("expected the continuation to be attempted, got %d upstream calls", n)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the stream was already open with its own status, got %d", resp.StatusCode)
+	}
+	if strings.Contains(string(out), "upstream request failed") {
+		t.Fatalf("a 502 body was appended to an open event stream:\n%s", out)
+	}
+	// The model's own call comes back, as on every other path the loop cannot finish, and the
+	// turn terminates.
+	for _, want := range []string{"LEADING", `"type":"message_stop"`} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("the client's turn is incomplete, missing %q:\n%s", want, out)
+		}
+	}
+	var snap metrics.Snapshot
+	stx, _ := http.Get(srv.URL + "/stats")
+	json.NewDecoder(stx.Body).Decode(&snap)
+	stx.Body.Close()
+	if snap.SSEExpandAfterStream != 1 {
+		t.Fatalf("handing the client our own tool_use must be counted here too: %+v", snap)
+	}
+}
+
+// A continuation round that answers with JSON instead of an event stream — the request said
+// stream: true, so this is an upstream anomaly — cannot be spliced into the open stream. The
+// client's turn must still terminate: it gets the events the splice withheld, which is a
+// complete message, rather than a stream cut off mid-block.
+func TestAJSONContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
+	var calls int
+	head, tail := leadThenExpand("text")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		calls++
+		if calls > 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"type":"message","role":"assistant","content":[{"type":"text","text":"ANSWERED"}]}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(head + tail))
+	}))
+	defer upstream.Close()
+
+	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+		strings.NewReader(string(anthropicSSEBody(t, "look at <<cg:HASH>> and finish"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if calls != 2 {
+		t.Fatalf("expected the continuation round, got %d upstream calls", calls)
+	}
+	if strings.Contains(string(out), `{"type":"message","role":"assistant"`) {
+		t.Fatalf("a JSON body was appended to an open event stream:\n%s", out)
+	}
+	for _, want := range []string{"LEADING", `"type":"message_stop"`} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("the client's turn is incomplete, missing %q:\n%s", want, out)
+		}
 	}
 }

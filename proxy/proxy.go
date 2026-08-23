@@ -1255,6 +1255,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// sp is nil until an Anthropic event stream needs splicing, and then lives for the rest
 	// of the client request: every later round is written into the response it opened.
 	var sp *sseSplicer
+	// The events the current round withheld, hoisted out of the loop: once a stream is open,
+	// EVERY way this request can end has to end it with a complete turn, and these are the
+	// bytes that do it.
+	var withheld []byte
 	defer func() {
 		// Hand the finished request to the keep-alive. Last, so `body` is the bytes that
 		// actually went upstream on the final round (an expand round rewrites it) and the
@@ -1305,6 +1309,18 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// And count it: this path does not go through failAuth, so without this the
 			// only 502s on the dashboard would be our own misconfiguration.
 			recordRefusal(refuseUpstream, tn.ID)
+			if sp != nil {
+				// The client is MID-STREAM. A 502 written into an open event stream is not
+				// a status any client can read — it arrives as garbage appended to the
+				// model's turn — so end the turn with the events the splice withheld
+				// instead. The client sees the model's own call, which is the same fail-open
+				// as every other round the loop cannot finish.
+				if withheld != nil && h.agg != nil {
+					h.agg.RecordSSEExpandAfterStream()
+				}
+				sp.handBack(withheld)
+				return
+			}
 			// The client gets a fixed string, NOT err.Error(). http.Client returns a
 			// *url.Error, which stringifies as `Post "<the full upstream URL>": ...` —
 			// so echoing it hands every caller the operator's upstream address, and if
@@ -1353,7 +1369,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		if round >= maxExpandRounds {
 			stopAt = ""
 		}
-		var respBody, withheld []byte
+		var respBody []byte
 		switch {
 		case isSSE && provider == bschemas.Anthropic:
 			// Forward the events as they arrive and stop at the expand call, rather than
@@ -1399,6 +1415,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		default:
 			respBody, _ = io.ReadAll(resp.Body)
 			resp.Body.Close()
+			// A JSON round after a stream was opened is an upstream anomaly (the request
+			// said stream: true), and there is no way to splice a JSON body into an event
+			// stream. withheld deliberately still holds the previous round's events, so
+			// bail below ends the client's turn with a complete stream rather than cutting
+			// it off mid-message.
 		}
 		if u, ok := responseUsage(resp.Header.Get("Content-Type"), respBody); ok {
 			usage, usageOK = u, true
