@@ -26,6 +26,12 @@ var statsGoldenTopLevel = []string{
 	"cache_write_tokens",
 	"cg_added_ms_avg",
 	"compaction_resets",
+	// Unresolved expand calls, split by cause. expand_unresolved_missing is a well-formed marker with
+	// nothing stashed behind it, i.e. a cut advertised as reversible that is not; malformed is the
+	// model inventing an id. Added because the refusal of expand calls was previously invisible here
+	// and had to be found by grepping a benchmark client's transcripts.
+	"expand_unresolved_malformed",
+	"expand_unresolved_missing",
 	"components",
 	"extract",
 	"fresh_input_tokens",

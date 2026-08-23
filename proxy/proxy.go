@@ -169,6 +169,10 @@ type Handler struct {
 	agg    *metrics.Aggregator
 	opts   Options
 	client *http.Client
+	// expandSeen records which sessions have been offered the expand tool, so a call arriving on a
+	// later turn that does not advertise it is still intercepted rather than relayed to a client
+	// that has no such tool. See expandoffered.go.
+	expandSeen *expandOfferedSet
 	// tracker owns the per-session cached-prefix boundary. Always present: every mode
 	// benefits from reading and recording it in one locked step (the previous
 	// read-then-deferred-write raced between concurrent turns of a session).
@@ -218,7 +222,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 		c = &http.Client{Timeout: 5 * time.Minute}
 	}
 	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
-		tracker: modes.NewTracker(0), rec: opts.Dashboard}
+		tracker: modes.NewTracker(0), rec: opts.Dashboard, expandSeen: &expandOfferedSet{}}
 	if h.mode() == components.ModeObserve {
 		h.pool = modes.NewPool(opts.Observe.MaxQueue, opts.Observe.Workers)
 		h.shadow = store.NewMemory(store.Options{})
@@ -752,7 +756,25 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	//
 	// Since injection now requires markers (expand.Inject, InjectAuto), this keeps the
 	// documented fast path: no offload yet → no tool → no buffering, zero added latency.
+	// ADVERTISED vs INTERCEPTED, and why these are no longer the same condition.
+	//
+	// They were deliberately unified: never declare a tool whose use you will not handle. But the
+	// unification assumed the model only calls tools listed on the CURRENT request, and it does not.
+	// A model that saw the tool on turn N calls it on turn N+1, and under InjectAuto turn N+1 often
+	// carries no marker, so the tool is not advertised, nothing intercepts, and the raw tool_use is
+	// relayed to a client that has no such tool. Measured on LOCA: `Tool 'context_guru_expand' not
+	// found` on 17 of 38 attempts in one arm and 48 of 108 in another, after which the model gave up
+	// on recovery and re-ran the original tool instead.
+	//
+	// So interception now also covers any session that has EVER been offered the tool. The fast path
+	// survives for sessions that never were: no offload, no advertisement, no inspection, no
+	// buffering. Once a session has seen it, inspecting that session's responses is exactly the cost
+	// of being able to answer a call it was invited to make.
 	advertised := expand.HasTool(string(provider), body)
+	if advertised && sess != "" {
+		h.noteExpandOffered(sess)
+	}
+	mayCall := advertised || (sess != "" && h.expandOffered(sess))
 	// SSE accounting is PER CLIENT REQUEST, not per upstream round: one client request
 	// that drives several expand rounds waited for all of them, so timing a single
 	// round would report a healthy TTFB for a client that waited three round-trips.
@@ -776,6 +798,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 	}()
+	zeroResolved := 0 // rounds where no id resolved; capped so placeholders cannot loop
 	for round := 0; ; round++ {
 		upStart := time.Now()
 		resp, err := h.doUpstream(r, up, body)
@@ -813,7 +836,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// hit the round cap. Nothing else can produce a call to it, so this is both the
 		// necessary and the sufficient condition — and for SSE it is what decides whether we
 		// pay the buffering cost.
-		checkExpand := advertised && round < maxExpandRounds
+		// Whether to inspect this response for an expand call.
+		//
+		// mayCall covers "this request advertised the tool, or an earlier turn of this session did".
+		// But a model may call the tool on a turn where neither holds -- it remembers the tool from
+		// its own history -- and relaying that call to a client that does not implement it is the
+		// worst outcome available (measured: 48 of 108 attempts refused, after which the model
+		// abandons recovery and re-runs the original tool).
+		//
+		// So for a NON-STREAMING response, always inspect. The cost is nil: a JSON body is read in
+		// full either way, so there is nothing to buffer and no latency to add. The advertise/session
+		// gate is kept only for SSE, where inspecting means buffering the whole stream and the client
+		// genuinely loses its incremental output -- which is the cost expand/inject.go weighed, and it
+		// applies to streaming alone.
+		checkExpand := (mayCall || !isSSE) && round < maxExpandRounds
 		if !checkExpand {
 			// sseBuffered is sticky: if an earlier round was buffered the client already
 			// lost its stream, so this request counts as buffered however it ends.
@@ -879,11 +915,33 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			}
 		}
 		next, ok := expand.Continuation(string(provider), body, msg, resolved)
-		if got == 0 || !ok {
-			writeRaw(w, resp, respBody) // nothing recovered; return the model's own call
+		if !ok {
+			// The continuation could not be BUILT — an internal failure, not a miss. Replaying is
+			// the honest fail-open: we cannot construct a valid next request.
+			writeRaw(w, resp, respBody)
 			return
 		}
-		body = next // loop: re-invoke with the originals in hand
+		if got == 0 {
+			// NOTHING RESOLVED. This used to replay the model's own tool_use to the client, which is
+			// the worst available option: a client that does not implement this tool answers "Tool
+			// 'context_guru_expand' not found", the model loses its recovery path, and it re-runs the
+			// original tool instead — paying a full tool execution plus fresh output, and enlarging
+			// the very transcript that provoked the cut.
+			//
+			// Answer the model ourselves instead. `resolved` already carries an explicit placeholder
+			// per call id (see above), so the continuation is well formed and tells the model the
+			// content is gone — information it can act on, unlike a missing tool.
+			//
+			// Capped at ONE such round. A model that asks again gets the same placeholders, so
+			// continuing indefinitely would burn a round-trip per attempt for no new information;
+			// after one, fall through and replay.
+			if zeroResolved > 0 {
+				writeRaw(w, resp, respBody)
+				return
+			}
+			zeroResolved++
+		}
+		body = next // loop: re-invoke with the originals (or the placeholders) in hand
 	}
 }
 
@@ -1035,6 +1093,12 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// indistinguishable from a run that had little to compact — the arm reads as fast
 	// because it silently stopped working. llm_call_timeout_ms travels with the counts
 	// because a timeout total is meaningless without the budget it was measured against.
+	// Unresolved expand calls, split by cause. `expand_unresolved_missing` is the one that matters:
+	// a well-formed marker with nothing stashed behind it is a cut that was advertised as reversible
+	// and is not. It was invisible before, which is how three iterations ran while the model was
+	// being refused recovery — the failure was only found by grepping the benchmark client's own
+	// transcripts. See expand/unresolved.go.
+	snap.ExpandUnresolvedMalformed, snap.ExpandUnresolvedMissing = expand.Unresolved()
 	snap.LLMTimeouts = offload.LLMTimeouts()
 	snap.LLMErrors = offload.LLMErrors()
 	snap.LLMCallTimeoutMs = offload.LLMCallTimeout().Milliseconds()

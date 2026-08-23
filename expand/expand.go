@@ -108,6 +108,10 @@ func ParseMarkers(s string) []string {
 func Resolve(s store.Store, key string) (string, bool) {
 	b, ok := s.Get(key)
 	if !ok {
+		// Classify the miss. A well-formed id with nothing behind it means a marker was issued and
+		// its original is gone -- a cut advertised as reversible that is not. That is the number
+		// worth alerting on, and it was previously invisible; see unresolved.go.
+		noteUnresolved(WellFormedID(key))
 		return "", false
 	}
 	return string(b), true

@@ -614,6 +614,16 @@ type Snapshot struct {
 	// off a cliff mid-session is the regression it exists to expose. Filled by the host at
 	// serve time (the counter lives in `modes`, which metrics cannot import).
 	CompactionResets int64 `json:"compaction_resets"`
+	// Expand calls the proxy could not satisfy, split by cause. ExpandUnresolvedMissing is the
+	// alerting number: a well-formed marker with nothing stashed behind it is a cut that was
+	// advertised as reversible and is not, so every count is a case where reversibility silently
+	// failed. Malformed ids are the model's own invention and need no action. Neither existed
+	// before, which is how three experiment iterations ran while the model was calling the expand
+	// tool and being refused — the refusal was found by grepping the benchmark client's transcripts,
+	// not from any counter here. Filled by the host at serve time (the counters live in `expand`,
+	// which metrics cannot import).
+	ExpandUnresolvedMalformed int64 `json:"expand_unresolved_malformed"`
+	ExpandUnresolvedMissing   int64 `json:"expand_unresolved_missing"`
 	// cmdfilter attribution: which command FAMILIES pay off (builds/tests/iac/pkg/net),
 	// which individual filters fire, and which output shapes matched no filter (the
 	// backlog of filters worth writing). Additive fields — nothing above is renamed.
