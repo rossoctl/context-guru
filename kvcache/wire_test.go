@@ -52,7 +52,7 @@ var wireKeys = map[string][]string{
 	"Savings": {"strategy", "baseline", "baseline_usd", "strategy_usd", "absolute_usd",
 		"percent_usd", "percent_known", "hit_delta", "latency_avoided_ms", "latency_known"},
 	"Group": {"key", "requests", "total_usd", "hits", "misses", "hit_rate_pct", "pings",
-		"ping_usd", "writes_5m", "writes_1h", "unpriced"},
+		"ping_usd", "writes_5m", "writes_1h", "unpriced", "valued"},
 	"Latency":      {"per_miss_ms", "hit_n", "miss_n", "hit_mean_ms", "miss_mean_ms", "known"},
 	"Coverage":     {"recorded", "assumed"},
 	"Pricing":      {"model", "input", "output", "cache_read", "write_5m", "write_1h", "ping_input_tokens", "ping_output_tokens", "source", "known"},

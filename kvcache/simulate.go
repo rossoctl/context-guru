@@ -134,6 +134,12 @@ type Group struct {
 	Writes5m int64   `json:"writes_5m"`
 	Writes1h int64   `json:"writes_1h"`
 	Unpriced int64   `json:"unpriced"`
+	// Valued is whether ANY request in this group could be priced, exactly as Result.Valued is
+	// for the whole replay — and it is here because omitting it forced the consumer to spell the
+	// predicate a second time as `unpriced < requests` on every per-user and per-model row. Two
+	// spellings of one predicate is how they come to disagree the day one of them gains a caveat,
+	// which is the argument for Result.Valued and applies unchanged one level down.
+	Valued bool `json:"valued"`
 }
 
 // Latency is the window's own measured cost of a cache miss, in milliseconds, and the two
@@ -730,6 +736,7 @@ func finishGroups(m map[string]*groupAcc) []Group {
 		if d := g.Hits + g.Misses; d > 0 {
 			g.HitRate = 100 * float64(g.Hits) / float64(d)
 		}
+		g.Valued = g.Requests > 0 && g.Unpriced < g.Requests
 		out = append(out, g)
 	}
 	sort.Slice(out, func(i, j int) bool {

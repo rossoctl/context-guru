@@ -680,6 +680,12 @@ class Group:
         d = self.hits + self.misses
         return 100.0 * self.hits / d if d else 0.0
 
+    @property
+    def valued(self) -> bool:
+        """As Cost.valued, one level down. Here so a consumer never has to spell the predicate
+        a second time as `unpriced < requests` on every per-user and per-model row."""
+        return self.requests > 0 and self.unpriced < self.requests
+
 
 @dataclass
 class Cost:
@@ -762,9 +768,11 @@ class Cost:
         out["cache_premium_usd"] = self.cache_premium_usd
         out["hit_rate_pct"] = self.hit_rate_pct
         out["miss_rate_pct"] = self.miss_rate_pct
-        out["by_user"] = {k: g.__dict__ | {"hit_rate_pct": g.hit_rate_pct}
+        out["by_user"] = {k: g.__dict__ | {"hit_rate_pct": g.hit_rate_pct,
+                                           "valued": g.valued}
                           for k, g in self.by_user.items()}
-        out["by_model"] = {k: g.__dict__ | {"hit_rate_pct": g.hit_rate_pct}
+        out["by_model"] = {k: g.__dict__ | {"hit_rate_pct": g.hit_rate_pct,
+                                           "valued": g.valued}
                            for k, g in self.by_model.items()}
         return out
 
