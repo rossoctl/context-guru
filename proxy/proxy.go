@@ -1123,6 +1123,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// and is not. It was invisible before, which is how three iterations ran while the model was
 	// being refused recovery — the failure was only found by grepping the benchmark client's own
 	// transcripts. See expand/unresolved.go.
+	snap.ExpandRestored = expand.Restored()
 	snap.ExpandUnresolvedMalformed, snap.ExpandUnresolvedMissing = expand.Unresolved()
 	snap.LLMTimeouts = offload.LLMTimeouts()
 	snap.LLMErrors = offload.LLMErrors()

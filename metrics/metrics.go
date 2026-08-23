@@ -622,6 +622,13 @@ type Snapshot struct {
 	// tool and being refused — the refusal was found by grepping the benchmark client's transcripts,
 	// not from any counter here. Filled by the host at serve time (the counters live in `expand`,
 	// which metrics cannot import).
+	// ExpandRestored counts client tool_results rewritten back to their stashed original on the
+	// REQUEST path. This is the counter that says the recovery loop is working: the client cannot
+	// execute a proxy-injected tool, so it always refuses, and its refusal is only harmless because
+	// this substitution happens before the request goes upstream. Without it there is no way to tell
+	// a working restore from a silent no-op -- which is exactly the gap that let the refusals run
+	// unnoticed for three iterations.
+	ExpandRestored int64 `json:"expand_restored"`
 	ExpandUnresolvedMalformed int64 `json:"expand_unresolved_malformed"`
 	ExpandUnresolvedMissing   int64 `json:"expand_unresolved_missing"`
 	// cmdfilter attribution: which command FAMILIES pay off (builds/tests/iac/pkg/net),

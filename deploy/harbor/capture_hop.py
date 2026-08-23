@@ -113,6 +113,13 @@ class Handler(BaseHTTPRequestHandler):
                         "n_tools": len(tools),
                         "has_expand": any("expand" in (n or "") for n in names),
                         "has_marker": "<<cg:" in body_s,
+                        # THE signal for whether recovery works. The client cannot execute a
+                        # proxy-injected tool, so it ALWAYS refuses -- counting refusals in the
+                        # client's own log therefore measures nothing. What matters is whether the
+                        # refusal text is still in the request the MODEL receives. If the request-path
+                        # restore is working this is False even though the client refused.
+                        "refusal_reached_model": "context_guru_expand' not found" in body_s
+                        or "context_guru_expand\\' not found" in body_s,
                         "bytes": len(raw),
                         "status": status,
                     }) + "\n")

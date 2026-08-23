@@ -30,6 +30,10 @@ var statsGoldenTopLevel = []string{
 	// nothing stashed behind it, i.e. a cut advertised as reversible that is not; malformed is the
 	// model inventing an id. Added because the refusal of expand calls was previously invisible here
 	// and had to be found by grepping a benchmark client's transcripts.
+	// expand_restored is the counter that distinguishes a working recovery loop from a silent
+	// no-op; the client always refuses a proxy-injected tool, so only this says the substitution
+	// happened before the request went upstream.
+	"expand_restored",
 	"expand_unresolved_malformed",
 	"expand_unresolved_missing",
 	"components",
