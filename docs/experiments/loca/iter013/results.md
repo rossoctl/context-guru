@@ -120,7 +120,9 @@ With server-side clearing inert everywhere, the size difference cannot be a rese
 | merged (keeps 94% of candidates) | 39.2 | 2.8 | **9.9%** | **0** |
 | separate (4 components, most removal) | 47.0 | 8.2 | **25.3%** | **0** |
 
-**The repeat rate is dose-dependent in removal**, and `expand` was called **zero times in 225 runs**.
+**The repeat rate is dose-dependent in removal.** ~~And `expand` was called zero times in 225 runs.~~
+**That was wrong — it was grepped for `cg_expand`, and the tool is named `context_guru_expand`.** The
+model calls it constantly and is REFUSED; see the section below.
 
 The loop: CG removes content and leaves a `<<cg:HASH>>` marker plus an `expand` tool. The agent does
 not expand — it **re-issues the same tool call with the same arguments**. That returns *fresh* output,
@@ -143,10 +145,8 @@ The measured outcome is none of these. **The model notices, does not expand, and
 That is *worse than (1)* — a full tool execution plus fresh output rather than a cached round-trip — and
 unlike (3) it **compounds**, because each repeat enlarges the transcript that provoked it.
 
-It also undercuts the reversibility argument that justifies lossy compaction here. The stash makes a cut
-*recoverable*, and `expand` makes recovery *possible*, but across 225 runs and three pipelines the agent
-never once chose it. Reversibility that is never exercised is not a mitigation; on this evidence the
-marker functions as a signal to redo the work.
+It also undercuts the reversibility argument that justifies lossy compaction here — though for a
+different reason than first recorded. Recovery is not declined; it is **broken**. See below.
 
 ### Caveats
 
@@ -158,3 +158,54 @@ marker functions as a signal to redo the work.
   needs per-marker correlation, which the current capture does not record.
 - `INJECT_EXPAND=auto` was set in every CG arm, so the tool was present and advertised. Whether a
   different prompt or a more legible residue would get it used is untested.
+
+## WHY the agent re-runs tools: expand is CALLED and REFUSED
+
+An earlier draft of this document claimed `expand` was never called. That was a grep error — it searched
+for `cg_expand`, and the injected tool is named **`context_guru_expand`**. Corrected:
+
+| arm | `context_guru_expand` mentions | **`Tool '…' not found` rejections** |
+|---|---|---|
+| `[format]` lossless baseline | 0 | 0 |
+| separate components | 38 | **17** |
+| merged | **108** | **48** |
+
+**The model reaches for recovery constantly and roughly half those calls are refused outright.** The
+refusal text is the client's: `"content": "Tool 'context_guru_expand' not found"`.
+
+### The mechanism, and it is architectural rather than a prompt problem
+
+1. `expand.Inject` in `InjectAuto` advertises the tool **only when the outgoing request carries a
+   marker**, and `serve` ties interception to the same test — `advertised := expand.HasTool(provider,
+   body)` on the OUTGOING body. One condition, deliberately, so a tool is never advertised without
+   being intercepted *on that request*.
+2. **The client's history never carries the markers.** LOCA stores its own original content and resends
+   it every turn — confirmed: **0 of 75** trajectories contain `<<cg:`. CG rewrites in flight only.
+3. So marker presence, and therefore tool advertisement, is **unstable turn to turn**. The model sees
+   the tool on turn N and calls it on turn N+1, which may carry no marker — so the tool is not
+   advertised, `HasTool` is false, and **nothing intercepts**.
+4. The raw `tool_use` is relayed to the client, which has no such tool, and answers "not found".
+5. With recovery refused, the model does the only other thing available: **re-runs the original tool**.
+
+The proxy logs contain **no expand lines at all** across either arm, consistent with zero interceptions.
+The freeze counters corroborate the underlying cause — **frozen_misses 773,201 against 1,249 hits** in
+the separate arm — CG is repeatedly re-deriving rewrites for content that keeps arriving fresh.
+
+### Why this matters beyond the rig
+
+The single-condition design is correct *for a client that persists what the proxy sent*. It assumes the
+marker survives in the conversation the client replays, so the tool stays advertised as long as the
+marker is live. **A client that keeps its own originals breaks that assumption**, and the failure is
+silent and expensive: the model is offered a recovery path, takes it, is told the tool does not exist,
+and falls back to re-executing work.
+
+Any agent framework that maintains its own message history — which is most of them — has this shape.
+`docs/proposals/coref-compaction.md`'s reversibility argument depends on recovery being *available*;
+here it is advertised and then withdrawn mid-conversation, which is worse than never offering it.
+
+**Open, and the right next question:** whether interception should key on the *session* having live
+stashes rather than the current request carrying a marker. That would keep the tool resolvable for as
+long as anything is recoverable, at the cost of advertising it on marker-free requests — which
+`expand/inject.go` documents as its own hazard (a call that resolves nothing, replayed to the client,
+reads as an empty summary). Both failure modes trace to the same root: **the proxy cannot see whether
+the client kept its rewrites.**
