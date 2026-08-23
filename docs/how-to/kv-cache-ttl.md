@@ -12,7 +12,7 @@ what the whole thing measured on this service's own traffic. The short version:
   more than `fixed-5m`), and that is banked.
 - **The entire remaining TTL headroom is 8.74%**, and reaching it requires knowing the future.
 - **A blind keep-alive takes 2.91% of it** with no model at all.
-- **93% of the headroom is 92 decisions out of 5,722.** This is a rare-event problem, which
+- **93% of the headroom is 285 decisions out of 14,407.** This is a rare-event problem, which
   is a very different thing from a prediction problem, and it is the finding that should
   shape any further work.
 
@@ -311,8 +311,10 @@ unconditional.
 
 ### The learned arms took nothing
 
-On the held-out half, the threshold-ladder arm scored **−0.01%** and a cost-based rule over
-the same model scored **+0.00%** — and not because the model is bad. It halves the Brier score
+On the **held-out half** — 5,722 requests, where the ceiling is 7.50% rather than the whole
+set's 8.74%, because the two are different populations and their percentages are not
+interchangeable — the threshold-ladder arm scored **−0.01%** and a cost-based rule over the
+same model scored **+0.00%**. Not because the model is bad. It halves the Brier score
 of the base rate:
 
 | horizon | actual | predicted | Brier | Brier of the base rate |
@@ -328,18 +330,31 @@ trusting a threshold on it.
 
 ### Where the headroom actually is
 
-Replaying `optimal`'s own choices one kind at a time, against `fixed-5m` on the held-out half:
+Replaying `optimal`'s own choices one kind at a time — **on the whole set**, so these compose
+with the 8.74% above rather than with the held-out figures in the section before it:
 
-| the optimum's choices, in isolation | saving |
+| the optimum's choices, in isolation | saving vs `fixed-5m` |
 |---|---:|
-| only its 70 one-hour writes | **+5.04%** ($93.61) |
-| only its 22 keep-alive pings | +1.72% ($31.89) |
-| only its 1,246 expiries | +0.69% ($12.85) |
+| only the **218 requests** it wrote at the 1-hour tier | **+6.37%** ($289.18) |
+| only the **67 requests** it held with keep-alives | +1.77% ($80.39) |
+| only the **2,862 requests** it declined to cache | +0.47% ($21.39) |
 
-**93% of the reachable headroom is 92 decisions out of 5,722.** That is what to build for: not
-a model that is well calibrated on average, but one that is precise on the tail and weighted
-by prefix size. A model scored on average calibration will look good and buy nothing — which
-is exactly what the two learned arms above did.
+Those are counts of REQUESTS the optimum decided about, which is not the same as the columns
+in the table above: 92 there is keep-alives that actually *fired* (67 requests can attract more
+than one), and 230 is cache-creation *events* at the hourly tier, which a keep-alive can cause
+as well as a write. Two similar-looking numbers counting different things is worth one sentence
+rather than a reader's afternoon.
+
+Those three sum to **8.61%** against a combined **8.74%**, and the 0.13-point residual is not
+rounding: the choices interact. An hour-long hold on one turn changes whether the next turn
+hits, so replaying one kind of choice in isolation is not the same as its share of the total.
+The three rows are therefore *contributions*, not a partition, and they are quoted here because
+the ORDERING is the finding — not because they add up.
+
+**93% of the reachable headroom is 285 decisions out of 14,407 — 2.0% of requests.** That is
+what to build for: not a model that is well calibrated on average, but one that is precise on
+the tail and weighted by prefix size. A model scored on average calibration will look good and
+buy nothing — which is exactly what the two learned arms above did.
 
 ## The honest downside
 

@@ -121,7 +121,7 @@ HOW TO USE IT
     predictor.fit(train_events)                    # .train() is the same call
     proba = predictor.predict_proba(test_events)   # (n_rows, n_buckets + 1)
     predictor.save("kvttl.joblib")
-    predictor = KVTTLTimePredictor.load("kvttl.joblib")
+    predictor = KVTTLTimePredictor.load("kvttl.joblib")   # pickle: see the SECURITY note on load()
 
 `fit` and `train` are the same method. `predict_proba` and `inference` are the same
 method. `predict_distribution` returns the same numbers in long form for a human, and
@@ -655,14 +655,35 @@ class KVTTLTimePredictor(BaseEstimator):
         )
 
     def save(self, path: str | Path) -> None:
-        """Serialize the fitted predictor with joblib."""
+        """Serialize the fitted predictor with joblib.
+
+        The file is a PICKLE. Treat it as executable, not as data: it goes wherever the code
+        that produced it may go, and no further. See :meth:`load`.
+        """
 
         check_is_fitted(self, "pipeline_")
         joblib.dump(self, Path(path))
 
     @classmethod
     def load(cls, path: str | Path) -> "KVTTLTimePredictor":
-        """Load a predictor previously written by :meth:`save`."""
+        """Load a predictor previously written by :meth:`save`.
+
+        SECURITY: joblib is pickle, and unpickling executes arbitrary code. Loading a file
+        someone else produced is equivalent to running their program with your privileges —
+        a model pulled from an artefact store, a bucket, a CI cache or a colleague's laptop
+        is an execution boundary, not an input.
+
+        The isinstance check below is NOT a defence and must not be read as one. Pickle runs
+        the payload during deserialization, so by the time there is an object to type-check,
+        anything the file wanted to do has already happened. It catches an honest mistake —
+        the wrong file — and nothing adversarial.
+
+        Load only files this process wrote, or files whose integrity you verify out of band
+        before opening (a digest you obtained separately, not one shipped beside the file).
+        Where a model must cross a trust boundary, do not send a pickle: refit from the
+        training frame, or serialize the fitted coefficients and the preprocessor's
+        parameters as JSON and rebuild the estimator from those.
+        """
 
         predictor = joblib.load(Path(path))
         if not isinstance(predictor, cls):
