@@ -53,7 +53,7 @@ const round2Answer = "event: message_start\ndata: {\"type\":\"message_start\",\"
 //	OUT <tool_use_error>Error: No such tool available: context_guru_expand</tool_use_error>
 //
 // A tool_use naming OUR tool reached the client, which implements no such tool. It got
-// there because the peek decided on the FIRST content_block_start and streamed everything
+// there because the bounded peek decided on the FIRST content_block_start and streamed everything
 // that did not open with the expand call — and a tool_use is almost never the first block.
 //
 // The client must never see that block: it is ours to answer.
@@ -557,5 +557,83 @@ func TestASplicedRoundThatCallsExpandAgainStaysWellFormed(t *testing.T) {
 	}
 	if strings.Contains(string(out), "context_guru_expand") {
 		t.Fatalf("client got our tool_use:\n%s", out)
+	}
+}
+
+// The residual gap: terminate can only forward closers that EXIST in the withheld bytes, and
+// when the withheld round was itself truncated there are none. The turn genuinely failed, so
+// the client gets an `error` event — not a synthetic message_stop, which would report a broken
+// turn as one that finished normally. Every spliced exit has to do this, not just one.
+func TestATruncatedRoundStillGivesTheClientAnEnd(t *testing.T) {
+	// Round 1: a leading block, the expand call, and then nothing — no message_delta, no
+	// message_stop. Whatever the continuation does, there are no closers to fall back on.
+	r1 := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"LEADING\"}}\n\n" +
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"context_guru_expand\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"id\\\":\\\"HASH\\\"}\"}}\n\n"
+	// A second expand call batched with a client tool sends the loop down the bail exit
+	// instead, with the same truncated round behind it.
+	r1Batched := r1 +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_2\",\"name\":\"Bash\"}}\n\n"
+	for _, tc := range []struct {
+		name         string
+		round1       string
+		round2       string
+		hijackRound2 bool
+	}{
+		{"continuation exit: both rounds truncated", r1, "", false},
+		{"bail exit: batched client tool, round truncated", r1Batched, "", false},
+		{"upstream-error exit: the continuation call fails", r1, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int64
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				if calls.Add(1) == 1 {
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.Write([]byte(tc.round1))
+					return
+				}
+				if tc.hijackRound2 {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err == nil {
+						conn.Close()
+					}
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Write([]byte(tc.round2))
+			}))
+			defer upstream.Close()
+
+			h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+			st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
+			srv := httptest.NewServer(h.Mux())
+			defer srv.Close()
+
+			resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+				strings.NewReader(string(anthropicSSEBody(t, "look at <<cg:HASH>> and finish"))))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			if !strings.Contains(string(out), `"type":"error"`) {
+				t.Fatalf("no terminator existed anywhere, so the client must be told the turn "+
+					"failed rather than left mid-message:\n%q", out)
+			}
+			if strings.Contains(string(out), `"type":"message_stop"`) {
+				t.Fatalf("a turn that never finished must not be reported as finished:\n%q", out)
+			}
+			if !strings.Contains(string(out), "LEADING") {
+				t.Fatalf("the streamed prefix must survive:\n%q", out)
+			}
+			if n := strings.Count(string(out), `"type":"error"`); n != 1 {
+				t.Fatalf("the end must be announced once, got %d:\n%q", n, out)
+			}
+		})
 	}
 }

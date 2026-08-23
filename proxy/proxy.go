@@ -1231,9 +1231,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// to be byte-stable across a session or every change to it costs the whole cached prefix.
 	// So for a tools-bearing client this is true from the FIRST turn, and the old "no offload
 	// yet → no tool → no buffering" fast path is gone with it. What replaced it is narrower
-	// and does the same job: peekSSE withholds only a response that OPENS with an expand
-	// call, so a normal answer still streams after a bounded peek rather than being buffered
-	// whole (see ssepeek.go). Non-Anthropic dialects are not peeked at all.
+	// and does the same job: sseSplicer withholds only the block that calls the expand tool
+	// and streams everything else as it arrives (see ssepeek.go). Non-Anthropic dialects are
+	// not inspected at all.
 	advertised := expand.HasTool(string(provider), body)
 	// SSE accounting is PER CLIENT REQUEST, not per upstream round: one client request
 	// that drives several expand rounds waited for all of them, so timing a single
@@ -1327,6 +1327,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 					h.agg.RecordSSEExpandAfterStream()
 				}
 				sp.handBack(withheld)
+				sp.terminate(withheld)
 				return
 			}
 			// The client gets a fixed string, NOT err.Error(). http.Client returns a
@@ -1457,6 +1458,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				h.agg.RecordSSEExpandAfterStream()
 			}
 			sp.handBack(withheld)
+			// Idempotent via sp.ended: if those events closed the turn this is a no-op, and
+			// if the round was truncated it is the only thing that closes it.
+			sp.terminate(withheld)
 		}
 		if round >= maxExpandRounds {
 			// The cap is reached, so this call cannot be answered — the client gets it, and

@@ -30,7 +30,8 @@ import (
 // two independent re-measurements say so. With no proxy in the path, 22 of 22 responses came
 // back as text/event-stream with ttfb/wall 0.47-0.78 (p50 0.58-0.68). Timestamping every
 // event of 39 more turns on two models (aws/claude-sonnet-5 n=36, aws/claude-opus-4-7 n=3):
-// the first event lands at 40-55% of wall and the deltas stream across the rest. Individual
+// the first event lands at a MEDIAN of 0.49 of wall, range 0.23-0.81, and the deltas stream
+// across the rest. Individual
 // turns do read 1.000 when generation finishes fast enough to arrive in one burst, which is
 // the likeliest thing the original 6 turns caught.
 //
@@ -52,11 +53,13 @@ import (
 // measured and rejected. Both arms are derivable from one response's event timeline, so the
 // comparison is paired by construction with no proxy restart inside the arm: forwarding from
 // the first event against forwarding from the first tool_use block. Over 36 sonnet turns,
-// deciding at the first tool_use withholds 98.4% +/- 2.1% of the streaming span on
-// tool-calling turns (sem 0.6), 99.1% +/- 1.7% with thinking on, and 100% on a turn with no
-// tool_use at all, where the decision point becomes message_stop; +3.2 s to +4.5 s of client
-// wait per response (sem 0.19-0.28, so ~12-16 sigma). It would pay that on nearly every
-// response to intercept the ~1.3% that call expand.
+// deciding at the first tool_use withholds 98.3% +/- 2.1% of the streaming span on
+// tool-calling turns, 99.0% +/- 1.6% with thinking on, and 100% on a turn with no tool_use at
+// all, where the decision point becomes message_stop; +3.2 s to +4.5 s of client wait per
+// response. Note that peek-further >= this is an identity of the construction, so the sign is
+// not evidence; the magnitudes and the prose-only case are. It would pay that on nearly every
+// response to intercept the ~1.3% that call expand. Rows in
+// docs/results/expand-splice-2026-08.
 //
 // So decide per BLOCK instead of per response, which is the upgrade path this file used to
 // name: forward events as they arrive, stop at the content_block_start that calls the expand
@@ -145,9 +148,16 @@ func (sp *sseSplicer) round(resp *http.Response) {
 // when the upstream does. Measured against the gateway this deployment fronts, which accepts
 // max_tokens up to 128,000 (200,000 is refused with "the maximum allowed number of output
 // tokens"), and an event stream runs ~35 bytes per output
-// token — ~4 bytes of text plus ~105 bytes of framing per delta of ~3.5 tokens — so a
-// full-length response is ~4.5 MB. A stream that emitted ONE token per delta would pay the
-// framing per token instead, ~109 bytes, and reach ~14 MB; 16 MiB covers that.
+// token — ~4 bytes of text plus ~123 bytes of framing per delta of ~4 tokens — so a
+// full-length response is ~4.5 MB, which is 3.4x under the bound. A stream that emitted ONE
+// token per delta would pay that framing per TOKEN instead, ~127 bytes, and reach ~16.3 MB:
+// a margin of about 3%, not headroom.
+//
+// That margin is deliberately not treated as a cliff, because overshoot is graceful by
+// construction. Past the bound the round is forwarded whole, the call is counted, and the
+// repair answers it next request — which is precisely the behaviour of every release before
+// the splice existed. A bound that occasionally gives up on the largest imaginable stream
+// costs one interception; no bound at all costs the process.
 //
 // Past it the round is forwarded whole and nothing is intercepted, so the feature degrades
 // rather than breaking: the client gets the model's own expand call, it is counted, and
@@ -356,6 +366,18 @@ func (sp *sseSplicer) terminate(withheld []byte) {
 			}
 		}
 		if err != nil {
+			if !sp.ended {
+				// The withheld round had no closer either — it was truncated too, so there
+				// are no closing events anywhere to forward. The turn DID fail, and an
+				// `error` event is how this protocol says so: the client gets a diagnosable
+				// end instead of a socket that stops mid-message. Not a synthetic
+				// message_stop — no stop_reason in the enum means "truncated", and end_turn
+				// would tell the client a broken turn finished normally.
+				sp.forward([]byte("event: error\ndata: {\"type\":\"error\",\"error\":" +
+					"{\"type\":\"api_error\",\"message\":\"upstream ended the turn " +
+					"without a terminator\"}}\n\n"))
+				sp.ended = true
+			}
 			return
 		}
 	}

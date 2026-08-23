@@ -394,7 +394,7 @@ func TestExpandSSELoop(t *testing.T) {
 	}
 	// The counters have to say what happened: round 1 opened with the expand call, so it
 	// was buffered, and sse_buffered is sticky for the whole client request even though
-	// round 2 streamed. If this ever reads streamed=1/buffered=0 the peek has started
+	// round 2 streamed. If this ever reads streamed=1/buffered=0 the splice has started
 	// letting real expand calls through, which is the failure this whole path guards.
 	var snap metrics.Snapshot
 	stresp, _ := http.Get(srv.URL + "/stats")
@@ -610,9 +610,9 @@ func TestMarkerFreeSSEStreamsThrough(t *testing.T) {
 	// which is what the "last" assertion below detects.
 	// The expand tool is advertised on every tools-bearing request (expand.InjectAuto is
 	// session-stable, so the tools array never changes shape mid-session), which means EVERY
-	// Anthropic stream is inspected. This assertion was weakened once, to "the peek ended at
-	// the first content_block_start", because a peek had to hold the deciding event before it
-	// could decide. Splicing decides per event, so the original and stronger claim is back:
+	// Anthropic stream is inspected. This assertion was weakened once, to "forwarding ended at
+	// the first content_block_start", because a bounded peek had to hold the deciding event
+	// before it could decide. Splicing decides per event, so the original claim is back:
 	// the model's first delta reaches the client while the upstream is still generating.
 	ch := sseChunks(resp.Body)
 	first, ok := collectUntil(ch, "first", 2*time.Second)
@@ -646,9 +646,9 @@ func TestMarkerFreeSSEStreamsThrough(t *testing.T) {
 // 33.4% of responses buffered, sse_ttfb_ms_avg_buffered 28,998 ms against 7,918 ms
 // streamed, ~21 seconds of extra time to first byte.
 //
-// A response that OPENS with a text block cannot be intercepted from its first block, so
-// the bounded peek flushes and streams. The upstream here blocks before its tail, so a
-// buffering proxy cannot answer at all — the "last" assertion is what tells the two apart.
+// A response that opens with a text block streams as it arrives; only the block that calls the
+// expand tool is withheld. The upstream here blocks before its tail, so a buffering proxy
+// cannot answer at all — the "last" assertion is what tells the two apart.
 func TestMarkerBearingSSEStreamsWhenItOpensWithText(t *testing.T) {
 	release := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

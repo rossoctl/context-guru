@@ -656,8 +656,9 @@ type Snapshot struct {
 	// requests", not as a latency to compare against sse_ttfb_ms_avg.
 	SSETTFBMsAvgBuf float64 `json:"sse_ttfb_ms_avg_buffered"`
 	SSEBufferedPct  float64 `json:"sse_buffered_pct"`
-	// SSEExpandAfterStream counts streamed responses that named the expand tool anyway —
-	// the bounded peek's cost. See Aggregator.RecordSSEExpandAfterStream.
+	// SSEExpandAfterStream counts responses whose expand call reached the CLIENT anyway —
+	// batched with a client tool, past the round cap, past the retain bound, or in a dialect
+	// that cannot be reconstructed. See Aggregator.RecordSSEExpandAfterStream.
 	SSEExpandAfterStream int64 `json:"sse_expand_after_stream"`
 	// Freeze-replay health — the cache-WRITE cost line. A frozen decision replayed
 	// (frozen_hits) keeps an already-cached message byte-identical. A decision the store

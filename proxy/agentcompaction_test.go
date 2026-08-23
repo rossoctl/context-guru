@@ -200,7 +200,7 @@ func TestAgentCompactionBypassIsCounted(t *testing.T) {
 // hashes to its own prefix and shares no entry with the turns around it.
 //
 // TestMarkerFreeSSEStreamsThrough is the other half of the pair: advertising on every turn
-// means every Anthropic stream is peeked, and it pins that the peek still streams.
+// means every Anthropic stream is inspected, and it pins that inspection still streams.
 func TestExpandToolAdvertisedOnEveryTurnButNeverOnACompaction(t *testing.T) {
 	marked := map[string]any{"role": "user", "content": "earlier output <<cg:HASH>>"}
 	for _, tc := range []struct {
