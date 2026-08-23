@@ -368,3 +368,56 @@ func TestTheLivePanelSaysWhatItsNumbersAre(t *testing.T) {
 			"button would return 200 and keep nothing warm")
 	}
 }
+
+// Every table with a manager-only scope column marks it with the attribute showScopeCol actually
+// reads, and every table that calls showScopeCol has one.
+//
+// NOT keep-alive-specific — it lives here because it is the same kind of whole-bundle static check
+// as TestNoUIScriptShadowsAWindowMethod, and because no test covered the scope column for ANY
+// table. The live panel shipped its header as `data-ka-live-scope` while showScopeCol queries
+// `thead th[data-scope-col]`, so the attribute was read by nothing: the TENANT header stayed
+// permanently hidden while the row renderer still emitted a visible TENANT cell whenever
+// wideScope() was true — the DEFAULT view for a manager. Eleven cells under ten visible headers,
+// and every column after the hidden one shifted left: ONE LAPSE showed the ping price, PINGS PER
+// LAPSE showed a dollar, REALISED showed the breakeven. Two dollar figures reading as each other,
+// on the one panel whose whole thesis is not mislabelling dollars.
+//
+// The attribute name is EXTRACTED from showScopeCol rather than written down here, so renaming it
+// in app.js cannot leave this check asserting a stale spelling.
+func TestEveryScopeColumnUsesTheAttributeShowScopeColReads(t *testing.T) {
+	app, html := readUI(t, "ui/app.js"), readUI(t, "ui/index.html")
+	m := regexp.MustCompile(`thead th\[([a-z-]+)\]`).FindStringSubmatch(app)
+	if m == nil {
+		t.Fatal("showScopeCol's selector no longer looks like `thead th[attr]`; this check needs " +
+			"rewriting against whatever replaced it")
+	}
+	attr := m[1]
+
+	// Every table told to toggle a scope column must actually have one, under that attribute.
+	calls := regexp.MustCompile(`showScopeCol\('\[data-testid=["']?([a-z-]+)["']?\]'`).FindAllStringSubmatch(app, -1)
+	if len(calls) == 0 {
+		t.Fatal("no showScopeCol call sites found; this check needs rewriting")
+	}
+	for _, c := range calls {
+		i := strings.Index(html, c[1])
+		if i < 0 {
+			t.Errorf("showScopeCol is called for table %q, which is not in index.html", c[1])
+			continue
+		}
+		end := strings.Index(html[i:], "</thead>")
+		if end < 0 || !strings.Contains(html[i:i+end], attr) {
+			t.Errorf("table %q calls showScopeCol but no <th> in its thead carries %q, so the "+
+				"column can never be revealed — while the row renderer still emits the cell. "+
+				"Every body row would then have one more cell than there are visible headers, and "+
+				"every column after it reads as its neighbour.", c[1], attr)
+		}
+	}
+	// And no header may mark itself with a DIFFERENT scope-ish attribute: that is the defect
+	// itself, and it is invisible because a `hidden` <th> that is never un-hidden looks deliberate.
+	for _, bad := range regexp.MustCompile(`data-[a-z-]*scope[a-z-]*`).FindAllString(html, -1) {
+		if bad != attr {
+			t.Errorf("index.html marks a scope column %q, but showScopeCol only reads %q, so that "+
+				"header stays hidden forever. Use %q.", bad, attr, attr)
+		}
+	}
+}

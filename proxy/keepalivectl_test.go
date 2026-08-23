@@ -161,6 +161,30 @@ func TestArmingIgnoresAPostedPerPingBudget(t *testing.T) {
 	if got, has := out["max_usd_per_ping"].(float64); has && got == 99 {
 		t.Error("a posted per-ping budget of $99 was accepted; the guard is the account's own")
 	}
+	// The reported ceiling is the ENFORCED one, and this is the assertion that was missing.
+	//
+	// "not 99" passes on a raw 0, which is exactly the defect: an account that configured no
+	// ceiling stores 0, the request path resolves that to the default through
+	// CachePolicy.Ceiling(), and reporting the raw 0 told the operator the ceiling was $0.00 while
+	// the default was enforced. REVIEW-96 called that "worse than omitting it", the fix went in,
+	// and nothing held it there — reverting armedView to `tn.Cache.MaxUSDPerPing` left the whole
+	// package green. The number on the wire has to be a number somebody could act on.
+	got, has := out["max_usd_per_ping"].(float64)
+	if !has {
+		t.Fatal("the arm response states no per-ping ceiling at all; it is the guard the caller " +
+			"is authorizing spend against")
+	}
+	if got <= 0 {
+		t.Errorf("max_usd_per_ping = %v on an account that configured none. 0 is the document's "+
+			"\"unconfigured\" sentinel, not a ceiling: the request path resolves it to $%v and "+
+			"enforces that, so reporting 0 states a limit of nothing while infinity looks plausible "+
+			"to whoever reads it.", got, DefaultMaxUSDPerPing)
+	}
+	if got != DefaultMaxUSDPerPing {
+		t.Errorf("max_usd_per_ping = %v, want the enforced default %v — the report and the guard "+
+			"must come from the same resolver (CachePolicy.Ceiling()) or they will drift again",
+			got, DefaultMaxUSDPerPing)
+	}
 }
 
 // Every arm and every disarm leaves a DURABLE audit row with the resolved parameters. That row is

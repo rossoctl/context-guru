@@ -944,20 +944,23 @@ func (k *keeper) record1(j pingJob, u Usage, status int, ms float64) float64 {
 //
 // max_tokens is 1 rather than 0, and the reason is now MEASURED rather than assumed.
 //
-// `max_tokens: 0` is the provider's own documented cache pre-warm shape and it works on this
-// gateway: probed live against aws/claude-sonnet-5, it returned 200 with
-// `cache_read_input_tokens: 5851`, `cache_creation_input_tokens: 0` and `output_tokens: 0` —
-// a full cache read for no output at all. So the cheaper shape exists and is real.
+// `max_tokens: 0` is the provider's documented cache pre-warm shape, and on THIS gateway it is
+// MODEL-DEPENDENT, which is the whole reason 1 wins:
 //
-// It stays at 1 anyway, on the balance of the two measured quantities. The saving is ONE output
-// token, $0.000015 on sonnet against the $0.0018 the read itself costs on the same prefix — under
-// a percent of a ping. Against that, the docs list four bodies `max_tokens: 0` is REJECTED for:
-// `stream: true`, extended thinking, structured outputs, and `tool_choice` of type `tool` or
-// `any`. This ping forces `stream: false` and refuses thinking-enabled sessions, but it resends
-// the caller's body verbatim and does not touch `tool_choice` — because touching it would change
-// the hashed prefix and the ping would miss the entry it exists to refresh. An agent that sets
-// `tool_choice: {"type": "any"}` would therefore get a 400 on every ping, and the failure mode of
-// this request is that a cache entry lapses. A tenth of a percent is not worth that branch.
+//   - aws/claude-sonnet-5: 200, `cache_read_input_tokens: 5851`, `cache_creation_input_tokens: 0`,
+//     `output_tokens: 0` — a full cache read for no output at all.
+//   - claude-haiku-4-5:    **400**, `max_tokens: must be greater than or equal to 1`.
+//
+// So the cheaper shape is real on some routes and a hard failure on others, and the routing is not
+// this function's to know: `model` comes from the caller's own body. A ping that 400s is a cache
+// entry allowed to lapse, which is the one outcome this request exists to prevent.
+//
+// The prize for taking that risk is ONE output token: $0.0000076 against the $0.0073304 the read
+// itself costs on a 48k-token prefix, i.e. 0.1% of a ping. The docs additionally list four bodies
+// 0 is rejected for — `stream: true`, extended thinking, structured outputs, and `tool_choice` of
+// type `tool` or `any`. This ping forces `stream: false` and refuses thinking-enabled sessions, but
+// it resends the caller's body verbatim and does not touch `tool_choice`, because touching it would
+// change the hashed prefix and miss the entry. 0.1% does not buy that many ways to fail.
 //
 // stream is false so the response is one small JSON body with its usage block in it, rather
 // than an SSE stream this would have to read to the end to price.
