@@ -122,8 +122,15 @@ func TestTheRecommendationRendersARangeAndRefusesThinHistory(t *testing.T) {
 		t.Fatal("loadKARecommend is gone; this check needs rewriting")
 	}
 	body := src[i : i+min(len(src)-i, 4000)]
-	if !strings.Contains(body, "rec.lo_usd") || !strings.Contains(body, "rec.hi_usd") {
-		t.Error("the recommendation does not render an interval")
+	// The SEPARATOR is pinned, not merely the two field names. Asserting only that both names
+	// appear leaves `usd((rec.lo_usd + rec.hi_usd) / 2)` — a single hero midpoint — passing, which
+	// is precisely what this check exists to forbid, and it did pass: the whole dash package
+	// stayed green with the tile rendering a point.
+	if !regexp.MustCompile(`rec\.lo_usd[\s\S]{0,40}\x{2013}[\s\S]{0,40}rec\.hi_usd`).MatchString(body) {
+		t.Error("the recommendation tile does not render lo and hi as a RANGE with a dash between " +
+			"them. Two field names in the same function is not enough: a midpoint of the two " +
+			"mentions both and is a hero number, which is the one thing this payload has no " +
+			"point estimate on the wire in order to prevent")
 	}
 	if !strings.Contains(body, "rec.refused") {
 		t.Error("the recommendation has no refusal branch; below 20 addressable expiries a real " +
@@ -231,4 +238,133 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// No UI script may declare a top-level binding named after a window method.
+//
+// dash/ui/*.js are CLASSIC scripts, so they share one global scope, and a top-level
+// `const prompt = {...}` in tools.js creates a binding in the global declarative
+// environment that shadows `window.prompt` for every bare `prompt(...)` in every other
+// script on the page — app.js included, regardless of load order, because the reference is
+// resolved at call time. That shipped: the "Keep warm" button and the "copy this token now"
+// dialog both threw `prompt is not a function` and failed SILENTLY, which is the only
+// reason it survived review.
+//
+// The declaration and the call site are in different files, so nothing local to either one
+// can catch this. It is a whole-bundle property, and this is the cheapest place to assert it.
+func TestNoUIScriptShadowsAWindowMethod(t *testing.T) {
+	// The window methods a classic script can plausibly call bare. Not exhaustive by
+	// design — it is the set whose shadowing would be silent, which is the dangerous kind.
+	shadowable := []string{
+		"prompt", "alert", "confirm", "open", "close", "print", "focus", "blur", "stop",
+		"find", "scroll", "scrollTo", "scrollBy", "postMessage", "fetch", "atob", "btoa",
+		"setTimeout", "setInterval", "clearTimeout", "clearInterval", "queueMicrotask",
+		"requestAnimationFrame", "cancelAnimationFrame", "structuredClone", "reportError",
+		"getComputedStyle", "matchMedia", "getSelection", "name", "status", "length",
+	}
+	decl := regexp.MustCompile(`(?m)^(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)`)
+	for _, f := range []string{"ui/app.js", "ui/tools.js"} {
+		src := stripJSComments(readUI(t, f))
+		for _, m := range decl.FindAllStringSubmatch(src, -1) {
+			for _, bad := range shadowable {
+				if m[1] != bad {
+					continue
+				}
+				t.Errorf("%s declares a top-level %q, which shadows window.%s for every bare "+
+					"%s(...) call in every classic script on the page, in any load order.\n"+
+					"Rename it (promptView, openPanel, …). A shadow like this fails silently: "+
+					"the control just does nothing.", f, bad, bad, bad)
+			}
+		}
+	}
+}
+
+// The K rule's copy states its REACH, and the two refuted numbers may not come back.
+//
+// The page used to justify "one ping is never suggested" with "it reaches about 4.7 minutes" and
+// "it is $71 worse than nothing". Both are the K*X coverage error: coverage is K*X + TTL, because
+// the last ping is itself a cache read and a read refreshes the entry — which is the arithmetic
+// CoverageSeconds carries a warning about, and which the page's own K-ladder prints correctly
+// three panels away. Under correct coverage one ping is +$101.56 in the adjudicated sweep, not
+// -$71, so the page was contradicting itself AND arguing from a refuted figure.
+//
+// Pinned against CoverageSeconds itself, so reverting the reach to K*X fails here rather than
+// only in a review: at X=280 the wrong arithmetic gives 4.7 and 9.3 minutes where the right one
+// gives 9.7 and 14.3.
+func TestTheKRuleCopyStatesItsReachAndNotTheRefutedNumbers(t *testing.T) {
+	src := readUI(t, "ui/app.js")
+	for _, dead := range []string{"4.7 minute", "$71 worse", "71 worse than"} {
+		if strings.Contains(src, dead) {
+			t.Errorf("the refuted figure %q is back in the tab's copy. Coverage is K*X + TTL; "+
+				"one ping reaches 9.7 minutes at X=280 and is a smaller win, not a loss", dead)
+		}
+	}
+	for k, want := range map[int]string{1: "9.7", 2: "14.3"} {
+		if got := trimZero(CoverageSeconds(280, k) / 60); got != want {
+			t.Fatalf("CoverageSeconds(280,%d) is %s minutes, not %s — this check's expected "+
+				"strings need rewriting along with the copy", k, got, want)
+		}
+		if !strings.Contains(src, want) {
+			t.Errorf("the copy does not state the K=%d reach of %s minutes; the rule has to be "+
+				"argued from the coverage the code actually enforces", k, want)
+		}
+	}
+}
+
+// The live panel's three honesty properties, in the markup and in the renderer.
+//
+// Each one is invisible on screen when it is wrong — the page looks completely fine — which is
+// what earns a source-level assertion, exactly as the tiles' explanations do:
+//
+//   - the TTL shown is the tier the provider BILLED, not one read off configuration. A
+//     `ttl: "1h"` request on a model that does not support it returns a normal 200 with a
+//     five-minute entry, so configuration is not evidence about what is in force.
+//   - the potential saving is a CEILING and says so. It is only spent if the session resumes
+//     after its entry has gone, and the provider's cache is content-keyed.
+//   - the countdown is computed against the SERVER's clock, which is on the wire for that reason.
+func TestTheLivePanelSaysWhatItsNumbersAre(t *testing.T) {
+	html := readUI(t, "ui/index.html")
+	if !strings.Contains(html, `data-testid="ka-live-table"`) {
+		t.Fatal("the live-sessions table is gone; this check needs rewriting")
+	}
+	note := html[strings.Index(html, `data-testid="ka-live-note"`):]
+	note = note[:strings.Index(note, "</p>")]
+	if !strings.Contains(note, "BILLED") {
+		t.Error("the live panel does not say the lifetime it shows is the tier the provider " +
+			"BILLED. A `ttl: \"1h\"` request on a model that does not grant it comes back a " +
+			"normal 200 with a 5-minute entry, so configuration is not evidence")
+	}
+	if !strings.Contains(note, "START") {
+		t.Error("the live panel does not say the lifetime runs from each request's START. " +
+			"Anchoring it at the response instead is the single change that flips the sign of " +
+			"this whole feature, and a countdown that gets it wrong is over-optimistic by the " +
+			"length of the response")
+	}
+	src := readUI(t, "ui/app.js")
+	i := strings.Index(src, "function renderKALive(")
+	if i < 0 {
+		t.Fatal("renderKALive is gone; this check needs rewriting")
+	}
+	body := src[i : i+min(len(src)-i, 6000)]
+	if !strings.Contains(body, "CEILING") {
+		t.Error("the expiring-soon warning states a dollar figure without calling it a CEILING. " +
+			"It is only spent if the session resumes AFTER its entry lapsed, and the provider's " +
+			"cache is keyed on content, so another session sending the same prefix refreshes it " +
+			"for nothing")
+	}
+	if !strings.Contains(body, "ABSENCE") {
+		t.Error("the empty state does not distinguish an absence from a zero saving; every other " +
+			"coverage state on this tab does")
+	}
+	// The countdown must come from the server's clock, and the field has to be read for that to
+	// mean anything.
+	if !strings.Contains(body, "live.soon_seconds") || !strings.Contains(src, "'keepalive/live'") {
+		t.Error("the live panel does not read the server's own threshold; a countdown driven by " +
+			"the browser's clock reads \"2 minutes left\" on an entry that expired ten ago")
+	}
+	if !strings.Contains(body, "mySession(r)") {
+		t.Error("the arm button is drawn without checking the row is the caller's own. An override " +
+			"is keyed to the principal that arms it, so on a manager's service-wide view every " +
+			"button would return 200 and keep nothing warm")
+	}
 }
