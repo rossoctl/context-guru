@@ -389,9 +389,21 @@ function gauge(t) {
       'invoked ' + num(t.declared_tokens - t.unused_tokens) + ' tok'),
     el('span', {}, el('i', { class: 'cg-sw cg-unused' }),
       'never invoked ' + num(t.unused_tokens) + ' tok (' + pct(t.unused_pct) + ')')));
-  if (!t.unused_tokens) {
+  // Two different zeroes, and they must not read the same. An account that declared MCP tools and
+  // skills and used all of them has nothing to remove; an account that declared NONE has nothing
+  // to remove FROM, which on a plain Claude Code session is the normal state — and saying "nothing
+  // was left unused" there implies a clean bill over an empty set while 15,000 tokens of built-ins
+  // sit in the section at the end of the page.
+  if (!t.declared_tokens) {
+    box.appendChild(el('p', { class: 'hint' }, 'No MCP tools and no skills were declared in this '
+      + 'scope, so there is nothing here you can turn off. That is not "no waste": what these '
+      + 'sessions carried was the agent\'s own tools'
+      + (t.aside_tokens ? ' — ' + num(t.aside_tokens) + ' tokens a session of them' : '')
+      + ', which are listed at the end of the page and are not yours to remove.'));
+  } else if (!t.unused_tokens) {
     box.appendChild(el('p', { class: 'hint ok' },
-      'Nothing in this scope was declared and left unused. There is nothing to remove.'));
+      'Everything you declared in this scope was invoked at least once. There is nothing to '
+      + 'remove.'));
   }
   return box;
 }
