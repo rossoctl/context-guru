@@ -209,3 +209,40 @@ long as anything is recoverable, at the cost of advertising it on marker-free re
 `expand/inject.go` documents as its own hazard (a call that resolves nothing, replayed to the client,
 reads as an empty summary). Both failure modes trace to the same root: **the proxy cannot see whether
 the client kept its rewrites.**
+
+## CORRECTION: the CG arms did NOT carry vastly more tokens — the cost is the CACHE TIER
+
+Earlier sections of this document quote mean arriving requests of 86,125 (baseline) against 692,613
+(separate) and describe the CG arms as carrying ~8× the context. **That number is `tokens_before` — the
+raw history ARRIVING at the proxy, before compaction — and using it to imply cost was wrong.**
+
+| arm | requests | arriving (M) | **SENT upstream (M)** | cache_read (M) | fresh (M) | **BILLED (M)** |
+|---|---|---|---|---|---|---|
+| `[format]` baseline | 1,171 | 100.9 | **86.4** | **101.3** | 37.7 | **146.4** |
+| separate | 3,548 | 2,457.4 | **55.8** | 76.5 | **82.8** | **166.2** |
+| merged | 2,981 | 1,931.1 | **59.1** | 78.2 | **78.0** | **164.5** |
+
+**The CG arms sent 32–35% FEWER tokens upstream than the baseline.** Compaction did its job. Billed input
+was only **12–14% higher**, not 8× and not the 19–24× the arriving figures suggest.
+
+**The extra ~$75–85 is a tier shift, not volume.** The baseline billed 101.3M tokens at cache-read rates
+and 37.7M fresh; the CG arms billed ~77M cached and ~80M fresh. Fresh input costs roughly 10× cache-read,
+so moving ~45M tokens from the cheap tier to the dear one accounts for the difference on its own.
+Reconstructing at Sonnet-5 rates gives ≈$114 baseline against ≈$192–198 for the CG arms, which tracks the
+observed $189.95 / $204.94 / $223.22.
+
+**Mechanism:** compaction rewrites earlier messages, which invalidates the provider's cached prefix from
+that point on, so tokens the baseline replayed cheaply from cache are re-billed as fresh. The expand-tool
+flap made this worse by invalidating from position **zero** (tools precede system and messages in the
+cache hash), but the message rewrites do it regardless — which is why cache-read share falls from 69.2%
+to 46–47.5% and why that, not token count, is where the money went.
+
+**What survives from the volume claim:** only the tail. Five requests exceeded the model's 1M window (up
+to 6,035,894 tokens), so at the extreme compaction could not keep up. But on the mean CG's output was
+SMALLER than the baseline's, so "the CG arms carry far more tokens" is false as a general statement and is
+withdrawn.
+
+**Consequence for what to fix.** The target is not "remove more tokens" — the arms already send fewer. It
+is **cache-prefix stability**: rewriting early messages is what converts cheap replay into expensive fresh
+input. That reframes the expand-loop fix as well: its value is keeping the tools array stable (no
+position-zero invalidation) and making recovery actually work, not reducing volume.
