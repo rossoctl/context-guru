@@ -1,0 +1,104 @@
+/* The KV-cache tab's own stylesheet, linked from kvcache.js so mounting the whole view is
+   one line in the shared page — the same arrangement tools.css has.
+
+   Every colour here is a token from style.css. No new hue: the four-hue categorical order,
+   the status palette and the de-emphasis gray are the whole vocabulary, and a fifth colour
+   would mean a chart needs splitting rather than a new swatch. */
+
+/* The page's own filter row: the four dimensions the shared filter bar above does not carry
+   (user, time-of-day band, observed TTL, and whether a request has a successor). Laid out
+   like the keep-alive calculator's controls so the two pages read as one product. */
+.kv-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  align-items: flex-end;
+}
+.kv-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.kv-controls select,
+.kv-controls input[type="number"] {
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 5px 7px;
+  font: inherit;
+  font-size: 13px;
+}
+.kv-controls input[type="number"] { width: 8ch; }
+
+/* The pricing table's editable rate cells. Narrow, right-aligned and monospaced, so a column
+   of rates lines up on its decimal point and a typo is visible. */
+.kv-rate {
+  width: 9ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 3px 5px;
+  font-size: 12px;
+}
+.kv-rate:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* An edited rate is marked, so nobody reads a typed number as a configured one. */
+.kv-rate.kv-edited { border-color: var(--accent); background: var(--accent-soft); }
+
+/* One cost formula: the expression on its own line, monospaced, with its note beneath. */
+.kv-formula { margin: var(--sp-3) 0; }
+.kv-formula code {
+  display: block;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-sunken);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre;
+}
+.kv-formula .kv-formula-name { font-weight: 600; font-size: 13px; }
+.kv-formula .kv-formula-note { color: var(--fg-muted); font-size: 12px; margin-top: var(--sp-1); }
+
+/* The strategy picker: one checkbox per arm with its own description under the label. */
+.kv-arms { display: grid; gap: var(--sp-2); }
+.kv-arm { display: flex; gap: var(--sp-2); align-items: flex-start; }
+.kv-arm > input { margin-top: 3px; }
+.kv-arm-name { font-weight: 600; font-size: 13px; }
+.kv-arm-desc { color: var(--fg-muted); font-size: 12px; }
+
+/* The baseline row of the comparison table: it is the denominator of every percentage beside
+   it, so it is marked rather than left for the reader to find. */
+.tbl tbody tr.kv-baseline > td { background: var(--bg-sunken); }
+.tbl tbody tr.kv-baseline > td:first-child { font-weight: 600; }
+
+/* A conversation or request id in a table cell: clipped, monospaced, and a link. */
+.kv-link { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+/* An UNREACHABLE arm — one that reads the true next-request time — is the ceiling on what any
+   policy could do, never a result. It gets the de-emphasis gray and a dashed edge so it cannot
+   be mistaken for an option at a glance, in the picker and in the comparison table alike. The
+   word "ceiling" travels with it in the markup; this only makes the distinction visible without
+   reading, and never carries it alone. */
+.kv-arm-ceiling .kv-arm-name,
+.kv-arm-ceiling .kv-arm-desc { color: var(--fg-muted); }
+.tbl tbody tr.kv-ceiling > td {
+  color: var(--fg-muted);
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+}
+.tbl tbody tr.kv-ceiling > td:first-child { font-style: italic; }
+
+/* The direction word beside a signed difference ("cheaper" / "MORE"). Smaller than the figure
+   and never a replacement for it: the number is the measurement, the word is which way it
+   points, and colour is the third statement of the same fact rather than the only one. */
+.kv-dir { font-size: 11px; letter-spacing: 0.02em; margin-left: 2px; }
+
+/* The comparison table's first column. Held narrow on purpose: thirteen numeric columns follow
+   it, and the two that matter (total cost, vs baseline) have to be visible without scrolling
+   sideways. The strategy's description lives on the picker above and on this cell's title. */
+.kv-sim-name { font-weight: 600; white-space: nowrap; }
