@@ -274,7 +274,18 @@ func (c *Config) applyPreset() error {
 	// thresholds). Decode it into a scratch Config, then use its values only where the
 	// user didn't specify (pipeline; per-component config merged with user override).
 	if doc, ok := presetConfigs[c.Preset]; ok {
-		var pc Config
+		// Decoded into the TWO fields applyPreset actually carries, not into a full Config.
+		// With KnownFields(true) that turns "a preset declared a field this function ignores"
+		// from a silent discard into a load error, which TestEveryPresetBuilds already
+		// catches for every preset. The alternative — a test listing the ignored fields by
+		// hand — is correct only until somebody adds a top-level Config field, because
+		// KnownFields would happily accept it. `cache:` is the one that made this worth
+		// closing: it carries the keep-alive, so a preset declaring it would look like it
+		// spends the caller's money per ping and in fact do nothing at all.
+		var pc struct {
+			Pipeline   []string             `yaml:"pipeline"`
+			Components map[string]yaml.Node `yaml:"components"`
+		}
 		dec := yaml.NewDecoder(bytes.NewReader([]byte(doc)))
 		dec.KnownFields(true)
 		if err := dec.Decode(&pc); err != nil {
@@ -488,11 +499,17 @@ components:
 	// tokens/output against a largest-observed 2,053. TestNoDefaultConfigRunsExtractLLMOnCachingBackend
 	// includes this preset so that combination cannot ship by accident.
 	//
-	// llm_max_per_session: 0 is UNLIMITED, by operator decision. The remaining bounds on a
-	// long session are llm_max_per_request (4), the pressure trigger (20,000 request
-	// tokens) and the economic gate. cold_cache.max_calls: 20 bounds one TTL-expiry sweep
-	// (0 there would mean the built-in 4, and -1 would mean unlimited — a different knob
-	// with a different zero).
+	// llm_max_per_session: 0 is UNLIMITED, by operator decision — and it is INERT here for
+	// the same reason allow_on_caching_backend is. extract_llm.go:1168 splits on `sweeping`:
+	// the sweep consults cold_cache.max_calls, the hot path consults llm_max_per_request and
+	// llm_max_per_session, and they are the two arms of one if/else. With `per_output: false`
+	// only the sweep runs, so NEITHER per-request nor per-session is ever read at any value.
+	//
+	// So the only thing bounding spend here is `cold_cache.max_calls: 20` — calls per
+	// TTL-expiry sweep — plus the economic gate and the 20,000-token pressure trigger. 0
+	// there would mean the built-in 4 and -1 would mean unlimited: a different knob with a
+	// different zero, which is exactly why it is stated rather than left to be inferred from
+	// the per-session one.
 	"housellm": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
 components:
   extract:

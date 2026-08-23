@@ -645,8 +645,11 @@ mode: sync
 **`housellm`** is the same pipeline with `extract_llm` inserted before `extract`, applied
 per account on request. It calls a cheap model (`claude-haiku-4-5`, on the caller's own
 credential and endpoint) when the economic gate says the expected saving beats the priced
-cost of the call — including on prompt-cached traffic, which the deterministic default
-leaves alone. It is offered by name rather than turned on for everyone because those calls
+cost of the call — and **only on a turn whose prompt cache has expired**, never on
+prompt-cached traffic. That is what `per_output: false` means, and it is the brake: a cold
+turn is about to re-bill its whole transcript at the write rate, so a token removed there is
+the most valuable one there is. On warm turns the same removal is worth a tenth as much and
+the component stays out of the way. It is offered by name rather than turned on for everyone because those calls
 spend the caller's money.
 
 **Changed 2026-08-23:** `searchfold` and `toolfilter` joined the default, and `dedup` moved

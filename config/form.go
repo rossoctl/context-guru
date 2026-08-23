@@ -182,10 +182,12 @@ type ExtractLLMForm struct {
 // These are housellm's values with two documented exceptions — AllowOnCachingBackend
 // (below) and cold_cache.max_calls, which this form does not model at all, so an account
 // prefilled from here gets the component's own default of 4 rather than housellm's 20.
-// housellm is the one extract_llm configuration this service has actually run and measured — so the form now offers what
-// production runs rather than a second opinion about it. Three differ from what this
-// function returned before, and each difference is the reason the component did nothing on
-// a real account:
+// housellm is the one extract_llm configuration this service has actually run and measured,
+// so the form offers what production runs rather than a second opinion about it. Six values
+// changed from what this function returned before. Two are the interesting ones and NEITHER
+// is a spend change, because `per_output: false` puts the whole hot path out of reach
+// (extract_llm.go:1168 switches on `sweeping`; the per-request and per-session caps are the
+// other arm of that if/else):
 //
 //	AllowOnCachingBackend stays FALSE, and it is the one value that deliberately does NOT
 //	  match housellm. There the flag is inert, because `per_output: false` means nothing
@@ -197,8 +199,10 @@ type ExtractLLMForm struct {
 //	  something that only becomes live when somebody changes a different field.
 //	TriggerMinTokens 20000 and ContextMessages 2, from the same measured config: a higher
 //	  pressure bar so most turns still make no call, and a shorter context window per call.
-//	MaxPerSession 0, which the component reads as UNLIMITED. An operator decision — the
-//	  bounds that remain are MaxPerRequest, the pressure trigger and the economic gate.
+//	MaxPerSession 0, read by the component as UNLIMITED, and MaxPerRequest 4. An operator
+//	  decision, and inert while per_output is off: the sweep bounds itself with
+//	  cold_cache.max_calls, which this form does not model. What bounds a long session here
+//	  is that cap, the pressure trigger and the economic gate.
 func DefaultExtractLLMForm() ExtractLLMForm {
 	return ExtractLLMForm{
 		PerOutput: false, ColdEnabled: true, SizeTrigger: false,
