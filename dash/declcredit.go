@@ -87,7 +87,10 @@ func (d *DB) DeclCreditFor(f Filter, price func(string) (modelinfo.Price, bool),
 		out.Priced = false
 	}
 	if price == nil {
-		return out, nil // SelfRemovals needs a pricer to attribute a tier at all
+		// SelfRemovals calls price() per session with no nil guard of its own, so this return is
+		// load-bearing rather than an optimisation. DeclFilterSavings above checks for itself,
+		// which is why the filter half is still computed here.
+		return out, nil
 	}
 	self, err := d.SelfRemovals(f, price, filtered)
 	if err != nil {
