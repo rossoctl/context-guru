@@ -58,22 +58,38 @@ prompt is too long: 1,584,405 … 6,035,894 tokens > 1,000,000 max
 not bring it back under.** One further error is the known `thinking`-block defect
 ([iteration 011](../iter011/results.md)).
 
-**The likely mechanism, stated as a hypothesis because this design cannot isolate it:** CG compacts
-each *request*, but the agent keeps its own full history. LOCA decides whether to clear from the token
-usage the provider *reports*, which reflects the compacted request — so the better CG is at shrinking
-what it sends, the less LOCA believes it needs to clear. The agent's raw history then grows unchecked
-until it outruns what any per-request compaction can rescue.
+### RETRACTED: the "proxy suppresses the agent's clearing" explanation
 
-The blunt-reset arm does not have this problem precisely *because* CG removes nothing there:
-`compaction_resets=319` with `llm_calls=0` and only lossless `format` acting, so LOCA sees its own
-uncompacted sizes and clears on schedule. Mean arriving request is **86,125** tokens against the CG
-arm's **692,613** — an 8× difference on identical tasks.
+The first explanation offered here was that CG's compaction keeps requests under the provider's
+`clear_tool_uses` trigger, so the agent's own clearing never fires and its raw history grows unchecked.
+**That is wrong, and the check that refutes it is one line:**
 
-**If that hypothesis holds it is the most operationally important result in this work**, and it cuts
-against deploying a compaction proxy in front of an agent that manages its own context: the two
-mechanisms are not additive, they are *substitutive*, and the proxy silently disables the agent's
-safety net while taking on a job it cannot always finish. It also reframes iteration 011's finding
-that summarisation drove contexts *toward* exhaustion — same shape, one band lower.
+| arm | trajectories | with `context_management_events` | total events |
+|---|---|---|---|
+| `[format]` blunt reset | 75 | **0** | **0** |
+| separate components | 75 | **0** | **0** |
+| merged | 75 | **0** | **0** |
+
+**Server-side context management never ran in ANY arm, including the baseline.** So the baseline was
+never "protected by the provider's unconditional trigger" — there was no trigger firing anywhere. The
+retracted claim had the shape of a good explanation and was asserted without checking the one counter
+that records the mechanism.
+
+LOCA does request it (`context_management` edits plus `betas:
+["context-management-2025-06-27"]`), and CG passes the parameter through byte-identically (verified by
+`apply.TestContextManagementParamSurvivesCountChange`). So the feature is asked for and forwarded, yet
+never applied. Whether the gateway strips the beta, or the Bedrock-routed `aws/claude-sonnet-5` does not
+implement it, is under direct test.
+
+**What still stands, and what does not.** The measurements stand: the baseline had **0** `prompt is too
+long` errors against the CG arms' **5**, and mean arriving requests of **86,125** against **692,613** on
+identical tasks. What does not stand is the *causal* story. With no server-side clearing anywhere, the
+difference must come from the trajectories themselves — the CG arms ran 3× more requests, each ~8×
+larger — which is the same trajectory-divergence confound
+[iteration 012](../iter012/results.md) established makes per-arm behaviour hard to attribute.
+
+So the honest position is narrower: **at this band, pipelines including CG compaction reached contexts
+that exceeded the model's window while the lossless baseline did not, and why is not established.**
 
 **Caveats, because this is one arm.** `compaction_resets` cannot separate CG's own shrinking from
 LOCA's clearing in the CG arms (summarize acted 2,511 times, and each shrink registers), so the reset
