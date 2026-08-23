@@ -785,11 +785,13 @@ const TILE_INFO = {
   'total-saved-usd': {
     what: 'The money context-guru avoided in total, after paying for itself. This is the '
       + 'one number to look at if you only look at one.',
-    how: 'Three savings added together. First, what compaction avoided: what this traffic '
+    how: 'Four savings added together. First, what compaction avoided: what this traffic '
       + 'would have cost had we removed nothing, minus what it actually cost, minus what '
       + "context-guru's own model calls cost. Second, what the prefix-cache split avoided. "
       + 'Third, the idle keep-alive\u2019s NET \u2014 what it avoided minus what its pings cost. '
-      + 'The three touch different tokens, so adding them does not count anything twice.',
+      + 'Fourth, the tool, MCP and skill declarations the removal filter stopped sending, counted '
+      + 'from what the filter itself recorded on each request it acted on. The four touch '
+      + 'different tokens, so adding them does not count anything twice.',
     catch: 'It can be NEGATIVE, and it is shown in red when it is \u2014 that means context-guru '
       + 'spent more on its own model calls than it saved you. Nothing here is hidden when '
       + 'the answer is unflattering. The keep-alive contributes its NET, not its saving: the '
@@ -797,7 +799,10 @@ const TILE_INFO = {
       + 'NOT in the billed-cost line above \u2014 a ping is not traffic your agent produced, so '
       + 'it is excluded from the request count and every average. And the keep-alive\u2019s '
       + 'saving half is a CEILING: the provider\u2019s cache is keyed on content, so another '
-      + 'session sending a byte-identical prompt would have refreshed the same entry for free.',
+      + 'session sending a byte-identical prompt would have refreshed the same entry for free. '
+      + 'What is NOT in here is anything YOU removed by hand \u2014 an MCP server you dropped, a '
+      + 'skill you switched off. That reduction is real and it is not ours, so it has its own '
+      + 'tile and its own total beside this one.',
   },
   // ── Keep-alive tab ────────────────────────────────────────────────────────
   // Every one of these carries the same two disclosures: the saving is a CEILING, and a zero
@@ -1116,6 +1121,52 @@ const TILE_INFO = {
       + 'component configurations it EXCEEDS what the compaction saved — check the '
       + "Components tab, which shows each component's net separately.",
   },
+  'total-reduced-usd': {
+    what: 'How much smaller this bill got in total \u2014 what context-guru avoided PLUS what you '
+      + 'removed yourself.',
+    how: '"Total dollars avoided" plus the declarations this account stopped carrying on its own: '
+      + 'an MCP server you removed, a skill you switched off. Those tokens genuinely stopped being '
+      + 'billed.',
+    catch: 'The two totals are separate on purpose. This one answers "how much smaller did my '
+      + 'bill get"; the other answers "how much of that did context-guru do". Rolling your own '
+      + 'work into the figure this product claims for itself would be taking credit for it. The '
+      + 'half that is yours is also MODELLED rather than measured \u2014 see the "Removed by you" '
+      + 'tile for exactly how, and when it is wrong.',
+  },
+  'decl-filter-saved': {
+    what: 'Money not spent because the removal filter stopped sending tool schemas, MCP tool '
+      + 'schemas and skill listing entries you opted out of.',
+    how: 'The filter records, on every request it acts on, how many declaration tokens it '
+      + 'dropped. Those are summed and priced at the tier that request actually paid \u2014 the '
+      + 'cache-read rate on a warm turn, the cache-creation rate on the turn that wrote the '
+      + 'prefix, the full input rate on a turn with no cache. Measured on requests that were '
+      + 'really sent; nothing here is a projection.',
+    catch: 'This is a saving of ours that appeared in NO total on this page until recently, and '
+      + 'the reason was mechanical rather than a decision: the whole savings walk is built on our '
+      + 'own token count of the MESSAGES, and a tool declaration is not in the messages \u2014 it '
+      + 'is a top-level field. So the largest lever measured in this project (82.7% of a declared '
+      + 'catalogue is never invoked) moved none of the figures beside it. Turning the filter on '
+      + 'also costs one cache miss per session in flight, once, because the declarations sit at '
+      + 'the front of the cached prompt; that charge is inside the billed cost and is not '
+      + 'subtracted from this figure.',
+  },
+  'self-removed': {
+    what: 'Declarations YOU stopped carrying \u2014 an MCP server removed with `claude mcp '
+      + 'remove`, a skill switched off. Real money, and not ours.',
+    how: 'The inventory is a time series. A name present in the early sessions of this window and '
+      + 'absent from the later ones stopped being declared, and its weight times the requests of '
+      + 'the sessions that followed is what carrying it would have cost. Only COMPARABLE later '
+      + 'sessions count \u2014 one that declared no MCP tool at all cannot testify about a missing '
+      + 'MCP tool \u2014 and fewer than three of them is not reported at all.',
+    catch: 'MODELLED, not measured, and the difference matters. The method sees that the '
+      + 'declaration set changed; it cannot see WHY. On this deployment\u2019s own history the '
+      + 'largest candidate was the editor integration, which is declared only when a session runs '
+      + 'inside the IDE \u2014 so "you removed it" and "you worked in a terminal that day" look '
+      + 'identical here, and no threshold separates them. The reduction is real either way; the '
+      + 'attribution is a guess. That is why this is outside "Total dollars avoided" and inside '
+      + '"Total the bill came down". Anything the removal filter is already credited for is '
+      + 'excluded rather than counted twice, and the count of exclusions is on the tile.',
+  },
   'cachesplit-saved': {
     what: 'Money saved by splitting the prompt so that the stable part stays cached when '
       + 'the volatile part changes.',
@@ -1343,8 +1394,18 @@ function renderTiles(o) {
     // NOT in here — it was, under the label "compaction + provider cache", and a headline
     // number that mostly measures somebody else's mechanism is not a headline number.
     tile('total-saved-usd', 'Total dollars avoided', costKnown ? usd(o.total_saved_usd) : 'unknown',
-      'compaction + prefix cache + keep-alive',
+      'compaction + prefix cache + keep-alive + declarations dropped',
       costKnown ? (o.total_saved_usd < 0 ? 'bad' : 'good') : ''),
+    // The second total, beside the first and only when they differ. It is the SAME money plus
+    // what the account removed itself — an MCP server they dropped, a skill they switched off.
+    // Two tiles rather than one because they answer different questions ("how much smaller did
+    // my bill get" against "how much of that did this product do") and folding the user's own
+    // work into the figure we claim credit for would be taking it.
+    costKnown && Math.abs(o.total_reduced_usd - o.total_saved_usd) > 0.00005
+      ? tile('total-reduced-usd', 'Total the bill came down', usd(o.total_reduced_usd),
+        'ours + ' + usd(o.self_removed_usd) + ' you removed yourself',
+        o.total_reduced_usd < 0 ? 'bad' : 'good')
+      : null,
     tile('saved-usd', 'Net dollars saved', costKnown ? usd(o.net_saved_usd) : 'unknown',
       'baseline − actual − our spend', costKnown ? (o.net_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-unique', 'Tokens saved (unique)', compact(o.saved_unique),
@@ -1467,6 +1528,27 @@ function renderTiles(o) {
     // saving alone would be exactly the half-truth this ledger exists to prevent.
     (o.keepalive_pings || o.keepalive_saved_usd)
       ? kaOverviewTile(o, costKnown)
+      : null,
+    // Declarations no longer sent, MEASURED half. It is a saving of ours that reached no total on
+    // this page until now, and the reason was mechanical rather than a judgement: the savings walk
+    // is built on tokens_before, which counts message text only, and a tool schema lives in the
+    // top-level `tools` array. So the largest lever in the product — 82.7% of a declared catalogue
+    // is never invoked — moved none of the figures beside it.
+    o.decl_filter_requests
+      ? tile('decl-filter-saved', 'Declarations not sent',
+        o.decl_credit_priced ? usd(o.decl_filter_usd) : compact(o.decl_filter_reads) + ' tok',
+        num(o.decl_filter_requests) + ' requests sent without them',
+        o.decl_filter_usd > 0 ? 'good' : '')
+      : null,
+    // And the MODELLED half, in its own tile, labelled as the user's rather than ours. It is in
+    // total_reduced above and not in total_saved.
+    o.self_removed_items
+      ? tile('self-removed', 'Removed by you, not by us',
+        o.decl_credit_priced ? usd(o.self_removed_usd) : compact(o.self_removed_reads) + ' tok',
+        num(o.self_removed_items) + ' item' + (o.self_removed_items === 1 ? '' : 's')
+          + ' · modelled, see Inventory'
+          + (o.self_removed_overlap ? ' · ' + num(o.self_removed_overlap) + ' excluded as overlap' : ''),
+        'accent')
       : null,
   ]));
 

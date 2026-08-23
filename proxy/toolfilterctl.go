@@ -22,6 +22,7 @@ import (
 
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -197,9 +198,20 @@ func declConfigName(kind, name, server string) (string, error) {
 	case dash.KindServerTool:
 		return "", errors.New("a provider-side tool is resolved by the provider from its " +
 			"type, not by a schema we send, so it cannot be removed here")
-	case dash.KindSkill, dash.KindSkillListing:
-		return "", errors.New("a skill is declared as prose inside the transcript rather than " +
-			"as a tool, so removing one is not supported yet")
+	case dash.KindSkill:
+		if name == "" {
+			return "", errors.New("no skill name")
+		}
+		if !skills.ValidName(name) {
+			// The listing is the authority for what may be cut out of a real request, so a name
+			// that could not have come from one is refused rather than written into a config that
+			// would match nothing forever.
+			return "", errors.New("that is not a skill name")
+		}
+		return skills.RemovePrefix + name, nil
+	case dash.KindSkillListing:
+		return "", errors.New("the skills listing is one indivisible block of prose — remove the " +
+			"individual skills instead, and the listing shrinks with them")
 	case dash.KindTool, dash.KindMCPTool, "":
 		if name == "" {
 			return "", errors.New("no declaration name")

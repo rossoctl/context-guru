@@ -121,3 +121,53 @@ func TestPromptRouteServesTheOwningTenantOverTheNetwork(t *testing.T) {
 		t.Errorf("hosted: the owning tenant cannot read its own system prompt:\n%s", body)
 	}
 }
+
+// The system prompt's PARTS are content too, and the gate has to take them whole.
+//
+// This is the same hole /api/prompt shipped with, one field narrower. The decomposition adds a
+// list of section titles and a slice of text per section; a strip that only cleared Region.Text
+// would leave the titles behind, and a heading in somebody's CLAUDE.md names their project, their
+// employer or their incident. So the assertion is on a marker that lives in a HEADING rather than
+// in a body, because a strip that misses the titles passes a body-only test.
+func TestPromptPartsAreStrippedForAnUntrustedCaller(t *testing.T) {
+	const headingMarker = "SECRET-PROJECT-HEADING-9f3a1c"
+	f := newScopeFixture(t, nil)
+	if _, err := f.rec.DB().sql.Exec(`UPDATE requests SET tools = 1`); err != nil {
+		t.Fatal(err)
+	}
+	sys := "You are an agent.\n\n# " + headingMarker + "\n\nDeploy on Fridays.\n\n# Environment\n\ncwd\n"
+	inv := ScanInventory("anthropic", sysBody(t, sys, []string{tool("Bash", declMarker)}, skillsReminder))
+	if inv == nil {
+		t.Fatal("no inventory scanned")
+	}
+	f.rec.RecordInventory("tenant-a", "tenant-a:sess", time.Now().UnixMilli(), inv, true)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, withText := textRows(t, f.rec.DB()); withText > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("declaration text never landed; the fixture has nothing to gate")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The fixture HOLDS the parts, from loopback. Without this the negative below passes just as
+	// well against a report that never decomposed anything.
+	_, trusted := f.getFrom(t, "/api/prompt", "127.0.0.1:1234")
+	for _, want := range []string{`"parts"`, headingMarker, `"parts_tokens"`} {
+		if !strings.Contains(trusted, want) {
+			t.Fatalf("fixture is empty: loopback /api/prompt has no %s:\n%s", want, trusted)
+		}
+	}
+	// And an untrusted peer gets neither the parts nor their titles.
+	_, body := f.get(t, "/api/prompt")
+	for _, leak := range []string{headingMarker, `"parts"`, `"parts_tokens"`} {
+		if strings.Contains(body, leak) {
+			t.Errorf("/api/prompt served %s to an untrusted address:\n%s", leak, body)
+		}
+	}
+	// The weights still come through, which is why this strips rather than refuses.
+	if !strings.Contains(body, `"kind":"system_prompt"`) {
+		t.Errorf("the strip took the system prompt's weight with its text:\n%s", body)
+	}
+}

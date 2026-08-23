@@ -105,7 +105,11 @@ func TestPingRowsStayOutOfAgentAggregates(t *testing.T) {
 	// The keep-alive fields and the two totals they feed are the ONLY keys allowed to differ.
 	mayMove := map[string]bool{
 		"keepalive_pings": true, "keepalive_ping_usd": true, "keepalive_net_usd": true,
-		"total_saved_usd": true,
+		// total_reduced_usd is total_saved plus the account's own removals, so it moves with the
+		// total it is built on. Allowed, and pinned to the SAME delta below rather than merely
+		// excused: if it ever moved by a different amount, the ping spend would be reaching one
+		// total and not the other.
+		"total_saved_usd": true, "total_reduced_usd": true,
 		// The waterfall carries the ping SPEND as a step of its own, which is the whole point of
 		// having it; its reconciliation is TestTheWaterfallReconcilesWithTotalSaved.
 		"waterfall": true,
@@ -127,6 +131,10 @@ func TestPingRowsStayOutOfAgentAggregates(t *testing.T) {
 	// the keep-alive's NET, which here is the negative of what the pings cost. The credit rows
 	// are in BOTH fixtures — they are agent rows — so the saving half does not move and the
 	// whole difference is the ping spend. That is the assertion that fails on `+= SavedUSD`.
+	if got, want := b.TotalReducedUSD-a.TotalReducedUSD, b.TotalSavedUSD-a.TotalSavedUSD; math.Abs(got-want) > 1e-9 {
+		t.Errorf("total_reduced moved by %v while total_saved moved by %v: the ping spend is "+
+			"reaching one total and not the other", got, want)
+	}
 	if got, want := b.TotalSavedUSD-a.TotalSavedUSD, b.KeepAliveNetUSD-a.KeepAliveNetUSD; math.Abs(got-want) > 1e-9 {
 		t.Errorf("total_saved moved by %.6f, want exactly the change in keepalive_net_usd %.6f",
 			got, want)
@@ -268,18 +276,35 @@ func TestTheWaterfallReconcilesWithTotalSaved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The declaration-removal credit is attached with BOTH halves non-zero and DIFFERENT, which
+	// is the only configuration that can tell the two totals apart: equal halves, or a zero in
+	// either, reconcile even if the code puts the wrong one in the wrong total.
+	o.SetDeclCredit(&DeclCredit{FilterUSD: 0.11, FilterReads: 4000, FilterRequests: 7,
+		SelfUSD: 0.37, SelfReads: 9000, SelfItems: 2, SelfOverlap: 1, Priced: true})
 	steps := map[string]float64{}
 	for _, s := range o.waterfall() {
 		steps[s.Key] = s.DeltaUSD
 	}
 	// total_saved = -(baseline step) + compaction + cg_llm + cachesplit + keepalive_ping +
-	// keepalive_saved, in signed terms: the reductions are negative and the spends positive, so
-	// the sum of the non-total steps below the baseline is the negation of what was avoided.
+	// keepalive_saved + the filter's realized saving, in signed terms: the reductions are
+	// negative and the spends positive, so the sum of the non-total steps below the baseline is
+	// the negation of what was avoided.
 	sum := -(steps["compaction"] + steps["cg_llm"] + steps["cachesplit_saved"] +
-		steps["keepalive_ping"] + steps["keepalive_saved"])
+		steps["keepalive_ping"] + steps["keepalive_saved"] + steps["decl_filter_saved"])
 	if math.Abs(sum-steps["total_saved"]) > 0.005 {
 		t.Errorf("the walk does not reconcile: steps sum to %.4f, total_saved is %.4f",
 			sum, steps["total_saved"])
+	}
+	// And the second total is the first plus the account's OWN removals — the one step that is
+	// deliberately outside total_saved, because those tokens are not ours.
+	if got := steps["total_reduced"] - steps["total_saved"]; math.Abs(got-0.37) > 0.005 {
+		t.Errorf("total_reduced − total_saved = %.4f, want the $0.37 the account removed itself; "+
+			"a self-removal has leaked into the figure that claims our credit, or is missing from "+
+			"the one that does not", got)
+	}
+	if math.Abs(sum-steps["total_reduced"]) < 0.005 {
+		t.Error("the two totals are equal: the self-removal half is reaching neither total, or " +
+			"both")
 	}
 }
 

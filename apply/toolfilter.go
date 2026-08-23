@@ -105,8 +105,10 @@ package apply
 // tool back.
 
 import (
+	"bytes"
 	"strings"
 
+	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -195,10 +197,17 @@ func filterDeclarations(body []byte, remove []string) (out []byte, removedTokens
 	return next, removedTokens, removed
 }
 
-// removeSets splits the configured list into exact names and whole-server entries.
+// removeSets splits the configured list into exact names and whole-server entries, and drops the
+// skill entries: those are removed from the listing prose by filterSkillListing, and leaving
+// `skill__foo` in the tool-name set would mean a tool actually called `skill__foo` was removed by
+// a request to remove a skill. No such tool exists today, which is exactly why the guard belongs
+// here rather than in a bug report later.
 func removeSets(remove []string) (names, servers map[string]bool) {
 	names, servers = make(map[string]bool, len(remove)), map[string]bool{}
 	for _, r := range remove {
+		if strings.HasPrefix(r, skills.RemovePrefix) {
+			continue
+		}
 		if s, ok := serverEntry(r); ok {
 			servers[s] = true
 			continue
@@ -406,4 +415,131 @@ func identByte(prose string, i int) bool {
 	}
 	c := prose[i]
 	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// ── skills ──────────────────────────────────────────────────────────────────
+
+// filterSkillListing removes the named skills' entries from the skills listing.
+//
+// # Why this is a different mechanism from the tools filter, and a SAFER one
+//
+// The listing is prose in a role:"system" MESSAGE (measured on real traffic: messages[1], a
+// plain string, 6,867 bytes), not an element of `tools`. So the two hazards are inverted.
+//
+// The tools filter's danger is SILENCE: strip a declaration whose prose survives and the model
+// may narrate the call instead of emitting one, which nothing surfaces. A skill cannot fail that
+// way. The `Skill` tool's schema takes a free-form string with NO enum — verified against a real
+// declaration — and its description says only that names come from the listing. So an unlisted
+// skill the model names anyway still RUNS. The failure mode of over-removing here is that the
+// model does not know a skill exists, which is exactly what the account asked for, and the
+// failure mode of the model remembering one anyway is that it works. Fail-open by construction.
+//
+// # What it shares with the tools filter: determinism
+//
+// It edits a message deep inside the cached prefix, so any per-turn variation would re-anchor
+// the prefix on every turn (see §3 of this file's header). The inputs are the same
+// session-invariant ones — the configured list, and the prose region minus the listing itself —
+// so for a given account the answer is the same on every turn of every session. Switching it on
+// mid-session re-anchors ONCE, the same one-time charge the tools half pays and the same
+// arithmetic in reverse for putting a skill back.
+//
+// The prose gate is kept for consistency with the tools half, with the listing SUBTRACTED from
+// the region first: the gate has to mean "named somewhere other than its own listing entry", or
+// a client that puts its listing in messages[0] with role system would have every skill
+// permanently pinned by the entry that is the thing being removed.
+//
+// Fails open on everything: no listing, no terminator, a body shape it does not recognise, a
+// re-encode that errors — all return the input untouched and a saving of zero.
+func filterSkillListing(body []byte, remove []string) (out []byte, removedTokens, removed int) {
+	drop := map[string]bool{}
+	for _, r := range remove {
+		if n := strings.TrimPrefix(r, skills.RemovePrefix); n != r && n != "" {
+			drop[n] = true
+		}
+	}
+	if len(drop) == 0 {
+		return body, 0, 0
+	}
+	// Which message holds the listing, and — when its content is an array — which block. The
+	// FIRST match, the same choice dash's reader makes, so the page and the filter describe the
+	// same listing on a body that somehow carries two.
+	path, text := skillListingPath(body)
+	if path == "" {
+		return body, 0, 0
+	}
+	i := strings.Index(text, skills.Header)
+	if i < 0 {
+		return body, 0, 0 // path said there was one: refuse rather than guess
+	}
+	head := text[:i+len(skills.Header)]
+	rest := text[i+len(skills.Header):]
+	tail := ""
+	if j := strings.Index(rest, skills.ReminderEnd); j >= 0 {
+		rest, tail = rest[:j], rest[j:]
+	}
+	// The prose gate, with the listing itself removed from the region it tests against.
+	prose := strings.Replace(proseRegion(body), text, "", 1)
+	l := skills.Parse(rest)
+	for name := range drop {
+		if proseReferenced(prose, name) {
+			delete(drop, name)
+		}
+	}
+	if len(drop) == 0 {
+		return body, 0, 0
+	}
+	for _, e := range l.Entries {
+		if drop[e.Name] {
+			removedTokens += tokens.Count(l.Text(e))
+		}
+	}
+	next, n := l.Without(drop)
+	if n == 0 {
+		return body, 0, 0
+	}
+	nb, err := sjson.SetBytes(body, path, head+next+tail)
+	if err != nil {
+		return body, 0, 0
+	}
+	return nb, removedTokens, n
+}
+
+// skillListingPath finds the listing: the sjson path of the string that holds it, and that
+// string. "" when no message carries one.
+//
+// A byte search over the raw body first, because both anchors survive JSON escaping and the
+// overwhelming majority of requests have nothing to do here — a body with no listing must not
+// pay a walk of a multi-megabyte messages array. Only on a hit does it walk to find the path.
+func skillListingPath(body []byte) (string, string) {
+	// bytes.Contains, not strings.Contains(string(body), ...): the body runs to megabytes and the
+	// conversion would copy all of it on the request goroutine, on every request, to answer a
+	// question that is usually "no".
+	if !bytes.Contains(body, []byte(skills.Header)) {
+		return "", ""
+	}
+	path, text := "", ""
+	gjson.GetBytes(body, "messages").ForEach(func(idx, m gjson.Result) bool {
+		if !strings.Contains(m.Raw, skills.Header) {
+			return true
+		}
+		c := m.Get("content")
+		if c.Type == gjson.String {
+			if strings.Contains(c.String(), skills.Header) {
+				path, text = "messages."+idx.String()+".content", c.String()
+				return false
+			}
+			return true
+		}
+		c.ForEach(func(bidx, blk gjson.Result) bool {
+			t := blk.Get("text")
+			if t.Exists() && strings.Contains(t.String(), skills.Header) {
+				path = "messages." + idx.String() + ".content." + bidx.String() + ".text"
+				text = t.String()
+				return false
+			}
+			return true
+		})
+		return path == ""
+	})
+	return path, text
 }

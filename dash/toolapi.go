@@ -180,6 +180,15 @@ type ToolCoverage struct {
 }
 
 // ToolTotals is the summary line.
+//
+// EVERY FIGURE HERE EXCEPT DeclaredSetTokens AND THE TWO Aside FIELDS COVERS THE CONTROLLABLE
+// SET ONLY — MCP tools and skills. It used to cover everything declared, and that made the
+// headline of this page a number nobody could act on: Claude Code's own tools are the largest
+// group here by weight and removing one breaks the agent, so a "you never touch 82.7% of what
+// you carry" assembled mostly out of Read, Bash and Grep was, in effect, advice to break your
+// agent. The built-ins are still reported — in Aside, and in their own section at the end of
+// the page — they are simply not inside the statistics a reader is invited to act on.
+// See ToolReport.Aside.
 type ToolTotals struct {
 	// DeclaredTokens / UnusedTokens are per-session averages over the CAPTURED sessions.
 	DeclaredTokens int     `json:"declared_tokens"`
@@ -190,6 +199,13 @@ type ToolTotals struct {
 	UnusedReads int64   `json:"unused_reads"`
 	UnusedUSD   float64 `json:"unused_usd"`
 	Priced      bool    `json:"priced"`
+	// AsideTokens is the per-session mean weight of the declarations kept OUT of every figure
+	// above: Claude Code's own tools, another agent's client tools, the provider's. Reported so
+	// the page can state what it left out and how large it is, instead of leaving a reader to
+	// discover that the composition bar below is bigger than the headline and wonder which lied.
+	AsideTokens int `json:"aside_tokens"`
+	// AsideSetTokens is that group's set total, the counterpart of DeclaredSetTokens.
+	AsideSetTokens int `json:"aside_set_tokens"`
 	// RequestsPerSession is a MEAN over every TOOL-BEARING session in scope, captured or not,
 	// while Median and Typical below are over the CAPTURED ones only — a different and smaller
 	// population. That is deliberate (this one answers "how many requests does a session make",
@@ -203,9 +219,11 @@ type ToolTotals struct {
 	// full session" projection must use — see the comment where it is computed for why the
 	// mean and the median both answer a different question and both understate it badly.
 	RequestsPerSessionTypical float64 `json:"requests_per_session_typical"`
-	// DeclaredSetTokens is the summed weight of everything declared, once — the whole that
-	// every SharePct is a part of. DeclaredTokens above is a per-session MEAN and is a
-	// different quantity; the two were conflated and produced shares over 100%.
+	// DeclaredSetTokens is the summed weight of everything declared, once — INCLUDING the
+	// aside group, because it is the whole that every SharePct is a part of and a share has to
+	// be a share of the actual prompt. DeclaredTokens above is a per-session MEAN over the
+	// controllable set and is a different quantity twice over; the two were conflated once and
+	// produced shares over 100%.
 	DeclaredSetTokens int `json:"declared_set_tokens"`
 }
 
@@ -239,9 +257,28 @@ type PromptStat struct {
 type ToolReport struct {
 	Coverage ToolCoverage `json:"coverage"`
 	Totals   ToolTotals   `json:"totals"`
-	Tools    []ToolStat   `json:"tools"`
-	Servers  []ServerStat `json:"servers"`
-	Skills   SkillStat    `json:"skills"`
+	// Tools is the CONTROLLABLE set: MCP tools. Skills are the other half and are in Skills.
+	//
+	// It used to be every client-side declaration, which put Claude Code's own tools at the top
+	// of a page whose whole purpose is to recommend removals. They are not a candidate for
+	// removal, they are the largest group by weight, and they therefore dominated the headline,
+	// the composition, the totals and the sortable table with a number no reader should act on.
+	// They are in Aside instead.
+	Tools   []ToolStat   `json:"tools"`
+	Servers []ServerStat `json:"servers"`
+	Skills  SkillStat    `json:"skills"`
+	// Aside is everything declared that is NOT the reader's to remove, in the same row shape:
+	// Claude Code's own tools (Builtin true), a third-party agent's or SDK application's client
+	// tools, and the provider's server-side tools.
+	//
+	// It is REPORTED and it is not in any figure in Totals. Both halves of that matter. Hiding
+	// it would be a lie about what the prompt contains — it is the majority of it — and folding
+	// it into the totals was the older lie, that a reader could act on the majority of it.
+	// The three sub-groups are told apart by Builtin and Kind, not by their position here,
+	// because the page shows them under different warnings: the built-ins break the agent, an
+	// unknown client tool needs its declarer identified first, a provider tool cannot be
+	// touched from Claude Code at all.
+	Aside []ToolStat `json:"aside"`
 	// Models is every model this scope ran on, with its cache-write and cache-read rates, so
 	// "what would removing this save me" can be answered per model instead of at one blended
 	// rate that describes none of them.
@@ -494,7 +531,12 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 
 	stats := map[statKey]*ToolStat{}
 	captured := map[string]bool{}
+	// declTok / unusedTok are the CONTROLLABLE set's per-session weights (MCP tools and the
+	// skills listing); asideTok is everything else's. Split here, in the one loop that sees each
+	// declaration, rather than re-derived later from the output lists: the same classification
+	// then decides the totals and the lists, so the two cannot disagree.
 	declTok, unusedTok := map[string]int{}, map[string]int{}
+	asideTok := map[string]int{}
 	listingTok, listingSessions, unknownListings := 0, 0, 0
 	skillsSeen := false
 	for _, dr := range decls {
@@ -549,19 +591,30 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		}
 		st.HasText = st.HasText || dr.hasText
 		st.SessionsDeclared++
-		declTok[dr.session] += dr.tokens
+		aside := isAside(dr.kind, dr.name)
+		if aside {
+			asideTok[dr.session] += dr.tokens
+		} else {
+			declTok[dr.session] += dr.tokens
+		}
 		calls := usedIn[dr.session][k]
 		if calls > 0 {
 			st.SessionsUsed++
 			st.Calls += calls
 			continue
 		}
-		unusedTok[dr.session] += dr.tokens
+		// UnusedReads and UnusedUSD are computed for every row, aside included: the row-level
+		// figures are what the built-ins section prints, and withholding them there would only
+		// mean the page could not say how much the group it is warning about actually costs.
+		// What the aside group stays out of is the TOTALS, below.
 		st.UnusedReads += int64(dr.tokens) * int64(sc.requests())
 		if sc.priced {
 			st.UnusedUSD += sc.usd(dr.tokens)
 		} else {
 			st.Priced = false
+		}
+		if !aside {
+			unusedTok[dr.session] += dr.tokens
 		}
 	}
 
@@ -581,13 +634,15 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 	}
 	rep.Totals.Priced = rep.Coverage.Captured > 0 && rep.Coverage.UnpricedSessions == 0
 	if n := rep.Coverage.Captured; n > 0 {
-		var dsum, usum int
+		var dsum, usum, asum int
 		for id := range captured {
 			dsum += declTok[id]
 			usum += unusedTok[id]
+			asum += asideTok[id]
 		}
 		rep.Totals.DeclaredTokens = dsum / n
 		rep.Totals.UnusedTokens = usum / n
+		rep.Totals.AsideTokens = asum / n
 		if dsum > 0 {
 			rep.Totals.UnusedPct = 100 * float64(usum) / float64(dsum)
 		}
@@ -634,6 +689,12 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 	rep.Models = modelRates(sessions)
 
 	for _, st := range stats {
+		if isAside(st.Kind, st.Name) {
+			rep.Aside = append(rep.Aside, *st)
+			continue
+		}
+		// Only the controllable set reaches the totals. This is the same restriction the loop
+		// above put on unusedTok, applied to the scope-wide sum.
 		rep.Totals.UnusedReads += st.UnusedReads
 		rep.Totals.UnusedUSD += st.UnusedUSD
 		if st.Kind == KindSkill {
@@ -666,6 +727,7 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 	rep.Servers = serverRollup(rep.Tools)
 	sortStats(rep.Tools)
 	sortStats(rep.Skills.Skills)
+	sortStats(rep.Aside)
 	// Classification, share and removal advice, applied to every row once the list is final.
 	// On READ rather than at capture: the built-in/user-added split is a name allowlist that
 	// will gain entries as Claude Code does, and re-capturing history to learn a new name is
@@ -678,14 +740,42 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 	// inventory, so the mean is far smaller than a single large declaration and shares came out
 	// at 650%. A percentage over 100 is not a rounding problem, it is proof the denominator is
 	// not the whole the numerator is part of.
+	// The denominator is the WHOLE declared set, aside group included, and every row's share is
+	// a share of that one whole. Two denominators — "share of what you control" for one list and
+	// "share of everything" for the other — would put two incompatible percentages in one column
+	// name, and the page prints them in the same table.
 	whole := rep.Skills.ListingTokens
 	for _, t := range rep.Tools {
 		whole += t.Tokens
 	}
+	for _, t := range rep.Aside {
+		whole += t.Tokens
+		rep.Totals.AsideSetTokens += t.Tokens
+	}
 	annotate(rep.Tools, whole)
 	annotate(rep.Skills.Skills, whole)
+	annotate(rep.Aside, whole)
 	rep.Totals.DeclaredSetTokens = whole
 	return rep
+}
+
+// isAside reports whether a declaration belongs to the group the reader cannot act on: Claude
+// Code's OWN tools, and the provider's server-side tools.
+//
+// A third-party client tool — KindTool with a name that is not one of Claude Code's — stays in
+// the main set, and that boundary is the whole point of this function rather than an oversight.
+// The first cut of this split keyed on KIND, so every KindTool row went aside; that is correct on
+// a Claude Code account (all of them are built-ins there, which is the account this was written
+// for) and quietly wrong on any other, because it took the removable declarations of every SDK
+// application and agent off the page — out of the totals, out of the sortable table, and out of
+// the suggestion engine and therefore out of the filter, which is a capability regression dressed
+// as a presentation change. Three tests caught it, which is why they exist.
+//
+// So the rule is the one the reader's decision actually turns on: a built-in must not be in the
+// statistics because acting on it breaks the agent, and a provider tool must not be because it
+// cannot be acted on at all. Everything else is somebody's choice and belongs in front of them.
+func isAside(kind, name string) bool {
+	return kind == KindServerTool || IsBuiltinTool(kind, name)
 }
 
 // annotate fills the three read-time fields on a row: whether it is a built-in, its share of
@@ -819,7 +909,7 @@ func (a *API) tools(w http.ResponseWriter, r *http.Request) {
 		// The account's own server-side removal list, so a reduction that the tool filter is
 		// ALREADY credited for can be marked as overlapping instead of counted twice.
 		filtered := map[string]bool{}
-		for _, n := range a.toolFilterState(f.Tenant).Removed {
+		for _, n := range a.toolFilterStateForScope(f).Removed {
 			filtered[n] = true
 		}
 		sr, err := a.rec.DB().SelfRemovals(f, price, filtered)

@@ -32,7 +32,7 @@ Every headline number, with the honesty machinery visible rather than hidden:
 | Volume | requests · sessions · tokens before/after |
 | Savings | gross · unique · net-of-restores · **each reduction re-earned** (was "overcount ratio") |
 | Amortization | **replay realized · replay ceiling · % of ceiling** |
-| Money | baseline cost · actual cost · context-guru's own LLM spend · net dollars saved · **prefix-cache savings** · **total avoided** |
+| Money | baseline cost · actual cost · context-guru's own LLM spend · net dollars saved · **prefix-cache savings** · **declarations not sent** · **total avoided** · **total the bill came down** |
 | Addressable spend | **addressable (input-side) spend · saved as % of it · output-token cost · reconciliation against the bill** |
 | Tokens billed | fresh input · cache reads · cache writes · output — each **with what that tier cost** |
 | Latency | context-guru added (mean + **p95**) · upstream (mean + p95) |
@@ -43,6 +43,34 @@ See [What the value pass changed](#what-the-value-pass-changed) for which number
 meaning and why.
 
 Three of those deserve their own explanation.
+
+#### Two totals, and why they are not one
+
+`total_saved_usd` answers *how much of this did context-guru do*. `total_reduced_usd` answers
+*how much smaller did this bill get*. They differ by what the account removed **itself**, and
+folding that into the first would be taking credit for the reader's own work.
+
+| Field | What it is | Which total |
+|---|---|---|
+| `decl_filter_usd` | **Measured, ours.** `requests.filtered_decl_tokens` — what the removal filter actually stopped sending, on requests that were really sent, priced at the tier each one paid. | both |
+| `self_removed_usd` | **Modelled, the user's.** Declarations the account stopped carrying on its own. | `total_reduced_usd` only |
+
+`decl_filter_usd` reaching a total at all is a **fix**, not a new feature. The whole savings walk
+is built on `tokens_before − tokens_after`, which is `schema.MessagesTokens`: message text only. A
+tool declaration lives in the top-level `tools` array, so the filter's saving moved
+`baseline_cost_usd` by exactly nothing and appeared in `net_saved_usd`, `total_saved_usd` and the
+waterfall by exactly nothing. It was on the Inventory tab and in no total anywhere — the largest
+lever measured in this project (82.7% of a declared catalogue is never invoked), invisible to the
+page that adds the savings up. Demonstrated on a live run: two clicks in the dashboard UI, and
+`total_saved_usd` went from `$0.000000` to `$0.003254`.
+
+`self_removed_usd` is kept out of the credited total because the method cannot see WHY a
+declaration stopped appearing. It sees that the declaration set changed — which is a fact, and the
+tokens genuinely were not billed — and infers a removal, which is a guess. On the production
+snapshot the largest candidate in the window was the editor integration, declared only when a
+session runs inside the IDE: "you removed it" and "you worked in a terminal that day" are
+indistinguishable in the data, and no threshold separates them. Rows the filter is already credited
+for are excluded rather than counted twice, and the count of exclusions is reported.
 
 #### Four savings denominators, not one
 

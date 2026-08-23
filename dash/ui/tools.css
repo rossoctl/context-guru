@@ -189,3 +189,15 @@
 details.why > .inv-prompt-regions { max-width: none; }
 /* The prose inside it keeps a readable measure; only the region LIST goes full width. */
 .inv-prompt-regions > p { max-width: 78ch; }
+
+/* ── the system prompt's parts ────────────────────────────────────────────── */
+/* Indented by heading level, so a `##` reads as living inside the `#` above it rather than as a
+   sibling. Three levels is all splitSystemPrompt produces (0 for the preamble, 1 and 2). */
+.inv-parts { margin: 0.5rem 0 0.25rem; }
+.inv-part { border-left: 2px solid var(--border-soft); padding-left: 0.6rem; margin: 0.2rem 0; }
+.inv-part-l2 { margin-left: 1.1rem; }
+.inv-part > summary { cursor: pointer; display: flex; gap: 0.6rem; align-items: baseline; }
+.inv-part-name { font-weight: 600; }
+/* The per-row removal fold sits in a table cell, so it must not stretch the row. */
+.inv-removal-fold > summary { white-space: nowrap; }
+.inv-removal-fold .inv-removal { min-width: 22rem; }

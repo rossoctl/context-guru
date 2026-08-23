@@ -370,10 +370,17 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// envelope (82.7% of a session's declared tokens are never invoked). Deterministic,
 	// unconditional while configured, and never touching a name the account did not list:
 	// see toolfilter.go for the prose gate and the determinism argument.
+	// The skills half is the same component's other mechanism: a skill is a line of prose in a
+	// transcript message rather than an element of `tools`, so it needs its own rewrite. Both run
+	// here, from the one configured list, and both report into the same two counters — the
+	// component's ledger says "declarations no longer sent", and a reader does not care which of
+	// the two shapes each one had.
 	filteredTokens, filteredDecls := 0, 0
 	if !bypass && pipe != nil {
 		if tf, ok := pipe.Find("toolfilter").(interface{ Removed() []string }); ok {
 			body, filteredTokens, filteredDecls = filterDeclarations(body, tf.Removed())
+			sBody, sTok, sN := filterSkillListing(body, tf.Removed())
+			body, filteredTokens, filteredDecls = sBody, filteredTokens+sTok, filteredDecls+sN
 		}
 	}
 

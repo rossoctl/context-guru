@@ -463,8 +463,24 @@ func TestToolReportDiffsDeclaredAgainstUsed(t *testing.T) {
 	for _, s := range rep.Tools {
 		byName[s.Name] = s
 	}
-	if s := byName["Bash"]; s.SessionsUsed != 1 || s.Calls != 7 || s.UnusedReads != 0 {
-		t.Errorf("Bash = %+v, want used with no waste", s)
+	aside := map[string]ToolStat{}
+	for _, s := range rep.Aside {
+		aside[s.Name] = s
+	}
+	// Bash is one of Claude Code's own, so it is reported in Aside and NOWHERE in the main set.
+	// Both halves are asserted: the group has to be visible (it is most of the prompt) and it has
+	// to be outside the figures the page invites the reader to act on.
+	if s := aside["Bash"]; s.SessionsUsed != 1 || s.Calls != 7 || s.UnusedReads != 0 || !s.Builtin {
+		t.Errorf("Bash in Aside = %+v, want a used built-in with no waste", s)
+	}
+	if _, ok := byName["Bash"]; ok {
+		t.Error("Bash is in the main tool list; the built-in split is not applied")
+	}
+	// Workflow is a client tool that is NOT one of Claude Code's, so it stays actionable. This is
+	// the boundary the split is drawn on, and getting it wrong the other way takes every
+	// SDK application's removable declarations off the page.
+	if _, ok := aside["Workflow"]; ok {
+		t.Error("Workflow is in Aside; only built-ins and provider tools belong there")
 	}
 	// Workflow: declared, never called, 10 requests re-read it.
 	wf := byName["Workflow"]
@@ -476,10 +492,32 @@ func TestToolReportDiffsDeclaredAgainstUsed(t *testing.T) {
 	if got := wf.UnusedUSD; got < 0.0049 || got > 0.0051 {
 		t.Errorf("Workflow unused USD = %g, want ~0.005", got)
 	}
-	// Declared weight per captured session: 100+5000+400+1000+300 = 6800; unused
-	// everything but Bash = 6700.
-	if rep.Totals.DeclaredTokens != 6800 || rep.Totals.UnusedTokens != 6700 {
-		t.Errorf("totals = %+v, want 6800 declared / 6700 unused per session", rep.Totals)
+	// Declared weight per captured session over the CONTROLLABLE set: 5000+400+1000+300 = 6700.
+	// Bash's 100 is not in it and is reported separately in AsideTokens, so the two still add up
+	// to the 6800 the session actually carried — the split moves weight between figures, it never
+	// loses any.
+	if rep.Totals.DeclaredTokens != 6700 || rep.Totals.UnusedTokens != 6700 {
+		t.Errorf("totals = %+v, want 6700 declared / 6700 unused per session", rep.Totals)
+	}
+	if rep.Totals.AsideTokens != 100 || rep.Totals.AsideSetTokens != 100 {
+		t.Errorf("aside weight = %d/%d, want 100/100 (Bash)",
+			rep.Totals.AsideTokens, rep.Totals.AsideSetTokens)
+	}
+	if got := rep.Totals.DeclaredTokens + rep.Totals.AsideTokens; got != 6800 {
+		t.Errorf("controllable + aside = %d, want the 6800 the session declared", got)
+	}
+	// The share denominator is still the WHOLE set, aside included, so a share is a share of the
+	// real prompt: the skills LISTING (1000) + Workflow (5000) + the MCP tool (400) + Bash (100)
+	// = 6500. The dataviz row's 300 is deliberately absent — a skill's weight is its ENTRY inside
+	// that listing, so adding the rows to the listing counts the same bytes twice. That is why
+	// this figure and DeclaredTokens above differ, and it predates the built-in split.
+	if rep.Totals.DeclaredSetTokens != 6500 {
+		t.Errorf("declared set = %d, want 6500 (listing + every tool row, aside included)",
+			rep.Totals.DeclaredSetTokens)
+	}
+	if rep.Totals.DeclaredSetTokens-rep.Totals.AsideSetTokens != 6400 {
+		t.Errorf("controllable share of the set = %d, want 6400",
+			rep.Totals.DeclaredSetTokens-rep.Totals.AsideSetTokens)
 	}
 	if rep.Totals.UnusedReads != 67_000 {
 		t.Errorf("unused reads = %d, want 67000", rep.Totals.UnusedReads)

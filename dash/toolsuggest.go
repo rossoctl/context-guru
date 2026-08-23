@@ -56,6 +56,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/skills"
 )
 
 // Sufficiency defaults. See the file comment for why these two numbers and not others.
@@ -70,9 +71,11 @@ type Suggestion struct {
 	Kind   string `json:"kind"`
 	Name   string `json:"name"`
 	Server string `json:"server,omitempty"`
-	// RemoveAs is the exact string to put in toolfilter's `remove` list. For an MCP tool
-	// that is its full `mcp__server__tool` name; the whole server is removable as
-	// `mcp__server`, which the servers list offers separately.
+	// RemoveAs is the exact string to put in toolfilter's `remove` list, which is NOT always
+	// Name: an MCP tool goes in as its full `mcp__server__tool` name (the whole server is
+	// `mcp__server`, offered separately by the servers list) and a skill as
+	// `skill__<name>`, because the two are removed by different mechanisms and a bare name
+	// cannot say which is meant. See internal/skills.RemovePrefix.
 	RemoveAs string `json:"remove_as"`
 	// Tokens is what carrying this costs on ONE request.
 	Tokens int `json:"tokens"`
@@ -320,16 +323,18 @@ func (d *DB) ToolFilterDocFor(f Filter, price func(string) (modelinfo.Price, boo
 	if realized.Requests > 0 {
 		out.Realized = realized
 	}
-	// Skills are reported by the inventory but NOT offered here: a skill is declared as
-	// prose inside a transcript message rather than as an element of `tools`, so removing one
-	// means editing the listing itself — and the Skill tool's schema carries no enum, so the
-	// model can still name a skill that is no longer listed. That is a different mechanism
-	// with a different failure mode; see docs/how-to/declaration-removal.md.
+	// Skills ARE offered here now, alongside the tools. They used to be excluded because the
+	// only removal mechanism was the `tools` array and a skill is not in it — that is no longer
+	// true (apply.filterSkillListing cuts the listing entry), and the reason the exclusion gave
+	// for itself turned out to argue the other way: the Skill tool's schema carries no enum, so a
+	// model that names an unlisted skill anyway still RUNS it. That makes over-removing a skill
+	// fail OPEN, where over-removing a tool fails silent. The safer of the two was the one being
+	// withheld. See docs/how-to/declaration-removal.md.
 	excluded := map[statKey]bool{}
 	for _, e := range out.Excluded {
 		excluded[statKey{e.Kind, e.Name}] = true
 	}
-	for _, st := range rep.Tools {
+	for _, st := range append(append([]ToolStat{}, rep.Tools...), rep.Skills.Skills...) {
 		if excluded[statKey{st.Kind, st.Name}] {
 			continue // already opted out: this is a realized saving, not a suggestion
 		}
@@ -355,7 +360,13 @@ func excludedFrom(names []string, since int64) []ExcludedDecl {
 	out := make([]ExcludedDecl, 0, len(names))
 	for _, n := range names {
 		e := ExcludedDecl{Kind: KindTool, Name: n, Since: since}
-		if server, _, ok := SplitMCPName(n); ok {
+		if skill := strings.TrimPrefix(n, skills.RemovePrefix); skill != n {
+			// A skill entry carries the prefix in the CONFIG and not in the report: the page
+			// matches an exclusion against an inventory row by (kind, name), and a row's name is
+			// the skill's own. Reporting the prefixed form here would leave every skill's switch
+			// permanently off-looking-on — the write would land and the checkbox would not move.
+			e.Kind, e.Name = KindSkill, skill
+		} else if server, _, ok := SplitMCPName(n); ok {
 			e.Kind, e.Server = KindMCPTool, server
 		} else if strings.HasPrefix(n, "mcp__") {
 			// The bare `mcp__<server>` form: a whole server, which is its own unit and not a
@@ -372,8 +383,16 @@ func excludedFrom(names []string, since int64) []ExcludedDecl {
 func suggest(st ToolStat, w declWindow) (Suggestion, bool) {
 	// Server-side tools (web_search, code_execution, the mcp_toolset connector) are declared
 	// by a `type` the provider resolves, not by a schema we can drop from the array without
-	// changing what the request IS. Never offered.
-	if st.Kind == KindServerTool || st.Kind == KindSkill || st.Kind == KindSkillListing {
+	// changing what the request IS. Never offered. Nor is the skills LISTING: it is one
+	// indivisible block of prose, and it shrinks by removing the skills inside it.
+	if st.Kind == KindServerTool || st.Kind == KindSkillListing {
+		return Suggestion{}, false
+	}
+	// A built-in is never offered either, and this is the second gate on that rather than the
+	// first: buildToolReport keeps them out of rep.Tools, so nothing reaches here. It stays
+	// because "suggest removing Read" is the single worst thing this API could say, and one
+	// caller's filter is not where that belongs.
+	if IsBuiltinTool(st.Kind, st.Name) {
 		return Suggestion{}, false
 	}
 	// Positive, sufficient observation, and every clause is required.
@@ -383,8 +402,12 @@ func suggest(st ToolStat, w declWindow) (Suggestion, bool) {
 		return Suggestion{}, false
 	}
 	days := span.Hours() / 24
+	removeAs := st.Name
+	if st.Kind == KindSkill {
+		removeAs = skills.RemovePrefix + st.Name
+	}
 	return Suggestion{
-		Kind: st.Kind, Name: st.Name, Server: st.Server, RemoveAs: st.Name,
+		Kind: st.Kind, Name: st.Name, Server: st.Server, RemoveAs: removeAs,
 		Tokens: st.Tokens, Sessions: w.sessions, Days: days, Since: w.first,
 		UnusedReads: st.UnusedReads, ProjectedUSD: st.UnusedUSD, Priced: st.Priced,
 		Basis: fmt.Sprintf("declared but never invoked across %d of your sessions since %s (%.0f days)",
@@ -411,6 +434,36 @@ func (a *API) toolFilterState(tenantID string) ToolFilterState {
 	return a.toolFilterFn(tenantID)
 }
 
+// toolFilterStateForScope resolves the removal configuration for the scope being VIEWED, and
+// refuses — with a reason a reader can act on — when the view spans more than one account.
+//
+// This is the read-side twin of the bug writeToolFilterDoc's comment records, and it shipped
+// unfixed while the write side was patched. A MANAGER's default scope is the whole service, so
+// f.Tenant is "" — and the registry lookup for tenant "" fails, which surfaced as
+// `enabled:false, reason:"could not read your account"`. The effect on the live page: every
+// opt-out switch on the Inventory tab rendered DISABLED for the one role permitted to use them,
+// under a message saying something had gone wrong with their account. Nothing had; the request
+// was ambiguous, and the removal list is a per-account setting with no service-wide meaning.
+//
+// Found by clicking the switch on a real hosted deployment. It is invisible from the tests
+// because every fixture that exercises the control pins a tenant, and invisible from the page
+// because a disabled switch under an explanatory paragraph looks like a deployment that has not
+// enabled the feature.
+func (a *API) toolFilterStateForScope(f Filter) ToolFilterState {
+	if f.TenantAll || f.Tenant == "" {
+		if a.auth == nil {
+			// Single-tenant: TenantAll is the only scope there is, so this is not ambiguity — it
+			// is a deployment with no per-account configuration to write to. Its own answer.
+			return a.toolFilterState("")
+		}
+		return ToolFilterState{Reason: "you are viewing every account's traffic, and a removal " +
+			"list belongs to ONE account — there is no service-wide list to switch. Pick an " +
+			"account (or your own) in the account selector and the switches become live; the " +
+			"analysis below is unaffected either way."}
+	}
+	return a.toolFilterState(f.Tenant)
+}
+
 // ToolFilterDocument builds the removal control document for a request's own scope. Exported
 // because the control plane's write route answers with it too: a switch must repaint from the
 // same document it would have read, and two builders would drift.
@@ -419,7 +472,7 @@ func (a *API) ToolFilterDocument(r *http.Request) (*ToolFilterDoc, error) {
 	if !ok {
 		return nil, errNotPermitted
 	}
-	return a.rec.DB().ToolFilterDocFor(f, a.priceFn(r), a.toolFilterState(f.Tenant))
+	return a.rec.DB().ToolFilterDocFor(f, a.priceFn(r), a.toolFilterStateForScope(f))
 }
 
 // errNotPermitted is returned to a caller that has no scope, so the control plane can tell
@@ -433,7 +486,7 @@ func (a *API) toolFilterDoc(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	doc, err := a.rec.DB().ToolFilterDocFor(f, a.priceFn(r), a.toolFilterState(f.Tenant))
+	doc, err := a.rec.DB().ToolFilterDocFor(f, a.priceFn(r), a.toolFilterStateForScope(f))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "could not read the removal report")
 		return

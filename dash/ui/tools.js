@@ -63,6 +63,10 @@ const tools = {
   // with the reason rather than vanishing — a control that disappears looks like a page
   // that has no opinion.
   control: null,
+  // controlDoc is the same document even when it is NOT usable, kept for its `reason`. A control
+  // that vanishes with no explanation is a page with no opinion; the reason is the whole
+  // difference between "this proxy cannot do it" and "pick an account first".
+  controlDoc: null,
   sort: 'unused_reads',
   dir: 'desc',
   busy: '',
@@ -303,11 +307,12 @@ function renderHeadline(host, rep) {
     return;
   }
   const used = Math.max(0, t.declared_tokens - t.unused_tokens);
-  host.appendChild(tileGroup('What you carry, and what you use',
+  host.appendChild(tileGroup('What you carry that you can change, and what you use',
     'per session, averaged over the ' + num(c.captured) + ' session'
-    + (c.captured === 1 ? '' : 's') + ' whose inventory was captured', [
+    + (c.captured === 1 ? '' : 's') + ' whose inventory was captured — MCP tools and skills only, '
+    + 'which are the things you can actually turn off', [
     tile('inv-declared', 'Declared per session', num(t.declared_tokens),
-      'tool schemas, MCP tools and the skills listing'),
+      'your MCP tool schemas and the skills listing'),
     tile('inv-used', 'Invoked at least once', num(used),
       pct(100 - t.unused_pct) + ' of what you declare', used ? 'good' : ''),
     // The number this page exists for. Deliberately the only 'bad' tile: three red tiles
@@ -334,6 +339,18 @@ function renderHeadline(host, rep) {
       t.priced ? 'if none of it had been carried' : 'no dollar: some models here are unpriced'),
   ], 'headline'));
   host.appendChild(gauge(t));
+  // What these tiles LEFT OUT, and how big it is. Without this line the reader meets a
+  // composition bar further down that is several times larger than the headline and has to work
+  // out for themselves which of the two is lying. Neither is; they answer different questions.
+  if (t.aside_tokens) {
+    host.appendChild(el('p', { class: 'hint', 'data-testid': 'inv-aside-note' },
+      'A further ' + num(t.aside_tokens) + ' tokens per session are Claude Code\'s own tools and '
+      + 'the provider\'s. They are NOT in the four figures above, on purpose: removing one does '
+      + 'not slim your agent, it takes away equipment the model is expected to have, so counting '
+      + 'them as waste would make the headline a number whose only action breaks things. They are '
+      + 'in the composition bar below, which shows the whole prompt, and listed in full in their '
+      + 'own section at the end of this page.'));
+  }
 }
 
 /**
@@ -354,10 +371,11 @@ function gauge(t) {
   // averaged over instead of only its unit.
   const box = el('div', { class: 'panel cg-gauge', 'data-testid': 'inv-gauge' },
     el('div', { class: 'cg-gauge-head' },
-      el('h2', {}, 'What every request carries before you type anything'),
+      el('h2', {}, 'What every request carries that you could stop carrying'),
       el('span', { class: 'section-note', text: num(t.declared_tokens)
-        + ' tokens of tool and skill declarations, per request, averaged over the sessions '
-        + 'whose inventory was captured' })),
+        + ' tokens of YOUR MCP tool and skill declarations, per request, averaged over the '
+        + 'sessions whose inventory was captured — the agent\'s own tools are excluded and are '
+        + 'shown separately' })),
     el('div', { class: 'cg-gauge-track' },
       el('span', {
         class: 'cg-seg cg-used', style: 'width:' + (100 - unusedPct).toFixed(2) + '%',
@@ -522,11 +540,16 @@ function renderUnused(host, rep) {
   }
   panel.appendChild(reversibilityNote());
   if (!tools.control) {
-    // Graceful degradation, stated. The analysis and the COMMANDS are the whole value and
-    // stand on their own; only the one-click switch is missing.
+    // Graceful degradation, stated — and stated with the SERVER's reason where there is one.
+    // The generic sentence was wrong on the commonest hosted case: a manager's default view
+    // spans every account, a removal list belongs to one, and the honest answer is "pick an
+    // account", not "this proxy cannot do it".
+    const why = (tools.controlDoc && tools.controlDoc.reason) || '';
     panel.appendChild(el('div', { class: 'state', 'data-testid': 'inv-control-absent' },
       el('div', { class: 'state-body' },
-        el('strong', {}, 'One-click opt-out is not enabled on this proxy'),
+        el('strong', {}, why ? 'The one-click switches are not live in this view'
+          : 'One-click opt-out is not enabled on this proxy'),
+        why ? el('span', {}, why) : null,
         el('span', {}, 'It changes nothing about the list below. Every group carries the '
           + 'command that removes it from your own configuration, which is the more direct '
           + 'fix anyway — it stops the declaration at the source rather than filtering it '
@@ -629,8 +652,19 @@ const EXPANDED_GROUPS = 8;
  */
 function removalGroup(g, rep) {
   const many = g.items.length > 1;
+  // The group-level switch, for the group whose MECHANISM is group-wide: an MCP server. It posts
+  // one `mcp_server` exclusion, which is the same unit `claude mcp remove <server>` beside it
+  // takes and the same unit the config stores as `mcp__<server>`.
+  //
+  // It exists because the page grouped by "what one action removes" and then offered a switch per
+  // TOOL only: a reader who had decided to drop a nineteen-tool server had to tick nineteen
+  // boxes, each one a separate write, each one its own prefix rebuild — which is the one thing
+  // the reversibility note tells them not to do.
+  const srv = many && g.sub === 'MCP server'
+    ? { kind: 'mcp_server', name: '', server: g.label, tokens: g.tokens } : null;
   const head = el('div', { class: 'inv-group-head' },
     el('div', { class: 'inv-group-id' },
+      srv ? excludeToggle(srv) : null,
       el('span', { class: 'inv-group-name comp-name', text: g.label }),
       g.sub ? el('span', { class: 'pill neutral', text: g.sub }) : kindPill(g.items[0]),
       many ? el('span', { class: 'section-note', text: num(g.items.length) + ' declarations' }) : null),
@@ -683,17 +717,24 @@ function soloRowExtras(t, rep) {
 }
 
 /**
- * unusedRow is one candidate, its evidence, and its switch.
+ * unusedRow is one candidate, its evidence, its switch, and the command that removes it AT SOURCE.
  *
  * The checkbox and the name are inside a <label> and NOTHING ELSE IS. A copy button inside a
  * label is a button that toggles the checkbox when you click it, which is how an affordance
- * added for convenience becomes a change nobody meant to make.
+ * added for convenience becomes a change nobody meant to make. There were two copies of this
+ * function in this file; the older one wrapped the whole row in the label, and being second it
+ * won — so the reveal and the command below were unreachable code for as long as both existed.
+ *
+ * EVERY row carries its own command, not just the group head. A group of one already showed it,
+ * and a group of many showed the SERVER-level command once at the top — which is right for "get
+ * rid of this whole MCP server" and no answer at all to "get rid of just this one tool", the
+ * question a reader with a nineteen-tool server actually has. The server command remains at the
+ * group head; this is the per-item one beside it.
  */
 function unusedRow(t, rep) {
   const c = rep.coverage;
   const key = t.kind + '/' + t.name;
-  const off = !!(tools.control && tools.control.excluded
-    && tools.control.excluded.some((e) => e.kind === t.kind && e.name === t.name));
+  const off = isExcluded(t);
   // Only a provider-side tool is inert AS A ROW: it can never be dropped here, whatever this
   // proxy supports. A missing endpoint disables every switch, but that is one fact about the
   // page, stated once by renderUnused — repeating it under forty rows buries the evidence
@@ -703,14 +744,7 @@ function unusedRow(t, rep) {
     class: 'cg-item' + (off ? ' cg-off' : '') + (fixed ? ' cg-fixed' : ''),
     'data-testid': 'inv-item-' + key,
   });
-  const cb = el('input', {
-    type: 'checkbox', 'data-testid': 'inv-toggle-' + key,
-    id: 'inv-cb-' + key,
-    disabled: fixed || !tools.control || tools.busy === key,
-    checked: off ? 'checked' : null,
-    onchange: (ev) => toggleExcluded(t, ev.currentTarget.checked),
-  });
-  box.appendChild(cb);
+  box.appendChild(excludeToggle(t));
   box.appendChild(el('label', { class: 'cg-item-main', for: 'inv-cb-' + key },
     el('span', { class: 'cg-item-name comp-name', text: t.name }),
     kindPill(t),
@@ -732,7 +766,34 @@ function unusedRow(t, rep) {
       + 'restore it; that pays the one-time prefix rebuild again.' }));
   }
   box.appendChild(promptTextReveal(t));
+  // The per-item removal, folded: the group head already carries the one-command answer, so
+  // forty open copy-boxes under it would bury the evidence sentence that is the point of the row.
+  // Folded is not hidden — the summary names the item and the mechanism.
+  box.appendChild(removalDetails(t, 'Remove just ' + t.name + ' from your own setup'));
   return box;
+}
+
+/**
+ * removalDetails is removalCell behind a disclosure, for the places that show one row per item.
+ *
+ * The tables and the member lists have one of these per row, and removalCell renders two
+ * copy-boxes and a note — open, that is a page of snippets where a table was. The summary states
+ * the item, so a reader scanning for "how do I get rid of THIS one" does not have to open every
+ * row to find out which is which.
+ */
+function removalDetails(t, summary) {
+  const det = el('details', { class: 'why inv-removal-fold',
+    'data-testid': 'inv-removal-' + t.kind + '/' + t.name },
+  el('summary', {}, summary));
+  // Built lazily: removalCell is cheap, but forty of them per table times four tables is DOM
+  // nobody has looked at yet, and the copy buttons register listeners.
+  let built = false;
+  det.addEventListener('toggle', () => {
+    if (!det.open || built) return;
+    built = true;
+    det.appendChild(removalCell(t));
+  });
+  return det;
 }
 
 /**
@@ -759,51 +820,6 @@ function reversibilityNote() {
       + 'switch off in one pass, and why toggling an item back and forth pays it every time.'),
     el('p', {}, 'Sessions already running keep whatever they declared at their first turn. The '
       + 'change lands on the next new session, and on the next prefix rebuild of the old ones.'));
-}
-
-/** unusedRow is one candidate, its evidence, and its switch. */
-function unusedRow(t, rep) {
-  const c = rep.coverage;
-  const key = t.kind + '/' + t.name;
-  const off = !!(tools.control && tools.control.excluded
-    && tools.control.excluded.some((e) => e.kind === t.kind && e.name === t.name));
-  // A provider-side tool is declared by the API, not by the client, so there is nothing
-  // here to stop sending. Saying so beats a switch that silently does nothing.
-  // Only a provider-side tool is inert AS A ROW: it can never be dropped here, whatever
-  // this proxy supports. A missing endpoint disables every switch, but that is one fact
-  // about the page, stated once by renderUnused — repeating it under all forty rows buries
-  // the evidence sentence that is the point of the row.
-  const fixed = t.kind === 'server_tool';
-  const why = fixed ? 'Provider-side tool. It is part of the API request the agent builds, not '
-    + 'something this proxy declares, so it cannot be dropped here.' : '';
-  const box = el('label', {
-    class: 'cg-item' + (off ? ' cg-off' : '') + (fixed ? ' cg-fixed' : ''),
-    'data-testid': 'inv-item-' + key,
-  });
-  const cb = el('input', {
-    type: 'checkbox', 'data-testid': 'inv-toggle-' + key,
-    disabled: fixed || !tools.control || tools.busy === key,
-    checked: off ? 'checked' : null,
-    onchange: (ev) => toggleExcluded(t, ev.currentTarget.checked),
-  });
-  box.appendChild(cb);
-  box.appendChild(el('span', { class: 'cg-item-main' },
-    el('span', { class: 'cg-item-name comp-name', text: t.name }),
-    kindPill(t),
-    t.server ? el('span', { class: 'cg-item-srv', text: t.server }) : null,
-    el('span', { class: 'cg-item-weight' },
-      num(t.tokens) + ' tok/request · ' + compact(t.unused_reads) + ' read for nothing · '),
-    el('span', { class: 'cg-item-usd' }, money(t.unused_usd, t.priced))));
-  // The basis. One sentence, always present, always naming the denominator and the window.
-  box.appendChild(el('span', { class: 'cg-item-basis', 'data-testid': 'inv-basis-' + key },
-    'Unused across ' + num(t.sessions_declared) + ' of your ' + num(c.captured)
-    + ' captured session' + (c.captured === 1 ? '' : 's') + ' — ' + rangeLabel() + '.'));
-  if (why) box.appendChild(el('span', { class: 'comp-warn', text: why }));
-  if (off) {
-    box.appendChild(el('span', { class: 'cg-item-basis', text: 'Opted out. Switch back on to '
-      + 'restore it; that pays the one-time prefix rebuild again.' }));
-  }
-  return box;
 }
 
 /**
@@ -840,7 +856,7 @@ function renderRealized(host) {
 
 /** toggleExcluded posts one change and repaints from the server's answer, not from the DOM. */
 async function toggleExcluded(t, on) {
-  const key = t.kind + '/' + t.name;
+  const key = t.kind + '/' + (t.name || t.server || '');
   tools.busy = key;
   try {
     const res = await fetch('/api/toolfilter', {
@@ -892,32 +908,35 @@ function tsortable(table, keys, onSort) {
  */
 function toolTable(host, rep) {
   const panel = el('div', { class: 'panel' },
-    el('h2', {}, 'Every declaration, by weight'),
-    el('p', { class: 'note' }, 'Everything you added, sorted by what it cost to carry unused. '
+    el('h2', {}, 'Every declaration you control, by weight'),
+    el('p', { class: 'note' }, 'Your MCP tools, sorted by what it cost to carry them unused. '
       + '"Read for nothing" is this item\'s size times the requests that re-read it in the '
-      + "sessions that never called it. Claude Code's own tools are in their own section at "
-      + 'the end of this page.'));
+      + "sessions that never called it. Claude Code's own tools and the provider's are in their "
+      + 'own section at the end of this page, and in none of the figures above. Skills have their '
+      + 'own table below, because a skills listing can be unreadable in a way a tools array '
+      + 'cannot.'));
   const table = el('table', { class: 'tbl', 'data-testid': 'inv-tools-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Name'), el('th', {}, 'Kind'),
       el('th', { class: 'num' }, 'Tokens'), el('th', { class: 'num' }, 'Sessions'),
       el('th', { class: 'num' }, 'Used in'), el('th', { class: 'num' }, 'Calls'),
-      el('th', { class: 'num' }, 'Read for nothing'), el('th', { class: 'num' }, 'Cost of that'))));
+      el('th', { class: 'num' }, 'Read for nothing'), el('th', { class: 'num' }, 'Cost of that'),
+      el('th', {}, 'How to remove it'))));
   const body = el('tbody');
   table.appendChild(body);
   panel.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
   host.appendChild(panel);
   tsortable(table, TOOL_COLS, () => renderTools());
-  const listed = rep.tools.filter((x) => !x.builtin && x.kind !== 'server_tool');
-  if (!listed.length) {
-    tableMessage(body, 8, 'No declarations captured',
-      'Nothing in this scope recorded what it declared.');
+  // The server already excluded the built-ins and the provider's tools from rep.tools — they are
+  // in rep.aside, out of every total. No filter here: a second copy of that rule in the client
+  // is a second place for it to drift, and the drift is invisible because both look plausible.
+  if (!rep.tools.length) {
+    tableMessage(body, 9, 'No MCP tools captured',
+      'No session in this scope declared an MCP tool. Anything else it declared is in the '
+      + 'skills table below, or in the agent\'s own section at the end.');
     return;
   }
-  // Same exclusion as the actionable list: the agent's own tools have their own section at
-  // the end of the page, so this table is the things a reader can actually decide about.
-  for (const t of sortRows(rep.tools.filter((x) => !x.builtin && x.kind !== 'server_tool'),
-    tools.sort, tools.dir)) {
+  for (const t of sortRows(rep.tools, tools.sort, tools.dir)) {
     body.appendChild(el('tr', { class: t.sessions_used ? '' : 'cg-row-unused' },
       el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: t.name })),
       el('td', {}, kindPill(t), t.server ? el('span', { class: 'cg-item-srv', text: t.server }) : null),
@@ -926,7 +945,10 @@ function toolTable(host, rep) {
         ? num(t.sessions_used)
         : el('span', { class: 'pill missing' }, 'never')),
       numTd(t.calls), readTd(t.unused_reads),
-      el('td', { class: 'num' }, money(t.unused_usd, t.priced))));
+      el('td', { class: 'num' }, money(t.unused_usd, t.priced)),
+      // Every row, used or not. The actionable list above covers the never-invoked ones; a reader
+      // who wants rid of something they DO use occasionally had nowhere to find the command.
+      el('td', {}, removalDetails(t, 'Command'))));
   }
 }
 
@@ -1016,22 +1038,72 @@ function skillsPanel(host, rep) {
   if (!(s.skills || []).length) return;
   const table = el('table', { class: 'tbl compact', 'data-testid': 'inv-skills-table' },
     el('thead', {}, el('tr', {},
-      el('th', {}, 'Skill'), el('th', { class: 'num' }, 'Tokens'),
+      el('th', {}, 'Off'), el('th', {}, 'Skill'), el('th', { class: 'num' }, 'Tokens'),
       el('th', { class: 'num' }, 'Sessions'), el('th', { class: 'num' }, 'Used in'),
       el('th', { class: 'num' }, 'Calls'), el('th', { class: 'num' }, 'Read for nothing'),
-      el('th', { class: 'num' }, 'Cost of that'))));
+      el('th', { class: 'num' }, 'Cost of that'), el('th', {}, 'How to remove it'))));
   const body = el('tbody');
   table.appendChild(body);
   for (const t of s.skills) {
     body.appendChild(el('tr', { class: t.sessions_used ? '' : 'cg-row-unused' },
+      // The switch, on EVERY skill and not only the never-invoked ones. A skill the reader used
+      // once and does not want to keep paying for is exactly the case the actionable list above
+      // cannot reach, and editing a config file by hand was the only route to it.
+      el('td', {}, excludeToggle(t)),
       el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: t.name })),
       numTd(t.tokens), numTd(t.sessions_declared),
       el('td', { class: 'num' }, t.sessions_used
         ? num(t.sessions_used) : el('span', { class: 'pill missing' }, 'never')),
       numTd(t.calls), readTd(t.unused_reads),
-      el('td', { class: 'num' }, money(t.unused_usd, t.priced))));
+      el('td', { class: 'num' }, money(t.unused_usd, t.priced)),
+      el('td', {}, removalDetails(t, 'Command'))));
   }
   panel.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
+  panel.appendChild(el('p', { class: 'hint' }, 'Switching a skill off here stops context-guru '
+    + 'sending its entry in the listing, from your next session. It does not edit your own '
+    + 'configuration — the command beside each row does that, permanently and at source. One '
+    + 'caveat worth knowing: the Skill tool takes a free-form name, so a model that remembers an '
+    + 'unlisted skill can still run it. That is deliberate — it fails open — but it means this is '
+    + 'a way to stop PAYING for a skill, not a way to forbid it.'));
+}
+
+/**
+ * excludeToggle is the one-click opt-out, extracted so a table row and a card row share it.
+ *
+ * There were two copies of this checkbox and they had already diverged once (one had the id/for
+ * pairing, the other wrapped the whole row in a label). Now there is one, and the two call sites
+ * differ only in what they put beside it.
+ */
+function excludeToggle(t) {
+  const key = t.kind + '/' + (t.name || t.server || '');
+  const off = isExcluded(t);
+  const fixed = t.kind === 'server_tool' || t.builtin;
+  const cb = el('input', {
+    type: 'checkbox', 'data-testid': 'inv-toggle-' + key, id: 'inv-cb-' + key,
+    title: fixed ? 'This one is not yours to drop from here.'
+      : (tools.control ? 'Stop sending this declaration' : 'One-click opt-out is not enabled on '
+        + 'this proxy — use the command beside this row'),
+    disabled: fixed || !tools.control || tools.busy === key,
+    checked: off ? 'checked' : null,
+    onchange: (ev) => toggleExcluded(t, ev.currentTarget.checked),
+  });
+  return cb;
+}
+
+/**
+ * isExcluded matches a row against the account's removal list. One definition, three callers.
+ *
+ * An MCP SERVER is matched on its server name rather than on `name`: the config stores it as the
+ * bare `mcp__<server>` form and excludedFrom reports that back with kind `mcp_server` and an empty
+ * tool name, so a name comparison would never match and the switch would spring back off after a
+ * write that had landed.
+ */
+function isExcluded(t) {
+  const list = (tools.control && tools.control.excluded) || [];
+  if (t.kind === 'mcp_server') {
+    return list.some((e) => e.kind === 'mcp_server' && e.server === t.server);
+  }
+  return list.some((e) => e.kind === t.kind && e.name === t.name);
 }
 
 /**
@@ -1056,12 +1128,18 @@ function skillsPanel(host, rep) {
  * not answering.
  */
 function renderComposition(host, rep) {
-  const all = (rep.tools || []).concat(rep.skills.skills || []);
-  const sum = (f) => all.filter(f).reduce((n, t) => n + t.tokens, 0);
-  const mcp = sum((t) => t.kind === 'mcp_tool');
-  const provider = sum((t) => t.kind === 'server_tool');
-  const builtin = sum((t) => t.builtin);
-  const client = sum((t) => t.kind === 'tool' && !t.builtin);
+  // Two sources, because the report keeps two lists: rep.tools/rep.skills is what the reader
+  // controls, rep.aside is what they do not. This panel is the ONE place both are counted — its
+  // job is the whole prompt, and a composition that omitted the largest group would be a
+  // composition of nothing.
+  const mine = (rep.tools || []).concat(rep.skills.skills || []);
+  const aside = rep.aside || [];
+  const sum = (rows, f) => rows.filter(f).reduce((n, t) => n + t.tokens, 0);
+  const all = mine.concat(aside);
+  const mcp = sum(mine, (t) => t.kind === 'mcp_tool');
+  const provider = sum(aside, (t) => t.kind === 'server_tool');
+  const builtin = sum(aside, (t) => t.builtin);
+  const client = sum(mine, (t) => t.kind === 'tool' && !t.builtin);
   // Skills contribute their LISTING and nothing else. Each skill row's token weight is the
   // weight of its own ENTRY IN that listing — a sub-slice of the same block — so adding the
   // rows to the listing counts every skill twice. It did: the segments summed to 43,933 while
@@ -1107,7 +1185,7 @@ function renderComposition(host, rep) {
 
   // The per-item detail: ONE measure across many long-named categories, so ONE hue. Twelve
   // colours here would assert that twelve different things are being plotted.
-  const top = all.filter((t) => t.tokens > 0 && !t.builtin)
+  const top = mine.filter((t) => t.tokens > 0)
     .sort((a, b) => b.tokens - a.tokens).slice(0, 12);
   if (top.length) {
     panel.appendChild(el('h3', {}, 'The heaviest removable declarations'));
@@ -1120,8 +1198,9 @@ function renderComposition(host, rep) {
         + num(t.sessions_declared) + ' session' + (t.sessions_declared === 1 ? '' : 's')),
     })));
     panel.appendChild(el('p', { class: 'hint' }, 'Share is of the ' + num(declared)
-      + ' tokens of DECLARATIONS, not of the whole prefix above — the system prompt is not a '
-      + 'declaration and is not in that denominator.'));
+      + ' tokens of DECLARATIONS — every one of them, the agent\'s own tools included, so a '
+      + 'share here is a share of the real array. It is NOT of the whole prefix above: the '
+      + 'system prompt is not a declaration and is not in that denominator.'));
   }
 }
 
@@ -1221,7 +1300,8 @@ function renderRemovalValue(host, rep) {
   panel.appendChild(el('p', { class: 'hint' },
     'To value one item, multiply by its token weight ÷ 1,000. The heaviest removable '
     + 'declaration in this scope is '
-    + num(Math.max(0, ...((rep.tools || []).filter((t) => !t.builtin).map((t) => t.tokens))))
+    + num(Math.max(0, ...(rep.tools || []).concat(rep.skills.skills || [])
+      .map((t) => t.tokens)))
     + ' tokens.'));
 }
 
@@ -1236,7 +1316,11 @@ function renderRemovalValue(host, rep) {
  * to be made hard to act on in the same breath.
  */
 function renderBuiltins(host, rep) {
-  const rows = (rep.tools || []).filter((t) => t.builtin || t.kind === 'server_tool');
+  // rep.aside, not a filter over rep.tools: the server decides this split, because it is the same
+  // decision that keeps these rows out of every total. A client-side filter would be a second
+  // copy of the rule, and a page whose table and whose headline disagreed about which group a row
+  // was in would look right in both places.
+  const rows = rep.aside || [];
   if (!rows.length) return;
   const tok = rows.reduce((n, t) => n + t.tokens, 0);
   // The warning belongs on the CLOSED bar. It used to live only inside the expanded panel, so
@@ -1244,24 +1328,33 @@ function renderBuiltins(host, rep) {
   // indistinguishable from the collapsed detail panels elsewhere on the page, and reading as
   // "more of the same, but folded away" rather than as "this is the one section that is not a
   // saving". A danger that is only visible after you have opened the door is decoration.
+  const share = pct(100 * tok / Math.max(1, rep.totals.declared_set_tokens), 0);
+  const builtins = rows.filter((t) => t.builtin).length;
+  const provider = rows.filter((t) => t.kind === 'server_tool').length;
   const det = el('details', { class: 'panel inv-builtins', 'data-testid': 'inv-builtins' },
     el('summary', {},
       el('span', { class: 'pill bad' }, 'not a saving'),
       el('span', { class: 'inv-builtins-title' }, "The agent's own tools — " + num(rows.length)
-        + ' items, ' + num(tok) + ' tokens, ' + pct(100 * tok
-        / Math.max(1, rep.totals.declared_set_tokens), 0) + ' of what you declare'),
+        + ' items, ' + num(tok) + ' tokens, ' + share + ' of what you declare'),
       el('span', { class: 'section-note' },
         'removing any of these breaks the agent — expand only if you know why you are here')));
   det.appendChild(el('div', { class: 'state blocked', 'data-testid': 'inv-builtins-danger' },
     el('div', { class: 'state-body' },
       el('strong', {}, 'Removing any of these will break the agent'),
-      el('span', {}, 'These are Claude Code\'s own tools and the provider\'s. They are '
-        + 'not unused capacity you are wasting money on — they are the equipment the model is '
-        + 'expected to have, and a session missing one does not degrade gracefully: anything '
-        + 'that needed it simply fails.'),
-      el('span', {}, 'They are listed because they are ' + pct(100 * tok
-        / Math.max(1, rep.totals.declared_set_tokens), 0) + ' of what you carry and pretending '
-        + 'otherwise would be dishonest. Acting on that number is almost always the wrong call.'),
+      el('span', {}, 'These are Claude Code\'s own tools' + (provider
+        ? ' (' + num(builtins) + ') and the provider\'s (' + num(provider) + ')' : '')
+        + '. They are not unused capacity you are wasting money on — they are the equipment the '
+        + 'model is expected to have, and a session missing one does not degrade gracefully: '
+        + 'anything that needed it simply fails.'),
+      // The reason they are down here AND out of the numbers, stated where a reader who scrolled
+      // this far will meet it. Without this the page looks like it is hiding its biggest group.
+      el('span', {}, 'They are ' + share + ' of everything you declare, and they are in NONE of '
+        + 'the figures above — not the headline, not the bar, not the totals, not the tables. '
+        + 'That is deliberate: a "you never touch 82% of what you carry" assembled mostly out of '
+        + 'Read, Bash and Grep is a true number and useless advice, because the only action it '
+        + 'suggests is one that breaks your agent. The composition bar near the top of the page '
+        + 'is the one place they are counted, because that bar\'s job is to show the whole '
+        + 'prompt.'),
       el('span', {}, 'A low "never invoked" count here is normal and is NOT a reason to remove '
         + 'one: a tool that goes uncalled for fifty sessions is doing its job by being '
         + 'available on the fifty-first.'))));
@@ -1279,7 +1372,12 @@ function renderBuiltins(host, rep) {
       el('td', { class: 'num', text: pct(t.share_pct, 1) }),
       el('td', { class: 'num' }, t.sessions_used
         ? num(t.sessions_used) : el('span', { class: 'pill missing' }, 'never')),
-      el('td', {}, removalCell(t))));
+      // FOLDED, unlike every other command on this page, and that asymmetry is the point. The
+      // requirement for this section is that it be visible and deliberately not easy to act on;
+      // twenty-two open copy-boxes reading `claude --disallowedTools "Bash"` is the opposite of
+      // that, however loud the warning above them. A reader who means it opens the section and
+      // then opens the row.
+      el('td', {}, removalDetails(t, 'If you really must'))));
   }
   table.appendChild(body);
   det.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
@@ -1577,13 +1675,67 @@ function promptRegion(r) {
   el('summary', {},
     el('span', { class: 'inv-region-name comp-name', text: name }),
     isSys ? el('span', { class: 'pill neutral' }, 'system') : kindPill(r),
-    el('span', { class: 'section-note', text: num(r.tokens) + ' tok · ' + pct(r.share, 1) })));
-  if (r.has_text) {
-    det.appendChild(el('pre', { class: 'inv-snippet inv-text-pre', text: r.text }));
-  } else {
+    el('span', { class: 'section-note', text: num(r.tokens) + ' tok · ' + pct(r.share, 1)
+      + ((r.parts || []).length ? ' · ' + num(r.parts.length) + ' parts' : '') })));
+  if (!r.has_text) {
     notCapturedState(det.appendChild(el('div')));
+    return det;
   }
+  // The system prompt gets decomposed. Every other region is one JSON object or one block of
+  // prose, so there is nothing to decompose and the raw text IS the answer.
+  if ((r.parts || []).length) {
+    det.appendChild(promptParts(r));
+  }
+  det.appendChild(el('details', { class: 'why', 'data-testid': 'inv-whole-' + r.kind },
+    el('summary', {}, (r.parts || []).length
+      ? 'Or read the whole thing assembled, as it was sent — ' + num(r.tokens) + ' tokens'
+      : 'The text — ' + num(r.tokens) + ' tokens'),
+    el('pre', { class: 'inv-snippet inv-text-pre', text: r.text })));
   return det;
+}
+
+/**
+ * promptParts is the system prompt broken into the sections it was assembled from.
+ *
+ * This is the answer to "show me the parts". A 12,000-token system prompt is not one decision:
+ * it is the agent's identity preamble, plus the harness rules, plus the environment block, plus
+ * whatever the reader's own CLAUDE.md contributed — and only some of those are theirs to change.
+ * Undivided, the page could show the number and not the answer.
+ *
+ * The split is on HEADINGS and the panel says so, because "part" could equally mean the wire
+ * blocks (`system` is an array, each block separately cacheable) and a reader comparing this
+ * against a breakpoint count would otherwise be misled. Those boundaries are not recoverable —
+ * they are joined before anything is stored — so headings are what there is, on every row ever
+ * captured rather than only on rows written from today.
+ *
+ * The parts' weights are measured per part and their SUM is printed beside the region's own
+ * total, never reconciled with it: BPE is not additive across a split point, so the two are
+ * different measurements of the same bytes and neither is the error. Hiding that would be a
+ * small lie in the service of a tidy column.
+ */
+function promptParts(r) {
+  const wrap = el('div', { class: 'inv-parts', 'data-testid': 'inv-parts' });
+  const drift = (r.parts_tokens || 0) - r.tokens;
+  wrap.appendChild(el('p', { class: 'note' }, num(r.parts.length) + ' parts, split at the '
+    + 'prompt\'s own markdown headings — which is how it is organised, not how it is CACHED: the '
+    + 'API sends the system prompt as an array of blocks and those boundaries are not recorded. '
+    + 'Heaviest part first is NOT the order the model reads them in; that is the order below.'));
+  for (const p of r.parts) {
+    wrap.appendChild(el('details', { class: 'inv-part inv-part-l' + (p.level || 0),
+      'data-testid': 'inv-part-' + p.title },
+    el('summary', {},
+      el('span', { class: 'inv-part-name comp-name', text: p.title }),
+      el('span', { class: 'section-note', text: num(p.tokens) + ' tok · ' + pct(p.share, 1) })),
+    el('pre', { class: 'inv-snippet inv-text-pre', text: p.text })));
+  }
+  wrap.appendChild(el('p', { class: 'hint' }, 'The parts measure '
+    + num(r.parts_tokens || 0) + ' tokens against the region\'s ' + num(r.tokens)
+    + (drift === 0 ? ' — they agree here.'
+      : ', a difference of ' + num(Math.abs(drift)) + '. That is not an error in either: the '
+        + 'tokenizer is not additive across a split, so measuring the pieces and measuring the '
+        + 'whole are two measurements of the same bytes. The region\'s own figure is the one '
+        + 'every other number on this page uses.')));
+  return wrap;
 }
 
 /**
@@ -1605,10 +1757,31 @@ function renderSelfRemoved(host, rep) {
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-self-removed' },
     el('h2', {}, 'You removed these yourself'),
     el('p', { class: 'note' }, num(rows.length) + ' declaration'
-      + (rows.length === 1 ? '' : 's') + ' stopped appearing partway through this window. That '
-      + 'is a real reduction and it is credited here — no component removed it, so it appears '
-      + 'in no other figure on this dashboard.'));
+      + (rows.length === 1 ? '' : 's') + ' stopped appearing partway through this window. The '
+      + 'tokens genuinely stopped being billed, no component of ours was involved, and the '
+      + 'reduction is credited to YOU — on the Overview tab it is the "Removed by you, not by us" '
+      + 'line, and it is inside "Total the bill came down" and deliberately outside "Total cost '
+      + 'avoided", which is the figure this product claims for itself.'));
   host.appendChild(panel);
+  // The honest limit of the method, up front rather than as a footnote under the weakest row.
+  // This is the finding that decided where the figure is allowed to appear: the inference is
+  // right about the facts and can be wrong about the cause, and no threshold fixes that.
+  panel.appendChild(el('details', { class: 'why', 'data-testid': 'inv-self-removed-basis' },
+    el('summary', {}, 'How this is worked out, and when it is wrong'),
+    el('p', {}, 'The inventory is a time series. A name that appears in the early sessions of '
+      + 'this window and in none of the later ones stopped being declared, and the strength of '
+      + 'the claim is the number of COMPARABLE sessions that ran afterwards without it — a '
+      + 'session that declared no MCP tool at all cannot testify about a missing MCP tool, so '
+      + 'those are not counted. Every row shows its own count and anything under a dozen is '
+      + 'marked weak.'),
+    el('p', {}, 'What it cannot tell you is WHY the name went. On this deployment\'s own history '
+      + 'the largest candidate was the editor integration, which is declared only when a session '
+      + 'runs inside the IDE — so "you removed it" and "you worked in a terminal that day" look '
+      + 'identical here, and no threshold separates them. The reduction is real either way; the '
+      + 'attribution is a guess, which is why this figure is labelled as modelled everywhere it '
+      + 'appears and is kept out of the total that claims our credit.'),
+    el('p', {}, 'A row the server-side filter is already credited for is marked, and excluded '
+      + 'from the Overview figure rather than counted twice.')));
   const table = el('table', { class: 'tbl' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Item'), el('th', { class: 'num' }, 'Was costing'),
@@ -1678,18 +1851,25 @@ function renderTools() {
 async function loadTools() {
   loadingState(toolsView, 4);
   let control = null;
+  let controlDoc = null;
   try {
     const c = await api('toolfilter');
-    // enabled:false is a proxy that has the endpoint and is not acting; treat it as absent
-    // so the copy says "not enabled" instead of offering a switch that does nothing.
+    // enabled:false is a proxy that has the endpoint and is not acting; treat it as absent so
+    // the copy says "not enabled" instead of offering a switch that does nothing. But KEEP the
+    // document either way: it carries the REASON, and discarding it is why the page could only
+    // ever say "one-click opt-out is not enabled on this proxy" — which on a hosted deployment
+    // was simply false. The proxy had it; the request was ambiguous.
+    controlDoc = c || null;
     if (c && c.enabled) control = c;
   } catch (err) {
     if (aborted(err)) return;
     control = null; // 404 on an older proxy, or the feature is not built yet
+    controlDoc = null;
   }
   try {
     tools.report = await api('tools');
     tools.control = control;
+    tools.controlDoc = controlDoc;
   } catch (err) {
     if (aborted(err)) return;
     errorState(toolsView, 'Could not read the tool inventory', err);

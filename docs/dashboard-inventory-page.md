@@ -18,15 +18,17 @@ the page belongs to the same design system rather than shipping a second one.
 
 | Section | Answers |
 |---|---|
-| **Headline tiles** | declared tokens per session, how many were invoked, how many never were, and the projected cost of the difference |
+| **Headline tiles** | declared tokens per session, how many were invoked, how many never were, and the projected cost of the difference — **over the controllable set only**: your MCP tools and skills. The weight left out is stated in a line under the gauge |
 | **Gauge** | one bar, two segments, drawn to scale: invoked against never-invoked |
 | **Who owns your system prompt** | the part-to-whole bar: every region of the prefix, coloured by whether it is yours to change. Headed *"Who owns what you carry in front of every request"* until a session in scope has recorded a system prompt, because until then the bar is declarations only |
-| **Your system prompt, and what shares it** | its size, the whole prefix, and the reveal that shows the actual text region by region |
+| **Your system prompt, and what shares it** | its size, the whole prefix, and the reveal that shows the actual text region by region — with the **system prompt decomposed into its own sections**, each named, measured and readable, plus the whole thing assembled |
 | **Carried by every request, never once called** | the actionable list — grouped by what ONE action removes, each group with the command that removes it |
 | **Realized by your removals** | what a removal *actually* avoided on requests that were really sent |
 | **Every declaration, by weight** | the full table, sortable on any column |
 | **MCP servers** | the per-server rollup, because a server is the unit you add or remove |
-| **Skills** | the listing's own weight, how many skills were declared, how many were ever called |
+| **Skills** | the listing's own weight, how many skills were declared, how many were ever called, and **one switch and one command per skill** |
+| **You removed these yourself** | declarations that stopped appearing partway through the window — credited to the reader, not to us, and labelled as modelled rather than measured |
+| **The agent's own tools** | LAST, collapsed, behind the danger warning: Claude Code's built-ins and the provider's tools, in **none** of the figures above |
 | **What these numbers are computed over** | the denominator: sessions in scope, how many were captured, how many were priced, and at which tier a token became a dollar |
 | **The agent's own tools** | built-ins and provider tools, last, collapsed, behind a danger warning on the closed bar |
 
@@ -35,7 +37,46 @@ it was derived and its catch, from `TILE_INFO` in `app.js` — the same registry
 tiles read. `tools.js` adds its fourteen entries to that object rather than keeping a second
 one, so the whole set can be read side by side and checked for one voice.
 
-## Four things this round changed, and why
+## What this round changed, and why
+
+**The built-ins left the statistics.** They are the largest group by weight — 15,746 tokens per
+session against 12,257 of controllable declarations on a real capture, 59% of everything declared
+— and removing one breaks the agent. So a headline reading "you never touch 82% of what you
+carry", assembled mostly out of `Read`, `Bash` and `Grep`, was a true number whose only available
+action was a mistake. They are now in `ToolReport.Aside`: reported in their own section at the end
+of the page and in the composition bar (whose job is the whole prompt), and in no total, no
+percentage, no gauge and no sortable table. The headline says how much it left out and why.
+
+The split is drawn on `IsBuiltinTool`, **not** on the declaration kind. A third-party client tool
+is a different thing: it is somebody's choice, it is removable, and an earlier cut of this sent
+every `KindTool` row aside — correct on a Claude Code account, and on any other account it took
+every SDK application's removable declarations off the page, out of the suggestion engine and
+therefore out of the filter. Three tests caught it.
+
+**The system prompt is decomposed.** A 5,684-token prompt is not one decision, and the page could
+show the number without answering it. It is now split at its own markdown headings, each section
+named, measured and readable, with the assembled whole one disclosure below. On a real capture that
+found 17 sections and put a single one — *Types of memory*, 1,508 tokens — at 26.5% of the prompt.
+The split is on HEADINGS and the panel says so: the wire boundaries (`system` is an array of
+separately cacheable blocks) are joined before anything is stored, so they are gone from every row
+already captured, and a decomposition that only worked for prompts recorded from today is not one
+a reader can use. The parts' summed weight is printed beside the region's own and never reconciled
+with it — BPE is not additive across a split, so they are two measurements of the same bytes.
+
+**Skills became removable, and every row carries its own command.** `removalCell` existed and was
+rendered in exactly one place — the built-ins table, the one group nobody should act on — while a
+multi-item group showed only the SERVER-level command, which is no answer at all to "get rid of
+just this one tool". Every candidate row, every row of both tables, and every built-in now carries
+its own, folded.
+
+**One duplicate function.** `unusedRow` was defined twice in `tools.js`, 70 lines apart. The second
+won, and the second was the older one: no prompt-text reveal, no `id`/`for` pairing, and the whole
+row wrapped in a `<label>` so a copy button inside it toggled the checkbox. The fixed copy was
+unreachable code while both existed, which is why "the system prompt parts are not visible" was
+reported against a file that contained the code to show them.
+`TestNoFunctionIsDefinedTwiceInTheDashboardSource` is the guard.
+
+## Four things the previous round changed, and why
 
 **The removal command is visible, per group.** It existed on the API
 (`dash/toolremoval.go`) from the start and was rendered in exactly one place: the built-ins

@@ -81,10 +81,26 @@ Also kept, always: the tool `tool_choice` forces (removing it would turn a force
 400), provider-side tools declared by `type` rather than by a schema, and the last remaining
 tool (a body that declares a catalogue and one that declares none are different shapes).
 
-**Skills are reported but not removable.** A skill is declared as prose inside a transcript
-message rather than as an element of `tools`, so removing one means editing that listing; and
-the `Skill` tool's schema carries no enum, so the model can still name a skill that is no
-longer listed. Different mechanism, different failure mode — see *Not done* below.
+**Skills are removable, by a different mechanism, and the failure mode is the SAFER one.** A
+skill is declared as prose inside a transcript message (measured: `messages[1]`, `role:"system"`,
+a plain string, 6,867 bytes), not as an element of `tools`, so removing one means cutting its
+entry out of that listing. List it as `skill__<name>`.
+
+An earlier version of this page gave a reason for *not* doing it, and the reason was backwards.
+It said the `Skill` tool's schema carries no enum, so removal turns "unused" into "errors when
+called". The first half is right and the second does not follow: with no enum, `skill` is a
+free-form string, so a model that names an unlisted skill anyway simply **runs it**. Verified on
+a live session. So over-removing a skill fails OPEN, where over-removing a tool fails silent —
+the model narrating a call it can no longer make, which nothing surfaces. The safer of the two
+mechanisms was the one being withheld.
+
+What that means for you: switching a skill off here stops you *paying* for it. It is not a way
+to forbid it. To actually disable one, use Claude Code's own `skillOverrides` — the command
+beside each row on the Inventory page.
+
+The prose gate applies to skills too, with the listing itself subtracted from the region it
+tests against: a skill named in your own system prompt is kept, but its own listing entry does
+not count as naming it.
 
 ## Suggestions, and what "enough evidence" means
 
@@ -256,11 +272,6 @@ definition.
 
 ## Not done, and why
 
-- **Skill removal.** Biggest remaining piece of the measured waste (all 11 skills in the
-  corpus went uninvoked). It needs a different mechanism — editing prose inside a transcript
-  message — and it cannot be made as safe: the `Skill` tool's schema has no enum, so removal
-  turns "unused" into "errors when called" rather than "unavailable". Worth doing on its own
-  evidence, not as a footnote to this.
 - **Truncating or dropping tool *descriptions*.** 110 KB of the 131 KB of `tools` on real
   traffic, and the one lever whose failure mode is a wrong tool call. See
   `components/reformat/toolschema.go`, which declines it for the same reason.

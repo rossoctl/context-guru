@@ -46,6 +46,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
 )
@@ -407,65 +408,27 @@ func skillDecls(text string) []Decl {
 	marker := Decl{Kind: KindSkillListing, Server: SkillsUnknown,
 		Tokens: tokens.Count(listing), Text: listing}
 	out := []Decl{marker}
-	// Entries are line-anchored `- name: description`, each running to the next such
-	// line. A description containing its own "\n- " line would truncate that entry's
-	// weight, so the span is taken to the next line that parses as a NAME.
-	lines := strings.Split(body, "\n")
-	name, start := "", 0
-	flush := func(end int) {
-		if name == "" {
-			return
-		}
-		entry := strings.Join(lines[start:end], "\n")
-		out = append(out, Decl{Kind: KindSkill, Name: name,
-			Tokens: tokens.Count(entry), Text: entry})
+	// The entry split is internal/skills's, not this file's, because the declaration FILTER cuts
+	// entries out of a real request using the same rule and the two must not drift: a filter that
+	// disagreed about where an entry ends would leave an orphaned description line in the prompt
+	// while this page reported a clean removal. Entries are line-anchored `- name: description`,
+	// each running to the next line that parses as a NAME — a description carrying its own "- "
+	// bullet must not truncate the entry's measured weight.
+	l := skills.Parse(body)
+	for _, e := range l.Entries {
+		entry := l.Text(e)
+		out = append(out, Decl{Kind: KindSkill, Name: e.Name, Tokens: tokens.Count(entry), Text: entry})
 	}
-	for n, ln := range lines {
-		if nm, ok := skillEntryName(ln); ok {
-			flush(n)
-			name, start = nm, n
-		}
-	}
-	flush(len(lines))
 	if len(out) > 1 {
 		out[0].Server = SkillsOK
 	}
 	return out
 }
 
-// skillEntryName reads a listing line's name, or reports that the line is not an entry.
-func skillEntryName(line string) (string, bool) {
-	if !strings.HasPrefix(line, "- ") {
-		return "", false
-	}
-	rest := line[2:]
-	i := strings.Index(rest, ":")
-	if i <= 0 {
-		return "", false
-	}
-	name := rest[:i]
-	// A plugin skill is `plugin:skill`, so one colon may be part of the name: take the
-	// longer candidate when the first colon is not followed by a space.
-	if !strings.HasPrefix(rest[i:], ": ") {
-		if j := strings.Index(rest[i+1:], ": "); j >= 0 {
-			name = rest[:i+1+j]
-		} else {
-			return "", false
-		}
-	}
-	if name == "" || len(name) > 128 {
-		return "", false
-	}
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '.' || r == '_' || r == ':' || r == '-' || r == '/':
-		default:
-			return "", false
-		}
-	}
-	return name, true
-}
+// skillEntryName reads a listing line's name, or reports that the line is not an entry. Kept as
+// a name in this package because its tests are here and read as this file's contract; the rule
+// itself is internal/skills's, shared with the filter that acts on it.
+func skillEntryName(line string) (string, bool) { return skills.EntryName(line) }
 
 // usedFrom collects the tool calls of the LAST tool-using turn, plus a fingerprint of
 // that turn. Not the whole transcript: the agent resends it every request, so counting

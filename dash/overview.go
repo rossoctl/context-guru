@@ -164,12 +164,42 @@ type Overview struct {
 	SplitTailMoved     int64 `json:"split_tail_moved"`
 	SplitCredited      int64 `json:"split_credited"`
 	SplitCreditedMoved int64 `json:"split_credited_moved"`
-	// TotalSavedUSD is our three savings together: compaction's, less our own spend; the
-	// prefix components'; and the keep-alive's NET, which is its saving minus what its pings
-	// cost. All three are ours and the token sets are disjoint. The keep-alive contributes its
-	// net rather than its gross because the ping spend is excluded from CostUSD — a ping is not
-	// agent traffic — so it has nowhere else in this walk to appear.
+	// The declarations no longer sent. TWO figures, because they are two different claims about
+	// the same kind of tokens and adding them together would either overstate what this product
+	// did or refuse a number a reader has asked for. See dash/declcredit.go for the argument.
+	//
+	// DeclFilterUSD is MEASURED and OURS: `requests.filtered_decl_tokens`, written by the filter
+	// on every request it acted on, priced at the tier those requests paid. It is in
+	// TotalSavedUSD. It was in NO total before, and that was a bug rather than a policy — the
+	// savings walk is built on tokens_before, which is message text only, and a tool declaration
+	// is not in `messages`, so the biggest measured lever in the product moved none of it.
+	//
+	// SelfRemovedUSD is MODELLED and the USER's: the account stopped declaring something and no
+	// component of ours was involved. It is NOT in TotalSavedUSD, which states that its addends
+	// are all ours. SelfRemovedOverlap is how many candidate rows were dropped because the filter
+	// is already credited for the same tokens.
+	DeclFilterUSD      float64 `json:"decl_filter_usd"`
+	DeclFilterReads    int64   `json:"decl_filter_reads"`
+	DeclFilterRequests int64   `json:"decl_filter_requests"`
+	SelfRemovedUSD     float64 `json:"self_removed_usd"`
+	SelfRemovedReads   int64   `json:"self_removed_reads"`
+	SelfRemovedItems   int64   `json:"self_removed_items"`
+	SelfRemovedOverlap int64   `json:"self_removed_overlap"`
+	// DeclCreditPriced is false when a contributing model had no rates: the token counts above
+	// stand and the dollars are the priced subset, which a consumer must not read as the total.
+	DeclCreditPriced bool `json:"decl_credit_priced"`
+
+	// TotalSavedUSD is OUR savings together: compaction's, less our own spend; the prefix
+	// components'; the keep-alive's NET, which is its saving minus what its pings cost; and the
+	// declaration filter's realized saving. All of them are ours and the token sets are disjoint.
+	// The keep-alive contributes its net rather than its gross because the ping spend is excluded
+	// from CostUSD — a ping is not agent traffic — so it has nowhere else in this walk to appear.
 	TotalSavedUSD float64 `json:"total_saved_usd"`
+	// TotalReducedUSD is TotalSavedUSD plus what the ACCOUNT removed itself. It answers "how much
+	// smaller did this account's bill get", where TotalSavedUSD answers "how much of that did
+	// context-guru do". A reader wants both and they are not the same question; printing one
+	// under the other's label is how a dashboard takes credit for its user's work.
+	TotalReducedUSD float64 `json:"total_reduced_usd"`
 	// PrefixChangeCost is a DIAGNOSTIC, not a cost subtracted from net.
 	//
 	// It sums cost_usd over requests whose cache missed with reason prefix_change AND whose
@@ -645,6 +675,10 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// three addends are disjoint token sets: compaction's removals, the prefix split's stable
 	// half, and the entries the pings refreshed.
 	o.TotalSavedUSD = o.NetSavedUSD + o.CachesplitSavedUSD + o.KeepAliveNetUSD
+	// Both totals exist before the priced additions land, so a deployment with no rates — or a
+	// caller that does not attach the credit — reads a total that is short rather than one that
+	// is absent. SetDeclCredit moves both.
+	o.TotalReducedUSD = o.TotalSavedUSD
 
 	for name, col := range map[string]string{
 		"accounting": "token_accounting", "cache_miss": "cache_miss_reason", "uncompressed": "uncompressed_reason",
@@ -709,6 +743,23 @@ func (o *Overview) SetTiers(t *TierCosts) {
 	o.SafetyCost.FrozenReadUSD = t.FrozenReadUSD
 	o.SafetyCost.FrozenWriteRiskUSD = t.FrozenWriteRiskUSD
 	o.SafetyCost.Priced = true
+}
+
+// SetDeclCredit attaches the declarations-no-longer-sent credit and folds each half into the
+// total it belongs in: the filter's measured saving into TotalSavedUSD (it is ours), the account's
+// own removals into TotalReducedUSD only (they are not). Called by the API layer, which holds the
+// rates, for the same reason SetTiers is — DB.Overview deliberately cannot price anything.
+func (o *Overview) SetDeclCredit(c *DeclCredit) {
+	if c == nil {
+		return
+	}
+	o.DeclFilterUSD, o.DeclFilterReads = c.FilterUSD, c.FilterReads
+	o.DeclFilterRequests = int64(c.FilterRequests)
+	o.SelfRemovedUSD, o.SelfRemovedReads = c.SelfUSD, c.SelfReads
+	o.SelfRemovedItems, o.SelfRemovedOverlap = int64(c.SelfItems), int64(c.SelfOverlap)
+	o.DeclCreditPriced = c.Priced
+	o.TotalSavedUSD += c.FilterUSD
+	o.TotalReducedUSD = o.TotalSavedUSD + c.SelfUSD
 }
 
 // denominators builds the labelled savings ratios. Each one names its divisor.
@@ -815,6 +866,16 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"at 1.25x rather than 1x. A ceiling rather than a floor, and the one figure here " +
 				"that is: the provider's cache is keyed on content, so another session sending the " +
 				"same prefix would have refreshed it for nothing."},
+		{Key: "decl_filter_saved", Label: "Declarations no longer sent", DeltaUSD: -o.DeclFilterUSD,
+			Description: "Tool and MCP schemas, and skill listing entries, that the declaration " +
+				"filter stopped sending — measured on requests that were really sent, from the " +
+				"count the filter itself wrote on each one, priced at the tier that request paid. " +
+				"It is a THIRD saving outside the compaction walk above and for a mechanical " +
+				"reason: that walk is built on tokens_before, which counts message text only, and " +
+				"a tool declaration lives in the top-level `tools` array. So this reduction moved " +
+				"no figure in it and appeared in no total on this page at all, even though 82.7% " +
+				"of a declared catalogue is never invoked and it is the largest lever measured in " +
+				"this project."},
 		{Key: "total_saved", Label: "Total cost avoided", DeltaUSD: o.TotalSavedUSD, Total: true,
 			Description: "Net compaction savings, plus prefix-cache savings, plus the idle " +
 				"keep-alive's NET — its savings minus what its pings cost. Three disjoint token " +
@@ -828,6 +889,24 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"uncached world: the provider's own cache saved far more than this on the same " +
 				"traffic (cache_saved_usd, reported by the API as a diagnostic), and none of that " +
 				"is credited here."},
+		{Key: "self_removed", Label: "Removed by you, not by us", DeltaUSD: -o.SelfRemovedUSD,
+			Description: "Declarations this ACCOUNT stopped carrying on its own — an MCP server " +
+				"you removed, a skill you switched off. The tokens genuinely were not billed, and " +
+				"no component of ours was involved, so this is deliberately OUTSIDE the total " +
+				"above and inside the one below. It is also MODELLED rather than measured: the " +
+				"evidence is that the inventory is a time series and a name is in its early part " +
+				"and not its late part, which cannot tell a removal from a session that ran in a " +
+				"different environment — on the production snapshot the largest candidate is the " +
+				"editor integration, which is simply absent outside the IDE. Every row and its " +
+				"own evidence is on the Inventory tab; rows the filter is already credited for " +
+				"are excluded here rather than counted twice."},
+		{Key: "total_reduced", Label: "Total the bill came down", DeltaUSD: o.TotalReducedUSD,
+			Total: true,
+			Description: "Everything above, ours and yours: the total cost avoided plus what you " +
+				"removed yourself. It answers 'how much smaller did this bill get', where the " +
+				"total above answers 'how much of that did context-guru do'. Both are worth " +
+				"knowing and they are not the same number, so neither is printed under the " +
+				"other's label."},
 	}
 	return steps
 }

@@ -2,6 +2,7 @@ package dash
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -222,14 +223,32 @@ func TestRealizedSavingUnpricedIsNotZero(t *testing.T) {
 }
 
 // TestSuggestNeverOffersWhatCannotBeRemoved: a provider-side tool is resolved by its `type`
-// rather than by a schema we can drop, and a skill is prose in a message rather than an
-// element of tools[] — offering either would produce a configuration the filter refuses.
+// rather than by a schema we can drop; the skills LISTING is one indivisible block; and a
+// built-in is Claude Code's own equipment. Offering any of the three would produce either a
+// configuration the filter refuses or the worst advice this API can give.
+//
+// A SKILL is no longer on that list, and that is the point of the change rather than a
+// relaxation of it: apply.filterSkillListing removes a skill's listing entry, so the offer now
+// has a mechanism behind it. The RemoveAs assertion below is what makes the offer usable — the
+// config needs `skill__<name>`, and a suggestion carrying the bare name would write a list entry
+// that matches nothing forever.
 func TestSuggestNeverOffersWhatCannotBeRemoved(t *testing.T) {
 	w := declWindow{sessions: 50, first: day(0), last: day(60)}
-	for _, kind := range []string{KindServerTool, KindSkill, KindSkillListing} {
+	for _, kind := range []string{KindServerTool, KindSkillListing} {
 		if _, ok := suggest(ToolStat{Kind: kind, Name: "x", Tokens: 5000}, w); ok {
 			t.Errorf("%s was offered for removal", kind)
 		}
+	}
+	if _, ok := suggest(ToolStat{Kind: KindTool, Name: "Read", Tokens: 5000}, w); ok {
+		t.Error("a Claude Code built-in was offered for removal")
+	}
+	s, ok := suggest(ToolStat{Kind: KindSkill, Name: "dataviz", Tokens: 5000}, w)
+	if !ok {
+		t.Fatal("an unused skill with ample evidence was not offered")
+	}
+	if s.RemoveAs != "skill__dataviz" {
+		t.Errorf("skill RemoveAs = %q, want skill__dataviz — the bare name matches no mechanism",
+			s.RemoveAs)
 	}
 	if _, ok := suggest(ToolStat{Kind: KindTool, Name: "x", Tokens: 5000}, w); !ok {
 		t.Error("a plain unused tool with ample evidence was not offered")
@@ -306,5 +325,80 @@ func TestAnExcludedItemIsNotAlsoSuggested(t *testing.T) {
 	}
 	if _, bad := suggestionsByName(doc)["Workflow"]; bad {
 		t.Error("an already-excluded declaration was suggested again")
+	}
+}
+
+// TestTheRemovalControlIsLiveForAManagerViewingOneAccount is the read-side twin of the bug
+// writeToolFilterDoc's comment records, which shipped fixed on the write path and broken here.
+//
+// A manager's DEFAULT scope is the whole service, so f.Tenant is "". The state lookup was handed
+// that empty id, the registry had no such account, and the document came back
+// `enabled:false, reason:"could not read your account"` — so every opt-out switch on the
+// Inventory tab rendered DISABLED for the only role permitted to use them, under a message
+// claiming something was wrong with their account. Nothing was: a removal list belongs to one
+// account and the request named none.
+//
+// Both directions are asserted. The service-wide view must refuse with a reason that says what to
+// do, and the one-account view must be LIVE — a fix that disabled it everywhere would satisfy
+// half a test.
+func TestTheRemovalControlIsLiveForAManagerViewingOneAccount(t *testing.T) {
+	api := &API{auth: func(*http.Request) (Principal, bool) {
+		return Principal{TenantID: "boss", Manager: true}, true
+	}}
+	api.SetToolFilterState(func(id string) ToolFilterState {
+		if id == "" {
+			// What a real registry does with an empty id, which is the whole bug.
+			return ToolFilterState{Reason: "could not read your account"}
+		}
+		return ToolFilterState{Enabled: true, Removed: []string{"Workflow"}}
+	})
+
+	// A manager viewing ONE account — their own, or somebody's — gets a live control.
+	for _, f := range []Filter{{Tenant: "boss"}, {Tenant: "someone-else"}} {
+		st := api.toolFilterStateForScope(f)
+		if !st.Enabled {
+			t.Errorf("scope %+v: the control is disabled for a manager viewing one account "+
+				"(reason %q); the switches on the Inventory tab are dead for the only role "+
+				"allowed to use them", f, st.Reason)
+		}
+	}
+
+	// The service-wide view refuses, and the refusal has to be ACTIONABLE rather than a claim
+	// that the account could not be read.
+	st := api.toolFilterStateForScope(Filter{TenantAll: true})
+	if st.Enabled {
+		t.Error("the control is live while viewing every account: a switch there would edit one " +
+			"account's configuration from a page describing all of them")
+	}
+	if strings.Contains(st.Reason, "could not read") {
+		t.Errorf("the service-wide refusal blames the account: %q\n"+
+			"Nothing failed — the request named no account. A reader told their account cannot "+
+			"be read goes looking for a broken account.", st.Reason)
+	}
+	for _, want := range []string{"account"} {
+		if !strings.Contains(st.Reason, want) {
+			t.Errorf("the refusal does not mention %q, so it does not say what to do: %q",
+				want, st.Reason)
+		}
+	}
+	if st.Reason == "" {
+		t.Error("the refusal carries no reason at all, so the page can only guess")
+	}
+}
+
+// Single-tenant is NOT the ambiguous case: TenantAll is the only scope there is, so the answer is
+// the deployment's own ("this proxy has no per-account configuration"), not "pick an account"
+// against a selector that does not exist.
+func TestSingleTenantKeepsItsOwnReason(t *testing.T) {
+	api := &API{} // auth nil == single-tenant
+	st := api.toolFilterStateForScope(Filter{TenantAll: true})
+	if st.Enabled {
+		t.Error("enabled with no configuration hook at all")
+	}
+	if strings.Contains(st.Reason, "account selector") || strings.Contains(st.Reason, "Pick an") {
+		t.Errorf("single-tenant was told to pick an account: %q", st.Reason)
+	}
+	if !strings.Contains(st.Reason, "per-account configuration") {
+		t.Errorf("single-tenant reason = %q, want the deployment's own answer", st.Reason)
 	}
 }

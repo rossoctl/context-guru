@@ -52,6 +52,16 @@ type PromptRegion struct {
 	// the same answer as "we do not have it".
 	Text    string `json:"text,omitempty"`
 	HasText bool   `json:"has_text"`
+	// Parts decomposes the SYSTEM PROMPT region into the sections it was assembled from, so
+	// "your system prompt is 12,400 tokens" becomes a list of things a reader can act on
+	// separately. Empty for every other region: a tool schema is one JSON object and a skills
+	// listing is one block, so neither has parts to name. See splitSystemPrompt.
+	Parts []PromptPart `json:"parts,omitempty"`
+	// PartsTokens is the SUM of the parts' own measured weights, which is a few tokens off
+	// Tokens above and must be shown as its own figure rather than reconciled: BPE is not
+	// additive across a split point, so measuring the pieces and measuring the whole are two
+	// measurements of the same bytes and neither is the error.
+	PartsTokens int `json:"parts_tokens,omitempty"`
 }
 
 // PromptView is one session's prefix, decomposed.
@@ -118,6 +128,12 @@ func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
 	if !trusted {
 		for i := range view.Regions {
 			view.Regions[i].Text, view.Regions[i].HasText = "", false
+			// The parts are the same content sliced up, so they go with it. Dropped whole
+			// rather than blanked field by field: a list of section TITLES is still content —
+			// a heading in a user's CLAUDE.md names their project — and leaving the titles
+			// behind would have re-opened the gate this strip exists to close, one field
+			// narrower. TestPromptPartsAreStrippedForAnUntrustedCaller holds it.
+			view.Regions[i].Parts, view.Regions[i].PartsTokens = nil, 0
 		}
 	}
 	writeJSON(w, view)
@@ -221,6 +237,15 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 		}
 		if gz != nil {
 			reg.Text, reg.HasText = gunzipText(gz), true
+		}
+		// The system prompt gets decomposed; nothing else has parts to decompose. Done here
+		// rather than in the handler so a caller of PromptViewFor gets the same answer the
+		// route does — the whole reason the strip below is the ONLY thing the handler changes.
+		if reg.Kind == KindSystemPrompt && reg.HasText {
+			reg.Parts = splitSystemPrompt(reg.Text)
+			for _, part := range reg.Parts {
+				reg.PartsTokens += part.Tokens
+			}
 		}
 		v.Regions = append(v.Regions, reg)
 		v.Tokens += reg.Tokens

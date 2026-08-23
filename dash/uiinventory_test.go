@@ -119,3 +119,131 @@ func readUI(t *testing.T, name string) string {
 	}
 	return string(b)
 }
+
+// TestNoFunctionIsDefinedTwiceInTheDashboardSource is the root-cause check for the defect the
+// owner reported as "the system prompt parts are not visible".
+//
+// tools.js defined `unusedRow` TWICE, 70 lines apart. In JavaScript the second wins, and the
+// second was the OLDER one: it wrapped the whole row in a <label> (so a copy button inside it
+// toggled the checkbox) and, decisively, it had no promptTextReveal call. The fixed version — the
+// one with the reveal, the id/for pairing and the per-item command — was unreachable code for as
+// long as both existed. Nothing failed, nothing warned, and the feature was simply absent from
+// every grouped row on the page while its code sat right there in the file being read by
+// reviewers.
+//
+// A static check earns its keep here because the failure is invisible three ways at once: the
+// page renders, the tests pass, and the dead copy looks like the live one.
+func TestNoFunctionIsDefinedTwiceInTheDashboardSource(t *testing.T) {
+	// kv in app.js is a PRE-EXISTING duplicate of exactly this shape, found by this check and
+	// deliberately not fixed here: the two bodies differ only in how they pass their text, it is
+	// 3,700 lines away from anything this change touches, and a silent edit to a shared helper is
+	// how an unrelated regression gets attributed to the wrong commit. It is listed so the check
+	// can guard everything else rather than being scoped down to one file.
+	known := map[string]bool{"ui/app.js:kv": true}
+	def := regexp.MustCompile(`(?m)^function ([A-Za-z_$][\w$]*)\s*\(`)
+	for _, name := range []string{"ui/tools.js", "ui/app.js"} {
+		seen := map[string]int{}
+		for _, m := range def.FindAllStringSubmatch(readUI(t, name), -1) {
+			seen[m[1]]++
+		}
+		if len(seen) == 0 {
+			t.Fatalf("%s: found no top-level function definitions; this check needs rewriting", name)
+		}
+		for fn, n := range seen {
+			if n > 1 && !known[name+":"+fn] {
+				t.Errorf("%s defines %s() %d times.\n"+
+					"The later definition silently wins and the earlier one becomes unreachable "+
+					"code that still reads as live. This is how the prompt-text reveal came to be "+
+					"absent from every grouped row on the Inventory page while the function that "+
+					"rendered it sat in the file.", name, fn, n)
+			}
+		}
+	}
+}
+
+// TestEveryRemovableRowCarriesItsOwnCommand: the owner asked for the exact command "for each MCP
+// tool and each skill", and the group-level command is not that.
+//
+// A group of one already showed it. A group of MANY showed the SERVER-level `claude mcp remove
+// <server>` once at the top — the right answer to "drop this whole server" and no answer at all
+// to "drop just this one tool", which is the question a reader with a nineteen-tool server has.
+// And the sortable tables, which are where a reader goes for a tool they DO use occasionally,
+// showed no command anywhere.
+func TestEveryRemovableRowCarriesItsOwnCommand(t *testing.T) {
+	src := readUI(t, "ui/tools.js")
+	if !strings.Contains(src, "function removalDetails(") {
+		t.Fatal("removalDetails is gone; this check needs rewriting against its replacement")
+	}
+	// The per-item row, the tools table and the skills table each render one.
+	for fn, why := range map[string]string{
+		"function unusedRow(":   "a member of a multi-item group has no per-item command",
+		"function toolTable(":   "the tools table has no removal command column",
+		"function skillsPanel(": "the skills table has no removal command column",
+	} {
+		i := strings.Index(src, fn)
+		if i < 0 {
+			t.Errorf("%s is gone; this check needs rewriting", fn)
+			continue
+		}
+		end := strings.Index(src[i:], "\n}\n")
+		if end < 0 {
+			end = len(src) - i
+		}
+		if !strings.Contains(src[i:i+end], "removalDetails(") {
+			t.Errorf("%s: %s", fn, why)
+		}
+	}
+	// And a skill must be switchable from the skills table, not only from the never-invoked list:
+	// a skill used once and no longer wanted is exactly the case that list cannot reach.
+	i := strings.Index(src, "function skillsPanel(")
+	end := strings.Index(src[i:], "\n}\n")
+	if !strings.Contains(src[i:i+end], "excludeToggle(") {
+		t.Error("the skills table has no opt-out switch, so turning a skill off still needs a " +
+			"config file edit")
+	}
+}
+
+// TestTheAsideGroupComesFromTheServer: the built-in/provider split decides what is in the totals,
+// so the client must not re-derive it.
+//
+// A client-side `filter((t) => t.builtin)` over rep.tools is a second copy of a rule the server
+// already applied when it kept those rows out of every total. Two copies drift, and the drift is
+// invisible: a row in the wrong group looks perfectly plausible in both places, and the headline
+// and the table would simply disagree about which one it was in.
+func TestTheAsideGroupComesFromTheServer(t *testing.T) {
+	src := readUI(t, "ui/tools.js")
+	i := strings.Index(src, "function renderBuiltins(")
+	if i < 0 {
+		t.Fatal("renderBuiltins is gone; this check needs rewriting against its replacement")
+	}
+	end := strings.Index(src[i:], "\n}\n")
+	if end < 0 {
+		end = len(src) - i
+	}
+	body := src[i : i+end]
+	if !strings.Contains(body, "rep.aside") {
+		t.Error("the built-ins section does not read rep.aside; it is re-deriving the split the " +
+			"server already made when it kept those rows out of the totals")
+	}
+	if regexp.MustCompile(`rep\.tools[^\n]*\bfilter\(`).MatchString(body) {
+		t.Errorf("the built-ins section filters rep.tools:\n%s\n\n"+
+			"rep.tools no longer holds them. A filter here would silently render an empty "+
+			"section while the whole group went unlisted.", body)
+	}
+}
+
+// TestTheHeadlineSaysWhatItLeftOut. The four headline tiles now cover MCP tools and skills only,
+// which is what makes them actionable — and it also makes them several times smaller than the
+// composition bar further down the same page. A reader who meets both and is told nothing has to
+// work out for themselves which one is lying. Neither is; they answer different questions, and the
+// page has to say so where the smaller number is.
+func TestTheHeadlineSaysWhatItLeftOut(t *testing.T) {
+	src := readUI(t, "ui/tools.js")
+	if !strings.Contains(src, "aside_tokens") {
+		t.Error("nothing on the page reads totals.aside_tokens, so the headline never says how " +
+			"much weight it excluded")
+	}
+	if !strings.Contains(src, "inv-aside-note") {
+		t.Error("the headline has no disclosure of the excluded group")
+	}
+}

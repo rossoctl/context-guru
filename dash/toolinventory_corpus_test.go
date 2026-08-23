@@ -133,7 +133,8 @@ func TestCorpusInventory(t *testing.T) {
 				rep.Skills.UnusedListingReads)
 			t.Logf("  coverage: %d sessions, %d captured, %d not captured",
 				rep.Coverage.Sessions, rep.Coverage.Captured, rep.Coverage.NotCaptured)
-			t.Logf("  unused reads %d tokens", rep.Totals.UnusedReads)
+			t.Logf("  unused reads %d tokens (controllable set only); aside %d tok/session, %d tok in the set",
+				rep.Totals.UnusedReads, rep.Totals.AsideTokens, rep.Totals.AsideSetTokens)
 			// The dead-weight table, biggest first.
 			for i, s := range rep.Tools {
 				if i >= 30 {
@@ -152,12 +153,40 @@ func TestCorpusInventory(t *testing.T) {
 			if rep.Totals.DeclaredTokens == 0 || rep.Totals.UnusedTokens == 0 {
 				t.Error("declared or unused weight came out zero on real traffic")
 			}
-			names := map[string]bool{}
+			// Bash IS declared by every session in these corpora, and it must be reported — in
+			// Aside. This assertion moved rather than being deleted: the point of the report is
+			// that nothing declared goes missing, and the point of the split is that the agent's
+			// own equipment is not in the statistics a reader is invited to act on. A test that
+			// only checked the first half would pass on a report that had silently dropped it.
+			main, aside := map[string]bool{}, map[string]bool{}
 			for _, s := range rep.Tools {
-				names[s.Name] = true
+				main[s.Name] = true
 			}
-			if !names["Bash"] {
-				t.Error("Bash is declared by every session in these corpora and is missing")
+			for _, s := range rep.Aside {
+				aside[s.Name] = true
+			}
+			if !aside["Bash"] {
+				t.Error("Bash is declared by every session in these corpora and is missing from Aside")
+			}
+			if main["Bash"] {
+				t.Error("Bash is in the main statistics: the built-in split is not applied")
+			}
+			// No built-in and no provider tool in the main list, and nothing in both lists.
+			for _, s := range rep.Tools {
+				if s.Builtin || s.Kind == KindServerTool {
+					t.Errorf("main list carries %s (kind %s, builtin %v): it belongs in Aside",
+						s.Name, s.Kind, s.Builtin)
+				}
+				if aside[s.Name] {
+					t.Errorf("%s is in both the main list and Aside", s.Name)
+				}
+			}
+			// And the converse: everything in Aside is there for one of the two stated reasons.
+			for _, s := range rep.Aside {
+				if !s.Builtin && s.Kind != KindServerTool {
+					t.Errorf("Aside carries %s (kind %s): it is neither a built-in nor a provider tool",
+						s.Name, s.Kind)
+				}
 			}
 		})
 	}
