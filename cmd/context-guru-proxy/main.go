@@ -42,7 +42,7 @@ func main() {
 	var (
 		addr      = envOr("LISTEN_ADDR", ":4000")
 		cfgPath   = flag.String("config", envOr("CONFIG", ""), "path to context-guru YAML config")
-		preset    = flag.String("preset", envOr("PRESET", "codesmart"), "preset to use when --config is absent (codesmart = the SWE-bench-winning cache-aware config; codesafe = deterministic-only)")
+		preset    = flag.String("preset", envOr("PRESET", "house"), "preset to use when --config is absent (house = the service default, deterministic; housellm = the same plus the compaction-model pass; codesmart/codesafe = the SWE-bench study's configs, kept so its published numbers stay reproducible)")
 		openai    = flag.String("openai-upstream", envOr("OPENAI_UPSTREAM", "https://api.openai.com"), "OpenAI upstream base URL")
 		anthropic = flag.String("anthropic-upstream", envOr("ANTHROPIC_UPSTREAM", "https://api.anthropic.com"), "Anthropic upstream base URL")
 		// Not a whole-request timeout on purpose: a streaming turn that is still producing

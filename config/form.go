@@ -178,22 +178,32 @@ type ExtractLLMForm struct {
 // DefaultExtractLLMForm is what the settings page pre-fills. The sweep on, the hot path
 // off: the cold turn is the regime where our own measurements say a model call pays, and
 // the per-output pass on a warm cache is the one they say loses.
+//
+// These are the values the `housellm` config carries, which is the one extract_llm
+// configuration this service has actually run and measured — so the form now offers what
+// production runs rather than a second opinion about it. Three differ from what this
+// function returned before, and each difference is the reason the component did nothing on
+// a real account:
+//
+//	AllowOnCachingBackend true. False makes the economic gate hard-decline every
+//	  prompt-cached candidate, and on Claude Code against Anthropic that is all of them.
+//	  economic_gate stays on, so this buys "spend when it pays", not "spend on size".
+//	TriggerMinTokens 20000 and ContextMessages 2, from the same measured config: a higher
+//	  pressure bar so most turns still make no call, and a shorter context window per call.
+//	MaxPerSession 0, which the component reads as UNLIMITED. An operator decision — the
+//	  bounds that remain are MaxPerRequest, the pressure trigger and the economic gate.
 func DefaultExtractLLMForm() ExtractLLMForm {
 	return ExtractLLMForm{
 		PerOutput: false, ColdEnabled: true, SizeTrigger: false,
-		MinTokens: 2000, MaxPerRequest: 2, MaxPerSession: 20,
-		Aggressiveness: "medium", Context: "recent", ContextMessages: 7,
-		ColdMinTokens: 1000,
+		MinTokens: 3000, MaxPerRequest: 4, MaxPerSession: 0,
+		Aggressiveness: "medium", Context: "recent", ContextMessages: 2,
+		ColdMinTokens: 3000,
 		// incoming, not config: on the hosted service there is no operator-configured
 		// compaction model, so `source: config` is a component that can never make a call.
 		ModelSource: "incoming", ModelName: "claude-haiku-4-5",
 		Strategy: "code", EveryNRequests: 1,
-		TriggerMinTokens: 3000,
-		// Left FALSE: the component's own measurements say it loses money on a caching
-		// backend, and a default that starts spending is not this form's call. It is a
-		// FIELD now, so the operator who wants it can see it and tick it, which is the part
-		// that was missing — it was invisible, not just off.
-		AllowOnCachingBackend: false,
+		TriggerMinTokens:      20000,
+		AllowOnCachingBackend: true,
 	}
 }
 

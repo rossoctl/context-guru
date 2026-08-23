@@ -96,15 +96,19 @@ const (
 	RoleManager Role = "manager"
 )
 
-// DefaultConfigYAML is the pipeline every new tenant starts on: codesmart with the
-// LLM extractor removed and no blind collapse. Deterministic all the way through,
+// DefaultConfigYAML is the pipeline every new tenant starts on: the config named
+// `house`, which is codesmart's structural offloaders in an operator-chosen order with
+// the LLM extractor removed and no blind collapse. Deterministic all the way through,
 // which on a SHARED box is the property that matters — it makes no cheap-model
 // calls, so it adds no upstream spend, contends on no shared LLM budget, and costs
 // near-zero added latency on someone else's agent. A tenant can opt into
 // extract_llm on their settings page and see the tradeoff there.
 //
-// Expressed as a literal pipeline rather than a registered preset name: this is one
-// default value, not a new vocabulary word.
+// Kept as a literal document even though `house` is now a registered preset name, for
+// two reasons that have nothing to do with taste: supersededDefaults compares stored
+// configs against it BYTE for byte, and this package must not import the pipeline. The
+// two cannot drift — defaultconfig_test.go asserts this literal and `preset: house`
+// resolve to the same pipeline and the same component blocks.
 // failed_run is deliberately absent. Measured on this service and on Terminal-Bench it
 // acted ZERO times while spending real wall clock scanning every request for superseded
 // failures (843 ms across 251 requests on one account, 28.8 s on the Terminal-Bench arm).
@@ -117,9 +121,14 @@ const (
 // 1,724 of 1,748 distinct tool outputs measured on this box are not JSON. Measured
 // −17,219 tokens = 1.73% of the capture corpus, at no upstream spend and no cache churn,
 // which is why it is safe to turn on for everyone rather than offer as an opt-in.
-// Ordered after toon per the pipeline's "lossless repack first" rule, so every downstream
-// component's token counts are honest (see config.presets["general"]).
-const DefaultConfigYAML = `pipeline: [format, toon, textclean, dedup, cmdfilter, extract, cachesplit]
+// The order is the operator's: dedup and cmdfilter run ahead of searchfold and textclean,
+// so the lossless trio does NOT lead here as it does in config.presets["general"]. The
+// consequence is confined to attribution — two offloaders have already edited the messages
+// by the time the folds count theirs, so the per-component split in /stats is less honest
+// than `general`'s. Totals are unaffected. toolfilter is last and carries an empty removal
+// list, so it is a no-op until an account names something; it is in the default so that
+// naming one is a settings change rather than a pipeline change.
+const DefaultConfigYAML = `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
 components:
   extract:
     min_tokens: 400
@@ -136,6 +145,14 @@ mode: sync
 // a record, not a mechanism: nothing rewrites a stored config on the strength of it. A
 // sweep, if one is ever wanted, gets to be a separate and reversible decision.
 var supersededDefaults = []string{
+	// Superseded 2026-08-23 by the config named `house` in config.presetConfigs: searchfold
+	// and toolfilter added, dedup moved ahead of toon.
+	`pipeline: [format, toon, textclean, dedup, cmdfilter, extract, cachesplit]
+components:
+  extract:
+    min_tokens: 400
+mode: sync
+`,
 	// Superseded 2026-08-20 by the addition of textclean.
 	`pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
 components:

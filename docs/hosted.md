@@ -631,16 +631,31 @@ the compaction.
 
 ## Default configuration
 
-Every new tenant starts on `codesmart` minus the LLM extractor (and minus `codesafe`'s
-blind `collapse`):
+Every new tenant starts on **`house`** — the structural offloaders with no model call
+anywhere in the path:
 
 ```yaml
-pipeline: [format, toon, textclean, dedup, cmdfilter, extract, cachesplit]
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
 components:
   extract:
     min_tokens: 400
 mode: sync
 ```
+
+**`housellm`** is the same pipeline with `extract_llm` inserted before `extract`, applied
+per account on request. It calls a cheap model (`claude-haiku-4-5`, on the caller's own
+credential and endpoint) when the economic gate says the expected saving beats the priced
+cost of the call — including on prompt-cached traffic, which the deterministic default
+leaves alone. It is offered by name rather than turned on for everyone because those calls
+spend the caller's money.
+
+**Changed 2026-08-23:** `searchfold` and `toolfilter` joined the default, and `dedup` moved
+ahead of `toon`. `toolfilter` ships with an empty removal list, so it is a no-op until an
+account names a tool, MCP server or skill to stop sending — it is in the default so that
+naming one is a settings change rather than a pipeline change. `toon` stays in this order at
+the operator's request even though it acted 0 times on 5,752 measured requests; it is
+lossless, so what it costs is latency, never content. `linecap` is **not** here and is the
+one omission worth re-measuring: it took 20.3% of all shipped tokens on the captured corpus.
 
 `textclean` was added on 2026-08-20 and is the reason to re-read this section if you last
 saw it earlier. It strips ANSI escapes and carriage-return redraws from tool output, which

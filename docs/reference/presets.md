@@ -7,7 +7,9 @@ taken exactly from the `presets` map in `config/config.go`.
 
 | Preset | Ordered pipeline | When to use |
 |---|---|---|
-| `codesmart` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `extract_llm` → `extract` → `linecap` → `cachesplit` | **The default.** The SWE-bench-winning cache-aware config: structural offloaders + a cheap-model relevance-trimmer (`extract_llm`, routed to `CHEAP_MODEL`, gated so most turns make no model call) + deterministic `extract`. `extract_llm` no-ops (→ deterministic) when no cheap model is configured. **Changed 2026-08:** the lossless trio replaced `toon`, which acted 0 times on 5,752 production requests, and `linecap` was added. Re-measure before quoting the published SWE-bench numbers against it. |
+| `house` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract` → `cachesplit` → `toolfilter` | **The default**, for the standalone proxy and for every hosted tenant that has not chosen otherwise. Deterministic all the way through: no model call, so it adds no upstream spend and no latency to anyone else's agent on a shared box. `toolfilter` carries an empty removal list until an account names something. The order is the operator's, not this file's lossless-first rule — see the note below the table. |
+| `housellm` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract` → `cachesplit` → `toolfilter` | `house` plus the compaction-model pass, applied per account on request. `allow_on_caching_backend: true` (the only preset that sets it) with `economic_gate: true`, so a call happens on prompt-cached traffic only when the expected saving beats the priced cost of making it. `llm_max_per_session: 0` = unlimited; the remaining bounds are `llm_max_per_request: 4`, a 20,000-token pressure trigger and the gate. |
+| `codesmart` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `extract_llm` → `extract` → `linecap` → `cachesplit` | The SWE-bench-winning cache-aware config: structural offloaders + a cheap-model relevance-trimmer (`extract_llm`, routed to `CHEAP_MODEL`, gated so most turns make no model call) + deterministic `extract`. `extract_llm` no-ops (→ deterministic) when no cheap model is configured. **Changed 2026-08:** the lossless trio replaced `toon`, which acted 0 times on 5,752 production requests, and `linecap` was added. Re-measure before quoting the published SWE-bench numbers against it. |
 | `codesafe` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `extract` → `collapse` → `linecap` → `cachesplit` | `codesmart` minus the LLM pass — **deterministic-only, zero model calls by policy**. The safe control / the choice when you don't want an LLM on the hot path. |
 | `off` | *(empty)* | Passthrough — no components. The baseline / A-B control. |
 | `safe` | `format` → `textclean` → `searchfold` → `cachesplit` | Lossless only: repack JSON compactly and split the volatile system tail so the shared prefix stays cacheable. Zero risk of dropping content. |
@@ -46,6 +48,25 @@ taken exactly from the `presets` map in `config/config.go`.
     7th saved 5,524,476 tokens — **worse than the 5,556,801 with no linecap at all**, because it
     took 39,335 tokens off messages `collapse` would have taken 76,554 off. Placed last it saves
     **5,811,621 (+1.33 pp)**.
+
+!!! warning "`house` / `housellm` depart from two rules above, on purpose"
+    Both are the operator's ordering, and the two deviations are recorded here so nobody
+    "corrects" them by reading the section above:
+
+    **The lossless trio does not lead.** `dedup` and `cmdfilter` run before `searchfold` and
+    `textclean`, so two offloaders have already edited the messages by the time the folds count
+    theirs. The consequence is confined to **attribution** — the per-component split in `/stats`
+    is less honest than `general`'s. Totals are unaffected, and nothing can lose content: all
+    three folds verify-then-adopt whatever order they run in.
+
+    **`toon` runs**, against its own retirement measurement (0 acts in 5,752 requests, 0
+    convertible candidates in 11.67M tokens). It is a `Reformat`, so the cost is latency and
+    never content: 1.53 ms and one `TextTokens` call per tool message. If tabular traffic ever
+    arrives, it is already in the path.
+
+    **`linecap` is absent**, and that is the omission worth re-measuring rather than the two
+    above: it took **20.3% of all shipped tokens** on the captured corpus, more than anything
+    else deterministic in the catalogue.
 
 !!! note "`coding` changed in August 2026"
     It used to be `format → skeleton → cmdfilter → cachesplit`, and because

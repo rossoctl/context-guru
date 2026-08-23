@@ -397,6 +397,26 @@ var presets = map[string][]string{
 	// /compact?preset=) resolving them.
 	"codesmart": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "linecap", "cachesplit"},
 	"codesafe":  {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract", "collapse", "linecap", "cachesplit"},
+	// house / housellm are the SERVICE configs: `house` is what every account runs unless
+	// it says otherwise (tenant.DefaultConfigYAML is this document), `housellm` is the same
+	// pipeline with the compaction-model pass added, applied per account on request.
+	//
+	// The component ORDER here is the operator's, not this file's usual rule. Two
+	// deliberate deviations, recorded so nobody "fixes" them by reading the comments above:
+	//
+	//	toon runs, against the measurement in TestToonIsInNoPreset (0 acts on 5,752
+	//	  production requests, 0 convertible candidates in 11.67M tokens, 1.53 ms and one
+	//	  TextTokens call per tool message). It is a Reformat, so the cost is latency, never
+	//	  content. If tabular traffic ever arrives it is already in the path.
+	//	dedup and cmdfilter run BEFORE searchfold and textclean, so the lossless trio no
+	//	  longer leads. Downstream token counts are therefore taken after two offloaders
+	//	  have already edited the messages, which makes the per-component attribution in
+	//	  /stats less honest than in `general` — the totals are unaffected.
+	//
+	// linecap is absent, which is the one thing here worth re-measuring: it took 20.3% of
+	// all shipped tokens on the captured corpus, more than anything else deterministic.
+	"house":    {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
+	"housellm": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
@@ -435,6 +455,56 @@ components:
 components:
   collapse:
     max_tokens: 3000`,
+	// house: the service default, deterministic all the way through — no model call, so it
+	// adds no upstream spend and no latency to anyone else's agent on a shared box.
+	// tenant.DefaultConfigYAML is this pipeline with `mode: sync`, and a test there asserts
+	// the two cannot drift apart.
+	"house": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
+components:
+  extract:
+    min_tokens: 400`,
+	// housellm: house plus the compaction-model pass, as measured on this service.
+	//
+	// allow_on_caching_backend is TRUE here, and everywhere else in this file it is not.
+	// Unset means false, and the economic gate then hard-declines every candidate whose
+	// tokens are prompt-cached — which on Claude Code against Anthropic is the entire
+	// workload, and is how a fully configured extract_llm ran 251 times and acted 0 times.
+	// The brake that remains is economic_gate, still on: a call happens only when the
+	// expected saving beats the priced cost of making it. That is the difference between
+	// "spend on size" and "spend when it pays", and it is why this is offered by name
+	// rather than turned on for everyone.
+	//
+	// llm_max_per_session: 0 is UNLIMITED, by operator decision. The remaining bounds on a
+	// long session are llm_max_per_request (4), the pressure trigger (20,000 request
+	// tokens) and the economic gate. cold_cache.max_calls: 20 bounds one TTL-expiry sweep
+	// (0 there would mean the built-in 4, and -1 would mean unlimited — a different knob
+	// with a different zero).
+	"housellm": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
+components:
+  extract:
+    min_tokens: 400
+  extract_llm:
+    aggressiveness: medium
+    allow_on_caching_backend: true
+    cold_cache:
+      enabled: true
+      max_calls: 20
+      min_tokens: 3000
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 4
+    llm_max_per_session: 0
+    min_tokens: 3000
+    model:
+      model: claude-haiku-4-5
+      source: incoming
+    per_output: false
+    strategy: code
+    trigger:
+      min_request_tokens: 20000`,
 	// agentdiet: the published AgentDiet baseline at the paper's tuned hyperparameters
 	// (a=2, b=1, θ=500) and the authors' artifact apply-gate (saved >= 400 || keep <
 	// 0.8). Routed to the CHEAP model because the method's economics depend on the
