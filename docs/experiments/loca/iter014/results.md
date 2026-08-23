@@ -94,3 +94,43 @@ calls for the same outcome), not qualitative.
 two arms differ by ~26 points of prompt framing in iteration 009's measurements, so framing clearly
 dominates the model's behaviour — which is itself an argument that the decision is not really being made
 on the evidence.
+
+## A rig bug that invalidated two arms and nearly took the headline with it
+
+Found while reading the third arm's counters: they listed `coref` and `extract_llm` as having acted,
+but that arm's pipeline was `[format, summarize]`, which contains neither.
+
+**Cause.** `stage6.sh` was generated with `sed 's|cg-proxy-v7|cg-proxy-v8|g' stage5.sh`, but the kill
+line reads `pkill -f "cg-proxy-v[7]"`. The brackets mean sed's literal pattern never matched it, so the
+generated script **killed v7 while launching v8** — and v8 proxies were never cleaned up between arms.
+When a later arm reused a port, the previous arm's proxy was still bound to it, answered `/healthz`
+identically, and the new proxy silently failed to bind. That arm then ran the **previous arm's
+pipeline** and reported that proxy's **cumulative** counters.
+
+| arm | port | components that acted | matches its config? |
+|---|---|---|---|
+| `s7-xllm-sum` | 6700 | coref, extract_llm, format, summarize | **yes** — valid |
+| `s7-merged` | 6800 | extract_llm, format, summarize (**no coref**) | **yes** — valid |
+| `s7-sum` | 6700 (**reused**) | coref, extract_llm, format, summarize | **NO** — invalid |
+
+`s7-sum` reported 5,779 requests ≈ 3,548 + 2,231, i.e. the earlier arm's total plus its own.
+
+**The headline comparison survives, and not by design.** Arms 1 and 2 alternated ports 6700/6800, so
+each got a genuinely fresh proxy, and their component sets match their configs exactly — `s7-merged`
+records **no `coref`**, which is the one thing that would betray a stale-proxy mix-up, since every
+other arm has it. Had arms 1 and 2 shared a port, the merged result would have been garbage and would
+have looked entirely plausible.
+
+**Two fixes, both at the source rather than in the copy:** the kill pattern is now
+`cg-proxy-v[0-9]` so it covers every version, and the generated `stage6.sh` is deleted. A `/healthz`
+200 is also no longer accepted as proof the intended proxy answered — the arm now requires its OWN
+proxy log to show a `pipeline=` line and echoes which pipeline bound the port, so a stale proxy cannot
+be mistaken for a fresh one.
+
+**Not re-run:** the two invalidated arms were the expendable deferral context, ~$460 for the pair, and
+the question they served is already answered at 32k by [iteration 011](../iter011/results.md). Re-running
+them is a budget decision, not a correctness one.
+
+This is the same failure family as the three vacuous checks and the wrong lossy-baseline signal already
+logged: **a check that cannot distinguish success from a plausible-looking substitute.** `/healthz`
+returning 200 answered "is something listening" when the question was "is MY process listening".
