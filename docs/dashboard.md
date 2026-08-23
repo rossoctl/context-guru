@@ -16,10 +16,21 @@ route, including [`/stats`](reference/routes.md), is byte-for-byte unchanged.
 ![The dashboard's Overview](img/dashboard/01-overview.jpg)
 
 !!! info "No CDN, no build step, no network"
-    The whole UI is three files (`index.html`, `style.css`, `app.js`) embedded in the
-    binary with `go:embed`, served under a `default-src 'self'` CSP. Charts are
-    hand-drawn SVG — no chart library, no framework, no npm. The page fetches nothing
-    off-origin, so it works in a VPC or fully air-gapped, and a test asserts that.
+    The whole UI is five files (`index.html`, `style.css`, `app.js`, and the Inventory
+    tab's `tools.js` / `tools.css`) embedded in the binary with `go:embed`, served under a
+    `default-src 'self'` CSP. Charts are hand-drawn SVG — no chart library, no framework,
+    no npm. The page fetches nothing off-origin, so it works in a VPC or fully air-gapped,
+    and a test asserts that.
+
+!!! warning "The two scripts share one global scope"
+    `app.js` and `tools.js` are loaded as **classic** scripts, not modules, so they do not
+    get a scope each: every top-level `const`, `let`, `function` and `class` in either file
+    is one shared global binding. A top-level name that collides with a browser API
+    silently disables that API for every *bare* call on the page — `window.<name>` keeps
+    working, so nothing reads as wrong until a handler throws. `tools.js` shipped a
+    top-level `const prompt` once, which is what broke Settings → **Mint a token**; see
+    `TestUIScriptsDoNotShadowBrowserGlobals` in `dash/uishadow_test.go`, which now fails on
+    any such name.
 
 ## What it shows
 

@@ -1354,8 +1354,28 @@ function copyBox(text, label) {
  *
  * `state` is one of: 'idle' (not asked for yet), 'loading', 'ok', 'absent' (the endpoint is
  * not there — an older proxy), 'error'.
+ *
+ * NOT named `prompt`, and nothing at this level may be. app.js and this file are both
+ * CLASSIC scripts, so they share one global lexical scope: a top-level `const prompt` here
+ * shadowed window.prompt for every bare prompt() call in BOTH files, while leaving
+ * window.prompt itself a function — so nothing looked wrong in app.js, in the markup or in
+ * any test, and the only symptom was a TypeError thrown inside a click handler. It shipped
+ * that way, and it broke three things by taking out four call sites in app.js:
+ *
+ *   - Settings → "Mint a token" threw on its FIRST statement, so the button did nothing at
+ *     all: no dialog, no request, no token.
+ *   - Tenants → "Reissue token" threw AFTER its POST had succeeded, so the replacement
+ *     token was minted and then never shown. Tokens are stored hashed, so each click left
+ *     the account one live credential nobody holds.
+ *   - the keep-alive's "how many hours?" threw before it could ask, so arming a session
+ *     did nothing.
+ *
+ * The fourth, the audit trail's "copy the document as it was before this save", is a
+ * clipboard fallback, so only a browser that refuses clipboard access reached it.
+ *
+ * TestUIScriptsDoNotShadowBrowserGlobals now fails on any such name.
  */
-const prompt = { state: 'idle', view: null, byName: new Map() };
+const promptState = { state: 'idle', view: null, byName: new Map() };
 
 /**
  * loadPrompt fetches the prefix text once and repaints only the reveals that are open.
@@ -1365,20 +1385,20 @@ const prompt = { state: 'idle', view: null, byName: new Map() };
  * Each reveal registers a repaint of its own body instead.
  */
 async function loadPrompt() {
-  if (prompt.state === 'loading' || prompt.state === 'ok') return;
-  prompt.state = 'loading';
+  if (promptState.state === 'loading' || promptState.state === 'ok') return;
+  promptState.state = 'loading';
   repaintPrompt();
   try {
     const v = await api('prompt');
-    prompt.view = v;
-    prompt.byName = new Map();
-    for (const r of v.regions || []) prompt.byName.set(r.kind + '/' + r.name, r);
-    prompt.state = 'ok';
+    promptState.view = v;
+    promptState.byName = new Map();
+    for (const r of v.regions || []) promptState.byName.set(r.kind + '/' + r.name, r);
+    promptState.state = 'ok';
   } catch (err) {
     if (aborted(err)) return;
     // A 404 is an older proxy that has the report and not this route. That is "the feature
     // is not there", not "something broke", and the two must not read the same.
-    prompt.state = /404|not found/i.test(String((err && err.message) || err)) ? 'absent' : 'error';
+    promptState.state = /404|not found/i.test(String((err && err.message) || err)) ? 'absent' : 'error';
   }
   repaintPrompt();
 }
@@ -1411,20 +1431,20 @@ function promptTextReveal(t) {
   det.appendChild(body);
   const paint = () => {
     clear(body);
-    if (prompt.state === 'idle' || prompt.state === 'loading') {
+    if (promptState.state === 'idle' || promptState.state === 'loading') {
       body.appendChild(el('p', { class: 'hint' }, 'Reading…'));
       return;
     }
-    if (prompt.state === 'absent') {
+    if (promptState.state === 'absent') {
       body.appendChild(el('p', { class: 'hint' }, 'This proxy records the token weight of each '
         + 'declaration but not its text. The weight above is exact.'));
       return;
     }
-    if (prompt.state === 'error') {
+    if (promptState.state === 'error') {
       body.appendChild(el('p', { class: 'hint' }, 'Could not read the prompt text.'));
       return;
     }
-    const reg = prompt.byName.get(t.kind + '/' + t.name);
+    const reg = promptState.byName.get(t.kind + '/' + t.name);
     if (reg && reg.has_text) {
       body.appendChild(el('p', { class: 'hint' }, num(reg.tokens) + ' tokens, '
         + pct(reg.share, 1) + ' of the prefix that session carried.'));
@@ -1451,7 +1471,7 @@ let promptWaiters = [];
  * prevent — the same one captureState fixes on the server.
  */
 function notCapturedState(host) {
-  const v = prompt.view || {};
+  const v = promptState.view || {};
   if (v.blocked_by === 'operator') {
     return emptyState(host, 'Prompt text is not stored on this deployment',
       'The operator has content capture switched off service-wide, so no prompt or transcript '
@@ -1540,21 +1560,21 @@ function renderPromptPanel(host, rep) {
   det.appendChild(body);
   const paint = () => {
     clear(body);
-    if (prompt.state === 'loading' || prompt.state === 'idle') {
+    if (promptState.state === 'loading' || promptState.state === 'idle') {
       body.appendChild(el('p', { class: 'hint' }, 'Reading…'));
       return;
     }
-    if (prompt.state === 'absent') {
+    if (promptState.state === 'absent') {
       emptyState(body, 'This proxy does not record prompt text',
         'It records the token weight of every region, which is what the figures above are. '
         + 'Reading the text needs a newer proxy.');
       return;
     }
-    if (prompt.state === 'error') {
+    if (promptState.state === 'error') {
       emptyState(body, 'Could not read the prompt text', 'The figures above are unaffected.');
       return;
     }
-    const v = prompt.view || {};
+    const v = promptState.view || {};
     if (!v.captured) { notCapturedState(body); return; }
     body.appendChild(el('p', { class: 'note' }, 'One session\'s actual prefix — '
       + num(v.tokens) + ' tokens across ' + num((v.regions || []).length) + ' regions, captured '

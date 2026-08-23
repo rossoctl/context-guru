@@ -14,6 +14,12 @@ shared page carries exactly one line about it (`<script src="tools.js"></script>
 `tile()`, `tileGroup()`, `emptyState()`, `sortRows()`, `rangeLabel()` — is `app.js`'s, so
 the page belongs to the same design system rather than shipping a second one.
 
+Mounting itself is not the same as having its own scope. Both files are **classic** scripts,
+so `tools.js`'s top-level declarations are globals that `app.js` sees too — which is how a
+`const prompt` here once shadowed `window.prompt` and broke Settings → *Mint a token* in the
+other file. Name top-level bindings in this file as if they were `app.js`'s; the guard is
+`TestUIScriptsDoNotShadowBrowserGlobals`.
+
 ## What is on the page, top to bottom
 
 | Section | Answers |
