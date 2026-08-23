@@ -399,7 +399,11 @@ func TestEveryScopeColumnUsesTheAttributeShowScopeColReads(t *testing.T) {
 		t.Fatal("no showScopeCol call sites found; this check needs rewriting")
 	}
 	for _, c := range calls {
-		i := strings.Index(html, c[1])
+		// The QUOTED attribute, not the bare id: `sessions-table` is a substring of
+		// `ka-sessions-table`, so a bare search resolves by file order and would silently inspect
+		// the wrong table's thead if the panels were ever reordered — and PASS, because both carry
+		// the attribute. A check that passes for the wrong reason is worse than no check.
+		i := strings.Index(html, `data-testid="`+c[1]+`"`)
 		if i < 0 {
 			t.Errorf("showScopeCol is called for table %q, which is not in index.html", c[1])
 			continue
