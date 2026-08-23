@@ -144,13 +144,16 @@ that differs can say so rather than being silently mispriced:
 
 WHAT AN ACTION IS
 -----------------
-Five, and they are the whole set of things a prompt-caching provider sells:
+Six, and they are the whole set of things a prompt-caching provider sells:
 
-    'expire'    write no cache_control; this prompt is billed as fresh input
-    'write_5m'  write/retain the prefix at the 5-minute tier
-    'write_1h'  write/retain the prefix at the 1-hour tier
-    'ping_5m'   hold at 5 minutes AND refresh with keep-alives while idle
-    'ping_1h'   hold at an hour AND refresh with keep-alives while idle
+    'expire'            write no cache_control; this prompt is billed as fresh input
+    'write_5m'          write/retain the prefix at the 5-minute tier
+    'write_1h'          write/retain the prefix at the 1-hour tier
+    'ping_5m'           hold at 5 minutes AND refresh with keep-alives while idle
+    'ping_1h'           hold at an hour AND refresh with keep-alives while idle
+    'write_5m_ping_1h'  write at the CHEAP 5-minute tier, and if a keep-alive comes due before
+                        it lapses, extend the context by an hour with a 1-hour write — so the
+                        long-hold premium is paid only on conversations that actually go quiet
 
 `evaluate(rows, actions)` takes `actions` as either a list parallel to the chronological
 row order, or a dict keyed by `request_id`. TTL SECONDS are accepted as a convenience — 0,
@@ -233,11 +236,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
+from urllib.parse import quote
 
 # ── actions and tiers ──────────────────────────────────────────────────────
 
@@ -617,7 +622,13 @@ def load_trajectories(db_path: str | Path = DEFAULT_DB, *, since_ms: int | None 
                       until_ms: int | None = None,
                       include_keepalive: bool = False) -> list[Request]:
     """Read the trajectories from the dashboard store, READ-ONLY, chronologically."""
-    uri = f"file:{Path(db_path).as_posix()}?mode=ro"
+    # quote() the path, do not merely concatenate it. SQLite's URI syntax gives '?' and '&'
+    # meaning, so an unescaped path containing either injects query parameters — and SQLite
+    # honours the FIRST mode it sees, which demotes the appended mode=ro to an ignored junk
+    # parameter. Demonstrated: a db_path of "new.db?mode=rwc&" opened WRITABLE and CREATED the
+    # file. "We never write to the production store" is this module's central promise, so it
+    # cannot rest on the path happening to contain no punctuation.
+    uri = f"file:{quote(Path(db_path).resolve().as_posix())}?mode=ro"
     con = sqlite3.connect(uri, uri=True)
     try:
         have = {r[1] for r in con.execute("PRAGMA table_info(requests)")}
@@ -1653,7 +1664,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "training half")
     ap.add_argument("--threshold-5m", type=float, default=0.5)
     ap.add_argument("--threshold-1h", type=float, default=0.5)
-    ap.add_argument("--json", help="write the full result set here")
+    ap.add_argument("--json", help="write the full result set here. CONTAINS PER-ACCOUNT "
+                                   "IDENTIFIERS (by_user is keyed by tenant id); written 0600")
     ap.add_argument("--fixture", help="score a JSON fixture and print it (drift test)")
     args = ap.parse_args(argv)
     if args.fixture:
@@ -1721,16 +1733,23 @@ def main(argv: Sequence[str] | None = None) -> int:
           f"same {len(test):,} requests.")
 
     if args.json:
-        Path(args.json).write_text(json.dumps({
-            "window": {"since_ms": lo, "until_ms": hi, "cut_ms": cut},
-            "baseline": args.baseline,
-            "notes": ctx.notes,
-            "billed_usd": billed,
-            "policies": {n: c.to_dict() for n, c in costs.items()},
-            "savings": {n: compare(costs[args.baseline], c).__dict__
-                        for n, c in costs.items()},
-        }, indent=2, default=str), encoding="utf-8")
-        print(f"  wrote {args.json}")
+        # 0600, and created that way rather than chmod'd afterwards: the payload carries
+        # by_user keyed by TENANT ID with each account's request count and dollar total, so a
+        # world-readable default (0644 minus umask) hands per-customer spend to every local
+        # user. O_CREAT|O_TRUNC with the mode set at creation leaves no window where the file
+        # exists with wider permissions.
+        fd = os.open(args.json, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "window": {"since_ms": lo, "until_ms": hi, "cut_ms": cut},
+                "baseline": args.baseline,
+                "notes": ctx.notes,
+                "billed_usd": billed,
+                "policies": {n: c.to_dict() for n, c in costs.items()},
+                "savings": {n: compare(costs[args.baseline], c).__dict__
+                            for n, c in costs.items()},
+                }, indent=2, default=str))
+        print(f"  wrote {args.json} (mode 0600: it contains per-account identifiers)")
     return 0
 
 

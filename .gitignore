@@ -125,6 +125,16 @@ celerybeat.pid
 # Environments
 .env
 .venv
+# Any venv, not only the one named exactly `.venv`. The KV-cache TTL tooling documents
+# `.venv-kvpred`, whose bin/ and pyvenv.cfg were otherwise untracked-but-not-ignored.
+.venv*/
+
+# Fitted survival predictors (deploy/harbor/kv_ttl_survival_predictor.py). NEVER committed:
+# joblib is pickle, so the file is executable content, and the fitted pipeline one-hot-encodes
+# user_id — which is the real tenant id — so OneHotEncoder.categories_ carries a verbatim list
+# of every account in the training window. This repo is public. One `git add -A` in the root
+# would publish the customer list.
+*.joblib
 env/
 venv/
 ENV/

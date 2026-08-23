@@ -240,7 +240,8 @@ func (r *Replay) Unanswered() int64 { return r.missing }
 // turn t — its size, its tier, its deadline, the keep-alives that fired during the span — is
 // a function of the PREVIOUS action alone, given the two rows' timestamps. So the cost
 // decomposes as a sum of f(action[t-1], action[t]) along the chain and one Viterbi pass per
-// trajectory settles it: five states, five transitions, O(25n).
+// trajectory settles it: len(Actions) states, len(Actions) transitions each, so
+// O(len(Actions)^2 * n) — six actions today, and the bookkeeping is linear (see back[] below).
 //
 // Every surface that shows this must label it unreachable (see StrategySpec.Unreachable).
 type Optimal struct{ chosen map[int64]Action }
@@ -273,17 +274,29 @@ func NewOptimal(reqs []*Request, cfg Config) *Optimal {
 			}
 			return group[i].ID < group[j].ID
 		})
-		// cost[a] and path[a] are the best total, and the plan behind it, for a prefix of the
-		// trajectory whose LAST action is Actions[a].
+		// cost[a] is the best total for a prefix of the trajectory whose LAST action is
+		// Actions[a]. The plan itself is NOT carried forward beside it: back[i][a] records which
+		// previous action that best came from, and the plan is recovered by walking those
+		// pointers once at the end.
+		//
+		// That is the difference between the O(len(Actions)^2 * n) this claims and the O(n^2) an
+		// earlier version actually did. It kept a []Action per state and copied the whole winning
+		// prefix into each of them every turn, so the recurrence was linear while the bookkeeping
+		// around it was quadratic in both time and allocation — measured at 8.4 ms for a
+		// 500-request trajectory rising to 94 SECONDS at 64k, a clean 4x per doubling. Trajectory
+		// length is not bounded by anything we control: a conversation is keyed on a
+		// CLIENT-SUPPLIED session id, so one account reusing one id makes one group arbitrarily
+		// long. A comment claiming linear bookkeeping over quadratic code is how that becomes a
+		// production incident rather than a benchmark.
 		cost := make([]float64, len(Actions))
-		path := make([][]Action, len(Actions))
+		back := make([][]int, len(group))
 		for i, r := range group {
 			nextCost := make([]float64, len(Actions))
-			nextPath := make([][]Action, len(Actions))
+			back[i] = make([]int, len(Actions))
 			for bi, b := range Actions {
 				if i == 0 {
 					nextCost[bi] = stepCost(nil, ActionExpire, r, b, cfg)
-					nextPath[bi] = []Action{b}
+					back[i][bi] = -1
 					continue
 				}
 				bestCost, bestAt := 0.0, -1
@@ -294,9 +307,9 @@ func NewOptimal(reqs []*Request, cfg Config) *Optimal {
 					}
 				}
 				nextCost[bi] = bestCost
-				nextPath[bi] = append(append([]Action(nil), path[bestAt]...), b)
+				back[i][bi] = bestAt
 			}
-			cost, path = nextCost, nextPath
+			cost = nextCost
 		}
 		// The OPEN span after the last turn: an action that pings keeps spending, bounded by
 		// the window's end. Without charging for it the optimum would happily choose a
@@ -309,8 +322,14 @@ func NewOptimal(reqs []*Request, cfg Config) *Optimal {
 				bestCost, bestAt = c, ai
 			}
 		}
-		for j, r := range group {
-			out.chosen[r.ID] = path[bestAt][j]
+		// Walk the back-pointers from the last turn to the first, then assign. One pass, one
+		// int per (turn, state), no prefix ever copied.
+		at := bestAt
+		for i := len(group) - 1; i >= 0; i-- {
+			out.chosen[group[i].ID] = Actions[at]
+			if prev := back[i][at]; prev >= 0 {
+				at = prev
+			}
 		}
 	}
 	return out

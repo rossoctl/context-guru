@@ -1,5 +1,5 @@
 // Package kvcache is the KV-cache TTL domain: the per-request analysis dataset the
-// dashboard's KV-cache page reads, the pricing model for the five things a prompt-cache
+// dashboard's KV-cache page reads, the pricing model for the six things a prompt-cache
 // policy can spend money on, the Strategy interface a TTL policy (or a future learned
 // predictor) implements, and the historical replay simulator that scores one strategy
 // against another.

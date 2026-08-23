@@ -10,7 +10,7 @@ import (
 // Action is what a strategy decides to do about a conversation's cached context for the
 // idle span that starts now.
 //
-// Five actions and no sixth: they are the whole set of things a caller can actually buy
+// Six actions, and they are the whole set of things a caller can actually buy
 // from a prompt-caching provider. "Do nothing" is ActionExpire — an entry nobody pays to
 // keep lapses on its own — and saying so explicitly is what makes a no-cache baseline a
 // strategy rather than an absence.

@@ -98,7 +98,7 @@ func TestOptimalIsALowerBoundOnEveryOtherArm(t *testing.T) {
 		t.Error("no arm was dearer than the optimum, so this dataset cannot tell a real bound " +
 			"from a coincidence")
 	}
-	// A random plan must not beat it either — the DP is over the same five actions, so a
+	// A random plan must not beat it either — the DP is over the same actions, so a
 	// hand-picked sequence is a direct challenge to its optimality.
 	plans := map[int64]Action{}
 	for i, r := range reqs {
