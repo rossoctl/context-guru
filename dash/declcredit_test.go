@@ -2,6 +2,7 @@ package dash
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -165,5 +166,105 @@ func TestSetDeclCreditPutsEachHalfInTheRightTotal(t *testing.T) {
 	o.SetDeclCredit(nil)
 	if o.TotalSavedUSD != saved || o.TotalReducedUSD != reduced {
 		t.Error("a nil credit moved a total")
+	}
+}
+
+// TestTheDeclarationFilterSavingIsDisjointFromCompactions makes the word "disjoint" executable.
+//
+// TotalSavedUSD adds the filter's saving to compaction's and calls the token sets disjoint. For
+// the tools half that is true by construction — a tool schema is not in `messages` and
+// `tokens_before` counts nothing else. For the SKILLS half it is not: a skill's listing entry IS
+// in `messages`, so the two could describe the same tokens and the total would double-count them.
+//
+// It holds because both halves of the filter run in apply BEFORE the pipeline takes its baseline,
+// so `tokens_before` is measured on the already-filtered body and the removal is simply absent
+// from Saved() rather than inside it. That is an ORDERING property of a different package, which
+// is exactly the kind of thing a later refactor falsifies silently — the total would keep adding
+// and nothing would complain.
+//
+// Asserted as the invariant rather than by re-deriving the order: a request that carries a filter
+// saving and no compaction contributes to the filter half and to NOTHING else.
+func TestTheDeclarationFilterSavingIsDisjointFromCompactions(t *testing.T) {
+	db := openTestDB(t)
+	// The shape a filtered request really has, taken from a live run: tokens_before ==
+	// tokens_after (the pipeline saw an already-filtered body and removed nothing further), and a
+	// non-zero filtered_decl_tokens beside it.
+	e := mkEvent(1000, "s", "claude", 4910, 4910)
+	e.TenantID, e.Tools, e.FilteredDeclTokens = "t1", 4, 561
+	e.CacheRead, e.CacheWrite = 49132, 0
+	// mkEvent hardcodes BaselineCostUSD: 0.02 against CostUSD: 0.01 whatever tokens it is given,
+	// so its default row claims a cent of compaction saving on a request that compacted nothing.
+	// Equal is what a filtered-but-not-compacted request ACTUALLY looks like — verified on the
+	// live run, where baseline_cost_usd − cost_usd was 0.0 on all six such rows. Without this the
+	// test fails on the fixture rather than on the mechanism, which is the wrong red.
+	e.BaselineCostUSD = e.CostUSD
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := db.Overview(Filter{Tenant: "t1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compaction saw nothing, so every compaction-side figure is zero and the baseline equals the
+	// bill. If a future reordering put the filter's removal inside the baseline, this is where it
+	// would show up — as a saving compaction did not make.
+	if o.SavedGross != 0 || o.SavedUnique != 0 {
+		t.Errorf("compaction reports saved_gross=%d saved_unique=%d on a request it did not "+
+			"touch: the declaration filter's removal has entered the compaction accounting, and "+
+			"TotalSavedUSD now counts it twice", o.SavedGross, o.SavedUnique)
+	}
+	if o.BaselineCostUSD != o.CostUSD {
+		t.Errorf("baseline $%g != cost $%g on a request compaction did not touch: the filter's "+
+			"removal is inside the baseline, so it is in NetSavedUSD AND in DeclFilterUSD",
+			o.BaselineCostUSD, o.CostUSD)
+	}
+	if o.NetSavedUSD != 0 {
+		t.Errorf("net_saved_usd = $%g before any credit is attached, so the filter's saving is "+
+			"already counted once here and will be counted again by SetDeclCredit", o.NetSavedUSD)
+	}
+	// And the filter half does carry it, so this is a test of disjointness rather than of an
+	// empty fixture.
+	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.FilterReads != 561 {
+		t.Fatalf("filter half = %d reads, want 561 — the fixture is not exercising anything",
+			c.FilterReads)
+	}
+	o.SetDeclCredit(c)
+	if o.TotalSavedUSD != c.FilterUSD {
+		t.Errorf("total_saved $%g != the filter's $%g; something else contributed to a request "+
+			"that only the filter acted on", o.TotalSavedUSD, c.FilterUSD)
+	}
+}
+
+// TestTheWalkAndTheTotalAgreeOnHowManyAddendsThereAre.
+//
+// TotalSavedUSD's doc comment enumerates its addends in prose and the waterfall's `total_saved`
+// step enumerates them again in prose shown to the reader. Adding a fourth means updating both,
+// and the second one was missed — the page said "Three disjoint token sets" while the field summed
+// four. Prose in two places drifts; this is the cheapest thing that notices.
+func TestTheWalkAndTheTotalAgreeOnHowManyAddendsThereAre(t *testing.T) {
+	var desc string
+	for _, s := range (&Overview{}).waterfall() {
+		if s.Key == "total_saved" {
+			desc = s.Description
+		}
+	}
+	if desc == "" {
+		t.Fatal("the total_saved step is gone; this check needs rewriting")
+	}
+	// The four steps the total is built from, each of which must be described where the total is.
+	for _, want := range []string{"compaction", "prefix-cache", "keep-alive", "declarations"} {
+		if !strings.Contains(strings.ToLower(desc), want) {
+			t.Errorf("the total_saved description does not mention %q:\n%s\n\n"+
+				"Every addend of TotalSavedUSD is named here, or the page enumerates fewer "+
+				"things than it sums.", want, desc)
+		}
+	}
+	if strings.Contains(desc, "Three disjoint") {
+		t.Errorf("the description still says 'Three disjoint token sets' while TotalSavedUSD " +
+			"sums four")
 	}
 }

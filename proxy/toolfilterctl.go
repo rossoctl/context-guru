@@ -132,11 +132,17 @@ func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
 		f.Components[toolFilterComponent] = map[string]any{}
 	}
 	f.Components[toolFilterComponent]["remove"] = names
-	// The component runs LAST, after cachesplit: it edits the top-level `tools` array rather
-	// than a message, so its position among the message reducers is meaningless, and appending
-	// keeps an existing order untouched. An empty list leaves the pipeline entirely — a
-	// component with nothing to remove is a pass over every request for nothing.
-	f.Pipeline = withComponent(f.Pipeline, toolFilterComponent, len(names) > 0)
+	// ADDED when absent, and never REMOVED. `toolfilter` now ships in the default pipeline with
+	// an empty removal list, so naming a tool is a settings change and not a pipeline change —
+	// and an emptied list that took the component back out would write an explicit pipeline
+	// DIVERGING from the default, for no gain: a component with nothing to remove already does
+	// nothing. The add stays because an account whose stored pipeline predates that default does
+	// not have it, and without the add that account's first exclusion would save nothing and
+	// report success.
+	//
+	// Position is meaningless here either way: the rewrite lives in apply, not in the component,
+	// because `tools` is a top-level field the message pipeline never sees.
+	f.Pipeline = withComponent(f.Pipeline, toolFilterComponent, true)
 	// This route models exactly one component, so it claims exactly one. Without the claim
 	// ApplyForm preserves anything the stored pipeline runs and this omission is not sent —
 	// which is the rule that stops a stale settings page dropping a component it cannot see,

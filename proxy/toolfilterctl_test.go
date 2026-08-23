@@ -54,8 +54,10 @@ func TestToolFilterExcludeRoundTrip(t *testing.T) {
 		t.Fatalf("server exclusion not stored: %q", doc)
 	}
 
-	// RECOVERY: re-including both empties the list, which takes the component back out of
-	// the pipeline rather than leaving a pass over every request that removes nothing.
+	// RECOVERY: re-including both empties the LIST. The component stays in the pipeline, because
+	// it now ships in the default one with an empty list — taking it out would write an explicit
+	// pipeline diverging from the default to no effect, since a filter with nothing to remove
+	// already removes nothing. What must not survive is the NAME.
 	for _, name := range []string{`{"kind":"tool","name":"Workflow","action":"include"}`,
 		`{"kind":"mcp_server","server":"playwright","action":"include"}`} {
 		if w, _ = f.do(t, "POST", "/api/toolfilter", name, jar); w.Code != http.StatusOK {
@@ -65,8 +67,16 @@ func TestToolFilterExcludeRoundTrip(t *testing.T) {
 	_, me = f.do(t, "GET", "/api/me", "", jar)
 	tn, _ = me["tenant"].(map[string]any)
 	doc, _ = tn["effective_config_yaml"].(string)
-	if strings.Contains(doc, "Workflow") || strings.Contains(doc, "toolfilter") {
-		t.Errorf("re-including left the filter configured: %q", doc)
+	if strings.Contains(doc, "Workflow") || strings.Contains(doc, "mcp__playwright") {
+		t.Errorf("re-including left a name in the removal list: %q", doc)
+	}
+	// And the component is STILL there, which is the half a revert to the old
+	// `withComponent(..., len(names) > 0)` would break silently: the list would be right, the
+	// account's pipeline would explicitly omit a component the default ships, and nothing would
+	// notice until the default changed under it.
+	if !strings.Contains(doc, "toolfilter") {
+		t.Errorf("re-including took toolfilter out of the pipeline; it ships in the default one "+
+			"and an empty list already removes nothing: %q", doc)
 	}
 
 	// The audit trail recorded the configuration changes.
@@ -239,7 +249,7 @@ func TestToolFilterStoresASkillUnderItsOwnPrefix(t *testing.T) {
 		t.Fatalf("exclude a plugin skill = %d %s", w.Code, w.Body)
 	}
 
-	// RECOVERY: re-including empties the list and takes the component back out.
+	// RECOVERY: re-including empties the list. The component stays (see the round-trip test).
 	for _, body := range []string{
 		`{"kind":"skill","name":"dataviz","action":"include"}`,
 		`{"kind":"skill","name":"ponytail:ponytail","action":"include"}`,
@@ -251,7 +261,7 @@ func TestToolFilterStoresASkillUnderItsOwnPrefix(t *testing.T) {
 	_, me = f.do(t, "GET", "/api/me", "", jar)
 	tn, _ = me["tenant"].(map[string]any)
 	doc, _ = tn["effective_config_yaml"].(string)
-	if strings.Contains(doc, "skill__") || strings.Contains(doc, "toolfilter") {
-		t.Errorf("re-including left the filter configured: %q", doc)
+	if strings.Contains(doc, "skill__") {
+		t.Errorf("re-including left a skill in the removal list: %q", doc)
 	}
 }

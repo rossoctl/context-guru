@@ -191,7 +191,19 @@ type Overview struct {
 
 	// TotalSavedUSD is OUR savings together: compaction's, less our own spend; the prefix
 	// components'; the keep-alive's NET, which is its saving minus what its pings cost; and the
-	// declaration filter's realized saving. All of them are ours and the token sets are disjoint.
+	// declaration filter's realized saving. FOUR addends, all ours, over disjoint token sets.
+	//
+	// The fourth one's disjointness is the only one that needs an argument, because half of what
+	// it removes (a skill's listing entry) lives in `messages`, which is exactly where
+	// `tokens_before` is measured. It holds because BOTH halves of the filter run in apply
+	// BEFORE the pipeline takes its baseline, so `tokens_before` is measured on the
+	// already-filtered body and the removal is invisible to Saved() rather than counted twice.
+	// Measured on a live run: on every request where the filter dropped 561 tokens,
+	// tokens_before == tokens_after, saved_gross == 0 and baseline_cost_usd − cost_usd == 0,
+	// while tokens_before itself fell by exactly the skill entry's weight.
+	// TestTheDeclarationFilterSavingIsDisjointFromCompactions holds it, because "disjoint" is a
+	// claim that a later reordering in apply could quietly falsify.
+	//
 	// The keep-alive contributes its net rather than its gross because the ping spend is excluded
 	// from CostUSD — a ping is not agent traffic — so it has nowhere else in this walk to appear.
 	TotalSavedUSD float64 `json:"total_saved_usd"`
@@ -878,10 +890,13 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"this project."},
 		{Key: "total_saved", Label: "Total cost avoided", DeltaUSD: o.TotalSavedUSD, Total: true,
 			Description: "Net compaction savings, plus prefix-cache savings, plus the idle " +
-				"keep-alive's NET — its savings minus what its pings cost. Three disjoint token " +
+				"keep-alive's NET — its savings minus what its pings cost — plus the declarations " +
+				"the removal filter stopped sending. FOUR disjoint token " +
 				"sets, all ours, so nothing is counted twice: compaction's removals never reached " +
-				"the provider, the split moved a breakpoint over tokens that did, and the " +
-				"keep-alive refreshed entries that already existed. The keep-alive enters as a net " +
+				"the provider, the split moved a breakpoint over tokens that did, the " +
+				"keep-alive refreshed entries that already existed, and the filter's declarations " +
+				"were dropped before the compaction baseline was even measured — so they are " +
+				"absent from the first line rather than counted in it. The keep-alive enters as a net " +
 				"because the pings' own spend is not in the billed-cost line above — ping rows are " +
 				"excluded from agent traffic — so this is the only place both halves are " +
 				"comparable, and its saving half is a CEILING (see Keep-alive savings). It is not " +
