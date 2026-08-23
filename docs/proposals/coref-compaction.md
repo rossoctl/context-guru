@@ -774,3 +774,41 @@ against has never been measured.
   `extract_llm`-style cheap-model pass restricted to far-field large spans. That pass is
   *sampled* output, so per constraint 1 its decision must be latched on first computation and
   never recomputed.
+
+
+---
+
+## FUTURE CONSIDERATION: reversibility is only coherent if the substitution is total
+
+Raised in review and recorded here rather than acted on, because it does not affect current behaviour.
+
+Expand recovery now works by rewriting the client's own `tool_result` on the request path
+(`expand.RestoreResults`), because the response loop structurally cannot satisfy an expand call that
+arrives alongside a real tool call — and live traffic showed that is 102 of 107 cases.
+
+That rewrite touches a message the model has **already seen**. It is coherent only if applied
+**deterministically on every turn**:
+
+- **Intermittent substitution is incoherent.** The model saw `Tool 'context_guru_expand' not found` on
+  turn N and may have acted on it — re-run the tool, written the content off. If turn N+5 shows the
+  content where the failure was, the record contradicts the model's own reasoning that is still sitting
+  next to it.
+- **Intermittent substitution is also a cache miss**, from the position of the changed message, every
+  time it flips. The client resends its originals each turn, so the rewrite must be re-derived每 turn or
+  the prefix flaps — the same discipline the freeze/reapply machinery exists to enforce.
+
+Being keyed only by marker id and store contents, the rewrite is deterministic **for as long as the
+stash lives**. Two things protect that, and both are worth revisiting:
+
+1. `MarkKeptVerbatim` (applied on both the response and request paths) stops expanded content being
+   re-compacted, so no later turn needs a marker for it.
+2. Stash durability. The in-memory store loses everything on restart, and
+   `expand_unresolved_missing` in `/stats` counts exactly the cases where a marker was issued and its
+   original is gone — i.e. where a cut advertised as reversible was not.
+
+**The open question is whether reversibility is worth this much machinery.** The measured facts do not
+obviously favour it: across 225 runs the agent reached for recovery constantly and was refused, and its
+fallback was to re-run the tool rather than to give up — which is more expensive than the "one
+round-trip" the design assumes. If recovery cannot be made reliably total, `marker_mode: summary` (drop
+without pretending reversibility) or simply not removing the content are the honest alternatives, and
+they should be compared on reward rather than assumed inferior.

@@ -26,6 +26,10 @@ import (
 var (
 	unresolvedMalformed atomic.Int64
 	unresolvedMissing   atomic.Int64
+	// restoredCount counts tool_results rewritten back to their stashed original on the REQUEST path.
+	// That is the path that covers a mixed turn -- an expand call alongside a real tool -- which the
+	// response loop structurally cannot handle, and which live traffic showed to be 102 of 107 cases.
+	restoredCount atomic.Int64
 )
 
 // noteUnresolved records one expand id the proxy could not satisfy. wellFormed distinguishes a
@@ -37,6 +41,9 @@ func noteUnresolved(wellFormed bool) {
 	}
 	unresolvedMalformed.Add(1)
 }
+
+// Restored returns how many expand tool_results were rewritten back to their originals.
+func Restored() int64 { return restoredCount.Load() }
 
 // Unresolved returns (malformed, missing) since process start. missing > 0 means reversibility
 // failed for that many cuts.

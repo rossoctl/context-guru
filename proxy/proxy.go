@@ -677,6 +677,31 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				tn:       tn,
 			})
 			sess = tr.Session
+			// RESTORE EXPAND RESULTS, after the pipeline and before the forward.
+			//
+			// The response loop can only satisfy an expand call that arrives ALONE: when the model
+			// also called a real tool the client must execute it, so the response is relayed and the
+			// loop bails on `otherTools`. Live traffic showed that is the dominant shape -- 102 of 107
+			// refused turns carried two or more tool_use blocks, 5 carried one -- so the client
+			// answers the expand call itself with "Tool 'context_guru_expand' not found", the model
+			// loses recovery, and it re-runs the original tool instead.
+			//
+			// Rewriting the client's own tool_result on its way back upstream covers that case with
+			// no response splitting and nothing required of the client. AFTER the pipeline
+			// deliberately: restored content must not be handed straight back to the components that
+			// just cut it, which would compact it into another marker and another expand call. The
+			// kept-verbatim mark uses the pipeline's own session id for the same reason the expand
+			// loop does -- written under any other id, the guard sits where nothing reads it.
+			if !bypassed && tn.Store != nil {
+				if nb, restored := expand.RestoreResults(string(provider), body, tn.Store); len(restored) > 0 {
+					body = nb
+					for _, hh := range restored {
+						if orig2, ok := expand.Resolve(tn.Store, hh); ok {
+							offload.MarkKeptVerbatim(tn.Store, sess, orig2)
+						}
+					}
+				}
+			}
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
 			cp.noteTrace(tr)
