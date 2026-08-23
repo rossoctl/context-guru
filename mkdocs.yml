@@ -96,6 +96,7 @@ nav:
       - Measuring savings: how-to/measure-savings.md
       - Stop carrying unused tools: how-to/declaration-removal.md
       - Keep an idle prompt cache warm: how-to/cache-keepalive.md
+      - Choose a cache TTL: how-to/kv-cache-ttl.md
   - Components:
       - Overview: components.md
       - Choose a preset: how-to/choose-a-preset.md
