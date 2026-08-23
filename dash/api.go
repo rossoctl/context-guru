@@ -239,7 +239,10 @@ func (a *API) routes() []route {
 	rs = append(rs, a.toolRoutes()...)
 	// The keep-alive tab's reads, declared beside their handlers in keepaliveapi.go and
 	// appended here for the same reason: this table is what both scoping tests walk.
-	return append(rs, a.keepAliveRoutes()...)
+	rs = append(rs, a.keepAliveRoutes()...)
+	// The KV-cache TTL analysis and strategy simulator, declared beside its handlers in
+	// kvcacheapi.go and appended here for the same reason.
+	return append(rs, a.kvCacheRoutes()...)
 }
 
 // Mount registers every dashboard route on a mux under the given prefix
@@ -597,6 +600,7 @@ func filterFrom(r *http.Request) Filter {
 		Effort:     q.Get("effort"),
 		Thinking:   q.Get("thinking"),
 		StopReason: q.Get("stop_reason"),
+		TTL:        q.Get("ttl"),
 		Q:          q.Get("q"),
 	}
 	f.Since = atoi64(q.Get("since"))

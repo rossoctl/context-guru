@@ -68,17 +68,25 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 		// Fail loudly if the reference extraction stops finding anything: a reshaped
 		// index.html that no longer matches must break this test, not quietly ship
 		// unversioned URLs.
-		if checked < 3 {
-			t.Errorf("%s: found only %d local asset references; index.html references at least style.css, app.js and tools.js", entry, checked)
+		if checked < 4 {
+			t.Errorf("%s: found only %d local asset references; index.html references at least style.css, app.js, tools.js and kvcache.js", entry, checked)
 		}
 	}
 
-	// tools.css is fetched by tools.js, not by the HTML, and it goes stale the same
-	// way. The rewrite covers any text asset, so the reference inside the served
-	// script is versioned too.
-	js := get("/dashboard/tools.js").Body.String()
-	if !strings.Contains(js, "'tools.css?v="+assetVersion+"'") {
-		t.Error("tools.js still asks for an unversioned tools.css")
+	// Some references are built at RUNTIME by a script rather than written in the HTML —
+	// a self-mounting view links its own stylesheet — and those go stale the same way. The
+	// rewrite covers any text asset, so the reference inside the served script is versioned
+	// too. Enumerated as DATA, because the count below is checked against it: a view added
+	// later must appear here or the rewrite total will not add up.
+	runtimeRefs := []struct{ asset, ref string }{
+		{"tools.js", "tools.css"},
+		{"kvcache.js", "kvcache.css"},
+	}
+	for _, rr := range runtimeRefs {
+		js := get("/dashboard/" + rr.asset).Body.String()
+		if !strings.Contains(js, "'"+rr.ref+"?v="+assetVersion+"'") {
+			t.Errorf("%s still asks for an unversioned %s", rr.asset, rr.ref)
+		}
 	}
 
 	// Versioned URLs are what make the hour of caching safe; keep it.
@@ -97,13 +105,13 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 	// attribute AND in a JS object literal — so a quoted asset name that is NOT a
 	// reference gets versioned too, silently. Totalling the rewrites and comparing them
 	// with the references enumerated above turns that into a red test: index.html's
-	// references, plus the one tools.js builds.
+	// references, plus the ones a self-mounting view builds at runtime.
 	rewrites := 0
 	for _, b := range versionedUI {
 		rewrites += strings.Count(string(b), "?v="+assetVersion)
 	}
-	if want := checked + 1; rewrites != want {
-		t.Errorf("versionedUI rewrote %d references but this test accounts for %d — either a quoted asset name that is not a reference is being versioned, or a reference is no longer found", rewrites, want)
+	if want := checked + len(runtimeRefs); rewrites != want {
+		t.Errorf("versionedUI rewrote %d references but this test accounts for %d (%d in index.html plus %d built at runtime) — either a quoted asset name that is not a reference is being versioned, or a reference is no longer found", rewrites, want, checked, len(runtimeRefs))
 	}
 }
 
