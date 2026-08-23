@@ -11,9 +11,12 @@
 path	retained_bytes	churn_bytes	churn_x	heap_held_bytes	heap_x	note
 splice pass(), buffer per event	2250205	30006216	13.33	13438040	5.97	incl_recorder
 old buffered path (peek + ReadAll + concat)	2250205	7115064	3.16	1753344	0.78	GC ran inside the arm
-scratch: read+append only, buffer reused	2250205	10811264	4.80	8636024	3.84	MISLEADING - omits the per-event parsing, do not quote
+scratch: read+append only, buffer reused	2250205	10811264	4.798	8636024	3.84	MISLEADING - omits the per-event parsing, do not quote; deliberately carries a third decimal so it cannot be confused with the shipped path's 4.81x
 splice pass(), buffer reused	2250293	26417168	11.74	-	-	incl_recorder
-splice pass(), reused + substring pre-filters	2250293	19211648	8.54	-	-	incl_recorder; 4.81x without
+splice pass(), reused + substring pre-filters	2250293	19211648	8.54	-	-	incl_recorder; THE SHIPPED PATH: quote as 4.81x (8.54x incl_recorder)
+#
+# Recorder-free ladder, one unit, for quoting: per-event 9.60x -> +reuse 8.01x ->
+# +pre-filters 4.81x, against the old whole-response path's 3.16x.
 #
 # Attribution of the per-event cost, same events:
 sseEventPayload (bytes.Split + payload string), x18753	-	3600504	1.60	-	-	called TWICE per event

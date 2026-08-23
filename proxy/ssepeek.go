@@ -89,8 +89,11 @@ import (
 //     whole-response buffering held, and it now applies to every tools-bearing streaming
 //     response rather than only marker-bearing ones (33.4%), since injection stopped
 //     requiring markers. Allocation is the separate number, and the two must not be
-//     conflated: reading events one at a time churned 13.3x the stream against that path's
-//     3.2x until the event buffer was reused, which brought it to 4.8x.
+//     conflated. Reading events one at a time churns more than buffering the response whole
+//     did, and the ladder is measured recorder-free so the numbers are one unit: 9.60x the
+//     stream per-event, 8.01x once the event buffer is reused, 4.81x once the substring
+//     pre-filters skip the parse — against 3.16x for the whole-response buffering this
+//     replaced. So a halving, and still 1.52x more than what it replaced.
 //
 // Every one of those paths ends at the same place on the NEXT request, so they are closed
 // there instead: expand.RepairToolResults replaces the client's `No such tool available` with
@@ -175,10 +178,11 @@ const sseRetainMaxBytes = 16 << 20
 // to count it.
 func (sp *sseSplicer) pass(body io.Reader, expandTool string) (whole, withheld []byte, found bool) {
 	br := bufio.NewReader(body)
-	// One event buffer for the round, not one per event: a 2.25 MB round is ~19,000 events,
-	// and allocating a buffer for each cost 13.3x the stream in churn against the 3.2x of the
-	// whole-response buffering this replaced. Reusing it is 4.8x. Every consumer of ev is
-	// done with it before the next read overwrites it.
+	// One event buffer for the round, not one per event: a 2.25 MB round is ~19,000 events.
+	// Worth doing and not where the money was — recorder-free, per-event churn is 9.60x the
+	// stream and reuse alone takes it to 8.01x; the substring pre-filters below are what reach
+	// 4.81x (8.54x incl_recorder). Every consumer of ev is done with it before the next read
+	// overwrites it.
 	var buf, ev bytes.Buffer
 	cut := -1     // where withholding began; -1 = forwarding
 	over := false // past the bound: the turn cannot be rebuilt
