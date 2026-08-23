@@ -29,9 +29,20 @@ switch per declaration, which posts one change to `POST /api/toolfilter`
 (`{kind, name, server, action:"exclude"|"include"}`) and repaints from the document the server
 answers with. That route is part of the **control plane**, not the dashboard, on purpose — the
 removal list is your compaction configuration, so it goes through the same account-update path
-as `PUT /api/me` and inherits its validation, its audit entry and its manager gate. A junk name
-or a wildcard is a 400; changing what we send is attributable; and setting it is a manager's
-action, like every other decision about what runs on the traffic.
+as `PUT /api/me` and inherits its validation and its audit entry. A junk name or a wildcard is a
+400, and changing what we send is attributable.
+
+It does **not** inherit that route's manager gate. Any signed-in account can switch off the
+declarations it added itself — MCP tools, MCP servers, and any other client-side tool that is not
+one of Claude Code's own — because those are on your own bill, and shrinking your own prompt is
+not a decision anyone else has to make for you. The write only ever touches your own account,
+only ever the removal list, and is recorded against you in the audit log.
+
+The exception is Claude Code's **own** tools. Switching one of those off does not trim a little
+fat, it takes away equipment the model is expected to have, so `POST /api/toolfilter` answers
+403 for a plain account and a manager has to make that change. Putting one back is never
+refused — that is the repair. The Inventory page offers no switch for a built-in to anyone; the
+danger warning and the paste-able command in its collapsed section are the whole interface.
 
 `GET /api/toolfilter` is the read half, served by the dashboard:
 

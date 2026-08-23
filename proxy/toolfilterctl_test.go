@@ -9,11 +9,13 @@ import (
 // The write half of declaration removal has to inherit three things from the control plane
 // rather than reimplement them, and each of them is a way the switch could go wrong:
 //
-//	the manager gate  — the removal list decides what runs on the traffic, exactly like
-//	                    config_yaml, so a plain user cannot set it for themselves;
 //	validation        — the stored document must still build, or the account's next turn
 //	                    fails on a configuration a settings page accepted;
 //	the audit trail   — a change to what we send must be attributable.
+//
+// It must NOT inherit the fourth: PUT /api/me's manager gate. One declaration off a user's own
+// prompt is that user's own bill, so any signed-in account may do it — with the single
+// exception of a built-in, which is not a saving but a broken agent.
 //
 // It also has to be a real round trip: excluding then re-including must leave a document that
 // runs the same pipeline as before, because that is the recovery path.
@@ -84,21 +86,147 @@ func TestToolFilterExcludeRoundTrip(t *testing.T) {
 	}
 }
 
-// TestToolFilterIsAManagersDecision: a hidden control is not a permission, and this route is
-// one curl away. Same rule PUT /api/me applies to config_yaml.
-func TestToolFilterIsAManagersDecision(t *testing.T) {
+// TestToolFilterIsTheUsersOwnDecision: a plain account may stop carrying its own MCP tools and
+// MCP servers. This is the whole point of the inventory page — it is shown to every account, so
+// a route that answered 403 made the switch a lie.
+//
+// The audit row matters as much as the 200: the write goes through reg.Update as the USER, so
+// "who changed what runs on my traffic" has to name the user and not a manager who never
+// touched it.
+func TestToolFilterIsTheUsersOwnDecision(t *testing.T) {
 	f := ctlFixture(t)
-	w, _ := f.signUp(t, "boss@ibm.com", "l") // the fixture's manager
-	_ = w
-	w, _ = f.signUp(t, "user@ibm.com", "u")
-	userJar := w.Result().Cookies()
-	if w, _ := f.do(t, "POST", "/api/toolfilter",
-		`{"kind":"tool","name":"Workflow","action":"exclude"}`, userJar); w.Code != http.StatusForbidden {
-		t.Errorf("a plain user set the removal list: %d", w.Code)
+	f.signUp(t, "boss@ibm.com", "l") // the bootstrap account is the manager
+	w, _ := f.signUp(t, "user@ibm.com", "u")
+	jar := w.Result().Cookies()
+	_, me := f.do(t, "GET", "/api/me", "", jar)
+	tn, _ := me["tenant"].(map[string]any)
+	userID, _ := tn["id"].(string)
+	if userID == "" {
+		t.Fatalf("no tenant id for the plain account: %v", me)
 	}
-	// And with no session at all.
+	if mgr, _ := tn["role"].(string); mgr == "manager" {
+		t.Fatalf("the second account is a manager, so this test proves nothing: %v", tn)
+	}
+
+	for _, body := range []string{
+		`{"kind":"mcp_tool","name":"mcp__playwright__click","server":"playwright","action":"exclude"}`,
+		`{"kind":"mcp_server","server":"playwright","action":"exclude"}`,
+	} {
+		if w, _ := f.do(t, "POST", "/api/toolfilter", body, jar); w.Code != http.StatusOK {
+			t.Fatalf("a plain account could not filter its own declaration: %s = %d %s",
+				body, w.Code, w.Body)
+		}
+	}
+	_, me = f.do(t, "GET", "/api/me", "", jar)
+	tn, _ = me["tenant"].(map[string]any)
+	doc, _ := tn["effective_config_yaml"].(string)
+	if !strings.Contains(doc, "mcp__playwright__click") || !strings.Contains(doc, "toolfilter") {
+		t.Fatalf("the user's own document does not carry the removal: %q", doc)
+	}
+
+	// Attributable TO THE USER. A manager id here would mean the write borrowed a privilege.
+	_, audit := f.do(t, "GET", "/api/me/audit", "", jar)
+	entries, _ := audit["audit"].([]any)
+	found := 0
+	for _, e := range entries {
+		m, ok := e.(map[string]any)
+		if !ok || m["field"] != "config_yaml" {
+			continue
+		}
+		if m["actor"] != userID || m["target"] != userID {
+			t.Errorf("config change attributed to actor=%v target=%v, want the user itself",
+				m["actor"], m["target"])
+		}
+		found++
+	}
+	if found != 2 {
+		t.Errorf("audit recorded %d config changes of 2: %v", found, entries)
+	}
+}
+
+// TestToolFilterUserCannotDropABuiltin: the one thing a plain account may not switch off.
+//
+// Removing Claude Code's own tool does not trim fat, it takes away equipment the model is
+// expected to have — and the page offers no switch for one to ANYBODY, so only a hand-crafted
+// POST can get here. The check is on the resolved name rather than the caller's `kind`, because
+// the kind is caller-supplied and a kind test is one lie away from being bypassed.
+func TestToolFilterUserCannotDropABuiltin(t *testing.T) {
+	f := ctlFixture(t)
+	w, _ := f.signUp(t, "boss@ibm.com", "l")
+	mgrJar := w.Result().Cookies()
+	w, _ = f.signUp(t, "user@ibm.com", "u")
+	jar := w.Result().Cookies()
+
+	for _, body := range []string{
+		`{"kind":"tool","name":"Read","action":"exclude"}`,
+		// The bypass: claim a kind whose branch does not classify built-ins.
+		`{"kind":"mcp_tool","name":"Read","action":"exclude"}`,
+		`{"kind":"","name":"Bash","action":"exclude"}`,
+	} {
+		w, _ := f.do(t, "POST", "/api/toolfilter", body, jar)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("a plain account removed a built-in: %s = %d %s", body, w.Code, w.Body)
+		}
+		if strings.Contains(w.Body.String(), "compaction configuration") {
+			t.Errorf("the refusal still blames the compaction-configuration gate, which is no "+
+				"longer why this is refused: %s", w.Body)
+		}
+	}
+	// A name that is not one of Claude Code's own is not a built-in, whatever it looks like.
 	if w, _ := f.do(t, "POST", "/api/toolfilter",
-		`{"kind":"tool","name":"Workflow","action":"exclude"}`, nil); w.Code == http.StatusOK {
+		`{"kind":"tool","name":"Workflow","action":"exclude"}`, jar); w.Code != http.StatusOK {
+		t.Errorf("another agent's client-side tool was refused as a built-in: %d %s", w.Code, w.Body)
+	}
+	// A manager keeps the escape hatch: refusing them here would be theatre, since they can
+	// write the same line through PUT /api/me.
+	if w, _ := f.do(t, "POST", "/api/toolfilter",
+		`{"kind":"tool","name":"Read","action":"exclude"}`, mgrJar); w.Code != http.StatusOK {
+		t.Errorf("a manager could not remove a built-in: %d %s", w.Code, w.Body)
+	}
+	// PUTTING ONE BACK is the repair, so it is never refused — otherwise a user whose manager
+	// dropped Read for them cannot un-break their own agent.
+	if w, _ := f.do(t, "POST", "/api/toolfilter",
+		`{"kind":"tool","name":"Read","action":"include"}`, jar); w.Code != http.StatusOK {
+		t.Errorf("a plain account could not re-include a built-in: %d %s", w.Code, w.Body)
+	}
+}
+
+// TestToolFilterGrantsNothingElse: dropping the gate must widen this route and nothing around
+// it. A user who can post one declaration name must still not be able to write a configuration
+// document, and must not be able to reach anything the route does not model.
+func TestToolFilterGrantsNothingElse(t *testing.T) {
+	f := ctlFixture(t)
+	f.signUp(t, "boss@ibm.com", "l")
+	w, _ := f.signUp(t, "user@ibm.com", "u")
+	jar := w.Result().Cookies()
+
+	// A whole config document through PUT /api/me is still a manager's privilege — that gate is
+	// the reason this one could be dropped, so it is the one that must not have moved.
+	for _, body := range []string{
+		`{"config_yaml":"pipeline: []\n"}`,
+		`{"config":{"pipeline":["toolfilter"]}}`,
+	} {
+		if w, _ := f.do(t, "PUT", "/api/me", body, jar); w.Code != http.StatusForbidden {
+			t.Errorf("a plain account wrote a configuration document: %s = %d %s",
+				body, w.Code, w.Body)
+		}
+	}
+
+	// The route models one component, so a save must leave the rest of the document alone —
+	// including a pipeline entry it has no business knowing about.
+	if w, _ := f.do(t, "POST", "/api/toolfilter",
+		`{"kind":"mcp_server","server":"playwright","action":"exclude"}`, jar); w.Code != http.StatusOK {
+		t.Fatalf("exclude = %d %s", w.Code, w.Body)
+	}
+	_, me := f.do(t, "GET", "/api/me", "", jar)
+	tn, _ := me["tenant"].(map[string]any)
+	if role, _ := tn["role"].(string); role != "user" {
+		t.Errorf("the account's role changed through the toolfilter route: %q", role)
+	}
+
+	// And with no session at all it is nobody's own bill.
+	if w, _ := f.do(t, "POST", "/api/toolfilter",
+		`{"kind":"mcp_server","server":"playwright","action":"exclude"}`, nil); w.Code == http.StatusOK {
 		t.Error("an unauthenticated caller changed a configuration")
 	}
 }

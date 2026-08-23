@@ -4,11 +4,15 @@ package proxy
 //
 // It lives in the control plane rather than beside the read route in dash for one reason:
 // the removal list is part of an account's compaction configuration, and the rules that
-// govern writing that — strict validation of the whole document, an audit entry naming the
-// field, and the manager gate — already exist here on PUT /api/me. A second writer with its
-// own copy of those rules is how one of the two ends up missing one; this route reuses the
-// same Form round trip and the same registry Update, so the only thing it adds is the shape
-// a single switch posts.
+// govern writing that — strict validation of the whole document and an audit entry naming the
+// field — already exist here on PUT /api/me. A second writer with its own copy of those rules
+// is how one of the two ends up missing one; this route reuses the same Form round trip and the
+// same registry Update, so the only thing it adds is the shape a single switch posts.
+//
+// What it does NOT inherit is that route's manager gate. A user may drop the declarations they
+// added themselves — their own MCP tools and MCP servers — because what their prompt carries is
+// their own bill. declConfigName says which kinds are removable at all; ctlToolFilter says the
+// one removable thing a user may not drop, and why.
 //
 // It also inherits what the route table gives every control-plane write: the ctlTenant gate,
 // cookie-only identity (a pasted proxy token cannot change a configuration), and the
@@ -97,13 +101,6 @@ func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
 		readErr(w, err)
 		return
 	}
-	// The same gate PUT /api/me applies to config_yaml, and for the same reason: this decides
-	// what runs on the traffic. Enforced here and not only by hiding the switch — a hidden
-	// control is not a permission, and this route is one curl away.
-	if !t.IsManager() {
-		ctlErr(w, http.StatusForbidden, "a manager sets the compaction configuration")
-		return
-	}
 	name, err := declConfigName(in.Kind, in.Name, in.Server)
 	if err != nil {
 		ctlErr(w, http.StatusBadRequest, err.Error())
@@ -112,6 +109,25 @@ func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
 	exclude := in.Action == "exclude"
 	if !exclude && in.Action != "include" {
 		ctlErr(w, http.StatusBadRequest, `action must be "exclude" or "include"`)
+		return
+	}
+	// NOT the config_yaml gate PUT /api/me applies, and deliberately so: what a user carries
+	// in their own prompt is their own bill, and the inventory page exists to let them stop
+	// paying it. This route is narrower than that gate by construction — ONE validated
+	// declaration name, PipelineKnown pinned to this component so nothing else in the document
+	// can move, and reg.Update confining the write to the caller's own account and auditing it.
+	//
+	// A built-in is the one exception, and only on the way OUT. Removing one does not degrade
+	// the agent gracefully, it breaks it, and the page offers no switch for one to anybody — so
+	// a hand-crafted POST gets a reason rather than a configuration whose next session fails.
+	// Checked on the RESOLVED name and not the claimed kind, because the kind is caller-supplied:
+	// {"kind":"mcp_tool","name":"Read"} resolves to `Read` and must not slip past a kind test.
+	// A manager keeps it because refusing them here would be theatre — they can write the same
+	// line through PUT /api/me, which is exactly the privilege a user does not have. And an
+	// `include` is never refused: re-adding a built-in is the repair, not the damage.
+	if exclude && !t.IsManager() && dash.IsBuiltinTool(dash.KindTool, name) {
+		ctlErr(w, http.StatusForbidden, "removing one of Claude Code's own tools breaks the "+
+			"agent rather than saving you anything, so a manager has to make that change")
 		return
 	}
 	reg := h.registry()
