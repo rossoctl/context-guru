@@ -262,7 +262,10 @@ func NewOptimal(reqs []*Request, cfg Config) *Optimal {
 		if keys[i].User != keys[j].User {
 			return keys[i].User < keys[j].User
 		}
-		return keys[i].Conversation < keys[j].Conversation
+		if keys[i].Conversation != keys[j].Conversation {
+			return keys[i].Conversation < keys[j].Conversation
+		}
+		return keys[i].Model < keys[j].Model
 	})
 
 	out := &Optimal{chosen: make(map[int64]Action, len(reqs))}

@@ -585,8 +585,16 @@ class Request:
     idle_ms: int | None = None
 
     @property
-    def key(self) -> tuple[str, str]:
-        return (self.user, self.conversation)
+    def key(self) -> tuple[str, str, str]:
+        """The conversation this request belongs to: (user, conversation, MODEL).
+
+        The model is part of the key because a cache entry does not transfer between models, so
+        an opus request cannot read a sonnet request's entry. Omitting it links the two as
+        successor and grants the second a hit at 0.1x on an entry it could never have matched —
+        which is the same rule this repo's predictor states for its compatibility columns, and
+        reaches 5.7% of this deployment's trajectories.
+        """
+        return (self.user, self.conversation, self.model)
 
     @property
     def hour_utc(self) -> int:
@@ -893,13 +901,20 @@ def evaluate(rows: Sequence[Request], actions: Mapping[int, Any] | Sequence[Any]
         forced = r.miss_reason in UNRESCUABLE
         if forced:
             out.forced_misses += 1
-        hit = alive and not forced
-        reusable = min(st.tokens, r.cached_context) if hit else 0
 
         # 3. the action for the span that starts now.
         action = chosen.get(r.request_id, EXPIRE)
         out.decisions[action] = out.decisions.get(action, 0) + 1
         tier = tier_of(action)
+
+        # HIT IS DECIDED HERE, after the action, and it needs the action to be decided at all. A
+        # request whose action is EXPIRE writes no cache_control, so the provider reads nothing
+        # and bills the whole prefix as fresh input however warm the entry was. Deciding `hit`
+        # from aliveness alone counted such a turn as a hit — in hits, in hit_rate_pct and in
+        # avoided_recomputations — while it paid for a fully uncached prompt, and the tell was
+        # avoided_recomputations of 1 beside avoided_tokens of 0 in one result.
+        hit = alive and not forced and tier != TTL_NONE
+        reusable = min(st.tokens, r.cached_context) if hit else 0
 
         # 4. bill this request under the chosen tier.
         fresh, read, write = r.input_tokens, reusable, 0

@@ -432,7 +432,22 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 				gap = 0
 			}
 			hist.Observe(r.User, r.Model, BucketAt(st.lastTS), gap)
-			simulatePings(out, ug, mg, st, price, sem, cfg, r.TS, false)
+			// Priced and attributed at the PREVIOUS request's model, not this one's. The entry
+			// these keep-alives refresh was created by that request, so its rates are the ones
+			// the provider would bill and its group is the one the spend belongs to — which is
+			// exactly what convState.model is carried for, and what the open-span pass below
+			// already does.
+			//
+			// This used to pass the CURRENT request's price and groups, which is invisible on
+			// single-model traffic and wrong the moment a conversation switches: 101 of this
+			// deployment's 1,772 trajectories use more than one model. It was not only a
+			// misattribution. stepCost prices the same span at the previous model
+			// (registry.go), so the exact optimum was minimising a different objective than
+			// Simulate was billing, and NewOptimal stopped being a bound at all — measured at
+			// 65% above a plan the same simulator prices lower.
+			prevPrice := cfg.Prices.For(st.model)
+			simulatePings(out, acc(byUser, st.user), acc(byModel, st.model), st, prevPrice,
+				sem, cfg, r.TS, false)
 		}
 
 		// ── 2. hit or miss, under THIS strategy's own history ───────────────
@@ -440,14 +455,6 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 		forced := r.MissReason == "prefix_change" || r.MissReason == "cold_start"
 		if forced {
 			out.ForcedMisses++
-		}
-		hit := alive && !forced
-		reusable := int64(0)
-		if hit {
-			reusable = st.tokens
-			if reusable > r.CachedContext {
-				reusable = r.CachedContext
-			}
 		}
 
 		// ── 3. decide, with nothing but the past ────────────────────────────
@@ -467,6 +474,28 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 		out.StatsLevels[level]++
 		action := s.Decide(o)
 		out.Decisions[action]++
+		// HIT IS DECIDED HERE, after the action, and it needs the action to be decided at all.
+		//
+		// A request whose action is ActionExpire writes no cache_control, so the provider reads
+		// nothing from cache and bills the whole prefix as fresh input — however warm the entry
+		// was a microsecond earlier. Computing `hit` from aliveness alone, before the action was
+		// known, therefore counted such a turn as a hit: it landed in Hits, in HitRate and in
+		// AvoidedRecomputations while paying for a fully uncached prompt. The tell was in the same
+		// Result: AvoidedRecomputations of 1 beside AvoidedTokens of 0, two fields contradicting
+		// each other. It also fed Compare.HitDelta and so credited an avoided DELAY to a request
+		// that took the miss latency.
+		//
+		// Nothing above depends on the order: the Observation carries no hit flag, deliberately,
+		// so a strategy cannot see this and the decision cannot be circular.
+		tier := action.Tier()
+		hit := alive && !forced && tier != TTLNone
+		reusable := int64(0)
+		if hit {
+			reusable = st.tokens
+			if reusable > r.CachedContext {
+				reusable = r.CachedContext
+			}
+		}
 		if isObserved {
 			if obs.Covered(r.ID) {
 				out.ObservedCoverage.Recorded++
@@ -476,7 +505,6 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 		}
 
 		// ── 4. bill this request under the chosen tier ──────────────────────
-		tier := action.Tier()
 		fresh, read, write := r.InputTokens, reusable, int64(0)
 		switch {
 		case tier == TTLNone:
@@ -730,7 +758,10 @@ func statesInOrder(m map[Conversation]*convState) []*convState {
 		if keys[i].User != keys[j].User {
 			return keys[i].User < keys[j].User
 		}
-		return keys[i].Conversation < keys[j].Conversation
+		if keys[i].Conversation != keys[j].Conversation {
+			return keys[i].Conversation < keys[j].Conversation
+		}
+		return keys[i].Model < keys[j].Model
 	})
 	out := make([]*convState, 0, len(keys))
 	for _, k := range keys {

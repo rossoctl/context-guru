@@ -140,6 +140,19 @@ func BucketAt(tsMs int64) Bucket {
 type Conversation struct {
 	User         string
 	Conversation string
+	// Model is part of the key, and leaving it out was a bug rather than a simplification. A
+	// cache entry does not transfer between models, so an opus request cannot read a sonnet
+	// request's entry. Without the model here, Derive links the two as successor and the replay
+	// grants the second a hit at 0.1x on an entry it could never have matched — measured at 46%
+	// understatement on a two-request trajectory, and the bias is one-directional: every arm
+	// looks cheaper and hits more often than it can.
+	//
+	// It reaches 5.7% of this deployment's corpus (101 of 1,772 trajectories use more than one
+	// model), and this repo's own predictor said so before the simulator did: the
+	// compatibility-columns note in deploy/harbor/kv_ttl_survival_predictor.py keys on the model
+	// for exactly this reason and spells out the consequence of not doing it. The Python was
+	// right and the Go was wrong.
+	Model string
 }
 
 // Request is one historical request as the analysis dataset sees it: what was billed, what
@@ -226,7 +239,7 @@ const (
 
 // Key is this request's conversation.
 func (r *Request) Key() Conversation {
-	return Conversation{User: r.User, Conversation: r.ConversationID}
+	return Conversation{User: r.User, Conversation: r.ConversationID, Model: r.Model}
 }
 
 // Idle is the idle duration and whether there is one at all. The only way to read it: a
@@ -267,6 +280,9 @@ func Derive(reqs []*Request) {
 		}
 		if a.ConversationID != b.ConversationID {
 			return a.ConversationID < b.ConversationID
+		}
+		if a.Model != b.Model {
+			return a.Model < b.Model
 		}
 		if a.TS != b.TS {
 			return a.TS < b.TS
