@@ -7739,8 +7739,9 @@ function renderKALive() {
   const rows = live.rows || [];
   if (!rows.length) {
     tableMessage(body, 11, 'No session of yours has a live cache entry',
-      'Every session in this window has been idle longer than its own prompt-cache lifetime, so '
-      + 'there is nothing left to keep warm. This is an ABSENCE, not a zero saving.');
+      'Either every session in the selected window has been idle longer than its own prompt-cache '
+      + 'lifetime, or the window itself ends more than an hour ago — this panel is about NOW, and '
+      + 'the filter above still applies to it. Both are an ABSENCE, not a zero saving.');
     $('#ka-live-hint').textContent = '';
     return;
   }
@@ -7751,7 +7752,10 @@ function renderKALive() {
     warn.appendChild(el('div', { class: 'banner warn', 'data-testid': 'ka-live-expiring' },
       el('strong', {}, `${num(live.soon)} of your ${num(rows.length)} live `
         + `session${rows.length === 1 ? '' : 's'} expire${live.soon === 1 ? 's' : ''} within `
-        + `${Math.round(live.soon_seconds / 60)} minutes.`),
+        // The threshold is 330 s, which is 5.5 minutes: Math.round made the banner say "within
+        // 6 minutes" about a 5.5-minute rule, which is 30 seconds of overclaim in the direction
+        // of "you have longer than you do".
+        + `${(live.soon_seconds / 60).toFixed(1).replace(/\.0$/, '')} minutes.`),
       ' ',
       live.soon_usd > 0
         ? `Between them they would pay ${usd(live.soon_usd)} to re-create what they are about to lose`
