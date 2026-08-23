@@ -136,9 +136,15 @@ func (e *ExtractLLM) adjudicateMerged(
 		rep.Gate("merged_call_failed")
 		return nil
 	}
-	verdicts := extract.ParseBulkVerdicts(reply)
-	if len(verdicts) == 0 {
+	verdicts, parsed := extract.ParseBulkVerdicts(reply)
+	if !parsed {
 		rep.Gate("merged_unparseable")
+		return nil
+	}
+	if len(verdicts) == 0 {
+		// A well-formed empty answer: the model read the batch and kept all of it. The contract
+		// invites that explicitly, so it must not be filed as a failure.
+		rep.Gate("merged_kept_whole_batch")
 		return nil
 	}
 

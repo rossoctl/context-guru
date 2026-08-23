@@ -683,7 +683,16 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// Prefix reach is on. The co-reference index is the cheapest gate there is, so
 			// it goes first: no model call, no economics, nothing, for content a free
 			// deterministic pass can already show is still in use.
-			if !prefixSpent[i] {
+			//
+			// EXCEPT in merged mode, where this gate is self-defeating twice over. Measured: it
+			// removed 149,681 candidates in one arm, leaving ~1 per request, so the "bulk"
+			// adjudication returned 1.02 verdicts per call and was really the PER-OUTPUT design --
+			// the one refuted at 6% live-kept. And filtering by the index means the model only ever
+			// sees what the index has ALREADY judged spent, which destroys the one thing merged mode
+			// exists to provide: a veto on the index's Tier-1 blind spot. The index's verdict still
+			// reaches the model, but as EVIDENCE inside the prompt (see renderEvidence) rather than
+			// as a gate that pre-decides the answer.
+			if !prefixSpent[i] && e.selectionMode != "merged" {
 				rep.Gate("prefix_still_referenced")
 				continue
 			}

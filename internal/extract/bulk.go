@@ -117,17 +117,22 @@ func BuildBulkPrompt(goal string, items []BulkItem) string {
 	return b.String()
 }
 
-// ParseBulkVerdicts reads the model's reply. Anything unparseable yields no verdicts, which the
-// caller treats as "change nothing" — the fail-open direction.
-func ParseBulkVerdicts(reply string) []BulkVerdict {
+// ParseBulkVerdicts reads the model's reply, returning the verdicts and whether the reply PARSED.
+//
+// The two must be distinguished. An empty array is a legitimate answer -- "keep everything", which
+// the contract explicitly invites -- while unparseable output is a prompt or model failure. Folding
+// both into "no verdicts" made a deliberate keep-all indistinguishable from junk in the gate
+// counters, and those counters are the only way to tell "the model declined to act" from "the model
+// was never successfully asked", which is exactly the distinction one live arm turned on.
+func ParseBulkVerdicts(reply string) ([]BulkVerdict, bool) {
 	s := stripFences(strings.TrimSpace(reply))
 	i, j := strings.Index(s, "["), strings.LastIndex(s, "]")
 	if i < 0 || j <= i {
-		return nil
+		return nil, false
 	}
 	var out []BulkVerdict
 	if err := json.Unmarshal([]byte(s[i:j+1]), &out); err != nil {
-		return nil
+		return nil, false
 	}
 	keep := out[:0]
 	for _, v := range out {
@@ -136,5 +141,5 @@ func ParseBulkVerdicts(reply string) []BulkVerdict {
 			keep = append(keep, v)
 		}
 	}
-	return keep
+	return keep, true
 }
