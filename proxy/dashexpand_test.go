@@ -144,3 +144,67 @@ func TestTheRepairChargesTheRestoredTokensOnce(t *testing.T) {
 			"back may be charged", charged)
 	}
 }
+
+// The other half of F2, and the one that decides whether the gate is a fix or a mute: a
+// legitimate SECOND recovery must still be charged. The suppression keys on `contentKey`,
+// the same key SavedUnique dedups by — which is what puts the two operands of
+// SavedUnique − ExpandTokens in one unit — so it must suppress a re-repair of the same
+// CONTENT and nothing else. Keying it on the tool-call id instead would look identical on
+// the test above and silently stop charging every distinct original after the first.
+//
+// Three ids, two distinct originals: A and C share content, B differs. Three recoveries
+// happen; two are charged.
+func TestADistinctOriginalIsStillCharged(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer up.Close()
+
+	h, rec := dashHandler(t, up.URL, dash.Options{})
+	shared := strings.Repeat("the original A and C both point at\n", 20)
+	other := strings.Repeat("a different original entirely, B's\n", 20)
+	h.store.Put("HASH_A", []byte(shared))
+	h.store.Put("HASH_B", []byte(other))
+	h.store.Put("HASH_C", []byte(shared)) // same CONTENT as A, different id
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	turn := func(call, hash string) string {
+		return `{"model":"gpt-x","tools":[{"type":"function","function":{"name":"read_file"}}],"messages":[` +
+			`{"role":"user","content":"go"},` +
+			`{"role":"assistant","tool_calls":[{"id":"` + call + `","type":"function","function":{` +
+			`"name":"context_guru_expand","arguments":"{\"id\":\"` + hash + `\"}"}}]},` +
+			`{"role":"tool","tool_call_id":"` + call + `","content":"Error: No such tool available: context_guru_expand"}]}`
+	}
+	for _, tc := range []struct{ call, hash string }{
+		{"call_a", "HASH_A"}, {"call_b", "HASH_B"}, {"call_c", "HASH_C"},
+	} {
+		resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json",
+			strings.NewReader(turn(tc.call, tc.hash)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	waitForRows(t, rec, 3)
+
+	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charged := 0
+	for _, e := range page.Requests {
+		if e.ExpandTokens > 0 {
+			charged++
+		}
+	}
+	// A is charged, B is a distinct original and is charged, C repeats A's content and is not.
+	if charged != 2 {
+		t.Fatalf("%d of 3 rows carry expand_tokens, want 2: A and B are distinct originals "+
+			"and must both be charged; only C, which repeats A's content, may be suppressed. "+
+			"Suppressing on the call id rather than the content would give 1 here and still "+
+			"pass TestTheRepairChargesTheRestoredTokensOnce", charged)
+	}
+}
