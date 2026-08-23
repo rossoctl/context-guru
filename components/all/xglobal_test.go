@@ -112,6 +112,18 @@ func TestNoDefaultConfigRunsExtractLLMOnCachingBackend(t *testing.T) {
 		"defaults": "strategy: code\nmodel:\n  source: config\n",
 		"codesmart": "strategy: code\nmodel:\n  source: config\nmin_tokens: 3000\n" +
 			"trigger:\n  min_request_tokens: 3000\nllm_every_n_requests: 1\nllm_max_per_request: 4\n",
+		// housellm sets allow_on_caching_backend: TRUE, and passes anyway — which is the
+		// reason to have it here. The flag lifts exactly one check, and with per_output:false
+		// the only path into the gate is the cold sweep, whose branch returns cached:false by
+		// construction. So `per_output: false` is the brake, not the flag and not the economic
+		// gate. If a future edit turns per_output on while leaving the flag set, this case
+		// fails and names the combination our own numbers price as net-negative.
+		"housellm": "strategy: code\nper_output: false\nallow_on_caching_backend: true\n" +
+			"economic_gate: true\nmodel:\n  source: config\nmin_tokens: 3000\n" +
+			"aggressiveness: medium\ncontext: recent\ncontext_messages: 2\n" +
+			"trigger:\n  min_request_tokens: 20000\nllm_every_n_requests: 1\n" +
+			"llm_max_per_request: 4\nllm_max_per_session: 0\n" +
+			"cold_cache:\n  enabled: true\n  max_calls: 20\n  min_tokens: 3000\n",
 	}
 	for name, cfg := range cfgs {
 		t.Run(name, func(t *testing.T) {

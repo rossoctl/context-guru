@@ -174,11 +174,26 @@ func TestToonIsInNoPreset(t *testing.T) {
 			t.Errorf("rich preset %q still ships toon", name)
 		}
 	}
-	// The exemption list may not name a preset that does not exist: a stale entry would
-	// silently widen the rule the next time somebody adds a preset with that name.
+	// The exemption list may not name a preset that does not exist, and may not name one
+	// that no longer ships toon. The first would silently widen the rule the next time
+	// somebody adds a preset with that name; the second leaves a standing permission for a
+	// component nobody is running any more, which is how an exemption outlives its reason.
+	// Asserted because the first version of this check only covered the first case.
 	for name := range byOperatorRequest {
-		if _, ok := presets[name]; !ok {
+		p, ok := presets[name]
+		if !ok {
 			t.Errorf("toon exemption names %q, which is not a preset", name)
+			continue
+		}
+		has := false
+		for _, c := range p {
+			if c == "toon" {
+				has = true
+			}
+		}
+		if !has {
+			t.Errorf("preset %q is exempted from the toon rule but no longer runs toon; "+
+				"drop the exemption rather than leaving a standing permission", name)
 		}
 	}
 }
@@ -198,6 +213,35 @@ func TestLinecapRunsLastAmongTheOffloaders(t *testing.T) {
 			if i != len(pipeline)-2 || pipeline[len(pipeline)-1] != "cachesplit" {
 				t.Errorf("preset %q runs linecap at %d of %v; it must be immediately before "+
 					"cachesplit, or it steals candidates from the heavier offloaders", name, i, pipeline)
+			}
+		}
+	}
+}
+
+// applyPreset copies only Pipeline and Components out of a rich preset. Everything else in
+// the document — `mode`, `cache`, `store`, `observe` — is decoded into the scratch Config
+// and then dropped on the floor. A preset that declares one is therefore a lie that costs
+// nothing to write and produces no error, and `cache` is the block that spends money: it
+// carries the keep-alive, which bills the caller's own credential per ping. Somebody adding
+// `cache:` to a preset and shipping it would be shipping nothing.
+//
+// Two ways out: teach applyPreset to carry them, or refuse to let a preset declare them.
+// This is the second, because no shipped preset needs them and a test that forbids the
+// footgun cannot itself be wrong about which fields are carried — it reads the same list
+// applyPreset does. If a preset ever genuinely needs one, delete the entry here and make
+// applyPreset copy it, in that order.
+func TestNoRichPresetDeclaresAFieldApplyPresetDiscards(t *testing.T) {
+	// KnownFields(true) means an unknown key is already an error, so this list only has to
+	// cover the top-level fields Config really has and applyPreset really ignores.
+	discarded := []string{"mode:", "cache:", "store:", "observe:", "preset:"}
+	for name, doc := range presetConfigs {
+		for _, field := range discarded {
+			for _, line := range strings.Split(doc, "\n") {
+				if strings.HasPrefix(line, field) {
+					t.Errorf("rich preset %q declares top-level %s — applyPreset copies only "+
+						"Pipeline and Components, so this is silently discarded and the preset "+
+						"does not do what it says", name, strings.TrimSuffix(field, ":"))
+				}
 			}
 		}
 	}

@@ -43,8 +43,11 @@ import (
 // The honest limit, stated because it is a real behaviour change. A response that opens
 // with thinking or text and calls expand LATER is streamed through, so the client receives
 // the model's raw expand tool_use instead of the proxy resolving it. That outcome already
-// exists on two live paths (`otherTools`, and `got == 0` when nothing resolves), so it is
-// within the design's failure envelope rather than new — but it is not free, and the peek
+// exists on other live paths (`otherTools`; `Continuation` returning !ok; the round cap;
+// AggregateSSE failing; and every non-Anthropic SSE response, which is never peeked at all),
+// so it is within the design's failure envelope rather than new. `got == 0` is NO LONGER one
+// of them: a call that resolves nothing now continues with a placeholder tool_result instead
+// of replaying the model's own call — but it is not free, and the peek
 // deliberately does not pretend otherwise: streamFrom counts every streamed response that
 // turned out to name the expand tool, so the rate is a number on /stats
 // (sse_expand_after_stream) rather than an argument here.

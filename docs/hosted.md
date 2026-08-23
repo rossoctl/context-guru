@@ -654,8 +654,10 @@ ahead of `toon`. `toolfilter` ships with an empty removal list, so it is a no-op
 account names a tool, MCP server or skill to stop sending — it is in the default so that
 naming one is a settings change rather than a pipeline change. `toon` stays in this order at
 the operator's request even though it acted 0 times on 5,752 measured requests; it is
-lossless, so what it costs is latency, never content. `linecap` is **not** here and is the
-one omission worth re-measuring: it took 20.3% of all shipped tokens on the captured corpus.
+lossless, so what it costs is latency, never content. `linecap` is **not** here. Its 20.3% is
+gross reach, not incremental value: measured on the same corpus, adding it to this pipeline is
+worth +0.797 pp (+152,615 tokens), because the offloaders ahead of it have already taken most
+of what it would have caught.
 
 `textclean` was added on 2026-08-20 and is the reason to re-read this section if you last
 saw it earlier. It strips ANSI escapes and carriage-return redraws from tool output, which

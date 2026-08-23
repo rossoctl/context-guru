@@ -413,8 +413,11 @@ var presets = map[string][]string{
 	//	  have already edited the messages, which makes the per-component attribution in
 	//	  /stats less honest than in `general` — the totals are unaffected.
 	//
-	// linecap is absent, which is the one thing here worth re-measuring: it took 20.3% of
-	// all shipped tokens on the captured corpus, more than anything else deterministic.
+	// linecap is absent. Its 20.3% figure is GROSS reach — the share of shipped tokens its
+	// rules touch — and not what adding it to this pipeline is worth. Measured incrementally
+	// on the same 1,795-request corpus, house vs house+linecap: +152,615 tokens, +0.797 pp,
+	// 14.5% of what was reachable. Real, and an order of magnitude short of "the largest
+	// deterministic lever", which is what the gross number reads as.
 	"house":    {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"housellm": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
 }
@@ -465,14 +468,25 @@ components:
     min_tokens: 400`,
 	// housellm: house plus the compaction-model pass, as measured on this service.
 	//
-	// allow_on_caching_backend is TRUE here, and everywhere else in this file it is not.
-	// Unset means false, and the economic gate then hard-declines every candidate whose
-	// tokens are prompt-cached — which on Claude Code against Anthropic is the entire
-	// workload, and is how a fully configured extract_llm ran 251 times and acted 0 times.
-	// The brake that remains is economic_gate, still on: a call happens only when the
-	// expected saving beats the priced cost of making it. That is the difference between
-	// "spend on size" and "spend when it pays", and it is why this is offered by name
-	// rather than turned on for everyone.
+	// allow_on_caching_backend is TRUE here and nowhere else in this file, and it is INERT
+	// as this preset ships. Read that before changing per_output.
+	//
+	// The flag only ever lifts one check: `if val.cached && !allowCached` in
+	// extract_econ.go's gate. With `per_output: false` the sole path into that gate is the
+	// cold sweep, and the cold branch returns `cached: false` by construction
+	// (extract_econ.go:145 — an EXPIRED prefix is about to be re-billed at 1.25x fresh, so a
+	// token removed there is the most valuable token there is, not the least). So the check
+	// the flag disables is unreachable, and `per_output: false` is the actual brake.
+	// Production agrees: 0 caching-backend declines across the measured window, where every
+	// suppression was "saving below call cost".
+	//
+	// It stays because it is the account configuration this preset was asked to carry, and
+	// because it costs nothing while per_output is off. What it must not become is a live
+	// flag: turn `per_output` on and the hot path reaches that gate with `cached: true`, the
+	// decline no longer fires, and extract_econ.go:333 records what our own measurements say
+	// happens then — net-negative even with the gate working, break-even ~30,500
+	// tokens/output against a largest-observed 2,053. TestNoDefaultConfigRunsExtractLLMOnCachingBackend
+	// includes this preset so that combination cannot ship by accident.
 	//
 	// llm_max_per_session: 0 is UNLIMITED, by operator decision. The remaining bounds on a
 	// long session are llm_max_per_request (4), the pressure trigger (20,000 request

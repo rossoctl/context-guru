@@ -64,9 +64,11 @@ taken exactly from the `presets` map in `config/config.go`.
     never content: 1.53 ms and one `TextTokens` call per tool message. If tabular traffic ever
     arrives, it is already in the path.
 
-    **`linecap` is absent**, and that is the omission worth re-measuring rather than the two
-    above: it took **20.3% of all shipped tokens** on the captured corpus, more than anything
-    else deterministic in the catalogue.
+    **`linecap` is absent.** Its **20.3%** is GROSS reach — the share of shipped tokens its
+    rules touch — not what adding it to this pipeline buys. Measured incrementally on the same
+    1,795-request corpus, `house` against `house`+`linecap`: **+152,615 tokens, +0.797 pp**,
+    which is 14.5% of what was reachable once the other offloaders had taken their share. Worth
+    adding; not the headline the gross number implies.
 
 !!! note "`coding` changed in August 2026"
     It used to be `format → skeleton → cmdfilter → cachesplit`, and because

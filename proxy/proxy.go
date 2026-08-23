@@ -1076,13 +1076,28 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// Skipped in observe mode: nothing was offloaded, so there is nothing to
 			// recover, and injecting a tool declaration would MODIFY the request — which is
 			// precisely the one thing observe mode promises never to do.
-			// Skipped on a bypassed request too, and this one is NOT in tension with the
-			// byte-stable tools array that expand.InjectAuto now guarantees: bypass promises a
-			// byte-identical forward, and a bypassed request is an agent-compaction request
-			// whose system prompt and message set differ from the conversation's anyway — so it
-			// hashes to its own prefix and shares no cache entry with the turns around it.
-			// Skipping it therefore costs no cache, while injecting into it would break the
-			// byte-identical promise.
+			// Skipped on a bypassed request too, and this one DOES cost cache sometimes. The
+			// earlier claim here — that a bypassed request is a compaction whose prefix is its
+			// own, so skipping is free — is true for a real compaction and false for a false
+			// positive, and isAgentCompaction has a reachable one: it fires on any last message
+			// with role "user" containing a compaction phrase (agentcompaction.go:71-77), and in
+			// the Anthropic dialect a tool_result IS a user-role message. So a tool output that
+			// quotes one of those phrases — a session reading the docs page, or reading this
+			// file — makes an ordinary mid-conversation turn bypass, lose the expand tool, and
+			// flip the tools array against the very prefix it shares.
+			//
+			// Measured on the dashboard: bypassed rows carry prefix_change at 26.7% against
+			// 1.44% for non-bypassed, an 18.6x enrichment, with zero cold_start and 22 of 30
+			// mid-session. n=30, so treat the RATE as indicative and the mechanism as
+			// established.
+			//
+			// Not fixed here, deliberately: the fix is to stop the detector matching a
+			// tool_result (require the phrase in a text block), which changes what bypass means
+			// for every caller of it, not just for this injection. That belongs in its own
+			// change with its own measurement — the check it needs is a phrase count in a
+			// capture against bypassed=1 rows. Injecting into a bypassed request instead is not
+			// the answer: bypass promises a byte-identical forward, and breaking that to save a
+			// prefix trades a documented guarantee for an unmeasured gain.
 			if tn.Mode != components.ModeObserve && !bypassed {
 				im := h.opts.InjectExpand
 				if im == "" {

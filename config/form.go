@@ -179,15 +179,22 @@ type ExtractLLMForm struct {
 // off: the cold turn is the regime where our own measurements say a model call pays, and
 // the per-output pass on a warm cache is the one they say loses.
 //
-// These are the values the `housellm` config carries, which is the one extract_llm
-// configuration this service has actually run and measured — so the form now offers what
+// These are housellm's values with two documented exceptions — AllowOnCachingBackend
+// (below) and cold_cache.max_calls, which this form does not model at all, so an account
+// prefilled from here gets the component's own default of 4 rather than housellm's 20.
+// housellm is the one extract_llm configuration this service has actually run and measured — so the form now offers what
 // production runs rather than a second opinion about it. Three differ from what this
 // function returned before, and each difference is the reason the component did nothing on
 // a real account:
 //
-//	AllowOnCachingBackend true. False makes the economic gate hard-decline every
-//	  prompt-cached candidate, and on Claude Code against Anthropic that is all of them.
-//	  economic_gate stays on, so this buys "spend when it pays", not "spend on size".
+//	AllowOnCachingBackend stays FALSE, and it is the one value that deliberately does NOT
+//	  match housellm. There the flag is inert, because `per_output: false` means nothing
+//	  prompt-cached ever reaches the check it lifts (see config.presetConfigs). Here it
+//	  would not stay inert: `per_output` is a CHECKBOX on this page, so pre-arming the flag
+//	  puts the net-negative combination one tick away — extract_econ.go:333 prices it at
+//	  break-even ~30,500 tokens/output against a largest-observed 2,053, and this repo has a
+//	  guard test whose whole point is that no default ships it. A prefill must not pre-arm
+//	  something that only becomes live when somebody changes a different field.
 //	TriggerMinTokens 20000 and ContextMessages 2, from the same measured config: a higher
 //	  pressure bar so most turns still make no call, and a shorter context window per call.
 //	MaxPerSession 0, which the component reads as UNLIMITED. An operator decision — the
@@ -203,7 +210,7 @@ func DefaultExtractLLMForm() ExtractLLMForm {
 		ModelSource: "incoming", ModelName: "claude-haiku-4-5",
 		Strategy: "code", EveryNRequests: 1,
 		TriggerMinTokens:      20000,
-		AllowOnCachingBackend: true,
+		AllowOnCachingBackend: false,
 	}
 }
 
