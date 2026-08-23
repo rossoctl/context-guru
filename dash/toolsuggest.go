@@ -379,6 +379,32 @@ func excludedFrom(names []string, since int64) []ExcludedDecl {
 	return out
 }
 
+// declFilteredSet turns the account's RAW config removal list into a lookup keyed the way the
+// INVENTORY names things, so an overlap test compares like with like.
+//
+// It exists because the two vocabularies differ and the comparison was being made across them. The
+// config stores `skill__dataviz` and `mcp__plan`; a report row is named `dataviz` with kind skill,
+// or `mcp__plan__make_plan` with server `plan`. So `filtered[row.Name]` never matched a skill and
+// `filtered[row.Server]` never matched a whole MCP server — the overlap exclusion could not fire
+// for either, which made three user-facing statements false: the field's own doc, the
+// `self_removed` waterfall description, and the tile's overlap count.
+//
+// Built from excludedFrom rather than with a second mapping, because that function already knows
+// how a config name becomes a report row and a second copy is how the two drift apart. Taking the
+// raw list also deletes the identical map-building loop from both call sites, so neither can get
+// the shape wrong again.
+func declFilteredSet(removed []string) map[statKey]bool {
+	out := make(map[statKey]bool, len(removed))
+	for _, e := range excludedFrom(removed, 0) {
+		out[statKey{e.Kind, e.Name}] = true
+		if e.Kind == "mcp_server" {
+			// A whole server is matched on the SERVER, since it names no single tool.
+			out[statKey{"mcp_server", e.Server}] = true
+		}
+	}
+	return out
+}
+
 // suggest applies the sufficiency rule to one item. The ONLY place the rule lives.
 func suggest(st ToolStat, w declWindow) (Suggestion, bool) {
 	// Server-side tools (web_search, code_execution, the mcp_toolset connector) are declared

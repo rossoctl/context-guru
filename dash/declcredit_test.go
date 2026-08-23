@@ -87,8 +87,9 @@ func TestDeclCreditKeepsTheMeasuredAndModelledHalvesApart(t *testing.T) {
 // modelled half must drop it — and say that it did, rather than the row silently vanishing.
 func TestDeclCreditDropsWhatTheFilterIsAlreadyCreditedFor(t *testing.T) {
 	db := seedCredit(t, 1000)
-	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice,
-		map[string]bool{"mcp__gone__x": true})
+	// The list is passed VERBATIM as the configuration stores it, which for a whole MCP server is
+	// the bare `mcp__<server>` form and not the tool name.
+	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, []string{"mcp__gone__x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,21 +170,21 @@ func TestSetDeclCreditPutsEachHalfInTheRightTotal(t *testing.T) {
 	}
 }
 
-// TestTheDeclarationFilterSavingIsDisjointFromCompactions makes the word "disjoint" executable.
+// TestTheDeclarationFilterSavingIsDisjointFromCompactions pins the DOWNSTREAM ARITHMETIC, and the
+// title used to over-claim. It does not exercise apply and it cannot: it builds the row shape by
+// hand, so it verifies "given a request the filter acted on and compaction did not, no total counts
+// it twice" — which is a real and separate property of Overview and SetDeclCredit.
 //
-// TotalSavedUSD adds the filter's saving to compaction's and calls the token sets disjoint. For
-// the tools half that is true by construction — a tool schema is not in `messages` and
-// `tokens_before` counts nothing else. For the SKILLS half it is not: a skill's listing entry IS
-// in `messages`, so the two could describe the same tokens and the total would double-count them.
+// What it does NOT verify is that such a row is what apply actually produces. That is an ordering
+// property of another package — the filter must run before the pipeline takes its baseline
+// (components/pipeline.go:35 over the normalized request built at apply/apply.go:441) — and it is
+// guarded by TestFilterRemovalIsNotInsideTheCompactionBaseline in the apply package, which compares
+// two real runs instead of asserting a fixture.
 //
-// It holds because both halves of the filter run in apply BEFORE the pipeline takes its baseline,
-// so `tokens_before` is measured on the already-filtered body and the removal is simply absent
-// from Saved() rather than inside it. That is an ORDERING property of a different package, which
-// is exactly the kind of thing a later refactor falsifies silently — the total would keep adding
-// and nothing would complain.
-//
-// Asserted as the invariant rather than by re-deriving the order: a request that carries a filter
-// saving and no compaction contributes to the filter half and to NOTHING else.
+// The distinction is not pedantry. A reviewer showed that the only mutation that reddened THIS test
+// was deleting its own `e.BaselineCostUSD = e.CostUSD` fixture line, not changing any production
+// code — so on its own it was evidence about the fixture. The two tests together cover the claim;
+// either alone does not.
 func TestTheDeclarationFilterSavingIsDisjointFromCompactions(t *testing.T) {
 	db := openTestDB(t)
 	// The shape a filtered request really has, taken from a live run: tokens_before ==
@@ -266,5 +267,113 @@ func TestTheWalkAndTheTotalAgreeOnHowManyAddendsThereAre(t *testing.T) {
 	if strings.Contains(desc, "Three disjoint") {
 		t.Errorf("the description still says 'Three disjoint token sets' while TotalSavedUSD " +
 			"sums four")
+	}
+}
+
+// TestOverlapMatchesTheConfigVocabularyNotTheReportsIsTheF3 regression: the overlap exclusion
+// compared a REPORT name against a CONFIG list and so could never fire for two of the three shapes.
+//
+// The config stores `skill__dataviz` and `mcp__plan`; a report row is named `dataviz` with kind
+// skill, or `mcp__plan__make_plan` with server `plan`. The old test passed a bare `mcp__gone__x`
+// and passed, because an exact tool name is the ONE shape where the two vocabularies coincide.
+//
+// Not a literal double count — declarations are captured pre-filter, so a filtered item keeps
+// appearing in later sessions and does not read as self-removed. It matters because it is a
+// documented honesty guarantee (the field's doc, the waterfall description, the tile's count) that
+// was false for exactly the class this change newly made filterable, and because the case it
+// guards is real: an account can remove something locally AND have it on the server list.
+func TestOverlapMatchesTheConfigVocabularyNotTheReports(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		removed []string
+		want    int // expected SelfOverlap
+	}{
+		// A whole MCP SERVER, which is how the dashboard's own group switch writes it. `gone` is
+		// the server whose tools stopped being declared, so this must be recognised as overlap.
+		{"whole mcp server, config form", []string{"mcp__gone"}, 1},
+		// The exact tool name — the one shape that worked before.
+		{"exact mcp tool name", []string{"mcp__gone__x"}, 1},
+		// A name in the REPORT's vocabulary is not what the config holds and must NOT match, or
+		// the exclusion starts firing on things the filter is not credited for.
+		{"bare server name is not a config entry", []string{"gone"}, 0},
+		{"an unrelated entry", []string{"mcp__other"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := seedCredit(t, 1000)
+			c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, tc.removed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.SelfOverlap != tc.want {
+				t.Errorf("removed=%v gave overlap=%d items=%d, want overlap=%d\n"+
+					"The config and the report name things differently; the comparison has to be "+
+					"made in one vocabulary.", tc.removed, c.SelfOverlap, c.SelfItems, tc.want)
+			}
+			// And the two are complementary: an excluded row leaves the modelled half.
+			if tc.want == 1 && c.SelfItems != 0 {
+				t.Errorf("overlap counted but the row is still credited: items=%d", c.SelfItems)
+			}
+		})
+	}
+}
+
+// The SKILL half of the same bug, in its own test because a skill is the class this change newly
+// made filterable and the one the reviewer reproduced: `skill__dataviz` on the list against a row
+// named `dataviz`.
+func TestOverlapFiresForASkillInTheConfigForm(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	var msgs []invMsg
+	for i := 0; i < 10; i++ {
+		s := "s" + string(rune('a'+i))
+		for k := 0; k < 5; k++ {
+			e := mkEvent(day(i)+int64(k), s, "claude", 100, 90)
+			e.TenantID, e.Tools = "t1", 4
+			evs = append(evs, e)
+		}
+		// Every session carries a skills LISTING (so a later session can testify about a missing
+		// skill), and only the first four carry the skill itself.
+		ds := []Decl{{Kind: KindSkillListing, Server: SkillsOK, Tokens: 900}}
+		if i < 4 {
+			ds = append(ds, Decl{Kind: KindSkill, Name: "dataviz", Tokens: 300})
+		}
+		msgs = append(msgs, invMsg{tenant: "t1", session: s, ts: day(i), inv: &Inventory{
+			Digest: s, Decls: ds, UseFingerprint: uint64(i)}})
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write(msgs); err != nil {
+		t.Fatal(err)
+	}
+	// With nothing on the list it is credited as the account's own removal.
+	base, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.SelfItems != 1 {
+		t.Fatalf("the skill was not detected as self-removed at all (items=%d); the fixture is "+
+			"not exercising the overlap path", base.SelfItems)
+	}
+	// With the CONFIG form on the list it is overlap, not a second credit.
+	got, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, []string{"skill__dataviz"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SelfOverlap != 1 || got.SelfItems != 0 {
+		t.Errorf("skill__dataviz on the list gave overlap=%d items=%d, want 1 and 0.\n"+
+			"This is the shape the dashboard actually writes, and the exclusion has to see it.",
+			got.SelfOverlap, got.SelfItems)
+	}
+	// The bare name is the REPORT's vocabulary and is not what a config holds.
+	bare, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, []string{"dataviz"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bare.SelfOverlap != 0 {
+		t.Errorf("a bare `dataviz` matched (overlap=%d); the config stores skill__dataviz and "+
+			"matching the bare form would exclude rows the filter is not credited for",
+			bare.SelfOverlap)
 	}
 }

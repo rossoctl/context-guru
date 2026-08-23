@@ -1,5 +1,7 @@
 package dash
 
+import "strings"
+
 // How a user actually gets rid of a capability they are paying to carry, and which of the
 // things they carry are safe to get rid of at all.
 //
@@ -264,11 +266,24 @@ func isPluginServer(server string) bool {
 
 // splitPluginSkill splits a "<plugin>:<skill>" skill name. A personal or project skill has no
 // colon and is managed by skillOverrides; a plugin's skill is managed by its plugin.
+//
+// A colon is NOT enough, because two different things wear one: a plugin skill is
+// `<plugin>:<skill>` and a DIRECTORY-SCOPED skill is `<path>:<skill>` — Claude Code lists those as
+// e.g. `apps/web:deploy`. Treating the second as the first emitted
+// `claude plugin disable apps/web`, which names no plugin and silently does nothing: the worst
+// output this file can produce, because it gets pasted and appears to succeed.
+//
+// A `/` in the prefix is the discriminator: a path segment can contain one and a plugin name
+// cannot. A directory-scoped skill therefore falls through to the plain skillOverrides mechanism,
+// which is keyed by the same name the listing prints.
 func splitPluginSkill(name string) (plugin, skill string, ok bool) {
 	for i := 0; i < len(name); i++ {
 		if name[i] == ':' {
 			if i == 0 || i == len(name)-1 {
 				return "", "", false
+			}
+			if strings.ContainsRune(name[:i], '/') {
+				return "", "", false // a directory scope, not a plugin
 			}
 			return name[:i], name[i+1:], true
 		}

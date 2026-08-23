@@ -3,6 +3,7 @@ package dash
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -263,7 +264,7 @@ func TestSelfRemovalNeedsComparableLaterSessions(t *testing.T) {
 
 	got, err := db.SelfRemovals(Filter{TenantAll: true},
 		func(m string) (modelinfo.Price, bool) { return handPrice.Price(context.Background(), m) },
-		map[string]bool{})
+		nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +295,7 @@ func TestSelfRemovalNeedsComparableLaterSessions(t *testing.T) {
 	// Overlap with a server-side filter list is reported, never netted away.
 	got2, err := db.SelfRemovals(Filter{TenantAll: true},
 		func(m string) (modelinfo.Price, bool) { return handPrice.Price(context.Background(), m) },
-		map[string]bool{"mcp__srv__thing": true})
+		[]string{"mcp__srv__thing"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,6 +448,10 @@ func TestBuiltinClassification(t *testing.T) {
 		{KindMCPTool, "mcp__srv__thing", false, "mcp_tool"},
 		{KindSkill, "dataviz", false, "skill"},
 		{KindSkill, "someplugin:someskill", false, "plugin_skill"},
+		// A DIRECTORY-SCOPED skill also wears a colon and is NOT a plugin: the prefix is a path.
+		// Routing it to the plugin mechanism emitted `claude plugin disable apps/web`, which names
+		// no plugin and silently does nothing. See TestDirectoryScopedSkillIsNotAPlugin.
+		{KindSkill, "apps/web:deploy", false, "skill"},
 		{KindServerTool, "code_execution", false, "provider"},
 	} {
 		if got := IsBuiltinTool(tc.kind, tc.name); got != tc.builtin {
@@ -886,5 +891,42 @@ func TestUniqueHasThreeStatesNotTwo(t *testing.T) {
 	if m.UniqueDiffRows == 0 {
 		t.Errorf("rows did dedup, so diff must be nonzero: diff=%d of rows=%d",
 			m.UniqueDiffRows, m.UniqueRows)
+	}
+}
+
+// TestDirectoryScopedSkillIsNotAPlugin: two different things wear a colon, and conflating them
+// produced the worst output this file can emit — a command that appears to succeed and changes
+// nothing, in a panel whose whole purpose is to be pasted.
+//
+// `ponytail:ponytail` is a plugin skill and its unit is the plugin. `apps/web:deploy` is a
+// DIRECTORY-SCOPED skill; the prefix is a path, which is why it can contain a `/`, and
+// `claude plugin disable apps/web` names nothing that exists. Pre-existing in splitPluginSkill,
+// but this change claims "the exact command for each skill", so it is in scope now.
+func TestDirectoryScopedSkillIsNotAPlugin(t *testing.T) {
+	plug := RemovalFor(KindSkill, "ponytail:ponytail", "")
+	if plug.Kind != "plugin_skill" || plug.Command != "claude plugin disable ponytail" {
+		t.Errorf("plugin skill = %q / %q, want plugin_skill and the plugin command",
+			plug.Kind, plug.Command)
+	}
+	for _, name := range []string{"apps/web:deploy", "a/b/c:thing"} {
+		got := RemovalFor(KindSkill, name, "")
+		if got.Kind == "plugin_skill" {
+			t.Errorf("%s routed to the plugin mechanism (command %q): that names a path, not a "+
+				"plugin, so running it does nothing at all", name, got.Command)
+		}
+		if got.Kind != "skill" {
+			t.Errorf("%s = kind %q, want the plain skill mechanism", name, got.Kind)
+		}
+		// The snippet names the skill by the SAME string the listing prints, which is what
+		// skillOverrides is keyed by.
+		if !strings.Contains(got.Settings, name) {
+			t.Errorf("%s: the settings snippet does not name it: %q", name, got.Settings)
+		}
+	}
+	// Plain skills and degenerate colons are unaffected.
+	for _, name := range []string{"dataviz", ":x", "x:"} {
+		if got := RemovalFor(KindSkill, name, ""); got.Kind != "skill" {
+			t.Errorf("%s = kind %q, want skill", name, got.Kind)
+		}
 	}
 }

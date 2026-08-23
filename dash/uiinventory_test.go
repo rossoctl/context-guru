@@ -134,11 +134,19 @@ func readUI(t *testing.T, name string) string {
 // A static check earns its keep here because the failure is invisible three ways at once: the
 // page renders, the tests pass, and the dead copy looks like the live one.
 func TestNoFunctionIsDefinedTwiceInTheDashboardSource(t *testing.T) {
-	// kv in app.js is a PRE-EXISTING duplicate of exactly this shape, found by this check and
-	// deliberately not fixed here: the two bodies differ only in how they pass their text, it is
-	// 3,700 lines away from anything this change touches, and a silent edit to a shared helper is
-	// how an unrelated regression gets attributed to the wrong commit. It is listed so the check
-	// can guard everything else rather than being scoped down to one file.
+	// KNOWN EXCEPTION — ui/app.js:kv. A pre-existing duplicate of exactly this shape, found by
+	// this check and deliberately not fixed here.
+	//
+	// app.js defines kv() at ~2929 and ~6644. The later wins; the two bodies differ only in how
+	// they pass their text (`text: k` vs a child node, `v` vs `String(v)`), so there is no visible
+	// defect today. It is recorded rather than repaired because it sits ~3,700 lines from anything
+	// this change touches, and a silent edit to a shared helper is how an unrelated regression gets
+	// attributed to the wrong commit.
+	//
+	// TO CLEAR IT: keep one definition, delete the other, drop this entry. Everything a tracking
+	// issue would need is in this comment on purpose — the change that found it could not file one
+	// (an outbound write it had no authorisation for), and a finding whose only record is a review
+	// thread is a finding that evaporates.
 	known := map[string]bool{"ui/app.js:kv": true}
 	def := regexp.MustCompile(`(?m)^function ([A-Za-z_$][\w$]*)\s*\(`)
 	for _, name := range []string{"ui/tools.js", "ui/app.js"} {
@@ -245,5 +253,40 @@ func TestTheHeadlineSaysWhatItLeftOut(t *testing.T) {
 	}
 	if !strings.Contains(src, "inv-aside-note") {
 		t.Error("the headline has no disclosure of the excluded group")
+	}
+}
+
+// TestTheGaugeTellsTheTwoZeroesApart. With the built-ins out of these figures, "declared 0" is now
+// the NORMAL state of a plain Claude Code session that carries no MCP tools and no skills — and it
+// means something completely different from "declared plenty and used all of it".
+//
+// Both landed on one line reading "Nothing in this scope was declared and left unused", which over
+// an empty controllable set reads as a clean bill while fifteen thousand tokens of the agent's own
+// tools sit in the section at the end of the page. A static check because the branch is chosen from
+// report data the Go tests do not render.
+func TestTheGaugeTellsTheTwoZeroesApart(t *testing.T) {
+	src := readUI(t, "ui/tools.js")
+	i := strings.Index(src, "function gauge(")
+	if i < 0 {
+		t.Fatal("gauge is gone; this check needs rewriting against its replacement")
+	}
+	end := strings.Index(src[i:], "\n}\n")
+	if end < 0 {
+		end = len(src) - i
+	}
+	body := src[i : i+end]
+	// The two states are distinguished at all...
+	if !strings.Contains(body, "!t.declared_tokens") {
+		t.Error("the gauge does not branch on declared_tokens being zero, so 'you declared " +
+			"nothing controllable' and 'you used everything you declared' print the same line")
+	}
+	// ...and the empty-set branch does NOT congratulate the reader.
+	if !strings.Contains(body, "not \\\"no waste\\\"") && !strings.Contains(body, `not "no waste"`) {
+		t.Error("the declared-nothing branch does not say it is not a clean bill; a reader with " +
+			"15k tokens of built-ins would read it as one")
+	}
+	// ...and it points at where the weight actually is.
+	if !strings.Contains(body, "aside_tokens") {
+		t.Error("the declared-nothing branch does not name the weight it excluded")
 	}
 }

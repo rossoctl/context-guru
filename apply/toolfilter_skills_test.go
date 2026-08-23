@@ -185,3 +185,40 @@ func TestFilterSkillReadsABlockArrayListing(t *testing.T) {
 		t.Error("the entry survived in the block-array shape")
 	}
 }
+
+// TestRemoveSetsKeepsSkillEntriesOutOfTheToolNames is the guard in removeSets, which had none.
+//
+// A `skill__x` entry must not land in the tool-name set: it is removed from the listing prose by
+// filterSkillListing, and leaving it in `names` would mean a tool literally called `skill__x` was
+// dropped by a request to remove a SKILL called `x`. No such tool exists today, which is exactly
+// why the guard needed a test rather than a comment — nothing would have noticed its removal.
+func TestRemoveSetsKeepsSkillEntriesOutOfTheToolNames(t *testing.T) {
+	names, servers := removeSets([]string{
+		skills.RemovePrefix + "dataviz", "Workflow", "mcp__srv", "mcp__srv__tool",
+	})
+	if names[skills.RemovePrefix+"dataviz"] {
+		t.Error("a skill entry reached the tool-name set; a tool of that name would be dropped by " +
+			"a request to remove a skill")
+	}
+	for _, want := range []string{"Workflow", "mcp__srv__tool"} {
+		if !names[want] {
+			t.Errorf("%s is missing from the tool names", want)
+		}
+	}
+	if !servers["srv"] {
+		t.Error("the whole-server entry did not reach the server set")
+	}
+	if len(names) != 2 {
+		t.Errorf("tool names = %v, want exactly the two tool entries", names)
+	}
+	// The end-to-end consequence: a tool whose NAME is the skill entry survives a skill removal.
+	body := `{"model":"m","tools":[` +
+		`{"name":"skill__dataviz","description":"a tool that happens to be called this","input_schema":{"type":"object"}},` +
+		`{"name":"Bash","description":"run","input_schema":{"type":"object"}}],` +
+		`"system":[{"type":"text","text":"You are an agent."}],` +
+		`"messages":[{"role":"user","content":"hi"}]}`
+	out, tok, n := filterDeclarations([]byte(body), []string{skills.RemovePrefix + "dataviz"})
+	if n != 0 || tok != 0 || string(out) != body {
+		t.Errorf("a skill removal dropped %d tool declarations (%d tokens)", n, tok)
+	}
+}

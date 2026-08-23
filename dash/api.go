@@ -647,11 +647,8 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 	// runs outside the block above; best-effort and non-fatal, because it is an addition to the
 	// walk and a deployment where it fails should still get the walk. NEVER silent, though: an
 	// error swallowed here returns zeros, and a zero in a savings figure is a claim.
-	filtered := map[string]bool{}
-	for _, n := range a.toolFilterStateForScope(f).Removed {
-		filtered[n] = true
-	}
-	if c, err := a.rec.DB().DeclCreditFor(f, a.priceFn(r), filtered); err == nil {
+	if c, err := a.rec.DB().DeclCreditFor(f, a.priceFn(r),
+		a.toolFilterStateForScope(f).Removed); err == nil {
 		o.SetDeclCredit(c)
 	} else {
 		slog.Warn("dash: declaration-removal credit unavailable", "err", err)

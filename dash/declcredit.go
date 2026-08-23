@@ -66,11 +66,14 @@ type DeclCredit struct {
 
 // DeclCreditFor totals both halves over one scope.
 //
-// filtered is the account's own server-side removal list, used ONLY to drop overlapping rows out
-// of the modelled half. It is passed in rather than read here for the reason dash reads no tenant
-// configuration anywhere: the host owns it (see API.SetToolFilterState).
+// removed is the account's own server-side removal list, VERBATIM as the configuration stores it,
+// used ONLY to drop overlapping rows out of the modelled half. It is passed in rather than read
+// here for the reason dash reads no tenant configuration anywhere: the host owns it (see
+// API.SetToolFilterState). Raw rather than pre-keyed, because the config's vocabulary and the
+// report's differ and doing that translation per caller is what made the exclusion silently
+// inert — see declFilteredSet.
 func (d *DB) DeclCreditFor(f Filter, price func(string) (modelinfo.Price, bool),
-	filtered map[string]bool) (*DeclCredit, error) {
+	removed []string) (*DeclCredit, error) {
 	out := &DeclCredit{Priced: true}
 	if price == nil {
 		// No rates: the token counts still stand and the dollars do not exist. Reported as
@@ -92,7 +95,7 @@ func (d *DB) DeclCreditFor(f Filter, price func(string) (modelinfo.Price, bool),
 		// which is why the filter half is still computed here.
 		return out, nil
 	}
-	self, err := d.SelfRemovals(f, price, filtered)
+	self, err := d.SelfRemovals(f, price, removed)
 	if err != nil {
 		return nil, err
 	}

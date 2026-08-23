@@ -62,7 +62,7 @@ tool declaration lives in the top-level `tools` array, so the filter's saving mo
 waterfall by exactly nothing. It was on the Inventory tab and in no total anywhere — the largest
 lever measured in this project (82.7% of a declared catalogue is never invoked), invisible to the
 page that adds the savings up. Demonstrated on a live run: two clicks in the dashboard UI, and
-`total_saved_usd` went from `$0.000000` to `$0.003254`.
+`total_saved_usd` went from `$0.000000` to `$0.004456`.
 
 `self_removed_usd` is kept out of the credited total because the method cannot see WHY a
 declaration stopped appearing. It sees that the declaration set changed — which is a fact, and the

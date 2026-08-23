@@ -39,9 +39,12 @@ one, so the whole set can be read side by side and checked for one voice.
 
 ## What this round changed, and why
 
-**The built-ins left the statistics.** They are the largest group by weight — 15,746 tokens per
-session against 12,257 of controllable declarations on a real capture, 59% of everything declared
-— and removing one breaks the agent. So a headline reading "you never touch 82% of what you
+**The built-ins left the statistics.** They are the largest group by weight — on a real capture
+**15,694 tokens per session** (`aside_tokens`) against **12,250** of controllable declarations
+(`declared_tokens`), and **15,746 of the 26,825**-token declaration SET (`aside_set_tokens` of
+`declared_set_tokens`), **58.7%** of everything declared. The per-session mean and the set total are
+different statistics over different populations and are named here as such, because this page has a
+history of printing one under the other's label — and removing any of it breaks the agent. So a headline reading "you never touch 82% of what you
 carry", assembled mostly out of `Read`, `Bash` and `Grep`, was a true number whose only available
 action was a mistake. They are now in `ToolReport.Aside`: reported in their own section at the end
 of the page and in the composition bar (whose job is the whole prompt), and in no total, no
@@ -63,11 +66,14 @@ already captured, and a decomposition that only worked for prompts recorded from
 a reader can use. The parts' summed weight is printed beside the region's own and never reconciled
 with it — BPE is not additive across a split, so they are two measurements of the same bytes.
 
-**Skills became removable, and every row carries its own command.** `removalCell` existed and was
-rendered in exactly one place — the built-ins table, the one group nobody should act on — while a
-multi-item group showed only the SERVER-level command, which is no answer at all to "get rid of
-just this one tool". Every candidate row, every row of both tables, and every built-in now carries
-its own, folded.
+**Skills became removable, and every row carries its own command.** At the previous round's HEAD
+`removalCell` was rendered in TWO places — the built-ins table, and the group HEAD in
+`removalGroup` (the earlier fix) — so a group of one already showed its command. What was missing is
+per-ITEM: a group of many showed only the SERVER-level `claude mcp remove <server>`, which is the
+right answer to "drop this whole server" and no answer at all to "drop just this one tool", the
+question a reader with a nineteen-tool server actually has; and neither sortable table showed a
+command anywhere, which is where a reader goes for a tool they DO use occasionally. Every candidate
+row, every row of both tables, and every built-in now carries its own, folded.
 
 **One duplicate function.** `unusedRow` was defined twice in `tools.js`, 70 lines apart. The second
 won, and the second was the older one: no prompt-text reveal, no `id`/`for` pairing, and the whole

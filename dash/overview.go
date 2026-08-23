@@ -195,9 +195,13 @@ type Overview struct {
 	//
 	// The fourth one's disjointness is the only one that needs an argument, because half of what
 	// it removes (a skill's listing entry) lives in `messages`, which is exactly where
-	// `tokens_before` is measured. It holds because BOTH halves of the filter run in apply
-	// BEFORE the pipeline takes its baseline, so `tokens_before` is measured on the
-	// already-filtered body and the removal is invisible to Saved() rather than counted twice.
+	// `tokens_before` is measured. It holds because BOTH halves of the filter run in apply BEFORE
+	// the request is normalized (apply/apply.go:441) and therefore before the pipeline baselines it
+	// (components/pipeline.go:35), so `tokens_before` is measured on the already-filtered body and
+	// the removal is invisible to Saved() rather than counted twice. The boundary is NORMALIZE, not
+	// the `msgsRaw` read above it — that one exists so a later rewrite cannot move a byte offset,
+	// and a filter placed between the two would still be safe for this purpose. Confirmed by
+	// mutation: moving the skill half past normalize reds the apply-side guard.
 	// Measured on a live run: on every request where the filter dropped 561 tokens,
 	// tokens_before == tokens_after, saved_gross == 0 and baseline_cost_usd − cost_usd == 0,
 	// while tokens_before itself fell by exactly the skill entry's weight.

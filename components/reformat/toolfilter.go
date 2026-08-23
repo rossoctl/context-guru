@@ -106,6 +106,16 @@ func (Toolfilter) Reformat(_ *schemas.BifrostChatRequest, rep *components.Report
 	return nil
 }
 
+// ponytail: this component records NO gate, so a configured name the prose gate declines is
+// invisible in /stats — the one inconsistency GROUND-TRUTH already notes against toolfilter
+// ("no gates recorded"). rep.Gate("prose_referenced") is the right home for it and the plumbing is
+// the cost: the decision is made in apply, so the count has to reach Ctx the way FilteredDecls
+// does, which means a fourth return value on filterDeclarations and filterSkillListing and their
+// 31 call sites, 28 of them in tests. Deferred deliberately rather than duplicating
+// proseReferenced at a second site, which is how the two would drift. The user-facing half is
+// already handled: the page states the condition instead of promising an outcome it has not
+// checked (dash/ui/tools.js, the opted-out row and the skills panel).
+
 func init() {
 	components.RegisterFields("toolfilter", toolfilterConfig{}, []components.Field{
 		{Key: "remove", Type: components.FieldStrings,

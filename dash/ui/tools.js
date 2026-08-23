@@ -774,8 +774,16 @@ function unusedRow(t, rep) {
       + 'dropped here.'));
   }
   if (off) {
-    box.appendChild(el('span', { class: 'cg-item-basis', text: 'Opted out. Switch back on to '
-      + 'restore it; that pays the one-time prefix rebuild again.' }));
+    // NOT "this is no longer sent". The filter keeps any declaration your own system prompt still
+    // NAMES — stripping a declaration whose prose survives invites the model to narrate the call
+    // instead of making it, which nothing surfaces — so an opt-out can be recorded and correctly
+    // declined at request time. The page cannot tell which from here (the decision is per request,
+    // in apply, and nothing stores it per item), so it states the condition rather than implying
+    // an outcome it has not checked.
+    box.appendChild(el('span', { class: 'cg-item-basis', text: 'Opted out: context-guru stops '
+      + 'sending it from your next session — unless your own system prompt still names it, in '
+      + 'which case it is deliberately kept and will go on appearing here. Switching back on '
+      + 'restores it and pays the one-time prefix rebuild again.' }));
   }
   box.appendChild(promptTextReveal(t));
   // The per-item removal, folded: the group head already carries the one-command answer, so
@@ -1073,10 +1081,13 @@ function skillsPanel(host, rep) {
   panel.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, table));
   panel.appendChild(el('p', { class: 'hint' }, 'Switching a skill off here stops context-guru '
     + 'sending its entry in the listing, from your next session. It does not edit your own '
-    + 'configuration — the command beside each row does that, permanently and at source. One '
-    + 'caveat worth knowing: the Skill tool takes a free-form name, so a model that remembers an '
-    + 'unlisted skill can still run it. That is deliberate — it fails open — but it means this is '
-    + 'a way to stop PAYING for a skill, not a way to forbid it.'));
+    + 'configuration — the command beside each row does that, permanently and at source. Two '
+    + 'caveats worth knowing. The Skill tool takes a free-form name, so a model that remembers an '
+    + 'unlisted skill can still run it: that is deliberate — it fails open — but it means this is '
+    + 'a way to stop PAYING for a skill, not a way to forbid it. And a skill your own system '
+    + 'prompt names by name is KEPT whatever you switch here, because removing a declaration '
+    + 'while the prose describing it survives is the one way this can quietly make the agent '
+    + 'worse.'));
 }
 
 /**

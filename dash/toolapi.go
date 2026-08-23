@@ -908,11 +908,7 @@ func (a *API) tools(w http.ResponseWriter, r *http.Request) {
 	if price != nil {
 		// The account's own server-side removal list, so a reduction that the tool filter is
 		// ALREADY credited for can be marked as overlapping instead of counted twice.
-		filtered := map[string]bool{}
-		for _, n := range a.toolFilterStateForScope(f).Removed {
-			filtered[n] = true
-		}
-		sr, err := a.rec.DB().SelfRemovals(f, price, filtered)
+		sr, err := a.rec.DB().SelfRemovals(f, price, a.toolFilterStateForScope(f).Removed)
 		if err != nil {
 			// Non-fatal, but never silent: swallowing this returned an empty list that was
 			// indistinguishable from "the account removed nothing", which is a claim.
@@ -968,7 +964,11 @@ func (d *DB) countInventoryRows() (decls, uses int64, err error) {
 // Deliberately NOT netted into the declaration filter's realized savings: an account that both
 // removed a server locally and has it on its server-side filter list would otherwise be credited
 // twice for one reduction. Rows in that position are marked Overlap and left for the reader.
-func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), filtered map[string]bool) ([]SelfRemoval, error) {
+func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), removed []string) ([]SelfRemoval, error) {
+	// The account's raw config list, keyed the way the inventory names things. Converted HERE
+	// rather than by each caller: the two callers had identical loops building it in the CONFIG's
+	// vocabulary, and the comparison below is in the REPORT's.
+	filtered := declFilteredSet(removed)
 	where, args := f.where()
 	// Session ordering comes from the requests table (the declarations carry a ts, but one per
 	// digest, not per session start), so "before" and "after" mean the same thing here as
@@ -1103,7 +1103,8 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 		r := SelfRemoval{
 			Kind: c.kind, Name: c.name, Server: c.server,
 			Tokens: c.tokens, LastSeen: c.lastSeen, SessionsBefore: c.before,
-			Overlap: filtered[c.name] || (c.server != "" && filtered[c.server]),
+			Overlap: filtered[statKey{c.kind, c.name}] ||
+				(c.server != "" && filtered[statKey{"mcp_server", c.server}]),
 		}
 		priced := true
 		for _, s := range sess {
