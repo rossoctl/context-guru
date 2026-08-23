@@ -139,9 +139,12 @@ func (sp *sseSplicer) round(resp *http.Response) {
 // can now live.
 //
 // The number is the first power of two above the largest round a model can legitimately
-// produce, so it never fires on real traffic and only ever catches pathology. Measured, not
-// assumed: this gateway accepts max_tokens up to 128,000 (200,000 is refused with "the
-// maximum allowed number of output tokens"), and an event stream runs ~35 bytes per output
+// produce, so it never fires on real traffic and only ever catches pathology. Re-derive it if
+// it ever looks tight, because the input that moves is not ours: this proxy never caps
+// max_tokens, it only reads it, so the ceiling is whatever the UPSTREAM allows and it changes
+// when the upstream does. Measured against the gateway this deployment fronts, which accepts
+// max_tokens up to 128,000 (200,000 is refused with "the maximum allowed number of output
+// tokens"), and an event stream runs ~35 bytes per output
 // token — ~4 bytes of text plus ~105 bytes of framing per delta of ~3.5 tokens — so a
 // full-length response is ~4.5 MB. A stream that emitted ONE token per delta would pay the
 // framing per token instead, ~109 bytes, and reach ~14 MB; 16 MiB covers that.

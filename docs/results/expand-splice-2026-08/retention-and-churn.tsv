@@ -1,0 +1,29 @@
+# What one round costs while the splice holds it. Same 2.25 MB synthetic round (18,753 events)
+# through each code path, in one process, runtime.MemStats around the call.
+#
+# Read CHURN (TotalAlloc, monotonic), not heap-held: HeapAlloc deltas depend on whether a GC
+# happened to run inside the arm. The old-buffered-path row proves that hazard — 0.78x is BELOW
+# the floor of the data it must hold, so a GC ran during it.
+#
+# The httptest recorder's own buffer growth is a TEST ARTIFACT, measured separately at 3.73x: a
+# real ResponseWriter writes through a fixed bufio buffer to a socket. Rows marked incl_recorder
+# carry it; subtract it to compare against the old path, which does no per-event writes.
+path	retained_bytes	churn_bytes	churn_x	heap_held_bytes	heap_x	note
+splice pass(), buffer per event	2250205	30006216	13.33	13438040	5.97	incl_recorder
+old buffered path (peek + ReadAll + concat)	2250205	7115064	3.16	1753344	0.78	GC ran inside the arm
+scratch: read+append only, buffer reused	2250205	10811264	4.80	8636024	3.84	MISLEADING - omits the per-event parsing, do not quote
+splice pass(), buffer reused	2250293	26417168	11.74	-	-	incl_recorder
+splice pass(), reused + substring pre-filters	2250293	19211648	8.54	-	-	incl_recorder; 4.81x without
+#
+# Attribution of the per-event cost, same events:
+sseEventPayload (bytes.Split + payload string), x18753	-	3600504	1.60	-	-	called TWICE per event
+gjson.Parse on top of that payload	-	3600504	1.60	-	-	the parse is free; the string conversion is the cost
+bytes.Contains pre-filter	-	0	0.00	-	-	which is why the fix is a substring reject
+httptest recorder writes, x18753	-	8388800	3.73	-	-	test artifact, not production
+#
+# max_tokens the upstream accepts (the proxy never caps it, so this sets the retention ceiling):
+# aws/claude-sonnet-5    64000 ok  128000 ok  200000 400 "max_tokens: 200000 > 128000, which is
+#                                                        the maximum allowed number of output
+#                                                        tokens"
+# aws/claude-sonnet-4-5  64000 ok  128000 ok  200000 400
+# aws/claude-opus-4-7    64000 ok  128000 ok  200000 400

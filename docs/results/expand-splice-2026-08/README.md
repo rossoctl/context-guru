@@ -19,6 +19,11 @@ at 40-55% of wall and the deltas run across the rest. An older comment in `ssepe
 the opposite from 6 turns; individual turns do read 1.000 when generation finishes fast enough
 to arrive in one burst.
 
+`retention-and-churn.tsv` — the allocation cost of holding a round, per code path, plus the
+attribution that found it (`sseEventPayload` called twice per event, not the event buffer) and
+the `max_tokens` ceilings the upstream enforces. It also records the two instrument hazards it
+hit: a GC running inside one arm, and the `httptest` recorder's own buffer growth.
+
 `sse-bytes-per-output-token.tsv` — what a round costs in memory while the splice holds it.
 ~35 bytes per output token, mechanically explained, so a full-length response at this
 gateway's `max_tokens` ceiling of 128,000 is ~4.5 MB. That is what sets `sseRetainMaxBytes`.
