@@ -93,6 +93,32 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             data, status, hdrs = json.dumps({"error": str(e)}).encode(), 502, {}
 
+        # PER-REQUEST FLAP LOG. The expand tool sits at the FRONT of the prompt-cache hash (tools ->
+        # system -> messages), so every turn where it appears or disappears is a full prefix miss from
+        # position zero -- the most expensive invalidation available. Under INJECT_EXPAND=auto the tool
+        # is advertised only on turns whose outgoing body carries a marker, which is not every turn, so
+        # the array flaps. That was inferred from the advertise rule plus per-arm action rates, never
+        # measured per request. This makes it countable: one compact line per request recording how
+        # many tools were advertised, whether the expand tool was among them, and whether a marker was
+        # present. A flap is then a transition in has_expand between consecutive requests of a session.
+        if os.environ.get("CAPTURE_FLAPLOG"):
+            try:
+                pl = json.loads(raw)
+                tools = pl.get("tools") or []
+                names = [t.get("name") for t in tools if isinstance(t, dict)]
+                body_s = raw.decode("utf-8", "replace")
+                with open(os.environ["CAPTURE_FLAPLOG"], "a") as fh:
+                    fh.write(json.dumps({
+                        "seq": self.headers.get("x-cg-rig-seq"),
+                        "n_tools": len(tools),
+                        "has_expand": any("expand" in (n or "") for n in names),
+                        "has_marker": "<<cg:" in body_s,
+                        "bytes": len(raw),
+                        "status": status,
+                    }) + "\n")
+            except Exception:
+                pass
+
         if status >= 400:
             try:
                 payload = json.loads(raw)
