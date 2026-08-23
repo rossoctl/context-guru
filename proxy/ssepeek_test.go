@@ -2,157 +2,212 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/rossoctl/context-guru/expand"
 )
 
-func peek(t *testing.T, stream string) ([]byte, sseVerdict) {
-	t.Helper()
-	head, v := peekSSE(bufio.NewReader(strings.NewReader(stream)), expand.ToolName)
-	return head, v
-}
-
 const (
 	pkStart  = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n"
 	pkText   = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
 	pkThink  = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n"
 	pkDelta  = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"
+	pkBStop  = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
 	pkStop   = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	pkPing   = "event: ping\ndata: {\"type\":\"ping\"}\n\n"
 	pkErrEv  = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}\n\n"
-	pkOtherT = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{}}}\n\n"
+	pkOtherT = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{}}}\n\n"
 )
 
 func pkExpand() string {
-	return "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0," +
+	return "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1," +
 		"\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"" + expand.ToolName + "\",\"input\":{}}}\n\n"
 }
 
-// The verdict table. Only a response that OPENS with a call to the expand tool has to be
-// withheld from the client; everything else can stream.
-func TestPeekVerdicts(t *testing.T) {
+// The one event a client must never receive. Everything else — thinking, text, another
+// tool, a ping, an error — is the client's to have, and the block INDEX is irrelevant:
+// deciding by index is the bug this replaced.
+func TestStartsExpandCall(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		stream string
-		want   sseVerdict
+		name string
+		ev   string
+		want bool
 	}{
-		{"opens with text — the common case, must stream", pkStart + pkText + pkDelta + pkStop, sseStreamable},
-		{"opens with thinking — 100% of captured traffic has thinking on", pkStart + pkThink + pkDelta + pkStop, sseStreamable},
-		{"opens with ANOTHER tool: the loop bails on otherTools anyway", pkStart + pkOtherT + pkStop, sseStreamable},
-		{"opens with the expand call: this is what buffering exists for", pkStart + pkExpand() + pkStop, sseMustBuffer},
-		{"pings before the first block do not decide anything", pkStart + pkPing + pkPing + pkText, sseStreamable},
-		{"an empty message: no block at all, nothing to intercept", pkStart + pkStop, sseStreamable},
-		{"an error event must reach the client as it arrived", pkStart + pkErrEv, sseStreamable},
-		{"a stream that ends mid-preamble", pkStart, sseStreamable},
-		{"an empty body", "", sseStreamable},
-		{"a truncated final line", pkStart + "event: content_block_st", sseStreamable},
-		{"not the Anthropic dialect at all", "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", sseStreamable},
+		{"the expand call itself", pkExpand(), true},
+		{"a text block", pkText, false},
+		{"a thinking block", pkThink, false},
+		{"another tool the client owns", pkOtherT, false},
+		{"a delta", pkDelta, false},
+		{"message_start", pkStart, false},
+		{"message_stop", pkStop, false},
+		{"a ping", pkPing, false},
+		{"an error event", pkErrEv, false},
+		{"an OpenAI-shaped chunk", "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", false},
+		{"[DONE]", "data: [DONE]\n\n", false},
+		{"no data line at all", "event: content_block_start\n\n", false},
+	} {
+		if got := startsExpandCall([]byte(tc.ev), expand.ToolName); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// The round cap passes an empty tool name to withhold nothing.
+	if startsExpandCall([]byte(pkExpand()), "") {
+		t.Error("an empty tool name must withhold nothing")
+	}
+}
+
+// pass must never eat or duplicate input: what it forwarded plus what it withheld has to
+// reconstitute the stream byte-for-byte, because the client's response is built from one
+// half and the continuation loop's input from both.
+func TestPassSplitsTheStreamWithoutLosingAByte(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		stream     string
+		wantFound  bool
+		wantClient string // "" means "everything"
+	}{
+		{"a plain text answer streams whole", pkStart + pkText + pkDelta + pkBStop + pkStop, false, ""},
+		{"an expand call after a text block is withheld from it on",
+			pkStart + pkText + pkDelta + pkBStop + pkExpand() + pkDelta + pkStop, true,
+			pkStart + pkText + pkDelta + pkBStop},
+		{"an expand call after thinking, likewise",
+			pkStart + pkThink + pkDelta + pkBStop + pkExpand() + pkStop, true,
+			pkStart + pkThink + pkDelta + pkBStop},
+		{"an expand call in the FIRST block: the client gets the preamble only",
+			pkStart + pkExpand() + pkStop, true, pkStart},
+		{"another tool is not ours to withhold", pkStart + pkOtherT + pkStop, false, ""},
+		{"pings and errors pass through", pkStart + pkPing + pkErrEv, false, ""},
+		{"an empty body", "", false, ""},
+		{"a truncated final event", pkStart + "event: content_block_st", false, ""},
+		{"CRLF framing", strings.ReplaceAll(pkStart+pkText+pkExpand(), "\n", "\r\n"), true,
+			strings.ReplaceAll(pkStart+pkText, "\n", "\r\n")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, got := peek(t, tc.stream); got != tc.want {
-				t.Fatalf("verdict %v, want %v", got, tc.want)
+			rec := httptest.NewRecorder()
+			sp := newSSESplicer(rec)
+			sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
+			whole, withheld, found := sp.pass(strings.NewReader(tc.stream), expand.ToolName)
+			if found != tc.wantFound {
+				t.Fatalf("found=%v, want %v", found, tc.wantFound)
+			}
+			if string(whole) != tc.stream {
+				t.Fatalf("whole must be the stream as it arrived:\n want %q\n got  %q", tc.stream, whole)
+			}
+			wantClient := tc.wantClient
+			if wantClient == "" {
+				wantClient = tc.stream
+			}
+			if got := rec.Body.String(); got != wantClient {
+				t.Fatalf("client got:\n %q\n want %q", got, wantClient)
+			}
+			if got := wantClient + string(withheld); got != tc.stream {
+				t.Fatalf("forwarded + withheld must be the whole stream:\n want %q\n got  %q", tc.stream, got)
+			}
+			if found && bytes.Contains([]byte(rec.Body.String()), []byte(expand.ToolName)) {
+				t.Fatalf("the client received our own tool_use: %q", rec.Body.String())
 			}
 		})
 	}
 }
 
-// The peek must never eat input. Whatever it consumed is returned, and head + the
-// remainder has to reconstitute the stream byte-for-byte — the client's response on the
-// streaming path and the loop's input on the buffered one are both built from that pair.
-func TestPeekReturnsEveryByteItConsumed(t *testing.T) {
-	for _, stream := range []string{
-		pkStart + pkText + pkDelta + pkStop,
-		pkStart + pkExpand() + pkDelta + pkStop,
-		pkStart + pkPing + pkThink + pkDelta + pkStop,
-		pkStart,
-		"",
-		strings.Repeat(pkPing, 50) + pkText + pkStop,
+// The splice: round 2's blocks are renumbered to follow the ones the client already has,
+// its message_start is dropped (a client sees ONE message per turn), and round 1's own
+// events are passed through untouched — byte-for-byte, which is what keeps a response that
+// never calls expand an exact pass-through.
+func TestSpliceRenumbersTheContinuationAndKeepsOneMessage(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sp := newSSESplicer(rec)
+	resp := &http.Response{StatusCode: 200, Header: http.Header{}}
+
+	sp.round(resp)
+	round1 := pkStart + pkText + pkDelta + pkBStop + pkExpand() + pkStop
+	_, withheld, found := sp.pass(strings.NewReader(round1), expand.ToolName)
+	if !found || sp.blocks != 1 {
+		t.Fatalf("round 1 should have forwarded exactly one block, found=%v blocks=%d", found, sp.blocks)
+	}
+	prefix := rec.Body.String()
+	if prefix != pkStart+pkText+pkDelta+pkBStop {
+		t.Fatalf("round 1 prefix must be verbatim: %q", prefix)
+	}
+
+	sp.round(resp)
+	round2 := pkStart + pkText + pkDelta + pkBStop + pkStop
+	if _, _, found := sp.pass(strings.NewReader(round2), expand.ToolName); found {
+		t.Fatal("round 2 has no expand call")
+	}
+	out := rec.Body.String()
+	spliced := strings.TrimPrefix(out, prefix)
+	if spliced == out {
+		t.Fatalf("the prefix must still be intact at the front: %q", out)
+	}
+	if strings.Contains(spliced, "message_start") {
+		t.Fatalf("a second message_start must be dropped: %q", spliced)
+	}
+	for _, want := range []string{
+		`"type":"content_block_start","index":1`,
+		`"type":"content_block_delta","index":1`,
+		`"type":"content_block_stop","index":1`,
 	} {
-		br := bufio.NewReader(strings.NewReader(stream))
-		head, _ := peekSSE(br, expand.ToolName)
-		rest := new(strings.Builder)
-		if _, err := rest.Write(nil); err != nil {
-			t.Fatal(err)
-		}
-		buf := make([]byte, 512)
-		for {
-			n, err := br.Read(buf)
-			rest.Write(buf[:n])
-			if err != nil {
-				break
-			}
-		}
-		if got := string(head) + rest.String(); got != stream {
-			t.Fatalf("peek lost or duplicated bytes:\n want %q\n got  %q", stream, got)
+		if !strings.Contains(spliced, want) {
+			t.Fatalf("round 2's block must be renumbered to 1, missing %s:\n%q", want, spliced)
 		}
 	}
+	if strings.Count(out, `"type":"message_stop"`) != 1 {
+		t.Fatalf("the client's turn must end exactly once: %q", out)
+	}
+	if sp.blocks != 2 {
+		t.Fatalf("the client holds 2 blocks, splicer says %d", sp.blocks)
+	}
+	if _, withheldAgain, _ := sp.pass(strings.NewReader(""), expand.ToolName); withheldAgain != nil {
+		t.Fatal("an empty round withholds nothing")
+	}
+	_ = withheld
 }
 
-// The peek stops at the deciding event, not at the end of the stream — that is the whole
-// point, and a peek that reads to EOF would be the old buffering wearing a new name.
-func TestPeekStopsAtTheDecidingEvent(t *testing.T) {
-	tail := strings.Repeat(pkDelta, 500)
-	head, v := peek(t, pkStart+pkText+tail+pkStop)
-	if v != sseStreamable {
-		t.Fatalf("verdict %v", v)
-	}
-	if len(head) >= len(pkStart+pkText+tail) {
-		t.Fatalf("peek read %d bytes; it must stop at the first content_block_start "+
-			"(~%d bytes), not drain the stream", len(head), len(pkStart+pkText))
-	}
-	if !strings.Contains(string(head), "content_block_start") {
-		t.Fatalf("the deciding event must be part of the flushed head, got %q", head)
-	}
-}
-
-// An unreadable or absurdly long preamble falls back to buffering — the old behaviour.
-// Fail open: a dialect we cannot read must not be streamed past an inspection that the
-// reversibility loop is depending on.
-func TestPeekFallsBackToBufferingOnAnOversizedPreamble(t *testing.T) {
-	// Well-formed events that never decide, past the bound.
-	junk := strings.Repeat(pkPing, ssePeekMaxBytes/len(pkPing)+10)
-	if _, v := peek(t, junk+pkText); v != sseMustBuffer {
-		t.Fatalf("verdict %v, want sseMustBuffer for a preamble past the bound", v)
+// handBack is the fail-open path: whatever the splice withheld goes to the client exactly
+// as it arrived when the loop cannot answer it. On round 1 that is byte-for-byte the old
+// pass-through, which is the behaviour every "replays verbatim" test depends on.
+func TestHandBackReplaysTheWithheldEventsVerbatim(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sp := newSSESplicer(rec)
+	sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
+	stream := pkStart + pkText + pkDelta + pkBStop + pkExpand() + pkOtherT + pkStop
+	_, withheld, _ := sp.pass(strings.NewReader(stream), expand.ToolName)
+	sp.handBack(withheld)
+	if got := rec.Body.String(); got != stream {
+		t.Fatalf("prefix + handBack must reconstitute the stream:\n want %q\n got  %q", stream, got)
 	}
 }
 
-// The counter that keeps the trade-off honest rather than argued.
-func TestSSENamesExpandTool(t *testing.T) {
-	if !sseNamesExpandTool([]byte(pkExpand()), expand.ToolName) {
-		t.Fatal("a chunk carrying the expand tool_use must be detected")
+// readSSEEvent frames on the blank line and hands back the bytes it read, unmodified,
+// including a final event the upstream never terminated.
+func TestReadSSEEventFramesWholeEventsAndKeepsAPartialTail(t *testing.T) {
+	stream := pkStart + pkPing + "event: content_block_st"
+	br := bufio.NewReader(strings.NewReader(stream))
+	var got []string
+	for {
+		ev, err := readSSEEvent(br)
+		if len(ev) > 0 {
+			got = append(got, string(ev))
+		}
+		if err != nil {
+			break
+		}
 	}
-	if sseNamesExpandTool([]byte(pkText+pkDelta), expand.ToolName) {
-		t.Fatal("a plain text chunk must not be counted")
+	want := []string{pkStart, pkPing, "event: content_block_st"}
+	if strings.Join(got, "") != stream {
+		t.Fatalf("events must reconstitute the stream: %q", got)
 	}
-}
-
-// A non-Anthropic SSE response must be streamed with NO peek at all, and this is a test about
-// BYTES CONSUMED, not about the verdict. sseLineVerdict only decides on content_block_start /
-// message_stop / error, and no OpenAI-shaped event carries a type it recognises — so peeking
-// such a stream decides nothing and drains it to EOF. Overriding the verdict afterwards fixed
-// the label and left the behaviour: the client's first byte still arrived after the last
-// upstream byte, filed into the STREAMED bucket as a time-to-last-byte value.
-func TestOpenAIDialectPeekWouldDrainTheWholeStream(t *testing.T) {
-	var sb strings.Builder
-	for i := 0; i < 200; i++ {
-		sb.WriteString(`data: {"id":"c","object":"chat.completion.chunk","choices":[{"index":0,` +
-			`"delta":{"content":"token ` + strings.Repeat("x", 20) + `"}}]}` + "\n\n")
+	if len(got) != len(want) {
+		t.Fatalf("got %d events, want %d: %q", len(got), len(want), got)
 	}
-	sb.WriteString("data: [DONE]\n\n")
-	stream := sb.String()
-
-	head, v := peek(t, stream)
-	// The verdict is right and useless: what matters is that the peek ate everything.
-	if v != sseStreamable {
-		t.Fatalf("verdict %v", v)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("event %d: got %q, want %q", i, got[i], want[i])
+		}
 	}
-	if len(head) < len(stream) {
-		t.Fatalf("peek consumed %d of %d bytes — if this ever becomes partial the guard in "+
-			"serve() may look unnecessary; it is not, it is what keeps the peek off this path",
-			len(head), len(stream))
-	}
-	t.Logf("peek consumed %d of %d bytes (100%%) — which is why serve() tests the provider "+
-		"BEFORE peeking rather than overriding the verdict after", len(head), len(stream))
 }

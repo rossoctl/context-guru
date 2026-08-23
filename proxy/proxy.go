@@ -11,7 +11,6 @@
 package proxy
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1041,6 +1040,15 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					body = orig
 				}
 			}()
+			// A client that received our own expand tool_use answered it itself, with an
+			// error — no client implements the tool. Put the content the model asked for where
+			// that error is, BEFORE the pipeline reads the transcript, so the restored text is
+			// marked kept-verbatim and offload does not compact it straight back into the
+			// marker that caused the call. Same gate as expand.Inject below: we repair exactly
+			// when we are rewriting this request at all.
+			if tn.Mode != components.ModeObserve && !bypassed {
+				body = h.repairExpandErrors(provider, body, tn, cp)
+			}
 			var added time.Duration
 			body, added, tr = h.applyMode(&reqInfo{
 				// cp.llmCtx: context-guru's OWN compaction-model spend under this context
@@ -1157,6 +1165,29 @@ const maxRequestBytes = 32 << 20 // 32 MiB
 // closes the loop: the marker text tells the model to call context_guru_expand, and
 // the tool is now actually declared, so the continuation loop below can fire.
 
+// repairExpandErrors resolves every expand tool_result the CLIENT had to answer itself, so
+// `No such tool available: context_guru_expand` never reaches the model. It is the request
+// half of interception: h.serve withholds the call from the client wherever it can, and this
+// covers what it structurally cannot — a batched client tool, the round cap, an event stream
+// that will not reconstruct, a non-Anthropic stream, a bypassed turn carrying older markers.
+// See expand.RepairToolResults.
+//
+// Restored content is marked kept-verbatim: an offloader that re-compacted it would trigger
+// the same expand call again next turn. The tokens land on the dashboard row because they
+// really are in this request, and on every later turn that re-sends the same transcript —
+// but NOT on the process-wide bounce counter, which counts expand CALLS, and repairing the
+// same stale error on ten later turns is one call, not ten.
+func (h *Handler) repairExpandErrors(provider bschemas.ModelProvider, body []byte, tn *Tenancy, cp *capture) []byte {
+	out, restored := expand.RepairToolResults(string(provider), body, func(hashID string) (string, bool) {
+		return expand.Resolve(tn.Store, hashID)
+	})
+	for _, orig := range restored {
+		offload.MarkKeptVerbatim(tn.Store, orig)
+		cp.noteExpand(schema.TextTokens(orig))
+	}
+	return out
+}
+
 var errNoUpstream = errors.New("no upstream configured")
 
 // serve forwards the request and runs the expand continuation loop: if the model
@@ -1214,6 +1245,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// response", so this — not the moment the response finished — is the instant the idle
 	// clock starts from.
 	var lastUpStart time.Time
+	// sp is nil until an Anthropic event stream needs splicing, and then lives for the rest
+	// of the client request: every later round is written into the response it opened.
+	var sp *sseSplicer
 	defer func() {
 		// Hand the finished request to the keep-alive. Last, so `body` is the bytes that
 		// actually went upstream on the final round (an expand round rewrites it) and the
@@ -1284,12 +1318,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		isSSE := strings.Contains(resp.Header.Get("Content-Type"), "event-stream")
 		lg.Debug("cg.upstream", "round", round, "status", resp.StatusCode,
 			"upstream_ms", upMs, "sse", isSSE, "expand_advertised", advertised)
-		// Inspect for a lone expand call when the tool is actually advertised and we haven't
-		// hit the round cap. Nothing else can produce a call to it, so this is both the
-		// necessary and the sufficient condition — and for SSE it is what decides whether we
-		// pay the buffering cost.
-		checkExpand := advertised && round < maxExpandRounds
-		if !checkExpand {
+		// The expand tool is intercepted exactly when it is advertised. Nothing else can
+		// produce a call to it, so this is both the necessary and the sufficient condition.
+		if !advertised {
 			// sseBuffered is sticky: if an earlier round was buffered the client already
 			// lost its stream, so this request counts as buffered however it ends.
 			sse = sse || isSSE
@@ -1309,63 +1340,56 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			}
 			return
 		}
-		var respBody []byte
-		if isSSE {
-			// A bounded peek instead of buffering the whole stream. Only a response that
-			// OPENS with a call to the expand tool has to be withheld from the client; a
-			// response that opens with thinking, text or another tool cannot be intercepted
-			// from its first block, so its peek is flushed and the rest streams. See
-			// ssepeek.go for the measurement that motivates this and the limit it accepts.
-			//
-			// Non-Anthropic dialects stream with NO peek at all, and the test has to come
-			// FIRST. sseLineVerdict only decides on content_block_start / message_stop /
-			// error, and no OpenAI-shaped event carries a type it recognises — so peeking
-			// such a stream decides nothing and runs to EOF or the 64 KB bound. Measured: an
-			// OpenAI-shaped 200-chunk stream of 11,614 bytes was 100% consumed. Overriding
-			// the verdict afterwards therefore fixed the label and not the behaviour: the
-			// client's first byte still arrived after the last upstream byte, and because
-			// sseBuffered stayed false, RecordSSE filed a time-to-LAST-byte value into the
-			// streamed bucket — the exact mislabelling sse_ttfb_ms_avg_buffered documents,
-			// reintroduced on another path and dragging the streamed average down invisibly.
-			//
-			// There is nothing to inspect anyway: AggregateSSE only reconstructs the
-			// Anthropic event stream, so for any other dialect the buffered path below
-			// reaches `writeRaw` and replays the bytes verbatim.
-			var br io.Reader = resp.Body
-			verdict := sseStreamable
-			var head []byte
-			if provider == bschemas.Anthropic {
-				pr := bufio.NewReader(resp.Body)
-				head, verdict = peekSSE(pr, expand.ToolName)
-				br = pr
+		// Past the round cap there is no continuation left to run, so nothing is withheld:
+		// the round goes to the client whole.
+		stopAt := expand.ToolName
+		if round >= maxExpandRounds {
+			stopAt = ""
+		}
+		var respBody, withheld []byte
+		switch {
+		case isSSE && provider == bschemas.Anthropic:
+			// Forward the events as they arrive and stop at the expand call, rather than
+			// buffering the response to find out whether it holds one. See ssepeek.go.
+			sse = true
+			if sp == nil {
+				sp = newSSESplicer(w)
 			}
-			if verdict == sseStreamable {
-				sse = true
-				lg.Debug("cg.sse_peek", "round", round, "verdict", "streamed",
-					"peek_bytes", len(head))
-				first, u, ok := h.streamFrom(w, resp, head, br)
-				if !sseBuffered {
-					sseFirstByte = first
-				}
-				if ok {
-					usage, usageOK = u, true
-				} else {
-					usage.StopReason = u.StopReason // as on the other stream path
-				}
-				return
-			}
-			rest, _ := io.ReadAll(br)
-			respBody = append(head, rest...)
+			sp.round(resp)
+			var found bool
+			respBody, withheld, found = sp.pass(resp.Body, stopAt)
 			resp.Body.Close()
-			// Buffered: the client sees nothing until the whole stream has arrived, so its
-			// first byte lands no earlier than the write on whichever path we return from.
-			sse, sseBuffered, sseFirstByte = true, true, time.Time{}
-			// The one decision on this path that costs a user something they can feel — a
-			// stream stopped being a stream — so it says WHY: this response opens with a
-			// call to the expand tool, which has to be intercepted.
-			lg.Debug("cg.sse_buffered", "round", round, "reason", "opens_with_expand_call",
-				"bytes", len(respBody))
-		} else {
+			switch {
+			case found && sp.blocks == 0:
+				// The model OPENED with the call, so the client holds a message_start and
+				// nothing else and waits for the whole continuation. That is a buffered
+				// response, and its first byte has to stay unset: filing the message_start's
+				// timestamp as the TTFB of a client that waited a round-trip is the
+				// mislabelling sse_ttfb_ms_avg_buffered exists to expose.
+				sseBuffered, sseFirstByte = true, time.Time{}
+			case !sseBuffered:
+				sseFirstByte = sp.first
+			}
+			lg.Debug("cg.sse_splice", "round", round, "expand_call", found,
+				"blocks_sent", sp.blocks, "bytes", len(respBody))
+		case isSSE:
+			// Non-Anthropic dialects are not inspected at all: AggregateSSE only reconstructs
+			// the Anthropic event stream, so there is nothing the loop could read even if we
+			// held the bytes — and holding them would cost the client its stream for nothing.
+			// A raw expand call on this path is repaired on the REQUEST side instead
+			// (expand.RepairToolResults).
+			sse = true
+			first, u, ok := h.stream(w, resp)
+			if !sseBuffered {
+				sseFirstByte = first
+			}
+			if ok {
+				usage, usageOK = u, true
+			} else {
+				usage.StopReason = u.StopReason // as on the other stream path
+			}
+			return
+		default:
 			respBody, _ = io.ReadAll(resp.Body)
 			resp.Body.Close()
 		}
@@ -1374,6 +1398,28 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
 		}
+		if isSSE && withheld == nil {
+			return // the whole round is already on the wire and it never called expand
+		}
+		// bail is what the client gets when the loop cannot answer after all. On a spliced
+		// stream that is the withheld events ONLY — the client already holds the prefix and
+		// this response's headers went out with it — which for a round whose blocks were not
+		// renumbered is byte-for-byte the stream as it arrived. It is also the one path that
+		// hands a client our own tool_use, so it says so on /stats instead of in a comment.
+		bail := func() {
+			if sp == nil {
+				writeRaw(w, resp, respBody)
+				return
+			}
+			if withheld != nil && h.agg != nil {
+				h.agg.RecordSSEExpandAfterStream()
+			}
+			sp.handBack(withheld)
+		}
+		if round >= maxExpandRounds {
+			bail()
+			return
+		}
 
 		// Reconstruct the message the loop reasons over. For SSE, aggregate the events;
 		// if that fails, replay the raw stream unchanged (fail-open).
@@ -1381,7 +1427,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		if isSSE {
 			agg, ok := expand.AggregateSSE(string(provider), respBody)
 			if !ok {
-				writeRaw(w, resp, respBody)
+				bail()
 				return
 			}
 			msg = agg
@@ -1389,7 +1435,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 
 		calls, otherTools := expand.ResponseCalls(string(provider), msg)
 		if len(calls) == 0 || otherTools {
-			writeRaw(w, resp, respBody) // normal answer (or other tools) — replay verbatim
+			bail() // normal answer (or other tools) — hand it over unchanged
 			return
 		}
 		// Build a tool_result for EVERY expand call — the provider requires one per
@@ -1410,7 +1456,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				}
 				cp.noteExpand(back) // and on the dashboard row, or SavedAdjusted over-reports
 			} else {
-				resolved[c.CallID] = "[expand: original for id " + c.HashID + " is no longer available]"
+				resolved[c.CallID] = expand.Unavailable(c.HashID)
 			}
 		}
 		expanded += got
@@ -1422,7 +1468,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			"resolved", got, "unresolved", len(calls)-got)
 		next, ok := expand.Continuation(string(provider), body, msg, resolved)
 		if !ok {
-			writeRaw(w, resp, respBody) // malformed shapes — fail open, replay verbatim
+			bail() // malformed shapes — fail open, hand the response over unchanged
 			return
 		}
 		// got == 0 CONTINUES, and that is the change that let the expand tool be advertised
@@ -1508,52 +1554,27 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 // It also returns the instant the client got its first byte (zero if the body was
 // empty), which is the SSE TTFB accounting in serve.
 func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (firstByte time.Time, u Usage, ok bool) {
-	return h.streamFrom(w, resp, nil, resp.Body)
-}
-
-// streamFrom is stream with a head already read off the body — the bytes a bounded SSE
-// peek consumed before it could decide (see ssepeek.go). The head is written and flushed
-// first, so the client's first byte is that write, and body supplies the remainder.
-//
-// It also watches the bytes going past for the expand tool's name, because a response the
-// peek let through may still turn out to contain a call the continuation loop would have
-// intercepted. That count is the honest price of the peek and belongs on /stats, not in a
-// comment.
-func (h *Handler) streamFrom(w http.ResponseWriter, resp *http.Response, head []byte, body io.Reader) (firstByte time.Time, u Usage, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	flush, _ := w.(http.Flusher)
 	sn := newSniffer(h.rec != nil || h.agg != nil)
-	namedExpand := false
-	emit := func(p []byte) {
-		if firstByte.IsZero() {
-			firstByte = time.Now()
-		}
-		w.Write(p)
-		sn.write(p)
-		if len(head) > 0 && !namedExpand && sseNamesExpandTool(p, expand.ToolName) {
-			namedExpand = true
-		}
-		if flush != nil {
-			flush.Flush()
-		}
-	}
-	if len(head) > 0 {
-		emit(head)
-	}
 	buf := make([]byte, 16*1024)
 	for {
-		n, rerr := body.Read(buf)
+		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
-			emit(buf[:n])
+			if firstByte.IsZero() {
+				firstByte = time.Now()
+			}
+			w.Write(buf[:n])
+			sn.write(buf[:n])
+			if flush != nil {
+				flush.Flush()
+			}
 		}
 		if rerr != nil {
 			break
 		}
-	}
-	if namedExpand && h.agg != nil {
-		h.agg.RecordSSEExpandAfterStream()
 	}
 	u, ok = responseUsage(resp.Header.Get("Content-Type"), sn.bytes())
 	return firstByte, u, ok

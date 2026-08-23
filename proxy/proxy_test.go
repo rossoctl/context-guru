@@ -514,6 +514,61 @@ const (
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 )
 
+// The proxy flushes per SSE EVENT, so one Read returns one event. "Did the client get this
+// while the upstream was still generating" is therefore a question about the bytes that
+// arrive BEFORE the upstream is released, not about a single Read — hence a background
+// reader plus a client-side deadline shorter than the upstream's own fallback. A test that
+// just kept reading would be satisfied by the fallback firing and would pass on a fully
+// buffering proxy.
+func sseChunks(r io.Reader) <-chan []byte {
+	ch := make(chan []byte, 256)
+	go func() {
+		defer close(ch)
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				c := make([]byte, n)
+				copy(c, buf[:n])
+				ch <- c
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return ch
+}
+
+// collectUntil accumulates chunks until want has been seen or d elapses.
+func collectUntil(ch <-chan []byte, want string, d time.Duration) (string, bool) {
+	deadline := time.After(d)
+	var got strings.Builder
+	for {
+		select {
+		case c, ok := <-ch:
+			if !ok {
+				return got.String(), strings.Contains(got.String(), want)
+			}
+			got.Write(c)
+			if strings.Contains(got.String(), want) {
+				return got.String(), true
+			}
+		case <-deadline:
+			return got.String(), false
+		}
+	}
+}
+
+// drain returns everything left on the channel once the response ends.
+func drain(ch <-chan []byte) string {
+	var got strings.Builder
+	for c := range ch {
+		got.Write(c)
+	}
+	return got.String()
+}
+
 // TestMarkerFreeSSEStreamsThrough is the failing-test proof for issue #26. The
 // upstream sends the head of an event-stream, then blocks until the test says the
 // client has already seen bytes. If context-guru buffers the response, nothing
@@ -632,25 +687,18 @@ func TestMarkerBearingSSEStreamsWhenItOpensWithText(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	buf := make([]byte, 4096)
-	n, rerr := resp.Body.Read(buf)
-	first := string(buf[:n])
+	ch := sseChunks(resp.Body)
+	first, ok := collectUntil(ch, "first", 2*time.Second)
 	close(release)
-	if n == 0 {
-		t.Fatalf("first read returned no bytes: %v", rerr)
-	}
-	// The peek stops AT the content_block_start it decided on and flushes there, so that
-	// event is what proves the response streamed: it reached the client while the upstream
-	// was still blocked on `release`.
-	if !strings.Contains(first, "content_block_start") {
-		t.Fatalf("expected the flushed peek, got %q", first)
+	if !ok {
+		t.Fatalf("a marker-bearing SSE response that opens with TEXT was buffered whole; "+
+			"the model's first delta must reach the client while the upstream is still "+
+			"generating, got %q", first)
 	}
 	if strings.Contains(first, "last") {
-		t.Fatal("a marker-bearing SSE response that opens with TEXT was buffered whole; " +
-			"the peek exists so it is not")
+		t.Fatal("the client received the upstream's tail before it was written")
 	}
-	rest, _ := io.ReadAll(resp.Body)
-	whole := first + string(rest)
+	whole := first + drain(ch)
 	for _, want := range []string{"first", "last", "message_stop"} {
 		if !strings.Contains(whole, want) {
 			t.Fatalf("the streamed response lost %q; peek + remainder must be the whole "+

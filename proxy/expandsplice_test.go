@@ -166,19 +166,14 @@ func TestTheStreamedPrefixReachesTheClientBeforeTheExpandCall(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	buf := make([]byte, 4096)
-	n, rerr := resp.Body.Read(buf)
-	first := string(buf[:n])
+	ch := sseChunks(resp.Body)
+	first, ok := collectUntil(ch, "LEADING", 2*time.Second)
 	close(release)
-	if n == 0 {
-		t.Fatalf("first read returned no bytes: %v", rerr)
+	if !ok {
+		t.Fatalf("the blocks before the expand call must reach the client while the upstream "+
+			"is still generating them; got %q", first)
 	}
-	if !strings.Contains(first, "LEADING") {
-		t.Fatalf("the blocks before the expand call must stream while the upstream is still "+
-			"generating; got %q", first)
-	}
-	rest, _ := io.ReadAll(resp.Body)
-	whole := first + string(rest)
+	whole := first + drain(ch)
 	if strings.Contains(whole, "context_guru_expand") {
 		t.Fatalf("client received our own tool_use:\n%s", whole)
 	}
@@ -195,5 +190,83 @@ func TestTheStreamedPrefixReachesTheClientBeforeTheExpandCall(t *testing.T) {
 	stx.Body.Close()
 	if snap.SSEStreamed != 1 || snap.SSEBuffered != 0 {
 		t.Fatalf("want one streamed, zero buffered: %+v", snap)
+	}
+}
+
+// The paths the splice CANNOT close, closed on the request side. The model batched expand
+// with a tool only the client owns: the proxy cannot answer half a batch, so the client does
+// receive our tool_use and answers it the only way it can — `No such tool available`. That
+// error must not reach the model; the content it asked for must.
+//
+// This is the whole sequence a user lives through, in two requests, because that is the only
+// place it is visible: the leak on the first and the repair on the second.
+func TestTheClientsNoSuchToolErrorNeverReachesTheModel(t *testing.T) {
+	var lastUpstream []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastUpstream, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n" +
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"context_guru_expand\"}}\n\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"id\\\":\\\"HASH\\\"}\"}}\n\n" +
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_2\",\"name\":\"Bash\"}}\n\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"ls\\\"}\"}}\n\n" +
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	// Turn 1: the batch the proxy declines to answer. The client gets the raw call — that is
+	// the documented limit, and it is counted rather than hidden.
+	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+		strings.NewReader(string(anthropicSSEBody(t, "look at <<cg:HASH>> then list files"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(out), "context_guru_expand") {
+		t.Skip("the batch is now intercepted; this test's premise is gone and the repair " +
+			"needs a different unanswerable path")
+	}
+	var snap metrics.Snapshot
+	stx, _ := http.Get(srv.URL + "/stats")
+	json.NewDecoder(stx.Body).Decode(&snap)
+	stx.Body.Close()
+	if snap.SSEExpandAfterStream != 1 {
+		t.Fatalf("handing a client our own tool_use must be counted: %+v", snap)
+	}
+
+	// Turn 2: what the client sends back. Claude Code's error, verbatim.
+	follow := `{"model":"claude","stream":true,` +
+		`"tools":[{"name":"Bash","description":"run","input_schema":{"type":"object"}}],` +
+		`"messages":[{"role":"user","content":"look at <<cg:HASH>> then list files"},` +
+		`{"role":"assistant","content":[{"type":"text","text":"on it"},` +
+		`{"type":"tool_use","id":"toolu_1","name":"context_guru_expand","input":{"id":"HASH"}},` +
+		`{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"ls"}}]},` +
+		`{"role":"user","content":[` +
+		`{"type":"tool_result","tool_use_id":"toolu_1","content":"<tool_use_error>Error: No such tool available: context_guru_expand</tool_use_error>","is_error":true},` +
+		`{"type":"tool_result","tool_use_id":"toolu_2","content":"file1 file2"}]}]}`
+	resp2, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(follow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp2.Body)
+	resp2.Body.Close()
+
+	if strings.Contains(string(lastUpstream), "No such tool available") {
+		t.Fatalf("the model received the client's error for OUR tool:\n%s", lastUpstream)
+	}
+	if !strings.Contains(string(lastUpstream), "THE ORIGINAL CONTENT") {
+		t.Fatalf("the model must receive the content it asked for:\n%s", lastUpstream)
+	}
+	// And the client's own tool result is untouched — it is not ours to rewrite.
+	if !strings.Contains(string(lastUpstream), "file1 file2") {
+		t.Fatalf("the client's own tool result was lost:\n%s", lastUpstream)
 	}
 }
