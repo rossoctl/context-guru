@@ -77,9 +77,13 @@ import (
 //     the Anthropic dialect, so there is nothing the loop could read even if we held the
 //     bytes.
 //   - The forwarded bytes are retained until the round ends, because Continuation needs the
-//     whole assistant turn. That is the memory the old buffered path used, minus the latency
-//     — but it now applies to every tools-bearing streaming response rather than only
-//     marker-bearing ones, since injection stopped requiring markers.
+//     whole assistant turn — bounded by sseRetainMaxBytes. Measured on a 2.25 MB round, the
+//     largest a 128K-output model typically produces: the RETAINED bytes are what the old
+//     whole-response buffering held, and it now applies to every tools-bearing streaming
+//     response rather than only marker-bearing ones (33.4%), since injection stopped
+//     requiring markers. Allocation is the separate number, and the two must not be
+//     conflated: reading events one at a time churned 13.3x the stream against that path's
+//     3.2x until the event buffer was reused, which brought it to 4.8x.
 //
 // Every one of those paths ends at the same place on the NEXT request, so they are closed
 // there instead: expand.RepairToolResults replaces the client's `No such tool available` with
@@ -122,31 +126,80 @@ func (sp *sseSplicer) round(resp *http.Response) {
 	sp.headers = true
 }
 
+// sseRetainMaxBytes bounds what one round may retain. pass keeps the round's bytes because
+// Continuation needs the whole assistant turn, and the peek this replaced had its own bound
+// (an unreadable or oversized preamble bailed out at 64 KB) — removing it left one
+// pathological stream, a runaway generation or an upstream that never sends message_stop,
+// retained in full with nothing to stop it. This is that bound, restored at the only place it
+// can now live.
+//
+// The number is the first power of two above the largest round a model can legitimately
+// produce, so it never fires on real traffic and only ever catches pathology. Measured, not
+// assumed: this gateway accepts max_tokens up to 128,000 (200,000 is refused with "the
+// maximum allowed number of output tokens"), and an event stream runs ~35 bytes per output
+// token — ~4 bytes of text plus ~105 bytes of framing per delta of ~3.5 tokens — so a
+// full-length response is ~4.5 MB. A stream that emitted ONE token per delta would pay the
+// framing per token instead, ~109 bytes, and reach ~14 MB; 16 MiB covers that.
+//
+// Past it the round is forwarded whole and nothing is intercepted, so the feature degrades
+// rather than breaking: the client gets the model's own expand call, it is counted, and
+// expand.RepairToolResults answers it on the next request.
+const sseRetainMaxBytes = 16 << 20
+
 // pass forwards this round's events until the one that calls the expand tool, and returns
 // the round's whole event stream — forwarded and withheld together — because the
 // continuation loop reconstructs the assistant turn from all of it. withheld is the
 // deciding event and everything after it: the caller either answers it or hands it back.
+//
+// Past sseRetainMaxBytes it returns whole=nil: the turn can no longer be rebuilt, so nothing
+// can be intercepted, and everything is forwarded as it arrives. found still reports whether
+// the response called expand, because the client then receives that call and the caller has
+// to count it.
 func (sp *sseSplicer) pass(body io.Reader, expandTool string) (whole, withheld []byte, found bool) {
 	br := bufio.NewReader(body)
-	var buf bytes.Buffer
-	cut := -1
+	// One event buffer for the round, not one per event: a 2.25 MB round is ~19,000 events,
+	// and allocating a buffer for each cost 13.3x the stream in churn against the 3.2x of the
+	// whole-response buffering this replaced. Reusing it is 4.8x. Every consumer of ev is
+	// done with it before the next read overwrites it.
+	var buf, ev bytes.Buffer
+	cut := -1     // where withholding began; -1 = forwarding
+	over := false // past the bound: the turn cannot be rebuilt
 	for {
-		ev, err := readSSEEvent(br)
-		if len(ev) > 0 {
-			buf.Write(ev)
-			if cut < 0 && startsExpandCall(ev, expandTool) {
-				cut = buf.Len() - len(ev)
+		e, err := readSSEEvent(br, &ev)
+		if len(e) > 0 {
+			sent := false
+			if startsExpandCall(e, expandTool) {
+				found = true
+				if !over && cut < 0 {
+					cut = buf.Len()
+				}
 			}
-			if cut < 0 {
-				sp.forward(ev)
+			if !over {
+				buf.Write(e)
+				if buf.Len() > sseRetainMaxBytes {
+					// Nothing is dropped: whatever was already withheld goes to the client
+					// now, and the rest of the stream follows it event by event. The flush
+					// includes THIS event, so it must not also be forwarded below.
+					if cut >= 0 {
+						sp.handBack(buf.Bytes()[cut:])
+						cut, sent = -1, true
+					}
+					over, buf = true, bytes.Buffer{}
+				}
+			}
+			if cut < 0 && !sent {
+				sp.forward(e)
 			}
 		}
 		if err != nil {
+			if over {
+				return nil, nil, found
+			}
 			whole = buf.Bytes()
 			if cut < 0 {
-				return whole, nil, false
+				return whole, nil, found
 			}
-			return whole, whole[cut:], true
+			return whole, whole[cut:], found
 		}
 	}
 }
@@ -155,10 +208,11 @@ func (sp *sseSplicer) pass(body io.Reader, expandTool string) (whole, withheld [
 // client the model's own expand call when nothing else can be done with it.
 func (sp *sseSplicer) handBack(withheld []byte) {
 	br := bufio.NewReader(bytes.NewReader(withheld))
+	var ev bytes.Buffer
 	for {
-		ev, err := readSSEEvent(br)
-		if len(ev) > 0 {
-			sp.forward(ev)
+		e, err := readSSEEvent(br, &ev)
+		if len(e) > 0 {
+			sp.forward(e)
 		}
 		if err != nil {
 			return
@@ -185,6 +239,14 @@ func (sp *sseSplicer) forward(ev []byte) {
 // already has. With no offset to apply it returns the event untouched — byte-for-byte,
 // which is what keeps a response that never calls expand an exact pass-through.
 func (sp *sseSplicer) rewrite(ev []byte) ([]byte, bool) {
+	// With no offset to apply, the only events that can change what the client holds are a
+	// message_start (de-duplicated) and a content_block_start (counted) — one per block, so
+	// counting starts alone is exact. Every delta of a long turn skips the parse below, which
+	// is not a micro-optimisation: a 2.25 MB round is ~18,750 events and building each
+	// event's payload string cost 1.6x the stream, twice over.
+	if sp.base == 0 && !bytes.Contains(ev, []byte("_start")) {
+		return ev, true
+	}
 	payload := sseEventPayload(ev)
 	if payload == "" {
 		return ev, true
@@ -213,12 +275,12 @@ func (sp *sseSplicer) rewrite(ev []byte) ([]byte, bool) {
 	return ev, true
 }
 
-// readSSEEvent reads one complete Server-Sent Event: every line up to and including the
-// blank line that terminates it, verbatim, framing included. On a read error it returns
+// readSSEEvent reads one complete Server-Sent Event into ev: every line up to and including
+// the blank line that terminates it, verbatim, framing included. On a read error it returns
 // whatever it holds — a partial final event still has to be forwarded, or the stream loses
-// its tail.
-func readSSEEvent(br *bufio.Reader) ([]byte, error) {
-	var ev bytes.Buffer
+// its tail. ev is the caller's, reset here and valid until the next call.
+func readSSEEvent(br *bufio.Reader, ev *bytes.Buffer) ([]byte, error) {
+	ev.Reset()
 	for {
 		line, err := br.ReadBytes('\n')
 		ev.Write(line)
@@ -250,6 +312,9 @@ func sseEventPayload(ev []byte) string {
 // startsExpandCall reports whether this event OPENS a call to the expand tool — the one
 // block a client must never receive, because only this proxy implements the tool.
 func startsExpandCall(ev []byte, expandTool string) bool {
+	if !bytes.Contains(ev, []byte("content_block_start")) {
+		return false // cheap reject: the parse below is the expensive half
+	}
 	p := gjson.Parse(sseEventPayload(ev))
 	if p.Get("type").String() != "content_block_start" {
 		return false

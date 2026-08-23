@@ -1364,6 +1364,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			return
 		}
 		var respBody []byte
+		found := false // this round called the expand tool
 		switch {
 		case isSSE && provider == bschemas.Anthropic:
 			// Forward the events as they arrive and stop at the expand call, rather than
@@ -1373,7 +1374,6 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				sp = newSSESplicer(w)
 			}
 			sp.round(resp)
-			var found bool
 			respBody, withheld, found = sp.pass(resp.Body, expand.ToolName)
 			resp.Body.Close()
 			switch {
@@ -1421,7 +1421,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
 		}
 		if isSSE && withheld == nil {
-			return // the whole round is already on the wire and it never called expand
+			// The whole round is already on the wire. Either it never called expand, or it
+			// ran past sseRetainMaxBytes and the turn could no longer be rebuilt — and in
+			// that second case the client has our tool_use, which is the leak the counter
+			// exists for.
+			if found && h.agg != nil {
+				h.agg.RecordSSEExpandAfterStream()
+			}
+			return
 		}
 		// bail is what the client gets when the loop cannot answer after all. On a spliced
 		// stream that is the withheld events ONLY — the client already holds the prefix and

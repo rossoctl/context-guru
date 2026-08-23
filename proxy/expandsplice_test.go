@@ -382,3 +382,56 @@ func TestAJSONContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
 		}
 	}
 }
+
+// End to end: a round past sseRetainMaxBytes cannot be intercepted, so the client receives
+// the model's own expand call — and that is counted, like every other path that hands one
+// over, and repaired on the next request. No continuation is attempted.
+func TestARoundPastTheRetainBoundCountsTheLeakAndDoesNotContinue(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n" +
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
+		delta := "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"pad\"}}\n\n"
+		for n := 0; n < 17<<20; n += len(delta) {
+			w.Write([]byte(delta))
+		}
+		w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"context_guru_expand\"}}\n\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"id\\\":\\\"HASH\\\"}\"}}\n\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+		strings.NewReader(string(anthropicSSEBody(t, "look at <<cg:HASH>> and finish"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("a round we cannot rebuild must not drive a continuation, got %d upstream calls", n)
+	}
+	if !strings.Contains(string(out), "context_guru_expand") {
+		t.Fatalf("the client must receive the stream as it arrived, expand call included")
+	}
+	if !strings.Contains(string(out), `"type":"message_stop"`) {
+		t.Fatal("the client's turn must still terminate")
+	}
+	var snap metrics.Snapshot
+	stx, _ := http.Get(srv.URL + "/stats")
+	json.NewDecoder(stx.Body).Decode(&snap)
+	stx.Body.Close()
+	if snap.SSEExpandAfterStream != 1 {
+		t.Fatalf("giving up past the retain bound hands the client our tool_use and must "+
+			"be counted: %+v", snap)
+	}
+}

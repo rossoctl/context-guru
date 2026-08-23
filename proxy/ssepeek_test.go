@@ -185,10 +185,11 @@ func TestReadSSEEventFramesWholeEventsAndKeepsAPartialTail(t *testing.T) {
 	stream := pkStart + pkPing + "event: content_block_st"
 	br := bufio.NewReader(strings.NewReader(stream))
 	var got []string
+	var buf bytes.Buffer
 	for {
-		ev, err := readSSEEvent(br)
+		ev, err := readSSEEvent(br, &buf)
 		if len(ev) > 0 {
-			got = append(got, string(ev))
+			got = append(got, string(ev)) // copied: ev is only valid until the next read
 		}
 		if err != nil {
 			break
@@ -205,5 +206,87 @@ func TestReadSSEEventFramesWholeEventsAndKeepsAPartialTail(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("event %d: got %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// bigStream builds a round of at least n bytes, with the expand call placed before or after
+// the retain bound so both orderings can be driven.
+func bigStream(n int, expandFirst bool) string {
+	var sb strings.Builder
+	sb.WriteString(pkStart)
+	sb.WriteString(pkText)
+	if expandFirst {
+		sb.WriteString(pkExpand())
+	}
+	for sb.Len() < n {
+		sb.WriteString(pkDelta)
+	}
+	if !expandFirst {
+		sb.WriteString(pkExpand())
+	}
+	sb.WriteString(pkStop)
+	return sb.String()
+}
+
+// Past sseRetainBoundMaxBytes the turn cannot be rebuilt, so nothing is intercepted and
+// NOTHING IS DROPPED: the client gets the stream exactly as it arrived, expand call included,
+// and pass says so with whole=nil and found=true so the caller can count the leak.
+//
+// The bound is a per-ROUND ceiling and AggregateSSE's 8 MB is a per-LINE one, so a round past
+// this bound is not necessarily a round the aggregator would have refused — a 20 MiB round of
+// short events parses fine today. The bound wins anyway, deliberately: it exists to stop one
+// pathological stream being retained in full, which is what the old peek's 64 KB bail did.
+func TestARoundPastTheRetainBoundIsForwardedWholeAndNothingIsWithheld(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		expandFirst bool
+	}{
+		{"expand call past the bound", false},
+		{"expand call BEFORE the bound, so withheld events must be handed back", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := bigStream(20<<20, tc.expandFirst)
+			if len(stream) <= sseRetainMaxBytes {
+				t.Fatalf("fixture is %d B, must exceed the %d B bound", len(stream), sseRetainMaxBytes)
+			}
+			rec := httptest.NewRecorder()
+			sp := newSSESplicer(rec)
+			sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
+			whole, withheld, found := sp.pass(strings.NewReader(stream), expand.ToolName)
+			if whole != nil {
+				t.Fatalf("past the bound the round must not be retained, got %d B", len(whole))
+			}
+			if withheld != nil {
+				t.Fatalf("past the bound nothing can be withheld, got %d B", len(withheld))
+			}
+			if !found {
+				t.Fatal("the response called expand and the caller has to know, to count the leak")
+			}
+			if got := rec.Body.String(); got != stream {
+				t.Fatalf("the client must receive the stream byte-for-byte: got %d B, want %d B",
+					len(got), len(stream))
+			}
+		})
+	}
+}
+
+// And a round UNDER the bound is unaffected — the bound must not change the behaviour of any
+// response a model can actually produce. This gateway allows max_tokens up to 128,000, which
+// at the measured ~35 B/token is ~4.5 MB.
+func TestARoundUnderTheRetainBoundIsStillIntercepted(t *testing.T) {
+	stream := bigStream(4500000, false) // 128,000 output tokens at the measured ~35 B/token
+	if len(stream) >= sseRetainMaxBytes {
+		t.Fatalf("fixture %d B must stay under the %d B bound", len(stream), sseRetainMaxBytes)
+	}
+	rec := httptest.NewRecorder()
+	sp := newSSESplicer(rec)
+	sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
+	whole, withheld, found := sp.pass(strings.NewReader(stream), expand.ToolName)
+	if !found || withheld == nil || string(whole) != stream {
+		t.Fatalf("a full-length 4.5 MB round must still be retained and withheld: found=%v withheld=%d whole=%d",
+			found, len(withheld), len(whole))
+	}
+	if strings.Contains(rec.Body.String(), expand.ToolName) {
+		t.Fatal("the client received our own tool_use")
 	}
 }
