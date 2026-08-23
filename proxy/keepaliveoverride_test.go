@@ -10,6 +10,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/metrics"
 )
@@ -60,19 +61,40 @@ func TestOverrideCannotRaiseThePerPingBudget(t *testing.T) {
 	}
 }
 
-// The credential-hold ceiling. (K+1) x X is the hard retention deadline, so an override changes
-// how long this service may hold somebody's key — which is why it is refused past an hour and
-// why the accepted one's timer fires at exactly that.
+// The credential-hold ceiling that is ACTUALLY ENFORCED: 58 minutes, and it comes from the idle
+// and ping caps rather than from maxOverrideHold.
+//
+// (K+1) x X is the hard retention deadline, so an override changes how long this service may hold
+// somebody's key. The `maxOverrideHold = time.Hour` constant reads as an independent third rule
+// and is not one: 12 x 290 s = 58 minutes is the most the other two caps allow, so the hour is
+// unreachable and no override can be refused by it. This test used to claim to reach it — "12
+// would be 62.7 minutes, so reach the ceiling through X" — and then could not, because X is capped
+// too, ending up asserting hold() arithmetic on ACCEPTED overrides. It asserts the real ceiling
+// now, in both directions.
 func TestOverrideRespectsTheCredentialHoldCeiling(t *testing.T) {
 	now := time.Now()
-	// 11 pings 290 s apart is (11+1) x 290 = 58 minutes: accepted, just inside.
-	if _, err := validOverride("s", 290*time.Second, 11, 0, now.Add(time.Hour), now, "t1"); err != nil {
-		t.Errorf("58 minutes of hold was refused: %v", err)
+	// The maximum hold any override can buy: both caps at their limit.
+	o, err := validOverride("s", maxOverrideIdle, maxOverridePings, 0, now.Add(time.Hour), now, "t1")
+	if err != nil {
+		t.Fatalf("the largest override the caps allow was refused: %v", err)
 	}
-	// 12 would be 62.7 minutes — but K is capped at 11 first, so reach the ceiling through X.
-	_, err := validOverride("s", 290*time.Second, 12, 0, now.Add(time.Hour), now, "t1")
-	if err == nil {
-		t.Error("K = 12 was accepted; the band is 1..11")
+	if got, want := o.hold(), 58*time.Minute; got != want {
+		t.Errorf("the maximum credential hold is %v, want %v ((%d+1) x %v). If this moved, the "+
+			"Settings copy and maxOverrideHold both need revisiting — the hour is unreachable "+
+			"only because of these two caps", got, want, maxOverridePings, maxOverrideIdle)
+	}
+	if o.hold() > maxOverrideHold {
+		t.Errorf("the caps now allow a hold of %v, past the operator ceiling of %v: the ceiling "+
+			"has stopped being unreachable and needs its own refusal test", o.hold(), maxOverrideHold)
+	}
+	// One past each cap is refused, so the 58 minutes is a real bound and not a coincidence.
+	if _, err := validOverride("s", maxOverrideIdle, maxOverridePings+1, 0, now.Add(time.Hour), now, "t1"); err == nil {
+		t.Errorf("K = %d was accepted; the band is %d..%d", maxOverridePings+1,
+			minOverridePings, maxOverridePings)
+	}
+	if _, err := validOverride("s", maxOverrideIdle+time.Second, maxOverridePings, 0, now.Add(time.Hour), now, "t1"); err == nil {
+		t.Errorf("X = %v was accepted; past %v the first ping lands after the lifetime has lapsed",
+			maxOverrideIdle+time.Second, maxOverrideIdle)
 	}
 	// And the message has to name the number the person is authorizing.
 	if _, err := validOverride("s", 280*time.Second, 11, 0, now.Add(time.Hour), now, "t1"); err != nil {
@@ -278,13 +300,38 @@ func TestArmingIsRefusedWithoutAnAuditSinkOrWithTheKillSwitchOn(t *testing.T) {
 	}
 }
 
-// A session id whose `tenant:uuid` prefix names SOMEBODY ELSE addresses nothing: the keeper keys
-// on the AUTHENTICATED principal, never on a value out of the body, so such an arm becomes a key
-// under the caller's own tenant that no request will ever match.
-func TestOverrideForAnotherTenantsSessionIdAddressesNothing(t *testing.T) {
+// A session id whose `tenant:uuid` prefix names SOMEBODY ELSE is REFUSED, and if one ever got
+// past that it would still address nothing: the keeper keys on the AUTHENTICATED principal, never
+// on a value out of the body.
+//
+// Two layers, and both are the test. The refusal is the fix for a real path — a manager's
+// service-wide session list is entirely other tenants' rows, so arming one was a click away, and
+// it returned a cheerful 200 having kept nothing warm. The isolation underneath it is defence in
+// depth and stays asserted directly against the keeper, because it is what makes the refusal a
+// usability fix rather than the only thing standing between two accounts.
+func TestOverrideForAnotherTenantsSessionIdIsRefusedAndWouldAddressNothing(t *testing.T) {
 	k, _, clock := testKeeper(t, Limits{})
 	victim := "t-victim:9f3a-1c2b"
-	armOn(t, k, victim, 60*time.Second, 4, clock.now().Add(time.Hour))
+	now := clock.now()
+	if _, err := validOverride(victim, 60*time.Second, 4, 0, now.Add(time.Hour), now, "t1"); err == nil {
+		t.Error("arming a session id that names another account was accepted; it can only ever " +
+			"be a no-op, and the arm response would report a 0-token prefix and no price")
+	}
+	// The caller's OWN prefix is of course fine, as is a bare id with no tenant prefix at all.
+	for _, ok := range []string{"t1:9f3a-1c2b", "9f3a-1c2b"} {
+		if _, err := validOverride(ok, 60*time.Second, 4, 0, now.Add(time.Hour), now, "t1"); err != nil {
+			t.Errorf("session id %q was refused for the principal that owns it: %v", ok, err)
+		}
+	}
+	// Defence in depth: installed directly, past the check, it is still inert for the victim.
+	o, err := validOverride("t1:9f3a-1c2b", 60*time.Second, 4, 0, now.Add(time.Hour), now, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.pol.Idle = 60 * time.Second
+	if err := k.arm("t1", victim, o); err != nil {
+		t.Fatal(err)
+	}
 	// The victim's own traffic is unaffected: resolution is under THEIR tenant id.
 	off := CachePolicy{Idle: 280 * time.Second, MaxPings: 2}
 	if k.overrideFor("t-victim", victim, off).on() {
@@ -302,7 +349,6 @@ func TestOverrideForAnotherTenantsSessionIdAddressesNothing(t *testing.T) {
 		t.Errorf("the arming principal's own list shows %d entries, want 1", len(got))
 	}
 	// And a session id that is not one is refused before it becomes a map key.
-	now := clock.now()
 	for _, bad := range []string{"", strings.Repeat("x", maxSessionIDBytes+1), "a\x00b"} {
 		if _, err := validOverride(bad, 280*time.Second, 2, 0, now.Add(time.Hour), now, "t1"); err == nil {
 			t.Errorf("session id %q was accepted", bad)
@@ -398,5 +444,89 @@ func TestArmedSessionsAreNotDurableAndSayItOnTheWire(t *testing.T) {
 	k.Stop()
 	if got := len(k.armedFor("t1")); got != 0 {
 		t.Errorf("%d overrides survived Stop()", got)
+	}
+}
+
+// A session armed on an account whose keep-alive is OFF still has a per-ping cost ceiling.
+//
+// This is the case the guard was written for and the one case it did not cover. cachePolicy()
+// hands the request path a ZERO CachePolicy when nothing in the account's `cache:` block is
+// switched on, `pingable()` read `MaxUSDPerPing <= 0` as "no cap", and the arm response
+// reported `max_usd_per_ping: 0` — so the operator was told the ceiling was $0.00 while
+// infinity was enforced, on the one path where per-ping cost is unbounded by anything else.
+func TestAnOverrideOnAKeepAliveOffAccountStillHasAPingCeiling(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	armOn(t, k, "sess-1", 280*time.Second, 2, clock.now().Add(time.Hour))
+	// The account default: keep-alive off, nothing configured — a zero policy.
+	pol := k.overrideFor("t1", "sess-1", CachePolicy{})
+	if !pol.on() {
+		t.Fatal("the override did not enable the mechanism; the rest of this test is vacuous")
+	}
+	if pol.Ceiling() != DefaultMaxUSDPerPing {
+		t.Errorf("Ceiling() = %v on an unconfigured policy, want the default %v — 0 means "+
+			"nobody configured a ceiling, and in a spend guard that may not mean infinity",
+			pol.Ceiling(), DefaultMaxUSDPerPing)
+	}
+	// And it BITES: an entry whose projected ping cost is over the default is refused.
+	over := &kaEntry{turn: 1, prefix: 1_000_000, pol: pol, pingUSD: DefaultMaxUSDPerPing + 0.01}
+	if over.pingable() {
+		t.Errorf("a ping projected at $%.2f passed the guard on an account with no configured "+
+			"ceiling; the p99 ping is $0.2275 and the max $0.3780, which is what the guard is "+
+			"for", over.pingUSD)
+	}
+	under := &kaEntry{turn: 1, prefix: 1_000_000, pol: pol, pingUSD: DefaultMaxUSDPerPing - 0.01}
+	if !under.pingable() {
+		t.Error("a ping inside the default ceiling was refused; the guard has become a block")
+	}
+	// A caller who really wants no ceiling has to type a negative number.
+	none := &kaEntry{turn: 1, prefix: 1_000_000, pingUSD: 99,
+		pol: CachePolicy{KeepAlive: true, Idle: time.Second, MaxPings: 1, MaxUSDPerPing: -1}}
+	if !none.pingable() {
+		t.Error("an explicitly negative ceiling did not mean unlimited; that is the only way to " +
+			"ask for it and it has to keep working")
+	}
+}
+
+// worst_case_pings is a CEILING, so it counts one ping per idle interval and not K per span.
+//
+// A span ends the instant a real request arrives. The worst case is therefore not a session
+// that goes quiet — it is one whose requests land just after each ping, restarting the clock
+// every time. `until/((K+1)X) x K` under-states that by (K+1)/K: 8 against 12 at the shipped
+// defaults, 2x at K=1. It is labelled CEILING in the arm dialog somebody reads before
+// authorizing a spend.
+func TestWorstCasePingsIsAnActualCeiling(t *testing.T) {
+	h := &Handler{}
+	now := time.Now()
+	o, err := validOverride("s", 280*time.Second, 2, 0, now.Add(time.Hour), now, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, pings := h.worstCase("t1", "s", o)
+	// 3600/280 = 12.85 -> 12. The span form gives 3600/840 = 4 spans x 2 = 8.
+	if pings != 12 {
+		t.Errorf("worst_case_pings = %d over an hour at X=280s, want 12 (3600/280). 8 is the "+
+			"(K+1)X-span form, which under-states the ceiling by (K+1)/K", pings)
+	}
+	// K=1 is where the span form is wrong by 2x, so it is worth pinning too.
+	o1, err := validOverride("s", 280*time.Second, 1, 0, now.Add(time.Hour), now, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, p1 := h.worstCase("t1", "s", o1); p1 != 12 {
+		t.Errorf("worst_case_pings = %d at K=1, want 12: the ceiling is set by the idle interval, "+
+			"not by K", p1)
+	}
+}
+
+// The default this package enforces is the one the configuration loader documents.
+//
+// proxy may not import config, so the constant is duplicated, and a duplicated money default
+// that drifts is worse than no default at all: the account document would say one thing and the
+// request path enforce another.
+func TestTheProxysPingCeilingDefaultMatchesTheConfigLoaders(t *testing.T) {
+	if DefaultMaxUSDPerPing != config.DefaultKeepAliveMaxUSDPerPing {
+		t.Errorf("proxy.DefaultMaxUSDPerPing = %v, config.DefaultKeepAliveMaxUSDPerPing = %v; "+
+			"an unconfigured account would be told one ceiling and have another enforced",
+			DefaultMaxUSDPerPing, config.DefaultKeepAliveMaxUSDPerPing)
 	}
 }

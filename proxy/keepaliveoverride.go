@@ -59,7 +59,15 @@ const (
 	// maxOverrideHold is the operator's ceiling on the CREDENTIAL HOLD an override may buy.
 	// The hard deadline is (K+1)x X (see kaEntry.timer), and the Settings copy promises "up to
 	// about 14 minutes" at the shipped defaults — an override changes that number, so the arm
-	// dialog states the computed hold and this refuses anything past an hour.
+	// dialog states the computed hold.
+	//
+	// It is CURRENTLY UNREACHABLE, and saying so is more useful than implying an independent
+	// rule: the two caps above bound (K+1)x X at 12 x 290 s = 58 minutes, so the real ceiling on
+	// the hold is 58 minutes and it is a consequence of them. This stays as the bound that keeps
+	// holding if either of those is ever widened — a credential-retention limit is the wrong place
+	// to rely on an emergent property of two unrelated caps — but no test can exercise it without
+	// changing one of them, and TestOverrideRespectsTheCredentialHoldCeiling asserts the 58
+	// minutes that is actually enforced.
 	maxOverrideHold = time.Hour
 	// Bounds on the map itself. Same order as maxKeepAliveSessions, and both are needed for
 	// the same reason that bound has two: many accounts with a few, or one account with many.
@@ -107,6 +115,19 @@ func validOverride(session string, idle time.Duration, pings, minPrefix int,
 	}
 	if strings.ContainsRune(session, 0) {
 		return sessionOverride{}, fmt.Errorf("that is not a session id")
+	}
+	// A session id whose `tenant:base` prefix names SOMEBODY ELSE is refused rather than armed.
+	//
+	// Overrides are keyed under the authenticated principal, which is the isolation this feature
+	// wants — so a foreign session id becomes a key under the caller's own tenant that no request
+	// will ever match. Arming it did nothing and returned 200, and the response then reported
+	// `last_prefix_tokens: 0` and `priced: false` because the worst-case lookup is scoped to the
+	// arming principal too. A manager's service-wide session list is full of these rows, so this
+	// is reachable by clicking, not only by hand.
+	if t, _, ok := strings.Cut(session, ":"); ok && t != by {
+		return sessionOverride{}, fmt.Errorf(
+			"that session belongs to another account. An override is keyed to the principal that " +
+				"arms it, so this one would match no request and keep nothing warm")
 	}
 	if until.IsZero() {
 		return sessionOverride{}, fmt.Errorf("an override must state when it expires")

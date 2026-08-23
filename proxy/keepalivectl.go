@@ -168,14 +168,18 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 		"durable":           false,
 		"min_prefix_tokens": o.pol.MinPrefixTokens,
 	}
-	// The account's own per-ping guard, reported because the body's value is ignored. Resolved
-	// from the account's own document through the same builder the request path uses, so the
-	// number shown is the number that will be enforced.
+	// The per-ping guard that will actually be ENFORCED, reported because the body's value is
+	// ignored. Through CachePolicy.Ceiling(), so the number shown is the number enforced: the
+	// account's document stores 0 for "unconfigured", and reporting that raw told the operator
+	// the ceiling was $0.00 on exactly the accounts — keep-alive off, one session armed by hand
+	// — where the guard resolves to the default instead.
+	ceiling := CachePolicy{}.Ceiling()
 	if h.opts.Tenants != nil {
 		if tn, err := h.opts.Tenants.ForTenant(t); err == nil {
-			out["max_usd_per_ping"] = tn.Cache.MaxUSDPerPing
+			ceiling = CachePolicy{MaxUSDPerPing: tn.Cache.MaxUSDPerPing}.Ceiling()
 		}
 	}
+	out["max_usd_per_ping"] = ceiling
 	// The worst case, priced from THIS SESSION's own last billed prefix at its own model's
 	// cache-read rate — never a service-wide average, because per-ping cost is bimodal. Absent
 	// rather than zero when the model has no rate on the operator's list.
@@ -198,20 +202,23 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 // worstCase is the ceiling on what one armed override can cost: the session's last billed
 // prefix, its model, and the most pings the override can send before it expires.
 //
-// The ping count is K per idle span and one span is at most (K+1) x Idle long — the hard
-// retention deadline — so the number of spans left until `until` bounds the total. Deliberately
-// a CEILING and not an estimate: a session that goes quiet sends none of them, and the honest
-// thing to show somebody authorizing a spend is the most it can be.
+// The count is `time until expiry / X`, one ping per idle interval, and NOT `K pings per
+// (K+1)X span`. A span ends the instant a real request arrives, so the worst case is not a
+// session that goes quiet — it is one whose requests land just after each ping, restarting the
+// clock every time and sending one ping per X for the whole hold. The span form under-states by
+// (K+1)/K: 8 against a true 12 at the shipped defaults, and 2x at K=1. Under-stating a ceiling
+// on a spend authorization is the one direction that cannot be defended.
+//
+// Deliberately a CEILING and not an estimate: a session that goes quiet sends none of them, and
+// the honest thing to show somebody authorizing a spend is the most it can be.
 func (h *Handler) worstCase(tenantID, session string, o sessionOverride) (prefix int64, model string, pings int64) {
-	spanSeconds := o.hold().Seconds()
-	if spanSeconds <= 0 {
+	if o.pol.Idle <= 0 {
 		return 0, "", 0
 	}
-	spans := int64(time.Until(o.until).Seconds() / spanSeconds)
-	if spans < 1 {
-		spans = 1
+	pings = int64(time.Until(o.until).Seconds() / o.pol.Idle.Seconds())
+	if pings < 1 {
+		pings = 1
 	}
-	pings = spans * int64(o.pol.MaxPings)
 	if h.rec == nil {
 		return 0, "", pings
 	}

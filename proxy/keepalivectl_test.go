@@ -62,9 +62,9 @@ func TestASaveFromAStalePageIsRefused(t *testing.T) {
 			before.ConfigYAML, after.ConfigYAML)
 	}
 
-	// The SAME body with a base that matches is accepted, and `extract` survives because the
-	// client did not claim to have drawn it... it did claim it, so it is removed. `linecap` was
-	// NOT claimed, so it survives at its own index. Both halves of the rule in one save.
+	// The SAME body with a base that matches is accepted. `extract` IS claimed in
+	// pipeline_known and absent from `pipeline`, so it is removed; `linecap` is not claimed, so it
+	// survives at its own index. Both halves of the rule in one save.
 	ok := `{"config":{"pipeline":["format","toon"],` +
 		`"pipeline_known":["format","toon","extract"],` +
 		`"pipeline_base":["format","linecap","extract"],` +
@@ -313,5 +313,30 @@ func TestArmingIsRateLimited(t *testing.T) {
 	}
 	if !limited {
 		t.Errorf("more than %d arms an hour were accepted", overrideArmsPerHour)
+	}
+}
+
+// A REORDER-ONLY stale render is refused too.
+//
+// sameNames documents itself as an ordered comparison — "order is part of a pipeline's meaning" —
+// and nothing enforced it: replacing it with a multiset comparison left the whole proxy package
+// green, so a page that rendered the same components in a different order sailed through the 409.
+// It is the same class of stale render as a page that rendered a different SET, and it silently
+// rewrites the order the components run in.
+func TestASaveFromAPageThatReorderedThePipelineIsRefused(t *testing.T) {
+	f := newMgrFixture(t)
+	mgrJar, id := f.signUpJar(t, "boss@ibm.com")
+	const stored = "pipeline:\n  - format\n  - linecap\n  - extract\nmode: sync\n"
+	setDoc(t, f, id, stored)
+	// The same three names, permuted: as a SET this matches the stored pipeline exactly.
+	body := `{"config":{"pipeline":["format","linecap","extract"],` +
+		`"pipeline_known":["format","linecap","extract"],` +
+		`"pipeline_base":["linecap","format","extract"],` +
+		`"components":{},"cache":{"keepalive":false,"head_ttl_1h":false}}}`
+	w, _ := f.do(t, http.MethodPut, "/api/me", body, mgrJar)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("a save whose pipeline_base is the stored pipeline REORDERED = %d, want 409. "+
+			"Order is part of a pipeline's meaning, so a page that rendered a different order "+
+			"rendered a different configuration: %s", w.Code, w.Body)
 	}
 }
