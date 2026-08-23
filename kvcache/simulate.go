@@ -43,9 +43,20 @@ import (
 // last, and `max` caps the count. A span no longer than `idle` attracts none.
 //
 // This is the same arithmetic as dash.PingsPerSpan, which serves the keep-alive tab's own
-// calculator. It is restated here because the dependency runs the other way — dash imports
-// this package — and TestPingScheduleMatchesTheKeepAliveTab in package dash asserts the two
-// agree over a table of inputs, so they cannot drift.
+// calculator. It is restated here because the dependency runs the other way: dash imports this
+// package, so this one cannot import dash to reuse it.
+//
+// THE TWO ARE NOT PINNED AGAINST EACH OTHER, and that is a gap rather than a decision. An
+// earlier version of this comment claimed a test in package dash asserted they agree. No such
+// test exists, and a comment that promises a guard is worse than no comment at all, because it
+// tells the next reader to stop worrying. The Python port IS pinned, by four guards in
+// deploy/harbor/kv_ttl_cost_drift_test.go — so the one duplication left unguarded is the Go/Go
+// pair, which would be the easiest of the three to guard.
+//
+// The formulas agree today. They are not the same function at the boundaries: dash's takes
+// float64 SECONDS and floor-divides those, this takes a time.Duration and floor-divides integer
+// nanoseconds. The test belongs in package dash — only it can import both — and is about twenty
+// lines mirroring TestPingScheduleMatchesThePort.
 func PingsPerSpan(gap, idle time.Duration, max int) int {
 	if idle <= 0 || max <= 0 || gap <= idle {
 		return 0

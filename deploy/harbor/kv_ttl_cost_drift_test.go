@@ -448,14 +448,6 @@ func TestPythonCostModelAgreesWithTheShippedSimulator(t *testing.T) {
 		t.Error("the fixture prices nothing, so every dollar compared here is zero on both " +
 			"sides and this test proves nothing")
 	}
-	for _, c := range []struct {
-		name     string
-		got, exp int64
-	}{} {
-		if c.got != c.exp {
-			t.Errorf("%s: port %d, kvcache.Simulate %d", c.name, c.got, c.exp)
-		}
-	}
 	// A fixture that exercised nothing would pass this test while proving nothing, so the
 	// branches it exists for are asserted to have actually been reached.
 	if want.Pings == 0 || want.PingsThatRewrote == 0 || want.PingsOnOpenSpans == 0 {
