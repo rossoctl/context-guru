@@ -8095,9 +8095,8 @@ async function loadKACalc() {
     'PINGS is every ping the shipped policy would have sent over this window — gated as the ' +
     'request path gates (past the session’s first request, cached prompt over 20k tokens) and ' +
     'INCLUDING the pings a session’s last request attracts, because a live policy cannot know a ' +
-    'session has ended and sends its full K anyway. Counting only the gaps between two requests ' +
-    'under-counted by 6.4× on this service’s own traffic, which is enough to flip the sign of ' +
-    'NET. ' +
+    'session has ended and sends its full K anyway. Counting only the gaps BETWEEN two requests, ' +
+    'and counting them ungated, charged a different population from the one this column names. ' +
     'A replay of your own past gaps, not a forecast — and it counts only expiries that were ' +
     'addressable (the provider wrote a prefix that a ping could have refreshed). Reach grows ' +
     'sharply from one ping to two and then flattens while ping cost keeps climbing, which is ' +

@@ -778,9 +778,11 @@ func TestKeepAliveRoutesAnswerOnAnEmptyDatabase(t *testing.T) {
 //   - it applied no gate, charging pings on the turn-0 and small-prefix spans that the shipped
 //     `turn >= 1 AND prefix >= 20k` never touches.
 //
-// Net on the production corpus: 1,452 pings against a blanket policy's 9,234, a 6.4x under-count
-// that turned the panel's +$70 headline into -$785. NET = SAVED - PINGS x EACH, so a ping count
-// that under-states by 6.4x does not make the column approximate, it flips its sign.
+// Measured on the 19,805-request snapshot at X=280, K=2: the LAG form 1,452, this form 1,060, a
+// blanket policy 9,234. The two errors partly cancel, so the old column over-charged the SHIPPED
+// policy by 1.37x rather than under-charging it 6.4x — that 6.4x is the gap to a blanket policy the
+// calculator does not model. NET = SAVED - PINGS x EACH either way, so a column counting a
+// different population than it names is a dollar figure about nothing in particular.
 //
 // The fixture separates the two errors: the gated session's spans differ between the LAG and LEAD
 // forms, and the small-prefix session is charged by one form and not the other.

@@ -998,14 +998,24 @@ func (s pingSpan) pings(idleSeconds float64, maxPings int) int {
 // the calculator and by the recommendation's bootstrap so the two cannot disagree about what a
 // policy costs.
 //
-// It replaced a LAG over `requests` that was wrong in both directions at once, and the two
-// errors did not cancel: it charged NO pings for a session-final request, where a live policy
-// must send K, and it charged pings on turn-0 and small-prefix spans that the shipped gate
-// (`turn >= 1 AND prefix >= MinPrefixTokens`) never touches. Replayed on the production corpus
-// the LAG form counted 1,452 pings against a blanket policy's 9,234 — a 6.4x under-count, enough
-// to flip the sign of the calculator's headline from +$70 to -$785.
+// It replaced a LAG over `requests` that was wrong in two directions: it charged NO pings for a
+// session-final request, where a live policy must send K because it cannot know the session ended,
+// and it charged pings on the turn-0 and small-prefix spans the shipped gate
+// (`turn >= 1 AND prefix >= MinPrefixTokens`) never touches.
 //
-// The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable().
+// The two errors PARTLY CANCEL, and the direction is the opposite of what it looks like. Replayed
+// on the 19,805-request snapshot at X=280, K=2: the LAG form counts 1,452, this form counts 1,060,
+// and a BLANKET policy would send 9,234. So the old column over-charged the shipped policy by
+// 1.37x — correcting it makes NET slightly more positive on that corpus. The "6.4x under-count"
+// that is easy to quote is the gap to a blanket policy, which the calculator does not model.
+//
+// What this buys is therefore not a different headline: it is a column that models the policy it
+// names, so it MOVES when the gate or K moves instead of silently ignoring both.
+//
+// The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It
+// gates at the shipped 20k default and not at the account's own configured floor, because this
+// package does not read tenant configuration — an account that tuned its floor sees a replay of
+// the default policy, and the panel's copy names 20k so the page stays self-consistent.
 func (d *DB) pingSpans(f Filter, minPrefix int64) ([]pingSpan, error) {
 	cond, args := f.where()
 	// LEAD, not LAG: a span belongs to the request that OPENS it, which is the request the gate
