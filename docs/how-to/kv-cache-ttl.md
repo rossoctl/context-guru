@@ -8,13 +8,14 @@ no way to price one.
 This page is that way. It covers the cost model, the strategies, the offline predictor, and
 what the whole thing measured on this service's own traffic. The short version:
 
-- **Prompt caching itself is already earning 54%** of the bill (`no-cache` costs 115.62%
-  more than `fixed-5m`), and that is banked.
-- **The entire remaining TTL headroom is 8.74%**, and reaching it requires knowing the future.
-- **A blind keep-alive takes 2.91% of it** with no model at all.
-- **93% of the headroom is 285 decisions out of 14,407.** This is a rare-event problem, which
-  is a very different thing from a prediction problem, and it is the finding that should
-  shape any further work.
+- **Prompt caching itself is already earning 77.4%** of the uncached bill, and that is banked.
+- **The reachable TTL headroom on top of it is 7.44%**, taken by a blind keep-alive with no model
+  at all. The exact ceiling is 21.95%, and reaching it requires knowing the future.
+- **93% of that ceiling is 526 decisions out of 14,407** — 3.7% of requests. This is a rare-event
+  problem, which is a very different thing from a prediction problem, and it is the finding that
+  should shape any further work.
+- **Hit rate is not the objective.** The arm with the second-best hit rate on the page is the most
+  expensive reachable arm, by 41%.
 
 ## What the domain package is
 
@@ -261,102 +262,138 @@ reported on rows its parameters were chosen from.
 
 ## What it measured
 
-The hosted deployment's own capture: 14,407 requests, 12 accounts, 1,772 trajectories,
-2026-08-17 11:48 → 08-19 20:38 UTC, at `/etc/context-guru/prices.yaml` — which matters,
-because this gateway bills `aws/claude-sonnet-5` at `$1.52/MTok` where anthropic.com bills
-`$3.00`, so the public list price would overstate every figure below by about `2x`.
+The hosted deployment's own capture: 14,407 requests, 12 accounts, **1,896 trajectories**,
+2026-08-17 11:48 → 08-19 20:38 UTC, at `/etc/context-guru/prices.yaml` — which matters, because
+this gateway bills `aws/claude-sonnet-5` at `$1.52/MTok` where anthropic.com bills `$3.00`, so
+the public list price would overstate every figure below.
 
-Over the whole set, against `fixed-5m` at **$4,540.33**:
+A trajectory is `(account, session, MODEL)`, which is why there are 1,896 of them and not 1,772:
+a cache entry does not transfer between models, so a session that switches model is two
+trajectories. Everything in this section is the whole window, one population throughout, at the
+default keep-alive schedule (a refresh every 280 s for a 5-minute entry, every 3,360 s for an
+hourly one, **at most 2 per idle span**). That schedule is a parameter, not a law, and a
+different ping budget is a lever these figures hold fixed.
 
-| arm | total | vs `fixed-5m` | hit % | pings | upgrades |
-|---|---:|---:|---:|---:|---:|
-| `optimal` *(ceiling)* | $4,143.46 | **−8.74%** | 78.2% | 92 | 0 |
-| **`keepalive-5m`** | **$4,408.10** | **−2.91%** | 78.3% | 2,023 | 0 |
-| `fixed-5m` | $4,540.33 | — | 77.1% | 0 | 0 |
-| `keepalive-5m-to-1h` | $5,256.81 | +15.78% | 79.3% | 1,836 | 1,076 |
-| `fixed-1h` | $6,115.49 | +34.69% | 79.0% | 0 | 0 |
-| `no-cache` | $9,789.96 | +115.62% | 0.0% | 0 | 0 |
+Against `fixed-5m` at **$2,215.28**:
+
+| arm | total | vs `fixed-5m` | hit % | pings |
+|---|---:|---:|---:|---:|
+| `optimal` *(unreachable — reads the future)* | $1,728.95 | **−21.95%** | 76.8% | 119 |
+| **`keepalive-5m`** | **$2,050.56** | **−7.44%** | 76.8% | 2,726 |
+| `keepalive-1h` | $2,086.91 | −5.79% | **78.6%** | 1,789 |
+| `fixed-1h` | $2,150.19 | −2.94% | 78.0% | 0 |
+| `fixed-5m` | $2,215.28 | — | 74.7% | 0 |
+| `observed-policy` | $2,215.28 | — | 74.7% | 0 |
+| `keepalive-5m-to-1h` | $3,124.58 | **+41.05%** | 78.5% | 2,406 |
+| `no-cache` | $9,789.96 | +341.93% | 0.0% | 0 |
 
 Where the money goes:
 
 | arm | fresh in | read | write | pings | output |
 |---|---:|---:|---:|---:|---:|
-| `optimal` | 269.51 | 696.63 | 2,990.83 | 11.50 | 174.99 |
-| `keepalive-5m` | 104.95 | 682.96 | 3,350.48 | 94.72 | 174.99 |
-| `fixed-5m` | 104.95 | 663.23 | 3,597.16 | 0.00 | 174.99 |
-| `keepalive-5m-to-1h` | 104.95 | 697.14 | 3,173.30 | **1,106.44** | 174.99 |
-| `fixed-1h` | 104.95 | 693.92 | **5,141.63** | 0.00 | 174.99 |
+| `optimal` *(unreachable)* | 161.74 | 907.83 | 475.16 | 9.22 | 174.99 |
+| `keepalive-5m` | 104.95 | 889.91 | 763.66 | 117.05 | 174.99 |
+| `fixed-1h` | 104.95 | 902.62 | 967.63 | 0.00 | 174.99 |
+| `fixed-5m` | 104.95 | 865.41 | 1,069.93 | 0.00 | 174.99 |
+| `keepalive-5m-to-1h` | 104.95 | 906.57 | 555.37 | **1,382.70** | 174.99 |
+
+### Prompt caching itself is the win, and it is already banked
+
+`no-cache` costs 4.4x the shipped policy: caching is taking **77.4%** off the uncached bill
+today. Everything else on this page is a fight over the remaining quarter.
 
 ### Hit rate is not the objective
 
-`fixed-1h` has the second-best hit rate on the page and is the most expensive arm on it.
-`optimal` has a *lower* hit rate than `fixed-1h` and is the cheapest. Against `fixed-5m`,
-`fixed-1h` buys 281 extra hits for **$1,575.16** — **$5.61 per extra hit**, where an avoided
-miss on the median 124,845-token prefix is worth **$0.55**. It is paying roughly `10x` what the
-thing is worth, because to rescue those few requests it pays the hourly creation premium on
-*all* of them.
+This is the most useful thing on the page, and the corrected data makes it sharper rather than
+weaker:
 
-**A page that sorts or colours by hit rate will recommend the worst option.**
+- `keepalive-1h` has the **best hit rate on the page** (78.6%) and is not the cheapest arm.
+- `keepalive-5m-to-1h` has the **second-best hit rate** (78.5%) and is **the most expensive
+  reachable arm by a wide margin** (+41.05%).
+- `optimal` has a **lower** hit rate than three arms it beats on cost, and is the cheapest thing
+  that exists.
+- The cheapest reachable arm, `keepalive-5m`, hits **less often** than `keepalive-1h`,
+  `keepalive-5m-to-1h` and `fixed-1h`.
 
-### Why `keepalive-5m-to-1h` loses, and what would fix it
+**A view that sorts or colours by hit rate will recommend the worst option.** `keepalive-5m-to-1h`
+is the demonstration: 1,486 of its 2,406 keep-alives were tier upgrades, each a one-hour write of
+a whole prefix at 2.0x input, and that is $1,382.70 of ping cost buying $515 of avoided writes. It
+fires on almost every idle span because 92.5% of gaps close inside five minutes, so most upgrades
+bought an hour of hold for a conversation that returned in seconds. The arm is not wrong; its
+trigger is unconditional.
 
-It should be strictly smarter than `fixed-1h`, and it is — by $859. It still loses to plain
-`fixed-5m`, and the decomposition says why: **1,076 of its 1,836 pings were upgrades**, each a
-one-hour write of a whole prefix at `2.0x`. That is $1,106 of ping cost to save $424 of
-writes. It fires far too often, because 92.5% of gaps close inside five minutes and most of
-those upgrades bought an hour of hold for a conversation that came back in fifteen seconds.
+### Where the headroom is
 
-`optimal` does the same thing 92 times, not 1,836. The arm is not wrong; its trigger is
-unconditional.
-
-### The learned arms took nothing
-
-On the **held-out half** — 5,722 requests, where the ceiling is 7.50% rather than the whole
-set's 8.74%, because the two are different populations and their percentages are not
-interchangeable — the threshold-ladder arm scored **−0.01%** and a cost-based rule over the
-same model scored **+0.00%**. Not because the model is bad. It halves the Brier score
-of the base rate:
-
-| horizon | actual | predicted | Brier | Brier of the base rate |
-|---|---:|---:|---:|---:|
-| ≤ 5m | 0.7558 | 0.8157 | 0.0986 | 0.1846 |
-| ≤ 1h | 0.8315 | 0.8587 | 0.0695 | 0.1401 |
-
-They took nothing because **92.5% of gaps close inside five minutes**, so the five-minute tier
-is already right for almost every request and there is no decision left for a probability to
-improve. The model also runs about six points **optimistic** on this split — the training half
-had a higher return rate than the test half — so re-fit and re-check calibration before
-trusting a threshold on it.
-
-### Where the headroom actually is
-
-Replaying `optimal`'s own choices one kind at a time — **on the whole set**, so these compose
-with the 8.74% above rather than with the held-out figures in the section before it:
+Replaying `optimal`'s own choices one kind at a time — each against the same `fixed-5m` baseline,
+with every other request falling back to `fixed-5m`. These are **ablations, not a partition**: an
+hour-long hold on one turn changes whether the next turn hits, so they interact and do not sum to
+21.95%.
 
 | the optimum's choices, in isolation | saving vs `fixed-5m` |
 |---|---:|
-| only the **218 requests** it wrote at the 1-hour tier | **+6.37%** ($289.18) |
-| only the **67 requests** it held with keep-alives | +1.77% ($80.39) |
-| only the **2,862 requests** it declined to cache | +0.47% ($21.39) |
+| only the **435 requests** it wrote at the 1-hour tier | **+17.93%** ($397.22) |
+| only the **91 requests** it held with keep-alives | +3.09% ($68.37) |
+| only the **2,801 requests** it declined to cache | +0.62% ($13.68) |
 
-Those are counts of REQUESTS the optimum decided about, which is not the same as the columns
-in the table above: 92 there is keep-alives that actually *fired* (67 requests can attract more
-than one), and 230 is cache-creation *events* at the hourly tier, which a keep-alive can cause
-as well as a write. Two similar-looking numbers counting different things is worth one sentence
-rather than a reader's afternoon.
+So **526 decisions out of 14,407 — 3.7% of requests — carry almost all of the headroom.** That is
+a rare-event problem, which is a different thing from a prediction problem, and it is the finding
+that should shape any further work: not a model that is well calibrated on average, but one that
+is precise on the tail and weighted by prefix size.
 
-Those three sum to **8.61%** against a combined **8.74%**, and the 0.13-point residual is not
-rounding: the choices interact. An hour-long hold on one turn changes whether the next turn
-hits, so replaying one kind of choice in isolation is not the same as its share of the total.
-The three rows are therefore *contributions*, not a partition, and they are quoted here because
-the ORDERING is the finding — not because they add up.
+### The learned arms
 
-**93% of the reachable headroom is 285 decisions out of 14,407 — 2.0% of requests.** That is
-what to build for: not a model that is well calibrated on average, but one that is precise on
-the tail and weighted by prefix size. A model scored on average calibration will look good and
-buy nothing — which is exactly what the two learned arms above did.
+On a held-out remainder (the predictor is fitted on the first 70% of the window by time and its
+thresholds tuned there), both machine-learned arms scored within a rounding error of `fixed-5m`.
+The cost-based rule is not merely unprofitable but **degenerate**: it chose `write_5m` on every
+row, so it never deviated from the baseline at all.
+
+That is not because the model is bad. It halves the Brier score of the base rate — see
+`kv_ttl_survival_predictor.py`, which reports that on its own chronological split, a **different**
+split from the one the arms were scored on. It buys nothing because 92.5% of gaps close inside
+five minutes, so the five-minute tier is already right for almost every request and there is no
+decision left for a probability to improve. The 3.7% above is where a model would have to earn
+its keep.
+
+### These figures were recomputed after three correctness fixes
+
+An earlier version of this page published numbers from code with three defects, all of which moved
+figures in the flattering direction, and one of which **inverted a recommendation**: `fixed-1h`
+was reported at +34.69% (the worst reachable arm) when it is in fact −2.94% (an improvement). The
+defects were a cache entry being handed between models, the ceiling not being a bound on any
+trajectory that switched model, and an `expire` turn being counted as a cache hit. They are fixed,
+pinned by tests, and verified by exhaustive search over every action sequence on multi-model
+fixtures plus 450 randomised trajectories. The figures above are from the fixed code.
 
 ## The honest downside
+
+- **The 1-hour creation rate is DERIVED, and it is the single biggest lever on these results.**
+  No gateway publishes one, so it is the documented 2.0x multiple of base input. `fixed-1h`'s
+  −2.94%, `keepalive-1h`'s −5.79% and the whole of `keepalive-5m-to-1h`'s +41.05% move directly
+  with that multiplier. It is a configurable field, which is a design virtue and *not* a reason to
+  treat the number as measured. Worse, the code knows the sharper risk: a requested `ttl:"1h"` is
+  not always honoured — on this gateway it depends on the model — so a 1h arm may be priced for a
+  tier the provider silently declined to give.
+- **The keep-alive schedule is held fixed at 2 refreshes per idle span.** Every ping figure and
+  the ceiling itself are optimal *under that budget*. A 5-minute entry can be held at most
+  2x280+300 = 860 s, so the band between 14 minutes and an hour is unexplored, and a larger budget
+  buys it at the 0.1x read rate against a rescue worth ~1.15x. The ceiling is therefore a ceiling
+  over six actions at one schedule, not over all policies.
+- **An `expire` turn is modelled as LAPSING the cache entry, and the provider appears not to do
+  that.** Anthropic's cache is content-addressed with no delete verb, so a request omitting
+  `cache_control` should neither read, refresh nor remove the entry. Tested against this window:
+  in 132 cases where a caching request followed a non-caching one inside the earlier entry's TTL,
+  **128 (97%) still read from cache**. The simulator charges those turns for a re-creation they
+  would not pay, so every arm that uses `expire` — including the ceiling — is charged **too much**,
+  and the ceiling is understated rather than overstated. Not corrected here because fixing it makes
+  the dynamic program's state no longer a function of the previous action alone, which is the same
+  structural break as `HitRefreshesTTL=false`; the two are one change and it needs its own PR.
+- **`NewOptimal` is unsound under `Semantics{HitRefreshesTTL: false}`** — measured 18% overstated —
+  because the entry's deadline then carries across an unbounded run of hits. That setting is a
+  configuration flip, so the arm must refuse it rather than answer.
+- **Token counts and miss reasons are observed under ONE policy and held fixed across every
+  counterfactual arm.** `cached_context` is what the 5-minute policy that actually ran was billed,
+  and a recorded `cold_start` forces a miss on every arm. Defensible, and the foundation of the
+  whole replay.
 
 - The measured window is **57 hours** and one deployment. Every figure here is that window's,
   not a law.
