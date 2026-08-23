@@ -136,6 +136,7 @@ nav:
   - Dashboard: dashboard.md
   - Tool inventory: tool-inventory.md
   - Inventory page (UI): dashboard-inventory-page.md
+  - KV-cache page (UI): dashboard-kvcache-page.md
   - Hosted service: hosted.md
   - Results:
       - Overview: RESULTS.md

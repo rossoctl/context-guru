@@ -44,6 +44,15 @@ type Filter struct {
 	Effort     string
 	Thinking   string
 	StopReason string
+	// TTL selects requests by the prompt-cache TTL TIER they asked for: 'ephemeral_5m',
+	// 'ephemeral_1h', or the sentinel "none" for a body that carried no cache_control at all.
+	//
+	// "none" needs a sentinel for the same reason Reason's "compacted" does: the column's
+	// value for that case is the empty string, which is also what "no filter" looks like, so
+	// an empty Filter field cannot mean it. Folding an uncached request in with the 5-minute
+	// ones would be the third answer disappearing, which is the whole reason cache_ttl was
+	// added as a TEXT column rather than a boolean.
+	TTL string
 	// WithKeepAlive includes keep-alive PING rows. Off by default, and that default is the
 	// point: a ping is a request context-guru sent on the user's behalf while they were away,
 	// not traffic their agent produced. Counted in an aggregate it silently inflates the
@@ -95,6 +104,13 @@ func (f Filter) where() (string, []any) {
 		if v != "" {
 			add(col+" = ?", v)
 		}
+	}
+	switch f.TTL {
+	case "":
+	case "none":
+		add("r.cache_ttl = ''")
+	default:
+		add("r.cache_ttl = ?", f.TTL)
 	}
 	switch f.Reason {
 	case "":
