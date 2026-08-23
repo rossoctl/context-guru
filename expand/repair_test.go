@@ -151,3 +151,29 @@ func TestRepairHandlesEveryCallInATurn(t *testing.T) {
 		t.Fatalf("an error for OUR tool survived:\n%s", out)
 	}
 }
+
+// F3: an id-less tool_use for our tool must not make "" a live key. A tool_result carrying no
+// tool_use_id is somebody else's block, and overwriting its content is data loss even when the
+// value written is only a placeholder.
+func TestRepairNeverMatchesAnIDLessBlock(t *testing.T) {
+	for _, body := range []string{
+		`{"model":"claude","messages":[` +
+			`{"role":"assistant","content":[{"type":"tool_use","name":"` + expand.ToolName + `","input":{}}]},` +
+			`{"role":"user","content":[{"type":"tool_result","content":"SOMEONE ELSE'S RESULT"}]}]}`,
+		`{"model":"gpt-x","messages":[` +
+			`{"role":"assistant","tool_calls":[{"type":"function","function":{"name":"` + expand.ToolName + `","arguments":"{}"}}]},` +
+			`{"role":"tool","content":"SOMEONE ELSE'S RESULT"}]}`,
+	} {
+		provider := "anthropic"
+		if strings.Contains(body, "gpt-x") {
+			provider = "openai"
+		}
+		out, restored := expand.RepairToolResults(provider, []byte(body), resolver(nil))
+		if string(out) != body {
+			t.Fatalf("%s: an id-less pair was rewritten:\n want %s\n got  %s", provider, body, out)
+		}
+		if len(restored) != 0 {
+			t.Fatalf("%s: restored %q", provider, restored)
+		}
+	}
+}

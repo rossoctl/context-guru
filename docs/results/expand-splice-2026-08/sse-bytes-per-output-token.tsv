@@ -1,0 +1,25 @@
+# SSE bytes per billed output token — the number that sets what one round retains, since the
+# splice holds a round's events until it ends (Continuation needs the whole assistant turn).
+# Raw byte counts straight from the gateway, output tokens from the stream's own message_delta.
+#
+# The ratio is mechanical, not fitted: ~4 bytes of text plus ~105 bytes of event framing per
+# delta of ~3.5 tokens -> (14+105)/3.5 ~= 34. That is why it can be extrapolated to a
+# max-length response: this gateway accepts max_tokens up to 128,000 (200,000 is refused with
+# "the maximum allowed number of output tokens"), so a full-length round is ~4.5 MB.
+model	shape	max_tokens	raw_sse_bytes	output_tokens	bytes_per_token
+aws/claude-sonnet-5	long prose	8000	275809	8000	34.48
+aws/claude-sonnet-5	long code	8000	31816	8000	3.98
+aws/claude-sonnet-5	thinking 4k + prose	8000	280855	8000	35.11
+aws/claude-opus-4-7	long prose	8000	273881	7909	34.63
+# Real Claude Code turns through a local proxy, bytes retained by pass() against billed output:
+local-run	claude-code turn	-	3701	244	15.2
+local-run	claude-code turn	-	1751	89	19.7
+local-run	claude-code turn	-	1364	59	23.1
+local-run	claude-code turn	-	7133	724	9.9
+local-run	claude-code turn	-	3374	208	16.2
+local-run	claude-code turn	-	2167	140	15.5
+local-run	claude-code turn	-	1281	32	40.0
+# Short turns show a worse ratio because the fixed per-response events are amortised over few
+# tokens; that overhead does not scale, so the large-response figure is the one that bounds
+# retention. The "long code" row is the outlier: its reported output_tokens cannot fit in its
+# raw bytes, so treat that row as suspect and read the ceiling off the prose rows.

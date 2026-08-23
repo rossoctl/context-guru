@@ -435,3 +435,127 @@ func TestARoundPastTheRetainBoundCountsTheLeakAndDoesNotContinue(t *testing.T) {
 			"be counted: %+v", snap)
 	}
 }
+
+// A continuation round is not obliged to carry a terminator of its own. It can come back
+// empty, truncated mid-generation, or in another dialect — and once the splice has withheld
+// round 1's message_stop, that round holds the only terminator the client will ever get.
+// Leaving the message half-open is worse than the leaked tool_use it replaced: on the parent
+// commit these shapes cannot arise, because there is no round 2 at all.
+func TestEveryContinuationShapeStillClosesTheClientsMessage(t *testing.T) {
+	head, tail := leadThenExpand("text")
+	for _, tc := range []struct {
+		name   string
+		round2 string
+	}{
+		{"empty: 200, event-stream, zero bytes", ""},
+		{"truncated mid-generation", "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n" +
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"CUT\"}}\n\n"},
+		{"OpenAI-shaped on the Anthropic route", "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"},
+		{"an error event instead of an answer", "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int64
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				if calls.Add(1) == 1 {
+					w.Write([]byte(head + tail))
+					return
+				}
+				w.Write([]byte(tc.round2))
+			}))
+			defer upstream.Close()
+
+			h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+			st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
+			srv := httptest.NewServer(h.Mux())
+			defer srv.Close()
+
+			resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+				strings.NewReader(string(anthropicSSEBody(t, "look at <<cg:HASH>> and finish"))))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			if n := strings.Count(string(out), `"type":"message_stop"`); n != 1 {
+				t.Fatalf("the client's message must be closed exactly once, got %d:\n%q", n, out)
+			}
+			// Closed with the model's own closing events, never with the block those events
+			// were withheld alongside.
+			if strings.Contains(string(out), "context_guru_expand") {
+				t.Fatalf("closing the message must not hand over our tool_use:\n%q", out)
+			}
+			if !strings.Contains(string(out), "LEADING") {
+				t.Fatalf("the streamed prefix must survive:\n%q", out)
+			}
+		})
+	}
+}
+
+// The nested case: the continuation ITSELF calls expand after a leading block of its own.
+// Indices have to stay monotonic across three rounds and the client still sees one message.
+func TestASplicedRoundThatCallsExpandAgainStaysWellFormed(t *testing.T) {
+	head, tail := leadThenExpand("text")
+	r2 := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"SECOND\"}}\n\n" +
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_2\",\"name\":\"context_guru_expand\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"id\\\":\\\"HASH2\\\"}\"}}\n\n" +
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch calls.Add(1) {
+		case 1:
+			w.Write([]byte(head + tail))
+		case 2:
+			w.Write([]byte(r2))
+		default:
+			w.Write([]byte(round2Answer))
+		}
+	}))
+	defer upstream.Close()
+
+	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	st.Put("HASH", []byte("ORIGINAL ONE"))
+	st.Put("HASH2", []byte("ORIGINAL TWO"))
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+		strings.NewReader(string(anthropicSSEBody(t, "look at <<cg:HASH>> and finish"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if n := calls.Load(); n != 3 {
+		t.Fatalf("want 3 upstream rounds, got %d", n)
+	}
+	for _, want := range []string{
+		`"index":0,"content_block":{"type":"text"`,
+		`"index":1,"content_block":{"type":"text"`,
+		`"index":2,"content_block":{"type":"text"`,
+		"LEADING", "SECOND", "ANSWERED",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("three rounds must splice into three consecutive blocks, missing %s:\n%s", want, out)
+		}
+	}
+	for _, once := range []string{`"type":"message_start"`, `"type":"message_stop"`} {
+		if n := strings.Count(string(out), once); n != 1 {
+			t.Fatalf("%s appears %d times, want 1:\n%s", once, n, out)
+		}
+	}
+	if strings.Contains(string(out), "context_guru_expand") {
+		t.Fatalf("client got our tool_use:\n%s", out)
+	}
+}

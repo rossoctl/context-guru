@@ -51,15 +51,22 @@ func RepairToolResults(provider string, body []byte, resolve func(id string) (st
 	for _, m := range msgs.Array() {
 		if provider == "anthropic" {
 			for _, blk := range m.Get("content").Array() {
+				// An id-less tool_use would make "" a live key, and then a tool_result that
+				// carries no tool_use_id — someone else's block — matches it and is
+				// overwritten. Both halves of the pair must name an id.
 				if blk.Get("type").String() == "tool_use" && blk.Get("name").String() == ToolName {
-					ours[blk.Get("id").String()] = blk.Get("input.id").String()
+					if id := blk.Get("id").String(); id != "" {
+						ours[id] = blk.Get("input.id").String()
+					}
 				}
 			}
 			continue
 		}
 		for _, tc := range m.Get("tool_calls").Array() {
 			if tc.Get("function.name").String() == ToolName {
-				ours[tc.Get("id").String()] = gjson.Get(tc.Get("function.arguments").String(), "id").String()
+				if id := tc.Get("id").String(); id != "" {
+					ours[id] = gjson.Get(tc.Get("function.arguments").String(), "id").String()
+				}
 			}
 		}
 	}
@@ -93,6 +100,9 @@ func RepairToolResults(provider string, body []byte, resolve func(id string) (st
 // cost the model a turn it would otherwise have had.
 func repairOne(body []byte, restored []string, ours map[string]string, callID, path string,
 	hasErrFlag bool, resolve func(id string) (string, bool)) ([]byte, []string) {
+	if callID == "" {
+		return body, restored // answers nothing; not ours to touch
+	}
 	hashID, ok := ours[callID]
 	if !ok {
 		return body, restored

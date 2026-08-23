@@ -1,0 +1,54 @@
+# Where a streaming decision point puts the client's first byte. One row per turn, straight
+# to the gateway with no proxy in the path, every SSE event timestamped from the request.
+#
+# Both arms come from ONE timeline, so the comparison is paired by construction and no proxy
+# restart can land inside an arm:
+#   splice   = the client's first byte is the stream's first event            -> `first`
+#   peek-far = the client's first byte is the first tool_use block, or, when a turn has no
+#              tool_use at all, message_stop, i.e. the whole response         -> `first_tool`
+# Note that peek-far >= splice is an identity of the construction, not a finding: the sign
+# carries no statistical content. The magnitudes, and the prose-only rows, are the result.
+#
+# shape: tool = "prose then call a tool"; prose = "prose only, no tool call";
+#        think = tool-calling with extended thinking enabled (budget 1024)
+# times in seconds from the request; first_tool empty = the turn had no tool_use block
+model	shape	wall	first	first_tool	deltas
+aws/claude-sonnet-5	tool	6.12	2.75	5.95	73
+aws/claude-sonnet-5	tool	6.60	2.83	6.60	78
+aws/claude-sonnet-5	tool	7.01	5.68	7.00	60
+aws/claude-sonnet-5	tool	7.78	4.80	7.72	61
+aws/claude-sonnet-5	tool	8.12	5.26	8.06	64
+aws/claude-sonnet-5	tool	7.66	3.97	7.64	79
+aws/claude-sonnet-5	tool	7.49	4.32	7.45	73
+aws/claude-sonnet-5	tool	6.27	2.74	6.04	75
+aws/claude-sonnet-5	tool	6.09	2.87	6.08	67
+aws/claude-sonnet-5	tool	8.65	4.93	8.58	78
+aws/claude-sonnet-5	tool	7.17	3.49	7.17	74
+aws/claude-sonnet-5	tool	10.68	7.29	10.67	59
+aws/claude-sonnet-5	prose	6.10	2.06		87
+aws/claude-sonnet-5	prose	8.48	3.04		99
+aws/claude-sonnet-5	prose	8.17	1.86		94
+aws/claude-sonnet-5	prose	8.37	4.08		95
+aws/claude-sonnet-5	prose	6.64	2.43		93
+aws/claude-sonnet-5	prose	7.83	3.52		91
+aws/claude-sonnet-5	prose	7.55	3.32		91
+aws/claude-sonnet-5	prose	8.19	4.02		92
+aws/claude-sonnet-5	prose	7.54	2.94		101
+aws/claude-sonnet-5	prose	6.45	2.15		94
+aws/claude-sonnet-5	prose	8.07	4.10		86
+aws/claude-sonnet-5	prose	8.76	4.26		88
+aws/claude-sonnet-5	think	5.96	2.60	5.94	71
+aws/claude-sonnet-5	think	14.62	11.41	14.61	65
+aws/claude-sonnet-5	think	6.94	4.14	6.78	66
+aws/claude-sonnet-5	think	5.80	2.80	5.79	63
+aws/claude-sonnet-5	think	8.56	2.42	8.56	81
+aws/claude-sonnet-5	think	6.45	3.58	6.44	67
+aws/claude-sonnet-5	think	9.55	6.33	9.55	68
+aws/claude-sonnet-5	think	5.89	1.94	5.88	68
+aws/claude-sonnet-5	think	5.63	2.35	5.58	68
+aws/claude-sonnet-5	think	8.73	4.39	8.73	80
+aws/claude-sonnet-5	think	5.84	3.05	5.83	59
+aws/claude-sonnet-5	think	9.61	6.45	9.54	64
+aws/claude-opus-4-7	tool	9.95	6.28	9.93	
+aws/claude-opus-4-7	tool	8.67	3.97	8.67	
+aws/claude-opus-4-7	tool	8.28	4.70	8.24	

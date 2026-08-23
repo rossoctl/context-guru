@@ -1180,17 +1180,22 @@ const maxRequestBytes = 32 << 20 // 32 MiB
 // See expand.RepairToolResults.
 //
 // Restored content is marked kept-verbatim: an offloader that re-compacted it would trigger
-// the same expand call again next turn. The tokens land on the dashboard row because they
-// really are in this request, and on every later turn that re-sends the same transcript —
-// but NOT on the process-wide bounce counter, which counts expand CALLS, and repairing the
-// same stale error on ten later turns is one call, not ten.
+// the same expand call again next turn. That mark is also what keeps the accounting honest —
+// the tokens are charged to the dashboard row once, on the turn the original first comes back,
+// because the client keeps its own copy of the error and the repair therefore runs again on
+// every later turn. Nothing is charged to the process-wide bounce counter, which counts expand
+// CALLS, and ten repairs of one stale error are one call.
 func (h *Handler) repairExpandErrors(provider bschemas.ModelProvider, body []byte, tn *Tenancy, cp *capture) ([]byte, int) {
 	out, restored := expand.RepairToolResults(string(provider), body, func(hashID string) (string, bool) {
 		return expand.Resolve(tn.Store, hashID)
 	})
 	for _, orig := range restored {
+		// Charge the row only the FIRST time this original comes back. Repairing the same
+		// stale error on ten later turns is one recovery, not ten.
+		if !offload.KeptVerbatim(tn.Store, orig) {
+			cp.noteExpand(schema.TextTokens(orig))
+		}
 		offload.MarkKeptVerbatim(tn.Store, orig)
-		cp.noteExpand(schema.TextTokens(orig))
 	}
 	return out, len(restored)
 }
@@ -1201,18 +1206,19 @@ var errNoUpstream = errors.New("no upstream configured")
 // calls the expand tool (and ONLY that tool), resolve the originals from the store,
 // append the tool-result turn, and re-invoke upstream — up to a few rounds.
 //
-// Streaming (SSE) works too: when the outgoing request carries expandable markers
-// (`<<cg:…>>`, i.e. offload has happened, so the model MIGHT call expand), the SSE
-// response is buffered and reconstructed so the loop can inspect it. If it is not a
-// lone expand call, the buffered SSE bytes are replayed to the client verbatim (a
-// one-time latency cost, no correctness change). Requests without markers — early in
-// a session — stream straight through with zero added latency and no possible expand.
+// Streaming (SSE) keeps streaming while it does. An Anthropic event stream is forwarded
+// event by event and forwarding stops at the content_block_start that calls the expand
+// tool; the continuation's blocks are then spliced into the same open response, renumbered
+// past the blocks already sent (sseSplicer, ssepeek.go). Nothing is buffered to decide
+// this, and the client's first byte is the upstream's first event. Both outcomes are
+// counted (agg.RecordSSE → /stats sse_streamed / sse_buffered), and a response is filed as
+// buffered only when the model opened with the call, so the client really did wait for the
+// whole continuation.
 //
-// Buffering is the only thing that stops a stream being a stream, so the marker test
-// is scoped to the model-visible content and both outcomes are counted (agg.RecordSSE
-// → /stats sse_streamed / sse_buffered). It previously matched the expand tool
-// description this proxy injects itself, so it was unconditionally true and the
-// zero-added-latency promise above never held for any request (issue #26).
+// Whatever cannot be intercepted — the model batching a client tool with ours, the round
+// cap, a stream that will not reconstruct, another dialect, a bypassed turn carrying older
+// markers — reaches the client as the model wrote it, is counted (sse_expand_after_stream),
+// and is answered on the NEXT request instead (expand.RepairToolResults).
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, body []byte, bypassed bool, cp *capture, tn *Tenancy, session string, lg *slog.Logger) {
 	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
 	// it is advertised on the outgoing request. Those used to be different conditions —
@@ -1257,8 +1263,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	var sp *sseSplicer
 	// The events the current round withheld, hoisted out of the loop: once a stream is open,
 	// EVERY way this request can end has to end it with a complete turn, and these are the
-	// bytes that do it.
-	var withheld []byte
+	// bytes that do it. prevWithheld keeps the round before's, because a continuation round
+	// that carries no terminator of its own leaves the earlier round's message_stop as the
+	// only one the client will ever get.
+	var withheld, prevWithheld []byte
 	defer func() {
 		// Hand the finished request to the keep-alive. Last, so `body` is the bytes that
 		// actually went upstream on the final round (an expand round rewrites it) and the
@@ -1374,6 +1382,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				sp = newSSESplicer(w)
 			}
 			sp.round(resp)
+			// The PREVIOUS round's withheld events, because pass is about to overwrite
+			// withheld and round 1's message_stop may be the only terminator this client
+			// will ever get (see the terminator check below).
+			prevWithheld = withheld
 			respBody, withheld, found = sp.pass(resp.Body, expand.ToolName)
 			resp.Body.Close()
 			switch {
@@ -1428,6 +1440,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if found && h.agg != nil {
 				h.agg.RecordSSEExpandAfterStream()
 			}
+			sp.terminate(prevWithheld)
 			return
 		}
 		// bail is what the client gets when the loop cannot answer after all. On a spliced

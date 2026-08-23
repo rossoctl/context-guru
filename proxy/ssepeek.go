@@ -73,6 +73,10 @@ import (
 //   - Same for a stream that will not reconstruct, a Continuation that will not build, and
 //     the round cap. (`got == 0` is NOT one of them: a call that resolves nothing continues
 //     with a placeholder tool_result, so that turn completes.)
+//   - A block the model generated AFTER the expand call is withheld with it and, on a
+//     successful continuation, never reaches the client — while the continuation DID send it
+//     back upstream, so the model believes it said something the client never saw. The
+//     realistic shape is thinking interleaved after a tool call.
 //   - Non-Anthropic event streams are not inspected at all: AggregateSSE only reconstructs
 //     the Anthropic dialect, so there is nothing the loop could read even if we held the
 //     bytes.
@@ -103,6 +107,7 @@ type sseSplicer struct {
 	flush    http.Flusher
 	headers  bool      // response headers and status are on the wire
 	msgStart bool      // the client has its message_start
+	ended    bool      // a message_stop has gone out: the client's turn is closed
 	blocks   int       // content blocks the client holds
 	base     int       // index offset applied to the round being forwarded
 	first    time.Time // when the client got its first byte
@@ -244,7 +249,7 @@ func (sp *sseSplicer) rewrite(ev []byte) ([]byte, bool) {
 	// counting starts alone is exact. Every delta of a long turn skips the parse below, which
 	// is not a micro-optimisation: a 2.25 MB round is ~18,750 events and building each
 	// event's payload string cost 1.6x the stream, twice over.
-	if sp.base == 0 && !bytes.Contains(ev, []byte("_start")) {
+	if sp.base == 0 && !bytes.Contains(ev, []byte("_start")) && !bytes.Contains(ev, []byte("message_stop")) {
 		return ev, true
 	}
 	payload := sseEventPayload(ev)
@@ -258,6 +263,8 @@ func (sp *sseSplicer) rewrite(ev []byte) ([]byte, bool) {
 			return nil, false
 		}
 		sp.msgStart = true
+	case "message_stop":
+		sp.ended = true
 	case "content_block_start", "content_block_delta", "content_block_stop":
 		idx := int(p.Get("index").Int()) + sp.base
 		if idx >= sp.blocks {
@@ -321,4 +328,32 @@ func startsExpandCall(ev []byte, expandTool string) bool {
 	}
 	cb := p.Get("content_block")
 	return cb.Get("type").String() == "tool_use" && cb.Get("name").String() == expandTool
+}
+
+// terminate closes the client's turn if nothing has. A continuation round is not obliged to
+// carry a message_stop — it can come back empty, truncated, or in another dialect — and the
+// round whose terminator the splice withheld is the only other place one exists. Without
+// this the client is left with a half-open message, which is worse than the leaked tool_use
+// it replaced: on main those rounds cannot arise at all.
+func (sp *sseSplicer) terminate(withheld []byte) {
+	if sp.ended || !sp.msgStart {
+		return
+	}
+	// Only the CLOSING events, never the content: the withheld bytes begin with the expand
+	// call, which is the one block the client must not receive. So this closes the message
+	// with the model's own message_delta and message_stop and invents nothing.
+	br := bufio.NewReader(bytes.NewReader(withheld))
+	var ev bytes.Buffer
+	for {
+		e, err := readSSEEvent(br, &ev)
+		if len(e) > 0 {
+			switch gjson.Parse(sseEventPayload(e)).Get("type").String() {
+			case "message_delta", "message_stop":
+				sp.forward(e)
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }

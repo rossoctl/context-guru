@@ -279,6 +279,16 @@ func MarkKeptVerbatim(st store.Store, original string) {
 	st.Put(keptKey(contentKey(original)), []byte{1})
 }
 
+// KeptVerbatim reports whether this content has already been marked. The expand repair reads
+// it to charge a restored original to the dashboard ONCE: the client keeps its own copy of the
+// error, so the same repair runs on every later turn, and counting each one drives the
+// headline savings arbitrarily negative (ExpandTokens is subtracted from a unique-counted
+// total, so the units do not even match).
+func KeptVerbatim(st store.Store, original string) bool {
+	_, ok := st.Get(keptKey(contentKey(original)))
+	return ok
+}
+
 func isKeptVerbatim(c *components.Ctx, ck string) bool {
 	_, ok := c.Store.Get(keptKey(ck))
 	return ok

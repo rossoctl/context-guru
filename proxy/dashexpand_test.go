@@ -88,3 +88,59 @@ func TestDashboardRecordsExpands(t *testing.T) {
 			o.SavedAdjusted, o.SavedUnique)
 	}
 }
+
+// F2: the client keeps its own copy of `No such tool available`, so the repair runs again on
+// every later turn that re-sends the transcript. Charging the restored tokens each time drives
+// SavedAdjusted (SavedUnique − ExpandTokens) arbitrarily negative — and the units do not even
+// match, because SavedUnique is counted once per distinct content and this would be counted
+// once per turn. The recovery is charged the FIRST time and not again.
+func TestTheRepairChargesTheRestoredTokensOnce(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer up.Close()
+
+	h, rec := dashHandler(t, up.URL, dash.Options{})
+	h.store.Put("HASH", []byte(strings.Repeat("the original content that had to come back\n", 20)))
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	// The turn a client produces after receiving our own tool_use: its error, answered.
+	body := `{"model":"gpt-x","tools":[{"type":"function","function":{"name":"read_file"}}],"messages":[` +
+		`{"role":"user","content":"go"},` +
+		`{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{` +
+		`"name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"}}]},` +
+		`{"role":"tool","tool_call_id":"call_1","content":"Error: No such tool available: context_guru_expand"}]}`
+	for i := 0; i < 3; i++ {
+		resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	waitForRows(t, rec, 3)
+
+	o, err := rec.DB().Overview(dash.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Expands != 1 {
+		t.Fatalf("three turns repairing ONE stale error is one recovery, got expands=%d", o.Expands)
+	}
+	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charged := 0
+	for _, e := range page.Requests {
+		if e.ExpandTokens > 0 {
+			charged++
+		}
+	}
+	if charged != 1 {
+		t.Fatalf("%d of 3 rows carry expand_tokens; only the turn the original first came "+
+			"back may be charged", charged)
+	}
+}
