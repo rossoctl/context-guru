@@ -218,6 +218,25 @@ func TestTheReplayCeilingCountsAgentTurnsNotPings(t *testing.T) {
 		t.Errorf("a ping BEFORE the reduction changed the ceiling: %d -> %d; only LATER rows can "+
 			"replay it", a.ReplayProjectedTokens, c.ReplayProjectedTokens)
 	}
+	// And the correction is deliberately NOT scoped to the window, because the main query's inner
+	// count is not either: it counts every later turn in the SESSION, so a ping that falls outside
+	// the filtered slice still inflates a ceiling computed inside it. Scoping the correction to the
+	// window is the plausible-looking change that would silently stop correcting exactly here.
+	clipped := Filter{TenantAll: true, Since: 950_000, Until: 1_140_000}
+	d, err := with.db.Overview(clipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := without.db.Overview(clipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.ReplayProjectedTokens != e.ReplayProjectedTokens {
+		t.Errorf("with a window that CLIPS THE PING OUT the ceiling still moved: %d -> %d. The "+
+			"inner count spans the whole session, so a ping outside the window inflates it just "+
+			"the same and the correction has to reach outside too", e.ReplayProjectedTokens,
+			d.ReplayProjectedTokens)
+	}
 }
 
 // The headline takes the keep-alive's NET and not its gross, so a window where the pings cost
@@ -745,5 +764,220 @@ func TestKeepAliveRoutesAnswerOnAnEmptyDatabase(t *testing.T) {
 		if !json.Valid(w.Body.Bytes()) {
 			t.Errorf("%s did not answer with JSON: %s", path, w.Body)
 		}
+	}
+}
+
+// The calculator's PINGS column is a policy somebody could actually run.
+//
+// It was a LAG over `requests`, which is wrong in both directions at once and the errors do not
+// cancel:
+//
+//   - a LAG span exists only BETWEEN two requests, so it charged nothing for a session-final
+//     request — where a live policy must send K, because it cannot know the session ended.
+//     7,782 of the 9,234 pings in the adjudicated replay were session-final.
+//   - it applied no gate, charging pings on the turn-0 and small-prefix spans that the shipped
+//     `turn >= 1 AND prefix >= 20k` never touches.
+//
+// Net on the production corpus: 1,452 pings against a blanket policy's 9,234, a 6.4x under-count
+// that turned the panel's +$70 headline into -$785. NET = SAVED - PINGS x EACH, so a ping count
+// that under-states by 6.4x does not make the column approximate, it flips its sign.
+//
+// The fixture separates the two errors: the gated session's spans differ between the LAG and LEAD
+// forms, and the small-prefix session is charged by one form and not the other.
+func TestTheCalculatorChargesThePingsAPolicyWouldActuallySend(t *testing.T) {
+	const t0 = int64(1_700_000_000_000)
+	sec := func(n int64) int64 { return n * 1000 }
+	evs := []*Event{
+		// A gated session: prefix 50k throughout. turn 0, then a 300 s gap, then a 1000 s gap,
+		// then nothing — the last request opens a span a live policy pings in and never closes.
+		kaAgent(t0, "big", 0.10),
+		kaAgent(t0+sec(300), "big", 0.10),
+		kaAgent(t0+sec(1300), "big", 0.10),
+		// Below the 20k prefix floor: the shipped gate never pings this session at all.
+		smallPrefix(kaAgent(t0, "small", 0.10)),
+		smallPrefix(kaAgent(t0+sec(1000), "small", 0.10)),
+	}
+	fx := newKAFixture(t, evs...)
+	calc, err := fx.db.KeepAliveCalc(Filter{TenantAll: true}, 280, 100_000, "aws/claude-sonnet-5",
+		func(string) (modelinfo.Price, bool) {
+			return modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}, true
+		}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row *CalcRow
+	for i := range calc.Rows {
+		if calc.Rows[i].MaxPings == 2 {
+			row = &calc.Rows[i]
+		}
+	}
+	if row == nil {
+		t.Fatal("no K=2 rung on the ladder")
+	}
+	// "big" turn 1 opens a 1000 s span (2 pings at K=2) and turn 2 opens an unbounded one (K=2).
+	// turn 0 is not pingable and "small" never reaches the prefix floor.
+	if row.Pings != 4 {
+		t.Errorf("PINGS at K=2 = %d, want 4: two from the gated session's 1000 s span and two "+
+			"from its session-final span. 3 is the LAG form (it charges turn 0's span and none "+
+			"of the session-final one); 5 adds the sub-floor session the gate never touches",
+			row.Pings)
+	}
+	// And the money follows the count, so the column cannot be right while NET is wrong.
+	if want := float64(row.Pings) * calc.PingUSDEach; math.Abs(row.PingUSD-want) > 1e-12 {
+		t.Errorf("PING COST = %.6f, want pings x each = %.6f", row.PingUSD, want)
+	}
+	if want := row.SavedUSD - row.PingUSD; math.Abs(row.NetUSD-want) > 1e-12 {
+		t.Errorf("NET = %.6f, want SAVED - PING COST = %.6f", row.NetUSD, want)
+	}
+}
+
+// smallPrefix drops a fixture row's billed prefix below the replay gate's floor.
+func smallPrefix(e *Event) *Event {
+	e.CacheRead, e.CacheWrite = 1_000, 0
+	return e
+}
+
+// The replay gate is the request path's gate. A drift here is a calculator modelling a policy
+// nobody runs, which is the whole of F5.
+func TestTheReplayGateMatchesTheShippedPolicy(t *testing.T) {
+	if kaGateMinPrefix != 20000 {
+		t.Errorf("kaGateMinPrefix = %d; config.DefaultKeepAliveMinPrefix is 20000 and the replay "+
+			"has to gate on what the request path gates on", kaGateMinPrefix)
+	}
+}
+
+// The live panel's arithmetic: which lifetime is in force, what is left of it, and the breakeven.
+//
+// Three things it has to get right, and each has a wrong answer that looks plausible on screen:
+//
+//   - the TTL in force is the tier this session's MOST RECENT WRITE landed in, read off
+//     cache_write_1h. Not configuration: a `ttl: "1h"` request that the model does not support
+//     comes back a perfectly normal 200 with the entry granted for five minutes, so the billed
+//     tier is the only honest source. A later 5-minute write REPLACES an earlier one-hour entry.
+//   - the lifetime runs from the request's START, per the provider's documented rule, and an
+//     entry whose life has already elapsed is not returned at all.
+//   - the breakeven is MissUSD / PingUSDEach, and it is what the whole panel exists to say.
+func TestTheLivePanelPricesOneSessionsOwnBreakeven(t *testing.T) {
+	now := int64(1_700_000_000_000)
+	ago := func(sec int64) int64 { return now - sec*1000 }
+	// A session's last request: 100k of billed prefix, written at the tier `oneHour` names.
+	live := func(ts int64, session string, read, write, write1h int64) *Event {
+		e := kaAgent(ts, session, 0.10)
+		e.CacheRead, e.CacheWrite, e.CacheWrite1h = read, write, write1h
+		return e
+	}
+	fx := newKAFixture(t,
+		// Five-minute entry, 100 s old: 200 s left.
+		live(ago(100), "five", 0, 100_000, 0),
+		// One-hour entry, 100 s old, and its last request is a pure READ — the tier is the one
+		// the entry was WRITTEN at, and a read refreshes it at that same tier.
+		live(ago(400), "hour", 0, 100_000, 100_000),
+		live(ago(100), "hour", 100_000, 0, 0),
+		// An hour-long entry REPLACED by a later five-minute write. The most recent write decides,
+		// so this session has 200 s left and not 3500.
+		live(ago(400), "downgraded", 0, 100_000, 100_000),
+		live(ago(100), "downgraded", 0, 100_000, 0),
+		// Written 400 s ago at five minutes: gone, and not a row.
+		live(ago(400), "lapsed", 0, 100_000, 0),
+	)
+	price := func(string) (modelinfo.Price, bool) {
+		// 0.1x read, 1.25x write, on a $3/MTok input rate: the shipped Anthropic shape.
+		return modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}, true
+	}
+	got, err := fx.db.KeepAliveLive(Filter{TenantAll: true}, now, 280, 2, price)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]KeepAliveLiveRow{}
+	for _, r := range got.Rows {
+		rows[r.SessionID] = r
+	}
+	if _, ok := rows["lapsed"]; ok {
+		t.Error("a session whose entry expired 100 s ago is on the live list; the page would be " +
+			"stating a lifetime that has already elapsed")
+	}
+	for _, c := range []struct {
+		session   string
+		ttl       int64
+		remaining float64
+	}{
+		{"five", 300, 200},
+		{"hour", 3600, 3500},
+		{"downgraded", 300, 200},
+	} {
+		r, ok := rows[c.session]
+		if !ok {
+			t.Errorf("session %q is missing from the live list", c.session)
+			continue
+		}
+		if r.TTLSeconds != c.ttl {
+			t.Errorf("%s: ttl_seconds = %d, want %d — the tier in force is the one this "+
+				"session's MOST RECENT write was billed at", c.session, r.TTLSeconds, c.ttl)
+		}
+		if math.Abs(r.RemainingSeconds-c.remaining) > 0.001 {
+			t.Errorf("%s: remaining_seconds = %.3f, want %.3f — measured from the request's "+
+				"START, which is what the provider measures it from", c.session,
+				r.RemainingSeconds, c.remaining)
+		}
+	}
+	// The breakeven, in full, on the five-minute row. Both terms scale with the prefix, so this
+	// is a ratio of the model's own rates and it comes out the same on any session on this model:
+	// a lapse costs 11.49 pings, so eleven pings are cheaper than letting it go.
+	r := rows["five"]
+	if !r.Priced {
+		t.Fatal("the row is not priced; every figure below is vacuous")
+	}
+	for _, c := range []struct {
+		name      string
+		got, want float64
+		why       string
+	}{
+		{"ping_usd_each", r.PingUSDEach, 100_000*3e-7 + 15e-6,
+			"the prefix at the cache-READ rate plus the one output token the ping asks for"},
+		{"miss_usd", r.MissUSD, 100_000 * (3.75e-6 - 3e-7),
+			"the avoidable WRITE PREMIUM, not the whole re-read: a resuming request pays to " +
+				"read its prefix either way"},
+		{"breakeven_minutes", r.BreakevenMinutes, (11*280 + 300) / 60.0,
+			"K x X + TTL at the breakeven count, which is the idle time one lapse pays to bridge"},
+		{"breakeven_1h_minutes", r.Breakeven1hMinutes, (18*280 + 3600) / 60.0,
+			"an hour-long entry needs a ping only once an hour, so the same pings bridge " +
+				"twelve times the wall clock"},
+	} {
+		if math.Abs(c.got-c.want) > 1e-9 {
+			t.Errorf("%s = %.9f, want %.9f: %s", c.name, c.got, c.want, c.why)
+		}
+	}
+	if r.BreakevenPings != 11 {
+		t.Errorf("breakeven_pings = %d, want 11: one lapse costs $%.6f and one ping $%.6f, so "+
+			"11.49 pings are what a lapse buys and eleven of them are cheaper than it",
+			r.BreakevenPings, r.MissUSD, r.PingUSDEach)
+	}
+	// A one-hour entry is dearer to re-create (2.0x base against 1.25x), so a lapse pays for MORE
+	// pings — the figure has to move in that direction and by that amount.
+	if r.Breakeven1hPings != 18 {
+		t.Errorf("breakeven_1h_pings = %d, want 18: a 1h write is 2.0x base input against the "+
+			"5m tier's 1.25x, so the premium at risk is larger", r.Breakeven1hPings)
+	}
+	// The warning's totals are the SERVER's, not a sum the browser assembled: "five" and
+	// "downgraded" have 200 s left, inside the 330 s threshold; "hour" has 3500 s and is not.
+	if got.Soon != 2 {
+		t.Errorf("soon = %d, want 2 — the two five-minute rows are inside the %.0f s threshold "+
+			"and the one-hour row is not", got.Soon, got.SoonSeconds)
+	}
+	if want := 2 * rows["five"].MissUSD; math.Abs(got.SoonUSD-want) > 1e-9 {
+		t.Errorf("soon_usd = %.6f, want %.6f: the write premium of the two rows about to lapse",
+			got.SoonUSD, want)
+	}
+	if want := 3 * rows["five"].MissUSD; math.Abs(got.PotentialUSD-want) > 1e-9 {
+		t.Errorf("potential_usd = %.6f, want %.6f: every live row, not only the urgent ones",
+			got.PotentialUSD, want)
+	}
+	if got.Now != now || got.IdleSeconds != 280 || got.MaxPings != 2 {
+		t.Errorf("the policy and the clock the figures were computed at are not on the wire: %+v",
+			struct {
+				Now         int64
+				IdleSeconds float64
+				MaxPings    int
+			}{got.Now, got.IdleSeconds, got.MaxPings})
 	}
 }

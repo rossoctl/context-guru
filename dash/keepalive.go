@@ -699,6 +699,227 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	return out, nil
 }
 
+// ttlTTL1h is the provider's extended prompt-cache lifetime, for sessions whose last write
+// landed in the one-hour tier.
+const ttlTTL1h = time.Hour
+
+// write1hMultiple is the provider's published price for a ONE-HOUR cache write: 2.0x base
+// input, against 1.25x for the five-minute tier and 0.1x for a read.
+//
+// Derived from Input rather than read off the operator's price list, because the list carries
+// one `cache_write` rate per model and it is the 5-minute one — which is what the provider
+// bills for the tier this service's models actually grant. Any 1-hour figure on this page is
+// therefore explicitly a "what it would be" and is labelled as one.
+const write1hMultiple = 2.0
+
+// KeepAliveLiveRow is one session that may still hold a provider cache entry RIGHT NOW: which
+// lifetime is in force on it, how long that entry has left, and what one ping and one lapse
+// would each cost on this session's own prefix at its own model's rates.
+//
+// The economics are per SESSION and never blended, for the reason the calculator refuses to
+// average a prefix: per-ping cost is bimodal (p50 $0.0004, p99 $0.2275), so a service-wide
+// average is a number that describes no session on the list.
+type KeepAliveLiveRow struct {
+	SessionID string `json:"session_id"`
+	TenantID  string `json:"tenant_id"`
+	Model     string `json:"model"`
+	Turns     int64  `json:"turns"`
+	// LastTS is the last real request's START, which is what the provider measures the lifetime
+	// from — not the end of its response. A response that streamed for four minutes has already
+	// spent four minutes of its own entry's life.
+	LastTS int64 `json:"last_ts"`
+	// Prefix is that request's billed prefix (cache_read + cache_write): the size of the entry
+	// at risk, in the provider's own units. Never tokens_before, which is message text only and
+	// runs a median 3.38x low.
+	Prefix int64 `json:"prefix_tokens"`
+	// TTLSeconds is the lifetime IN FORCE: 3600 when this session's most recent write landed in
+	// the one-hour tier, 300 otherwise. Read off cache_write_1h rather than off configuration,
+	// because a `ttl: "1h"` request that the model does not support is granted as a 5-minute
+	// entry with a perfectly normal 200 — the tier billed is the only honest source.
+	TTLSeconds int64 `json:"ttl_seconds"`
+	// RemainingSeconds is what is left of it. Rows at or below zero are not returned: the entry
+	// is gone and the page would be stating a lifetime that has already elapsed.
+	RemainingSeconds float64 `json:"remaining_seconds"`
+	// Pings/PingUSD/SavedUSD are this session's keep-alive history in the window. Whether it is
+	// armed RIGHT NOW is not here: that lives in the proxy's control plane, which the dashboard
+	// does not read — the page joins the two, from /api/me/keepalive/sessions.
+	Pings    int64   `json:"pings"`
+	PingUSD  float64 `json:"ping_usd"`
+	SavedUSD float64 `json:"saved_usd"`
+	// Priced false means this model has no rate on the operator's list, and then EVERY dollar
+	// below is omitted rather than defaulted. A blended rate here is the defect class this
+	// project has hit five times.
+	Priced bool `json:"priced"`
+	// PingUSDEach is one ping on this prefix: the prefix at the model's cache-READ rate plus the
+	// single output token the ping asks for. MissUSD is what letting the entry lapse costs — the
+	// avoidable WRITE PREMIUM, prefix x (cache_write - cache_read), and not the whole re-read,
+	// because a resuming request pays to read its prefix either way.
+	PingUSDEach float64 `json:"ping_usd_each,omitempty"`
+	MissUSD     float64 `json:"miss_usd,omitempty"`
+	// BreakevenPings is how many pings one lapse pays for: MissUSD / PingUSDEach, floored. It is
+	// THE number that decides whether to arm, and it is nearly prefix-independent — both terms
+	// scale with the prefix, so it collapses to a ratio of the model's own rates.
+	// BreakevenMinutes is the idle time that many pings bridges at the current policy.
+	BreakevenPings   int64   `json:"breakeven_pings,omitempty"`
+	BreakevenMinutes float64 `json:"breakeven_minutes,omitempty"`
+	// The same pair for a ONE-HOUR entry, which is strictly a "what it would be" on a deployment
+	// whose models grant 5 minutes: a 1h write costs 2.0x base against 1.25x, so a lapse is
+	// dearer and pays for more pings, and each ping buys an hour instead of five minutes.
+	Breakeven1hPings   int64   `json:"breakeven_1h_pings,omitempty"`
+	Breakeven1hMinutes float64 `json:"breakeven_1h_minutes,omitempty"`
+}
+
+// KeepAliveLive is the live-session answer: the rows, and the clock they were computed against.
+type KeepAliveLive struct {
+	// Now is the server's clock at read time. On the wire so the page can count down without
+	// drifting against a browser clock that may be minutes out — a countdown computed from the
+	// client's own clock is how a "2 minutes left" reads on a session that expired ten ago.
+	Now int64 `json:"now"`
+	// IdleSeconds and MaxPings are the policy the reach figures are computed at.
+	IdleSeconds float64 `json:"idle_seconds"`
+	MaxPings    int     `json:"max_pings"`
+	// SoonSeconds is the threshold the page warns at.
+	SoonSeconds float64 `json:"soon_seconds"`
+	// Soon and SoonUSD are the expiry warning: how many rows are inside SoonSeconds of lapsing
+	// and what they would pay to re-create what they are about to lose. PotentialUSD is the same
+	// figure over every live row.
+	//
+	// Summed HERE and not in the browser. The tab's rule is that the server owns every dollar on
+	// the page (see renderKACalcControls: "nothing below multiplies a dollar by anything"), and
+	// a total assembled client-side is a figure with no test behind it — which is how a
+	// denominator came to be the twenty rows a table happened to be showing.
+	Soon         int64   `json:"soon"`
+	SoonUSD      float64 `json:"soon_usd"`
+	PotentialUSD float64 `json:"potential_usd"`
+	// SoonUnpriced counts rows inside the warning whose model has no rate, so the page can say
+	// the total excludes them rather than implying it covers everything.
+	SoonUnpriced int64              `json:"soon_unpriced"`
+	Rows         []KeepAliveLiveRow `json:"rows"`
+}
+
+// keepAliveSoon is how much of an entry's life left counts as "about to expire".
+//
+// One idle interval plus the margin a ping needs to land: below this, the next ping is the last
+// one that can still reach the entry, so it is the last moment arming can change the outcome.
+const keepAliveSoon = 330 * time.Second
+
+// KeepAliveLive lists the sessions whose provider cache entry has not yet lapsed.
+//
+// `now` is passed in rather than read, for the same reason the keeper's clock is: a function
+// that reads the wall clock cannot be tested against a fixture.
+func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings int,
+	price func(string) (modelinfo.Price, bool)) (*KeepAliveLive, error) {
+	if idleSeconds <= 0 {
+		idleSeconds = recIdleSeconds
+	}
+	if maxPings <= 0 {
+		maxPings = recMaxPings
+	}
+	out := &KeepAliveLive{Now: now, IdleSeconds: idleSeconds, MaxPings: maxPings,
+		SoonSeconds: keepAliveSoon.Seconds(), Rows: []KeepAliveLiveRow{}}
+	cond, args := f.where()
+	// One pass. The partition is (tenant, session) exactly as everywhere else on this tab, and
+	// the three window MAXes answer "which tier is in force" without a query per row: the entry's
+	// lifetime is the one it was WRITTEN at, and a read refreshes it at that same tier, so the
+	// tell is whether this session's most recent write was a one-hour write.
+	rows, err := d.sql.Query(`WITH t AS (
+		SELECT r.session_id AS session_id, r.tenant_id AS tenant_id, r.ts AS ts, r.model AS model,
+		       r.cache_read + r.cache_write AS prefix,
+		       ROW_NUMBER() OVER w AS rn,
+		       COUNT(*) OVER w2 AS turns,
+		       MAX(r.ts) OVER w2 AS last_ts,
+		       MAX(CASE WHEN r.cache_write > 0 THEN r.ts ELSE 0 END) OVER w2 AS last_write_ts,
+		       MAX(CASE WHEN r.cache_write_1h > 0 THEN r.ts ELSE 0 END) OVER w2 AS last_1h_ts
+		FROM requests r WHERE `+cond+` AND r.session_id <> ''
+		WINDOW w AS (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts DESC, r.id DESC),
+		       w2 AS (PARTITION BY r.tenant_id, r.session_id))
+		SELECT session_id, tenant_id, model, turns, ts, prefix,
+		       CASE WHEN last_1h_ts > 0 AND last_1h_ts = last_write_ts THEN 1 ELSE 0 END
+		FROM t WHERE rn = 1 AND ts >= ?
+		ORDER BY prefix DESC, session_id`,
+		append(args, now-ttlTTL1h.Milliseconds())...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r KeepAliveLiveRow
+		var oneHour int
+		if err := rows.Scan(&r.SessionID, &r.TenantID, &r.Model, &r.Turns, &r.LastTS,
+			&r.Prefix, &oneHour); err != nil {
+			return nil, err
+		}
+		ttl := ttlTTL
+		if oneHour == 1 {
+			ttl = ttlTTL1h
+		}
+		r.TTLSeconds = int64(ttl.Seconds())
+		r.RemainingSeconds = float64(r.LastTS+ttl.Milliseconds()-now) / 1000
+		if r.RemainingSeconds <= 0 {
+			continue // the entry is gone; a lifetime that has elapsed is not a lifetime in force
+		}
+		if price != nil && r.Model != "" && r.Prefix > 0 {
+			if p, ok := price(r.Model); ok && !p.Zero() {
+				r.Priced = true
+				// The ping as the request path actually sends it: max_tokens 1, so one output
+				// token is billed. max_tokens 0 is accepted by this gateway and bills none, but
+				// the figure has to match what is sent, not the cheapest shape available.
+				r.PingUSDEach = float64(r.Prefix)*p.CacheRead + p.Output
+				r.MissUSD = float64(r.Prefix) * (p.CacheWrite - p.CacheRead)
+				if r.PingUSDEach > 0 {
+					r.BreakevenPings = int64(r.MissUSD / r.PingUSDEach)
+					r.BreakevenMinutes = CoverageSeconds(idleSeconds, int(r.BreakevenPings)) / 60
+					miss1h := float64(r.Prefix) * (p.Input*write1hMultiple - p.CacheRead)
+					r.Breakeven1hPings = int64(miss1h / r.PingUSDEach)
+					// An hour-long entry needs a ping only once an hour, so the same count of
+					// pings bridges twelve times the wall clock: K x X per span still, but the
+					// lifetime the last one refreshes is 3600 s and not 300.
+					if r.Breakeven1hPings > 0 {
+						r.Breakeven1hMinutes = (float64(r.Breakeven1hPings)*idleSeconds +
+							ttlTTL1h.Seconds()) / 60
+					}
+				}
+			}
+		}
+		out.PotentialUSD += r.MissUSD
+		if r.RemainingSeconds <= out.SoonSeconds {
+			out.Soon++
+			out.SoonUSD += r.MissUSD
+			if !r.Priced {
+				out.SoonUnpriced++
+			}
+		}
+		out.Rows = append(out.Rows, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out.Rows) == 0 {
+		return out, nil
+	}
+	// This session's own keep-alive history, from the same two queries the concentration table
+	// uses, so the two panels cannot disagree about what a session's pings cost.
+	saved, err := d.sumBySession(cond, args, "r.keepalive_saved_usd", "r.keepalive_saved_usd > 0")
+	if err != nil {
+		return nil, err
+	}
+	kaCond, kaArgs := withKeepAlive(f).where()
+	spent, err := d.sumBySession(kaCond, kaArgs, "r.cost_usd", "r.keepalive = 1")
+	if err != nil {
+		return nil, err
+	}
+	pings, err := d.countBySession(kaCond, kaArgs, "r.keepalive = 1")
+	if err != nil {
+		return nil, err
+	}
+	for i := range out.Rows {
+		id := out.Rows[i].SessionID
+		out.Rows[i].SavedUSD, out.Rows[i].PingUSD = saved[id], spent[id]
+		out.Rows[i].Pings = pings[id]
+	}
+	return out, nil
+}
+
 // countBySession counts rows per session under an extra predicate.
 func (d *DB) countBySession(cond string, args []any, extra string) (map[string]int64, error) {
 	rows, err := d.sql.Query(`SELECT r.session_id, COUNT(*) FROM requests r
@@ -747,6 +968,75 @@ func PingsPerSpan(gap, idleSeconds float64, maxPings int) int {
 	return n
 }
 
+// kaGateMinPrefix is the billed-prefix floor a replay gates on: the shipped default, mirroring
+// config.DefaultKeepAliveMinPrefix, which this package may not import. Pinned by
+// TestTheReplayGateMatchesTheShippedPolicy.
+const kaGateMinPrefix = 20000
+
+// pingSpan is one idle span a live keep-alive would send pings in.
+type pingSpan struct {
+	session string
+	// gap is the seconds until the next request in the session. Open says there was none.
+	gap  float64
+	open bool
+}
+
+// pings is how many pings this span attracts under (X, K).
+//
+// An OPEN span gets the full K. That is the whole correction: a live policy cannot know a
+// session has ended, so it sends its K and stops — 7,782 of the 9,234 pings in the adjudicated
+// replay were session-final, and a LAG-based span list, which exists only BETWEEN two requests,
+// charges for none of them.
+func (s pingSpan) pings(idleSeconds float64, maxPings int) int {
+	if s.open {
+		return maxPings
+	}
+	return PingsPerSpan(s.gap, idleSeconds, maxPings)
+}
+
+// pingSpans is the ONE definition of "the idle spans a live keep-alive would ping in", shared by
+// the calculator and by the recommendation's bootstrap so the two cannot disagree about what a
+// policy costs.
+//
+// It replaced a LAG over `requests` that was wrong in both directions at once, and the two
+// errors did not cancel: it charged NO pings for a session-final request, where a live policy
+// must send K, and it charged pings on turn-0 and small-prefix spans that the shipped gate
+// (`turn >= 1 AND prefix >= MinPrefixTokens`) never touches. Replayed on the production corpus
+// the LAG form counted 1,452 pings against a blanket policy's 9,234 — a 6.4x under-count, enough
+// to flip the sign of the calculator's headline from +$70 to -$785.
+//
+// The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable().
+func (d *DB) pingSpans(f Filter, minPrefix int64) ([]pingSpan, error) {
+	cond, args := f.where()
+	// LEAD, not LAG: a span belongs to the request that OPENS it, which is the request the gate
+	// is evaluated on, and LEAD is NULL exactly on the session-final row.
+	rows, err := d.sql.Query(`WITH s AS (
+		SELECT r.session_id AS session_id,
+		       ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id
+		                          ORDER BY r.ts, r.id) - 1 AS turn,
+		       r.cache_read + r.cache_write AS prefix,
+		       (LEAD(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts, r.id)
+		         - r.ts) / 1000.0 AS gap_s
+		FROM requests r WHERE `+cond+`)
+		SELECT session_id, gap_s FROM s
+		WHERE turn >= 1 AND prefix >= ? AND (gap_s IS NULL OR gap_s > 0)`,
+		append(args, minPrefix)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []pingSpan
+	for rows.Next() {
+		var sess string
+		var gap sql.NullFloat64
+		if err := rows.Scan(&sess, &gap); err != nil {
+			return nil, err
+		}
+		out = append(out, pingSpan{session: sess, gap: gap.Float64, open: !gap.Valid})
+	}
+	return out, rows.Err()
+}
+
 // CalcRow is one rung of the K ladder.
 type CalcRow struct {
 	MaxPings int     `json:"max_pings"`
@@ -757,10 +1047,14 @@ type CalcRow struct {
 	ConvertibleUSD float64 `json:"convertible_usd"`
 	SharePct       float64 `json:"share_of_addressable_pct"`
 	Pings          int64   `json:"pings"`
-	PingUSD        float64 `json:"ping_usd"`
-	SavedUSD       float64 `json:"saved_usd"`
-	NetUSD         float64 `json:"net_usd"`
-	Current        bool    `json:"current,omitempty"`
+	// omitempty on the three dollar fields, so an unpriced ladder puts no `0` on the wire at all.
+	// "A field that exists gets rendered" is this project's own rule, and a 0 that means "no rate
+	// on the operator's list" is the shape every zero-as-a-measurement defect on this dashboard has
+	// had. The UI gates on `priced` as well; both, because either alone has failed before.
+	PingUSD  float64 `json:"ping_usd,omitempty"`
+	SavedUSD float64 `json:"saved_usd,omitempty"`
+	NetUSD   float64 `json:"net_usd,omitempty"`
+	Current  bool    `json:"current,omitempty"`
 }
 
 // KeepAliveCalc is the calculator's whole answer.
@@ -826,28 +1120,12 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// EVERY idle span, not only the ones that expired: the ping cost is paid on all of them,
-	// and counting only the spans that paid off is how a calculator flatters its own feature.
-	var spans []float64
-	cond, args := f.where()
-	rows, err = d.sql.Query(`WITH s AS (
-		SELECT (r.ts - LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts))
-		         / 1000.0 AS gap_s
-		FROM requests r WHERE `+cond+`)
-		SELECT gap_s FROM s WHERE gap_s IS NOT NULL AND gap_s > 0`, args...)
+	// EVERY idle span the gate admits, not only the ones that expired: the ping cost is paid on
+	// all of them, and counting only the spans that paid off is how a calculator flatters its own
+	// feature. Session-final spans included — see pingSpans, and see the PINGS column's own note
+	// on the panel, which says which pings are counted.
+	spans, err := d.pingSpans(f, kaGateMinPrefix)
 	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var g float64
-		if err := rows.Scan(&g); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		spans = append(spans, g)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	if out.Priced {
@@ -866,8 +1144,8 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		if out.AddressableUSD > 0 {
 			row.SharePct = 100 * row.ConvertibleUSD / out.AddressableUSD
 		}
-		for _, g := range spans {
-			row.Pings += int64(PingsPerSpan(g, idleSeconds, k))
+		for _, sp := range spans {
+			row.Pings += int64(sp.pings(idleSeconds, k))
 		}
 		if out.Priced {
 			row.PingUSD = float64(row.Pings) * out.PingUSDEach
@@ -978,8 +1256,11 @@ const (
 type KeepAliveRecommendation struct {
 	// Refused is the reason, when there is one. Its presence is the branch.
 	Refused string `json:"refused,omitempty"`
-	// IdleSeconds and MaxPings are the recommendation. K = 1 is NEVER returned: one ping
-	// reaches about 4.7 minutes, inside the free TTL, and it is -$71 service-wide.
+	// IdleSeconds and MaxPings are the recommendation. K = 1 is NEVER returned, and the reason
+	// is REACH, not a loss: coverage is K*X + TTL, so one ping reaches 580 s against two pings'
+	// 860 s. The "4.7 minutes / -$71 service-wide" this comment used to give is the K*X coverage
+	// error CoverageSeconds exists to refuse — under correct coverage K=1 is +$101.56 in the
+	// adjudicated sweep and K=2 is +$170.08, so K=2 dominates on size and not on sign.
 	IdleSeconds int `json:"idle_seconds,omitempty"`
 	MaxPings    int `json:"max_pings,omitempty"`
 	// LoUSD/HiUSD is the 90% interval over a window like this one. A RANGE, always, and the UI
@@ -1072,12 +1353,31 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 	if err != nil {
 		return nil, err
 	}
-	spans, err := d.spansBySession(f)
+	spans, err := d.pingSpans(f, kaGateMinPrefix)
 	if err != nil {
 		return nil, err
 	}
-	keys := make([]string, 0, len(bySession))
+	bySpan := map[string][]pingSpan{}
+	for _, sp := range spans {
+		bySpan[sp.session] = append(bySpan[sp.session], sp)
+	}
+	// The resampling unit is EVERY session in the window, not only the ones that expired.
+	//
+	// Resampling only the sessions with an addressable expiry drew the saving side and the cost
+	// side from different populations: it charged ping cost over 53 of 3,891 sessions and omitted
+	// 42.4% of even the intra-session pings, on top of every session-final one. Both omissions
+	// push the interval UP — the direction that makes the rule fire when it should refuse — and
+	// condition 3 is the load-bearing test that decides whether this is recommended at all.
+	// Resampling over sessions with zero expiries is exactly how a bootstrap sees the cost side.
+	all := map[string]bool{}
 	for s := range bySession {
+		all[s] = true
+	}
+	for s := range bySpan {
+		all[s] = true
+	}
+	keys := make([]string, 0, len(all))
+	for s := range all {
 		keys = append(keys, s)
 	}
 	sort.Strings(keys) // deterministic draw order for a given seed
@@ -1089,8 +1389,8 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 				v += m.usd * recRecoverableShare
 			}
 		}
-		for _, g := range spans[s] {
-			v -= float64(PingsPerSpan(g, recIdleSeconds, k)) * pingUSD
+		for _, sp := range bySpan[s] {
+			v -= float64(sp.pings(recIdleSeconds, k)) * pingUSD
 		}
 		return v
 	}
@@ -1189,31 +1489,6 @@ func (d *DB) medianPingUSD(f Filter) (float64, error) {
 		return 0, err
 	}
 	return pctlF(xs, 0.50), nil
-}
-
-// spansBySession is every idle span per session, for the ping-cost half of a replay.
-func (d *DB) spansBySession(f Filter) (map[string][]float64, error) {
-	cond, args := f.where()
-	rows, err := d.sql.Query(`WITH s AS (
-		SELECT r.session_id,
-		       (r.ts - LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts))
-		         / 1000.0 AS gap_s
-		FROM requests r WHERE `+cond+`)
-		SELECT session_id, gap_s FROM s WHERE gap_s IS NOT NULL AND gap_s > 0`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string][]float64{}
-	for rows.Next() {
-		var s string
-		var g float64
-		if err := rows.Scan(&s, &g); err != nil {
-			return nil, err
-		}
-		out[s] = append(out[s], g)
-	}
-	return out, rows.Err()
 }
 
 // trimZero renders a number to at most one decimal place and drops a trailing ".0", so a band

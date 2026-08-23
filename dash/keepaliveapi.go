@@ -3,9 +3,10 @@ package dash
 import (
 	"net/http"
 	"strconv"
+	"time"
 )
 
-// The keep-alive tab's five read routes.
+// The keep-alive tab's six read routes.
 //
 // All in API.routes(), which is the table Mount walks AND the table both scoping tests walk —
 // TestEveryMountedRouteDeclaresItsScope and TestNoRouteServesContentTextFromAnUntrustedAddress.
@@ -23,6 +24,7 @@ func (a *API) keepAliveRoutes() []route {
 		{"GET /api/keepalive/behaviour", scopeTenant, a.keepAliveBehaviour},
 		{"GET /api/keepalive/sessions", scopeTenant, a.keepAliveSessions},
 		{"GET /api/keepalive/calc", scopeTenant, a.keepAliveCalc},
+		{"GET /api/keepalive/live", scopeTenant, a.keepAliveLive},
 		{"GET /api/keepalive/recommend", scopeTenant, a.keepAliveRecommend},
 	}
 }
@@ -114,7 +116,16 @@ func (a *API) keepAliveCalc(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		prefix, source = p, "account_median"
+		// "account_median" only when there IS one. On an account with no addressable expiry the
+		// median comes back 0, and labelling that a measurement is the same defect the whole tab
+		// polices: `prefix_source` is on the wire so nobody reads a typed number as a measured
+		// one, and it was reporting a measurement where there was no number at all.
+		prefix = p
+		if p > 0 {
+			source = "account_median"
+		} else {
+			source = "none"
+		}
 		// The account's own most-used model on those expiries, not a blend and not a default:
 		// without it the panel reported "not priced" on a deployment whose price list was fine,
 		// simply because nothing had named a model. Still refuses to invent a rate.
@@ -128,6 +139,30 @@ func (a *API) keepAliveCalc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out.PrefixSource = source
+	writeJSON(w, out)
+}
+
+// keepAliveLive serves the sessions whose provider cache entry has not lapsed yet: the lifetime
+// in force on each, what is left of it, and what one ping and one lapse cost on that session's
+// own prefix.
+//
+// x and k come from the caller's current policy, as on /behaviour, because the reach figures are
+// arithmetic on them. The clock is the SERVER'S: a countdown computed against a browser clock
+// that is minutes out reads "2 minutes left" on an entry that expired ten ago.
+func (a *API) keepAliveLive(w http.ResponseWriter, r *http.Request) {
+	f, _, ok := a.scope(r)
+	if !ok {
+		unauthorized(w)
+		return
+	}
+	q := r.URL.Query()
+	x, _ := strconv.ParseFloat(q.Get("x"), 64)
+	k, _ := strconv.Atoi(q.Get("k"))
+	out, err := a.rec.DB().KeepAliveLive(f, time.Now().UnixMilli(), x, k, a.priceFn(r))
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, out)
 }
 
