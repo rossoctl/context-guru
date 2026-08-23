@@ -111,6 +111,36 @@ func TestTheRemovalCommandIsInTheActionableList(t *testing.T) {
 	}
 }
 
+// TestTheRemovalSwitchIsNotRoleGated pins the assumption POST /api/toolfilter now rests on.
+//
+// That route accepts a plain account because this page OFFERS a plain account the switch: the
+// tab is mounted unconditionally, and the only thing that disables a checkbox is a provider-side
+// row or a proxy that reports no control. The route's permission was written to match. If a
+// role gate is ever added here, the two ends disagree in the direction that is invisible on
+// screen — every account still sees the analysis, managers still see a working switch, and a
+// user's switch silently does nothing but alert — which is the exact defect the route gate was.
+//
+// A static check because there is no DOM here, and a grep for the role helpers is enough: they
+// are the only way this view could learn a caller's role, since it is handed a report and a
+// control document and neither carries one.
+func TestTheRemovalSwitchIsNotRoleGated(t *testing.T) {
+	src := readUI(t, "ui/tools.js")
+	for _, gate := range []string{"isManager(", "wideScope(", "'manager'", `"manager"`} {
+		if strings.Contains(src, gate) {
+			t.Errorf("the Inventory view consults %s. Its switch is offered to every account "+
+				"and POST /api/toolfilter accepts every account to match; gating the control on "+
+				"a role here makes a user's switch a no-op that only alerts. Hide nothing, or "+
+				"change the route's permission with it.", gate)
+		}
+	}
+	// And the switch's own disabled condition must stay about the ROW and the PROXY, not the
+	// reader: `fixed` is a provider-side tool, `!tools.control` is a proxy offering no control.
+	if n := strings.Count(src, "disabled: fixed || !tools.control"); n != 2 {
+		t.Errorf("found %d of the 2 expected switch disabled conditions; if the condition moved, "+
+			"check it still turns on the row and the proxy rather than the reader's role", n)
+	}
+}
+
 func readUI(t *testing.T, name string) string {
 	t.Helper()
 	b, err := uiFS.ReadFile(name)
