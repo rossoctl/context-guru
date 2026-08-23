@@ -1465,7 +1465,7 @@ function copyBox(text, label) {
  * `state` is one of: 'idle' (not asked for yet), 'loading', 'ok', 'absent' (the endpoint is
  * not there — an older proxy), 'error'.
  */
-const prompt = { state: 'idle', view: null, byName: new Map() };
+const promptView = { state: 'idle', view: null, byName: new Map() };
 
 /**
  * loadPrompt fetches the prefix text once and repaints only the reveals that are open.
@@ -1475,20 +1475,20 @@ const prompt = { state: 'idle', view: null, byName: new Map() };
  * Each reveal registers a repaint of its own body instead.
  */
 async function loadPrompt() {
-  if (prompt.state === 'loading' || prompt.state === 'ok') return;
-  prompt.state = 'loading';
+  if (promptView.state === 'loading' || promptView.state === 'ok') return;
+  promptView.state = 'loading';
   repaintPrompt();
   try {
     const v = await api('prompt');
-    prompt.view = v;
-    prompt.byName = new Map();
-    for (const r of v.regions || []) prompt.byName.set(r.kind + '/' + r.name, r);
-    prompt.state = 'ok';
+    promptView.view = v;
+    promptView.byName = new Map();
+    for (const r of v.regions || []) promptView.byName.set(r.kind + '/' + r.name, r);
+    promptView.state = 'ok';
   } catch (err) {
     if (aborted(err)) return;
     // A 404 is an older proxy that has the report and not this route. That is "the feature
     // is not there", not "something broke", and the two must not read the same.
-    prompt.state = /404|not found/i.test(String((err && err.message) || err)) ? 'absent' : 'error';
+    promptView.state = /404|not found/i.test(String((err && err.message) || err)) ? 'absent' : 'error';
   }
   repaintPrompt();
 }
@@ -1521,20 +1521,20 @@ function promptTextReveal(t) {
   det.appendChild(body);
   const paint = () => {
     clear(body);
-    if (prompt.state === 'idle' || prompt.state === 'loading') {
+    if (promptView.state === 'idle' || promptView.state === 'loading') {
       body.appendChild(el('p', { class: 'hint' }, 'Reading…'));
       return;
     }
-    if (prompt.state === 'absent') {
+    if (promptView.state === 'absent') {
       body.appendChild(el('p', { class: 'hint' }, 'This proxy records the token weight of each '
         + 'declaration but not its text. The weight above is exact.'));
       return;
     }
-    if (prompt.state === 'error') {
+    if (promptView.state === 'error') {
       body.appendChild(el('p', { class: 'hint' }, 'Could not read the prompt text.'));
       return;
     }
-    const reg = prompt.byName.get(t.kind + '/' + t.name);
+    const reg = promptView.byName.get(t.kind + '/' + t.name);
     if (reg && reg.has_text) {
       body.appendChild(el('p', { class: 'hint' }, num(reg.tokens) + ' tokens, '
         + pct(reg.share, 1) + ' of the prefix that session carried.'));
@@ -1561,7 +1561,7 @@ let promptWaiters = [];
  * prevent — the same one captureState fixes on the server.
  */
 function notCapturedState(host) {
-  const v = prompt.view || {};
+  const v = promptView.view || {};
   if (v.blocked_by === 'operator') {
     return emptyState(host, 'Prompt text is not stored on this deployment',
       'The operator has content capture switched off service-wide, so no prompt or transcript '
@@ -1650,21 +1650,21 @@ function renderPromptPanel(host, rep) {
   det.appendChild(body);
   const paint = () => {
     clear(body);
-    if (prompt.state === 'loading' || prompt.state === 'idle') {
+    if (promptView.state === 'loading' || promptView.state === 'idle') {
       body.appendChild(el('p', { class: 'hint' }, 'Reading…'));
       return;
     }
-    if (prompt.state === 'absent') {
+    if (promptView.state === 'absent') {
       emptyState(body, 'This proxy does not record prompt text',
         'It records the token weight of every region, which is what the figures above are. '
         + 'Reading the text needs a newer proxy.');
       return;
     }
-    if (prompt.state === 'error') {
+    if (promptView.state === 'error') {
       emptyState(body, 'Could not read the prompt text', 'The figures above are unaffected.');
       return;
     }
-    const v = prompt.view || {};
+    const v = promptView.view || {};
     if (!v.captured) { notCapturedState(body); return; }
     body.appendChild(el('p', { class: 'note' }, 'One session\'s actual prefix — '
       + num(v.tokens) + ' tokens across ' + num((v.regions || []).length) + ' regions, captured '
