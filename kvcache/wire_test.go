@@ -36,31 +36,23 @@ import (
 //     update the golden set.
 //   - ADDING a key is additive and safe. Add it to the golden set, and tell whoever owns the
 //     page, or it ships as a field nothing reads.
+//   - ADDING `omitempty` to an existing field is BREAKING even though the name is unchanged:
+//     the key then vanishes from every payload where the value is zero, and a consumer reading
+//     it sees undefined on exactly the rows where zero was the answer. The golden set therefore
+//     stores the whole tag, options and all.
 var wireKeys = map[string][]string{
-	"Request": {"id", "user", "conversation_id", "ts", "hour_utc", "bucket", "model",
-		"provider", "agent", "input_tokens", "output_tokens", "cache_read_tokens",
-		"cache_write_tokens", "cache_write_1h_tokens", "cached_context_tokens", "ttl",
-		"ttl_source", "hit", "miss_reason", "next_ts", "next_id", "has_next", "idle_ms",
-		"within_5m", "within_1h", "upstream_ms", "cost_usd", "cost_known", "keepalive"},
-	"Result": {"strategy", "description", "requests", "conversations", "total_usd",
-		"fresh_input_usd", "cache_read_usd", "cache_write_usd", "output_usd", "ping_usd",
-		"uncached_usd", "cache_premium_usd", "hits", "misses", "hit_rate_pct", "miss_rate_pct",
-		"forced_misses", "pings", "pings_that_rewrote", "pings_that_upgraded",
-		"pings_on_open_spans", "writes_5m", "writes_1h", "expires", "avoided_recomputations",
-		"avoided_tokens", "retained_ms", "unpriced", "valued", "decisions", "stats_levels",
-		"observed_coverage", "by_user", "by_model", "latency"},
-	"Savings": {"strategy", "baseline", "baseline_usd", "strategy_usd", "absolute_usd",
-		"percent_usd", "percent_known", "hit_delta", "latency_avoided_ms", "latency_known"},
-	"Group": {"key", "requests", "total_usd", "hits", "misses", "hit_rate_pct", "pings",
-		"ping_usd", "writes_5m", "writes_1h", "unpriced", "valued"},
+	"Request":      {"id", "user", "conversation_id", "ts", "hour_utc", "bucket", "model", "provider", "agent", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cache_write_1h_tokens", "cached_context_tokens", "ttl", "ttl_source", "hit", "miss_reason", "next_ts,omitempty", "next_id,omitempty", "has_next", "idle_ms", "within_5m", "within_1h", "upstream_ms", "cost_usd", "cost_known", "keepalive,omitempty"},
+	"Result":       {"strategy", "description,omitempty", "requests", "conversations", "total_usd", "fresh_input_usd", "cache_read_usd", "cache_write_usd", "output_usd", "ping_usd", "uncached_usd", "cache_premium_usd", "hits", "misses", "hit_rate_pct", "miss_rate_pct", "forced_misses", "pings", "pings_that_rewrote", "pings_that_upgraded", "pings_on_open_spans", "writes_5m", "writes_1h", "expires", "avoided_recomputations", "avoided_tokens", "retained_ms", "unpriced", "valued", "decisions", "stats_levels", "observed_coverage,omitempty", "by_user", "by_model", "latency"},
+	"Savings":      {"strategy", "baseline", "baseline_usd", "strategy_usd", "absolute_usd", "percent_usd", "percent_known", "hit_delta", "latency_avoided_ms", "latency_known"},
+	"Group":        {"key", "requests", "total_usd", "hits", "misses", "hit_rate_pct", "pings", "ping_usd", "writes_5m", "writes_1h", "unpriced", "valued"},
 	"Latency":      {"per_miss_ms", "hit_n", "miss_n", "hit_mean_ms", "miss_mean_ms", "known"},
 	"Coverage":     {"recorded", "assumed"},
 	"Pricing":      {"model", "input", "output", "cache_read", "write_5m", "write_1h", "ping_input_tokens", "ping_output_tokens", "source", "known"},
-	"Override":     {"input", "output", "cache_read", "write_5m", "write_1h", "ping_input_tokens", "ping_output_tokens"},
+	"Override":     {"input,omitempty", "output,omitempty", "cache_read,omitempty", "write_5m,omitempty", "write_1h,omitempty", "ping_input_tokens,omitempty", "ping_output_tokens,omitempty"},
 	"Multipliers":  {"cache_read", "write_5m", "write_1h"},
 	"Semantics":    {"hit_refreshes_ttl", "ping_refreshes_ttl", "zero_generation"},
 	"PriceList":    {"multipliers", "models"},
-	"StrategySpec": {"name", "description", "unreachable", "needs_dataset", "baseline"},
+	"StrategySpec": {"name", "description", "unreachable", "needs_dataset", "baseline,omitempty"},
 }
 
 // wireTypes is one zero value per contract type, so the reflection below cannot drift from the
@@ -98,7 +90,13 @@ func TestTheWireContractIsUnchanged(t *testing.T) {
 				}
 				continue
 			}
-			got = append(got, strings.Split(tag, ",")[0])
+			// The FULL tag, options included, not just the name before the comma. `omitempty`
+			// is part of the contract: a field that gains it stops appearing on the wire
+			// whenever its value is zero, so a consumer reading it gets undefined on exactly
+			// the rows where the zero was the interesting answer. That is how `next_ts`
+			// disappears for a conversation's last request — deliberate there, and a trap
+			// anywhere it arrives by accident. Pinning the name alone cannot see it.
+			got = append(got, tag)
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s's JSON keys changed.\n  got:  %v\n  want: %v\n\n"+
@@ -133,20 +131,22 @@ func TestTheWireContractSurvivesARoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
-	// omitempty drops a zero value, so only the keys that CANNOT be empty on a real replay are
-	// required here — asserting all of them would fail on a legitimately absent field and
-	// teach whoever hits it to weaken the check.
-	for _, k := range []string{"strategy", "requests", "conversations", "total_usd",
-		"cache_write_usd", "hits", "misses", "hit_rate_pct", "valued", "decisions",
-		"stats_levels", "by_user", "by_model", "latency"} {
-		if _, ok := got[k]; !ok {
+	// Required = every field whose tag carries NO omitempty, derived from the tags rather than
+	// listed by hand. A hand-written list is the same manual step this whole test exists to
+	// remove: a field added later needs somebody to remember it, and nobody does.
+	for _, tag := range wireKeys["Result"] {
+		name, opts, _ := strings.Cut(tag, ",")
+		if strings.Contains(opts, "omitempty") {
+			continue
+		}
+		if _, ok := got[name]; !ok {
 			present := make([]string, 0, len(got))
 			for k := range got {
 				present = append(present, k)
 			}
 			sort.Strings(present)
-			t.Errorf("a real replay's JSON has no %q key; the page reads it. Present: %v",
-				k, present)
+			t.Errorf("a real replay's JSON has no %q key, and its tag carries no omitempty so "+
+				"it should always be emitted. Present: %v", name, present)
 		}
 	}
 	// Savings too: percent_known is the field that stops a zero baseline reading as 0%.
