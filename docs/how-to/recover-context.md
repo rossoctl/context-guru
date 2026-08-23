@@ -20,6 +20,19 @@ request. When the model needs what is behind a marker, it calls the tool with th
 as a tool result, and re-invokes upstream so the model finishes with the full content in
 hand — all before the response reaches your agent.
 
+!!! info "Recovered content is APPENDED, never put back where the marker was"
+    The marker stays exactly where the offloader wrote it, hash id and all, and the original
+    arrives at the **end** of the conversation as a `tool_result`. That is a prompt-cache
+    property before it is anything else: `messages` is hashed in order, so rewriting a message
+    in the middle of a transcript discards every cached byte from that point on, while
+    appending two turns at the end leaves the whole prefix intact. Splicing the original back
+    over its marker would read as a tidier transcript and cost the entire prefix on every
+    expand call.
+
+    Pinned by `TestContinuationAppendsAndNeverRewritesAnEarlierMessage`, which asserts that no
+    pre-existing message changes by a single byte, that the marker survives, and that the
+    recovered text appears **only** in the last message.
+
 ```mermaid
 sequenceDiagram
   participant M as Model
@@ -62,6 +75,14 @@ deliberately (with `marker_mode: off`) so `/compact` returns a clean, marker-fre
 from the store. The provider requires one `tool_result` per `tool_call_id`, so an explicit
 placeholder is sent rather than nothing — which turns that offload lossy. Raise
 `store.ttl` / `store.max_entries` if you see it often.
+
+The turn still **completes**: the placeholder continuation is sent even when *nothing*
+resolved, so the model reads "no longer available" and finishes with text. It used to replay
+the model's raw `tool_use` to the client in that case, which is a turn a client cannot answer
+— and on an agent's own compaction request reads as a summary that came back empty. That is
+also what lets the tool be advertised on every request in a session: the advertise condition
+no longer has to avoid ever reaching this path, so it no longer has to read the turn, so the
+`tools` array no longer changes shape and the prompt-cache prefix survives.
 
 **Expansion did not happen at all.** The loop is capped at 3 rounds, and it bails if the
 model calls another tool alongside the expand call — the response is returned as-is. Check

@@ -7,26 +7,36 @@ import (
 
 // InjectMode controls whether the expand tool is advertised on outgoing requests.
 //
-//   - "auto" (default): inject only when the request already declares tools, the request
-//     actually carries an expandable marker, AND the store can persist stashes. This is
-//     the safe default — it never perturbs a request that uses no tools (the riskiest
-//     case for models that penalize an unexpected tool), and never advertises a tool
-//     that can't be resolved.
+//   - "auto" (default): inject whenever the request already declares tools AND the store
+//     can persist stashes. Both conditions are properties of the SESSION, not of the turn,
+//     so the `tools` array a session sends is byte-identical on every request in it.
 //
-//     The marker condition is not cosmetic. Advertising the tool on a request with
-//     nothing to expand invites a call that resolves nothing, and the host then has to
-//     replay the model's raw tool_use to the client — which for an agent's own
-//     compaction request reads as "the summary came back empty", and three of those in a
-//     row disable auto-compact for the rest of the session. It also makes the
-//     advertise-condition equal to the host's intercept-condition (proxy.serve only
-//     buffers SSE when the tool is on the request), so a declared tool is never a tool
-//     whose use goes uninspected. Cost: the `tools` array changes shape on the first turn
-//     that offloads, which is a full prompt-cache prefix miss (tools sit ahead of system
-//     and messages in the cache hash) — but that same turn already rewrites early
-//     messages, so most of that prefix was lost anyway, and markers persist across later
-//     turns (sticky offload ids), so it flips once, not per turn.
+//     That stability is the whole point, and it is worth more than what it replaced.
+//     `tools` sits ahead of `system` and `messages` in the provider's cache hash, so ANY
+//     change to the array invalidates the ENTIRE cached prefix — not the tail, the whole
+//     thing. This condition used to also require that the request carry an expandable
+//     marker, which made advertising a property of the turn: the array grew on the first
+//     turn that offloaded and SHRANK again on any later turn that carried no marker. The
+//     comment here claimed that "flips once, not per turn", and that was only true while
+//     markers persisted; every marker-free turn in between paid a full prefix miss, in
+//     both directions.
 //
-//   - "always": inject whenever the store persists (create the tools array if absent).
+//     It never perturbs a request that uses no tools — the riskiest case for models that
+//     penalize an unexpected tool — because `hasTools` is still required. What it DOES do
+//     is advertise on a request with nothing to expand, which is safe now for a reason
+//     that is elsewhere: an expand call that resolves nothing is answered with a
+//     placeholder tool_result and the turn completes normally (proxy.serve). It used to
+//     replay the model's raw tool_use to the client instead, which on an agent's own
+//     compaction request reads as "the summary came back empty" — three of those in a row
+//     and Claude Code disables auto-compact for the session. THAT is what the marker
+//     condition was really protecting against, and it was protecting against it in the
+//     wrong place: at the advertisement, at the cost of the prefix, rather than at the
+//     resolution, which costs one bounded round trip and only when a model asks for an id
+//     that has aged out.
+//
+//   - "always": inject whenever the store persists, creating the tools array if absent.
+//     Differs from auto only for a request that declares NO tools, which is the case auto
+//     deliberately leaves alone.
 //
 //   - "never": never inject (the pre-D2 behavior; pair with marker_mode: summary).
 const (
@@ -57,7 +67,10 @@ func Inject(provider, mode string, body []byte, storePersists bool) (out []byte,
 	}
 	tools := gjson.GetBytes(body, "tools")
 	hasTools := tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
-	if mode == InjectAuto && (!hasTools || !HasMarkersInMessages(body)) {
+	// No marker condition, deliberately: see the note on InjectAuto. Advertising must not
+	// depend on anything that varies turn to turn, or the tools array varies with it and
+	// every variation is a whole-prefix cache miss.
+	if mode == InjectAuto && !hasTools {
 		return body, false
 	}
 	// Idempotent: skip if the expand tool is already present.

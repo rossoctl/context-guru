@@ -181,24 +181,39 @@ func TestAgentCompactionBypassIsCounted(t *testing.T) {
 	}
 }
 
-// TestExpandToolAdvertisedOnlyWithMarkers: the condition to ADVERTISE context_guru_expand
-// and the condition to INTERCEPT its use are now one condition — the tool is on the
-// outgoing request. It used to be advertised whenever the client declared tools, while
-// SSE was only inspected when markers were present, so a marker-free request declared a
-// tool whose use then streamed straight to a client that has no such tool. The compaction
-// case is worse: nothing resolves, the raw tool_use is replayed, and Claude Code counts
-// that as a failed compaction.
+// The condition to ADVERTISE context_guru_expand and the condition to INTERCEPT its use
+// are one condition — the tool is on the outgoing request — and that condition is now a
+// property of the SESSION rather than of the turn. `tools` sits ahead of `system` and
+// `messages` in the provider's cache hash, so an advertise test that reads the turn makes
+// the tools array a per-turn value and every change to it discards the entire cached
+// prefix. It previously required a marker, so the array grew on the first offloading turn
+// and shrank again on the next turn without one.
 //
-// TestMarkerFreeSSEStreamsThrough is the other half of the pair (no buffering without
-// markers); together they show the two conditions agree.
-func TestExpandToolAdvertisedOnlyWithMarkers(t *testing.T) {
+// What made that narrowing look necessary was the compaction case: nothing resolves, the
+// model's raw tool_use is replayed to a client that implements no such tool, and Claude
+// Code counts three of those as reason to disable auto-compact. That is fixed where it
+// belongs — proxy.serve continues with a placeholder tool_result when nothing resolves —
+// so advertising no longer has to pay for it.
+//
+// The bypass case below is the one that must NOT change, and it costs no cache to keep: a
+// compaction request's system prompt and message set differ from the conversation's, so it
+// hashes to its own prefix and shares no entry with the turns around it.
+//
+// TestMarkerFreeSSEStreamsThrough is the other half of the pair: advertising on every turn
+// means every Anthropic stream is peeked, and it pins that the peek still streams.
+func TestExpandToolAdvertisedOnEveryTurnButNeverOnACompaction(t *testing.T) {
 	marked := map[string]any{"role": "user", "content": "earlier output <<cg:HASH>>"}
 	for _, tc := range []struct {
 		name string
 		msgs []map[string]any
 		want bool
 	}{
-		{"no markers yet", []map[string]any{{"role": "user", "content": "go"}}, false},
+		// Advertised even with nothing to expand. The tools array must be byte-identical on
+		// every request in a session or each change to it costs the whole cached prefix, so
+		// the advertise test may not read the turn. An expand call that resolves nothing is
+		// handled at the RESOLUTION now — proxy.serve continues with a placeholder
+		// tool_result — which is what used to make this case unsafe.
+		{"no markers yet", []map[string]any{{"role": "user", "content": "go"}}, true},
 		{"marker present", []map[string]any{marked, {"role": "user", "content": "go on"}}, true},
 		// The compaction request carries the whole transcript, markers included — it must
 		// STILL not get the tool, because it is bypassed.

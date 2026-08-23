@@ -64,6 +64,17 @@ func HasPlaceholder(s string) bool {
 var rawMarkerRe = regexp.MustCompile(`(?:<|(?i:\\u003c)){2}cg:([A-Za-z0-9_-]{1,64})(?:>|(?i:\\u003e)){2}`)
 
 // HasMarkersInMessages reports whether a request body carries a context-guru
+// marker in its MESSAGES.
+//
+// It no longer gates injection. It was the "auto" advertise condition until the tools
+// array's byte-stability was found to be worth more than the condition bought: a
+// per-turn advertise test makes the array a per-turn value, and `tools` sits ahead of
+// everything in the provider's cache hash. Kept because it is exported and answers a
+// question callers still legitimately ask — "is there anything here to expand?" — but a
+// caller using it to decide whether to DECLARE the tool is reintroducing that miss.
+// Original doc follows.
+//
+// HasMarkersInMessages reports whether a request body carries a context-guru
 // placeholder in content the MODEL can see and reference — the messages array and
 // the system prompt.
 //

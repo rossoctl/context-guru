@@ -85,7 +85,7 @@ for every component's config block.
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | — | Real key injected on forward (gateway mode); empty = pass client auth through. |
 | `CHEAP_MODEL` (+ `CHEAP_MODEL_BASE` / `_KEY` / `_AUTH` / `_PROVIDER`) | — | Dedicated cheap model for the LLM components (`extract_llm`, `summarize`) — the `model.source: config` client. Without it they no-op. |
 | `FORCE_MODEL` | — | Overwrite the request `model` (eval-containers uses `EVAL_MODEL`). |
-| `INJECT_EXPAND` | `auto` | Whether the `context_guru_expand` tool is advertised: `auto` (only when the request already declares tools, carries a `<<cg:HASH>>` marker, and the store persists) \| `always` \| `never`. |
+| `INJECT_EXPAND` | `auto` | Whether the `context_guru_expand` tool is advertised: `auto` (whenever the request already declares tools and the store persists — both session-stable, so the `tools` array never changes shape mid-session and the prompt-cache prefix survives) \| `always` (also when the request declares no tools, creating the array) \| `never`. |
 | `CACHE_MODE` | `auto` | Cache-aware compaction: `auto` (on when the agent sets its own breakpoints) \| `on` \| `off`. |
 | `MODEL_INFO_URL` / `MODEL_INFO` | LiteLLM map | Source for context-window sizes (used by the fractional triggers). `MODEL_INFO=off` disables the lookup; fractions are then ignored and absolutes apply. |
 | `MODEL_PRICES` | — | Path to an **operator price list**, consulted before the public map. See below. A file that fails to load is fatal. |

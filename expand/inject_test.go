@@ -121,40 +121,62 @@ func TestInjectRespectsForcingToolChoice(t *testing.T) {
 	}
 }
 
-// TestInjectAutoRequiresMarkers: under "auto" the tool is advertised only when the
-// request actually carries something expandable. Advertising it on a marker-free request
-// invites a call that can resolve nothing — and the host then has to hand the model's raw
-// tool_use back to a client that has no such tool, which for an agent's own compaction
-// request reads as a failed compaction (three in a row and Claude Code disables
-// auto-compact for the session).
-func TestInjectAutoRequiresMarkers(t *testing.T) {
-	tools := `"tools":[{"type":"function","function":{"name":"read_file"}}]`
-	for _, tc := range []struct {
+// The tools array a session sends must be byte-identical on every request in it. `tools`
+// sits ahead of `system` and `messages` in the provider's cache hash, so any change to it
+// invalidates the ENTIRE cached prefix — and an advertise condition that reads the TURN
+// makes the array a per-turn value.
+//
+// This replaces TestInjectAutoRequiresMarkers, which asserted the opposite: that "auto"
+// advertises only on a marker-bearing request. That condition existed to keep an
+// unresolvable expand call from reaching a client, which is now handled where it belongs,
+// at the resolution (proxy.serve continues on a placeholder tool_result instead of
+// replaying the model's raw tool_use). The old condition bought that safety with the
+// prefix, in BOTH directions: the array grew on the first offloading turn and shrank again
+// on the next turn that carried no marker.
+func TestInjectAutoIsByteStableAcrossTurnsWithAndWithoutMarkers(t *testing.T) {
+	const tools = `"tools":[{"function":{"name":"x"}}]`
+	turns := []struct {
 		name string
 		body string
-		want bool
 	}{
-		{"no markers", `{` + tools + `,"messages":[{"role":"user","content":"plain turn"}]}`, false},
-		{"plain marker", `{` + tools + `,"messages":[{"role":"user","content":"out <<cg:k1>>"}]}`, true},
+		{"early turn, nothing offloaded yet", `{` + tools + `,"messages":[{"role":"user","content":"plain turn"}]}`},
+		{"first offload, marker present", `{` + tools + `,"messages":[{"role":"user","content":"out <<cg:k1>>"}]}`},
 		// The spelling markers actually arrive in: encoding/json HTML-escapes "<".
-		{"escaped marker", `{` + tools + `,"messages":[{"role":"user","content":"out \u003c\u003ccg:k1\u003e\u003e"}]}`, true},
-		{"summary sentinel", `{` + tools + `,"messages":[{"role":"user","content":"out ⟪cg⟫"}]}`, true},
-		{"marker in system only", `{` + tools + `,"system":"prior: <<cg:k1>>","messages":[{"role":"user","content":"go"}]}`, true},
-		{"marker but no tools", `{"messages":[{"role":"user","content":"out <<cg:k1>>"}]}`, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out, injected := Inject("openai", InjectAuto, []byte(tc.body), true)
-			if injected != tc.want {
-				t.Fatalf("Inject injected=%v, want %v", injected, tc.want)
-			}
-			// The ADVERTISE condition and what a host can OBSERVE on the wire must agree:
-			// a host decides whether to intercept expand calls by reading the outgoing
-			// body, so HasTool must report exactly what Inject did.
-			if HasTool("openai", out) != tc.want {
-				t.Fatalf("HasTool=%v disagrees with injected=%v; a host would either declare "+
-					"a tool it does not intercept or buffer for a tool that is not there: %s",
-					HasTool("openai", out), injected, out)
-			}
-		})
+		{"escaped marker", `{` + tools + `,"messages":[{"role":"user","content":"out \u003c\u003ccg:k1\u003e\u003e"}]}`},
+		{"later turn, markers gone again", `{` + tools + `,"messages":[{"role":"user","content":"expanded, nothing left to recover"}]}`},
+	}
+	var want string
+	for _, tc := range turns {
+		out, injected := Inject("openai", InjectAuto, []byte(tc.body), true)
+		if !injected {
+			t.Fatalf("%s: not advertised. Every turn in a session must carry the same tools "+
+				"array; a turn that omits it pays a whole-prefix cache miss, and so does the "+
+				"next turn that puts it back", tc.name)
+		}
+		got := gjson.GetBytes(out, "tools").Raw
+		if want == "" {
+			want = got
+			continue
+		}
+		if got != want {
+			t.Errorf("%s: tools array differs from the first turn's, so the cached prefix is "+
+				"lost\n got %s\nwant %s", tc.name, got, want)
+		}
+	}
+}
+
+// The one case "auto" still declines, and the reason is unchanged: a request that uses no
+// tools at all is the riskiest one to perturb, because a model that never saw a tool may
+// penalize an unexpected one. There is no cache argument against declining it either — a
+// client that sends no tools sends none on every turn, so the array is stable at absent.
+func TestInjectAutoStillLeavesAToollessRequestAlone(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"out <<cg:k1>>"}]}`)
+	if _, injected := Inject("openai", InjectAuto, body, true); injected {
+		t.Error("auto injected into a request that declares no tools")
+	}
+	// And "always" is the mode that exists for the opposite choice.
+	if _, injected := Inject("openai", InjectAlways, body, true); !injected {
+		t.Error(`"always" must inject even with no tools array; that is the only thing that ` +
+			"distinguishes it from auto now")
 	}
 }

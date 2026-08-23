@@ -1076,11 +1076,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// Skipped in observe mode: nothing was offloaded, so there is nothing to
 			// recover, and injecting a tool declaration would MODIFY the request — which is
 			// precisely the one thing observe mode promises never to do.
-			// Skipped on a bypassed request too: bypass promises a byte-identical forward,
-			// nothing was offloaded on this turn, and on an agent-compaction request an
-			// advertised expand tool is actively harmful — the summarizer may call it, and a
-			// tool_use with no text replayed to the client counts as a FAILED compaction
-			// (three of those and Claude Code disables auto-compact for the session).
+			// Skipped on a bypassed request too, and this one is NOT in tension with the
+			// byte-stable tools array that expand.InjectAuto now guarantees: bypass promises a
+			// byte-identical forward, and a bypassed request is an agent-compaction request
+			// whose system prompt and message set differ from the conversation's anyway — so it
+			// hashes to its own prefix and shares no cache entry with the turns around it.
+			// Skipping it therefore costs no cache, while injecting into it would break the
+			// byte-identical promise.
 			if tn.Mode != components.ModeObserve && !bypassed {
 				im := h.opts.InjectExpand
 				if im == "" {
@@ -1166,8 +1168,13 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// straight to a client that has no such tool. Reading the outgoing body rather than
 	// trusting Inject's return value also covers a request that already carried the tool.
 	//
-	// Since injection now requires markers (expand.Inject, InjectAuto), this keeps the
-	// documented fast path: no offload yet → no tool → no buffering, zero added latency.
+	// Injection no longer requires markers (expand.Inject, InjectAuto): the tools array has
+	// to be byte-stable across a session or every change to it costs the whole cached prefix.
+	// So for a tools-bearing client this is true from the FIRST turn, and the old "no offload
+	// yet → no tool → no buffering" fast path is gone with it. What replaced it is narrower
+	// and does the same job: peekSSE withholds only a response that OPENS with an expand
+	// call, so a normal answer still streams after a bounded peek rather than being buffered
+	// whole (see ssepeek.go). Non-Anthropic dialects are not peeked at all.
 	advertised := expand.HasTool(string(provider), body)
 	// SSE accounting is PER CLIENT REQUEST, not per upstream round: one client request
 	// that drives several expand rounds waited for all of them, so timing a single
@@ -1399,10 +1406,24 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		lg.Debug("cg.expand", "round", round, "calls", len(calls),
 			"resolved", got, "unresolved", len(calls)-got)
 		next, ok := expand.Continuation(string(provider), body, msg, resolved)
-		if got == 0 || !ok {
-			writeRaw(w, resp, respBody) // nothing recovered; return the model's own call
+		if !ok {
+			writeRaw(w, resp, respBody) // malformed shapes — fail open, replay verbatim
 			return
 		}
+		// got == 0 CONTINUES, and that is the change that let the expand tool be advertised
+		// on every request in a session (expand.InjectAuto). `resolved` already carries a
+		// placeholder for every unresolved id, so the continuation is well formed whether
+		// anything came back or not, and the model gets to finish its turn by reading "that
+		// id is no longer available" — which is a turn that completes.
+		//
+		// Replaying the raw response here instead handed the CLIENT a bare tool_use for a
+		// tool the client does not implement. On an agent's own compaction request that
+		// reads as a summary that came back empty, and three of those disable auto-compact
+		// for the session — so the advertise condition was narrowed to marker-bearing turns
+		// to avoid ever reaching this line. It bought that safety with the whole prompt-cache
+		// prefix, on every turn where the marker set changed. The cost of paying it here
+		// instead is one bounded upstream round (maxExpandRounds still caps the loop), and
+		// only when a model asks for an id that has aged out of the store.
 		body = next // loop: re-invoke with the originals in hand
 	}
 }
