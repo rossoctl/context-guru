@@ -549,9 +549,17 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	}
 	// The tail hash of each session's LATEST request, alongside its recency: without it the
 	// first turn after a restart reads as a tail change and earns a credit it did not.
+	//
+	// `keepalive = 0` in BOTH halves. A keep-alive ping is a row in `requests`, and the row
+	// this seeds from is the session's LATEST — which for a pinged session is usually a ping.
+	// Seeding recency from one re-dates the session across a restart and makes the next real
+	// request's gap read as four minutes instead of the twenty it actually was, which is the
+	// one thing proxy/keepalive.go promises a ping never does. It would corrupt exactly the
+	// ttl_expiry attribution the keep-alive is judged on.
 	rows, err := r.db.sql.Query(`SELECT r.session_id, r.ts, r.split_tail_hash FROM requests r
-		WHERE r.ts >= ? AND r.id = (SELECT r2.id FROM requests r2
-			WHERE r2.session_id = r.session_id ORDER BY r2.ts DESC, r2.id DESC LIMIT 1)`,
+		WHERE r.ts >= ? AND r.keepalive = 0 AND r.id = (SELECT r2.id FROM requests r2
+			WHERE r2.session_id = r.session_id AND r2.keepalive = 0
+			ORDER BY r2.ts DESC, r2.id DESC LIMIT 1)`,
 		now-staleSession)
 	if err != nil {
 		return 0, err

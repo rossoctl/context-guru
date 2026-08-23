@@ -530,6 +530,15 @@ func TestInFlightSessionIsNotAVerdict(t *testing.T) {
 	}
 }
 
+// kaPingRow is a keep-alive ping: a real billed row in `requests`, marked, with no components.
+// Deliberately minimal — what matters to the caller is only that it is a row in the session
+// which is NOT an agent turn.
+func kaPingRow(ts int64, session string) *Event {
+	return &Event{TS: ts, SessionID: session, Model: "m", Provider: "anthropic",
+		KeepAlive: true, CacheRead: 50_000, CostUSD: 0.01, Meta: Meta{MaxTokens: 1},
+		TokenAccounting: AccountingComplete}
+}
+
 // TestPrefixChangeCostIsAnObservationNotADebt. The figure is bigger than every saving on
 // the dashboard, so it has to be visible; mutation is not randomly assigned, so it may not
 // be netted off. Both halves are the test.
@@ -552,6 +561,13 @@ func TestPrefixChangeCostIsAnObservationNotADebt(t *testing.T) {
 		// Mutated, but the miss was the TTL, which wins ties and is not a prefix change.
 		mk(1_000, "expired", true, CacheHit, 0.10),
 		mk(2_000, "expired", false, CacheTTLExpiry, 0.90),
+		// Same as "blamed", with a keep-alive PING between the mutating turn and the miss.
+		// A ping is not a turn: it carries no components, so if it is allowed to be "the
+		// session's previous turn" the EXISTS goes false and this row drops out of the
+		// diagnostic — under-reporting our own harm, which is the flattering direction.
+		mk(1_000, "pinged", true, CacheHit, 0.10),
+		kaPingRow(1_500, "pinged"),
+		mk(2_000, "pinged", false, CachePrefixChange, 0.30),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -559,9 +575,15 @@ func TestPrefixChangeCostIsAnObservationNotADebt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if math.Abs(o.PrefixChangeCost-0.50) > 1e-12 {
-		t.Errorf("prefix_change_cost_usd = %.4f, want 0.50 — only the turn that missed on a "+
-			"changed prefix AFTER a mutating turn belongs in it", o.PrefixChangeCost)
+	if math.Abs(o.PrefixChangeCost-0.80) > 1e-12 {
+		t.Errorf("prefix_change_cost_usd = %.4f, want 0.80 ($0.50 + the $0.30 whose mutating "+
+			"turn is separated from it by a ping) — only the turn that missed on a changed "+
+			"prefix AFTER a mutating turn belongs in it, and a ping is not a turn",
+			o.PrefixChangeCost)
+	}
+	if o.PrefixChangeRequests != 2 {
+		t.Errorf("prefix_change_requests = %d, want 2 — the cost and the count share one SQL "+
+			"definition and must agree about the ping", o.PrefixChangeRequests)
 	}
 	// It is a diagnostic. Net is baseline − cost − our spend and nothing else; subtracting an
 	// unrandomized correlation from it would book a hypothesis as money owed.

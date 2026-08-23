@@ -378,6 +378,24 @@ const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
 		  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 		ORDER BY p.ts DESC, p.id DESC LIMIT 1), r.split_tail_hash + 1)`
 
+// afterOurMutation is the ONE definition of "the session's previous turn mutated something",
+// in SQL, shared by the prefix-change cost and its request count so the two cannot drift.
+//
+// `p.keepalive = 0` is load-bearing. A keep-alive ping is a row in `requests` like any other,
+// so without the predicate a ping becomes "the previous turn"; a ping has no
+// `request_components` rows, the EXISTS goes false, and a genuine prefix_change row silently
+// drops out of the diagnostic. That is the flattering direction on the one figure that
+// measures our OWN harm — it made context-guru look less responsible for prefix changes than
+// it is. Filter.where() already keeps pings out of every agent aggregate for the same reason;
+// this subquery reaches past it because it names `requests` itself.
+const afterOurMutation = `EXISTS (
+			SELECT 1 FROM request_components c WHERE c.mutated = 1 AND c.request_id = (
+				SELECT p.id FROM requests p
+				WHERE p.session_id = r.session_id AND p.keepalive = 0
+				  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
+				ORDER BY p.ts DESC, p.id DESC LIMIT 1)
+		)`
+
 // Overview computes the headline aggregates for the filtered window.
 func (d *DB) Overview(f Filter) (*Overview, error) {
 	cond, args := f.where()
@@ -421,18 +439,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		-- the cache missed on a changed prefix AND the session's previous turn had mutated
 		-- something. Derived, never stored, and never netted off — see the field's comment for
 		-- why a correlation this confounded may not be turned into a debt.
-		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' AND EXISTS (
-			SELECT 1 FROM request_components c WHERE c.mutated = 1 AND c.request_id = (
-				SELECT p.id FROM requests p
-				WHERE p.session_id = r.session_id AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
-				ORDER BY p.ts DESC, p.id DESC LIMIT 1)
-		) THEN r.cost_usd ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' AND EXISTS (
-			SELECT 1 FROM request_components c WHERE c.mutated = 1 AND c.request_id = (
-				SELECT p.id FROM requests p
-				WHERE p.session_id = r.session_id AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
-				ORDER BY p.ts DESC, p.id DESC LIMIT 1)
-		) THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' AND `+afterOurMutation+` THEN r.cost_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' AND `+afterOurMutation+` THEN 1 ELSE 0 END),0),
 		-- The whole prefix_change bucket, unconditional: the total exposure of the failure
 		-- mode, not only the part adjacent to one of our own mutations.
 		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' THEN r.cost_usd ELSE 0 END),0),
@@ -514,12 +522,11 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// into a row fetch per candidate. Measured: 231 ms to 277 ms on the 10,000-row perf
 	// fixture, and 10.6 s to 15.3 s of that same test under -race, which is enough to blow its
 	// budget on a loaded box. The correction below is driven from the PING side instead, which
-	// is a tiny population — one linear pass plus an index lookup per ping — and costs exactly
-	// nothing on a deployment where the mechanism has never run.
+	// is a tiny population — one linear pass plus an index lookup per ping.
 	//
 	// The bug this fixes: the inner count had NO predicate at all, so a ping counted as a later
-	// turn that could replay the reduction. On a fixture with three pings it inflated the
-	// ceiling from 30 to 70 tokens and dragged replay_realized_pct down with it, which reads as
+	// turn that could replay the reduction. On a fixture with ONE ping it inflated the ceiling
+	// from 30 to 50 tokens and dragged replay_realized_pct down with it, which reads as
 	// compaction realising less of its value than it does. Found by
 	// TestPingRowsStayOutOfAgentAggregates, which compares the whole Overview key by key rather
 	// than the aggregates somebody thought of.
@@ -534,32 +541,27 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		FROM requests r WHERE `+cond+` AND r.saved_unique > 0`, args...).Scan(&o.ReplayProjectedTokens); err != nil {
 		return nil, err
 	}
-	// The correction, and it is GATED so that it costs nothing where there is nothing to
-	// correct. Two gates, both cheap: the `IN` set is materialised once and is empty on a
-	// deployment that has never pinged (so every row fails a hash lookup and the correlated
-	// count is never evaluated), and the outer `EXISTS` skips even that. Pings are ~1% of rows
-	// and concentrated in a handful of sessions, so where the set is non-empty it is small.
-	var anyPing int64
-	if err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests WHERE keepalive = 1)`).Scan(
-		&anyPing); err != nil {
+	// The correction, driven from the PING side: one pass to find the pings, then ONE indexed sum
+	// per ping over the earlier rows of its own session. O(pings x session) rather than a second
+	// full pass over the filtered rows, and pings are ~1% of rows — on a deployment that has never
+	// pinged it is a single index scan over an empty set.
+	//
+	// It used to sit behind an `EXISTS(SELECT 1 FROM requests WHERE keepalive = 1)` gate, claiming
+	// the correction then "costs literally nothing where the mechanism has never run". It does not:
+	// `keepalive` is in no index, so the EXISTS is itself a scan. Timed alternately on the
+	// 10,000-row perf fixture, 5 trials: gated 52.7 ms against 53.0 ms ungated at 0 pings, and
+	// 58.0 against 57.3 at 100 — one extra scan for no measurable saving, so it is gone.
+	var inflation int64
+	if err := d.sql.QueryRow(`SELECT COALESCE(SUM((
+			SELECT COALESCE(SUM(r.saved_unique),0) FROM requests r
+			  WHERE r.session_id = p.session_id AND r.saved_unique > 0
+			    AND (r.ts < p.ts OR (r.ts = p.ts AND r.id < p.id))
+			    AND `+cond+`)),0)
+		FROM requests p WHERE p.keepalive = 1`, args...).Scan(&inflation); err != nil {
 		return nil, err
 	}
-	if anyPing != 0 {
-		// Driven from the PING side: one pass to find the pings, then ONE indexed sum per ping
-		// over the earlier rows of its own session. That is O(pings x session) rather than a
-		// second full pass over the filtered rows, and pings are ~1% of rows.
-		var inflation int64
-		if err := d.sql.QueryRow(`SELECT COALESCE(SUM((
-				SELECT COALESCE(SUM(r.saved_unique),0) FROM requests r
-				  WHERE r.session_id = p.session_id AND r.saved_unique > 0
-				    AND (r.ts < p.ts OR (r.ts = p.ts AND r.id < p.id))
-				    AND `+cond+`)),0)
-			FROM requests p WHERE p.keepalive = 1`, args...).Scan(&inflation); err != nil {
-			return nil, err
-		}
-		if o.ReplayProjectedTokens -= inflation; o.ReplayProjectedTokens < 0 {
-			o.ReplayProjectedTokens = 0
-		}
+	if o.ReplayProjectedTokens -= inflation; o.ReplayProjectedTokens < 0 {
+		o.ReplayProjectedTokens = 0
 	}
 	if o.ReplayProjectedTokens > 0 {
 		o.ReplayRealizedPct = float64(o.ReplayTokens) / float64(o.ReplayProjectedTokens) * 100

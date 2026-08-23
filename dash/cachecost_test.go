@@ -420,6 +420,57 @@ func TestSessionRecencySurvivesARestart(t *testing.T) {
 
 // The tail comparison is per session and must survive a restart, or the first turn after one
 // reads as a snapshot change and earns a credit it did not.
+// A keep-alive PING must not re-date its session across a restart.
+//
+// SeedSessions takes each session's LATEST row, and for a pinged session that row is usually a
+// ping — 7,782 of 9,234 in the adjudicated replay were session-final. Seeding recency from one
+// would make the next real request's gap read as the time since the PING rather than since the
+// last real turn: a twenty-minute gap reading as four, no ttl_expiry recorded, and the cache
+// miss this whole mechanism is judged on made invisible. proxy/keepalive.go promises in as many
+// words that a ping never touches the session-recency map; this is the promise being kept on the
+// restart path, which is the one place the ping code cannot reach.
+func TestARestartDoesNotRecoverRecencyFromAPing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "d.db")
+	rec, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const now = int64(1_700_000_000_000)
+	// A real turn, then a ping 19 minutes later — the shape a keep-alive leaves behind.
+	rec.Record(&Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10})
+	rec.Record(&Event{TS: now + 1_140_000, TenantID: "t1", SessionID: "t1:live", Model: "m",
+		KeepAlive: true, CacheRead: 50_000, CostUSD: 0.01})
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int64
+		_ = rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n)
+		if n == 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	rec.Close()
+
+	rec2, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec2.Close()
+	if _, err := rec2.SeedSessions(now + 1_200_000); err != nil {
+		t.Fatal(err)
+	}
+	// The next real request arrives 20 minutes after the last REAL turn.
+	seen, _, since := rec2.Observe("t1", "t1:live", "m", now+1_200_000)
+	if !seen {
+		t.Fatal("the session was not recovered at all")
+	}
+	if since != 1_200_000 {
+		t.Errorf("recovered gap = %d ms, want 1200000 — the gap since the last real turn. %d ms "+
+			"is the gap since the PING, which would hide the very cache expiry the keep-alive "+
+			"exists to demonstrate", since, since)
+	}
+}
+
 func TestTailChangeIsPerSessionAndSurvivesARestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "d.db")
 	rec, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
