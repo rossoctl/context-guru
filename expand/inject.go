@@ -11,15 +11,31 @@ import (
 //     can persist stashes. Both conditions are properties of the SESSION, not of the turn,
 //     so the `tools` array a session sends is byte-identical on every request in it.
 //
-//     That stability is the whole point, and it is worth more than what it replaced.
-//     `tools` sits ahead of `system` and `messages` in the provider's cache hash, so ANY
-//     change to the array invalidates the ENTIRE cached prefix — not the tail, the whole
-//     thing. This condition used to also require that the request carry an expandable
-//     marker, which made advertising a property of the turn: the array grew on the first
-//     turn that offloaded and SHRANK again on any later turn that carried no marker. The
-//     comment here claimed that "flips once, not per turn", and that was only true while
-//     markers persisted; every marker-free turn in between paid a full prefix miss, in
-//     both directions.
+//     That stability is the whole point. `tools` sits ahead of `system` and `messages` in
+//     the provider's cache hash, so a change to the array cannot be cached against the old
+//     prefix: the first request carrying a NEW tools array re-creates the ENTIRE prefix at
+//     the write rate, not just the tail. This condition used to also require that the
+//     request carry an expandable marker, which made advertising a property of the turn:
+//     the array grew on the first turn that offloaded and shrank again on any later turn
+//     that carried no marker.
+//
+//     MEASURED, and narrower than an earlier version of this comment claimed. Direct
+//     probe, byte-identical 9.5k-token system block, only `tools` changed: A->A read 9,471
+//     / write 0; A->B write 9,558 / read 0 — the whole prefix. But A->B->A->B then reads on
+//     all three, because the provider keeps BOTH lineages alive within the TTL. So the cost
+//     is ONE full-prefix write per NEW tools variant, plus a doubled write delta while it
+//     alternates — not a full miss on every flip in both directions, which is what this
+//     comment used to say.
+//
+//     On a real 7-turn Claude Code session the old build flipped once, at the turn the
+//     first dedup marker appeared: tools 20->21, that turn billed write 43,359 / read 0
+//     against the 40,320-token prefix the first three turns had built ($0.0824 against
+//     $0.0071 for a comparable turn with no flip). After the fix, one tools hash across all
+//     7 turns and that turn billed write 163 / read 43,135. Paired sessions, run in both
+//     arm orders: input cost $0.212401 -> $0.137185, a 35.4% and 35.3% saving on 0.1 pp of
+//     spread, with total input tokens up 313 — the same bytes, moved from 1.25x to 0.1x.
+//     The tool declaration's own cost is +129 tokens on the first write, included in those
+//     figures. A session that never offloads saves nothing.
 //
 //     It never perturbs a request that uses no tools — the riskiest case for models that
 //     penalize an unexpected tool — because `hasTools` is still required. What it DOES do

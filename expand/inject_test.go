@@ -131,8 +131,11 @@ func TestInjectRespectsForcingToolChoice(t *testing.T) {
 // unresolvable expand call from reaching a client, which is now handled where it belongs,
 // at the resolution (proxy.serve continues on a placeholder tool_result instead of
 // replaying the model's raw tool_use). The old condition bought that safety with the
-// prefix, in BOTH directions: the array grew on the first offloading turn and shrank again
-// on the next turn that carried no marker.
+// prefix: the array grew on the first offloading turn and shrank again on the next turn
+// that carried no marker, and each NEW variant re-created the whole prefix at the write
+// rate. (Measured caveat, because the stronger version of this claim is wrong: alternating
+// back to a previous array READS, since the provider keeps both lineages alive within the
+// TTL. The cost is one full write per new variant, not one per flip.)
 func TestInjectAutoIsByteStableAcrossTurnsWithAndWithoutMarkers(t *testing.T) {
 	const tools = `"tools":[{"function":{"name":"x"}}]`
 	turns := []struct {
