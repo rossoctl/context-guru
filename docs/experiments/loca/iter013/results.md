@@ -109,3 +109,52 @@ threshold is set from the *pre*-compaction size, which no current knob exposes.
 `coref`'s unique contribution is **874,969 of 2.46 billion tokens before — 0.04%** — while its reported
 figure overstates it **19-fold**. `extract_llm`'s is 0.08%. On unique tokens at this band the two
 components under study are rounding error against `format` and `summarize`.
+
+## ANSWERED: why CG arms carry 8× the context — the agent re-runs tools instead of expanding
+
+With server-side clearing inert everywhere, the size difference cannot be a reset. Measured directly:
+
+| arm | steps/run | duplicate tool calls/run | **% of calls that are exact repeats** | `cg_expand` calls |
+|---|---|---|---|---|
+| `[format]` lossless baseline | 15.5 | 0.1 | **0.4%** | **0** |
+| merged (keeps 94% of candidates) | 39.2 | 2.8 | **9.9%** | **0** |
+| separate (4 components, most removal) | 47.0 | 8.2 | **25.3%** | **0** |
+
+**The repeat rate is dose-dependent in removal**, and `expand` was called **zero times in 225 runs**.
+
+The loop: CG removes content and leaves a `<<cg:HASH>>` marker plus an `expand` tool. The agent does
+not expand — it **re-issues the same tool call with the same arguments**. That returns *fresh* output,
+so the transcript grows rather than shrinking, which invites more compaction, which removes more, which
+provokes more repeats. Hence 3× the steps and 8× the mean request, ending in five requests that exceeded
+the model's window outright.
+
+The baseline stays small for an unremarkable reason: nothing is removed, so nothing is lost, so nothing
+is repeated (0.4%).
+
+### This is a fourth outcome the design did not enumerate
+
+`corefstub.go` reasons carefully about a wrong cut having three outcomes:
+
+1. the model notices and expands the right marker — one round-trip plus a cache-write;
+2. it notices something is missing but cannot tell WHICH marker holds it — several expands, or it gives up;
+3. it never notices, and answers from less information than it had.
+
+The measured outcome is none of these. **The model notices, does not expand, and re-runs the tool.**
+That is *worse than (1)* — a full tool execution plus fresh output rather than a cached round-trip — and
+unlike (3) it **compounds**, because each repeat enlarges the transcript that provoked it.
+
+It also undercuts the reversibility argument that justifies lossy compaction here. The stash makes a cut
+*recoverable*, and `expand` makes recovery *possible*, but across 225 runs and three pipelines the agent
+never once chose it. Reversibility that is never exercised is not a mitigation; on this evidence the
+marker functions as a signal to redo the work.
+
+### Caveats
+
+- Duplicate detection is regex-based over each step's action payload. The **monotone ordering** across
+  arms (same regex, same corpus) is the load-bearing part; the absolute percentages are approximate.
+- Longer trajectories offer more opportunity for repeats, but the figure quoted is repeats as a **share
+  of calls**, so it is not merely a length artifact.
+- **Not established:** that the specific repeated calls are the ones whose output was compacted. That
+  needs per-marker correlation, which the current capture does not record.
+- `INJECT_EXPAND=auto` was set in every CG arm, so the tool was present and advertised. Whether a
+  different prompt or a more legible residue would get it used is untested.
