@@ -239,3 +239,71 @@ func TestKeepAliveArmsPingAndTheHourlyOnePingsLess(t *testing.T) {
 			five.Writes5m, hour.Writes1h)
 	}
 }
+
+// An UNPRICED window must not be able to pass as a measurement, and least of all as a ceiling.
+//
+// The hazard is real and was hit in the browser rather than in a test: the price map is fetched
+// in the background, so the first load after a restart has no rates for a few seconds. In that
+// window every arm sums to $0.00, and the exact optimum — whose dynamic program is comparing
+// zeroes — settles on the first action in the table and reports "never cache anything, 0% hit
+// rate" in the style reserved for the cheapest plan that exists. $0.00 is indistinguishable
+// from free, and a ceiling of "cache nothing" is a fabricated recommendation.
+//
+// This does not assert that anything REFUSES. Refusing would trade a misleading answer for a
+// missing panel, and the caller is better placed to choose. It asserts that the condition is
+// impossible to MISS: Result.Valued is false on every arm, so anything rendering a cost, a
+// saving or a ceiling has one field to check.
+func TestAnUnpricedWindowIsNotValuedAndCannotPassAsACeiling(t *testing.T) {
+	reqs, cfg := dataset(t)
+	// The same trajectories against a price list that knows nothing — a cold start, exactly.
+	cfg.Prices = NewPriceList(context.Background(), []string{"m"}, nil, Multipliers{}, nil)
+	if cfg.Prices.For("m").Known {
+		t.Fatal("the fixture priced a model it was given no rates for")
+	}
+
+	best := Simulate(reqs, NewOptimal(reqs, cfg), cfg)
+	if best.Valued {
+		t.Error("an all-unpriced replay reports Valued=true; every dollar on it is zero for " +
+			"want of rates, and a caller that trusts it will render $0.00 as free")
+	}
+	if best.Unpriced != best.Requests {
+		t.Errorf("Unpriced %d of %d requests; the fixture is partly priced and is not testing "+
+			"the cold-start window", best.Unpriced, best.Requests)
+	}
+	if best.TotalUSD != 0 {
+		t.Errorf("an unpriced replay totalled $%.6f; it must contribute nothing rather than "+
+			"guess", best.TotalUSD)
+	}
+
+	// Every arm, and the point is that they are INDISTINGUISHABLE. The ceiling has no claim to
+	// being cheapest here, so nothing may be concluded from the ordering — which is precisely
+	// why Valued has to gate the display rather than the comparison being trusted.
+	for _, spec := range Registry() {
+		if spec.Name == StrategyReplay {
+			continue
+		}
+		s, err := NewStrategy(spec.Name, reqs, cfg)
+		if err != nil {
+			t.Fatalf("%s: %v", spec.Name, err)
+		}
+		got := Simulate(reqs, s, cfg)
+		if got.Valued {
+			t.Errorf("%s reports Valued=true on an unpriced window", spec.Name)
+		}
+		if got.TotalUSD != 0 {
+			t.Errorf("%s totalled $%.6f with no rates", spec.Name, got.TotalUSD)
+		}
+		// And a saving computed from two unpriced arms is undefined, not 0%.
+		if sv := Compare(best, got); sv.Known {
+			t.Errorf("%s: a percentage saving was reported against a zero baseline", spec.Name)
+		}
+	}
+
+	// The same dataset WITH rates is valued, so this test cannot pass by the fixture being
+	// empty — the failure mode that makes a negative assertion worthless.
+	_, priced := dataset(t)
+	if v := Simulate(reqs, Fixed5m(), priced); !v.Valued || v.TotalUSD <= 0 {
+		t.Errorf("the priced control is not valued (Valued=%v, total=%.6f); this test proves "+
+			"nothing", v.Valued, v.TotalUSD)
+	}
+}

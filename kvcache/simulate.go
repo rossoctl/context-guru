@@ -247,6 +247,22 @@ type Result struct {
 	// not a free one.
 	Unpriced int64 `json:"unpriced"`
 
+	// Valued is whether ANY of these requests could be priced at all.
+	//
+	// False means every dollar figure on this Result is zero because nothing had RATES — not
+	// because nothing was spent. Derivable from Unpriced == Requests, and stated anyway,
+	// because a consumer that has to derive it is a consumer that will forget to: the price
+	// map is fetched in the background, so the first load after a restart genuinely has no
+	// rates for a few seconds, and in that window every arm costs 0.00 and the exact ceiling
+	// degenerates to "never cache anything, 0%% hit rate" — a fabricated recommendation
+	// rendered in the style reserved for the cheapest plan that exists.
+	//
+	// Nothing here refuses to produce a plan when it cannot price one; refusing would trade a
+	// misleading answer for a missing panel, and the caller is better placed to choose. What
+	// this guarantees is that the caller cannot MISS the condition. Anything that renders a
+	// cost, a saving or a ceiling must check it first.
+	Valued bool `json:"valued"`
+
 	// Decisions counts each action the strategy chose.
 	Decisions map[Action]int64 `json:"decisions"`
 	// StatsLevels counts which fallback level the account's own statistics could answer at,
@@ -539,6 +555,9 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 		out.HitRate = 100 * float64(out.Hits) / float64(d)
 		out.MissRate = 100 * float64(out.Misses) / float64(d)
 	}
+	// Set BEFORE the totals are read by anything: an all-unpriced replay sums to 0.00, which
+	// is indistinguishable from free.
+	out.Valued = out.Requests > 0 && out.Unpriced < out.Requests
 	out.TotalUSD = out.FreshInputUSD + out.CacheReadUSD + out.CacheWriteUSD + out.OutputUSD +
 		out.PingUSD
 	out.CachePremium = out.TotalUSD - out.UncachedUSD

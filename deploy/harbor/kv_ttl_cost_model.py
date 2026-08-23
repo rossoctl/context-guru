@@ -723,6 +723,18 @@ class Cost:
     by_model: dict[str, Group] = field(default_factory=dict)
 
     @property
+    def valued(self) -> bool:
+        """Whether ANY of these requests could be priced at all.
+
+        False means every dollar figure here is zero because nothing had RATES — not because
+        nothing was spent. Stated rather than left to be derived from unpriced == requests,
+        because a consumer that has to derive it will forget to: a cold start with no price map
+        makes every arm cost 0.00 and turns the exact ceiling into "never cache anything",
+        rendered in the style reserved for the cheapest plan that exists.
+        """
+        return self.requests > 0 and self.unpriced < self.requests
+
+    @property
     def total_usd(self) -> float:
         return (self.fresh_input_usd + self.cache_read_usd + self.cache_write_usd
                 + self.output_usd + self.ping_usd)
@@ -746,6 +758,7 @@ class Cost:
     def to_dict(self) -> dict[str, Any]:
         out = {k: v for k, v in self.__dict__.items() if k not in ("by_user", "by_model")}
         out["total_usd"] = self.total_usd
+        out["valued"] = self.valued
         out["cache_premium_usd"] = self.cache_premium_usd
         out["hit_rate_pct"] = self.hit_rate_pct
         out["miss_rate_pct"] = self.miss_rate_pct

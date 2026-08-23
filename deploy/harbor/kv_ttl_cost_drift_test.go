@@ -269,6 +269,7 @@ type pyResult struct {
 	AvoidedTokens     int64   `json:"avoided_tokens"`
 	RetainedMs        int64   `json:"retained_ms"`
 	Unpriced          int64   `json:"unpriced"`
+	Valued            bool    `json:"valued"`
 }
 
 // scoreWithPort writes the fixture and returns what the Python evaluator made of it.
@@ -433,6 +434,24 @@ func TestPythonCostModelAgreesWithTheShippedSimulator(t *testing.T) {
 		{"retained_ms", got.RetainedMs, want.RetainedMs},
 		{"unpriced", got.Unpriced, want.Unpriced},
 	} {
+		if c.got != c.exp {
+			t.Errorf("%s: port %d, kvcache.Simulate %d", c.name, c.got, c.exp)
+		}
+	}
+	// Valued gates every cost the page renders, so the two must agree about it too — and the
+	// fixture must actually be priced, or this comparison is two falses agreeing and the whole
+	// dollar comparison above is zero on both sides.
+	if got.Valued != want.Valued {
+		t.Errorf("valued: port %v, kvcache.Simulate %v", got.Valued, want.Valued)
+	}
+	if !want.Valued {
+		t.Error("the fixture prices nothing, so every dollar compared here is zero on both " +
+			"sides and this test proves nothing")
+	}
+	for _, c := range []struct {
+		name     string
+		got, exp int64
+	}{} {
 		if c.got != c.exp {
 			t.Errorf("%s: port %d, kvcache.Simulate %d", c.name, c.got, c.exp)
 		}
