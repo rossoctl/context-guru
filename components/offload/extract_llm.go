@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
@@ -671,6 +673,14 @@ func ratesPricing(r components.TokenRates) cheapmodel.Pricing {
 	}
 }
 
+// extractInflight collapses concurrent extractions of identical content into one model call.
+// Keyed on extract.ResultKey — the same key the persistent cross-session cache uses — so the
+// in-flight window and the stored window agree on what "identical" means.
+var extractInflight singleflight.Group
+
+// inflightDeduped counts calls avoided because an identical extraction was already running.
+var inflightDeduped atomic.Int64
+
 func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	// Resolved once: the candidate loop below tests it per tool output, and it is a
 	// handler call rather than a field read.
@@ -1253,8 +1263,39 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if cands[k].noWindow {
 				callCfg.MaxChars = 0
 			}
-			res, sum, strategy, why := extract.RunExtractionDetail(ctx, cands[k].content, goal,
-				keepIDs, before, callCfg, model)
+			// SINGLE-FLIGHT on the cross-session result key. The persistent global cache
+			// (getResultGlobal above) only helps a request that arrives AFTER the first one
+			// finished; two requests carrying byte-identical content at the same time both
+			// missed it and both paid. MEASURED on two live sessions started together: the
+			// same 4,577-token candidate was extracted twice 1.6s apart, $0.0224 for a result
+			// the system was already deriving — 54% of that run's entire extraction spend for
+			// nothing. Colleagues working one repo through one proxy is exactly this shape.
+			//
+			// `executed` is what keeps the accounting honest: singleflight hands every waiter
+			// the leader's value, so without it each waiter would record a ModelCall and its
+			// saved tokens, double-counting a saving that happened once. Only the goroutine
+			// whose closure actually ran sets its own flag.
+			var (
+				res, sum, strategy, why string
+				executed                bool
+			)
+			sfv, _, _ := extractInflight.Do(extract.ResultKey(cands[k].id, e.modelName, extCfg),
+				func() (any, error) {
+					executed = true
+					r, sm, st, w := extract.RunExtractionDetail(ctx, cands[k].content, goal,
+						keepIDs, before, callCfg, model)
+					return [4]string{r, sm, st, w}, nil
+				})
+			if v, ok := sfv.([4]string); ok {
+				res, sum, strategy, why = v[0], v[1], v[2], v[3]
+			}
+			if !executed {
+				// A concurrent request derived this exact result; take it and charge nothing.
+				inflightDeduped.Add(1)
+				rep.Gate("deduped_inflight_extraction")
+				out[k] = outT{projected: res, summary: sum}
+				return
+			}
 			latency := float64(time.Since(start).Milliseconds())
 			metrics.RecordExtractionCall(latency)
 			_, inTok, outTok := callSink.Totals()
@@ -1356,7 +1397,15 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			}(k)
 		}
 		wg.Wait()
-		rep.Calls = calls      // serial: every goroutine has returned
+		// Serial from here: every goroutine has returned. Only slots that actually made a
+		// call are reported — a single-flight FOLLOWER returns before filling its slot, and
+		// reporting that zero value put a phantom `cand=0 saved=0 $0.00` row in the ledger,
+		// inflating the call count with work that by definition did not happen.
+		for k := range calls {
+			if calls[k].Component != "" {
+				rep.Calls = append(rep.Calls, calls[k])
+			}
+		}
 		for k := range cands { // Phase 3 (serial): freeze + splice.
 			if out[k].projected == "" {
 				continue

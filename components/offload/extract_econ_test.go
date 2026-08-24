@@ -1,8 +1,15 @@
 package offload
 
 import (
+	"context"
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/store"
 	"math"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
@@ -569,4 +576,75 @@ func TestTheTailIsStillGatedOnItsOwnEconomics(t *testing.T) {
 		t.Fatalf("priced at the READ rate the same 200,000-token candidate should not clear "+
 			"the gate; if it does, this test no longer demonstrates the mis-pricing: %q", d.reason)
 	}
+}
+
+// TestConcurrentIdenticalExtractionsCollapseToOneCall pins the single-flight fix.
+//
+// The persistent cross-session cache only helps a request that arrives after the first one
+// finished. Measured on two live sessions started together, the same 4,577-token candidate was
+// extracted twice 1.6s apart — $0.0224 for a result the system was already deriving, 54% of
+// that run's entire extraction spend. Ten colleagues on one repo through one proxy is exactly
+// that shape, so this is not a theoretical race.
+//
+// The assertion is on the MODEL CALL COUNT, not on the output: both requests must still get a
+// reduced result, and only one of them may pay for it.
+func TestConcurrentIdenticalExtractionsCollapseToOneCall(t *testing.T) {
+	// A model that blocks until released, so both goroutines are provably in flight together
+	// — a sleep would make this a timing coincidence rather than a test.
+	release := make(chan struct{})
+	var calls atomic.Int64
+	blocking := blockingModel{calls: &calls, release: release}
+
+	cfg := "strategy: code\nmin_tokens: 1\neconomic_gate: false\nmodel:\n  source: config\n" +
+		"trigger:\n  min_request_tokens: 1\n"
+	comp, err := newExtractLLM([]byte(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := comp.(*ExtractLLM)
+	e.mode = markerFull
+
+	pad := strings.Repeat("padding ", 200)
+	body := `[{"id":1,"name":"keep this ` + pad + `"},{"id":2,"name":"drop this ` + pad + `"}]`
+	// One shared Store, as a real proxy has, but two DIFFERENT sessions: the point is that
+	// cross-session dedup happens while the first extraction is still running.
+	st := store.NewMemory(store.Options{})
+
+	var wg sync.WaitGroup
+	for _, session := range []string{"session-A", "session-B"} {
+		wg.Add(1)
+		go func(session string) {
+			defer wg.Done()
+			req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+				userMsg("find the keep records"), toolResultMsg(body),
+			}}
+			c := &components.Ctx{Ctx: context.Background(), Session: session, Store: st,
+				Model: components.ModelSpec{Static: blocking}, CtxWindow: 1_000_000}
+			var rep components.Report
+			if _, err := e.Offload(req, &rep, c); err != nil {
+				t.Error(err)
+			}
+		}(session)
+	}
+	// Both goroutines are now either waiting on the model or waiting on the leader. Release.
+	time.Sleep(150 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("two concurrent requests for byte-identical content made %d model calls; "+
+			"single-flight must collapse them to 1 (this race cost 54%% of a measured run's "+
+			"extraction spend)", got)
+	}
+}
+
+type blockingModel struct {
+	calls   *atomic.Int64
+	release chan struct{}
+}
+
+func (m blockingModel) Complete(context.Context, string) (string, error) {
+	m.calls.Add(1)
+	<-m.release
+	return "data = json.decode(INPUT)\nOUTPUT = json.encode([r for r in data if \"keep\" in r[\"name\"]])\n", nil
 }

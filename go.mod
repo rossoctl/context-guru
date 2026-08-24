@@ -28,6 +28,7 @@ require (
 	github.com/tree-sitter/go-tree-sitter v0.25.0
 	go.starlark.net v0.0.0-20260708150628-5395d018f003
 	golang.org/x/crypto v0.55.0
+	golang.org/x/sync v0.21.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.56.0
 )
