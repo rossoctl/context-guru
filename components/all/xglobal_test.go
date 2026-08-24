@@ -2,13 +2,16 @@ package all_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
+	"gopkg.in/yaml.v3"
 )
 
 // TestExtractResultCacheHitsAcrossSessions is the headline acceptance criterion for issue
@@ -112,18 +115,14 @@ func TestNoDefaultConfigRunsExtractLLMOnCachingBackend(t *testing.T) {
 		"defaults": "strategy: code\nmodel:\n  source: config\n",
 		"codesmart": "strategy: code\nmodel:\n  source: config\nmin_tokens: 3000\n" +
 			"trigger:\n  min_request_tokens: 3000\nllm_every_n_requests: 1\nllm_max_per_request: 4\n",
-		// housellm sets allow_on_caching_backend: TRUE, and passes anyway — which is the
-		// reason to have it here. The flag lifts exactly one check, and with per_output:false
-		// the only path into the gate is the cold sweep, whose branch returns cached:false by
-		// construction. So `per_output: false` is the brake, not the flag and not the economic
-		// gate. If a future edit turns per_output on while leaving the flag set, this case
-		// fails and names the combination our own numbers price as net-negative.
-		"housellm": "strategy: code\nper_output: false\nallow_on_caching_backend: true\n" +
-			"economic_gate: true\nmodel:\n  source: config\nmin_tokens: 3000\n" +
-			"aggressiveness: medium\ncontext: recent\ncontext_messages: 2\n" +
-			"trigger:\n  min_request_tokens: 20000\nllm_every_n_requests: 1\n" +
-			"llm_max_per_request: 4\nllm_max_per_session: 0\n" +
-			"cold_cache:\n  enabled: true\n  max_calls: 20\n  min_tokens: 3000\n",
+		// housellm is read from config.presetConfigs rather than copied here, because a copy
+		// cannot catch the drift this test exists to catch. The preset now ships
+		// per_output: TRUE, which makes `val.cached && !allowCached` live on every warm turn;
+		// the only thing keeping this case green is that allow_on_caching_backend is absent
+		// from the preset. Re-add it there and this fails, naming the combination our own
+		// numbers price as net-negative (extract_econ.go:333, break-even ~30,500 tokens per
+		// output against a largest-observed 2,053).
+		"housellm": housellmExtractLLM(t),
 	}
 	for name, cfg := range cfgs {
 		t.Run(name, func(t *testing.T) {
@@ -264,5 +263,70 @@ func TestGlobalCacheHitIsNotSplicedAtDepth(t *testing.T) {
 	}
 	if cmC.calls != 0 {
 		t.Fatalf("a global hit must avoid the model call, got %d", cmC.calls)
+	}
+}
+
+// housellmExtractLLM returns the extract_llm block EXACTLY as the housellm preset ships it,
+// so the guard above tests the shipped configuration instead of a transcription of it.
+func housellmExtractLLM(t *testing.T) string {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte("preset: housellm\n"))
+	if err != nil {
+		t.Fatalf("load housellm preset: %v", err)
+	}
+	node, ok := cfg.Components["extract_llm"]
+	if !ok {
+		t.Fatal("housellm preset no longer configures extract_llm; this guard is testing nothing")
+	}
+	raw, err := yaml.Marshal(&node)
+	if err != nil {
+		t.Fatalf("marshal extract_llm block: %v", err)
+	}
+	return string(raw)
+}
+
+// TestHousellmColdSweepActuallyFires is the other half of
+// TestNoDefaultConfigRunsExtractLLMOnCachingBackend, and it exists because the preset
+// shipped for a day in a state where BOTH halves were silent.
+//
+// Every extraction call this service has ever made was a cold one, so cold_cache.min_tokens
+// is the single knob deciding whether extract_llm does anything at all. It was 3000, and at
+// 3000 production recorded `below_output_floor` on all 36 sweeping turns and zero
+// extractions across 3,437 requests — the component was configured into a no-op while
+// looking fully enabled. A candidate of ~1,500 tokens is the size that regression turned
+// away, so that is what this asserts on: the preset, not a copy of it, must call the model
+// on a cold turn.
+//
+// Raising the preset's cold floor above ~1,500 fails this; re-adding
+// allow_on_caching_backend fails the warm guard above. The pair pins the economics from
+// both sides.
+func TestHousellmColdSweepActuallyFires(t *testing.T) {
+	off := newComp(t, "extract_llm", housellmExtractLLM(t))
+	// ~1,500 tokens of the noise the sweep is meant to reduce, with a filterable shape.
+	body := `[`
+	for i := 0; i < 120; i++ {
+		if i > 0 {
+			body += ","
+		}
+		body += `{"id":` + strconv.Itoa(i) + `,"name":"record ` + strings.Repeat("payload ", 6) + `"}`
+	}
+	body += `]`
+	cm := &countingModel{resp: "data = json.decode(INPUT)\nOUTPUT = json.encode(data[:2])\n"}
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+		userMsg("summarize the records"), toolMsg(body),
+	}}
+	// ColdCache is what makes this a sweep: the prefix TTL has expired, so the whole
+	// transcript is about to be re-billed at the write rate and savedTokenValue reports
+	// cached:false — which is why the warm guard's decline does not apply here.
+	c := &components.Ctx{Ctx: context.Background(), Session: "cold1",
+		Store: store.NewMemory(store.Options{}), Model: components.ModelSpec{Static: cm},
+		CacheAware: true, ColdCache: true, MaxCachedIdx: -1, CtxWindow: 1_000_000}
+	var rep components.Report
+	if _, err := off.Offload(req, &rep, c); err != nil {
+		t.Fatal(err)
+	}
+	if cm.calls == 0 {
+		t.Fatalf("the housellm preset made NO model call on a cold turn with a ~1.5k-token "+
+			"candidate — the component is configured into a no-op. gates=%v", rep.Gates)
 	}
 }
