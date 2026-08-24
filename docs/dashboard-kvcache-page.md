@@ -22,7 +22,10 @@ The tab sits next to **Keep-alive** — both answer "what is the prompt cache do
 at `/dashboard/#kvcache`. It respects the shared filter bar above it: every figure is "over this
 window", so the time range, the model, the agent and the account selector all narrow it. Three
 narrowings exist only here (time-of-day band, observed TTL tier, and whether a request has a
-successor at all) because all three are derived rather than columns.
+successor at all) because all three are derived rather than columns. The tier one is deliberately
+**not** a shared `Filter` dimension as well: it briefly was both, and since `Filter` matched the raw
+`cache_ttl` column while this page matches the *reconstructed* tier, the two were silently
+intersected — so the groups that exist only by reconstruction drilled down to an empty table.
 
 ## What is on the page, top to bottom
 
@@ -33,7 +36,7 @@ successor at all) because all three are derived rather than columns.
 | **How long until the next request** | the idle histogram, fixed edges, with everything past five minutes in the de-emphasis gray — a default cached prefix is already gone by then |
 | **Has it come back yet** | the survival curve: the cumulative share of conversations that had returned by each elapsed time. The question a TTL is actually chosen against, which a histogram does not answer |
 | **Who waits how long** | the same measurements grouped by observed TTL, by user, by model and by time-of-day band (UTC) |
-| **Prices** | every rate the simulation uses, editable, with what each comes to on this window's own median prefix |
+| **Prices** | every rate the simulation uses, editable, with what each comes to on this window's own median prefix — medianed over the requests that **cached something**, because a request with no prefix has none to price, and omitted entirely when nothing in the window cached rather than shown as `$0.00` |
 | **Strategies** | the arm picker, built from the server's registry, and the comparison table with each arm's cost against one baseline |
 | **Every request in the analysis** | the derived dataset, sortable on thirteen columns and paged on the server, each row linking back to the request drawer and the session diff |
 | **What every figure rests on** | the formulas and the caveats, printed from the payload |

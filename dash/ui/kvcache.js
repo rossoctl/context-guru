@@ -519,7 +519,11 @@ function renderKVControls() {
       ['morning', 'Morning 06–12'], ['afternoon', 'Afternoon 12–18'], ['evening', 'Evening 18–24']],
     (v) => { kvc.bucket = v; kvReload(); }, 'kv-filter-bucket'),
     kvSelect('Observed TTL', kvc.ttl, [['', 'All'], ['ephemeral_5m', '5 minutes'],
-      ['ephemeral_1h', '1 hour'], ['none', 'Not cached']],
+      ['ephemeral_1h', '1 hour'], ['none', 'Not cached'],
+      // The fourth group is reachable by clicking its row in the by-TTL table, so it needs an
+      // option here too: without one kvSelect matches nothing and the browser falls back to
+      // showing the first, so the page read "All" while filtered to the not-recorded rows.
+      ['unrecorded', 'Not recorded']],
     (v) => { kvc.ttl = v; kvReload(); }, 'kv-filter-ttl'),
     kvSelect('Next request', kvc.hasNext, [['', 'All'], ['yes', 'Has one'], ['no', 'None (final)']],
       (v) => { kvc.hasNext = v; kvReload(); }, 'kv-filter-hasnext'));
@@ -739,6 +743,16 @@ function renderKVPricing() {
   const host = clear($('#kv-pricing'));
   const v = kvc.prices;
   if (!v) { loadingState(host, 2); return; }
+  // No prefix means no size to apply a rate to, so every cost below would be $0.00 — which is
+  // not a price. The server states this in one field rather than leaving the page to infer it
+  // from a zero, which is the inference a reader of a table of dollar signs will not make.
+  if (v.prefix_known === false) {
+    host.appendChild(el('div', { class: 'banner warn', 'data-testid': 'kv-no-prefix' },
+      el('strong', {}, 'No request in this window cached anything. '),
+      'There is no cached prompt to price, so the cost columns below are omitted rather than '
+      + 'shown as $0.00. The rates themselves are still the configured ones and are still '
+      + 'editable.'));
+  }
   const list = v.pricing || { models: [] };
   if (!list.models.length) {
     emptyState(host, 'No models in this window', 'Nothing to price.');

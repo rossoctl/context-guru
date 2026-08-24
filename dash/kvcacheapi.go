@@ -46,7 +46,14 @@ func (a *API) kvCache(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	out, err := a.rec.DB().KVCacheAnalyze(f, kvCacheOptionsFrom(r), a.pricer, kvCacheConfigFrom(r))
+	// The two routes that read the whole dataset take a slot, so a refresh storm cannot commit
+	// the process's memory several times over. A caller who has already gone never takes one.
+	if err := acquireKVCache(r.Context()); err != nil {
+		return
+	}
+	defer releaseKVCache()
+	out, err := a.rec.DB().WithContext(r.Context()).
+		KVCacheAnalyze(f, kvCacheOptionsFrom(r), a.pricer, kvCacheConfigFrom(r))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -61,7 +68,7 @@ func (a *API) kvCacheRows(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	out, err := a.rec.DB().KVCacheRows(f, kvCacheOptionsFrom(r))
+	out, err := a.rec.DB().WithContext(r.Context()).KVCacheRows(f, kvCacheOptionsFrom(r))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -76,9 +83,20 @@ func (a *API) kvCacheSimulate(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	out, err := a.rec.DB().KVCacheSimulate(f, kvCacheOptionsFrom(r), a.pricer, kvCacheConfigFrom(r))
+	if err := acquireKVCache(r.Context()); err != nil {
+		return
+	}
+	defer releaseKVCache()
+	out, err := a.rec.DB().WithContext(r.Context()).
+		KVCacheSimulate(f, kvCacheOptionsFrom(r), a.pricer, kvCacheConfigFrom(r))
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		// An unknown arm or baseline is the caller's mistake; anything else came from the store.
+		// Reporting a database failure as 400 means no 5xx alert ever fires for it.
+		code := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "unknown baseline strategy") {
+			code = http.StatusBadRequest
+		}
+		httpErr(w, code, err.Error())
 		return
 	}
 	writeJSON(w, out)
@@ -94,13 +112,18 @@ func (a *API) kvCachePricing(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
+	// The page's own narrowings reach the prefix too. Without them this route priced on a
+	// different population from the cards beside it — 53,457 against 133,245 under has_next=no,
+	// both captioned "this window's own median".
+	o := kvCacheOptionsFrom(r)
 	cfg := kvCacheConfigFrom(r)
-	models, err := a.rec.DB().KVCacheModels(f)
+	db := a.rec.DB().WithContext(r.Context())
+	models, err := db.KVCacheModels(f)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	prefix, err := a.rec.DB().KVCacheMedianPrefix(f)
+	prefix, err := db.KVCacheMedianPrefix(f, o)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -128,6 +151,19 @@ func kvCacheOptionsFrom(r *http.Request) KVCacheOptions {
 			}
 		}
 	}
+	// The tier filter is PAGE-LOCAL and deliberately not a Filter dimension.
+	//
+	// It briefly was both, and that was a live defect: Filter.TTL matched the RAW cache_ttl
+	// column while ttlPredicate matches the RECONSTRUCTED tier, kvCacheQuery ANDed the two, and
+	// they disagree on exactly the rows observedTTL exists to rescue. `ttl=unrecorded` became
+	// `cache_ttl = 'unrecorded'` — a value the column can never hold — so the by-TTL table's
+	// own drill-down returned an empty table for a group showing 295 requests. `ttl=1h` lost
+	// every row whose tier was deduced from the provider's 1h write counter rather than
+	// recorded. On a deployment upgraded from a pre-cache_ttl schema every row is blank, so
+	// BOTH groups were unreachable. One parameter name, two vocabularies, silently intersected.
+	//
+	// So there is one reader of `ttl` in this package and it is this one.
+	// TestEveryTierGroupRoundTripsThroughItsOwnFilter is the guard.
 	switch t := q.Get("ttl"); t {
 	case "none", TTLUnrecorded, string(kvcache.TTL5m), string(kvcache.TTL1h):
 		o.TTL = t

@@ -248,3 +248,95 @@ func TestTheReuseSharesAreRecomputableAndTheHorizonsNest(t *testing.T) {
 // sameFloat is the tolerance the recomputation checks above use. Named apart from meta_test.go's
 // own `near`, which this package already owns for a different comparison.
 func sameFloat(a, b float64) bool { return a-b < 1e-9 && b-a < 1e-9 }
+
+// The number every cost on the pricing panel is multiplied by is medianed over the requests that
+// CACHED SOMETHING, and it is the same number the summary card reports.
+//
+// Three separate defects met on this one figure. It medianed over every request including the
+// ones that cached nothing, which is not noise but bias — 2,120 of the production corpus's 14,407
+// rows have a zero prefix, pulling the median from 147,550 to 124,845, so every derived cost ran
+// 18% low. The pricing route computed it from Filter alone, so the page's own narrowings never
+// reached it and the panel and the card printed medians 2.5x apart under the same caption. And a
+// window where nothing cached produced a median of zero, which rendered as a whole table of
+// $0.00 rates at known:true — a fabricated measurement of exactly the kind Result.Valued exists
+// to prevent, reachable by the tenant most likely to be reading the page.
+func TestTheMedianPrefixPricesOnlyRowsThatCached(t *testing.T) {
+	// Three cached rows at 100k and four that cached nothing. Over all seven the median is 0;
+	// over the three that cached, it is 100,000.
+	db := seedKV(t,
+		kvEvent("t", "s1", "m", kvBase, 100_000, 0),
+		kvEvent("t", "s1", "m", kvBase+10_000, 100_000, 0),
+		kvEvent("t", "s2", "m", kvBase+20_000, 100_000, 0),
+		kvEvent("t", "s3", "m", kvBase+30_000, 0, 0),
+		kvEvent("t", "s4", "m", kvBase+40_000, 0, 0),
+		kvEvent("t", "s5", "m", kvBase+50_000, 0, 0),
+		kvEvent("t", "s6", "m", kvBase+60_000, 0, 0),
+	)
+	an, err := db.KVCacheAnalyze(allTenants(), KVCacheOptions{}, staticPricer{ibmSonnet},
+		KVCacheSimConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := an.Cards.CachedContextP50; got != 100_000 {
+		t.Errorf("cached_context_p50 = %d, want 100000. Over all seven rows the median is 0, "+
+			"because four of them cached nothing — and a request with no prefix has no prefix to "+
+			"price.", got)
+	}
+	// The pricing route medians the same population over the same rows.
+	sql, err := db.KVCacheMedianPrefix(allTenants(), KVCacheOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sql != an.Cards.CachedContextP50 {
+		t.Errorf("the pricing route's median is %d and the summary card's is %d. Both are "+
+			"captioned \"this window's own median\", so they have to be one number.",
+			sql, an.Cards.CachedContextP50)
+	}
+	// And the page's own narrowings reach it. has_next=no keeps only the last request of each
+	// conversation, a different population with a different median.
+	only := KVCacheOptions{HasNext: "no"}
+	anF, err := db.KVCacheAnalyze(allTenants(), only, staticPricer{ibmSonnet}, KVCacheSimConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlF, err := db.KVCacheMedianPrefix(allTenants(), only)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sqlF != anF.Cards.CachedContextP50 {
+		t.Errorf("under has_next=no the pricing route medians %d and the card medians %d; the "+
+			"route is ignoring the page's own filters", sqlF, anF.Cards.CachedContextP50)
+	}
+}
+
+// A window where nothing cached has NO prefix, and the pricing panel says so instead of printing
+// a table of $0.00 rates.
+func TestAnUncachedWindowHasNoPriceablePrefix(t *testing.T) {
+	db := seedKV(t,
+		kvEvent("t", "s1", "m", kvBase, 0, 0),
+		kvEvent("t", "s2", "m", kvBase+10_000, 0, 0),
+	)
+	prefix, err := db.KVCacheMedianPrefix(allTenants(), KVCacheOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefix != 0 {
+		t.Fatalf("prefix = %d; this fixture caches nothing", prefix)
+	}
+	view := kvCachePriceView([]string{"m"}, prefix, staticPricer{ibmSonnet}, KVCacheSimConfig{})
+	if view.PrefixKnown {
+		t.Error("prefix_known is true with a zero prefix; the page would render the cost columns")
+	}
+	if len(view.Costs) != 1 {
+		t.Fatalf("%d cost rows", len(view.Costs))
+	}
+	if view.Costs[0].Known {
+		t.Error("a cost row reads known:true with no prefix to price. Every figure on it is zero " +
+			"for want of a size, and $0.00 beside known:true is a claim that the tier is free.")
+	}
+	// The model itself IS priced — that fact must not be lost, only the costs derived from a
+	// missing size.
+	if !view.Pricing.Models[0].Known {
+		t.Error("the model's own rates were reported as unknown; only the prefix is missing")
+	}
+}

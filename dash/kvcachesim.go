@@ -434,8 +434,14 @@ type KVCachePriceView struct {
 	// Prefix is the window's own MEDIAN billed prefix, in tokens, and the size every cost
 	// above is computed on. The median rather than the mean: per-request cache cost is
 	// bimodal on real traffic, so a mean would describe no request.
-	Prefix int64              `json:"prefix_tokens"`
-	Costs  []KVCachePriceCost `json:"costs"`
+	Prefix int64 `json:"prefix_tokens"`
+	// PrefixKnown is false when no request in this window cached anything, so there is no prefix
+	// to price on. Every cost below is then ZERO FOR WANT OF A SIZE, not because the tier is
+	// free — and a table of $0.00 rates beside `known: true` is exactly the fabricated
+	// measurement kvcache.Result.Valued exists to prevent one layer over. It was reachable: a
+	// tenant whose traffic is mostly uncached is the tenant most likely to be reading this page.
+	PrefixKnown bool               `json:"prefix_known"`
+	Costs       []KVCachePriceCost `json:"costs"`
 }
 
 // KVCachePriceView builds the pricing panel's payload.
@@ -444,12 +450,14 @@ func kvCachePriceView(models []string, prefix int64, p modelinfo.Pricer,
 	list := kvcache.NewPriceList(context.Background(), models, p, cfg.Multipliers, cfg.Overrides)
 	a := kvCacheAssumptions(cfg)
 	out := &KVCachePriceView{Pricing: list, Assumptions: a, Prefix: prefix,
-		Costs: []KVCachePriceCost{}}
+		PrefixKnown: prefix > 0, Costs: []KVCachePriceCost{}}
 	sem := a.Semantics
 	k := a.Schedule.MaxPings
 	for _, m := range list.Models {
-		c := KVCachePriceCost{Model: m.Model, Known: m.Known}
-		if m.Known {
+		// Known means "this model has rates AND there is a prefix to apply them to". A rate
+		// without a size produces $0.00, which must not read as a price.
+		c := KVCachePriceCost{Model: m.Model, Known: m.Known && prefix > 0}
+		if c.Known {
 			c.Uncached = m.UncachedCost(0, prefix, 0)
 			c.Read = float64(prefix) * m.CacheRead
 			c.Write5m = m.HoldCost(prefix, kvcache.TTL5m, 0, sem)
@@ -469,7 +477,7 @@ func kvCachePriceView(models []string, prefix int64, p modelinfo.Pricer,
 // model the reader could be pricing — including the ones with no rates.
 func (d *DB) KVCacheModels(f Filter) ([]string, error) {
 	cond, args := f.where()
-	rows, err := d.sql.Query(`SELECT DISTINCT r.model FROM requests r WHERE `+cond+
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT DISTINCT r.model FROM requests r WHERE `+cond+
 		` ORDER BY r.model`, args...)
 	if err != nil {
 		return nil, err
@@ -486,17 +494,28 @@ func (d *DB) KVCacheModels(f Filter) ([]string, error) {
 	return out, rows.Err()
 }
 
-// KVCacheMedianPrefix is the window's own median billed prefix (cache_read + cache_write), in
-// tokens.
+// KVCacheMedianPrefix is the median billed prefix (cache_read + cache_write) of the requests
+// that CACHED SOMETHING, over the same rows the analysis describes.
 //
-// NOT tokens_before, which is message text only and runs a median 3.38x low — the same
-// correction the keep-alive tab's calculator already applies. Exact rather than interpolated,
-// for the reason pctlF is: sorting a few thousand values is free and an estimate here is a
-// number nobody can reproduce.
-func (d *DB) KVCacheMedianPrefix(f Filter) (int64, error) {
-	cond, args := f.where()
-	rows, err := d.sql.Query(`SELECT r.cache_read + r.cache_write FROM requests r WHERE `+cond,
-		args...)
+// Three things had to line up here and none of them did. It took only a Filter, so the page's own
+// narrowings (time-of-day band, tier, has-a-successor) never reached it and the pricing panel
+// printed a median 2.5x away from the card directly above it — both labelled "this window's own
+// median". It had no LIMIT, so it was the one read on the page the stated 200,000-row ceiling did
+// not apply to: it materialised a float64 per matching row and sorted the lot, scaling with the
+// tenant rather than with the cap. And it medianed over EVERY request, including the ones that
+// cached nothing, which is the population bias described on KVCacheCards.CachedContextP50.
+//
+// So it now takes the options too, is built through kvCacheQuery like every other read on this
+// page, excludes zero-prefix rows, and is bounded by the same ceiling — newest first, so the rows
+// it medians are the rows the analysis kept.
+//
+// NOT tokens_before, which is message text only and runs a median 3.4x low — the same correction
+// the keep-alive tab's calculator applies. Exact rather than interpolated, for the reason pctlF
+// is: an estimate here is a number nobody can reproduce.
+func (d *DB) KVCacheMedianPrefix(f Filter, o KVCacheOptions) (int64, error) {
+	q, args := kvCacheQuery(f, o, "r.cache_read + r.cache_write")
+	q += " AND (r.cache_read + r.cache_write) > 0 ORDER BY r.ts DESC LIMIT ?"
+	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, kvCacheMaxRows)...)
 	if err != nil {
 		return 0, err
 	}

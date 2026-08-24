@@ -55,7 +55,42 @@ import (
 // traffic. Past it the read keeps the NEWEST rows and every payload carries scanned, total and
 // truncated: a silent cap reads as "this is your whole history", which is the one thing a
 // savings figure must never imply.
-const kvCacheMaxRows = 200_000
+// A var rather than a const so a test can lower it: the truncation branch decides what `total`
+// means and whether the extra row is trimmed, and a branch that only executes above 200,000 rows
+// is a branch no test reaches.
+var kvCacheMaxRows = 200_000
+
+// kvCacheMaxConcurrent bounds how many analysis reads run at once, which is the half of the
+// ceiling kvCacheMaxRows does not cover.
+//
+// kvCacheMaxRows bounds ONE request: ~135 MB of live heap and several seconds at the cap. Nothing
+// bounded the NUMBER of requests, and the store opens its pool with no SetMaxOpenConns, so under
+// WAL every reader genuinely runs in parallel — eight concurrent analyses measured at 1.65 GB
+// resident and 24 s each, which OOMs a 2 GB container. A dashboard reader holding the refresh key
+// is enough, and on a single-tenant deployment no credential is needed to do it.
+//
+// Two, deliberately, because the number is a memory budget rather than a throughput choice:
+// 2 x 135 MB is a bound worth stating, and almost every real window is far below the cap so the
+// queue is rarely reached. A waiter whose request has been abandoned leaves the queue instead of
+// entering it, so the slot goes to somebody still listening.
+const kvCacheMaxConcurrent = 2
+
+// kvCacheSlots is that bound. Package-level because the resource being protected is the process's
+// memory, not any one account's quota.
+var kvCacheSlots = make(chan struct{}, kvCacheMaxConcurrent)
+
+// acquireKVCache waits for a slot, or gives up if the caller has already gone.
+func acquireKVCache(ctx context.Context) error {
+	select {
+	case kvCacheSlots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// releaseKVCache returns a slot.
+func releaseKVCache() { <-kvCacheSlots }
 
 // idleEdges are the idle-gap histogram's fixed edges, in seconds; the last band is unbounded.
 //
@@ -357,13 +392,14 @@ func scanKVCacheRequest(rows interface{ Scan(...any) error }) (*kvcache.Request,
 // an analysis of the recent past is useful, and one that silently stopped at some point in the
 // middle of the window is not.
 func (d *DB) KVCacheDataset(f Filter, o KVCacheOptions) ([]*kvcache.Request, int64, error) {
-	total, err := d.kvCacheCount(f, o)
-	if err != nil {
-		return nil, 0, err
-	}
+	// One row past the cap, so the read itself says whether it was truncated. The COUNT below is
+	// a SECOND complete pass over the same window function, and it is only needed when the answer
+	// is "yes" — on every untruncated window, which is nearly all of them, the count is exactly
+	// the number of rows returned. It was costing 0.76 s of a 7 s request to learn something the
+	// read already knew.
 	q, args := kvCacheQuery(f, o, kvCacheCols)
 	q += " ORDER BY r.ts DESC, r.id DESC LIMIT ?"
-	rows, err := d.sql.Query(q, append(args, kvCacheMaxRows)...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, kvCacheMaxRows+1)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -379,6 +415,14 @@ func (d *DB) KVCacheDataset(f Filter, o KVCacheOptions) ([]*kvcache.Request, int
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
+	total := int64(len(out))
+	if len(out) > kvCacheMaxRows {
+		// Truncated, so the true total needs the count, and the extra row must not be returned.
+		out = out[:kvCacheMaxRows]
+		if total, err = d.kvCacheCount(f, o); err != nil {
+			return nil, 0, err
+		}
+	}
 	// Read newest-first so the cap keeps the newest; handed back oldest-first so the replay can
 	// walk it.
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
@@ -391,7 +435,7 @@ func (d *DB) KVCacheDataset(f Filter, o KVCacheOptions) ([]*kvcache.Request, int
 func (d *DB) kvCacheCount(f Filter, o KVCacheOptions) (int64, error) {
 	q, args := kvCacheQuery(f, o, "COUNT(*)")
 	var n int64
-	err := d.sql.QueryRow(q, args...).Scan(&n)
+	err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(&n)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
@@ -449,13 +493,13 @@ func (d *DB) KVCacheRows(f Filter, o KVCacheOptions) (*KVCacheRowPage, error) {
 	}
 	q, args := kvCacheQuery(f, o, kvCacheCols)
 	q += " ORDER BY " + fmt.Sprintf(order, dir) + " LIMIT ? OFFSET ?"
-	rows, err := d.sql.Query(q, append(args, o.Limit, o.Offset)...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, o.Limit, o.Offset)...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := &KVCacheRowPage{Rows: []*KVCacheRow{}, Total: total, Offset: o.Offset, Limit: o.Limit,
-		Truncated: total > kvCacheMaxRows}
+		Truncated: total > int64(kvCacheMaxRows)}
 	for rows.Next() {
 		r, err := scanKVCacheRequest(rows)
 		if err != nil {
@@ -534,8 +578,19 @@ type KVCacheCards struct {
 	HitRatePct  float64 `json:"hit_rate_pct"`
 	CostUSD     float64 `json:"cost_usd"`
 	CostUnknown int64   `json:"cost_unknown"`
-	// CachedContextP50 is the median billed prefix in tokens: the size every cache write, cache
-	// read and keep-alive on this page is proportional to.
+	// CachedContextP50 is the median billed prefix in tokens, over the requests that CACHED
+	// SOMETHING — rows with a zero prefix are excluded.
+	//
+	// The population is the whole point. This figure is what every cache-write, cache-read and
+	// keep-alive dollar in the pricing panel is multiplied by, and a request that cached nothing
+	// has no prefix to price. Including them does not add noise, it biases: 2,120 of the
+	// production corpus's 14,407 rows have a zero prefix, which pulled the median from 147,550
+	// down to 124,845 — 18% low on every cost derived from it. A tenant whose traffic is mostly
+	// uncached got a median of ZERO, and then a whole table of $0.00 rates rendered as though
+	// they were known, which is the failure Result.Valued exists to prevent one layer over.
+	//
+	// PrefixKnown on the pricing view is the flag that says whether this could be computed at
+	// all; see TestTheMedianPrefixPricesOnlyRowsThatCached.
 	CachedContextP50 int64 `json:"cached_context_p50"`
 }
 
@@ -631,7 +686,7 @@ func (d *DB) KVCacheAnalyze(f Filter, o KVCacheOptions, p modelinfo.Pricer,
 	// Destructured, not passed as a tuple: QueryRow takes (string, ...any), so handing it a
 	// two-value call passes the whole []any as ONE argument and the driver rejects it.
 	kaQ, kaArgs := kvCacheKeepAliveCount(f)
-	if err := d.sql.QueryRow(kaQ, kaArgs...).Scan(&out.Coverage.KeepAliveRows); err != nil &&
+	if err := d.sql.QueryRowContext(d.readCtx(), kaQ, kaArgs...).Scan(&out.Coverage.KeepAliveRows); err != nil &&
 		err != sql.ErrNoRows {
 		return nil, err
 	}
@@ -682,7 +737,10 @@ func analyseKVCache(rows []*kvcache.Request) *KVCacheAnalysis {
 		kvAccFor(byBucket, string(r.Bucket)).add(r)
 		kvAccFor(byUser, r.User).add(r)
 		kvAccFor(byModel, r.Model).add(r)
-		prefixes = append(prefixes, float64(r.CachedContext))
+		// Only rows that cached something contribute: see CachedContextP50.
+		if r.CachedContext > 0 {
+			prefixes = append(prefixes, float64(r.CachedContext))
+		}
 		if r.HourUTC >= 0 && r.HourUTC < 24 {
 			hourN[r.HourUTC]++
 			hourUSD[r.HourUTC] += r.CostUSD

@@ -28,6 +28,38 @@ var memSeq atomic.Uint64
 type DB struct {
 	sql  *sql.DB
 	path string // "" for the in-memory store
+	// ctx bounds the READS made through this handle, so a request the caller has abandoned stops
+	// costing the process. nil means context.Background().
+	//
+	// Carried on a shallow copy (see WithContext) rather than added as a parameter to every
+	// query method, which would have meant a context argument on fifty call sites, most of them
+	// tests, for a value only the HTTP layer can supply. The struct is two fields and holds no
+	// lock, so copying it is safe; `go vet` would say otherwise if it did.
+	ctx context.Context
+}
+
+// WithContext returns a handle whose reads are cancellable, for a caller that has one.
+//
+// The KV-cache analysis reads up to kvCacheMaxRows rows and builds a Request per row, which is
+// ~135 MB and several seconds at the ceiling. Without a context that work continued after the
+// client had gone: a request killed 1.5 s in still burned 7.1 s of CPU and allocated to
+// completion, so a reader who hits refresh five times commits five times the memory and gets
+// none of it back. Reads made through this handle stop when the request does.
+func (d *DB) WithContext(ctx context.Context) *DB {
+	if d == nil {
+		return nil
+	}
+	c := *d
+	c.ctx = ctx
+	return &c
+}
+
+// readCtx is the context reads run under.
+func (d *DB) readCtx() context.Context {
+	if d == nil || d.ctx == nil {
+		return context.Background()
+	}
+	return d.ctx
 }
 
 // Open opens (creating if needed) the dashboard database at path. path ":memory:"
