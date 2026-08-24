@@ -67,8 +67,28 @@ func TestReusePriorMatchesTheMeasuredLedger(t *testing.T) {
 	if expectedReuses(true, 5) <= expectedReuses(false, 5) {
 		t.Error("recurring content must still be valued above first sight")
 	}
-	if expectedReuses(false, 40) >= expectedReuses(false, 5) {
-		t.Error("late in a session there are fewer turns left to amortize over")
+	// This used to assert the OPPOSITE — that a long transcript has fewer turns left to
+	// amortize over — and the measurement refutes it. Session length here is heavy-tailed
+	// (6,744 sessions, median 1, mean 5.5, max 6,024), so median turns REMAINING rises with
+	// turns so far: 2 at one message, 19 at five, 59 at twenty, 112 at forty. The old prior
+	// discounted precisely where amortization is most real.
+	if expectedReuses(false, 40) <= expectedReuses(false, 5) {
+		t.Error("expected remaining turns RISE with turns so far in a heavy-tailed length " +
+			"distribution (median remaining: 19 at five messages, 112 at forty), so a long " +
+			"transcript must not be valued below a short one")
+	}
+	// Monotone, so no band boundary can invert the relationship the line above checks.
+	for _, pair := range [][2]int{{1, 20}, {20, 40}, {40, 80}, {80, 200}} {
+		if expectedReuses(false, pair[0]) > expectedReuses(false, pair[1]) {
+			t.Errorf("prior must be monotone non-decreasing in turnsSoFar: %d gave %.1f but "+
+				"%d gave %.1f", pair[0], expectedReuses(false, pair[0]),
+				pair[1], expectedReuses(false, pair[1]))
+		}
+	}
+	// The cap is documented as a cap; if it grows past the min..median band this file
+	// anchors on, that is a different change and needs its own measurement.
+	if got := expectedReuses(false, 100_000); got > 12 {
+		t.Errorf("prior is capped at the top of the documented 4.0-12.0 band; got %.1f", got)
 	}
 }
 

@@ -332,14 +332,54 @@ type gateDecision struct {
 // distribution rather than an aggregate that a few long sessions dominate (max 215 against a
 // median of 12). Upgrade to a per-session decay fit only if a measurement shows the estimate is
 // still what misprices calls.
+// The late-session DISCOUNT below used to run the wrong way, and that is the only thing
+// corrected here. Session length on this deployment is heavy-tailed — 6,744 sessions, median
+// 1 turn, mean 5.5, max 6,024 — and in a heavy tail the expected REMAINING length grows with
+// the length so far. Measured, as median turns still to come:
+//
+//	turns so far     1     3     5    10    20    40    80   160
+//	median remaining 2    16    19    34    59   112   147   242
+//
+// Monotonically increasing at every step. The old prior returned 4 and then dropped to 3 once
+// turnsSoFar >= 20, "because fewer turns remain to amortize over" — the one place the data
+// says the opposite: a transcript that has already reached 20 messages has a median 59 still
+// to come. So the gate was cheapest exactly where amortization is most real.
+//
+// The realized multiplier is the check: saved_gross/saved_unique over ALL extract_llm rows is
+// 54.6x in aggregate and 16.6x at the per-session median, against the 5.0x the first-sighting
+// prior implies. Both say the prior is LOW, not high.
+//
+// DELIBERATELY CONSERVATIVE, and deliberately narrow. The measurement would justify much
+// larger numbers, but the early-turn and recurring values are left exactly as they were:
+//
+//   - The early value stays 4. A first-message candidate is the one whose removal is least
+//     likely to be replayed (median remaining 2), so the measurement does not argue for
+//     raising it and short sessions are where a wrong prior wastes money fastest.
+//   - `seenBefore` stays a flat 6. Every published break-even figure in
+//     docs/components/extract_llm.md is quoted for recurring content, and
+//     TestBreakEvenSizesMatchTheDocumentedVerdict pins them; moving it would invalidate that
+//     documentation as a side effect of a change about turn counts.
+//   - Only the >=20 band moves, from 3 to a rising 5/8/12, and 12 is the top of the 4.0-12.0
+//     min..median band this file already documents. The cap is a cap, not an extrapolation:
+//     the median remaining at 160 messages is 242, and pricing that honestly is a separate
+//     change needing its own measurement of the churn it would license.
+//
+// ponytail: a step function over a measured table, not a fitted decay. Upgrade to a fit only
+// if a measurement shows these steps are what misprices calls.
 func expectedReuses(seenBefore bool, turnsSoFar int) float64 {
 	if seenBefore {
-		return 6 // already recurred once, so at or above the observed median
+		return 6 // already recurred once; the documented break-evens are quoted at this
 	}
-	if turnsSoFar >= 20 {
-		return 3 // late in a long session: fewer turns remain to amortize over
+	switch {
+	case turnsSoFar < 20:
+		return 4 // unchanged: the observed minimum
+	case turnsSoFar < 40:
+		return 5
+	case turnsSoFar < 80:
+		return 8
+	default:
+		return 12 // the top of the documented min..median band, capped not extrapolated
 	}
-	return 4 // the observed minimum
 }
 
 // evaluateGate decides whether one candidate output is worth an extraction call.

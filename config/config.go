@@ -562,7 +562,7 @@ components:
     llm_every_n_requests: 1
     llm_max_per_request: 8
     llm_max_per_session: 0
-    min_tokens: 8000
+    min_tokens: 3000
     model:
       model: claude-haiku-4-5
       source: incoming

@@ -341,27 +341,32 @@ func TestHousellmColdSweepActuallyFires(t *testing.T) {
 }
 
 // TestHousellmDoesNotAttemptTheTailBelowBreakEven pins the floor that makes the warm/tail
-// path safe, from the loss side. TestDefaultConfigsSpendOnlyOnTheUncachedTail shows a huge
-// tail candidate IS worth a call now; this shows a realistically-sized one is not, and that
-// the preset refuses it before spending anything.
+// path safe, from the loss side. TestDefaultConfigsSpendOnlyOnTheUncachedTail shows a large
+// tail candidate IS worth a call now; this shows a small one is not, and that the preset
+// refuses it before spending anything.
 //
-// The number is measured, not chosen. On real warm sessions through a local proxy an
-// extraction call cost ~$0.0193 per ACCEPTED result — output-dominated, and including the
-// 1-in-5 rejected outright that pays full price for nothing. At the cache-write rate that
-// needs ~4,060 saved tokens, and the observed reduction on accepted tail calls was ~65%, so
-// the candidate must be ~6,250 tokens before a call can repay itself. The preset's floor is
-// 8,000.
+// The floor is derived. A call costs ~$0.0193 per ACCEPTED result — output-dominated, and
+// including the 1-in-5 rejected outright that pays full price for nothing. At the cache-write
+// rate plus the corrected amortization (reuses 12 on a long transcript) a saved token is worth
+// ~$9.31/MTok, so a call needs ~2,073 saved tokens, which at the observed ~65% reduction needs
+// a ~3,190-token candidate. The preset's floor is 3000.
 //
-// At a 1,000 floor the same sessions made 5 warm calls, accepted 4, saved 8,718 tokens for
-// $0.0771 — net -$0.036 — and every one of those calls was permitted by the EXPLORATION
-// budget rather than by the arithmetic. That is what this floor exists to prevent, and it is
-// why the assertion is on below_output_floor specifically: the floor must refuse the
-// candidate BEFORE the exploration allowance can spend on it.
+// It is NOT 8000, which an earlier revision of this change used: tool outputs on this workload
+// top out near 7,399 tokens (see TestContentClassesGateOnExpectedYield) and only 1 of 132
+// production candidates reached 8000, so that floor disabled the path rather than bounding it.
+//
+// The assertion is on below_output_floor specifically because the floor must refuse the
+// candidate BEFORE the exploration allowance can spend on it: exploration bypasses the
+// arithmetic, and at a 1000 floor every warm call real sessions made was an exploration call,
+// for a measured net of -$0.036.
 func TestHousellmDoesNotAttemptTheTailBelowBreakEven(t *testing.T) {
 	off := newComp(t, "extract_llm", housellmExtractLLM(t))
-	// ~4,000 tokens of log lines: comfortably above the OLD 1,000 floor, below break-even,
-	// and in the tail. This is the shape that lost money.
-	body := strings.Repeat("2024-01-01 GET /users/42 200 12ms handler=src/api/users.py\n", 330)
+	// 1,495 tokens of log lines (measured with schema.TextTokens, not estimated — 23 tokens
+	// per line, and guessing 12 put an earlier version of this fixture ABOVE the floor it was
+	// meant to sit under). Above the old 1,000 floor, below the 3,000 one, and in the tail:
+	// this is literally the size that lost money, since the two smallest calls real sessions
+	// made were 1,357 and 1,536 tokens, saving 290 and 0 for $0.0133 and $0.0124.
+	body := strings.Repeat("2024-01-01 GET /users/42 200 12ms handler=src/api/users.py\n", 65)
 	cm := &countingModel{resp: "data = json.decode(INPUT)\nOUTPUT = json.encode(data[:1])\n"}
 	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
 		userMsg("find the slow handler"), toolMsg(body),
@@ -374,9 +379,9 @@ func TestHousellmDoesNotAttemptTheTailBelowBreakEven(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cm.calls != 0 {
-		t.Fatalf("the preset spent a call on a ~4k-token tail candidate, which measured a "+
-			"net LOSS of $0.036 across five such calls; the hot floor must refuse it. "+
-			"calls=%d gates=%v", cm.calls, rep.Gates)
+		t.Fatalf("the preset spent a call on a 1,495-token tail candidate; candidates this "+
+			"size saved 0-290 tokens for $0.012-0.013 each in real sessions, so the hot "+
+			"floor must refuse it. calls=%d gates=%v", cm.calls, rep.Gates)
 	}
 	if rep.Gates["below_output_floor"] == 0 {
 		t.Fatalf("expected below_output_floor to be what refused it — anything else means the "+
