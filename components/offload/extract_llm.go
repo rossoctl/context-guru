@@ -1106,7 +1106,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if clsOK {
 				candRatio = clsRatio
 			}
-			d := evaluateGate(sz, candRatio, val, callCost(pricing, sz, goalOverhead), seenBefore, turnsSoFar,
+			// Per CANDIDATE, not per request: a tail candidate is not in the provider's
+			// cache and is worth the write rate, not the read rate. See savedTokenValueAt.
+			d := evaluateGate(sz, candRatio, savedTokenValueAt(c, i), callCost(pricing, sz, goalOverhead), seenBefore, turnsSoFar,
 				explore, e.allowCached)
 			if !d.allow && e.fireOnSize {
 				// ADVISORY: `fire_on: size` is the operator taking the spending decision

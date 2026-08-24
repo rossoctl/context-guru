@@ -44,6 +44,14 @@ func sizeBigOutput() string {
 	return strings.Repeat("2024-01-01 GET /users/42 200 12ms handler=src/api/users.py\n", 700)
 }
 
+// sizeSmallOutput is ~1.2k tokens: above a 500-token floor, and far below what one
+// cheap-model call can repay even priced at the cache-WRITE rate. It is the candidate the
+// economic gate must refuse, which is what makes the advisory demotion observable now that
+// the caching guard no longer decides anything on a warm turn.
+func sizeSmallOutput() string {
+	return strings.Repeat("2024-01-01 GET /users/42 200 12ms handler=src/api/users.py\n", 100)
+}
+
 func sizeReq() *bschemas.BifrostChatRequest {
 	return &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
 		userMsg("Find the auth timeout in src/api/users.py and fix it."),
@@ -130,38 +138,65 @@ func TestSessionCapIsTheOuterBoundOnCalls(t *testing.T) {
 	}
 }
 
-// On a caching backend the gate HARD-declines by default (measured net-negative). With
-// `fire_on: size` the operator has taken that decision, so the call must happen AND the
-// counterfactual must be recorded — a silent override is how a $3 surprise happens.
-func TestFireOnSizeDemotesTheCachingGuardToAdvisory(t *testing.T) {
+// `fire_on: size` demotes the economic gate to ADVISORY: the operator has taken the spending
+// decision, so the call must happen AND the counterfactual must be recorded — a silent
+// override is how a $3 surprise happens.
+//
+// This test used to be about the CACHING guard, and its own setup line said
+// "MaxCachedIdx: 0, // the tool output at index 1 is in the tail" while expecting the default
+// to refuse. That expectation came from a mis-pricing: a tail candidate is being written into
+// the cache on this turn, so it is worth the cache-WRITE rate, and savedTokenValue was
+// reporting the request-level cache-READ rate for it — 12.5x low. Now that savedTokenValueAt
+// prices per candidate, `val.cached` is false in the tail and true only at depth, where the
+// tail gate has already refused the candidate before the economic gate sees it. So the
+// caching guard no longer decides anything on a warm turn and cannot be what this test
+// observes; the ECONOMIC gate is what remains, and it is the honest subject.
+//
+// Exploration is why this runs the same session three times. The gate deliberately spends up
+// to maxExploreCalls = 2 calls per session to learn the workload's compression ratio, and
+// those allowances sit in front of the arithmetic. The third candidate is the first one the
+// economics actually decide.
+func TestFireOnSizeDemotesTheEconomicGateToAdvisory(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		yaml     string
 		wantCall bool
 		gate     string
 	}{
-		{"default blocks on a caching backend", "min_tokens: 500\nstrategy: code\n", false, "economic_gate"},
+		{"default refuses once exploration is spent", "min_tokens: 500\nstrategy: code\n", false, "economic_gate"},
 		{"size makes it advisory", "fire_on: size\nmin_tokens: 500\nstrategy: code\n", true, "economic_gate_advisory"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := &silentModel{}
 			e := newSizeComponent(t, model, tc.yaml)
-			rep := &components.Report{}
-			c := &components.Ctx{
-				Session: "advisory-" + tc.name, Ctx: context.Background(),
-				Store: store.NewMemory(store.Options{}), CtxWindow: 1_000_000,
-				CacheAware: true, MaxCachedIdx: 0, // the tool output at index 1 is in the tail
-				Model: components.ModelSpec{Static: model, Incoming: model},
+			var rep *components.Report
+			var callsBefore int64
+			for turn := 0; turn < 3; turn++ {
+				rep = &components.Report{}
+				c := &components.Ctx{
+					Session: "advisory-" + tc.name, Ctx: context.Background(),
+					Store: store.NewMemory(store.Options{}), CtxWindow: 1_000_000,
+					CacheAware: true, MaxCachedIdx: 0, // the tool output at index 1 is in the tail
+					Model: components.ModelSpec{Static: model, Incoming: model},
+				}
+				// A distinct body per turn, or the result cache answers without a call and the
+				// gate is never consulted at all.
+				req := sizeReq()
+				req.Input[1] = toolResultMsg(sizeSmallOutput() + strconv.Itoa(turn))
+				if turn == 2 {
+					callsBefore = atomic.LoadInt64(&model.calls)
+				}
+				if _, err := e.Offload(req, rep, c); err != nil {
+					t.Fatalf("Offload must fail open: %v", err)
+				}
 			}
-			if _, err := e.Offload(sizeReq(), rep, c); err != nil {
-				t.Fatalf("Offload must fail open: %v", err)
-			}
-			calls := atomic.LoadInt64(&model.calls)
+			// Only the THIRD turn is evidence: the first two may be exploration allowances.
+			calls := atomic.LoadInt64(&model.calls) - callsBefore
 			if tc.wantCall != (calls > 0) {
-				t.Fatalf("calls=%d, wantCall=%v (gates: %v)", calls, tc.wantCall, rep.Gates)
+				t.Fatalf("on the third turn calls=%d, wantCall=%v (gates: %v)", calls, tc.wantCall, rep.Gates)
 			}
 			if rep.Gates[tc.gate] == 0 {
-				t.Fatalf("expected the %s gate; got %v", tc.gate, rep.Gates)
+				t.Fatalf("expected the %s gate on the third turn; got %v", tc.gate, rep.Gates)
 			}
 		})
 	}

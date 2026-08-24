@@ -499,3 +499,74 @@ func TestTheGateSeesTheWholePromptNotJustTheCandidate(t *testing.T) {
 		t.Fatal("overhead 0 must fall back to promptOverheadTokens")
 	}
 }
+
+// TestSavedTokenValueAtPricesTheTailAtTheWriteRate pins the correction this change is: the
+// same request, the same rates, two candidates, and position is the only difference.
+func TestSavedTokenValueAtPricesTheTailAtTheWriteRate(t *testing.T) {
+	// A real rate card, so the assertion is about position and not about the fallback table.
+	c := &components.Ctx{CacheAware: true, MaxCachedIdx: 3, SelfRates: components.TokenRates{
+		Input: 3.00 / 1e6, CacheRead: 0.30 / 1e6, CacheWrite: 3.75 / 1e6,
+	}}
+	depth := savedTokenValueAt(c, 2) // 2 <= MaxCachedIdx: inside the live cached prefix
+	tail := savedTokenValueAt(c, 4)  // 4 > MaxCachedIdx: being written into the cache now
+
+	if !depth.cached || depth.perToken != 0.30/1e6 {
+		t.Fatalf("a candidate inside the cached prefix must be priced at the READ rate and "+
+			"reported cached: got cached=%v perToken=%g", depth.cached, depth.perToken)
+	}
+	if tail.cached || tail.perToken != 3.75/1e6 {
+		t.Fatalf("a candidate in the uncached TAIL must be priced at the cache-WRITE rate and "+
+			"NOT reported cached — it is entering the cache on this turn, not being read from "+
+			"it: got cached=%v perToken=%g", tail.cached, tail.perToken)
+	}
+	// The repeat rate is the read rate on both sides: whatever we remove, the turns that
+	// replay that removal are warm ones.
+	if tail.repeatPerToken != 0.30/1e6 || depth.repeatPerToken != 0.30/1e6 {
+		t.Fatalf("repeat rate must be the read rate on both sides: tail=%g depth=%g",
+			tail.repeatPerToken, depth.repeatPerToken)
+	}
+	if got := tail.perToken / depth.perToken; math.Abs(got-12.5) > 0.01 {
+		t.Fatalf("the tail/depth ratio is the size of the old mis-pricing and should be "+
+			"12.5x (1.25 / 0.1); got %.2fx", got)
+	}
+	// A cold sweep prices at the write rate wherever the candidate sits, because there is no
+	// live prefix for it to be inside.
+	cold := &components.Ctx{CacheAware: true, ColdCache: true, MaxCachedIdx: 3}
+	if a, b := savedTokenValueAt(cold, 1), savedTokenValueAt(cold, 9); a != b || a.cached {
+		t.Fatalf("on a cold sweep position must not change the price: %+v vs %+v", a, b)
+	}
+}
+
+// TestTheTailIsStillGatedOnItsOwnEconomics is the other half of
+// TestDefaultConfigsSpendOnlyOnTheUncachedTail, and the reason that one is a re-pricing
+// rather than an opening of the floodgates. Correcting the tail's VALUE does not remove the
+// gate: a tail candidate too small to repay a call must still be refused.
+//
+// explore is false throughout — the exploration allowance deliberately spends a bounded call
+// when no compression ratio has been observed yet, and it would mask the arithmetic here.
+func TestTheTailIsStillGatedOnItsOwnEconomics(t *testing.T) {
+	rates := components.TokenRates{Input: 3.00 / 1e6, CacheRead: 0.30 / 1e6, CacheWrite: 3.75 / 1e6}
+	c := &components.Ctx{CacheAware: true, MaxCachedIdx: 0, SelfRates: rates}
+	tail := savedTokenValueAt(c, 1)
+	depth := savedTokenValueAt(c, 0)
+	const ratio = 0.30 // a plausible observed compression ratio
+	cost := 0.012      // ~one cheap-model call
+
+	small := evaluateGate(1_200, ratio, tail, cost, false, 4, false, false)
+	if small.allow {
+		t.Fatalf("a 1,200-token tail candidate cannot repay a $%.3f call even at the write "+
+			"rate (expected saving $%.5f) — the gate must still refuse it: %q",
+			cost, small.expSaving, small.reason)
+	}
+	big := evaluateGate(200_000, ratio, tail, cost, false, 4, false, false)
+	if !big.allow {
+		t.Fatalf("a 200,000-token tail candidate must clear a $%.3f call (expected saving "+
+			"$%.5f): %q", cost, big.expSaving, big.reason)
+	}
+	// Same candidate, same size, priced as cached: the 12.5x haircut is what used to make
+	// every tail call look unaffordable, so this is the before-and-after in one assertion.
+	if d := evaluateGate(200_000, ratio, depth, cost, false, 4, false, false); d.allow {
+		t.Fatalf("priced at the READ rate the same 200,000-token candidate should not clear "+
+			"the gate; if it does, this test no longer demonstrates the mis-pricing: %q", d.reason)
+	}
+}

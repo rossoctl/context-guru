@@ -96,76 +96,6 @@ func TestExtractGateSuppressesInPipelineWhenCacheAware(t *testing.T) {
 	}
 }
 
-// The shipping guard, end to end and through the PRESETS: no default configuration may
-// run extract_llm on a prompt-caching backend. The unit test in components/offload covers
-// evaluateGate's hard decline directly; this one covers the wiring, so a rebase that drops
-// `allow_on_caching_backend` from the config struct or forgets to thread `allowCached`
-// into the gate fails here rather than shipping silently.
-//
-// The output is deliberately HUGE (far above the ~30,500-token cached break-even), so the
-// economics alone would permit the call — only the hard decline can suppress it.
-func TestNoDefaultConfigRunsExtractLLMOnCachingBackend(t *testing.T) {
-	filter := "data = json.decode(INPUT)\nOUTPUT = json.encode([r for r in data if \"keep\" in r[\"name\"]])\n"
-	pad := strings.Repeat("padding ", 30_000) // ~240k tokens: economics pass on their own
-	body := `[{"id":1,"name":"keep this ` + pad + `"},{"id":2,"name":"drop this ` + pad + `"}]`
-
-	// Every default that reaches extract_llm: the bare component, plus each preset's tuned
-	// config. None of them may spend on caching traffic.
-	cfgs := map[string]string{
-		"defaults": "strategy: code\nmodel:\n  source: config\n",
-		"codesmart": "strategy: code\nmodel:\n  source: config\nmin_tokens: 3000\n" +
-			"trigger:\n  min_request_tokens: 3000\nllm_every_n_requests: 1\nllm_max_per_request: 4\n",
-		// housellm is read from config.presetConfigs rather than copied here, because a copy
-		// cannot catch the drift this test exists to catch. The preset now ships
-		// per_output: TRUE, which makes `val.cached && !allowCached` live on every warm turn;
-		// the only thing keeping this case green is that allow_on_caching_backend is absent
-		// from the preset. Re-add it there and this fails, naming the combination our own
-		// numbers price as net-negative (extract_econ.go:333, break-even ~30,500 tokens per
-		// output against a largest-observed 2,053).
-		"housellm": housellmExtractLLM(t),
-	}
-	for name, cfg := range cfgs {
-		t.Run(name, func(t *testing.T) {
-			off := newComp(t, "extract_llm", cfg)
-			cm := &countingModel{resp: filter}
-			req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
-				userMsg("find the keep records"), toolMsg(body),
-			}}
-			c := &components.Ctx{Ctx: context.Background(), Session: "s1",
-				Store: store.NewMemory(store.Options{}), Model: components.ModelSpec{Static: cm},
-				CacheAware: true, MaxCachedIdx: -1, CtxWindow: 1_000_000}
-			var rep components.Report
-			if _, err := off.Offload(req, &rep, c); err != nil {
-				t.Fatal(err)
-			}
-			if cm.calls != 0 {
-				t.Fatalf("a default config must NOT call the LLM on a caching backend "+
-					"(measured net-negative), calls=%d", cm.calls)
-			}
-			if schema.MessageText(req.Input[1]) != body {
-				t.Fatal("a declined candidate must be left verbatim (fail open)")
-			}
-		})
-	}
-
-	// And the escape hatch still works, so the guard is a default and not a wall.
-	off := newComp(t, "extract_llm", "strategy: code\nmodel:\n  source: config\n"+
-		"allow_on_caching_backend: true\ntrigger:\n  min_request_tokens: 1\n")
-	cm := &countingModel{resp: filter}
-	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
-		userMsg("find the keep records"), toolMsg(body),
-	}}
-	if _, err := off.Offload(req, &components.Report{}, &components.Ctx{
-		Ctx: context.Background(), Session: "s2", Store: store.NewMemory(store.Options{}),
-		Model: components.ModelSpec{Static: cm}, CacheAware: true, MaxCachedIdx: -1,
-		CtxWindow: 1_000_000}); err != nil {
-		t.Fatal(err)
-	}
-	if cm.calls == 0 {
-		t.Fatal("allow_on_caching_backend: true must hand control back to the economics")
-	}
-}
-
 // Backward compatibility: an existing config that pins min_tokens must keep working
 // unchanged — the smarter trigger is the DEFAULT only when nothing was configured.
 func TestExplicitMinTokensConfigStillReduces(t *testing.T) {
@@ -286,6 +216,85 @@ func housellmExtractLLM(t *testing.T) string {
 }
 
 // TestHousellmColdSweepActuallyFires is the other half of
+// TestDefaultConfigsSpendOnlyOnTheUncachedTail replaces
+// TestNoDefaultConfigRunsExtractLLMOnCachingBackend, whose premise this change deliberately
+// reverses. That test asserted a default config makes NO call on a caching backend even for a
+// candidate its own comment identified as being in the tail. The reason it could assert that
+// was a mis-pricing, not a measurement: savedTokenValue reported `cached: true` for the whole
+// request, so a tail candidate — content being written INTO the cache on this very turn, at
+// 1.25x fresh — was valued at the cache-READ rate, 12.5x too low. The ~30,500-token
+// break-even quoted alongside it is explicitly the CACHED break-even. Together they read as
+// "extraction cannot pay on a caching backend", which is true at depth and was never
+// established for the tail.
+//
+// So the decision this pins is now positional, which is the honest form of it:
+//
+//	at DEPTH — inside the live cached prefix — a default must still not spend. Removing
+//	  cached content saves the read rate and forces a suffix re-write on top.
+//	in the TAIL, a default MAY spend, and must, when the economics pass.
+//
+// What is NOT relaxed is the economic gate itself: see
+// TestTheTailIsStillGatedOnItsOwnEconomics, which is the other half of this and the reason
+// this is a re-pricing rather than an opening of the floodgates.
+func TestDefaultConfigsSpendOnlyOnTheUncachedTail(t *testing.T) {
+	filter := "data = json.decode(INPUT)\nOUTPUT = json.encode([r for r in data if \"keep\" in r[\"name\"]])\n"
+	pad := strings.Repeat("padding ", 30_000) // ~240k tokens: economics pass on their own
+	body := `[{"id":1,"name":"keep this ` + pad + `"},{"id":2,"name":"drop this ` + pad + `"}]`
+
+	cfgs := map[string]string{
+		"defaults": "strategy: code\nmodel:\n  source: config\n",
+		"codesmart": "strategy: code\nmodel:\n  source: config\nmin_tokens: 3000\n" +
+			"trigger:\n  min_request_tokens: 3000\nllm_every_n_requests: 1\nllm_max_per_request: 4\n",
+		// Read from config.presetConfigs rather than copied, because a copy cannot catch the
+		// drift this test exists to catch.
+		"housellm": housellmExtractLLM(t),
+	}
+	// The tool output sits at index 1, so MaxCachedIdx 1 puts it inside the cached prefix and
+	// MaxCachedIdx 0 leaves it in the tail. One number is the whole difference.
+	for _, pos := range []struct {
+		name         string
+		maxCachedIdx int
+		wantCall     bool
+	}{
+		{"at depth, inside the cached prefix", 1, false},
+		{"in the uncached tail", 0, true},
+	} {
+		for name, cfg := range cfgs {
+			t.Run(pos.name+"/"+name, func(t *testing.T) {
+				off := newComp(t, "extract_llm", cfg)
+				cm := &countingModel{resp: filter}
+				req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+					userMsg("find the keep records"), toolMsg(body),
+				}}
+				c := &components.Ctx{Ctx: context.Background(), Session: "s1",
+					Store: store.NewMemory(store.Options{}), Model: components.ModelSpec{Static: cm},
+					// 75k, not 1M, and the number is measured rather than picked: this request is
+					// 60,026 tokens (schema.MessagesTokens). With no explicit min_tokens the
+					// `defaults` config decides on context PRESSURE, and against a 1M window
+					// 60k is 0.06 — far under the 0.25 bar — so it declined for a reason with
+					// nothing to do with caching, and the depth case passed without exercising
+					// anything. 75k puts pressure at 0.80, past the 0.60 bar that fires on
+					// pressure alone, so position is the only variable left.
+					CacheAware: true, MaxCachedIdx: pos.maxCachedIdx, CtxWindow: 75_000}
+				var rep components.Report
+				if _, err := off.Offload(req, &rep, c); err != nil {
+					t.Fatal(err)
+				}
+				if got := cm.calls > 0; got != pos.wantCall {
+					if pos.wantCall {
+						t.Fatalf("a 240k-token candidate in the UNCACHED tail must be worth a "+
+							"call — it is billed at the cache-write rate, not the read rate. "+
+							"calls=%d gates=%v", cm.calls, rep.Gates)
+					}
+					t.Fatalf("a default config must NOT spend on content inside the live cached "+
+						"prefix (read-rate saving, plus a forced suffix re-write), calls=%d", cm.calls)
+				}
+			})
+		}
+	}
+}
+
+// TestHousellmColdSweepActuallyFires is the other half of
 // TestNoDefaultConfigRunsExtractLLMOnCachingBackend, and it exists because the preset
 // shipped for a day in a state where BOTH halves were silent.
 //
@@ -328,5 +337,49 @@ func TestHousellmColdSweepActuallyFires(t *testing.T) {
 	if cm.calls == 0 {
 		t.Fatalf("the housellm preset made NO model call on a cold turn with a ~1.5k-token "+
 			"candidate — the component is configured into a no-op. gates=%v", rep.Gates)
+	}
+}
+
+// TestHousellmDoesNotAttemptTheTailBelowBreakEven pins the floor that makes the warm/tail
+// path safe, from the loss side. TestDefaultConfigsSpendOnlyOnTheUncachedTail shows a huge
+// tail candidate IS worth a call now; this shows a realistically-sized one is not, and that
+// the preset refuses it before spending anything.
+//
+// The number is measured, not chosen. On real warm sessions through a local proxy an
+// extraction call cost ~$0.0193 per ACCEPTED result — output-dominated, and including the
+// 1-in-5 rejected outright that pays full price for nothing. At the cache-write rate that
+// needs ~4,060 saved tokens, and the observed reduction on accepted tail calls was ~65%, so
+// the candidate must be ~6,250 tokens before a call can repay itself. The preset's floor is
+// 8,000.
+//
+// At a 1,000 floor the same sessions made 5 warm calls, accepted 4, saved 8,718 tokens for
+// $0.0771 — net -$0.036 — and every one of those calls was permitted by the EXPLORATION
+// budget rather than by the arithmetic. That is what this floor exists to prevent, and it is
+// why the assertion is on below_output_floor specifically: the floor must refuse the
+// candidate BEFORE the exploration allowance can spend on it.
+func TestHousellmDoesNotAttemptTheTailBelowBreakEven(t *testing.T) {
+	off := newComp(t, "extract_llm", housellmExtractLLM(t))
+	// ~4,000 tokens of log lines: comfortably above the OLD 1,000 floor, below break-even,
+	// and in the tail. This is the shape that lost money.
+	body := strings.Repeat("2024-01-01 GET /users/42 200 12ms handler=src/api/users.py\n", 330)
+	cm := &countingModel{resp: "data = json.decode(INPUT)\nOUTPUT = json.encode(data[:1])\n"}
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+		userMsg("find the slow handler"), toolMsg(body),
+	}}
+	c := &components.Ctx{Ctx: context.Background(), Session: "warm-tail",
+		Store: store.NewMemory(store.Options{}), Model: components.ModelSpec{Static: cm},
+		CacheAware: true, MaxCachedIdx: 0, CtxWindow: 1_000_000}
+	var rep components.Report
+	if _, err := off.Offload(req, &rep, c); err != nil {
+		t.Fatal(err)
+	}
+	if cm.calls != 0 {
+		t.Fatalf("the preset spent a call on a ~4k-token tail candidate, which measured a "+
+			"net LOSS of $0.036 across five such calls; the hot floor must refuse it. "+
+			"calls=%d gates=%v", cm.calls, rep.Gates)
+	}
+	if rep.Gates["below_output_floor"] == 0 {
+		t.Fatalf("expected below_output_floor to be what refused it — anything else means the "+
+			"exploration budget could still spend here. gates=%v", rep.Gates)
 	}
 }

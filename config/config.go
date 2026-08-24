@@ -497,19 +497,39 @@ components:
 	// spend, 63% of calls accepted) both ran 1000. Replayed on 28 captured requests with 1h
 	// idle gaps, 1000 recovers 53,071 tokens against 45,458 at 3000, at comparable cost.
 	//
-	// per_output is TRUE, and on this service that is very nearly a no-op — verified, not
-	// assumed: the same 28-request replay makes zero warm calls with it on. It is true
-	// because it is the correct default for a NON-caching backend, where the same reduction
-	// is a direct saving, and because false additionally suppressed the frozen-replay path
-	// for no gain. Do not read it as the lever that turns extraction on; the floor above is.
+	// per_output is TRUE and the WARM/TAIL path is now genuinely reachable, because
+	// savedTokenValueAt prices a candidate by POSITION: the tail is being written into the
+	// cache on this turn (measured: 17.2M cache_write against 9.4M fresh_input across 4,384
+	// warm requests, ~4,124 written tokens per turn), so it is worth the cache-WRITE rate,
+	// not the request-level cache-READ rate the gate used to apply to everything.
 	//
-	// allow_on_caching_backend IS DELIBERATELY ABSENT (component default: false), and it must
-	// stay absent. It lifts exactly one check — `val.cached && !allowCached` — and with
-	// per_output now TRUE that check is live on every warm turn. Setting it is the one edit
-	// here that would spend money to lose it: extract_econ.go:333 prices the combination at
-	// break-even ~30,500 tokens per output against a largest-observed 2,053, and
-	// TestNoDefaultConfigRunsExtractLLMOnCachingBackend reads THIS literal (not a copy of it)
-	// so the combination cannot ship by accident.
+	// min_tokens: 8000 is that path's floor, and it is DERIVED, not chosen. Measured on real
+	// warm sessions through a local proxy, an extraction call costs ~$0.015-0.018 and the cost
+	// is OUTPUT-dominated — trimming the prompt barely moves it (context_messages 7 -> 2 -> 0
+	// gave $0.0149 / $0.0159 / $0.0179 per call). Including the 1-in-5 call that is rejected
+	// outright and pays full price for nothing, cost per ACCEPTED call was $0.0193. At the
+	// cache-write rate that needs 4,060 saved tokens to break even, and the observed reduction
+	// on accepted tail calls was ~65%, so the candidate has to be ~6,250 tokens. 8,000 carries
+	// the margin.
+	//
+	// Below that floor the path is measurably a LOSS, which is why the floor is not lower:
+	// at min_tokens 1000 real sessions made 5 warm calls, accepted 4, saved 8,718 tokens for
+	// $0.0771 — net -$0.036. Every one of those calls was allowed by the EXPLORATION budget
+	// (2 per session) rather than by the arithmetic, so a low floor buys exploration waste and
+	// not savings. At 8,000 the same corpus makes zero warm calls and loses nothing, while the
+	// cold sweep still returns net +$0.062. context_messages is 2 for the same reason it is
+	// cheap: the tail call carries the candidate, not the conversation.
+	//
+	// allow_on_caching_backend IS DELIBERATELY ABSENT, and it is now VESTIGIAL rather than
+	// load-bearing. It lifts one check — `val.cached && !allowCached` — and since
+	// savedTokenValueAt prices per candidate that check no longer fires on a warm turn at all:
+	// the tail reports cached:false (it is being written INTO the cache, at 1.25x fresh), and
+	// depth reports cached:true but the tail gate refused it long before the economic gate saw
+	// it. Leaving the key out keeps the preset honest about which brake is real. The brake is
+	// the economic gate on a correctly-priced candidate, pinned from both sides by
+	// TestDefaultConfigsSpendOnlyOnTheUncachedTail (position decides) and
+	// TestTheTailIsStillGatedOnItsOwnEconomics (size still decides), the first of which reads
+	// THIS literal rather than a copy of it.
 	//
 	// llm_max_per_session: 0 is UNLIMITED, by operator decision, and unlike the previous
 	// revision of this comment it is now genuinely live — per_output: true means
@@ -536,13 +556,13 @@ components:
       enabled: true
       min_tokens: 1000
     context: recent
-    context_messages: 7
+    context_messages: 2
     economic_gate: true
     fire_on: pressure
     llm_every_n_requests: 1
     llm_max_per_request: 8
     llm_max_per_session: 0
-    min_tokens: 1000
+    min_tokens: 8000
     model:
       model: claude-haiku-4-5
       source: incoming

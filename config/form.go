@@ -184,13 +184,19 @@ type ExtractLLMForm struct {
 // false and which the preset now also omits. housellm is the one extract_llm configuration
 // this service has actually run and measured, so the form offers what production runs.
 //
-// PerOutput is TRUE here, matching the preset, and that is safe for the same reason it is
-// safe there: AllowOnCachingBackend false means every warm candidate is declined by
-// `val.cached && !allowCached`, verified as zero warm calls on a 28-request replay. The pair
-// is what matters — this prefill must never offer PerOutput true WITH
-// AllowOnCachingBackend true, because that combination is priced net-negative
-// (extract_econ.go:333: break-even ~30,500 tokens per output against a
-// largest-observed 2,053) and a guard test reads the preset to keep it from shipping.
+// PerOutput is TRUE here, matching the preset, and it now does something: savedTokenValueAt
+// prices a candidate by position, so a tail candidate is valued at the cache-WRITE rate rather
+// than the request-level cache-READ rate, and the hot path can pay on the uncached tail.
+//
+// MinTokens 8000 is what makes that safe, and it is derived from measurement rather than
+// picked: a call costs ~$0.0193 per ACCEPTED result (output-dominated, and including the
+// 1-in-5 that is rejected outright), which needs 4,060 saved tokens at the cache-write rate,
+// which at the observed ~65% reduction needs a ~6,250-token candidate. At MinTokens 1000 the
+// same real sessions lost $0.036 — every call allowed by the exploration budget rather than by
+// the arithmetic. Lower this and the form starts recommending a measured loss.
+//
+// AllowOnCachingBackend stays false and is vestigial either way: the check it lifts no longer
+// fires on a warm turn (the tail is not cached; depth is refused by the tail gate first).
 //
 // ColdMinTokens 1000 is the value that decides whether this component does anything at all
 // on this service: every extraction call production has ever made was a cold one, and at
@@ -206,8 +212,8 @@ type ExtractLLMForm struct {
 func DefaultExtractLLMForm() ExtractLLMForm {
 	return ExtractLLMForm{
 		PerOutput: true, ColdEnabled: true, SizeTrigger: false,
-		MinTokens: 1000, MaxPerRequest: 8, MaxPerSession: 0,
-		Aggressiveness: "medium", Context: "recent", ContextMessages: 7,
+		MinTokens: 8000, MaxPerRequest: 8, MaxPerSession: 0,
+		Aggressiveness: "medium", Context: "recent", ContextMessages: 2,
 		ColdMinTokens: 1000,
 		// incoming, not config: on the hosted service there is no operator-configured
 		// compaction model, so `source: config` is a component that can never make a call.

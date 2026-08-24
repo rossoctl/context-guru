@@ -111,12 +111,10 @@ const (
 	agentCacheWritePerMTok = 3.75
 )
 
-// savedTokenValue prices one saved token for THIS request. When the request goes to a
-// prompt-caching backend, content the agent re-sends every turn is already in the cached
-// prefix, so removing it saves the cache-read rate — the 10x haircut that sinks the
-// component's economics.
-func savedTokenValue(c *components.Ctx) tokenValue {
-	fresh, read, write := agentFreshPerMTok/1e6, agentCacheReadPerMTok/1e6, agentCacheWritePerMTok/1e6
+// agentRates resolves the three billing tiers for this request, preferring the deployment's
+// own price table over the built-in constants.
+func agentRates(c *components.Ctx) (fresh, read, write float64) {
+	fresh, read, write = agentFreshPerMTok/1e6, agentCacheReadPerMTok/1e6, agentCacheWritePerMTok/1e6
 	// The request's own model, at the rates this deployment is actually billed, beats any
 	// constant. Ctx.SelfRates comes from the same provider price table the dashboard prices
 	// requests with, so the gate's numerator and the operator's bill can no longer disagree.
@@ -134,6 +132,14 @@ func savedTokenValue(c *components.Ctx) tokenValue {
 			write = fresh * 1.25
 		}
 	}
+	return fresh, read, write
+}
+
+// savedTokenValue prices one saved token for THIS request, ignoring where in the transcript
+// it sits. It is the REQUEST-level answer and it is correct only for content in the cached
+// prefix; use savedTokenValueAt for a decision about a specific candidate.
+func savedTokenValue(c *components.Ctx) tokenValue {
+	fresh, read, write := agentRates(c)
 	if c != nil && c.CacheAware {
 		// A cache-aware turn whose cache has EXPIRED is the opposite case to a warm one: the
 		// whole prefix is about to be re-written at 1.25x fresh, so a token removed here is
@@ -150,6 +156,39 @@ func savedTokenValue(c *components.Ctx) tokenValue {
 	// No caching backend: every turn re-sends at the fresh rate, so a replay is worth as
 	// much as the first removal.
 	return tokenValue{perToken: fresh, repeatPerToken: fresh, cached: false}
+}
+
+// savedTokenValueAt prices a saved token for ONE candidate, at message index i.
+//
+// `cached` is a property of the CANDIDATE, not of the request, and conflating the two was a
+// real mis-pricing rather than a rounding choice. On a warm turn the tail — everything past
+// the provider's last cached index — is NOT in the cache: it is being written into it on this
+// very turn. MEASURED on this deployment across 4,384 warm requests, the tail is billed as
+// cache_creation, not as fresh input (17.2M cache_write tokens against 9.4M fresh_input,
+// averaging 4,124 written tokens per warm turn). So a token removed from the tail saves
+// 1.25x fresh, which is 12.5x what savedTokenValue reported for it.
+//
+// That understatement is what silenced the hot path. The `val.cached && !allowCached` decline
+// in evaluateGate was refusing tail candidates on the strength of a value computed as though
+// they were already cached, and the ~30,500-token break-even quoted against it is explicitly
+// the CACHED break-even — the two facts compounded into "extraction cannot pay on a caching
+// backend", which is true at depth and was never established for the tail.
+//
+// Depth is unchanged: a candidate inside the live cached prefix really is worth the read rate,
+// and removing it additionally forces a suffix re-write, which is why the tail gate stops it
+// before this function is ever consulted.
+func savedTokenValueAt(c *components.Ctx, i int) tokenValue {
+	v := savedTokenValue(c)
+	// A cold sweep already prices at the write rate, and a non-caching backend at fresh;
+	// neither has a cached prefix to be inside, so position cannot change the answer.
+	if v.cold || c == nil || !c.CacheAware {
+		return v
+	}
+	if !c.TailOnly(i) {
+		return v // inside the live cached prefix: the read rate is the honest one
+	}
+	_, read, write := agentRates(c)
+	return tokenValue{perToken: write, repeatPerToken: read, cached: false}
 }
 
 // priorCallCost is a last-resort per-call cost estimate (~the Terminal-Bench average).
