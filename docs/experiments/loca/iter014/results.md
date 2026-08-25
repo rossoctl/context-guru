@@ -3,6 +3,16 @@
 **Date:** 2026-08-23 · **Pre-registered:** `fe4d8d0`, before the run · **Both arms on `cg-proxy-v8`**,
 so the binary is not a difference between them · **128k band, n=75/arm** · **Cost: ~$460** for the pair.
 
+> **CORRECTION (iteration 019).** The conclusion below — that the model "declines to act on
+> evidence", read as a negative answer on the merged design — is **not safe**. This arm returned
+> **2,078 decisions across 2,030 calls = 1.02 candidates per call**, and `merged_kept_whole_batch`
+> never fired, which rules out empty-array replies as the explanation. Bulk adjudication is a
+> *comparative* mechanism measured at ~15 candidates; at 1.02 this arm was running the **per-output**
+> design already refuted at 6% live-kept, not the bulk design it is labelled as. The cause was the
+> prefix eligibility pre-filter removing 149,681 candidates (fixed at `extract_llm.go:695`). The
+> efficiency and deferral findings are unaffected — they do not depend on batch size. See
+> [iteration 019](../iter019/results.md).
+
 ## The result
 
 | | separate components | **merged** |

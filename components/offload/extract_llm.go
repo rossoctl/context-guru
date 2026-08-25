@@ -278,10 +278,23 @@ type extractLLMConfig struct {
 	// breaks the prefix hash and forces a cache-write of the suffix — the one cost every
 	// other offloader refuses to pay (see prefix_econ.go).
 	//
-	// This is the "full body" reach. The tail restriction is not a safety property of the
-	// model call, it is a cache-cost property, so lifting it is legitimate as long as the
-	// cost is PRICED — which is why enabling this also switches on two extra gates that do
-	// not apply to tail work:
+	// This is the "full body" reach. Lifting the tail restriction has a cache cost, which is
+	// why enabling this switches on two extra gates that do not apply to tail work — but the
+	// cost is not the only thing it changes.
+	//
+	// CORRECTED (iteration 019): an earlier version of this comment claimed the tail
+	// restriction "is not a safety property of the model call, it is a cache-cost property".
+	// That is wrong. It is also an INFORMATION property. Need is relevance minus whatever has
+	// already been captured elsewhere, and that second term lives in the turns AFTER the
+	// output — which the model is not shown. On tail content there are few later turns, so
+	// almost nothing can have superseded it and relevance ≈ need; the local prompt is sound
+	// precisely because of the restriction. Lifting it moves the model onto old outputs, where
+	// the gap between relevance and need is widest, while still asking the local question.
+	// The index pre-filter below is what compensates — so a selection mode that bypasses that
+	// pre-filter (see selectionMode == "merged") has neither the index nor the window.
+	// Measured in docs/experiments/loca/iter019/results.md §4.
+	//
+	// The two extra gates:
 	//
 	//  1. the co-reference index as an eligibility pre-filter, so the component never pays
 	//     a model call to look at prefix content a cheap deterministic pass can already
@@ -891,75 +904,75 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			goto splice
 		}
 		{
-		sem := make(chan struct{}, llmConcurrency)
-		var wg sync.WaitGroup
-		for k := range cands {
-			wg.Add(1)
-			go func(k int) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				ctx, cancel := context.WithTimeout(c.Ctx, llmCallTimeout)
-				defer cancel()
-				before := schema.TextTokens(cands[k].content)
-				start := time.Now()
-				res, sum, _ := extract.RunExtractionSummary(ctx, cands[k].content, goal, keepIDs, before, extCfg, model)
-				metrics.RecordExtractionCall(float64(time.Since(start).Milliseconds()))
-				// CLASSIFY THE SILENT FAILURE — and classify it INDEPENDENTLY of whether
-				// a result came back. RunExtractionSummary returns ("", "", "none") for every
-				// failure mode, so timeout / sandbox rejection / "nothing shrank" are
-				// indistinguishable in its return value. Our own ctx is the one reliable
-				// signal: if its deadline expired, THIS call was abandoned.
-				//
-				// Do NOT fold this into an `else` of the success check. In `code` mode the
-				// deterministic strategy runs as a fallback (extract.go:367-368), so a call
-				// whose LLM leg timed out can still return a smaller `res` — and an `else`
-				// would then record nothing. That is exactly the shape of the bug these
-				// counters exist to expose: the arm keeps compacting a little, so no
-				// dashboard looks broken while the expensive path has silently stopped.
-				//
-				// Fail-open behaviour is unchanged either way — this only records.
-				timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
-				if ctx.Err() != nil {
-					if timedOut {
-						atomic.AddInt64(&llmTimeouts, 1)
-					} else {
-						atomic.AddInt64(&llmErrors, 1)
+			sem := make(chan struct{}, llmConcurrency)
+			var wg sync.WaitGroup
+			for k := range cands {
+				wg.Add(1)
+				go func(k int) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					ctx, cancel := context.WithTimeout(c.Ctx, llmCallTimeout)
+					defer cancel()
+					before := schema.TextTokens(cands[k].content)
+					start := time.Now()
+					res, sum, _ := extract.RunExtractionSummary(ctx, cands[k].content, goal, keepIDs, before, extCfg, model)
+					metrics.RecordExtractionCall(float64(time.Since(start).Milliseconds()))
+					// CLASSIFY THE SILENT FAILURE — and classify it INDEPENDENTLY of whether
+					// a result came back. RunExtractionSummary returns ("", "", "none") for every
+					// failure mode, so timeout / sandbox rejection / "nothing shrank" are
+					// indistinguishable in its return value. Our own ctx is the one reliable
+					// signal: if its deadline expired, THIS call was abandoned.
+					//
+					// Do NOT fold this into an `else` of the success check. In `code` mode the
+					// deterministic strategy runs as a fallback (extract.go:367-368), so a call
+					// whose LLM leg timed out can still return a smaller `res` — and an `else`
+					// would then record nothing. That is exactly the shape of the bug these
+					// counters exist to expose: the arm keeps compacting a little, so no
+					// dashboard looks broken while the expensive path has silently stopped.
+					//
+					// Fail-open behaviour is unchanged either way — this only records.
+					timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+					if ctx.Err() != nil {
+						if timedOut {
+							atomic.AddInt64(&llmTimeouts, 1)
+						} else {
+							atomic.AddInt64(&llmErrors, 1)
+						}
 					}
-				}
-				if res != "" && res != cands[k].content {
-					out[k] = outT{res, sum}
-					// Feed the observed ratio so the gate prices future calls on what this
-					// workload actually achieves, not on an assumption.
-					e.ratios.observe(before-schema.TextTokens(res), before)
-					metrics.RecordExtractionSaving(before - schema.TextTokens(res))
-				} else if !timedOut {
-					e.ratios.observe(0, before) // a miss is real evidence: ratio 0
-				}
-				// TIMED OUT WITH NOTHING BACK => DELIBERATELY NOT OBSERVED. A ratio-0
-				// observation means "the model looked at this output and could not shrink
-				// it", which is real evidence about the workload. A deadline means the call
-				// never finished — evidence about SERVER LATENCY, not compressibility — and
-				// feeding it to the tracker makes the gate shut itself permanently on
-				// exactly the deployment where the budget is already too small:
-				//
-				//   minRatioSampleTokens is 1500, so ONE timed-out medium output both ends
-				//   this session's exploration (r.total >= the sample floor => exploring()
-				//   returns false) and starts dragging ratio() down from the 0.12 prior. A
-				//   few more and expectedRemoved falls below call cost for everything, so
-				//   evaluateGate suppresses every call — and the tracker lives on the
-				//   Pipeline for the proxy's LIFETIME, so nothing revises it afterwards.
-				//
-				// That is the self-justifying prior extract_econ.go's exploration budget
-				// exists to prevent, re-entered through the timeout path. MEASURED: 13
-				// timeouts in one 50-task arm at the 90s budget on a KV-pressured TP=1
-				// server, i.e. this is a live regime, not a hypothetical. Skipping the
-				// observation leaves the gate's estimate untouched; the timeouts are still
-				// counted (above) and still brake exploration via slowCallMs, which is the
-				// latency-aware layer that SHOULD react to a slow server.
-			}(k)
-		}
-		wg.Wait()
+					if res != "" && res != cands[k].content {
+						out[k] = outT{res, sum}
+						// Feed the observed ratio so the gate prices future calls on what this
+						// workload actually achieves, not on an assumption.
+						e.ratios.observe(before-schema.TextTokens(res), before)
+						metrics.RecordExtractionSaving(before - schema.TextTokens(res))
+					} else if !timedOut {
+						e.ratios.observe(0, before) // a miss is real evidence: ratio 0
+					}
+					// TIMED OUT WITH NOTHING BACK => DELIBERATELY NOT OBSERVED. A ratio-0
+					// observation means "the model looked at this output and could not shrink
+					// it", which is real evidence about the workload. A deadline means the call
+					// never finished — evidence about SERVER LATENCY, not compressibility — and
+					// feeding it to the tracker makes the gate shut itself permanently on
+					// exactly the deployment where the budget is already too small:
+					//
+					//   minRatioSampleTokens is 1500, so ONE timed-out medium output both ends
+					//   this session's exploration (r.total >= the sample floor => exploring()
+					//   returns false) and starts dragging ratio() down from the 0.12 prior. A
+					//   few more and expectedRemoved falls below call cost for everything, so
+					//   evaluateGate suppresses every call — and the tracker lives on the
+					//   Pipeline for the proxy's LIFETIME, so nothing revises it afterwards.
+					//
+					// That is the self-justifying prior extract_econ.go's exploration budget
+					// exists to prevent, re-entered through the timeout path. MEASURED: 13
+					// timeouts in one 50-task arm at the 90s budget on a KV-pressured TP=1
+					// server, i.e. this is a live regime, not a hypothetical. Skipping the
+					// observation leaves the gate's estimate untouched; the timeouts are still
+					// counted (above) and still brake exploration via slowCallMs, which is the
+					// latency-aware layer that SHOULD react to a slow server.
+				}(k)
+			}
+			wg.Wait()
 		}
 	splice:
 		for k := range cands { // Phase 3 (serial): freeze + splice.
