@@ -1,0 +1,38 @@
+# iter020 arm: the merged design run as SPECIFIED for the first time.
+#
+# Three changes from iter018's s14, all from docs/experiments/loca/iter019/results.md:
+#
+#  1. min_tokens 3000 -> 800. iter018 offered the model 2.63 candidates per call. Bulk adjudication
+#     is a COMPARATIVE mechanism and was measured at ~15; at 2.63 it is close to the per-output
+#     design refuted at 6% live-kept. Measured offline: at batch 3-6 the model dropped a
+#     genuinely-spent output only 2/4 of the time, at batch 10 it cleared 100% of them. Small
+#     batches do not make it wrong, they make it unwilling to act -- which is what iter018's 94.6%
+#     keep rate looks like from the inside.
+#
+#  2. the contract now states the SPENT criterion (current step / unfinished user instruction /
+#     agent's own stated next step) and REQUIRES the model to name and quote the obligation.
+#     Stating the criterion alone was measured inert (4/4 false drops); requiring the evidence
+#     halved it. Code change, internal/extract/bulk.go.
+#
+#  3. trim is gone. Chosen zero times in 21 offline opportunities; in production accepted once
+#     against eight rejected as invented.
+#
+# model stays on the cheap client. Reading the real context via a cache-read on the request model
+# is buildable and cheap (iter019 section 2) but the capability it was meant to enable -- the
+# Tier-2 veto -- did not appear, so it is deliberately NOT bundled into this arm. One variable
+# cluster at a time.
+pipeline: [format, extract_llm, summarize]
+components:
+  extract_llm:
+    selection_mode: merged
+    strategy: code
+    model: {source: config}
+    min_tokens: 800
+    allow_on_caching_backend: true
+    allow_cached_prefix: true
+  summarize:
+    trigger: {min_request_frac: 0.78}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

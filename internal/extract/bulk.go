@@ -42,11 +42,23 @@ type BulkItem struct {
 	Sample     string // the output itself, truncated
 }
 
-// BulkVerdict is one decision. Kept carries the retained text for a trim, and is ignored otherwise.
+// BulkVerdict is one decision.
+//
+// NeededBy and Quote are the FORCED EVIDENCE, and they are the only thing measured to protect the
+// marginal case (docs/experiments/loca/iter019/results.md §6). Arms carrying an identical criterion
+// differed ONLY in whether the model had to emit which obligation still needs the output, and the
+// arm that had to emit it halved the false-drop rate: instructions the model can skim past are
+// inert, a required output field is not.
+//
+// `Kept` is GONE along with the trim verdict. Offered across 21 probe opportunities trim was chosen
+// zero times, keep/drop scored identically to keep/drop/trim on every metric, and in production it
+// was accepted once against eight rejected as invented -- it was the only verdict requiring the
+// model to transport text, which is what it is worst at.
 type BulkVerdict struct {
-	Index   int    `json:"i"`
-	Verdict string `json:"verdict"` // keep | trim | drop
-	Kept    string `json:"kept,omitempty"`
+	Index    int    `json:"i"`
+	Verdict  string `json:"verdict"`   // keep | drop
+	NeededBy string `json:"needed_by"` // a | b | c | none  (see bulkContract's CRITERION)
+	Quote    string `json:"quote,omitempty"`
 }
 
 // bulkContract is deliberately blunt about consequences. See the cost-honest framing note above:
@@ -55,6 +67,14 @@ const bulkContract = `You are shown several tool outputs from one agent's transc
 about whether the agent has referred back to it since. Decide, for EACH output, whether the agent
 still needs it.
 
+CRITERION. An output is SPENT only if it is needed for NONE of the following:
+  (a) the step the agent is on right now;
+  (b) any instruction the user has given that is NOT YET COMPLETE;
+  (c) any step the agent has EXPLICITLY STATED it will take and has not yet taken.
+Only obligations WRITTEN IN THE TRANSCRIPT count -- do not invent hypothetical future needs. An
+output whose information has already been captured elsewhere (a filed total, a recorded conclusion)
+AND which no outstanding obligation needs in raw form is spent.
+
 WHAT A WRONG REMOVAL ACTUALLY COSTS. If you remove something the agent still needs, it usually does
 NOT notice the gap and does not ask for the content back. It answers from worse information and gets
 the task wrong. There is no safety net you should count on. A wrong removal is a silent, permanent
@@ -62,31 +82,34 @@ loss of task quality; a wrong retention costs only tokens.
 
 JUDGE THEM AGAINST EACH OTHER. You are given several outputs precisely so you can compare. Rank them:
 the ones whose information has clearly been consumed and superseded are the candidates. If they all
-look load-bearing, keep them all — "keep everything" is a valid and often correct answer.
+look load-bearing, keep them all -- "keep everything" is a valid and often correct answer.
 
 READING THE EVIDENCE. novel = identifiers this output introduced. refs = how many later turns reused
 one. ref_age = how many messages ago the last reuse was. used_frac = what share of its identifiers
 were carried forward. later_turns = how many turns the output has HAD to be referenced in.
 
-  - refs=0 with many later_turns is the strongest signal of deadness — but it is exact-match
+  - refs=0 with many later_turns is the strongest signal of deadness -- but it is exact-match
     evidence only, so an output whose values were TRANSFORMED (summed, reformatted, reworded) before
     being restated leaves refs=0 while still being load-bearing. Your job on those is to VETO the
     index, not to rubber-stamp it.
   - a LOW used_frac on a referenced output is ambiguous and must not be read as "the rest is chaff".
-    The agent may have taken an ANCHOR — a name, an id — precisely in order to point at a payload it
+    The agent may have taken an ANCHOR -- a name, an id -- precisely in order to point at a payload it
     never copied. Keep the payload.
   - novel=0 means the index could see nothing trackable. That is absence of evidence, not evidence of
     absence. Default to keep.
   - few later_turns means the output has not yet had a chance to be used. Keep it.
 
-VERDICTS, one per output:
-  keep — still needed, or you are unsure. This is the default.
-  drop — its information is spent; a short descriptor of its shape will remain in its place.
-  trim — mostly spent, but some records must survive. Return those records VERBATIM in "kept":
-         byte-for-byte copies of what you were shown, never paraphrased, summarised or reformatted.
+FOR EACH OUTPUT, ANSWER THE CRITERION FIRST, THEN DECIDE:
+  "needed_by" -- which of (a)/(b)/(c) still needs this output, or "none" if it is spent.
+  "quote"     -- when needed_by is a/b/c, the transcript text that creates that obligation, copied
+                 VERBATIM. Leave empty only when needed_by is "none".
+  "verdict"   -- keep (still needed, or you are unsure -- this is the default) or drop (its
+                 information is spent; a short descriptor of its shape will remain in its place).
+                 A verdict of "drop" REQUIRES needed_by "none": if any obligation still needs the
+                 output, the verdict must be keep.
 
 Reply with ONLY a JSON array, one object per output, no prose:
-[{"i": <index>, "verdict": "keep|trim|drop", "kept": "<verbatim text, trim only>"}]`
+[{"i": <index>, "needed_by": "a|b|c|none", "quote": "<verbatim text or empty>", "verdict": "keep|drop"}]`
 
 // BuildBulkPrompt renders the adjudication request. goal is what the agent is currently doing, so
 // relevance is judged toward the live task rather than in the abstract.
@@ -137,7 +160,14 @@ func ParseBulkVerdicts(reply string) ([]BulkVerdict, bool) {
 	keep := out[:0]
 	for _, v := range out {
 		switch v.Verdict {
-		case "keep", "trim", "drop":
+		case "keep", "drop":
+			keep = append(keep, v)
+		case "trim":
+			// Trim is no longer offered. A model that answers with it anyway is asking for partial
+			// retention we cannot perform, so degrade to the safe direction rather than discarding
+			// the verdict -- dropping it entirely would leave the output unjudged and looks
+			// identical to "the model said nothing about it".
+			v.Verdict = "keep"
 			keep = append(keep, v)
 		}
 	}

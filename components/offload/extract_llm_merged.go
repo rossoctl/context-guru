@@ -48,8 +48,16 @@ import (
 // plus the contract still fit the extraction model's window.
 const mergedSampleChars = 4000
 
-// mergedMaxItems caps one adjudication. ~15 is the size the bulk arm was measured at.
-const mergedMaxItems = 15
+// mergedMaxItems caps one adjudication.
+//
+// 12, not 15. Batch size is a YIELD/SAFETY trade-off, measured in
+// docs/experiments/loca/iter019/results.md §"batch size": at batch 3-6 the model dropped a
+// genuinely-spent output only half the time -- small batches do not make it wrong, they make it
+// unwilling to act, which is what a 94% keep rate at a live batch of 2.63 looks like. At batch 10 it
+// cleared 100% of the genuinely-spent candidates. But at batch 16 the transport burden started to
+// tell: 4 of 37 required quotes came back non-verbatim, against 0 of 16 at batch 10. So the ceiling
+// sits between 10 and 16 and this picks the conservative end of it.
+const mergedMaxItems = 12
 
 // renderEvidence formats one output's co-reference record for the prompt. Counts only — no
 // identifier lists — because the measured win came from comparative ranking, not from more detail,
@@ -96,11 +104,29 @@ func (e *ExtractLLM) adjudicateMerged(
 		return nil
 	}
 	if len(cands) > mergedMaxItems {
+		// NO SILENT CAPS. A truncated batch is a bounded-coverage decision and must be visible in
+		// the counters, or "we judged everything" and "we judged the first twelve" read identically.
+		rep.Gate("merged_batch_truncated")
 		cands = cands[:mergedMaxItems]
 	}
 
 	// The index's own measurements, keyed by message index, so the model sees what the
 	// deterministic pass concluded and can veto it rather than duplicate it.
+	// The transcript as one string, so a claimed obligation quote can be verified against what the
+	// agent was actually told rather than trusted.
+	var fb strings.Builder
+	for _, m := range flattenForCoref(req) {
+		for _, t := range m.Texts {
+			fb.WriteString(t)
+			fb.WriteByte('\n')
+		}
+		for _, r := range m.Results {
+			fb.WriteString(r.Text)
+			fb.WriteByte('\n')
+		}
+	}
+	flat := fb.String()
+
 	recs := map[int]*coref.Record{}
 	for _, r := range coref.Index(flattenForCoref(req), e.minTokens, schema.TextTokens) {
 		rr := r
@@ -160,24 +186,44 @@ func (e *ExtractLLM) adjudicateMerged(
 		}
 		content := cands[k].Content
 		before := schema.TextTokens(content)
+		nb := strings.ToLower(strings.TrimSpace(v.NeededBy))
+
+		// THE FORCED EVIDENCE, CHECKED. The model must say which obligation still needs the output
+		// and quote the transcript text creating it. Verifying the quote is cheap and turns
+		// "did it make that up?" from a worry into a counter -- the same discipline the old trim
+		// containment check applied, which caught 8 inventions in 9 attempts.
+		if q := strings.TrimSpace(v.Quote); q != "" {
+			if !strings.Contains(flat, q) {
+				// A fabricated obligation argues for KEEPING, so this is not a dangerous failure --
+				// but it is unreliability, and it grew with batch size when measured, so it is the
+				// signal that says the batch is too large.
+				rep.Gate("merged_quote_not_verbatim")
+			}
+		} else if nb != "" && nb != "none" {
+			rep.Gate("merged_obligation_unquoted")
+		}
+
 		var projected, summary string
 		switch v.Verdict {
 		case "drop":
+			// COHERENCE, and it points the dangerous way. The criterion states that a drop requires
+			// needed_by "none"; a verdict that names an outstanding obligation and then drops the
+			// output anyway contradicts itself in the direction of silent loss. Refuse it.
+			if nb != "" && nb != "none" {
+				rep.Gate("merged_drop_contradicts_obligation")
+				continue
+			}
+			if nb == "" {
+				// The field was not answered at all. Tolerated rather than refused -- requiring it
+				// would collapse yield to zero against a model that omits it -- but counted, because
+				// an unanswered criterion means the forcing function did not run for this verdict
+				// and the drop carries none of the protection it was measured to provide.
+				rep.Gate("merged_drop_unjustified")
+			}
 			// The residue is the SHAPE descriptor, not a head peek: for a record set the first
 			// rows say nothing about whether the field you want is in there. See corefstub.go.
 			projected, summary = mergedResidue(content), "adjudicated spent"
 			rep.Gate("merged_drop")
-		case "trim":
-			kept := strings.TrimSpace(v.Kept)
-			// CONTAINMENT. A trim may only return text that was actually shown; anything else is
-			// the model having written prose where it was asked to copy records. Reject rather
-			// than splice an invention.
-			if kept == "" || !strings.Contains(content, kept) {
-				rep.Gate("merged_trim_not_contained")
-				continue
-			}
-			projected = kept
-			rep.Gate("merged_trim")
 		default:
 			rep.Gate("merged_keep")
 			continue

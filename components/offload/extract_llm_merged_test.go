@@ -100,17 +100,20 @@ func TestMergedMakesExactlyOneModelCall(t *testing.T) {
 		t.Error("prompt lacks the cost-honest framing, worth ~26 points of live-kept when measured")
 	}
 	if strings.Contains(strings.ToLower(m.lastAsk), "recoverable") {
-		t.Error("prompt reassures the model that removals are recoverable -- the exact clause that "+
+		t.Error("prompt reassures the model that removals are recoverable -- the exact clause that " +
 			"measured 91% removal at 6% live-kept")
 	}
 }
 
-// A trim whose text was not in the original must be refused, never spliced.
-func TestMergedRefusesUncontainedTrim(t *testing.T) {
+// TRIM IS GONE, and a model that answers with it anyway must degrade to the SAFE direction. Dropping
+// the verdict outright would leave the output unjudged, which reads identically to "the model said
+// nothing about it" in the counters -- the same indistinguishability the Report.Gates comment warns
+// about. Trim was removed because it was chosen zero times in 21 probe opportunities and, in
+// production, accepted once against eight rejected as invented.
+func TestMergedTrimDegradesToKeep(t *testing.T) {
 	body := strings.Repeat("{\"row\":\"real value here\"}\n", 400)
 	req := mergedReq(3, body)
-	vs := []extract.BulkVerdict{{Index: 2, Verdict: "trim", Kept: "text the model invented"}}
-	raw, _ := json.Marshal(vs)
+	raw, _ := json.Marshal([]map[string]any{{"i": 2, "verdict": "trim", "kept": "text the model invented"}})
 	m := &countingModel{reply: string(raw)}
 	e, _ := newExtractLLM([]byte("{\"selection_mode\":\"merged\",\"min_tokens\":300,\"allow_on_caching_backend\":true,\"economic_gate\":false}"))
 	off := e.(components.Offload)
@@ -118,9 +121,85 @@ func TestMergedRefusesUncontainedTrim(t *testing.T) {
 		Store: store.NewMemory(store.Options{}), CtxWindow: 200000,
 		Model: components.ModelSpec{Incoming: m, Static: m}}
 	before := schema.MessagesTokens(req)
-	off.Offload(req, &components.Report{}, c)
+	rep := &components.Report{}
+	off.Offload(req, rep, c)
 	if schema.MessagesTokens(req) != before {
-		t.Error("an uncontained trim was spliced; the containment check must refuse invented text")
+		t.Error("a trim verdict changed the request; trim is no longer a supported action and must " +
+			"degrade to keep rather than splice model-authored text")
+	}
+	if rep.Gates["merged_keep"] == 0 {
+		t.Errorf("a trim verdict was not counted as a keep; gates=%v", rep.Gates)
+	}
+}
+
+// A drop that CONTRADICTS its own obligation answer must be refused. This is the one verification
+// that points the dangerous way: the model has said an outstanding obligation still needs the output
+// and then asked to remove it anyway.
+func TestMergedRefusesDropThatNamesAnObligation(t *testing.T) {
+	body := strings.Repeat("{\"row\":\"real value here\"}\n", 400)
+	req := mergedReq(3, body)
+	raw, _ := json.Marshal([]map[string]any{{"i": 2, "verdict": "drop",
+		"needed_by": "b", "quote": "find the failing test in src/auth.py"}})
+	m := &countingModel{reply: string(raw)}
+	e, _ := newExtractLLM([]byte("{\"selection_mode\":\"merged\",\"min_tokens\":300,\"allow_on_caching_backend\":true,\"economic_gate\":false}"))
+	off := e.(components.Offload)
+	c := &components.Ctx{Ctx: context.Background(), Session: "merged-4",
+		Store: store.NewMemory(store.Options{}), CtxWindow: 200000,
+		Model: components.ModelSpec{Incoming: m, Static: m}}
+	before := schema.MessagesTokens(req)
+	rep := &components.Report{}
+	off.Offload(req, rep, c)
+	if schema.MessagesTokens(req) != before {
+		t.Errorf("an output was dropped although the model said obligation (b) still needs it; "+
+			"gates=%v", rep.Gates)
+	}
+	if rep.Gates["merged_drop_contradicts_obligation"] == 0 {
+		t.Errorf("the contradiction was not counted; gates=%v", rep.Gates)
+	}
+}
+
+// A FABRICATED obligation quote must be counted. It argues for keeping, so it is not dangerous, but
+// quote fidelity degraded with batch size when measured (4 of 37 non-verbatim at batch 16 against 0
+// of 16 at batch 10), which makes this counter the signal that the batch is too large.
+func TestMergedCountsFabricatedObligationQuote(t *testing.T) {
+	body := strings.Repeat("{\"row\":\"real value here\"}\n", 400)
+	req := mergedReq(3, body)
+	raw, _ := json.Marshal([]map[string]any{{"i": 2, "verdict": "keep",
+		"needed_by": "b", "quote": "a sentence that appears nowhere in the transcript at all"}})
+	m := &countingModel{reply: string(raw)}
+	e, _ := newExtractLLM([]byte("{\"selection_mode\":\"merged\",\"min_tokens\":300,\"allow_on_caching_backend\":true,\"economic_gate\":false}"))
+	off := e.(components.Offload)
+	c := &components.Ctx{Ctx: context.Background(), Session: "merged-5",
+		Store: store.NewMemory(store.Options{}), CtxWindow: 200000,
+		Model: components.ModelSpec{Incoming: m, Static: m}}
+	rep := &components.Report{}
+	off.Offload(req, rep, c)
+	if rep.Gates["merged_quote_not_verbatim"] == 0 {
+		t.Errorf("an invented obligation quote was accepted without being counted; gates=%v", rep.Gates)
+	}
+}
+
+// The prompt must carry the CRITERION and demand the obligation evidence. Arms with an identical
+// criterion but no required evidence field measured 4/4 false drops against 2/4 -- so a prompt that
+// states the rule without forcing the answer is a different, measurably worse experiment.
+func TestMergedPromptForcesObligationEvidence(t *testing.T) {
+	body := strings.Repeat("{\"row\":\"real value here\"}\n", 400)
+	req := mergedReq(3, body)
+	m := &countingModel{reply: "[]"}
+	e, _ := newExtractLLM([]byte("{\"selection_mode\":\"merged\",\"min_tokens\":300,\"allow_on_caching_backend\":true,\"economic_gate\":false}"))
+	off := e.(components.Offload)
+	c := &components.Ctx{Ctx: context.Background(), Session: "merged-6",
+		Store: store.NewMemory(store.Options{}), CtxWindow: 200000,
+		Model: components.ModelSpec{Incoming: m, Static: m}}
+	off.Offload(req, &components.Report{}, c)
+	for _, want := range []string{"NOT YET COMPLETE", "needed_by", "quote", "VERBATIM"} {
+		if !strings.Contains(m.lastAsk, want) {
+			t.Errorf("prompt is missing %q, so the forcing function measured to halve false drops "+
+				"is not present", want)
+		}
+	}
+	if strings.Contains(m.lastAsk, "\"trim\"") {
+		t.Error("prompt still offers trim, which was removed")
 	}
 }
 
