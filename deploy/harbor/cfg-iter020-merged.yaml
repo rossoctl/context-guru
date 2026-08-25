@@ -30,6 +30,27 @@ components:
     min_tokens: 800
     allow_on_caching_backend: true
     allow_cached_prefix: true
+    # AMENDED MID-RUN, on the pre-registered abort criterion and before any outcome data.
+    #
+    # The first launch reached only 1.93 candidates per call at 213 requests with acted=0, and the
+    # counters named the cause: the economic gate SUPPRESSED 1,497 candidates against 224 that
+    # reached the model, top reason "cache-aware, saving below call cost".
+    #
+    # That gate prices each candidate's expected saving against the cost of A WHOLE MODEL CALL,
+    # which is right for the per-output loop where candidate == call. In merged mode there is ONE
+    # call regardless of batch size, so the marginal cost of adding a candidate is a few prompt
+    # tokens. The gate therefore suppresses exactly the candidates that would make the batch
+    # bulk-sized -- and it fights min_tokens directly: a lower floor yields smaller candidates,
+    # each of which looks even less worth "a call".
+    #
+    # This is the THIRD instance of one class of defect (prefix pre-filter, llm_max_per_request,
+    # now this): cost machinery written for per-output calls, applied to a one-call design. The
+    # correct fix is to amortise one call across the batch in merged mode; that is only worth
+    # building if bulk batches improve yield, which is what this run exists to answer. So the gate
+    # is disabled HERE, for a run that was pre-registered as mechanism-only and never going to make
+    # a cost claim. Calls do not multiply with candidates in merged mode, so the added spend is
+    # prompt tokens only.
+    economic_gate: false
   summarize:
     trigger: {min_request_frac: 0.78}
     resummarize_tokens: 20000

@@ -47,6 +47,42 @@ best** — different binaries, different expand behaviour. If the mechanism beha
 iterations 014/016/018 were not, which made them unreproducible), 128k band, `aws/claude-sonnet-5`, cheap model `aws/claude-haiku-4-5`,
 LOCA clearing at 128k, `INJECT_EXPAND=always`, n=75. Expected ~$230.
 
+## AMENDMENT 1 — economic gate disabled (written before any outcome data)
+
+The first launch hit the pre-registered abort criterion: **1.93 candidates/call at 213 requests, with
+`extract_llm.acted` = 0**. Acting on it is following this plan, not deviating from it.
+
+The counters identified the cause, and it was not `min_tokens`: **`economic_gate` suppressed 1,497
+candidates against 224 that reached the model**, top reason *"cache-aware, saving below call cost"*.
+The gate prices each candidate against the cost of a whole model call — correct for the per-output
+loop, wrong for a design with one call per request, where the marginal cost of a candidate is a few
+prompt tokens. It also fights `min_tokens`: a lower floor produces smaller candidates, each of which
+looks even less worth "a call", which is why 3000 → 800 did not help.
+
+`below_output_floor` (11,036) is **not** evidence about the floor — every request re-scans the whole
+transcript, so small outputs are re-counted each turn. That is an occurrence count, not an event
+count, and it was nearly misread as one.
+
+**Amendment:** `economic_gate: false` for this arm. Calls do not multiply with candidates in merged
+mode, so the added spend is prompt tokens (~$25 of haiku). This run was pre-registered as
+mechanism-only and makes no cost claim; the proper fix — amortising one call across the batch — is
+worth building only if bulk batches improve yield, which is the question here.
+
+**No endpoint, threshold or pre-registered reading is changed.** Primary endpoint remains candidates
+per call ≥ 8.
+
+**A finding already banked, independent of the outcome:** this is the third instance of one defect
+class — the prefix pre-filter (iter014), `llm_max_per_request`, and now the economic gate — cost
+machinery written for per-output calls, silently applied to a one-call design. Each one starved the
+batch, and each was invisible until the batch size was measured directly.
+
+### Additional observation from the aborted launch
+
+`merged_quote_not_verbatim` ran **19 of 224 verdicts (8.5%)** on **haiku**, against **0 of 59** on
+sonnet in the iter019 probes. At a batch of ~2 that cannot be a batch-size effect, so the forced-
+evidence mechanism may not survive the cheap model. If it holds at bulk size, that is a material
+limit on the fix, since every probe behind it was run on sonnet.
+
 ## Primary endpoint (mechanism)
 
 **Candidates per call ≥ 8**, computed as (sum of verdict gates) / `extract.calls`. Below that the arm
