@@ -28,6 +28,7 @@ import (
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
+	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
@@ -699,6 +700,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// loop does -- written under any other id, the guard sits where nothing reads it.
 			if !bypassed && tn.Store != nil {
 				if nb, restored := expand.RestoreResults(string(provider), body, tn.Store); len(restored) > 0 {
+					// A stray call the AGENT made to the maintenance tool gets a definite answer instead of the
+					// client's "tool not found". Same request-path shape, and necessary for the same reason: the
+					// model calls advertised tools it was told not to -- observed with expand at step 2 of a run.
+					if nb, answered := adjudicate.AnswerStrayCalls(string(provider), body); answered > 0 {
+						body = nb
+					}
 					body = nb
 					for _, hh := range restored {
 						if orig2, ok := expand.Resolve(tn.Store, hh); ok {
@@ -731,6 +738,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					im = expand.InjectAuto
 				}
 				body, _ = expand.Inject(string(provider), im, body, tn.Store.Persists())
+				// The context-maintenance tool goes on EVERY request, not only when the pipeline is
+				// about to ask. `tools` hashes before system and messages, so a tool that comes and
+				// goes invalidates the prefix from position zero -- the flap expand's `always` mode
+				// exists to avoid. Declaring it is also what makes the model answer in a schema
+				// instead of prose; see internal/adjudicate.
+				body, _ = adjudicate.Inject(string(provider), body)
 			}
 		}()
 		h.serve(w, r, provider, up, body, bypassed, cp, tn, sess)
@@ -1137,6 +1150,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// being refused recovery — the failure was only found by grepping the benchmark client's own
 	// transcripts. See expand/unresolved.go.
 	snap.ExpandRestored = expand.Restored()
+	snap.AdjudicateStray = adjudicate.StrayAnswered()
 	snap.ExpandUnresolvedMalformed, snap.ExpandUnresolvedMissing = expand.Unresolved()
 	snap.LLMTimeouts = offload.LLMTimeouts()
 	snap.LLMErrors = offload.LLMErrors()

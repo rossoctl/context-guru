@@ -66,10 +66,15 @@ func TestCompletePrefixedPreservesThePrefix(t *testing.T) {
 		t.Error("tools were altered; tools ARE part of the cache key -- dropping them read a " +
 			"different, smaller cache entry when measured")
 	}
-	if tc := gjson.GetBytes(got, "tool_choice.type").String(); tc != "none" {
-		t.Errorf("tool_choice = %q, want none: the prefix carries the agent's tools, so without "+
-			"this the model answers with a tool_use instead of verdicts (and it is free -- "+
-			"tool_choice is not in the cache key)", tc)
+	// tool_choice must be ABSENT. This assertion used to demand {"type":"none"}, on the reasoning that
+	// the prefix carries the agent's tools so a tool_use reply had to be suppressed. Measurement
+	// reversed it: with "none" the model answered in PROSE and produced no verdicts at all (0 of 6
+	// labels), while with tool_choice omitted it called the advertised structured-answer tool and
+	// covered the whole batch (6 of 6, on 4 of 4 trials) at the same cache-read price. Forcing a
+	// named tool is a third option and NOT free -- it wrote a separate cache entry.
+	if tc := gjson.GetBytes(got, "tool_choice"); tc.Exists() {
+		t.Errorf("tool_choice was set to %q; it must be omitted, or the model answers in prose "+
+			"instead of calling the structured-answer tool", tc.Raw)
 	}
 	if gjson.GetBytes(got, "stream").Exists() {
 		t.Error("stream survived; the caller wants one JSON answer, not a stream")

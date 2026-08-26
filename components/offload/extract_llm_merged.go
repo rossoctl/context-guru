@@ -3,7 +3,9 @@ package offload
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -42,6 +44,13 @@ import (
 // The integration point is deliberately narrow: this fills the SAME projected/summary slots the
 // parallel per-output loop fills, so freezing, marker creation, the store, the never-worse check and
 // every counter downstream are untouched and shared. Only the decision changes, not the mechanics.
+
+// unusableSamples bounds how many unparseable replies get logged in full. Process-wide, because the
+// question it answers ("what is the model actually emitting?") is answered by the first few and the
+// rest would only be log volume.
+var unusableSamples atomic.Int64
+
+const maxUnusableSamples = 5
 
 // mergedSampleChars bounds each output shown in the prompt. The whole point is comparative
 // judgement across many outputs, so the per-output budget must stay small enough that ~15 of them
@@ -209,6 +218,24 @@ func (e *ExtractLLM) adjudicateMerged(
 			rep.Gate("merged_reply_truncated")
 		} else {
 			rep.Gate("merged_unparseable")
+		}
+		// LOG A BOUNDED SAMPLE OF THE ACTUAL TEXT.
+		//
+		// Six rounds of this component's failures were diagnosed by inferring a cause from gate
+		// counters, and each inference was at least partly wrong: the pre-filter, the per-request call
+		// cap, the economic gate, an always-firing trigger, a batch metric that counted answers rather
+		// than offers, and a reply cut off by the output budget. A counter can say THAT a reply was
+		// unusable; only the text says WHY. Reading one is cheaper than a seventh inference.
+		//
+		// Bounded in count and length, because a systematic failure would otherwise flood the log with
+		// transcript content lifted from the reply.
+		if unusableSamples.Add(1) <= maxUnusableSamples {
+			head := reply
+			if len(head) > 500 {
+				head = head[:500]
+			}
+			slog.Warn("cg.merged.unusable_reply", "reply_len", len(reply),
+				"offered", len(cands), "head", head)
 		}
 		return nil
 	}

@@ -34,6 +34,10 @@ var statsGoldenTopLevel = []string{
 	// no-op; the client always refuses a proxy-injected tool, so only this says the substitution
 	// happened before the request went upstream.
 	"expand_restored",
+	// adjudicate_stray counts tool_results rewritten because the AGENT called the injected
+	// context-maintenance tool. A rising rate means the tool's "do not call this yourself" description
+	// is not working and the agent is losing turns to it.
+	"adjudicate_stray",
 	"expand_unresolved_malformed",
 	"expand_unresolved_missing",
 	"components",

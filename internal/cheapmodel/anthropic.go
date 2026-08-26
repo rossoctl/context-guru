@@ -164,10 +164,19 @@ func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask 
 	if err != nil {
 		return "", u, err
 	}
-	// tool_choice: free (not in the cache key) and required, or the model answers with a tool_use.
-	if body, err = sjson.SetBytes(body, "tool_choice", map[string]any{"type": "none"}); err != nil {
-		return "", u, err
-	}
+	// NO tool_choice. This is deliberate and was measured, twice over:
+	//
+	//   - Setting {"type":"none"} -- which an earlier version of this method did, to stop the model
+	//     answering with a tool_use -- drove it into PROSE and produced no answer at all: 0 of 6 labels
+	//     across trials, while the caller scored the prose as an unparseable failure.
+	//   - Setting {"type":"tool","name":...} to force the answer is NOT free: it wrote a second cache
+	//     entry (8,378 tokens against the 8,268 already cached), so naming a tool participates in the
+	//     cache key even though "none" does not.
+	//   - Omitting it entirely reads the same cache entry as "none" and the model calls the advertised
+	//     tool of its own accord: 6 of 6 labels on 4 of 4 trials.
+	//
+	// So the answer arrives schema-shaped, in full, at cache-read price -- provided the tool is present
+	// in the prefix, which is why it is injected on every request rather than only here.
 	// 16k, not the 2048 default, and this is a correctness matter rather than generosity.
 	//
 	// MEASURED: with 2048 this path produced UNPARSEABLE replies on ~70% of calls (24 of 34). Two
@@ -218,7 +227,10 @@ func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask 
 	}
 	var out struct {
 		Content []struct {
-			Text string `json:"text"`
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 		Usage struct {
 			InputTokens      int `json:"input_tokens"`
@@ -234,6 +246,18 @@ func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask 
 		Fresh: out.Usage.InputTokens, Output: out.Usage.OutputTokens}
 	recordUsageCache(out.Usage.InputTokens, out.Usage.OutputTokens,
 		out.Usage.CacheCreationTok, out.Usage.CacheReadTok)
+	// A TOOL_USE INPUT BEATS TEXT. When the prefix advertises a structured-answer tool the model uses
+	// it, and its input arrives already schema-shaped -- which removes three failure modes the text path
+	// had: prose instead of JSON, verdicts for only part of the batch, and a JSON array cut off by the
+	// output budget mid-flight. The raw input is returned as-is so the caller's existing parser reads it
+	// unchanged.
+	for _, c := range out.Content {
+		if c.Type == "tool_use" && len(c.Input) > 0 {
+			return string(c.Input), u, nil
+		}
+	}
+	// No tool call: fall through to text, which covers a model that answered in prose anyway and any
+	// provider that does not return tool_use here. The caller counts what it cannot parse.
 	for _, c := range out.Content {
 		if c.Text != "" {
 			return c.Text, u, nil
