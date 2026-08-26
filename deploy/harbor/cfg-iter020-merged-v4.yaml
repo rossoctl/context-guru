@@ -1,0 +1,45 @@
+# iter020 attempt 4: act WHEN THERE IS ENOUGH CONTEXT, which attempts 1-3 did not.
+#
+# WHAT WENT WRONG IN ATTEMPT 3. extract_llm fired on 190 of 264 requests (72%), regardless of how
+# large the context was, and `request_trigger_not_fired` never fired once. Three restraints were off
+# simultaneously:
+#
+#   1. pinning `min_tokens` sets `explicit`, and shouldFire() then returns
+#      "explicit min_tokens/trigger configured" -- true unconditionally, bypassing the derived
+#      pressure trigger. Any explicit floor does this: min_tokens, trigger.min_request_tokens and
+#      trigger.min_output_tokens all mark `explicit`, so the floor and the when-to-act decision are
+#      coupled and cannot be set independently.
+#   2. the explicit request trigger is only enforced when `!c.CacheAware` (extract_llm.go:761), so on
+#      a caching backend an operator's context threshold is silently ignored.
+#   3. `economic_gate: false`, which removed the last thing that was refusing low-value work.
+#
+# Firing on a small context is not merely wasted spend. It removes outputs that have had no turns in
+# which to be superseded -- exactly the case the contract says to keep -- so it is a harm mechanism,
+# and it confounds the deferral number, since summarize firing less may just mean extract removed
+# early and often.
+#
+# THE FIX IS TO PIN NOTHING. With no floor and no trigger configured, `explicit` is false and the
+# derived trigger governs: fire above 0.60 context pressure (~77k of this 128k band), or above 0.25
+# with >10% growth, and otherwise stay out. That engages before summarize's 0.78 (~100k), which is
+# the intended ordering -- selective removal first, blunt summary only if that was not enough.
+#
+# The cost is the floor: it reverts to the 300 default rather than 120. Measured, floor 300 offers
+# smaller batches than 120 -- but a correctly-triggered arm at floor 300 answers the question, and an
+# always-on arm at floor 120 does not.
+pipeline: [format, extract_llm, summarize]
+components:
+  extract_llm:
+    selection_mode: merged
+    strategy: code
+    model: {source: request}   # the agent's own model: same cache namespace, and 0/59 bad quotes
+                               # against haiku's 20.8% at the batch sizes bulk needs
+    allow_on_caching_backend: true
+    allow_cached_prefix: true
+    economic_gate: false       # see docs/results/min-tokens-vs-economic-gate.md: it prices each
+                               # candidate against a whole call, and merged makes one call per request
+  summarize:
+    trigger: {min_request_frac: 0.78}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

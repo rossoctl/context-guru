@@ -103,6 +103,13 @@ func (e *ExtractLLM) adjudicateMerged(
 	if model == nil || len(cands) == 0 {
 		return nil
 	}
+	// OFFERED, counted separately from ANSWERED. verdicts/calls was used as the batch-size metric
+	// and it is not one: it counts what the model chose to answer, not what it was shown. Live, that
+	// read 2.80 while merged_batch_truncated fired 43 times in 162 calls -- arithmetically impossible
+	// for offered batches, and the resolution is that the model silently omits labels. Without this
+	// counter, "the batch is starved" and "the model answered for a third of the batch" are the same
+	// number, and the first reading cost three iterations.
+	rep.GateN("merged_offered", len(cands))
 	if len(cands) > mergedMaxItems {
 		// NO SILENT CAPS. A truncated batch is a bounded-coverage decision and must be visible in
 		// the counters, or "we judged everything" and "we judged the first twelve" read identically.

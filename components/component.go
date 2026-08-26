@@ -325,6 +325,23 @@ func (r *Report) Gate(name string) {
 	r.Gates[name]++
 }
 
+// GateN adds n to the named counter in one call, for the counts that are not
+// one-candidate-declined-per-increment.
+//
+// It exists because a per-candidate Gate() cannot express "this call was OFFERED twelve
+// candidates". Deriving batch size from verdict counts instead was measured wrong: verdicts count
+// what the model chose to ANSWER, so a starved batch and a model that ignores two thirds of a full
+// batch produce the same number. Distinguishing them needs the offered count recorded directly.
+func (r *Report) GateN(name string, n int) {
+	if r == nil || n == 0 {
+		return
+	}
+	if r.Gates == nil {
+		r.Gates = map[string]int{}
+	}
+	r.Gates[name] += n
+}
+
 // Saved returns non-negative tokens saved by this component.
 func (r Report) Saved() int {
 	if r.TokensAfter > r.TokensBefore {

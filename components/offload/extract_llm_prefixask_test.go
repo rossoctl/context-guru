@@ -127,3 +127,39 @@ func TestPrefixAskFallsBackToCompletion(t *testing.T) {
 		t.Error("the fallback completion shipped no samples, so the model was shown nothing to judge")
 	}
 }
+
+// OFFERED is not ANSWERED, and conflating them is what made three iterations read as "the model
+// declines to act". Live, verdicts/calls read 2.80 while merged_batch_truncated fired 43 times in 162
+// calls -- impossible for offered batches. This asserts the two quantities are recorded separately, so
+// a starved batch and a model that answers for a third of a full batch cannot look identical.
+func TestMergedRecordsOfferedSeparatelyFromAnswered(t *testing.T) {
+	body := strings.Repeat("{\"row\":\"real value here padding\"}\n", 400)
+	req := mergedReq(6, body) // six tool outputs => six candidates offered
+	// The model answers for exactly ONE of them, which is the behaviour being made visible.
+	raw, _ := json.Marshal([]extract.BulkVerdict{{Index: 2, Verdict: "keep"}})
+	m := &countingModel{reply: string(raw)}
+	e, err := newExtractLLM([]byte("{\"selection_mode\":\"merged\",\"min_tokens\":300,\"allow_on_caching_backend\":true,\"economic_gate\":false}"))
+	if err != nil {
+		t.Fatalf("newExtractLLM: %v", err)
+	}
+	c := &components.Ctx{Ctx: context.Background(), Session: "offered-1",
+		Store: store.NewMemory(store.Options{}), CtxWindow: 200000,
+		Model: components.ModelSpec{Incoming: m, Static: m}}
+	rep := &components.Report{}
+	e.(components.Offload).Offload(req, rep, c)
+
+	offered := rep.Gates["merged_offered"]
+	answered := rep.Gates["merged_keep"] + rep.Gates["merged_drop"] +
+		rep.Gates["merged_drop_contradicts_obligation"]
+	if offered < 2 {
+		t.Fatalf("merged_offered = %d; the offered batch size must be recorded, not inferred from "+
+			"verdicts; gates=%v", offered, rep.Gates)
+	}
+	if answered != 1 {
+		t.Fatalf("expected exactly 1 verdict answered, got %d; gates=%v", answered, rep.Gates)
+	}
+	if offered == answered {
+		t.Errorf("offered (%d) and answered (%d) are indistinguishable, which is precisely the "+
+			"conflation that made a full batch look like a starved one", offered, answered)
+	}
+}
