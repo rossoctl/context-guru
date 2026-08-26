@@ -449,6 +449,12 @@ CREATE TABLE IF NOT EXISTS tool_declarations (
 );
 CREATE INDEX IF NOT EXISTS idx_tooldecl_tenant ON tool_declarations(tenant_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_tooldecl_name   ON tool_declarations(name);
+-- SelfRemovals (dash/toolapi.go) joins sess.sid = d.session_id over every tenant, so the
+-- (tenant_id, session_id, ...) primary key cannot help it — that leading column is
+-- unconstrained on a manager's service-wide view. Without this, SQLite full-scans every
+-- declaration row and probes an automatic temp index for each one; measured, ~25-36s on
+-- the production corpus for a query with no other reason to be slow.
+CREATE INDEX IF NOT EXISTS idx_tooldecl_session ON tool_declarations(session_id);
 
 -- What a session actually INVOKED: one row per distinct tool name (and, for the Skill
 -- tool, per skill — input.skill is the only place a skill invocation is identifiable,
@@ -534,6 +540,17 @@ BEGIN
   DELETE FROM tool_uses
     WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id;
 END;
+
+-- Overview's CompactionResets (dash/overview.go) finds, per row, the most recent EARLIER
+-- row in the same session with tokens_before > 0 — and on this corpus tokens_before > 0
+-- is true for essentially every row, so the filter does nothing to narrow the search.
+-- idx_requests_session (session_id, ts) cannot answer "and what was tokens_before" without
+-- a table fetch per candidate; measured, ~25s on the production corpus for that reason
+-- alone. Carrying tokens_before in the index makes the lookup covering AND keeps the
+-- (ts DESC, id DESC) order the query already searches in, so it can stop at the first
+-- matching row instead of fetching every candidate to check it.
+CREATE INDEX IF NOT EXISTS idx_requests_session_tb
+  ON requests(session_id, ts DESC, id DESC, tokens_before);
 `
 
 // additiveColumns are columns added to an EXISTING table without a version bump.

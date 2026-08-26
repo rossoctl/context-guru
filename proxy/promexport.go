@@ -206,13 +206,22 @@ func (h *Handler) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.promCache.mu.Lock()
-	defer h.promCache.mu.Unlock()
 	if time.Since(h.promCache.at) < promCacheTTL && h.promCache.body != "" {
-		writeMetrics(w, h.promCache.body)
+		body := h.promCache.body
+		h.promCache.mu.Unlock()
+		writeMetrics(w, body)
 		return
 	}
+	h.promCache.mu.Unlock()
+	// Rendered OUTSIDE the lock: renderMetrics does real work (a per-tenant DB query), and
+	// holding the lock across it used to serialize every concurrent scraper behind whichever
+	// one rendered first — one slow render, and every other caller queues up behind it rather
+	// than getting the stale-but-fine cached body. A cache-miss race now costs at most one
+	// redundant render, not a growing queue.
 	body := h.renderMetrics()
+	h.promCache.mu.Lock()
 	h.promCache.at, h.promCache.body = time.Now(), body
+	h.promCache.mu.Unlock()
 	writeMetrics(w, body)
 }
 

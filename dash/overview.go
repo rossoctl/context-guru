@@ -635,12 +635,25 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// session. This is the bound on amortization — replay accrues only while removed content
 	// keeps being re-sent, and this is where that stops — so it belongs beside the replay
 	// ceiling that is computed by assuming it never happens.
-	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+`
-		AND r.tokens_before > 0 AND r.tokens_before < (
-			SELECT p.tokens_before FROM requests p
-			WHERE p.session_id = r.session_id AND p.tokens_before > 0
-			  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
-			ORDER BY p.ts DESC, p.id DESC LIMIT 1)`, args...).Scan(&o.CompactionResets); err != nil {
+	//
+	// A window function, not the correlated subquery this used to be: that version priced a
+	// covering index (idx_requests_session_tb, see schema.go) and still measured ~20s on the
+	// production corpus, unchanged by the index — because the cost was never the lookup, it
+	// was doing 65k+ SEPARATE subquery invocations. tokens_before > 0 is true for essentially
+	// every row here, so the filter narrows nothing; a correlated subquery per outer row pays
+	// per-invocation overhead 65k times over where a window function sorts once. LAG only
+	// looks at the IMMEDIATELY preceding row, where the subquery it replaces would skip past a
+	// prior row with tokens_before <= 0 to find one further back — on this corpus that never
+	// happens (tokens_before > 0 holds for every row measured), so this is not a behavior
+	// change in practice, but it is not a byte-for-byte port of the old query's guarantee.
+	q := `WITH s AS (
+		SELECT r.*, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
+			OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
+		FROM requests r
+	) SELECT COUNT(*) FROM s r WHERE ` + cond + `
+		AND r.tokens_before > 0 AND r.prev_tokens_before IS NOT NULL
+		AND r.tokens_before < r.prev_tokens_before`
+	if err := d.sql.QueryRow(q, args...).Scan(&o.CompactionResets); err != nil {
 		return nil, err
 	}
 	// The estimator check, on the only population where the two counts are comparable: requests
