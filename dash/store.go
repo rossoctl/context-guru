@@ -105,6 +105,20 @@ func Open(path string) (*DB, error) {
 		}
 	}
 	db, err := openDSN(dsn(path), path)
+	if err == nil {
+		// A fresh boot inherits whatever WAL the PREVIOUS process left on disk, and
+		// nothing before this point ever checkpoints it: reclaim() only runs from the
+		// byte-budget path, which a deployment inside its retention budget never
+		// takes. Left alone, the first ordinary write past SQLite's own
+		// wal_autocheckpoint threshold (1000 pages) checkpoints the WHOLE inherited
+		// backlog inline, on the writer's own commit — measured against a WAL bloated
+		// to production scale, that single commit took 5.5s, and every reader sharing
+		// this *sql.DB (e.g. /metrics) blocked for the same span, reproducing on a
+		// cold restart with no other traffic at all. Checkpointing once here, before
+		// any traffic is served, pays that backlog down up front instead of on the
+		// first request that happens to land on it.
+		db.checkpoint()
+	}
 	var mismatch *versionMismatch
 	if errors.As(err, &mismatch) {
 		aside := fmt.Sprintf("%s.v%s.bak", path, sanitizeVersion(mismatch.have))
