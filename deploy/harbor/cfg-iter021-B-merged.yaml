@@ -1,0 +1,38 @@
+# iter021 ARM B -- arm A with ONE component inserted. Nothing else differs.
+#
+# extract_llm sits BEFORE extract, following ns-full.yaml's existing order. If the deterministic
+# extractor runs first it shrinks outputs below the model pass's floor, starving the batch -- the exact
+# failure iteration 020 spent five aborts diagnosing.
+#
+# NO min_tokens and NO trigger on extract_llm, on purpose. Pinning either sets `explicit`, and
+# shouldFire() then returns true unconditionally, so the component fires on every request regardless of
+# context size -- measured at 72% of requests with request_trigger_not_fired never firing once. Left
+# unpinned, the derived trigger governs: fire above 0.60 context pressure (~77k of this 128k band) or
+# above 0.25 with >10% growth, which engages before summarize's 0.78.
+#
+# economic_gate: false is NOT a shippable setting and the pre-registration says so. The gate prices each
+# candidate against a whole model call, which is right for the per-output loop and wrong for a design
+# making one call per request; with it on, 1,497 candidates were suppressed against 224 that got
+# through and the arm does not run the design. Making it batch-aware is the real fix, and is
+# deliberately not being done immediately before freezing the binary.
+#
+# model.source: request puts the adjudication on the agent's own model, which is required twice over --
+# prompt caches are per-model, so only that client can read the prefix the agent's request populated;
+# and the cheap model's verbatim quoting degraded to 20.8% at the batch sizes this needs, against 0 of
+# 59 on the request model.
+pipeline: [format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    selection_mode: merged
+    strategy: code
+    model: {source: request}
+    allow_on_caching_backend: true
+    allow_cached_prefix: true
+    economic_gate: false
+  summarize:
+    trigger: {min_request_frac: 0.78}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

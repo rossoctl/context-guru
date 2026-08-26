@@ -1,0 +1,16 @@
+# iter021 ARM A -- the shipped product. The deterministic pipeline plus summarize, and nothing else.
+#
+# coref is deliberately ABSENT: it is new on the coref-compaction branch, so it is not part of "what we
+# had beforehand". Its own value is a separate arm.
+#
+# summarize's configuration is IDENTICAL to arm B's, so any change in how often it fires is
+# attributable to the one component that differs between them.
+pipeline: [format, toon, dedup, failed_run, cmdfilter, extract, cachesplit, summarize]
+components:
+  extract: {min_tokens: 400}
+  summarize:
+    trigger: {min_request_frac: 0.78}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}
