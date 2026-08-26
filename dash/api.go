@@ -38,12 +38,15 @@ type API struct {
 	tenantCapture func(tenantID string) bool
 	// pricer values the pre-instrumentation split figure on read. nil = that figure is omitted.
 	pricer modelinfo.Pricer
-	// statsCache and facetsCache hold the last rendered body per (principal, query), briefly.
-	// Overview alone measured 25s under real production write load (many sequential queries,
-	// each one a chance to queue behind the writer), and this endpoint has NO other cache — a
-	// dashboard tab left auto-refreshing, or two managers looking at the same window, each cost
-	// another full 25s+ read rather than getting the answer the last one just computed.
-	statsCache, facetsCache jsonCache
+	// statsCache, facetsCache and componentsCache hold the last rendered body per
+	// (principal, query), briefly. Overview alone measured 25s under real production write
+	// load (many sequential queries, each one a chance to queue behind the writer), and
+	// these endpoints had NO other cache — a dashboard tab left auto-refreshing, or two
+	// managers looking at the same window, each cost another full read rather than getting
+	// the answer the last one just computed. components was missed by the original fix:
+	// its own 5 queries (Components, DecomposeComponentSavedUSD, EstimateComponentSavedUSD)
+	// measured ~4.4s cold on a comparable corpus, uncached, on the dashboard's most-read tab.
+	statsCache, facetsCache, componentsCache jsonCache
 }
 
 // dashCacheTTL bounds how stale a cached /api/stats or /api/facets body may be. Short enough
@@ -864,9 +867,15 @@ func (a *API) sessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) components(w http.ResponseWriter, r *http.Request) {
-	f, _, ok := a.scope(r)
+	f, p, ok := a.scope(r)
 	if !ok {
 		unauthorized(w)
+		return
+	}
+	key := cacheKey(p, r)
+	if body, ok := a.componentsCache.get(key); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
 		return
 	}
 	rows, err := a.rec.DB().Components(f)
@@ -892,7 +901,14 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 				"err", err)
 		}
 	}
-	writeJSON(w, map[string]any{"components": rows})
+	body, err := json.Marshal(map[string]any{"components": rows})
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	a.componentsCache.set(key, body)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
 }
 
 // breakdown serves spent-vs-saved and usage aggregated by ONE dimension — per model, per
