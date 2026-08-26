@@ -105,6 +105,30 @@ exactly, with 15 errors against 8, and concluded that intent-to-treat is the rea
 Nothing else changes: the clustered test still governs, the 25% harm bound still blocks a positive
 claim, and no minimum effect size is claimed as a win.
 
+## AMENDMENT 2 — arm B ran BELOW its own coverage gate, and was continued anyway
+
+At 477 requests, arm B's verdict coverage was **34%**. The checkpoint above requires **≥50%** and says
+to abort below it. Recording the decision here rather than in the results, so it cannot be
+retrospectively smoothed over.
+
+**Continued, on the operator's call.** The gate was written to catch "the design never ran", and by every
+other measure it is running: `prefix_ask_cache_read_ZERO` = 0, `merged_reply_truncated` = 0,
+`adjudicate_stray` = 0, 44 real drops and 686k unique tokens removed by that point. What is happening is
+PARTIAL ANSWERING — the model returns verdicts for about a third of a full 12-item batch — not a dead
+mechanism. Coverage also rose through iteration 020 (46% → 51% → 65%), so 34% at 20% of the run may be
+an early reading rather than the final one.
+
+**The cost of continuing is stated, not hidden:** arm B's numbers are a **FLOOR** on what the design can
+do, because it acted on roughly a third of the candidates it identified. A null result therefore cannot
+be read as "merged does not help" — only as "merged at ~34% coverage does not help detectably".
+
+**The honest alternative was to abort**, which would have preserved the gate's authority at the cost of
+re-running arm B, and there is no tested coverage fix to re-run it *with*: the leading candidate is a
+SMALLER batch, since a probe answered 6 of 6 on six items against ~34% on twelve, and that is untested.
+
+Nothing else changes. The clustered test governs, ITT scores errored runs zero, and the 25% harm bound
+still blocks a positive claim.
+
 ## Pre-registered readings
 
 | outcome | conclusion | next |
