@@ -69,6 +69,42 @@ Accuracy is not binary on this benchmark (observed values 0.0, 0.2, 0.6, 0.8, 1.
 **Margin:** no minimum effect size is claimed as a win. The honest reading of a null result at this n is
 "underpowered", not "no effect" — previous harm bounds reached ±39%.
 
+## AMENDMENT 1 — errored runs score ZERO (written before any solve count was read)
+
+Arm A produced **16 upstream 400s in 3,347 requests (0.5%)**, all `"prompt is too long"`, on bodies of
+2.6 MB to 14.8 MB. Diagnosed while arm A was still running and before its results existed.
+
+**Cause, and it is mine.** A single tool output arrives larger than any component can reduce: `extract`
+matched no noise pattern (`acted` = 0, `no_obvious_noise` 16,891), `cmdfilter` matched nothing
+(`acted` = 0), `toon` needs a uniform object array, `dedup` needs an exact duplicate — so the only real
+compactor is `summarize`, which protects `keep_last: 3`, and a fresh oversized output sits in exactly
+that protected tail. `extract_llm` would decline it too, by design: `over_model_context` leaves any
+output that exceeds the compaction model's context verbatim.
+
+The product has a component for precisely this — `collapse`, "the content-agnostic fallback for an
+oversized tool output that no more specific component handled", which keeps a head/tail window and
+stashes the original behind a marker. It is in the `general` and `codesafe` presets and **not** in
+`codesmart`, which is what these arm configs descend from. So this is a rig-configuration error, not a
+product defect — with the caveat that a user of the shipped `codesmart` preset has the same gap.
+
+**Why the arms are NOT being restarted:** both lack `collapse`, so both take the same class of failure,
+and the comparison stays fair in expectation. Restarting costs both arms.
+
+**What is being fixed instead — the analysis plan, stated before any outcome is known.** Errors are the
+one place where this omission could bias the result: arm B removes more, so it may error *less*, and
+excluding errored runs would then compare arm B's survivors against arm A's. Iteration 014 hit this
+exactly, with 15 errors against 8, and concluded that intent-to-treat is the reading that survives.
+
+  * **Primary analysis is INTENT-TO-TREAT.** A run that errored, or has no `eval.json`, scores
+    **accuracy 0**. Every one of the 75 pairs is scored.
+  * **Per-protocol** (errored pairs dropped) is reported as a sensitivity check only, alongside the
+    error count per arm, and never as the headline.
+  * **The error counts themselves are a reported endpoint.** A large asymmetry is a finding about
+    oversized-output handling, whichever direction it points.
+
+Nothing else changes: the clustered test still governs, the 25% harm bound still blocks a positive
+claim, and no minimum effect size is claimed as a win.
+
 ## Pre-registered readings
 
 | outcome | conclusion | next |
