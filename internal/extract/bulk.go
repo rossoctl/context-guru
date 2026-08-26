@@ -173,3 +173,64 @@ func ParseBulkVerdicts(reply string) ([]BulkVerdict, bool) {
 	}
 	return keep, true
 }
+
+// BuildPrefixAsk renders the adjudication question for a PREFIX ASK — a call whose prefix is the
+// transcript the agent already sent, read from the provider's prompt cache.
+//
+// The difference from BuildBulkPrompt is what is NOT here: the outputs themselves. BuildBulkPrompt
+// must ship a truncated sample of every candidate because a bare completion has no other way to show
+// them, which caps each at mergedSampleChars and forces the model to judge an excerpt. A prefix ask
+// has the whole transcript above it, so shipping samples would pay fresh tokens for content already
+// being read from cache — and would show a TRUNCATED copy of something the model can read in full.
+//
+// What remains is an inventory: a small integer label per candidate, its tool-call id, its size, and
+// a short head so the model can locate it unambiguously in the transcript above.
+//
+// The labels are integers for a measured reason. Asked to answer with opaque tool_use ids, the model
+// regularised them -- `toolu_01..07` for `toolu_probe_00..07` -- because reproducing a random
+// identifier from thousands of tokens back is a copying task, not a judgement. With integer labels it
+// was 0 bad labels in 40+ trials. The rule generalises: give the model short things it cannot get
+// wrong, and keep every mapping on our side.
+func BuildPrefixAsk(goal string, items []BulkItem) string {
+	var b strings.Builder
+	b.WriteString(bulkContract)
+	b.WriteString("\n\nThe transcript above is the agent's own. Read the tool outputs from it directly.\n")
+	b.WriteString("\nWHAT THE AGENT IS DOING NOW (judge relevance toward this):\n")
+	g := strings.TrimSpace(goal)
+	if g == "" {
+		g = "(no explicit goal stated)"
+	}
+	if len(g) > 4000 {
+		g = g[:4000]
+	}
+	b.WriteString(g)
+	b.WriteString("\n\nTOOL OUTPUTS UNDER CONSIDERATION. Refer to them by these labels only:\n")
+	for _, it := range items {
+		b.WriteString("  [")
+		b.WriteString(strconv.Itoa(it.Index))
+		b.WriteString("] ")
+		b.WriteString(strconv.Itoa(it.SizeTokens))
+		b.WriteString(" tokens, tool_use id ")
+		b.WriteString(it.ID)
+		b.WriteString(", evidence: ")
+		b.WriteString(it.Evidence)
+		b.WriteString("\n       begins: ")
+		b.WriteString(headLine(it.Sample, 90))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// headLine returns a single-line, bounded opening of s, for locating an output in the transcript
+// above. Newlines are collapsed so one candidate stays one line and the inventory stays readable to
+// a model counting labels.
+func headLine(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}

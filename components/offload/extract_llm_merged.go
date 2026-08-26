@@ -156,7 +156,37 @@ func (e *ExtractLLM) adjudicateMerged(
 	ctx, cancel := context.WithTimeout(c.Ctx, llmCallTimeout)
 	defer cancel()
 	start := time.Now()
-	reply, err := model.Complete(ctx, extract.BuildBulkPrompt(goal, items))
+
+	// PREFER A PREFIX ASK. With the transcript above the question, the model reads the outputs in
+	// full from the provider's cache instead of judging truncated samples we paid fresh to ship --
+	// and it can finally see the later turns, which is where "already captured elsewhere" lives. A
+	// bare completion cannot show it either of those things.
+	//
+	// Falls back to the plain completion on the first turn of a session (nothing forwarded yet), when
+	// the feature is off, and on any error. Falling back rather than skipping matters: treating "no
+	// prefix" as "no verdicts" would silently turn the component off for the first turn of every
+	// session and look like a model that declined to act.
+	var reply string
+	var err error
+	if c.PrefixAsk != nil {
+		var u components.PrefixUsage
+		reply, u, err = c.PrefixAsk.Ask(ctx, extract.BuildPrefixAsk(goal, items))
+		if err != nil {
+			rep.Gate("prefix_ask_failed")
+			reply, err = model.Complete(ctx, extract.BuildBulkPrompt(goal, items))
+		} else {
+			rep.Gate("prefix_ask_used")
+			// THE justification for the whole mechanism, so it is counted rather than assumed. A
+			// prefix ask that reads nothing from cache is paying fresh for the transcript -- roughly
+			// ten times the intended cost -- and is indistinguishable from a working one except on
+			// the bill.
+			if u.CacheRead == 0 {
+				rep.Gate("prefix_ask_cache_read_ZERO")
+			}
+		}
+	} else {
+		reply, err = model.Complete(ctx, extract.BuildBulkPrompt(goal, items))
+	}
 	metrics.RecordExtractionCall(float64(time.Since(start).Milliseconds()))
 	if err != nil {
 		rep.Gate("merged_call_failed")

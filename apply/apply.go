@@ -315,6 +315,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// provider's cap of four counts them all (issue #32, defect 2).
 		ExistingBreakpoints: wireBreakpoints(body),
 		Mode:                mode,
+		PrefixAsk:           o.PrefixAsk,
 	}
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
 	// The eligible (attempted) denominator: what age/supersession offloaders were

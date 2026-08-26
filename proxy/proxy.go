@@ -173,6 +173,10 @@ type Handler struct {
 	// later turn that does not advertise it is still intercepted rather than relayed to a client
 	// that has no such tool. See expandoffered.go.
 	expandSeen *expandOfferedSet
+	// sent holds the last body forwarded upstream per session, so a component can put a question to
+	// the request's own model with the bytes the provider's cache was populated from. See
+	// prefixask.go; bounded, and populated only when CONTEXT_GURU_PREFIX_ASK is on.
+	sent *sentStash
 	// tracker owns the per-session cached-prefix boundary. Always present: every mode
 	// benefits from reading and recording it in one locked step (the previous
 	// read-then-deferred-write raced between concurrent turns of a session).
@@ -222,7 +226,8 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 		c = &http.Client{Timeout: 5 * time.Minute}
 	}
 	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
-		tracker: modes.NewTracker(0), rec: opts.Dashboard, expandSeen: &expandOfferedSet{}}
+		tracker: modes.NewTracker(0), rec: opts.Dashboard, expandSeen: &expandOfferedSet{},
+		sent: newSentStash()}
 	if h.mode() == components.ModeObserve {
 		h.pool = modes.NewPool(opts.Observe.MaxQueue, opts.Observe.Workers)
 		h.shadow = store.NewMemory(store.Options{})
@@ -827,6 +832,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	for round := 0; ; round++ {
 		upStart := time.Now()
 		resp, err := h.doUpstream(r, up, body)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			// The bytes the provider's prompt cache is now populated from. Stashed here rather than
+			// anywhere earlier because only what was ACTUALLY forwarded is a valid prefix -- an
+			// aborted or rejected send caches nothing. See prefixask.go.
+			if prefixAskEnabled() {
+				h.sent.put(sess, body)
+			}
+		}
 		if err != nil {
 			// LOG it, and record it on the captured row. An upstream failure used to be
 			// invisible in both places: the caller got a 502 and the operator got nothing

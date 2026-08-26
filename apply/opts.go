@@ -37,6 +37,10 @@ type Opts struct {
 	// Mode is the operating mode. Empty means components.ModeSync, so a caller that does
 	// not know about modes gets exactly today's behavior.
 	Mode components.Mode
+	// PrefixAsk, when set, lets a component put a question to the request's own model with the
+	// previous turn's SENT body as the cached prefix. See components.PrefixAsker. nil => components
+	// fall back to Model.Complete, which is today's behaviour for every caller that does not set it.
+	PrefixAsk components.PrefixAsker
 	// Tracker, when set, owns the per-session cached-prefix boundary. Supplying it also
 	// removes the concurrent-turn race in the legacy read-then-deferred-write of prevLen.
 	// nil => the legacy store-backed path, unchanged for library callers and /compact.
