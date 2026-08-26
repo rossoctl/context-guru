@@ -170,7 +170,7 @@ func (e *ExtractLLM) adjudicateMerged(
 	var err error
 	if c.PrefixAsk != nil {
 		var u components.PrefixUsage
-		reply, u, err = c.PrefixAsk.Ask(ctx, extract.BuildPrefixAsk(goal, items))
+		reply, u, err = c.PrefixAsk.Ask(ctx, c.Session, extract.BuildPrefixAsk(goal, items))
 		if err != nil {
 			rep.Gate("prefix_ask_failed")
 			reply, err = model.Complete(ctx, extract.BuildBulkPrompt(goal, items))

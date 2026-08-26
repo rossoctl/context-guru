@@ -100,8 +100,13 @@ type PrefixUsage struct {
 //
 // nil when the host cannot support it (no stashed body for this session yet, first turn, or the
 // feature is off). Callers MUST fall back to Model.Complete rather than skipping their work.
+// The session is passed at CALL time, not bound at construction. It has to be: the host builds the
+// asker before the pipeline runs, and the RESOLVED session id (a content hash when the caller sends
+// no session header, then tenant-scoped) is only known inside the pipeline. Binding the host's
+// pre-pipeline value stashed under one key and looked up under another -- observed live as
+// prefix_ask_used = 0 with no failures recorded, i.e. a feature that silently never ran.
 type PrefixAsker interface {
-	Ask(ctx context.Context, ask string) (reply string, usage PrefixUsage, err error)
+	Ask(ctx context.Context, session, ask string) (reply string, usage PrefixUsage, err error)
 }
 
 // ModelSpec carries the LLM clients a NeedsModel component may use, resolved per

@@ -16,15 +16,16 @@ import (
 // fakeAsker stands in for the proxy's prefix asker.
 type fakeAsker struct {
 	ask       string
+	session   string
 	reply     string
 	cacheRead int
 	err       error
 	calls     int
 }
 
-func (f *fakeAsker) Ask(_ context.Context, ask string) (string, components.PrefixUsage, error) {
+func (f *fakeAsker) Ask(_ context.Context, session, ask string) (string, components.PrefixUsage, error) {
 	f.calls++
-	f.ask = ask
+	f.ask, f.session = ask, session
 	if f.err != nil {
 		return "", components.PrefixUsage{}, f.err
 	}

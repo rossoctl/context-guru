@@ -92,16 +92,15 @@ func (s *sentStash) get(session string) []byte {
 // prefixAsker is the components.PrefixAsker the pipeline receives. It is created per request and
 // holds no lock; the stash owns its own.
 type prefixAsker struct {
-	stash   *sentStash
-	session string
-	cli     cheapmodel.Anthropic
+	stash *sentStash
+	cli   cheapmodel.Anthropic
 }
 
 // Ask appends the question to this session's last forwarded body and returns the model's text plus
 // what it actually cost. A missing stash is an error rather than a silent empty answer, so the
 // caller falls back to a plain completion instead of treating "no prefix" as "no verdicts".
-func (p prefixAsker) Ask(ctx context.Context, ask string) (string, components.PrefixUsage, error) {
-	body := p.stash.get(p.session)
+func (p prefixAsker) Ask(ctx context.Context, session, ask string) (string, components.PrefixUsage, error) {
+	body := p.stash.get(session)
 	if len(body) == 0 {
 		return "", components.PrefixUsage{}, errNoPrefix
 	}
@@ -122,8 +121,8 @@ func (errNoPrefixType) Error() string { return "no stashed prefix for this sessi
 // Anthropic only: the appended-message construction and the tool_choice/tools cache-key facts were
 // measured on that dialect, and guessing at another provider's cache semantics is how a claimed
 // cache read becomes a silent 10x bill.
-func (h *Handler) prefixAskerFor(provider bschemas.ModelProvider, models components.ModelSpec, session string) components.PrefixAsker {
-	if !prefixAskEnabled() || provider != bschemas.Anthropic || session == "" {
+func (h *Handler) prefixAskerFor(provider bschemas.ModelProvider, models components.ModelSpec) components.PrefixAsker {
+	if !prefixAskEnabled() || provider != bschemas.Anthropic {
 		return nil
 	}
 	cli, ok := models.Incoming.(cheapmodel.Anthropic)
@@ -132,8 +131,9 @@ func (h *Handler) prefixAskerFor(provider bschemas.ModelProvider, models compone
 		// which lives in a different cache namespace and could not read this prefix anyway.
 		return nil
 	}
-	if h.sent.get(session) == nil {
-		return nil
-	}
-	return prefixAsker{stash: h.sent, session: session, cli: cli}
+	// NO pre-flight stash check. The first turn of a session has nothing stashed, and that case must
+	// surface as an error from Ask -- counted as prefix_ask_failed and falling back to a plain
+	// completion -- rather than as a nil asker. A nil asker is indistinguishable from "the feature is
+	// off", which is exactly how the session-key mismatch above stayed invisible.
+	return prefixAsker{stash: h.sent, cli: cli}
 }

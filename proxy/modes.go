@@ -45,7 +45,7 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 		Provider: r.provider, Body: r.body, Session: r.session, Tenant: r.tn.ID, Bypass: r.bypassed,
 		Models: r.models, Window: r.window, CacheMode: h.opts.CacheMode,
 		Mode: mode, Tracker: h.tracker,
-		PrefixAsk: h.prefixAskerFor(r.provider, r.models, r.session),
+		PrefixAsk: h.prefixAskerFor(r.provider, r.models),
 	})
 	added := time.Since(start)
 	if res.Body == nil {
