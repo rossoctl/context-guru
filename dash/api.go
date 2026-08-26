@@ -92,8 +92,22 @@ func (c *jsonCache) set(key string, body []byte) {
 
 // cacheKey scopes a cache entry to the actual caller, not just the URL: a manager and a
 // tenant hitting the same query string must never share a cached body.
+//
+// since/until are rounded to the cache TTL bucket rather than compared verbatim. The UI's
+// relative ranges ("last 24h") re-stamp since/until with Date.now() on every single call —
+// so the raw query string is different every time and this cache would otherwise never hit
+// for the single most common view on the page.
 func cacheKey(p Principal, r *http.Request) string {
-	return p.TenantID + "\x00" + strconv.FormatBool(p.Manager) + "\x00" + r.URL.RawQuery
+	q := r.URL.Query()
+	bucket := dashCacheTTL.Milliseconds()
+	for _, param := range []string{"since", "until"} {
+		if v := q.Get(param); v != "" {
+			if ms, err := strconv.ParseInt(v, 10, 64); err == nil {
+				q.Set(param, strconv.FormatInt(ms/bucket*bucket, 10))
+			}
+		}
+	}
+	return p.TenantID + "\x00" + strconv.FormatBool(p.Manager) + "\x00" + q.Encode()
 }
 
 // NewAPI builds the HTTP surface for a recorder. Malformed CIDRs are skipped with
