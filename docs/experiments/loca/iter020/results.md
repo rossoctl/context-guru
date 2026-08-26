@@ -4,8 +4,14 @@
 exposed a defect the previous configuration had hidden. The sixth ran to completion and produced this
 iteration's only instrument-independent numbers.
 
-**Headline: 22/75 solves at $240 total, against iteration 018's 8/75 at $243.** That is *not* an effect
+**Headline: 21/75 solves at $240 total, against iteration 018's 8/75 at $243.** That is *not* an effect
 estimate for the merged design — see §5 before quoting it.
+
+> **CORRECTION.** This iteration first reported **22/75**. The correct figure is **21/75**. The original
+> method multiplied each task's `avg_accuracy` by its 5 seeds, and `avg_accuracy` averages only the runs
+> that COMPLETED — so any task with an errored seed was over-credited. Recomputed per seed from
+> `tasks/<Task>/state<N>/eval.json`, which is what intent-to-treat requires and what iteration 021's
+> amendment 1 now mandates for both arms.
 
 ## 1. Read this before quoting any number from the LOCA output
 
@@ -15,7 +21,7 @@ not the count of tasks solved. The comparable metric is accuracy-weighted:
 | metric | value |
 |---|---|
 | `Overall Success` (ran without error) | 70/75 |
-| **accuracy-weighted solves** | **22/75** |
+| **accuracy-weighted solves** | **21/75** |
 
 Per task: two at 1.0, two at 0.8, one at 0.6, one at 0.2, nine at 0.0. Anyone reading the raw output
 will see 70/75 first, and it is off by a factor of three.
@@ -24,7 +30,7 @@ will see 70/75 first, and it is off by a factor of three.
 
 | | iter018 | **iter020** |
 |---|---|---|
-| accuracy-weighted solves | 8/75 | **22/75** |
+| accuracy-weighted solves | 8/75 | **21/75** |
 | runs completed without error | 67/75 | 70/75 |
 | LOCA cost | $234.09 | **$207.02** |
 | CG model spend | $9.21 | $33.07 |
@@ -94,7 +100,7 @@ reads as "removals are not reversible" while expand was restoring 866 of them. `
 verdicts through an injected tool, no truncated replies, no stray tool calls, reversibility intact,
 recovery working at 866 restores with 5 unresolved.
 
-**Does not: attribute 22 vs 8 to the merged design.** There was **no concurrent baseline**. The binary,
+**Does not: attribute 21 vs 8 to the merged design.** There was **no concurrent baseline**. The binary,
 the configuration and seven defects all differ from iteration 018. The pre-registration scoped this as a
 mechanism run and said solves were context only, with comparisons to earlier arms indicative at best —
 that limit binds here.
