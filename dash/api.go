@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -37,6 +38,62 @@ type API struct {
 	tenantCapture func(tenantID string) bool
 	// pricer values the pre-instrumentation split figure on read. nil = that figure is omitted.
 	pricer modelinfo.Pricer
+	// statsCache and facetsCache hold the last rendered body per (principal, query), briefly.
+	// Overview alone measured 25s under real production write load (many sequential queries,
+	// each one a chance to queue behind the writer), and this endpoint has NO other cache — a
+	// dashboard tab left auto-refreshing, or two managers looking at the same window, each cost
+	// another full 25s+ read rather than getting the answer the last one just computed.
+	statsCache, facetsCache jsonCache
+}
+
+// dashCacheTTL bounds how stale a cached /api/stats or /api/facets body may be. Short enough
+// that a real change shows up almost immediately; long enough that a page's own auto-refresh,
+// or a second tab open on the same window, does not each pay for a separate expensive read.
+const dashCacheTTL = 5 * time.Second
+
+// jsonCache is a short-TTL cache for one expensive, filter-keyed JSON response. Unlike
+// promexport's cache (proxy/promexport.go), this one is keyed: /api/stats and /api/facets
+// vary by tenant scope and by every filter query parameter, so there is no single body to
+// cache — there is one per (principal, query).
+type jsonCache struct {
+	mu      sync.Mutex
+	entries map[string]jsonCacheEntry
+}
+
+type jsonCacheEntry struct {
+	at   time.Time
+	body []byte
+}
+
+func (c *jsonCache) get(key string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok || time.Since(e.at) >= dashCacheTTL {
+		return nil, false
+	}
+	return e.body, true
+}
+
+func (c *jsonCache) set(key string, body []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[string]jsonCacheEntry)
+	}
+	// Bounded the cheap way: a key per distinct query string could otherwise grow without
+	// limit. Once it is bigger than any real deployment's working set, drop it all rather
+	// than build an LRU for a cache that exists to survive a few seconds of auto-refresh.
+	if len(c.entries) > 256 {
+		c.entries = make(map[string]jsonCacheEntry)
+	}
+	c.entries[key] = jsonCacheEntry{at: time.Now(), body: body}
+}
+
+// cacheKey scopes a cache entry to the actual caller, not just the URL: a manager and a
+// tenant hitting the same query string must never share a cached body.
+func cacheKey(p Principal, r *http.Request) string {
+	return p.TenantID + "\x00" + strconv.FormatBool(p.Manager) + "\x00" + r.URL.RawQuery
 }
 
 // NewAPI builds the HTTP surface for a recorder. Malformed CIDRs are skipped with
@@ -627,9 +684,15 @@ func atoiDefault(s string, def int) int {
 }
 
 func (a *API) stats(w http.ResponseWriter, r *http.Request) {
-	f, _, ok := a.scope(r)
+	f, p, ok := a.scope(r)
 	if !ok {
 		unauthorized(w)
+		return
+	}
+	key := cacheKey(p, r)
+	if body, ok := a.statsCache.get(key); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
 		return
 	}
 	o, err := a.rec.DB().Overview(f)
@@ -659,7 +722,14 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 	} else {
 		slog.Warn("dash: declaration-removal credit unavailable", "err", err)
 	}
-	writeJSON(w, o)
+	body, err := json.Marshal(o)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	a.statsCache.set(key, body)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
 }
 
 func (a *API) series(w http.ResponseWriter, r *http.Request) {
@@ -849,9 +919,15 @@ func (a *API) breakdown(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) facets(w http.ResponseWriter, r *http.Request) {
-	flt, _, ok := a.scope(r)
+	flt, p, ok := a.scope(r)
 	if !ok {
 		unauthorized(w)
+		return
+	}
+	key := cacheKey(p, r)
+	if body, ok := a.facetsCache.get(key); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
 		return
 	}
 	f, err := a.rec.DB().Facets(flt)
@@ -859,7 +935,14 @@ func (a *API) facets(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, f)
+	body, err := json.Marshal(f)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	a.facetsCache.set(key, body)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
 }
 
 // The two /api/config descriptions. This route serves the PROCESS's own resolved
