@@ -115,7 +115,7 @@ func TestOptimalIsALowerBoundOnEveryOtherArm(t *testing.T) {
 func TestRegistryIsBuildableAndUnique(t *testing.T) {
 	reqs, cfg := dataset(t)
 	seen := map[string]bool{}
-	var baselines, unreachable int
+	var baselines, unreachable, partialUnsafe int
 	for _, spec := range Registry() {
 		if seen[spec.Name] {
 			t.Errorf("duplicate arm name %q", spec.Name)
@@ -129,6 +129,16 @@ func TestRegistryIsBuildableAndUnique(t *testing.T) {
 		}
 		if spec.Unreachable {
 			unreachable++
+		}
+		if spec.PartialReplayUnsafe {
+			partialUnsafe++
+			if spec.Name != StrategyStickySession1h {
+				t.Errorf("%s is marked PartialReplayUnsafe; only sticky-session-1h commits "+
+					"once for a whole conversation", spec.Name)
+			}
+		} else if spec.Name == StrategyStickySession1h {
+			t.Errorf("%s decides once per conversation and never revisits; it must be marked "+
+				"PartialReplayUnsafe", spec.Name)
 		}
 		s, err := NewStrategy(spec.Name, reqs, cfg)
 		if spec.Name == StrategyReplay {
@@ -150,6 +160,17 @@ func TestRegistryIsBuildableAndUnique(t *testing.T) {
 	if unreachable != 1 {
 		t.Errorf("%d arms are marked Unreachable; only the exact optimum reads the future",
 			unreachable)
+	}
+	// Only StickySession1h commits once for a whole conversation and never revisits the
+	// choice; every other arm decides fresh from Observation and Stats, so slicing a real
+	// conversation across several Simulate calls cannot silently break it. A future arm with
+	// the same whole-conversation commitment must be marked here too, or an unattended sweep
+	// that replays partial conversations (dash's per-user, per-hour suggester) will offer it
+	// as a candidate and silently answer a different question than its own description
+	// promises.
+	if partialUnsafe != 1 {
+		t.Errorf("%d arms are marked PartialReplayUnsafe, want exactly 1 (sticky-session-1h)",
+			partialUnsafe)
 	}
 	if _, err := NewStrategy("no-such-arm", reqs, cfg); err == nil {
 		t.Error("an unknown arm name must be an error, not a silent default")

@@ -30,6 +30,23 @@ type StrategySpec struct {
 	NeedsDataset bool `json:"needs_dataset"`
 	// Baseline marks the arm that is the honest default denominator for a savings figure.
 	Baseline bool `json:"baseline,omitempty"`
+	// PartialReplayUnsafe marks an arm whose Strategy implementation commits ONCE for a whole
+	// conversation and never revisits the choice (see StickySession1h.committed), rather than
+	// deciding fresh from Observation on every call. Such an arm has no way to tell "the first
+	// row of this Simulate call" apart from "the conversation's true first turn" — Simulate
+	// itself makes no such promise (see its own doc comment: a caller may hand it any slice,
+	// in chronological order, and it is scored honestly as exactly that slice).
+	//
+	// A caller that replays ONE real conversation's requests across several DISJOINT Simulate
+	// calls — a per-account, per-hour-of-day sweep, for one — will see such an arm silently
+	// re-decide in every call it appears in, each time believing it is at turn one. That
+	// contradicts the arm's own documented guarantee (decide once, hold for the whole session)
+	// without erroring or even being visible in the result: the numbers are simply answering a
+	// different, less meaningful question than the one the arm's name and description promise.
+	// True only when the whole trajectory that arm cares about is guaranteed to be in the one
+	// Simulate call it is given — false (the default) for every arm that decides fresh from
+	// Observation and Stats alone, which cannot be broken by slicing.
+	PartialReplayUnsafe bool `json:"partial_replay_unsafe,omitempty"`
 }
 
 // The canonical arm names. Strings, because they are a wire contract: they appear in a query
@@ -81,7 +98,8 @@ var registry = []StrategySpec{
 		"uncovered.", NeedsDataset: true},
 	{Name: StrategyHistorical, Description: HistoricalProbability{}.Describe()},
 	{Name: StrategyStopReasonGated, Description: StopReasonGated{}.Describe()},
-	{Name: StrategyStickySession1h, Description: NewStickySession1h().Describe()},
+	{Name: StrategyStickySession1h, Description: NewStickySession1h().Describe(),
+		PartialReplayUnsafe: true},
 	{Name: StrategyReplay, Description: "Replay an explicit action supplied per request. The " +
 		"seam a policy decided elsewhere — an offline predictor, a hand-written experiment — " +
 		"is scored through.", NeedsDataset: true},

@@ -52,7 +52,7 @@ var wireKeys = map[string][]string{
 	"Multipliers":  {"cache_read", "write_5m", "write_1h"},
 	"Semantics":    {"hit_refreshes_ttl", "ping_refreshes_ttl", "zero_generation"},
 	"PriceList":    {"multipliers", "models"},
-	"StrategySpec": {"name", "description", "unreachable", "needs_dataset", "baseline,omitempty"},
+	"StrategySpec": {"name", "description", "unreachable", "needs_dataset", "baseline,omitempty", "partial_replay_unsafe,omitempty"},
 }
 
 // wireTypes is one zero value per contract type, so the reflection below cannot drift from the
