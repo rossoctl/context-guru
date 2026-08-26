@@ -2,7 +2,7 @@
 
 This is the terminal comparison for the KV-cache TTL predictor work. It draws on
 [kv-ttl-predictor-features.md](kv-ttl-predictor-features.md) (the feature catalog),
-[kv-cache-ttl.md](kv-cache-ttl.md) (the prior exact-ceiling study), and
+[kv-cache-ttl.md](../how-to/kv-cache-ttl.md) (the prior exact-ceiling study), and
 [kv-ttl-savings-reconciliation.md](kv-ttl-savings-reconciliation.md) (why the Strategies
 tab and Overview disagree — resolved, not a bug). All figures below are from the live
 deployment, measured read-only, aggregate-only (see the feature catalog doc for the exact
@@ -114,7 +114,7 @@ tenant identity, ahead of time-of-day, ahead of every rolling-gap feature.
 
 ## The sticky whole-session 1h-vs-5m arm
 
-Full detail in [kv-cache-ttl.md](kv-cache-ttl.md#the-sticky-whole-session-arm-and-a-real-haiku-4-5-measurement).
+Full detail in [kv-cache-ttl.md](../how-to/kv-cache-ttl.md#the-sticky-whole-session-arm-and-a-real-haiku-4-5-measurement).
 `kvcache.StickySession1h` decides once, at a conversation's first request, whether to
 commit that whole session to the 1-hour or 5-minute tier, and never revisits the choice —
 modeling the real constraint that a created cache entry cannot be renegotiated in place.

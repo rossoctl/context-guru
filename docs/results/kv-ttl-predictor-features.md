@@ -3,7 +3,7 @@
 This is the feature catalog for a predictor that answers the question a TTL decision
 needs: will this conversation's *next* request land inside the 5-minute cache lifetime,
 the 5m–1h band a keep-alive can rescue, or beyond an hour where nothing helps? It extends
-[kv-cache-ttl.md](kv-cache-ttl.md)'s prior study rather than restarting it — that page
+[kv-cache-ttl.md](../how-to/kv-cache-ttl.md)'s prior study rather than restarting it — that page
 already found the exact ceiling and the two arms it tried before this one. Read it first.
 
 Every number below is from the live deployment, measured **read-only** via
@@ -204,10 +204,10 @@ trusting a pooled fit.
 
 ## Related
 
-- [Choose a cache TTL, and know what it is worth](kv-cache-ttl.md) — the prior study this
+- [Choose a cache TTL, and know what it is worth](../how-to/kv-cache-ttl.md) — the prior study this
   extends: the exact ceiling, the arm registry, and the "93% of the ceiling is 3.7% of
   requests" finding.
-- [Keep an idle prompt cache warm](cache-keepalive.md) — the shipped keep-alive mechanism
+- [Keep an idle prompt cache warm](../how-to/cache-keepalive.md) — the shipped keep-alive mechanism
   and the break-even derivation this doc applies rather than re-derives.
 - `deploy/harbor/kv_ttl_survival_predictor.py` — the existing offline survival model; its
   docstring carries the exact extraction SQL and seven numbered traps.

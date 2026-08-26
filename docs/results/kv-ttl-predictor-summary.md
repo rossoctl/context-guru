@@ -208,7 +208,7 @@ carried essentially all of the positive net.
 request, whether to commit that whole session to the 1-hour or 5-minute tier — modeling the
 real constraint that a created cache entry can't be renegotiated in place. Built, registered,
 and tested against the same "never beats `optimal`," "never sees the future" invariants every
-other arm here is held to. Full detail: [kv-cache-ttl.md](kv-cache-ttl.md#the-sticky-whole-session-arm-and-a-real-haiku-4-5-measurement).
+other arm here is held to. Full detail: [kv-cache-ttl.md](../how-to/kv-cache-ttl.md#the-sticky-whole-session-arm-and-a-real-haiku-4-5-measurement).
 
 **Its simulated performance on this deployment's actual (sonnet-5-heavy) traffic is not
 reported** — that would need the same aggregate-only DB access pattern the rest of this page
@@ -260,7 +260,7 @@ Everything above is one query away — no need to trust this page's numbers on f
 - [kv-ttl-predictor-arms.md](kv-ttl-predictor-arms.md) — the rule-based and learned arms,
   scored with rolling-origin splits and bootstrap CIs; per-fold tables; the
   `historical-probability` diagnosis in full.
-- [kv-cache-ttl.md](kv-cache-ttl.md) — the prior exact-ceiling study (the domain model, the
+- [kv-cache-ttl.md](../how-to/kv-cache-ttl.md) — the prior exact-ceiling study (the domain model, the
   cost formulas, the arm registry) plus the sticky-session-1h arm and the real haiku-4-5
   measurement.
 - [kv-ttl-predictor-comparison.md](kv-ttl-predictor-comparison.md) — the terminal comparison

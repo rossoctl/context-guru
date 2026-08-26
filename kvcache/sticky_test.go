@@ -193,4 +193,3 @@ func TestStickySessionBreakEvenGatesTheCommitment(t *testing.T) {
 		t.Errorf("p just above break-even decided %v, want write_1h", got)
 	}
 }
-

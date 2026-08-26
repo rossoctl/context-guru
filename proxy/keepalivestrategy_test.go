@@ -210,8 +210,8 @@ func TestApplyStrategyCopiesPredictorFields(t *testing.T) {
 	now := clock.now()
 	s := tenant.Strategy{
 		ID: "s1", Active: true, Target: tenant.Target{Mode: tenant.TargetAll},
-		Windows:            []tenant.Window{{Start: "00:00", End: "23:59"}},
-		IdleSeconds:        280, MaxPings: 1,
+		Windows:     []tenant.Window{{Start: "00:00", End: "23:59"}},
+		IdleSeconds: 280, MaxPings: 1,
 		PredictorID:        "stop-reason-gated",
 		PredictorThreshold: 0.5,
 	}

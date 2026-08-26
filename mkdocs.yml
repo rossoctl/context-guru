@@ -154,6 +154,11 @@ nav:
       - "Measured, Aug 2026: this branch": results/branch-2026-08-19.md
       - "Why below_trigger is not the trigger": results/below-trigger-2026-08.md
       - "The flattened one-message class": results/flattened-compaction-2026-08.md
+      - KV-cache TTL predictors, the whole story: results/kv-ttl-predictor-summary.md
+      - TTL predictor feature catalog: results/kv-ttl-predictor-features.md
+      - Rule-based and learned TTL arms, scored: results/kv-ttl-predictor-arms.md
+      - TTL predictors compared, pooled and per tenant: results/kv-ttl-predictor-comparison.md
+      - "Strategies vs Overview: reconciling keep-alive savings": results/kv-ttl-savings-reconciliation.md
       - "SWE-bench Verified: per-arm detail":
           - baseline: results/baseline.md
           - context-guru: results/context-guru.md
