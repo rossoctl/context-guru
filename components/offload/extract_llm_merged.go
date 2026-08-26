@@ -201,7 +201,15 @@ func (e *ExtractLLM) adjudicateMerged(
 	}
 	verdicts, parsed := extract.ParseBulkVerdicts(reply)
 	if !parsed {
-		rep.Gate("merged_unparseable")
+		// TRUNCATION IS NOT JUNK, and folding them together hid a 70%-of-calls failure behind a name
+		// that reads as "the prompt is wrong". A reply that opened the array but never closed it ran
+		// out of output budget; one that never opened it is a genuine format failure. The remedies
+		// are opposite -- raise max_tokens versus fix the prompt -- so they get separate counters.
+		if strings.Contains(reply, "[") && !strings.Contains(reply, "]") {
+			rep.Gate("merged_reply_truncated")
+		} else {
+			rep.Gate("merged_unparseable")
+		}
 		return nil
 	}
 	if len(verdicts) == 0 {

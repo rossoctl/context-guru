@@ -168,9 +168,21 @@ func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask 
 	if body, err = sjson.SetBytes(body, "tool_choice", map[string]any{"type": "none"}); err != nil {
 		return "", u, err
 	}
+	// 16k, not the 2048 default, and this is a correctness matter rather than generosity.
+	//
+	// MEASURED: with 2048 this path produced UNPARSEABLE replies on ~70% of calls (24 of 34). Two
+	// things stack up. The request model runs adaptive thinking, which consumes the output budget
+	// before any text is emitted -- at max_tokens 900 a probe returned thinking blocks and no text at
+	// all. And a verdict array over a 12-item batch, each entry carrying an obligation label and a
+	// VERBATIM quote, is simply long. The array was being cut mid-flight, leaving no closing bracket,
+	// so the parse failed and the caller changed nothing -- indistinguishable in the counters from a
+	// model that declined to act, which is exactly how it was misread for three iterations.
+	//
+	// Output tokens bill as GENERATED, not as budgeted, so a ceiling this high costs nothing until it
+	// is used. An operator who wants a tighter bound sets MaxTokens explicitly.
 	maxTok := a.MaxTokens
 	if maxTok == 0 {
-		maxTok = 2048
+		maxTok = 16000
 	}
 	if body, err = sjson.SetBytes(body, "max_tokens", maxTok); err != nil {
 		return "", u, err

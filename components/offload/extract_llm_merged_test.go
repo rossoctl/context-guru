@@ -239,3 +239,41 @@ func TestMergedCanDropUnstructuredOutput(t *testing.T) {
 			"decides and removes nothing.", before, schema.MessagesTokens(req), rep.Gates)
 	}
 }
+
+// A TRUNCATED reply and a MALFORMED one need different counters, because they need opposite fixes:
+// raise the output budget versus fix the prompt. Folded together under merged_unparseable, a failure
+// on ~70% of calls read as "the prompt is wrong" and sat unnoticed at 19 and 22 in two earlier arms --
+// where it looked negligible only because it was being compared against the DECISION count instead of
+// the CALL count.
+func TestMergedDistinguishesTruncatedReplyFromJunk(t *testing.T) {
+	body := strings.Repeat("{\"row\":\"real value here\"}\n", 400)
+	for _, tc := range []struct {
+		name, reply, wantGate string
+	}{
+		// Opened the array, never closed it: ran out of output budget mid-verdict.
+		{"truncated", "[{\"i\":2,\"verdict\":\"drop\",\"needed_by\":\"none\",\"quote\":\"", "merged_reply_truncated"},
+		// Never produced an array at all: a format failure.
+		{"junk", "I would rather explain my reasoning in prose, thank you.", "merged_unparseable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := mergedReq(3, body)
+			m := &countingModel{reply: tc.reply}
+			e, err := newExtractLLM([]byte("{\"selection_mode\":\"merged\",\"min_tokens\":300,\"allow_on_caching_backend\":true,\"economic_gate\":false}"))
+			if err != nil {
+				t.Fatalf("newExtractLLM: %v", err)
+			}
+			c := &components.Ctx{Ctx: context.Background(), Session: "trunc-" + tc.name,
+				Store: store.NewMemory(store.Options{}), CtxWindow: 200000,
+				Model: components.ModelSpec{Incoming: m, Static: m}}
+			rep := &components.Report{}
+			before := schema.MessagesTokens(req)
+			e.(components.Offload).Offload(req, rep, c)
+			if rep.Gates[tc.wantGate] == 0 {
+				t.Errorf("%s reply was not counted as %s; gates=%v", tc.name, tc.wantGate, rep.Gates)
+			}
+			if schema.MessagesTokens(req) != before {
+				t.Error("an unusable reply changed the request; it must fail open")
+			}
+		})
+	}
+}
