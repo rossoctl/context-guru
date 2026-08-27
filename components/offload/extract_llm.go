@@ -1291,6 +1291,20 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// One record per call, written to its own slot so the goroutines need no lock (a
 		// Report is copied by value across this codebase and cannot carry one).
 		calls := make([]components.ModelCall, len(cands))
+		// AND THE SAME RULE FOR GATES, which it did not previously get (#119).
+		//
+		// The two gates raised inside runCall — deduped_inflight_extraction and reply_truncated —
+		// were calling rep.Gate from the goroutines. Report.Gates is a plain map with no lock, for
+		// exactly the reason the comment above gives, so two concurrent raises are a data race on
+		// a Go map. That is NOT a wrong counter and it is NOT a recoverable panic: the runtime
+		// aborts the process with `fatal error: concurrent map writes`, which in a proxy means the
+		// whole process dies rather than one component failing open. The dedup gate is the
+		// reachable one — singleflight releases every follower of a shared key at the same instant,
+		// so N identical candidates in one request give N-1 simultaneous raises.
+		//
+		// Same discipline as the records: each call appends its own gate names to its own slot, and
+		// the serial phase below raises them.
+		gateNames := make([][]string, len(cands))
 		sem := make(chan struct{}, llmConcurrency)
 		var wg sync.WaitGroup
 		runCall := func(k int) {
@@ -1340,7 +1354,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if !executed {
 				// A concurrent request derived this exact result; take it and charge nothing.
 				inflightDeduped.Add(1)
-				rep.Gate("deduped_inflight_extraction")
+				gateNames[k] = append(gateNames[k], "deduped_inflight_extraction")
 				out[k] = outT{projected: res, summary: sum}
 				return
 			}
@@ -1368,7 +1382,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// real session: 26.8s and ~$0.08 for a reply cut off at 2048 tokens.
 			if outTok >= int64(cheapExtractOutputTokens) {
 				calls[k].GateReason = "reply truncated at the output cap: " + calls[k].GateReason
-				rep.Gate("reply_truncated")
+				gateNames[k] = append(gateNames[k], "reply_truncated")
 				atomic.AddInt64(&llmTruncated, 1)
 			}
 			// CLASSIFY THE SILENT FAILURE — and classify it INDEPENDENTLY of whether
@@ -1450,6 +1464,11 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// reporting that zero value put a phantom `cand=0 saved=0 $0.00` row in the ledger,
 		// inflating the call count with work that by definition did not happen.
 		for k := range calls {
+			// The gates first, and unconditionally: a single-flight FOLLOWER returns before
+			// filling its ModelCall slot, and its gate is precisely the one that says so.
+			for _, g := range gateNames[k] {
+				rep.Gate(g)
+			}
 			if calls[k].Component != "" {
 				rep.Calls = append(rep.Calls, calls[k])
 			}
