@@ -66,6 +66,11 @@ type Opts struct {
 	// upgrade entirely rather than defaulting, so a host that forgets to resolve its
 	// configuration asks for nothing instead of asking on every request.
 	HeadTTLMinTokens int
+	// PrefixAsk, when set, lets a component put a question to the request's own model with the
+	// previous turn's SENT body as the cached prefix. See components.PrefixAsker. nil => a component
+	// that wants one gets none and decides for itself; today's behaviour for every caller that does
+	// not set it.
+	PrefixAsk components.PrefixAsker
 	// Tracker, when set, owns the per-session cached-prefix boundary. Supplying it also
 	// removes the concurrent-turn race in the legacy read-then-deferred-write of prevLen.
 	// nil => the legacy store-backed path, unchanged for library callers and /compact.

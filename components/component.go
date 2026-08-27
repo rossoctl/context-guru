@@ -114,6 +114,43 @@ type Budgeter interface {
 	WithMaxTokens(n int) Model
 }
 
+// PrefixUsage reports what one PrefixAsk cost, straight from the provider's usage block. It exists
+// because the whole point of a prefix ask is the cache READ, and a cache read that silently is not
+// happening looks identical to one that is — except on the bill.
+//
+// RETURNED rather than merely recorded, and that is the load-bearing part of this type. A caller
+// whose entire justification is the cache read has to be able to gate on whether the read happened,
+// which a metrics counter cannot support.
+type PrefixUsage struct {
+	CacheRead  int
+	CacheWrite int
+	Fresh      int
+	Output     int
+}
+
+// PrefixAsker completes `ask` as a trailing user message appended to the EXACT body this session
+// sent upstream on the PREVIOUS turn.
+//
+// WHY THE PREVIOUS TURN'S SENT BODY AND NOT THE INCOMING ONE. The provider's prompt cache was
+// populated by what context-guru emitted, which is the COMPACTED form. The incoming body is
+// uncompacted, so it diverges from the cached bytes at the first thing any component removed, and
+// everything after that point is a miss. Appending to the bytes actually sent is the only
+// construction that reliably reads the cache — measured at 19,595 read against 0 created.
+//
+// THE CONSEQUENCE, stated here rather than left to be rediscovered: the ask sees the transcript as of
+// the PREVIOUS turn, so the newest tool output is invisible to it. That is acceptable for the
+// judgement this serves — the missing part is tail content, which has had no turns in which to be
+// superseded and would be kept anyway — and it has the side benefit of keeping a large model call off
+// the agent's critical path.
+//
+// nil when the host cannot support it: no stashed body for this session yet, the first turn, a
+// non-Anthropic route, or the feature switched off. A caller must decide for itself what nil means;
+// see extract_llm_sweep, which DECLINES rather than falling back, because the fallback is the cost the
+// mechanism exists to avoid.
+type PrefixAsker interface {
+	Ask(ctx context.Context, session, ask string) (reply string, usage PrefixUsage, err error)
+}
+
 // ModelSpec carries the LLM clients a NeedsModel component may use, resolved per
 // request by the host adapter. Incoming is the proxied request's own model +
 // credentials (nil when unavailable, e.g. the AuthBridge host); Static is a
@@ -276,6 +313,20 @@ type Ctx struct {
 	// -1 = unknown/first turn/cache off ⇒ no tail restriction. Only meaningful when
 	// CacheAware is true.
 	MaxCachedIdx int
+	// PrefixAsk, when non-nil, lets a component put a question to the request's own model with the
+	// previous turn's SENT body as the prefix, so the provider reads its prompt cache instead of
+	// being re-sent the transcript. See PrefixAsker for why that body and not the incoming one.
+	PrefixAsk PrefixAsker
+	// CacheTTLMs is how long this request's prompt cache is assumed to live, in milliseconds, as
+	// DERIVED from the request rather than assumed: for the Anthropic family the body declares it
+	// (a bare `ephemeral` mark is 5 minutes, an explicit `ttl: "1h"` is an hour), widened to the
+	// longest lifetime this prefix has ever asked for. 0 when unknown.
+	//
+	// Carried alongside IdleMs and ColdCache so a component can reason about where in the cache's
+	// LIFETIME this turn falls, not merely whether the entry is already gone. extract_llm_sweep
+	// needs exactly that: a prefix ask must read a cache that still EXISTS, while rewriting deep
+	// history wants one that is nearly worthless — which is a window before expiry, not after it.
+	CacheTTLMs int64
 	// FilterStats receives cmdfilter's per-filter ledger (which command families pay
 	// off, and which output shapes matched nothing). nil = not recording.
 	//

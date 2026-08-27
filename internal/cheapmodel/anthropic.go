@@ -11,7 +11,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/rossoctl/context-guru/components"
 )
@@ -180,3 +184,121 @@ func clipErrBody(r io.Reader) string {
 }
 
 const errBodyCap = 512
+
+// PrefixUsage is what one CompletePrefixed call cost, straight from the provider's usage block.
+// Returned rather than only recorded because the CALLER has to gate on it: a prefix ask whose whole
+// justification is the cache read must be able to see that the read happened.
+type PrefixUsage struct {
+	CacheRead  int
+	CacheWrite int
+	Fresh      int
+	Output     int
+}
+
+// CompletePrefixed sends `ask` as a trailing user message appended to prefixBody — an ENTIRE
+// previously-sent Anthropic request — so the provider reads the prompt cache that body populated
+// instead of being charged fresh for the transcript again.
+//
+// NOTE WHAT THE CACHED REGION IS HERE, because it is not what the rest of this file deals with.
+// systemBlocks places OUR OWN cache_control on a system prefix we built, and is therefore subject to
+// the provider's minimum cacheable size (4,096 provider tokens on haiku-class). This method places no
+// breakpoint at all: the marks are the ones the AGENT's own request already carried, and the region
+// they cover is the transcript. That clears any minimum by orders of magnitude — the measurement
+// below read 19,595 tokens — so the size floor that governs systemBlocks does not apply, and neither
+// does its model-family asymmetry.
+//
+// Measured against the live gateway (docs/experiments/loca/iter019/results.md §2):
+//
+//   - appending a trailing user message to a byte-identical prefix reads the whole prefix from
+//     cache and writes nothing: 19,595 read / 0 created.
+//   - `tool_choice` is NOT part of the cache key, so forcing it to "none" is free — and necessary,
+//     because the prefix carries the agent's tools and the model will otherwise answer with a
+//     tool_use instead of the verdicts.
+//   - `tools` ARE part of the key. They are therefore left exactly as the prefix had them; dropping
+//     them read a different, smaller entry (19,129) i.e. a separate cache line and a fresh write.
+//   - this route REJECTS assistant prefill ("the conversation must end with a user message"), which
+//     the appended user message satisfies by construction — but it means prefixBody must not be
+//     extended any other way.
+//
+// Everything else about the body is preserved untouched, because every byte before the appended
+// message is prefix and any edit to it costs the cache read this method exists for. `stream` is the
+// one exception: the caller wants a single JSON answer, and a streamed response is not that.
+func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask string) (string, PrefixUsage, error) {
+	var u PrefixUsage
+	if !gjson.GetBytes(prefixBody, "messages").IsArray() {
+		return "", u, fmt.Errorf("cheapmodel: prefix body has no messages array")
+	}
+	n := len(gjson.GetBytes(prefixBody, "messages").Array())
+	body, err := sjson.SetBytes(prefixBody, "messages."+strconv.Itoa(n),
+		map[string]any{"role": "user", "content": ask})
+	if err != nil {
+		return "", u, err
+	}
+	// tool_choice: free (not in the cache key) and required, or the model answers with a tool_use.
+	if body, err = sjson.SetBytes(body, "tool_choice", map[string]any{"type": "none"}); err != nil {
+		return "", u, err
+	}
+	maxTok := a.MaxTokens
+	if maxTok == 0 {
+		maxTok = DefaultMaxTokens
+	}
+	if body, err = sjson.SetBytes(body, "max_tokens", maxTok); err != nil {
+		return "", u, err
+	}
+	body, _ = sjson.DeleteBytes(body, "stream")
+
+	base := a.BaseURL
+	if base == "" {
+		base = "https://api.anthropic.com"
+	}
+	client := a.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(base, "/")+"/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return "", u, err
+	}
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	// The caller's own credential and scheme, exactly as Complete sends it — the prefix belongs to
+	// this caller's cache namespace, so presenting a different credential would read nothing.
+	if a.AuthScheme == "bearer" {
+		req.Header.Set("Authorization", "Bearer "+a.APIKey)
+	} else {
+		req.Header.Set("x-api-key", a.APIKey)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", u, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", u, fmt.Errorf("cheapmodel: prefixed status %d: %s", resp.StatusCode, clipErrBody(resp.Body))
+	}
+	var out struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+		Usage struct {
+			InputTokens      int `json:"input_tokens"`
+			OutputTokens     int `json:"output_tokens"`
+			CacheCreationTok int `json:"cache_creation_input_tokens"`
+			CacheReadTok     int `json:"cache_read_input_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", u, err
+	}
+	u = PrefixUsage{CacheRead: out.Usage.CacheReadTok, CacheWrite: out.Usage.CacheCreationTok,
+		Fresh: out.Usage.InputTokens, Output: out.Usage.OutputTokens}
+	recordUsageCache(ctx, a.Model, out.Usage.InputTokens, out.Usage.OutputTokens,
+		out.Usage.CacheCreationTok, out.Usage.CacheReadTok)
+	for _, c := range out.Content {
+		if c.Text != "" {
+			return c.Text, u, nil
+		}
+	}
+	return "", u, nil
+}

@@ -452,6 +452,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	nowMs := o.nowMs()
 	coldCache := false
 	idleMs := int64(0)
+	// ttlMs is the cache lifetime the cold decision below derives, carried onto the Ctx so a
+	// component can act BEFORE expiry rather than only after it. 0 when the cache-aware path did not
+	// run, which reads as "unknown" to every consumer.
+	ttlMs := int64(0)
 	maxCachedIdx := -1
 	if cacheAware && !bypass {
 		// Messages present on the previous turn of this session are already committed
@@ -521,6 +525,11 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				ttl = a
 			}
 			coldCache = cacheIsCold(prevAt, nowMs, ttl)
+			// The SAME ttl the cold decision used, carried onto the Ctx. A component that wants to
+			// act BEFORE expiry rather than after needs the lifetime, not just the verdict, and
+			// re-deriving it there would be a second read of one fact — which is how the cold
+			// decision and the dashboard came to disagree once already (see ttlTier).
+			ttlMs = ttl.Milliseconds()
 			if prevAt > 0 && nowMs > prevAt {
 				idleMs = nowMs - prevAt
 			}
@@ -583,6 +592,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// provider's cap of four counts them all (issue #32, defect 2).
 		ExistingBreakpoints: bps.Total(),
 		Mode:                mode,
+		PrefixAsk:           o.PrefixAsk,
+		CacheTTLMs:          ttlMs,
 		// Set BEFORE the run, so cachesplit's own report is right at the source and every
 		// consumer of it agrees. Amending the report afterwards fixed the dashboard and
 		// left /stats and the Prometheus component counters still saying "skipped",
