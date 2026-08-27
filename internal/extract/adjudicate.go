@@ -1,9 +1,12 @@
 package extract
 
 import (
+	"context"
 	"encoding/json"
 	"strconv"
 	"strings"
+
+	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
 // COLD-SWEEP ADJUDICATION. The model returns VERDICTS, never content.
@@ -161,22 +164,112 @@ FOR EACH OUTPUT, ANSWER THE CRITERION FIRST, THEN DECIDE:
 Reply with ONLY a JSON array, one object per output, no prose:
 [{"i": <label>, "needed_by": "a|b|c|none", "quote": "<verbatim text or empty>", "verdict": "keep|drop"}]`
 
-// BuildAdjudicationPrompt renders the request for a BATCH. goal is the conversation the caller chose
-// to carry (see the component's `context` setting), so spent-ness is judged against the live task
-// rather than in the abstract.
+// THE PROMPT IS SPLIT so the invariant half can be cached, and the sibling batches of one sweep can
+// read it instead of each paying fresh for the same bytes.
+//
+// It was NOT split at first, and that was a real defect rather than a missed optimisation: the
+// component called Model.Complete, which routes to CompleteSystem(ctx, "", prompt) and thence to
+// CompleteBlocks(ctx, nil, prompt) — no system field, so systemBlocks places NO cache_control mark
+// at all. Every batch of a sweep sent the whole contract as fresh input and none could read
+// another's write, because there was nothing to read. The identical defect is documented on
+// extract_llm's own path.
+//
+// WHAT GOES WHERE, and it matters: the CONTRACT is invariant across every request and every tenant,
+// so it is a system block. The GOAL is invariant across the batches of ONE request, so it is a second
+// system block when the caller says there is more than one batch to share it. THE ITEMS ARE NEVER IN
+// THE PREFIX — they differ per batch, so a cache entry containing them could never be read, which is
+// strictly worse than no breakpoint.
+//
+// SIZE IS THE LIMIT, AND IT IS NOT MET ON HAIKU. A cache_control below the model's minimum cacheable
+// prefix is silently ignored — no error, cache_creation_input_tokens: 0 — and the minimum is 4,096
+// PROVIDER tokens on haiku-class (3,413 o200k after the unit conversion) against 1,024 on
+// sonnet-class (853 o200k). MEASURED with internal/tokens: this contract is 504 o200k tokens, and
+// with a two-message `recent` context the whole prefix is ~536. So:
+//
+//	sonnet-class    reachable — it needs only ~349 tokens of conversation on top of the contract,
+//	                which a real two-message context often supplies.
+//	haiku-class     PROVABLY NOT at context: recent — it would need ~2,909 tokens of conversation,
+//	                i.e. context: full or a very large context_messages. That is proposal open
+//	                question 2 and deliberately not changed to chase a cache.
+//	unnameable id   treated as haiku-class, which is minCacheablePrefix's own conservative default.
+//
+// Split anyway. systemBlocks withholds the mark below the floor, so the split is free and correct on
+// haiku and wins on sonnet — the same conclusion CompleteSystem's comment reaches for the same
+// reason. The caller must not ASSUME the win: see AdjudicationPrefixTokens, and the
+// sweep_prefix_uncacheable / sweep_prefix_cache_read_ZERO counters that make the outcome visible
+// rather than hoped for.
+
+// adjudicationGoalPrefix labels the conversation context. Kept as a constant because it is part of
+// the cached prefix's bytes, and a prefix whose framing drifts is a prefix with a new cache key.
+const adjudicationGoalPrefix = "WHAT THE AGENT IS DOING NOW (judge relevance toward this):\n"
+
+// BuildAdjudicationSplit renders one batch as (cacheable system blocks, per-batch user message).
+//
+// cacheContext moves the goal into a trailing system block. Worth it only when the request will make
+// MORE THAN ONE call — the goal is identical across a sweep's batches, so batches 2..N read it
+// instead of re-sending it, but a cache WRITE costs 1.25x fresh, so paying it for a single call is a
+// 25% loss. The caller decides, exactly as extract.Cfg.CacheContext works for the compaction path.
+func BuildAdjudicationSplit(goal string, items []AdjudicationItem, cacheContext bool) (system []string, user string) {
+	system = []string{adjudicationContract}
+	g := clipAdjudicationGoal(goal)
+	if cacheContext {
+		system = append(system, adjudicationGoalPrefix+g)
+		return system, adjudicationItemsBlock(items)
+	}
+	return system, adjudicationGoalPrefix + g + "\n\n" + adjudicationItemsBlock(items)
+}
+
+// AdjudicationPrefixTokens is the o200k size of the system prefix BuildAdjudicationSplit would
+// produce, so a caller can ask cheapmodel.CacheablePrefix whether the provider will honour a
+// breakpoint on it before paying a serialized round to earn one. Same unit as internal/tokens, which
+// is the unit CacheablePrefix expects — comparing a provider count with an o200k count is the unit
+// error that silently cost every haiku call its cache once already.
+func AdjudicationPrefixTokens(goal string, cacheContext bool) int {
+	system, _ := BuildAdjudicationSplit(goal, nil, cacheContext)
+	n := 0
+	for _, b := range system {
+		n += tokens.Count(b)
+	}
+	return n
+}
+
+// AskAdjudication sends one batch through the best caching capability the client has: ordered system
+// blocks, else one joined system field, else a single user message. Identical content in all three
+// cases — only the caching differs — so a Model implementing neither optional interface still works.
+//
+// It lives here rather than in the component because completeSplit is unexported and because the
+// decision about which half of the prompt is cacheable belongs next to the contract it is splitting.
+func AskAdjudication(ctx context.Context, model Model, goal string, items []AdjudicationItem,
+	cacheContext bool) (string, error) {
+	system, user := BuildAdjudicationSplit(goal, items, cacheContext)
+	return completeSplit(ctx, model, system, user)
+}
+
+// BuildAdjudicationPrompt renders the whole request as ONE string — the shape a client with no
+// system capability receives, and what the split's two halves concatenate to. Kept so a test can
+// assert on the whole thing the model sees.
 func BuildAdjudicationPrompt(goal string, items []AdjudicationItem) string {
-	var b strings.Builder
-	b.WriteString(adjudicationContract)
-	b.WriteString("\n\nWHAT THE AGENT IS DOING NOW (judge relevance toward this):\n")
+	system, user := BuildAdjudicationSplit(goal, items, false)
+	return strings.Join(system, "\n\n") + "\n\n" + user
+}
+
+// clipAdjudicationGoal bounds the conversation context. Also the reason the goal is a separate
+// block: clipping it inside the cached prefix keeps the prefix's size bounded and its bytes stable.
+func clipAdjudicationGoal(goal string) string {
 	g := strings.TrimSpace(goal)
 	if g == "" {
-		g = "(no explicit goal stated)"
+		return "(no explicit goal stated)"
 	}
 	if len(g) > 4000 {
 		g = g[:4000]
 	}
-	b.WriteString(g)
-	b.WriteString("\n\n")
+	return g
+}
+
+// adjudicationItemsBlock renders the candidates. NEVER cacheable: they differ per batch, which is
+// what makes them the user half.
+func adjudicationItemsBlock(items []AdjudicationItem) string {
+	var b strings.Builder
 	for _, it := range items {
 		b.WriteString("=== OUTPUT ")
 		b.WriteString(strconv.Itoa(it.Label))

@@ -74,7 +74,51 @@ they make it unwilling to act.*
 **12 is a measured ceiling**, not a round number: quote fidelity degraded with batch size, 4 of 37
 quotes non-verbatim at batch 16 against 0 of 16 at batch 10.
 
-Two things make the batch safe that were fixed on the way here:
+### Sibling batches and the shared prefix
+
+Every batch of one sweep sends the same contract and the same conversation context. The prompt is
+**split** so that invariant half can carry a `cache_control` breakpoint and the batches after the
+first can read it instead of each paying fresh: the contract is a system block, the goal is a second
+system block when there is more than one batch to share it, and **the candidates are never in the
+prefix** — they differ per batch, so a cache entry containing them could never be read, which is
+strictly worse than no breakpoint.
+
+It also needs the calls *ordered*. `cheapmodel.claimCacheWrite` deliberately withholds the breakpoint
+from concurrent siblings, because an entry that is only ever written is worse than none — so with
+every batch in flight at once, sharing cannot happen even in principle. The first batch therefore runs
+alone to earn the write, then the rest run concurrently to read it.
+
+**But only where the write is earnable, and on the shipped model it is not.** A `cache_control` below
+the provider's minimum cacheable prefix is silently ignored — no error, `cache_creation_input_tokens:
+0` — and the minimum is 4,096 provider tokens on haiku-class against 1,024 on sonnet-class. Measured
+with `internal/tokens`:
+
+| | |
+|---|---|
+| adjudication contract | **504** o200k tokens |
+| contract + a two-message `recent` context | **~537** o200k tokens |
+| haiku-class floor | 3,413 o200k — needs ~2,900 tokens of conversation on top of the contract |
+| sonnet-class floor | 853 o200k — needs ~349, which a real two-message context often supplies |
+| unnameable gateway alias | treated as haiku-class, `minCacheablePrefix`'s conservative default |
+
+So **sharing is reachable on sonnet-class and provably cannot work on haiku-class at `context:
+recent`** — and `housellm` pins `claude-haiku-4-5`. The component reads its own prefix size, serializes
+the first batch **only** when the model would honour the breakpoint (otherwise the serialized round
+would buy a gateway queue wait, ~2–4 s p50, for nothing), and counts the outcome either way:
+`sweep_prefix_uncacheable` when the floor cannot be cleared, `sweep_prefix_cache_read_ZERO` when a
+sibling read nothing despite the ordering.
+
+Raising `context` would clear haiku's floor. **That is not done here** — it is open question 2 and
+unmeasured, and chasing a cache is the wrong reason to change what the model is shown.
+
+What the duplication actually costs is small, and that is by construction rather than luck: three
+extra batches re-send ~1,600 input tokens, a fraction of a cent on haiku and about 4% of one batch's
+own body. The transcript is deliberately not in the prefix. This is the difference from
+`extract_llm`'s `context: full` sweep, where the prefix *was* the transcript at ~138,000 tokens and
+duplicating it across five calls was the whole defect. It is why `max_calls` defaulting to a
+concurrency round stands even where sharing fails.
+
+Two more things make the batch safe that were fixed on the way here:
 
 - the reply budget is raised to **16,000 output tokens**. `659e7a6` traced 24 of 34 unparseable
   replies to a 2,048-token default: a verdict array over 12 items each carrying a verbatim quote is
@@ -148,7 +192,7 @@ is **not** a failure), `sweep_unparseable`, `sweep_reply_truncated` (a different
 unparseable: raise the budget, not the prompt), `sweep_verdict_unusable`,
 `sweep_verdict_unknown_label`, `sweep_verdict_duplicate_label`, `sweep_verdict_missing`,
 `sweep_reply_budget_not_raised`, `sweep_escalated_to_agent_model`, `sweep_call_failed`,
-`sweep_drop_would_not_shrink`.
+`sweep_drop_would_not_shrink`, `sweep_prefix_uncacheable`, `sweep_prefix_cache_read_ZERO`.
 
 ## What is not measured
 

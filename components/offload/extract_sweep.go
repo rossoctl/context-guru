@@ -111,6 +111,15 @@ type extractSweepConfig struct {
 	// The default is one concurrency round for the same reason the per-output default was: past it
 	// the calls serialize and latency grows multiplicatively for a linear gain.
 	//
+	// WHAT A SECOND BATCH DUPLICATES, since the sibling calls cannot always share their prefix (see
+	// the prefix block in Offload). MEASURED with internal/tokens: the adjudication contract is 504
+	// o200k tokens and the whole shared prefix at `context: recent` is ~537, so three extra batches
+	// re-send about 1,600 input tokens — a fraction of a cent on a haiku-class model, and roughly 4%
+	// of ONE batch's own body (twelve candidates bounded at 4,000 chars each). The prefix is not
+	// where this component's money is, and that is by construction: the transcript is deliberately
+	// NOT in it. That is the difference from extract_llm's `context: full` sweep, where the prefix
+	// WAS the transcript at ~138,000 tokens and duplicating it was the whole defect.
+	//
 	// The unbounded default this replaces was measured wrong in the way unbounded spend paths usually
 	// are: one production request made 27 calls against a tenant whose llm_max_per_request was 2,
 	// spent $0.229 and added 76.6 s to a turn whose upstream took 33.5 s — context-guru was 2.3x
@@ -494,30 +503,74 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		}
 		rep.GateN("sweep_offered", len(cands))
 
+		// THE SHARED PREFIX, AND WHETHER IT CAN ACTUALLY BE SHARED.
+		//
+		// Every batch of one sweep sends the same contract and the same conversation context. With
+		// two or more batches that is worth writing into the provider's cache once and reading back
+		// on the rest; with ONE batch there is nothing to read it back and a cache write costs 1.25x
+		// fresh, so paying for it would be a 25% loss. Same condition extract_llm applies for the
+		// same reason.
+		cacheContext := len(batches) > 1
+		// AND THE WRITE HAS TO BE EARNABLE BEFORE IT IS WORTH ORDERING THE CALLS FOR.
+		// cheapmodel.claimCacheWrite deliberately suppresses the breakpoint on CONCURRENT siblings —
+		// a cache entry only ever written is worse than no breakpoint — so with the calls all in
+		// flight at once the first takes the write slot and the rest send no mark and pay plain fresh
+		// input. Running the first batch ALONE fixes that: one writer, then readers.
+		//
+		// It costs a whole gateway queue round, ~2-4 s p50 with a tail of 12-16 s (per-call latency
+		// here is queue time, not prompt size), so it is only paid where it buys something. On this
+		// path it frequently buys NOTHING, and that is measured rather than assumed: a cache_control
+		// below the model's minimum cacheable prefix is silently ignored, and the prefix is ~536
+		// o200k tokens against a 3,413 floor on haiku-class. See AdjudicationPrefixTokens.
+		prefixTok := extract.AdjudicationPrefixTokens(goal, cacheContext)
+		prefixCacheable := cheapmodel.CacheablePrefix(callModel, prefixTok)
+		serialFirst := cacheContext && prefixCacheable
+		if cacheContext && !prefixCacheable {
+			// COUNTED, NOT SILENT. This says the sibling batches are each paying fresh for the same
+			// prefix and no ordering can change it on this model. It is a small waste here by
+			// construction — the prefix is the contract plus the goal, not the transcript — but an
+			// operator reading a duplicated-input bill needs to be able to see which of the two
+			// causes it is, and the remedy (a larger `context`, which is unmeasured) is not one this
+			// component may choose on its own.
+			rep.Gate("sweep_prefix_uncacheable")
+			if debugExtractLLM(c) {
+				logging.From(c.Ctx).Debug("cg.sweep.prefix_uncacheable", "model", callModel,
+					"prefix_o200k", prefixTok, "batches", len(batches))
+			}
+		}
+
 		out := make([]sweepOutcome, len(batches))
 		calls := make([]components.ModelCall, len(batches))
 		sem := make(chan struct{}, llmConcurrency)
 		var wg sync.WaitGroup
-		for bi := range batches {
+		runBatch := func(bi int) {
+			items := make([]extract.AdjudicationItem, 0, len(batches[bi]))
+			for _, k := range batches[bi] {
+				items = append(items, extract.AdjudicationItem{
+					// The LABEL is the candidate's position in cands, so the mapping back is
+					// ours and the model only ever handles a small integer. See
+					// AdjudicationItem.Label for why that is not a style choice.
+					Label:      k,
+					ID:         cands[k].id,
+					SizeTokens: schema.TextTokens(cands[k].content),
+					Content:    cands[k].content,
+				})
+			}
+			out[bi], calls[bi] = e.adjudicateBatch(c, rep.Component, items, cands,
+				goal, flat, model, pricing, callModel, escalated, cacheContext, bi > 0)
+		}
+		first := 0
+		if serialFirst {
+			runBatch(0) // the writer; its release() records that the prefix now exists
+			first = 1
+		}
+		for bi := first; bi < len(batches); bi++ {
 			wg.Add(1)
 			go func(bi int) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				items := make([]extract.AdjudicationItem, 0, len(batches[bi]))
-				for _, k := range batches[bi] {
-					items = append(items, extract.AdjudicationItem{
-						// The LABEL is the candidate's position in cands, so the mapping back is
-						// ours and the model only ever handles a small integer. See
-						// AdjudicationItem.Label for why that is not a style choice.
-						Label:      k,
-						ID:         cands[k].id,
-						SizeTokens: schema.TextTokens(cands[k].content),
-						Content:    cands[k].content,
-					})
-				}
-				out[bi], calls[bi] = e.adjudicateBatch(c, rep.Component, items, cands,
-					goal, flat, model, pricing, callModel, escalated)
+				runBatch(bi)
 			}(bi)
 		}
 		wg.Wait()
@@ -598,7 +651,7 @@ func (o *sweepOutcome) gate(name string) { o.gates = append(o.gates, name) }
 func (e *ExtractSweep) adjudicateBatch(c *components.Ctx, component string,
 	items []extract.AdjudicationItem, cands []sweepCand, goal, flat string,
 	model components.Model, pricing cheapmodel.Pricing, callModel string,
-	escalated bool) (sweepOutcome, components.ModelCall) {
+	escalated, cacheContext, sibling bool) (sweepOutcome, components.ModelCall) {
 
 	var o sweepOutcome
 	// A SINGLE-ITEM BATCH IS THE REFUTED DESIGN WEARING THE NEW NAME, so it is counted rather than
@@ -636,7 +689,10 @@ func (e *ExtractSweep) adjudicateBatch(c *components.Ctx, component string,
 		o.gate("sweep_reply_budget_not_raised")
 	}
 
-	reply, err := model.Complete(ctx, extract.BuildAdjudicationPrompt(goal, items))
+	// Through the SPLIT, so the invariant half can carry a cache_control breakpoint. Calling
+	// Model.Complete here sent no system field at all, which meant no breakpoint could be placed and
+	// every batch of a sweep paid fresh for the same contract.
+	reply, err := extract.AskAdjudication(ctx, model, goal, items, cacheContext)
 	latency := float64(time.Since(start).Milliseconds())
 	metrics.RecordExtractionCall(latency)
 	_, inTok, outTok := callSink.Totals()
@@ -655,6 +711,14 @@ func (e *ExtractSweep) adjudicateBatch(c *components.Ctx, component string,
 		} else {
 			atomic.AddInt64(&llmErrors, 1)
 		}
+	}
+	// THE JUSTIFICATION FOR THE ORDERING, COUNTED RATHER THAN ASSUMED. A sibling batch is the whole
+	// reason the first one was serialized: if it reads nothing from cache it paid fresh for the
+	// prefix anyway, and the serialized round bought a queue wait for nothing. That failure is
+	// indistinguishable from a working one except on the bill, which is why it needs a counter and
+	// not a comment.
+	if cacheContext && sibling && cr == 0 {
+		o.gate("sweep_prefix_cache_read_ZERO")
 	}
 	if err != nil {
 		o.gate("sweep_call_failed")
