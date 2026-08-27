@@ -333,6 +333,55 @@ func TestSweepRejectsCompactionOnlyKeys(t *testing.T) {
 	}
 }
 
+// THE COUNTER CONTRACT, component end. These six names are what an operator's dashboard query and
+// alert rule are written against, so a rename breaks monitoring silently rather than loudly. The
+// other end is pinned in proxy/sweep_counters_test.go, which asserts the same literal strings survive
+// to /stats and to the Prometheus gate series.
+//
+// Two of them are the ones that must be ALERTABLE, and each names a distinct misbehaviour:
+// sweep_drop_refused_obligation means the model tried to remove an output it had just said was still
+// needed, and sweep_quote_fabricated means it is inventing evidence — the only such signal left on
+// this design, because nothing else it returns is content.
+func TestSweepRaisesTheContractedCounterNames(t *testing.T) {
+	const obligation = "Next I will patch the timeout in src/api/users.py."
+	for _, tc := range []struct {
+		name, reply string
+		want        []string
+	}{
+		{"a spent output", `{"needed_by":"none","quote":"","verdict":"drop"}`,
+			[]string{"sweep_adjudicated", "sweep_dropped"}},
+		{"an output still needed", `{"needed_by":"a","quote":"` + obligation + `","verdict":"keep"}`,
+			[]string{"sweep_adjudicated", "sweep_kept"}},
+		{"a drop contradicting an obligation", `{"needed_by":"a","quote":"` + obligation + `","verdict":"drop"}`,
+			[]string{"sweep_adjudicated", "sweep_drop_refused_obligation"}},
+		{"an invented obligation", `{"needed_by":"a","quote":"rewrite the parser in Rust","verdict":"keep"}`,
+			[]string{"sweep_quote_fabricated"}},
+		{"an unanswered criterion", `{"verdict":"drop"}`,
+			[]string{"sweep_criterion_missing"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &verdictModel{reply: tc.reply}
+			e := newSweep(t, model, "")
+			rep := &components.Report{}
+			if _, err := e.Offload(sweepReq(), rep,
+				sweepCtx("s", true, 3_600_000, store.NewMemory(store.Options{}))); err != nil {
+				t.Fatal(err)
+			}
+			// PRECONDITION: an adjudication happened. A component that never called the model
+			// raises no counters at all, and every assertion below would then fail for the wrong
+			// reason — or, for a subset check, pass while proving nothing.
+			if rep.Gates["sweep_adjudicated"] != 1 {
+				t.Fatalf("no adjudication was counted, so no counter was exercised: %v", rep.Gates)
+			}
+			for _, want := range tc.want {
+				if rep.Gates[want] == 0 {
+					t.Errorf("the component did not raise %q; got %v", want, rep.Gates)
+				}
+			}
+		})
+	}
+}
+
 // The prompt the component actually sends must be the adjudication contract — not a compaction
 // prompt, and never one inviting the model to return content.
 func TestSweepSendsTheAdjudicationContract(t *testing.T) {
