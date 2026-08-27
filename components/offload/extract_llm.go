@@ -226,6 +226,27 @@ const (
 	unknownModelInputLimit = 32768
 )
 
+// nonTransportingStrategies are the strategies that never hand tool-output text back THROUGH the
+// model: `code` has it write a Starlark program executed against the real text, and
+// `deterministic` makes no model call at all. `single` (returns the selected JSON) and `rlm`
+// (returns selected content per chunk) are the transporting ones, and are what a sweep excludes.
+//
+// `auto` is deliberately absent rather than filtered: it is a strategy ORDER, and
+// extract.intersectAllowed narrows the order it produces, so an `auto` configuration still resolves
+// — to code, then deterministic — instead of being emptied.
+var nonTransportingStrategies = []string{"code", "deterministic"}
+
+// transportsText reports whether a configured strategy would have asked the model to reproduce
+// content, so narrowing it can be counted rather than applied silently. `auto` counts, because its
+// first pick on a large body — the sweep case — is `rlm`.
+func transportsText(strategy string) bool {
+	switch strategy {
+	case "single", "rlm", "auto":
+		return true
+	}
+	return false
+}
+
 // staticWindows is the last-resort model→window table modelinfo already maintains. Held as
 // a package var because DefaultStatic allocates.
 var staticWindows = modelinfo.DefaultStatic()
@@ -823,6 +844,37 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	extCfg.Aggressiveness = e.aggro
 	if e.maxChars > 0 {
 		extCfg.MaxChars = e.maxChars
+	}
+	// NEVER ASK THE MODEL TO TRANSPORT TEXT WHILE SWEEPING HISTORY.
+	//
+	// This is the per-output form of removing the merged design's `trim` verdict, and it rests on
+	// the same measurement: trim was chosen zero times in 21 probe opportunities, metrics were
+	// identical without it, and in production it was accepted ONCE against EIGHT rejected as
+	// invented. It was the only verdict that asked the model to transport text, which is what it
+	// is worst at.
+	//
+	// The strategies divide the same way. `code` and `deterministic` produce a PROGRAM (or a
+	// deterministic projection) that is executed against the real text, so nothing is transported
+	// and nothing can be invented. `single` returns the selected JSON and `rlm` returns selected
+	// content per chunk — both hand the content back through the model, which is the transporting
+	// shape trim was removed for.
+	//
+	// Restricted on the SWEEP specifically, for two compounding reasons. `strategy: auto` orders
+	// `rlm` ahead of `code` once a body is large, and large bodies are exactly what a sweep works
+	// on — so the transporting mode is not a corner case here, it is the default pick. And a sweep
+	// rewrites content DEEP IN HISTORY that the model has already reasoned about, so an invention
+	// contradicts the transcript rather than just degrading one recent tool result.
+	//
+	// The exclusion is COUNTED, not silent, which is the half of the trim change that is easy to
+	// lose: there a model answering `trim` degraded to `keep` and was counted, because an unjudged
+	// output is otherwise indistinguishable from silence. Here a configuration whose strategy was
+	// narrowed is recorded, so "the operator asked for rlm and got code" never looks like "the
+	// operator asked for code".
+	if sweeping {
+		extCfg.AllowedStrategies = nonTransportingStrategies
+		if transportsText(e.strategy) {
+			rep.Gate("sweep_strategy_narrowed")
+		}
 	}
 
 	// Keep-ids are harvested from the AGENT's OWN WORDS, never from the tool outputs — even
