@@ -19,6 +19,20 @@ import (
 // this out of an input budget must use this constant, not a literal, or the two drift.
 const DefaultMaxTokens = 4096
 
+// PrefixAskMaxTokens is the reply budget for a PREFIX ASK, which needs far more than a compaction.
+//
+// 16000, from `659e7a6`, the commit about exactly this failure: an adjudication arm's replies were
+// being cut off at a 2048-token default and the parse failure was misread as a model declining to act
+// for three iterations. One prefix-ask reply carries a verdict for EVERY candidate — each with an
+// obligation label and a VERBATIM quote — and the request model runs adaptive thinking, which spends
+// part of the budget before emitting any text at all (a probe at max_tokens 900 returned thinking
+// blocks and no text whatsoever).
+//
+// Output bills as generated and not as budgeted, so the ceiling costs nothing until it is used. Kept
+// separate from DefaultMaxTokens because the two answer different questions: what a Starlark program
+// needs, against what a verdict array over an unbounded candidate list needs.
+const PrefixAskMaxTokens = 16000
+
 // Prompt-cache minimums, MEASURED against the gateway rather than assumed.
 //
 // A provider silently ignores a cache_control breakpoint that sits below its minimum

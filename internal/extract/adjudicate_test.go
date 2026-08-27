@@ -1,23 +1,23 @@
 package extract
 
 import (
-	"strconv"
 	"strings"
 	"testing"
 )
 
-// The four safety invariants of the cold-sweep adjudicator, in the order the spec ranks them by
-// danger. Each is written to FAIL when its subject is reverted; the reverted-output is quoted in the
-// commit message.
+// The four safety invariants of the sweep adjudicator, in the order the spec ranks them by danger.
+// Each is written to FAIL when its subject is reverted; the reverted output is quoted in the commit
+// message.
 //
-// They are orthogonal to batch size: the rules apply per VERDICT, whatever the batch was. What the
-// move to batched adjudication changed is only where a reply becomes verdicts — ParseVerdicts — so
-// invariant 2 is now checked on both halves, the array parser and the per-verdict judgement.
+// They are orthogonal to how the question is DELIVERED. These rules applied when the prompt carried
+// copied output content, they applied at batch 12, and they apply now that the question is a prefix ask
+// over the cached transcript: they operate on one VERDICT, and a verdict has the same shape whatever
+// the model was reading when it wrote one.
 //
 // Every test asserts a PRECONDITION first — that the reply parsed, and that the verdict reached the
-// check under test. Without it a parse regression turns each of these into a vacuous pass: Judge
-// would return the zero Adjudication, Drop would be false, and "the refusal worked" and "the reply
-// was never read" would be indistinguishable.
+// check under test. Without it a parse regression turns each of these into a vacuous pass: Judge would
+// return the zero Adjudication, Drop would be false, and "the refusal worked" and "the reply was never
+// read" would be indistinguishable.
 
 const testTranscript = `user: find the flaky test and fix it
 assistant: I will run the suite, then patch the failing case.
@@ -45,8 +45,6 @@ func TestDropNamingAnObligationIsRefused(t *testing.T) {
 	for _, nb := range []string{"a", "b", "c", "A", " b ", "in-progress-step"} {
 		v := one(t, `[{"i":3,"needed_by":"`+nb+`","quote":"Next I will patch auth/session.go.","verdict":"drop"}]`)
 		a := Judge(v, testTranscript)
-		// PRECONDITION: the verdict reached the drop branch. If this fails the assertion below
-		// proves nothing — an unread verdict is also not a drop.
 		if a.VerdictUnusable {
 			t.Fatalf("needed_by=%q: verdict was not read as a drop, so the refusal was never exercised", nb)
 		}
@@ -59,8 +57,8 @@ func TestDropNamingAnObligationIsRefused(t *testing.T) {
 	}
 }
 
-// The other side of invariant 1, so it cannot be satisfied by refusing everything: needed_by "none"
-// is the one answer a drop is allowed to carry, and it must go through.
+// The other side of invariant 1, so it cannot be satisfied by refusing everything: needed_by "none" is
+// the one answer a drop is allowed to carry, and it must go through.
 func TestDropWithNoObligationIsPerformed(t *testing.T) {
 	a := Judge(one(t, `[{"i":0,"needed_by":"none","quote":"","verdict":"drop"}]`), testTranscript)
 	if !a.Drop {
@@ -110,10 +108,10 @@ func TestUnsureDefaultsToKeep(t *testing.T) {
 	}
 }
 
-// THE DISTINCTION `4ca1f13` ADDED, and it is the one the whole batch shape's diagnosis rests on. An
-// EMPTY array is the model saying "keep everything", which the contract explicitly invites. A reply
-// that did not parse is a model or prompt failure. Folding them together makes "the model declined to
-// act" and "the model was never successfully asked" the same number.
+// THE DISTINCTION 4ca1f13 ADDED. An EMPTY array is the model saying "keep everything", which the
+// contract explicitly invites. A reply that did not parse is a model or prompt failure. Folding them
+// together makes "the model declined to act" and "the model was never successfully asked" the same
+// number.
 func TestAnEmptyArrayIsADeliberateKeepAllNotAFailure(t *testing.T) {
 	vs, ok := ParseVerdicts("[]")
 	if !ok {
@@ -122,15 +120,15 @@ func TestAnEmptyArrayIsADeliberateKeepAllNotAFailure(t *testing.T) {
 	if len(vs) != 0 {
 		t.Fatalf("expected no verdicts, got %d", len(vs))
 	}
-	// And the two must not be conflatable: an unparseable reply reports the opposite.
 	if _, ok := ParseVerdicts("no."); ok {
 		t.Fatal("junk reported as parsed, so keep-all and failure are indistinguishable")
 	}
 }
 
 // A TRUNCATED reply is not a malformed one, and they need opposite fixes — raise the output budget
-// versus fix the prompt. `659e7a6` found 24 of 34 unparseable replies were truncation at a 2048-token
-// budget, misread for three iterations because one name covered both.
+// versus fix the prompt. 659e7a6 found 24 of 34 unparseable replies were truncation at a 2048-token
+// budget, misread for three iterations because one name covered both. It matters MORE now: one reply
+// carries a verdict for every candidate, not twelve.
 func TestTruncationIsDistinguishedFromAFormatFailure(t *testing.T) {
 	truncated := `[{"i":1,"needed_by":"none","verdict":"drop"},{"i":2,"needed_by":"a","quote":"I will run the su`
 	if _, ok := ParseVerdicts(truncated); ok {
@@ -144,17 +142,16 @@ func TestTruncationIsDistinguishedFromAFormatFailure(t *testing.T) {
 	}
 }
 
-// INVARIANT 3. A fabricated obligation quote is counted. It argues for KEEPING so it is not
-// dangerous — but it is the signal that the model is inventing, and on this design it is the only
-// such signal left, since nothing else it returns is content.
+// INVARIANT 3. A fabricated obligation quote is counted. It argues for KEEPING so it is not dangerous
+// — but it is the signal that the model is inventing, and on this design it is the only such signal
+// left, since nothing else it returns is content. It is also the measurement that decided WHICH model
+// is asked: verbatim quoting degraded to 20.8% on the cheap model against 0 of 59 on the request one.
 func TestFabricatedObligationQuoteIsCounted(t *testing.T) {
 	a := Judge(one(t, `[{"i":1,"needed_by":"c","quote":"Next I will rewrite the parser in Rust.","verdict":"keep"}]`),
 		testTranscript)
 	if !a.QuoteFabricated {
 		t.Fatalf("a quote absent from the transcript was not counted as fabricated")
 	}
-	// And a real quote must NOT be counted, or the signal is noise. Both directions, because a check
-	// that fires on everything is as useless as one that fires on nothing.
 	b := Judge(one(t, `[{"i":1,"needed_by":"c","quote":"Next I will patch auth/session.go.","verdict":"keep"}]`),
 		testTranscript)
 	if b.QuoteFabricated {
@@ -182,16 +179,14 @@ func TestUnansweredCriterionIsToleratedAndCounted(t *testing.T) {
 	if !a.CriterionMissing {
 		t.Errorf("an unanswered criterion was not counted; the forcing function's absence would be invisible")
 	}
-	// Answered, so not counted — otherwise the counter says nothing.
 	if b := Judge(one(t, `[{"i":1,"needed_by":"none","verdict":"drop"}]`), testTranscript); b.CriterionMissing {
 		t.Errorf("an answered criterion was counted as missing")
 	}
 }
 
-// A BATCH IS JUDGED AS A BATCH: every verdict is returned, keyed by its own label, and mixed verdicts
-// in one reply are each decided on their own merits. This is the shape `4ca1f13` found missing when a
-// "bulk" arm was answering 1.02 verdicts per call.
-func TestABatchReplyIsParsedPerLabel(t *testing.T) {
+// Mixed verdicts in one reply are each decided on their own merits, keyed by their own label. This is
+// the shape 4ca1f13 found missing when a "bulk" arm was answering 1.02 verdicts per call.
+func TestAReplyIsJudgedPerLabel(t *testing.T) {
 	reply := `[
 	  {"i":0,"needed_by":"none","quote":"","verdict":"drop"},
 	  {"i":1,"needed_by":"c","quote":"Next I will patch auth/session.go.","verdict":"keep"},
@@ -200,7 +195,7 @@ func TestABatchReplyIsParsedPerLabel(t *testing.T) {
 	]`
 	vs, ok := ParseVerdicts(reply)
 	if !ok {
-		t.Fatal("a well-formed batch reply did not parse")
+		t.Fatal("a well-formed multi-verdict reply did not parse")
 	}
 	if len(vs) != 4 {
 		t.Fatalf("expected 4 verdicts, got %d", len(vs))
@@ -218,8 +213,8 @@ func TestABatchReplyIsParsedPerLabel(t *testing.T) {
 	}
 	for i, w := range want {
 		if vs[i].Label != w.label {
-			t.Errorf("verdict %d carries label %d, want %d — the label mapping is what keys "+
-				"a decision to an output", i, vs[i].Label, w.label)
+			t.Errorf("verdict %d carries label %d, want %d — the label mapping is what keys a "+
+				"decision to an output", i, vs[i].Label, w.label)
 		}
 		a := Judge(vs[i], testTranscript)
 		if a.Drop != w.drop || a.RefusedObligation != w.refused || a.VerdictUnusable != w.unusabl {
@@ -229,76 +224,89 @@ func TestABatchReplyIsParsedPerLabel(t *testing.T) {
 	}
 }
 
-// The contract must invite COMPARATIVE judgement, which is the measured difference between 6% and 58%
-// live-kept, and must never invite the model to return content.
-func TestContractAsksForComparativeJudgementAndNoTransport(t *testing.T) {
+// THE INVENTORY SHIPS NO OUTPUT CONTENT. This is the property the whole prefix-ask design rests on:
+// the model reads the outputs in full from its own prompt cache, and paying fresh to send truncated
+// copies of them would both defeat the mechanism and show it an excerpt of something it could read
+// whole.
+func TestThePrefixAskShipsAnInventoryAndNotTheOutputs(t *testing.T) {
+	body := "SECRET-PAYLOAD-ostrich line one\nSECRET-PAYLOAD-ostrich line two\n" +
+		strings.Repeat("more payload that must not travel\n", 50)
 	items := []AdjudicationItem{
-		{Label: 0, ID: "toolu_1", SizeTokens: 4200, Content: "alpha line\nbeta line\n"},
-		{Label: 1, ID: "toolu_2", SizeTokens: 900, Content: "gamma line\n"},
+		{Label: 0, ID: "toolu_abc123", SizeTokens: 4200, Head: HeadLine(body, AdjudicationHeadChars)},
+		{Label: 1, ID: "toolu_def456", SizeTokens: 900, Head: HeadLine("second output starts here\nand goes on", AdjudicationHeadChars)},
 	}
-	p := BuildAdjudicationPrompt("fix the flaky test", items)
-	for _, want := range []string{
-		"keep|drop",
-		"JUDGE THEM AGAINST EACH OTHER", // absent, this is the refuted per-output shape
-		`"i": <label>`,                  // the array contract, one object per output
-	} {
-		if !strings.Contains(p, want) {
-			t.Errorf("prompt does not carry %q", want)
+	ask := BuildPrefixAsk(items)
+
+	// PRECONDITION: the ask is a real ask. If the contract or the labels were missing, the leak
+	// assertions below would pass against an empty string.
+	for _, want := range []string{"keep|drop", `"i": <label>`, "SPENT only if",
+		"JUDGE THEM AGAINST EACH OTHER", "[0]", "[1]"} {
+		if !strings.Contains(ask, want) {
+			t.Fatalf("the ask does not carry %q", want)
 		}
 	}
-	for _, banned := range []string{"trim", "rewrite", "summarize", "shorten"} {
-		if strings.Contains(strings.ToLower(p), banned) {
-			t.Errorf("prompt invites the model to transport text: mentions %q", banned)
-		}
+	// The body must NOT be in it. Only the bounded head line may appear, which is there to locate the
+	// output in the transcript above rather than to inform the judgement.
+	if strings.Contains(ask, "more payload that must not travel") {
+		t.Error("output content past the head line reached the ask; it is being paid for twice")
 	}
-	// It must also NOT mention recoverability. Measured: reassuring the model that removals stay
-	// recoverable produced 91% removal at 6% live-kept; the cost-honest framing is worth ~26 points
-	// of live-kept on its own.
-	for _, banned := range []string{"recoverab", "restore", "you can get it back"} {
-		if strings.Contains(strings.ToLower(p), banned) {
-			t.Errorf("prompt tells the model its mistakes are cheap: mentions %q", banned)
-		}
+	if n := strings.Count(ask, "SECRET-PAYLOAD-ostrich"); n != 1 {
+		t.Errorf("the payload appears %d times in the ask; only the single head line may carry it", n)
 	}
-	// Every offered output must be SHOWN and LABELLED, or the model cannot answer per label.
+	if strings.Contains(ask, "line two") {
+		t.Error("the head line spans more than one line of the output")
+	}
+	// The ask must be small: it is the only part paid fresh, so its size is the mechanism's whole cost.
+	if len(ask) > len(adjudicationContract)+500 {
+		t.Errorf("the inventory added %d chars over the contract; it should be one line per candidate",
+			len(ask)-len(adjudicationContract))
+	}
+	// The opaque tool_use ids stay on OUR side: a random identifier in front of the model is a string
+	// it may echo instead of the integer label, and the labels are integers for exactly that reason.
 	for _, it := range items {
-		if !strings.Contains(p, "=== OUTPUT "+strconv.Itoa(it.Label)) {
-			t.Errorf("output %d is not labelled in the prompt", it.Label)
+		if strings.Contains(ask, it.ID) {
+			t.Errorf("tool_use id %q reached the ask", it.ID)
 		}
 	}
-	if !strings.Contains(p, "alpha line") || !strings.Contains(p, "gamma line") {
-		t.Error("the prompt does not show every output it is asking about")
-	}
-	// The opaque tool-call id must NOT reach the model: asked to echo those back it regularised
-	// them, because reproducing a random identifier is a copying task rather than a judgement.
-	if strings.Contains(p, "toolu_1") || strings.Contains(p, "toolu_2") {
-		t.Error("a tool_use id reached the prompt; labels are integers precisely so it cannot")
+	// And it must tell the model to read from the conversation rather than from the ask.
+	if !strings.Contains(ask, "conversation above is your own") {
+		t.Error("the ask does not point the model at the cached transcript")
 	}
 }
 
-// A large output is shown as a MARKED excerpt, so the model does not reason as though it had seen the
-// end of something it has not.
-func TestLargeOutputExcerptIsMarked(t *testing.T) {
-	body := strings.Repeat("x", AdjudicationSampleChars+500)
-	p := BuildAdjudicationPrompt("goal", []AdjudicationItem{{Label: 0, Content: body}})
-	if strings.Contains(p, body) {
-		t.Fatalf("the whole oversized body was shipped; the bound did not apply")
+// The contract must never invite the model to transport text, and must never tell it that a mistake is
+// cheap. Measured: reassuring the model that removals stay recoverable produced 91% removal at 6%
+// live-kept.
+func TestTheContractOffersNoTransportAndPromisesNoSafetyNet(t *testing.T) {
+	ask := BuildPrefixAsk([]AdjudicationItem{{Label: 0, SizeTokens: 10, Head: "x"}})
+	low := strings.ToLower(ask)
+	for _, banned := range []string{"trim", "rewrite", "summarize", "shorten"} {
+		if strings.Contains(low, banned) {
+			t.Errorf("the contract invites the model to transport text: mentions %q", banned)
+		}
 	}
-	if !strings.Contains(p, "excerpt truncated") {
-		t.Errorf("the cut is not marked, so the model cannot tell it is judging an excerpt")
+	for _, banned := range []string{"recoverab", "restore", "you can get it back"} {
+		if strings.Contains(low, banned) {
+			t.Errorf("the contract tells the model its mistakes are cheap: mentions %q", banned)
+		}
 	}
 }
 
-// The batch cap is a MEASURED ceiling, not a round number: 4 of 37 quotes came back non-verbatim at
-// batch 16 against 0 of 16 at batch 10, so the transport limit sits between them. Pinned so a later
-// "let's offer more" cannot quietly cross it.
-func TestBatchCapStaysBelowTheMeasuredTransportCeiling(t *testing.T) {
-	if MaxAdjudicationItems > 12 {
-		t.Errorf("MaxAdjudicationItems = %d, above the measured quote-fidelity ceiling of 12",
-			MaxAdjudicationItems)
-	}
-	if MaxAdjudicationItems < 10 {
-		t.Errorf("MaxAdjudicationItems = %d, below the batch size at which the model was measured "+
-			"willing to act at all (10); small batches make it unwilling, not wrong",
-			MaxAdjudicationItems)
+// The head line is bounded and single-line, whatever the output looks like.
+func TestHeadLineIsBoundedAndSingleLine(t *testing.T) {
+	for _, tc := range []string{
+		"short\n",
+		strings.Repeat("x", 500),
+		"\n\n\nleading blank lines then content\nand more\n",
+		"a\rb\rc",
+	} {
+		got := HeadLine(tc, AdjudicationHeadChars)
+		if strings.ContainsAny(got, "\r\n") {
+			t.Errorf("head line contains a newline: %q", got)
+		}
+		// The ellipsis is multi-byte, so bound on runes rather than bytes.
+		if n := len([]rune(got)); n > AdjudicationHeadChars+1 {
+			t.Errorf("head line is %d runes, over the %d bound: %q", n, AdjudicationHeadChars, got)
+		}
 	}
 }

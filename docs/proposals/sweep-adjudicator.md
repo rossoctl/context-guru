@@ -1,16 +1,33 @@
 # The cold sweep should adjudicate, not compact
 
-**Status:** implemented as `extract_llm_sweep`.
+**Status:** implemented as `extract_llm_sweep`. This document has now been wrong twice; what follows
+is a description of the code rather than a specification ahead of it.
 
-**CORRECTION, 2026-08-27.** The version of this document that was implemented from argued for ONE
-CALL PER OUTPUT, and its argument was inverted: it cited `4ca1f13` as evidence that per-output
-adjudication "is a shape that has already run", when that commit diagnoses the per-output shape as a
-DEFECT — an arm that had degraded to 1.02 verdicts per call, which it names as "the per-output design
-refuted at 6% live-kept, not the bulk shape that measured 58%". The secondary argument (that batching
-invites truncated replies and degraded quote fidelity) was also wrong: both were already solved on
-`feat/coref-compaction` before this document was written. The section below has been rewritten. The
-safety invariants, the counters and the config surface were unaffected — they are per-verdict
-properties and hold at any batch size.
+**CORRECTION 2, 2026-08-28 — the delivery mechanism.** The sweep no longer copies candidate content
+into any prompt. It asks the REQUEST's own model, over the transcript already in that model's prompt
+cache, and ships an INVENTORY of candidates rather than their content (`a9d666f`). Three measurements
+force it:
+
+- appending a trailing user message to a byte-identical prefix read **19,595 tokens from cache and
+  created 0**, on the live route;
+- verbatim quoting — the only remaining signal that the model is inventing — degraded to **20.8%** on
+  the cheap model at bulk batch sizes, against **0 of 59** on the request model;
+- need is relevance *minus* what has already been captured elsewhere, and that second term lives in
+  the later turns, which a prompt carrying only the candidate cannot show.
+
+That makes it **one call for all candidates**. The batch assembler, the 12-item cap, per-batch
+concurrency and `max_calls` are gone: they existed only because content was being copied.
+
+**CORRECTION 1, 2026-08-27 — the batch, now also superseded.** The first implemented version asked one
+call per output, and this document argued for it by citing `4ca1f13` as evidence that per-output "is a
+shape that has already run". That was inverted: the commit diagnoses per-output as the shape **refuted
+at 6% live-kept**. Batching fixed that; the prefix ask then removed the need for batching at all. The
+secondary argument for per-output — that batching invites truncated replies and degraded quote fidelity
+— was also wrong, and both were already solved before this document was written (`659e7a6`, `cc1aa9f`).
+
+**What survived both corrections unchanged:** the contract, the six safety invariants, and the counters.
+They are properties of a VERDICT, and a verdict has the same shape whatever the model was reading when
+it wrote one.
 
 ## The problem
 
@@ -58,60 +75,71 @@ The model returns a verdict and a quote. It never returns content. That removes 
 output and either keeps it **verbatim** or drops it, leaving a short shape descriptor plus the
 existing `<<cg:HASH>>` marker so `expand` still recovers the original.
 
-**One call per BATCH.** `4ca1f13` is the commit this rests on, and it points the other way from how
-it was first read. It found a live arm reporting 2,030 bulk calls and 2,074 verdicts — 1.02 verdicts
-per call, so every "bulk" adjudication judged a single output — and filed that as the bug: *"That is
-the per-output design refuted at 6% live-kept, not the bulk shape that measured 58%, so iteration 014
-measured something other than what it claimed."* It also added the assertion whose absence let it
-through: the prompt must offer more than one output, because *"asserting a single call was not enough,
-since one call carrying one item is exactly the refuted design"*.
+**One call, to the request's own model, over its cached transcript.**
 
-The measurement behind that, from `docs/results/coref-selection-experiment.md` over 8,105 recorded
-decisions: shown ONE output, a model scored 6% live-kept on haiku and 14% on sonnet, both inside the
-drop-everything null model's error bar — shown a single output, a model simply drops it. Shown ~15
-together it reached 58% at the LOWEST cost per output, because the overhead amortises and, more
-importantly, because comparative judgement beats absolute judgement: ranking a dozen candidates
-against each other is a question a model can answer, "is this one output expendable" is not.
+The judgement needs the whole transcript and it needs a model that quotes faithfully. Sending the
+transcript fresh costs ~10x a cache read, and the cheap model does not quote faithfully at the sizes
+required. Only one construction satisfies both: append the question to the bytes this session already
+sent, so the provider reads the prefix it cached from them.
 
-`cc1aa9f` gives the direction of the failure, which is the one a SWEEP specifically cannot tolerate:
-*"at batch 3-6 the model dropped a genuinely-spent output only 2 times in 4, at batch 10 it dropped it
-4 in 4 and cleared 100% of genuinely-spent candidates. Small batches do not make it wrong, they make it
-UNWILLING TO ACT, which is what a 94.6% keep rate looks like from inside."* A sweep exists because the
-entire transcript is re-billing at the write rate; an adjudicator too timid to remove anything is an
-expensive no-op exactly where the money is.
+What travels is an inventory — one line per candidate, carrying a small integer label, a token count
+and a bounded locating head. Not the outputs: *"Paying fresh to send truncated copies of content the
+model is reading from cache would defeat the mechanism and show it an excerpt of something it could
+read in full."* Labels are integers because asked for opaque `tool_use` ids the model regularised them;
+with integers it was 0 bad labels in 40+ trials.
 
-The batch is capped at **12 items**, a measured ceiling rather than a round number: quote fidelity
-degraded with batch size, 4 of 37 quotes non-verbatim at batch 16 against 0 of 16 at batch 10, so the
-transport limit sits between them and 12 takes the conservative end (`cc1aa9f`).
+**The prefix is the PREVIOUS turn's SENT body.** The upstream cache was populated by what context-guru
+emitted, i.e. the compacted form; the incoming body is uncompacted and diverges at the first thing any
+component removed, making everything past that point a fresh charge. The consequence is that the ask
+sees the transcript as of the previous turn, so the newest tool output is invisible to it — acceptable,
+because tail content has had no turns in which to be superseded.
 
-**Neither objection to batching survives.** Both were solved on `feat/coref-compaction` before this
-document was written, so they never distinguished the two shapes:
+**The cache read is VERIFIED and always counted; what happens on a miss is a choice.** `PrefixUsage` is
+returned rather than merely recorded so the caller can gate on it, and `sweep_prefix_cache_read_ZERO`
+fires whenever the read did not happen — that part is not optional, because a silent miss looks
+identical to a working call except on the bill, and silent misses are what hid this class of problem
+before.
 
-- *A shared reply truncated mid-array.* `659e7a6` traced 24 of 34 unparseable replies to a 2048-token
-  output budget and raised it to 16,000. A verdict array over 12 items, each carrying an obligation
-  label and a verbatim quote, is simply long, and a model running adaptive thinking spends part of the
-  budget before emitting any text. Output bills as generated rather than as budgeted, so the ceiling
-  costs nothing until used. Truncation is now counted separately from a format failure, because the
-  two need opposite fixes — raise the budget versus fix the prompt.
-- *Quote fidelity decaying with batch size.* Measured, and the cap is set below the observed ceiling
-  (above).
+By **default** the sweep then falls back to a self-contained completion, which is what `a9d666f` chose:
+treating "no prefix" as "no verdicts" would disable the component on every session's *first* turn and
+read, in the counters, as a model that declined to act. The fallback carries a bounded sample of each
+output, so it pays fresh for content the cached path reads for a tenth of the price — the cost the
+prefix ask exists to avoid. It goes to the **request's own model** regardless, because the measurement
+that chose that model is about faithful quoting rather than caching, and that reason survives the loss
+of the cache read.
 
-And the **transport principle never distinguished them at all**. Once `trim` is removed, no verdict
-carries content in either shape: there is no reply field a model could return output text through.
-That argument rules out rewriting; it says nothing about how many verdicts travel in one reply.
-
-**Do not thin the batch upstream.** `4ca1f13`'s other finding is that the arm's real defect was an
-upstream per-candidate filter — `prefix_still_referenced` removed 149,681 candidates, leaving about
-one per request. Any per-candidate gate ahead of batch assembly reproduces this: it thins the batch one
-output at a time until comparative judgement has nothing to compare, and returns the component to
-batch-of-one silently. That is why the economic gate is evaluated ONCE for the batch rather than per
-candidate — which is also the correct arithmetic, since one call now covers up to twelve candidates and
-charging each of them a whole call priced the batch at ~12x its real cost.
+`block_fallback: true` declines instead. That is the right setting where the bill matters more than the
+removal, and the honest one to reach for if `sweep_prefix_cache_read_ZERO` turns out to be common.
 
 **Reuse, do not fork.** The adjudication contract text should move to a shared location rather
 than being copied out of `bulk.go` — the *contract* is general, the *batching* is not. The model
 client, pricing, result cache, keep-list harvesting, marker/stash machinery and the report/gate
 plumbing are all shared with `extract_llm` and must stay shared.
+
+## The trigger: pre-expiry, not cold
+
+The two halves of this component want **opposite** cache states, and that contradiction is what the
+trigger resolves:
+
+- the **ask** needs a WARM cache — a prefix ask reads an entry that must still exist, or the call pays
+  fresh for the whole transcript;
+- the **removal** wants a COLD cache — rewriting deep history invalidates a live prefix and forces a
+  cache-write of the whole suffix at 1.25x fresh.
+
+Both are cheap in the window where the entry still exists but has little life left. So the sweep fires
+when `0 < remaining <= pre_expiry_seconds`, where `remaining` is the cache's believed lifetime minus
+this session's idle time.
+
+**The TTL is derived, never assumed.** `Ctx.CacheTTLMs` is the same figure apply's cold decision uses,
+read out of the request itself: a bare `ephemeral` mark is 5 minutes, an explicit `ttl: "1h"` is an
+hour, widened to the longest lifetime this prefix has ever asked for. `0` means unknown, and unknown
+does not fire — a window computed from a guessed TTL would invalidate live prefixes on exactly the
+deployments whose TTL could not be read.
+
+**The window's WIDTH is the one unmeasured number in the design.** It defaults to one minute, which is
+`apply.coldMargin` — the single figure in this codebase with a stated purpose for clock uncertainty
+around cache expiry. Wider fires more often and invalidates more remaining TTL; narrower fires rarely.
+Nothing measures either side, so it is configurable and deliberately narrow rather than tuned.
 
 ## Config surface
 
@@ -119,9 +147,20 @@ The split that makes this expressible. `extract_llm` keeps the warm/tail path; `
 is the cold one. Existing configs break deliberately — there is one deployment, and it is migrated
 by hand.
 
-| `extract_llm_sweep` | `extract_llm` only | Shared by both |
-|---|---|---|
-| `min_tokens` (its own floor, replaces `cold_cache.min_tokens`), `min_idle_seconds`, `max_calls` | `strategy`, `rewrite`, `aggressiveness`, `max_chars`, `fire_on`, `trigger`, `llm_every_n_requests`, `llm_max_per_request`, `allow_on_caching_backend` | `model`, `marker_mode`, `context`, `context_messages`, `model_max_input_tokens`, `economic_gate` |
+| `extract_llm_sweep` | `extract_llm` only |
+|---|---|
+| `min_tokens`, `pre_expiry_seconds`, `block_fallback`, `marker_mode` | `strategy`, `rewrite`, `aggressiveness`, `max_chars`, `fire_on`, `trigger`, `llm_every_n_requests`, `llm_max_per_request`, `allow_on_caching_backend`, `model`, `context`, `context_messages`, `economic_gate` |
+
+The sweep's surface is nearly empty, and every absence is structural rather than a default:
+
+- no **`model`**: the ask goes to the request's own model because only that model's cache holds the
+  transcript. Naming another would read a different namespace and pay fresh for everything.
+- no **`context` / `context_messages`**: the conversation IS the cached prefix, so there is no amount
+  of it to choose to re-send.
+- no **`max_calls`**: one ask covers every candidate.
+- no **`economic_gate`**: the gate prices a per-output cheap-model call against an expected saving.
+  This is one cached read for the whole transcript, so its arithmetic does not describe the component.
+  The brakes are the floor, the window, and `block_fallback` where an operator wants one.
 
 Note what leaves the sweep's surface entirely: **`strategy`, `rewrite`, `aggressiveness` and
 `max_chars` stop applying**, because an adjudicator selects no compaction strategy and produces no

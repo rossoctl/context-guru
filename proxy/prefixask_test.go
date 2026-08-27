@@ -156,8 +156,8 @@ func TestAskWithoutAStashedBodyReportsNoPrefix(t *testing.T) {
 	if err == nil {
 		t.Fatal("a missing prefix was not reported as an error")
 	}
-	if err != ErrNoPrefix {
-		t.Errorf("err = %v, want ErrNoPrefix so a caller can tell it from a transport failure", err)
+	if err != components.ErrNoPrefix {
+		t.Errorf("err = %v, want components.ErrNoPrefix so a caller can tell it from a transport failure", err)
 	}
 	if u.CacheRead != 0 {
 		t.Errorf("usage was reported for a call that never happened: %+v", u)
@@ -186,7 +186,7 @@ func TestAskUsesTheStashedBodyForThatSession(t *testing.T) {
 	}
 	// A DIFFERENT session must not read this one's prefix: it is another cache namespace, and
 	// appending to it would read nothing while looking like a hit.
-	if _, _, err := a.Ask(context.Background(), "scoped-session-2", "x"); err != ErrNoPrefix {
+	if _, _, err := a.Ask(context.Background(), "scoped-session-2", "x"); err != components.ErrNoPrefix {
 		t.Errorf("session 2 got session 1's prefix (err=%v)", err)
 	}
 }

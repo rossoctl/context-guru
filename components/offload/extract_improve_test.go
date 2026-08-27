@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
@@ -189,27 +190,32 @@ func headLine(s string) string {
 	return s
 }
 
-// A sweep must have a bound. Production made 27 calls on one request against a tenant cap of
-// 2, spent $0.229 and added 76.6 s to a turn — the sweep does not draw on any other component's
-// caps, so its own default is the only brake and it used to be "unlimited". It now bounds BATCH
-// calls, each covering up to extract.MaxAdjudicationItems candidates.
-func TestColdSweepIsBoundedByDefault(t *testing.T) {
+// THE SWEEP'S SPEND BOUND IS NO LONGER A CALL CAP, and the change is worth recording because the
+// number that motivated one is still in production's logs: a single sweep once made 27 model calls,
+// spent $0.229 and added 76.6 s to a turn whose upstream took 33.5 s, against a tenant cap of 2.
+//
+// That shape is gone. The sweep makes exactly ONE call per firing turn — an ask over the transcript
+// already in the request model's prompt cache, shipping an inventory rather than any output content —
+// so there is nothing left for a per-call cap to bound. What bounds it now is WHEN it fires: the
+// pre-expiry window, which is at most once per cache lifetime per session.
+func TestSweepMakesOneCallSoNeedsNoCallCap(t *testing.T) {
 	c, err := newExtractSweep(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	e := c.(*ExtractSweep)
-	if e.maxCalls <= 0 || e.maxCalls > llmConcurrency {
-		t.Fatalf("default sweep cap = %d, want a bound at or below one concurrency round (%d)",
-			e.maxCalls, llmConcurrency)
+	// The window is the brake, and it must be bounded and non-zero: zero would never fire, and an
+	// unbounded one would fire on every warm turn and invalidate live prefixes.
+	if e.preExpiry <= 0 {
+		t.Fatalf("the pre-expiry window is %v, so the sweep can never fire", e.preExpiry)
 	}
-	// An operator can still opt out, explicitly.
-	uc, err := newExtractSweep([]byte("max_calls: -1\n"))
-	if err != nil {
-		t.Fatal(err)
+	if e.preExpiry > 5*time.Minute {
+		t.Errorf("the default window is %v, which exceeds a bare ephemeral mark's whole 5-minute "+
+			"lifetime — it would fire on every turn of a session", e.preExpiry)
 	}
-	if un := uc.(*ExtractSweep); un.maxCalls != 0 {
-		t.Fatalf("max_calls: -1 must mean unlimited, got %d", un.maxCalls)
+	// And a call cap must not have quietly come back: it would be a knob that cannot bind.
+	if _, err := newExtractSweep([]byte("max_calls: 4\n")); err == nil {
+		t.Error("max_calls was accepted; one call per turn means it can never bind")
 	}
 }
 

@@ -673,7 +673,7 @@ func TestTheFieldsThatDecideWhetherExtractLLMRunsAtAllRoundTrip(t *testing.T) {
 		`"aggressiveness":"medium","context":"recent","context_messages":7,` +
 		`"allow_on_caching_backend":true,"model.source":"incoming","strategy":"code",` +
 		`"llm_every_n_requests":1,"trigger.min_request_tokens":3000},` +
-		`"extract_llm_sweep":{"min_tokens":1000,"model.source":"incoming"}}}}`
+		`"extract_llm_sweep":{"min_tokens":1000}}}}`
 	w, out := f.do(t, "PUT", "/api/me", body, jar)
 	if w.Code != http.StatusOK {
 		t.Fatalf("field save = %d %s", w.Code, w.Body)

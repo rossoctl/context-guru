@@ -217,106 +217,26 @@ func housellmBlock(t *testing.T, name string) string {
 
 func housellmExtractLLM(t *testing.T) string { return housellmBlock(t, "extract_llm") }
 
-// TestHousellmColdSweepActuallyFires is the other half of
-// TestDefaultConfigsSpendOnlyOnTheUncachedTail replaces
-// TestNoDefaultConfigRunsExtractLLMOnCachingBackend, whose premise this change deliberately
-// reverses. That test asserted a default config makes NO call on a caching backend even for a
-// candidate its own comment identified as being in the tail. The reason it could assert that
-// was a mis-pricing, not a measurement: savedTokenValue reported `cached: true` for the whole
-// request, so a tail candidate — content being written INTO the cache on this very turn, at
-// 1.25x fresh — was valued at the cache-READ rate, 12.5x too low. The ~30,500-token
-// break-even quoted alongside it is explicitly the CACHED break-even. Together they read as
-// "extraction cannot pay on a caching backend", which is true at depth and was never
-// established for the tail.
+// TestHousellmSweepActuallyFires is the other half of
+// TestDefaultConfigsSpendOnlyOnTheUncachedTail.
 //
-// So the decision this pins is now positional, which is the honest form of it:
+// Every extraction call this service has ever made was on a turn whose cache had gone, so the sweep's
+// min_tokens is the single knob deciding whether the compaction-model pass does anything at all. It was
+// 3000, and at 3000 production recorded `below_output_floor` on all 36 sweeping turns and zero
+// extractions across 3,437 requests — the component was configured into a no-op while looking fully
+// enabled. A candidate of ~1,500 tokens is the size that regression turned away, so that is what this
+// asserts on: the preset, not a copy of it, must ask on a turn inside the pre-expiry window.
 //
-//	at DEPTH — inside the live cached prefix — a default must still not spend. Removing
-//	  cached content saves the read rate and forces a suffix re-write on top.
-//	in the TAIL, a default MAY spend, and must, when the economics pass.
+// It drives the sweep through a PREFIX ASKER rather than a Model, because that is the only way the
+// component reaches a model at all: it asks the REQUEST's own model over that model's prompt cache. A
+// stubbed Model would leave it declining with sweep_no_asker, which is the "configured into a no-op"
+// failure this guard exists to catch, one layer down.
 //
-// What is NOT relaxed is the economic gate itself: see
-// TestTheTailIsStillGatedOnItsOwnEconomics, which is the other half of this and the reason
-// this is a re-pricing rather than an opening of the floodgates.
-func TestDefaultConfigsSpendOnlyOnTheUncachedTail(t *testing.T) {
-	filter := "data = json.decode(INPUT)\nOUTPUT = json.encode([r for r in data if \"keep\" in r[\"name\"]])\n"
-	pad := strings.Repeat("padding ", 30_000) // ~240k tokens: economics pass on their own
-	body := `[{"id":1,"name":"keep this ` + pad + `"},{"id":2,"name":"drop this ` + pad + `"}]`
-
-	cfgs := map[string]string{
-		"defaults": "strategy: code\nmodel:\n  source: config\n",
-		"codesmart": "strategy: code\nmodel:\n  source: config\nmin_tokens: 3000\n" +
-			"trigger:\n  min_request_tokens: 3000\nllm_every_n_requests: 1\nllm_max_per_request: 4\n",
-		// Read from config.presetConfigs rather than copied, because a copy cannot catch the
-		// drift this test exists to catch.
-		"housellm": housellmExtractLLM(t),
-	}
-	// The tool output sits at index 1, so MaxCachedIdx 1 puts it inside the cached prefix and
-	// MaxCachedIdx 0 leaves it in the tail. One number is the whole difference.
-	for _, pos := range []struct {
-		name         string
-		maxCachedIdx int
-		wantCall     bool
-	}{
-		{"at depth, inside the cached prefix", 1, false},
-		{"in the uncached tail", 0, true},
-	} {
-		for name, cfg := range cfgs {
-			t.Run(pos.name+"/"+name, func(t *testing.T) {
-				off := newComp(t, "extract_llm", cfg)
-				cm := &countingModel{resp: filter}
-				req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
-					userMsg("find the keep records"), toolMsg(body),
-				}}
-				c := &components.Ctx{Ctx: context.Background(), Session: "s1",
-					Store: store.NewMemory(store.Options{}), Model: components.ModelSpec{Static: cm},
-					// 75k, not 1M, and the number is measured rather than picked: this request is
-					// 60,026 tokens (schema.MessagesTokens). With no explicit min_tokens the
-					// `defaults` config decides on context PRESSURE, and against a 1M window
-					// 60k is 0.06 — far under the 0.25 bar — so it declined for a reason with
-					// nothing to do with caching, and the depth case passed without exercising
-					// anything. 75k puts pressure at 0.80, past the 0.60 bar that fires on
-					// pressure alone, so position is the only variable left.
-					CacheAware: true, MaxCachedIdx: pos.maxCachedIdx, CtxWindow: 75_000}
-				var rep components.Report
-				if _, err := off.Offload(req, &rep, c); err != nil {
-					t.Fatal(err)
-				}
-				if got := cm.calls > 0; got != pos.wantCall {
-					if pos.wantCall {
-						t.Fatalf("a 240k-token candidate in the UNCACHED tail must be worth a "+
-							"call — it is billed at the cache-write rate, not the read rate. "+
-							"calls=%d gates=%v", cm.calls, rep.Gates)
-					}
-					t.Fatalf("a default config must NOT spend on content inside the live cached "+
-						"prefix (read-rate saving, plus a forced suffix re-write), calls=%d", cm.calls)
-				}
-			})
-		}
-	}
-}
-
-// TestHousellmColdSweepActuallyFires is the other half of
-// TestNoDefaultConfigRunsExtractLLMOnCachingBackend, and it exists because the preset
-// shipped for a day in a state where BOTH halves were silent.
-//
-// Every extraction call this service has ever made was a cold one, so the sweep's min_tokens is
-// the single knob deciding whether the compaction-model pass does anything at all. It was 3000,
-// and at 3000 production recorded `below_output_floor` on all 36 sweeping turns and zero
-// extractions across 3,437 requests — the component was configured into a no-op while looking
-// fully enabled. A candidate of ~1,500 tokens is the size that regression turned away, so that is
-// what this asserts on: the preset, not a copy of it, must call the model on a cold turn.
-//
-// It reads the extract_llm_sweep block now. The sweep left extract_llm, and if this guard had
-// stayed pointed at the old component it would have kept passing against a component that no
-// longer sweeps — which is precisely the "configured into a no-op while looking enabled" failure
-// it exists to catch, one level up.
-//
-// Raising the preset's sweep floor above ~1,500 fails this; re-adding allow_on_caching_backend
-// fails the warm guard above. The pair pins the economics from both sides.
-func TestHousellmColdSweepActuallyFires(t *testing.T) {
+// Raising the preset's floor above ~1,500 fails this; re-adding allow_on_caching_backend fails the
+// warm guard above. The pair pins the economics from both sides.
+func TestHousellmSweepActuallyFires(t *testing.T) {
 	off := newComp(t, "extract_llm_sweep", housellmBlock(t, "extract_llm_sweep"))
-	// ~1,500 tokens of the noise the sweep is meant to reduce, with a filterable shape.
+	// ~1,500 tokens of the noise the sweep is meant to remove.
 	body := `[`
 	for i := 0; i < 120; i++ {
 		if i > 0 {
@@ -325,32 +245,44 @@ func TestHousellmColdSweepActuallyFires(t *testing.T) {
 		body += `{"id":` + strconv.Itoa(i) + `,"name":"record ` + strings.Repeat("payload ", 6) + `"}`
 	}
 	body += `]`
-	// A VERDICT, not a program: the sweep adjudicates rather than compacts. Label 0 is the only
-	// candidate this transcript offers.
-	cm := &countingModel{resp: `[{"i":0,"needed_by":"none","quote":"","verdict":"drop"}]`}
+	asker := &stubAsker{reply: `[{"i":0,"needed_by":"none","quote":"","verdict":"drop"}]`, cacheRead: 19595}
 	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
 		userMsg("summarize the records"), toolMsg(body),
 	}}
-	// ColdCache is what makes this a sweep: the prefix TTL has expired, so the whole
-	// transcript is about to be re-billed at the write rate and savedTokenValue reports
-	// cached:false — which is why the warm guard's decline does not apply here.
-	c := &components.Ctx{Ctx: context.Background(), Session: "cold1",
-		Store: store.NewMemory(store.Options{}), Model: components.ModelSpec{Static: cm},
-		CacheAware: true, ColdCache: true, MaxCachedIdx: -1, CtxWindow: 1_000_000}
+	// INSIDE THE PRE-EXPIRY WINDOW: the cache still exists (idle below the TTL) and is within a minute
+	// of expiring, which is where the ask can still read it and what it invalidates is nearly
+	// worthless. A bare `ephemeral` mark buys the 5-minute TTL this uses.
+	c := &components.Ctx{Ctx: context.Background(), Session: "prexp1",
+		Store: store.NewMemory(store.Options{}), CacheAware: true, MaxCachedIdx: -1,
+		CtxWindow: 1_000_000, ColdCache: false,
+		IdleMs: 4 * 60 * 1000, CacheTTLMs: 5 * 60 * 1000, PrefixAsk: asker}
 	var rep components.Report
 	if _, err := off.Offload(req, &rep, c); err != nil {
 		t.Fatal(err)
 	}
-	if cm.calls == 0 {
-		t.Fatalf("the housellm preset made NO model call on a cold turn with a ~1.5k-token "+
+	if asker.calls == 0 {
+		t.Fatalf("the housellm preset made NO ask in the pre-expiry window with a ~1.5k-token "+
 			"candidate — the component is configured into a no-op. gates=%v", rep.Gates)
 	}
-	// AND IT ACTED ON THE VERDICT. A call that adjudicates and then removes nothing is the same
-	// no-op from the operator's side, and it is what a floor regression one layer down would look
-	// like.
+	// AND IT ACTED ON THE VERDICT. An ask that removes nothing is the same no-op from the operator's
+	// side, and it is what a floor regression one layer down would look like.
 	if rep.Gates["sweep_dropped"] == 0 {
-		t.Fatalf("the sweep called the model and removed nothing. gates=%v", rep.Gates)
+		t.Fatalf("the sweep asked and removed nothing. gates=%v", rep.Gates)
 	}
+}
+
+// stubAsker is a components.PrefixAsker that answers without a provider, reporting the cache read the
+// sweep gates on. A read of zero would make it decline, so a test that wants it to act must say the
+// read happened.
+type stubAsker struct {
+	reply     string
+	cacheRead int
+	calls     int
+}
+
+func (s *stubAsker) Ask(_ context.Context, _, _ string) (string, components.PrefixUsage, error) {
+	s.calls++
+	return s.reply, components.PrefixUsage{CacheRead: s.cacheRead, Fresh: 40, Output: 60}, nil
 }
 
 // TestHousellmDoesNotAttemptTheTailBelowBreakEven pins the floor that makes the warm/tail

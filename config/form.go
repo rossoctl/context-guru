@@ -253,18 +253,15 @@ func RecommendedComponents() map[string]map[string]any {
 			"model.model":                d.ModelName,
 			"trigger.min_request_tokens": d.TriggerMinTokens,
 		},
-		// The sweep's own block. It shares the model and the context settings — the same
-		// resolution and the same cost lever — and carries its own floor, because the two
-		// paths have opposite economics: 8,000 on the tail where a call must beat the
-		// cache-write rate on one output, 1,000 on a cold turn where every candidate is
-		// re-billing anyway. strategy, aggressiveness, rewrite and max_chars are absent
-		// because an adjudicator has no compaction target; writing one is a config error.
+		// The sweep's own block, and it is nearly empty by construction rather than by neglect. It
+		// asks the REQUEST's model over that model's prompt cache, so there is no model to name and
+		// no amount of conversation to size; one ask covers every candidate, so there is no call cap;
+		// and the economic gate prices a per-output cheap-model call, which this is not. Writing any
+		// of those is a config error naming the reason. What is left is the floor — 1,000, the value
+		// that decides whether the pass does anything at all on this service — and the window's
+		// width, left unset so it takes the documented default.
 		"extract_llm_sweep": {
-			"min_tokens":       d.ColdMinTokens,
-			"context":          d.Context,
-			"context_messages": d.ContextMessages,
-			"model.source":     d.ModelSource,
-			"model.model":      d.ModelName,
+			"min_tokens": d.ColdMinTokens,
 		},
 	}
 }

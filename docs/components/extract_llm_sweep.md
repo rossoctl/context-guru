@@ -55,79 +55,99 @@ identical criterion differed only in whether the model had to name and quote the
 arm that had to emit it **halved the false-drop rate** (4/4 → 2/4). Stating the criterion alone
 measured inert.
 
-## Batched, not one call per output
+## One call, to the request's own model, over its cached transcript
 
-One call is shown up to **12** outputs together. This is the shape that was measured good, and the
-per-output shape is the one that was **refuted**:
+The question goes to the **request's own model**, appended as a trailing user message to the exact body
+this session forwarded on the previous turn, so the provider reads the prompt cache those bytes
+populated. What travels is an **inventory** — one line per candidate, carrying a small integer label, a
+token count and a bounded locating head — never the outputs themselves.
 
-| shape | live-kept |
-|---|---|
-| one call, one output | 6% (haiku) / 14% (sonnet) — inside the drop-everything null model's error bar |
-| one call, ~15 outputs | **58%**, at the lowest cost per output |
-
-Comparative judgement beats absolute judgement: ranking a dozen candidates against each other is a
-question a model can answer, "is this one output expendable" is not. And the failure direction of a
-small batch is the one a sweep cannot tolerate — `cc1aa9f`: at batch 3–6 the model dropped a
-genuinely-spent output only 2 times in 4; at batch 10, 4 in 4. *Small batches do not make it wrong,
-they make it unwilling to act.*
-
-**12 is a measured ceiling**, not a round number: quote fidelity degraded with batch size, 4 of 37
-quotes non-verbatim at batch 16 against 0 of 16 at batch 10.
-
-### Sibling batches and the shared prefix
-
-Every batch of one sweep sends the same contract and the same conversation context. The prompt is
-**split** so that invariant half can carry a `cache_control` breakpoint and the batches after the
-first can read it instead of each paying fresh: the contract is a system block, the goal is a second
-system block when there is more than one batch to share it, and **the candidates are never in the
-prefix** — they differ per batch, so a cache entry containing them could never be read, which is
-strictly worse than no breakpoint.
-
-It also needs the calls *ordered*. `cheapmodel.claimCacheWrite` deliberately withholds the breakpoint
-from concurrent siblings, because an entry that is only ever written is worse than none — so with
-every batch in flight at once, sharing cannot happen even in principle. The first batch therefore runs
-alone to earn the write, then the rest run concurrently to read it.
-
-**But only where the write is earnable, and on the shipped model it is not.** A `cache_control` below
-the provider's minimum cacheable prefix is silently ignored — no error, `cache_creation_input_tokens:
-0` — and the minimum is 4,096 provider tokens on haiku-class against 1,024 on sonnet-class. Measured
-with `internal/tokens`:
+Three measurements force that shape:
 
 | | |
 |---|---|
-| adjudication contract | **504** o200k tokens |
-| contract + a two-message `recent` context | **~537** o200k tokens |
-| haiku-class floor | 3,413 o200k — needs ~2,900 tokens of conversation on top of the contract |
-| sonnet-class floor | 853 o200k — needs ~349, which a real two-message context often supplies |
-| unnameable gateway alias | treated as haiku-class, `minCacheablePrefix`'s conservative default |
+| appending to a byte-identical prefix | **19,595 tokens read from cache, 0 created** |
+| verbatim quoting, cheap model at bulk batch sizes | **20.8%** |
+| verbatim quoting, request model | **0 of 59 non-verbatim** |
 
-So **sharing is reachable on sonnet-class and provably cannot work on haiku-class at `context:
-recent`** — and `housellm` pins `claude-haiku-4-5`. The component reads its own prefix size, serializes
-the first batch **only** when the model would honour the breakpoint (otherwise the serialized round
-would buy a gateway queue wait, ~2–4 s p50, for nothing), and counts the outcome either way:
-`sweep_prefix_uncacheable` when the floor cannot be cleared, `sweep_prefix_cache_read_ZERO` when a
-sibling read nothing despite the ordering.
+The second and third settle *which* model is asked: a fabricated quote is the only remaining signal
+that the model is inventing, so a judge that cannot quote faithfully cannot be checked. The first
+settles how the transcript is afforded. And the judgement needs the whole transcript because need is
+relevance *minus* what has already been captured elsewhere, and that second term lives in the later
+turns — which a prompt carrying only the candidate cannot show.
 
-Raising `context` would clear haiku's floor. **That is not done here** — it is open question 2 and
-unmeasured, and chasing a cache is the wrong reason to change what the model is shown.
+Because nothing is copied per candidate, **one call covers all of them**. The batch assembler, the
+12-item cap, per-batch concurrency and `max_calls` are gone; they existed only to bound copied content
+against a cheap model's window.
 
-What the duplication actually costs is small, and that is by construction rather than luck: three
-extra batches re-send ~1,600 input tokens, a fraction of a cent on haiku and about 4% of one batch's
-own body. The transcript is deliberately not in the prefix. This is the difference from
-`extract_llm`'s `context: full` sweep, where the prefix *was* the transcript at ~138,000 tokens and
-duplicating it across five calls was the whole defect. It is why `max_calls` defaulting to a
-concurrency round stands even where sharing fails.
+Labels are integers because asked for opaque `tool_use` ids the model regularised them — `toolu_01..07`
+for `toolu_probe_00..07` — since reproducing a random identifier from thousands of tokens back is a
+copying task, not a judgement. With integers it was 0 bad labels in 40+ trials. The ids stay on our
+side, for logs.
 
-Two more things make the batch safe that were fixed on the way here:
+**The prefix is the previous turn's SENT body.** The upstream cache was populated by what context-guru
+emitted, i.e. the compacted form; the incoming body is uncompacted and diverges at the first thing any
+component removed, making everything past that point a fresh charge. The consequence: the ask sees the
+transcript as of the previous turn, so the newest tool output is invisible to it. Acceptable — tail
+content has had no turns in which to be superseded — and it keeps a large model call off the agent's
+critical path.
 
-- the reply budget is raised to **16,000 output tokens**. `659e7a6` traced 24 of 34 unparseable
-  replies to a 2,048-token default: a verdict array over 12 items each carrying a verbatim quote is
-  long, and a model running adaptive thinking spends part of the budget before emitting any text.
-  Output bills as generated, not as budgeted, so the ceiling costs nothing until used.
-- the economic gate is evaluated **once for the batch**. Per-candidate gating both misprices it
-  (~12x, since one call covers twelve candidates) and *starves* it — `4ca1f13` found an upstream
-  per-candidate filter had left a "bulk" arm judging 1.02 outputs per call, i.e. silently running the
-  refuted design. `sweep_batch_of_one` counts that shape if anything reintroduces it.
+Three construction facts, each measured and each a test: `tool_choice: none` is **not** in the cache key
+so forcing it is free, and **necessary**, or the prefix's tools make the model answer with a `tool_use`;
+`tools` **are** in the key, so stripping them reads a different, smaller entry; and the route rejects
+assistant prefill, which an appended user message satisfies by construction.
+
+## The trigger: pre-expiry, not cold
+
+The two halves of this component want **opposite** cache states:
+
+- the **ask** needs a WARM cache — it reads an entry that must still exist, or the call pays fresh for
+  the whole transcript;
+- the **removal** wants a COLD cache — rewriting deep history invalidates a live prefix and forces a
+  cache-write of the whole suffix at 1.25x fresh.
+
+Both are cheap in the window where the entry still exists but has little life left. The sweep therefore
+fires when `0 < remaining <= pre_expiry_seconds`, where `remaining` is the cache's believed lifetime
+minus this session's idle time.
+
+**The TTL is derived, never assumed.** It is the same figure the cold decision uses, read out of the
+request itself: a bare `ephemeral` mark is 5 minutes, an explicit `ttl: "1h"` is an hour, widened to the
+longest lifetime this prefix has ever asked for. Unknown does not fire — a window computed from a
+guessed TTL would invalidate live prefixes on exactly the deployments whose TTL could not be read.
+
+**The window's WIDTH is the one unmeasured number in the design.** It defaults to one minute, which is
+the codebase's own clock-uncertainty margin for cache expiry. Wider fires more often and invalidates
+more remaining TTL; narrower fires rarely. Nothing measures either side.
+
+## When the cache read does not happen
+
+`PrefixUsage` is returned rather than merely recorded, so the component gates on it. A read of zero is
+**always counted** (`sweep_prefix_cache_read_ZERO`) — a silent miss looks identical to a working call
+except on the bill.
+
+By default it then **falls back** to a self-contained completion carrying a bounded sample of each
+output. That keeps the component working on a session's first turn and whenever an entry has gone;
+treating "no prefix" as "no verdicts" would disable it there and read as a model that declined to act.
+The fallback is the expensive path by construction — it pays fresh for content the cached path reads for
+a tenth of the price, and shows a truncated view of each output — so it is counted every time
+(`sweep_fallback_used`). It still asks the **request's** model: the reason that model was chosen is
+faithful quoting, not caching.
+
+`block_fallback: true` declines instead, forgoing the yield rather than paying for it.
+
+Note what neither mode can undo: the fresh read that already happened on the call that missed. The
+counter is what tells an operator the window is mistimed.
+
+## The model is not a free choice here
+
+Unlike `extract_llm`, this component cannot compact with any model you name — and the asymmetry is
+structural rather than an oversight. `extract_llm`'s prompt **carries** the output it is compacting, so
+any model can read it. This component's prompt carries an inventory, and the outputs are read from the
+**prompt cache of the model being asked**. Only the request's model has that cache.
+
+So `model.source: config` is not a cheaper configuration of this component, it is a broken one: the ask
+would read nothing and degrade to paying fresh for the entire transcript. A `model` block is therefore
+**refused** with an error naming that reason, rather than accepted and silently corrected.
 
 ## Safety
 
@@ -158,19 +178,17 @@ net; the model does not get to hear about it.
 
 | key | default | what it does |
 |---|---|---|
-| `min_tokens` | 1000 | Per-output floor. Lower than `extract_llm`'s, because on this turn every candidate re-bills at the write rate anyway. At 3000 this produced **zero** extractions across 3,437 production requests. |
-| `min_idle_seconds` | 0 | Demand MORE idle time than the provider TTL implies. Raises the bar, never lowers it — the TTL check is the correctness condition. |
-| `max_calls` | one concurrency round | Cap **batch** calls (`-1` = unlimited). Each call covers up to 12 candidates. Unbounded was measured at 27 calls, $0.229, and 76.6 s added to a turn whose upstream took 33.5 s. |
-| `context` | `recent` | How much conversation the prompt carries. `full` is plausibly what a spent-ness judgement needs and is also what made the predecessor lose money (99% of the prompt was a copy of the transcript being compacted). Unmeasured either way. |
-| `context_messages` | 2 | The N for `context: recent`. The biggest lever on what a call costs. |
-| `economic_gate` | `true` | Only call when the expected saving beats the priced call cost. **Note:** the gate's arithmetic is calibrated on compaction, which removes a fraction of an output; a drop removes all of it, so the break-even here is a different and unmeasured number. |
-| `model.*` | — | Same block as every other model-using component. |
-| `marker_mode` | `full` | `full` is the only mode that keeps a drop recoverable. |
-| `model_max_input_tokens` | — | Pin the adjudication model's input budget for an id the static table cannot name. |
+| `min_tokens` | 1000 | Per-output floor for naming a candidate in the inventory. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 this produced **zero** extractions across 3,437 production requests. |
+| `pre_expiry_seconds` | 60 | Width of the pre-expiry window. The component's one unmeasured number. |
+| `block_fallback` | `false` | Decline instead of falling back to a content-carrying completion when the cache read did not happen. |
+| `marker_mode` | `full` | `full` is the only mode that keeps a removal recoverable. |
 
-**`strategy`, `rewrite`, `aggressiveness` and `max_chars` are config errors here**, not ignored keys.
-An adjudicator selects no compaction strategy and produces no rewritten text, so a silently accepted
-`rewrite: false` would read as "verified deletion-only is on" when nothing is being rewritten.
+Every other key is a **config error naming its reason**, not an ignored one. `strategy`, `rewrite`,
+`aggressiveness` and `max_chars` because an adjudicator selects no strategy and produces no rewritten
+text — a silently accepted `rewrite: false` would read as "verified deletion-only is on" when nothing is
+being rewritten. `model` because only the request's model has the cache (above). `context` and
+`context_messages` because the conversation *is* the cached prefix. `max_calls` because one ask covers
+every candidate. `economic_gate` because it prices a per-output cheap-model call, which this is not.
 
 ## Counters
 
@@ -191,8 +209,12 @@ Diagnostics, all visible at `/stats` under the component and as
 is **not** a failure), `sweep_unparseable`, `sweep_reply_truncated` (a different fix from
 unparseable: raise the budget, not the prompt), `sweep_verdict_unusable`,
 `sweep_verdict_unknown_label`, `sweep_verdict_duplicate_label`, `sweep_verdict_missing`,
-`sweep_reply_budget_not_raised`, `sweep_escalated_to_agent_model`, `sweep_call_failed`,
-`sweep_drop_would_not_shrink`, `sweep_prefix_uncacheable`, `sweep_prefix_cache_read_ZERO`.
+`sweep_prefix_cache_read_ok`, `sweep_prefix_cache_read_ZERO`, `sweep_fallback_used`,
+`sweep_fallback_blocked`, `sweep_fallback_failed`, `sweep_fallback_no_model`, `sweep_no_asker`,
+`sweep_no_prefix`, `sweep_ask_failed`, `sweep_inventory_of_one`, `sweep_kept_everything`,
+`sweep_unparseable`, `sweep_reply_truncated`, `sweep_verdict_unusable`, `sweep_verdict_unknown_label`,
+`sweep_verdict_duplicate_label`, `sweep_verdict_missing`, `sweep_drop_would_not_shrink`,
+`not_in_pre_expiry_window`.
 
 ## What is not measured
 
@@ -204,6 +226,8 @@ Three questions the design records rather than answers, from
    here.
 2. Whether a spent-ness judgement needs `context: full`. The default is `recent` because `full` is
    what the predecessor lost money on, not because `recent` was shown sufficient.
-3. The economic gate's break-even for a *drop*. The gate is calibrated on compaction. The sweep
-   carries its own ratio tracker and the existing exploration budget learns the real drop rate, but
-   the first calls of a session are priced on the compaction prior.
+3. The **width of the pre-expiry window**. It defaults to the codebase's own clock-uncertainty margin,
+   which makes it safe rather than optimal. Widening it fires on more turns and invalidates prefixes
+   with more remaining TTL; nothing measures either side of that trade.
+4. How often `sweep_prefix_cache_read_ZERO` fires in practice. That number decides whether the
+   fallback default is right, and it is the first thing to look at after this ships.

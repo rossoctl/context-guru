@@ -1,4 +1,9 @@
-t"
+package config
+
+import (
+	"encoding/json"
+	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -376,11 +381,7 @@ const osherDoc = `components:
     trigger:
       min_request_tokens: 3000
   extract_llm_sweep:
-    max_calls: 6
-    min_idle_seconds: 120
     min_tokens: 1000
-    model:
-      source: config
 mode: sync
 pipeline:
   - format
@@ -719,7 +720,11 @@ func TestTheColdCacheKeysSurviveASaveThatDoesNotMentionThem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"min_idle_seconds: 120", "max_calls: 6"} {
+	// Keys the form does not mention must survive a plain re-save. It used to be asserted on the
+	// sweep's own min_idle_seconds / max_calls; the sweep configures almost nothing now (it asks the
+	// request's model over that model's cache, so there is no model, context or call cap to set), so
+	// the same property is asserted on keys this document still carries.
+	for _, want := range []string{"min_tokens: 1000", "llm_max_per_session: 80", "min_request_tokens: 3000"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("a plain re-save lost %q:\n%s", want, out)
 		}

@@ -240,7 +240,7 @@ func (a Anthropic) CompletePrefixed(ctx context.Context, prefixBody []byte, ask 
 	}
 	maxTok := a.MaxTokens
 	if maxTok == 0 {
-		maxTok = DefaultMaxTokens
+		maxTok = PrefixAskMaxTokens
 	}
 	if body, err = sjson.SetBytes(body, "max_tokens", maxTok); err != nil {
 		return "", u, err

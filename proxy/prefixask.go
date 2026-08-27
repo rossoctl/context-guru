@@ -110,19 +110,11 @@ type prefixAsker struct {
 func (p prefixAsker) Ask(ctx context.Context, session, ask string) (string, components.PrefixUsage, error) {
 	body := p.stash.get(session)
 	if len(body) == 0 {
-		return "", components.PrefixUsage{}, ErrNoPrefix
+		return "", components.PrefixUsage{}, components.ErrNoPrefix
 	}
 	reply, u, err := p.cli.CompletePrefixed(ctx, body, ask)
 	return reply, components.PrefixUsage(u), err
 }
-
-// ErrNoPrefix is the first-turn case: nothing has been forwarded for this session yet. Exported so a
-// component can tell it apart from a transport failure without string matching.
-var ErrNoPrefix = errNoPrefixType{}
-
-type errNoPrefixType struct{}
-
-func (errNoPrefixType) Error() string { return "no stashed prefix for this session" }
 
 // prefixAskerFor builds the asker for one request, or nil when a precondition is missing.
 //
@@ -144,5 +136,10 @@ func (h *Handler) prefixAskerFor(provider bschemas.ModelProvider, models compone
 		// different cache namespace and could not read this prefix anyway.
 		return nil
 	}
+	// THE REPLY BUDGET, set here because this is where the prefix-ask client is built and the default
+	// is sized for something else entirely. Without it the reply is capped at DefaultMaxTokens and a
+	// verdict array over a long candidate list is cut off mid-flight — which parses as nothing and is
+	// indistinguishable from a model that declined to act. See PrefixAskMaxTokens.
+	cli.MaxTokens = cheapmodel.PrefixAskMaxTokens
 	return prefixAsker{stash: h.sent, cli: cli}
 }

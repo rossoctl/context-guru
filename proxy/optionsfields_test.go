@@ -118,12 +118,16 @@ func TestOptionsServesTheFieldContractTheSettingsPageDraws(t *testing.T) {
 	if sweep["min_tokens"] != components.FieldInt {
 		t.Error("the sweep's own floor is not on the page, and it is the knob that decides whether it fires")
 	}
-	if sweep["model.model"] != components.FieldString {
-		t.Error("the sweep's nested model key is not served as one dotted field")
+	if sweep["pre_expiry_seconds"] != components.FieldInt {
+		t.Error("the pre-expiry window is not on the page, and it is what decides WHEN the sweep fires")
 	}
-	// The compaction knobs must NOT be there: the component refuses them, so a field would put a
-	// control on the page whose only behaviour is to fail the save.
-	for _, banned := range []string{"strategy", "aggressiveness", "rewrite", "max_chars"} {
+	// THE KEYS THAT DO NOT APPLY MUST NOT BE THERE. The component refuses each of them with a named
+	// reason, so a field would put a control on the page whose only behaviour is to fail the save.
+	// `model` and `context` are on this list for a structural reason rather than a stylistic one: the
+	// ask goes to the REQUEST's model over that model's prompt cache, and the conversation IS the
+	// cached prefix, so there is nothing to name and nothing to size.
+	for _, banned := range []string{"strategy", "aggressiveness", "rewrite", "max_chars",
+		"model.model", "model.source", "context", "context_messages", "max_calls", "economic_gate"} {
 		if _, present := sweep[banned]; present {
 			t.Errorf("extract_llm_sweep declares %q, which its constructor rejects", banned)
 		}

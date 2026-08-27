@@ -151,6 +151,19 @@ type PrefixAsker interface {
 	Ask(ctx context.Context, session, ask string) (reply string, usage PrefixUsage, err error)
 }
 
+// ErrNoPrefix is what Ask returns on the FIRST turn of a session: nothing has been forwarded yet, so
+// there is no cached prefix to append to.
+//
+// Declared here rather than in the host so a component can tell it apart from a transport failure
+// without string matching. The distinction is worth a sentinel because the two mean opposite things to
+// an operator: "there was nothing to read yet", which every session does once and which needs no
+// attention, against "the read failed", which does.
+var ErrNoPrefix = errNoPrefix{}
+
+type errNoPrefix struct{}
+
+func (errNoPrefix) Error() string { return "no stashed prefix for this session" }
+
 // ModelSpec carries the LLM clients a NeedsModel component may use, resolved per
 // request by the host adapter. Incoming is the proxied request's own model +
 // credentials (nil when unavailable, e.g. the AuthBridge host); Static is a
