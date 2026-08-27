@@ -35,6 +35,10 @@ type Anthropic struct {
 // AsModel is components.Remodeler: same endpoint, same credential, different model.
 func (a Anthropic) AsModel(id string) components.Model { a.Model = id; return a }
 
+// WithMaxTokens is components.Budgeter: same call, larger reply budget. See the interface for why a
+// caller asking a long question has to be able to raise this.
+func (a Anthropic) WithMaxTokens(n int) components.Model { a.MaxTokens = n; return a }
+
 func (a Anthropic) Complete(ctx context.Context, prompt string) (string, error) {
 	return a.CompleteSystem(ctx, "", prompt)
 }

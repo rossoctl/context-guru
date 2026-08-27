@@ -6,50 +6,115 @@ import (
 	"strings"
 )
 
-// COLD-SWEEP ADJUDICATION. The model returns a VERDICT, never content.
+// COLD-SWEEP ADJUDICATION. The model returns VERDICTS, never content.
 //
 // This is the contract `feat/coref-compaction` arrived at (internal/extract/bulk.go), ported here
-// without its batching. The contract is general; the batch is not.
+// with its batching, because the batch is the part that was measured good.
 //
-// WHY IT IS A VERDICT AND NOT A REWRITE. `cc1aa9f` removed the `trim` verdict from that design after
-// measuring it: trim was chosen ZERO times in 21 probe opportunities, keep/drop scored identically to
-// keep/drop/trim on every metric, and in production it was accepted ONCE against EIGHT rejected as
-// invented. It was the only verdict that asked the model to transport text, which is what it is worst
-// at. What survives is binary, and it removes the transporting OPERATION rather than merely the
-// transporting STRATEGIES — the strongest available form of "never ask a model to transport text".
+// WHY IT IS A BATCH AND NOT ONE CALL PER OUTPUT. This was got wrong once already, so the evidence is
+// recorded rather than summarised. docs/results/coref-selection-experiment.md measured ten arms over
+// 8,105 recorded decisions:
+//
+//	REFUTED — the per-output shape. One call shown ONE output, deciding its fate, scored 6% live-kept
+//	on haiku and 14% on sonnet, both inside the drop-everything null model's error bar. Shown a single
+//	output, a model simply drops it.
+//
+//	WORKS — bulk adjudication. One call shown ~15 outputs TOGETHER lifted live-kept from 6% to 58% at
+//	the LOWEST cost per output, because the overhead amortises and, more importantly, because
+//	COMPARATIVE judgement beats absolute judgement: ranking a dozen candidates against each other is a
+//	question a model can answer, "is this one output expendable" is not.
+//
+// `4ca1f13` is the commit that makes this concrete, and it is the one that was previously misread as
+// evidence FOR per-output. It found a live arm reporting 1.02 verdicts per call and diagnosed that as
+// a DEFECT — "that is the per-output design refuted at 6% live-kept, not the bulk shape that measured
+// 58%, so iteration 014 measured something other than what it claimed". A single call carrying a
+// single item is the refuted design wearing a new name, which is why buildBatch's caller must assert
+// the batch offers more than one.
+//
+// `cc1aa9f` adds the direction of the failure, and it is the direction a SWEEP cannot tolerate: "at
+// batch 3-6 the model dropped a genuinely-spent output only 2 times in 4, at batch 10 it dropped it 4
+// in 4 and cleared 100% of genuinely-spent candidates. Small batches do not make it wrong, they make
+// it UNWILLING TO ACT, which is what a 94.6% keep rate looks like from inside." A cold sweep exists
+// because the whole transcript is re-billing at the write rate; an adjudicator too timid to remove
+// anything is an expensive no-op there.
+//
+// WHAT THE BATCH DOES NOT COST. The two failure modes that once argued for per-output calls were both
+// solved on the branch this is ported from, so they no longer distinguish the shapes:
+//
+//   - a shared reply truncated mid-array. `659e7a6` traced 24 of 34 unparseable replies to an output
+//     budget of 2048 and raised it; a verdict array over 12 items each carrying an obligation label
+//     and a verbatim quote is simply long. Output bills as generated, not as budgeted, so the ceiling
+//     costs nothing until used. See ParseVerdicts for why truncation is now counted separately from a
+//     format failure — the two need opposite fixes.
+//   - quote fidelity decaying with batch size. `cc1aa9f` measured the ceiling and capped the batch
+//     below it: 4 of 37 quotes non-verbatim at batch 16 against 0 of 16 at batch 10. See
+//     MaxAdjudicationItems.
+//
+// And the transport principle never distinguished them at all: post-trim, NO verdict carries content
+// in either shape. There is no reply field a model could return output text through.
+//
+// WHY IT IS A VERDICT AND NOT A REWRITE. `cc1aa9f` removed the `trim` verdict after measuring it:
+// chosen ZERO times in 21 probe opportunities, keep/drop scored identically to keep/drop/trim on
+// every metric, and in production it was accepted ONCE against EIGHT rejected as invented. It was the
+// only verdict that asked the model to transport text, which is what it is worst at. Removing it
+// removes the transporting OPERATION rather than merely the transporting STRATEGIES.
 //
 // WHY THE CRITERION IS FORCED EVIDENCE AND NOT ADVICE. Arms carrying an identical criterion differed
 // ONLY in whether the model had to emit which obligation still needs the output; the arm that had to
 // emit it HALVED the false-drop rate (4/4 -> 2/4). Stating the criterion alone measured inert.
 // Instructions a model can skim past are inert; a required output field is not.
 //
-// WHAT IS DELIBERATELY ABSENT, against bulk.go. Two things, and both because there is nothing here
-// for them to talk about:
-//
-//   - the READING THE EVIDENCE section. It taught the model to interpret a co-reference index's
-//     counters, and there is no such index on this path. Shipping the section without the counters
-//     would be teaching the model to read a field the prompt never carries.
-//   - the JUDGE THEM AGAINST EACH OTHER section. Comparative ranking is the one thing a per-output
-//     call structurally cannot do, so the paragraph would be a lie about the question being asked.
-//
-// The second absence is a KNOWN RISK, recorded here rather than hidden: the merged experiment
-// measured comparative judgement as the difference between 6% and 58% live-kept, and `4ca1f13` found
-// a live arm that had degraded to 1.02 verdicts per call and read that as "the per-output design
-// already refuted at 6%". So the prior on per-output YIELD is negative and the safety machinery below
-// is what carries this design — every failure mode it detects resolves toward keep.
+// WHAT IS DELIBERATELY ABSENT, against bulk.go: the READING THE EVIDENCE section. It taught the model
+// to interpret a co-reference index's counters (novel / refs / ref_age / used_frac), and there is no
+// such index on `main`. Shipping the section would be teaching the model to read fields the prompt
+// never carries.
 
-// AdjudicationItem is the one candidate output a single adjudication call is about.
+// MaxAdjudicationItems caps one adjudication batch.
+//
+// 12, not 15, and the number is a measured ceiling rather than a round figure. Batch size is a
+// YIELD/SAFETY trade-off (docs/experiments/loca/iter019/results.md, "batch size"): at batch 3-6 the
+// model dropped a genuinely-spent output only half the time, at batch 10 it cleared 100% of the
+// genuinely-spent candidates. But at batch 16 the transport burden started to tell -- 4 of 37
+// required quotes came back non-verbatim, against 0 of 16 at batch 10. So the ceiling sits between 10
+// and 16 and this takes the conservative end of it.
+const MaxAdjudicationItems = 12
+
+// AdjudicationSampleChars bounds each output shown in the prompt.
+//
+// The whole point is comparative judgement across many outputs, so the per-output budget must stay
+// small enough that a full batch plus the contract still fits the adjudication model's window.
+// Exported because the caller sizes its context check against the same number.
+const AdjudicationSampleChars = 4000
+
+// AdjudicationReplyTokens is the reply budget one batched adjudication needs.
+//
+// 16000, from `659e7a6`, which is the commit that found this: the merged arm's replies were being cut
+// off at a 2048-token default and the parse failure was misread as a model declining to act for three
+// iterations. A verdict array over 12 items, each carrying an obligation label and a VERBATIM quote,
+// is long -- and a request model running adaptive thinking spends part of the budget before emitting
+// any text at all (a probe at max_tokens 900 returned thinking blocks and no text whatsoever). Output
+// bills as generated and not as budgeted, so the ceiling costs nothing until it is used.
+const AdjudicationReplyTokens = 16000
+
+// AdjudicationItem is one candidate output offered for adjudication.
 type AdjudicationItem struct {
-	Index      int    // caller's message index, for the operator's logs only
-	ID         string // tool-call id, likewise
+	// Label is the small integer the model answers with, and it is small for a measured reason.
+	// Asked to answer with opaque tool_use ids, the model REGULARISED them -- `toolu_01..07` for
+	// `toolu_probe_00..07` -- because reproducing a random identifier from thousands of tokens back
+	// is a copying task, not a judgement. With integer labels it was 0 bad labels in 40+ trials.
+	// The rule generalises: give the model short things it cannot get wrong and keep every mapping
+	// on our side.
+	Label      int
+	ID         string // tool-call id, for the operator's logs only — never shown to the model
 	SizeTokens int
 	Content    string // the output itself; BuildAdjudicationPrompt bounds what it shows
 }
 
-// Verdict is the model's whole reply. Note what is NOT in it: any field carrying output content.
-// A parse that succeeds cannot produce text to splice, which is what makes the transport failure
-// mode unreachable rather than merely guarded.
+// Verdict is one decision. Note what is NOT in it: any field carrying output content. A parse that
+// succeeds cannot produce text to splice, which is what makes the transport failure mode unreachable
+// rather than merely guarded.
 type Verdict struct {
+	Label    int    `json:"i"`
 	Verdict  string `json:"verdict"`   // keep | drop
 	NeededBy string `json:"needed_by"` // a | b | c | none  (see adjudicationContract's CRITERION)
 	Quote    string `json:"quote,omitempty"`
@@ -63,9 +128,9 @@ type Verdict struct {
 // 49%/58%. Telling a model its mistakes are cheap makes it careless. So this text states the true
 // cost and NEVER mentions recoverability — even though, on this path, the drop genuinely is
 // recoverable through the marker and the stash. That asymmetry is intentional: the operator gets the
-// safety net, the model is not told about it.
-const adjudicationContract = `You are shown ONE tool output from an agent's transcript. Decide whether the agent
-still needs it.
+// safety net, the model is not told about it. Every softening of this text measured WORSE.
+const adjudicationContract = `You are shown several tool outputs from one agent's transcript. Decide, for EACH
+output, whether the agent still needs it.
 
 CRITERION. An output is SPENT only if it is needed for NONE of the following:
   (a) the step the agent is on right now;
@@ -80,11 +145,11 @@ NOT notice the gap and does not ask for the content back. It answers from worse 
 the task wrong. There is no safety net you should count on. A wrong removal is a silent, permanent
 loss of task quality; a wrong retention costs only tokens.
 
-"KEEP EVERYTHING" IS A VALID AND OFTEN CORRECT ANSWER. You are judging one output in isolation, so
-you cannot tell whether something else would have been the better thing to remove. If this one looks
-load-bearing, keep it. Do not reach for a removal because you were asked a question.
+JUDGE THEM AGAINST EACH OTHER. You are given several outputs precisely so you can compare. Rank them:
+the ones whose information has clearly been consumed and superseded are the candidates. If they all
+look load-bearing, keep them all -- "keep everything" is a valid and often correct answer.
 
-ANSWER THE CRITERION FIRST, THEN DECIDE:
+FOR EACH OUTPUT, ANSWER THE CRITERION FIRST, THEN DECIDE:
   "needed_by" -- which of (a)/(b)/(c) still needs this output, or "none" if it is spent.
   "quote"     -- when needed_by is a/b/c, the transcript text that creates that obligation, copied
                  VERBATIM. Leave empty only when needed_by is "none".
@@ -93,21 +158,13 @@ ANSWER THE CRITERION FIRST, THEN DECIDE:
                  A verdict of "drop" REQUIRES needed_by "none": if any obligation still needs the
                  output, the verdict must be keep.
 
-Reply with ONLY a JSON object, no prose:
-{"needed_by": "a|b|c|none", "quote": "<verbatim text or empty>", "verdict": "keep|drop"}`
+Reply with ONLY a JSON array, one object per output, no prose:
+[{"i": <label>, "needed_by": "a|b|c|none", "quote": "<verbatim text or empty>", "verdict": "keep|drop"}]`
 
-// adjudicationSampleChars bounds the output shown to the model.
-//
-// The same 4,000 the compaction prompts use, and for the same reason: it is the largest excerpt worth
-// paying for on every candidate. It is a HEAD excerpt with the cut marked, because the question is
-// "is this spent", which is answered from what the output IS rather than from every row in it — and
-// because an unmarked cut invites the model to reason about content it was never shown.
-const adjudicationSampleChars = 4000
-
-// BuildAdjudicationPrompt renders the request for ONE output. goal is the conversation the caller
-// chose to carry (see the component's `context` setting), so spent-ness is judged against the live
-// task rather than in the abstract.
-func BuildAdjudicationPrompt(goal string, item AdjudicationItem) string {
+// BuildAdjudicationPrompt renders the request for a BATCH. goal is the conversation the caller chose
+// to carry (see the component's `context` setting), so spent-ness is judged against the live task
+// rather than in the abstract.
+func BuildAdjudicationPrompt(goal string, items []AdjudicationItem) string {
 	var b strings.Builder
 	b.WriteString(adjudicationContract)
 	b.WriteString("\n\nWHAT THE AGENT IS DOING NOW (judge relevance toward this):\n")
@@ -119,11 +176,16 @@ func BuildAdjudicationPrompt(goal string, item AdjudicationItem) string {
 		g = g[:4000]
 	}
 	b.WriteString(g)
-	b.WriteString("\n\n=== THE OUTPUT UNDER CONSIDERATION (")
-	b.WriteString(strconv.Itoa(item.SizeTokens))
-	b.WriteString(" tokens)\n")
-	b.WriteString(clipForAdjudication(item.Content, adjudicationSampleChars))
-	b.WriteString("\n")
+	b.WriteString("\n\n")
+	for _, it := range items {
+		b.WriteString("=== OUTPUT ")
+		b.WriteString(strconv.Itoa(it.Label))
+		b.WriteString(" (")
+		b.WriteString(strconv.Itoa(it.SizeTokens))
+		b.WriteString(" tokens)\ncontent:\n")
+		b.WriteString(clipForAdjudication(it.Content, AdjudicationSampleChars))
+		b.WriteString("\n\n")
+	}
 	return b.String()
 }
 
@@ -137,35 +199,45 @@ func clipForAdjudication(s string, max int) string {
 		strconv.Itoa(len(s)-max) + " more characters]"
 }
 
-// ParseVerdict reads the model's reply, returning the verdict and whether the reply PARSED.
+// ParseVerdicts reads the model's reply, returning the verdicts and whether the reply PARSED.
 //
-// The two must stay distinguishable. A reply that parsed and said keep is the model DECLINING to act,
-// which the contract explicitly invites; a reply that did not parse is a prompt or model failure the
-// component never got an answer from. Folding both into "no drop" makes those two identical in the
-// counters, and telling them apart is exactly the distinction one live arm turned on (4ca1f13).
-func ParseVerdict(reply string) (Verdict, bool) {
+// THE TWO MUST STAY DISTINGUISHABLE, and `4ca1f13` is the commit that separated them. An EMPTY array
+// is a legitimate answer -- "keep everything", which the contract explicitly invites -- while
+// unparseable output is a prompt or model failure. Folding both into "no verdicts" made a deliberate
+// keep-all indistinguishable from junk in the counters, and those counters are the only way to tell
+// "the model declined to act" from "the model was never successfully asked", which is exactly the
+// distinction one live arm turned on.
+func ParseVerdicts(reply string) ([]Verdict, bool) {
 	s := stripFences(strings.TrimSpace(reply))
-	i, j := strings.Index(s, "{"), strings.LastIndex(s, "}")
+	i, j := strings.Index(s, "["), strings.LastIndex(s, "]")
 	if i < 0 || j <= i {
-		return Verdict{}, false
+		return nil, false
 	}
-	var v Verdict
-	if err := json.Unmarshal([]byte(s[i:j+1]), &v); err != nil {
-		return Verdict{}, false
+	var out []Verdict
+	if err := json.Unmarshal([]byte(s[i:j+1]), &out); err != nil {
+		return nil, false
 	}
-	return v, true
+	return out, true
+}
+
+// ReplyWasTruncated reports whether an unparseable reply looks CUT OFF rather than malformed.
+//
+// A reply that opened the array and never closed it ran out of output budget; one that never opened
+// it is a genuine format failure. The remedies are opposite -- raise the budget versus fix the prompt
+// -- so folding them under one name hid a 70%-of-calls failure behind a label that reads as "the
+// prompt is wrong" (`659e7a6`). Only meaningful when ParseVerdicts returned false.
+func ReplyWasTruncated(reply string) bool {
+	return strings.Contains(reply, "[") && !strings.Contains(reply, "]")
 }
 
 // Adjudication is what OUR code concluded, which is not the same thing as what the model said. Every
 // field but Drop exists so a failure is COUNTED rather than inferred from a yield number.
 type Adjudication struct {
-	// Parsed is false when the reply was not a usable JSON object at all.
-	Parsed bool
 	// Drop is the only field that authorises an action, and it is true only when every check below
 	// passed. Every other outcome leaves the output verbatim.
 	Drop bool
-	// VerdictUnusable marks a reply that parsed but carried no verdict we act on — absent, empty, or
-	// a value the contract does not offer (`trim`, most likely, since it used to be offered).
+	// VerdictUnusable marks a verdict we do not act on — absent, empty, or a value the contract does
+	// not offer (`trim`, most likely, since it used to be offered).
 	VerdictUnusable bool
 	// RefusedObligation marks a drop we would not perform: the model named an outstanding obligation
 	// and then dropped the output anyway. ALERTABLE — it means the model tried to remove something
@@ -175,26 +247,21 @@ type Adjudication struct {
 	// the model is inventing evidence, and on this design it is the ONLY such signal left, because
 	// nothing else the model returns is content.
 	QuoteFabricated bool
-	// CriterionMissing marks a reply that never answered needed_by. Tolerated, but counted: it means
-	// the forcing function did not run for this verdict.
+	// CriterionMissing marks a verdict that never answered needed_by. Tolerated, but counted: it
+	// means the forcing function did not run for this verdict.
 	CriterionMissing bool
 }
 
-// Judge turns one reply into a decision, applying the four safety rules that make a verdict
-// actionable. transcript is the agent's own text, flattened, and is what an obligation quote is
-// checked against — verifying the quote is cheap and turns "did it make that up?" from a worry into
-// a counter.
+// Judge turns ONE verdict into a decision, applying the four safety rules that make it actionable.
+// transcript is the agent's own text, flattened, and is what an obligation quote is checked against
+// — verifying the quote is cheap and turns "did it make that up?" from a worry into a counter.
 //
 // EVERY FAILURE PATH RESOLVES TOWARD KEEP. That is not caution for its own sake: a wrong keep costs
 // tokens on one turn, a wrong drop is a silent permanent loss the agent does not notice and cannot
-// ask about. The two errors are not comparable, so the code does not treat them symmetrically.
-func Judge(reply, transcript string) Adjudication {
-	v, ok := ParseVerdict(reply)
-	if !ok {
-		// UNSURE DEFAULTS TO KEEP, and an unparseable reply is the strongest form of unsure.
-		return Adjudication{}
-	}
-	a := Adjudication{Parsed: true}
+// ask about. The two errors are not comparable, so the code does not treat them symmetrically. This
+// is orthogonal to batch size — the same rules applied per-verdict whatever the batch was.
+func Judge(v Verdict, transcript string) Adjudication {
+	var a Adjudication
 	nb := strings.ToLower(strings.TrimSpace(v.NeededBy))
 	if nb == "" {
 		// Counted on keeps as well as drops. The name is what it says: the criterion was not
@@ -222,8 +289,8 @@ func Judge(reply, transcript string) Adjudication {
 	default:
 		// Missing, empty, or a verdict we do not perform. `trim` is the one to expect: it was
 		// offered by the previous design and a model may still answer with it. Degrade to keep and
-		// COUNT it rather than discarding the reply — a discarded reply leaves the output unjudged,
-		// which looks identical to a model that said nothing.
+		// COUNT it rather than discarding the verdict — a discarded verdict leaves the output
+		// unjudged, which looks identical to a model that said nothing about it.
 		a.VerdictUnusable = true
 	}
 	return a

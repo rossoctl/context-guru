@@ -24,6 +24,10 @@ type OpenAI struct {
 // AsModel is components.Remodeler: same endpoint, same credential, different model.
 func (o OpenAI) AsModel(id string) components.Model { o.Model = id; return o }
 
+// WithMaxTokens is components.Budgeter: same call, larger reply budget. See the interface for why a
+// caller asking a long question has to be able to raise this.
+func (o OpenAI) WithMaxTokens(n int) components.Model { o.MaxTokens = n; return o }
+
 func (o OpenAI) Complete(ctx context.Context, prompt string) (string, error) {
 	return o.CompleteSystem(ctx, "", prompt)
 }

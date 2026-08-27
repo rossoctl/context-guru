@@ -92,6 +92,28 @@ type Remodeler interface {
 	AsModel(id string) Model
 }
 
+// Budgeter is an optional interface on a Model: the same endpoint, the same credential and the same
+// model id, with a larger REPLY budget.
+//
+// It exists because a truncated reply is the worst outcome available — full price, zero result — and
+// it is indistinguishable from a model declining to act. MEASURED (`659e7a6`): the batched
+// adjudication arm had 24 of 34 replies unparseable, and the cause was the client's default output
+// budget, not the prompt. A verdict array over a dozen items, each carrying an obligation label and a
+// verbatim quote, is simply long; a request model running adaptive thinking spends part of the budget
+// before emitting any text at all. The array was cut mid-flight, the parse failed, and the caller
+// changed nothing — misread as "the model declined" for three iterations.
+//
+// Why an interface rather than raising cheapmodel.DefaultMaxTokens: the budget a caller needs is a
+// property of what it ASKS FOR, not of the endpoint. A one-tool-output compaction reply and a
+// twelve-verdict array are different lengths, and raising the shared default would move both.
+//
+// Output tokens bill as generated, not as budgeted, so a raised ceiling costs nothing until used.
+// Optional, and callers must fall back to the client as-is: a Model implementation that does not
+// support it still works, it just keeps its own budget.
+type Budgeter interface {
+	WithMaxTokens(n int) Model
+}
+
 // ModelSpec carries the LLM clients a NeedsModel component may use, resolved per
 // request by the host adapter. Incoming is the proxied request's own model +
 // credentials (nil when unavailable, e.g. the AuthBridge host); Static is a
@@ -508,6 +530,25 @@ func (r *Report) Gate(name string) {
 		r.Gates = map[string]int{}
 	}
 	r.Gates[name]++
+}
+
+// GateN records n at once, for a gate whose subject is a COUNT rather than a single candidate.
+//
+// It exists because a per-candidate loop cannot express "this many were OFFERED". The distinction is
+// not cosmetic: a live batched-adjudication arm reported 2.80 verdicts per call and that was read as
+// the batch size, when it counted what the model chose to ANSWER rather than what it was SHOWN. The
+// truncation counter was firing on 43 of 162 calls at the same time, which is arithmetically
+// impossible for batches of 2.8 — the resolution being that the model silently omitted labels.
+// Without a way to count the offer, "the batch is starved" and "the model answered for a third of the
+// batch" are the same number, and the first reading cost three iterations.
+func (r *Report) GateN(name string, n int) {
+	if r == nil || n <= 0 {
+		return
+	}
+	if r.Gates == nil {
+		r.Gates = map[string]int{}
+	}
+	r.Gates[name] += n
 }
 
 // Saved returns non-negative tokens saved by this component.

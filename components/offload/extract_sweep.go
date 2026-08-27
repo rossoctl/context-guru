@@ -44,6 +44,16 @@ func init() { components.Register("extract_llm_sweep", newExtractSweep) }
 // there — removing a token is worth 12.5x what it is worth warm, and touching deep history is free
 // because there is no live cached prefix left to invalidate.
 //
+// ONE CALL PER BATCH, NOT PER OUTPUT, and this was got wrong once. The per-output shape is the one
+// docs/results/coref-selection-experiment.md REFUTED at 6% live-kept, inside the drop-everything null
+// model's error bar; the batch shape lifted that to 58% at the lowest cost per output, because
+// comparative judgement beats absolute judgement. `4ca1f13` diagnosed a live arm answering 1.02
+// verdicts per call as exactly that refuted design wearing the bulk name. And `cc1aa9f` names the
+// direction of the failure, which is the one a sweep cannot tolerate: small batches "do not make it
+// wrong, they make it UNWILLING TO ACT, which is what a 94.6% keep rate looks like from inside". A
+// sweep exists because the entire transcript is re-billing at the write rate; a timid adjudicator is
+// an expensive no-op there. See internal/extract/adjudicate.go for the full evidence.
+//
 // WHAT IT NEVER DOES. It selects no compaction strategy, produces no rewritten text, and there is no
 // reply field a model could return content through. `strategy`, `rewrite`, `aggressiveness` and
 // `max_chars` are therefore not merely defaulted differently here, they are meaningless, and writing
@@ -87,14 +97,25 @@ type extractSweepConfig struct {
 	// Raises the bar, never lowers it: the TTL check is the correctness condition and this is only
 	// extra caution.
 	MinIdleSeconds int `yaml:"min_idle_seconds"`
-	// MaxCalls caps model calls for one sweep (0 = defaultSweepMaxCalls; -1 = unlimited).
+	// MaxCalls caps BATCH calls for one sweep (0 = defaultSweepMaxCalls; -1 = unlimited).
 	//
-	// It used to default to unlimited on the cold_cache block this replaces, on the reasoning that
-	// a sweep runs once per idle gap on a turn that is already expensive. MEASURED, that reasoning
-	// was wrong in the way unbounded spend paths usually are: one production request made 27 calls
-	// against a tenant whose llm_max_per_request was 2, spent $0.229 and added 76.6 s to a turn
-	// whose upstream took 33.5 s — context-guru was 2.3x slower than the model it was saving money
-	// on. The sweep deliberately draws on no other component's caps, so this is its ONLY brake.
+	// It bounds CALLS, and each call now adjudicates up to extract.MaxAdjudicationItems candidates
+	// together, so the two brakes are independent: the item cap is a measured quote-fidelity ceiling
+	// and this is a spend/latency bound.
+	//
+	// Why it still exists at all, when the measured shape made exactly one call per request: with a
+	// single call a transcript carrying 40 candidates would have 12 adjudicated and 28 left verbatim
+	// — on the one turn whose whole point is that everything is re-billing at the write rate, that is
+	// leaving most of the money. Nothing measured says four batches of 12 is worse than one batch of
+	// 12; the per-batch shape is byte-identical, and batch SIZE is the variable the experiments moved.
+	// The default is one concurrency round for the same reason the per-output default was: past it
+	// the calls serialize and latency grows multiplicatively for a linear gain.
+	//
+	// The unbounded default this replaces was measured wrong in the way unbounded spend paths usually
+	// are: one production request made 27 calls against a tenant whose llm_max_per_request was 2,
+	// spent $0.229 and added 76.6 s to a turn whose upstream took 33.5 s — context-guru was 2.3x
+	// slower than the model it was saving money on. The sweep draws on no other component's caps, so
+	// this is its only spend brake.
 	MaxCalls int `yaml:"max_calls"`
 
 	Model      modelConfig `yaml:"model"`
@@ -281,13 +302,7 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	ratio := e.ratios.ratio()
 	turnsSoFar := len(req.Input)
 
-	type cand struct {
-		i          int
-		content    string
-		id         string
-		gateReason string
-	}
-	var cands []cand
+	var cands []sweepCand
 	var keys []string
 	changed := 0
 
@@ -363,78 +378,140 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			rep.Gate("over_model_context")
 			continue
 		}
-		gateReason := "gate off"
-		if e.gate {
-			seenBefore := markSeenContent(c, id)
-			explore := !tooSlowToExplore(metrics.ExtractionP50LatencyMs()) &&
-				e.ratios.exploring(c.Session)
-			d := evaluateGate(sz, ratio, savedTokenValueAt(c, i),
-				callCost(pricing, sz, goalOverhead), seenBefore, turnsSoFar, explore, true)
-			// allowCached is unconditionally true here, and it is not an override of the
-			// caching-backend guard: that guard refuses candidates whose tokens are being billed
-			// at the cache-READ rate, and on a cold turn none are — savedTokenValueAt prices them
-			// at the cache-WRITE rate. The guard's own measurement (net-negative on caching
-			// workloads) is about warm traffic, which this component never sees.
-			if !d.allow {
-				metrics.RecordExtractionSuppressed(d.reason)
-				rep.Gate("economic_gate")
-				continue
+		// NO PER-CANDIDATE ECONOMIC GATE HERE. It is evaluated once for the whole batch below,
+		// for two reasons that both point the same way.
+		//
+		// ARITHMETIC: the gate compares one candidate's expected saving against one CALL's cost, and
+		// a call now covers up to twelve candidates. Charging each of them a whole call priced the
+		// batch at ~12x its real cost and would suppress batches that pay comfortably.
+		//
+		// STARVATION, which is the worse failure. `4ca1f13` found the merged arm's real defect was an
+		// upstream per-candidate filter: prefix_still_referenced removed 149,681 candidates, leaving
+		// about one per request, so a "bulk" arm was running the per-output design refuted at 6%
+		// live-kept. A per-candidate gate on this path is the same mechanism — it thins the batch one
+		// output at a time until comparative judgement has nothing to compare — and it would return
+		// this component to batch-of-one silently. See sweep_batch_of_one, which counts it if any
+		// future filter reintroduces the shape.
+		cands = append(cands, sweepCand{i: i, content: content, id: id})
+	}
+
+	// THE ECONOMIC GATE, ONCE FOR THE SWEEP. Priced the way the call is actually made: the batch's
+	// total candidate tokens against ONE call's cost. That is the same comparison evaluateGate always
+	// made, just given the unit that now corresponds to a call.
+	gateReason := "gate off"
+	if e.gate && len(cands) > 0 {
+		var total int
+		seenBefore := true
+		for k := range cands {
+			total += schema.TextTokens(cands[k].content)
+			// Recurrence is a property of the CONTENT, so it is recorded for every candidate — a
+			// suppressed batch still counts as seen. The batch is treated as recurring only when
+			// every member is, which is the conservative direction for a spending decision.
+			if !markSeenContent(c, cands[k].id) {
+				seenBefore = false
 			}
+		}
+		explore := !tooSlowToExplore(metrics.ExtractionP50LatencyMs()) &&
+			e.ratios.exploring(c.Session)
+		// allowCached is unconditionally true, and it is not an override of the caching-backend
+		// guard: that guard refuses candidates whose tokens bill at the cache-READ rate, and on a
+		// cold turn none do — savedTokenValue prices them at the cache-WRITE rate. The guard's own
+		// measurement (net-negative on caching workloads) is about warm traffic, which this
+		// component never sees.
+		d := evaluateGate(total, ratio, val, callCost(pricing, total, goalOverhead),
+			seenBefore, turnsSoFar, explore, true)
+		if !d.allow {
+			metrics.RecordExtractionSuppressed(d.reason)
+			// Counted per candidate the batch would have covered, so the figure is comparable with
+			// the other per-candidate gates above rather than reading as a single refusal.
+			rep.GateN("economic_gate", len(cands))
+			cands = nil
+		} else {
 			metrics.RecordExtractionReason(d.reason)
 			gateReason = d.reason
 		}
-		cands = append(cands, cand{i: i, content: content, id: id, gateReason: gateReason})
+	}
+	for k := range cands {
+		cands[k].gateReason = gateReason
 	}
 
-	// The sweep's own cap, drawing on no other component's allowance. The paths are switched
-	// independently and have opposite economics, so a shared budget would silently disable one
-	// depending on which fired first.
-	if e.maxCalls > 0 && len(cands) > e.maxCalls {
-		for k := e.maxCalls; k < len(cands); k++ {
-			rep.Gate("over_sweep_cap")
-		}
-		cands = cands[:e.maxCalls]
-	}
-
-	// Phase 2 (parallel): ONE CALL PER OUTPUT. Not a batch — a shared reply can be truncated
-	// mid-array, quote fidelity degraded with batch size when measured (4 of 37 quotes
-	// non-verbatim at batch 16 against 0 of 16 at batch 10), and a batch-truncation counter has to
-	// exist to compensate. A per-output call has none of those. The known cost of the choice is
-	// that comparative judgement is unavailable; see internal/extract/adjudicate.go.
+	// Phase 2: BATCHED ADJUDICATION. Candidates are chunked into batches of at most
+	// extract.MaxAdjudicationItems and each batch is ONE call, so the model ranks a dozen outputs
+	// against each other rather than being asked "is this one expendable" twelve times over.
+	//
+	// The batches fan out, so the gate discipline from #119 applies here too: a Report's Gates map
+	// carries no lock, so each call accumulates its own gate names into its own slot and the serial
+	// phase raises them.
 	if len(cands) > 0 {
-		out := make([]sweepOutcome, len(cands))
-		calls := make([]components.ModelCall, len(cands))
+		batches := make([][]int, 0, len(cands)/extract.MaxAdjudicationItems+1)
+		for lo := 0; lo < len(cands); lo += extract.MaxAdjudicationItems {
+			hi := lo + extract.MaxAdjudicationItems
+			if hi > len(cands) {
+				hi = len(cands)
+			}
+			idx := make([]int, 0, hi-lo)
+			for k := lo; k < hi; k++ {
+				idx = append(idx, k)
+			}
+			batches = append(batches, idx)
+		}
+		// The spend brake. NO SILENT CAPS: a truncated sweep is a bounded-coverage decision and must
+		// be visible, or "we judged everything" and "we judged the first twelve" read identically.
+		if e.maxCalls > 0 && len(batches) > e.maxCalls {
+			for _, b := range batches[e.maxCalls:] {
+				for range b {
+					rep.Gate("sweep_batch_truncated")
+				}
+			}
+			batches = batches[:e.maxCalls]
+		}
+		rep.GateN("sweep_offered", len(cands))
+
+		out := make([]sweepOutcome, len(batches))
+		calls := make([]components.ModelCall, len(batches))
 		sem := make(chan struct{}, llmConcurrency)
 		var wg sync.WaitGroup
-		for k := range cands {
+		for bi := range batches {
 			wg.Add(1)
-			go func(k int) {
+			go func(bi int) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				out[k], calls[k] = e.adjudicate(c, rep.Component, cands[k].content, cands[k].id,
-					cands[k].gateReason, goal, flat, model, pricing, callModel)
-			}(k)
+				items := make([]extract.AdjudicationItem, 0, len(batches[bi]))
+				for _, k := range batches[bi] {
+					items = append(items, extract.AdjudicationItem{
+						// The LABEL is the candidate's position in cands, so the mapping back is
+						// ours and the model only ever handles a small integer. See
+						// AdjudicationItem.Label for why that is not a style choice.
+						Label:      k,
+						ID:         cands[k].id,
+						SizeTokens: schema.TextTokens(cands[k].content),
+						Content:    cands[k].content,
+					})
+				}
+				out[bi], calls[bi] = e.adjudicateBatch(c, rep.Component, items, cands,
+					goal, flat, model, pricing, callModel)
+			}(bi)
 		}
 		wg.Wait()
-		// SERIAL FROM HERE, and the gates are why. components.Report is a plain struct whose
-		// Gates map has no lock -- a Report is copied by value across this codebase and cannot
-		// carry one -- so calling rep.Gate from the goroutines above is a data race, and Go's map
-		// implementation turns it into `fatal error: concurrent map writes` rather than a wrong
-		// count. Each call therefore accumulates its own gate names into its own slot and the
-		// serial phase raises them, which is the same discipline the ModelCall records use.
-		for k := range calls {
-			for _, g := range out[k].gates {
+
+		// Serial from here.
+		drop := map[int]bool{}
+		for bi := range calls {
+			for _, g := range out[bi].gates {
 				rep.Gate(g)
 			}
-			if calls[k].Component != "" {
-				rep.Calls = append(rep.Calls, calls[k])
+			for _, k := range out[bi].drop {
+				drop[k] = true
+			}
+			if calls[bi].Component != "" {
+				rep.Calls = append(rep.Calls, calls[bi])
 			}
 		}
 		// Phase 3 (serial): freeze + splice. Serial because the store write and the message
 		// mutation are not concurrency-safe.
 		for k := range cands {
-			if !out[k].drop {
+			if !drop[k] {
 				continue
 			}
 			desc := sweepDescriptor(cands[k].content)
@@ -458,6 +535,16 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	return keys, nil
 }
 
+// sweepCand is one candidate the sweep collected: where it sits, what it holds, and what the economic
+// gate concluded for the batch it belongs to. A package-level type because adjudicateBatch needs to
+// resolve a model-supplied LABEL back to content, and that mapping must stay on our side of the wire.
+type sweepCand struct {
+	i          int
+	content    string
+	id         string
+	gateReason string
+}
+
 // sweepOutcome is one adjudication's result, carried back to the SERIAL phase.
 //
 // The gate names travel as data rather than being raised where they are decided, because
@@ -465,31 +552,63 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 // lock. Raising a gate from a goroutine is not a slightly-wrong counter, it is
 // `fatal error: concurrent map writes` -- which is how this was found.
 type sweepOutcome struct {
-	drop  bool
+	// drop lists the candidate labels this batch authorised removing. A slice rather than a bool
+	// because one call now decides for many outputs.
+	drop  []int
 	gates []string
 }
 
 func (o *sweepOutcome) gate(name string) { o.gates = append(o.gates, name) }
 
-// adjudicate makes ONE model call about ONE output and returns whether it may be dropped.
+// adjudicateBatch makes ONE model call about a BATCH of outputs and returns the labels it authorised
+// dropping.
 //
-// Every failure resolves toward keep: a call error, a timeout, an unparseable reply, an unusable
-// verdict, a drop that contradicts a named obligation. A wrong keep costs tokens on one turn; a
-// wrong drop is a silent permanent loss the agent does not notice and cannot ask about.
-func (e *ExtractSweep) adjudicate(c *components.Ctx, component string,
-	content, id, gateReason, goal, flat string, model components.Model,
-	pricing cheapmodel.Pricing, callModel string) (sweepOutcome, components.ModelCall) {
+// EVERY FAILURE PATH RESOLVES TOWARD KEEP -- a call error, a timeout, an unparseable reply, an
+// unusable verdict, a drop that contradicts a named obligation, a verdict for something we did not
+// offer. A wrong keep costs tokens on one turn; a wrong drop is a silent permanent loss the agent
+// does not notice and cannot ask about. The two errors are not comparable, so this does not treat
+// them symmetrically.
+func (e *ExtractSweep) adjudicateBatch(c *components.Ctx, component string,
+	items []extract.AdjudicationItem, cands []sweepCand, goal, flat string,
+	model components.Model, pricing cheapmodel.Pricing, callModel string) (sweepOutcome, components.ModelCall) {
 
 	var o sweepOutcome
+	// A SINGLE-ITEM BATCH IS THE REFUTED DESIGN WEARING THE NEW NAME, so it is counted rather than
+	// silently accepted. `4ca1f13` found a live "bulk" arm answering 1.02 verdicts per call and
+	// diagnosed it as the per-output shape refuted at 6% live-kept; asserting one CALL was not enough
+	// to catch it, because one call carrying one item is exactly that. The call still proceeds -- a
+	// transcript can legitimately have one candidate above the floor -- but a workload where this
+	// fires routinely has an upstream filter starving the batch, which is the failure that cost three
+	// iterations.
+	if len(items) < 2 {
+		o.gate("sweep_batch_of_one")
+	}
 
 	ctx, cancel := context.WithTimeout(c.Ctx, llmCallTimeout)
 	defer cancel()
 	ctx, callSink := cheapmodel.WithCallSink(ctx)
-	before := schema.TextTokens(content)
+	var before int
+	for _, it := range items {
+		before += it.SizeTokens
+	}
 	start := time.Now()
 
-	reply, err := model.Complete(ctx, extract.BuildAdjudicationPrompt(goal,
-		extract.AdjudicationItem{ID: id, SizeTokens: before, Content: content}))
+	// RAISE THE REPLY BUDGET. A verdict array over a full batch, each entry carrying an obligation
+	// label and a verbatim quote, is long, and `659e7a6` measured what happens when the budget is the
+	// client's default: 24 of 34 replies cut off mid-array, which parses as nothing and is
+	// indistinguishable from a model declining to act. Optional interface, so a client that does not
+	// support it is used as-is rather than refused.
+	if b, ok := model.(components.Budgeter); ok {
+		if m := b.WithMaxTokens(extract.AdjudicationReplyTokens); m != nil {
+			model = m
+		}
+	} else {
+		// Counted, because the alternative is a silent return to the truncation regime on whatever
+		// client shape this is.
+		o.gate("sweep_reply_budget_not_raised")
+	}
+
+	reply, err := model.Complete(ctx, extract.BuildAdjudicationPrompt(goal, items))
 	latency := float64(time.Since(start).Milliseconds())
 	metrics.RecordExtractionCall(latency)
 	_, inTok, outTok := callSink.Totals()
@@ -500,8 +619,7 @@ func (e *ExtractSweep) adjudicate(c *components.Ctx, component string,
 		PromptTokens: inTok, CompletionTokens: outTok,
 		CacheRead: cr, CacheWrite: cw,
 		CostUSD:    pricing.Cost(inTok, outTok, cw, cr),
-		GateReason: gateReason,
-		Before:     content,
+		GateReason: cands[items[0].Label].gateReason,
 	}
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -515,76 +633,124 @@ func (e *ExtractSweep) adjudicate(c *components.Ctx, component string,
 		call.Rejection = "adjudication call failed: " + err.Error()
 		return o, call
 	}
-	o.gate("sweep_adjudicated")
+	for range items {
+		o.gate("sweep_adjudicated")
+	}
 
-	a := extract.Judge(reply, flat)
-	if !a.Parsed {
-		// A reply that opened the object but never closed it ran out of output budget; one that
-		// never opened it is a format failure. The remedies are opposite — raise max_tokens versus
-		// fix the prompt — so they get separate counters rather than one that reads as "the prompt
-		// is wrong".
-		if strings.Contains(reply, "{") && !strings.Contains(reply, "}") {
+	verdicts, parsed := extract.ParseVerdicts(reply)
+	if !parsed {
+		// TRUNCATION IS NOT JUNK, and the two need opposite fixes -- raise the budget versus fix the
+		// prompt -- so one name for both hid a 70%-of-calls failure behind a label that reads as "the
+		// prompt is wrong".
+		if extract.ReplyWasTruncated(reply) {
 			o.gate("sweep_reply_truncated")
 		} else {
 			o.gate("sweep_unparseable")
 		}
+		// LOG A BOUNDED SAMPLE OF THE ACTUAL TEXT. A counter can say THAT a reply was unusable; only
+		// the text says WHY, and six rounds of the predecessor's failures were diagnosed by inferring
+		// a cause from counters with every inference at least partly wrong.
 		if sweepUnusableSamples.Add(1) <= maxSweepUnusableSamples {
 			head := reply
 			if len(head) > 500 {
 				head = head[:500]
 			}
-			slog.Warn("cg.sweep.unusable_reply", "reply_len", len(reply), "head", head)
+			slog.Warn("cg.sweep.unusable_reply", "reply_len", len(reply),
+				"offered", len(items), "head", head)
 		}
-		call.Rejection = "reply did not parse; output kept verbatim"
+		call.Rejection = "reply did not parse; every output kept verbatim"
 		e.ratios.observe(0, before)
 		return o, call
 	}
-	if a.QuoteFabricated {
-		o.gate("sweep_quote_fabricated")
-	}
-	if a.CriterionMissing {
-		o.gate("sweep_criterion_missing")
-	}
-	if a.VerdictUnusable {
-		o.gate("sweep_verdict_unusable")
-	}
-	// The refusal is counted INSTEAD of a keep, not alongside it. Both leave the output verbatim,
-	// but "the model judged this still needed" and "the model tried to remove something it had just
-	// said was needed" are different events, and folding the second into the keep total is what
-	// would make the alertable one invisible in the ratio an operator actually looks at.
-	if a.RefusedObligation {
-		o.gate("sweep_drop_refused_obligation")
+	if len(verdicts) == 0 {
+		// A well-formed EMPTY array: the model read the batch and kept all of it. The contract
+		// explicitly invites that, so it must not be filed as a failure -- that conflation is what
+		// made "the model declined to act" and "the model was never successfully asked" the same
+		// number for three iterations (4ca1f13).
+		o.gate("sweep_kept_whole_batch")
 		e.ratios.observe(0, before)
-		call.Rejection = "drop refused: the verdict named an outstanding obligation"
+		call.Rejection = "adjudicated: keep the whole batch"
 		return o, call
 	}
-	if !a.Drop {
-		o.gate("sweep_kept")
-		// A keep is real evidence about this workload: the adjudicator looked at this output and
-		// judged it still needed. Ratio 0, which is what it removed.
-		e.ratios.observe(0, before)
-		call.Rejection = "adjudicated still needed; kept verbatim"
-		return o, call
+
+	offered := map[int]bool{}
+	for _, it := range items {
+		offered[it.Label] = true
 	}
-	after := schema.TextTokens(sweepDescriptor(content))
-	if after >= before {
-		// The never-worse check also lives in applySweepDrop, marker included. This one is here so
-		// the ratio tracker is not fed a negative saving for a decision phase 3 will refuse.
-		o.gate("sweep_drop_would_not_shrink")
-		return o, call
+	var removed int
+	seen := map[int]bool{}
+	for _, v := range verdicts {
+		if !offered[v.Label] {
+			// A verdict for something this batch did not offer. Never acted on: the label is how a
+			// decision is keyed to an output, so a wrong label is a decision about an unknown
+			// message and acting on it would remove the wrong content.
+			o.gate("sweep_verdict_unknown_label")
+			continue
+		}
+		if seen[v.Label] {
+			o.gate("sweep_verdict_duplicate_label")
+			continue
+		}
+		seen[v.Label] = true
+		content := cands[v.Label].content
+		a := extract.Judge(v, flat)
+		if a.QuoteFabricated {
+			o.gate("sweep_quote_fabricated")
+		}
+		if a.CriterionMissing {
+			o.gate("sweep_criterion_missing")
+		}
+		if a.VerdictUnusable {
+			o.gate("sweep_verdict_unusable")
+		}
+		// The refusal is counted INSTEAD of a keep, not alongside it. Both leave the output verbatim,
+		// but "the model judged this still needed" and "the model tried to remove something it had
+		// just said was needed" are different events, and folding the second into the keep total is
+		// what would make the alertable one invisible in the ratio an operator actually looks at.
+		if a.RefusedObligation {
+			o.gate("sweep_drop_refused_obligation")
+			continue
+		}
+		if !a.Drop {
+			o.gate("sweep_kept")
+			continue
+		}
+		sz := schema.TextTokens(content)
+		after := schema.TextTokens(sweepDescriptor(content))
+		if after >= sz {
+			// The never-worse check also lives in applySweepDrop, marker included. This one is here
+			// so the ratio tracker is not fed a negative saving for a decision phase 3 will refuse.
+			o.gate("sweep_drop_would_not_shrink")
+			continue
+		}
+		o.gate("sweep_dropped")
+		o.drop = append(o.drop, v.Label)
+		removed += sz - after
+		metrics.RecordExtractionSaving(sz - after)
+		metrics.RecordExtractionValue(float64(sz-after) * savedTokenValue(c).perToken)
 	}
-	o.gate("sweep_dropped")
-	o.drop = true
-	call.Accepted = true
-	call.SavedTokens = before - after
-	call.After = sweepDescriptor(content)
-	e.ratios.observe(before-after, before)
-	metrics.RecordExtractionSaving(before - after)
-	metrics.RecordExtractionValue(float64(before-after) * savedTokenValue(c).perToken)
+	// An output this batch offered that no verdict mentioned is UNJUDGED, and it must not look like a
+	// keep: `4ca1f13` found a live arm where the model silently omitted labels and the missing answers
+	// were invisible, so "the batch is starved" and "the model answered for a third of it" were the
+	// same number.
+	for _, it := range items {
+		if !seen[it.Label] {
+			o.gate("sweep_verdict_missing")
+		}
+	}
+	// Feed the observed ratio so the gate prices FUTURE batches on what this workload actually
+	// achieves. Fed once per CALL over the whole batch, which is the unit the gate now prices.
+	e.ratios.observe(removed, before)
+	if removed > 0 {
+		call.Accepted = true
+		call.SavedTokens = removed
+	} else {
+		call.Rejection = "adjudicated: nothing in this batch was spent"
+	}
 	if debugExtractLLM(c) {
-		logging.From(c.Ctx).Debug("cg.sweep.drop", "candidate_tokens", before,
-			"residue_tokens", after, "criterion_missing", a.CriterionMissing,
-			"quote_fabricated", a.QuoteFabricated)
+		logging.From(c.Ctx).Debug("cg.sweep.batch", "offered", len(items),
+			"verdicts", len(verdicts), "dropped", len(o.drop),
+			"candidate_tokens", before, "removed_tokens", removed)
 	}
 	return o, call
 }
