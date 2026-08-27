@@ -1,9 +1,4 @@
-package config
-
-import (
-	"encoding/json"
-	"fmt"
-	"reflect"
+t"
 	"sort"
 	"strings"
 	"testing"
@@ -33,7 +28,7 @@ func TestApplyFormSurvivesDocumentShapesTheOldWriterCorrupted(t *testing.T) {
 	// per-field sweep runs on ONE canonical document below; running it against every
 	// hostile shape too would be ~700 cases for no extra coverage.
 	perturb := map[string]any{
-		"per_output": true, "strategy": "single", "min_tokens": 1234, "model.model": "cg-test-model",
+		"strategy": "single", "min_tokens": 1234, "model.model": "cg-test-model",
 	}
 	for name, doc := range map[string]string{
 		"block sequence pipeline": "mode: sync\npreset: general\npipeline:\n  - format\n  - extract\n",
@@ -51,6 +46,15 @@ func TestApplyFormSurvivesDocumentShapesTheOldWriterCorrupted(t *testing.T) {
 				f.Components = map[string]map[string]any{}
 			}
 			f.Components["extract_llm"] = clone(perturb)
+			// AND IN THE POSTED PIPELINE, which is now the only way to ask for a component.
+			// It used to be inferred from the block's own switches — applyExtractLLMCoupling
+			// inserted the name when per_output or cold_cache.enabled was set — and that
+			// inference went with the cold-sweep split, because a component whose checkbox
+			// means two different things is exactly what the split removed.
+			if !contains(f.Pipeline, "extract_llm") {
+				f.Pipeline = append(f.Pipeline, "extract_llm")
+			}
+			f.PipelineKnown = append([]string(nil), f.Pipeline...)
 			out, err := ApplyForm(doc, f)
 			if err != nil {
 				t.Fatalf("ApplyForm: %v", err)
@@ -80,7 +84,7 @@ func TestApplyFormKeepsAPresetsOtherComponents(t *testing.T) {
 	if len(f.Pipeline) < 2 {
 		t.Fatalf("the preset should resolve to a real pipeline, got %v", f.Pipeline)
 	}
-	f.Components = map[string]map[string]any{"extract_llm": {"per_output": true}}
+	f.Components = map[string]map[string]any{"extract_llm": {"strategy": "code"}}
 	out, err := ApplyForm(doc, f)
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +101,7 @@ func TestApplyFormKeepsAPresetsOtherComponents(t *testing.T) {
 // preserves them for free; the string surgery it replaces had to special-case them, and only
 // did so for one block.
 func TestApplyFormPreservesUnmanagedConfiguration(t *testing.T) {
-	doc := `pipeline: [format, extract_llm, extract]
+	doc := `pipeline: [format, extract_llm, extract_llm_sweep, extract]
 mode: sync
 components:
   extract_llm:
@@ -105,10 +109,8 @@ components:
     marker_mode: summary
     model:
       model: claude-haiku-4-5
-    per_output: true
-    cold_cache:
-      enabled: true
-      min_tokens: 1000
+  extract_llm_sweep:
+    min_tokens: 1000
   extract:
     min_tokens: 400
 store:
@@ -128,34 +130,88 @@ store:
 	}
 }
 
-// Both switches off means the component has nothing to do — its own constructor refuses
-// that combination outright — so it leaves the pipeline rather than costing a pass over
-// every request for nothing. This is the ONE per-component coupling the form has.
-func TestApplyFormRemovesTheComponentWhenBothSwitchesAreOff(t *testing.T) {
-	doc := "pipeline: [format, extract_llm, extract]\ncomponents:\n  extract_llm:\n    per_output: true\nmode: sync\n"
+// THE ONE PER-COMPONENT COUPLING IS GONE. extract_llm used to refuse `per_output: false` with the
+// cold sweep off ("nothing to do"), so the form had to translate two switches into pipeline
+// membership. The sweep is its own component now and extract_llm is unconditionally the warm/tail
+// pass, so both follow the ordinary rule every other component follows: a component is enabled when
+// it is in the pipeline, and unticking it removes it.
+func TestExtractLLMFollowsTheOrdinaryEnabledRule(t *testing.T) {
+	doc := "pipeline: [format, extract_llm, extract]\ncomponents:\n  extract_llm:\n    strategy: code\nmode: sync\n"
 	f := mustParse(t, doc)
-	f.Components["extract_llm"]["per_output"] = false
+	// PRECONDITION: it really is configured in the document we start from, or "it left the
+	// pipeline" is trivially true.
+	if !contains(f.Pipeline, "extract_llm") {
+		t.Fatalf("the fixture does not run extract_llm: %v", f.Pipeline)
+	}
+	f.PipelineKnown = append([]string(nil), f.Pipeline...)
+	f.Pipeline = remove(f.Pipeline, "extract_llm")
 	out, err := ApplyForm(doc, f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out, "extract_llm") {
-		t.Errorf("still configured:\n%s", out)
+		t.Errorf("unticking the component left it configured:\n%s", out)
 	}
+}
+
+// The sweep is an ORDINARY component on the form: it is asked for by being in the posted pipeline,
+// and its own block configures it. Nothing special-cases it, which is the whole point of the split —
+// the form no longer has to know that one component's checkbox meant two different things.
+func TestApplyFormConfiguresTheSweepAsAnOrdinaryComponent(t *testing.T) {
+	doc := "pipeline: [format, extract_llm, extract]\nmode: sync\n"
+	f := mustParse(t, doc)
+	f.Pipeline = []string{"format", "extract_llm", "extract_llm_sweep", "extract"}
+	f.PipelineKnown = append([]string(nil), f.Pipeline...)
+	f.Components = map[string]map[string]any{"extract_llm_sweep": {"min_tokens": 1000}}
+	out, err := ApplyForm(doc, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := mustLoad(t, out).Pipeline
+	iSweep, iExtract := indexOf(got, "extract_llm_sweep"), indexOf(got, "extract")
+	if iSweep < 0 {
+		t.Fatalf("the sweep was not written: %v", got)
+	}
+	// The order the presets use: the model passes first, then the cheap deterministic one, so it
+	// sees whatever they leave.
+	if iExtract >= 0 && iSweep > iExtract {
+		t.Errorf("the sweep runs after the deterministic extract: %v", got)
+	}
+	if !strings.Contains(out, "min_tokens: 1000") {
+		t.Errorf("the sweep's own floor was not written:\n%s", out)
+	}
+	// And a compaction-only key must be refused, naming the reason — the form must not be able to
+	// write a document the component rejects.
+	bad := mustParse(t, doc)
+	bad.Pipeline = f.Pipeline
+	bad.PipelineKnown = f.PipelineKnown
+	bad.Components = map[string]map[string]any{"extract_llm_sweep": {"aggressiveness": "high"}}
+	if _, err := ApplyForm(doc, bad); err == nil {
+		t.Error("the form wrote a compaction knob into the adjudicator's block")
+	}
+}
+
+func indexOf(xs []string, want string) int {
+	for i, x := range xs {
+		if x == want {
+			return i
+		}
+	}
+	return -1
 }
 
 // Enum typos and out-of-range numbers are a 400 naming the field, not a silently ignored
 // key. Per-component blocks are strict now, so a bad value would refuse the whole document
 // on the next build — which is a worse place to find out than the save that caused it.
 func TestApplyFormRejectsValuesTheComponentWouldRefuse(t *testing.T) {
-	base := "pipeline: [format, extract_llm]\nmode: sync\ncomponents:\n  extract_llm:\n    per_output: true\n"
+	base := "pipeline: [format, extract_llm]\nmode: sync\ncomponents:\n  extract_llm:\n    strategy: code\n"
 	for name, mangle := range map[string]func(*Form){
 		"enum":              func(f *Form) { f.Components["extract_llm"]["aggressiveness"] = "aggressive" },
 		"enum, other field": func(f *Form) { f.Components["extract_llm"]["context"] = "last_n" },
 		"mode":              func(f *Form) { f.Mode = "syncc" },
 		"negative cap":      func(f *Form) { f.Components["extract_llm"]["llm_max_per_session"] = -1 },
 		"zero threshold":    func(f *Form) { f.Components["extract_llm"]["min_tokens"] = 0 },
-		"wrong type":        func(f *Form) { f.Components["extract_llm"]["per_output"] = "yes" },
+		"wrong type":        func(f *Form) { f.Components["extract_llm"]["economic_gate"] = "yes" },
 		"undeclared key":    func(f *Form) { f.Components["extract_llm"]["min_tokns"] = 5000 },
 		"unknown component": func(f *Form) { f.Components["no_such_component"] = map[string]any{} },
 	} {
@@ -213,7 +269,7 @@ func TestBarePresetDoesNotReadAsSwitchedOff(t *testing.T) {
 // "no cap" (R3). Only keys the document really states are on the form.
 func TestAZeroCapIsDisplayedAndPreserved(t *testing.T) {
 	doc := "pipeline: [format, extract_llm]\nmode: sync\ncomponents:\n  extract_llm:\n" +
-		"    per_output: true\n    llm_max_per_session: 0\n    llm_max_per_request: 0\n"
+		"    strategy: code\n    llm_max_per_session: 0\n    llm_max_per_request: 0\n"
 	f := mustParse(t, doc)
 	if f.Components["extract_llm"]["llm_max_per_session"] != 0 ||
 		f.Components["extract_llm"]["llm_max_per_request"] != 0 {
@@ -307,11 +363,6 @@ const osherDoc = `components:
     min_tokens: 400
   extract_llm:
     aggressiveness: medium
-    cold_cache:
-      enabled: true
-      min_tokens: 1000
-      min_idle_seconds: 120
-      max_calls: 6
     context: recent
     context_messages: 7
     fire_on: pressure
@@ -321,10 +372,15 @@ const osherDoc = `components:
     min_tokens: 1000
     model:
       source: config
-    per_output: true
     strategy: code
     trigger:
       min_request_tokens: 3000
+  extract_llm_sweep:
+    max_calls: 6
+    min_idle_seconds: 120
+    min_tokens: 1000
+    model:
+      source: config
 mode: sync
 pipeline:
   - format
@@ -333,6 +389,7 @@ pipeline:
   - failed_run
   - cmdfilter
   - extract_llm
+  - extract_llm_sweep
   - extract
   - cachesplit
 store:
@@ -353,11 +410,10 @@ func TestTheFormShowsWhyARealAccountsExtractLLMWasInert(t *testing.T) {
 		t.Error("allow_on_caching_backend is absent in the document, so the form must show it as unset (default FALSE), not as a value")
 	}
 	for key, want := range map[string]any{
-		"per_output": true, "cold_cache.enabled": true, "fire_on": "pressure",
+		"fire_on":    "pressure",
 		"min_tokens": 1000, "llm_max_per_request": 20, "llm_max_per_session": 80,
 		"llm_every_n_requests": 1, "trigger.min_request_tokens": 3000, "strategy": "code",
 		"aggressiveness": "medium", "context": "recent", "context_messages": 7,
-		"cold_cache.min_tokens": 1000, "cold_cache.min_idle_seconds": 120, "cold_cache.max_calls": 6,
 	} {
 		if x[key] != want {
 			t.Errorf("%s: got %v, want %v", key, x[key], want)
@@ -371,18 +427,15 @@ func TestTheFormShowsWhyARealAccountsExtractLLMWasInert(t *testing.T) {
 
 // canonicalDoc runs EVERY registered component, so the sweep below can perturb every
 // declared field of every component and still be exercising a document the proxy builds.
-// cold_cache.enabled is on because per_output: false with the sweep off is a combination the
-// component refuses — the one coupling the form has.
+// No seeded block any more: extract_llm's "both switches off is refused" coupling went with the
+// cold-sweep split, so every component now builds from an empty block.
 func canonicalDoc(t *testing.T) string {
 	t.Helper()
 	names := components.Names()
 	m := map[string]any{
 		"mode":     "sync",
 		"pipeline": names,
-		"components": map[string]any{
-			"extract_llm": map[string]any{"cold_cache": map[string]any{"enabled": true}},
-		},
-		"store": map[string]any{"ttl_seconds": 900},
+		"store":    map[string]any{"ttl_seconds": 900},
 	}
 	b, err := yaml.Marshal(m)
 	if err != nil {
@@ -612,13 +665,6 @@ func TestSwitchingAComponentOffClearsItsDeclaredKeysAndNothingElse(t *testing.T)
 			off := mustParse(t, configured)
 			off.PipelineKnown = append([]string(nil), off.Pipeline...)
 			off.Pipeline = remove(off.Pipeline, name)
-			if name == "extract_llm" {
-				// The one component with a coupling: it is switched off by its two
-				// switches, and the pipeline follows from them (see
-				// applyExtractLLMCoupling), not the other way round.
-				off.Components[name]["per_output"] = false
-				off.Components[name]["cold_cache.enabled"] = false
-			}
 			out, err := ApplyForm(configured, off)
 			if err != nil {
 				t.Fatalf("switch-off failed: %v", err)
@@ -651,7 +697,7 @@ func TestSwitchingAComponentOffClearsItsDeclaredKeysAndNothingElse(t *testing.T)
 // into one that makes model calls.
 func TestAStoredStrategyTheFormDoesNotOfferIsNeverRewritten(t *testing.T) {
 	doc := "pipeline: [extract_llm]\nmode: sync\ncomponents:\n  extract_llm:\n" +
-		"    per_output: true\n    strategy: deterministic\n"
+		"    strategy: deterministic\n"
 	f := mustParse(t, doc)
 	if got := f.Components["extract_llm"]["strategy"]; got != "deterministic" {
 		t.Fatalf("the form read strategy %q, not the stored deterministic", got)
@@ -717,7 +763,7 @@ func TestTheColdCacheKeysSurviveASaveThatDoesNotMentionThem(t *testing.T) {
 func TestAStoredCredentialIsNeverEchoedAndNeverLost(t *testing.T) {
 	const secret = "sk-do-not-echo-me"
 	doc := "pipeline: [extract_llm]\nmode: sync\ncomponents:\n  extract_llm:\n" +
-		"    per_output: true\n    model:\n      model: claude-haiku-4-5\n      api_key: " + secret + "\n"
+		"    strategy: code\n    model:\n      model: claude-haiku-4-5\n      api_key: " + secret + "\n"
 	f := mustParse(t, doc)
 	if _, ok := f.Components["extract_llm"]["model.api_key"]; ok {
 		t.Error("the parsed form carries the stored api_key")

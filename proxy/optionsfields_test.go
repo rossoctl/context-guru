@@ -100,8 +100,33 @@ func TestOptionsServesTheFieldContractTheSettingsPageDraws(t *testing.T) {
 	if x["llm_max_per_session"].Min != 0 {
 		t.Error("llm_max_per_session must accept 0 — the component reads it as unlimited")
 	}
-	if x["cold_cache.min_tokens"].Type != components.FieldInt {
+	// A nested key must be served as ONE dotted field, which is the whole point of the path. It
+	// used to be asserted on cold_cache.min_tokens; the cold sweep is its own component now, so it
+	// is asserted on the same nesting that remains on this one.
+	if x["trigger.min_request_tokens"].Type != components.FieldInt {
 		t.Error("a nested key is not served as one dotted field, which is the whole point of the path")
+	}
+	// And the sweep's own fields must reach the page at all, or the split moved a component out of
+	// the operator's reach rather than out of extract_llm.
+	sweep := map[string]string{}
+	for _, fd := range got.ComponentFields["extract_llm_sweep"] {
+		sweep[fd.Key] = fd.Type
+	}
+	if len(sweep) == 0 {
+		t.Fatalf("extract_llm_sweep serves no fields, so the settings page cannot configure it")
+	}
+	if sweep["min_tokens"] != components.FieldInt {
+		t.Error("the sweep's own floor is not on the page, and it is the knob that decides whether it fires")
+	}
+	if sweep["model.model"] != components.FieldString {
+		t.Error("the sweep's nested model key is not served as one dotted field")
+	}
+	// The compaction knobs must NOT be there: the component refuses them, so a field would put a
+	// control on the page whose only behaviour is to fail the save.
+	for _, banned := range []string{"strategy", "aggressiveness", "rewrite", "max_chars"} {
+		if _, present := sweep[banned]; present {
+			t.Errorf("extract_llm_sweep declares %q, which its constructor rejects", banned)
+		}
 	}
 	// The recommended prefill is a separate layer from a component's own defaults, served
 	// so the page does not carry a second copy of the policy.

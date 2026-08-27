@@ -196,24 +196,26 @@ func TestGlobalCacheHitIsNotSplicedAtDepth(t *testing.T) {
 	}
 }
 
-// housellmExtractLLM returns the extract_llm block EXACTLY as the housellm preset ships it,
-// so the guard above tests the shipped configuration instead of a transcription of it.
-func housellmExtractLLM(t *testing.T) string {
+// housellmBlock returns one component's block EXACTLY as the housellm preset ships it, so the
+// guards here test the shipped configuration instead of a transcription of it.
+func housellmBlock(t *testing.T, name string) string {
 	t.Helper()
 	cfg, err := config.LoadBytes([]byte("preset: housellm\n"))
 	if err != nil {
 		t.Fatalf("load housellm preset: %v", err)
 	}
-	node, ok := cfg.Components["extract_llm"]
+	node, ok := cfg.Components[name]
 	if !ok {
-		t.Fatal("housellm preset no longer configures extract_llm; this guard is testing nothing")
+		t.Fatalf("housellm preset no longer configures %s; this guard is testing nothing", name)
 	}
 	raw, err := yaml.Marshal(&node)
 	if err != nil {
-		t.Fatalf("marshal extract_llm block: %v", err)
+		t.Fatalf("marshal %s block: %v", name, err)
 	}
 	return string(raw)
 }
+
+func housellmExtractLLM(t *testing.T) string { return housellmBlock(t, "extract_llm") }
 
 // TestHousellmColdSweepActuallyFires is the other half of
 // TestDefaultConfigsSpendOnlyOnTheUncachedTail replaces
@@ -298,19 +300,22 @@ func TestDefaultConfigsSpendOnlyOnTheUncachedTail(t *testing.T) {
 // TestNoDefaultConfigRunsExtractLLMOnCachingBackend, and it exists because the preset
 // shipped for a day in a state where BOTH halves were silent.
 //
-// Every extraction call this service has ever made was a cold one, so cold_cache.min_tokens
-// is the single knob deciding whether extract_llm does anything at all. It was 3000, and at
-// 3000 production recorded `below_output_floor` on all 36 sweeping turns and zero
-// extractions across 3,437 requests — the component was configured into a no-op while
-// looking fully enabled. A candidate of ~1,500 tokens is the size that regression turned
-// away, so that is what this asserts on: the preset, not a copy of it, must call the model
-// on a cold turn.
+// Every extraction call this service has ever made was a cold one, so the sweep's min_tokens is
+// the single knob deciding whether the compaction-model pass does anything at all. It was 3000,
+// and at 3000 production recorded `below_output_floor` on all 36 sweeping turns and zero
+// extractions across 3,437 requests — the component was configured into a no-op while looking
+// fully enabled. A candidate of ~1,500 tokens is the size that regression turned away, so that is
+// what this asserts on: the preset, not a copy of it, must call the model on a cold turn.
 //
-// Raising the preset's cold floor above ~1,500 fails this; re-adding
-// allow_on_caching_backend fails the warm guard above. The pair pins the economics from
-// both sides.
+// It reads the extract_llm_sweep block now. The sweep left extract_llm, and if this guard had
+// stayed pointed at the old component it would have kept passing against a component that no
+// longer sweeps — which is precisely the "configured into a no-op while looking enabled" failure
+// it exists to catch, one level up.
+//
+// Raising the preset's sweep floor above ~1,500 fails this; re-adding allow_on_caching_backend
+// fails the warm guard above. The pair pins the economics from both sides.
 func TestHousellmColdSweepActuallyFires(t *testing.T) {
-	off := newComp(t, "extract_llm", housellmExtractLLM(t))
+	off := newComp(t, "extract_llm_sweep", housellmBlock(t, "extract_llm_sweep"))
 	// ~1,500 tokens of the noise the sweep is meant to reduce, with a filterable shape.
 	body := `[`
 	for i := 0; i < 120; i++ {
@@ -320,7 +325,9 @@ func TestHousellmColdSweepActuallyFires(t *testing.T) {
 		body += `{"id":` + strconv.Itoa(i) + `,"name":"record ` + strings.Repeat("payload ", 6) + `"}`
 	}
 	body += `]`
-	cm := &countingModel{resp: "data = json.decode(INPUT)\nOUTPUT = json.encode(data[:2])\n"}
+	// A VERDICT, not a program: the sweep adjudicates rather than compacts. Label 0 is the only
+	// candidate this transcript offers.
+	cm := &countingModel{resp: `[{"i":0,"needed_by":"none","quote":"","verdict":"drop"}]`}
 	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
 		userMsg("summarize the records"), toolMsg(body),
 	}}
@@ -337,6 +344,12 @@ func TestHousellmColdSweepActuallyFires(t *testing.T) {
 	if cm.calls == 0 {
 		t.Fatalf("the housellm preset made NO model call on a cold turn with a ~1.5k-token "+
 			"candidate — the component is configured into a no-op. gates=%v", rep.Gates)
+	}
+	// AND IT ACTED ON THE VERDICT. A call that adjudicates and then removes nothing is the same
+	// no-op from the operator's side, and it is what a floor regression one layer down would look
+	// like.
+	if rep.Gates["sweep_dropped"] == 0 {
+		t.Fatalf("the sweep called the model and removed nothing. gates=%v", rep.Gates)
 	}
 }
 

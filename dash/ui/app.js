@@ -5973,10 +5973,13 @@ function fieldText(fd, v) {
   return fd.type === 'strings' ? (Array.isArray(v) ? v.join(', ') : String(v || '')) : String(v);
 }
 
-/** XLLM_SWITCHES are the two passes extract_llm can do. Its constructor REFUSES both off
- *  ("nothing to do"), so the form must not be able to post that combination — see
- *  config.applyExtractLLMCoupling, which takes the component out of the pipeline instead. */
-const XLLM_SWITCHES = ['per_output', 'cold_cache.enabled'];
+/* extract_llm used to have TWO passes behind two switches (per_output and
+ * cold_cache.enabled) and a constructor that refused both off, so this file carried a
+ * special case that flipped one back on. THE COLD SWEEP IS ITS OWN COMPONENT NOW
+ * (extract_llm_sweep), extract_llm is unconditionally the warm/tail pass, and both follow
+ * the ordinary rule: a component runs when it is ticked in Pipeline components. The special
+ * case is gone with the thing it worked around — a checkbox that meant two different things
+ * is exactly what the split removed. */
 
 /**
  * renderComponentFields draws ONE component's whole configuration from the descriptors the
@@ -6018,7 +6021,6 @@ function renderComponentFields(name, fields, values, disabled, ctx) {
   // The one place a combination is refused client-side, and it is refused because the
   // component's constructor refuses it. Rather than redraw, the sibling switch is flipped
   // in place and the note says what happened and what to do instead.
-  const boxes = {};
   const note = el('p', { class: 'hint warn-text', role: 'status', 'data-testid': 'cfg-note-' + name });
   const effective = (key) => {
     const fd = fields.find((f) => f.key === key);
@@ -6031,18 +6033,9 @@ function renderComponentFields(name, fields, values, disabled, ctx) {
     // it alone still posts nothing, so an untouched form adds no key.
     cb.checked = !!(stated(fd.key) ? values[fd.key] : fieldDefault(fd));
     cb.disabled = disabled;
-    boxes[fd.key] = cb;
     cb.addEventListener('change', () => {
       set(fd.key, cb.checked);
       note.textContent = '';
-      if (name !== 'extract_llm' || !XLLM_SWITCHES.includes(fd.key) || cb.checked) return;
-      if (XLLM_SWITCHES.some((k) => effective(k))) return;
-      const other = XLLM_SWITCHES.find((k) => k !== fd.key);
-      set(other, true);
-      if (boxes[other]) boxes[other].checked = true;
-      note.textContent = 'extract_llm with both passes off is a component with nothing to '
-        + 'do — its own constructor refuses that, so ' + other + ' was switched back on. To '
-        + 'stop it running at all, untick extract_llm in Pipeline components above.';
     });
     return el('div', { class: 'field cfg-field' },
       el('label', { class: 'comp', for: tid(fd.key) }, cb, el('span', { class: 'comp-name' }, fd.key)),

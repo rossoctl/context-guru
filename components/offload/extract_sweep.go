@@ -297,6 +297,33 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 
 	inputLimit := e.inputLimit(c)
 	promptOverhead := extractPromptOverheadTokens + schema.TextTokens(goal)
+	// MODEL ESCALATION. A batched adjudication ships the contract, the conversation context and up
+	// to twelve outputs, so the prompt's FIXED part alone can exceed a small adjudication model's
+	// window — and then fitsModelContext correctly declines every candidate and the sweep silently
+	// does nothing on exactly the largest, most expensive transcripts. When that happens, fall back
+	// to the model the AGENT is using: it demonstrably holds this conversation, since it is about to
+	// be sent the same one.
+	//
+	// Moved here from extract_llm, where it was already guarded on `sweeping` and became unreachable
+	// when the sweep left. It belongs here and matters MORE here, because a batch's fixed cost is
+	// larger than a single output's.
+	escalated := false
+	if sweeping && model != nil && !fitsModelContext(0, promptOverhead, inputLimit) {
+		if inc := c.Model.For("incoming"); inc != nil && c.CtxWindow > inputLimit {
+			model, inputLimit, escalated = inc, c.CtxWindow, true
+			// The call now goes to a DIFFERENT model, so the two things derived from which model it
+			// is must be re-derived. Leaving them recorded an escalated call under the pinned cheap
+			// model's id and priced it at its rates — the ~3x understatement the pricing block
+			// exists to remove, reintroduced on the most expensive calls the component makes.
+			if !c.SelfRates.Zero() {
+				pricing = ratesPricing(c.SelfRates)
+			}
+			if c.ModelName != "" {
+				callModel = c.ModelName
+			}
+			rep.Gate("sweep_escalated_to_agent_model")
+		}
+	}
 	goalOverhead := promptOverheadTokens + schema.TextTokens(goal)
 	val := savedTokenValue(c)
 	ratio := e.ratios.ratio()
@@ -490,7 +517,7 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 					})
 				}
 				out[bi], calls[bi] = e.adjudicateBatch(c, rep.Component, items, cands,
-					goal, flat, model, pricing, callModel)
+					goal, flat, model, pricing, callModel, escalated)
 			}(bi)
 		}
 		wg.Wait()
@@ -570,7 +597,8 @@ func (o *sweepOutcome) gate(name string) { o.gates = append(o.gates, name) }
 // them symmetrically.
 func (e *ExtractSweep) adjudicateBatch(c *components.Ctx, component string,
 	items []extract.AdjudicationItem, cands []sweepCand, goal, flat string,
-	model components.Model, pricing cheapmodel.Pricing, callModel string) (sweepOutcome, components.ModelCall) {
+	model components.Model, pricing cheapmodel.Pricing, callModel string,
+	escalated bool) (sweepOutcome, components.ModelCall) {
 
 	var o sweepOutcome
 	// A SINGLE-ITEM BATCH IS THE REFUTED DESIGN WEARING THE NEW NAME, so it is counted rather than
@@ -615,7 +643,7 @@ func (e *ExtractSweep) adjudicateBatch(c *components.Ctx, component string,
 	cw, cr := callSink.CacheTotals()
 	call := components.ModelCall{
 		Component: component, Model: callModel, Strategy: "adjudicate",
-		Cold: true, CandidateTokens: before, LatencyMs: latency,
+		Cold: true, Escalated: escalated, CandidateTokens: before, LatencyMs: latency,
 		PromptTokens: inTok, CompletionTokens: outTok,
 		CacheRead: cr, CacheWrite: cw,
 		CostUSD:    pricing.Cost(inTok, outTok, cw, cr),

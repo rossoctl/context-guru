@@ -643,14 +643,18 @@ mode: sync
 ```
 
 **`housellm`** is the same pipeline with `extract_llm` inserted before `extract`, applied
-per account on request. It calls a cheap model (`claude-haiku-4-5`, on the caller's own
-credential and endpoint) when the economic gate says the expected saving beats the priced
-cost of the call — and **only on a turn whose prompt cache has expired**, never on
-prompt-cached traffic. That is what `per_output: false` means, and it is the brake: a cold
-turn is about to re-bill its whole transcript at the write rate, so a token removed there is
-the most valuable one there is. On warm turns the same removal is worth a tenth as much and
-the component stays out of the way. It is offered by name rather than turned on for everyone because those calls
-spend the caller's money.
+per account on request, plus `extract_llm_sweep` after it. Both call a cheap model
+(`claude-haiku-4-5`, on the caller's own credential and endpoint) when the economic gate says the
+expected saving beats the priced cost of the call.
+
+They divide the turn between them. `extract_llm` reduces individual tool outputs in the **uncached
+tail**, where a removed token is being written into the cache at 1.25x fresh. `extract_llm_sweep`
+runs **only on a turn whose prompt cache has expired** and adjudicates **at depth** — it asks the
+model, a batch of outputs at a time, which are spent, and removes those rather than rewriting them.
+A cold turn is about to re-bill its whole transcript at the write rate, so a token removed there is
+the most valuable one there is; on warm turns depth is untouchable, because rewriting it would
+invalidate a live cached prefix. Both are offered by name rather than turned on for everyone,
+because those calls spend the caller's money.
 
 **Changed 2026-08-23:** `searchfold` and `toolfilter` joined the default, and `dedup` moved
 ahead of `toon`. `toolfilter` ships with an empty removal list, so it is a no-op until an
@@ -786,13 +790,15 @@ else's account through the account editor — the settings page itself has no YA
 more, see below:
 
 ```yaml
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm_sweep, extract, cachesplit, toolfilter]
 components:
-  extract_llm:
-    per_output: false
-    cold_cache:
-      enabled: true
-      min_tokens: 1000
+  extract_llm_sweep:
+    min_tokens: 1000
 ```
+
+The cold sweep is its own component, so asking for it means naming it in the pipeline — there is no
+`enabled` key. Leaving `extract_llm` out is how you get the sweep *without* the warm/tail pass, which
+is what `per_output: false` used to mean.
 
 **Then check what it did**, before turning on anything else. Requests tab → open a request →
 **Compaction model calls**: one row per call with its cost, its saving, its latency, whether

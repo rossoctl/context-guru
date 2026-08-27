@@ -607,10 +607,11 @@ func TestSettingsFieldsSaveOverABlockSequencePipeline(t *testing.T) {
 	// Now save through the fields, turning the compaction model on.
 	// The wire shape is components{name{dotted key: value}} — the same keys the YAML
 	// document uses, so the page cannot post a field name the server does not read.
-	body := `{"config":{"pipeline":["format","extract"],"mode":"sync","components":{"extract_llm":` +
-		`{"per_output":true,"fire_on":"pressure","min_tokens":2000,` +
+	body := `{"config":{"pipeline":["format","extract_llm","extract_llm_sweep","extract"],"mode":"sync",` +
+		`"components":{"extract_llm":` +
+		`{"fire_on":"pressure","min_tokens":2000,` +
 		`"llm_max_per_request":2,"llm_max_per_session":20,"aggressiveness":"medium","context":"recent",` +
-		`"context_messages":7,"cold_cache.enabled":true,"cold_cache.min_tokens":1000}}}}`
+		`"context_messages":7},"extract_llm_sweep":{"min_tokens":1000}}}}`
 	w, out = f.do(t, "PUT", "/api/me", body, jar)
 	if w.Code != http.StatusOK {
 		t.Fatalf("field save = %d %s", w.Code, w.Body)
@@ -619,16 +620,22 @@ func TestSettingsFieldsSaveOverABlockSequencePipeline(t *testing.T) {
 	eff, _ = tn["effective_config"].(map[string]any)
 	comps, _ := eff["components"].(map[string]any)
 	x, _ := comps["extract_llm"].(map[string]any)
-	if x == nil || x["per_output"] != true || x["cold_cache.enabled"] != true {
-		t.Errorf("the switches did not stick: %v", eff)
+	if x == nil || x["min_tokens"] != float64(2000) {
+		t.Errorf("the compaction settings did not stick: %v", eff)
 	}
-	if !strings.Contains(fmt.Sprint(eff["pipeline"]), "extract_llm") {
-		t.Errorf("the component is configured but not in the pipeline: %v", eff["pipeline"])
+	// The sweep is a component of its own now, with its own block and its own floor.
+	if sw, _ := comps["extract_llm_sweep"].(map[string]any); sw == nil || sw["min_tokens"] != float64(1000) {
+		t.Errorf("the sweep's own block did not stick: %v", eff)
+	}
+	for _, want := range []string{"extract_llm", "extract_llm_sweep"} {
+		if !strings.Contains(fmt.Sprint(eff["pipeline"]), want) {
+			t.Errorf("%s is configured but not in the pipeline: %v", want, eff["pipeline"])
+		}
 	}
 
 	// A bad value is a 400 naming the field, not a key the component silently ignores.
 	w, out = f.do(t, "PUT", "/api/me",
-		`{"config":{"mode":"sync","components":{"extract_llm":{"per_output":true,"aggressiveness":"very","context":"recent"}}}}`, jar)
+		`{"config":{"mode":"sync","components":{"extract_llm":{"aggressiveness":"very","context":"recent"}}}}`, jar)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("a bad aggressiveness = %d, want 400", w.Code)
 	}
@@ -660,11 +667,13 @@ func TestTheFieldsThatDecideWhetherExtractLLMRunsAtAllRoundTrip(t *testing.T) {
 	w, _ := f.signUp(t, "boss@ibm.com", "l")
 	jar := w.Result().Cookies()
 
-	body := `{"config":{"pipeline":["format"],"mode":"sync","components":{"extract_llm":{"per_output":true,` +
-		`"cold_cache.enabled":true,"min_tokens":2000,"llm_max_per_request":2,"llm_max_per_session":20,` +
-		`"aggressiveness":"medium","context":"recent","context_messages":7,"cold_cache.min_tokens":1000,` +
+	body := `{"config":{"pipeline":["format","extract_llm","extract_llm_sweep"],"mode":"sync",` +
+		`"components":{"extract_llm":{` +
+		`"min_tokens":2000,"llm_max_per_request":2,"llm_max_per_session":20,` +
+		`"aggressiveness":"medium","context":"recent","context_messages":7,` +
 		`"allow_on_caching_backend":true,"model.source":"incoming","strategy":"code",` +
-		`"llm_every_n_requests":1,"trigger.min_request_tokens":3000}}}}`
+		`"llm_every_n_requests":1,"trigger.min_request_tokens":3000},` +
+		`"extract_llm_sweep":{"min_tokens":1000,"model.source":"incoming"}}}}`
 	w, out := f.do(t, "PUT", "/api/me", body, jar)
 	if w.Code != http.StatusOK {
 		t.Fatalf("field save = %d %s", w.Code, w.Body)

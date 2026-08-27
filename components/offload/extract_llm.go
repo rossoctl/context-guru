@@ -140,8 +140,6 @@ type ExtractLLM struct {
 	ctxMode     contextMode
 	ctxMessages int
 	maxChars    int
-	perOutput   bool
-	cold        coldCacheConfig
 
 	// minTokensSet records whether the operator pinned min_tokens / trigger explicitly.
 	// When they did, their threshold governs (backward compatibility). When they did not,
@@ -293,48 +291,6 @@ func fitsModelContext(bodyTok, overheadTok, limit int) bool {
 	return est+cheapExtractOutputTokens+cheapExtractSlack <= limit
 }
 
-// coldCacheConfig is the whole-transcript sweep.
-//
-// Why it exists, and why it is not just "extraction with a bigger budget": on a turn whose
-// prompt cache has expired, the provider re-bills the ENTIRE transcript as cache creation
-// at 1.25x the fresh rate. Measured on this deployment over 1.4 days, those turns were 4%
-// of requests and 31% of spend ($360 of $1,173, ~$1.64 per turn against $0.144 warm), and
-// the shipped pipeline saved 0.015% of it. Two things are true only on that turn: removing
-// a token is worth 12.5x what it is worth on a warm turn, and rewriting deep history is
-// free because there is no live cached prefix left to invalidate. So the sweep is not
-// aggression, it is taking the one window where the arithmetic is overwhelmingly in favour.
-type coldCacheConfig struct {
-	Enabled bool `yaml:"enabled"`
-	// MinTokens is the per-output floor for the sweep (0 = 1000). Lower than the hot path's,
-	// because on this turn every candidate is being re-billed at the write rate anyway.
-	MinTokens int `yaml:"min_tokens"`
-	// MinIdleSeconds demands MORE idle time than the provider TTL implies (0 = just the
-	// TTL). Raises the bar, never lowers it: the TTL check is the correctness condition and
-	// this is only extra caution.
-	MinIdleSeconds int `yaml:"min_idle_seconds"`
-	// MaxCalls caps model calls for one sweep (0 = defaultColdMaxCalls; -1 = unlimited).
-	//
-	// It used to default to unlimited, on the reasoning that a sweep runs once per idle gap
-	// on a turn that is already expensive. MEASURED, that reasoning was wrong in the way
-	// unbounded spend paths usually are: one production request made 27 calls against a
-	// tenant whose llm_max_per_request was 2, spent $0.229 and added 76.6 s to a turn whose
-	// upstream took 33.5 s — context-guru was 2.3x slower than the model it was saving money
-	// on. The sweep deliberately does not draw on the hot path's caps (see the comment at the
-	// cap site), so this is the ONLY brake it has, and an unbounded default meant it had none.
-	// One concurrency round is the natural bound: past it the calls serialize and the latency
-	// grows multiplicatively for a linear gain.
-	MaxCalls int `yaml:"max_calls"`
-}
-
-// defaultColdFloor is the sweep's per-output floor when none is configured.
-const defaultColdFloor = 1000
-
-// defaultColdMaxCalls bounds one sweep when the operator names no cap. It is llmConcurrency
-// so a sweep costs ONE round of calls: the (k+1)th call cannot start until one of the first k
-// returns, and at a 7.1 s median that is where a sweep starts costing more wall clock than
-// the turn it is shortening.
-const defaultColdMaxCalls = llmConcurrency
-
 type extractLLMConfig struct {
 	MinTokens    int    `yaml:"min_tokens"`
 	Strategy     string `yaml:"strategy"`             // code (default) | single | rlm | auto
@@ -355,13 +311,6 @@ type extractLLMConfig struct {
 	// is why the only brakes left are MinTokens, LLMMaxPerReq and LLMMaxPerSess. Set
 	// those before setting this.
 	FireOn string `yaml:"fire_on"`
-	// PerOutput enables the HOT-PATH pass: reduce individual tool outputs as they arrive.
-	// Unset = true (today's behaviour). Set false to run only the cold-cache sweep below,
-	// which is a different economic proposition and deserves its own switch.
-	PerOutput *bool `yaml:"per_output"`
-	// ColdCache configures the whole-transcript sweep on a turn whose prompt cache has
-	// expired. Off by default.
-	ColdCache coldCacheConfig `yaml:"cold_cache"`
 	// Context selects how much conversation the extraction prompt carries:
 	// goal | recent (default) | full. See contextMode.
 	Context string `yaml:"context"`
@@ -422,6 +371,21 @@ type extractLLMConfig struct {
 	SkipFileReads *bool `yaml:"skip_file_reads"`
 }
 
+// movedToSweep names the keys the cold-sweep split took out of this component, and where each one
+// went. They are refused rather than ignored: `cold_cache: {enabled: true}` silently accepted would
+// read as "the sweep is on" while nothing swept, which is the most expensive possible misreading of
+// this config — the sweep exists for the turns that are 4% of requests and 31% of spend.
+var movedToSweep = []struct {
+	key, why string
+}{
+	{"per_output", "this component now IS the warm/tail pass, so there is nothing to switch off; " +
+		"remove the key. The cold sweep is a separate component in the pipeline"},
+	{"cold_cache", "the whole-transcript sweep is now the `extract_llm_sweep` component. " +
+		"cold_cache.min_tokens becomes its min_tokens, cold_cache.min_idle_seconds its " +
+		"min_idle_seconds, and cold_cache.max_calls its max_calls (which now bounds BATCH calls); " +
+		"cold_cache.enabled becomes the component's presence in the pipeline"},
+}
+
 func newExtractLLM(raw []byte) (components.Component, error) {
 	cfg := extractLLMConfig{MinTokens: 300, Strategy: "code"}
 	// Detect whether the operator pinned a threshold BEFORE defaults are applied: the
@@ -440,6 +404,21 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 			explicit = probe.MinTokens != nil ||
 				(probe.Trigger != nil &&
 					(probe.Trigger.MinRequestTokens != nil || probe.Trigger.MinOutputTokens != nil))
+		}
+	}
+	// KEYS THAT MOVED TO extract_llm_sweep, refused BEFORE components.Decode's KnownFields
+	// rejects them with a generic yaml message. Breaking existing configs is deliberate — there is
+	// one deployment and it is migrated by hand — but a removed key must say where it went, or the
+	// operator reads "field not found" and concludes the key was a typo rather than relocated.
+	if len(raw) > 0 {
+		var probe map[string]yaml.Node
+		if err := yaml.Unmarshal(raw, &probe); err == nil {
+			for _, m := range movedToSweep {
+				if _, present := probe[m.key]; present {
+					return nil, fmt.Errorf("extract_llm: %s has moved to the extract_llm_sweep "+
+						"component: %s", m.key, m.why)
+				}
+			}
 		}
 	}
 	if err := components.Decode(raw, &cfg); err != nil {
@@ -463,23 +442,6 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	ctxMode, err := parseContextMode(cfg.Context)
 	if err != nil {
 		return nil, fmt.Errorf("extract_llm: %w", err)
-	}
-	perOutput := true
-	if cfg.PerOutput != nil {
-		perOutput = *cfg.PerOutput
-	}
-	if cfg.ColdCache.MinTokens <= 0 {
-		cfg.ColdCache.MinTokens = defaultColdFloor
-	}
-	switch {
-	case cfg.ColdCache.MaxCalls == 0:
-		cfg.ColdCache.MaxCalls = defaultColdMaxCalls
-	case cfg.ColdCache.MaxCalls < 0:
-		cfg.ColdCache.MaxCalls = 0 // an explicit opt-out of the bound
-	}
-	if !perOutput && !cfg.ColdCache.Enabled {
-		return nil, fmt.Errorf("extract_llm: per_output: false with cold_cache disabled " +
-			"leaves the component with nothing to do; remove it from the pipeline instead")
 	}
 	fireOnSize := false
 	switch cfg.FireOn {
@@ -511,7 +473,6 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 		llmEveryN: cfg.LLMEveryN, llmMaxPerReq: cfg.LLMMaxPerReq,
 		llmMaxPerSess: cfg.LLMMaxPerSess, fireOnSize: fireOnSize, aggro: aggro,
 		ctxMode: ctxMode, ctxMessages: cfg.ContextMessages, maxChars: cfg.MaxChars,
-		perOutput: perOutput, cold: cfg.ColdCache,
 		skipFileReads: cfg.SkipFileReads, llmSeen: map[string]int{},
 		llmSpent:     map[string]int{},
 		minTokensSet: explicit, gate: gate, allowCached: allowCached,
@@ -533,20 +494,6 @@ func (e *ExtractLLM) noteRequestSize(session string, tokens int) int {
 
 func (*ExtractLLM) Name() string                 { return "extract_llm" }
 func (*ExtractLLM) Enabled(*components.Ctx) bool { return true }
-
-// sweepThisRequest reports whether this turn gets the whole-transcript sweep: the operator
-// enabled it, the provider's cache has certainly expired, and any extra idle requirement is
-// met. Everything it unlocks (rewriting at depth, pricing at the write rate) is only correct
-// when the cache really is gone, so all three must hold.
-func (e *ExtractLLM) sweepThisRequest(c *components.Ctx) bool {
-	if !e.cold.Enabled || c == nil || !c.ColdCache {
-		return false
-	}
-	if e.cold.MinIdleSeconds > 0 && c.IdleMs < int64(e.cold.MinIdleSeconds)*1000 {
-		return false
-	}
-	return true
-}
 
 // extractionContext renders the conversation the extraction prompt will carry, in the
 // configured mode. One method so every caller (and every test) agrees on what the model is
@@ -571,7 +518,7 @@ func (e *ExtractLLM) sweepThisRequest(c *components.Ctx) bool {
 //
 // An operator who wants the old behaviour writes `context: full`, which now means what it
 // says on every turn instead of being imposed on one.
-func (e *ExtractLLM) extractionContext(req *bschemas.BifrostChatRequest, _ bool) string {
+func (e *ExtractLLM) extractionContext(req *bschemas.BifrostChatRequest) string {
 	return conversationContext(req, e.ctxMode, e.ctxMessages)
 }
 
@@ -705,15 +652,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// Resolved once: the candidate loop below tests it per tool output, and it is a
 	// handler call rather than a field read.
 	dbg := debugExtractLLM(c)
-	sweeping := e.sweepThisRequest(c)
-	if !e.perOutput && !sweeping {
-		// per_output: false — this component is here only for the cold sweep, and this is a
-		// warm turn. Frozen replays below still run: they are free and they are what keeps
-		// the prefix byte-stable.
-		rep.Gate("per_output_disabled")
-	}
 	fires := e.trigger.Fires(req, c.CtxWindow)
-	goal := e.extractionContext(req, sweeping)
+	goal := e.extractionContext(req)
 	query := keywords(goal)
 	if len(query) == 0 {
 		rep.Gate("no_goal_keywords")
@@ -744,10 +684,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			rep.Gate("model_source_fell_back_to_config")
 		}
 	}
-	// Per-session cadence: on throttled steps drop the model (skip this request). The sweep
-	// is exempt — it happens at most once per idle gap, which is its own throttle, and
-	// skipping it means paying the full re-billing of the transcript instead.
-	if model != nil && !sweeping && fires && !e.llmAllowedThisRequest(c.Session) {
+	// Per-session cadence: on throttled steps drop the model (skip this request).
+	if model != nil && fires && !e.llmAllowedThisRequest(c.Session) {
 		model = nil
 	}
 	// Derived trigger (#28 E): context pressure + growth rate replace a hand-tuned
@@ -762,14 +700,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	if c.CtxWindow <= 0 {
 		pressureFires, triggerReason = fires, "context window unknown; absolute trigger only"
 	}
-	if model != nil && !pressureFires && !sweeping {
+	if model != nil && !pressureFires {
 		model = nil // no model call this request; frozen reapplications still run below
-	}
-	if model != nil && !e.perOutput && !sweeping {
-		model = nil // cold-sweep-only configuration, and this is a warm turn
-	}
-	if sweeping {
-		triggerReason = "cold cache: prompt cache expired, whole transcript re-billed"
 	}
 	metrics.RecordExtractionReason(triggerReason)
 
@@ -780,12 +712,6 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		if pf := pressureFloor(c.CtxWindow, pressure); pf > 0 {
 			floor = pf
 		}
-	}
-	if sweeping {
-		// The sweep's own floor. Every candidate on this turn is being re-billed at the
-		// cache-write rate whatever we do, so the bar for "worth a call" is genuinely lower
-		// than on a warm turn.
-		floor = e.cold.MinTokens
 	}
 	// Gate inputs shared by every candidate this request.
 	//
@@ -848,39 +774,6 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// The same prompt, for the COST model rather than the window check: callCost adds the
 	// static preamble itself, so it must be given only the variable part.
 	goalOverhead := promptOverheadTokens + schema.TextTokens(goal)
-	// MODEL ESCALATION, sweep only. The sweep sends the whole transcript as context, so the
-	// prompt's fixed part alone can exceed a small extraction model's window — and then
-	// fitsModelContext correctly declines every candidate and the sweep silently does
-	// nothing on exactly the largest, most expensive transcripts. When that happens, fall
-	// back to the model the AGENT is using: it demonstrably holds this conversation, since
-	// it is about to be sent the same one.
-	escalated := false
-	if sweeping && model != nil && !fitsModelContext(0, promptOverhead, inputLimit) {
-		if inc := c.Model.For("incoming"); inc != nil && c.CtxWindow > inputLimit {
-			model, inputLimit, escalated = inc, c.CtxWindow, true
-			// The call is now going to a DIFFERENT model, so the two things derived from
-			// which model it is must be re-derived. Leaving them meant an escalated call was
-			// recorded under the pinned cheap model's id and priced at its rates — the exact
-			// ~3x understatement the pricing block above exists to remove, reintroduced on
-			// the most expensive calls the component makes.
-			if !c.SelfRates.Zero() {
-				pricing = cheapmodel.Pricing{
-					InputPerMTok:      c.SelfRates.Input * 1_000_000,
-					OutputPerMTok:     c.SelfRates.Output * 1_000_000,
-					CacheReadPerMTok:  c.SelfRates.CacheRead * 1_000_000,
-					CacheWritePerMTok: c.SelfRates.CacheWrite * 1_000_000,
-				}
-			}
-			if c.ModelName != "" {
-				callModel = c.ModelName
-			}
-			if dbg {
-				logging.From(c.Ctx).Debug("cg.extract_llm.escalate",
-					"reason", "transcript exceeds the extraction model's window",
-					"overhead_tokens", promptOverhead, "window", c.CtxWindow)
-			}
-		}
-	}
 	tools := toolIndices(req)
 	var keys []string
 	changed := 0
@@ -940,7 +833,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// A cold sweep is the exception in the other direction: nothing is cached, file reads are
 	// the largest mass in a coding transcript, and every token of them is being re-billed at
 	// the cache-write rate — so AUTO reduces them there.
-	skipFR := c.CacheAware && !sweeping
+	skipFR := c.CacheAware
 	if e.skipFileReads != nil {
 		skipFR = *e.skipFileReads
 	}
@@ -1008,7 +901,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// new cache entry whatever we do, and a message at depth is exactly as free to
 		// rewrite as one in the tail. This is the only place that restriction is lifted, and
 		// only because the condition it protects against is provably absent.
-		if c.CacheAware && !sweeping && !c.TailOnly(i) {
+		if c.CacheAware && !c.TailOnly(i) {
 			dbgTail++
 			if sz >= floor {
 				dbgBigTailBlocked++ // a large output we skipped ONLY because it's not in the tail
@@ -1072,29 +965,18 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// of the few parts of this component that unambiguously pays. A metric that argues for
 		// optimizing something already working is worse than no metric.
 		metrics.RecordExtractionCacheLookup(false)
-		// The operator's REQUEST-level trigger, now honored on WARM caching turns.
+		// The operator's REQUEST-level trigger, honored on every turn this component sees.
 		//
-		// This condition used to carry `!c.CacheAware`, and that spelling was too broad. What
-		// legitimately bypasses a request-size threshold is a COLD SWEEP: on a cold turn the
-		// whole transcript re-bills at the cache-write rate whatever the request's size, so the
-		// request-level threshold answers the wrong question and the sweep brings its own floor
-		// (e.cold.MinTokens, set above). That is why `sweeping` already overrides the cadence
-		// gate and the pressure gate — this check simply had not been given the same treatment.
+		// This condition used to carry a cold-sweep carve-out, and before that `!c.CacheAware`.
+		// Both are gone: the sweep is its own component now, and Trigger's zero value fires always
+		// (see components/trigger.go — "a zero field is no constraint"), so `!fires` is reachable
+		// only when min_request_tokens / min_request_frac / min_messages was set and not met. There
+		// is no derived value here for a carve-out to protect; the derived pressure trigger is
+		// separate and gates the model earlier via shouldFire.
 		//
-		// `c.CacheAware` is true on warm caching turns as well as cold ones, so the old spelling
-		// also discarded the threshold on every warm turn, where it means exactly what the
-		// operator wrote. And it could ONLY discard operator configuration: Trigger's zero value
-		// fires always (see components/trigger.go — "a zero field is no constraint"), so `!fires`
-		// is reachable only when min_request_tokens / min_request_frac / min_messages was set and
-		// not met. There is no derived value in `fires` for a cache carve-out to protect; the
-		// derived pressure trigger is separate and gates the model earlier via shouldFire.
-		//
-		// Found by the housellm cold-sweep preset test, which fails if `sweeping` is dropped
-		// here — the sweep is the part of the old carve-out that was carrying real weight.
-		//
-		// IsHuge still overrides, unchanged: a single output that large is worth a call whatever
-		// the request-level threshold says.
-		if huge := e.trigger.IsHuge(sz, c.CtxWindow); !fires && !huge && !sweeping {
+		// IsHuge still overrides: a single output that large is worth a call whatever the
+		// request-level threshold says.
+		if huge := e.trigger.IsHuge(sz, c.CtxWindow); !fires && !huge {
 			rep.Gate("request_trigger_not_fired")
 			continue
 		}
@@ -1225,33 +1107,23 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			"cacheAware", c.CacheAware, "maxCachedIdx", c.MaxCachedIdx, "floor", floor,
 			"nInput", len(req.Input))
 	}
-	// Caps. The sweep is bounded by its OWN cap and does not draw on the hot path's
-	// per-request or per-session allowance: the two paths are switched independently and
-	// have opposite economics, so letting a sweep drain the session budget would silently
-	// disable the hot path (or the reverse) depending on which fired first.
-	if sweeping {
-		if e.cold.MaxCalls > 0 && len(cands) > e.cold.MaxCalls {
-			for k := e.cold.MaxCalls; k < len(cands); k++ {
-				rep.Gate("over_cold_sweep_cap")
-			}
-			cands = cands[:e.cold.MaxCalls]
+	// Caps. extract_llm_sweep is bounded by its OWN cap and does not draw on these: the two
+	// paths are switched independently and have opposite economics, so a shared budget would
+	// silently disable one depending on which fired first.
+	if e.llmMaxPerReq > 0 && len(cands) > e.llmMaxPerReq {
+		for k := e.llmMaxPerReq; k < len(cands); k++ {
+			rep.Gate("over_per_request_cap")
 		}
-	} else {
-		if e.llmMaxPerReq > 0 && len(cands) > e.llmMaxPerReq {
-			for k := e.llmMaxPerReq; k < len(cands); k++ {
-				rep.Gate("over_per_request_cap")
-			}
-			cands = cands[:e.llmMaxPerReq] // cap model calls per request
+		cands = cands[:e.llmMaxPerReq] // cap model calls per request
+	}
+	// Then the session's own allowance. Reserved here, after the per-request cap, because
+	// every surviving candidate becomes exactly one model call in phase 2 below — so the
+	// reservation is the spend.
+	if n := e.reserveSessionBudget(c.Session, len(cands)); n < len(cands) {
+		for k := n; k < len(cands); k++ {
+			rep.Gate("over_per_session_cap")
 		}
-		// Then the session's own allowance. Reserved here, after the per-request cap,
-		// because every surviving candidate becomes exactly one model call in phase 2
-		// below — so the reservation is the spend.
-		if n := e.reserveSessionBudget(c.Session, len(cands)); n < len(cands) {
-			for k := n; k < len(cands); k++ {
-				rep.Gate("over_per_session_cap")
-			}
-			cands = cands[:n]
-		}
+		cands = cands[:n]
 	}
 
 	// Phase 2 (parallel): the candidate compactions are independent. A focused per-output
@@ -1267,25 +1139,14 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// costs 1.25x fresh — so paying for it would be a 25% loss. Decided here because this
 		// is the only place the final candidate count is known (the caps above trim it).
 		extCfg.CacheContext = len(cands) > 1
-		// AND THE WRITE HAS TO BE EARNED BEFORE IT CAN BE READ. Setting CacheContext was not
-		// enough: cheapmodel.claimCacheWrite deliberately suppresses the breakpoint on
-		// CONCURRENT siblings (a cache entry only ever written is worse than no breakpoint),
-		// so with llmConcurrency=4 the first call took the write slot and calls 2-4 sent no
-		// mark and paid plain fresh input for the same context — the saving the flag exists
-		// for was never collected. Measured on production: five haiku calls on ONE request
-		// each sent ~138,000 prompt tokens with cache_read=0 AND cache_write=0.
-		//
-		// So run the first call alone, then the rest concurrently: one writer, then readers.
-		// At T=180k, k=4 that moves break-even removal from 198,620 tokens to 79,088.
-		//
-		// IT COSTS WALL CLOCK AND THE TRADE IS DELIBERATE. Per-call latency here is gateway
-		// QUEUE time, not prompt size (measured: an 8-token call has a 1,812 ms p50 floor and
-		// is not faster than an 8k-token one), so serializing one call adds roughly one whole
-		// queue round — ~2-4 s p50, and the tail reaches 12-16 s. We pay it only where the
-		// money is overwhelming: k >= 2 on a turn whose entire transcript is being re-billed
-		// at 1.25x fresh. On the warm per-output path the extra second buys a fraction of a
-		// cent, so it stays fully concurrent.
-		serialFirst := extCfg.CacheContext && sweeping
+		// THE ONE-WRITER-THEN-READERS ORDERING WENT WITH THE SWEEP. cheapmodel.claimCacheWrite
+		// suppresses the breakpoint on CONCURRENT siblings (a cache entry only ever written is
+		// worse than no breakpoint), so with llmConcurrency=4 the first call takes the write slot
+		// and calls 2-4 send no mark. Serializing the first call fixes that but costs a whole
+		// gateway queue round — ~2-4 s p50, tail 12-16 s. It was paid only where the money is
+		// overwhelming: a turn whose entire transcript re-bills at 1.25x fresh. On this warm
+		// per-output path the extra second buys a fraction of a cent, so it stays fully concurrent
+		// and the flag above is best-effort.
 		type outT struct{ projected, summary string }
 		out := make([]outT, len(cands))
 		// One record per call, written to its own slot so the goroutines need no lock (a
@@ -1365,7 +1226,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			calls[k] = components.ModelCall{
 				Component: rep.Component, Model: callModel,
 				Strategy: strategy, Aggressiveness: string(e.aggro),
-				Cold: sweeping, Escalated: escalated,
+				Cold:            c.ColdCache,
 				CandidateTokens: before, LatencyMs: latency,
 				PromptTokens: inTok, CompletionTokens: outTok,
 				CacheRead: cr, CacheWrite: cw,
@@ -1444,12 +1305,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// counted (above) and still brake exploration via slowCallMs, which is the
 			// latency-aware layer that SHOULD react to a slow server.
 		}
-		first := 0
-		if serialFirst {
-			runCall(0) // the writer; its release() marks the prefix as present
-			first = 1
-		}
-		for k := first; k < len(cands); k++ {
+		for k := 0; k < len(cands); k++ {
 			wg.Add(1)
 			go func(k int) {
 				defer wg.Done()
@@ -1487,13 +1343,6 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// recoverable. One key per decision (#40) — projected text and summary travel
 			// together, so a replay can never emit half a decision.
 			putResult(c, cands[k].id, out[k].projected, out[k].summary)
-			// Not published globally when the call escalated to the agent's model: the global
-			// key is built from e.modelName, so a result derived by a DIFFERENT model would
-			// be served to other sessions under the configured model's key. Session-scoped
-			// reuse (the replay that keeps this session's prefix stable) is unaffected.
-			if escalated {
-				continue
-			}
 			if !e.rewrite || effectiveMode(c, e.mode) == markerFull {
 				putResultGlobal(c, extract.ResultKey(cands[k].id, e.modelName, extCfg),
 					out[k].projected, out[k].summary)
@@ -1510,8 +1359,6 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 
 func init() {
 	f := []components.Field{
-		{Key: "per_output", Type: components.FieldBool, Default: true,
-			Hint: "The HOT-PATH pass: reduce individual tool outputs as they arrive. With this off and cold_cache.enabled off the component has nothing to do and refuses to build — take it out of the pipeline instead."},
 		{Key: "fire_on", Type: components.FieldEnum, Default: "pressure", Options: []string{"pressure", "size"},
 			Hint: "What decides a request is worth a model call. pressure = the derived context-pressure trigger. size = fire whenever any candidate clears min_tokens, which ALSO demotes the economic gate and the caching-backend guard to advisory — a deliberate licence to spend, so set the caps first."},
 		{Key: "min_tokens", Type: components.FieldInt, Default: 300, Min: 1,
@@ -1544,14 +1391,6 @@ func init() {
 		{Key: "model_max_input_tokens", Type: components.FieldInt,
 			Hint: "Pin the EXTRACTION model's input budget, for a model id the static table cannot name (a self-hosted id, or a gateway alias). Unset = resolved per model."},
 		markerModeField(),
-		{Key: "cold_cache.enabled", Type: components.FieldBool,
-			Hint: "The whole-transcript sweep on a turn whose prompt cache has EXPIRED. Measured here: those turns were 4% of requests and 31% of spend, and removing a token on one is worth 12.5x what it is worth on a warm turn."},
-		{Key: "cold_cache.min_tokens", Type: components.FieldInt, Default: defaultColdFloor, Min: 1,
-			Hint: "Per-output floor for the sweep. Lower than the hot path's, because on that turn every candidate is being re-billed at the write rate anyway."},
-		{Key: "cold_cache.min_idle_seconds", Type: components.FieldInt,
-			Hint: "Demand MORE idle time than the provider TTL implies (0 = just the TTL). Raises the bar, never lowers it."},
-		{Key: "cold_cache.max_calls", Type: components.FieldInt,
-			Hint: "Cap model calls for one sweep. 0 = unlimited, which is the default because the sweep runs once per idle gap on a turn that is already expensive."},
 	}
 	f = append(f, modelFields("model")...)
 	components.RegisterFields("extract_llm", extractLLMConfig{}, append(f, components.TriggerFields("trigger")...))

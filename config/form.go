@@ -99,7 +99,7 @@ type Form struct {
 	// the settings page can produce.
 	Cache *CacheForm `json:"cache,omitempty"`
 	// Components holds, per component name, the DOTTED key paths that component's block
-	// actually states — `{"extract_llm": {"cold_cache.min_tokens": 800}}`. Only keys the
+	// actually states — `{"extract_llm": {"trigger.min_request_tokens": 800}}`. Only keys the
 	// document really carries are present: an absent key means "the component's default",
 	// which is a different thing from a value, and prefilling defaults here is how a save
 	// wrote 20 over a deliberate `llm_max_per_session: 0` (R3).
@@ -134,10 +134,14 @@ type CacheForm struct {
 // our own measurements. Conflating the two is how a form ends up writing its opinion over
 // an operator's deliberate value.
 type ExtractLLMForm struct {
-	// PerOutput is the hot-path pass, ColdEnabled the cold-cache sweep. Both false means
-	// the component is removed from the pipeline entirely — there would be nothing left
-	// for it to do, and its constructor refuses that combination outright.
-	PerOutput   bool `json:"per_output"`
+	// ColdEnabled asks for the cold sweep, which is now a SEPARATE component
+	// (extract_llm_sweep) rather than a key inside this one. It therefore means "put that
+	// component in the pipeline", and the fields below that describe it (ColdMinTokens) are
+	// written into its block, not into extract_llm's.
+	//
+	// There is no PerOutput any more: extract_llm IS the warm/tail pass, so the only way to
+	// switch it off is to take it out of the pipeline, which is what every other component's
+	// checkbox already means. That removes the one per-component exception this form carried.
 	ColdEnabled bool `json:"cold_enabled"`
 	// SizeTrigger picks fire_on: size over the default pressure trigger. Named for what
 	// the operator is choosing, not for the YAML value, because it also demotes the
@@ -184,9 +188,9 @@ type ExtractLLMForm struct {
 // false and which the preset now also omits. housellm is the one extract_llm configuration
 // this service has actually run and measured, so the form offers what production runs.
 //
-// PerOutput is TRUE here, matching the preset, and it now does something: savedTokenValueAt
-// prices a candidate by position, so a tail candidate is valued at the cache-WRITE rate rather
-// than the request-level cache-READ rate, and the hot path can pay on the uncached tail.
+// extract_llm's warm/tail path genuinely pays here, which is why it is offered at all:
+// savedTokenValueAt prices a candidate by position, so a tail candidate is valued at the
+// cache-WRITE rate rather than the request-level cache-READ rate.
 //
 // MinTokens 8000 is what makes that safe, and it is derived from measurement rather than
 // picked: a call costs ~$0.0193 per ACCEPTED result (output-dominated, and including the
@@ -198,20 +202,20 @@ type ExtractLLMForm struct {
 // AllowOnCachingBackend stays false and is vestigial either way: the check it lifts no longer
 // fires on a warm turn (the tail is not cached; depth is refused by the tail gate first).
 //
-// ColdMinTokens 1000 is the value that decides whether this component does anything at all
-// on this service: every extraction call production has ever made was a cold one, and at
-// 3000 the sweep refused every candidate it saw (below_output_floor on all 36 sweeping
-// turns, 0 extractions across 3,437 requests). cold_cache.max_calls is still not modelled
-// by this form, so an account prefilled from here gets the component's own default of 4
-// rather than the preset's 20.
+// ColdMinTokens 1000 is the value that decides whether the compaction-model pass does anything
+// at all on this service: every extraction call production has ever made was a cold one, and at
+// 3000 the sweep refused every candidate it saw (below_output_floor on all 36 sweeping turns,
+// 0 extractions across 3,437 requests). It is written into extract_llm_sweep's own min_tokens
+// now. That component's max_calls is still not modelled here, so an account prefilled from this
+// form gets its default of one concurrency round.
 //
-// MaxPerSession 0 is read by the component as UNLIMITED — an operator decision, and now a
-// live one, since PerOutput true means the hot arm reads it. What bounds a long session in
-// practice is eligibility rather than this cap: 132 calls across three days of heavy use,
-// under a per-session cap of 40 that was never approached.
+// MaxPerSession 0 is read by extract_llm as UNLIMITED — an operator decision, and a live one:
+// with the sweep split out, extract_llm has only the hot arm and it reads this on every turn it
+// fires. What bounds a long session in practice is eligibility rather than this cap: 132 calls
+// across three days of heavy use, under a per-session cap of 40 that was never approached.
 func DefaultExtractLLMForm() ExtractLLMForm {
 	return ExtractLLMForm{
-		PerOutput: true, ColdEnabled: true, SizeTrigger: false,
+		ColdEnabled: true, SizeTrigger: false,
 		MinTokens: 8000, MaxPerRequest: 8, MaxPerSession: 0,
 		Aggressiveness: "medium", Context: "recent", ContextMessages: 2,
 		ColdMinTokens: 1000,
@@ -233,24 +237,36 @@ func RecommendedComponents() map[string]map[string]any {
 	if d.SizeTrigger {
 		fireOn = "size"
 	}
-	return map[string]map[string]any{"extract_llm": {
-		"per_output":                 d.PerOutput,
-		"fire_on":                    fireOn,
-		"min_tokens":                 d.MinTokens,
-		"llm_max_per_request":        d.MaxPerRequest,
-		"llm_max_per_session":        d.MaxPerSession,
-		"llm_every_n_requests":       d.EveryNRequests,
-		"aggressiveness":             d.Aggressiveness,
-		"context":                    d.Context,
-		"context_messages":           d.ContextMessages,
-		"strategy":                   d.Strategy,
-		"allow_on_caching_backend":   d.AllowOnCachingBackend,
-		"cold_cache.enabled":         d.ColdEnabled,
-		"cold_cache.min_tokens":      d.ColdMinTokens,
-		"model.source":               d.ModelSource,
-		"model.model":                d.ModelName,
-		"trigger.min_request_tokens": d.TriggerMinTokens,
-	}}
+	return map[string]map[string]any{
+		"extract_llm": {
+			"fire_on":                    fireOn,
+			"min_tokens":                 d.MinTokens,
+			"llm_max_per_request":        d.MaxPerRequest,
+			"llm_max_per_session":        d.MaxPerSession,
+			"llm_every_n_requests":       d.EveryNRequests,
+			"aggressiveness":             d.Aggressiveness,
+			"context":                    d.Context,
+			"context_messages":           d.ContextMessages,
+			"strategy":                   d.Strategy,
+			"allow_on_caching_backend":   d.AllowOnCachingBackend,
+			"model.source":               d.ModelSource,
+			"model.model":                d.ModelName,
+			"trigger.min_request_tokens": d.TriggerMinTokens,
+		},
+		// The sweep's own block. It shares the model and the context settings — the same
+		// resolution and the same cost lever — and carries its own floor, because the two
+		// paths have opposite economics: 8,000 on the tail where a call must beat the
+		// cache-write rate on one output, 1,000 on a cold turn where every candidate is
+		// re-billing anyway. strategy, aggressiveness, rewrite and max_chars are absent
+		// because an adjudicator has no compaction target; writing one is a config error.
+		"extract_llm_sweep": {
+			"min_tokens":       d.ColdMinTokens,
+			"context":          d.Context,
+			"context_messages": d.ContextMessages,
+			"model.source":     d.ModelSource,
+			"model.model":      d.ModelName,
+		},
+	}
 }
 
 // ParseForm reads a configuration document into form fields.
@@ -407,8 +423,12 @@ func ApplyForm(doc string, f Form) (string, error) {
 		was = cur.Pipeline
 	}
 
+	// NO PER-COMPONENT COUPLING ANY MORE. extract_llm used to need one: its constructor refused
+	// `per_output: false` with the cold sweep off ("nothing to do"), so this function had to
+	// translate two switches into pipeline membership or the form could write a document the proxy
+	// could not build. The cold sweep is its own component now and extract_llm is unconditionally
+	// the warm/tail pass, so every component follows the same rule — enabled means in the pipeline.
 	pipeline := append([]string(nil), f.Pipeline...)
-	pipeline = applyExtractLLMCoupling(pipeline, f.Components["extract_llm"])
 	// Before the component loop, not after: a preserved component is ON, and the loop below
 	// CLEARS the declared keys of anything it reads as switched off. Resolving the pipeline
 	// once, here, is what stops a save preserving a component in the run order while deleting
@@ -476,32 +496,6 @@ func ApplyForm(doc string, f Form) (string, error) {
 	return out, nil
 }
 
-// applyExtractLLMCoupling is the ONE per-component exception to "enabled == in the
-// pipeline", and it is here because the component's own constructor demands it: per_output
-// false with the cold sweep off is refused outright ("nothing to do"), so a form that
-// wrote that combination would produce a document the proxy cannot build.
-//
-// Note what it does NOT do: derive fire_on from per_output. That was tried, and it meant
-// ticking a checkbox quietly turned the spending brakes advisory — fire_on is its own
-// declared enum, and it follows only the explicit choice.
-func applyExtractLLMCoupling(pipeline []string, vals map[string]any) []string {
-	const name = "extract_llm"
-	if vals == nil {
-		return pipeline
-	}
-	hot, hotSet := vals["per_output"].(bool)
-	cold, _ := vals["cold_cache.enabled"].(bool)
-	if hotSet && !hot && !cold {
-		return remove(pipeline, name)
-	}
-	if !contains(pipeline, name) && ((hotSet && hot) || cold) {
-		// Before the deterministic `extract` where there is one: the cheap pass should see
-		// whatever the model pass leaves, which is the order every shipped preset uses.
-		return insertBefore(pipeline, name, "extract")
-	}
-	return pipeline
-}
-
 // preserveUnmodelled re-inserts every component the STORED pipeline ran that the posted one
 // does not mention AND the client did not declare a control for.
 //
@@ -519,10 +513,11 @@ func applyExtractLLMCoupling(pipeline []string, vals map[string]any) []string {
 //
 // A DECLARED removal still removes: a name in `known` and absent from `sent` is gone.
 //
-// `sent` is what the CLIENT posted and `resolved` is that after applyExtractLLMCoupling, and
-// the two are deliberately different arguments. The membership test is on `sent`, because this
-// rule is about what the client said; the insertion is into `resolved`, because that is the
-// pipeline being written. Testing membership on the resolved list instead would undo the
+// `sent` is what the CLIENT posted and `resolved` is the pipeline being written. They are equal
+// today, now that no component resolves its own membership, but they stay separate arguments
+// because the rule reads differently on each: the membership test is on `sent`, because this rule
+// is about what the client said; the insertion is into `resolved`. Testing membership on the
+// resolved list instead would undo the
 // coupling's own removal of extract_llm — a SERVER decision, not a client omission — and put
 // a component back that its own constructor refuses to build.
 func preserveUnmodelled(was, resolved, sent, known []string) []string {
@@ -770,8 +765,8 @@ func setPath(m map[string]any, path string, v any) {
 	m[keys[len(keys)-1]] = v
 }
 
-// delPath deletes a dotted key path and prunes any block it emptied — a bare `cold_cache:
-// {}` left behind is not what the operator wrote, and yaml renders it.
+// delPath deletes a dotted key path and prunes any block it emptied — a bare `trigger: {}` left
+// behind is not what the operator wrote, and yaml renders it.
 func delPath(m map[string]any, path string) {
 	keys := strings.Split(path, ".")
 	if len(keys) == 1 {

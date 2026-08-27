@@ -190,26 +190,26 @@ func headLine(s string) string {
 }
 
 // A sweep must have a bound. Production made 27 calls on one request against a tenant cap of
-// 2, spent $0.229 and added 76.6 s to a turn — the sweep does not draw on the hot path's caps,
-// so its own default was the only brake and it was "unlimited".
+// 2, spent $0.229 and added 76.6 s to a turn — the sweep does not draw on any other component's
+// caps, so its own default is the only brake and it used to be "unlimited". It now bounds BATCH
+// calls, each covering up to extract.MaxAdjudicationItems candidates.
 func TestColdSweepIsBoundedByDefault(t *testing.T) {
-	c, err := newExtractLLM([]byte("per_output: false\ncold_cache:\n  enabled: true\n"))
+	c, err := newExtractSweep(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := c.(*ExtractLLM)
-	if e.cold.MaxCalls <= 0 || e.cold.MaxCalls > llmConcurrency {
+	e := c.(*ExtractSweep)
+	if e.maxCalls <= 0 || e.maxCalls > llmConcurrency {
 		t.Fatalf("default sweep cap = %d, want a bound at or below one concurrency round (%d)",
-			e.cold.MaxCalls, llmConcurrency)
+			e.maxCalls, llmConcurrency)
 	}
 	// An operator can still opt out, explicitly.
-	uc, err := newExtractLLM([]byte("per_output: false\ncold_cache:\n  enabled: true\n  max_calls: -1\n"))
+	uc, err := newExtractSweep([]byte("max_calls: -1\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	un := uc.(*ExtractLLM)
-	if un.cold.MaxCalls != 0 {
-		t.Fatalf("max_calls: -1 must mean unlimited, got %d", un.cold.MaxCalls)
+	if un := uc.(*ExtractSweep); un.maxCalls != 0 {
+		t.Fatalf("max_calls: -1 must mean unlimited, got %d", un.maxCalls)
 	}
 }
 

@@ -68,7 +68,7 @@ costing ~$0.012 must therefore remove a *lot* of tokens to break even:
     and `TestColdTurnPricesReplaysAtTheReadRate`.
 
 The warm figures are why the component is **off by default on caching backends** and why
-`per_output: false` is the right setting on a prompt-caching agent: the agent truncates every
+Running ONLY the cold sweep is the right setting on a prompt-caching agent: the agent truncates every
 tool result near 30,000 characters, so **the largest output that can exist is ~7,399 tokens** —
 5x below the warm break-even. The gate would only ever be declining. Independently confirmed
 on production: the same saved tokens valued at the warm cache-read rate were worth **$0.017
@@ -504,8 +504,8 @@ actual $360.09).
 
 ```yaml
 extract_llm:
-  per_output: false          # leave ordinary turns alone
-  cold_cache:
+  # extract_llm_sweep, in its own block, leaves ordinary turns alone
+  extract_llm_sweep:
     enabled: true
     min_tokens: 1000
 ```
@@ -754,16 +754,11 @@ over-long one used to abandon the whole reduction rather than truncate.
 | `llm_max_per_request` | 0 | Cap LLM calls per firing request (0 = unlimited). |
 | `rewrite` | `true` | `false` forces the verified deletion-only (subsequence) guarantee. |
 | `skip_file_reads` | auto | Skip line-numbered source dumps when cached; `true`/`false` to force. AUTO now actually works — see the note below. |
-| `per_output` | `true` | The hot-path pass: reduce individual tool outputs as they arrive. `false` leaves only the cold-cache sweep, which is the half whose economics are unambiguous. |
-| `cold_cache.enabled` | `false` | Sweep the whole transcript on a turn whose prompt cache has expired. See [Cold-cache sweep](#cold-cache-sweep). |
-| `cold_cache.min_tokens` | 1000 | Per-output floor for the sweep — lower than the everyday one, because on that turn every candidate is re-billed at the write rate anyway. |
-| `cold_cache.min_idle_seconds` | 0 | Demand MORE idle time than the provider TTL implies. Raises the bar, never lowers it. |
-| `cold_cache.max_calls` | 4 | Cap model calls in one sweep (`-1` = unlimited). The sweep deliberately does not draw on `llm_max_per_request` / `llm_max_per_session`, so this is its ONLY brake — and it used to default to unlimited. MEASURED: one production request made **27 calls** against a tenant whose `llm_max_per_request` was 2, spent $0.229 and added 76.6 s to a turn whose upstream took 33.5 s. The default is now one `llmConcurrency` round, past which calls serialize and latency grows multiplicatively for a linear gain. |
 | `fire_on` | `pressure` | `pressure` = the derived context-pressure trigger. `size` = fire whenever a candidate clears `min_tokens`, and demote the economic gate **and** the caching-backend guard to advisory. |
 | `llm_max_per_session` | 0 | Cap model calls for the whole session (0 = unlimited). The per-request cap cannot bound a long session: 2 calls x 300 turns is 600 calls. |
 | `aggressiveness` | `medium` | `low` \| `medium` \| `high` — the compaction target, taught with worked examples. |
 | `context` | `recent` | How much conversation the prompt carries: `goal` \| `recent` \| `full`. |
-| `context_messages` | 2 | N for `context: recent`. **The biggest lever on per-call cost**: production sent 3,785 prompt tokens to compress a 2,700-token candidate at 7, so the candidate was a third of the call. Cutting it also shrinks the keep-list harvested from the same window, which is what "dropped a referenced identifier" rejections are counted against (28 of 31 production rejections) — so the cheaper prompt and the higher acceptance rate are one change. It trades away our own prefix cache on requests making MANY calls (see `cold_cache.max_calls`). |
+| `context_messages` | 2 | N for `context: recent`. **The biggest lever on per-call cost**: production sent 3,785 prompt tokens to compress a 2,700-token candidate at 7, so the candidate was a third of the call. Cutting it also shrinks the keep-list harvested from the same window, which is what "dropped a referenced identifier" rejections are counted against (28 of 31 production rejections) — so the cheaper prompt and the higher acceptance rate are one change. It trades away our own prefix cache on requests making MANY calls. |
 | `max_chars` | 4000 | Window for the model-free deterministic projection. The window is line-aligned and names what it dropped; a result that hits the cap with nothing saying so is refused whatever this is set to. |
 | `marker_mode` | `full` | How the recovery marker is emitted: `full` \| `summary` \| `off`. |
 

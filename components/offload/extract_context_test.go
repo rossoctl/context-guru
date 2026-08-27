@@ -159,7 +159,7 @@ func TestContextFallsBackRatherThanInventing(t *testing.T) {
 		t.Fatal(err)
 	}
 	x := e.(*ExtractLLM)
-	if schema.TextTokens(x.extractionContext(ctxReq(), false)) == 0 {
+	if schema.TextTokens(x.extractionContext(ctxReq())) == 0 {
 		t.Fatal("the component's own context renderer returned nothing to count")
 	}
 }
@@ -201,7 +201,7 @@ func TestKeepIdsNeverComeFromToolOutput(t *testing.T) {
 		}
 		x := e.(*ExtractLLM)
 		// The prompt's context may include the payload (that is what `full` is for)...
-		if mode == ctxFull && !strings.Contains(x.extractionContext(req, false), "zz9plural") {
+		if mode == ctxFull && !strings.Contains(x.extractionContext(req), "zz9plural") {
 			t.Fatal("full context should carry the tool output")
 		}
 		// ...but the keep-list must not be derived from it.

@@ -28,7 +28,7 @@ is a walk over those declarations.
 ```go
 // components/registry.go
 type Field struct {
-    Key     string   // DOTTED path inside the block: "cold_cache.min_tokens", "model.source"
+    Key     string   // DOTTED path inside the block: "trigger.min_request_tokens", "model.source"
     Type    string   // bool | int | float | enum | string | strings
     Default any      // what an ABSENT key means (nil = the type's zero)
     Options []string // the permitted set, for enum
@@ -53,7 +53,7 @@ func init() {
 
 The zero-value config struct is passed in on purpose: the anti-drift test reflects over its
 `yaml` tags and fails when the declared keys and the struct's keys disagree in **either**
-direction. Nested blocks (`model:`, `trigger:`, `cold_cache:`) need no nesting in the
+direction. Nested blocks (`model:`, `trigger:`) need no nesting in the
 descriptor — they are dotted paths, and `components.TriggerFields("trigger")` /
 `modelFields("model")` declare the shared ones once.
 
@@ -96,16 +96,15 @@ over an operator's deliberate value.
   "components": ["agentdiet", "cacheinject", "cachesplit", "…"],
   "component_fields": {
     "extract_llm": [
-      {"key": "per_output", "type": "bool", "default": true, "hint": "The HOT-PATH pass…"},
       {"key": "strategy", "type": "enum", "default": "code",
        "options": ["auto", "code", "single", "rlm", "deterministic"], "hint": "…"},
       {"key": "min_tokens", "type": "int", "default": 300, "min": 1, "hint": "…"},
-      {"key": "cold_cache.min_tokens", "type": "int", "default": 1000, "min": 1, "hint": "…"},
+      {"key": "trigger.min_request_tokens", "type": "int", "hint": "…"},
       {"key": "model.api_key", "type": "string", "secret": true, "hint": "…"}
     ],
     "cachesplit": []
   },
-  "recommended": {"extract_llm": {"per_output": false, "cold_cache.enabled": true, "…": "…"}}
+  "recommended": {"extract_llm": {"min_tokens": 8000, "…": "…"}, "extract_llm_sweep": {"min_tokens": 1000, "…": "…"}}
 }
 ```
 
@@ -120,7 +119,7 @@ The form itself is posted to `PUT /api/me` (or `PATCH /api/tenants/{id}`) as:
 {"config": {
   "pipeline": ["format", "dedup", "extract_llm", "cachesplit"],
   "mode": "sync",
-  "components": {"extract_llm": {"per_output": true, "cold_cache.min_tokens": 800}}
+  "components": {"extract_llm": {"min_tokens": 8000}, "extract_llm_sweep": {"min_tokens": 800}}
 }}
 ```
 
@@ -142,10 +141,12 @@ are the **dotted YAML keys**, so the page cannot post a field name the server do
   and key order do **not** survive — accepted, because the page is fields now.
 - **Secrets are write-only**: `model.api_key` is never read into the form, so "absent" cannot
   mean "cleared" — an explicit empty string clears it, anything else leaves it alone.
-- **One coupling, named.** `extract_llm` with `per_output: false` and the cold sweep off is a
-  combination its own constructor refuses ("nothing to do"), so the form takes it out of the
-  pipeline instead. `fire_on` is *never* derived from `per_output`: deriving it once meant
-  ticking a checkbox quietly turned the spending brakes advisory.
+- **No couplings.** There used to be exactly one: `extract_llm` with `per_output: false` and the
+  cold sweep off was a component with nothing to do, and its constructor refused that combination,
+  so the form had to translate two switches into pipeline membership. The cold-sweep split removed
+  the thing being worked around — `extract_llm_sweep` is its own component — so every component now
+  follows the same rule: it runs when it is in the pipeline. `fire_on` is still *never* derived from
+  anything; deriving it once meant ticking a checkbox quietly turned the spending brakes advisory.
 
 ## Strict per-component blocks
 
@@ -171,7 +172,7 @@ Each of these came from a production failure, and each has a test named after it
 | **R3** | Only stated keys reach the form, so a meaningful zero is displayed and preserved. |
 | **R4** | A key written by merging into an existing block is never deleted as its parent. |
 | **R5** | Keys the form does not know about survive the round trip; comments and order do not. |
-| **R7** | The delete list is *derived* from the declared keys, so the enable and disable paths cannot disagree. The hand-written list named the whole `cold_cache` block, so disabling deleted `min_idle_seconds` and `max_calls` that enabling had carefully preserved. |
+| **R7** | The delete list is *derived* from the declared keys, so the enable and disable paths cannot disagree. The hand-written list named a whole nested block, so disabling deleted sibling keys that enabling had carefully preserved. |
 | **R8** | Enum options are read from the same constant the engine parses (`extract.Modes`), never retyped. |
 | **R11** | The descriptor carries the component default; the recommended prefill is a separate policy layer. |
 
@@ -247,9 +248,10 @@ say why. Mentioning a name is no longer evidence of anything; not mentioning one
   server recommends anything for. It fills the fields in and saves nothing.
 - **`parse_error` disables every control** and the save omits `config` entirely; the server's
   409 is the second line of defence.
-- **The coupling is refused, not posted.** Switching off the second of `per_output` /
-  `cold_cache.enabled` switches the other back on and says why — the combination the
-  constructor refuses cannot leave the page.
+- **A removed key names its replacement.** `per_output` and `cold_cache.*` are gone from
+  `extract_llm`; posting one is a 400 that says the sweep is `extract_llm_sweep` now and which of
+  its keys the old one became. A removed key that reads as "field not found" looks like a typo
+  rather than a relocation.
 
 The page is checked by driving it under jsdom against the real descriptors: all 97 fields
 render, all 25 enums offer exactly their declared options, all 53 numeric inputs carry their
