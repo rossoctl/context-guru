@@ -113,6 +113,23 @@ func logDecisions(lg *slog.Logger, rr *components.RunReport) {
 		if len(rep.Gates) > 0 {
 			attrs = append(attrs, "gates", formatGates(rep.Gates))
 		}
+		// EVENTS TOO, or splitting the histogram silently blinded this line.
+		//
+		// Everything a component recorded used to land in Gates, so one field carried it all. After
+		// the split (#121) a component whose counters are all EVENTS logged no counter information
+		// whatsoever — and the component most affected is the one that only records successes when it
+		// works. Observed live: the turn that adjudicated twelve outputs, removed twelve and saved
+		// 33,340 tokens logged `verdict=acted saved=33340` and not one counter, because all eleven
+		// names it raised are events. That is the exact diagnosis this line exists to provide,
+		// missing precisely when the component succeeded.
+		//
+		// Rendered as one `name=n name=n` STRING for the same reason gates are: an attribute key is
+		// checked against the credential-name denylist, so a future event called `no_auth` would have
+		// its count replaced by «redacted». As a value it is scrubbed as content, where a short
+		// integer after `=` matches nothing.
+		if len(rep.Events) > 0 {
+			attrs = append(attrs, "events", formatGates(rep.Events))
+		}
 		if rep.Irreversible {
 			attrs = append(attrs, "irreversible", true)
 		}
