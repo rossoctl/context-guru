@@ -167,7 +167,7 @@ by hand.
 
 | `extract_llm_sweep` | `extract_llm` only |
 |---|---|
-| `min_tokens`, `pre_expiry_seconds`, `block_fallback`, `marker_mode` | `strategy`, `rewrite`, `aggressiveness`, `max_chars`, `fire_on`, `trigger`, `llm_every_n_requests`, `llm_max_per_request`, `allow_on_caching_backend`, `model`, `context`, `context_messages`, `economic_gate` |
+| `min_tokens`, `min_inventory`, `pre_expiry_seconds`, `block_fallback`, `marker_mode` | `strategy`, `rewrite`, `aggressiveness`, `max_chars`, `fire_on`, `trigger`, `llm_every_n_requests`, `llm_max_per_request`, `allow_on_caching_backend`, `model`, `context`, `context_messages`, `economic_gate` |
 
 The sweep's surface is nearly empty, and every absence is structural rather than a default:
 
@@ -178,7 +178,8 @@ The sweep's surface is nearly empty, and every absence is structural rather than
 - no **`max_calls`**: one ask covers every candidate.
 - no **`economic_gate`**: the gate prices a per-output cheap-model call against an expected saving.
   This is one cached read for the whole transcript, so its arithmetic does not describe the component.
-  The brakes are the floor, the window, and `block_fallback` where an operator wants one.
+  The brakes are the per-output floor, the INVENTORY floor, the window, and `block_fallback`
+  where an operator wants one.
 
 Note what leaves the sweep's surface entirely: **`strategy`, `rewrite`, `aggressiveness` and
 `max_chars` stop applying**, because an adjudicator selects no compaction strategy and produces no
@@ -186,15 +187,20 @@ rewritten text. `rewrite` in particular becomes moot rather than merely defaulte
 governs how a *rewritten* result is validated, and nothing is rewritten. Any of these appearing
 under `extract_llm_sweep` should be a config error naming the reason, not a silently ignored key.
 
-`max_calls` bounds BATCH calls, not per-output calls. The item cap above and this are independent
-brakes: one is a measured quote-fidelity ceiling, the other a spend/latency bound. It defaults to one
-concurrency round rather than to a single call, because with one call a transcript carrying 40
-candidates would have 12 adjudicated and 28 left verbatim — on the one turn whose whole point is that
-everything is re-billing at the write rate, that is leaving most of the money. Nothing measured
-compares four batches of 12 against one batch of 12; batch SIZE is the variable the experiments moved,
-and the per-batch shape is identical either way. It must never truncate the CANDIDATE list instead of
-the batch list: `max_calls: 4` leaving four candidates is a batch of four, which is the size at which
-the model was measured unwilling to act.
+**`min_inventory` is the brake that batch SIZE turned into.** The old `max_calls` paragraph that
+stood here described a per-batch spend bound and an item cap, and CORRECTION 2 had already removed
+both — it survived as a contradiction of this document's own header. What the batch measurements were
+really about is the one thing that did not go away: the model's judgement is a function of how many
+candidates it COMPARES, so the surviving knob bounds the inventory from BELOW rather than bounding
+calls from above.
+
+Below `min_inventory` (10) the sweep does not ask at all. Ten is `cc1aa9f`'s measured inflection:
+at batch 3–6 the model dropped a genuinely-spent output 2 times in 4, at batch 10 it dropped it 4 in
+4 and cleared 100% of genuinely-spent candidates, while shown ONE output it scored 6% live-kept on
+haiku and 14% on sonnet — both inside the drop-everything null model's error bar. So a small
+inventory is not a timid version of this mechanism, it is the shape `4ca1f13` refuted, and declining
+is strictly better than asking: a wrong keep costs one turn's tokens, a wrong drop costs content the
+agent still needs. The decline is counted as `sweep_inventory_below_min`.
 
 `per_output` and the `cold_cache` block disappear from `extract_llm`, along with the
 `per_output: false with cold_cache disabled leaves the component with nothing to do` error — that
@@ -220,10 +226,31 @@ Each is a test, and each must be verified to FAIL when its subject is reverted.
 
 ## Counters
 
-`sweep_adjudicated`, `sweep_dropped`, `sweep_kept`, `sweep_drop_refused_obligation`,
-`sweep_quote_fabricated`, `sweep_criterion_missing`. The refusal and fabrication counters are the
-two that must be alertable: the first means the model tried to drop something still needed, the
-second means it is inventing evidence.
+They are split across two histograms, because a decline and a success exported under one metric
+named `cg_component_gate_declines_total` made the series rise as the component worked better (#121).
+Work PERFORMED goes to `Report.Events` and reaches `/stats` under `events` and Prometheus under
+`cg_component_events_total`; a candidate turned AWAY goes to `Report.Gates` and keeps the declines
+series.
+
+- **Events:** `sweep_offered`, `sweep_adjudicated`, `sweep_dropped`, `sweep_candidate_at_depth`,
+  `sweep_prefix_cache_read_ok`, `sweep_fallback_used`, `sweep_inventory_of_one`,
+  `sweep_inventory_thinned`, `reapplied_same_session`.
+- **Gates:** everything else this component raises — the two alertable ones,
+  `sweep_drop_refused_obligation` and `sweep_quote_fabricated`, plus `sweep_kept`,
+  `sweep_criterion_missing`, `sweep_verdict_unusable`, `sweep_verdict_missing`,
+  `sweep_verdict_unknown_label`, `sweep_verdict_duplicate_label`, `sweep_unparseable`,
+  `sweep_reply_truncated`, `sweep_kept_everything`, `sweep_drop_would_not_shrink`,
+  `sweep_inventory_below_min`, `sweep_no_prefix`, `sweep_no_asker`, `sweep_ask_failed`,
+  `sweep_prefix_cache_read_ZERO`, `sweep_fallback_blocked`, `sweep_fallback_failed`,
+  `sweep_fallback_no_model`, `not_in_pre_expiry_window`, `below_output_floor`,
+  `non_text_blocks`, `empty_or_marker_present`, `kept_verbatim_after_expand`.
+
+The refusal and fabrication counters are the two that must be alertable: the first means the model
+tried to drop something still needed, the second means it is inventing evidence. Both are gates.
+
+`sweep_candidate_at_depth` is the one to watch for a REGRESSION rather than for a rate: it counts
+candidates past the cached boundary, and its going to zero is how #122 — the depth permission keyed
+on a flag the trigger makes false — would come back.
 
 ## Open questions
 
