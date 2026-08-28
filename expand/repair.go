@@ -109,6 +109,10 @@ func repairOne(body []byte, restored []string, ours map[string]string, callID, p
 	}
 	orig, found := resolve(hashID)
 	if !found {
+		// The model reads the same placeholder either way, but WE need to know which of the two
+		// happened: an id we could have minted with nothing behind it is our broken promise, not the
+		// model's invention. See unresolved.go.
+		noteUnresolved(hashID)
 		orig = Unavailable(hashID)
 	}
 	nb, err := sjson.SetBytes(body, path+".content", orig)

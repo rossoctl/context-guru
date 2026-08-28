@@ -599,15 +599,22 @@ func (a *Aggregator) Run(r components.RunReport) {
 // honest, bounce-adjusted figure, plus quality signals naming components that
 // never earned their place (rtk's top_passthrough idea).
 type Snapshot struct {
-	Requests      int64               `json:"requests"`
-	TokensBefore  int64               `json:"tokens_before"`
-	TokensAfter   int64               `json:"tokens_after"`
-	SavedTokens   int64               `json:"saved_tokens"`
-	SavingsPct    float64             `json:"savings_pct"`
-	WastedTokens  int64               `json:"wasted_tokens"`  // re-served via expand
-	Bounces       int64               `json:"bounces"`        // expand events
-	AdjustedSaved int64               `json:"adjusted_saved"` // saved - wasted (may be negative)
-	Components    map[string]compStat `json:"components"`
+	Requests      int64   `json:"requests"`
+	TokensBefore  int64   `json:"tokens_before"`
+	TokensAfter   int64   `json:"tokens_after"`
+	SavedTokens   int64   `json:"saved_tokens"`
+	SavingsPct    float64 `json:"savings_pct"`
+	WastedTokens  int64   `json:"wasted_tokens"`  // re-served via expand
+	Bounces       int64   `json:"bounces"`        // expand events
+	AdjustedSaved int64   `json:"adjusted_saved"` // saved - wasted (may be negative)
+	// Reversibility's two failure causes, split because they call for opposite responses.
+	// Malformed = the model invented a marker id; nothing to do. Missing = an id this proxy could
+	// have minted resolved to nothing, i.e. a cut advertised as reversible was not — a defect, and
+	// the ALERTABLE one. Neither can be inferred from WastedTokens, which counts successful
+	// re-serves and therefore reads identically whether a stash broke or expand was never called.
+	ExpandUnresolvedMalformed int64               `json:"expand_unresolved_malformed"`
+	ExpandUnresolvedMissing   int64               `json:"expand_unresolved_missing"`
+	Components                map[string]compStat `json:"components"`
 	// TopPassthrough names components that ran but never saved a token — dead
 	// weight in the pipeline, candidates to drop from the config.
 	TopPassthrough []string `json:"top_passthrough"`

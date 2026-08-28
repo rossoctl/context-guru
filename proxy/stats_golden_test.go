@@ -35,6 +35,13 @@ var statsGoldenTopLevel = []string{
 	"cg_added_ms_avg",
 	"compaction_resets",
 	"components",
+	"expand_unresolved_malformed",
+	// The alertable half of reversibility: a marker id this proxy could have minted that resolved
+	// to nothing, i.e. a cut advertised as reversible that was not. Added to the reviewed contract
+	// rather than loosening the assertion, per the rule above. Nothing already here can substitute
+	// for it — wasted_tokens counts successful re-serves, so a broken stash reads identically to a
+	// session that never called expand.
+	"expand_unresolved_missing",
 	"extract",
 	"fresh_input_tokens",
 	"frozen_dropped",

@@ -1520,6 +1520,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				}
 				cp.noteExpand(back) // and on the dashboard row, or SavedAdjusted over-reports
 			} else {
+				// Classified as well as counted: the response loop and the request-path repair
+				// both reach here, and an id this proxy could have minted with nothing behind it
+				// is our own broken reversibility promise rather than the model inventing one.
+				// See expand/unresolved.go.
+				expand.NoteUnresolved(c.HashID)
 				resolved[c.CallID] = expand.Unavailable(c.HashID)
 			}
 		}
@@ -1736,6 +1741,12 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.AgentDietCallTimeoutMs = offload.AgentDietCallTimeout().Milliseconds()
 	// Freeze-replay health, same layering: the counters live with the code that owns
 	// them (offload for the replay path, the store for dropped/repaired decisions).
+	// Reversibility's two failure causes, split because they need opposite responses and one of
+	// them is an alert. `missing` means this proxy removed content, said it could be had back, and
+	// then could not produce it. Nothing else in this snapshot can go non-zero for that: wasted
+	// tokens counts successful re-serves, so a broken stash was indistinguishable from a session
+	// that simply never called expand. See expand/unresolved.go.
+	snap.ExpandUnresolvedMalformed, snap.ExpandUnresolvedMissing = expand.Unresolved()
 	snap.FrozenHits, snap.FrozenMisses = offload.FrozenStats()
 	if fl, ok := h.store.(*store.Memory); ok { // process store; hosted per-tenant stores report via the dashboard
 		snap.FrozenDropped, snap.FrozenRepaired = fl.FrozenLossStats()
