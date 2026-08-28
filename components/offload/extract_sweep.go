@@ -53,6 +53,8 @@ func init() { components.Register("extract_llm_sweep", newExtractSweep) }
 // one is a config error rather than a silently ignored key (see newExtractSweep).
 type ExtractSweep struct {
 	minTokens int
+	// minInventory is the fewest candidates worth asking about. See defaultMinInventory.
+	minInventory int
 	// blockFallback refuses the content-copying fallback. See extractSweepConfig.BlockFallback.
 	blockFallback bool
 	// preExpiry is how long before the prompt cache's believed expiry the sweep may fire. See
@@ -78,6 +80,10 @@ type extractSweepConfig struct {
 	// naming in the inventory: each line is paid fresh, and a small output's removal cannot repay
 	// the marker it leaves behind.
 	MinTokens int `yaml:"min_tokens"`
+	// MinInventory is the fewest candidates worth asking about (0 = defaultMinInventory). Below it
+	// the sweep declines entirely rather than asking, because the model's judgement at small
+	// inventory sizes is measured poor — see the floor check in Offload for the figures.
+	MinInventory int `yaml:"min_inventory"`
 	// PreExpirySeconds is the width of the pre-expiry window (0 = defaultPreExpiry).
 	PreExpirySeconds int `yaml:"pre_expiry_seconds"`
 	// BlockFallback refuses the fallback path: when the prefix ask cannot read the cache, decline
@@ -99,6 +105,13 @@ type extractSweepConfig struct {
 // block this component replaced: at 3000 the shipped preset produced ZERO extractions across 3,437
 // production requests, with `below_output_floor` refusing every candidate on all 36 sweeping turns.
 const defaultSweepFloor = 1000
+
+// defaultMinInventory is the fewest candidates this component will ask about. Ten, because that is
+// where `cc1aa9f` measured the model becoming willing to act CORRECTLY: at batch 3-6 it dropped a
+// genuinely-spent output 2 times in 4, at batch 10 it dropped it 4 in 4 and cleared 100% of
+// genuinely-spent candidates. Below that the mechanism is not a timid version of itself, it is
+// answering the question the selection experiment refuted at 6% live-kept.
+const defaultMinInventory = 10
 
 // defaultPreExpiry is the pre-expiry window's width when none is configured.
 //
@@ -173,12 +186,16 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 	if cfg.MinTokens <= 0 {
 		cfg.MinTokens = defaultSweepFloor
 	}
+	if cfg.MinInventory <= 0 {
+		cfg.MinInventory = defaultMinInventory
+	}
 	pre := defaultPreExpiry
 	if cfg.PreExpirySeconds > 0 {
 		pre = time.Duration(cfg.PreExpirySeconds) * time.Second
 	}
 	return &ExtractSweep{
-		minTokens: cfg.MinTokens, preExpiry: pre, mode: parseMarkerMode(cfg.MarkerMode),
+		minTokens: cfg.MinTokens, minInventory: cfg.MinInventory,
+		preExpiry: pre, mode: parseMarkerMode(cfg.MarkerMode),
 		blockFallback: cfg.BlockFallback,
 	}, nil
 }
@@ -302,20 +319,40 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			rep.Gate("below_output_floor")
 			continue
 		}
-		// The depth restriction, lifted for the reason this component exists: the prefix this turn
-		// invalidates is nearly expired, so a message at depth is very nearly as free to act on as
-		// one in the tail. Routed through TailOnlyCold rather than skipped so the condition is
-		// CHECKED here rather than assumed from `sweeping`.
+		// NO DEPTH RESTRICTION. Candidates are the ENTIRE transcript, which is what this component
+		// is for, and the sweep window is the whole justification.
 		//
-		// It reads ColdCache, which is false in the pre-expiry window by construction — so this is
-		// the ordinary tail gate, and a candidate deep in the prefix is refused by it. That is the
-		// conservative reading and it is deliberate: lifting the gate on a prefix that is merely
-		// NEARLY expired would need a measurement of what the early invalidation costs, and there is
-		// none. The sweep therefore acts on the uncached tail in this window, and the counter below
-		// says how much it is turning away.
-		if !c.TailOnlyCold(i, true) {
-			rep.Gate("cached_prefix")
-			continue
+		// The tail gate exists for the WARM-turn compactor: rewriting a message inside a live cached
+		// prefix invalidates everything after it, so extract_llm must confine itself to the uncached
+		// tail. This component's premise is the opposite — it ACCEPTS that invalidation, because it
+		// only ever runs on a prefix with almost no TTL left. Refusing depth here does not make the
+		// sweep conservative, it makes it pointless: the candidates would be exactly the messages the
+		// prefix ask CANNOT SEE, since the ask reads the previous turn's sent body (everything up to
+		// the cached boundary) while the tail is everything past it. Disjoint by construction.
+		//
+		// That is not hypothetical. It shipped, and live verification found the model judging outputs
+		// it had never read: one turn kept two outputs citing "Reply with the word ACK only." as the
+		// obligation for each — a real transcript string, so no fabrication counter fired — and
+		// another DROPPED an output having seen only `begins: # ledger_b` and a token count. See #122.
+		//
+		// It is also what made the inventory degenerate. Candidates confined to the tail means one
+		// candidate on an ordinary agent turn, which is the per-output shape `4ca1f13` records as
+		// refuted at 6% live-kept — reached by default, and acted on.
+		//
+		// WHY THIS NEEDS NO MEASUREMENT OF EARLY INVALIDATION, which is the objection the previous
+		// version of this comment raised against itself. The cost of invalidating early is bounded by
+		// the window width, not by the TTL: inside the window the prefix has at most `window` left to
+		// live, so at most that much cache value is being given up, and the window is deliberately
+		// small (one minute against a 5-minute TTL by default). The trigger is what buys the
+		// permission — that is the entire reason it exists — so keying the permission on ColdCache
+		// instead of on the window withdrew it exactly where it had just been paid for.
+		//
+		// Counted positively rather than as a refusal: `sweep_candidate_at_depth` says the component
+		// is genuinely reaching past the cached boundary. It going to zero is the signal that this
+		// regressed again, which a `cached_prefix` refusal counter could not distinguish from
+		// "nothing was deep this turn".
+		if !c.TailOnly(i) {
+			rep.Gate("sweep_candidate_at_depth")
 		}
 		// EVERY CANDIDATE PAST THIS POINT MUST REACH THE INVENTORY, and sweep_inventory_thinned below
 		// is the tripwire for the day one does not.
@@ -334,7 +371,14 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		// verdict belongs in the prompt as EVIDENCE for the model to weigh
 		// (extract.AdjudicationItem.Evidence), never as a gate that pre-decides the answer.
 		eligible++
-		cands = append(cands, sweepCand{i: i, content: content, id: id})
+		// The wire's own tool-call id, which apply.normalize sets on every synthetic tool message it
+		// lifts out of an Anthropic tool_result block. Read here rather than reconstructed, because a
+		// reconstructed anchor is exactly the defect #123 records.
+		toolID := ""
+		if msg.ChatToolMessage != nil && msg.ChatToolMessage.ToolCallID != nil {
+			toolID = *msg.ChatToolMessage.ToolCallID
+		}
+		cands = append(cands, sweepCand{i: i, content: content, id: id, toolID: toolID})
 	}
 	// WHAT WAS SHOWN, counted apart from what was answered. A per-candidate loop cannot express "this
 	// many were OFFERED", and the distinction is not cosmetic: a live arm reported 2.80 verdicts per
@@ -344,6 +388,32 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	rep.GateN("sweep_offered", len(cands))
 	if eligible > len(cands) {
 		rep.GateN("sweep_inventory_thinned", eligible-len(cands))
+	}
+	// DO NOT ASK AT ALL BELOW THE INVENTORY FLOOR. The yield of this mechanism is a property of how
+	// many candidates the model compares, and the numbers are not close:
+	//
+	//	shown 1 output    6% live-kept on haiku, 14% on sonnet — both inside the
+	//	                  drop-everything null model's error bar (8,105 recorded decisions)
+	//	shown ~15         58% live-kept, at the LOWEST cost per output
+	//	batch 3-6         dropped a genuinely-spent output 2 times in 4
+	//	batch 10          dropped it 4 in 4, and cleared 100% of genuinely-spent candidates
+	//
+	// So `cc1aa9f`'s conclusion — "small batches do not make it wrong, they make it UNWILLING TO
+	// ACT" — has a corollary this component needs: below about ten, the model is not merely timid,
+	// it is answering a question the measurements say it answers badly, and a `drop` from it is a
+	// guess. Declining is strictly better than asking, because a wrong keep costs one turn's tokens
+	// and a wrong drop costs content the agent still needs.
+	//
+	// Ten is the measured inflection above, not a round number. Configurable because a deployment
+	// whose transcripts are shorter may prefer to trade the yield away entirely rather than act on
+	// small inventories.
+	//
+	// Counted, because a component that declines is indistinguishable from one that is broken unless
+	// the decline is recorded — the failure mode that hid the `economic_gate: false` blind spot in
+	// this same component and three vacuous trim tests before it.
+	if len(cands) < e.minInventory {
+		rep.GateN("sweep_inventory_below_min", len(cands))
+		return keys, nil
 	}
 
 	// Phase 2: ONE ASK for every candidate. Not a batch and not a call per output — nothing is
@@ -384,7 +454,18 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 type sweepCand struct {
 	i       int
 	content string
-	id      string
+	// id is the CONTENT KEY (extract.ContentKey): the store/stash key and the result-cache key. It is
+	// ours, and it appears nowhere in the transcript.
+	id string
+	// toolID is the wire's own tool-call id, lifted from the normalized message. It is the only string
+	// here that also occurs in the transcript the model reads, so it is the only one that can serve as
+	// a locating anchor — which is why it is a SEPARATE field rather than a reuse of `id`.
+	//
+	// They were conflated once, and the effect was worse than omitting the anchor: the inventory
+	// announced "tool_use id 300c312d1492952219bfb1c4" while the real id in that transcript was
+	// `toolu_d2`, so the contract told the model to locate content by a key that cannot be found
+	// anywhere. See #123. Empty when the dialect carries no id, in which case nothing is claimed.
+	toolID string
 }
 
 // sweepResult is one adjudication's outcome, carried back to the SERIAL phase.
@@ -427,7 +508,7 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 	for k := range cands {
 		items = append(items, extract.AdjudicationItem{
 			Label:      k,
-			ID:         cands[k].id,
+			ID:         cands[k].toolID, // the wire's id, not our content key — see #123
 			SizeTokens: schema.TextTokens(cands[k].content),
 			Head:       extract.HeadLine(cands[k].content, extract.AdjudicationHeadChars),
 		})
@@ -724,6 +805,8 @@ func init() {
 	components.RegisterFields("extract_llm_sweep", extractSweepConfig{}, []components.Field{
 		{Key: "min_tokens", Type: components.FieldInt, Default: defaultSweepFloor, Min: 1,
 			Hint: "Per-output floor for naming a candidate in the inventory. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 the shipped preset produced ZERO extractions across 3,437 production requests."},
+		{Key: "min_inventory", Type: components.FieldInt, Default: defaultMinInventory, Min: 1,
+			Hint: "Fewest candidates worth asking about; below it the sweep declines without asking. The model's judgement is a function of how many candidates it COMPARES, and the numbers are far apart: shown one output it scored 6% live-kept on haiku and 14% on sonnet, both inside the drop-everything null model's error bar, while ~15 together reached 58% at the lowest cost per output. At batch 3-6 it dropped a genuinely-spent output 2 times in 4; at 10, 4 in 4. Below the floor a removal is a guess, and a wrong removal costs content the agent still needs while a wrong keep costs one turn's tokens. Lower it only to trade that asymmetry away deliberately."},
 		{Key: "pre_expiry_seconds", Type: components.FieldInt, Default: int(defaultPreExpiry / time.Second),
 			Hint: "How long before the prompt cache's believed expiry the sweep may fire. The window is where BOTH halves are cheap: the ask still reads a live cache, and the prefix it invalidates has little life left. The TTL itself is read from the request, never assumed. This WIDTH is the component's one unmeasured number — wider fires more often and invalidates more remaining TTL, narrower fires rarely, and nothing measures either side."},
 		{Key: "block_fallback", Type: components.FieldBool,

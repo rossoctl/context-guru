@@ -247,8 +247,17 @@ func TestHousellmSweepActuallyFires(t *testing.T) {
 	body += `]`
 	asker := &stubAsker{reply: `[{"i":0,"needed_by":"none","quote":"","verdict":"drop"}]`, cacheRead: 19595}
 	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
-		userMsg("summarize the records"), toolMsg(body),
+		userMsg("summarize the records"),
 	}}
+	// ENOUGH CANDIDATES TO CLEAR THE PRESET'S INVENTORY FLOOR, which is part of what this guard pins.
+	// A single candidate is the per-output shape the design refutes at 6% live-kept, and the shipped
+	// component now declines it rather than asking — so a one-output fixture would assert that the
+	// preset does something it is deliberately unwilling to do, and would read as "configured into a
+	// no-op" for the wrong reason. Ten is the shipped default, so this fixture is the smallest
+	// transcript the preset will actually act on.
+	for i := 0; i < 10; i++ {
+		req.Input = append(req.Input, toolMsg(body))
+	}
 	// INSIDE THE PRE-EXPIRY WINDOW: the cache still exists (idle below the TTL) and is within a minute
 	// of expiring, which is where the ask can still read it and what it invalidates is nearly
 	// worthless. A bare `ephemeral` mark buys the 5-minute TTL this uses.

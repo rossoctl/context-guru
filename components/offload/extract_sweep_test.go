@@ -73,15 +73,56 @@ func newSweep(t *testing.T, extraYAML string) *ExtractSweep {
 	return c.(*ExtractSweep)
 }
 
+// newSweepSmall is newSweep with the inventory floor lowered to 1.
+//
+// For the tests whose subject is PER-CANDIDATE accounting — this counter fired once, that verdict was
+// ignored, this removal replayed — and which therefore assert exact counts against sweepReq's single
+// above-floor output. Under the default floor of 10 those inventories decline before any ask, so the
+// tests would assert an impossibility.
+//
+// It is a deliberate opt-in rather than the default for these, because the config it selects is one
+// the measurements refute: at an inventory of one a model scored 6% live-kept, inside the
+// drop-everything null model's error bar. A test may run there to count something precisely; a
+// deployment should not. The floor's own behaviour is covered against the real default in
+// TestSweepDeclinesBelowTheInventoryFloor, and the default is exercised end to end in
+// TestSweepOffersCandidatesInsideTheCachedPrefix.
+func newSweepSmall(t *testing.T, extraYAML string) *ExtractSweep {
+	t.Helper()
+	return newSweep(t, "min_inventory: 1\n"+extraYAML)
+}
+
 // sweepReq puts a BIG tool output in the tail, and states an obligation the refusal test quotes back.
 func sweepReq() *bschemas.BifrostChatRequest {
-	return &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
 		userMsg("Find the auth timeout in src/api/users.py and fix it."),
 		toolResultMsg(strings.Repeat("2024-01-01 GET /users/42 200 12ms src/api/users.py\n", 700)),
 		assistantMsg("Next I will patch the timeout in src/api/users.py."),
 		toolResultMsg(strings.Repeat("filler line to grow the transcript\n", 50)),
 		userMsg("keep going"),
 	}}
+	return req
+}
+
+// sweepReqStocked is sweepReq with enough further candidates to clear the inventory floor, for the
+// tests whose subject is that the component ACTS — an ask happening, a removal applying, the fallback
+// firing. Those cannot run on sweepReq alone any more: it carries a single above-floor output, and an
+// inventory of one is the per-output shape `4ca1f13` records as refuted at 6% live-kept, which the
+// floor now declines by design.
+//
+// Kept SEPARATE from sweepReq rather than folded into it, because several tests assert exact
+// per-candidate counts against that fixture's precise shape and stocking it shifts every one of them.
+// A test asserting "one candidate was adjudicated" and a test asserting "the component acted at all"
+// want different fixtures, and conflating them is how a fixture change becomes a four-test cascade.
+//
+// Appended AFTER the original five, so index 1 remains the big output and index 0's obligation text is
+// unchanged — the refusal test quotes both back.
+func sweepReqStocked() *bschemas.BifrostChatRequest {
+	req := sweepReq()
+	for i := 0; i < defaultMinInventory; i++ {
+		req.Input = append(req.Input, toolResultMsgWithID("toolu_fixture_"+strconv.Itoa(i),
+			strings.Repeat("record "+strconv.Itoa(i)+" of the audit log\n", 900)))
+	}
+	return req
 }
 
 // manyCandidates builds a transcript of n distinct tool outputs, all above the floor.
@@ -134,8 +175,8 @@ func (m *recordingModel) lastPrompt() string { s, _ := m.prompt.Load().(string);
 func TestSweepRemovesSpentOutputsFromOneCachedAsk(t *testing.T) {
 	asker := &labelAsker{verdict: "drop", needed: "none"}
 	asker.cacheRead = 19595
-	e := newSweep(t, "")
-	req := sweepReq()
+	e := newSweepSmall(t, "")
+	req := sweepReqStocked()
 	original := schema.MessageText(req.Input[1])
 	st := store.NewMemory(store.Options{})
 	rep := &components.Report{}
@@ -180,7 +221,7 @@ func TestSweepAsksOnceForEveryCandidate(t *testing.T) {
 	const n = 20
 	asker := &labelAsker{verdict: "keep", needed: "none"}
 	asker.cacheRead = 19595
-	e := newSweep(t, "")
+	e := newSweepSmall(t, "")
 	rep := &components.Report{}
 	if _, err := e.Offload(manyCandidates(n), rep,
 		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
@@ -214,9 +255,9 @@ func TestSweepAsksOnceForEveryCandidate(t *testing.T) {
 func TestSweepFallsBackWhenTheCacheReadDidNotHappen(t *testing.T) {
 	asker := &fakeAsker{reply: `[{"i":0,"needed_by":"none","quote":"","verdict":"drop"}]`, cacheRead: 0}
 	before := atomic.LoadInt64(&fallbackModel.calls)
-	e := newSweep(t, "")
+	e := newSweepSmall(t, "")
 	rep := &components.Report{}
-	if _, err := e.Offload(sweepReq(), rep,
+	if _, err := e.Offload(sweepReqStocked(), rep,
 		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +292,7 @@ func TestSweepFallsBackWhenTheCacheReadDidNotHappen(t *testing.T) {
 func TestBlockFallbackDeclinesInsteadOfPaying(t *testing.T) {
 	asker := &fakeAsker{reply: `[{"i":0,"needed_by":"none","quote":"","verdict":"drop"}]`, cacheRead: 0}
 	before := atomic.LoadInt64(&fallbackModel.calls)
-	e := newSweep(t, "block_fallback: true\n")
+	e := newSweepSmall(t, "block_fallback: true\n")
 	req := sweepReq()
 	original := schema.MessageText(req.Input[1])
 	rep := &components.Report{}
@@ -283,7 +324,7 @@ func TestBlockFallbackDeclinesInsteadOfPaying(t *testing.T) {
 // as a missed read: fall back by default, decline under block_fallback.
 func TestSweepFallsBackWithNoAsker(t *testing.T) {
 	before := atomic.LoadInt64(&fallbackModel.calls)
-	e := newSweep(t, "")
+	e := newSweepSmall(t, "")
 	rep := &components.Report{}
 	if _, err := e.Offload(sweepReq(), rep,
 		preExpiryCtx("s", nil, store.NewMemory(store.Options{}))); err != nil {
@@ -301,7 +342,7 @@ func TestSweepFallsBackWithNoAsker(t *testing.T) {
 
 	// And under block_fallback it declines instead.
 	before = atomic.LoadInt64(&fallbackModel.calls)
-	strict := newSweep(t, "block_fallback: true\n")
+	strict := newSweepSmall(t, "block_fallback: true\n")
 	rep2 := &components.Report{}
 	if _, err := strict.Offload(sweepReq(), rep2,
 		preExpiryCtx("s", nil, store.NewMemory(store.Options{}))); err != nil {
@@ -344,7 +385,7 @@ func TestSweepCountsAMissingPrefixApartFromAFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			asker := &fakeAsker{err: tc.err}
-			e := newSweep(t, "")
+			e := newSweepSmall(t, "")
 			rep := &components.Report{}
 			if _, err := e.Offload(sweepReq(), rep,
 				preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
@@ -387,7 +428,7 @@ func TestSweepFiresOnlyInThePreExpiryWindow(t *testing.T) {
 		{"a 1h TTL, half an hour in", 30 * 60 * 1000, 60 * 60 * 1000, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newSweep(t, "")
+			e := newSweepSmall(t, "")
 			c := &components.Ctx{
 				IdleMs: tc.idleMs, CacheTTLMs: tc.ttlMs, ColdCache: tc.cold,
 			}
@@ -403,7 +444,7 @@ func TestSweepFiresOnlyInThePreExpiryWindow(t *testing.T) {
 func TestSweepDoesNothingOutsideTheWindow(t *testing.T) {
 	asker := &labelAsker{verdict: "drop", needed: "none"}
 	asker.cacheRead = 19595
-	e := newSweep(t, "")
+	e := newSweepSmall(t, "")
 	req := sweepReq()
 	original := schema.MessageText(req.Input[1])
 	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
@@ -425,8 +466,8 @@ func TestSweepDoesNothingOutsideTheWindow(t *testing.T) {
 
 // The window's width is configurable, and widening it moves the early edge.
 func TestPreExpirySecondsWidensTheWindow(t *testing.T) {
-	narrow := newSweep(t, "")
-	wide := newSweep(t, "pre_expiry_seconds: 180\n")
+	narrow := newSweepSmall(t, "")
+	wide := newSweepSmall(t, "pre_expiry_seconds: 180\n")
 	// Three minutes idle on a five-minute TTL: two minutes remaining.
 	c := &components.Ctx{IdleMs: 3 * 60 * 1000, CacheTTLMs: 5 * 60 * 1000}
 	if narrow.sweeping(c) {
@@ -443,7 +484,7 @@ func TestPreExpirySecondsWidensTheWindow(t *testing.T) {
 func TestSweepReplaysItsRemovalOnLaterTurns(t *testing.T) {
 	asker := &labelAsker{verdict: "drop", needed: "none"}
 	asker.cacheRead = 19595
-	e := newSweep(t, "")
+	e := newSweepSmall(t, "")
 	st := store.NewMemory(store.Options{})
 
 	first := sweepReq()
@@ -486,7 +527,7 @@ func TestSweepReplaysItsRemovalOnLaterTurns(t *testing.T) {
 // it would panic rather than merely act wrongly.
 func TestSweepIgnoresAVerdictForAnUnofferedLabel(t *testing.T) {
 	asker := &fakeAsker{reply: `[{"i":99,"needed_by":"none","quote":"","verdict":"drop"}]`, cacheRead: 19595}
-	e := newSweep(t, "")
+	e := newSweepSmall(t, "")
 	req := sweepReq()
 	original := schema.MessageText(req.Input[1])
 	rep := &components.Report{}
@@ -514,7 +555,7 @@ func TestSweepIgnoresAVerdictForAnUnofferedLabel(t *testing.T) {
 // filed as a failure — that conflation made "declined to act" and "was never asked" the same number.
 func TestSweepCountsKeepEverythingSeparatelyFromAFailure(t *testing.T) {
 	keepAll := &fakeAsker{reply: "[]", cacheRead: 19595}
-	e := newSweep(t, "")
+	e := newSweepSmall(t, "")
 	req := sweepReq()
 	original := schema.MessageText(req.Input[1])
 	rep := &components.Report{}
@@ -536,7 +577,7 @@ func TestSweepCountsKeepEverythingSeparatelyFromAFailure(t *testing.T) {
 
 	// A TRUNCATED reply is a failure, and a different one from malformed junk.
 	cut := &fakeAsker{reply: `[{"i":0,"needed_by":"none","quote":"partial`, cacheRead: 19595}
-	e2 := newSweep(t, "")
+	e2 := newSweepSmall(t, "")
 	rep2 := &components.Report{}
 	if _, err := e2.Offload(sweepReq(), rep2,
 		preExpiryCtx("s2", cut, store.NewMemory(store.Options{}))); err != nil {
@@ -557,7 +598,7 @@ func TestSweepRefusesADropThatNamesAnObligation(t *testing.T) {
 	asker := &labelAsker{verdict: "drop", needed: "c",
 		quote: "Next I will patch the timeout in src/api/users.py."}
 	asker.cacheRead = 19595
-	e := newSweep(t, "")
+	e := newSweepSmall(t, "")
 	req := sweepReq()
 	original := schema.MessageText(req.Input[1])
 	rep := &components.Report{}
@@ -584,10 +625,17 @@ func TestSweepRefusesADropThatNamesAnObligation(t *testing.T) {
 
 // A single-candidate inventory is the refuted shape wearing a new name, so it is COUNTED. Shown one
 // output, a model simply drops it: 6% live-kept, inside the null model's error bar.
+//
+// UNREACHABLE UNDER THE DEFAULT CONFIG, which is why this test lowers the floor explicitly. With
+// min_inventory at its default of 10 an inventory of one declines before any ask, so this counter can
+// only fire where an operator has deliberately lowered the floor into the range the measurements
+// refute. That is the counter's remaining job: not "this happens sometimes" but "you asked for this,
+// and here is how often it is costing you". Keeping the test on the default would assert an
+// impossibility; keeping the counter without the floor was what let the shape ship.
 func TestSweepCountsAnInventoryOfOne(t *testing.T) {
 	asker := &labelAsker{verdict: "keep", needed: "a", quote: "Find the auth timeout"}
 	asker.cacheRead = 19595
-	e := newSweep(t, "")
+	e := newSweepSmall(t, "")
 	rep := &components.Report{}
 	if _, err := e.Offload(sweepReq(), rep,
 		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
@@ -617,7 +665,7 @@ func TestSweepCountsAThinnedInventory(t *testing.T) {
 	const n = 8
 	asker := &labelAsker{verdict: "keep", needed: "none"}
 	asker.cacheRead = 19595
-	e := newSweep(t, "")
+	e := newSweepSmall(t, "")
 	rep := &components.Report{}
 	if _, err := e.Offload(manyCandidates(n), rep,
 		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
@@ -666,7 +714,7 @@ func TestSweepRaisesTheContractedCounterNames(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.asker.cacheRead = 19595
-			e := newSweep(t, "")
+			e := newSweepSmall(t, "")
 			rep := &components.Report{}
 			if _, err := e.Offload(sweepReq(), rep,
 				preExpiryCtx("s", tc.asker, store.NewMemory(store.Options{}))); err != nil {
@@ -724,7 +772,7 @@ func TestSweepRejectsKeysThatDoNotApply(t *testing.T) {
 func TestSweepSendsTheInventoryAndNotTheOutputs(t *testing.T) {
 	asker := &labelAsker{verdict: "keep", needed: "none"}
 	asker.cacheRead = 19595
-	e := newSweep(t, "")
+	e := newSweepSmall(t, "")
 	req := sweepReq()
 	body := schema.MessageText(req.Input[1])
 	rep := &components.Report{}

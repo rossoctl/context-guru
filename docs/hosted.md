@@ -643,17 +643,32 @@ mode: sync
 ```
 
 **`housellm`** is the same pipeline with `extract_llm` inserted before `extract`, applied
-per account on request, plus `extract_llm_sweep` after it. Both call a cheap model
-(`claude-haiku-4-5`, on the caller's own credential and endpoint) when the economic gate says the
-expected saving beats the priced cost of the call.
+per account on request, plus `extract_llm_sweep` after it. They do not share a model, a trigger, or
+a mechanism, and the differences are the point rather than tuning.
 
-They divide the turn between them. `extract_llm` reduces individual tool outputs in the **uncached
-tail**, where a removed token is being written into the cache at 1.25x fresh. `extract_llm_sweep`
-runs **only on a turn whose prompt cache has expired** and adjudicates **at depth** — it asks the
-model, a batch of outputs at a time, which are spent, and removes those rather than rewriting them.
-A cold turn is about to re-bill its whole transcript at the write rate, so a token removed there is
-the most valuable one there is; on warm turns depth is untouchable, because rewriting it would
-invalidate a live cached prefix. Both are offered by name rather than turned on for everyone,
+`extract_llm` reduces individual tool outputs in the **uncached tail**, where a removed token is
+being written into the cache at 1.25x fresh. It calls a cheap model (`claude-haiku-4-5`, on the
+caller's own credential and endpoint) when the economic gate says the expected saving beats the
+priced cost of the call, and it **rewrites** an output — a model-written program trims it down.
+
+`extract_llm_sweep` **adjudicates instead of rewriting**, and asks a different model in a different
+way. It fires in the window just before the prompt cache expires, and asks **the request's own
+model** — over the transcript that model already holds in its cache, which is what makes the
+question affordable — which outputs are spent, in **one call covering every candidate**. It never
+sends the outputs: the ask carries an inventory (label, size, tool-call id, first line), and the
+model answers with a verdict per label. A spent output is removed whole and replaced by a short
+shape descriptor plus a marker, so `expand` still recovers it; nothing is rewritten, so nothing can
+be invented. Candidates are the **entire transcript**, not the tail: the sweep accepts invalidating
+the prefix, which is what the window buys — inside it the prefix has at most the window's width left
+to live. The economic gate does not apply, because its arithmetic prices a per-output cheap-model
+call and this is neither.
+
+It declines below a minimum inventory (10 by default), because the model's judgement is a function
+of how many candidates it compares: shown one output it scores inside the drop-everything null
+model's error bar, and at ten it cleared 100% of genuinely-spent candidates in probes. Below the
+floor a removal would be a guess, and a wrong removal costs content the agent still needs.
+
+Both are offered by name rather than turned on for everyone,
 because those calls spend the caller's money.
 
 **Changed 2026-08-23:** `searchfold` and `toolfilter` joined the default, and `dedup` moved
