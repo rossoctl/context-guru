@@ -40,21 +40,36 @@ import (
 //   - the READING THE EVIDENCE section and the per-item `evidence` field. They described a
 //     co-reference index's counters, and there is no such index on `main`. Shipping either would
 //     teach the model to read a field the prompt never carries.
-//   - the per-item tool_use id. bulk.go printed it beside the label; it is kept off the wire here
-//     because a random identifier in front of the model is a string it may echo instead of the
-//     label, and the labels are integers for exactly that reason. Ids stay on our side, for logs.
+// The per-item tool_use id and the co-reference `evidence` field are both in the item shape and play
+// different parts here: the id is RENDERED, because it is the only exact anchor between an inventory
+// line and the content (see AdjudicationItem.ID), while evidence renders only when something populates
+// it, which nothing on `main` does.
 
 // AdjudicationItem is one candidate named in the inventory. Note what it does NOT carry to the model:
 // the output itself. Content is held only so the caller can resolve a label back to a message.
 type AdjudicationItem struct {
-	// Label is the small integer the model answers with, and it is small for a measured reason.
-	// Asked to answer with opaque tool_use ids, the model REGULARISED them -- `toolu_01..07` for
-	// `toolu_probe_00..07` -- because reproducing a random identifier from thousands of tokens back
-	// is a copying task, not a judgement. With integer labels it was 0 bad labels in 40+ trials.
-	// The rule generalises: give the model short things it cannot get wrong and keep every mapping
-	// on our side.
+	// Label is the ANSWER key: the small integer the model must put in "i", and the only thing it is
+	// asked to reproduce.
+	//
+	// An integer for a measured reason. Asked to answer with opaque tool_use ids the model REGULARISED
+	// them -- `toolu_01..07` for `toolu_probe_00..07` -- because reproducing a random identifier from
+	// thousands of tokens back is a copying task, not a judgement. With integer labels it was 0 bad
+	// labels in 40+ trials. The rule generalises: give the model short things it cannot get wrong and
+	// keep every mapping on our side.
 	Label int
-	// ID is the tool-call id, for the operator's logs only. Never shown to the model.
+	// ID is the tool-call id, and it is the EXACT anchor between an inventory line and the content the
+	// model is reading from cache. Shown, but never asked for.
+	//
+	// THE TWO AIDS HAVE SEPARATE JOBS, and conflating them is a mistake available in both directions.
+	// Label above is what the model ANSWERS with; this is what it LOCATES with, and it is never asked
+	// to reproduce it. The measurement behind integer labels says the answer key must be an integer --
+	// it says nothing about whether an id may appear in the prompt, and the echo risk it describes was
+	// always about what the model RETURNS rather than what it reads.
+	//
+	// Withholding it costs the one exact anchor there is. The id appears in the transcript the model
+	// reads from cache, so shipping it makes an inventory line and a tool result identifiable to each
+	// other; without it, head-plus-size is the only matching signal, and that is shaky on a transcript
+	// carrying a dozen near-identical `Read` results.
 	ID         string
 	SizeTokens int
 	// Head is a single bounded line so the model can LOCATE this output in the transcript above.
@@ -65,6 +80,15 @@ type AdjudicationItem struct {
 	// not happen and the model therefore cannot read the output from anywhere. Empty on the prefix-ask
 	// path, which is what keeps the content off the wire there.
 	Sample string
+	// Evidence is a rendered reference-tracking record for this output. It goes into the inventory line
+	// when non-empty and is omitted entirely when not.
+	//
+	// A SEAM, deliberately empty on `main`. There is no co-reference index here, so nothing populates
+	// it and the contract says nothing about how to read one -- a prompt that taught the model to
+	// interpret counters the prompt never carries would be teaching it to read a field that does not
+	// exist. A field rather than a future signature change, because the alternative is reshaping the
+	// contract when the index arrives, and the contract is the part with measurements attached to it.
+	Evidence string
 }
 
 // Verdict is one decision. Note what is NOT in it: any field carrying output content. A parse that
@@ -115,6 +139,10 @@ FOR EACH OUTPUT, ANSWER THE CRITERION FIRST, THEN DECIDE:
                  A verdict of "drop" REQUIRES needed_by "none": if any obligation still needs the
                  output, the verdict must be keep.
 
+ANSWER BY LABEL. Each output below is listed with a small integer label in brackets, and the "i" field
+must be that integer. The tool_use id is shown only so you can find the output in the conversation
+above; do not put it in your reply.
+
 Reply with ONLY a JSON array, one object per output, no prose:
 [{"i": <label>, "needed_by": "a|b|c|none", "quote": "<verbatim text or empty>", "verdict": "keep|drop"}]`
 
@@ -140,7 +168,16 @@ func BuildPrefixAsk(items []AdjudicationItem) string {
 		b.WriteString(strconv.Itoa(it.Label))
 		b.WriteString("] ")
 		b.WriteString(strconv.Itoa(it.SizeTokens))
-		b.WriteString(" tokens, begins: ")
+		b.WriteString(" tokens")
+		if it.ID != "" {
+			b.WriteString(", tool_use id ")
+			b.WriteString(it.ID)
+		}
+		if it.Evidence != "" {
+			b.WriteString(", evidence: ")
+			b.WriteString(it.Evidence)
+		}
+		b.WriteString(", begins: ")
 		b.WriteString(it.Head)
 		b.WriteString("\n")
 	}

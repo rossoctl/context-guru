@@ -116,6 +116,24 @@ than being copied out of `bulk.go` — the *contract* is general, the *batching*
 client, pricing, result cache, keep-list harvesting, marker/stash machinery and the report/gate
 plumbing are all shared with `extract_llm` and must stay shared.
 
+## A caveat on the 58% figure
+
+The measurement that justifies batch-style adjudication — 6% live-kept shown one output, **58%** shown
+~15 together — was taken **with the co-reference index supplying evidence** on every candidate: `novel`,
+`refs`, `ref_age`, `used_frac`, `later_turns`, and the index's own verdict, for the model to weigh or
+veto.
+
+`main` has no such index. The model reasons from the transcript alone, with no reference-tracking hints
+at all. That is **plausibly better** — it is not limited to exact matches, and the index's documented
+blind spot was precisely *transformed* reuse, a value summed or reworded before being restated, which
+leaves `refs=0` on something still load-bearing — but it is **untested**. The 58% should be read as
+measured on a differently-informed model.
+
+PR #80 will rebase onto this branch and bring the index with it; `AdjudicationItem.Evidence` is the seam
+it renders through, and it is deliberately empty until then. Whether the evidence helps, and whether it
+must arrive as evidence rather than as a pre-filter (see the starvation note at the candidate-gathering
+site), is the **second** thing a measurement should settle after the pre-expiry window's width.
+
 ## The trigger: pre-expiry, not cold
 
 The two halves of this component want **opposite** cache states, and that contradiction is what the

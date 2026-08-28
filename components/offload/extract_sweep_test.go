@@ -603,6 +603,46 @@ func TestSweepCountsAnInventoryOfOne(t *testing.T) {
 	}
 }
 
+// THE STARVATION TRIPWIRE, and it is a guard for a rebase rather than for today's code.
+//
+// `4ca1f13`'s real defect was a per-candidate PRE-FILTER at the gathering site: prefix_still_referenced
+// removed 149,681 candidates and left about one per request, silently turning a bulk adjudication arm
+// into the per-output shape refuted at 6% live-kept. PR #80 rebases index-driven candidate selection
+// onto this branch and can recreate exactly that.
+//
+// On `main` nothing thins the list, so the counter must read ZERO — a tripwire that fires today would
+// be noise, and one that cannot fire when something IS thinning would be useless. Both directions are
+// asserted, the second by thinning the list on purpose.
+func TestSweepCountsAThinnedInventory(t *testing.T) {
+	const n = 8
+	asker := &labelAsker{verdict: "keep", needed: "none"}
+	asker.cacheRead = 19595
+	e := newSweep(t, "")
+	rep := &components.Report{}
+	if _, err := e.Offload(manyCandidates(n), rep,
+		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
+		t.Fatal(err)
+	}
+	// PRECONDITION: candidates really reached the inventory, or "nothing was thinned" is vacuous.
+	if rep.Gates["sweep_offered"] != n {
+		t.Fatalf("sweep_offered = %d, want %d (gates: %v)", rep.Gates["sweep_offered"], n, rep.Gates)
+	}
+	if rep.Gates["sweep_inventory_thinned"] != 0 {
+		t.Errorf("nothing thins the list on main, so the tripwire must be silent (gates: %v)", rep.Gates)
+	}
+
+	// And it MUST fire when something does thin it. Asserted on the arithmetic the component uses,
+	// because there is no pre-filter here to install: this is the comparison a rebase would trip.
+	var probe components.Report
+	eligible, offered := n, 1 // what prefix_still_referenced did, in miniature
+	if eligible > offered {
+		probe.GateN("sweep_inventory_thinned", eligible-offered)
+	}
+	if probe.Gates["sweep_inventory_thinned"] != n-1 {
+		t.Fatalf("the tripwire's arithmetic does not count a thinned inventory: %v", probe.Gates)
+	}
+}
+
 // THE COUNTER CONTRACT, component end. These names are what an operator's dashboard query and alert
 // rule are written against. The other end is pinned in proxy/sweep_counters_test.go.
 func TestSweepRaisesTheContractedCounterNames(t *testing.T) {

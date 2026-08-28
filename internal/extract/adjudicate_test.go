@@ -261,12 +261,36 @@ func TestThePrefixAskShipsAnInventoryAndNotTheOutputs(t *testing.T) {
 		t.Errorf("the inventory added %d chars over the contract; it should be one line per candidate",
 			len(ask)-len(adjudicationContract))
 	}
-	// The opaque tool_use ids stay on OUR side: a random identifier in front of the model is a string
-	// it may echo instead of the integer label, and the labels are integers for exactly that reason.
+	// THE TWO AIDS, WITH THEIR ROLES SEPARATED. The tool_use id IS shipped, because it is the only
+	// exact anchor between an inventory line and the content the model reads from cache; without it,
+	// head-plus-size is the only matching signal, which is shaky on a transcript carrying a dozen
+	// near-identical `Read` results.
 	for _, it := range items {
-		if strings.Contains(ask, it.ID) {
-			t.Errorf("tool_use id %q reached the ask", it.ID)
+		if !strings.Contains(ask, it.ID) {
+			t.Errorf("tool_use id %q is not in the ask, so nothing anchors label %d to its content",
+				it.ID, it.Label)
 		}
+	}
+	// And the ANSWER key is the integer label, said explicitly, so the id being visible cannot be read
+	// as an invitation to reply with it.
+	if !strings.Contains(ask, "ANSWER BY LABEL") {
+		t.Error("the ask does not tell the model which of the two identifiers to answer with")
+	}
+	if !strings.Contains(ask, "do not put it in your reply") {
+		t.Error("the ask does not say the tool_use id must stay out of the reply")
+	}
+
+	// THE COREF SEAM. Evidence renders only when something populates it, and nothing on `main` does —
+	// a prompt that taught the model to read counters the prompt never carries would be teaching it to
+	// read a field that does not exist.
+	if strings.Contains(ask, "evidence:") {
+		t.Error("an evidence field was rendered with nothing populating it")
+	}
+	withEv := []AdjudicationItem{{Label: 0, ID: "toolu_x", SizeTokens: 10, Head: "h",
+		Evidence: "novel=12 refs=0 ref_age=never"}}
+	if got := BuildPrefixAsk(withEv); !strings.Contains(got, "evidence: novel=12 refs=0 ref_age=never") {
+		t.Error("a populated evidence field did not reach the inventory line, so PR #80 would have to " +
+			"reshape the contract to carry one")
 	}
 	// And it must tell the model to read from the conversation rather than from the ask.
 	if !strings.Contains(ask, "conversation above is your own") {

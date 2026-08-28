@@ -245,6 +245,10 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	var cands []sweepCand
 	var keys []string
 	changed := 0
+	// eligible counts candidates that cleared every gate this component knows about. Compared with the
+	// inventory's size below, to catch a pre-filter that thinned it -- see the comment at the append
+	// site for why that is the failure worth a tripwire.
+	eligible := 0
 
 	// Phase 1 (serial): replay frozen decisions at any depth, and collect the candidates to name in
 	// the inventory.
@@ -313,7 +317,33 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			rep.Gate("cached_prefix")
 			continue
 		}
+		// EVERY CANDIDATE PAST THIS POINT MUST REACH THE INVENTORY, and sweep_inventory_thinned below
+		// is the tripwire for the day one does not.
+		//
+		// `4ca1f13`'s real defect was a per-candidate PRE-FILTER sitting exactly here.
+		// prefix_still_referenced removed 149,681 candidates and left about one per request, which
+		// silently turned a bulk adjudication arm into the per-output shape refuted at 6% live-kept --
+		// and the arm reported itself as bulk throughout. It was self-defeating twice over: it starved
+		// the comparison, and it meant the model only ever saw what the index had ALREADY judged spent,
+		// which destroys the veto on the index's blind spot that the mechanism exists to provide.
+		//
+		// `main` has no such thinner, so `eligible` and the inventory size are equal by construction
+		// and this counter cannot fire today. THAT IS THE POINT: PR #80 rebases onto this branch and
+		// brings index-driven candidate selection with it, and a filter added between this line and the
+		// append below trips the counter on its first request. If you are adding one, the index's
+		// verdict belongs in the prompt as EVIDENCE for the model to weigh
+		// (extract.AdjudicationItem.Evidence), never as a gate that pre-decides the answer.
+		eligible++
 		cands = append(cands, sweepCand{i: i, content: content, id: id})
+	}
+	// WHAT WAS SHOWN, counted apart from what was answered. A per-candidate loop cannot express "this
+	// many were OFFERED", and the distinction is not cosmetic: a live arm reported 2.80 verdicts per
+	// call and that was read as the batch size, when it counted what the model chose to ANSWER rather
+	// than what it was SHOWN. Without this, "the inventory is starved" and "the model answered for a
+	// third of it" are the same number.
+	rep.GateN("sweep_offered", len(cands))
+	if eligible > len(cands) {
+		rep.GateN("sweep_inventory_thinned", eligible-len(cands))
 	}
 
 	// Phase 2: ONE ASK for every candidate. Not a batch and not a call per output — nothing is
@@ -554,6 +584,13 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 			// A verdict for something we did not offer. NEVER acted on: the label is how a decision is
 			// keyed to an output, so a wrong label is a decision about an unknown message — and
 			// indexing on it would panic rather than merely act wrongly.
+			//
+			// WHAT THIS CANNOT CATCH is a label that is IN RANGE but wrong: a verdict meant for output
+			// 4 arriving as output 5 removes the wrong content and looks perfectly valid from here, and
+			// nothing downstream can detect it either. That is the failure the tool_use id in the
+			// inventory exists to PREVENT rather than to detect -- an exact anchor between the line and
+			// the content makes mis-keying less likely in the first place, which is the only defence
+			// available against a plausible-but-wrong label.
 			r.gate("sweep_verdict_unknown_label")
 			continue
 		}

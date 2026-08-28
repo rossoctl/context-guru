@@ -229,5 +229,10 @@ Three questions the design records rather than answers, from
 3. The **width of the pre-expiry window**. It defaults to the codebase's own clock-uncertainty margin,
    which makes it safe rather than optimal. Widening it fires on more turns and invalidates prefixes
    with more remaining TTL; nothing measures either side of that trade.
-4. How often `sweep_prefix_cache_read_ZERO` fires in practice. That number decides whether the
+4. Whether the **co-reference evidence** helps. The 58%-live-kept figure that justifies this shape was
+   measured with an index supplying `refs` / `ref_age` / `used_frac` per candidate; on `main` the model
+   gets none and reasons from the transcript alone. Plausibly better — it is not limited to exact
+   matches, and the index's blind spot was transformed reuse — but untested. `AdjudicationItem.Evidence`
+   is the seam it will arrive through.
+5. How often `sweep_prefix_cache_read_ZERO` fires in practice. That number decides whether the
    fallback default is right, and it is the first thing to look at after this ships.
