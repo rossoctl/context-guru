@@ -226,7 +226,14 @@ Three families answer "this component ran and did nothing — is it broken?":
   turned away. This is what separates "the guard is misfiring" from "there was genuinely
   nothing to do": `toon` declining 14,675 of 18,288 candidates as
   `not_uniform_object_array` is the component working. Cardinality is bounded by code
-  (gate names are constants), not by traffic.
+  (gate names are constants), not by traffic. **Declines only** — see the next entry.
+- `cg_component_events_total{component,event}` — things a component *did*, as against
+  candidates it turned away: a replay served (`reapplied_same_session`), an output removed
+  (`sweep_dropped`), an inventory offered (`sweep_offered`), a candidate reached past the
+  cached boundary (`sweep_candidate_at_depth`). Split out because these used to land in
+  `..._gate_declines_total`, so that series **rose as a component worked better** and summing
+  it to gauge whether the pipeline was doing anything gave the wrong sign. A name appears in
+  one series or the other, never both — the component has to say which happened.
 - `cg_extract_*` — extraction economics, the one component that spends money:
   `cg_extract_calls_total{outcome="made|avoided|suppressed"}`, `cg_extract_cost_usd`,
   `cg_extract_net_value_usd`, `cg_extract_latency_ms`, and

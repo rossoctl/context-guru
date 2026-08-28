@@ -275,7 +275,7 @@ func TestHousellmSweepActuallyFires(t *testing.T) {
 	}
 	// AND IT ACTED ON THE VERDICT. An ask that removes nothing is the same no-op from the operator's
 	// side, and it is what a floor regression one layer down would look like.
-	if rep.Gates["sweep_dropped"] == 0 {
+	if rep.Events["sweep_dropped"] == 0 {
 		t.Fatalf("the sweep asked and removed nothing. gates=%v", rep.Gates)
 	}
 }

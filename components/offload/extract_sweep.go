@@ -305,7 +305,7 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 				if k != "" {
 					keys = append(keys, k)
 				}
-				rep.Gate("reapplied_same_session")
+				rep.Event("reapplied_same_session")
 			}
 			continue
 		}
@@ -352,7 +352,7 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		// regressed again, which a `cached_prefix` refusal counter could not distinguish from
 		// "nothing was deep this turn".
 		if !c.TailOnly(i) {
-			rep.Gate("sweep_candidate_at_depth")
+			rep.Event("sweep_candidate_at_depth")
 		}
 		// EVERY CANDIDATE PAST THIS POINT MUST REACH THE INVENTORY, and sweep_inventory_thinned below
 		// is the tripwire for the day one does not.
@@ -385,9 +385,9 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	// call and that was read as the batch size, when it counted what the model chose to ANSWER rather
 	// than what it was SHOWN. Without this, "the inventory is starved" and "the model answered for a
 	// third of it" are the same number.
-	rep.GateN("sweep_offered", len(cands))
+	rep.EventN("sweep_offered", len(cands))
 	if eligible > len(cands) {
-		rep.GateN("sweep_inventory_thinned", eligible-len(cands))
+		rep.EventN("sweep_inventory_thinned", eligible-len(cands))
 	}
 	// DO NOT ASK AT ALL BELOW THE INVENTORY FLOOR. The yield of this mechanism is a property of how
 	// many candidates the model compares, and the numbers are not close:
@@ -422,6 +422,9 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		drop, call := e.adjudicate(req, c, rep, cands)
 		for _, g := range call.gates {
 			rep.Gate(g)
+		}
+		for _, ev := range call.events {
+			rep.Event(ev)
 		}
 		if call.rec.Component != "" {
 			rep.Calls = append(rep.Calls, call.rec)
@@ -477,10 +480,17 @@ type sweepCand struct {
 // makes ONE call: the discipline is what stops the next concurrent thing here from reintroducing it.
 type sweepResult struct {
 	gates []string
-	rec   components.ModelCall
+	// events are the names that go to Report.Events rather than Report.Gates: work PERFORMED or
+	// neutral observation, as against a candidate turned away. Carried separately for the same
+	// reason gates are carried at all — the raise happens on the serial path — and split for the
+	// reason Report.Events exists: exported under a metric named "declines", a success made the
+	// series climb as the component worked better.
+	events []string
+	rec    components.ModelCall
 }
 
-func (r *sweepResult) gate(name string) { r.gates = append(r.gates, name) }
+func (r *sweepResult) gate(name string)  { r.gates = append(r.gates, name) }
+func (r *sweepResult) event(name string) { r.events = append(r.events, name) }
 
 // adjudicate makes ONE prefix ask about every candidate and returns the labels it authorised
 // dropping.
@@ -501,7 +511,7 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 	// fires routinely has an upstream filter starving the inventory, which is the failure that cost
 	// three iterations (4ca1f13).
 	if len(cands) < 2 {
-		r.gate("sweep_inventory_of_one")
+		r.event("sweep_inventory_of_one")
 	}
 
 	items := make([]extract.AdjudicationItem, 0, len(cands))
@@ -620,10 +630,10 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		}
 		fellBack = true
 	} else if !fellBack {
-		r.gate("sweep_prefix_cache_read_ok")
+		r.event("sweep_prefix_cache_read_ok")
 	}
 	for range items {
-		r.gate("sweep_adjudicated")
+		r.event("sweep_adjudicated")
 	}
 
 	verdicts, parsed := extract.ParseVerdicts(reply)
@@ -711,7 +721,7 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 			r.gate("sweep_drop_would_not_shrink")
 			continue
 		}
-		r.gate("sweep_dropped")
+		r.event("sweep_dropped")
 		drop = append(drop, v.Label)
 		removed += sz - after
 		metrics.RecordExtractionSaving(sz - after)
@@ -772,7 +782,7 @@ func (e *ExtractSweep) fallbackAsk(ctx context.Context, req *bschemas.BifrostCha
 		it.Sample = extract.ClipSample(cands[it.Label].content, extract.FallbackSampleChars)
 		withSamples[i] = it
 	}
-	r.gate("sweep_fallback_used")
+	r.event("sweep_fallback_used")
 	reply, err := model.Complete(ctx, extract.BuildFallbackAsk(conversationGoal(req), withSamples))
 	if err != nil {
 		r.gate("sweep_fallback_failed")

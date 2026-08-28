@@ -681,7 +681,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// went there. This gate is what makes an authentication failure attributable to the
 		// credential that was actually presented.
 		if model != nil && usedSource != "" && e.modelSource != "config" && usedSource == "config" {
-			rep.Gate("model_source_fell_back_to_config")
+			rep.Event("model_source_fell_back_to_config")
 		}
 	}
 	// Per-session cadence: on throttled steps drop the model (skip this request).
@@ -877,7 +877,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			}
 			apply(i, content, cached.Projected, cached.Summary)
 			dbgReapply++
-			rep.Gate("reapplied_same_session")
+			rep.Event("reapplied_same_session")
 			continue
 		}
 		// A NEW compaction, on the UNCACHED region only (cache-safe): when cache-aware that
@@ -948,7 +948,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				putResult(c, id, cached.Projected, cached.Summary)
 				apply(i, content, cached.Projected, cached.Summary)
 				dbgReapply++
-				rep.Gate("reapplied_cross_session")
+				rep.Event("reapplied_cross_session")
 				continue
 			}
 		}

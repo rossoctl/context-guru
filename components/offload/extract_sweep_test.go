@@ -3,6 +3,7 @@ package offload
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -188,7 +189,7 @@ func TestSweepRemovesSpentOutputsFromOneCachedAsk(t *testing.T) {
 	if n := atomic.LoadInt64(&asker.calls); n != 1 {
 		t.Fatalf("expected ONE prefix ask, got %d (gates: %v)", n, rep.Gates)
 	}
-	if rep.Gates["sweep_dropped"] == 0 {
+	if rep.Events["sweep_dropped"] == 0 {
 		t.Fatalf("no removal was recorded, so nothing under test ran (gates: %v)", rep.Gates)
 	}
 	got := schema.MessageText(req.Input[1])
@@ -210,7 +211,7 @@ func TestSweepRemovesSpentOutputsFromOneCachedAsk(t *testing.T) {
 		t.Errorf("the ask was made for session %q, not the request's", asker.sess())
 	}
 	// And the verified read is recorded, because it is the mechanism's whole justification.
-	if rep.Gates["sweep_prefix_cache_read_ok"] != 1 {
+	if rep.Events["sweep_prefix_cache_read_ok"] != 1 {
 		t.Errorf("the cache read was not recorded (gates: %v)", rep.Gates)
 	}
 }
@@ -230,11 +231,11 @@ func TestSweepAsksOnceForEveryCandidate(t *testing.T) {
 	if got := atomic.LoadInt64(&asker.calls); got != 1 {
 		t.Fatalf("%d candidates took %d asks; the shape is ONE ask over the cached transcript", n, got)
 	}
-	if rep.Gates["sweep_adjudicated"] != n {
+	if rep.Events["sweep_adjudicated"] != n {
 		t.Fatalf("sweep_adjudicated = %d, want %d — the inventory was starved before assembly "+
-			"(gates: %v)", rep.Gates["sweep_adjudicated"], n, rep.Gates)
+			"(gates: %v)", rep.Events["sweep_adjudicated"], n, rep.Gates)
 	}
-	if rep.Gates["sweep_inventory_of_one"] != 0 {
+	if rep.Events["sweep_inventory_of_one"] != 0 {
 		t.Errorf("an inventory of %d was recorded as one (gates: %v)", n, rep.Gates)
 	}
 	// Every candidate must be NAMED in the one ask.
@@ -269,7 +270,7 @@ func TestSweepFallsBackWhenTheCacheReadDidNotHappen(t *testing.T) {
 		t.Fatalf("a zero cache read was not counted; the mechanism's failure would be invisible "+
 			"(gates: %v)", rep.Gates)
 	}
-	if rep.Gates["sweep_fallback_used"] != 1 {
+	if rep.Events["sweep_fallback_used"] != 1 {
 		t.Fatalf("the default did not fall back, so the component stops working on a first turn "+
 			"(gates: %v)", rep.Gates)
 	}
@@ -312,7 +313,7 @@ func TestBlockFallbackDeclinesInsteadOfPaying(t *testing.T) {
 	if n := atomic.LoadInt64(&fallbackModel.calls) - before; n != 0 {
 		t.Fatalf("strict mode still paid for %d fallback completions", n)
 	}
-	if rep.Gates["sweep_dropped"] != 0 {
+	if rep.Events["sweep_dropped"] != 0 {
 		t.Fatalf("strict mode acted on a full-price read (gates: %v)", rep.Gates)
 	}
 	if schema.MessageText(req.Input[1]) != original {
@@ -333,7 +334,7 @@ func TestSweepFallsBackWithNoAsker(t *testing.T) {
 	if rep.Gates["sweep_no_asker"] != 1 {
 		t.Fatalf("a missing asker was not counted (gates: %v)", rep.Gates)
 	}
-	if rep.Gates["sweep_fallback_used"] != 1 {
+	if rep.Events["sweep_fallback_used"] != 1 {
 		t.Fatalf("no asker did not fall back (gates: %v)", rep.Gates)
 	}
 	if n := atomic.LoadInt64(&fallbackModel.calls) - before; n != 1 {
@@ -399,7 +400,7 @@ func TestSweepCountsAMissingPrefixApartFromAFailure(t *testing.T) {
 			}
 			// And it falls back rather than skipping, which is what keeps the component alive on a
 			// session's first turn.
-			if rep.Gates["sweep_fallback_used"] != 1 {
+			if rep.Events["sweep_fallback_used"] != 1 {
 				t.Errorf("%s did not fall back (gates: %v)", tc.name, rep.Gates)
 			}
 		})
@@ -493,7 +494,7 @@ func TestSweepReplaysItsRemovalOnLaterTurns(t *testing.T) {
 	if _, err := e.Offload(first, rep1, preExpiryCtx("sess", asker, st)); err != nil {
 		t.Fatal(err)
 	}
-	if rep1.Gates["sweep_dropped"] == 0 {
+	if rep1.Events["sweep_dropped"] == 0 {
 		t.Fatalf("the first turn did not remove anything, so there is nothing to replay (gates: %v)",
 			rep1.Gates)
 	}
@@ -509,7 +510,7 @@ func TestSweepReplaysItsRemovalOnLaterTurns(t *testing.T) {
 	if n := atomic.LoadInt64(&asker.calls); n != 1 {
 		t.Fatalf("the later turn asked again: %d asks total", n)
 	}
-	if rep2.Gates["reapplied_same_session"] != 1 {
+	if rep2.Events["reapplied_same_session"] != 1 {
 		t.Fatalf("the later turn did not replay the frozen removal (gates: %v)", rep2.Gates)
 	}
 	got := schema.MessageText(later.Input[1])
@@ -534,13 +535,13 @@ func TestSweepIgnoresAVerdictForAnUnofferedLabel(t *testing.T) {
 	if _, err := e.Offload(req, rep, preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
-	if rep.Gates["sweep_adjudicated"] == 0 {
+	if rep.Events["sweep_adjudicated"] == 0 {
 		t.Fatalf("no ask was made, so nothing under test ran (gates: %v)", rep.Gates)
 	}
 	if rep.Gates["sweep_verdict_unknown_label"] != 1 {
 		t.Fatalf("a verdict for an unoffered label was not counted (gates: %v)", rep.Gates)
 	}
-	if rep.Gates["sweep_dropped"] != 0 {
+	if rep.Events["sweep_dropped"] != 0 {
 		t.Fatalf("a verdict for an unoffered label was ACTED ON (gates: %v)", rep.Gates)
 	}
 	if schema.MessageText(req.Input[1]) != original {
@@ -562,7 +563,7 @@ func TestSweepCountsKeepEverythingSeparatelyFromAFailure(t *testing.T) {
 	if _, err := e.Offload(req, rep, preExpiryCtx("s", keepAll, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
-	if rep.Gates["sweep_adjudicated"] == 0 {
+	if rep.Events["sweep_adjudicated"] == 0 {
 		t.Fatalf("no ask was made (gates: %v)", rep.Gates)
 	}
 	if rep.Gates["sweep_kept_everything"] != 1 {
@@ -605,13 +606,13 @@ func TestSweepRefusesADropThatNamesAnObligation(t *testing.T) {
 	if _, err := e.Offload(req, rep, preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
-	if rep.Gates["sweep_adjudicated"] == 0 {
+	if rep.Events["sweep_adjudicated"] == 0 {
 		t.Fatalf("no ask was made, so the refusal was never exercised (gates: %v)", rep.Gates)
 	}
 	if rep.Gates["sweep_drop_refused_obligation"] == 0 {
 		t.Fatalf("the refusal was not counted (gates: %v)", rep.Gates)
 	}
-	if rep.Gates["sweep_dropped"] != 0 {
+	if rep.Events["sweep_dropped"] != 0 {
 		t.Fatalf("the contradictory drop was PERFORMED (gates: %v)", rep.Gates)
 	}
 	if schema.MessageText(req.Input[1]) != original {
@@ -641,11 +642,11 @@ func TestSweepCountsAnInventoryOfOne(t *testing.T) {
 		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
 		t.Fatal(err)
 	}
-	if rep.Gates["sweep_adjudicated"] != 1 {
+	if rep.Events["sweep_adjudicated"] != 1 {
 		t.Fatalf("expected one candidate adjudicated, got %d (gates: %v)",
-			rep.Gates["sweep_adjudicated"], rep.Gates)
+			rep.Events["sweep_adjudicated"], rep.Gates)
 	}
-	if rep.Gates["sweep_inventory_of_one"] != 1 {
+	if rep.Events["sweep_inventory_of_one"] != 1 {
 		t.Fatalf("an inventory of one was not counted; a starved inventory would be invisible "+
 			"(gates: %v)", rep.Gates)
 	}
@@ -672,10 +673,10 @@ func TestSweepCountsAThinnedInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 	// PRECONDITION: candidates really reached the inventory, or "nothing was thinned" is vacuous.
-	if rep.Gates["sweep_offered"] != n {
-		t.Fatalf("sweep_offered = %d, want %d (gates: %v)", rep.Gates["sweep_offered"], n, rep.Gates)
+	if rep.Events["sweep_offered"] != n {
+		t.Fatalf("sweep_offered = %d, want %d (gates: %v)", rep.Events["sweep_offered"], n, rep.Gates)
 	}
-	if rep.Gates["sweep_inventory_thinned"] != 0 {
+	if rep.Events["sweep_inventory_thinned"] != 0 {
 		t.Errorf("nothing thins the list on main, so the tripwire must be silent (gates: %v)", rep.Gates)
 	}
 
@@ -684,10 +685,10 @@ func TestSweepCountsAThinnedInventory(t *testing.T) {
 	var probe components.Report
 	eligible, offered := n, 1 // what prefix_still_referenced did, in miniature
 	if eligible > offered {
-		probe.GateN("sweep_inventory_thinned", eligible-offered)
+		probe.EventN("sweep_inventory_thinned", eligible-offered)
 	}
-	if probe.Gates["sweep_inventory_thinned"] != n-1 {
-		t.Fatalf("the tripwire's arithmetic does not count a thinned inventory: %v", probe.Gates)
+	if probe.Events["sweep_inventory_thinned"] != n-1 {
+		t.Fatalf("the tripwire's arithmetic does not count a thinned inventory: %v", probe.Events)
 	}
 }
 
@@ -722,17 +723,25 @@ func TestSweepRaisesTheContractedCounterNames(t *testing.T) {
 			}
 			// PRECONDITION: an adjudication happened. A component that never asked raises no
 			// counters, and every assertion would then fail for the wrong reason.
-			if rep.Gates["sweep_adjudicated"] != 1 {
+			if rep.Events["sweep_adjudicated"] != 1 {
 				t.Fatalf("no adjudication was counted: %v", rep.Gates)
 			}
+			// Looked up across BOTH histograms on purpose. What this test pins is that the
+			// component raises the contracted NAME; which of the two series it lands in is a
+			// different contract, pinned at the exporter end in proxy/sweep_counters_test.go, and
+			// the no-name-in-both invariant is pinned by components.TestGatesAndEventsAreDisjoint.
+			// Asserting the series here as well would make one fixture fail for two unrelated
+			// reasons.
+			raised := func(name string) int { return rep.Gates[name] + rep.Events[name] }
+			both := func() string { return fmt.Sprintf("gates=%v events=%v", rep.Gates, rep.Events) }
 			for _, want := range tc.want {
-				if rep.Gates[want] == 0 {
-					t.Errorf("the component did not raise %q; got %v", want, rep.Gates)
+				if raised(want) == 0 {
+					t.Errorf("the component did not raise %q; got %s", want, both())
 				}
 			}
 			for _, no := range tc.notWant {
-				if rep.Gates[no] != 0 {
-					t.Errorf("the component raised %q when it should not; got %v", no, rep.Gates)
+				if raised(no) != 0 {
+					t.Errorf("the component raised %q when it should not; got %s", no, both())
 				}
 			}
 		})

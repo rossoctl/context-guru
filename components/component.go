@@ -499,6 +499,21 @@ type Report struct {
 	// sat at zero on a whole workload without anyone being able to say which case each
 	// was in. Filled by the component via Gate(); rolled up into /stats per component.
 	Gates map[string]int
+	// Events counts, per named event, things this component DID rather than declined — a cache
+	// hit replayed, a candidate reached at depth, an output removed, an inventory offered.
+	//
+	// Separate from Gates because they were one map and the name lied. Everything in Gates is
+	// exported as `cg_component_gate_declines_total`, so `reapplied_same_session` (a cache HIT)
+	// and `sweep_dropped` (a removal that WORKED) were being counted as declines: anyone summing
+	// that series to gauge whether the pipeline was doing anything got the wrong SIGN, because the
+	// more a component succeeded the higher its "declines" climbed. Splitting the map rather than
+	// classifying names in the exporter puts the judgement at the call site, where the author knows
+	// which one it is, instead of in a lookup table that goes stale the next time a gate is added.
+	//
+	// A name must not appear in both maps for one component: that would mean the component cannot
+	// say whether the thing succeeded or was refused, and TestGatesAndEventsAreDisjoint pins it.
+	// Filled via Event()/EventN(); rolled up into /stats beside Gates.
+	Events map[string]int
 	// Calls records each LLM call this component made on this request. Empty for every
 	// deterministic component; one entry per model call for the two that make them.
 	//
@@ -613,6 +628,34 @@ func (r *Report) GateN(name string, n int) {
 		r.Gates = map[string]int{}
 	}
 	r.Gates[name] += n
+}
+
+// Event records that the component DID the named thing once — a replay served, a candidate reached
+// at depth, an output removed. The counterpart to Gate, and the distinction is the whole reason both
+// exist: a decline and a success exported under one metric name called "declines" produced a series
+// whose value rose as the component worked better. See Report.Events.
+//
+// Same stability rule as Gate: the names are read off /stats and scraped by label.
+func (r *Report) Event(name string) {
+	if r == nil {
+		return
+	}
+	if r.Events == nil {
+		r.Events = map[string]int{}
+	}
+	r.Events[name]++
+}
+
+// EventN records n at once, for an event whose subject is a COUNT rather than a single candidate —
+// how many were offered, how many were removed. GateN's rationale applies unchanged.
+func (r *Report) EventN(name string, n int) {
+	if r == nil || n <= 0 {
+		return
+	}
+	if r.Events == nil {
+		r.Events = map[string]int{}
+	}
+	r.Events[name] += n
 }
 
 // Saved returns non-negative tokens saved by this component.

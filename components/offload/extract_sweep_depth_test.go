@@ -60,7 +60,7 @@ func TestSweepOffersCandidatesInsideTheCachedPrefix(t *testing.T) {
 	}
 
 	// Precondition: the ask must have happened, or every assertion below is vacuous.
-	if got := rep.Gates["sweep_offered"]; got != 12 {
+	if got := rep.Events["sweep_offered"]; got != 12 {
 		t.Fatalf("sweep_offered = %d, want 12: candidates inside the cached prefix were refused, "+
 			"which is #122 — the ask reads that region and the tail gate was excluding it; gates=%v",
 			got, rep.Gates)
@@ -73,7 +73,7 @@ func TestSweepOffersCandidatesInsideTheCachedPrefix(t *testing.T) {
 	// And the positive counter must say the component genuinely reached past the boundary. Its going
 	// to zero is the signal that this regressed again, which a refusal counter could not distinguish
 	// from "nothing was deep this turn".
-	if got := rep.Gates["sweep_candidate_at_depth"]; got == 0 {
+	if got := rep.Events["sweep_candidate_at_depth"]; got == 0 {
 		t.Errorf("sweep_candidate_at_depth = 0 with MaxCachedIdx=%d over %d messages: nothing was "+
 			"counted as deep, so either the boundary is not being read or the fixture is wrong; "+
 			"gates=%v", c.MaxCachedIdx, len(req.Input), rep.Gates)

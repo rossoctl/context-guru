@@ -443,6 +443,34 @@ func (h *Handler) renderMetrics() string {
 					`component="`+escapeLabel(name)+`",gate="`+escapeLabel(g)+`"`, float64(gates[g]))
 			}
 		}
+		// EVENTS, EXPORTED APART FROM DECLINES, because they were one series and its name lied.
+		//
+		// Everything a component recorded landed in `..._gate_declines_total`, so a cache hit
+		// (`reapplied_same_session`) and a removal that worked (`sweep_dropped`) were counted as
+		// declines. The series therefore rose as a component worked BETTER, and anyone summing it to
+		// judge whether the pipeline was doing anything read the wrong sign. Splitting is safe to do
+		// bluntly rather than with an alias: both ends live in this repo — this exporter and the
+		// Grafana panels under deploy/grafana — so there is no external scraper to strand.
+		//
+		// Same bounded cardinality as declines: the names are constants in the components.
+		promHeaderProc(&b, "cg_component_events_total",
+			"Things a component DID, as against candidates it turned away — a replay served, an "+
+				"output removed, an inventory offered, a candidate reached past the cached "+
+				"boundary. Counted apart from cg_component_gate_declines_total because a success "+
+				"exported as a \"decline\" makes the series climb as the component works better.",
+			"counter")
+		for _, name := range names {
+			events := s.Components[name].Events
+			evNames := make([]string, 0, len(events))
+			for ev := range events {
+				evNames = append(evNames, ev)
+			}
+			sort.Strings(evNames) // stable output, same reason as the component order
+			for _, ev := range evNames {
+				promLine(&b, "cg_component_events_total",
+					`component="`+escapeLabel(name)+`",event="`+escapeLabel(ev)+`"`, float64(events[ev]))
+			}
+		}
 		promHeaderProc(&b, "cg_component_saved_tokens_unique_total",
 			"Tokens each component removed, deduplicated by content.", "counter")
 		for _, name := range names {
