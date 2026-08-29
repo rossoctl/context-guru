@@ -405,6 +405,18 @@ type CompRow struct {
 	// predates the column". The UI renders the first as a dash and the second as "unknown",
 	// and omitempty made every healthy component look like the second.
 	Gates map[string]int `json:"gates"`
+	// Events counts what this component DID — a replay served, an output removed, an inventory
+	// offered, a candidate reached past the cached boundary. The counterpart to Gates, and carried
+	// separately for the reason the two metrics series are separate: they answer opposite questions.
+	//
+	// Without it this row was blind in proportion to how well a component was working, because the
+	// names a component raises when it SUCCEEDS are the ones that moved. Observed live: the turn
+	// that adjudicated twelve outputs and removed twelve showed an empty gates cell, while a turn
+	// that refused everything showed a full one.
+	//
+	// Same omitempty reasoning as Gates, and it is load-bearing here too: an EMPTY map means "did
+	// nothing counted", a MISSING field means "this row predates the column".
+	Events map[string]int `json:"events"`
 }
 
 // ContentRow is one rewritten message's before/after text (already redacted and
@@ -502,6 +514,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 				row.Err = r.Err.Error()
 			}
 			row.Gates = r.Gates
+			row.Events = r.Events
 			if r.Reverted {
 				e.Reverts++
 			}

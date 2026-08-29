@@ -2164,26 +2164,45 @@ function syncDimPicker(dims) {
 }
 
 /**
- * gateSummary renders a component's gate counts: the reasons it turned candidates away,
- * commonest first.
+ * activitySummary renders what a component DID above what it turned away.
  *
- * This is the answer to the question the components table could not answer before —
- * "act rate 0%, why?" — and it is the difference between a Bob user concluding
- * context-guru does nothing and reading `no_filter_match 15`, which says the heuristics
- * were written for another agent's tool-output shapes.
+ * Both, because this cell used to show declines only and was therefore blind in proportion to how
+ * well a component was working: the names a component raises when it SUCCEEDS are the ones that live
+ * in `events`. Observed on real traffic — a turn that adjudicated twelve outputs and removed twelve
+ * showed an empty cell, while a turn that refused everything showed a full one.
  *
- * Three states, all different: a populated map is the reasons; an EMPTY map is "this
- * component turned nothing away"; a MISSING map is "unknown" — on a request row that means
- * it was written before the column existed, and on an aggregate row that no row in the
- * window carried gate data at all.
+ * Events lead, because "what happened" is the question a reader opens this cell with; declines
+ * answer "why did nothing happen", which is only interesting once the first is empty.
+ *
+ * Kept in ONE cell rather than adding a column: the column is intentionally unsortable (null in
+ * COMPONENT_SORT), and a new one would have to be threaded through that array and both header rows
+ * for no gain a reader can use. They stay labelled and on separate lines, so a success is never
+ * mistaken for a refusal — which is the whole point of having split them.
  */
-function gateSummary(gates) {
-  if (!gates) return el('span', { class: 'na', text: 'unknown' });
-  const all = Object.entries(gates).sort((a, b) => b[1] - a[1]);
-  if (!all.length) return el('span', { class: 'na', text: '—' });
-  const shown = all.slice(0, 2).map(([k, v]) => k + ' ' + num(v)).join(' · ');
-  const rest = all.length > 2 ? ' +' + (all.length - 2) : '';
-  return el('span', { title: all.map(([k, v]) => k + ' ' + num(v)).join('\n'), text: shown + rest });
+function activitySummary(gates, events) {
+  const parts = [];
+  const add = (label, m, cls) => {
+    if (!m) return;
+    const all = Object.entries(m).sort((a, b) => b[1] - a[1]);
+    if (!all.length) return;
+    const shown = all.slice(0, 2).map(([k, v]) => k + ' ' + num(v)).join(' · ');
+    const rest = all.length > 2 ? ' +' + (all.length - 2) : '';
+    parts.push(el('div', {
+      class: cls,
+      title: label + '\n' + all.map(([k, v]) => k + ' ' + num(v)).join('\n'),
+      text: shown + rest,
+    }));
+  };
+  add('did', events, 'did');
+  add('declined', gates, 's');
+  // Absent BOTH maps means the row predates the columns — "unknown", not "nothing happened". An
+  // empty pair means the component genuinely recorded neither, which is a dash. Conflating those
+  // two is the mistake the gates column's own comment records having made once.
+  if (!parts.length) {
+    const known = gates || events;
+    return el('span', { class: 'na', text: known ? '—' : 'unknown' });
+  }
+  return el('span', {}, ...parts);
 }
 
 /**
@@ -2510,7 +2529,7 @@ async function loadComponents() {
               + 'there is no repeat business to amortize.',
         }, c.replay_multiple ? c.replay_multiple.toFixed(1) + '×' : '—'),
         el('td', { class: 'num', text: num(c.errors) }),
-        el('td', {}, gateSummary(c.gates)),
+        el('td', {}, activitySummary(c.gates, c.events)),
         el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext }))));
     }
     renderNetReconcile(components);
@@ -3214,7 +3233,7 @@ async function openRequest(id, fromURL) {
           el('td', { class: 'num', text: ms(c.duration_ms) }),
           el('td', {}, el('span', { class: 'pill ' + outcome[1], text: outcome[0] }),
             c.err ? el('div', { class: 's', text: c.err }) : null),
-          el('td', {}, gateSummary(c.gates))));
+          el('td', {}, activitySummary(c.gates, c.events))));
       });
       tbl.appendChild(tb);
       body.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));

@@ -226,7 +226,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		return nil, err
 	}
 	crows, err := d.sql.Query(`SELECT component, kind, acted, mutated, reverted, skipped,
-		saved_gross, saved_unique, saved_usd, duration_ms, err, gates FROM request_components
+		saved_gross, saved_unique, saved_usd, duration_ms, err, gates, events FROM request_components
 		WHERE request_id = ? ORDER BY rowid`, id)
 	if err != nil {
 		return nil, err
@@ -235,9 +235,10 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 	for crows.Next() {
 		var c CompRow
 		var a, m, rv, sk int
-		var gates string
+		var gates, events string
 		if err := crows.Scan(&c.Component, &c.Kind, &a, &m, &rv, &sk,
-			&c.SavedGross, &c.SavedUnique, &c.SavedUSD, &c.DurationMs, &c.Err, &gates); err != nil {
+			&c.SavedGross, &c.SavedUnique, &c.SavedUSD, &c.DurationMs, &c.Err,
+			&gates, &events); err != nil {
 			return nil, err
 		}
 		c.Acted, c.Mutated, c.Reverted, c.Skipped = a != 0, m != 0, rv != 0, sk != 0
@@ -248,6 +249,16 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 			m := map[string]int{}
 			if err := json.Unmarshal([]byte(gates), &m); err == nil {
 				c.Gates = m
+			}
+		}
+		// Decoded the same way and for the same reasons — including the empty-versus-missing
+		// distinction, which matters more here: a component that only records successes writes an
+		// empty gates map on a turn where it did everything right, so "empty" and "unknown" landing
+		// on the same rendering is what made this row unreadable in the first place.
+		if events != "" {
+			m := map[string]int{}
+			if err := json.Unmarshal([]byte(events), &m); err == nil {
+				c.Events = m
 			}
 		}
 		e.Components = append(e.Components, c)
@@ -638,6 +649,10 @@ type ComponentRow struct {
 	// Not omitempty - see CompRow.Gates. Over a window an absent map means no row in it
 	// carried gate data at all.
 	Gates map[string]int64 `json:"gates"`
+	// Events is the counterpart total over the window: what this component DID. Same
+	// empty-versus-absent contract as Gates above — an absent map means no row in the window
+	// carried event data at all, which is not the same as a component that did nothing.
+	Events map[string]int64 `json:"events"`
 }
 
 // Components aggregates per-component accounting over the filtered window.
@@ -802,7 +817,40 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 		}
 		c.Gates[gate] += n
 	}
-	return out, grows.Err()
+	if err := grows.Err(); err != nil {
+		return nil, err
+	}
+	// EVENT totals, aggregated the same way and for the same reason. Summed in SQL rather than by
+	// decoding a map per row in Go, because a filtered window is hundreds of thousands of rows.
+	//
+	// A second query rather than a UNION over both columns: the two must land in separate maps, and
+	// merging them here would undo at the API what the column split did at the storage layer. The
+	// duplication is four lines and the alternative is a discriminator column threaded through the
+	// scan.
+	eq := `SELECT c.component, j.key, SUM(CAST(j.value AS INTEGER))
+		FROM request_components c JOIN requests r ON r.id = c.request_id, json_each(c.events) j
+		WHERE ` + cond + ` AND json_valid(c.events) GROUP BY 1, 2`
+	erows, err := d.sql.Query(eq, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer erows.Close()
+	for erows.Next() {
+		var name, event string
+		var n int64
+		if err := erows.Scan(&name, &event, &n); err != nil {
+			return nil, err
+		}
+		c, ok := byName[name]
+		if !ok {
+			continue
+		}
+		if c.Events == nil {
+			c.Events = map[string]int64{}
+		}
+		c.Events[event] += n
+	}
+	return out, erows.Err()
 }
 
 // Bucket is one time bucket of the series. Bucketing is done in SQL at query

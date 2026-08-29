@@ -254,7 +254,15 @@ CREATE TABLE IF NOT EXISTS request_components (
   -- to "nothing happened, why?", and the answer a user of a non-Claude agent needs most.
   -- JSON rather than a row per gate: it is read whole, never joined on, and json_each
   -- aggregates it in SQL when the components view needs totals.
-  gates        TEXT    NOT NULL DEFAULT ''
+  gates        TEXT    NOT NULL DEFAULT '',
+  -- What this component DID, as {"event_name":count} — the counterpart to gates above, and a
+  -- SEPARATE column for the same reason the metrics are two series: they answer opposite
+  -- questions, and one column with a type flag re-creates at the storage layer the ambiguity
+  -- that splitting them removed. Successes are the names a component raises when it works, so
+  -- folding them into the gates column made this row blind in proportion to how well the
+  -- component was doing: a turn that removed twelve outputs showed an empty cell, while a turn
+  -- that refused everything showed a full one.
+  events       TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_rc_request ON request_components(request_id);
 CREATE INDEX IF NOT EXISTS idx_rc_comp    ON request_components(component);
@@ -583,6 +591,11 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},
+	// Added with the gates/events split. Additive with a default, so an existing database keeps
+	// serving: pre-migration rows read as '' and the UI renders that as "unknown" rather than as
+	// "this component did nothing", which is the distinction the gates column's own comment
+	// records having got wrong once already.
+	{"request_components", "events", "TEXT NOT NULL DEFAULT ''"},
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
 }
 

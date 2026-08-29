@@ -662,7 +662,18 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		// explicitly invites that, so it must not be filed as a failure -- that conflation is what
 		// made "the model declined to act" and "the model was never successfully asked" the same
 		// number for three iterations (4ca1f13).
-		r.gate("sweep_kept_everything")
+		// SPLIT BY PATH, because a keep-all means different things on each and averaging them hides
+		// the more interesting one. The fallback has no transcript, so it cannot see that a task
+		// closed and resolves toward keep structurally -- measured at 12 of 12 kept where the prefix
+		// ask dropped 12 of 12 on the same content (#125). Without this split a run's numbers read as
+		// "the component sometimes acts and sometimes does not", when the real variable is whether
+		// the cache read happened. It is also how the goal-ordering fix in sweepIntent gets checked
+		// against real traffic rather than argued about.
+		if fellBack {
+			r.gate("sweep_fallback_kept_everything")
+		} else {
+			r.gate("sweep_kept_everything")
+		}
 		r.rec.Rejection = "adjudicated: keep everything"
 		return nil, r
 	}
@@ -783,13 +794,80 @@ func (e *ExtractSweep) fallbackAsk(ctx context.Context, req *bschemas.BifrostCha
 		withSamples[i] = it
 	}
 	r.event("sweep_fallback_used")
-	reply, err := model.Complete(ctx, extract.BuildFallbackAsk(conversationGoal(req), withSamples))
+	reply, err := model.Complete(ctx, extract.BuildFallbackAsk(sweepIntent(req), withSamples))
 	if err != nil {
 		r.gate("sweep_fallback_failed")
 		r.rec.Rejection = "fallback completion failed: " + err.Error()
 		return "", err
 	}
 	return reply, nil
+}
+
+// sweepIntent renders the conversation's intent for a SPENT-NESS judgement, which wants it ordered
+// differently from every other component's relevance question.
+//
+// conversationGoal joins firstUser, lastAsst, lastUser in that order, unlabelled. That is right for
+// extract_llm, which asks "is this output relevant to the task" — the opening instruction IS the
+// task. It is wrong here, and measurably so. This component asks whether an output is SPENT, and the
+// opening instruction describes what the session set out to do, which is precisely what may now be
+// finished. Leading with it makes everything look needed.
+//
+// MEASURED, on two near-identical transcripts with twelve candidates each: the prefix ask dropped
+// 12 of 12, while the fallback — same content, goal-string only — kept 12 of 12 and cited the
+// original read instruction as the obligation for every one. See #125. The fallback has no
+// transcript by construction, so it cannot see that the task closed; the goal string is the only
+// place that can tell it.
+//
+// So: same three parts, ordered current-FIRST and LABELLED, with the original instruction explicitly
+// marked as possibly already satisfied. The parts map onto the contract's own criteria — (a) the
+// current step, (b) an unfinished user instruction, (c) a next step the agent stated — rather than
+// arriving as one undifferentiated blob the model has to guess the structure of.
+//
+// The original instruction is kept rather than dropped, deliberately: criterion (b) is an unfinished
+// USER instruction, and a standing "…and summarise all of them at the end" lives in exactly that
+// message. Removing it would trade a bias toward keeping for a bias toward dropping, which is the
+// direction that loses content the agent still needs.
+func sweepIntent(req *bschemas.BifrostChatRequest) string {
+	var firstUser, lastUser, lastAsst string
+	for i := range req.Input {
+		if req.Input[i].Role == bschemas.ChatMessageRoleUser {
+			firstUser = strings.TrimSpace(schema.MessageText(req.Input[i]))
+			break
+		}
+	}
+	for i := len(req.Input) - 1; i >= 0; i-- {
+		switch req.Input[i].Role {
+		case bschemas.ChatMessageRoleUser:
+			if lastUser == "" {
+				lastUser = strings.TrimSpace(schema.MessageText(req.Input[i]))
+			}
+		case bschemas.ChatMessageRoleAssistant:
+			if lastAsst == "" {
+				lastAsst = strings.TrimSpace(schema.MessageText(req.Input[i]))
+			}
+		}
+		if lastUser != "" && lastAsst != "" {
+			break
+		}
+	}
+	var b strings.Builder
+	add := func(label, text string) {
+		if text == "" {
+			return
+		}
+		b.WriteString(label)
+		b.WriteString("\n")
+		b.WriteString(text)
+		b.WriteString("\n\n")
+	}
+	add("MOST RECENT USER TURN — this is the step the agent is on now:", lastUser)
+	add("THE AGENT'S OWN LAST STATEMENT — any next step it named is an obligation:", lastAsst)
+	// Last, and flagged. Its position in the prompt is the fix.
+	if firstUser != "" && firstUser != lastUser {
+		add("THE SESSION'S ORIGINAL INSTRUCTION — MAY ALREADY BE SATISFIED; treat it as an "+
+			"obligation only if some part of it is still outstanding:", firstUser)
+	}
+	return clipRunes(strings.TrimSpace(b.String()), goalCap)
 }
 
 // errNoFallbackModel is returned when the fallback has nowhere to go. Its own type so the caller can
