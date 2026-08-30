@@ -657,18 +657,16 @@ func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRo
 		return nil, err
 	}
 	// The pre-instrumentation split figure, per tenant, priced here because this is the layer
-	// that holds the rates. One query per tenant rather than one for all of them: the figure is
-	// scoped by tenant everywhere else it appears, and a shared query would have to be
-	// re-grouped anyway. Best-effort — a tenant it cannot value reports 0 for that metric only.
+	// that holds the rates. One query for every tenant, not one per tenant — see
+	// DB.CachesplitHistoricalUSDByTenant for why a query per tenant re-paid the same
+	// whole-table sort N times over. Best-effort — a query failure here zeroes this metric
+	// for every tenant rather than failing the whole scrape.
 	hist := map[string]float64{}
 	if a.prices != nil {
-		for _, r := range rows {
-			h, err := a.rec.DB().CachesplitHistoricalUSD(
-				dash.Filter{Since: since, Tenant: r.TenantID}, a.prices)
-			if err != nil {
-				continue // per tenant, as the comment above promises: break zeroed every tenant after this one
+		if byTenant, err := a.rec.DB().CachesplitHistoricalUSDByTenant(since, a.prices); err == nil {
+			for tid, h := range byTenant {
+				hist[tid] = h.USD
 			}
-			hist[r.TenantID] = h.USD
 		}
 	}
 	out := make([]proxy.TenantMetricRow, 0, len(rows))

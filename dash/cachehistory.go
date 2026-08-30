@@ -124,6 +124,92 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 	return out, rows.Err()
 }
 
+// CachesplitHistoricalUSDByTenant is CachesplitHistoricalUSD for every tenant since a given
+// time, in one pass instead of one call per tenant.
+//
+// The Prometheus exporter used to call CachesplitHistoricalUSD once per tenant. Each call's
+// ROW_NUMBER ranks the WHOLE unfiltered requests table (that's what makes it correct — see
+// CachesplitHistoricalUSD's comment), so calling it N times re-sorted that same table N
+// times over: on this deployment, 19 tenants at ~0.8s a sort, every single scrape. Tenant is
+// only ever the outer filter here, never part of the session-first ranking itself, so it is
+// safe to compute the ranking once and group the qualifying rows by tenant afterward.
+func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (map[string]CachesplitHistorical, error) {
+	out := map[string]CachesplitHistorical{}
+	if d == nil || p == nil {
+		return out, nil
+	}
+	sizes, err := d.CachesplitSizeSpread()
+	if err != nil {
+		return out, err
+	}
+	cond, args := (Filter{Since: since, TenantAll: true}).where()
+	rows, err := d.sql.Query(`WITH s AS (
+		SELECT r.*, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS rn
+		FROM requests r
+	) SELECT r.tenant_id, r.model, r.cache_read, r.cache_write FROM s r
+		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0 AND r.rn = 1`, args...)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	acc := map[string]*CachesplitHistorical{}
+	seen := map[string]map[string]bool{}
+	priced := map[string]float64{} // model -> value of one qualifying request, shared across tenants
+	for rows.Next() {
+		var tenant, model string
+		var read, write int64
+		if err := rows.Scan(&tenant, &model, &read, &write); err != nil {
+			return out, err
+		}
+		h, ok := acc[tenant]
+		if !ok {
+			h = &CachesplitHistorical{}
+			acc[tenant] = h
+			seen[tenant] = map[string]bool{}
+		}
+		sp, ok := sizes[model]
+		if !ok {
+			h.Uncovered++
+			continue
+		}
+		stable := int64(sp[1])
+		if read < stable || write >= stable {
+			continue // the stable half was not what the provider served from cache
+		}
+		v, done := priced[model]
+		if !done {
+			price, ok := p.Price(context.Background(), model)
+			if !ok || price.Zero() {
+				h.Uncovered++
+				continue
+			}
+			miss := price.CacheWrite
+			if miss < price.Input {
+				miss = price.Input
+			}
+			if delta := miss - price.CacheRead; delta > 0 {
+				v = float64(stable) * delta
+			}
+			priced[model] = v
+		}
+		if v <= 0 {
+			h.Uncovered++
+			continue
+		}
+		h.USD += v
+		h.Requests++
+		seen[tenant][model] = true
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	for tenant, h := range acc {
+		h.Models = len(seen[tenant])
+		out[tenant] = *h
+	}
+	return out, nil
+}
+
 // CachesplitSizeSpread reports the recorded minimum and maximum stable half per model. The
 // estimate above rests on those being equal; this is how that gets checked instead of assumed.
 func (d *DB) CachesplitSizeSpread() (map[string][2]int, error) {

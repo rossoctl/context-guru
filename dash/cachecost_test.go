@@ -599,6 +599,56 @@ func TestHistoricalSplitValuationIsReadOnlyAndConservative(t *testing.T) {
 	}
 }
 
+// TestHistoricalSplitValuationByTenantMatchesPerTenant is the equivalence check that makes
+// the grouped query safe: it must return, for every tenant, exactly what calling
+// CachesplitHistoricalUSD once per tenant would — the whole point of computing the
+// session-first ranking once is that grouping it afterward changes nothing about the
+// answer. Two tenants, each with a multi-request session, so a bug that let a mid-session
+// row through (or leaked one tenant's rows into another's total) would show up here.
+func TestHistoricalSplitValuationByTenantMatchesPerTenant(t *testing.T) {
+	db := openTestDB(t)
+	const stable = 5697
+	mk := func(tenant, sess string, ts int64, read, write int64, stableTok int) *Event {
+		e := &Event{TS: ts, TenantID: tenant, SessionID: sess, Model: "aws/claude-sonnet-5",
+			TokensBefore: 100, TokensAfter: 100, FreshInput: 10, CacheRead: read, CacheWrite: write,
+			OutputTokens: 20, SplitStableTokens: stableTok}
+		e.Price(ibmSonnet, true)
+		return e
+	}
+	evs := []*Event{
+		mk("t-x", "s-new", 5000, 54_304, 1_000, stable), // teaches the stable half
+		// t-x: session-first qualifies, second request in the same session must not.
+		mk("t-x", "s-a", 1000, 54_304, 1_000, 0),
+		mk("t-x", "s-a", 1100, 55_000, 900, 0),
+		// t-y: a single session-first request of its own — must not be counted against t-x.
+		mk("t-y", "s-b", 1200, 54_304, 1_000, 0),
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	pricer := staticPricer{ibmSonnet}
+	grouped, err := db.CachesplitHistoricalUSDByTenant(0, pricer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tenant := range []string{"t-x", "t-y"} {
+		want, err := db.CachesplitHistoricalUSD(Filter{Tenant: tenant}, pricer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := grouped[tenant]
+		if got != want {
+			t.Errorf("tenant %s: grouped = %+v, per-tenant call = %+v", tenant, got, want)
+		}
+	}
+	if got := grouped["t-x"].Requests; got != 1 {
+		t.Errorf("t-x requests = %d, want 1 (only the session-first row)", got)
+	}
+	if got := grouped["t-y"].Requests; got != 1 {
+		t.Errorf("t-y requests = %d, want 1", got)
+	}
+}
+
 // staticPricer prices every model the same, which is what a test wants and what production must
 // never do.
 type staticPricer struct{ p modelinfo.Price }
