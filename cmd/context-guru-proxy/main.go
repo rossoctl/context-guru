@@ -669,6 +669,28 @@ func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRo
 			}
 		}
 	}
+	// The keep-alive net needs no pricer (the credit is already priced at write time) — one
+	// more grouped-by-tenant query, best-effort like the one above.
+	kaNet := map[string]float64{}
+	if net, err := a.rec.DB().KeepAliveNetUSDByTenant(since); err == nil {
+		kaNet = net
+	}
+	// The declaration filter's saving, priced on read the same way the historical split
+	// figure is above.
+	declFilter := map[string]float64{}
+	if a.prices != nil {
+		priceFn := func(model string) (modelinfo.Price, bool) {
+			if model == "" {
+				return modelinfo.Price{}, false
+			}
+			return a.prices.Price(context.Background(), model)
+		}
+		if byTenant, err := a.rec.DB().DeclFilterSavingsByTenant(since, priceFn); err == nil {
+			for tid, s := range byTenant {
+				declFilter[tid] = s.USD
+			}
+		}
+	}
 	out := make([]proxy.TenantMetricRow, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, proxy.TenantMetricRow{
@@ -679,7 +701,8 @@ func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRo
 			CostUSD: r.CostUSD, BaselineUSD: r.BaselineUSD, CGLLMCostUSD: r.CGLLMCostUSD,
 			CacheSavedUSD: r.CacheSavedUSD, CachesplitSavedUSD: r.CachesplitSavedUSD,
 			CachesplitHistoricalUSD: hist[r.TenantID],
-			CGLatencyMs:             r.CGLatencyMs, UpstreamMs: r.UpstreamMs, Sessions: r.Sessions,
+			KeepAliveNetUSD:         kaNet[r.TenantID], DeclFilterUSD: declFilter[r.TenantID],
+			CGLatencyMs: r.CGLatencyMs, UpstreamMs: r.UpstreamMs, Sessions: r.Sessions,
 			ArchivedCount: r.ArchivedCount, ArchivedBytes: r.ArchivedBytes,
 		})
 	}

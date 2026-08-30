@@ -178,44 +178,90 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 		if err := rows.Scan(&session, &model, &tok, &cacheRead, &cacheWrite, &ts); err != nil {
 			return nil, err
 		}
-		out.Requests++
-		sessions[session] = true
-		out.Reads += tok
-		if out.Since == 0 || ts < out.Since {
-			out.Since = ts
-		}
-		var rate float64
-		p, priced := modelinfo.Price{}, false
-		if price != nil && model != "" {
-			p, priced = price(model)
-		}
-		switch {
-		case cacheRead > 0:
-			// The prefix was served from cache on this request, so these declarations would
-			// have been re-read at the cache-read rate. This is the overwhelmingly common case
-			// and the cheapest tier, which is exactly why the figure must be computed this way
-			// rather than at the fresh-input rate: doing the latter inflates it 10x.
-			out.CacheReadTokens += tok
-			rate = p.CacheRead
-		case cacheWrite > 0:
-			// No read, but a write: this request CREATED the prefix, so carrying them would
-			// have cost the creation rate (1.25x fresh).
-			out.CacheWriteTokens += tok
-			rate = p.CacheWrite
-		default:
-			out.FreshTokens += tok
-			rate = p.Input
-		}
-		if priced {
-			out.USD += float64(tok) * rate
-		} else {
-			out.Priced = false
-		}
+		accumulateDeclFilterRow(out, sessions, session, model, tok, cacheRead, cacheWrite, ts, price)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	out.Sessions = len(sessions)
+	return out, nil
+}
+
+// accumulateDeclFilterRow folds one filtered_decl_tokens>0 row into a running total — the one
+// piece of DeclFilterSavings that has to run in Go rather than SQL, since each row prices at
+// ITS OWN model's rate and cache tier. Shared with DeclFilterSavingsByTenant so the two never
+// drift on how a row is priced.
+func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
+	session, model string, tok, cacheRead, cacheWrite, ts int64, price func(string) (modelinfo.Price, bool)) {
+	out.Requests++
+	sessions[session] = true
+	out.Reads += tok
+	if out.Since == 0 || ts < out.Since {
+		out.Since = ts
+	}
+	var rate float64
+	p, priced := modelinfo.Price{}, false
+	if price != nil && model != "" {
+		p, priced = price(model)
+	}
+	switch {
+	case cacheRead > 0:
+		// The prefix was served from cache on this request, so these declarations would
+		// have been re-read at the cache-read rate. This is the overwhelmingly common case
+		// and the cheapest tier, which is exactly why the figure must be computed this way
+		// rather than at the fresh-input rate: doing the latter inflates it 10x.
+		out.CacheReadTokens += tok
+		rate = p.CacheRead
+	case cacheWrite > 0:
+		// No read, but a write: this request CREATED the prefix, so carrying them would
+		// have cost the creation rate (1.25x fresh).
+		out.CacheWriteTokens += tok
+		rate = p.CacheWrite
+	default:
+		out.FreshTokens += tok
+		rate = p.Input
+	}
+	if priced {
+		out.USD += float64(tok) * rate
+	} else {
+		out.Priced = false
+	}
+}
+
+// DeclFilterSavingsByTenant is DeclFilterSavings for every tenant since a given time, in one
+// pass instead of one call per tenant — see CachesplitHistoricalUSDByTenant
+// (dash/cachehistory.go) for why a query per tenant re-pays the same table scan N times over.
+func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinfo.Price, bool)) (map[string]*DeclFilterSaving, error) {
+	cond, args := (Filter{Since: since, TenantAll: true}).where()
+	rows, err := d.sql.Query(`SELECT r.tenant_id, r.session_id, r.model, r.filtered_decl_tokens,
+		r.cache_read, r.cache_write, r.ts FROM requests r
+		WHERE `+cond+` AND r.filtered_decl_tokens > 0`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]*DeclFilterSaving{}
+	sessions := map[string]map[string]bool{}
+	for rows.Next() {
+		var tenant, session, model string
+		var tok, cacheRead, cacheWrite, ts int64
+		if err := rows.Scan(&tenant, &session, &model, &tok, &cacheRead, &cacheWrite, &ts); err != nil {
+			return nil, err
+		}
+		s, ok := out[tenant]
+		if !ok {
+			s = &DeclFilterSaving{Priced: true}
+			out[tenant] = s
+			sessions[tenant] = map[string]bool{}
+		}
+		accumulateDeclFilterRow(s, sessions[tenant], session, model, tok, cacheRead, cacheWrite, ts, price)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for tenant, s := range out {
+		s.Sessions = len(sessions[tenant])
+	}
 	return out, nil
 }
 

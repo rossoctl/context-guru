@@ -200,6 +200,48 @@ func TestRealizedSavingPricesTheTierActuallyBilled(t *testing.T) {
 	}
 }
 
+// TestDeclFilterSavingsByTenantMatchesPerTenant is the equivalence check that makes the
+// grouped query safe: it must return, for every tenant, exactly what calling
+// DeclFilterSavings once per tenant would.
+func TestDeclFilterSavingsByTenantMatchesPerTenant(t *testing.T) {
+	db := openTestDB(t)
+	t1 := mkEvent(1000, "s1", "claude", 100, 90)
+	t1.TenantID, t1.Tools, t1.FilteredDeclTokens = "t1", 4, 1000
+	t1.CacheRead, t1.CacheWrite = 5000, 0
+	t2a := mkEvent(1001, "s2", "claude", 100, 90)
+	t2a.TenantID, t2a.Tools, t2a.FilteredDeclTokens = "t2", 4, 2000
+	t2a.CacheRead, t2a.CacheWrite = 0, 5000
+	t2b := mkEvent(1002, "s2", "claude", 100, 90)
+	t2b.TenantID, t2b.Tools, t2b.FilteredDeclTokens = "t2", 4, 500
+	t2b.CacheRead, t2b.CacheWrite = 0, 0
+	if err := db.insertBatch([]*Event{t1, t2a, t2b}); err != nil {
+		t.Fatal(err)
+	}
+	grouped, err := db.DeclFilterSavingsByTenant(0, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tenant := range []string{"t1", "t2"} {
+		want, err := db.DeclFilterSavings(Filter{Tenant: tenant}, flatPrice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := grouped[tenant]
+		if got == nil {
+			t.Fatalf("tenant %s: missing from grouped result", tenant)
+		}
+		if *got != *want {
+			t.Errorf("tenant %s: grouped = %+v, per-tenant call = %+v", tenant, *got, *want)
+		}
+	}
+	if got := grouped["t1"].Requests; got != 1 {
+		t.Errorf("t1 requests = %d, want 1", got)
+	}
+	if got := grouped["t2"].Requests; got != 2 {
+		t.Errorf("t2 requests = %d, want 2", got)
+	}
+}
+
 // TestRealizedSavingUnpricedIsNotZero: an unpriced model must not make a real saving read as
 // "this cost nothing".
 func TestRealizedSavingUnpricedIsNotZero(t *testing.T) {

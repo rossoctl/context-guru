@@ -853,6 +853,19 @@ const TILE_INFO = {
       + 'entry for free and we would have been paid for nothing. Read it with the ping counts '
       + 'beside it, never on its own.',
   },
+  'ka-latency': {
+    what: 'How much faster a large request ran when it hit cache than when it had to re-create '
+      + 'its prefix, measured on this window\u2019s own traffic.',
+    how: 'The mean upstream time of requests that hit cache, against the mean of requests that '
+      + 'wrote it, both restricted to requests carrying 100K+ combined tokens \u2014 below that '
+      + 'size the two populations skew toward different KINDS of request (a quick one-shot call '
+      + 'vs. a slower follow-up turn) and the comparison runs backwards. Absent, not a number, '
+      + 'below 20 requests on either side: a difference of two means from a handful of rows is '
+      + 'not a measurement.',
+    catch: 'A diagnostic about the MECHANISM \u2014 a cache hit is faster than a cache write \u2014 '
+      + 'not a per-request or per-dollar claim. Nothing here says how much of THIS SPECIFIC '
+      + 'saving is latency; it says what a hit is worth in time, on average, over the window.',
+  },
   'ka-addressable': {
     what: 'What cache expiries are still costing you in this window \u2014 the money this '
       + 'mechanism exists to go after.',
@@ -1425,7 +1438,13 @@ function renderTiles(o) {
     tile('requests', 'Requests', num(o.requests), num(o.sessions) + ' sessions'),
   ], 'headline'));
 
-  host.appendChild(tileGroup('Content tokens',
+  // Groups collapsed into one "Diagnostics" section below rather than shown at the same
+  // weight as the headline and Cost/Addressable-spend groups above: real, correct, and
+  // still one click away, but token-accounting internals and tier breakdowns are not what
+  // answers "is this worth it" for the person who opens this page most days.
+  const diagnostics = [];
+
+  diagnostics.push(tileGroup('Content tokens',
     'our own count, over message text only — NOT billed tokens; see "Provider-billed input"', [
     tile('tokens-before', 'Tokens before', compact(o.tokens_before)),
     tile('tokens-after', 'Tokens after', compact(o.tokens_after)),
@@ -1466,7 +1485,7 @@ function renderTiles(o) {
 
   // The replay, and the ceiling on it. Both were absent: the realized figure was labelled as
   // an over-count, and how much replay the cache-safety freeze forgoes had no number at all.
-  host.appendChild(tileGroup('Amortization', 'what the freeze forgoes', [
+  diagnostics.push(tileGroup('Amortization', 'what the freeze forgoes', [
     tile('replay-realized', 'Replay realized', compact(o.replay_tokens),
       'reductions re-earned on later turns'),
     tile('replay-projected', 'Replay ceiling', compact(o.replay_projected_tokens),
@@ -1486,7 +1505,7 @@ function renderTiles(o) {
   // beginning and neither denominator did, so "1.7% of what we tried to compact" could not be
   // sized by anyone reading it. The frozen figure is the more interesting of the two — at ~48%
   // of attempted it is the single largest constraint on this product, and it was a sub-line.
-  host.appendChild(tileGroup('What compaction could reach', 'the cost of cache safety', [
+  diagnostics.push(tileGroup('What compaction could reach', 'the cost of cache safety', [
     tile('attempted-tokens', 'Attempted', compact(o.attempted_tokens),
       'the uncached tail we may rewrite'),
     tile('frozen-tokens', 'Frozen for cache safety', compact(o.frozen_tokens),
@@ -1603,7 +1622,7 @@ function renderTiles(o) {
   // traffic is ~$0. The −34.1% that the A/B measured was CROSS-SESSION reuse, which this
   // per-request credit condition cannot see, and inventing a number for it here would be
   // worse than reporting the zero.
-  host.appendChild(tileGroup('Prefix split',
+  diagnostics.push(tileGroup('Prefix split',
     'mechanism verified; the credit only fires when the snapshot MOVES, and it does not move '
     + 'within a session — the A/B measured cross-session reuse, which this cannot see', [
     // "acted on", not "ran on": the component runs on every request and does nothing on most.
@@ -1649,7 +1668,7 @@ function renderTiles(o) {
   // fact that explains every small percentage on this page — most of the bill is output —
   // could only be inferred by dividing columns by hand.
   const tc = o.tier_costs;
-  host.appendChild(tileGroup('Billed tokens', 'the four tiers the provider charges on', [
+  diagnostics.push(tileGroup('Billed tokens', 'the four tiers the provider charges on', [
     tile('cache-read', 'Cache reads', compact(o.cache_read), tc ? usd(tc.cache_read_usd) : null),
     tile('cache-write', 'Cache writes', compact(o.cache_write),
       tc ? usd(tc.cache_write_usd) + ' · ~12.5× a read' : '~12.5× a read'),
@@ -1663,7 +1682,7 @@ function renderTiles(o) {
   // latency on the page when it is populated: ~21 s of extra wait on a third of responses,
   // against the 154 ms the pipeline itself adds two tiles to the left.
   const sseKnown = o.sse_recorded > 0;
-  host.appendChild(tileGroup('Response streaming',
+  diagnostics.push(tileGroup('Response streaming',
     sseKnown ? 'where the user-visible time actually goes'
       : 'newly captured — these fill in from the next streamed response', [
     tile('sse-buffered', 'Responses buffered', sseKnown ? pct(o.sse_buffered_pct, 1) : 'not recorded yet',
@@ -1685,7 +1704,7 @@ function renderTiles(o) {
       sseKnown && o.total_ms_avg_buffered > o.ttfb_ms_avg_streamed * 2 ? 'bad' : ''),
   ]));
 
-  host.appendChild(tileGroup('Latency and safety', 'the price of compaction', [
+  diagnostics.push(tileGroup('Latency and safety', 'the price of compaction', [
     tile('cg-latency', 'context-guru latency', ms(o.cg_latency_ms_avg), 'p95 ' + ms(o.cg_latency_ms_p95)),
     tile('upstream-latency', 'Upstream latency', ms(o.upstream_ms_avg), 'p95 ' + ms(o.upstream_ms_p95)),
     tile('expands', 'Restorations', num(o.expands),
@@ -1694,6 +1713,14 @@ function renderTiles(o) {
     tile('reverts', 'Reverts', num(o.reverts), 'never-worse guard'),
     tile('passthroughs', 'Not compacted', num(o.passthroughs)),
   ]));
+
+  // Collapsed, not deleted: every figure above is real and still one click away, just not
+  // at the same weight as "is this worth it" — see the comment where `diagnostics` starts.
+  const details = el('details', { class: 'panel' });
+  details.appendChild(el('summary', {},
+    'Diagnostics: token accounting, amortization, prefix split, billed tiers, streaming, latency'));
+  for (const group of diagnostics) details.appendChild(group);
+  host.appendChild(details);
 }
 
 function renderDenominators(o) {
@@ -1904,6 +1931,8 @@ async function loadOverview(opts = {}) {
     // Not awaited: its own request, on its own failure path, so a slow or failed
     // keep-alive ledger never delays or blanks the rest of Overview.
     loadOverviewKeepAlive();
+    // Same reasoning: a slow or failed components read must not blank the totals above it.
+    loadValueBreakdown();
     // Restore the offset after the repaint. Even swapping in place, a group that gained or
     // lost a tile changes the document height by a row, and the reader should not have to
     // find their place again because a number rolled over.
@@ -1940,7 +1969,50 @@ async function loadOverviewKeepAlive() {
       tile('ov-ka-saved', 'Re-creations avoided', usd(o.saved_usd), 'a ceiling — see the Keep-alive tab',
         o.saved_usd > 0 ? 'good' : ''),
       tile('ov-ka-net', 'Net', usd(o.net_usd), 'avoided − spent', o.net_usd < 0 ? 'bad' : 'good'),
+      o.latency && o.latency.known
+        ? tile('ov-ka-latency', 'Latency, large requests', Math.round(o.latency.per_miss_ms) + 'ms faster',
+          'cache hit vs. write, this window', 'good')
+        : null,
     ]));
+  } catch (e) {
+    if (!aborted(e)) panel.hidden = true; // best-effort: Overview must not depend on this
+  }
+}
+
+/**
+ * loadValueBreakdown renders one line per component that actually ran, plus keep-alive and
+ * the declaration filter — the two real levers Overview's own total already counts
+ * (keepalive_net_usd, decl_filter_usd) that are not components. No arithmetic here: every
+ * figure is what /api/components and /api/stats already computed. A component's net (or
+ * keep-alive's) can read negative and is shown as such — this is the "where is the value
+ * actually coming from" answer, and hiding an underwater lever would be the same mistake as
+ * hiding a bad total.
+ */
+async function loadValueBreakdown() {
+  const panel = $('#value-breakdown-panel');
+  if (!panel) return;
+  try {
+    const { components: raw } = await api('components');
+    const active = (raw || []).filter((c) => c.runs > 0);
+    const o = state.overview;
+    const hasKeepAlive = o && (o.keepalive_pings > 0 || o.keepalive_net_usd);
+    const hasDeclFilter = o && o.decl_filter_requests > 0;
+    if (!active.length && !hasKeepAlive && !hasDeclFilter) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+    const tiles = active.map((c) => tile('vb-' + c.component, c.component,
+      usd(c.net_usd_with_estimate), num(c.runs) + ' runs', c.net_usd_with_estimate < 0 ? 'bad' : 'good'));
+    if (hasKeepAlive) {
+      tiles.push(tile('vb-keepalive', 'Keep-alive (net)', usd(o.keepalive_net_usd),
+        num(o.keepalive_pings) + ' pings', o.keepalive_net_usd < 0 ? 'bad' : 'good'));
+    }
+    if (hasDeclFilter) {
+      tiles.push(tile('vb-declfilter', 'Declarations filtered', usd(o.decl_filter_usd),
+        num(o.decl_filter_requests) + ' requests', o.decl_filter_usd > 0 ? 'good' : ''));
+    }
+    clear($('#value-breakdown-tiles')).appendChild(tileGroup(null, null, tiles));
   } catch (e) {
     if (!aborted(e)) panel.hidden = true; // best-effort: Overview must not depend on this
   }
@@ -7210,16 +7282,15 @@ async function openStrategyLedger(s) {
     body.appendChild(tileGroup(null, null, [
       tile('sl-pings', 'Pings', num(led.pings)),
       tile('sl-ping-usd', 'Ping cost', usd(led.ping_usd)),
-      tile('sl-saved', 'Saved (ceiling, whole account credit)', usd(led.saved_usd)),
+      tile('sl-saved', 'Saved', usd(led.saved_usd)),
       tile('sl-net', 'Net', usd(led.net_usd), null, led.net_usd < 0 ? 'bad' : 'good'),
     ]));
     body.appendChild(el('p', { class: 'note' },
-      'Saved is each tenant’s WHOLE keep-alive credit in its history, not only the ' +
-      'share this strategy’s own pings produced — see the design doc’s attribution ' +
-      'caveat. A tenant running more than one strategy, or a session override, will show more ' +
-      'here than this strategy alone earned. This ledger is also ALL TIME — unlike Overview ' +
-      'or the Keep-Alive tab, it ignores whatever date range the dashboard is set to, so a ' +
-      'lower or higher number here than those pages show is not a discrepancy.'));
+      'Saved is only the credit THIS strategy’s own pings earned — a request rescued by a ' +
+      'different strategy, or by account config or a session override with no strategy at ' +
+      'all, is not counted here. This ledger is ALL TIME — unlike Overview or the Keep-Alive ' +
+      'tab, it ignores whatever date range the dashboard is set to, so a lower or higher ' +
+      'number here than those pages show is not a discrepancy.'));
     if (!led.tenants || !led.tenants.length) {
       emptyState(body, 'No pings under this strategy yet', '');
       return;
@@ -7252,10 +7323,11 @@ function renderStrategiesList(host, rows) {
     return;
   }
   host.appendChild(el('p', { class: 'note' },
-    'Each strategy’s “Stats” drawer shows pings and cost, which are exact and additive ' +
-    'across strategies, and a Saved figure, which is not: a tenant matching more than ' +
-    'one strategy is counted under each one. Compare against the Overview or Keep-Alive ' +
-    'tab’s total, not against a sum of these rows’ Saved figures.'));
+    'Each strategy’s “Stats” drawer shows pings, cost, and Saved — all exact and additive ' +
+    'across strategies, no double-counting. They will not sum to the Overview or ' +
+    'Keep-Alive tab’s total, though: a credit whose ping matched no strategy (plain ' +
+    'account config or a session override) belongs to none of these rows and only shows ' +
+    'up in the account-wide total.'));
   const tbl = el('table', { class: 'grid' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Name'), el('th', {}, 'Windows'), el('th', {}, 'Target'),
@@ -7982,6 +8054,13 @@ function renderKAVerdict(o) {
     tile('ka-rowgrowth', 'Ping rows on disk', o.pings_per_day > 0
       ? compact(o.bytes_per_day) + 'B/day' : '—',
       o.pings_per_day > 0 ? o.pings_per_day.toFixed(0) + ' pings/day × ~400 B' : 'no pings'),
+    // Absent, not zero, below the sample-size gate — kvcache.MeasureLatency's own rule: a
+    // difference of two means from a handful of rows is not a measurement.
+    o.latency && o.latency.known
+      ? tile('ka-latency', 'Large-context requests: cache hit vs. write',
+        Math.round(o.latency.per_miss_ms) + 'ms faster',
+        `n=${num(o.latency.hit_n)} hits vs n=${num(o.latency.miss_n)} writes this window`, 'good')
+      : null,
   ]));
 }
 

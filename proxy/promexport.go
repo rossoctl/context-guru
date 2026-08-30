@@ -180,6 +180,8 @@ type TenantMetricRow struct {
 	CacheSavedUSD           float64
 	CachesplitSavedUSD      float64
 	CachesplitHistoricalUSD float64
+	KeepAliveNetUSD         float64
+	DeclFilterUSD           float64
 	CGLatencyMs             float64
 	UpstreamMs              float64
 	Sessions                int64
@@ -667,6 +669,16 @@ func (h *Handler) renderMetrics() string {
 				"The same prefix-split saving as cg_tenant_cachesplit_saved_usd, but on requests written BEFORE it could be measured per request — valued on read from the model's measured stable half, never stored. Only the session's FIRST request of each of those, because crediting a mid-session turn needs the tail hash those rows do not carry. Add it to cg_tenant_cachesplit_saved_usd for the whole-history figure; it stops growing once the pre-instrumentation window ages out of retention.", "gauge")
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_cachesplit_historical_usd", tenantLabels(t), t.CachesplitHistoricalUSD)
+			}
+			promHeader(&b, "cg_tenant_keepalive_net_usd",
+				"This tenant's idle keep-alive credit minus its ping spend: what the mechanism actually netted this tenant, over the same rows Overview's keepalive_net_usd sums (a request the mechanism rescued, less what the pings that rescued it cost). Can read negative — a tenant whose pings mostly missed their own refresh nets a real loss, and this series says so rather than hiding it.", "gauge")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_keepalive_net_usd", tenantLabels(t), t.KeepAliveNetUSD)
+			}
+			promHeader(&b, "cg_tenant_decl_filter_usd",
+				"What the declaration filter stopped this tenant from sending: the token weight of tool/MCP/skill declarations the account opted to remove, priced at the tier the request carrying them was actually billed at. Measured and ours — the modelled 'account removed it themselves' half is not part of this series.", "gauge")
+			for _, t := range rows {
+				promLine(&b, "cg_tenant_decl_filter_usd", tenantLabels(t), t.DeclFilterUSD)
 			}
 			promHeader(&b, "cg_tenant_total_cost_usd",
 				"What this tenant's requests cost IN TOTAL: the provider's billed cost for the traffic plus context-guru's own compaction-model spend. The bill, before any counterfactual — sum it for the deployment's total cost of all requests. cg_tenant_cost_usd alone is the provider half; cg_tenant_cg_llm_cost_usd is ours.", "gauge")

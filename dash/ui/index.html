@@ -264,6 +264,16 @@
     <div id="overview-keepalive-tiles"></div>
   </div>
 
+  <!-- Where the total above actually comes from: one line per component that ran, plus
+       keep-alive and the declaration filter (real levers, not entries in the component
+       registry). Hidden until something in it has actually run. -->
+  <div class="panel" id="value-breakdown-panel" hidden>
+    <h2>Where the value comes from</h2>
+    <p class="note">One line per lever that ran in this window. A negative net is a real
+      outcome, not hidden — see the Components tab for the full breakdown.</p>
+    <div id="value-breakdown-tiles"></div>
+  </div>
+
   <div class="panel">
     <h2>Savings percentage</h2>
     <!-- Four bars, four denominators. The note stays short but must never let two of them

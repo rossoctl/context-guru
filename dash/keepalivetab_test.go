@@ -1008,3 +1008,99 @@ func TestTheLivePanelPricesOneSessionsOwnBreakeven(t *testing.T) {
 			}{got.Now, got.IdleSeconds, got.MaxPings})
 	}
 }
+
+// TestKeepAliveNetUSDByTenantMatchesPerTenantLedger is the equivalence check that makes the
+// grouped query safe: for every tenant it must equal what KeepAliveLedger's own
+// SavedUSD-minus-PingUSD would compute for that tenant alone.
+func TestKeepAliveNetUSDByTenantMatchesPerTenantLedger(t *testing.T) {
+	db := openTestDB(t)
+	t1ping := kaPing(1000, "s1", 0.02, 40_000, 0)
+	t1ping.TenantID = "t1"
+	t1credit := kaCredit(2000, "s1", 0.10)
+	t1credit.TenantID = "t1"
+	t2ping := kaPing(1500, "s2", 0.03, 60_000, 0)
+	t2ping.TenantID = "t2"
+	t2credit := kaCredit(2500, "s2", 0.05)
+	t2credit.TenantID = "t2"
+	if err := db.insertBatch([]*Event{t1ping, t1credit, t2ping, t2credit}); err != nil {
+		t.Fatal(err)
+	}
+	grouped, err := db.KeepAliveNetUSDByTenant(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tenant := range []string{"t1", "t2"} {
+		led, err := db.KeepAliveLedger(Filter{Tenant: tenant})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := grouped[tenant], led.NetUSD; got < want-1e-9 || got > want+1e-9 {
+			t.Errorf("tenant %s: grouped net = %v, KeepAliveLedger net = %v", tenant, got, want)
+		}
+	}
+}
+
+// latencyRow builds one row for the latency diagnostic: fresh/read/write sum to size, and
+// upstream_ms is the one figure under test.
+func latencyRow(ts int64, fresh, read, write int64, upstreamMs float64) *Event {
+	e := mkEvent(ts, "s", "aws/claude-sonnet-5", 100, 100)
+	e.FreshInput, e.CacheRead, e.CacheWrite, e.UpstreamMs = fresh, read, write, upstreamMs
+	return e
+}
+
+// Below latencyMinN (kvcache.LatencyMinN) on either side, the diagnostic must report Known
+// false rather than a difference of two means computed from a handful of rows.
+func TestKeepAliveLatencyDiagnosticGatesOnSampleSize(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := int64(0); i < 19; i++ { // one short of the gate on both sides
+		evs = append(evs, latencyRow(1000+i, 0, 150_000, 0, 1000))
+		evs = append(evs, latencyRow(2000+i, 0, 0, 150_000, 2000))
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	l, err := db.KeepAliveLatencyDiagnostic(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Known {
+		t.Errorf("Known = true with only 19 rows per side, want false (not a measurement)")
+	}
+}
+
+// At the large-context size where keep-alive/cache-split operate, a real hit-vs-write
+// latency gap is reported once both cohorts clear the gate — and rows below the size
+// threshold, even ones that would reverse the result, must not leak in.
+func TestKeepAliveLatencyDiagnosticReportsTheGapAboveTheSizeThreshold(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := int64(0); i < 25; i++ {
+		// Large context: hits fast, writes slow — the real, measured shape.
+		evs = append(evs, latencyRow(1000+i, 0, 150_000, 0, 1000))
+		evs = append(evs, latencyRow(2000+i, 0, 0, 150_000, 2000))
+		// Small context, BELOW the threshold, with the effect reversed. If these leaked into
+		// the same cohorts they would drag the measured gap toward zero or flip its sign.
+		evs = append(evs, latencyRow(3000+i, 0, 5_000, 0, 5000))
+		evs = append(evs, latencyRow(4000+i, 0, 0, 5_000, 100))
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	l, err := db.KeepAliveLatencyDiagnostic(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.Known {
+		t.Fatalf("Known = false, want true (25 rows per side, well over the gate): %+v", l)
+	}
+	if l.HitN != 25 || l.MissN != 25 {
+		t.Errorf("HitN=%d MissN=%d, want 25/25 — the small-context rows must be excluded", l.HitN, l.MissN)
+	}
+	if l.HitMeanMs != 1000 || l.MissMean != 2000 {
+		t.Errorf("HitMeanMs=%v MissMean=%v, want 1000/2000", l.HitMeanMs, l.MissMean)
+	}
+	if l.PerMissMs != 1000 {
+		t.Errorf("PerMissMs = %v, want 1000 (2000 - 1000)", l.PerMissMs)
+	}
+}

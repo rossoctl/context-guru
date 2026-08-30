@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/kvcache"
 )
 
 // The keep-alive tab's read side: one ledger, one behavioural read, one session list, one
@@ -121,6 +122,10 @@ type KeepAliveLedger struct {
 	// are the mechanism by which somebody could raise it.
 	PingsPerDay float64 `json:"pings_per_day"`
 	BytesPerDay float64 `json:"bytes_per_day"`
+	// Latency is the window's own measured hit-vs-write speed difference for large-context
+	// requests — see KeepAliveLatencyDiagnostic. Known is false (and every figure zero) on
+	// a window too small to measure it, never a fabricated number.
+	Latency kvcache.Latency `json:"latency"`
 	KeepAliveCoverage
 }
 
@@ -208,7 +213,96 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 		o.PingsPerDay = float64(o.Pings) / days
 		o.BytesPerDay = o.PingsPerDay * bytesPerPingRow
 	}
+	lat, err := d.KeepAliveLatencyDiagnostic(f)
+	if err != nil {
+		return nil, err
+	}
+	o.Latency = lat
 	return &o, nil
+}
+
+// KeepAliveNetUSDByTenant is the keep-alive net (credit minus ping spend) for every tenant
+// since a given time, in one pass — the exporter's per-tenant series otherwise needs one
+// query per tenant, and CachesplitHistoricalUSDByTenant (dash/cachehistory.go) is why that
+// gets paid for once instead of N times over.
+func (d *DB) KeepAliveNetUSDByTenant(since int64) (map[string]float64, error) {
+	out := map[string]float64{}
+	cond, args := (Filter{Since: since, TenantAll: true}).where()
+	rows, err := d.sql.Query(`SELECT r.tenant_id, COALESCE(SUM(r.keepalive_saved_usd),0)
+		FROM requests r WHERE `+cond+` GROUP BY r.tenant_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var tid string
+		var v float64
+		if err := rows.Scan(&tid, &v); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out[tid] = v
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	kaCond, kaArgs := withKeepAlive(Filter{Since: since, TenantAll: true}).where()
+	rows2, err := d.sql.Query(`SELECT r.tenant_id, COALESCE(SUM(r.cost_usd),0)
+		FROM requests r WHERE `+kaCond+` AND r.keepalive = 1 GROUP BY r.tenant_id`, kaArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows2.Close()
+	for rows2.Next() {
+		var tid string
+		var v float64
+		if err := rows2.Scan(&tid, &v); err != nil {
+			return nil, err
+		}
+		out[tid] -= v
+	}
+	return out, rows2.Err()
+}
+
+// largeContextTokens is the combined (fresh_input+cache_read+cache_write) size above which a
+// cache-hit-vs-write latency comparison stops being confounded by request size. Below it,
+// live data shows the comparison running BACKWARDS (smaller cache-write requests are simple,
+// fast one-shot calls; smaller cache-hit requests skew toward slower follow-up turns) — real
+// on this deployment at 100K+, checked directly against production traffic rather than
+// assumed. This is also where keep-alive/cache-split actually operate, so it is the population
+// their latency benefit is meaningful to measure over.
+const largeContextTokens = 100_000
+
+// KeepAliveLatencyDiagnostic reports the window's own measured hit-vs-write latency
+// differential for large-context requests, reusing kvcache.MeasureLatency's shape (mean per
+// cohort, gated at N>=20 — Known=false below that rather than a difference of two noisy
+// means). A diagnostic about the MECHANISM — a cache hit is faster than a cache write — not a
+// per-request or per-dollar claim: see kvcache.Latency's own comment for why, and why no
+// per-request counterfactual is computed anywhere in this codebase.
+func (d *DB) KeepAliveLatencyDiagnostic(f Filter) (kvcache.Latency, error) {
+	var l kvcache.Latency
+	cond, args := f.where()
+	var hitSum, missSum sql.NullFloat64
+	row := d.sql.QueryRow(`SELECT
+			SUM(CASE WHEN r.cache_read > r.cache_write AND r.cache_read > 0 THEN r.upstream_ms END),
+			COALESCE(SUM(CASE WHEN r.cache_read > r.cache_write AND r.cache_read > 0 THEN 1 ELSE 0 END),0),
+			SUM(CASE WHEN r.cache_write >= r.cache_read AND r.cache_write > 0 THEN r.upstream_ms END),
+			COALESCE(SUM(CASE WHEN r.cache_write >= r.cache_read AND r.cache_write > 0 THEN 1 ELSE 0 END),0)
+		FROM requests r
+		WHERE `+cond+` AND r.upstream_ms > 0
+		  AND (r.fresh_input + r.cache_read + r.cache_write) >= ?`,
+		append(args, largeContextTokens)...)
+	if err := row.Scan(&hitSum, &l.HitN, &missSum, &l.MissN); err != nil {
+		return l, err
+	}
+	if l.HitN < kvcache.LatencyMinN || l.MissN < kvcache.LatencyMinN {
+		return l, nil
+	}
+	l.HitMeanMs = hitSum.Float64 / float64(l.HitN)
+	l.MissMean = missSum.Float64 / float64(l.MissN)
+	l.PerMissMs = l.MissMean - l.HitMeanMs
+	l.Known = true
+	return l, nil
 }
 
 // sumBySession groups one column by session under an extra predicate.

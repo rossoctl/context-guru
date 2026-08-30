@@ -169,9 +169,9 @@ type Latency struct {
 	Known     bool    `json:"known"`
 }
 
-// latencyMinN is how many of each population the differential needs. 20 is small, and it is
+// LatencyMinN is how many of each population the differential needs. 20 is small, and it is
 // stated rather than assumed: below it the difference of two means is not a measurement.
-const latencyMinN = 20
+const LatencyMinN = 20
 
 // MeasureLatency computes the window's own hit/miss latency differential from the rows.
 func MeasureLatency(reqs []*Request) Latency {
@@ -189,7 +189,7 @@ func MeasureLatency(reqs []*Request) Latency {
 		l.MissN++
 		missSum += r.UpstreamMs
 	}
-	if l.HitN < latencyMinN || l.MissN < latencyMinN {
+	if l.HitN < LatencyMinN || l.MissN < LatencyMinN {
 		return l
 	}
 	l.HitMeanMs = hitSum / float64(l.HitN)

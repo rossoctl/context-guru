@@ -3062,7 +3062,7 @@
    "id": 42,
    "type": "stat",
    "title": "Total avoided this month",
-   "description": "Our two savings together: compaction (baseline minus actual, minus what our own model calls cost) plus the prefix-cache saving. Two disjoint token sets, both ours, added rather than nested \u2014 the compaction baseline already assumes the cache behaved as it did. It is NOT the cost of an uncached world: the provider's own cache saved far more on the same traffic (cg_tenant_cache_saved_usd) and none of that is credited here. NEGATIVE is the bad value and is painted red: compaction spending more on its own model than it saves is exactly the state this tile exists to show, and a green -$10.19 congratulates the operator for being underwater.",
+   "description": "The dashboard's own total_saved_usd, matched term for term: compaction (baseline minus actual, minus what our own model calls cost), plus the prefix-cache saving, plus the idle keep-alive's net (credit minus ping spend), plus the declaration filter's saving. Four disjoint sources, all ours, added rather than nested \u2014 the compaction baseline already assumes the cache behaved as it did. It is NOT the cost of an uncached world: the provider's own cache saved far more on the same traffic (cg_tenant_cache_saved_usd) and none of that is credited here. NEGATIVE is the bad value and is painted red: spending more on our own model or pings than we save is exactly the state this tile exists to show, and a green -$10.19 congratulates the operator for being underwater.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -3080,7 +3080,7 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "sum(cg_tenant_baseline_cost_usd) - sum(cg_tenant_cost_usd) - sum(cg_tenant_cg_llm_cost_usd) + sum(cg_tenant_cachesplit_saved_usd) + sum(cg_tenant_cachesplit_historical_usd)",
+     "expr": "sum(cg_tenant_baseline_cost_usd) - sum(cg_tenant_cost_usd) - sum(cg_tenant_cg_llm_cost_usd) + sum(cg_tenant_cachesplit_saved_usd) + sum(cg_tenant_cachesplit_historical_usd) + sum(cg_tenant_keepalive_net_usd) + sum(cg_tenant_decl_filter_usd)",
      "editorMode": "code",
      "legendFormat": "Total avoided this month",
      "instant": true,

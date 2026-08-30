@@ -82,11 +82,19 @@ type TenantMetricRow struct {
 	// measured per request, valued on read. Filled by the host, which holds the rates —
 	// TenantMetrics itself cannot price anything.
 	CachesplitHistoricalUSD float64
-	CGLatencyMs             float64
-	UpstreamMs              float64
-	Sessions                int64
-	ArchivedCount           int64
-	ArchivedBytes           int64
+	// KeepAliveNetUSD is this tenant's keep-alive credit minus its ping spend. Filled by the
+	// host via DB.KeepAliveNetUSDByTenant, alongside the other per-tenant figures below that
+	// need a second query — kept out of TenantMetrics' own query so that one stays untouched.
+	KeepAliveNetUSD float64
+	// DeclFilterUSD is this tenant's declaration-filter saving, valued on read the same way
+	// CachesplitHistoricalUSD is (DB.DeclFilterSavingsByTenant) — needs a pricer, so
+	// TenantMetrics itself cannot fill it.
+	DeclFilterUSD float64
+	CGLatencyMs   float64
+	UpstreamMs    float64
+	Sessions      int64
+	ArchivedCount int64
+	ArchivedBytes int64
 }
 
 // TenantMetrics rolls up per-tenant traffic since `since` (epoch ms), for the
