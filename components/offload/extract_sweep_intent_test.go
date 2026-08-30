@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/store"
 )
 
 // THE FALLBACK'S GOAL MUST LEAD WITH THE CURRENT STEP, NOT THE OPENING INSTRUCTION.
@@ -59,6 +61,49 @@ func TestSweepIntentLeadsWithTheCurrentStepNotTheOpeningInstruction(t *testing.T
 		if !strings.Contains(got, label) {
 			t.Errorf("part %q is unlabelled:\n%s", label, got)
 		}
+	}
+}
+
+// THE FALLBACK'S KEEP-ALL IS COUNTED APART FROM THE PREFIX ASK'S.
+//
+// Only the prefix-ask half was asserted before. The split is the whole point: a keep-all means
+// different things on each path, and the fallback's is the one worth watching — it has no transcript,
+// so it resolves toward keep structurally (#125). Averaged together, a run reads as "the component
+// sometimes acts" when the real variable is whether the cache read happened.
+//
+// The two arms differ ONLY in whether the asker reports a cache read, so this asserts the path split
+// rather than something general about keep-alls.
+func TestSweepCountsAFallbackKeepAllApartFromAPrefixAskKeepAll(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cacheRead int
+		wantGate  string
+		notGate   string
+	}{
+		{"prefix ask", 19595, "sweep_kept_everything", "sweep_fallback_kept_everything"},
+		{"fallback", 0, "sweep_fallback_kept_everything", "sweep_kept_everything"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// An empty array is the contract's own way of saying "keep everything", on both paths.
+			asker := &fakeAsker{reply: `[]`, cacheRead: tc.cacheRead}
+			prev := fallbackModel.reply
+			fallbackModel.reply = `[]`
+			defer func() { fallbackModel.reply = prev }()
+
+			e := newSweepSmall(t, "")
+			rep := &components.Report{}
+			if _, err := e.Offload(sweepReq(), rep,
+				preExpiryCtx("s-keepall-"+tc.name, asker, store.NewMemory(store.Options{}))); err != nil {
+				t.Fatal(err)
+			}
+			if rep.Gates[tc.wantGate] == 0 {
+				t.Errorf("%s path did not raise %q; gates=%v", tc.name, tc.wantGate, rep.Gates)
+			}
+			if rep.Gates[tc.notGate] != 0 {
+				t.Errorf("%s path raised the OTHER path's counter %q; the two must not be averaged; "+
+					"gates=%v", tc.name, tc.notGate, rep.Gates)
+			}
+		})
 	}
 }
 

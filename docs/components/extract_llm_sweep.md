@@ -218,8 +218,10 @@ unparseable: raise the budget, not the prompt), `sweep_verdict_unusable`,
 
 ## What is not measured
 
-Three questions the design records rather than answers, from
-[the proposal](../proposals/sweep-adjudicator.md):
+Three questions the design records rather than answers. The full argument, including which
+measurements refuted earlier versions of this design, is in `docs/proposals/sweep-adjudicator.md` in
+the repository — deliberately not published here, because it is addressed to whoever changes the code
+next rather than to whoever runs it.
 
 1. Whether the obligation quote pays for its tokens. Requiring evidence halved false drops at batch
    size, which is the shipped shape, so the measurement applies — but it has not been re-measured

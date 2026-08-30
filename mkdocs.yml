@@ -78,8 +78,16 @@ validation:
 
 # docs/superpowers/ holds working plans/specs for the skill that authored them, not
 # published site content — keep it out of the nav-completeness check above.
+#
+# docs/proposals/ is the same category and excluded for the same reason: design rationale
+# addressed to whoever changes the code next, not to whoever runs it. sweep-adjudicator.md, for
+# instance, argues against an earlier version of its own design and records which measurements
+# refuted it — useful in review, actively confusing on a page a user reaches looking for how to
+# configure something. Excluded rather than added to the nav so `mkdocs build --strict` stays
+# green without publishing internal argument, and so a proposal can be added without a nav edit.
 exclude_docs: |
   superpowers/
+  proposals/
 
 # Nav mirrors how people arrive: evaluate it (Get started) → understand it
 # (Concepts) → look a component up (Components) → run it a particular way
@@ -123,6 +131,7 @@ nav:
           - cmdfilter: components/cmdfilter.md
           - extract: components/extract.md
           - extract_llm: components/extract_llm.md
+          - extract_llm_sweep: components/extract_llm_sweep.md
           - smartcrush: components/smartcrush.md
           - mask: components/mask.md
           - summarize: components/summarize.md

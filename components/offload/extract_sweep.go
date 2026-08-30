@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -71,7 +72,10 @@ type ExtractSweep struct {
 // construction, because only that model's cache holds the transcript — naming another would read a
 // different namespace and pay fresh for everything. There is no `context` / `context_messages`: the
 // conversation IS the prefix, so there is nothing to choose how much of to re-send. There is no
-// `max_calls`: one call covers every candidate. And there is no `economic_gate`: the gate prices a
+// `max_calls`: there is exactly one ask per turn, bounded by maxAskItems rather than by a call count
+// — and that bound is not configurable, because it follows from the reply budget rather than from a
+// deployment's preference (see the cap in Offload, and #132 for the coverage question it leaves open).
+// And there is no `economic_gate`: the gate prices a
 // per-output cheap-model call against an expected saving, and this is one cached read for the whole
 // transcript, so its arithmetic does not describe this component at all — the brakes here are the
 // floor below and the verified cache read.
@@ -112,6 +116,11 @@ const defaultSweepFloor = 1000
 // genuinely-spent candidates. Below that the mechanism is not a timid version of itself, it is
 // answering the question the selection experiment refuted at 6% live-kept.
 const defaultMinInventory = 10
+
+// maxAskItems bounds how many candidates one ask may carry. Not configurable: it is a property of the
+// reply budget and the model's transport limit, not of a deployment's taste, and an operator raising
+// it would be trading a partial sweep for no sweep at all. See the cap in Offload for the arithmetic.
+const maxAskItems = 12
 
 // defaultPreExpiry is the pre-expiry window's width when none is configured.
 //
@@ -385,9 +394,44 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	// call and that was read as the batch size, when it counted what the model chose to ANSWER rather
 	// than what it was SHOWN. Without this, "the inventory is starved" and "the model answered for a
 	// third of it" are the same number.
+	// CAP THE ASK, because an uncapped one risks losing every verdict rather than some.
+	//
+	// The reply carries one verdict per candidate, each with a VERBATIM transcript quote, and the
+	// budget is PrefixAskMaxTokens (16,000). Live: a 12-candidate ask produced a 7,191-token reply —
+	// about 600 tokens per verdict once the model's reasoning is included — so roughly 26 candidates
+	// exhausts the budget. Past that the reply truncates, and truncation is ALL-OR-NOTHING: the array
+	// never closes, nothing parses, and every verdict in it is discarded. A 50-candidate transcript
+	// would therefore sweep nothing at all, having paid for the call.
+	//
+	// Twelve, and the two independent arguments agree on it, which is the only reason to trust a
+	// number here. Reply-budget arithmetic says ~26 is the ceiling and something well inside it is
+	// prudent. And `cc1aa9f` measured quote fidelity degrading with size — 4 of 37 quotes non-verbatim
+	// at 16 against 0 of 16 at 10 — so 12 was already the conservative end of the transport limit.
+	// That fidelity measurement was taken when content was copied into the prompt, which it no longer
+	// is, so it does not straightforwardly transfer; it is cited as corroboration, not as proof.
+	//
+	// LARGEST FIRST, so the cap keeps the candidates worth the most. And what is left over is
+	// COUNTED: a component that silently swept 12 of 50 while reporting success would be the same
+	// class of defect as the starved inventory this file already guards against.
+	//
+	// What this does NOT do is make a second ask to cover the remainder. That is a real coverage gap
+	// on a transcript-heavy session and it needs a measurement — whether N asks over one transcript
+	// beat one ask, and at what cost — so it is tracked rather than guessed at. See #132.
+	// Counted BEFORE the cap, and the thinning tripwire measured against this rather than against the
+	// post-cap length. The cap is a deliberate ceiling; sweep_inventory_thinned exists to catch a
+	// pre-filter quietly starving the comparison (`4ca1f13`), and letting the cap trip it would turn
+	// that alarm into noise on exactly the transcripts where it should be loudest.
+	assembled := len(cands)
+	if len(cands) > maxAskItems {
+		sort.SliceStable(cands, func(i, j int) bool {
+			return schema.TextTokens(cands[i].content) > schema.TextTokens(cands[j].content)
+		})
+		rep.GateN("sweep_over_ask_cap", len(cands)-maxAskItems)
+		cands = cands[:maxAskItems]
+	}
 	rep.EventN("sweep_offered", len(cands))
-	if eligible > len(cands) {
-		rep.EventN("sweep_inventory_thinned", eligible-len(cands))
+	if eligible > assembled {
+		rep.EventN("sweep_inventory_thinned", eligible-assembled)
 	}
 	// DO NOT ASK AT ALL BELOW THE INVENTORY FLOOR. The yield of this mechanism is a property of how
 	// many candidates the model compares, and the numbers are not close:
@@ -567,11 +611,29 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 	}
 	latency := float64(time.Since(start).Milliseconds())
 	metrics.RecordExtractionCall(latency)
+	// COST, which this record carried as $0.00 forever. It never set CostUSD at all, so the per-call
+	// ledger the dashboard shows for this component reported zero on every firing — measured live at
+	// $0.00 against real cache reads of 449,304 and 449,376 tokens and real completion tokens, while
+	// the request-level rollup (proxy/dashcapture.go, cg_llm_cost_usd) had the true $0.0940 and
+	// $0.1652. Two recorded totals disagreeing, one of them structurally zero, is worse than either
+	// alone: a component whose whole justification is cost looked free.
+	//
+	// Priced from the REQUEST's model, not a cheap-model card, because that is what this component
+	// calls by construction — and from the same rates the request-level figure uses, so the two agree
+	// rather than being two independent guesses. c.SelfRates is the model the request came in on;
+	// falling back to the env card keeps a figure when the host supplies no rates, the same
+	// convention extract_llm.pricingFor uses.
+	pricing := cheapmodel.PricingFromEnv()
+	if !c.SelfRates.Zero() {
+		pricing = ratesPricing(c.SelfRates)
+	}
 	r.rec = components.ModelCall{
 		Component: rep.Component, Model: c.ModelName, Strategy: "prefix_ask",
 		CandidateTokens: before, LatencyMs: latency,
 		PromptTokens: int64(usage.Fresh), CompletionTokens: int64(usage.Output),
 		CacheRead: int64(usage.CacheRead), CacheWrite: int64(usage.CacheWrite),
+		CostUSD: pricing.Cost(int64(usage.Fresh), int64(usage.Output),
+			int64(usage.CacheWrite), int64(usage.CacheRead)),
 		GateReason: "pre-expiry window: the cache still exists and is nearly worthless",
 	}
 	if ctx.Err() != nil {

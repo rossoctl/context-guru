@@ -231,19 +231,39 @@ func TestSweepAsksOnceForEveryCandidate(t *testing.T) {
 	if got := atomic.LoadInt64(&asker.calls); got != 1 {
 		t.Fatalf("%d candidates took %d asks; the shape is ONE ask over the cached transcript", n, got)
 	}
-	if rep.Events["sweep_adjudicated"] != n {
-		t.Fatalf("sweep_adjudicated = %d, want %d — the inventory was starved before assembly "+
-			"(gates: %v)", rep.Events["sweep_adjudicated"], n, rep.Gates)
+	// UP TO THE CAP, and the remainder counted rather than dropped silently. The cap exists because
+	// the reply carries a verbatim quote per verdict against a fixed budget, and truncation discards
+	// the WHOLE array — so an uncapped ask on a large transcript sweeps nothing at all. See
+	// maxAskItems. What this test still pins is the shape: ONE ask, not one call per output.
+	if got := rep.Events["sweep_adjudicated"]; got != maxAskItems {
+		t.Fatalf("sweep_adjudicated = %d, want %d (the ask cap) — the inventory was starved before "+
+			"assembly (gates: %v)", got, maxAskItems, rep.Gates)
+	}
+	if got := rep.Gates["sweep_over_ask_cap"]; got != n-maxAskItems {
+		t.Errorf("sweep_over_ask_cap = %d, want %d: what the cap left unasked must be counted, or a "+
+			"component that swept %d of %d would report plain success", got, n-maxAskItems,
+			maxAskItems, n)
 	}
 	if rep.Events["sweep_inventory_of_one"] != 0 {
 		t.Errorf("an inventory of %d was recorded as one (gates: %v)", n, rep.Gates)
 	}
-	// Every candidate must be NAMED in the one ask.
+	// The cap must NOT trip the starvation tripwire: that alarm is for a pre-filter quietly thinning
+	// the comparison, and a deliberate ceiling firing it would make it noise on exactly the
+	// transcripts where it should be loudest.
+	if got := rep.Events["sweep_inventory_thinned"]; got != 0 {
+		t.Errorf("the ask cap tripped sweep_inventory_thinned (%d); that counter is for an upstream "+
+			"filter, not for this ceiling", got)
+	}
+	// Every candidate the ask CARRIES must be named in it, and the cap keeps the largest.
 	ask := asker.ask()
+	named := 0
 	for i := 0; i < n; i++ {
-		if !strings.Contains(ask, "["+strconv.Itoa(i)+"] ") {
-			t.Errorf("candidate %d was not named in the inventory", i)
+		if strings.Contains(ask, "["+strconv.Itoa(i)+"] ") {
+			named++
 		}
+	}
+	if named != maxAskItems {
+		t.Errorf("the one ask named %d candidates, want %d", named, maxAskItems)
 	}
 }
 

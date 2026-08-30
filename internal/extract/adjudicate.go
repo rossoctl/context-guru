@@ -265,15 +265,62 @@ const AdjudicationHeadChars = 90
 // distinction one live arm turned on.
 func ParseVerdicts(reply string) ([]Verdict, bool) {
 	s := stripFences(strings.TrimSpace(reply))
-	i, j := strings.Index(s, "["), strings.LastIndex(s, "]")
-	if i < 0 || j <= i {
-		return nil, false
+	// SCAN FOR AN ARRAY THAT ACTUALLY PARSES, rather than assuming the outermost brackets are it.
+	//
+	// This used to take the FIRST `[` to the LAST `]` and unmarshal the span. That works only when
+	// nothing else in the reply contains a bracket, and a model asked to justify twelve verdicts does
+	// not oblige. MEASURED against the real gateway on aws/claude-sonnet-5: three firings, three
+	// failures to produce a usable verdict, one of them a 7,191-completion-token reply at 71.2s that
+	// was NOT truncated -- it simply had prose around and between the JSON, so first-to-last spanned
+	// reasoning text and unmarshal failed. Net effect: zero effective compactions on real traffic
+	// while the counters said `sweep_unparseable`, which reads as "the prompt is wrong".
+	//
+	// So try each `[` in turn with a streaming decoder, which reads exactly one value and ignores
+	// whatever follows. The first span that decodes to a verdict array wins. Cost is trivial next to
+	// the model call that produced the reply.
+	for i := 0; i < len(s); i++ {
+		if s[i] != '[' {
+			continue
+		}
+		var out []Verdict
+		if err := json.NewDecoder(strings.NewReader(s[i:])).Decode(&out); err != nil {
+			continue
+		}
+		// A decoded array is not automatically THE array. `[{}]` and `[{"note":"x"}]` both decode into
+		// []Verdict cleanly, giving a phantom verdict for label 0 -- and label 0 is a REAL candidate,
+		// so a phantom there would remove the wrong output. So an element has to look like a verdict
+		// object before the array is believed.
+		//
+		// "Looks like one" means ANY of the verdict fields is populated, NOT specifically `verdict`.
+		// That distinction is load-bearing and a stricter check got it wrong: a reply of
+		// `[{"i":1,"needed_by":"none","quote":""}]` -- a real verdict object whose `verdict` field the
+		// model omitted -- MUST parse, so the caller can classify it as an unusable verdict and
+		// default to keep. Refusing to parse it would file a model that answered badly as a model
+		// that could not be read, which are different failures with different remedies and are
+		// separately counted downstream for exactly that reason.
+		//
+		// An EMPTY array is accepted as-is: the contract explicitly invites keep-everything, and
+		// conflating that with junk is what made "the model declined to act" and "the model was never
+		// successfully asked" the same number for three iterations (4ca1f13).
+		if len(out) == 0 || looksLikeVerdict(out[0]) {
+			return out, true
+		}
 	}
-	var out []Verdict
-	if err := json.Unmarshal([]byte(s[i:j+1]), &out); err != nil {
-		return nil, false
-	}
-	return out, true
+	return nil, false
+}
+
+// looksLikeVerdict reports whether a decoded element is plausibly a verdict object rather than an
+// arbitrary JSON object that happened to decode into the struct.
+//
+// Deliberately generous: any populated verdict field counts. A malformed verdict is still a verdict
+// and the caller has counters to classify it (missing criterion, unusable verdict, unknown label);
+// what this rejects is an object with NONE of the fields, which carries no information at all and
+// would otherwise become a phantom verdict for label 0.
+//
+// Label is not consulted, because 0 is both a real label and the zero value, so its presence cannot
+// be told from its absence without decoding twice.
+func looksLikeVerdict(v Verdict) bool {
+	return v.Verdict != "" || v.NeededBy != "" || v.Quote != ""
 }
 
 // ReplyWasTruncated reports whether an unparseable reply looks CUT OFF rather than malformed.
