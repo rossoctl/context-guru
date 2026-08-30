@@ -62,10 +62,19 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 	// One pass: every pre-instrumentation session-first request, by model, with the read and
 	// write it was billed. The read/write test needs that model's stable half, which is known
 	// only here in Go, so the rows come back grouped and the test is applied per group.
-	rows, err := d.sql.Query(`SELECT r.model, r.cache_read, r.cache_write FROM requests r
-		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0
-		  AND NOT EXISTS (SELECT 1 FROM requests p WHERE p.session_id = r.session_id
-		      AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id)))`, args...)
+	//
+	// A window function, not the correlated NOT EXISTS this used to be (same fix as
+	// DB.Overview's CompactionResets, see its comment): split_stable_tokens = 0 AND cache_read
+	// > 0 matches 69% of requests on this corpus, so a correlated subquery per candidate row
+	// paid this driver's per-invocation overhead ~79k times over instead of sorting once.
+	// ROW_NUMBER ranks EVERY row in the table by session, unfiltered, so rn=1 means exactly
+	// what the old subquery's NOT EXISTS meant — "nothing earlier in this session, filtered or
+	// not" — before the outer WHERE narrows to the rows this query actually values.
+	rows, err := d.sql.Query(`WITH s AS (
+		SELECT r.*, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS rn
+		FROM requests r
+	) SELECT r.model, r.cache_read, r.cache_write FROM s r
+		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0 AND r.rn = 1`, args...)
 	if err != nil {
 		return out, err
 	}
