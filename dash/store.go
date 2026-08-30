@@ -240,6 +240,18 @@ func openDSN(d, path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// modernc.org/sqlite is pure Go: unlike a CGO sqlite3 build, connections do not share
+	// an mmap'd page cache, so each one carries its own in-heap page cache and VDBE state.
+	// Left unbounded (database/sql's default), a burst of concurrent dashboard/metrics
+	// reads opens one pooled connection per in-flight request — measured on this
+	// deployment climbing past 600 concurrent connections and taking the process from
+	// ~2GB to a hard OOM kill within minutes. WAL mode already gives every reader a
+	// consistent snapshot without needing its own connection to do it quickly, so this
+	// caps concurrency at a level that still saturates real traffic without letting the
+	// pool itself become the memory leak.
+	sdb.SetMaxOpenConns(20)
+	sdb.SetMaxIdleConns(10)
+	sdb.SetConnMaxIdleTime(5 * time.Minute)
 	if err := sdb.Ping(); err != nil {
 		sdb.Close()
 		return nil, err
