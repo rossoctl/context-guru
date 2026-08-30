@@ -45,17 +45,26 @@ build:
 
 So without `-tags cg_skeleton` there should be no cgo dependency at all.
 
-**Gate A — verify before anything else** (30 seconds, and it decides the shape of all of
-piece 1):
+**Gate A — measured, 2026-08-30. It passes.** Reproduce with `scripts/gate-a-purego.sh`
+(runs in a `golang:1.26` container, so no local Go needed):
 
-```sh
-CGO_ENABLED=0 go build -o /tmp/cg ./cmd/context-guru-proxy
-```
+| Check | Result |
+|---|---|
+| default tags, `CGO_ENABLED=0` | **PASS** — builds clean |
+| `-tags cg_skeleton`, `CGO_ENABLED=0` | **PASS (fails as intended)** — `build constraints exclude all Go files in …/go-sitter-forest/typescript`, the cgo-disabled signature. Confirms tree-sitter is the only C dependency |
+| `GOOS`/`GOARCH` × `linux,darwin` × `amd64,arm64` | **PASS, all four** |
+| artifact | **30.5 MB stripped** (`-ldflags="-s -w"`), 38.3 MB unstripped, `ldd` → *"not a dynamic executable"* |
 
-If it passes we get a **static single binary**: a plain `GOOS`/`GOARCH` matrix in one CI
-job, no C cross-toolchains, no zig, no libc coupling, ~20 lines of GoReleaser. If it
-fails, cross-compiling four platforms needs per-platform runners and the binaries carry
-libc requirements — still doable, several times the work.
+So we get a **fully static single binary**: a plain `GOOS`/`GOARCH` matrix in one CI job,
+no C cross-toolchains, no zig, no libc coupling, ~20 lines of GoReleaser. 30 MB is on the
+large side — the o200k_base tokenizer tables, the embedded dashboard UI and
+`modernc.org/sqlite` account for most of it — but it is a fine download for `brew` or
+`curl`, and it needs no runtime dependencies at all.
+
+**Consequence for the docs:** `docs/get-started/quickstart-proxy.md` currently instructs
+every evaluator to set `CGO_ENABLED=1` and install a C toolchain. That is only true for a
+`cg_skeleton` build. Fixing that paragraph is a one-line change that removes the largest
+onboarding gate we have, independent of everything else in this proposal.
 
 `skeleton` is the only casualty, and it costs nothing here: it is not in `codesmart` (the
 default) and not in the cache story at all. Ship pure-Go binaries for everyone; a
@@ -167,6 +176,27 @@ that blast radius is the main risk in this proposal — bigger than the build. H
 to project-local, `--global` as an explicit opt-in, and `--idle-exit` paired with the
 `SessionStart` hook so "is it running?" stops being the user's problem.
 
+**Gate B — measured, 2026-08-30: `env` blocks MERGE per key.** Reproduce with
+`scripts/gate-b-envmerge.sh` (relocates the config dir via `CLAUDE_CONFIG_DIR`, so it never
+touches a real `~/.claude`; a `SessionStart` hook dumps the environment it was handed).
+
+With `CG_USER`+`CG_BOTH` in user scope and `CG_BOTH`+`CG_PROJ` in project scope, the hook saw:
+
+```
+CG_BOTH=project      <- project won the key it sets
+CG_PROJ=project
+CG_USER=user         <- survived; the user object was NOT replaced
+```
+
+So a higher-precedence file wins only the keys it actually sets, and **a user-scope install
+survives a repo that ships its own `env` block.** That removes the failure mode this gate
+existed to catch.
+
+It does *not* change the default-scope recommendation. Per-key merge was one argument for
+project-local; the blast-radius argument above stands on its own and is the stronger one. It
+does mean `--global` is safe to offer without a per-repo caveat, and that `init` only has to
+reason about one conflict: an `ANTHROPIC_BASE_URL` the user already set themselves.
+
 **Why `SessionStart` and not a launchd/systemd service.** Session-scoped lifetime leaves
 nothing running on the machine and needs no privileged install. Mechanics check out:
 `SessionStart` supports `type: "command"`, hooks are awaited unless `async: true` is set, and
@@ -239,26 +269,42 @@ do not match a subscriber's bill.
 - **Not the DAM integration.** DAM is harness-plural with its own gateway; a Claude Code
   plugin covers one harness. Separate proposal.
 
+## Resolved before review
+
+Both gates that would have reshaped the plan were run rather than left open. Scripts are in
+this PR so a reviewer can re-run them.
+
+| Gate | Question | Answer |
+|---|---|---|
+| A | Does `CGO_ENABLED=0` build? | **Yes** — static 30.5 MB binary, all four targets, no C toolchain. `scripts/gate-a-purego.sh` |
+| B | Does `env` merge per key or get replaced wholesale? | **Merges per key** — a user-scope install survives a repo's own `env` block. `scripts/gate-b-envmerge.sh` |
+
+Neither answer changes a decision in this proposal; both remove a way it could have been
+wrong. Gate A is the load-bearing one — it is what makes piece 1 twenty lines of GoReleaser
+instead of a per-platform CI build.
+
 ## Open questions for reviewers
 
-1. **Gate A** — does `CGO_ENABLED=0` build? Everything in piece 1 scales off this answer.
-2. **Does an `env` block merge per-key across settings files, or is the whole object
-   replaced by the highest-precedence file?** The docs say *lists* merge and call `env` "an
-   ordinary key". If it is replaced wholesale, a user-scope install silently stops working in
-   any repo that ships its own `env` block — i.e. exactly the most-configured repos. Needs a
-   10-minute test.
-3. **Default scope: project-local or global?** Local is safer, global is the better demo. The
-   proposal picks local; happy to be overruled.
-4. **Idle-exit default: 24h?** And should the floor be `max(2 × store.ttl_seconds, 1h)`?
-5. **Homebrew tap: `rossoctl/homebrew-tap` as a new repo, and who owns release signing?**
+1. **Default scope: project-local or global?** Local is safer (a dead proxy costs one repo),
+   global is the better demo. The proposal picks local; happy to be overruled. Gate B means
+   global carries no per-repo caveat.
+2. **Idle-exit default: 24h?** And should the floor be `max(2 × store.ttl_seconds, 1h)`?
+3. **Homebrew tap: `rossoctl/homebrew-tap` as a new repo, and who owns release signing?**
+4. **Does the 30 MB artifact bother anyone?** It is mostly tokenizer tables, the embedded
+   dashboard UI and `modernc.org/sqlite`. A `-slim` build without the dashboard is possible if
+   it matters, but it costs the demo its best surface.
+5. **Ship `skeleton` at all in v1?** It is the only thing needing cgo, so a `-skeleton`
+   variant means per-platform CI for one component that is not in `codesmart` and not in the
+   cache story. Proposal: omit it from the first release and document the source build.
 
 ## Staging
 
-- **Stage 0** — Gate A + the `env` merge test. Half a day. Decides the rest.
+- ~~**Stage 0** — Gate A + the `env` merge test.~~ **Done** (see Resolved above).
 - **Stage 1** — GoReleaser + tap + `cache` preset + fix the CGO claim in the quickstart. The
   funnel already works here for anyone willing to run two commands by hand.
 - **Stage 2** — `--idle-exit` + the plugin (skill, scripts, `SessionStart` hook).
 - **Stage 3** — conformance items 1–5 with tests.
 
 Stage 1 is shippable alone and is most of the adoption win; stages 2–3 make it pleasant and
-safe.
+safe. With Gate A answered, the smallest useful change in the whole proposal is a one-line
+quickstart fix telling people they do not need a C compiler.
