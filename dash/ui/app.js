@@ -2009,7 +2009,10 @@ async function loadValueBreakdown() {
         num(o.keepalive_pings) + ' pings', o.keepalive_net_usd < 0 ? 'bad' : 'good'));
     }
     if (hasDeclFilter) {
-      tiles.push(tile('vb-declfilter', 'Declarations filtered', usd(o.decl_filter_usd),
+      // Same fallback as the Cost group's own decl-filter-saved tile: an unpriced model must
+      // not make a real saving read as "$0.00".
+      tiles.push(tile('vb-declfilter', 'Declarations filtered',
+        o.decl_credit_priced ? usd(o.decl_filter_usd) : compact(o.decl_filter_reads) + ' tok',
         num(o.decl_filter_requests) + ' requests', o.decl_filter_usd > 0 ? 'good' : ''));
     }
     clear($('#value-breakdown-tiles')).appendChild(tileGroup(null, null, tiles));

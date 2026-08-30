@@ -54,11 +54,18 @@ type API struct {
 // or a second tab open on the same window, does not each pay for a separate expensive read.
 const dashCacheTTL = 5 * time.Second
 
-// dashHandlerTimeout bounds /api/stats and /api/facets, the two DB-heaviest dashboard reads.
-// The connection pool they share (dash/store.go) is now bounded, so a burst past it queues
-// rather than growing unbounded — better than the OOM crash that replaced, but unbounded on
-// its own: without this, a queued request hangs the caller indefinitely instead of returning.
-// Matches Prometheus's own scrape_timeout, so a slow tab and a slow scrape fail the same way.
+// dashHandlerTimeout bounds /api/stats, /api/facets and /api/components — the three DB-heaviest
+// dashboard reads. The connection pool they share (dash/store.go) is now bounded, so a burst
+// past it queues for a connection rather than growing unbounded — better than the OOM crash
+// that replaced, but unbounded on its own: without this, a queued request hangs the caller
+// indefinitely instead of returning. Matches Prometheus's own scrape_timeout, so a slow tab and
+// a slow scrape fail the same way.
+//
+// This bounds the CALLER's wait, not the query itself: Overview() and Facets() run on plain
+// d.sql.Query/QueryRow (context.Background()), so a canceled request context does not cancel
+// the in-flight query or release its pooled connection early — the goroutine keeps running
+// until the query finishes on its own. A caller gets a fast, honest timeout instead of hanging;
+// backend pressure from a genuinely stuck query is not relieved by this alone.
 const dashHandlerTimeout = 10 * time.Second
 
 const dashTimeoutMsg = "dashboard query timed out; try again in a moment"
@@ -304,7 +311,7 @@ func (a *API) routes() []route {
 		{"GET /api/requests/{id}", scopeTenant, a.request},
 		{"GET /api/sessions", scopeTenant, a.sessions},
 		{"GET /api/sessions/{session}/transcript", scopeTenant, a.sessionTranscript},
-		{"GET /api/components", scopeTenant, a.components},
+		{"GET /api/components", scopeTenant, http.TimeoutHandler(http.HandlerFunc(a.components), dashHandlerTimeout, dashTimeoutMsg).ServeHTTP},
 		{"GET /api/breakdown", scopeTenant, a.breakdown},
 		{"GET /api/facets", scopeTenant, http.TimeoutHandler(http.HandlerFunc(a.facets), dashHandlerTimeout, dashTimeoutMsg).ServeHTTP},
 		{"GET /api/config", scopeManager, a.config},
