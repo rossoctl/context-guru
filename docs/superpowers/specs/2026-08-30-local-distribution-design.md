@@ -23,6 +23,46 @@ Target: **two commands, no toolchain, no guide, reversible.**
 /context-guru:install
 ```
 
+## What the user does
+
+Nothing is copied into their project, and the skill is not something they have to place.
+`/plugin install` writes to `enabledPlugins` in `~/.claude/settings.json` (user scope is the
+default and means "available across all projects"), so the plugin and its skills are
+installed **once per machine** and are then reachable from any repo.
+
+```
+1. /plugin marketplace add rossoctl/context-guru    # once per machine; prompts to trust the source
+2. /plugin install context-guru@context-guru        # once per machine; may ask for /reload-plugins
+3. /context-guru:install                            # once per repo (or once, with --global)
+```
+
+Step 3 is the whole reason a skill exists rather than a shell script. It:
+
+1. detects the platform and installs the binary — `brew` if present, else the release
+   tarball (one Bash approval);
+2. asks which scope to route (defaults to this project only);
+3. reads the target settings file, backs it up, and adds **one** key —
+   `env.ANTHROPIC_BASE_URL` (one file-edit approval);
+4. notices if the user already has an `ANTHROPIC_BASE_URL` and asks what to do rather than
+   overwriting it;
+5. starts the proxy, verifies `/healthz`, and prints the dashboard URL.
+
+Realistically **three to four approval prompts**, of which steps 1–2 happen once, ever.
+Afterwards `/context-guru:status` reads `/stats` and explains the numbers, and
+`/context-guru:uninstall` removes the key and stops the proxy.
+
+What is global and what is not:
+
+| Thing | Scope | Frequency |
+|---|---|---|
+| Plugin + its skills | global — user settings | once per machine |
+| Binary | global — `brew` / `~/.local/bin` | once per machine |
+| **Routing (the `env` block)** | **per-project by default**, `--global` opt-in | **once per repo** |
+| Proxy process | per-machine, started on demand | automatic |
+
+Only the *routing decision* is per-repo, and deliberately so — it is the one with blast
+radius. Everything else is install-once.
+
 ## What we ship
 
 Five pieces. Each is independently useful; the order is the order they unblock each other.
@@ -53,10 +93,9 @@ in one CI job: no C cross-toolchains, no zig, no libc coupling, ~20 lines of GoR
 30 MB is on the large side (tokenizer tables, the embedded dashboard UI and
 `modernc.org/sqlite`) but it is a fine `brew` or `curl` download with no runtime deps.
 
-**The one thing here that is worth acting on immediately:**
-`docs/get-started/quickstart-proxy.md` instructs every evaluator to set `CGO_ENABLED=1` and
-install a C toolchain. That is only true for a `cg_skeleton` build. Fixing that paragraph is
-a one-line change, it removes the largest onboarding gate we have, and it depends on nothing
+**The one thing here worth acting on immediately** is that quickstart paragraph. Its
+`CGO_ENABLED=1` instruction is true only for a `cg_skeleton` build, so fixing it is a
+one-line change that removes the largest onboarding gate we have — and it depends on nothing
 else in this proposal.
 
 `skeleton` is the only casualty, and it costs nothing here: it is not in `codesmart` (the
@@ -178,8 +217,16 @@ than two: an `ANTHROPIC_BASE_URL` the user already set themselves.
 nothing running on the machine and needs no privileged install. Mechanics check out:
 `SessionStart` supports `type: "command"`, hooks are awaited unless `async: true` is set, and
 the default timeout is 600s — so a hook that starts the proxy and polls `/healthz` before
-returning closes the race with the first API request. Four details:
+returning closes the race with the first API request. Five details:
 
+- **The hook must self-gate on `ANTHROPIC_BASE_URL`.** The plugin is installed at user scope,
+  so its hooks run in **every** project — including the ones the user never routed. Starting a
+  proxy there is pure waste. The fix needs no extra configuration: settings `env` values are
+  written into the process environment and hook processes inherit it, so the hook reads
+  `$ANTHROPIC_BASE_URL` and exits immediately unless it names our port. That makes the hook
+  run in exactly the projects where routing is configured, with no per-project enablement and
+  no second copy of the port to keep in sync. It also degrades correctly: if the user removes
+  the env key by hand, the hook stops firing on its own.
 - **Never set `async: true`** on this hook; it reintroduces the race.
 - **`SessionStart` also fires on `clear`, `compact`, `resume` and `fork`**, not just
   `startup`. The starter must be idempotent — probe `/healthz`, start only if absent.
