@@ -529,22 +529,27 @@ func kaKey(tenant, session string) string { return tenant + "\x00" + session }
 // while a real request is in flight could be pinged concurrently with it, which is both
 // pointless (the real request refreshes the entry itself) and a second request against the
 // tenant's concurrency budget.
-func (k *keeper) arrive(tenant, session string) (pings int, refreshed int64) {
+//
+// strategyID is e.appliedStrategy — which manager-controlled strategy resolved this idle
+// span's policy, "" when none did. It is in scope right here and nowhere else once the entry
+// is cleared, so this is the one place a real request's credit can be attributed to the
+// strategy that earned it, rather than only the tenant's whole lifetime credit.
+func (k *keeper) arrive(tenant, session string) (pings int, refreshed int64, strategyID string) {
 	if k == nil || session == "" {
-		return 0, 0
+		return 0, 0, ""
 	}
 	key := kaKey(tenant, session)
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	e, ok := k.live[key]
 	if !ok {
-		return 0, 0
+		return 0, 0, ""
 	}
-	pings, refreshed = e.pings, e.refreshed
+	pings, refreshed, strategyID = e.pings, e.refreshed, e.appliedStrategy
 	k.bytes -= int64(len(e.body))
 	e.clear()
 	delete(k.live, key)
-	return pings, refreshed
+	return pings, refreshed, strategyID
 }
 
 // record hands the keeper what it needs to ping this session, once the request that

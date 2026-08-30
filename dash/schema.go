@@ -129,10 +129,17 @@ CREATE TABLE IF NOT EXISTS requests (
   -- reason cachesplit_saved_usd is: those tokens carry cache_control, so a miss bills them
   -- as creation at 1.25x rather than at 1.0x.
   keepalive_saved_usd REAL   NOT NULL DEFAULT 0,
-  -- Which manager-controlled keep-alive STRATEGY, if any, resolved a PING row's policy —
-  -- see proxy/keepalivestrategy.go's resolution chain and kaEntry.appliedStrategy. Set
-  -- only on a ping row; the real request a ping later rescues carries no strategy id,
-  -- because only the ping's own policy resolution ever consults the strategy list.
+  -- Which manager-controlled keep-alive STRATEGY, if any, resolved the policy behind this
+  -- row — see proxy/keepalivestrategy.go's resolution chain and kaEntry.appliedStrategy.
+  -- Carries TWO meanings, disambiguated by the keepalive column: on a ping row (keepalive=1),
+  -- which strategy decided to send THIS ping; on the real row that ping's idle span later
+  -- ended with (keepalive=0, keepalive_pings>0), which strategy sent the ping(s) — set
+  -- whether or not that row ended up credited, since every reader of this column also
+  -- filters on keepalive_saved_usd>0. Captured at keeper.arrive, the one moment the idle
+  -- span's strategy is still in scope before the entry clears (proxy/keepalive.go). This is
+  -- what makes a per-strategy savings figure a real share of a tenant's credit instead of
+  -- the tenant's whole lifetime credit repeated under every strategy that ever touched them
+  -- (dash/keepalivestrategy.go).
   -- NULLABLE, unlike every other column here but temperature/top_p: a row written before
   -- this feature existed reads NULL rather than a fabricated "no strategy" answer, and it
   -- is never backfilled — there is no way to know which pre-feature pings would have

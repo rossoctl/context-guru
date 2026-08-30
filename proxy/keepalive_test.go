@@ -404,18 +404,21 @@ func TestArriveCancelsAndReports(t *testing.T) {
 	k.sweep(clock.advance(281 * time.Second))
 	waitPings(t, k, 1)
 
-	pings, refreshed := k.arrive("t1", "sess-1")
+	pings, refreshed, strategyID := k.arrive("t1", "sess-1")
 	if pings != 1 {
 		t.Errorf("pings = %d, want 1", pings)
 	}
 	if refreshed != 48576 {
 		t.Errorf("refreshed = %d, want the ping's own cache_read of 48576", refreshed)
 	}
+	if strategyID != "" {
+		t.Errorf("strategyID = %q, want \"\" (no strategy configured in this test)", strategyID)
+	}
 	if got := k.Stats().Live; got != 0 {
 		t.Errorf("still tracking %d sessions after the next request arrived", got)
 	}
-	if p, r := k.arrive("t1", "sess-1"); p != 0 || r != 0 {
-		t.Errorf("arrive reported %d/%d for an untracked session, want 0/0", p, r)
+	if p, r, s := k.arrive("t1", "sess-1"); p != 0 || r != 0 || s != "" {
+		t.Errorf("arrive reported %d/%d/%q for an untracked session, want 0/0/\"\"", p, r, s)
 	}
 }
 

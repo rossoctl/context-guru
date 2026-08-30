@@ -2,28 +2,35 @@ package dash
 
 import "testing"
 
-// StrategyLedger groups a strategy's own ping rows by tenant, and folds in each
-// tenant's whole keep-alive credit — see the ceiling caveat on StrategyLedger itself.
+// StrategyLedger groups a strategy's own ping rows by tenant, and now attributes each
+// credited request to whichever strategy's ping actually earned it (see StrategyLedger's
+// own comment) rather than a tenant's whole lifetime credit.
 
-func TestStrategyLedgerGroupsPingsByTenantAndFoldsInTheirCredit(t *testing.T) {
+func TestStrategyLedgerGroupsPingsByTenantAndAttributesTheirCredit(t *testing.T) {
 	db := openTestDB(t)
 
 	t1ping := kaPing(1000, "s1", 0.02, 40_000, 0)
 	t1ping.TenantID, t1ping.KeepAliveStrategyID = "t1", "strat-1"
 	t1credit := kaCredit(2000, "s1", 0.10)
-	t1credit.TenantID = "t1"
+	t1credit.TenantID, t1credit.KeepAliveStrategyID = "t1", "strat-1"
 
 	t2ping := kaPing(1500, "s2", 0.03, 60_000, 0)
 	t2ping.TenantID, t2ping.KeepAliveStrategyID = "t2", "strat-1"
 	t2credit := kaCredit(2500, "s2", 0.05)
-	t2credit.TenantID = "t2"
+	t2credit.TenantID, t2credit.KeepAliveStrategyID = "t2", "strat-1"
 
 	// A ping under a DIFFERENT strategy, and one that is not a ping at all: neither must
 	// be counted for strat-1.
 	otherStrategyPing := kaPing(1600, "s3", 0.09, 90_000, 0)
 	otherStrategyPing.TenantID, otherStrategyPing.KeepAliveStrategyID = "t1", "strat-2"
 
-	if err := db.insertBatch([]*Event{t1ping, t1credit, t2ping, t2credit, otherStrategyPing}); err != nil {
+	// t1's credit from an EARLIER idle span, under strat-2 (a strategy swap over time — the
+	// exact case that used to inflate every strategy's ledger to the tenant's whole
+	// lifetime credit): must not count toward strat-1's SavedUSD.
+	t1olderCredit := kaCredit(1800, "s4", 0.30)
+	t1olderCredit.TenantID, t1olderCredit.KeepAliveStrategyID = "t1", "strat-2"
+
+	if err := db.insertBatch([]*Event{t1ping, t1credit, t2ping, t2credit, otherStrategyPing, t1olderCredit}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -49,7 +56,8 @@ func TestStrategyLedgerGroupsPingsByTenantAndFoldsInTheirCredit(t *testing.T) {
 		t.Errorf("t1 row = %+v, want 1 ping at ~$0.02", t1)
 	}
 	if t1.SavedUSD < 0.099 || t1.SavedUSD > 0.101 {
-		t.Errorf("t1 SavedUSD = %v, want ~0.10 (its own whole keep-alive credit)", t1.SavedUSD)
+		t.Errorf("t1 SavedUSD = %v, want ~0.10 (only the credit strat-1's own ping earned, "+
+			"not the $0.30 credited under strat-2 in an earlier span)", t1.SavedUSD)
 	}
 	t2 := byTenant["t2"]
 	if t2.Pings != 1 || t2.PingUSD < 0.029 || t2.PingUSD > 0.031 {

@@ -63,9 +63,10 @@ var kvCacheMaxRows = 200_000
 // kvCacheMaxConcurrent bounds how many analysis reads run at once, which is the half of the
 // ceiling kvCacheMaxRows does not cover.
 //
-// kvCacheMaxRows bounds ONE request: ~135 MB of live heap and several seconds at the cap. Nothing
-// bounded the NUMBER of requests, and the store opens its pool with no SetMaxOpenConns, so under
-// WAL every reader genuinely runs in parallel — eight concurrent analyses measured at 1.65 GB
+// kvCacheMaxRows bounds ONE request: ~135 MB of live heap and several seconds at the cap. The
+// store's pool is bounded (dash/store.go's SetMaxOpenConns), but that caps CONNECTION count, not
+// per-request memory — a kvcache analysis is heavy enough that even a handful of them running at
+// once, well under the pool's own cap, is what OOMs: eight concurrent analyses measured at 1.65 GB
 // resident and 24 s each, which OOMs a 2 GB container. A dashboard reader holding the refresh key
 // is enough, and on a single-tenant deployment no credential is needed to do it.
 //

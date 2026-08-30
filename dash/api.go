@@ -54,6 +54,15 @@ type API struct {
 // or a second tab open on the same window, does not each pay for a separate expensive read.
 const dashCacheTTL = 5 * time.Second
 
+// dashHandlerTimeout bounds /api/stats and /api/facets, the two DB-heaviest dashboard reads.
+// The connection pool they share (dash/store.go) is now bounded, so a burst past it queues
+// rather than growing unbounded — better than the OOM crash that replaced, but unbounded on
+// its own: without this, a queued request hangs the caller indefinitely instead of returning.
+// Matches Prometheus's own scrape_timeout, so a slow tab and a slow scrape fail the same way.
+const dashHandlerTimeout = 10 * time.Second
+
+const dashTimeoutMsg = "dashboard query timed out; try again in a moment"
+
 // jsonCache is a short-TTL cache for one expensive, filter-keyed JSON response. Unlike
 // promexport's cache (proxy/promexport.go), this one is keyed: /api/stats and /api/facets
 // vary by tenant scope and by every filter query parameter, so there is no single body to
@@ -289,7 +298,7 @@ func (a *API) routes() []route {
 			http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
 		}},
 		{"GET /dashboard/", scopePublic, http.StripPrefix("/dashboard/", uiHandler()).ServeHTTP},
-		{"GET /api/stats", scopeTenant, a.stats},
+		{"GET /api/stats", scopeTenant, http.TimeoutHandler(http.HandlerFunc(a.stats), dashHandlerTimeout, dashTimeoutMsg).ServeHTTP},
 		{"GET /api/series", scopeTenant, a.series},
 		{"GET /api/requests", scopeTenant, a.requests},
 		{"GET /api/requests/{id}", scopeTenant, a.request},
@@ -297,7 +306,7 @@ func (a *API) routes() []route {
 		{"GET /api/sessions/{session}/transcript", scopeTenant, a.sessionTranscript},
 		{"GET /api/components", scopeTenant, a.components},
 		{"GET /api/breakdown", scopeTenant, a.breakdown},
-		{"GET /api/facets", scopeTenant, a.facets},
+		{"GET /api/facets", scopeTenant, http.TimeoutHandler(http.HandlerFunc(a.facets), dashHandlerTimeout, dashTimeoutMsg).ServeHTTP},
 		{"GET /api/config", scopeManager, a.config},
 		{"GET /api/benchmarks", scopeManager, a.benchmarks},
 		{"GET /api/benchmarks/{id}/tasks", scopeManager, a.benchmarkTasks},

@@ -233,7 +233,7 @@ func replay(t *testing.T, rows []snapRow, table *Table2, pol CachePolicy, blanke
 		if n := k.Stats().Live; n > out.peakLive {
 			out.peakLive = n
 		}
-		pings, _ := k.arrive(r.tenant, r.session)
+		pings, _, _ := k.arrive(r.tenant, r.session)
 		e := entries[r.session]
 		addressable := r.reason == "ttl_expiry" && r.cacheWrite > 0
 		if addressable {

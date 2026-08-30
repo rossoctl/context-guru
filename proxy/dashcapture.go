@@ -53,13 +53,15 @@ type capture struct {
 	tenant string
 	// meta is the request's own metadata, read once off the pristine inbound body.
 	meta dash.Meta
-	// kaPings / kaRefreshed are what the idle keep-alive did during the span this request
-	// just ended: how many pings it sent, and how many tokens the last of them read from
-	// cache. Recorded on the request path because the keeper's per-session state is cleared
-	// the moment a real request arrives, so this is the only point at which both facts are
-	// still in hand.
+	// kaPings / kaRefreshed / kaStrategy are what the idle keep-alive did during the span
+	// this request just ended: how many pings it sent, how many tokens the last of them
+	// read from cache, and which manager-controlled strategy (if any) resolved the policy
+	// that sent them. Recorded on the request path because the keeper's per-session state
+	// is cleared the moment a real request arrives, so this is the only point at which all
+	// three facts are still in hand.
 	kaPings     int
 	kaRefreshed int64
+	kaStrategy  string
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
 	// weights) plus the tool calls of its last tool-using turn — nil when the request
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
@@ -267,9 +269,9 @@ func (c *capture) noteUpstream(ms float64, status int) {
 }
 
 // noteKeepAlive records what the idle keep-alive did during the span this request ended.
-func (c *capture) noteKeepAlive(pings int, refreshed int64) {
+func (c *capture) noteKeepAlive(pings int, refreshed int64, strategyID string) {
 	if c != nil {
-		c.kaPings, c.kaRefreshed = pings, refreshed
+		c.kaPings, c.kaRefreshed, c.kaStrategy = pings, refreshed, strategyID
 	}
 }
 
@@ -368,6 +370,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// than only a label (see Event.keepaliveSavedUSD), so they have to be set before Price.
 	e.SinceLastMs = sinceMs
 	e.KeepAlivePings, e.KeepAliveRefreshed = c.kaPings, c.kaRefreshed
+	e.KeepAliveStrategyID = c.kaStrategy
 
 	var price modelinfo.Price
 	priced := false

@@ -349,8 +349,13 @@ func (h *Handler) Mux() *http.ServeMux {
 	})
 	m.HandleFunc("GET /stats", h.stats)
 	// Prometheus, for Grafana. Same gate as /stats: it is a service-wide view that
-	// includes per-tenant cost.
-	m.HandleFunc("GET /metrics", h.metricsHandler)
+	// includes per-tenant cost. Wrapped in a timeout matching Prometheus's own
+	// scrape_timeout: the dashboard DB's connection pool is bounded (dash/store.go), so a
+	// burst past it now queues instead of growing unbounded — better than the OOM crash
+	// that replaced, but a queued scrape must still get a fast, clear answer rather than
+	// hang the connection indefinitely.
+	m.HandleFunc("GET /metrics", http.TimeoutHandler(http.HandlerFunc(h.metricsHandler), 10*time.Second,
+		"metrics query timed out").ServeHTTP)
 	m.HandleFunc("GET /expand", h.expand)
 	// The dashboard mounts /dashboard/ (embedded UI) and /api/* (JSON + SSE) only
 	// when enabled, so an unconfigured proxy's route table is byte-identical to before.
@@ -1079,8 +1084,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// the pings during the idle span it just ended actually did. Both facts are
 			// needed BEFORE the row is priced — the ping count and the tokens the last ping
 			// refreshed are inputs to a dollar figure, not just a label.
-			kaPings, kaRefreshed := h.keeper.arrive(tn.ID, tr.Session)
-			cp.noteKeepAlive(kaPings, kaRefreshed)
+			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session)
+			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
 			if h.agg != nil && !bypassed {
 				h.agg.RecordAddedLatency(addedMs)
 				h.agg.RecordEligibility(tr.AttemptedTokens, tr.FrozenTokens)

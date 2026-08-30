@@ -34,14 +34,12 @@ type StrategyLedgerView struct {
 // already is (dash/keepalive.go), filtered by keepalive_strategy_id instead of by
 // Filter.Tenant.
 //
-// Pings and PingUSD are EXACT: every ping row this strategy caused carries its id (see
-// proxy's record1). SavedUSD is the SAME ceiling the account-wide ledger reports
-// (KeepAliveLedger) and carries the same caveat plus one more: it is the tenant's WHOLE
-// keep-alive credit, not only the share this strategy's own pings produced. The credit
-// lands on the real request a ping rescued, which carries no strategy id — only the ping
-// itself is attributed (see the design doc's "Attribution for stats") — so on a tenant
-// running more than one strategy, or a per-session override, alongside this one, this
-// number is an upper bound on this strategy's own contribution, not an exact share of it.
+// Pings, PingUSD, and now SavedUSD are all EXACT: every ping row this strategy caused
+// carries its id (proxy's record1), and every REAL row a ping later rescued carries the
+// same id (keeper.arrive, threaded through capture — see dash/schema.go's
+// keepalive_strategy_id comment). A tenant running more than one strategy over time no
+// longer has its whole lifetime credit repeated under each one — a credited request is
+// attributed to whichever strategy's ping(s) actually preceded it, once.
 func (d *DB) StrategyLedger(strategyID string) (*StrategyLedgerView, error) {
 	out := &StrategyLedgerView{StrategyID: strategyID, Tenants: []StrategyLedgerRow{}}
 	rows, err := d.sql.Query(`SELECT tenant_id, COUNT(*), COALESCE(SUM(cost_usd),0)
@@ -68,7 +66,8 @@ func (d *DB) StrategyLedger(strategyID string) (*StrategyLedgerView, error) {
 		row := &out.Tenants[i]
 		var saved sql.NullFloat64
 		if err := d.sql.QueryRow(`SELECT SUM(keepalive_saved_usd) FROM requests
-			WHERE tenant_id = ? AND keepalive_saved_usd > 0`, row.TenantID).Scan(&saved); err != nil {
+			WHERE tenant_id = ? AND keepalive_saved_usd > 0 AND keepalive_strategy_id = ?`,
+			row.TenantID, strategyID).Scan(&saved); err != nil {
 			return nil, err
 		}
 		row.SavedUSD = saved.Float64
