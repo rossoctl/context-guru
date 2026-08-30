@@ -8,6 +8,10 @@ right tags, run a binary, work out `ANTHROPIC_BASE_URL`, and trust that routing 
 coding agent through an unknown local proxy will not break it. Most evaluators stop at
 step one.
 
+Step one turns out to be avoidable. **The C toolchain is not required** — measured, not
+assumed (Gate A below): `CGO_ENABLED=0` produces a fully static binary for all four release
+targets, and our own quickstart is telling people otherwise.
+
 The value we want them to feel first is **KV-cache**, not the offloaders. That decides
 almost everything below, because cache work requires being on the wire — so this proposal
 is about making *the proxy* trivial to install, not about avoiding it.
@@ -19,31 +23,44 @@ Target: **two commands, no toolchain, no guide, reversible.**
 /context-guru:install
 ```
 
+## Findings up front
+
+Two questions could each have reshaped this proposal. Both were run before review rather
+than left open; the scripts ship alongside so a reviewer can re-run them.
+
+| Gate | Question | Answer | Reproduce |
+|---|---|---|---|
+| **A** | Does `CGO_ENABLED=0` build? | **Yes.** Static 30.5 MB binary, all four release targets, no C toolchain. `cg_skeleton` is the only cgo path. | `scripts/gate-a-purego.sh` |
+| **B** | Does an `env` block merge per key, or does the highest-precedence file replace the whole object? | **Merges per key.** A user-scope install survives a repo shipping its own `env` block. | `scripts/gate-b-envmerge.sh` |
+
+Neither answer changes a decision below; both remove a way this could have been wrong. Gate
+A is the load-bearing one — it turns piece 1 from a per-platform CI build into a plain
+`GOOS`/`GOARCH` matrix, and it means **the single smallest useful change in this whole
+proposal is a one-line quickstart fix telling people they do not need a C compiler.**
+
 ## What we ship
 
 Five pieces. Each is independently useful; the order is the order they unblock each other.
 
-| # | Piece | Why |
-|---|---|---|
-| 1 | Pure-Go release binaries + Homebrew tap | Removes the toolchain gate entirely |
-| 2 | `--idle-exit` self-terminating proxy | Nothing left running on the machine |
-| 3 | `cache` preset | The KV-cache-only pitch, fully lossless |
-| 4 | A plugin: install skill + `scripts/` + `SessionStart` hook | One command, and an agent that can make the judgment calls |
-| 5 | Gateway conformance fixes | Routing must not break their agent |
+| # | Piece | Why | Gated on |
+|---|---|---|---|
+| 1 | Pure-Go release binaries + Homebrew tap | Removes the toolchain gate entirely | Gate A ✅ |
+| 2 | `--idle-exit` self-terminating proxy | Nothing left running on the machine | — |
+| 3 | `cache` preset | The KV-cache-only pitch, fully lossless | — |
+| 4 | A plugin: install skill + `scripts/` + `SessionStart` hook | One command, and an agent that can make the judgment calls | Gate B ✅ |
+| 5 | Gateway conformance fixes | Routing must not break their agent | — |
 
 ### 1. Pure-Go binaries
 
 `docs/get-started/quickstart-proxy.md` tells every evaluator to set `CGO_ENABLED=1` and
-install a C toolchain. Reading the dependency tree, that looks unnecessary for the default
-build:
+install a C toolchain. The dependency tree says that is unnecessary for the default build,
+and Gate A confirms it:
 
 | Dependency | cgo? |
 |---|---|
 | `tiktoken-go/tokenizer` | **No.** `internal/tokens/tokens.go` says it outright: *"o200k_base is embedded in the binary (pure-Go, offline, no CGO)"* |
 | `modernc.org/sqlite` (dashboard) | **No** — pure Go by design |
-| `tree-sitter/go-tree-sitter` | Yes — but gated behind `//go:build cg_skeleton`, with `internal/treesitter/stub.go` for `!cg_skeleton` |
-
-So without `-tags cg_skeleton` there should be no cgo dependency at all.
+| `tree-sitter/go-tree-sitter` | Yes — the only one. Gated behind `//go:build cg_skeleton`, with `internal/treesitter/stub.go` for `!cg_skeleton` |
 
 **Gate A — measured, 2026-08-30. It passes.** Reproduce with `scripts/gate-a-purego.sh`
 (runs in a `golang:1.26` container, so no local Go needed):
@@ -269,21 +286,10 @@ do not match a subscriber's bill.
 - **Not the DAM integration.** DAM is harness-plural with its own gateway; a Claude Code
   plugin covers one harness. Separate proposal.
 
-## Resolved before review
-
-Both gates that would have reshaped the plan were run rather than left open. Scripts are in
-this PR so a reviewer can re-run them.
-
-| Gate | Question | Answer |
-|---|---|---|
-| A | Does `CGO_ENABLED=0` build? | **Yes** — static 30.5 MB binary, all four targets, no C toolchain. `scripts/gate-a-purego.sh` |
-| B | Does `env` merge per key or get replaced wholesale? | **Merges per key** — a user-scope install survives a repo's own `env` block. `scripts/gate-b-envmerge.sh` |
-
-Neither answer changes a decision in this proposal; both remove a way it could have been
-wrong. Gate A is the load-bearing one — it is what makes piece 1 twenty lines of GoReleaser
-instead of a per-platform CI build.
-
 ## Open questions for reviewers
+
+Both gates are answered (see [Findings up front](#findings-up-front)), so everything below is
+a judgment call rather than an unknown that could invalidate the plan.
 
 1. **Default scope: project-local or global?** Local is safer (a dead proxy costs one repo),
    global is the better demo. The proposal picks local; happy to be overruled. Gate B means
