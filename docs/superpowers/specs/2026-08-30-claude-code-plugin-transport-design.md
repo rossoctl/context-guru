@@ -17,11 +17,37 @@ prompt; it only injects `additionalContext` alongside it". Plugin `settings.json
 only `agent` and `subagentStatusLine`, so a plugin cannot even set `ANTHROPIC_BASE_URL`
 to point the session at the proxy.
 
+Verified twice over during review of this PR, and by a stronger method than the docs: 11 hook
+events exercised live (including `PostToolBatch`, `PreModelSwitch`/`PostModelSwitch` and
+`InstructionsLoaded`, which this doc had not covered), plus a direct read of the installed
+CLI's own `hookSpecificOutput` validation schema — 33 events, only 22 carrying output fields
+at all, and the validation union touches no envelope field. `cache_control` **is** present in
+the captured wire body, placed by the CLI on system blocks and the trailing message; it is
+simply never visible to, or writable by, any hook.
+
+**One precision, so this is not read as more absolute than it is.** "No plugin surface can set
+`cache_control`" is true, but cache *TTL* is not entirely out of reach: `promptCacheTtl` /
+`CLAUDE_CODE_PROMPT_CACHE_TTL` is a real lever (5m default on an API key, 1h on a
+subscription) — reachable through `settings.json` or the environment, **not** through any hook
+or plugin manifest field, and session-wide and static rather than per-breakpoint. It changes
+nothing here, because `cachesplit` and `cacheinject` both turn on per-breakpoint,
+per-turn reasoning that remains unreachable from plugin-land. It is worth stating because a
+settings-based install — the shape proposed for local distribution — *can* set it, and a flat
+claim of "zero cache control" would overstate the gap.
+
 What *is* interceptable is **one tool result, at the moment it is produced, before it
 enters context** — `PostToolUse` → `hookSpecificOutput.updatedToolOutput`, which
 "replaces the tool's output with the provided value before it is sent to Claude". The
 docs name this use case directly: *"For redaction or transformation use cases, intercept
 at `PreToolUse` for outbound tool inputs and `PostToolUse` for inbound tool results."*
+
+**On the figures quoted throughout.** Component measurements cited below (`cachesplit`'s
+−34.1% / 0%→96.7%, `mask`'s 27.5% and 12.5%, the ~7,017-token system block in
+`prefixsplit.go`) are this repo's own recorded results, read from code comments and
+`docs/RESULTS.md`. They are quoted accurately but they are **frozen historical measurements,
+not re-verified against current traffic** by this evaluation. The comparisons here turn on
+their relative order of magnitude, which is robust to drift; anyone planning work on the
+strength of a specific number should re-measure it.
 
 So the dividing line through our component set is not lossy-vs-lossless. It is:
 
@@ -320,40 +346,66 @@ New Go code, all of it thin:
 Everything under `components/`, `components/offload/`, `components/dsl/`, `store/`,
 `session/`, `config/`, `expand/`, `metrics/`, `dash/` is reused unmodified.
 
-## Three things to verify empirically before committing
+## Gate 0: persistence — RESOLVED, in this proposal's favour
 
-**0. Does `updatedToolOutput` persist into the session transcript?** This is the gate
-everything above rests on, and the docs do not state it directly. The whole
-defensive-half-is-free argument requires that the *replacement* is what Claude Code stores
-and re-sends on every later turn. Two data points point that way — the docs say the value
-is substituted "before it is sent to Claude", and for `additionalContext` they say Claude
-Code "saves the injected text in the session transcript … replays the saved text rather
-than re-running the hook" on resume — but neither is a statement about
-`updatedToolOutput`'s persistence. The counter-hypothesis is that the original is retained
-and the replacement applies to one request only.
+Everything above rested on one unverified fact: that the *replacement* is what Claude Code
+stores and re-sends, not just what it shows the model once. The counter-hypothesis — original
+retained, replacement applied to a single request — would have collapsed the whole
+proposition, because the freeze/replay layer would be needed again with no way to run it.
 
-If persistence does **not** hold, the plugin saves tokens on exactly one request per tool
-call and nothing thereafter, the entire freeze/replay layer is needed again (with no way to
-run it, since the hook can't see the request), and the whole proposition collapses. **Test
-this first, before anything else is built:** run a `PostToolUse` hook that replaces a Bash
-output with a sentinel string, take two more turns, then inspect the session transcript
-JSONL and — decisively — a captured outbound request body to confirm the sentinel is what
-gets re-sent.
+**Measured, 2026-08-30 (review of this PR).** A `PostToolUse` hook replaced a Bash output
+with a sentinel; the outbound body was captured through a raw-logging reverse proxy — the
+wire, not just the transcript file — across two turns of a real session. Turn 2,
+`messages[3]`:
 
-1. **Is `updatedToolOutput` subject to the 10,000-character cap?** The docs cap
-   "`additionalContext`, `systemMessage`, and plain stdout" and do not name
-   `updatedToolOutput` — but if the cap applies to total hook stdout, the hook is unusable
-   for exactly the large outputs that matter. Test with a >10 KB reduced output.
-2. **Shape validation fails silently.** "For built-in tools, a value that doesn't match the
-   tool's output schema is ignored and the original output is used." That is fail-open,
-   which suits us, but it is *invisible* — the same class of bug as #32, where a component
-   applied 46 breakpoints and 0 reached the wire. The hook must verify its own emission and
-   count rejections, or we will ship a silently inert plugin again.
+```json
+{"tool_use_id": "toolu_bdrk_01SC6Vg1gZAtY1WEVe7xsbsR", "type": "tool_result",
+ "content": "SENTINEL-OBJ-999-REPLACED", "is_error": false}
+```
 
-Also note `PostToolUse` does not fire for tool calls rejected before execution, and tool
-*errors* route to `PostToolUseFailure` instead — a nonzero-exit `Bash` call is still a
-success, so the `cmdfilter` path is covered, but a plugin wanting full coverage needs both
-events.
+The real content appears in **no** resent `tool_result`, and a later turn asked for the exact
+tool output answered with the sentinel at `input_tokens: 69` — i.e. from resent history, not
+regeneration. **The replacement persists and is resent verbatim.**
+
+A working `PostToolUse` collapse plugin (matcher `Bash`, head/tail with an omitted-count
+marker) was then A/B measured on a real session: **−6,285 tokens**, appearing as the *same*
+reduction on turn 1's cache-write and turn 2's cache-read. Two independent measurements of
+one session, which is what distinguishes a permanent reduction of resent context from a
+one-turn display trick.
+
+So the defensive-half-is-free argument holds, and the recommendation below is an
+empirically-grounded bet rather than a reasoned one.
+
+### The operational gotcha, hit exactly as predicted
+
+`updatedToolOutput` **must be the object shape** matching the tool's `tool_response` schema —
+for `Bash`: `{stdout, stderr, interrupted, isImage, noOutputExpected}`. A **bare string is
+silently ignored** and the original output stands. The first implementation attempt during
+review did exactly this and read as a negative result until the shape was corrected.
+
+This is the failure mode flagged below as the thing to guard against, and it arrived on the
+first try. The adapter must verify its own emission and count rejections; a silently inert
+plugin is the #32 bug in a new costume.
+
+## Remaining risks
+
+1. **Shape validation fails silently** — see above. Now demonstrated, not hypothetical.
+   `adapters/cchook` needs an emission-verified counter from day one.
+2. **Oversized emissions degrade rather than fail — and the earlier "10,000-char cap" figure
+   in this doc was wrong.** Measured by bisection with distinct-letter payload segments:
+   `updatedToolOutput.stdout` goes out verbatim and uncapped up to ~30,000 chars, with the
+   real threshold in **(30,000, 40,000]** — most likely 32,768, i.e. 3–4× the figure this doc
+   first cited from the `additionalContext` / `systemMessage` / plain-stdout cap, which does
+   not govern this field. Above the threshold there is neither truncation nor rejection: the
+   CLI's ordinary large-tool-output handler takes over, so the wire `tool_result` becomes a
+   ~2,260-char `<persisted-output>` wrapper carrying a 2 KB preview plus a pointer to the full
+   content on disk, while the local `toolUseResult` record stays intact (confirmed at 100,000
+   chars). "Cap" was the wrong frame — this is graceful degradation into the same
+   preview-plus-pointer pattern Claude Code already applies everywhere, and for an oversized
+   hook emission it is a token-cost *improvement*, not a hazard to design around.
+3. **Event coverage.** `PostToolUse` does not fire for tool calls rejected before execution,
+   and tool *errors* route to `PostToolUseFailure` — a nonzero-exit `Bash` call is still a
+   success, so the `cmdfilter` path is covered, but full coverage needs both events.
 
 ## Does this help the DAM push?
 
@@ -426,7 +478,11 @@ adapter code.
 
 ## Recommendation
 
-Build it, scoped as a convenience/transport layer, not as a strategy:
+The one-line version, and the honest scope of the claim: **a Claude Code plugin can replicate
+the offloader half of this repo — persistently, measurably — and categorically cannot
+replicate the cache-management half.** Not "a plugin can do what the proxy does."
+
+Build it, scoped as a transport for that half:
 
 - **Do**: MCP expand server, `PostToolUse` offload hook, operator skills, one `hook` preset.
 - **Don't**: attempt `cacheinject`, `cachesplit`, `mask`, `failed_run`, or `/stats` cost
@@ -434,9 +490,7 @@ Build it, scoped as a convenience/transport layer, not as a strategy:
   remains the only place they are possible.
 - **For DAM**: land the proxy in the gateway. Ship the plugin as the Claude-Code-session
   layer on top of it — never as the DAM integration.
-- **Gate the work** on check 0 — transcript persistence — before writing any adapter code.
-  It is a half-day experiment and it decides whether the plugin is worth building at all. If
-  it holds, the defensive KV-cache half comes free and a large amount of our hardest code is
-  simply not needed in that deployment. If it doesn't, stop: build the expand MCP server
-  alone and leave the pipeline in the proxy. Check 1 (the 10 KB cap) is the second gate; if
-  it bites, same outcome.
+- **Gate 0 is now closed** (persistence confirmed on the wire, plus a −6,285-token A/B on a
+  real session), so the build is no longer conditional. Carry forward one hard requirement
+  instead: the adapter emits the **object** `tool_response` shape and counts its own
+  rejections, because a bare string is accepted silently and does nothing.
