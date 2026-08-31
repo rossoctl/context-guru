@@ -40,6 +40,7 @@ import (
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"golang.org/x/sync/singleflight"
 )
 
 // Options configures upstreams and credential injection. Each upstream is a base
@@ -234,6 +235,9 @@ type Handler struct {
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
 	promCache promCache
+	// metricsInflight collapses every concurrent cache-miss into the one render already
+	// running — see metricsHandler.
+	metricsInflight singleflight.Group
 }
 
 // upstreamTransport is the default upstream client's transport, and the reason there is no

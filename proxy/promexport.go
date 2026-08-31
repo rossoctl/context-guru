@@ -215,12 +215,20 @@ func (h *Handler) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.promCache.mu.Unlock()
-	// Rendered OUTSIDE the lock: renderMetrics does real work (a per-tenant DB query), and
-	// holding the lock across it used to serialize every concurrent scraper behind whichever
-	// one rendered first — one slow render, and every other caller queues up behind it rather
-	// than getting the stale-but-fine cached body. A cache-miss race now costs at most one
-	// redundant render, not a growing queue.
-	body := h.renderMetrics()
+	// SINGLE-FLIGHT, not a bare re-render: rendering used to happen OUTSIDE any lock, on the
+	// stated assumption that a cache-miss race costs "at most one redundant render." That
+	// held only while a render finishes faster than requests arrive. Once real write
+	// contention (this driver blocks a read across the writer's whole open transaction —
+	// see CLAUDE.local.md) pushes a render's own time past that interval, EVERY request
+	// during the slow render sees the same stale cache and starts ANOTHER render — and more
+	// concurrent renders competing for the same bounded connection pool makes each one
+	// slower still, a spiral that measured live as /metrics reliably timing out. Collapsing
+	// every concurrent cache-miss into the one render already in flight stops that spiral at
+	// any render duration: however long it takes, it happens once, and every waiter shares it.
+	v, _, _ := h.metricsInflight.Do("metrics", func() (any, error) {
+		return h.renderMetrics(), nil
+	})
+	body := v.(string)
 	h.promCache.mu.Lock()
 	h.promCache.at, h.promCache.body = time.Now(), body
 	h.promCache.mu.Unlock()
