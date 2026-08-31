@@ -74,7 +74,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 0
+    "y": 22
    },
    "panels": []
   },
@@ -91,7 +91,7 @@
     "h": 5,
     "w": 4,
     "x": 0,
-    "y": 1
+    "y": 23
    },
    "targets": [
     {
@@ -171,7 +171,7 @@
     "h": 5,
     "w": 6,
     "x": 4,
-    "y": 1
+    "y": 23
    },
    "targets": [
     {
@@ -234,7 +234,7 @@
     "h": 5,
     "w": 5,
     "x": 10,
-    "y": 1
+    "y": 23
    },
    "targets": [
     {
@@ -296,7 +296,7 @@
     "h": 5,
     "w": 5,
     "x": 15,
-    "y": 1
+    "y": 23
    },
    "targets": [
     {
@@ -364,7 +364,7 @@
     "h": 5,
     "w": 4,
     "x": 20,
-    "y": 1
+    "y": 23
    },
    "targets": [
     {
@@ -426,7 +426,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 6
+    "y": 0
    },
    "panels": []
   },
@@ -443,7 +443,7 @@
     "h": 5,
     "w": 3,
     "x": 12,
-    "y": 7
+    "y": 1
    },
    "targets": [
     {
@@ -506,7 +506,7 @@
     "h": 5,
     "w": 3,
     "x": 6,
-    "y": 7
+    "y": 1
    },
    "targets": [
     {
@@ -570,7 +570,7 @@
     "h": 5,
     "w": 3,
     "x": 15,
-    "y": 7
+    "y": 1
    },
    "targets": [
     {
@@ -649,7 +649,7 @@
     "h": 5,
     "w": 3,
     "x": 18,
-    "y": 7
+    "y": 1
    },
    "targets": [
     {
@@ -715,7 +715,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 12
+    "y": 6
    },
    "targets": [
     {
@@ -837,7 +837,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 12
+    "y": 6
    },
    "targets": [
     {
@@ -959,7 +959,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 20
+    "y": 14
    },
    "targets": [
     {
@@ -1101,7 +1101,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 20
+    "y": 14
    },
    "targets": [
     {
@@ -1726,1219 +1726,1221 @@
    "id": 24,
    "type": "row",
    "title": "Is storage and cold storage healthy?",
-   "collapsed": false,
+   "collapsed": true,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
     "y": 51
    },
-   "panels": []
-  },
-  {
-   "id": 25,
-   "type": "timeseries",
-   "title": "Local database against cold storage",
-   "description": "Blue is what is still on this box, orange is what moved to Box. Blue climbing while orange stays flat is the bad shape \u2014 tiering has stopped and the disk fills.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 0,
-    "y": 52
-   },
-   "targets": [
+   "panels": [
     {
-     "refId": "A",
+     "id": 25,
+     "type": "timeseries",
+     "title": "Local database against cold storage",
+     "description": "Blue is what is still on this box, orange is what moved to Box. Blue climbing while orange stays flat is the bad shape \u2014 tiering has stopped and the disk fills.",
      "datasource": {
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "cg_dash_db_bytes",
-     "editorMode": "code",
-     "legendFormat": "local database"
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
+     "gridPos": {
+      "h": 8,
+      "w": 12,
+      "x": 0,
+      "y": 52
      },
-     "expr": "cg_archive_bytes_total",
-     "editorMode": "code",
-     "legendFormat": "cold storage"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "bytes",
-     "custom": {
-      "drawStyle": "line",
-      "lineWidth": 2,
-      "fillOpacity": 8,
-      "showPoints": "never",
-      "pointSize": 8,
-      "spanNulls": true,
-      "axisSoftMin": 0,
-      "axisGridShow": true,
-      "axisBorderShow": false,
-      "lineInterpolation": "linear",
-      "gradientMode": "none",
-      "scaleDistribution": {
-       "type": "linear"
-      },
-      "stacking": {
-       "mode": "none",
-       "group": "A"
-      }
-     },
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "text",
-        "value": null
-       }
-      ]
-     },
-     "color": {
-      "mode": "fixed",
-      "fixedColor": "#3987e5"
-     }
-    },
-    "overrides": [
-     {
-      "matcher": {
-       "id": "byName",
-       "options": "local database"
-      },
-      "properties": [
-       {
-        "id": "color",
-        "value": {
-         "mode": "fixed",
-         "fixedColor": "#3987e5"
-        }
-       }
-      ]
-     },
-     {
-      "matcher": {
-       "id": "byName",
-       "options": "cold storage"
-      },
-      "properties": [
-       {
-        "id": "color",
-        "value": {
-         "mode": "fixed",
-         "fixedColor": "#d95926"
-        }
-       }
-      ]
-     }
-    ]
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": true,
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "none"
-    }
-   }
-  },
-  {
-   "id": 26,
-   "type": "stat",
-   "title": "Filesystem in use",
-   "description": "Crossing 90% starts evicting the oldest sessions. With cold storage ready that is a migration; with it unreachable it is deletion.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 12,
-    "y": 52
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "cg_dash_disk_used_ratio",
-     "editorMode": "code",
-     "legendFormat": "used"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "percentunit",
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "#199e70",
-        "value": null
-       },
-       {
-        "color": "#c98500",
-        "value": 0.85
-       },
-       {
-        "color": "#e66767",
-        "value": 0.9
-       }
-      ]
-     },
-     "decimals": 1,
-     "min": 0,
-     "max": 1
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "fields": "",
-     "values": false
-    },
-    "textMode": "value",
-    "colorMode": "value",
-    "graphMode": "area",
-    "justifyMode": "auto"
-   }
-  },
-  {
-   "id": 27,
-   "type": "stat",
-   "title": "Cold storage",
-   "description": "NOT CONFIGURED is the bad value: while it reads that, disk pressure deletes sessions instead of archiving them.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 16,
-    "y": 52
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "cg_archive_configured",
-     "editorMode": "code",
-     "legendFormat": "configured",
-     "instant": true,
-     "range": false
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "none",
-     "mappings": [
+     "targets": [
       {
-       "type": "value",
-       "options": {
-        "0": {
-         "text": "NOT CONFIGURED",
-         "color": "#e66767",
-         "index": 0
-        },
-        "1": {
-         "text": "ready",
-         "color": "#199e70",
-         "index": 1
-        }
-       }
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "cg_dash_db_bytes",
+       "editorMode": "code",
+       "legendFormat": "local database"
+      },
+      {
+       "refId": "B",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "cg_archive_bytes_total",
+       "editorMode": "code",
+       "legendFormat": "cold storage"
       }
      ],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
+     "fieldConfig": {
+      "defaults": {
+       "unit": "bytes",
+       "custom": {
+        "drawStyle": "line",
+        "lineWidth": 2,
+        "fillOpacity": 8,
+        "showPoints": "never",
+        "pointSize": 8,
+        "spanNulls": true,
+        "axisSoftMin": 0,
+        "axisGridShow": true,
+        "axisBorderShow": false,
+        "lineInterpolation": "linear",
+        "gradientMode": "none",
+        "scaleDistribution": {
+         "type": "linear"
+        },
+        "stacking": {
+         "mode": "none",
+         "group": "A"
+        }
+       },
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "text",
+          "value": null
+         }
+        ]
+       },
+       "color": {
+        "mode": "fixed",
+        "fixedColor": "#3987e5"
+       }
+      },
+      "overrides": [
        {
-        "color": "#e66767",
-        "value": null
+        "matcher": {
+         "id": "byName",
+         "options": "local database"
+        },
+        "properties": [
+         {
+          "id": "color",
+          "value": {
+           "mode": "fixed",
+           "fixedColor": "#3987e5"
+          }
+         }
+        ]
        },
        {
-        "color": "#199e70",
-        "value": 1
+        "matcher": {
+         "id": "byName",
+         "options": "cold storage"
+        },
+        "properties": [
+         {
+          "id": "color",
+          "value": {
+           "mode": "fixed",
+           "fixedColor": "#d95926"
+          }
+         }
+        ]
        }
       ]
      },
-     "decimals": 0
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "fields": "",
-     "values": false
-    },
-    "textMode": "value",
-    "colorMode": "value",
-    "graphMode": "none",
-    "justifyMode": "auto"
-   }
-  },
-  {
-   "id": 28,
-   "type": "stat",
-   "title": "Sessions archived",
-   "description": "Cumulative sessions moved to cold storage. Stuck at zero while the filesystem gauge climbs means eviction is deleting, not tiering.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 20,
-    "y": 52
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum(cg_archive_sessions_total)",
-     "editorMode": "code",
-     "legendFormat": "archived",
-     "instant": true,
-     "range": false
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "text",
-        "value": null
-       }
-      ]
-     },
-     "decimals": 0,
-     "color": {
-      "mode": "fixed",
-      "fixedColor": "#3987e5"
+     "options": {
+      "legend": {
+       "displayMode": "list",
+       "placement": "bottom",
+       "showLegend": true,
+       "calcs": []
+      },
+      "tooltip": {
+       "mode": "multi",
+       "sort": "none"
+      }
      }
     },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "fields": "",
-     "values": false
-    },
-    "textMode": "value",
-    "colorMode": "value",
-    "graphMode": "none",
-    "justifyMode": "auto"
-   }
-  },
-  {
-   "id": 29,
-   "type": "timeseries",
-   "title": "Dropped capture events",
-   "description": "The capture queue filled and events were discarded. ANY non-zero bar means the dashboard is losing history exactly when load makes it most wanted.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 12,
-    "x": 12,
-    "y": 56
-   },
-   "targets": [
     {
-     "refId": "A",
+     "id": 26,
+     "type": "stat",
+     "title": "Filesystem in use",
+     "description": "Crossing 90% starts evicting the oldest sessions. With cold storage ready that is a migration; with it unreachable it is deletion.",
      "datasource": {
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "sum(increase(cg_dash_events_total{disposition=\"dropped\"}[5m]))",
-     "editorMode": "code",
-     "legendFormat": "dropped"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "custom": {
-      "drawStyle": "bars",
-      "lineWidth": 1,
-      "fillOpacity": 70,
-      "showPoints": "never",
-      "pointSize": 8,
-      "spanNulls": true,
-      "axisSoftMin": 0,
-      "axisGridShow": true,
-      "axisBorderShow": false,
-      "lineInterpolation": "linear",
-      "gradientMode": "none",
-      "scaleDistribution": {
-       "type": "linear"
-      },
-      "stacking": {
-       "mode": "none",
-       "group": "A"
-      },
-      "axisSoftMax": 1
+     "gridPos": {
+      "h": 4,
+      "w": 4,
+      "x": 12,
+      "y": 52
      },
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "text",
-        "value": null
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "cg_dash_disk_used_ratio",
+       "editorMode": "code",
+       "legendFormat": "used"
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "percentunit",
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "#199e70",
+          "value": null
+         },
+         {
+          "color": "#c98500",
+          "value": 0.85
+         },
+         {
+          "color": "#e66767",
+          "value": 0.9
+         }
+        ]
+       },
+       "decimals": 1,
+       "min": 0,
+       "max": 1
+      },
+      "overrides": []
+     },
+     "options": {
+      "reduceOptions": {
+       "calcs": [
+        "lastNotNull"
+       ],
+       "fields": "",
+       "values": false
+      },
+      "textMode": "value",
+      "colorMode": "value",
+      "graphMode": "area",
+      "justifyMode": "auto"
+     }
+    },
+    {
+     "id": 27,
+     "type": "stat",
+     "title": "Cold storage",
+     "description": "NOT CONFIGURED is the bad value: while it reads that, disk pressure deletes sessions instead of archiving them.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "gridPos": {
+      "h": 4,
+      "w": 4,
+      "x": 16,
+      "y": 52
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "cg_archive_configured",
+       "editorMode": "code",
+       "legendFormat": "configured",
+       "instant": true,
+       "range": false
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "none",
+       "mappings": [
+        {
+         "type": "value",
+         "options": {
+          "0": {
+           "text": "NOT CONFIGURED",
+           "color": "#e66767",
+           "index": 0
+          },
+          "1": {
+           "text": "ready",
+           "color": "#199e70",
+           "index": 1
+          }
+         }
+        }
+       ],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "#e66767",
+          "value": null
+         },
+         {
+          "color": "#199e70",
+          "value": 1
+         }
+        ]
+       },
+       "decimals": 0
+      },
+      "overrides": []
+     },
+     "options": {
+      "reduceOptions": {
+       "calcs": [
+        "lastNotNull"
+       ],
+       "fields": "",
+       "values": false
+      },
+      "textMode": "value",
+      "colorMode": "value",
+      "graphMode": "none",
+      "justifyMode": "auto"
+     }
+    },
+    {
+     "id": 28,
+     "type": "stat",
+     "title": "Sessions archived",
+     "description": "Cumulative sessions moved to cold storage. Stuck at zero while the filesystem gauge climbs means eviction is deleting, not tiering.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "gridPos": {
+      "h": 4,
+      "w": 4,
+      "x": 20,
+      "y": 52
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum(cg_archive_sessions_total)",
+       "editorMode": "code",
+       "legendFormat": "archived",
+       "instant": true,
+       "range": false
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "short",
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "text",
+          "value": null
+         }
+        ]
+       },
+       "decimals": 0,
+       "color": {
+        "mode": "fixed",
+        "fixedColor": "#3987e5"
        }
-      ]
+      },
+      "overrides": []
      },
-     "color": {
-      "mode": "fixed",
-      "fixedColor": "#e66767"
+     "options": {
+      "reduceOptions": {
+       "calcs": [
+        "lastNotNull"
+       ],
+       "fields": "",
+       "values": false
+      },
+      "textMode": "value",
+      "colorMode": "value",
+      "graphMode": "none",
+      "justifyMode": "auto"
+     }
+    },
+    {
+     "id": 29,
+     "type": "timeseries",
+     "title": "Dropped capture events",
+     "description": "The capture queue filled and events were discarded. ANY non-zero bar means the dashboard is losing history exactly when load makes it most wanted.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
      },
-     "decimals": 0
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": false,
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "single",
-     "sort": "none"
+     "gridPos": {
+      "h": 4,
+      "w": 12,
+      "x": 12,
+      "y": 56
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum(increase(cg_dash_events_total{disposition=\"dropped\"}[5m]))",
+       "editorMode": "code",
+       "legendFormat": "dropped"
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "short",
+       "custom": {
+        "drawStyle": "bars",
+        "lineWidth": 1,
+        "fillOpacity": 70,
+        "showPoints": "never",
+        "pointSize": 8,
+        "spanNulls": true,
+        "axisSoftMin": 0,
+        "axisGridShow": true,
+        "axisBorderShow": false,
+        "lineInterpolation": "linear",
+        "gradientMode": "none",
+        "scaleDistribution": {
+         "type": "linear"
+        },
+        "stacking": {
+         "mode": "none",
+         "group": "A"
+        },
+        "axisSoftMax": 1
+       },
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "text",
+          "value": null
+         }
+        ]
+       },
+       "color": {
+        "mode": "fixed",
+        "fixedColor": "#e66767"
+       },
+       "decimals": 0
+      },
+      "overrides": []
+     },
+     "options": {
+      "legend": {
+       "displayMode": "list",
+       "placement": "bottom",
+       "showLegend": false,
+       "calcs": []
+      },
+      "tooltip": {
+       "mode": "single",
+       "sort": "none"
+      }
+     }
     }
-   }
+   ]
   },
   {
    "id": 30,
    "type": "row",
    "title": "Is anything failing?",
-   "collapsed": false,
+   "collapsed": true,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 60
+    "y": 52
    },
-   "panels": [],
+   "panels": [
+    {
+     "id": 31,
+     "type": "timeseries",
+     "title": "Compaction-model failures",
+     "description": "Timeouts and errors from context-guru's own compaction model. A run of timeouts means the compactor silently did nothing: the arm looks fast because it stopped working.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "gridPos": {
+      "h": 8,
+      "w": 12,
+      "x": 0,
+      "y": 61
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum by (kind) (increase(cg_llm_failures_total[5m]))",
+       "editorMode": "code",
+       "legendFormat": "{{kind}}"
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "short",
+       "custom": {
+        "drawStyle": "bars",
+        "lineWidth": 1,
+        "fillOpacity": 70,
+        "showPoints": "never",
+        "pointSize": 8,
+        "spanNulls": true,
+        "axisSoftMin": 0,
+        "axisGridShow": true,
+        "axisBorderShow": false,
+        "lineInterpolation": "linear",
+        "gradientMode": "none",
+        "scaleDistribution": {
+         "type": "linear"
+        },
+        "stacking": {
+         "mode": "none",
+         "group": "A"
+        },
+        "axisSoftMax": 1
+       },
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "text",
+          "value": null
+         }
+        ]
+       },
+       "color": {
+        "mode": "fixed",
+        "fixedColor": "#3987e5"
+       },
+       "decimals": 0
+      },
+      "overrides": [
+       {
+        "matcher": {
+         "id": "byName",
+         "options": "timeout"
+        },
+        "properties": [
+         {
+          "id": "color",
+          "value": {
+           "mode": "fixed",
+           "fixedColor": "#d95926"
+          }
+         }
+        ]
+       },
+       {
+        "matcher": {
+         "id": "byName",
+         "options": "error"
+        },
+        "properties": [
+         {
+          "id": "color",
+          "value": {
+           "mode": "fixed",
+           "fixedColor": "#e66767"
+          }
+         }
+        ]
+       }
+      ]
+     },
+     "options": {
+      "legend": {
+       "displayMode": "list",
+       "placement": "bottom",
+       "showLegend": true,
+       "calcs": []
+      },
+      "tooltip": {
+       "mode": "multi",
+       "sort": "none"
+      }
+     }
+    },
+    {
+     "id": 32,
+     "type": "timeseries",
+     "title": "Cache-write churn (frozen decisions flipped)",
+     "description": "Frozen decisions the store dropped and did not re-derive. Each one flips an already-cached message and forces the provider to re-write the suffix at ~12x the read price. Should sit at zero; anything above it is money.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "gridPos": {
+      "h": 8,
+      "w": 12,
+      "x": 12,
+      "y": 61
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum(increase(cg_frozen_decisions_total{outcome=\"dropped\"}[15m])) - sum(increase(cg_frozen_decisions_total{outcome=\"repaired\"}[15m]))",
+       "editorMode": "code",
+       "legendFormat": "flips"
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "short",
+       "custom": {
+        "drawStyle": "bars",
+        "lineWidth": 1,
+        "fillOpacity": 70,
+        "showPoints": "never",
+        "pointSize": 8,
+        "spanNulls": true,
+        "axisSoftMin": 0,
+        "axisGridShow": true,
+        "axisBorderShow": false,
+        "lineInterpolation": "linear",
+        "gradientMode": "none",
+        "scaleDistribution": {
+         "type": "linear"
+        },
+        "stacking": {
+         "mode": "none",
+         "group": "A"
+        },
+        "axisSoftMax": 1
+       },
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "text",
+          "value": null
+         }
+        ]
+       },
+       "color": {
+        "mode": "fixed",
+        "fixedColor": "#d95926"
+       },
+       "decimals": 0
+      },
+      "overrides": []
+     },
+     "options": {
+      "legend": {
+       "displayMode": "list",
+       "placement": "bottom",
+       "showLegend": false,
+       "calcs": []
+      },
+      "tooltip": {
+       "mode": "single",
+       "sort": "none"
+      }
+     }
+    },
+    {
+     "id": 33,
+     "type": "timeseries",
+     "title": "Tokens wasted recovering offloaded content",
+     "description": "Tokens spent re-serving something compaction removed. This is savings handed back \u2014 a rising line means the pipeline is too aggressive for this traffic.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "gridPos": {
+      "h": 4,
+      "w": 12,
+      "x": 0,
+      "y": 69
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum(rate(cg_wasted_tokens_total[5m])) * 60",
+       "editorMode": "code",
+       "legendFormat": "wasted"
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "short",
+       "custom": {
+        "drawStyle": "bars",
+        "lineWidth": 1,
+        "fillOpacity": 70,
+        "showPoints": "never",
+        "pointSize": 8,
+        "spanNulls": true,
+        "axisSoftMin": 0,
+        "axisGridShow": true,
+        "axisBorderShow": false,
+        "lineInterpolation": "linear",
+        "gradientMode": "none",
+        "scaleDistribution": {
+         "type": "linear"
+        },
+        "stacking": {
+         "mode": "none",
+         "group": "A"
+        },
+        "axisSoftMax": 1
+       },
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "text",
+          "value": null
+         }
+        ]
+       },
+       "color": {
+        "mode": "fixed",
+        "fixedColor": "#e66767"
+       },
+       "decimals": 0
+      },
+      "overrides": []
+     },
+     "options": {
+      "legend": {
+       "displayMode": "list",
+       "placement": "bottom",
+       "showLegend": false,
+       "calcs": []
+      },
+      "tooltip": {
+       "mode": "single",
+       "sort": "none"
+      }
+     }
+    },
+    {
+     "id": 34,
+     "type": "stat",
+     "title": "Buffered streams",
+     "description": "Share of responses context-guru had to buffer in full before the client saw a byte. High on traffic that never expands is a straight latency regression.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "gridPos": {
+      "h": 4,
+      "w": 4,
+      "x": 12,
+      "y": 69
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum(cg_sse_streams_total{path=\"buffered\"}) / clamp_min(sum(cg_sse_streams_total), 1)",
+       "editorMode": "code",
+       "legendFormat": "buffered"
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "percentunit",
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "#199e70",
+          "value": null
+         },
+         {
+          "color": "#c98500",
+          "value": 0.2
+         },
+         {
+          "color": "#e66767",
+          "value": 0.5
+         }
+        ]
+       },
+       "decimals": 0,
+       "min": 0,
+       "max": 1
+      },
+      "overrides": []
+     },
+     "options": {
+      "reduceOptions": {
+       "calcs": [
+        "lastNotNull"
+       ],
+       "fields": "",
+       "values": false
+      },
+      "textMode": "value",
+      "colorMode": "value",
+      "graphMode": "area",
+      "justifyMode": "auto"
+     }
+    },
+    {
+     "id": 35,
+     "type": "stat",
+     "title": "Tenants disabled",
+     "description": "Accounts the proxy is currently refusing. Anything above zero is somebody's agent failing right now.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "gridPos": {
+      "h": 4,
+      "w": 4,
+      "x": 16,
+      "y": 69
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum(cg_tenant_disabled)",
+       "editorMode": "code",
+       "legendFormat": "disabled",
+       "instant": true,
+       "range": false
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "short",
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "#199e70",
+          "value": null
+         },
+         {
+          "color": "#e66767",
+          "value": 1
+         }
+        ]
+       },
+       "decimals": 0
+      },
+      "overrides": []
+     },
+     "options": {
+      "reduceOptions": {
+       "calcs": [
+        "lastNotNull"
+       ],
+       "fields": "",
+       "values": false
+      },
+      "textMode": "value",
+      "colorMode": "value",
+      "graphMode": "none",
+      "justifyMode": "auto"
+     }
+    },
+    {
+     "id": 37,
+     "type": "timeseries",
+     "title": "Expand bounces over time",
+     "description": "The same recoveries as the stat above, as a trend. A step up right after a config change means the new preset removes something the agent needs.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "gridPos": {
+      "h": 4,
+      "w": 12,
+      "x": 0,
+      "y": 73
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum(increase(cg_expand_bounces_total[5m]))",
+       "editorMode": "code",
+       "legendFormat": "bounces"
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "short",
+       "custom": {
+        "drawStyle": "bars",
+        "lineWidth": 1,
+        "fillOpacity": 70,
+        "showPoints": "never",
+        "pointSize": 8,
+        "spanNulls": true,
+        "axisSoftMin": 0,
+        "axisGridShow": true,
+        "axisBorderShow": false,
+        "lineInterpolation": "linear",
+        "gradientMode": "none",
+        "scaleDistribution": {
+         "type": "linear"
+        },
+        "stacking": {
+         "mode": "none",
+         "group": "A"
+        },
+        "axisSoftMax": 1
+       },
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "text",
+          "value": null
+         }
+        ]
+       },
+       "color": {
+        "mode": "fixed",
+        "fixedColor": "#e66767"
+       },
+       "decimals": 0
+      },
+      "overrides": []
+     },
+     "options": {
+      "legend": {
+       "displayMode": "list",
+       "placement": "bottom",
+       "showLegend": false,
+       "calcs": []
+      },
+      "tooltip": {
+       "mode": "single",
+       "sort": "none"
+      }
+     }
+    },
+    {
+     "id": 38,
+     "type": "timeseries",
+     "title": "Buffered against streamed responses",
+     "description": "Orange is responses context-guru had to read in full before the client saw a byte. Orange growing faster than blue is a straight latency regression.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "gridPos": {
+      "h": 4,
+      "w": 12,
+      "x": 12,
+      "y": 73
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum(cg_sse_streams_total{path=\"streamed\"})",
+       "editorMode": "code",
+       "legendFormat": "streamed"
+      },
+      {
+       "refId": "B",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum(cg_sse_streams_total{path=\"buffered\"})",
+       "editorMode": "code",
+       "legendFormat": "buffered"
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "short",
+       "custom": {
+        "drawStyle": "line",
+        "lineWidth": 2,
+        "fillOpacity": 8,
+        "showPoints": "never",
+        "pointSize": 8,
+        "spanNulls": true,
+        "axisSoftMin": 0,
+        "axisGridShow": true,
+        "axisBorderShow": false,
+        "lineInterpolation": "linear",
+        "gradientMode": "none",
+        "scaleDistribution": {
+         "type": "linear"
+        },
+        "stacking": {
+         "mode": "none",
+         "group": "A"
+        },
+        "axisSoftMax": 1
+       },
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "text",
+          "value": null
+         }
+        ]
+       },
+       "color": {
+        "mode": "fixed",
+        "fixedColor": "#3987e5"
+       },
+       "decimals": 0
+      },
+      "overrides": [
+       {
+        "matcher": {
+         "id": "byName",
+         "options": "streamed"
+        },
+        "properties": [
+         {
+          "id": "color",
+          "value": {
+           "mode": "fixed",
+           "fixedColor": "#3987e5"
+          }
+         }
+        ]
+       },
+       {
+        "matcher": {
+         "id": "byName",
+         "options": "buffered"
+        },
+        "properties": [
+         {
+          "id": "color",
+          "value": {
+           "mode": "fixed",
+           "fixedColor": "#d95926"
+          }
+         }
+        ]
+       }
+      ]
+     },
+     "options": {
+      "legend": {
+       "displayMode": "list",
+       "placement": "bottom",
+       "showLegend": true,
+       "calcs": []
+      },
+      "tooltip": {
+       "mode": "multi",
+       "sort": "none"
+      }
+     }
+    },
+    {
+     "id": 39,
+     "type": "timeseries",
+     "title": "Requests refused, by reason",
+     "description": "Requests turned away before an upstream was called. ANY sustained bar is somebody's agent failing right now. rate_limit and concurrency are both 429 with different fixes (raise TENANT_RPM, raise the in-flight cap), auth/forbidden is a bad or disabled token, no_upstream is our own misconfiguration and upstream_error is the provider.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "gridPos": {
+      "h": 8,
+      "w": 12,
+      "x": 0,
+      "y": 77
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum by (reason) (increase(cg_refused_requests_total[5m]))",
+       "editorMode": "code",
+       "legendFormat": "{{reason}}"
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "short",
+       "custom": {
+        "drawStyle": "bars",
+        "lineWidth": 1,
+        "fillOpacity": 70,
+        "showPoints": "never",
+        "pointSize": 8,
+        "spanNulls": true,
+        "axisSoftMin": 0,
+        "axisGridShow": true,
+        "axisBorderShow": false,
+        "lineInterpolation": "linear",
+        "gradientMode": "none",
+        "scaleDistribution": {
+         "type": "linear"
+        },
+        "stacking": {
+         "mode": "none",
+         "group": "A"
+        },
+        "axisSoftMax": 1
+       },
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "text",
+          "value": null
+         }
+        ]
+       },
+       "color": {
+        "mode": "palette-classic-by-name"
+       },
+       "decimals": 0
+      },
+      "overrides": []
+     },
+     "options": {
+      "legend": {
+       "displayMode": "list",
+       "placement": "bottom",
+       "showLegend": true,
+       "calcs": []
+      },
+      "tooltip": {
+       "mode": "multi",
+       "sort": "none"
+      }
+     }
+    },
+    {
+     "id": 40,
+     "type": "timeseries",
+     "title": "Refusals per tenant",
+     "description": "Which account is being refused, and for what. This is the panel that tells a quiet tenant apart from a blocked one: a tenant absent from 'Requests per tenant' AND present here is not idle, it is being turned away. Zero everywhere is healthy.",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "gridPos": {
+      "h": 8,
+      "w": 12,
+      "x": 12,
+      "y": 77
+     },
+     "targets": [
+      {
+       "refId": "A",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "cg-prom"
+       },
+       "expr": "sum by (label, reason) (increase(cg_tenant_refused_requests_total{label=~\"$tenant\"}[5m]))",
+       "editorMode": "code",
+       "legendFormat": "{{label}} / {{reason}}"
+      }
+     ],
+     "fieldConfig": {
+      "defaults": {
+       "unit": "short",
+       "custom": {
+        "drawStyle": "bars",
+        "lineWidth": 1,
+        "fillOpacity": 70,
+        "showPoints": "never",
+        "pointSize": 8,
+        "spanNulls": true,
+        "axisSoftMin": 0,
+        "axisGridShow": true,
+        "axisBorderShow": false,
+        "lineInterpolation": "linear",
+        "gradientMode": "none",
+        "scaleDistribution": {
+         "type": "linear"
+        },
+        "stacking": {
+         "mode": "none",
+         "group": "A"
+        },
+        "axisSoftMax": 1
+       },
+       "mappings": [],
+       "thresholds": {
+        "mode": "absolute",
+        "steps": [
+         {
+          "color": "text",
+          "value": null
+         }
+        ]
+       },
+       "color": {
+        "mode": "palette-classic-by-name"
+       },
+       "decimals": 0
+      },
+      "overrides": []
+     },
+     "options": {
+      "legend": {
+       "displayMode": "list",
+       "placement": "bottom",
+       "showLegend": true,
+       "calcs": []
+      },
+      "tooltip": {
+       "mode": "multi",
+       "sort": "none"
+      }
+     }
+    }
+   ],
    "description": "Rate-limit (429) REJECTIONS are not on this row because the proxy exports no counter for them \u2014 proxy/limits.go returns the status without recording it. Disabled accounts below are the closest available proxy."
-  },
-  {
-   "id": 31,
-   "type": "timeseries",
-   "title": "Compaction-model failures",
-   "description": "Timeouts and errors from context-guru's own compaction model. A run of timeouts means the compactor silently did nothing: the arm looks fast because it stopped working.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 0,
-    "y": 61
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum by (kind) (increase(cg_llm_failures_total[5m]))",
-     "editorMode": "code",
-     "legendFormat": "{{kind}}"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "custom": {
-      "drawStyle": "bars",
-      "lineWidth": 1,
-      "fillOpacity": 70,
-      "showPoints": "never",
-      "pointSize": 8,
-      "spanNulls": true,
-      "axisSoftMin": 0,
-      "axisGridShow": true,
-      "axisBorderShow": false,
-      "lineInterpolation": "linear",
-      "gradientMode": "none",
-      "scaleDistribution": {
-       "type": "linear"
-      },
-      "stacking": {
-       "mode": "none",
-       "group": "A"
-      },
-      "axisSoftMax": 1
-     },
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "text",
-        "value": null
-       }
-      ]
-     },
-     "color": {
-      "mode": "fixed",
-      "fixedColor": "#3987e5"
-     },
-     "decimals": 0
-    },
-    "overrides": [
-     {
-      "matcher": {
-       "id": "byName",
-       "options": "timeout"
-      },
-      "properties": [
-       {
-        "id": "color",
-        "value": {
-         "mode": "fixed",
-         "fixedColor": "#d95926"
-        }
-       }
-      ]
-     },
-     {
-      "matcher": {
-       "id": "byName",
-       "options": "error"
-      },
-      "properties": [
-       {
-        "id": "color",
-        "value": {
-         "mode": "fixed",
-         "fixedColor": "#e66767"
-        }
-       }
-      ]
-     }
-    ]
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": true,
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "none"
-    }
-   }
-  },
-  {
-   "id": 32,
-   "type": "timeseries",
-   "title": "Cache-write churn (frozen decisions flipped)",
-   "description": "Frozen decisions the store dropped and did not re-derive. Each one flips an already-cached message and forces the provider to re-write the suffix at ~12x the read price. Should sit at zero; anything above it is money.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 12,
-    "y": 61
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum(increase(cg_frozen_decisions_total{outcome=\"dropped\"}[15m])) - sum(increase(cg_frozen_decisions_total{outcome=\"repaired\"}[15m]))",
-     "editorMode": "code",
-     "legendFormat": "flips"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "custom": {
-      "drawStyle": "bars",
-      "lineWidth": 1,
-      "fillOpacity": 70,
-      "showPoints": "never",
-      "pointSize": 8,
-      "spanNulls": true,
-      "axisSoftMin": 0,
-      "axisGridShow": true,
-      "axisBorderShow": false,
-      "lineInterpolation": "linear",
-      "gradientMode": "none",
-      "scaleDistribution": {
-       "type": "linear"
-      },
-      "stacking": {
-       "mode": "none",
-       "group": "A"
-      },
-      "axisSoftMax": 1
-     },
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "text",
-        "value": null
-       }
-      ]
-     },
-     "color": {
-      "mode": "fixed",
-      "fixedColor": "#d95926"
-     },
-     "decimals": 0
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": false,
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "single",
-     "sort": "none"
-    }
-   }
-  },
-  {
-   "id": 33,
-   "type": "timeseries",
-   "title": "Tokens wasted recovering offloaded content",
-   "description": "Tokens spent re-serving something compaction removed. This is savings handed back \u2014 a rising line means the pipeline is too aggressive for this traffic.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 12,
-    "x": 0,
-    "y": 69
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum(rate(cg_wasted_tokens_total[5m])) * 60",
-     "editorMode": "code",
-     "legendFormat": "wasted"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "custom": {
-      "drawStyle": "bars",
-      "lineWidth": 1,
-      "fillOpacity": 70,
-      "showPoints": "never",
-      "pointSize": 8,
-      "spanNulls": true,
-      "axisSoftMin": 0,
-      "axisGridShow": true,
-      "axisBorderShow": false,
-      "lineInterpolation": "linear",
-      "gradientMode": "none",
-      "scaleDistribution": {
-       "type": "linear"
-      },
-      "stacking": {
-       "mode": "none",
-       "group": "A"
-      },
-      "axisSoftMax": 1
-     },
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "text",
-        "value": null
-       }
-      ]
-     },
-     "color": {
-      "mode": "fixed",
-      "fixedColor": "#e66767"
-     },
-     "decimals": 0
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": false,
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "single",
-     "sort": "none"
-    }
-   }
-  },
-  {
-   "id": 34,
-   "type": "stat",
-   "title": "Buffered streams",
-   "description": "Share of responses context-guru had to buffer in full before the client saw a byte. High on traffic that never expands is a straight latency regression.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 12,
-    "y": 69
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum(cg_sse_streams_total{path=\"buffered\"}) / clamp_min(sum(cg_sse_streams_total), 1)",
-     "editorMode": "code",
-     "legendFormat": "buffered"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "percentunit",
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "#199e70",
-        "value": null
-       },
-       {
-        "color": "#c98500",
-        "value": 0.2
-       },
-       {
-        "color": "#e66767",
-        "value": 0.5
-       }
-      ]
-     },
-     "decimals": 0,
-     "min": 0,
-     "max": 1
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "fields": "",
-     "values": false
-    },
-    "textMode": "value",
-    "colorMode": "value",
-    "graphMode": "area",
-    "justifyMode": "auto"
-   }
-  },
-  {
-   "id": 35,
-   "type": "stat",
-   "title": "Tenants disabled",
-   "description": "Accounts the proxy is currently refusing. Anything above zero is somebody's agent failing right now.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 16,
-    "y": 69
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum(cg_tenant_disabled)",
-     "editorMode": "code",
-     "legendFormat": "disabled",
-     "instant": true,
-     "range": false
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "#199e70",
-        "value": null
-       },
-       {
-        "color": "#e66767",
-        "value": 1
-       }
-      ]
-     },
-     "decimals": 0
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "fields": "",
-     "values": false
-    },
-    "textMode": "value",
-    "colorMode": "value",
-    "graphMode": "none",
-    "justifyMode": "auto"
-   }
-  },
-  {
-   "id": 37,
-   "type": "timeseries",
-   "title": "Expand bounces over time",
-   "description": "The same recoveries as the stat above, as a trend. A step up right after a config change means the new preset removes something the agent needs.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 12,
-    "x": 0,
-    "y": 73
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum(increase(cg_expand_bounces_total[5m]))",
-     "editorMode": "code",
-     "legendFormat": "bounces"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "custom": {
-      "drawStyle": "bars",
-      "lineWidth": 1,
-      "fillOpacity": 70,
-      "showPoints": "never",
-      "pointSize": 8,
-      "spanNulls": true,
-      "axisSoftMin": 0,
-      "axisGridShow": true,
-      "axisBorderShow": false,
-      "lineInterpolation": "linear",
-      "gradientMode": "none",
-      "scaleDistribution": {
-       "type": "linear"
-      },
-      "stacking": {
-       "mode": "none",
-       "group": "A"
-      },
-      "axisSoftMax": 1
-     },
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "text",
-        "value": null
-       }
-      ]
-     },
-     "color": {
-      "mode": "fixed",
-      "fixedColor": "#e66767"
-     },
-     "decimals": 0
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": false,
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "single",
-     "sort": "none"
-    }
-   }
-  },
-  {
-   "id": 38,
-   "type": "timeseries",
-   "title": "Buffered against streamed responses",
-   "description": "Orange is responses context-guru had to read in full before the client saw a byte. Orange growing faster than blue is a straight latency regression.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 12,
-    "x": 12,
-    "y": 73
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum(cg_sse_streams_total{path=\"streamed\"})",
-     "editorMode": "code",
-     "legendFormat": "streamed"
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum(cg_sse_streams_total{path=\"buffered\"})",
-     "editorMode": "code",
-     "legendFormat": "buffered"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "custom": {
-      "drawStyle": "line",
-      "lineWidth": 2,
-      "fillOpacity": 8,
-      "showPoints": "never",
-      "pointSize": 8,
-      "spanNulls": true,
-      "axisSoftMin": 0,
-      "axisGridShow": true,
-      "axisBorderShow": false,
-      "lineInterpolation": "linear",
-      "gradientMode": "none",
-      "scaleDistribution": {
-       "type": "linear"
-      },
-      "stacking": {
-       "mode": "none",
-       "group": "A"
-      },
-      "axisSoftMax": 1
-     },
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "text",
-        "value": null
-       }
-      ]
-     },
-     "color": {
-      "mode": "fixed",
-      "fixedColor": "#3987e5"
-     },
-     "decimals": 0
-    },
-    "overrides": [
-     {
-      "matcher": {
-       "id": "byName",
-       "options": "streamed"
-      },
-      "properties": [
-       {
-        "id": "color",
-        "value": {
-         "mode": "fixed",
-         "fixedColor": "#3987e5"
-        }
-       }
-      ]
-     },
-     {
-      "matcher": {
-       "id": "byName",
-       "options": "buffered"
-      },
-      "properties": [
-       {
-        "id": "color",
-        "value": {
-         "mode": "fixed",
-         "fixedColor": "#d95926"
-        }
-       }
-      ]
-     }
-    ]
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": true,
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "none"
-    }
-   }
-  },
-  {
-   "id": 39,
-   "type": "timeseries",
-   "title": "Requests refused, by reason",
-   "description": "Requests turned away before an upstream was called. ANY sustained bar is somebody's agent failing right now. rate_limit and concurrency are both 429 with different fixes (raise TENANT_RPM, raise the in-flight cap), auth/forbidden is a bad or disabled token, no_upstream is our own misconfiguration and upstream_error is the provider.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 0,
-    "y": 77
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum by (reason) (increase(cg_refused_requests_total[5m]))",
-     "editorMode": "code",
-     "legendFormat": "{{reason}}"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "custom": {
-      "drawStyle": "bars",
-      "lineWidth": 1,
-      "fillOpacity": 70,
-      "showPoints": "never",
-      "pointSize": 8,
-      "spanNulls": true,
-      "axisSoftMin": 0,
-      "axisGridShow": true,
-      "axisBorderShow": false,
-      "lineInterpolation": "linear",
-      "gradientMode": "none",
-      "scaleDistribution": {
-       "type": "linear"
-      },
-      "stacking": {
-       "mode": "none",
-       "group": "A"
-      },
-      "axisSoftMax": 1
-     },
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "text",
-        "value": null
-       }
-      ]
-     },
-     "color": {
-      "mode": "palette-classic-by-name"
-     },
-     "decimals": 0
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": true,
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "none"
-    }
-   }
-  },
-  {
-   "id": 40,
-   "type": "timeseries",
-   "title": "Refusals per tenant",
-   "description": "Which account is being refused, and for what. This is the panel that tells a quiet tenant apart from a blocked one: a tenant absent from 'Requests per tenant' AND present here is not idle, it is being turned away. Zero everywhere is healthy.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 12,
-    "y": 77
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum by (label, reason) (increase(cg_tenant_refused_requests_total{label=~\"$tenant\"}[5m]))",
-     "editorMode": "code",
-     "legendFormat": "{{label}} / {{reason}}"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "custom": {
-      "drawStyle": "bars",
-      "lineWidth": 1,
-      "fillOpacity": 70,
-      "showPoints": "never",
-      "pointSize": 8,
-      "spanNulls": true,
-      "axisSoftMin": 0,
-      "axisGridShow": true,
-      "axisBorderShow": false,
-      "lineInterpolation": "linear",
-      "gradientMode": "none",
-      "scaleDistribution": {
-       "type": "linear"
-      },
-      "stacking": {
-       "mode": "none",
-       "group": "A"
-      },
-      "axisSoftMax": 1
-     },
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "text",
-        "value": null
-       }
-      ]
-     },
-     "color": {
-      "mode": "palette-classic-by-name"
-     },
-     "decimals": 0
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": true,
-     "calcs": []
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "none"
-    }
-   }
   },
   {
    "id": 43,
@@ -2953,7 +2955,7 @@
     "h": 5,
     "w": 3,
     "x": 0,
-    "y": 7
+    "y": 1
    },
    "targets": [
     {
@@ -3011,7 +3013,7 @@
     "h": 5,
     "w": 3,
     "x": 9,
-    "y": 7
+    "y": 1
    },
    "targets": [
     {
@@ -3071,7 +3073,7 @@
     "h": 5,
     "w": 3,
     "x": 3,
-    "y": 7
+    "y": 1
    },
    "targets": [
     {
