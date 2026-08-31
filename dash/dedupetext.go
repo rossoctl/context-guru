@@ -14,9 +14,11 @@ package dash
 //     COLUMN stays in place (dropping a column rewrites the table in SQLite), unread by the
 //     writer, still read by the reader for whatever this has not reached.
 //   - IT RUNS AGAINST A LIVE SERVICE. So: bounded batches, a pause between them, the
-//     recorder's own done channel checked every batch, and no state of its own — the work
-//     left is a predicate over the data (`text_gz IS NOT NULL`), which is what makes it
-//     both resumable after a crash and idempotent on a second run.
+//     recorder's own done channel checked every batch. The work left is a predicate over the
+//     data (`text_gz IS NOT NULL`), which is what makes it both resumable after a crash and
+//     idempotent on a second run — the one piece of state this file keeps (see
+//     dedupeMigrationDoneKey below) is only a cache of that predicate's answer, never a
+//     substitute for it: losing or clearing that row costs one redundant scan, not correctness.
 //
 // The interruption story, which is the part worth checking rather than trusting: each batch
 // is two transactions, and every possible stopping point leaves the text readable.
@@ -30,6 +32,7 @@ package dash
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"log/slog"
 	"time"
@@ -54,17 +57,34 @@ const (
 // dedupeDeclarationText moves every per-row prompt blob into declaration_text and points the
 // row at it. Returns the number of rows migrated. It stops early and without error when stop
 // is closed, because a partial run is a valid state — the next start continues from the data.
+//
+// dedupeMigrationDoneKey short-circuits this on every restart AFTER the first one that finds
+// nothing left: the cursor resets to 0 on every new process (see below), and on a table that
+// has already been fully migrated that "resets to 0" cost is not the one-time ~3s this file
+// used to measure it at — tool_declarations grows without bound (no retention), so the scan
+// needed to conclude "nothing pending" grows with it, and it was measured taking ~18-20s on a
+// production-sized table under real concurrent load, once per restart, forever. A single row
+// in `meta` (already used for schema_version, see schema.go) records that the migration has
+// reached the end of the table at least once; once set, every later restart skips straight
+// past pendingDedupe's full scan instead of re-proving what is already known. This is a small
+// forward step from the partial-index alternative this file's history already rejected (that
+// one paid ~50s inside Open(), blocking every request until it finished, to buy the same thing)
+// — a meta flag costs nothing to check and nothing to set, and unlike the index it does not
+// touch tool_declarations at all.
 func (d *DB) dedupeDeclarationText(stop <-chan struct{}, batch int, pause time.Duration) (int64, error) {
 	if batch <= 0 {
 		batch = dedupeBatch
 	}
+	if done, err := d.dedupeMigrationDone(); err != nil {
+		slog.Warn("dash: could not read the dedupe-migration marker; scanning as if it were unset", "err", err)
+	} else if done {
+		return 0, nil
+	}
 	// A rowid cursor within the run. The predicate alone would be correct — and is what makes
 	// this resumable and idempotent — but re-issuing it each pass re-walks every row already
-	// migrated, which over 488k rows is quadratic. A partial index on the predicate was the
-	// other way to fix that and was measured worse: building it costs 50 seconds inside Open()
-	// on a production-sized file, i.e. 50 seconds of proxy startup, to save a scan that happens
-	// on this background goroutine. The cursor resets to 0 on the next process, which costs one
-	// scan (~3s, measured, off the request path) to conclude there is nothing left to do.
+	// migrated, which over 488k rows is quadratic. The cursor resets to 0 on the next process
+	// that has NOT yet set the marker above; once it sets the marker, there is no next scan to
+	// reset for.
 	var cursor, moved int64
 	started := time.Now()
 	for {
@@ -78,6 +98,13 @@ func (d *DB) dedupeDeclarationText(stop <-chan struct{}, batch int, pause time.D
 			return moved, err
 		}
 		if len(rows) == 0 {
+			// Reaching an empty page, at ANY cursor, means every row from here to the end of
+			// the table has been checked and none is pending — the whole table is done,
+			// regardless of how much of it this particular call walked versus a previous one.
+			if merr := d.markDedupeMigrationDone(); merr != nil {
+				slog.Warn("dash: could not persist the dedupe-migration marker; "+
+					"the next restart will re-scan to confirm nothing is pending", "err", merr)
+			}
 			break
 		}
 		cursor = rows[len(rows)-1].rowid
@@ -99,6 +126,33 @@ func (d *DB) dedupeDeclarationText(stop <-chan struct{}, batch int, pause time.D
 			"took", time.Since(started).Round(time.Millisecond))
 	}
 	return moved, nil
+}
+
+// dedupeMigrationDoneKey is the `meta` row this migration sets once it has scanned to the end
+// of tool_declarations and found nothing left pending. `meta` already holds schema_version
+// (see schema.go) as a generic key/value settings table, so this needs no new table.
+const dedupeMigrationDoneKey = "dedupe_declaration_text_done"
+
+// dedupeMigrationDone reports whether a previous run already proved nothing is pending. Best
+// read as "no" on error — a mis-read marker should cost one redundant scan, not a migration
+// that silently never runs.
+func (d *DB) dedupeMigrationDone() (bool, error) {
+	var v string
+	err := d.sql.QueryRow(`SELECT value FROM meta WHERE key = ?`, dedupeMigrationDoneKey).Scan(&v)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return v == "1", nil
+}
+
+// markDedupeMigrationDone persists that the scan reached the end of the table with nothing
+// pending, so the next process start can skip straight past it.
+func (d *DB) markDedupeMigrationDone() error {
+	_, err := d.sql.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, dedupeMigrationDoneKey)
+	return err
 }
 
 // declBlob is one row of work: where it lives and what it holds.

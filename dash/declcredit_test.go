@@ -1,7 +1,10 @@
 package dash
 
 import (
+	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -137,6 +140,80 @@ func TestDeclCreditFlagsAnUnpricedModel(t *testing.T) {
 	}
 	if c.Priced {
 		t.Error("priced = true for a model with no rates")
+	}
+}
+
+// TestWaterfallTotalMatchesTheHeadlineAfterAllPricedAdditions is the API-handler-level version
+// of TestSetDeclCreditPutsEachHalfInTheRightTotal: it caught a real bug that the field-level
+// test could not, because o.Waterfall is built INSIDE Overview(), before CachesplitHistoricalUSD
+// and SetDeclCredit ever run — so the waterfall's own "total_saved" bar baked in a total short by
+// both additions, silently disagreeing with the headline tile two inches above it (which reads
+// o.TotalSavedUSD directly, not through the waterfall). Exercises the real GET /api/stats
+// handler, not the field-level helpers, because that staleness is invisible to anything that
+// calls Overview()/SetDeclCredit directly without going through the handler's full sequence.
+func TestWaterfallTotalMatchesTheHeadlineAfterAllPricedAdditions(t *testing.T) {
+	db := seedCredit(t, 1000)
+	// A pre-instrumentation cachesplit-historical row, same shape as
+	// TestHistoricalSplitValuationIsReadOnlyAndConservative: one row teaching the model's stable
+	// half, one session-first row that qualifies for the historical credit.
+	teach := mkEvent(9000, "s-hist", "aws/claude-sonnet-5", 100, 100)
+	teach.TenantID, teach.CacheRead, teach.CacheWrite, teach.SplitStableTokens = "t1", 54_304, 1_000, 5_697
+	qualifies := mkEvent(9100, "s-new-hist", "aws/claude-sonnet-5", 100, 100)
+	qualifies.TenantID, qualifies.CacheRead, qualifies.CacheWrite = "t1", 54_304, 1_000
+	if err := db.insertBatch([]*Event{teach, qualifies}); err != nil {
+		t.Fatal(err)
+	}
+	// A Recorder built directly around the already-seeded db, not via NewRecorder: that
+	// constructor starts background goroutines (the writer, the dedupe backfill) against
+	// whatever DB it opens, and swapping rec.db out from under them afterward is a data race
+	// (caught by -race: dedupeLoop reads r.db concurrently with this test's own write to it).
+	// This test only needs a Recorder that answers DB() and Close() for NewAPI/t.Cleanup — no
+	// live capture pipeline is exercised here.
+	rec := &Recorder{db: db, hub: NewHub(), done: make(chan struct{})}
+	t.Cleanup(func() { rec.Close() })
+	api := NewAPI(rec)
+	api.SetPricer(staticPricer{ibmSonnet})
+	mux := http.NewServeMux()
+	api.Mount(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("/api/stats = %d: %s", w.Code, w.Body)
+	}
+	var resp struct {
+		TotalSavedUSD float64 `json:"total_saved_usd"`
+		DeclFilterUSD float64 `json:"decl_filter_usd"`
+		Waterfall     []struct {
+			Key      string  `json:"key"`
+			DeltaUSD float64 `json:"delta_usd"`
+		} `json:"waterfall"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad JSON: %v\n%s", err, w.Body)
+	}
+	if resp.DeclFilterUSD <= 0 {
+		t.Fatal("decl_filter_usd is not positive; the fixture stopped exercising it")
+	}
+	var waterfallTotal, waterfallDeclFilter float64
+	var sawDeclFilter bool
+	for _, s := range resp.Waterfall {
+		if s.Key == "total_saved" {
+			waterfallTotal = s.DeltaUSD
+		}
+		if s.Key == "decl_filter_saved" {
+			waterfallDeclFilter, sawDeclFilter = -s.DeltaUSD, true
+		}
+	}
+	if !sawDeclFilter {
+		t.Fatal("no decl_filter_saved step in the waterfall")
+	}
+	if math.Abs(waterfallTotal-resp.TotalSavedUSD) > 1e-9 {
+		t.Errorf("waterfall total_saved = %v, headline total_saved_usd = %v — the chart and the "+
+			"tile disagree", waterfallTotal, resp.TotalSavedUSD)
+	}
+	if math.Abs(waterfallDeclFilter-resp.DeclFilterUSD) > 1e-9 {
+		t.Errorf("waterfall's decl_filter_saved step = %v, headline decl_filter_usd = %v — the "+
+			"waterfall step is stale", waterfallDeclFilter, resp.DeclFilterUSD)
 	}
 }
 

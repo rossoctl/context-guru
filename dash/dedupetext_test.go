@@ -228,6 +228,57 @@ func TestBackfillIsEquivalentAndCollapsesDuplicates(t *testing.T) {
 	}
 }
 
+// A completed migration marks itself done, and a later call — a fresh process finding the
+// table already fully migrated — skips the scan entirely rather than re-walking the whole
+// table to rediscover the same answer. This is the property that makes the marker worth
+// having: without it, every restart pays pendingDedupe's full-table cost forever, even though
+// nothing is ever pending again once the one-time legacy backlog is gone.
+func TestDedupeMigrationMarkerSkipsARepeatScan(t *testing.T) {
+	db := emptyDB(t)
+	legacyRow(t, db, "s0", "Bash", `{"name":"Bash"}`)
+
+	if done, err := db.dedupeMigrationDone(); err != nil {
+		t.Fatal(err)
+	} else if done {
+		t.Fatal("marker reads done before any migration has run")
+	}
+
+	moved, err := db.dedupeDeclarationText(nil, 500, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 1 {
+		t.Fatalf("first run migrated %d rows, want 1", moved)
+	}
+	done, err := db.dedupeMigrationDone()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("marker not set after a run that scanned to the end of the table")
+	}
+
+	// A new legacy-shaped row appearing after the marker is set is the scenario the marker
+	// trades away deliberately (see the comment on dedupeDeclarationText): the current write
+	// path never produces one, so this is not expected in production, but the test should
+	// still prove the marker actually short-circuits rather than merely existing.
+	legacyRow(t, db, "s1", "Read", `{"name":"Read"}`)
+	moved, err = db.dedupeDeclarationText(nil, 500, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 0 {
+		t.Fatalf("second run migrated %d rows, want 0 (marker should have skipped the scan)", moved)
+	}
+	var stillLegacy int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM tool_declarations WHERE text_gz IS NOT NULL`).Scan(&stillLegacy); err != nil {
+		t.Fatal(err)
+	}
+	if stillLegacy != 1 {
+		t.Errorf("%d rows still carry text_gz, want 1 (the post-marker row the skip left alone)", stillLegacy)
+	}
+}
+
 // Interrupted, then resumed, then run again — and the reveal is identical at every step.
 //
 // This is the property the live migration is judged on: the process can stop anywhere, and what
