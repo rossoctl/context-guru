@@ -230,12 +230,33 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		r.wg.Add(1)
 		go r.archiveLoop()
 	}
-	// And the one-time prompt-text backfill, on its own goroutine for the same reason. It is
-	// unconditional and needs no flag: it is a no-op (one indexed query) on a database that has
-	// nothing left to move, which after the first run is every start. See dedupetext.go.
+	// And the one-time migrations, on their own shared goroutine for the same reason
+	// archiveLoop is: the writer owes the request path a fast insert, and anything measured
+	// in minutes on that goroutine means a full queue and dropped events. See
+	// backgroundMigrations for why they share ONE goroutine rather than one each.
 	r.wg.Add(1)
-	go r.dedupeLoop()
+	go r.backgroundMigrations()
 	return r, nil
+}
+
+// backgroundMigrations runs every one-time housekeeping migration in sequence, on one shared
+// goroutine, rather than giving each its own.
+//
+// Each was written expecting to be the only writer contending with the capture pipeline's own
+// batches, and is small and fast next to the archiver's minutes-scale rclone round trips (which
+// keeps its own goroutine, unchanged, for exactly that reason). Running dedupeLoop and
+// keepAliveStrategyBackfillLoop as two SEPARATE goroutines instead of one measurably doubled
+// SQLite write-lock contention on every startup — enough that
+// TestRecorderMigratesLegacyPromptTextOnStart's own migration missed its busy_timeout under
+// -race, on a database with no real content at all. Sequencing them costs nothing that
+// matters: neither runs for more than a fraction of a second on any deployment measured so
+// far, migrations that have already run skip past their own predicate check near-instantly
+// (see each one's own completion marker), and a deployment with real historical backlog in
+// both at once still finishes well inside the time a single one used to take alone.
+func (r *Recorder) backgroundMigrations() {
+	defer r.wg.Done()
+	r.dedupeLoop()
+	r.keepAliveStrategyBackfillLoop()
 }
 
 // archiveLoop runs the age-based archival passes until the recorder closes.

@@ -287,13 +287,10 @@ func (d *DB) dedupeOneBatch(batch []declBlob) (int64, error) {
 	return moved, tx2.Commit()
 }
 
-// dedupeLoop is the recorder's hook: run the backfill once, then reclaim what it freed.
-//
-// On its own goroutine and not on the writer's, for the reason archiveLoop is: the writer owes
-// the request path a fast insert, and anything measured in minutes on that goroutine means a
-// full queue and dropped events.
+// dedupeLoop runs the backfill once, then reclaims what it freed. Called from
+// backgroundMigrations (capture.go), not given its own goroutine — see that function's
+// comment for why every one-time migration shares one.
 func (r *Recorder) dedupeLoop() {
-	defer r.wg.Done()
 	moved, err := r.db.dedupeDeclarationText(r.done, dedupeBatch, dedupePause)
 	if err != nil {
 		// A partial migration is readable and resumable, so this is a warning, not a fatal:
