@@ -311,6 +311,83 @@ func TestSelfRemovalNeedsComparableLaterSessions(t *testing.T) {
 	}
 }
 
+// TestSelfRemovalDoesNotPoolAcrossTenants pins the bug found auditing the manager's
+// service-wide (TenantAll) view against a copy of the live DB: an MCP tool declared in exactly
+// ONE session of ONE tenant was reported "removed" on the strength of hundreds of OTHER
+// tenants' sessions that simply never carried that tenant's MCP server at all — a candidate's
+// query grouped `tool_declarations` by (kind, name, server) with no tenant_id in sight, so two
+// unrelated accounts' declaration timelines for a same-named item were pooled into one. The
+// production instance of this credited $154.53 of avoided cost to a removal nobody made.
+//
+// t1 declares mcp__srv__thing once and never again; t2, which has ALWAYS carried it (every one
+// of its sessions still declares it), must contribute nothing to t1's SessionsAfter or dollars —
+// and t1's own comparable-but-not-yet-three-strong count must not be inflated to "removed" by
+// borrowing t2's session count. session_id namespaces overlap deliberately (see
+// TestInventoryKeysAreTenantScoped, same technique on the write side): a fix that merely happened
+// to key off distinct ids would still be wrong the day two tenants' clients collide.
+func TestSelfRemovalDoesNotPoolAcrossTenants(t *testing.T) {
+	db := openTestDB(t)
+	decl := func(tenant, session string, ts int64, kinds [][3]string) {
+		e := &Event{
+			TS: ts, SessionID: session, Model: "m1", TenantID: tenant,
+			TokensBefore: 5000, TokensAfter: 5000, Meta: Meta{Tools: 3},
+			FreshInput: 10, CacheRead: 20000, TokenAccounting: AccountingComplete,
+		}
+		insertReq(t, db, e)
+		for _, k := range kinds {
+			if _, err := db.sql.Exec(`INSERT INTO tool_declarations(
+				tenant_id, session_id, digest, kind, name, server, tokens, ts)
+				VALUES(?,?,'d1',?,?,?,100,?)`, tenant, session, k[0], k[1], k[2], ts); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mcpTool := [][3]string{{KindMCPTool, "mcp__srv__thing", "srv"}}
+	// t1: one session declares the tool, then five later (same session-id namespace as t2's,
+	// on purpose) comparable sessions that do not.
+	decl("t1", "shared-a", 1000, mcpTool)
+	for i := 0; i < 5; i++ {
+		decl("t1", "shared-later"+string(rune('a'+i)), int64(2000+i), [][3]string{{KindMCPTool, "mcp__srv__other", "srv"}})
+	}
+	// t2: carries the SAME tool in every one of its sessions, including ones that collide with
+	// t1's session ids above. If these leak into t1's evidence, t1's tool would wrongly look
+	// still-carried (diluting SessionsAfter) or, in the pre-fix bug's actual failure mode,
+	// t2's carrying sessions would wrongly count as t1's "confirmed removed" testimony.
+	for i := 0; i < 5; i++ {
+		decl("t2", "shared-later"+string(rune('a'+i)), int64(2000+i), mcpTool)
+	}
+
+	got, err := db.SelfRemovals(Filter{TenantAll: true},
+		func(m string) (modelinfo.Price, bool) { return handPrice.Price(context.Background(), m) },
+		nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mine SelfRemoval
+	found := false
+	for _, r := range got {
+		if r.Name == "mcp__srv__thing" {
+			mine, found = r, true
+		}
+	}
+	if !found {
+		t.Fatal("t1's removed MCP tool was not credited at all")
+	}
+	// Only t1's own 5 later sessions may testify. If t2's sessions leaked in, this would be 10.
+	if mine.SessionsAfter != 5 {
+		t.Errorf("SessionsAfter = %d, want 5 — t2's sessions must not count as t1's evidence",
+			mine.SessionsAfter)
+	}
+	// t1's carried-then-dropped tool was 100 tokens; t2 read 20000 tokens on 5 sessions of a
+	// tool it never dropped. If those requests were priced into t1's row, AvoidedUSD would be
+	// off by orders of magnitude. Sanity bound: at 100 tokens x 5 sessions x a few requests each,
+	// this cannot rationally exceed a fraction of a cent.
+	if mine.AvoidedUSD > 0.01 {
+		t.Errorf("AvoidedUSD = %.6f, implausibly large for a 100-token item over 5 sessions — "+
+			"looks like another tenant's traffic leaked in", mine.AvoidedUSD)
+	}
+}
+
 // TestSessionLengthUsesTheRequestWeightedMean pins the statistic a per-session projection
 // multiplies by.
 //

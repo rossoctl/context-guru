@@ -973,41 +973,111 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 	// Session ordering comes from the requests table (the declarations carry a ts, but one per
 	// digest, not per session start), so "before" and "after" mean the same thing here as
 	// everywhere else on the page.
-	q := `WITH sess AS (
-			SELECT r.session_id AS sid, MIN(r.ts) AS started, COUNT(*) AS reqs,
-				SUM(CASE WHEN r.cache_read > 0 THEN 1 ELSE 0 END) AS reads,
-				SUM(CASE WHEN r.cache_read = 0 AND r.cache_write > 0 THEN 1 ELSE 0 END) AS writes,
-				SUM(CASE WHEN r.cache_read = 0 AND r.cache_write = 0 THEN 1 ELSE 0 END) AS fresh,
-				MIN(r.model) AS model
-			FROM requests r WHERE ` + where + ` AND r.tools > 0 GROUP BY 1)
-		SELECT d.kind, d.name, d.server, MAX(d.tokens), MAX(s.started),
-			COUNT(DISTINCT d.session_id)
-		FROM tool_declarations d JOIN sess s ON s.sid = d.session_id`
-	a := append([]any{}, args...)
-	if !f.TenantAll {
-		q += ` WHERE d.tenant_id = ?`
-		a = append(a, f.Tenant)
+	//
+	// Sessions in scope, their re-read multiplier, and (filled in below) the cohort flags — one
+	// query, reused for the candidate lastSeen/before computation, the cohort test, AND the
+	// AvoidedReads/AvoidedUSD walk. It used to be the same requests-table aggregate run under
+	// three different names for three different purposes.
+	type sessRow struct {
+		tenant, session      string
+		started              int64
+		reads, writes, fresh int
+		model                string
+		hasMCP, hasSkills    bool
 	}
-	q += ` GROUP BY d.kind, d.name, d.server`
-	rows, err := d.sql.Query(q, a...)
+	srows, err := d.sql.Query(`SELECT r.tenant_id, r.session_id, MIN(r.ts),
+			SUM(CASE WHEN r.cache_read > 0 THEN 1 ELSE 0 END),
+			SUM(CASE WHEN r.cache_read = 0 AND r.cache_write > 0 THEN 1 ELSE 0 END),
+			SUM(CASE WHEN r.cache_read = 0 AND r.cache_write = 0 THEN 1 ELSE 0 END),
+			MIN(r.model)
+		FROM requests r WHERE `+where+` AND r.tools > 0 GROUP BY r.tenant_id, r.session_id`, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	type cand struct {
-		kind, name, server string
-		tokens             int
-		lastSeen           int64
-		before             int
-	}
-	var cands []cand
-	for rows.Next() {
-		var c cand
-		if err := rows.Scan(&c.kind, &c.name, &c.server, &c.tokens, &c.lastSeen, &c.before); err != nil {
+	type sessKey struct{ tenant, session string }
+	sessByKey := map[sessKey]*sessRow{}
+	var sess []*sessRow
+	for srows.Next() {
+		s := &sessRow{}
+		if err := srows.Scan(&s.tenant, &s.session, &s.started, &s.reads, &s.writes, &s.fresh, &s.model); err != nil {
+			srows.Close()
 			return nil, err
 		}
-		// ONLY MCP tools and skills are eligible, and that is a correctness restriction rather
-		// than a scoping choice.
+		sessByKey[sessKey{s.tenant, s.session}] = s
+		sess = append(sess, s)
+	}
+	srows.Close()
+	if err := srows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Candidates and cohort flags, from ONE sequential scan of tool_declarations rather than two
+	// SQL joins against it.
+	//
+	// The joins this replaced each drove their nested loop from the SMALL side (a few thousand
+	// sessions) and probed tool_declarations' own (tenant_id, session_id, ...) primary-key index
+	// once per session — a separate index seek, and for the candidates query a separate row
+	// fetch, for every one of them. Measured on the production corpus (974k+ declaration rows,
+	// 4,553 in-scope sessions): 11.4s for the candidates join and 6.3s for the cohort join,
+	// EXPLAIN QUERY PLAN confirming `SEARCH d USING INDEX ... (tenant_id=? AND session_id=?)`
+	// inside a CO-ROUTINE — a probe per outer row, not a scan. This is the same shape the
+	// CompactionResets bug had (see dash/CLAUDE.local.md): the cost is invocation count, not
+	// I/O — 4,553 separate lookups into a 974k-row table costs more than one pass over that
+	// table, even though each individual lookup looks cheap.
+	//
+	// One plain SELECT over tool_declarations (5.9s to scan every row on this corpus) replaces
+	// both: whether a declared row's session is "in scope" becomes a map lookup instead of a
+	// join condition, and the candidate + cohort aggregation happen in the same pass. Filtered by
+	// tenant_id in SQL when the caller is scoped to one account — the common case — so a
+	// per-account view still only ever touches that account's own rows, exactly as before.
+	dq := `SELECT tenant_id, session_id, kind, name, server, tokens FROM tool_declarations`
+	var dargs []any
+	if !f.TenantAll {
+		dq += ` WHERE tenant_id = ?`
+		dargs = append(dargs, f.Tenant)
+	}
+	drows, err := d.sql.Query(dq, dargs...)
+	if err != nil {
+		return nil, err
+	}
+	type cand struct {
+		tenant, kind, name, server string
+		tokens                     int
+		lastSeen                   int64
+		sessionsSeen               map[string]bool
+	}
+	// Keyed by (tenant, kind, name, server): candidates are never pooled across tenants, even
+	// under TenantAll — a manager's service-wide view. Without that, a manager's "self-removed"
+	// figure pooled every tenant's declaration timeline into one: on the production corpus, an
+	// MCP tool declared in exactly ONE session of ONE tenant was reported as removed on the
+	// strength of 555 sessions belonging to OTHER tenants that simply never had that tenant's
+	// MCP server at all — $154.53 of avoided cost credited to a removal nobody made.
+	cands := map[[4]string]*cand{}
+	for drows.Next() {
+		var tenant, sid, kind, name, server string
+		var tokens int
+		if err := drows.Scan(&tenant, &sid, &kind, &name, &server, &tokens); err != nil {
+			drows.Close()
+			return nil, err
+		}
+		s, ok := sessByKey[sessKey{tenant, sid}]
+		if !ok {
+			continue // this session is not in the requests-side scope (tools>0, the filter, ...)
+		}
+		// The cohort flags: whether this session declared ANY MCP tool, and whether it carried a
+		// skills listing. Set from every row seen, INCLUDING kinds that are not themselves
+		// eligible candidates below (skill_listing counts for the cohort test but is never itself
+		// offered as a removal) — this is what makes a later session able to testify. A session
+		// that declared no MCP tools cannot be evidence that one particular MCP tool was
+		// removed — it is evidence that this session was not an MCP session.
+		switch kind {
+		case KindMCPTool:
+			s.hasMCP = true
+		case KindSkill, KindSkillListing:
+			s.hasSkills = true
+		}
+		// ONLY MCP tools and skills are eligible CANDIDATES, and that is a correctness
+		// restriction rather than a scoping choice.
 		//
 		// The first version of this considered every declaration and confidently reported that
 		// the account had "removed" Bash, Agent, TodoWrite and Monitor — because sessions
@@ -1019,82 +1089,27 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 		// MCP tools and skills are the items the question is actually about — they are what a
 		// user adds and drops — and they come with a usable control: a later session either
 		// carries MCP tools at all, or carries a skills listing at all, and only such a session
-		// can testify about a missing one. See the cohort test below, which is the other half of
+		// can testify about a missing one. See the cohort test above, which is the other half of
 		// this fix; neither half works alone.
-		if c.kind != KindMCPTool && c.kind != KindSkill {
+		if kind != KindMCPTool && kind != KindSkill {
 			continue
 		}
-		cands = append(cands, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// The sessions that ran after each candidate was last declared, and what they would have
-	// paid to keep carrying it. One pass over the session list rather than a query per
-	// candidate: the list is a few thousand rows and there can be hundreds of candidates.
-	// Each later session's cohort: whether it declared ANY MCP tool, and whether it carried a
-	// skills listing. This is what makes a later session able to testify. A session that
-	// declared no MCP tools cannot be evidence that one particular MCP tool was removed — it is
-	// evidence that this session was not an MCP session.
-	type sessRow struct {
-		started              int64
-		reads, writes, fresh int
-		model                string
-		hasMCP, hasSkills    bool
-	}
-	// The cohort flags come from a SEPARATE query, not a join onto the request aggregate.
-	//
-	// Joining tool_declarations onto requests multiplies every request row by the number of
-	// declarations in its session, so the SUMs below counted each request dozens of times and
-	// the avoided-cost figures came out at $456 for a 142-token skill — larger than this
-	// deployment's entire measured savings. A fanned-out join under an aggregate is silent and
-	// the result is merely implausible rather than an error, which is exactly why the sanity
-	// check ("is this number bigger than the whole bill?") is worth doing on any new figure.
-	crows, err := d.sql.Query(`SELECT d.session_id,
-			MAX(CASE WHEN d.kind = '`+KindMCPTool+`' THEN 1 ELSE 0 END),
-			MAX(CASE WHEN d.kind IN ('`+KindSkill+`','`+KindSkillListing+`') THEN 1 ELSE 0 END)
-		FROM tool_declarations d
-		WHERE d.session_id IN (SELECT r.session_id FROM requests r WHERE `+where+` AND r.tools > 0)
-		GROUP BY 1`, args...)
-	if err != nil {
-		return nil, err
-	}
-	cohortBySession := map[string]struct{ mcp, skills bool }{}
-	for crows.Next() {
-		var sid string
-		var mcp, sk int
-		if err := crows.Scan(&sid, &mcp, &sk); err != nil {
-			crows.Close()
-			return nil, err
+		key := [4]string{tenant, kind, name, server}
+		c, ok := cands[key]
+		if !ok {
+			c = &cand{tenant: tenant, kind: kind, name: name, server: server, sessionsSeen: map[string]bool{}}
+			cands[key] = c
 		}
-		cohortBySession[sid] = struct{ mcp, skills bool }{mcp == 1, sk == 1}
-	}
-	crows.Close()
-	if err := crows.Err(); err != nil {
-		return nil, err
-	}
-	srows, err := d.sql.Query(`SELECT r.session_id, MIN(r.ts),
-			SUM(CASE WHEN r.cache_read > 0 THEN 1 ELSE 0 END),
-			SUM(CASE WHEN r.cache_read = 0 AND r.cache_write > 0 THEN 1 ELSE 0 END),
-			SUM(CASE WHEN r.cache_read = 0 AND r.cache_write = 0 THEN 1 ELSE 0 END),
-			MIN(r.model)
-		FROM requests r WHERE `+where+` AND r.tools > 0 GROUP BY r.session_id`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer srows.Close()
-	var sess []sessRow
-	for srows.Next() {
-		var s sessRow
-		var sid string
-		if err := srows.Scan(&sid, &s.started, &s.reads, &s.writes, &s.fresh, &s.model); err != nil {
-			return nil, err
+		if tokens > c.tokens {
+			c.tokens = tokens
 		}
-		c := cohortBySession[sid]
-		s.hasMCP, s.hasSkills = c.mcp, c.skills
-		sess = append(sess, s)
+		if s.started > c.lastSeen {
+			c.lastSeen = s.started
+		}
+		c.sessionsSeen[sid] = true
 	}
-	if err := srows.Err(); err != nil {
+	drows.Close()
+	if err := drows.Err(); err != nil {
 		return nil, err
 	}
 
@@ -1102,12 +1117,15 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 	for _, c := range cands {
 		r := SelfRemoval{
 			Kind: c.kind, Name: c.name, Server: c.server,
-			Tokens: c.tokens, LastSeen: c.lastSeen, SessionsBefore: c.before,
+			Tokens: c.tokens, LastSeen: c.lastSeen, SessionsBefore: len(c.sessionsSeen),
 			Overlap: filtered[statKey{c.kind, c.name}] ||
 				(c.server != "" && filtered[statKey{"mcp_server", c.server}]),
 		}
 		priced := true
 		for _, s := range sess {
+			if s.tenant != c.tenant {
+				continue // a different tenant's session is not evidence about this tenant's removal
+			}
 			if s.started <= c.lastSeen {
 				continue // ran before or alongside the last sighting: proves nothing
 			}
