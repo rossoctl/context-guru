@@ -246,11 +246,18 @@ func openDSN(d, path string) (*DB, error) {
 	// reads opens one pooled connection per in-flight request — measured on this
 	// deployment climbing past 600 concurrent connections and taking the process from
 	// ~2GB to a hard OOM kill within minutes. WAL mode already gives every reader a
-	// consistent snapshot without needing its own connection to do it quickly, so this
-	// caps concurrency at a level that still saturates real traffic without letting the
-	// pool itself become the memory leak.
-	sdb.SetMaxOpenConns(20)
-	sdb.SetMaxIdleConns(10)
+	// consistent snapshot without needing its own connection to do it quickly, so bounding
+	// the pool caps the memory risk without needing per-connection changes elsewhere.
+	//
+	// First shipped at 20/10, which turned out too low for this deployment's real
+	// concurrent demand: live traffic queued for a connection long enough to blow the
+	// dashboard handlers' own 10s timeout (dash/api.go's dashHandlerTimeout), on a box with
+	// 561% CPU and zero SQLITE_BUSY errors logged — i.e. queued for a POOL SLOT, never even
+	// reaching SQLite to contend on a lock. 100/50 costs at most ~285MB more at the
+	// ~2.85MB/connection rate measured against the 600-connection incident (vs. an 8GB
+	// cgroup cap and ~300MB baseline) while giving 5x the headroom before a burst queues.
+	sdb.SetMaxOpenConns(100)
+	sdb.SetMaxIdleConns(50)
 	sdb.SetConnMaxIdleTime(5 * time.Minute)
 	if err := sdb.Ping(); err != nil {
 		sdb.Close()
@@ -291,11 +298,35 @@ func (d *DB) Close() error {
 // Path returns the on-disk path ("" when in-memory).
 func (d *DB) Path() string { return d.path }
 
+// gzPair is one blob's before/after compression, precomputed outside the transaction.
+type gzPair struct{ before, after []byte }
+
 // insertBatch writes a batch of captured events in ONE transaction — the whole
 // point of batching: a per-request fsync would make the writer the bottleneck
 // under agent traffic. A failed batch is logged and dropped; observability never
 // retries into a growing backlog.
 func (d *DB) insertBatch(evs []*Event) error {
+	// Every gzip compression this batch needs, done BEFORE the transaction opens. gzip is
+	// real CPU work — up to ContentMaxPerRequest x 2 blobs per event, plus one pair per
+	// extraction call — and this driver blocks a concurrent READ for the writer's WHOLE open
+	// transaction (see CLAUDE.local.md). Compressing inside the transaction was paying that
+	// CPU cost while every reader on the box waited for it; precomputing here means the
+	// transaction itself does nothing but the inserts it actually needs the lock for.
+	contentGz := make([][]gzPair, len(evs))
+	xcallGz := make([][]gzPair, len(evs))
+	for i, e := range evs {
+		cg := make([]gzPair, len(e.Content))
+		for j, c := range e.Content {
+			cg[j] = gzPair{gzipText(c.Before), gzipText(c.After)}
+		}
+		contentGz[i] = cg
+		xg := make([]gzPair, len(e.Extractions))
+		for j, x := range e.Extractions {
+			xg[j] = gzPair{gzipText(x.Before), gzipText(x.After)}
+		}
+		xcallGz[i] = xg
+	}
+
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return err
@@ -348,7 +379,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 	defer xcallStmt.Close()
 
 	spend := map[spendKey]float64{}
-	for _, e := range evs {
+	for idx, e := range evs {
 		// nil, not "", when no strategy applied — so the column stores SQL NULL and stays
 		// distinguishable from a row written before this feature existed either way; see
 		// the keepalive_strategy_id column comment in schema.go.
@@ -389,7 +420,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 		}
 		for i, c := range e.Content {
 			if _, err := contentStmt.Exec(id, i, c.Path, c.BeforeTokens, c.AfterTokens,
-				gzipText(c.Before), gzipText(c.After), strings.Join(c.Components, ",")); err != nil {
+				contentGz[idx][i].before, contentGz[idx][i].after, strings.Join(c.Components, ",")); err != nil {
 				return err
 			}
 		}
@@ -403,7 +434,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 				x.CandidateTokens, x.SavedTokens, x.PromptTokens, x.CompletionTok,
 				x.CacheRead, x.CacheWrite, x.CostUSD, x.LatencyMs, boolInt(x.Accepted),
 				x.GateReason, x.Rejection, x.Summary,
-				gzipText(x.Before), gzipText(x.After)); err != nil {
+				xcallGz[idx][i].before, xcallGz[idx][i].after); err != nil {
 				return err
 			}
 		}
