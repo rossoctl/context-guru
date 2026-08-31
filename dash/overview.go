@@ -3,6 +3,8 @@ package dash
 import (
 	"database/sql"
 	"fmt"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // Denominator is one labelled savings ratio. Shipping a single "savings %" is the
@@ -581,56 +583,100 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// about that, which is what matters: session ids are `tenant:uuid` so a cross-tenant
 	// collision is not reachable, and the ceiling is deliberately about the session's whole life
 	// rather than the filtered slice of it.
-	if err := d.sql.QueryRow(`SELECT COALESCE(SUM(r.saved_unique * (
-			SELECT COUNT(*) FROM requests p WHERE p.session_id = r.session_id
-			  AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id)))),0)
-		FROM requests r WHERE `+cond+` AND r.saved_unique > 0`, args...).Scan(&o.ReplayProjectedTokens); err != nil {
-		return nil, err
-	}
-	// The correction, driven from the PING side: one pass to find the pings, then ONE indexed sum
-	// per ping over the earlier rows of its own session. O(pings x session) rather than a second
-	// full pass over the filtered rows, and pings are ~1% of rows — on a deployment that has never
-	// pinged it is a single index scan over an empty set.
+	//
+	// NOT rewritten as a window function, despite looking like the same shape CompactionResets
+	// was fixed for. Tried it, verified against live production data: byte-identical result,
+	// but consistently ~50-70% SLOWER (0.9s correlated vs 1.5s windowed, 5 runs). The difference
+	// from CompactionResets: that query's outer filter (tokens_before > 0) matches ~100% of
+	// rows, so a correlated subquery paid its per-invocation overhead on nearly every row and a
+	// single sort over everyone wins. Here the outer filter (saved_unique > 0) matches only
+	// 8.5% of rows (measured on the live corpus) — the correlated subquery only ever runs for
+	// that 8.5%, each an indexed lookup, while a window function must still sort the WHOLE
+	// table before the outer filter can narrow anything. Left as the correlated form on purpose.
+	// Everything from here to the percentiles below is a separate, independent read against
+	// the same filter — none of these queries consumes another's result (the two exceptions,
+	// the inflation correction and the estimator median, are noted where they are), so nothing
+	// stops them running concurrently instead of one after another. That is not an optimization
+	// for its own sake: measured against a production-sized copy of this table with zero write
+	// contention, this stretch alone summed to ~9s run sequentially — CompactionResets and the
+	// replay estimate each multiple seconds by themselves — which is why /api/stats was timing
+	// out its 10s caller-facing deadline on every single call, not just under load. Run
+	// concurrently against the same pooled *sql.DB (store.go's SetMaxOpenConns already sizes
+	// the pool for this), wall time drops to roughly the slowest single query rather than their
+	// sum. SQLite's WAL mode already gave each of these its own read snapshot when they ran
+	// sequentially — nothing here was ever one atomic view of the table — so concurrency changes
+	// only how long the caller waits, never what any individual query reads.
+	var (
+		replayProjectedRaw, inflation          int64
+		ttl                                    map[string]int64
+		bs, bt, bm, bb, modalRequests          int64
+		estimatorDivergenceRows                int64
+		estimatorDivergence                    float64
+		keepAlivePings                         int64
+		keepAlivePingUSD                       float64
+		accountingM, cacheMissM, uncompressedM map[string]int64
+		p95cg, p95up                           float64
+	)
+	var g errgroup.Group
+	// The replay ceiling's raw form, corrected below by the inflation query once both are in —
+	// see the comment above `splitMoved` usage earlier in this function for the ceiling's own
+	// derivation, and see the correlated-vs-window-function tradeoff explained where this query
+	// used to live: NOT rewritten as a window function despite looking like the same shape
+	// CompactionResets was fixed for. Tried it, verified against live production data:
+	// byte-identical result, but consistently ~50-70% SLOWER (0.9s correlated vs 1.5s windowed,
+	// 5 runs). The difference from CompactionResets: that query's outer filter (tokens_before >
+	// 0) matches ~100% of rows, so a correlated subquery paid its per-invocation overhead on
+	// nearly every row and a single sort over everyone wins. Here the outer filter
+	// (saved_unique > 0) matches only 8.5% of rows (measured on the live corpus) — the
+	// correlated subquery only ever runs for that 8.5%, each an indexed lookup, while a window
+	// function must still sort the WHOLE table before the outer filter can narrow anything.
+	// Left as the correlated form on purpose.
+	g.Go(func() error {
+		return d.sql.QueryRow(`SELECT COALESCE(SUM(r.saved_unique * (
+				SELECT COUNT(*) FROM requests p WHERE p.session_id = r.session_id
+				  AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id)))),0)
+			FROM requests r WHERE `+cond+` AND r.saved_unique > 0`, args...).Scan(&replayProjectedRaw)
+	})
+	// The correction to the above, driven from the PING side: one pass to find the pings, then
+	// ONE indexed sum per ping over the earlier rows of its own session. O(pings x session)
+	// rather than a second full pass over the filtered rows, and pings are ~1% of rows — on a
+	// deployment that has never pinged it is a single index scan over an empty set.
 	//
 	// It used to sit behind an `EXISTS(SELECT 1 FROM requests WHERE keepalive = 1)` gate, claiming
 	// the correction then "costs literally nothing where the mechanism has never run". It does not:
 	// `keepalive` is in no index, so the EXISTS is itself a scan. Timed alternately on the
 	// 10,000-row perf fixture, 5 trials: gated 52.7 ms against 53.0 ms ungated at 0 pings, and
 	// 58.0 against 57.3 at 100 — one extra scan for no measurable saving, so it is gone.
-	var inflation int64
-	if err := d.sql.QueryRow(`SELECT COALESCE(SUM((
-			SELECT COALESCE(SUM(r.saved_unique),0) FROM requests r
-			  WHERE r.session_id = p.session_id AND r.saved_unique > 0
-			    AND (r.ts < p.ts OR (r.ts = p.ts AND r.id < p.id))
-			    AND `+cond+`)),0)
-		FROM requests p WHERE p.keepalive = 1`, args...).Scan(&inflation); err != nil {
-		return nil, err
-	}
-	if o.ReplayProjectedTokens -= inflation; o.ReplayProjectedTokens < 0 {
-		o.ReplayProjectedTokens = 0
-	}
-	if o.ReplayProjectedTokens > 0 {
-		o.ReplayRealizedPct = float64(o.ReplayTokens) / float64(o.ReplayProjectedTokens) * 100
-	}
+	g.Go(func() error {
+		return d.sql.QueryRow(`SELECT COALESCE(SUM((
+				SELECT COALESCE(SUM(r.saved_unique),0) FROM requests r
+				  WHERE r.session_id = p.session_id AND r.saved_unique > 0
+				    AND (r.ts < p.ts OR (r.ts = p.ts AND r.id < p.id))
+				    AND `+cond+`)),0)
+			FROM requests p WHERE p.keepalive = 1`, args...).Scan(&inflation)
+	})
 	// Which cache TTL tier each request asked for. A map rather than columns because ""
 	// (no cache_control at all) is a real third answer that must not be folded into 5m.
-	ttl, err := d.countBy(cond, args, "cache_ttl")
-	if err != nil {
-		return nil, err
-	}
-	o.CacheTTL = ttl
+	g.Go(func() error {
+		m, err := d.countBy(cond, args, "cache_ttl")
+		if err != nil {
+			return err
+		}
+		ttl = m
+		return nil
+	})
 	// The MODAL breakpoint placement, not the mean: 1.5 breakpoints in a system block is not
 	// a thing any request did, and an average across locations describes no prompt at all.
-	var bs, bt, bm, bb int64
-	if err := d.sql.QueryRow(`SELECT r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages,
-			r.cache_bp_blocks, COUNT(*) AS n
-		FROM requests r WHERE `+cond+`
-		GROUP BY 1,2,3,4 ORDER BY n DESC LIMIT 1`, args...).Scan(&bs, &bt, &bm, &bb,
-		&o.Breakpoints.ModalRequests); err != nil && err != sql.ErrNoRows {
-		return nil, err
-	} else if err == nil {
-		o.Breakpoints.Modal = fmt.Sprintf("system=%d, tools=%d, messages=%d, blocks=%d", bs, bt, bm, bb)
-	}
+	g.Go(func() error {
+		err := d.sql.QueryRow(`SELECT r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages,
+				r.cache_bp_blocks, COUNT(*) AS n
+			FROM requests r WHERE `+cond+`
+			GROUP BY 1,2,3,4 ORDER BY n DESC LIMIT 1`, args...).Scan(&bs, &bt, &bm, &bb, &modalRequests)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	})
 	// Context resets, DERIVED: a turn that arrived smaller than the previous turn of its own
 	// session. This is the bound on amortization — replay accrues only while removed content
 	// keeps being re-sent, and this is where that stops — so it belongs beside the replay
@@ -646,54 +692,113 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// prior row with tokens_before <= 0 to find one further back — on this corpus that never
 	// happens (tokens_before > 0 holds for every row measured), so this is not a behavior
 	// change in practice, but it is not a byte-for-byte port of the old query's guarantee.
-	q := `WITH s AS (
-		SELECT r.*, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
-			OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
-		FROM requests r
-	) SELECT COUNT(*) FROM s r WHERE ` + cond + `
-		AND r.tokens_before > 0 AND r.prev_tokens_before IS NOT NULL
-		AND r.tokens_before < r.prev_tokens_before`
-	if err := d.sql.QueryRow(q, args...).Scan(&o.CompactionResets); err != nil {
-		return nil, err
-	}
+	g.Go(func() error {
+		q := `WITH s AS (
+			SELECT r.*, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
+				OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
+			FROM requests r
+		) SELECT COUNT(*) FROM s r WHERE ` + cond + `
+			AND r.tokens_before > 0 AND r.prev_tokens_before IS NOT NULL
+			AND r.tokens_before < r.prev_tokens_before`
+		return d.sql.QueryRow(q, args...).Scan(&o.CompactionResets)
+	})
 	// The estimator check, on the only population where the two counts are comparable: requests
 	// where nothing was removed, so tokens_before and the provider's billed input describe the
 	// same prompt. A median rather than a mean, and rather than a ratio of sums, because a
 	// handful of enormous requests otherwise dominate and the figure stops describing a typical
 	// row. Computed with OFFSET over an ordered ratio, the same shape as DB.percentile — which
-	// takes a bare column name and so cannot express this ratio.
-	const ratioPop = ` AND r.tokens_before = r.tokens_after AND r.tokens_before > 0
-		AND r.token_accounting = 'complete' AND r.fresh_input + r.cache_read + r.cache_write > 0`
-	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+ratioPop,
-		args...).Scan(&o.EstimatorDivergenceRows); err != nil {
+	// takes a bare column name and so cannot express this ratio. The median query depends on
+	// the row-count query run just before it (the OFFSET is half the count), so those two stay
+	// sequential WITHIN this one goroutine — only across the other units does this run concurrently.
+	g.Go(func() error {
+		const ratioPop = ` AND r.tokens_before = r.tokens_after AND r.tokens_before > 0
+			AND r.token_accounting = 'complete' AND r.fresh_input + r.cache_read + r.cache_write > 0`
+		if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+ratioPop,
+			args...).Scan(&estimatorDivergenceRows); err != nil {
+			return err
+		}
+		if estimatorDivergenceRows > 0 {
+			var med sql.NullFloat64
+			if err := d.sql.QueryRow(`SELECT
+				CAST(r.fresh_input + r.cache_read + r.cache_write AS REAL) / r.tokens_before AS ratio
+				FROM requests r WHERE `+cond+ratioPop+`
+				ORDER BY ratio ASC LIMIT 1 OFFSET ?`,
+				append(append([]any(nil), args...), estimatorDivergenceRows/2)...).Scan(&med); err != nil {
+				return err
+			}
+			estimatorDivergence = med.Float64
+		}
+		return nil
+	})
+	// The COST half, over the same window and the same filters but with ping rows included.
+	// A second query rather than a CASE in the first, because the first deliberately cannot see
+	// them: one predicate, one meaning.
+	g.Go(func() error {
+		kaCond, kaArgs := withKeepAlive(f).where()
+		return d.sql.QueryRow(`SELECT
+			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
+			FROM requests r WHERE `+kaCond, kaArgs...).Scan(&keepAlivePings, &keepAlivePingUSD)
+	})
+	for name, col := range map[string]string{
+		"accounting": "token_accounting", "cache_miss": "cache_miss_reason", "uncompressed": "uncompressed_reason",
+	} {
+		name, col := name, col // captured per-goroutine, not by the shared loop variable
+		g.Go(func() error {
+			m, err := d.countBy(cond, args, col)
+			if err != nil {
+				return err
+			}
+			switch name {
+			case "accounting":
+				accountingM = m
+			case "cache_miss":
+				cacheMissM = m
+			case "uncompressed":
+				uncompressedM = m
+			}
+			return nil
+		})
+	}
+	g.Go(func() error {
+		v, err := d.percentile(cond, args, "cg_latency_ms", 0.95)
+		if err != nil {
+			return err
+		}
+		p95cg = v
+		return nil
+	})
+	g.Go(func() error {
+		v, err := d.percentile(cond, args, "upstream_ms", 0.95)
+		if err != nil {
+			return err
+		}
+		p95up = v
+		return nil
+	})
+	if err := g.Wait(); err != nil {
 		return nil, err
 	}
-	if o.EstimatorDivergenceRows > 0 {
-		var med sql.NullFloat64
-		if err := d.sql.QueryRow(`SELECT
-			CAST(r.fresh_input + r.cache_read + r.cache_write AS REAL) / r.tokens_before AS ratio
-			FROM requests r WHERE `+cond+ratioPop+`
-			ORDER BY ratio ASC LIMIT 1 OFFSET ?`,
-			append(append([]any(nil), args...), o.EstimatorDivergenceRows/2)...).Scan(&med); err != nil {
-			return nil, err
-		}
-		o.EstimatorDivergence = med.Float64
+
+	o.ReplayProjectedTokens = replayProjectedRaw
+	if o.ReplayProjectedTokens -= inflation; o.ReplayProjectedTokens < 0 {
+		o.ReplayProjectedTokens = 0
 	}
+	if o.ReplayProjectedTokens > 0 {
+		o.ReplayRealizedPct = float64(o.ReplayTokens) / float64(o.ReplayProjectedTokens) * 100
+	}
+	o.CacheTTL = ttl
+	o.Breakpoints.ModalRequests = modalRequests
+	if modalRequests > 0 {
+		o.Breakpoints.Modal = fmt.Sprintf("system=%d, tools=%d, messages=%d, blocks=%d", bs, bt, bm, bb)
+	}
+	o.EstimatorDivergenceRows = estimatorDivergenceRows
+	o.EstimatorDivergence = estimatorDivergence
 	if o.Requests > 0 {
 		o.ExpandRate = float64(o.Expands) / float64(o.Requests)
 	}
 	o.NetSavedUSD = o.BaselineCostUSD - o.CostUSD - o.CGLLMCostUSD
-	// The COST half, over the same window and the same filters but with ping rows included.
-	// A second query rather than a CASE in the first, because the first deliberately cannot see
-	// them: one predicate, one meaning.
-	kaCond, kaArgs := withKeepAlive(f).where()
-	if err := d.sql.QueryRow(`SELECT
-		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
-		FROM requests r WHERE `+kaCond, kaArgs...).Scan(
-		&o.KeepAlivePings, &o.KeepAlivePingUSD); err != nil {
-		return nil, err
-	}
+	o.KeepAlivePings, o.KeepAlivePingUSD = keepAlivePings, keepAlivePingUSD
 	// The keep-alive's net, and the one number a decision rests on. Not folded into
 	// TotalSavedUSD: presenting a saving without the spend that bought it is exactly the
 	// dishonesty this ledger exists to prevent, and CostUSD above no longer carries the pings
@@ -710,32 +815,9 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// caller that does not attach the credit — reads a total that is short rather than one that
 	// is absent. SetDeclCredit moves both.
 	o.TotalReducedUSD = o.TotalSavedUSD
-
-	for name, col := range map[string]string{
-		"accounting": "token_accounting", "cache_miss": "cache_miss_reason", "uncompressed": "uncompressed_reason",
-	} {
-		m, err := d.countBy(cond, args, col)
-		if err != nil {
-			return nil, err
-		}
-		switch name {
-		case "accounting":
-			o.Accounting = m
-		case "cache_miss":
-			o.CacheMiss = m
-		case "uncompressed":
-			o.Uncompressed = m
-		}
-	}
-
-	p95cg, err := d.percentile(cond, args, "cg_latency_ms", 0.95)
-	if err != nil {
-		return nil, err
-	}
-	p95up, err := d.percentile(cond, args, "upstream_ms", 0.95)
-	if err != nil {
-		return nil, err
-	}
+	o.Accounting = accountingM
+	o.CacheMiss = cacheMissM
+	o.Uncompressed = uncompressedM
 	o.CGLatencyMsP95, o.UpstreamMsP95 = p95cg, p95up
 
 	o.SafetyCost.FrozenTokens = o.FrozenTokens
