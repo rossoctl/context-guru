@@ -9,6 +9,26 @@
 handled: it keeps a `head_lines` + `tail_lines` window and stashes the full original behind a
 `<<cg:HASH>>` marker. It runs late (after `cmdfilter`/`format`) and skips content already marked.
 
+The window is cut by **lines** when there are enough of them, and by **characters** when there are
+not. The character path matters because `collapse` is the last resort: if it declines, nothing caps
+the output. The line-only version declined every output of `head_lines + tail_lines` lines or fewer
+(40 by default) — which is exactly the shape of the largest tool results in practice, a database or
+HTTP API response serialised as **one line** of JSON. Measured on a live 128k-band arm: 16 upstream
+400 `prompt is too long` responses in 3,347 requests, on outgoing bodies of **2.6 MB to 14.8 MB**,
+and 17 of 75 runs errored. Nothing else caught them — `extract` acted 0 times (`no_obvious_noise`
+16,891; it only strips known noise patterns), `cmdfilter` 0 (`no_filter_match`), `toon` 21
+(`not_uniform_object_array` 233,501), `dedup` 774 (exact duplicates only), `extract_llm` declines by
+design once the output exceeds the compaction model's own window (`over_model_context`), and
+`summarize` protects `keep_last`, which is where a fresh oversized output sits. `linecap`'s per-line
+cap does not rescue it either: its `neverTruncate` allow-list exempts any line matching
+`^\S+:\d+`, and `{"items":[{"id":1,...` matches that by accident.
+
+The character budget is the component's own token threshold expressed in characters — no new knob.
+It starts at `max_tokens × 4` (the same ratio `internal/tokens` falls back to), is split between
+head and tail in the `head_lines`:`tail_lines` ratio, and is then **measured** and tightened if the
+assembled window overshoots `max_tokens`, because dense JSON tokenizes closer to 2.5 chars/token.
+The cut is on rune boundaries, so a multibyte character is never split.
+
 ## Before → After
 
 ```
@@ -40,8 +60,14 @@ A catch-all last stage for huge outputs.
 
 ## When it's inert
 
-It now names its reason instead of passing silently: `below_max_tokens`, `too_few_lines` (head/tail
-would not help), `marker_or_kept_verbatim`, `non_text_blocks`, `marker_no_win`, or `cached_prefix`.
+It now names its reason instead of passing silently: `below_max_tokens`,
+`too_few_lines_and_chars` (too few lines for a line window *and* too few characters for a character
+one — the only genuine decline left), `marker_or_kept_verbatim`, `non_text_blocks`, `marker_no_win`,
+or `cached_prefix`.
+
+`too_few_lines` is **gone** and was not renamed: its population is now either handled (the
+`char_window` *event*) or a real decline (`too_few_lines_and_chars`). Exporting a decline and a
+success under one metric name gives a series that falls as the component works better.
 
 `cached_prefix` is new. `collapse` used to carry **no depth restriction at all** — it re-derived the
 whole transcript on every turn, which contradicted the cache-safety contract every other

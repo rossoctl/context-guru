@@ -20,7 +20,7 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | `skeleton` | Offload | function/method bodies | via expand | fenced ` ```lang ` code blocks and raw file dumps (`Read`/`cat`/`sed -n`); **behind the `cg_skeleton` build tag, needs CGO, in no preset, and must not be enabled** — it removes 0 tokens per live turn because every `Read` is the newest of its path, and the guards that make it safe are what make it worthless, see the measurement | `min_tokens` (80) |
 | `dedup` | Offload | later byte-identical tool outputs | via expand | repeated identical outputs | `min_tokens` (100) |
 | `readlifecycle` | Offload | file `Read` bodies the transcript proves are stale (file edited later) or superseded (re-read later) | via expand | `Read` results in an editing session; **opt-in, in no preset** — 0 tokens warm, a third of a *cold* request, see the break-even | `min_tokens` (100), `stale`, `superseded`, `bash_edits`, `stale_at_depth`, `cold_cache` |
-| `collapse` | Offload | middle of an oversized output | via expand | any large tool output (fallback) | `max_tokens` (2000), `head_lines` (20), `tail_lines` (20), `cold_cache` (**true**) |
+| `collapse` | Offload | middle of an oversized output (by lines, or by characters when there are too few lines) | via expand | any large tool output (fallback) | `max_tokens` (2000), `head_lines` (20), `tail_lines` (20), `cold_cache` (**true**) |
 | `failed_run` | Offload | earlier superseded test/build runs | via expand | ≥2 run-like outputs | `min_tokens` (100), `cold_cache` (**true**) |
 | `cmdfilter` | Offload | lines per declarative DSL filter | via expand | output matching a filter | `filters` ([]), `disable_builtins` (false), `min_size` (400) |
 | `linecap` | Offload | the tail of any line over 500 chars, and every NON-adjacent repeat of a line (first copy annotated `(xN)`) | via expand | any tool output ≥ `min_size`; command-agnostic, so it fires where per-command filters do not | `max_line_chars` (500), `collapse_duplicate_lines` (true), `min_size` (400) |
@@ -278,10 +278,15 @@ after:   <first 20 lines>
          <last 20 lines>
 ```
 
+When there are too few lines to cut (canonically a database/HTTP result serialised as ONE line of
+JSON — the shape behind measured `prompt is too long` 400s on 2.6–14.8 MB bodies), the same window is
+cut by **characters** instead, on rune boundaries, sized from `max_tokens` and split in the
+`head_lines`:`tail_lines` ratio.
+
 - **Config:** `max_tokens` (2000 threshold), `max_frac` (fraction of the context window; wins when
   known), `head_lines` (20), `tail_lines` (20), `marker_mode`. **Shines:** a
-  catch-all last stage for huge outputs. **Inert:** output ≤ `max_tokens`, or too few lines for
-  head/tail to help.
+  catch-all last stage for huge outputs, including single-line ones. **Inert:** output ≤
+  `max_tokens`, or too small for either window to shrink it (`too_few_lines_and_chars`).
 
 ### `failed_run`
 Recognizes test/build run output (regex: `N passed/failed`, `BUILD SUCCESS/FAIL`, `Traceback`,
