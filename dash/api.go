@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"golang.org/x/sync/errgroup"
 )
 
 // API serves the dashboard: the JSON endpoints, the SSE stream, and the embedded
@@ -728,33 +729,90 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		w.Write(body)
 		return
 	}
-	o, err := a.rec.DB().Overview(f)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	// The four calls below are independent of each other — none reads another's result, only
+	// this handler's own fields afterward do — so they run concurrently rather than one after
+	// another. Sequentially, on a production-sized DB, Overview() alone measured ~5-10s (see its
+	// own errgroup for why) and DeclCreditFor another ~4-16s (see SelfRemovals' own comment for
+	// why it was rewritten), which summed past this handler's 10s caller-facing timeout on every
+	// call. Run concurrently, wall time drops to roughly the slowest of the four rather than
+	// their sum.
+	var (
+		o              *Overview
+		overviewErr    error
+		cachesplitHist *CachesplitHistorical
+		tierCosts      *TierCosts
+		declCredit     *DeclCredit
+	)
+	var g errgroup.Group
+	g.Go(func() error {
+		var err error
+		o, err = a.rec.DB().Overview(f)
+		overviewErr = err
+		return nil // Overview's own error is reported below, not folded into the group's error:
+		// a pricing failure in one of the other three must not mask it, and it must not mask them.
+	})
 	// Best-effort, and omitted rather than zeroed when it cannot be computed: a figure the
 	// dashboard cannot value must read as absent, never as "saved nothing".
 	if a.pricer != nil {
-		if h, err := a.rec.DB().CachesplitHistoricalUSD(f, a.pricer); err == nil {
-			o.CachesplitHistorical = &h
-		}
+		g.Go(func() error {
+			if h, err := a.rec.DB().CachesplitHistoricalUSD(f, a.pricer); err == nil {
+				cachesplitHist = &h
+			}
+			return nil
+		})
 		// The bill split by tier, and with it the addressable share and the safety panel's
 		// benefit half. Same rule: absent when it cannot be priced, never a zeroed bill.
-		if t, err := a.rec.DB().TierCosts(f, a.pricer); err == nil {
-			o.SetTiers(t)
-		}
+		g.Go(func() error {
+			if t, err := a.rec.DB().TierCosts(f, a.pricer); err == nil {
+				tierCosts = t
+			}
+			return nil
+		})
 	}
 	// The declarations no longer sent, both halves. Needs no pricer for the token counts, so it
 	// runs outside the block above; best-effort and non-fatal, because it is an addition to the
 	// walk and a deployment where it fails should still get the walk. NEVER silent, though: an
 	// error swallowed here returns zeros, and a zero in a savings figure is a claim.
-	if c, err := a.rec.DB().DeclCreditFor(f, a.priceFn(r),
-		a.toolFilterStateForScope(f).Removed); err == nil {
-		o.SetDeclCredit(c)
-	} else {
-		slog.Warn("dash: declaration-removal credit unavailable", "err", err)
+	g.Go(func() error {
+		c, err := a.rec.DB().DeclCreditFor(f, a.priceFn(r), a.toolFilterStateForScope(f).Removed)
+		if err != nil {
+			slog.Warn("dash: declaration-removal credit unavailable", "err", err)
+			return nil
+		}
+		declCredit = c
+		return nil
+	})
+	g.Wait() //nolint:errcheck // every goroutine above always returns nil; see each one's own error handling
+	if overviewErr != nil {
+		httpErr(w, http.StatusInternalServerError, overviewErr.Error())
+		return
 	}
+	if cachesplitHist != nil {
+		o.CachesplitHistorical = cachesplitHist
+		// Folded into the running total here, not inside Overview() itself, because
+		// pricing it needs a.pricer — Overview() returns before this figure exists, the
+		// same reason DeclCreditFor's addition below happens out here too. Leaving it out
+		// was the actual inconsistency, not a deliberate scoping choice: the page's own
+		// "Prefix-cache savings" tile (dash/ui/app.js) already adds CachesplitSavedUSD and
+		// this historical figure together and calls the sum ours — the headline total
+		// should agree with the tile two inches to its right, not exclude half of it.
+		o.TotalSavedUSD += cachesplitHist.USD
+	}
+	if tierCosts != nil {
+		o.SetTiers(tierCosts)
+	}
+	if declCredit != nil {
+		o.SetDeclCredit(declCredit)
+	}
+	// Rebuilt here, not left as Overview()'s own snapshot: o.Waterfall was materialized
+	// before any of the priced additions above existed, so its "declarations no longer
+	// sent" step baked in a zero (SetDeclCredit had not run yet) and its own "total_saved"
+	// step baked in a total short by both the historical split figure and the decl-filter
+	// credit — silently disagreeing with the headline tile two inches above it, which reads
+	// o.TotalSavedUSD directly rather than through the waterfall. waterfall() only reads
+	// current field values, so calling it again here is exactly as correct as the first
+	// call and now sees everything this handler has since added.
+	o.Waterfall = o.waterfall()
 	body, err := json.Marshal(o)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
