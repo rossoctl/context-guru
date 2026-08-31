@@ -613,20 +613,27 @@
         <div id="ka-chart-usd" class="chart" data-testid="ka-chart-usd"></div>
       </div>
     </div>
-    <h3>Idle gap when the cache lapsed</h3>
-    <p class="note" id="ka-gap-note"></p>
-    <div id="ka-gap-bands" data-testid="ka-gap-bands"></div>
-    <h3>Cached prompt size when it lapsed</h3>
-    <p class="note" id="ka-prefix-note"></p>
-    <div id="ka-prefix-bands" data-testid="ka-prefix-bands"></div>
-    <h3>Time of day</h3>
-    <p class="note" id="ka-hour-note"></p>
-    <div id="ka-hour-bins" data-testid="ka-hour-bins"></div>
-    <h3>How long between expiries</h3>
-    <p class="note">Per account, never blended: on this service the per-account mean runs
-      from 0.64 h to 6.56 h with maxima past 30 h, so a single service-wide average would
-      describe nobody.</p>
-    <div id="ka-account-gaps" data-testid="ka-account-gaps"></div>
+    <!-- The two charts above answer "is this trending up or down"; everything below answers
+         "why" — gap timing, prompt size, time of day, per-account spread. Real and still one
+         click away, just not at the same weight as the trend. Same collapsed-by-default
+         pattern as Setup's "Other agents" (.setup-others). -->
+    <details class="setup-others">
+      <summary>Diagnostics: gap timing, prompt size, time of day, per-account spread</summary>
+      <h3>Idle gap when the cache lapsed</h3>
+      <p class="note" id="ka-gap-note"></p>
+      <div id="ka-gap-bands" data-testid="ka-gap-bands"></div>
+      <h3>Cached prompt size when it lapsed</h3>
+      <p class="note" id="ka-prefix-note"></p>
+      <div id="ka-prefix-bands" data-testid="ka-prefix-bands"></div>
+      <h3>Time of day</h3>
+      <p class="note" id="ka-hour-note"></p>
+      <div id="ka-hour-bins" data-testid="ka-hour-bins"></div>
+      <h3>How long between expiries</h3>
+      <p class="note">Per account, never blended: on this service the per-account mean runs
+        from 0.64 h to 6.56 h with maxima past 30 h, so a single service-wide average would
+        describe nobody.</p>
+      <div id="ka-account-gaps" data-testid="ka-account-gaps"></div>
+    </details>
   </div>
 
   <div class="panel">

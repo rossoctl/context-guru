@@ -7294,6 +7294,22 @@ async function openStrategyLedger(s) {
       'all, is not counted here. This ledger is ALL TIME — unlike Overview or the Keep-Alive ' +
       'tab, it ignores whatever date range the dashboard is set to, so a lower or higher ' +
       'number here than those pages show is not a discrepancy.'));
+    // Pings > 0 with Saved stuck at exactly $0 is not a broken calculation — it is what a
+    // strategy looks like before its FIRST real rescue under the current attribution code
+    // (2026-08-30). A ping only earns a Saved credit once the real request it protected
+    // actually resumes after the idle gap; every ping this strategy has sent so far either
+    // predates that code (so the row it rescued was written before this column existed to
+    // carry the strategy id at all) or has not yet been followed by such a resumption. Saved
+    // populates the next time this strategy is in a matching window AND a session it pinged
+    // comes back — there is nothing to fix here by waiting longer on this page.
+    if (led.pings > 0 && led.saved_usd === 0) {
+      body.appendChild(el('p', { class: 'note' },
+        'Saved reads $0 with real pings above: none of them has yet been followed by the ' +
+        'real request it protected actually resuming — that is the moment a ping turns into ' +
+        'a credit, not the moment it is sent. This is expected for a strategy whose pings are ' +
+        'all recent or predate 2026-08-30’s per-strategy attribution; it is not a stuck ' +
+        'calculation, and it will move the next time this strategy pings a session that then comes back.'));
+    }
     if (!led.tenants || !led.tenants.length) {
       emptyState(body, 'No pings under this strategy yet', '');
       return;
