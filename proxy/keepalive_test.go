@@ -18,6 +18,7 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/tenant"
 	"github.com/tidwall/gjson"
 )
 
@@ -419,6 +420,30 @@ func TestArriveCancelsAndReports(t *testing.T) {
 	}
 	if p, r, s := k.arrive("t1", "sess-1"); p != 0 || r != 0 || s != "" {
 		t.Errorf("arrive reported %d/%d/%q for an untracked session, want 0/0/\"\"", p, r, s)
+	}
+}
+
+// The property dash/keepalivestrategy.go's per-strategy ledger is built on: arrive() must
+// report the SAME strategy id the ping that rescued this session was itself tagged with,
+// because that id is what lets a real request's credit be attributed to one strategy instead
+// of the tenant's whole lifetime credit repeating under every strategy that ever touched them.
+// TestArriveCancelsAndReports above already covers the no-strategy case (empty, correctly);
+// this covers the case dash/keepalivestrategy.go actually depends on.
+func TestArriveReportsTheStrategyThatSentThePing(t *testing.T) {
+	k, _, clock := testKeeper(t, Limits{})
+	k.setStrategies([]tenant.Strategy{{
+		ID: "s1", Active: true, Target: tenant.Target{Mode: tenant.TargetAll},
+		Windows:     []tenant.Window{{Start: "00:00", End: "23:59"}},
+		IdleSeconds: 280, MaxPings: 2, MaxUSDPerPing: 0.25, MinPrefixTokens: 20000,
+	}})
+	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+	k.sweep(clock.advance(281 * time.Second))
+	waitPings(t, k, 1)
+
+	_, _, strategyID := k.arrive("t1", "sess-1")
+	if strategyID != "s1" {
+		t.Errorf("strategyID = %q, want %q — a real request's credit must trace back to the "+
+			"strategy that sent the ping which earned it", strategyID, "s1")
 	}
 }
 
