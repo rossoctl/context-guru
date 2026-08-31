@@ -26,17 +26,20 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 
 | Preset | Pipeline |
 |---|---|
-| `codesmart` | `format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit` |
-| `codesafe` | `format, dedup, failed_run, cmdfilter, extract, collapse, cachesplit` |
-| `safe` | `format, cachesplit` |
-| `balanced` | `format, dedup, failed_run, cmdfilter, cachesplit` |
-| `aggressive` | `format, dedup, failed_run, cmdfilter, smartcrush, extract, extract_llm, cachesplit` |
-| `coding` | `format, toon, dedup, cmdfilter, extract, cachesplit` |
-| `mcp` | `format, smartcrush, cachesplit` |
-| `agent` | `format, dedup, failed_run, mask, extract, extract_llm, cachesplit` |
-| `general` | `format, toon, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, cachesplit` |
+| `codesmart` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, linecap, cachesplit` |
+| `codesafe` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, extract, collapse, linecap, cachesplit` |
+| `safe` | `format, textclean, searchfold, cachesplit` |
+| `balanced` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, cachesplit` |
+| `aggressive` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, smartcrush, extract, extract_llm, linecap, cachesplit` |
+| `coding` | `format, textclean, searchfold, dedup, cmdfilter, extract, linecap, cachesplit` |
+| `mcp` | `format, textclean, smartcrush, cachesplit` |
+| `agent` | `format, textclean, searchfold, dedup, failed_run, mask, extract, extract_llm, cachesplit` |
+| `general` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, linecap, cachesplit` |
 | `summarize` | `summarize` |
 | `off` | *(empty)* |
+| `agentdiet` | `format, agentdiet, cachesplit` |
+| `house` | `format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter` |
+| `housellm` | `format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter` |
 
 Order is deliberate: lossless repack first, then the cheap structural offloaders, then
 anything that costs a model call, cache directives last.
