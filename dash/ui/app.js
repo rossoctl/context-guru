@@ -1396,6 +1396,21 @@ function renderTiles(o) {
   const exact = (o.accounting && o.accounting.complete) || 0;
   const costKnown = exact > 0;
 
+  // A request forwarded with NO compaction because this account's own stored configuration
+  // failed to build — proxy/tenancy.go fails open on purpose rather than taking the account
+  // offline over a bad config row, but until this banner existed that fact lived ONLY in the
+  // proxy's own log. Shown above the headline, not folded into Diagnostics: the number it
+  // reports is "your bill was bigger than it needed to be, right now", which is exactly what
+  // this page exists to prevent from going unnoticed.
+  if (o.invalid_config_requests > 0) {
+    host.appendChild(el('div', { class: 'banner bad', 'data-testid': 'invalid-config' },
+      el('div', {}, el('strong', {}, num(o.invalid_config_requests) + ' request'
+        + (o.invalid_config_requests === 1 ? '' : 's') + ' ran with NO compaction. '),
+        'This account’s stored configuration failed to build, so every one of them was ' +
+        'forwarded as-is instead — traffic kept working, but none of it was compacted. ' +
+        'Open Settings, fix the configuration, and save it again.')));
+  }
+
   // The headline row answers the only question someone opening this page has: did it
   // save money, did it save tokens, and over how much traffic. Everything else is the
   // evidence for those three, so it sits below them in labelled groups rather than
