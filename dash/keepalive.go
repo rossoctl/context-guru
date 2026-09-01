@@ -85,7 +85,15 @@ func addressable(f Filter) (string, []any) {
 // pruned — 7 of 105 credited rows ($11.81 of $167.28, 7.1%) carry keepalive_pings >= 1 while NO
 // ping row exists anywhere in the idle span they ended, two of them with no ping within 16.7
 // hours. On rev-keepalive's larger pre-prune corpus the same query removes $59.15 of $76.46
-// (77.4%) from 179 credited rows, which is where the mechanism costs real money. The credit on those rows belongs to
+// (77.4%) from 179 credited rows, which is where this costs real money.
+//
+// The two figures are far apart because THE LEAK IS NOT THE SAME ONE, and a reader who assumes
+// one of them is simply wrong will draw the wrong conclusion from both. That corpus has idle gaps
+// running to 2,750 s, so its credits fail for the reason the paragraph above describes: a gap
+// longer than any ping could bridge. Production has no gap over 821.8 s against 860 s of
+// coverage, so the missing upper bound is real code with no trigger there — what leaks instead is
+// a keepalive_pings set on rows whose span held no ping at all. One test catches both, which is
+// the argument for measuring coverage rather than gating on the gap. The credit on those rows belongs to
 // whatever else refreshed the entry — another session sending byte-identical content — and not
 // to us.
 //
