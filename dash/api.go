@@ -1112,8 +1112,12 @@ func (a *API) benchmarks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("refresh") == "1" {
-		runs, tasks := a.rec.DB().IngestBenchRoots(a.rec.Opts().BenchDirs)
-		writeJSON(w, map[string]any{"ingested_runs": runs, "ingested_tasks": tasks})
+		// The DIRS go back with the counts. Without them a re-scan of a mistyped path and a
+		// correct scan of an empty directory are the same response — and the UI reported both
+		// as "nothing happened" because it discarded the body entirely.
+		dirs := a.rec.Opts().BenchDirs
+		runs, tasks := a.rec.DB().IngestBenchRoots(dirs)
+		writeJSON(w, map[string]any{"ingested_runs": runs, "ingested_tasks": tasks, "dirs": dirs})
 		return
 	}
 	runs, err := a.rec.DB().BenchRuns()

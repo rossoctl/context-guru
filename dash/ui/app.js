@@ -4110,6 +4110,73 @@ function renderSessionDiff(body, session, out) {
 }
 
 // ── benchmarks ─────────────────────────────────────────────────────────────
+/** BENCH_BASELINE is the harness's name for the no-compaction arm, in every run dir it
+ *  writes (`rows-off.json`). It is the arm every delta on this tab is measured against. */
+const BENCH_BASELINE = 'off';
+
+/** benchOrder puts the baseline first and leaves the rest alphabetical. A comparison table
+ *  whose reference row sorts into the middle makes the reader do the subtraction. */
+function benchOrder(arms) {
+  return arms.slice().sort((a, b) => (a.arm === BENCH_BASELINE ? -1 : b.arm === BENCH_BASELINE ? 1
+    : a.arm < b.arm ? -1 : a.arm > b.arm ? 1 : 0));
+}
+
+/** benchCostKnown: did the ingester find a cost on ANY of this arm's tasks? See
+ *  BenchArm.CostRows — a zero here is an unparsed key far more often than a free run. */
+function benchCostKnown(a) { return (a.cost_rows || 0) > 0; }
+
+function benchCostNAReason(a) {
+  return 'none of this arm’s ' + num(a.tasks) + ' task rows carried a cost the ingester could '
+    + 'read. It reads the per-task cost from an "agent_cost" key; a rows file naming it '
+    + 'otherwise parses to zero, which would render this arm as the cheapest in the study.';
+}
+
+/**
+ * benchDeltaCell is the signed difference from the baseline arm, in the cell (docs/RESULTS.md's
+ * own shape). Solve rate in percentage POINTS, cost as a percentage of the baseline's own cost —
+ * two different units, so the caller names which, and a `pt`/`%` suffix is on the value.
+ *
+ * A sign and an arrow, never colour alone (DESIGN §2.5). Direction is per-measure: more solves
+ * is good, more dollars is not.
+ */
+function benchDeltaCell(a, base, isBase, key, unit) {
+  if (isBase) return el('td', { class: 'num muted', text: '—' });
+  if (!base) {
+    return el('td', { class: 'num' }, el('span', {
+      class: 'na', title: 'not available: this run has no "' + BENCH_BASELINE + '" arm, so there '
+        + 'is nothing to compare against',
+      'aria-label': 'not available: this run has no baseline arm to compare against',
+    }, 'n/a'));
+  }
+  const costLike = unit === '%';
+  if (costLike && !(benchCostKnown(a) && benchCostKnown(base))) {
+    return el('td', { class: 'num' }, el('span', {
+      class: 'na', title: 'not available: a cost delta needs a parseable cost on both this arm '
+        + 'and the baseline',
+      'aria-label': 'not available: a cost delta needs a parseable cost on both arms',
+    }, 'n/a'));
+  }
+  let d, txt;
+  if (costLike) {
+    const b = base[key] || 0;
+    if (!b) return el('td', { class: 'num muted', text: '—' });
+    d = (100 * ((a[key] || 0) - b)) / b;
+    txt = (d > 0 ? '+' : '−') + Math.abs(d).toFixed(2) + '%';
+  } else {
+    d = 100 * ((a[key] || 0) - (base[key] || 0));
+    txt = (d > 0 ? '+' : '−') + Math.abs(d).toFixed(1) + ' pt';
+  }
+  // Cheaper is better; more solved is better. One flag, both directions.
+  const good = costLike ? d < 0 : d > 0;
+  const arrow = d === 0 ? '' : d > 0 ? ' ▲' : ' ▼';
+  return el('td', {
+    class: 'num ' + (Math.abs(d) < 0.005 ? '' : good ? 'good-text' : 'bad-text'),
+    title: 'against the "' + base.arm + '" baseline' + (costLike
+      ? ' (normalised cost basis)' : ' (percentage points of solve rate)'),
+    text: Math.abs(d) < 0.005 ? '±0' : txt + arrow,
+  });
+}
+
 async function loadBenchmarks() {
   const host = clear($('#bench-list'));
   loadingState(host, 3);
@@ -4117,8 +4184,15 @@ async function loadBenchmarks() {
     const { runs } = await api('benchmarks');
     clear(host);
     if (!runs || !runs.length) {
+      // The flag is --dashboard-bench-dirs (cmd/context-guru-proxy/main.go:166). This string
+      // said --dash-bench-dirs, which does not exist anywhere in the repo, and an unknown flag
+      // makes the proxy EXIT — so the tab's only instruction killed the process of anyone who
+      // followed it. This empty state is the tab's primary surface: bench_runs is 0 on a
+      // 133k-request production deployment.
       emptyState(host, 'No benchmark runs ingested',
-        'Point --dash-bench-dirs at a harness jobs root (a directory of runs, each with summary.json and rows-*.json) and re-scan.');
+        'Point --dashboard-bench-dirs at a harness jobs root (a directory of runs, each with '
+        + 'summary.json and rows-*.json), restart, and press Re-scan. Re-scan reports what it '
+        + 'found, including the directories it looked in.');
       return;
     }
     // 42 ingested runs rendered flat is 40k pixels of table. Collapse each run and
@@ -4132,34 +4206,92 @@ async function loadBenchmarks() {
         '  ' + [run.dataset, run.model, armNames && 'arms: ' + armNames,
           when(run.ts)].filter(Boolean).join(' · ')));
       const inner = el('div', { style: 'padding:12px 14px' });
+      // BASELINE FIRST, and the delta column exists. The server orders by arm name
+      // (dash/bench.go benchArms), so `off` sorted third of four alphabetically and a reader had
+      // to compute the one number this tab exists to produce — the difference from baseline —
+      // in their head across four rows. docs/RESULTS.md:11-14 puts baseline first with the
+      // deltas in-cell; this matches it.
+      const arms = benchOrder(run.arms || []);
+      const base = arms.find((a) => a.arm === BENCH_BASELINE) || null;
       const tbl = el('table', { class: 'tbl' }, el('thead', {}, el('tr', {},
         el('th', { text: 'Arm' }), el('th', { class: 'num', text: 'Tasks' }),
-        el('th', { class: 'num', text: 'Solved' }), el('th', { class: 'num', text: 'Solve rate' }),
+        // Scored is the DENOMINATOR of Solve rate, and it was in BenchArm without being a
+        // column. Four arms printed rates off four different denominators (60, 59, 57, 57) with
+        // Tasks — which is not the denominator — beside them, and the only clue was Exceptions,
+        // eleven columns right and off-screen below 1100 px. Both now sit next to the rate.
+        el('th', { class: 'num', title: 'tasks that produced a score: tasks − exceptions. This '
+          + 'is the denominator of Solve rate; Tasks is not.', text: 'Scored' }),
+        el('th', { class: 'num', text: 'Exceptions' }),
+        el('th', { class: 'num', text: 'Solved' }),
+        el('th', { class: 'num', text: 'Solve rate' }),
+        el('th', { class: 'num', text: 'vs baseline' }),
         el('th', { class: 'num', text: 'Mean reward' }), el('th', { class: 'num', text: 'Mean steps' }),
-        el('th', { class: 'num', text: 'Total cost' }), el('th', { class: 'num', text: 'Cost / task' }),
+        // Two bases, both named. bench.go computes TotalNormCostUSD and the UI rendered
+        // neither basis by name — `grep -n norm_cost dash/ui/app.js` was zero hits, so the tab
+        // showed the agent-reported basis while the published claim (docs/RESULTS.md) is the
+        // normalised one, unlabelled and differing by over a point.
+        el('th', { class: 'num', title: 'as the agent harness reported it', text: 'Total cost (agent)' }),
+        el('th', { class: 'num', title: 'every arm re-priced from its own token counts at one '
+          + 'rate card — the basis docs/RESULTS.md quotes', text: 'Total cost (normalised)' }),
+        el('th', { class: 'num', text: 'vs baseline' }),
+        el('th', { class: 'num', text: 'Cost / task' }),
         el('th', { class: 'num', text: '$ per solve' }),
-        el('th', { class: 'num', text: 'Cache hit' }), el('th', { class: 'num', text: 'Mean wall' }),
-        el('th', { class: 'num', text: 'Exceptions' }))));
+        el('th', { class: 'num', text: 'Cache hit' }), el('th', { class: 'num', text: 'Mean wall' }))));
       const tb = el('tbody');
-      for (const a of run.arms || []) {
-        const perSolve = a.solved > 0 ? a.total_cost_usd / a.solved : null;
-        tb.appendChild(el('tr', { class: 'click', onclick: () => toggleBenchTasks(inner, run.id, a.arm) },
-          el('td', {}, el('code', { text: a.arm })),
+      for (const a of arms) {
+        const isBase = base && a.arm === base.arm;
+        const known = benchCostKnown(a);
+        const perSolve = a.solved > 0 && known ? a.total_cost_usd / a.solved : null;
+        tb.appendChild(el('tr', { class: 'click' + (isBase ? ' is-current' : ''),
+          onclick: () => toggleBenchTasks(inner, run.id, a.arm) },
+          el('td', {}, el('code', { text: a.arm }),
+            isBase ? el('span', { class: 'pill neutral', text: 'baseline' }) : null),
           el('td', { class: 'num', text: num(a.tasks) }),
+          el('td', { class: 'num', text: num(a.scored) }),
+          el('td', { class: 'num', text: num(a.exceptions) }),
           el('td', { class: 'num', text: num(a.solved) }),
-          el('td', { class: 'num', text: pct(a.solve_rate * 100) }),
+          // The denominator travels with the rate, in the same cell. codesmart 40/60 and rtk
+          // 38/57 both print 66.7% and are not the same measurement.
+          el('td', { class: 'num', title: num(a.solved) + ' of ' + num(a.scored) + ' scored tasks'
+            + (a.exceptions ? ' (' + num(a.exceptions) + ' excluded as infrastructure exceptions)' : '') },
+          a.scored > 0 ? pct(a.solve_rate * 100) + ' of ' + num(a.scored) : 'n/a'),
+          benchDeltaCell(a, base, isBase, 'solve_rate', 'pt'),
           el('td', { class: 'num', text: a.mean_reward.toFixed(3) }),
           el('td', { class: 'num', text: a.mean_steps.toFixed(1) }),
-          el('td', { class: 'num', text: usd(a.total_cost_usd) }),
-          el('td', { class: 'num', text: usd(a.mean_cost_usd) }),
-          el('td', { class: 'num', text: perSolve === null ? '—' : usd(perSolve) }),
-          el('td', { class: 'num', text: pct(a.cache_hit_rate * 100, 2) }),
-          el('td', { class: 'num', text: dur(a.mean_wall_s * 1000) }),
-          el('td', { class: 'num', text: num(a.exceptions) })));
+          el('td', { class: 'num', title: known ? '' : '' },
+            usdOrNA(a.total_cost_usd, known, benchCostNAReason(a))),
+          el('td', { class: 'num' },
+            usdOrNA(a.total_norm_cost_usd, known, benchCostNAReason(a))),
+          benchDeltaCell(a, base, isBase, 'total_norm_cost_usd', '%'),
+          el('td', { class: 'num' }, usdOrNA(a.mean_cost_usd, known, benchCostNAReason(a))),
+          el('td', { class: 'num', text: perSolve === null ? (known ? '—' : 'n/a') : usd(perSolve) }),
+          // Same shape as the cost cells: BenchArm.CacheHitRate is left at 0 when the arm
+          // reported no token counts at all (benchArms guards `total > 0`), and `0.00%` there is
+          // a claim about a cache that was never measured. The token sums are already on the
+          // wire, so the distinction costs nothing.
+          el('td', { class: 'num' }, a.cache_read + a.cache_write + a.fresh_input > 0
+            ? pct(a.cache_hit_rate * 100, 2)
+            : el('span', {
+              class: 'na',
+              title: 'not available: this arm’s rows carry no cache_read / cache_write / '
+                + 'fresh_input counts, so its cache behaviour was not measured',
+              'aria-label': 'not available: this arm reported no token counts, so its cache '
+                + 'hit rate was not measured',
+            }, 'n/a')),
+          el('td', { class: 'num', text: dur(a.mean_wall_s * 1000) })));
       }
       tbl.appendChild(tb);
       inner.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
-      inner.appendChild(el('p', { class: 'note', text: 'Cost per solve is the number that matters: an arm that spends less by solving fewer tasks has not saved anything. Click an arm for its per-task rows.' }));
+      inner.appendChild(el('p', { class: 'note', text: 'Cost per solve is the number that matters: an arm that spends less by solving fewer tasks has not saved anything. Solve rate is over SCORED tasks, so two arms with the same rate off different denominators are not the same measurement — the denominator is in the cell. Click an arm for its per-task rows.' }));
+      if (arms.some((a) => !benchCostKnown(a))) {
+        inner.appendChild(el('p', { class: 'hint' },
+          el('strong', {}, 'One or more arms report no cost on any task. '),
+          'Those cells read ', el('span', { class: 'na' }, 'n/a'),
+          ' rather than $0, because the ingester reads the per-task cost from an ',
+          el('code', {}, 'agent_cost'),
+          ' key and a rows file naming it something else parses to zero silently — which would '
+          + 'render as the cheapest arm in the study. Check the rows file’s cost key.'));
+      }
       // Cost-vs-reward scatter: the visualization the issue asks for.
       inner.appendChild(el('h2', { text: 'Cost vs reward, by arm' }));
       const scatter = el('div', { class: 'chart', 'data-testid': 'bench-scatter' });
@@ -4171,6 +4303,44 @@ async function loadBenchmarks() {
   } catch (err) {
     if (aborted(err)) return;
     errorState(host, 'Could not load benchmarks', err);
+  }
+}
+
+/**
+ * rescanBenchmarks fires the re-scan and SAYS WHAT IT FOUND.
+ *
+ * The click handler used to `await fetch(...)` and discard the response, so a mistyped path and
+ * a correct scan of an empty directory rendered identically — the tab simply stayed empty —
+ * while the server was returning real counts the whole time. It now also reports the
+ * directories, because "scanned nothing because none are configured" is a different problem
+ * from "scanned two and found no runs" and only one of them is fixed by editing a path.
+ */
+async function rescanBenchmarks() {
+  const host = $('#bench-list');
+  try {
+    const r = await fetch('/api/benchmarks?refresh=1');
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + r.statusText);
+    const out = await r.json();
+    const dirs = out.dirs || [];
+    if (out.ingested_runs > 0) {
+      $('#bench-scan').textContent = 'Scanned ' + dirs.length + ' director'
+        + (dirs.length === 1 ? 'y' : 'ies') + ': ingested ' + num(out.ingested_runs)
+        + ' run' + (out.ingested_runs === 1 ? '' : 's') + ', ' + num(out.ingested_tasks)
+        + ' task rows.';
+    } else if (!dirs.length) {
+      $('#bench-scan').textContent = 'Nothing was scanned: no --dashboard-bench-dirs is '
+        + 'configured on this proxy, so Re-scan has no directory to look in. Restart with the '
+        + 'flag pointing at a jobs root.';
+    } else {
+      $('#bench-scan').textContent = 'Scanned ' + dirs.join(', ') + ' and found no run '
+        + 'directory (a run needs summary.json and at least one rows-*.json). 0 runs, 0 tasks '
+        + 'ingested.';
+    }
+    $('#bench-scan').hidden = false;
+    loadBenchmarks();
+  } catch (err) {
+    if (aborted(err)) return;
+    errorState(host, 'Re-scan failed', err);
   }
 }
 
@@ -5068,10 +5238,7 @@ function init() {
   });
   $('#sess-prev').addEventListener('click', () => { state.sessOffset = Math.max(0, state.sessOffset - 25); loadSessions(); });
   $('#sess-next').addEventListener('click', () => { state.sessOffset += 25; loadSessions(); });
-  $('#bench-refresh').addEventListener('click', async () => {
-    await fetch('/api/benchmarks?refresh=1');
-    loadBenchmarks();
-  });
+  $('#bench-refresh').addEventListener('click', rescanBenchmarks);
   $('#drawer-close').addEventListener('click', closeDrawer);
   // Forward wrap: reaching the sentinel means the last real stop is behind us.
   $('#drawer-end').addEventListener('focus', () => { $('#drawer-close').focus(); });
@@ -9092,6 +9259,11 @@ async function loadKARecommend() {
     errorState(host, 'Could not work out a recommendation', e);
     return;
   }
+  kaState.recommend = rec;
+  // Same payload, two places: the decision row above (which is what a reader acts on) and the
+  // detail below. Rendering it only here is how the refusal came to sit 2,900 px under a green
+  // "Winner" tile that contradicted it.
+  renderKADecision(kaState.ledger, rec);
   clear(host);
   if (rec.refused) {
     // Two different refusals, and only one of them is about thin history: "your own gaps are

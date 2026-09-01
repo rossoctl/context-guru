@@ -192,6 +192,17 @@ type BenchArm struct {
 	CacheHitRate     float64 `json:"cache_hit_rate"`
 	MeanWallS        float64 `json:"mean_wall_s"`
 	Exceptions       int64   `json:"exceptions"`
+	// CostRows is how many of this arm's tasks carry a non-zero cost, and it exists so the UI
+	// can tell "this arm was free" apart from "the ingester could not find a cost in the file".
+	//
+	// harborRow.AgentCost binds to `agent_cost`. A rows file that names its cost anything else
+	// unmarshals to the zero value silently, every task lands at 0, and the arm then renders
+	// $0 / $0 / $0 and sorts as the CHEAPEST — a flattering lie with no way for a reader to see
+	// it. A float64 cannot express absence, and making the column nullable would spread that
+	// through five call sites; counting the rows that priced is the same information one join
+	// cheaper. An arm that ran tasks and cost exactly nothing on every one of them is not a
+	// measurement either, so `n/a` is the honest render in both cases.
+	CostRows int64 `json:"cost_rows"`
 }
 
 // BenchRuns returns every ingested run with its per-arm aggregates.
@@ -230,7 +241,8 @@ func (d *DB) benchArms(runID int64) ([]BenchArm, error) {
 		SUM(CASE WHEN reward >= 1 THEN 1 ELSE 0 END),
 		AVG(reward), AVG(steps), SUM(cost_usd), AVG(cost_usd), SUM(norm_cost_usd),
 		SUM(cache_read), SUM(cache_write), SUM(fresh_input), SUM(completion_tokens),
-		AVG(wall_s), SUM(exception)
+		AVG(wall_s), SUM(exception),
+		SUM(CASE WHEN cost_usd > 0 THEN 1 ELSE 0 END)
 		FROM bench_tasks WHERE run_id = ? GROUP BY arm ORDER BY arm`, runID)
 	if err != nil {
 		return nil, err
@@ -242,7 +254,7 @@ func (d *DB) benchArms(runID int64) ([]BenchArm, error) {
 		if err := rows.Scan(&a.Arm, &a.Tasks, &a.Scored, &a.Solved, &a.MeanReward, &a.MeanSteps,
 			&a.TotalCostUSD, &a.MeanCostUSD, &a.TotalNormCostUSD,
 			&a.CacheRead, &a.CacheWrite, &a.FreshInput, &a.Completion,
-			&a.MeanWallS, &a.Exceptions); err != nil {
+			&a.MeanWallS, &a.Exceptions, &a.CostRows); err != nil {
 			return nil, err
 		}
 		if a.Scored > 0 {

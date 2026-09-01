@@ -704,6 +704,9 @@
     <p class="note">From the harness artifacts. Reward sits beside cost on purpose: an arm
       that saves money by failing tasks is not saving money.</p>
     <button id="bench-refresh" class="ghost" data-testid="bench-refresh">Re-scan run directories</button>
+    <!-- What the re-scan actually found. The click handler used to discard the server's counts,
+         so a wrong path and a correct scan of an empty directory looked identical. -->
+    <p class="hint" id="bench-scan" data-testid="bench-scan" role="status" hidden></p>
     <div id="bench-list" data-testid="bench-list"></div>
   </div>
 </section>
