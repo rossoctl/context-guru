@@ -1420,6 +1420,34 @@ function tileGroup(label, note, tiles, cls) {
   return frag;
 }
 
+/**
+ * costCoverage is the share of the window that actually contributed to a dollar figure.
+ *
+ * Every dollar sum on this page is unrestricted by `token_accounting`, so a row with no
+ * provider usage contributes $0 to it — and `costKnown` used to be `complete > 0`, meaning ONE
+ * priced request in a window unlocked five tiles presented as totals. On a 40-row window with 8
+ * complete rows, 32 rows contributed nothing to a figure labelled "Total dollars avoided".
+ *
+ * The fix is not to hide the number: a partial total is still the best available figure and
+ * hiding it would be its own dishonesty. The fix is that it never renders without saying what
+ * share of the window it covers (DESIGN §3.4 rule 1 — a figure carries its denominator, in the
+ * same block, not in a tooltip).
+ */
+function costCoverage(o) {
+  const complete = (o.accounting && o.accounting.complete) || 0;
+  const requests = o.requests || 0;
+  return { complete, requests, pct: requests > 0 ? (100 * complete) / requests : 0 };
+}
+
+/** costNote appends the coverage to a dollar tile's sub-line. Kept as a suffix rather than a
+ *  separate line so the qualifier cannot be laid out away from the number it qualifies. */
+function costNote(o, sub) {
+  const c = costCoverage(o);
+  if (!c.requests) return sub;
+  return sub + ' · priced on ' + num(c.complete) + ' of ' + num(c.requests) + ' requests ('
+    + pct(c.pct, 1) + ')';
+}
+
 function renderTiles(o) {
   const host = clear($('#tiles'));
   const exact = (o.accounting && o.accounting.complete) || 0;
@@ -1454,7 +1482,7 @@ function renderTiles(o) {
     // NOT in here — it was, under the label "compaction + provider cache", and a headline
     // number that mostly measures somebody else's mechanism is not a headline number.
     tile('total-saved-usd', 'Total dollars avoided', costKnown ? usd(o.total_saved_usd) : 'unknown',
-      'compaction + prefix cache + keep-alive + declarations dropped',
+      costNote(o, 'compaction + prefix cache + keep-alive + declarations dropped'),
       costKnown ? (o.total_saved_usd < 0 ? 'bad' : 'good') : ''),
     // The second total, beside the first and only when they differ. It is the SAME money plus
     // what the account removed itself — an MCP server they dropped, a skill they switched off.
@@ -1463,11 +1491,12 @@ function renderTiles(o) {
     // work into the figure we claim credit for would be taking it.
     costKnown && Math.abs(o.total_reduced_usd - o.total_saved_usd) > 0.00005
       ? tile('total-reduced-usd', 'Total the bill came down', usd(o.total_reduced_usd),
-        'ours + ' + usd(o.self_removed_usd) + ' you removed yourself',
+        costNote(o, 'ours + ' + usd(o.self_removed_usd) + ' you removed yourself'),
         o.total_reduced_usd < 0 ? 'bad' : 'good')
       : null,
     tile('saved-usd', 'Net dollars saved', costKnown ? usd(o.net_saved_usd) : 'unknown',
-      'baseline − actual − our spend', costKnown ? (o.net_saved_usd < 0 ? 'bad' : 'good') : ''),
+      costNote(o, 'baseline − actual − our spend'),
+      costKnown ? (o.net_saved_usd < 0 ? 'bad' : 'good') : ''),
     tile('saved-unique', 'Tokens saved (unique)', compact(o.saved_unique),
       compact(o.replay_tokens) + ' re-earned on later turns', 'accent'),
     // Risk beside value, at the SAME altitude, because on this traffic it is 22x larger than
@@ -1477,7 +1506,7 @@ function renderTiles(o) {
     // and a $157 exposure in a folded footnote is not honest about which number is bigger.
     tile('prefix-change-exposure', 'Prefix-change exposure',
       costKnown ? usd(o.prefix_change_cost_all_usd) : 'unknown',
-      num(o.prefix_change_requests_all) + ' turns re-billed · not netted',
+      costNote(o, num(o.prefix_change_requests_all) + ' turns re-billed · not netted'),
       o.prefix_change_cost_all_usd > 0 ? 'bad' : ''),
     tile('requests', 'Requests', num(o.requests), num(o.sessions) + ' sessions'),
   ], 'headline'));
@@ -1497,10 +1526,17 @@ function renderTiles(o) {
     // no JSON envelope — and the provider bills a superset with its own tokenizer. Measured on
     // this corpus the two differ by 3.2x. Without this tile beside them, four token counts and
     // a "% saved" invite being read against an invoice they are not denominated in.
+    // ONE POPULATION, and the sub-line says which. The numerator is contributed only by rows
+    // where the provider reported usage — it is identically 0 elsewhere — so dividing it by
+    // tokens_before summed over ALL rows invented a ratio across two populations and understated
+    // it by exactly the share of unmeasured rows. It printed "0.6× our count", i.e. "the
+    // provider bills LESS than we count", directly above a tooltip in the same tile saying the
+    // figure is "about three times larger". Both server sums were individually correct.
     tile('billed-input', 'Provider-billed input', compact(o.billed_input_tokens),
-      o.tokens_before > 0
-        ? (o.billed_input_tokens / o.tokens_before).toFixed(1) + '× our count'
-        : 'fresh + cache reads + writes'),
+      o.tokens_before_billed > 0
+        ? (o.billed_input_tokens / o.tokens_before_billed).toFixed(2) + '× our count, on the '
+          + num(o.billed_input_rows) + ' requests reporting provider usage'
+        : 'fresh + cache reads + writes — no request in this window reported provider usage'),
     // The check itself, as a figure rather than a footnote. A ratio of sums (the tile to the
     // left) is dominated by the largest requests; this is the median per-request ratio over the
     // only population where the two counts describe the SAME prompt — requests where nothing
@@ -1559,7 +1595,12 @@ function renderTiles(o) {
         : '', 'accent'),
   ]));
 
-  host.appendChild(tileGroup('Cost', costKnown ? 'billed, and the counterfactual' : 'no priced requests in this window', [
+  // The whole group's coverage in the group note rather than five identical tile suffixes:
+  // every figure below is summed over the window unrestricted, so each of them is a partial
+  // total and the share is the same for all of them.
+  host.appendChild(tileGroup('Cost', costKnown
+    ? costNote(o, 'billed, and the counterfactual')
+    : 'no priced requests in this window', [
     tile('cost-baseline', 'Baseline cost', costKnown ? usd(o.baseline_cost_usd) : 'unknown',
       costKnown ? 'without context-guru' : 'needs all four tiers'),
     tile('cost-actual', 'Actual cost', costKnown ? usd(o.cost_usd) : 'unknown',

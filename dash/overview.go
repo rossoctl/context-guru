@@ -336,6 +336,20 @@ type Overview struct {
 	// over message text only — a different unit, roughly a third the size, and the reason no
 	// token figure on this page may be read as a billed-token figure. See the tile.
 	BilledInputTokens int64 `json:"billed_input_tokens"`
+	// TokensBeforeBilled and BilledInputRows are the DENOMINATOR and the POPULATION for
+	// BilledInputTokens, and they exist because the browser was dividing by the wrong thing.
+	//
+	// BilledInputTokens is fresh + cache_read + cache_write, which is identically 0 on a row
+	// where the provider reported no usage. TokensBefore is our own tokenizer and is non-zero on
+	// every row. So `billed_input_tokens / tokens_before` is a ratio across two populations: a
+	// numerator contributed only by rows with provider usage over a denominator summed across
+	// all of them. It understates the ratio by exactly the share of unmeasured rows, and it
+	// printed "the provider bills LESS than we count" 0 px above a tooltip saying the opposite.
+	//
+	// Restricting the DENOMINATOR to the same rows makes it one population, and BilledInputRows
+	// is that population's size so the ratio can state its own denominator (DESIGN §3.4).
+	TokensBeforeBilled int64 `json:"tokens_before_billed"`
+	BilledInputRows    int64 `json:"billed_input_rows"`
 
 	CGLatencyMsAvg float64 `json:"cg_latency_ms_avg"`
 	UpstreamMsAvg  float64 `json:"upstream_ms_avg"`
@@ -525,6 +539,13 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(CASE WHEN r.cache_bp_system + r.cache_bp_tools
 			+ r.cache_bp_messages + r.cache_bp_blocks > 0 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.fresh_input + r.cache_read + r.cache_write),0),
+		-- Our own count over the SAME rows that contributed the figure above, plus how many
+		-- rows those are. See Overview.TokensBeforeBilled: a ratio of the two sums is only a
+		-- ratio if both come from one population.
+		COALESCE(SUM(CASE WHEN r.fresh_input + r.cache_read + r.cache_write > 0
+			THEN r.tokens_before ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.fresh_input + r.cache_read + r.cache_write > 0
+			THEN 1 ELSE 0 END),0),
 		-- Coverage for the two new columns. A streaming request that carries neither a TTFB
 		-- nor the buffered flag predates the capture; counting those apart is what keeps a
 		-- history of zeros from reading as a measurement of zero.
@@ -551,6 +572,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.SSEStreamed, &o.SSEBuffered, &ttfbAvg, &upBufAvg,
 		&o.Breakpoints.System, &o.Breakpoints.Tools, &o.Breakpoints.Messages,
 		&o.Breakpoints.Blocks, &o.Breakpoints.Requests, &o.BilledInputTokens,
+		&o.TokensBeforeBilled, &o.BilledInputRows,
 		&o.SSERecorded, &o.SSEStreamRows, &o.CacheTTLRecorded,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h)
 	if err != nil {
