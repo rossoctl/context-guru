@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,6 +39,27 @@ import (
 	"github.com/rossoctl/context-guru/proxy"
 	"github.com/rossoctl/context-guru/tenant"
 )
+
+// listenAndAnnounce binds addr and, ONLY once the bind succeeded, logs the line an operator, a
+// CI job, a container healthcheck or a systemd readiness probe watches for.
+//
+// The order is the whole function. ListenAndServe used to bind forty lines below the log call,
+// so a bind failure — a port already owned by another instance being the ordinary one — logged
+// "listening" and then exited: a green on the one failure it most needs to catch. Observed for
+// real on this sweep, and the failure is worse than a missing process, because the sibling that
+// owned the port answered /healthz with 200 and served ITS corpus to the agent whose own proxy
+// had died: 51 sessions and 64 tools it had never created.
+//
+// The attrs are passed through unchanged so anything parsing the line keeps its fields and their
+// order; only the moment it fires has moved.
+func listenAndAnnounce(addr string, attrs ...any) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("context-guru-proxy listening", append([]any{"addr", addr}, attrs...)...)
+	return ln, nil
+}
 
 func main() {
 	var (
@@ -551,8 +573,10 @@ func main() {
 	}
 	// The sink last, so it is the line just above the traffic: "where are the logs and
 	// what level am I getting" is the first question when something looks quiet.
-	slog.Info("context-guru-proxy listening", "addr", addr, "pipeline", cfg.Pipeline,
-		"mode", mode, "logs", sink)
+	ln, err := listenAndAnnounce(addr, "pipeline", cfg.Pipeline, "mode", mode, "logs", sink)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -590,7 +614,7 @@ func main() {
 		close(idle)
 	}()
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 	<-idle
