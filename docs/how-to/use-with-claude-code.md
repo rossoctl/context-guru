@@ -81,7 +81,7 @@ ANTHROPIC_BASE_URL=https://127.0.0.1:1/nope ANTHROPIC_AUTH_TOKEN=bogus \
   claude -p 'say PONG' --max-turns 1     # must FAIL
 ```
 
-**Which preset?** `codesmart` is the default and the cheapest arm in the
+**Which preset?** `codesmart` is the recommended pipeline and the cheapest arm in the
 [benchmarks](../RESULTS.md) at the highest reward. Use `coding` if you want `skeleton` to
 strip function bodies out of large source reads — it needs a `cg_skeleton` build. See
 [Choose a preset](choose-a-preset.md).

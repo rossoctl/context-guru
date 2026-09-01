@@ -61,10 +61,6 @@ func TestCountTokensIsServed(t *testing.T) {
 // TestCountTokensForwardsUpstreamErrors: same wording-preservation rule as the chat route. A
 // client that cannot read the real error here has no way to tell a malformed request from an
 // auth failure.
-
-// TestCountTokensForwardsUpstreamErrors: same wording-preservation rule as the chat route. A
-// client that cannot read the real error here has no way to tell a malformed request from an
-// auth failure.
 func TestCountTokensForwardsUpstreamErrors(t *testing.T) {
 	errBody := `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -89,24 +85,3 @@ func TestCountTokensForwardsUpstreamErrors(t *testing.T) {
 		t.Errorf("status/body not forwarded verbatim: %d %s", resp.StatusCode, got)
 	}
 }
-
-// TestCachePresetAdvertisesNoExtraTool is the test that should have existed when the `cache`
-// preset shipped, and did not.
-//
-// The preset's promise — repeated in `config/config.go`, `docs/reference/presets.md`,
-// `docs/how-to/choose-a-preset.md`, `docs/how-to/install-plugin.md` and the install skill — is
-// that nothing is added to the user's requests. It was false: `expand.Inject` under `auto` gated
-// only on "the request declares tools" and "the store persists", so a cachesplit-only pipeline
-// forwarded `context_guru_expand` to the provider. Measured before the fix:
-//
-//	tools SENT by client    : [Read Bash]
-//	tools FORWARDED upstream: [Read Bash context_guru_expand]
-//
-// That is not cosmetic. A pipeline with no Offload mints no markers, so EVERY expand call against
-// it must fail — on a real session with marker-shaped text in a file, the model called it
-// unprompted and got "[expand: original for id ... is no longer available]", costing a round trip
-// and a step of the user's turn.
-//
-// TestCachePresetIsCachesplitAlone could not catch this: it asserts the presets MAP, while the
-// injection happens in proxy.go after apply returns. This one reads the bytes that leave the
-// process, which is the only place the claim is actually true or false.

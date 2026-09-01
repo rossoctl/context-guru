@@ -31,7 +31,7 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | `summarize` | Offload (LLM) | the middle of the transcript → one summary | via expand | long trajectories | `summary_level` (regular), `keep_last` (3), `min_tokens` (500), `resummarize_tokens` (6000), `model.source`, `trigger` |
 | [`agentdiet`](components/agentdiet.md) | Offload (LLM) | useless/redundant/**expired** content in the step that just aged past the delay | via expand | a step above `min_step_tokens`, `delay_steps` turns back | `delay_steps` (2), `context_steps` (1), `min_step_tokens` (500), `min_saved_tokens` (400), `max_keep_ratio` (0.8), `model.source` |
 
-Presets (`config/config.go`), verbatim: **`codesmart`** (the proxy default)
+Presets (`config/config.go`), verbatim: **`house`** (the proxy default), **`codesmart`** (the SWE-bench arm)
 `[format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, linecap, cachesplit]` ·
 **`codesafe`**
 `[format, textclean, searchfold, dedup, failed_run, cmdfilter, extract, collapse, linecap, cachesplit]`
@@ -79,10 +79,12 @@ Absolutes (`min_request_tokens`, etc.) still win; when the window is unknown, fr
 absolutes apply (backward compatible). This lets one config generalize across models/benchmarks.
 
 **Reversibility in practice.** The `context_guru_expand` tool is advertised on outgoing requests
-(`INJECT_EXPAND=auto|always|never`, default `auto` = whenever the request already declares
-tools and the store persists), so Offload markers are genuinely recoverable — not just described in marker text.
-Both conditions are properties of the **session**, not of the turn, so the `tools` array a session
-sends is byte-identical on every request in it. That matters more than it looks: `tools` sits ahead of
+(`INJECT_EXPAND=auto|always|never`, default `auto` = whenever the request already declares tools,
+the store persists, **and the pipeline contains at least one Offload**), so Offload markers are
+genuinely recoverable — not just described in marker text. That third condition is what keeps the
+tool off pipelines that mint no markers, where every call to it would have to fail.
+All three conditions are properties of the **session**, not of the turn, so the `tools` array a
+session sends is byte-identical on every request in it. That matters more than it looks: `tools` sits ahead of
 `system` and `messages` in the provider's prompt-cache hash, so the first request carrying a **new**
 tools array re-creates the **entire** prefix at the write rate. `auto` used to also require a marker on
 the request, which made the array grow on the first offloading turn and shrink again on the next turn

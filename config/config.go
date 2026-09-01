@@ -402,8 +402,11 @@ var presets = map[string][]string{
 	// stacking our offloaders beside it would reduce the same tool outputs first and
 	// there would be nothing left to attribute.
 	"agentdiet": {"format", "agentdiet", "cachesplit"},
-	// codesmart / codesafe are the SWE-bench study's winning configs, shipped as the
-	// recommended defaults (codesmart is the proxy default). Their tuned per-component
+	// codesmart / codesafe are the SWE-bench study's winning configs and the RECOMMENDED
+	// pipelines — but neither is the proxy default, which is `house` (see the --preset flag in
+	// cmd/context-guru-proxy/main.go). Asserting it here is how five documents came to repeat
+	// it: the claim was copied from three lines away from the flag that disproves it. Their
+	// tuned per-component
 	// settings live in presetConfigs; the name-lists here keep PresetPipeline (used by
 	// /compact?preset=) resolving them.
 	"codesmart": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "linecap", "cachesplit"},
@@ -442,7 +445,7 @@ var presets = map[string][]string{
 // reader relies on when deciding whether the published numbers describe the shipped
 // default. They describe an ancestor of it. Treat any preset change as a reason to
 // re-measure, not as a documentation edit.
-//   - codesmart (the winning cache-aware config, and the proxy default): the LLM
+//   - codesmart (the winning cache-aware config; NOT the proxy default, which is `house`): the LLM
 //     relevance-trimmer extract_llm routed to the CHEAP model (model.source: config,
 //     nil-when-unset ⇒ it silently no-ops to deterministic — see docs), gated at 3000
 //     tok so most turns make no model call, ≤4 calls/req; the free deterministic extract

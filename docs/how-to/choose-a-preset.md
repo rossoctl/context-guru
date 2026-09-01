@@ -11,7 +11,7 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 
 | Your workload | Preset |
 |---|---|
-| **Most agents — the default** | **`codesmart`** |
+| **Most agents — the recommended pipeline** | **`codesmart`** (pass `--preset codesmart`; the binary defaults to `house`) |
 | Same, but no LLM on the hot path | `codesafe` |
 | A guaranteed-safe, lossless win only | `safe` |
 | General non-agentic traffic | `balanced` |

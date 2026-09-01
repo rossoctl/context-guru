@@ -8,10 +8,14 @@ SWE-bench task driven by Claude Code.
 - **Go 1.26**. A **C toolchain** is needed only for the `cg_skeleton` tag used below
   (tree-sitter), and for `make test`'s race detector — *not* for the binary itself, which is
   pure Go and statically linked. bifrost's tokenizer does **not** use cgo: o200k_base is
-  embedded (`internal/tokens/tokens.go`), and a default `CGO_ENABLED=0` build of this repo
-  succeeds for all four `GOOS`/`GOARCH` targets we care about. CI asserts it on every PR with no C
-  compiler on `PATH` at all (`.github/workflows/ci.yaml`, the `purego` job), so this cannot rot
-  back into a false claim.
+  embedded (`internal/tokens/tokens.go`). CI asserts the pure-Go build on every PR — natively, for
+  linux/amd64 — in the `purego` job (`.github/workflows/ci.yaml`), which builds with
+  `CGO_ENABLED=0`, checks the artifact is statically linked, starts it and probes `/healthz`. So the
+  claim cannot rot back into a false one for the platform CI runs on.
+
+  Cross-compilation to the other three release targets (linux/arm64, darwin/amd64, darwin/arm64) is
+  **not** covered by that job: it was verified by hand on go 1.26.4 and is asserted at release time
+  by the tag workflow, not per PR.
 - **Docker** (for the gateway image / eval-containers), and the **eval-containers** repo.
 
 ## Build

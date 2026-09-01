@@ -12,26 +12,28 @@ import (
 	"testing"
 )
 
-// TestExpandToolIsAdvertisedOnlyWhereMarkersCanExist is the test that should have existed when the `cache`
-// preset shipped, and did not.
+// TestExpandToolIsAdvertisedOnlyWhereMarkersCanExist pins the gate this change adds.
 //
-// The preset's promise — repeated in `config/config.go`, `docs/reference/presets.md`,
-// `docs/how-to/choose-a-preset.md`, `docs/how-to/install-plugin.md` and the install skill — is
-// that nothing is added to the user's requests. It was false: `expand.Inject` under `auto` gated
-// only on "the request declares tools" and "the store persists", so a cachesplit-only pipeline
-// forwarded `context_guru_expand` to the provider. Measured before the fix:
+// `expand.Inject` under `auto` gated on two things — the request declares tools, and the store
+// persists. Nothing asked whether the pipeline could produce a `<<cg:HASH>>` marker at all, so an
+// offloader-free pipeline advertised `context_guru_expand` to the provider. Measured before the
+// fix, on a cachesplit-only pipeline:
 //
 //	tools SENT by client    : [Read Bash]
 //	tools FORWARDED upstream: [Read Bash context_guru_expand]
 //
 // That is not cosmetic. A pipeline with no Offload mints no markers, so EVERY expand call against
-// it must fail — on a real session with marker-shaped text in a file, the model called it
-// unprompted and got "[expand: original for id ... is no longer available]", costing a round trip
-// and a step of the user's turn.
+// it must fail — on a real session with marker-shaped text in a file (this repo's own docs contain
+// literal `<<cg:HASH>>`), the model called it unprompted and got "[expand: original for id ... is
+// no longer available]", costing a round trip and a step of the user's turn.
 //
-// TestCachePresetIsCachesplitAlone could not catch this: it asserts the presets MAP, while the
-// injection happens in proxy.go after apply returns. This one reads the bytes that leave the
-// process, which is the only place the claim is actually true or false.
+// It has to be asserted HERE, on the bytes that leave the process. Any test of the presets map or
+// of the built pipeline would pass throughout: the injection happens in proxy.go, after apply has
+// already returned.
+//
+// The `mcp` case below is the one that keeps this honest. It looks offloader-free and is not, so a
+// gate written against a list of preset names would get it wrong — as the first draft of this test
+// did.
 func TestExpandToolIsAdvertisedOnlyWhereMarkersCanExist(t *testing.T) {
 	for _, c := range []struct {
 		name     string

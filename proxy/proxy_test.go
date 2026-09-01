@@ -40,7 +40,8 @@ func buildHandler(t *testing.T, yaml string, upstream string) (*proxy.Handler, s
 //
 // Advertising that tool is gated on the pipeline containing an Offload, because a pipeline that
 // mints no markers would be declaring a tool whose every call must fail (the defect that shipped
-// in the `cache` and `off` presets). A `pipeline: []` fixture therefore no longer advertises it,
+// in `off` — the A/B control arm — and in `safe`). A `pipeline: []` fixture therefore no longer
+// advertises it,
 // and a test that hand-seeds the Store to simulate an offload has to use a pipeline where the
 // offload it is simulating could actually have happened.
 //

@@ -85,7 +85,9 @@ flowchart TD
 
 ## Install
 
-Requires **Go 1.26** and a **C toolchain** (`CGO_ENABLED=1`). Build from the repo root:
+Requires **Go 1.26**; no C toolchain — `make build` builds with cgo off and produces a statically
+linked binary. (A C compiler is needed only for `make test`'s race detector and the optional
+`cg_skeleton` tag.) Build from the repo root:
 
 ```sh
 CGO_ENABLED=1 go build -tags cg_skeleton -o bin/context-guru-proxy ./cmd/context-guru-proxy

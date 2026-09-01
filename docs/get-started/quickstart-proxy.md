@@ -3,8 +3,12 @@
 Run context-guru in front of your provider and point an agent at it. One port serves both
 the OpenAI and Anthropic dialects.
 
-You need **Go 1.26** and a **C toolchain** (`CGO_ENABLED=1`). Everything else is a normal
+You need **Go 1.26**. You do **not** need a C toolchain: `make build` builds with cgo disabled, and
+the result is a statically linked binary with no runtime dependencies. Everything else is a normal
 module dependency — build straight from the repo root.
+
+A C compiler is needed for exactly two things: `make test` (the race detector requires cgo) and the
+optional [`skeleton`](../components/skeleton.md) component's `cg_skeleton` build tag.
 
 ## Steps
 

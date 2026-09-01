@@ -9,10 +9,13 @@ LDFLAGS := -s -w \
 # CGO is on for DEVELOPMENT, and the reason is `go test -race`, which does not work
 # without it. It is NOT a requirement of the shipped binary: tree-sitter is the only cgo
 # dependency in the tree and it is behind the `cg_skeleton` build tag, so a default build
-# is pure Go. `make build-static` is that build, and CI proves it with no C compiler on PATH
-# (the `purego` job). Reading this variable as a shipping requirement is what put "install a C
-# toolchain" at the top of our own quickstart, and named bifrost's tokenizer as a cgo dependency
-# in docs/setup.md, which it never was.
+# is pure Go, and `make build` now builds it that way — so the documented "no C toolchain" claim
+# is true of the command the docs actually tell you to run, which it was not while this variable
+# applied to every target. CI proves it with no compiler on PATH at all (the `purego` job).
+#
+# Reading this variable as a SHIPPING requirement is what put "install a C toolchain" at the top of
+# our own quickstart, and named bifrost's tokenizer as a cgo dependency in docs/setup.md, which it
+# never was. It is needed for `go test -race` and for `-tags cg_skeleton`; nothing else.
 export CGO_ENABLED=1
 
 .DEFAULT_GOAL := help
@@ -23,12 +26,12 @@ help: ## Display this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
-build: ## Build the context-guru-proxy binary into ./bin
+build: ## Build the context-guru-proxy binary into ./bin (pure Go — no C toolchain needed)
 	@mkdir -p bin
-	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/context-guru-proxy
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/context-guru-proxy
 
 .PHONY: build-static
-build-static: ## Build the pure-Go static binary (no C toolchain needed)
+build-static: ## Same as build, plus -trimpath — the exact build releases ship
 	@mkdir -p bin
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/context-guru-proxy
 	@file bin/$(BINARY) 2>/dev/null || true

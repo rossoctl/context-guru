@@ -91,9 +91,9 @@ type Options struct {
 	//
 	// This comment used to claim a marker condition that expand.Inject explicitly disclaims,
 	// and the pipeline condition was missing entirely. The consequence was live: a
-	// cachesplit-only pipeline (the `cache` preset) forwarded `context_guru_expand` to the
-	// provider, a model that saw marker-shaped text in a file called it, and the call could
-	// only ever fail because nothing in that pipeline mints a marker to resolve.
+	// cachesplit-only pipeline forwarded `context_guru_expand` to the provider, a model that
+	// saw marker-shaped text in a file called it, and the call could only ever fail because
+	// nothing in that pipeline mints a marker to resolve.
 	//
 	// `always` still injects unconditionally — an operator asking for it by name gets it.
 	InjectExpand string
@@ -1161,11 +1161,17 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					im = expand.InjectAuto
 				}
 				// Under `auto`, advertise only when THIS request's pipeline can actually mint a
-				// marker. Without this, an offloader-free pipeline (`cache`, `off`, `safe`,
-				// `mcp`) declared a tool whose every use is guaranteed to fail — measured:
-				// `[Read Bash]` in, `[Read Bash context_guru_expand]` out, and on a transcript
-				// containing marker-shaped text the model duly called it and got
+				// marker. Without it, an offloader-free pipeline — `off`, `safe`, or any
+				// cachesplit-only configuration — declared a tool whose every use is guaranteed
+				// to fail: measured `[Read Bash]` in, `[Read Bash context_guru_expand]` out, and
+				// on a transcript containing marker-shaped text the model duly called it and got
 				// "[expand: original for id ... is no longer available]".
+				//
+				// Which presets those are is NOT a list worth writing down here — `mcp` looks
+				// offloader-free and is not, because `smartcrush` implements components.Offload.
+				// That is exactly why the gate asks the interface (Pipeline.HasOffload) instead
+				// of naming presets: a list in a comment is a second source of truth, and this
+				// one was wrong about `mcp` in its first draft.
 				//
 				// `off` mattered most: it is the A/B control arm, and a control that carries an
 				// extra tool declaration is not a control.
