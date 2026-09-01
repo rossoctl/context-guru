@@ -46,17 +46,14 @@ import (
 // calculator. It is restated here because the dependency runs the other way: dash imports this
 // package, so this one cannot import dash to reuse it.
 //
-// THE TWO ARE NOT PINNED AGAINST EACH OTHER, and that is a gap rather than a decision. An
-// earlier version of this comment claimed a test in package dash asserted they agree. No such
-// test exists, and a comment that promises a guard is worse than no comment at all, because it
-// tells the next reader to stop worrying. The Python port IS pinned, by four guards in
-// deploy/harbor/kv_ttl_cost_drift_test.go — so the one duplication left unguarded is the Go/Go
-// pair, which would be the easiest of the three to guard.
+// The two ARE pinned against each other, by TestPingScheduleMatchesTheKeepAliveTab in package
+// dash — the only package that can import both — over a 12x4x5 grid of (gap, idle, K) chosen to
+// straddle the boundaries where they could differ: dash's takes float64 SECONDS and floor-divides
+// those, this takes a time.Duration and floor-divides integer nanoseconds. The Python port is
+// pinned separately by four guards in deploy/harbor/kv_ttl_cost_drift_test.go.
 //
-// The formulas agree today. They are not the same function at the boundaries: dash's takes
-// float64 SECONDS and floor-divides those, this takes a time.Duration and floor-divides integer
-// nanoseconds. The test belongs in package dash — only it can import both — and is about twenty
-// lines mirroring TestPingScheduleMatchesThePort.
+// An earlier version of this comment said the Go/Go guard did not exist. It does; a comment that
+// denies a guard sends the next reader to write a second one.
 func PingsPerSpan(gap, idle time.Duration, max int) int {
 	if idle <= 0 || max <= 0 || gap <= idle {
 		return 0

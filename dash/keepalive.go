@@ -81,9 +81,11 @@ func addressable(f Filter) (string, []any) {
 // of them is an upper bound on the idle gap: it requires that the gap EXCEEDED the provider's
 // lifetime — the floor — and then credits the row whatever the gap was, on the strength of
 // keepalive_pings alone. That column is the whole of the write path's evidence, and on real rows
-// it is not sufficient evidence: measured on 105 credited rows, 7 of them ($11.81 of $167.28,
-// 7.1%) carry keepalive_pings >= 1 while NO ping row exists anywhere in the idle span they
-// ended, two of them with no ping within 16.7 hours. The credit on those rows belongs to
+// it is not sufficient evidence. On /tmp/cg.db — 133,064 real rows, opened read-only, never
+// pruned — 7 of 105 credited rows ($11.81 of $167.28, 7.1%) carry keepalive_pings >= 1 while NO
+// ping row exists anywhere in the idle span they ended, two of them with no ping within 16.7
+// hours. On rev-keepalive's larger pre-prune corpus the same query removes $59.15 of $76.46
+// (77.4%) from 179 credited rows, which is where the mechanism costs real money. The credit on those rows belongs to
 // whatever else refreshed the entry — another session sending byte-identical content — and not
 // to us.
 //
