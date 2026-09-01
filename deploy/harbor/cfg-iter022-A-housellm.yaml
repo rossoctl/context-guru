@@ -1,0 +1,53 @@
+# iter022 ARM A -- the BASELINE: the `housellm` service config, verbatim, plus summarize and collapse.
+#
+# housellm is what every account on this service runs when it runs the compaction-model pass, so it is
+# the honest "what we have today". Copied field for field from config/config.go's `housellm` preset
+# rather than approximated -- including two settings this file does NOT quietly fix:
+#
+#   1. min_tokens: 3000 on extract_llm. The comment above the preset DERIVES 8000 for that path from
+#      measured call cost (~$0.0193 per accepted call, needing 4,060 saved tokens to break even at the
+#      cache-write rate, ~65% observed reduction => a ~6,250-token candidate, 8,000 for margin), and
+#      records that below it the path is measurably a LOSS. Issue #120. Left at 3000 because it is what
+#      ships, and because it is IDENTICAL in all three arms, so it cannot bias B-A or C-A. Its net is a
+#      measured endpoint of this iteration instead of a config guess.
+#   2. Pinning min_tokens/trigger sets `explicit`, and shouldFire() then returns true unconditionally
+#      ("explicit min_tokens/trigger configured"), so extract_llm's context-pressure trigger is disabled
+#      and the tail pass fires on EVERY request. That is issue #134, open, and it is a property of the
+#      shipped config rather than of this experiment. It matters here for one reason beyond cost: the
+#      tail pass leaves markers, and extract_llm_sweep skips marked content, so a tail pass firing every
+#      turn can progressively starve the sweep. Whether it actually does is the pre-flight's gate.
+#
+# summarize is present because iter021's 71% -> 56% drop is a real effect that CANNOT BE MEASURED AT ALL
+# if summarize is absent from the pipeline. Identical in all three arms, so any change in how often it
+# fires is attributable to the component that differs. Its config is iter021 arm A's, unchanged.
+#
+# collapse is present in all three arms as a shared CONTROL, not as treatment. iter021 lost 17 and 10
+# runs to `prompt is too long` on single-line multi-megabyte tool outputs, and errored runs score 0 in
+# ITT -- the dominant noise term. #138 gave collapse a BYTE-based window gate that catches exactly that
+# shape. It sits LATE, after the LLM passes, per its own documentation ("the last-resort catch-all for
+# anything still oversized") and per the `general`/`codesafe` presets -- which also keeps its markers
+# from hiding candidates the sweep should have seen.
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, collapse, cachesplit, toolfilter, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    min_tokens: 3000
+    model: {model: claude-haiku-4-5, source: incoming}
+    strategy: code
+    trigger: {min_request_tokens: 3000}
+  extract_llm_sweep:
+    min_tokens: 1000
+  summarize:
+    trigger: {min_request_frac: 0.78}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}
