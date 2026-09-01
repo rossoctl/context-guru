@@ -6302,7 +6302,7 @@ async function loadMachines() {
       }, s.current ? 'Sign out here' : 'Revoke'))));
   }
   tbl.appendChild(body);
-  host.appendChild(tbl);
+  host.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
 }
 
 /** Store this configuration as the tenant's own, or '' to go back to following the
@@ -6675,7 +6675,7 @@ async function loadTokens() {
         }, 'Revoke'))));
   }
   tbl.appendChild(body);
-  host.appendChild(tbl);
+  host.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
 }
 
 async function loadAudit() {
@@ -6715,7 +6715,7 @@ async function loadAudit() {
           : null)));
     }
     tbl.appendChild(body);
-    host.appendChild(tbl);
+    host.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
   } catch (e) { errorState(host, 'Could not read the audit log', e); }
 }
 
@@ -6819,7 +6819,7 @@ async function loadTenants() {
           }, 'Manage')))));
     }
     tbl.appendChild(body);
-    host.appendChild(tbl);
+    host.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
   } catch (e) {
     clear(host);
     errorState(host, 'Could not list tenants', e);
@@ -7249,7 +7249,7 @@ async function loadVariants() {
     }
   }
   tbl.appendChild(body);
-  host.appendChild(tbl);
+  host.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
 
   // The full caveat list comes from the server rather than being written twice: the API
   // decides what this comparison cannot show, and a second copy in the page would drift.
@@ -7305,7 +7305,7 @@ async function loadArchive() {
         }, 'Open'))));
     }
     tbl.appendChild(body);
-    host.appendChild(tbl);
+    host.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
   } catch (e) {
     clear(host);
     errorState(host, 'Could not list the archive', e);
