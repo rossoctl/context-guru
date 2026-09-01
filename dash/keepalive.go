@@ -128,6 +128,9 @@ func kaSaved(alias string) string {
 		panic("dash: kaSaved needs a table alias; an un-aliased one resolves to the subquery")
 	}
 	col := alias + "keepalive_saved_usd"
+	// The `> 0` FIRST is not style: it short-circuits the probe to the credited rows. Measured on
+	// a 2.1 GB database, a full-table SUM is 314 ms this way and 61.9 SECONDS with the EXISTS
+	// first, for the identical answer. Do not reorder.
 	return `(CASE WHEN ` + col + ` > 0 AND EXISTS (
 			SELECT 1 FROM requests kp
 			WHERE kp.keepalive = 1 AND kp.status = 200

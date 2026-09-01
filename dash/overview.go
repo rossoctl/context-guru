@@ -552,8 +552,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		-- count in hand. The COST half cannot be summed here — this query excludes ping rows
 		-- (Filter.WithKeepAlive) so the request count and every average stay agent-only — so it
 		-- has its own query below.
-		COALESCE(SUM(r.keepalive_saved_usd),0),
-		COALESCE(SUM(CASE WHEN r.keepalive_saved_usd > 0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(`+kaSaved("r.")+`),0),
+		COALESCE(SUM(CASE WHEN `+kaSaved("r.")+` > 0 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.cache_write_1h),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
