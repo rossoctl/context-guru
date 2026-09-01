@@ -84,7 +84,8 @@ func addressable(f Filter) (string, []any) {
 // it is not sufficient evidence. On /tmp/cg.db — 133,064 real rows, opened read-only, never
 // pruned — 7 of 105 credited rows ($11.81 of $167.28, 7.1%) carry keepalive_pings >= 1 while NO
 // ping row exists anywhere in the idle span they ended, two of them with no ping within 16.7
-// hours. On rev-keepalive's larger pre-prune corpus the same query removes $59.15 of $76.46
+// hours ($152.36 credited after the correction). On rev-keepalive's larger pre-prune corpus the
+// same query removes $59.15 of $76.46
 // (77.4%) from 179 credited rows, which is where this costs real money.
 //
 // The two figures are far apart because THE LEAK IS NOT THE SAME ONE, and a reader who assumes
@@ -108,8 +109,16 @@ func addressable(f Filter) (string, []any) {
 // (keepalive = 1) with a ts and a session, so "was this row's prefix actually still under a
 // ping's 5-minute window" is a fact on disk, not an inference from a strategy's (X, K) — which
 // would assume every ping fired on schedule and would say nothing at all about the 8 credited
-// rows that carry no strategy id. status = 200 is part of it: two ping rows in this corpus
-// failed 502/503, and a ping that did not reach the provider refreshed nothing.
+// rows that carry no strategy id.
+//
+// `kp.cache_read > 0` is the second half of the test and it is the DIRECT observation rather than
+// a proxy: a ping refreshed the entry exactly when it read the entry. An earlier version asked
+// for status = 200 instead, which is weaker in both directions — it credits the 18 ping rows in
+// this corpus that returned 200 while reading nothing (a ping that arrived after the entry had
+// already expired re-CREATED it, which is why keepalive.go publishes PingsThatReadNothing and
+// PingsThatWrote beside the saving), and it refuses a ping whose refresh is visible but whose
+// status was never recorded. Both of the 502/503 ping rows here read nothing, so this subsumes
+// the status test on real data. It is also stricter: $155.47 under status = 200, $152.36 here.
 //
 // alias is the outer table's qualifier and it MUST be one: an un-aliased caller resolves
 // `ts` to the SUBQUERY's own requests row (inner scope wins in SQL), turning `kp.ts < ts` into
@@ -141,7 +150,7 @@ func kaSaved(alias string) string {
 	// first, for the identical answer. Do not reorder.
 	return `(CASE WHEN ` + col + ` > 0 AND EXISTS (
 			SELECT 1 FROM requests kp
-			WHERE kp.keepalive = 1 AND kp.status = 200
+			WHERE kp.keepalive = 1 AND kp.cache_read > 0
 			  AND kp.tenant_id = ` + alias + `tenant_id AND kp.session_id = ` + alias + `session_id
 			  AND kp.ts <= ` + alias + `ts
 			  AND kp.ts + ` + strconv.FormatInt(providerCacheTTLMs, 10) + ` >= ` + alias + `ts)

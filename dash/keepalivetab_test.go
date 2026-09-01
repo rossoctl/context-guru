@@ -1174,19 +1174,27 @@ func TestLedgerRefusesCreditOnAGapNoPingCovered(t *testing.T) {
 	}
 }
 
-// A ping the provider never answered refreshed nothing, so it cannot cover a gap. Two of 741 real
-// ping rows are 502/503, and they are stored like any other ping.
-func TestLedgerRefusesCreditFromAFailedPing(t *testing.T) {
-	const base = 10_000_000
-	credit := kaCredit(base, "s1", 1.00)
-	ping := kaPing(base-60_000, "s1", 0.01, 0, 0)
-	ping.Status = 503
-	f := newKAFixture(t, credit, ping)
-	led, err := f.db.KeepAliveLedger(Filter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if led.SavedUSD != 0 {
-		t.Errorf("SavedUSD = %v, want 0 — a 503 ping did not refresh anything", led.SavedUSD)
+// A ping that read nothing refreshed nothing, so it cannot cover a gap — whatever its status.
+// Reading the entry IS the refresh, so cache_read is the evidence and the status code is only a
+// proxy for it. Both cases are real: 2 of 741 production ping rows failed 502/503, and 18 more
+// returned 200 while reading nothing, having arrived after the entry had already expired and
+// re-created it instead (the same rows keepalive.go counts as PingsThatReadNothing).
+func TestLedgerRefusesCreditFromAPingThatRefreshedNothing(t *testing.T) {
+	for name, ping := range map[string]*Event{
+		"transport failure": func() *Event {
+			p := kaPing(9_940_000, "s1", 0.01, 0, 0)
+			p.Status = 503
+			return p
+		}(),
+		"200 but read nothing": kaPing(9_940_000, "s1", 0.01, 0, 48_000),
+	} {
+		f := newKAFixture(t, kaCredit(10_000_000, "s1", 1.00), ping)
+		led, err := f.db.KeepAliveLedger(Filter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if led.SavedUSD != 0 {
+			t.Errorf("%s: SavedUSD = %v, want 0 — that ping refreshed nothing", name, led.SavedUSD)
+		}
 	}
 }
