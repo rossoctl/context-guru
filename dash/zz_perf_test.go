@@ -7,6 +7,29 @@ import (
 	"time"
 )
 
+// Three measured counter-examples to "a correlated subquery is the slow shape", collected
+// here because this package keeps rediscovering the same lesson from the wrong end. The cost of
+// a correlated subquery is its INVOCATION COUNT, which is set by how selective the OUTER
+// predicate is and by where that predicate sits — not by the subquery being correlated.
+//
+//  1. CompactionResets' outer filter (tokens_before > 0) matched ~100% of rows, so the subquery
+//     ran 65k+ times and a covering index changed the plan without moving the measured time at
+//     all. A LAG window function took ~25s to ~3.3s. Correlated form lost.
+//  2. ReplayProjectedTokens looks identical in shape, and the same rewrite makes it WORSE:
+//     byte-identical result, consistently 50-70% slower on live data (0.9s correlated against
+//     1.5s windowed, 5 runs), because its outer filter (saved_unique > 0) matches only 8.5% of
+//     rows — so the subquery runs for that 8.5% while a window function must still sort the
+//     whole table first. Correlated form won. See the comment at that query.
+//  3. Predicate ORDER inside one AND is worth more than either: in kaSaved (dash/keepalive.go)
+//     the cheap `keepalive_saved_usd > 0` guard placed before the reachability EXISTS makes a
+//     full-table SUM 314 ms; placed after it, the identical answer takes 61.9 SECONDS. 197x,
+//     from moving one term. That expression is now inlined at ten read sites — do not let a
+//     tidy-up normalise the order.
+//
+// So: measure the selectivity of the outer predicate before reaching for a window function, and
+// put the cheap term first. An index that leaves the plan alone buys nothing, and a plan change
+// that leaves the invocation count alone buys nothing either.
+
 // The gate aggregation expands request_components through json_each, so it could have
 // turned a dashboard load into a table scan.
 //
