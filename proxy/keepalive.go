@@ -1158,6 +1158,44 @@ type KeepAliveStats struct {
 	SpentUSD float64 `json:"spend_usd"`
 }
 
+// PendingPings reports how many tracked sessions still have a ping scheduled ahead of them.
+//
+// This exists for the idle-exit watchdog, and it exists because the keep-alive INVERTS the
+// ordinary meaning of "idle": pinging is what the proxy does precisely while no client
+// traffic is arriving. A watchdog counting only requests would therefore kill the process in
+// exactly the window the feature was built for — the quiet gap after `end_turn`, where 83.7%
+// of the recoverable dollars sit. So "no requests recently" is not sufficient to exit; "and
+// nothing is waiting to be pinged" is the other half.
+//
+// The conditions are `due`'s minus the timing term: an entry that is stopped, or has spent
+// its MaxPings, or whose policy is off will never be pinged again and must not hold the
+// process open. Everything else is gated at record time (see pingable), so a live entry is by
+// construction one we intend to ping.
+func (h *Handler) PendingPings() int {
+	if h == nil {
+		return 0
+	}
+	return h.keeper.pendingPings()
+}
+
+// pendingPings counts entries with a ping still ahead of them. Nil-safe: a keeper whose
+// sweep never launched (the CONTEXT_GURU_KEEPALIVE kill switch) has nothing pending, which
+// correctly lets an idle proxy exit.
+func (k *keeper) pendingPings() int {
+	if k == nil {
+		return 0
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	n := 0
+	for _, e := range k.live {
+		if !e.stopped && e.pol.on() && e.pings < e.pol.MaxPings {
+			n++
+		}
+	}
+	return n
+}
+
 // Stats snapshots the keeper's counters.
 func (k *keeper) Stats() KeepAliveStats {
 	if k == nil {

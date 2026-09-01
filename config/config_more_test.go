@@ -125,7 +125,13 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 	// restructures the transcript alone, and agentdiet reproduces a published baseline
 	// whose whole claim is what ONE reflection achieves — stacking folds beside it would
 	// reduce the same outputs first and there would be nothing left to attribute.
-	exempt := map[string]bool{"off": true, "summarize": true, "agentdiet": true}
+	// `cache` is exempt for a reason the other three do not share: its whole product claim
+	// is that it is ONE component, verifiable by reading one line of the presets map. Adding
+	// format/textclean/searchfold to it would each be lossless in meaning and would still
+	// cost the claim — a stranger deciding whether to route their agent through us can check
+	// "nothing but a cache breakpoint moves" in a second, and cannot check four rewriters as
+	// fast. See TestCachePresetIsCachesplitAlone, which holds the other side of that trade.
+	exempt := map[string]bool{"off": true, "summarize": true, "agentdiet": true, "cache": true}
 	for name, pipeline := range presets {
 		if exempt[name] {
 			continue
@@ -215,5 +221,38 @@ func TestLinecapRunsLastAmongTheOffloaders(t *testing.T) {
 					"cachesplit, or it steals candidates from the heavier offloaders", name, i, pipeline)
 			}
 		}
+	}
+}
+
+// TestCachePresetIsCachesplitAlone guards the one preset whose CONTENT is its promise.
+//
+// `cache` is what the local-distribution funnel points a stranger at, and the pitch is
+// exact: no content dropped, no `<<cg:HASH>>` marker written, no expand tool injected, no
+// model called. That is not a property of cachesplit that survives company — every other
+// component in the repo either rewrites JSON, offloads content, or calls a model, so ANY
+// addition here converts a checkable claim into a trust-me claim, and the docs that make the
+// claim (docs/how-to/choose-a-preset.md, the plugin's install skill) do not get to notice.
+//
+// It is also why `cache` is exempt from TestLosslessFoldsAreInEveryWorkingPreset. That
+// exemption is only defensible while this test exists: without it, "cache is exempt from the
+// folds rule" would read as permission to put anything at all in it.
+func TestCachePresetIsCachesplitAlone(t *testing.T) {
+	p, ok := presets["cache"]
+	if !ok {
+		t.Fatal("preset `cache` is gone; the local-distribution funnel and the install skill both name it")
+	}
+	if len(p) != 1 || p[0] != "cachesplit" {
+		t.Fatalf("preset `cache` = %v, want exactly [cachesplit]: it is the only preset whose "+
+			"losslessness is verifiable by reading one line, and every other component either "+
+			"rewrites JSON, offloads content, or calls a model", p)
+	}
+	// The pipeline the proxy actually builds, not just the map literal: applyPreset and the
+	// rich-preset path both sit between this map and the wire.
+	built, ok := PresetPipeline("cache")
+	if !ok {
+		t.Fatal(`PresetPipeline("cache") did not resolve, so ?preset=cache would 400`)
+	}
+	if len(built) != 1 || built[0] != "cachesplit" {
+		t.Fatalf(`PresetPipeline("cache") = %v, want [cachesplit]`, built)
 	}
 }

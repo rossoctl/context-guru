@@ -358,7 +358,27 @@ func (c *Config) applyPreset() error {
 // sweep found 0 convertible candidates in 11.67M tokens. It was costing 1.53 ms and a
 // TextTokens call per tool message to convert nothing.
 var presets = map[string][]string{
-	"off":        {}, // passthrough: no components (baseline / A-B control)
+	"off": {}, // passthrough: no components (baseline / A-B control)
+	// cache: the volatile-tail split and NOTHING else. This is the preset a stranger
+	// evaluating context-guru on their own Claude Code sessions is pointed at, and the
+	// reason it exists is that it can be verified by reading this one line: no content is
+	// dropped, no `<<cg:HASH>>` marker is written, no expand tool is injected into the
+	// request, and no model is called. The loudest objection to putting a proxy on the
+	// wire — "you are editing my agent's context" — does not apply to it.
+	//
+	// It is also the best-evidenced single component in the repo: -34.1% cost and 0% ->
+	// 96.7% prefix-cache hit in an isolated A/B (docs/results/context-guru.md), which is
+	// why the funnel leads with the cache rather than the offloaders.
+	//
+	// Deliberately NOT `safe` (format -> textclean -> searchfold -> cachesplit): those are
+	// lossless in meaning but they still rewrite the JSON, so "we do not touch your
+	// context" stops being literally true and a reviewer has to take four components on
+	// trust instead of reading one. TestCachePresetIsCachesplitAlone holds it to that, and
+	// the lossless-folds rule exempts it for the same reason.
+	//
+	// Anthropic-family only, and the docs say so: cachesplit is a no-op on implicit
+	// prefix-cache backends (vLLM, llm-d) — see apply/prefixsplit.go.
+	"cache":      {"cachesplit"},
 	"safe":       {"format", "textclean", "searchfold", "cachesplit"},
 	"balanced":   {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "linecap", "cachesplit"},
 	"aggressive": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "smartcrush", "extract", "extract_llm", "linecap", "cachesplit"},

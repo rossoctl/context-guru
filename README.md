@@ -108,6 +108,9 @@ docker build -t context-guru:local .
 
 ## Quickstart (60 seconds)
 
+Download a release binary — statically linked, **no Go and no C compiler needed** — or build
+from source:
+
 ```sh
 # 1 — run the proxy (ships with the SWE-bench-winning cache-aware config by default)
 ./bin/context-guru-proxy                          # --preset house (the default); listens on :4000
@@ -144,6 +147,8 @@ See [docs/components.md](docs/components.md) and [docs/reference/presets.md](doc
 | Flag / env | Default | Purpose |
 |---|---|---|
 | `--preset` / `PRESET` | `house` | pipeline preset when no `--config` |
+| `--idle-exit` / `IDLE_EXIT` | `0` (never) | exit after this long unused; floor `max(2 × store.ttl_seconds, 1h)`, refused with `--upstreams` |
+| `--version` | — | print version and commit, then exit |
 | `--config` / `CONFIG` | — | YAML config (overrides preset) |
 | `LISTEN_ADDR` | `:4000` | listen address |
 | `--anthropic-upstream` / `ANTHROPIC_UPSTREAM` | `https://api.anthropic.com` | Anthropic upstream base |

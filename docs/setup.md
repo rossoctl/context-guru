@@ -10,12 +10,14 @@ SWE-bench task driven by Claude Code.
   pure Go and statically linked. bifrost's tokenizer does **not** use cgo: o200k_base is
   embedded (`internal/tokens/tokens.go`). CI asserts the pure-Go build on every PR — natively, for
   linux/amd64 — in the `purego` job (`.github/workflows/ci.yaml`), which builds with
-  `CGO_ENABLED=0`, checks the artifact is statically linked, starts it and probes `/healthz`. So the
-  claim cannot rot back into a false one for the platform CI runs on.
+  `CGO_ENABLED=0`, checks the artifact is statically linked, starts it and probes `/healthz`. The
+  release workflow asserts it again before publishing, deliberately: a release must not depend on a
+  PR check having run.
 
   Cross-compilation to the other three release targets (linux/arm64, darwin/amd64, darwin/arm64) is
-  **not** covered by that job: it was verified by hand on go 1.26.4 and is asserted at release time
-  by the tag workflow, not per PR.
+  covered by the release build, not by that per-PR job.
+- If you do not need `skeleton`, skip the build entirely and use a
+  [release binary](https://github.com/rossoctl/context-guru/releases).
 - **Docker** (for the gateway image / eval-containers), and the **eval-containers** repo.
 
 ## Build

@@ -3,6 +3,22 @@
 Route [Claude Code](https://docs.claude.com/en/docs/claude-code) through context-guru with
 one environment variable — no changes to Claude Code itself.
 
+## You do not need an API key
+
+Setting `ANTHROPIC_BASE_URL` **without** a credential variable leaves your claude.ai login in
+place: a Pro or Max subscription keeps working, with your usage limits and billing unchanged. You
+can run context-guru in front of your own sessions with **no API key at all** — which is the
+cheapest way to evaluate it.
+
+Two honest caveats:
+
+- On subscription billing the saving lands in **usage limits**, not dollars, so `/stats` cost
+  figures are list-price estimates and will not match a bill you do not receive.
+- Setting `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` in your Claude Code environment is what
+  moves you onto metered API billing. Only do it deliberately — see
+  [Keep the API key out of Claude Code](#keep-the-api-key-out-of-claude-code), which is about
+  the *proxy* holding the key, not Claude Code.
+
 ## Steps
 
 1. Start the proxy:
@@ -37,6 +53,9 @@ Add to `.claude/settings.json` so you don't export anything by hand:
   }
 }
 ```
+
+Use `.claude/settings.local.json` instead if you do not want to commit it: a base URL pointing at
+`localhost` breaks Claude Code for everyone who clones the repo whenever the proxy is not running.
 
 ## Keep the API key out of Claude Code
 

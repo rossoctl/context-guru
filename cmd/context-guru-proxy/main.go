@@ -63,7 +63,13 @@ func listenAndAnnounce(addr string, attrs ...any) (net.Listener, error) {
 
 func main() {
 	var (
-		addr      = envOr("LISTEN_ADDR", ":4000")
+		// --listen, not just LISTEN_ADDR. Two reasons beyond taste: an operator reading `ps`
+		// could not tell which port an instance held (the address reached it only through the
+		// environment), and a supervisor that needs to stop ONE instance among several had
+		// nothing in the command line to match on. Pattern-matching a process for shutdown is
+		// still the wrong tool — but when it happens, the port must at least be visible.
+		addrFlag  = flag.String("listen", envOr("LISTEN_ADDR", ":4000"), "address to listen on")
+		showVer   = flag.Bool("version", false, "print version and exit")
 		cfgPath   = flag.String("config", envOr("CONFIG", ""), "path to context-guru YAML config")
 		preset    = flag.String("preset", envOr("PRESET", "house"), "preset to use when --config is absent (house = the service default, deterministic; housellm = the same plus the compaction-model pass; codesmart/codesafe = the SWE-bench study's configs, kept so its published numbers stay reproducible)")
 		openai    = flag.String("openai-upstream", envOr("OPENAI_UPSTREAM", "https://api.openai.com"), "OpenAI upstream base URL")
@@ -78,6 +84,14 @@ func main() {
 		bob       = flag.String("bob-upstream", envOr("BOB_UPSTREAM", ""), "Bob (BobShell) backend base URL; enables the Bob gateway routes when set (e.g. https://api.us-east.bob.ibm.com)")
 		storeFlag = flag.String("store", envOr("STORE", ""), "override state store: true|false (default: config store.enabled, else on)")
 		modeFlag  = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | observe (overrides the config's mode:)")
+		// OFF by default, and it must stay that way: a gateway or eval-containers deployment
+		// that self-terminates is a much worse failure than a laptop process left running.
+		// Set only by the plugin installer, which pairs it with a SessionStart hook that
+		// starts the proxy again on demand — self-kill without that resurrection is a
+		// footgun, so they ship together. The floor is enforced below, not documented.
+		idleExit = flag.Duration("idle-exit", envDuration("IDLE_EXIT", 0),
+			"exit after this long with no requests and no keep-alive ping pending (0 = never; "+
+				"must be at least 2x store.ttl_seconds, see store.IdleExitFloor)")
 
 		// Dashboard. Off by default so an existing deployment's behavior and route
 		// table are unchanged until asked for; on, it adds /dashboard/ + /api/*.
@@ -189,6 +203,17 @@ func main() {
 			"comma-separated directories of benchmark runs (each with summary.json + rows-*.json) to ingest")
 	)
 	flag.Parse()
+
+	// --version before anything else: an installer asks a binary what it is, and it must be
+	// able to ask without starting a server or needing a config. buildinfo.Version was already
+	// compiled in and reachable only via /stats, which requires a running proxy — so
+	// `context-guru-proxy --version` was answered by the flag package's usage text, and an
+	// installer parsing it recorded "Usage of context-guru-proxy:" as the installed version.
+	if *showVer {
+		fmt.Printf("context-guru-proxy %s (commit %s)\n", buildinfo.Version, buildinfo.Commit)
+		return
+	}
+	addr := *addrFlag
 
 	// Logging first, before anything can want to log. Level, format and sink come from
 	// the environment (CG_LOG_LEVEL / CG_LOG_FORMAT / CG_LOG_FILE / CG_LOG_PLAIN) rather
@@ -571,6 +596,17 @@ func main() {
 		slog.Warn("context-guru: OBSERVE MODE — requests are forwarded UNMODIFIED; " +
 			"/stats reports what compaction WOULD have saved under potential_*/projected_* keys")
 	}
+	// Idle-exit validation goes BEFORE the "listening" line, because a fatal here used to be
+	// logged after it: the operator saw `context-guru-proxy listening` and then an exit, which
+	// reads as a crash rather than as a rejected configuration.
+	//
+	// Refused rather than warned about: a threshold below the store's entry lifetime does not
+	// degrade gracefully, it re-bills live prefixes as cache creation (the 11.5x regression
+	// FrozenLost exists to catch). A misconfigured value must not start.
+	if err := checkIdleExit(*idleExit, *upstreamsPath, cfg.Store); err != nil {
+		log.Fatalf("context-guru: %v", err)
+	}
+
 	// The sink last, so it is the line just above the traffic: "where are the logs and
 	// what level am I getting" is the first question when something looks quiet.
 	ln, err := listenAndAnnounce(addr, "pipeline", cfg.Pipeline, "mode", mode, "logs", sink)
@@ -578,9 +614,22 @@ func main() {
 		log.Fatalf("listen: %v", err)
 	}
 
+	// Activity stamping is wired ONLY when the watchdog is on, so an ordinary deployment's
+	// handler chain is byte-identical to before.
+	var handler http.Handler = h.Mux()
+	act := &activityClock{}
+	if *idleExit > 0 {
+		// Launch counts as activity, so the threshold is measured from a moment that means
+		// something rather than from whenever the watchdog goroutine is first scheduled.
+		act.touch(time.Now())
+		handler = stampActivity(handler, act, time.Now)
+		slog.Info("context-guru: idle-exit armed", "after", *idleExit,
+			"check_every", idleCheckInterval(*idleExit))
+	}
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: h.Mux(),
+		Handler: handler,
 		// ReadHeaderTimeout is the one that matters for a service on a network: without
 		// it, a client that opens a connection and never finishes its headers holds a
 		// goroutine and a file descriptor indefinitely.
@@ -600,12 +649,36 @@ func main() {
 	// Graceful shutdown, so the dashboard's writer goroutine flushes its batch and any
 	// in-flight archive upload is not abandoned halfway. Without this, a restart loses
 	// the last few hundred milliseconds of captured requests every time.
+	//
+	// Both reasons to stop — a signal, and the idle watchdog — converge on ONE teardown, so
+	// the self-terminating path cannot drift from the one that is known to work.
 	idle := make(chan struct{})
+	why := make(chan string, 2)
+	stopWatch := make(chan struct{})
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		s := <-sig
-		slog.Info("context-guru: shutting down", "signal", s.String())
+		why <- "signal " + s.String()
+	}()
+	if *idleExit > 0 {
+		t := time.NewTicker(idleCheckInterval(*idleExit))
+		go func() {
+			defer t.Stop()
+			// h.PendingPings is the half of "idle" that requests cannot express: the
+			// keep-alive works precisely when no client traffic is arriving.
+			if reason, ok := watchIdle(idleExitOptions{
+				threshold: *idleExit, act: act, pending: h.PendingPings,
+				now: time.Now, tick: t.C, stop: stopWatch,
+			}); ok {
+				why <- reason
+			}
+		}()
+	}
+	go func() {
+		reason := <-why
+		close(stopWatch)
+		slog.Info("context-guru: shutting down", "reason", reason)
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {

@@ -13,6 +13,7 @@ package store
 
 import (
 	"container/list"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -299,13 +300,64 @@ const DefaultMaxEntries = 5000
 // (stash_refused), instead of quietly making them irreversible.
 const DefaultStashMaxBytes = 256 << 20
 
+// EffectiveTTL is the entry lifetime this Options actually yields, defaulting included.
+//
+// Exported and used by NewMemory itself rather than duplicated, because a second copy of
+// "zero means DefaultTTL" is exactly the drift that would matter: IdleExitFloor sizes a
+// process's whole lifetime off this number, and a floor computed from a different default
+// than the store runs with is a floor that protects nothing.
+func (o Options) EffectiveTTL() time.Duration {
+	if o.TTLSeconds <= 0 {
+		return DefaultTTL
+	}
+	return time.Duration(o.TTLSeconds) * time.Second
+}
+
+// IdleExitFloor is the shortest idle-exit threshold that is not destructive.
+//
+// Process exit WIPES this store: rewind stashes, frozen decisions, `cg:len:`. A frozen
+// decision that dies mid-session is the 11.5x cache-WRITE regression that FrozenLost exists
+// to detect — the session's next turn re-creates the whole prefix at write prices instead of
+// reading it. So an idle-exit threshold shorter than the store's own entry lifetime turns a
+// convenience feature into a cost regression that looks like the proxy misbehaving.
+//
+// 2x the TTL, with a 1h absolute floor. Twice, not once, because the TTL is a SLIDING
+// window: an entry touched just before the idle clock started still has a full TTL ahead of
+// it, so 1x can expire live state. The 1h term covers a config that sets a tiny ttl_seconds
+// (a test rig, or an operator trimming memory) where 2x would collapse to seconds and the
+// threshold would be shorter than the keep-alive's own ping window.
+//
+// With the default TTL of 10000s the floor is ~5h34m, so the installer's 24h default clears
+// it comfortably; a 30-minute threshold is refused at startup rather than documented.
+func IdleExitFloor(o Options) time.Duration {
+	if f := 2 * o.EffectiveTTL(); f > time.Hour {
+		return f
+	}
+	return time.Hour
+}
+
+// ValidateIdleExit checks an idle-exit threshold against IdleExitFloor. Zero or negative
+// means the watchdog is off, which is always valid — a gateway or eval-containers
+// deployment must never self-terminate, so off is the default and the only way to a
+// self-killing proxy is to ask for one.
+func ValidateIdleExit(d time.Duration, o Options) error {
+	if d <= 0 {
+		return nil
+	}
+	if floor := IdleExitFloor(o); d < floor {
+		return fmt.Errorf("idle-exit %s is below the floor of %s (2x the store's %s entry "+
+			"lifetime): exiting wipes the in-memory store, so a shorter threshold drops live "+
+			"frozen decisions and re-bills their prefix as cache creation instead of a cache "+
+			"read. Raise --idle-exit, or raise store.ttl_seconds if the short lifetime is "+
+			"deliberate", d, floor, o.EffectiveTTL())
+	}
+	return nil
+}
+
 // NewMemory builds an in-memory store. Zero/negative option fields fall back to
 // defaults (DefaultTTL, DefaultMaxEntries, 100 sessions of sticky sets).
 func NewMemory(o Options) *Memory {
-	ttl := time.Duration(o.TTLSeconds) * time.Second
-	if o.TTLSeconds <= 0 {
-		ttl = DefaultTTL
-	}
+	ttl := o.EffectiveTTL()
 	max := o.MaxEntries
 	if max <= 0 {
 		max = DefaultMaxEntries
