@@ -492,25 +492,29 @@ func TestToolReportDiffsDeclaredAgainstUsed(t *testing.T) {
 	if got := wf.UnusedUSD; got < 0.0049 || got > 0.0051 {
 		t.Errorf("Workflow unused USD = %g, want ~0.005", got)
 	}
-	// Declared weight per captured session over the CONTROLLABLE set: 5000+400+1000+300 = 6700.
+	// Declared weight per captured session over the CONTROLLABLE set: 5000+400+1000 = 6400.
 	// Bash's 100 is not in it and is reported separately in AsideTokens, so the two still add up
-	// to the 6800 the session actually carried — the split moves weight between figures, it never
+	// to the 6500 the session actually carried — the split moves weight between figures, it never
 	// loses any.
-	if rep.Totals.DeclaredTokens != 6700 || rep.Totals.UnusedTokens != 6700 {
-		t.Errorf("totals = %+v, want 6700 declared / 6700 unused per session", rep.Totals)
+	//
+	// The dataviz row's 300 is NOT added: a skill entry is a slice of the listing, whose whole
+	// 1000 is already here, so counting both books the same bytes twice. This assertion read 6700
+	// until 2026-09 and that 300 was the bug — the same one DeclaredSetTokens below never had.
+	if rep.Totals.DeclaredTokens != 6400 || rep.Totals.UnusedTokens != 6400 {
+		t.Errorf("totals = %+v, want 6400 declared / 6400 unused per session", rep.Totals)
 	}
 	if rep.Totals.AsideTokens != 100 || rep.Totals.AsideSetTokens != 100 {
 		t.Errorf("aside weight = %d/%d, want 100/100 (Bash)",
 			rep.Totals.AsideTokens, rep.Totals.AsideSetTokens)
 	}
-	if got := rep.Totals.DeclaredTokens + rep.Totals.AsideTokens; got != 6800 {
-		t.Errorf("controllable + aside = %d, want the 6800 the session declared", got)
+	if got := rep.Totals.DeclaredTokens + rep.Totals.AsideTokens; got != 6500 {
+		t.Errorf("controllable + aside = %d, want the 6500 the session declared", got)
 	}
 	// The share denominator is still the WHOLE set, aside included, so a share is a share of the
 	// real prompt: the skills LISTING (1000) + Workflow (5000) + the MCP tool (400) + Bash (100)
 	// = 6500. The dataviz row's 300 is deliberately absent — a skill's weight is its ENTRY inside
-	// that listing, so adding the rows to the listing counts the same bytes twice. That is why
-	// this figure and DeclaredTokens above differ, and it predates the built-in split.
+	// that listing, so adding the rows to the listing counts the same bytes twice. This figure
+	// got that right from the start; DeclaredTokens above did not, and now agrees with it.
 	if rep.Totals.DeclaredSetTokens != 6500 {
 		t.Errorf("declared set = %d, want 6500 (listing + every tool row, aside included)",
 			rep.Totals.DeclaredSetTokens)
@@ -519,8 +523,15 @@ func TestToolReportDiffsDeclaredAgainstUsed(t *testing.T) {
 		t.Errorf("controllable share of the set = %d, want 6400",
 			rep.Totals.DeclaredSetTokens-rep.Totals.AsideSetTokens)
 	}
-	if rep.Totals.UnusedReads != 67_000 {
-		t.Errorf("unused reads = %d, want 67000", rep.Totals.UnusedReads)
+	// 50,000 (Workflow) + 4,000 (the MCP tool) + 10,000 (the listing). Not the skill ENTRY's
+	// 3,000 on top: that is the listing's own bytes again. Asserted in absolute reads and dollars
+	// rather than as UnusedPct, because numerator and denominator inflate together — the
+	// percentage moves by a fraction of a point and would pass with the double count in place.
+	if rep.Totals.UnusedReads != 64_000 {
+		t.Errorf("unused reads = %d, want 64000", rep.Totals.UnusedReads)
+	}
+	if got := rep.Totals.UnusedUSD; got < 0.00639 || got > 0.00641 {
+		t.Errorf("unused USD = %g, want ~0.0064 (64,000 cache-read tokens at $0.1/MTok)", got)
 	}
 	if rep.Totals.RequestsPerSession != 5.5 {
 		t.Errorf("requests per session = %v, want 5.5 (11 requests / 2 sessions)", rep.Totals.RequestsPerSession)
@@ -800,5 +811,70 @@ func TestScanSystemMemoizesTheEmptyCase(t *testing.T) {
 	// And the stored nil reads back as a hit, not as a fresh miss returning nil by accident.
 	if sp := scanSystem(body); sp != nil {
 		t.Errorf("the memoized negative came back as %+v", sp)
+	}
+}
+
+// TestToolReportCountsTheSkillsListingOnce pins the double-count bound directly: a corpus whose
+// declarations are NOTHING but a skills listing and the entries inside it. The entries sum to the
+// listing's own weight, so booking both puts the totals at exactly 2.00x the truth — the upper
+// bound of an inflation that ran at 15-17% of the reported figure on real corpora, where skills
+// are one declaration among many.
+//
+// Deliberately synthetic, and deliberately asserted on absolute tokens, reads and dollars.
+// UnusedPct is useless as a guard here: both halves of the ratio inflate together (99.25% vs
+// 99.02% on a real corpus), so a percentage assertion passes with the bug in place.
+func TestToolReportCountsTheSkillsListingOnce(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := 0; i < 10; i++ {
+		e := mkEvent(int64(1000+i), "skillsonly", "claude", 100, 90)
+		e.TenantID, e.Tools = "t1", 2 // r.tools > 0 is what makes a session eligible
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	// 400 + 600 = the listing's 1000: an entry's tokens are a SLICE of the listing's, and on a
+	// real listing the entries sum to it minus the header prose.
+	if err := w.write([]invMsg{{tenant: "t1", session: "skillsonly", ts: 1000, inv: &Inventory{
+		Digest: "d1",
+		Decls: []Decl{
+			{Kind: KindSkillListing, Server: SkillsOK, Tokens: 1000},
+			{Kind: KindSkill, Name: "dataviz", Tokens: 400},
+			{Kind: KindSkill, Name: "ponytail:ponytail", Tokens: 600},
+		},
+		UseFingerprint: 42,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := db.ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Totals.DeclaredTokens != 1000 || rep.Totals.UnusedTokens != 1000 {
+		t.Errorf("totals = %d declared / %d unused, want 1000 / 1000 (2000 is the listing twice)",
+			rep.Totals.DeclaredTokens, rep.Totals.UnusedTokens)
+	}
+	// 1000 tokens re-read by 10 requests, at $0.1/MTok for a cache read.
+	if rep.Totals.UnusedReads != 10_000 {
+		t.Errorf("unused reads = %d, want 10000", rep.Totals.UnusedReads)
+	}
+	if got := rep.Totals.UnusedUSD; got < 0.00099 || got > 0.00101 {
+		t.Errorf("unused USD = %g, want ~0.001", got)
+	}
+	// Both skills still appear, with their own weight, in the table the reader acts on: the fix
+	// removes them from the TOTALS, not from the page.
+	if len(rep.Skills.Skills) != 2 || rep.Skills.Declared != 2 {
+		t.Fatalf("skills = %+v, want both rows still reported", rep.Skills)
+	}
+	for _, s := range rep.Skills.Skills {
+		if s.UnusedReads == 0 {
+			t.Errorf("skill %q lost its own per-row waste figure", s.Name)
+		}
+	}
+	// And the listing's own waste is still booked once, under its own name.
+	if rep.Skills.UnusedListingReads != 10_000 {
+		t.Errorf("unused listing reads = %d, want 10000", rep.Skills.UnusedListingReads)
 	}
 }

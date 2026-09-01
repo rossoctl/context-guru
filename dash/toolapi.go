@@ -592,9 +592,17 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		st.HasText = st.HasText || dr.hasText
 		st.SessionsDeclared++
 		aside := isAside(dr.kind, dr.name)
-		if aside {
+		// A skill entry's tokens are a SLICE of the skills listing, whose whole weight the
+		// KindSkillListing branch above already added. Adding the entry as well books the same
+		// bytes twice — measured at 15.3-16.9% of the reported totals on real corpora and exactly
+		// 2.00x on a skills-only one. The listing is the unit that survives, because it is the
+		// unit that can be acted on: the prose is one indivisible block, and it is also the unit
+		// DeclaredSetTokens has always used (see `whole` below).
+		skillEntry := dr.kind == KindSkill
+		switch {
+		case aside:
 			asideTok[dr.session] += dr.tokens
-		} else {
+		case !skillEntry:
 			declTok[dr.session] += dr.tokens
 		}
 		calls := usedIn[dr.session][k]
@@ -613,7 +621,7 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 		} else {
 			st.Priced = false
 		}
-		if !aside {
+		if !aside && !skillEntry { // same reason as declTok above
 			unusedTok[dr.session] += dr.tokens
 		}
 	}
@@ -693,10 +701,10 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 			rep.Aside = append(rep.Aside, *st)
 			continue
 		}
-		// Only the controllable set reaches the totals. This is the same restriction the loop
-		// above put on unusedTok, applied to the scope-wide sum.
-		rep.Totals.UnusedReads += st.UnusedReads
-		rep.Totals.UnusedUSD += st.UnusedUSD
+		// A skill row's own figures print in the skills table, but they do NOT reach the totals:
+		// the listing they are a slice of is added once below, and adding both is the same
+		// double-count the declTok loop above avoids. This `continue` therefore has to sit
+		// ABOVE the two adds, not below them.
 		if st.Kind == KindSkill {
 			rep.Skills.Skills = append(rep.Skills.Skills, *st)
 			rep.Skills.Declared++
@@ -706,6 +714,10 @@ func buildToolReport(sessions map[string]*sessionCost, decls []declRow, uses []u
 			}
 			continue
 		}
+		// Only the controllable set reaches the totals. This is the same restriction the loop
+		// above put on unusedTok, applied to the scope-wide sum.
+		rep.Totals.UnusedReads += st.UnusedReads
+		rep.Totals.UnusedUSD += st.UnusedUSD
 		rep.Tools = append(rep.Tools, *st)
 	}
 	rep.Totals.UnusedReads += rep.Skills.UnusedListingReads
