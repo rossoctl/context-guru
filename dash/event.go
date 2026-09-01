@@ -184,8 +184,22 @@ type Event struct {
 	// they are away from the keyboard has to be auditable to the cent, and a ping that did
 	// not appear as a row would be spend with no owner.
 	KeepAlive bool `json:"keepalive"`
-	// KeepAlivePings is, on a REAL request, how many pings preceded it during the idle span
-	// it just ended. It is what makes the saving below attributable rather than assumed: a
+	// KeepAlivePings is, on a REAL request, how many pings the keeper DECIDED to send during the
+	// idle span it just ended — which is not the same as how many were sent, and the difference is
+	// why dash.kaSaved does not trust this column.
+	//
+	// proxy/keepalive.go increments it under the sweep's lock, before dispatch. Three paths then
+	// return without a request reaching the provider and without writing a ping row: the tenant
+	// limiter refusing spare headroom, an unusable body, and a transport error on send. All three
+	// bump skipped/failed and leave this count already raised. Measured consequence on a
+	// 133,064-row production corpus: 7 of 105 credited rows carry KeepAlivePings >= 1 with no ping
+	// row anywhere in the span, two with none within 16.7 hours.
+	//
+	// So this is dispatch intent, and only a stored ping row (keepalive = 1, status = 200) is
+	// evidence that a ping happened. The credit is gated on the latter at read time. Not fixed
+	// here: the counter is in proxy/ and the figure it feeds is already protected.
+	//
+	// It is still what makes the saving below attributable rather than assumed: a
 	// request that hits after a twenty-minute gap could have been rescued by our ping or by
 	// any other session that happened to send byte-identical content, and only this
 	// distinguishes them.
