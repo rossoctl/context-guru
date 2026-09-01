@@ -18,8 +18,8 @@ func init() { components.Register("collapse", newCollapse) }
 // cmdfilter/format), and skips anything already carrying a marker so it never
 // double-collapses.
 //
-// The window is cut by LINES when there are enough of them, and by CHARACTERS when
-// there are not. The character path is not a nicety. Being the last-resort catch-all,
+// The window is cut by LINES when that actually shrinks the output, and by CHARACTERS when
+// it does not. The character path is not a nicety. Being the last-resort catch-all,
 // collapse declining a payload means nothing caps it, and the line-only version
 // declined every output of head_lines+tail_lines lines or fewer — which includes the
 // single most common shape of an enormous tool result: a database or HTTP API response
@@ -35,11 +35,21 @@ func init() { components.Register("collapse", newCollapse) }
 // allow-list exempts any line matching `^\S+:\d+`, and a one-line JSON body
 // (`{"items":[{"id":1,...`) matches that by accident.
 //
-// ponytail: an output with MORE than head_lines+tail_lines lines still takes the line
-// window and can stay multi-megabyte if the kept lines are themselves huge (linecap,
-// which runs after, caps those lines unless neverTruncate exempts them). Deliberately
-// out of scope here so the line path stays byte-identical; the character window is a
-// natural second stage for it if that shape shows up in production.
+// The choice between the two windows is made on BYTES, not on the line count: an output
+// with more than head_lines+tail_lines lines whose kept head or tail is itself
+// multi-megabyte takes the CHARACTER window too. Gating on the line count alone left the
+// motivating shape alive above 40 lines — measured at 4,195,111 B in, 4,194,922 B out, and
+// worse than declining, because dropping the small filler lines in the middle counts as
+// acting and stamps a marker, which then makes linecap decline (marker_or_kept_verbatim)
+// and forwards 1.57 M tokens. linecap could not have capped it even without the marker:
+// its neverTruncate allow-list exempts any line matching `^\S+:\d+`, which one-line JSON
+// matches by accident (issue #151), so the mitigation this comment used to name is void
+// rather than conditional.
+//
+// ponytail: []rune(content) on the character path copies the whole output — ~59 MB for the
+// 14.8 MB payloads that motivated this component — once per oversized message per turn, on
+// top of the strings.Split above it. Fine at the measured rate (16 bodies in 3,347
+// requests) but it is the obvious thing to make streaming if that rate rises.
 type Collapse struct {
 	maxTokens int
 	maxFrac   float64
@@ -66,8 +76,12 @@ func newCollapse(raw []byte) (components.Component, error) {
 	if err := components.Decode(raw, &cfg); err != nil {
 		return nil, err
 	}
-	return &Collapse{maxTokens: cfg.MaxTokens, maxFrac: cfg.MaxFrac, headLines: cfg.HeadLines,
-		tailLines: cfg.TailLines, mode: parseMarkerMode(cfg.MarkerMode), coldCache: coldCacheDefault(cfg.ColdCache)}, nil
+	// Clamp here rather than at each use: a negative head_lines used to panic on the line
+	// path (`1 > -10` sends even a one-liner there, then lines[:-10] slices out of range),
+	// which fail-open contained but which also made splitWindow's own guard unreachable for
+	// the config it looked like it defended.
+	return &Collapse{maxTokens: cfg.MaxTokens, maxFrac: cfg.MaxFrac, headLines: max(cfg.HeadLines, 0),
+		tailLines: max(cfg.TailLines, 0), mode: parseMarkerMode(cfg.MarkerMode), coldCache: coldCacheDefault(cfg.ColdCache)}, nil
 }
 
 func (Collapse) Name() string                 { return "collapse" }
@@ -180,20 +194,35 @@ const collapseMinWindowChars = 200
 // after it in every live session mid-flight.
 func (cl *Collapse) window(content string, maxTokens int, rep *components.Report) (assemble func(string) string, byChars, ok bool) {
 	lines := strings.Split(content, "\n")
-	if len(lines) > cl.headLines+cl.tailLines {
+	if cl.headLines+cl.tailLines > 0 && len(lines) > cl.headLines+cl.tailLines {
 		omitted := len(lines) - cl.headLines - cl.tailLines
 		head := strings.Join(lines[:cl.headLines], "\n")
 		tail := strings.Join(lines[len(lines)-cl.tailLines:], "\n")
-		return func(tok string) string {
+		asm := func(tok string) string {
 			return fmt.Sprintf("%s\n... (%d lines omitted) %s\n%s", head, omitted, tok, tail)
-		}, false, true
+		}
+		// Take the line window only if it actually CUT: having more lines than the window
+		// says nothing about their size, and a multi-megabyte line inside the kept head or
+		// tail survives it untouched. Halving is the test because the line window is the
+		// byte-identical path and every shape it handles today clears it by orders of
+		// magnitude; the shapes that do not are the ones this fall-through exists for.
+		//
+		// BYTES, deliberately, and not a token comparison against maxTokens: maxTokens comes
+		// from resolveBudget(..., c.CtxWindow), CtxWindow can resolve differently mid-session,
+		// and repairLostFreeze re-derives at depth (see Offload). A token gate could therefore
+		// classify the same content line-window on one turn and character-window on the next
+		// and emit different bytes, trading a savings bug for a cache bug. This form depends
+		// only on content, head_lines and tail_lines, so it is replay-safe unconditionally.
+		if len(asm(""))*2 <= len(content) {
+			return asm, false, true
+		}
 	}
 	asm, ok := cl.runeWindow(content, maxTokens)
 	if !ok {
-		// The only genuine decline left: too few lines for a line window AND too few
-		// characters for a character one. `too_few_lines` is deliberately NOT reused —
-		// most of what it counted is now HANDLED, and exporting handled work under a
-		// decline's name yields a series that falls as the component works better.
+		// The only genuine decline left: no usable line window AND fewer characters than the
+		// smallest character one. `too_few_lines` is deliberately NOT reused — most of what
+		// it counted is now HANDLED, and exporting handled work under a decline's name yields
+		// a series that falls as the component works better.
 		rep.Gate("too_few_lines_and_chars")
 		return nil, false, false
 	}
@@ -207,12 +236,23 @@ func (cl *Collapse) window(content string, maxTokens int, rep *components.Report
 // The budget is the component's own token threshold expressed in characters, split
 // between head and tail in the head_lines:tail_lines ratio, so the existing knobs keep
 // meaning what they say ("how much of the start / the end is kept") without a second set
-// of char knobs to keep in sync. The assembled window is then measured against maxTokens
-// and the budget scaled down if it overshoots, which is what keeps the promise the
-// threshold makes: an output above max_tokens comes back at or under it.
+// of char knobs to keep in sync. The assembled window is then measured against maxTokens and
+// the budget scaled down if it overshoots, which brings an output above max_tokens back to
+// roughly it — not exactly it, on two counts worth naming rather than implying otherwise.
+// The collapseMinWindowChars floor returns before any measurement, so a very small
+// max_tokens buys a 200-character window regardless (max_tokens: 100 measures 118 tokens
+// out). And `got` measures asm("") — an EMPTY marker — while the shipped text carries the
+// ~15 tokens of `<<cg:HASH>> [full output: ...]`, which only the 10% margin below absorbs.
+// tryMark's never-worse guard is what makes the residue harmless: it measures the real
+// marker and declines rather than growing the message.
 func (cl *Collapse) runeWindow(content string, maxTokens int) (func(string) string, bool) {
 	r := []rune(content)
-	budget := maxTokens * collapseCharsPerToken
+	// Never seed above the content. chars/4 OVERESTIMATES on dense JSON (~2.5 chars/token),
+	// so bailing out below on the un-measured seed declined content the fit loop would have
+	// cut: at max_tokens 3000 — what the shipped codesafe preset sets — one-line JSON from
+	// 3,006 to 4,491 tokens was oversized and left entirely uncut. marker_no_win already
+	// protects the downside of seeding low.
+	budget := min(maxTokens*collapseCharsPerToken, len(r)-1)
 	for pass := 0; ; pass++ {
 		if budget < collapseMinWindowChars {
 			budget = collapseMinWindowChars
@@ -245,10 +285,13 @@ func (cl *Collapse) runeWindow(content string, maxTokens int) (func(string) stri
 
 // splitWindow divides a character budget between head and tail in the head_lines:tail_lines
 // ratio, so `head_lines: 40, tail_lines: 10` keeps four fifths of the window at the start on
-// the character path too. Both zero (or negative) means an even split rather than an empty
-// window, since a component configured with no line window still has to cap the output.
+// the character path too. Both zero means an even split rather than an empty window, since a
+// component configured with no line window still has to cap the output — and with both zero
+// window() routes here rather than to the line path, which would otherwise emit a bare
+// marker with no cue about what to expand (a 64 KB output became 87 bytes). Negatives are
+// clamped in newCollapse, so this only has to handle zero.
 func (cl *Collapse) splitWindow(budget int) (head, tail int) {
-	hl, tl := max(cl.headLines, 0), max(cl.tailLines, 0)
+	hl, tl := cl.headLines, cl.tailLines
 	if hl+tl == 0 {
 		hl, tl = 1, 1
 	}
@@ -263,9 +306,9 @@ func init() {
 		{Key: "max_frac", Type: components.FieldFloat,
 			Hint: "The same threshold as a fraction of the model's context window; wins when the window is known. 0 = unset."},
 		{Key: "head_lines", Type: components.FieldInt, Default: 20,
-			Hint: "Lines kept from the start of a collapsed output. On an output with too few lines to cut (a one-line JSON payload), the same ratio splits a CHARACTER window sized from max_tokens."},
+			Hint: "Lines kept from the start of a collapsed output. When a line window would not shrink it (a one-line JSON payload, or a huge line inside the kept window), the same ratio splits a CHARACTER window sized from max_tokens."},
 		{Key: "tail_lines", Type: components.FieldInt, Default: 20,
-			Hint: "Lines kept from the end of a collapsed output. Also the tail share of the character window used when there are too few lines."},
+			Hint: "Lines kept from the end of a collapsed output. Also the tail share of the character window used when a line window would not shrink the output."},
 		markerModeField(),
 		coldCacheField(),
 	})

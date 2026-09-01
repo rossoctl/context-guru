@@ -321,9 +321,12 @@ to content-token counts), and a component that burned wall time for nothing read
 `overcount_ratio` is the number that keeps the rest honest: a ratio of 7× means the
 gross figure counted the same compaction seven times as the agent re-sent its transcript.
 
-**Why declined** is the column to read when `act rate` is 0%. It is the component's own gate
-counts — `no_filter_match`, `no_obvious_noise`, `below_output_floor` — commonest first, with
-the full list on hover, and the same column appears per component in the request drawer.
+**Why / what happened** is the column to read when `act rate` is 0%. It is mostly the
+component's own gate counts — `no_filter_match`, `no_obvious_noise`, `below_output_floor` —
+commonest first, with the full list on hover, and the same column appears per component in the
+request drawer. It also carries *events*, which are not declines: `collapse`'s `char_window`
+appears there on a row that acted. The header said "Why declined" until the first event
+surfaced under it.
 Without it a table of zeros is unfalsifiable: it looks the same whether the pipeline is
 broken, the traffic is uncompactable, or the heuristics were written for a different agent's
 tool-output shapes. On a Bob session it is usually the last of those, and it says so.

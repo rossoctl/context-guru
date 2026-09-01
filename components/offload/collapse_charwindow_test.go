@@ -269,3 +269,227 @@ func TestCollapseTooSmallForEitherWindow(t *testing.T) {
 		t.Error("too_few_lines is retired; it must not reappear")
 	}
 }
+
+// charWindowFloored is the exact head/tail split every fixture below is cut with: at
+// max_tokens 50 the character budget is min(50*4, len(r)-1) = 200, which IS
+// collapseMinWindowChars, so runeWindow returns at pass 0 without a fit pass and
+// splitWindow divides 200 in the default 20:20 ratio. Spelled out here so the expectations
+// further down are a statement about the LAYOUT rather than a re-run of the budget code.
+const charWindowFlooredHead, charWindowFlooredTail = 100, 100
+
+// The character path's output is frozen and replayed at depth exactly like the line path's,
+// so it needs the same protection the line path got in TestCollapseLineWindowIsByteIdentical:
+// a changed layout re-anchors every cached position after it in every live session
+// mid-flight. Without a byte-exact expectation, an off-by-one head slice (r[:h+1]) or a
+// wrong omitted count passes the whole suite — both did.
+//
+// The expectation is written out as a literal format string rather than captured from
+// window(), so a layout change fails here instead of being adopted silently.
+func TestCollapseCharWindowIsByteIdentical(t *testing.T) {
+	longLine := oneLineJSON(5 << 10)
+	cases := map[string]string{
+		// The motivating shape: one line, dense, no newline anywhere.
+		"one line json": oneLineJSON(600),
+		// Multibyte, so a mutation from runes to bytes moves the cut and fails here.
+		"multibyte": strings.Repeat("日本語のログ行 ", 40),
+		// Plenty of lines, but a huge one inside the kept head, so the line window does not
+		// shrink it and the byte gate falls through to this path. The layout must be the
+		// same as any other character cut.
+		"huge line in head": longLine + "\n" + strings.Repeat("filler row\n", 60),
+		// Same, with the huge line in the kept tail.
+		"huge line in tail": strings.Repeat("filler row\n", 60) + longLine,
+	}
+	for name, body := range cases {
+		req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{tool(body)}}
+		c := collapseCtx()
+		var rep components.Report
+		cl := collapseFor(t, "max_tokens: 50\n")
+		if _, err := cl.Offload(req, &rep, c); err != nil {
+			t.Fatal(err)
+		}
+		r := []rune(body)
+		if len(r) <= charWindowFlooredHead+charWindowFlooredTail {
+			t.Fatalf("%s: fixture must be longer than the floored window (%d runes)", name, len(r))
+		}
+		want := fmt.Sprintf("%s\n... (%d characters omitted) %s [full output: call %s]\n%s",
+			string(r[:charWindowFlooredHead]),
+			len(r)-charWindowFlooredHead-charWindowFlooredTail,
+			expand.Marker(hashKey(body)), expand.ToolName,
+			string(r[len(r)-charWindowFlooredTail:]))
+		if got := schema.MessageText(req.Input[0]); got != want {
+			t.Fatalf("%s: character window is not byte-identical\n want %q\n got  %q", name, want, got)
+		}
+		// A precondition, not a nicety: if the line path had handled the fixture the
+		// comparison above would be vacuous as an assertion about THIS window.
+		if rep.Events["char_window"] != 1 {
+			t.Fatalf("%s: fixture did not take the character path, events %v gates %v", name, rep.Events, rep.Gates)
+		}
+	}
+}
+
+// The boundary this PR moves, asserted from the other side. At EXACTLY head_lines+tail_lines
+// lines the line window would omit zero lines, so it must not be taken. Flipping the gate to
+// `>=` survived all eight of the first round's tests: the line path computes omitted = 0,
+// emits the whole content plus a marker, fails tryMark and declines marker_no_win — so a
+// 40-line multi-megabyte output sails through with a green suite.
+func TestCollapseCharWindowAtExactlyTheLineWindowSize(t *testing.T) {
+	cl := collapseFor(t, "")
+	var b strings.Builder
+	for i := 0; i < cl.headLines+cl.tailLines; i++ {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(oneLineJSON(2 << 10))
+	}
+	body := b.String()
+	if n := strings.Count(body, "\n") + 1; n != cl.headLines+cl.tailLines {
+		t.Fatalf("fixture must have exactly %d lines, has %d", cl.headLines+cl.tailLines, n)
+	}
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{tool(body)}}
+	c := collapseCtx()
+	var rep components.Report
+	if _, err := cl.Offload(req, &rep, c); err != nil {
+		t.Fatal(err)
+	}
+	got := schema.MessageText(req.Input[0])
+	if got == body {
+		t.Fatalf("a %d-byte output of exactly %d lines was left verbatim; gates %v events %v",
+			len(body), cl.headLines+cl.tailLines, rep.Gates, rep.Events)
+	}
+	if rep.Events["char_window"] != 1 {
+		t.Fatalf("exactly headLines+tailLines lines must take the character path, events %v gates %v", rep.Events, rep.Gates)
+	}
+	if n := schema.TextTokens(got); n > cl.maxTokens {
+		t.Fatalf("collapsed output is %d tokens, above the %d-token threshold", n, cl.maxTokens)
+	}
+}
+
+// The blocking defect the review measured: the window was chosen on the LINE COUNT, so an
+// output with more than head_lines+tail_lines lines took the line path however big those
+// lines were. A multi-megabyte line inside the kept head or tail survived untouched — and
+// worse than being declined, because dropping the small filler lines in the middle counts as
+// acting and stamps a marker, which then makes linecap decline marker_or_kept_verbatim.
+// Measured: 4,195,111 B in, 4,194,922 B out, 189 bytes saved, 1.57 M tokens forwarded.
+func TestCollapseCutsAHugeLineInsideTheLineWindow(t *testing.T) {
+	huge := oneLineJSON(1 << 20) // one line, bigger than any window
+	filler := strings.Repeat("filler row\n", 60)
+	for name, body := range map[string]string{
+		"huge line in head": huge + "\n" + filler,
+		"huge line in tail": filler + huge,
+	} {
+		cl := collapseFor(t, "")
+		if n := strings.Count(body, "\n") + 1; n <= cl.headLines+cl.tailLines {
+			t.Fatalf("%s: fixture must have MORE lines than the line window, has %d", name, n)
+		}
+		req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{tool(body)}}
+		c := collapseCtx()
+		var rep components.Report
+		keys, err := cl.Offload(req, &rep, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := schema.MessageText(req.Input[0])
+		// The old behaviour: acted, marked, and still multi-megabyte.
+		if len(got)*2 > len(body) {
+			t.Fatalf("%s: %d-byte output came back %d bytes — the line window kept it; gates %v events %v",
+				name, len(body), len(got), rep.Gates, rep.Events)
+		}
+		if n := schema.TextTokens(got); n > cl.maxTokens {
+			t.Fatalf("%s: collapsed output is %d tokens, above the %d-token threshold", name, n, cl.maxTokens)
+		}
+		if rep.Events["char_window"] != 1 {
+			t.Fatalf("%s: a huge kept line must fall through to the character window, events %v gates %v", name, rep.Events, rep.Gates)
+		}
+		// Still reversible: the fall-through goes through the same stash.
+		if len(keys) != 1 {
+			t.Fatalf("%s: want 1 stash key, got %v", name, keys)
+		}
+		if raw, ok := c.Store.Get(keys[0]); !ok || string(raw) != body {
+			t.Fatalf("%s: original not recoverable byte-for-byte", name)
+		}
+	}
+}
+
+// A units mismatch declined a 55%-wide band of genuinely oversized content: the bail-out at
+// `head+tail >= len(r)` was tested against the UN-measured chars/4 seed, and dense JSON
+// tokenizes closer to 2.5 chars/token, so content over max_tokens was still shorter in runes
+// than its chars/4 budget and was declined outright as too_few_lines_and_chars. max_tokens
+// 3000 is what the shipped codesafe preset sets, which gave it the widest hole
+// (3,006-4,491 tokens uncut) and no test covered it.
+func TestCollapseCutsDenseJSONInTheOversizeBand(t *testing.T) {
+	for _, maxTokens := range []int{2000, 3000} {
+		cl := collapseFor(t, fmt.Sprintf("max_tokens: %d\n", maxTokens))
+		// Sized into the band: over the threshold in TOKENS, under it in chars/4 runes.
+		body := oneLineJSON(maxTokens * 8 / 3)
+		tokens, runes := schema.TextTokens(body), len([]rune(body))
+		if tokens <= maxTokens {
+			t.Fatalf("max_tokens %d: fixture must be oversized, is %d tokens", maxTokens, tokens)
+		}
+		if runes >= maxTokens*collapseCharsPerToken {
+			t.Fatalf("max_tokens %d: fixture must be INSIDE the band (%d runes vs a %d-char seed)",
+				maxTokens, runes, maxTokens*collapseCharsPerToken)
+		}
+		req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{tool(body)}}
+		var rep components.Report
+		if _, err := cl.Offload(req, &rep, collapseCtx()); err != nil {
+			t.Fatal(err)
+		}
+		got := schema.MessageText(req.Input[0])
+		if got == body {
+			t.Fatalf("max_tokens %d: %d-token single-line output left uncut; gates %v", maxTokens, tokens, rep.Gates)
+		}
+		if n := schema.TextTokens(got); n > maxTokens {
+			t.Fatalf("max_tokens %d: collapsed output is %d tokens, still above the threshold", maxTokens, n)
+		}
+		if rep.Events["char_window"] != 1 {
+			t.Fatalf("max_tokens %d: want the character window, events %v gates %v", maxTokens, rep.Events, rep.Gates)
+		}
+	}
+}
+
+// head_lines: 0, tail_lines: 0 reached the LINE path (`1 > 0+0`) and produced a bare marker
+// with no content cue — an 87-byte rewrite of a 64 KB output, which is precisely what
+// collapseMinWindowChars exists to prevent. With no line window configured the character
+// window (even split, floored) is the only sensible reading of "cap this output".
+func TestCollapseZeroLineWindowStillKeepsContent(t *testing.T) {
+	body := strings.Repeat("payload line with some detail in it\n", 2000)
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{tool(body)}}
+	var rep components.Report
+	cl := collapseFor(t, "head_lines: 0\ntail_lines: 0\n")
+	if _, err := cl.Offload(req, &rep, collapseCtx()); err != nil {
+		t.Fatal(err)
+	}
+	got := schema.MessageText(req.Input[0])
+	if got == body {
+		t.Fatalf("output left verbatim; gates %v", rep.Gates)
+	}
+	if len(got) < collapseMinWindowChars {
+		t.Fatalf("a %d-byte output collapsed to %d bytes — a bare marker with no cue: %q", len(body), len(got), got)
+	}
+	if !strings.HasPrefix(got, body[:64]) {
+		t.Errorf("head of the payload not kept: %.120q", got)
+	}
+	if rep.Events["char_window"] != 1 {
+		t.Fatalf("no line window means the character window, events %v gates %v", rep.Events, rep.Gates)
+	}
+}
+
+// A negative head_lines used to panic: `1 > -10` sent even a one-liner down the line path,
+// where lines[:-10] slices out of range. Fail-open contained it, and splitWindow's own
+// max(...) guard was unreachable for exactly the config it looked like it defended. The
+// clamp is now in newCollapse, so it covers both paths.
+func TestCollapseNegativeLineWindowIsClamped(t *testing.T) {
+	cl := collapseFor(t, "head_lines: -10\ntail_lines: -5\nmax_tokens: 50\n")
+	if cl.headLines != 0 || cl.tailLines != 0 {
+		t.Fatalf("negative line knobs must be clamped to 0, got %d/%d", cl.headLines, cl.tailLines)
+	}
+	body := oneLineJSON(4 << 10)
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{tool(body)}}
+	var rep components.Report
+	if _, err := cl.Offload(req, &rep, collapseCtx()); err != nil { // must not panic
+		t.Fatal(err)
+	}
+	if got := schema.MessageText(req.Input[0]); got == body {
+		t.Fatalf("output left verbatim; gates %v", rep.Gates)
+	}
+}

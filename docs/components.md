@@ -286,7 +286,8 @@ cut by **characters** instead, on rune boundaries, sized from `max_tokens` and s
 - **Config:** `max_tokens` (2000 threshold), `max_frac` (fraction of the context window; wins when
   known), `head_lines` (20), `tail_lines` (20), `marker_mode`. **Shines:** a
   catch-all last stage for huge outputs, including single-line ones. **Inert:** output ≤
-  `max_tokens`, or too small for either window to shrink it (`too_few_lines_and_chars`).
+  `max_tokens`, or shorter than the 200-character character-window floor
+  (`too_few_lines_and_chars`).
 
 ### `failed_run`
 Recognizes test/build run output (regex: `N passed/failed`, `BUILD SUCCESS/FAIL`, `Traceback`,
