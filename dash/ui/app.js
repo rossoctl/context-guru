@@ -99,6 +99,32 @@ function usd(v) {
   return (v < 0 ? '-' : '') + '$' + nf.format(Math.round(a));
 }
 function pct(v, digits = 1) { return v === null || v === undefined ? '—' : v.toFixed(digits) + '%'; }
+/**
+ * usdOrNA renders a dollar figure, or `n/a` WITH ITS REASON when the figure is not a
+ * measurement.
+ *
+ * It exists because usd(0) returns '$0' and a $0 is a CLAIM (BRIEF conventions, DESIGN §3.6).
+ * searchfold removed 1.76M tokens on this corpus with every one of its 488 acted rows
+ * unpriceable, and the cell read `$0` in the ordinary colour with a tooltip that said
+ * "recorded per request" — a confident zero standing in for an unknown, which is the single
+ * thing this dashboard exists to refuse. cachesplit is the same shape inverted: 8,906
+ * structural mutations, no content removed, and a `$0` that reads as "saved nothing" while
+ * /api/stats credits it separately.
+ *
+ * `known` is the CALLER's assertion that the number was computed from something, and it is a
+ * required argument rather than a defaulted one so that a new dollar cell cannot inherit the
+ * lie by omitting it. `reason` is required for the same purpose: an unreasoned `n/a` is
+ * indistinguishable from a bug and will be filed as one (DESIGN §3.6 rule 4).
+ *
+ * Returns a Node, not a string, because the reason has to reach a screen reader as well as a
+ * pointer.
+ */
+function usdOrNA(v, known, reason) {
+  if (known) return document.createTextNode(usd(v));
+  if (!reason) throw new Error('usdOrNA(): an n/a without a reason is indistinguishable from a bug');
+  return el('span', { class: 'na', title: 'not available: ' + reason,
+    'aria-label': 'not available: ' + reason }, 'n/a');
+}
 function ms(v) {
   if (!v) return '0 ms';
   return v >= 1000 ? (v / 1000).toFixed(2) + ' s' : v.toFixed(v < 10 ? 1 : 0) + ' ms';
@@ -2161,15 +2187,59 @@ function renderSeries(buckets) {
 
 // ── components ─────────────────────────────────────────────────────────────
 /**
- * verdict summarises whether a component earns its place, from what it saved
- * against what it cost. Order matters: a component that burned real wall time for
- * nothing is a worse finding than one that simply never fired, so the cost test
- * comes FIRST — otherwise extract_llm's 15 s of model calls for zero savings reads
- * as a bland "inert here".
+ * ERROR_RATE_BAD is the rate at which a component's own failures outrank its economics.
+ *
+ * There used to be no threshold at all: `if (c.errors > 0)` sat above every economic test, and
+ * because fail-open logs an error for each reverted run, EVERY component in a real window has
+ * some. On the 15,900-request corpus the worst rate is 0.39% (toolschema, 9 of 2,314) and all
+ * 14 rows rendered the red `errors` pill — so on a deployment saving $174 no component could
+ * ever read "earning its place", and extract_llm's $2.15 loss was indistinguishable from
+ * dedup's $66 gain. 5% is where "this component is broken" becomes the headline; below it the
+ * rate is noise and belongs in the Errors column, with its denominator, not in the verdict.
+ */
+const ERROR_RATE_BAD = 0.05;
+
+/** errRate is errors per run — the only form in which an error count is a finding. */
+function errRate(c) { return c.runs > 0 ? (c.errors || 0) / c.runs : 0; }
+
+/**
+ * actedStructuralOnly is a component that mutated requests without removing any content.
+ *
+ * cachesplit is the whole reason this predicate exists: its job is WHERE the cache breakpoint
+ * goes, so `acted_tokens` and `saved_unique` are 0 by construction and every content-shaped
+ * test below reads it as inert. Its dollars are recorded per REQUEST (`cachesplit_saved_usd`,
+ * $60.33 on this window from /api/stats) and never reach /api/components at all, so this
+ * column cannot judge it and must not try.
+ */
+function actedStructuralOnly(c) {
+  return (c.acted_structural || 0) > 0 && (c.acted_tokens || 0) === 0;
+}
+
+/**
+ * verdict summarises whether a component earns its place, from what it saved against what it
+ * cost. The precedence, in order, and every step of it was a defect once:
+ *
+ *   1. never ran            — nothing to judge.
+ *   2. error RATE over 5%   — a component failing on one request in twenty is worse news than
+ *                             any dollar figure. Thresholded, and stated WITH the rate; an
+ *                             unthresholded bare `errors` here defeated steps 3-5 for all 14
+ *                             components.
+ *   3. DOLLARS              — a component that makes LLM calls is the only kind that can be
+ *                             net-negative, and that is the most valuable thing this column
+ *                             can say. It comes before latency so extract_llm's 1h 2m of
+ *                             hot-path time for $0.09 of savings reads as `underwater -$2.15`
+ *                             rather than as a bland "inert here".
+ *   4. STRUCTURAL           — before every content test, because "removed no tokens" is
+ *                             cachesplit's normal state, not a failure. Reversed, this branch
+ *                             was unreachable and the third-largest saving on the deployment
+ *                             read `costly and inert`.
+ *   5. content economics    — latency against tokens, then act rate.
  */
 function verdict(c) {
   if (c.runs === 0) return ['—', 'neutral'];
-  if (c.errors > 0) return ['errors', 'missing'];
+  if (errRate(c) >= ERROR_RATE_BAD) {
+    return ['errors on ' + pct(errRate(c) * 100, 1) + ' of runs', 'missing'];
+  }
   // DOLLARS FIRST, where there are any. A component that makes LLM calls is the only kind
   // that can be net-negative, and until the per-call records existed this function had no
   // money to reason with — so it judged the one component that can lose money on tokens and
@@ -2185,6 +2255,11 @@ function verdict(c) {
     if (net < -0.01) return ['underwater ' + usd(net), 'missing'];
     if (net <= 0) return ['break-even', 'partial'];
     return ['net ' + usd(net), 'complete'];
+  }
+  // Consulted BEFORE the latency test below, which is what "costly and inert" is: that test
+  // asks "spent time, removed nothing", and removing nothing is this component's job.
+  if (actedStructuralOnly(c)) {
+    return [num(c.acted_structural) + ' structural mutations', 'partial'];
   }
   // Spent >1s of hot-path time and returned nothing: paid for, unused.
   if (c.saved_unique === 0 && c.duration_ms_total > 1000) return ['costly and inert', 'missing'];
@@ -2561,6 +2636,114 @@ const UNIQUE_MARK = { fabricated: '*', unknown: '?', measured: '', none: '' };
  *  every cell says how much of it is which. */
 function compSaved(c) { return (c.saved_usd || 0) + (c.saved_usd_estimated || 0); }
 
+/**
+ * savedKnown is whether this component's dollar saving is a MEASUREMENT rather than an
+ * unpriceable or inapplicable zero. Three cases, and only the last is a real $0:
+ *
+ *   - a non-zero figure                  → measured.
+ *   - zero with unpriceable rows         → the rows exist and could not be valued. searchfold
+ *                                          removed 1.76M tokens over 488 acted rows, every one
+ *                                          of them on a model with no price, and the cell read
+ *                                          `$0`.
+ *   - zero on a structural-only component→ this column does not measure what it does at all
+ *                                          (see actedStructuralOnly). `$0` there asserts
+ *                                          "saved nothing" about the third-largest saving on
+ *                                          the deployment.
+ *   - zero, priced, and it did act        → a genuine $0.
+ */
+function savedKnown(c) {
+  if (compSaved(c) !== 0) return true;
+  if (c.saved_usd_unpriced_rows > 0) return false;
+  return !actedStructuralOnly(c);
+}
+
+/** savedNAReason is why the saving is not a number, in the words the reader needs. */
+function savedNAReason(c) {
+  if (actedStructuralOnly(c)) {
+    return c.component + ' removes no content, so this column cannot value it. It mutated '
+      + num(c.acted_structural) + ' requests structurally — cache placement — and its saving is '
+      + 'recorded per request instead, as the prefix-cache figure on Overview.';
+  }
+  return num(c.saved_usd_unpriced_rows) + ' of this component\u2019s acted rows ran on a model '
+    + 'with no entry in the operator\u2019s price list, so their saving could not be valued. '
+    + 'It is missing from this figure, not zero.';
+}
+
+/**
+ * savedTitle names which parts of the figure are recorded, valued on read, and unpriceable.
+ *
+ * The unpriced clause used to be NESTED inside the `saved_usd_estimated` branch, and that field
+ * is 0 across this entire corpus — so the one disclosure that says "some of these rows could
+ * not be priced at all" was unreachable on every row that needed it. It is now a clause of its
+ * own, appended whenever there are unpriced rows, whether or not anything was estimated.
+ */
+function savedTitle(c) {
+  const parts = [c.saved_usd_estimated
+    ? usd(c.saved_usd) + ' recorded + ' + usd(c.saved_usd_estimated) + ' valued on read over '
+      + num(c.saved_usd_estimated_rows) + ' rows written before the column existed'
+    : usd(c.saved_usd) + ' recorded per request'];
+  if (c.saved_usd_unpriced_rows) {
+    parts.push(num(c.saved_usd_unpriced_rows) + ' row'
+      + (c.saved_usd_unpriced_rows === 1 ? '' : 's') + ' could not be priced at all — no model '
+      + 'price for the model they ran on, so their saving is MISSING from this figure, not zero');
+  }
+  return parts.join(' · ');
+}
+
+/** partly lists components with their unpriced row count, for the note above the table. */
+function partly(cs) {
+  return cs.map((c) => c.component + ' (' + num(c.saved_usd_unpriced_rows) + ' of '
+    + num(c.acted_tokens) + ' acted rows)').join(', ');
+}
+
+/**
+ * renderUnpricedNote is the ONE explanation a column of `n/a` is allowed to have (DESIGN §3.6
+ * rule 5) — the per-cell reasons are for detail, not for the fact that unpriced rows exist.
+ *
+ * It is level-1 visible rather than behind a `<details>`, because a missing denominator is a
+ * CAVEAT and disclosure hides derivation, never caveats (DESIGN §3.3).
+ */
+function renderUnpricedNote(components) {
+  const host = $('#components-unpriced');
+  if (!host) return;
+  clear(host);
+  const unpriced = components.filter((c) => c.saved_usd_unpriced_rows > 0);
+  const structural = components.filter((c) => actedStructuralOnly(c));
+  if (!unpriced.length && !structural.length) { host.hidden = true; return; }
+  host.hidden = false;
+  if (unpriced.length) {
+    const rows = unpriced.reduce((n, c) => n + c.saved_usd_unpriced_rows, 0);
+    // Two different outcomes and they must not be conflated. A component with SOME unpriceable
+    // rows still shows a figure — it is a lower bound, and calling it n/a would throw away a
+    // real measurement. A component with no priceable row at all has no figure to show.
+    const partial = unpriced.filter((c) => savedKnown(c));
+    const total = unpriced.filter((c) => !savedKnown(c));
+    host.appendChild(el('div', {},
+      el('strong', {}, num(rows) + ' acted rows across ' + unpriced.length + ' component'
+        + (unpriced.length === 1 ? '' : 's') + ' could not be priced'),
+      ' — the model they ran on has no entry in the operator’s price list, so their saving is '
+      + 'absent from the dollar columns rather than zero. Set MODEL_PRICES to value them.'));
+    if (partial.length) {
+      host.appendChild(el('div', {},
+        'Partly unpriced, so the dollar figure shown is a ', el('strong', {}, 'lower bound'),
+        ': ' + partly(partial) + '.'));
+    }
+    if (total.length) {
+      host.appendChild(el('div', {},
+        'No priceable row at all, so the dollar cells read ', el('span', { class: 'na' }, 'n/a'),
+        ' rather than $0: ' + partly(total) + '.'));
+    }
+  }
+  if (structural.length) {
+    host.appendChild(el('div', {},
+      el('strong', {}, structural.map((c) => c.component).join(', ')
+        + (structural.length === 1 ? ' removes' : ' remove') + ' no content'),
+      ' — ' + (structural.length === 1 ? 'its' : 'their') + ' work is where the cache breakpoint '
+      + 'goes, which this table measures in the Structural column and cannot value in dollars. '
+      + 'The saving is recorded per request and appears on Overview as the prefix-cache figure.'));
+  }
+}
+
 async function loadComponents() {
   const body = clear($('#components-body'));
   loadingRows(body, COMPONENT_SORT.length);
@@ -2624,7 +2807,7 @@ async function loadComponents() {
         // gap is named in the tooltip rather than hidden by the choice.
         el('td', {
           class: 'num',
-          title: !c.llm_calls ? '' : llmCostTitle(c),
+          title: !c.llm_calls ? 'this component makes no model calls of its own' : llmCostTitle(c),
         }, c.llm_calls ? usd(c.llm_cost_usd) + (llmCostGap(c) ? '‡' : '') : '—'),
         // A cost never travels alone. saved_usd is what this component's removals were
         // worth over the window — summed per turn, so a frozen reduction replaying across a
@@ -2636,34 +2819,36 @@ async function loadComponents() {
         // — 6 populated rows out of 100,579 on production — and the most-read tab in the
         // dashboard therefore said the product was worthless. The dagger says how much of the
         // figure is valued rather than recorded; it is never silently merged.
+        el('td', { class: 'num', title: savedKnown(c) ? savedTitle(c) : '' },
+          usdOrNA(compSaved(c), savedKnown(c), savedNAReason(c)),
+          savedKnown(c) && c.saved_usd_estimated ? '†' : null),
+        // A net whose benefit half is unknown is unknown too: subtracting a real cost from an
+        // unpriceable saving produced `$0` for searchfold and `-$0.00` for anything with a
+        // sliver of LLM cost, both of which read as measurements.
         el('td', {
-          class: 'num',
-          title: c.saved_usd_estimated
-            ? usd(c.saved_usd) + ' recorded + ' + usd(c.saved_usd_estimated) + ' valued on read '
-              + 'over ' + num(c.saved_usd_estimated_rows) + ' rows written before the column existed'
-              + (c.saved_usd_unpriced_rows
-                ? ' · ' + num(c.saved_usd_unpriced_rows) + ' rows unpriceable' : '')
-            : 'recorded per request',
-        }, usd(compSaved(c)) + (c.saved_usd_estimated ? '†' : '')),
-        el('td', {
-          class: 'num' + (c.net_usd_with_estimate < 0 ? ' warn-text' : ''),
-          title: 'AMORTIZED verdict: saved ' + usd(compSaved(c)) + ' across every turn those '
-            + 'removals stayed removed for, − own LLM cost ' + usd(c.llm_cost_usd || 0)
+          class: 'num' + (savedKnown(c) && c.net_usd_with_estimate < 0 ? ' warn-text' : ''),
+          title: !savedKnown(c) ? '' : 'AMORTIZED verdict: saved ' + usd(compSaved(c))
+            + ' across every turn those removals stayed removed for, − own LLM cost '
+            + usd(c.llm_cost_usd || 0)
             + '. The per-turn column beside this one is the same verdict without the repeat '
             + 'business, and it can have the opposite sign.',
-        }, usd(c.net_usd_with_estimate)),
+        }, usdOrNA(c.net_usd_with_estimate, savedKnown(c),
+          'the saving half of this net is not a number — ' + savedNAReason(c))),
         // The same verdict with replay excluded — the number /stats reports. It is here
         // BESIDE the amortized one, not instead of it, because the two answer different
         // questions and a component can be genuinely positive on one and negative on the
         // other. Showing only whichever is flattering is the failure mode this column exists
         // to prevent.
         el('td', {
-          class: 'num' + (c.net_usd_first_removal < 0 ? ' warn-text' : ''),
-          title: 'PER-TURN verdict: each piece of content credited ONCE at the rate it would '
-            + 'have entered the prompt at (' + usd(c.saved_usd_first_removal || 0) + ') − own '
-            + 'LLM cost ' + usd(c.llm_cost_usd || 0) + '. This is what the proxy\'s /stats '
-            + 'endpoint reports.',
-        }, c.saved_gross ? usd(c.net_usd_first_removal) : '—'),
+          class: 'num' + (savedKnown(c) && c.net_usd_first_removal < 0 ? ' warn-text' : ''),
+          title: !savedKnown(c) ? '' : 'PER-TURN verdict: each piece of content credited ONCE at '
+            + 'the rate it would have entered the prompt at ('
+            + usd(c.saved_usd_first_removal || 0) + ') − own LLM cost '
+            + usd(c.llm_cost_usd || 0) + '. This is what the proxy\'s /stats endpoint reports.',
+        }, c.saved_gross
+          ? usdOrNA(c.net_usd_first_removal, savedKnown(c),
+            'the saving half of this net is not a number — ' + savedNAReason(c))
+          : '—'),
         el('td', {
           class: 'num',
           title: c.replay_multiple > 1
@@ -2674,9 +2859,22 @@ async function loadComponents() {
             : 'Every removal this component made was of content it had not removed before, so '
               + 'there is no repeat business to amortize.',
         }, c.replay_multiple ? c.replay_multiple.toFixed(1) + '×' : '—'),
-        el('td', { class: 'num', text: num(c.errors) }),
+        // The count AND its rate. The verdict column no longer shouts `errors` below the 5%
+        // threshold (see ERROR_RATE_BAD), so this is where a sub-threshold rate stays visible —
+        // and a bare count over an unstated denominator was never a finding anyway: 41 errors
+        // means nothing until you know it is 41 of 14,057.
+        el('td', {
+          class: 'num' + (errRate(c) >= ERROR_RATE_BAD ? ' warn-text' : ''),
+          title: c.errors
+            ? num(c.errors) + ' of ' + num(c.runs) + ' runs = ' + pct(errRate(c) * 100, 2)
+              + '. Fail-open reverts the component and logs one of these per affected run, so a '
+              + 'low rate is the mechanism working, not a defect. The verdict column names '
+              + 'errors only above ' + pct(ERROR_RATE_BAD * 100, 0) + '.'
+            : 'no run of this component failed in this window',
+        }, c.errors ? num(c.errors) + ' (' + pct(errRate(c) * 100, 2) + ')' : '0'),
         el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext }))));
     }
+    renderUnpricedNote(components);
     renderNetReconcile(components);
     // One measure (unique tokens saved) across up to twelve components: a magnitude
     // comparison, so ONE hue. Colouring bar N by N implied each component was a

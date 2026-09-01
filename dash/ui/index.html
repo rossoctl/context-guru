@@ -487,6 +487,10 @@
         <tbody id="components-body"></tbody>
       </table>
     </div>
+    <!-- ONE explanation for a column of n/a, above nothing and beside the table, rather than
+         forty tooltips (DESIGN §3.6 rule 5). Filled by loadComponents only when this window
+         actually contains unpriceable rows; a `hidden` empty paragraph the rest of the time. -->
+    <p class="hint" id="components-unpriced" data-testid="components-unpriced" hidden></p>
     <!-- The two verdicts, reconciled. This dashboard and the proxy's /stats endpoint report
          OPPOSITE SIGNS for the same component, and until now neither surface admitted the
          other existed: a reader here saw extract_llm green and positive, an operator running
