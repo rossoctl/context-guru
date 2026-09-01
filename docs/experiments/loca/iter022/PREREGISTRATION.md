@@ -124,17 +124,74 @@ requests flow, numbers come out*. One task, one seed, arm B, and all four must h
 | a mechanism never fires | untestable, not refuted | fix the trigger or the floor first; no reward arm |
 | harm upper bound > 25% in any arm | blocked | no positive claim, whatever else moved |
 
+## Amendment 1 — band 64k, and `min_inventory: 3`. Written after the pre-flight, before any measured arm.
+
+The pre-flight failed criterion 4 and the diagnosis changed two settings. Recorded here rather than
+folded silently into the configs, because an amendment made after seeing data is only honest if it is
+visible.
+
+**What failed.** Arm B at 32k, one task: `not_in_pre_expiry_window` 19, `sweep_inventory_below_min` 15,
+`below_output_floor` 51, and **`prefix_rewrite_repaid` / `prefix_rewrite_not_repaid` both 0.** The
+branch's headline trigger was not refused — it was never *reached*. The `min_inventory` early return
+sits above the econ decision, so an inventory below the floor short-circuits the whole trigger.
+
+**Why the floor is unreachable here, measured not guessed.** 710 tool outputs across two pre-flight
+passes:
+
+| | |
+|---|---|
+| median output | **59 tokens** |
+| p75 / p90 / p99 | 1,187 / 3,059 / 6,507 |
+| candidates at the shipped floor (1000) | **4.0 per request** |
+| candidates at a floor of 100 | 5.9 per request |
+
+No floor reaches 10. `min_inventory: 10` was calibrated on production Claude Code traffic, where a tool
+output is large; LOCA's distribution is bimodal with most outputs under 100 tokens. So the floor moves
+to **3**, in all three arms, and `min_tokens` stays at the shipped **1000** so the candidate population
+is still the shipped one. The cost of a small batch is real and pre-registered: at batch 3–6 the model
+dropped a genuinely-spent output only half the time, against 4 of 4 at batch 10 — small batches make it
+*unwilling to act* rather than wrong. It is also the direction iteration 021's own conclusion named as
+the untested lead (a probe answered 6 of 6 on six candidates against ~61% on twelve).
+
+**Band moves to 64k.** Trigger one cannot fire under benchmark load at all — `not_in_pre_expiry_window`
+was 18/18, because eight workers hammering continuously never leave an idle gap for a cache entry to
+approach expiry. That is a property of benchmark traffic, not a defect. It is also *convenient*: with
+trigger one inert, arm B isolates the econ trigger cleanly, since econ is consulted only when
+pre-expiry did not fire. Stage 0's primary endpoints are operational and mechanism counters, none of
+which need reward headroom, so 64k costs nothing here — and iteration 008 already prescribed exactly
+this split (*"Savings — measure at 64k… need reward headroom"* at 32k). **Reward stays a 32k question,
+for Stage 1.**
+
+**And the econ arithmetic does clear at 64k — computed offline, for free, before spending.** Over 33
+paired requests from the pre-flight capture, with `W` taken pessimistically as the whole transcript:
+
+| | |
+|---|---|
+| `S` required to clear `S·T > 11.5·W` | **5,400 – 9,100** tokens |
+| `S` available (every tool output) | **25,000 – 33,655** tokens |
+
+`T` lands at 31–43 because per-turn growth is small (~700 tokens/turn against a 64k window), and it is
+`T` that carries the inequality. So the trigger has 3–4× margin. That is a **feasibility** result, not a
+prediction of yield: it says the trigger can be reached and evaluated, which is precisely what the
+pre-flight found it could not be. Whether it repays in practice is what `prefix_rewrite_repaid` vs
+`_not_repaid` will now report.
+
+**What this costs in interpretation.** Two arms' configs now differ from shipped `housellm` in one
+field. It is identical across all three arms, so it cannot bias B−A or C−A; and the deviation is
+recorded rather than hidden, on the precedent iteration 021 set when it ran `economic_gate: false` and
+said in advance that this was "not a shippable configuration".
+
 ## Frozen inputs
 
 Recorded before launch. Any code change before all three arms finish invalidates all three, not one.
 
 | | |
 |---|---|
-| binary | *(filled at launch)* |
-| SHA-256 | *(filled at launch)* |
-| code commit | *(filled at launch)* |
+| binary | `cg-i022-proxy-v01`, 40,910,697 bytes |
+| SHA-256 (first 32) | `d5bb95582c9893da408de06e4e872f5d` |
+| code commit | `143cf73` |
 | arm A config | `deploy/harbor/cfg-iter022-A-housellm.yaml` |
 | arm B config | `deploy/harbor/cfg-iter022-B-merged.yaml` |
 | arm C config | `deploy/harbor/cfg-iter022-C-coref.yaml` |
-| task config | `final_32k_set_config.json`, seed 42 subset (15 runs/arm) |
+| task config | `final_64k_set_config.json`, seed 42 subset (15 runs/arm), in 3 passes of 5 — see Amendment 1 |
 | rig location | `~/cg-loca` — moved off `/tmp`, which is on a 10-day cleaner that has already destroyed one iteration's frozen binary |

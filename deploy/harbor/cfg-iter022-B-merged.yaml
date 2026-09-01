@@ -42,6 +42,15 @@ components:
     trigger: {min_request_tokens: 3000}
   extract_llm_sweep:
     min_tokens: 1000
+    # AMENDMENT 1 (pre-launch, derived from the pre-flight -- see PREREGISTRATION.md "Amendment 1").
+    # min_inventory 10 is UNREACHABLE on this benchmark and it silently blocks everything downstream.
+    # Measured on 710 tool outputs across two pre-flight passes: median output 59 tokens, p75 1,187,
+    # p90 3,059. At the shipped floor of 1000 that is 4.0 candidates per request, and lowering the
+    # floor to 100 only reaches 5.9 -- so no floor makes 10. The early return at
+    # sweep_inventory_below_min fires BEFORE the econ decision is taken, so the branch's headline
+    # trigger was never even evaluated: prefix_rewrite_repaid and _not_repaid were both 0.
+    # min_tokens stays at the shipped 1000 so the candidate POPULATION is still the shipped one.
+    min_inventory: 3
     evidence: true
     econ_trigger: true
   summarize:
