@@ -164,7 +164,18 @@ cmd_install() {
 
   say "rclone config for cold storage"
   if [ -f "$STATE/rclone.conf" ]; then
-    ok "$STATE/rclone.conf exists (left alone)"
+    # CONTENTS left alone — this holds a live Box credential nobody wants regenerated. The
+    # OWNERSHIP and the mode are not content, and the same argument write_local_dropin
+    # makes for its chmod applies here with more at stake: the service opens this file as
+    # $SVC_USER, so once the owner or the mode has drifted (a manual edit, a restore from
+    # backup, an install predating the 0600 below) every start logs "permission denied",
+    # cold storage silently switches off, and the eviction path DELETES idle sessions
+    # instead of archiving them to Box. Only a re-run of this installer can put it back, so
+    # re-assert both unconditionally rather than treating "the file exists" as "the file
+    # works".
+    chown "$SVC_USER:$SVC_USER" "$STATE/rclone.conf"
+    chmod 0600 "$STATE/rclone.conf"
+    ok "$STATE/rclone.conf exists (contents left alone, 0600 $SVC_USER)"
   elif [ -n "$RCLONE_SRC" ] && [ -f "$RCLONE_SRC" ]; then
     install -m0600 -o "$SVC_USER" -g "$SVC_USER" "$RCLONE_SRC" "$STATE/rclone.conf"
     ok "copied $RCLONE_SRC -> $STATE/rclone.conf (0600, $SVC_USER)"
@@ -386,8 +397,17 @@ cmd_preflight() {
     warn "MANAGER_EMAIL is empty in the unit — no account will be able to administer others"
   fi
 
-  if [ -f "$STATE/rclone.conf" ]; then
-    ok "rclone config for cold storage"
+  # Existence is not access. This file is read by the service AS $SVC_USER, so a `-f` test
+  # here reports a green check for a file that is about to fail with "permission denied" on
+  # every restart — the only evidence being a journal line nobody is reading, while
+  # eviction quietly deletes what it should have archived. Ask the question the service
+  # asks: can $SVC_USER actually read it? -n so a sudo that wants to prompt fails instead
+  # of hanging a diagnostic.
+  if [ -f "$STATE/rclone.conf" ] && sudo -u "$SVC_USER" -n test -r "$STATE/rclone.conf" 2>/dev/null; then
+    ok "rclone config for cold storage (readable by $SVC_USER)"
+  elif [ -f "$STATE/rclone.conf" ]; then
+    warn "$STATE/rclone.conf exists but $SVC_USER cannot read it — check ownership/mode/SELinux context"
+    warn "cold storage is therefore OFF at runtime and eviction DELETES instead of archiving; fix with: sudo $0 install"
   else
     warn "no $STATE/rclone.conf — cold storage disabled, so eviction DELETES instead of archiving"
   fi
