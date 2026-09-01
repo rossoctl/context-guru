@@ -222,3 +222,46 @@ func TestRemoveSetsKeepsSkillEntriesOutOfTheToolNames(t *testing.T) {
 		t.Errorf("a skill removal dropped %d tool declarations (%d tokens)", n, tok)
 	}
 }
+
+// skillBodyNameOnly is the shape that made the removal switch act on the wrong rows: a skill with
+// an empty description is listed as a bare name. On a real captured prompt 15 of 39 entries looked
+// like this, and because an unparsed line is absorbed into the entry ABOVE it, removing that one
+// entry cut all 15 lines while reporting 1.
+const skillBodyNameOnly = `{"model":"claude-opus-5",` +
+	`"tools":[{"name":"Skill","description":"Invoke a skill.","input_schema":{"type":"object"}}],` +
+	`"system":[{"type":"text","text":"You are an agent.\n"}],` +
+	`"messages":[` +
+	`{"role":"user","content":"go"},` +
+	`{"role":"system","content":"<system-reminder>\n` +
+	`The following skills are available for use with the Skill tool:\n\n` +
+	`- dataviz: Use for charts and plots.\n` +
+	`- security-review\n` +
+	`- ui-ux-pro-max:brand\n` +
+	`- ponytail:ponytail-audit\n` +
+	`- superpowers:writing-skills\n` +
+	`- deep-research: A research harness.\n` +
+	`</system-reminder>"},` +
+	`{"role":"assistant","content":[{"type":"text","text":"ok"}]}]}`
+
+// TestFilterSkillRemovesOneWhenEntriesHaveNoDescription is the end-to-end guarantee behind the
+// Inventory tab's per-row "Off" switch: the removal it performs is the removal it reports. One
+// name in, one entry out, every other line still in the prompt.
+func TestFilterSkillRemovesOneWhenEntriesHaveNoDescription(t *testing.T) {
+	for _, name := range []string{"dataviz", "security-review", "ui-ux-pro-max:brand", "superpowers:writing-skills"} {
+		out, _, n := filterSkillListing([]byte(skillBodyNameOnly), []string{skills.RemovePrefix + name})
+		if n != 1 {
+			t.Errorf("removing %q removed %d entries, want 1", name, n)
+			continue
+		}
+		got := listingOf(t, out)
+		// Every line except the one asked for, still present. Counting lines is the assertion
+		// that catches the absorption bug: n==1 was already reported while 15 lines went.
+		before := strings.Count(listingOf(t, []byte(skillBodyNameOnly)), "\n- ")
+		if after := strings.Count(got, "\n- "); after != before-1 {
+			t.Errorf("removing %q left %d entry lines, want %d:\n%s", name, after, before-1, got)
+		}
+		if strings.Contains(got, "\n- "+name) {
+			t.Errorf("%q survived its own removal", name)
+		}
+	}
+}

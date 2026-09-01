@@ -114,30 +114,35 @@ func (l Listing) Without(drop map[string]bool) (string, int) {
 }
 
 // EntryName reads a listing line's skill name, or reports that the line is not an entry.
+//
+// The delimiter is `": "` and only `": "`, because a colon can also be part of the name — a
+// plugin skill is `plugin:skill`, a directory-scoped one `apps/web:deploy`. So the name is
+// everything up to the first `": "`, and a line with no `": "` at all is a name on its own.
+//
+// That last case is not hypothetical and is why this does not require a delimiter: a skill
+// whose description is empty is listed as a bare `- security-review`, and on a real captured
+// prompt 15 of 39 entries had that shape — one of them (`- ui-ux-pro-max:brand`) carrying a
+// colon that is the plugin separator rather than a delimiter. An unrecognised line is not
+// skipped, it is ABSORBED into the previous entry's span by Parse, so the previous entry
+// answers for a name that is not its own — and a declaration filter acting on that entry then
+// cuts every line it swallowed. One real entry swallowed 14 names.
+//
+// The charset is the whole gate on a name-only line, so it has to stay narrow: it is what stops
+// a description's own "\n- " bullet from being read as an entry. Anything with a space in it —
+// which is every prose bullet observed — is refused.
 func EntryName(line string) (string, bool) {
 	if !strings.HasPrefix(line, "- ") {
 		return "", false
 	}
-	rest := line[2:]
-	i := strings.Index(rest, ":")
-	if i <= 0 {
-		return "", false
+	rest := strings.TrimRight(line[2:], " \t")
+	name := rest
+	if i := strings.Index(rest, ": "); i > 0 {
+		name = rest[:i]
 	}
-	name := rest[:i]
-	// A plugin skill is `plugin:skill` and a directory-scoped one `apps/web:deploy`, so one
-	// colon may be part of the name: take the longer candidate when the first colon is not
-	// followed by a space.
-	if !strings.HasPrefix(rest[i:], ": ") {
-		j := strings.Index(rest[i+1:], ": ")
-		if j < 0 {
-			return "", false
-		}
-		name = rest[:i+1+j]
-	}
-	if name == "" || len(name) > 128 {
-		return "", false
-	}
-	if !ValidName(name) {
+	// `- name:` — a listing that always writes the delimiter leaves a bare colon behind when
+	// the description is empty, and that colon is not part of the name.
+	name = strings.TrimSuffix(name, ":")
+	if !ValidName(name) { // rejects "" and >128 too
 		return "", false
 	}
 	return name, true

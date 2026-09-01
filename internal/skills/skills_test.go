@@ -115,3 +115,71 @@ func TestValidNameMatchesTheListingCharset(t *testing.T) {
 		}
 	}
 }
+
+// nameOnly is the shape that was silently dropped: a skill whose description is empty is listed
+// as a bare name, with nothing after it on that line OR the next. Two forms, both from a real
+// captured prompt — a plain name, and a `plugin:skill` name whose colon is the plugin separator
+// and not a delimiter. 15 of 39 real entries looked like this.
+const nameOnly = `
+
+- alpha: does alpha things.
+- security-review
+- ui-ux-pro-max:brand
+- ponytail:ponytail-audit
+- superpowers:writing-skills
+- beta: does beta things.
+`
+
+func TestParseFindsNameOnlyEntries(t *testing.T) {
+	l := Parse(nameOnly)
+	got := names(l)
+	want := []string{"alpha", "security-review", "ui-ux-pro-max:brand",
+		"ponytail:ponytail-audit", "superpowers:writing-skills", "beta"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("entries = %v, want %v", got, want)
+	}
+	// The point of the fix: an unrecognised line does not vanish, it is absorbed into the entry
+	// above it — so alpha would answer for four names that are not its own, and cutting alpha
+	// would cut all five lines.
+	if alpha := l.Text(l.Entries[0]); strings.Contains(alpha, "security-review") {
+		t.Errorf("alpha's span swallowed the following entries: %q", alpha)
+	}
+}
+
+// The removal a page's one-click switch authorises has to be the removal it reports.
+func TestWithoutRemovesExactlyOneNameOnlyEntry(t *testing.T) {
+	got, n := Parse(nameOnly).Without(map[string]bool{"alpha": true})
+	if n != 1 {
+		t.Fatalf("dropped %d, want 1", n)
+	}
+	for _, keep := range []string{"- security-review", "- ui-ux-pro-max:brand",
+		"- ponytail:ponytail-audit", "- superpowers:writing-skills", "- beta:"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("%q was removed too", keep)
+		}
+	}
+}
+
+func TestEntryNameReadsANameOnlyLine(t *testing.T) {
+	for line, want := range map[string]string{
+		"- security-review":         "security-review",
+		"- ui-ux-pro-max:brand":     "ui-ux-pro-max:brand",
+		"- ponytail:ponytail-audit": "ponytail:ponytail-audit",
+		"- apps/web:deploy":         "apps/web:deploy",
+		"- security-review  ":       "security-review", // trailing space
+		"- security-review:":        "security-review", // empty description
+		"- ui-ux-pro-max:brand: x":  "ui-ux-pro-max:brand",
+		"- a:b:c":                   "a:b:c",
+	} {
+		if n, ok := EntryName(line); !ok || n != want {
+			t.Errorf("EntryName(%q) = %q,%v; want %q,true", line, n, ok, want)
+		}
+	}
+	// A prose bullet inside a description still is not an entry: the charset is the only gate
+	// left on a line with no delimiter, so it has to keep refusing anything with a space.
+	for _, line := range []string{"- and this line is part of a description", "- see also"} {
+		if n, ok := EntryName(line); ok {
+			t.Errorf("EntryName(%q) = %q, true — a prose bullet is not an entry", line, n)
+		}
+	}
+}
