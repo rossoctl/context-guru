@@ -235,9 +235,17 @@ func uiHandler() http.Handler {
 			}
 			w.Header().Set("ETag", etag)
 			// ServeContent still types the response from `name` (the .js/.css
-			// extension), sets Content-Length from the reader, and answers Range
-			// requests against the bytes it is given — which for a compressed
-			// response is the encoded body, as RFC 9110 requires.
+			// extension) and answers Range requests against the bytes it is given —
+			// which for a compressed response is the encoded body, as RFC 9110
+			// requires.
+			//
+			// It does NOT set Content-Length once Content-Encoding is set, so the
+			// compressed responses go out chunked and a browser shows no download
+			// progress for them. Do not "fix" that by setting Content-Length here:
+			// ServeContent answers a Range request with a 206 whose body is only the
+			// requested slice, and it will not overwrite a Content-Length we already
+			// set — so a full-body length on a 206 would be a broken response rather
+			// than a missing progress bar.
 			http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(b))
 			return
 		}
