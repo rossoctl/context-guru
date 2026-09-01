@@ -202,6 +202,20 @@ async function runCampHoldout() {
 }
 
 function renderCampHoldout(host, res) {
+  // Above the tiles, not below them, and worded like kvcache.js's own cap banner: a capped
+  // window is the one defect here that leaves every number below looking correct. The cap
+  // keeps each window's NEWEST rows and the two windows are capped independently, so a
+  // retention percentage over a capped pair divides two totals covering different
+  // fractions of the periods asked for.
+  if (res.train_truncated || res.test_truncated) {
+    host.appendChild(el('div', { class: 'banner warn', 'data-testid': 'camp-ho-truncated' },
+      el('strong', {}, `Capped: the train window read ${num(res.train_scanned)} of `
+        + `${num(res.train_total)} matching requests, the test window `
+        + `${num(res.test_scanned)} of ${num(res.test_total)}. `),
+      'The newest rows in each were kept, so a capped window is its own recent tail rather '
+      + 'than the period you asked for — and the two were capped independently. Narrow both '
+      + 'windows until each reads whole before comparing these totals.'));
+  }
   host.appendChild(tileGroup(null, null, [
     tile('camp-ho-train', 'Train saving (in-sample)', usd(res.total_train_saving_usd)),
     tile('camp-ho-test', 'Test saving (held out)', usd(res.total_test_saving_usd), null,

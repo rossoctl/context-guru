@@ -126,6 +126,26 @@ type KVCacheHoldout struct {
 	Users []string             `json:"users"`
 	Cells []KVCacheHoldoutCell `json:"cells"`
 
+	// Each window's own read coverage, carried straight from the KVCacheSuggest run that
+	// produced it. KVCacheDataset caps one read at kvCacheMaxRows and the cap keeps the
+	// NEWEST rows, so a window bigger than the cap is silently reduced to its own recent
+	// tail — and the two windows here are read and capped INDEPENDENTLY.
+	//
+	// That matters more here than on the single-window page, which already declares it
+	// (KVCacheSuggestions.Truncated, banner in dash/ui/kvcache.js). A clipped TRAIN window
+	// means the arm was chosen on a slice of the period the reader asked for; a clipped
+	// TEST window means it was scored on one; and RetentionPct can then divide two totals
+	// whose populations cover very different fractions of their own windows. Every
+	// per-cell request count reports only the rows that were read, so without these fields
+	// nothing in the payload reveals any of it — the one silent data loss that would
+	// undermine every other honesty flag in this file.
+	TrainScanned   int64 `json:"train_scanned"`
+	TrainTotal     int64 `json:"train_total"`
+	TrainTruncated bool  `json:"train_truncated"`
+	TestScanned    int64 `json:"test_scanned"`
+	TestTotal      int64 `json:"test_total"`
+	TestTruncated  bool  `json:"test_truncated"`
+
 	// TotalTrainSavingUSD and TotalTestSavingUSD sum the CHOSEN arm over exactly the cells
 	// where BOTH sides are known and neither side is below the request floor — the only
 	// population where the two totals describe the same thing. ComparableCells is that
@@ -197,8 +217,12 @@ func (d *DB) KVCacheSuggestHoldout(f Filter, o KVCacheOptions, p modelinfo.Price
 		MinRequests: trainOut.MinRequests,
 		TrainSince:  train.Since, TrainUntil: train.Until,
 		TestSince: test.Since, TestUntil: test.Until,
-		Users: []string{},
-		Cells: []KVCacheHoldoutCell{},
+		TrainScanned: trainOut.Scanned, TrainTotal: trainOut.Total,
+		TrainTruncated: trainOut.Truncated,
+		TestScanned:    testOut.Scanned, TestTotal: testOut.Total,
+		TestTruncated: testOut.Truncated,
+		Users:         []string{},
+		Cells:         []KVCacheHoldoutCell{},
 	}
 
 	for _, tc := range trainOut.Cells {
@@ -333,6 +357,19 @@ func (d *DB) KVCacheSuggestHoldout(f Filter, o KVCacheOptions, p modelinfo.Price
 			"is never counted as a zero.",
 		"Both windows read Sunday-Thursday only and are replayed per hour-of-day in UTC, " +
 			"exactly as the live suggester does — see dash/kvcachesuggest.go.",
+	}
+	// Stated in words, not only in the flags, because a clipped window is the one defect
+	// here that every other number goes on looking correct through: the cap keeps each
+	// window's NEWEST rows, so the two halves of the ratio can cover very different
+	// fractions of the periods asked for, and no per-cell count says so.
+	if out.TrainTruncated || out.TestTruncated {
+		out.Notes = append(out.Notes, fmt.Sprintf(
+			"One or both windows were CAPPED at the analysis row limit: train read %d of %d "+
+				"matching requests, test read %d of %d. The cap keeps each window's most recent "+
+				"rows, so a capped window is its own recent tail rather than the period asked "+
+				"for, and the two were capped independently — narrow the windows until both read "+
+				"whole before comparing these totals.",
+			out.TrainScanned, out.TrainTotal, out.TestScanned, out.TestTotal))
 	}
 	return out, nil
 }

@@ -315,3 +315,103 @@ func TestKVCacheHoldoutRouteRejectsABadWindowAsA400(t *testing.T) {
 		t.Error("the route served no JSON object")
 	}
 }
+
+// The analysis read is CAPPED at kvCacheMaxRows and the cap keeps the NEWEST rows in the
+// window (see KVCacheDataset). So a window bigger than the cap is silently reduced to its
+// own recent tail, and the single-window page shouts about it: KVCacheSuggestions carries
+// Scanned/Total/Truncated and dash/ui/kvcache.js renders a warning banner telling the
+// reader the analysis covers only the rows that were read.
+//
+// A holdout needs that louder, not quieter. The two windows are read and capped
+// INDEPENDENTLY, so a clipped train window means the arm was chosen on a slice of the
+// period the reader asked for, and RetentionPct can divide two totals whose populations
+// cover very different fractions of their windows — while every per-cell request count
+// reports only the post-cap rows, so nothing in the payload reveals it. That is the one
+// silent data loss that undermines every other honesty flag in this file.
+func TestKVCacheHoldoutReportsATruncatedWindow(t *testing.T) {
+	restore := kvCacheMaxRows
+	t.Cleanup(func() { kvCacheMaxRows = restore })
+	kvCacheMaxRows = 4
+
+	train, test := holdoutWeeks()
+	// 8 train-window requests and 6 test-window ones, all one (user, hour) cell: with the
+	// cap at 4, BOTH windows truncate and the train side loses half its rows.
+	var evs []*Event
+	for i := 0; i < 8; i++ {
+		ts := time.Date(2023, 1, 1, 10, 0, 0, 0, time.UTC).
+			Add(time.Duration(i) * 3 * time.Minute).UnixMilli()
+		evs = append(evs, kvEvent("u1", "s-train", "m", ts, 100_000, 0))
+	}
+	for i := 0; i < 6; i++ {
+		ts := time.Date(2023, 1, 8, 10, 0, 0, 0, time.UTC).
+			Add(time.Duration(i) * 3 * time.Minute).UnixMilli()
+		evs = append(evs, kvEvent("u1", "s-test", "m", ts, 100_000, 0))
+	}
+	db := seedKV(t, evs...)
+
+	out, err := db.KVCacheSuggestHoldout(allTenants(), KVCacheOptions{},
+		staticPricer{ibmSonnet}, KVCacheSimConfig{}, train, test)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !out.TrainTruncated || !out.TestTruncated {
+		t.Errorf("TrainTruncated=%v TestTruncated=%v, want both true: a reader cannot be told "+
+			"how much of each window was actually read if the payload does not carry it",
+			out.TrainTruncated, out.TestTruncated)
+	}
+	if out.TrainScanned != 4 || out.TrainTotal != 8 {
+		t.Errorf("train read %d of %d, want 4 of 8", out.TrainScanned, out.TrainTotal)
+	}
+	if out.TestScanned != 4 || out.TestTotal != 6 {
+		t.Errorf("test read %d of %d, want 4 of 6", out.TestScanned, out.TestTotal)
+	}
+	// Not just machine-readable: the notes are what the page shows a manager, and a
+	// retention figure computed over a clipped window has to say so in words too.
+	var said bool
+	for _, n := range out.Notes {
+		if strings.Contains(n, "capped") || strings.Contains(n, "truncat") {
+			said = true
+		}
+	}
+	if !said {
+		t.Errorf("no note mentions the cap; notes = %q", out.Notes)
+	}
+}
+
+// The other half of the same rule: an UNtruncated holdout must not carry a scary banner.
+// Truncated stays false and the notes stay quiet, so the flag means something when it is
+// set.
+func TestKVCacheHoldoutReportsAnUntruncatedWindowAsWhole(t *testing.T) {
+	train, test := holdoutWeeks()
+	var evs []*Event
+	for week, base := range []time.Time{
+		time.Date(2023, 1, 1, 10, 0, 0, 0, time.UTC),
+		time.Date(2023, 1, 8, 10, 0, 0, 0, time.UTC),
+	} {
+		for i := 0; i < 6; i++ {
+			ts := base.Add(time.Duration(i) * 3 * time.Minute).UnixMilli()
+			evs = append(evs, kvEvent("u1", "s-w"+strconv.Itoa(week), "m", ts, 100_000, 0))
+		}
+	}
+	db := seedKV(t, evs...)
+
+	out, err := db.KVCacheSuggestHoldout(allTenants(), KVCacheOptions{},
+		staticPricer{ibmSonnet}, KVCacheSimConfig{}, train, test)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.TrainTruncated || out.TestTruncated {
+		t.Errorf("TrainTruncated=%v TestTruncated=%v, want both false on a whole window",
+			out.TrainTruncated, out.TestTruncated)
+	}
+	if out.TrainScanned != 6 || out.TrainTotal != 6 || out.TestScanned != 6 || out.TestTotal != 6 {
+		t.Errorf("train %d/%d test %d/%d, want 6/6 each",
+			out.TrainScanned, out.TrainTotal, out.TestScanned, out.TestTotal)
+	}
+	for _, n := range out.Notes {
+		if strings.Contains(n, "capped") || strings.Contains(n, "truncat") {
+			t.Errorf("an untruncated holdout carries a cap note: %q", n)
+		}
+	}
+}
