@@ -126,6 +126,24 @@ function kindPill(t) {
     KIND_LABEL[k] || k);
 }
 
+/**
+ * shortName drops the `mcp__<server>__` prefix from a row that already shows its server.
+ *
+ * The name is the row's IDENTITY and this page exists so a reader can decide whether to remove
+ * the thing it names, so a clipped name is not a cosmetic defect — it is two rows a reader cannot
+ * tell apart while being asked to delete one of them. Measured on the seeded corpus: 132 distinct
+ * MCP tools, 7 of them clipped, 259-281 px of name in a 34ch box.
+ *
+ * The prefix is the right thing to cut because it is the part that distinguishes NOTHING: every
+ * tool of one server carries it, and `mcp__<server>__<tool>` names differ at the END, which is
+ * precisely what an end-truncating ellipsis destroys. The server is still on the row in its own
+ * cell, and the full name is always in `title`, so nothing is lost.
+ */
+function shortName(t) {
+  const pre = 'mcp__' + (t.server || '') + '__';
+  return t.server && t.name.indexOf(pre) === 0 ? t.name.slice(pre.length) : t.name;
+}
+
 /** A number cell. */
 function numTd(v) { return el('td', { class: 'num', text: num(v) }); }
 /** A compacted number cell, for the read counts that run to hundreds of millions. */
@@ -729,7 +747,16 @@ function paybackRow(g, rep) {
   // defect with the tooltips unfolded, and it was 110 px per card.
   return el('div', { class: 'inv-payback', 'data-testid': 'inv-payback-' + g.key },
     part('good', 'Benefit', per === null
-      ? na('This scope has no model rates, so its tokens cannot be turned into a dollar.')
+      // The reason has to name the RIGHT absence. `g.priced` is false when at least one session
+      // that carried this group ran on a model with no rates — which is not the same claim as
+      // "this deployment has no price list", and on the seeded corpus the second one is simply
+      // false while the first is true of 17 sessions. An n/a whose stated reason is wrong is worse
+      // than an unreasoned one: it is a confident wrong answer where the point was to refuse.
+      ? na(!g.priced
+        ? 'At least one session that carried this ran on a model with no known rates. Its tokens '
+          + 'are counted above; its cost is not known, and is not guessed at here.'
+        : 'No session in scope is recorded as having carried this, so there is no population to '
+          + 'divide the avoided cost over.')
       : document.createTextNode('+' + usd(per)), 'per later session'),
     part('bad', 'Cost', rebuild
       ? document.createTextNode('\u2212' + usd(rebuild.usd))
@@ -821,7 +848,8 @@ function ctaBlock(groups, rep) {
   const idx = el('ol', { class: 'inv-lead', 'data-testid': 'inv-lead' });
   for (const g of lead) {
     idx.appendChild(el('li', {},
-      el('span', { class: 'inv-lead-name comp-name', text: g.label }),
+      el('span', { class: 'inv-lead-name comp-name', title: g.label,
+        text: shortName(g.items.length === 1 ? g.items[0] : { name: g.label }) }),
       el('span', { class: 'inv-lead-usd' }, money(g.usd, g.priced)),
       el('span', { class: 'section-note', text: num(g.tokens) + ' tok/request · '
         + (g.items.length > 1 ? num(g.items.length) + ' declarations · ' : '')
@@ -997,7 +1025,7 @@ function unusedRow(t, rep) {
   });
   box.appendChild(excludeToggle(t));
   box.appendChild(el('label', { class: 'cg-item-main', for: 'inv-cb-' + key },
-    el('span', { class: 'cg-item-name comp-name', text: t.name }),
+    el('span', { class: 'cg-item-name comp-name', title: t.name, text: shortName(t) }),
     kindPill(t),
     t.server ? el('span', { class: 'cg-item-srv', text: t.server }) : null,
     el('span', { class: 'cg-item-weight' },
@@ -1231,7 +1259,7 @@ function toolTable(host, rep) {
   }
   for (const t of sortRows(rep.tools, tools.sort, tools.dir)) {
     body.appendChild(el('tr', { class: t.sessions_used ? '' : 'cg-row-unused' },
-      el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: t.name })),
+      el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: shortName(t) })),
       el('td', {}, kindPill(t), t.server ? el('span', { class: 'cg-item-srv', text: t.server }) : null),
       numTd(t.tokens), numTd(t.sessions_declared),
       el('td', { class: 'num' }, t.sessions_used
@@ -1357,7 +1385,7 @@ function skillsPanel(host, rep) {
       // once and does not want to keep paying for is exactly the case the actionable list above
       // cannot reach, and editing a config file by hand was the only route to it.
       el('td', {}, excludeToggle(t)),
-      el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: t.name })),
+      el('td', {}, el('span', { class: 'comp-name trunc', title: t.name, text: shortName(t) })),
       numTd(t.tokens), numTd(t.sessions_declared),
       el('td', { class: 'num' }, t.sessions_used
         ? num(t.sessions_used) : el('span', { class: 'pill missing' }, 'never')),
@@ -1859,10 +1887,14 @@ function renderPromptPanel(host, rep) {
   // different labels read as a bug — the reader has to work out that they agree because one
   // component of the sum is missing, which is the panel's own coverage story told badly.
   const tiles = [
-    tile('inv-prompt-tokens', 'System prompt', p.sessions
+    // "largest", on the tile, not only inside its explanation. The server sends the MAX over
+    // captured sessions (four observed values on the reference bodies were 5,783 / 5,789 / 5,783 /
+    // 5,791 and this reports 5,791) and this panel now gives that figure more room than it had, so
+    // an unqualified label would be a redesign promoting a max as a typical value.
+    tile('inv-prompt-tokens', 'System prompt — largest seen', p.sessions
       ? num(p.tokens) + ' tok' : 'not captured',
-      p.sessions ? 'recorded in ' + num(p.sessions) + ' session'
-        + (p.sessions === 1 ? '' : 's') : 'no session in this window recorded one'),
+      p.sessions ? 'the biggest of ' + num(p.sessions) + ' recorded, not a typical one'
+        : 'no session in this window recorded one'),
     tile('inv-prefix-total', 'Whole prefix per request', num(prefix) + ' tok', p.sessions
       ? 'system prompt + every declaration'
       : 'declarations only — no system prompt recorded here'),
@@ -1979,6 +2011,13 @@ function promptShareBar(host, rep, prefix) {
  * carry no `builtin` flag of their own, and re-deriving one here would be a second copy of a rule
  * that is invisible when it drifts.
  */
+// REGIONS_INLINE is how many of a run's regions render open before the tail folds.
+//
+// ponytail: a fixed count, matching EXPANDED_GROUPS' reasoning. If a corpus ever has a flat
+// weight distribution across a hundred regions this becomes "while the region is over 1% of the
+// prefix", but on every corpus measured so far the first dozen are the whole story.
+const REGIONS_INLINE = 12;
+
 function paintRegions(body, rep) {
   clear(body);
   if (promptView.state === 'loading' || promptView.state === 'idle') {
@@ -2022,7 +2061,7 @@ function paintRegions(body, rep) {
     ['Your MCP servers', 'one region per declared MCP tool'],
     ['The skills, one entry each', 'each is a slice of the listing above, not extra weight'],
     ['Other client tools', 'declared by whatever agent sent these requests'],
-    ['Claude Code’s own tools', 'not yours to remove'],
+    ['The agent’s own tools and the provider’s', 'not yours to remove'],
   ];
   for (let b = 0; b < HEADS.length; b++) {
     const rows = regions.filter((r) => bucket(r) === b).sort((x, y) => y.tokens - x.tokens);
@@ -2051,7 +2090,23 @@ function paintRegions(body, rep) {
       continue;
     }
     body.appendChild(head);
-    for (const r of rows) body.appendChild(promptRegion(r, maxShare));
+    // A corpus with 132 distinct MCP tools puts 72 regions in one run, which is 3,000 px of one
+    // owner group. Heaviest REGIONS_INLINE stay open, so the ask ("without requiring a click") is
+    // still met for the part of the run worth reading, and the tail folds with its own count and
+    // total stated — the same shape, and the same reason, as inv-group-tail in the decision list.
+    for (const r of rows.slice(0, REGIONS_INLINE)) body.appendChild(promptRegion(r, maxShare));
+    const tail = rows.slice(REGIONS_INLINE);
+    if (!tail.length) continue;
+    const tailTok = tail.reduce((n, r) => n + r.tokens, 0);
+    const det = el('details', { class: 'inv-regions-fold',
+      'data-testid': 'inv-regions-tail-' + b },
+    el('summary', {}, el('span', { class: 'inv-regions-h' },
+      el('span', { text: 'The other ' + num(tail.length) + ' — lighter than the ' + num(REGIONS_INLINE)
+        + ' above' }),
+      el('span', { class: 'section-note', text: num(tailTok) + ' tok · '
+        + pct(tail.reduce((n, r) => n + (r.share || 0), 0), 1) + ' of the prefix between them' }))));
+    for (const r of tail) det.appendChild(promptRegion(r, maxShare));
+    body.appendChild(det);
   }
 }
 
@@ -2067,7 +2122,7 @@ function paintRegions(body, rep) {
 function promptRegion(r, maxShare) {
   const isSys = r.kind === 'system_prompt';
   const name = isSys ? 'The system prompt itself'
-    : (r.kind === 'skill_listing' ? 'The skills listing' : r.name);
+    : (r.kind === 'skill_listing' ? 'The skills listing' : shortName(r));
   const det = el('details', { class: 'inv-region' + (isSys ? ' inv-region-sys' : ''),
     'data-testid': 'inv-region-' + r.kind + '/' + r.name,
     // The system prompt open by default: it is the region the reader asked to see, it is the
@@ -2075,7 +2130,7 @@ function promptRegion(r, maxShare) {
     // else is one JSON object or one block of prose, where the summary IS the answer.
     open: isSys ? 'open' : null },
   el('summary', {},
-    el('span', { class: 'inv-region-name comp-name', text: name }),
+    el('span', { class: 'inv-region-name comp-name', title: r.name || name, text: name }),
     isSys ? el('span', { class: 'pill neutral' }, 'system') : kindPill(r),
     el('span', { class: 'section-note', text: num(r.tokens) + ' tok · ' + pct(r.share, 1)
       + ((r.parts || []).length ? ' · ' + num(r.parts.length) + ' parts' : '') }),
