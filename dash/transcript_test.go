@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/apply"
 )
 
 // countingRemote records how many times the transcript route reached for cold storage.
@@ -546,4 +548,51 @@ func eventIDs(evs []*Event) []int64 {
 		out = append(out, e.ID)
 	}
 	return out
+}
+
+// content_cap_bytes used to serve the dashboard's own --dashboard-content-cap, which
+// could never bind: apply clips Change.Before/After to apply.TraceTextCap (4,000 bytes)
+// before a row reaches capture, and the dashboard default is 16 KiB. So the API asserted
+// a number no truncation had ever used. It must report the cap that actually binds.
+func TestContentCapReportsTheCapThatBinds(t *testing.T) {
+	if apply.TraceTextCap >= defaultContentCap {
+		t.Skipf("fixture assumption: apply's clip (%d) is the tighter of the two (dash %d)",
+			apply.TraceTextCap, defaultContentCap)
+	}
+	for _, tc := range []struct {
+		name    string
+		dashCap int
+		want    int
+	}{
+		{"default 16 KiB is not the cap", defaultContentCap, apply.TraceTextCap},
+		{"a dash cap tighter than apply's does bind", 512, 512},
+		{"unset means apply's", 0, apply.TraceTextCap},
+	} {
+		if got := effectiveContentCap(tc.dashCap); got != tc.want {
+			t.Errorf("%s: effectiveContentCap(%d) = %d, want %d", tc.name, tc.dashCap, got, tc.want)
+		}
+	}
+
+	// And the route serves it, on both the transcript and the single request.
+	a, rec, _ := transcriptAPI(t, Options{CaptureContent: true, ContentCap: defaultContentCap})
+	e := mkEvent(time.Now().UnixMilli(), "s", "m", 100, 90)
+	e.Content = []ContentRow{{Path: "messages.0", Before: "b", After: "a"}}
+	seed(t, rec, e)
+
+	for _, url := range []string{"/api/sessions/s/transcript", "/api/requests/1"} {
+		w, _ := get(t, a, url, "127.0.0.1:1")
+		if w.Code != 200 {
+			t.Fatalf("%s: status %d", url, w.Code)
+		}
+		var body struct {
+			Cap int `json:"content_cap_bytes"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Cap != apply.TraceTextCap {
+			t.Errorf("%s served content_cap_bytes = %d, want the binding cap %d",
+				url, body.Cap, apply.TraceTextCap)
+		}
+	}
 }

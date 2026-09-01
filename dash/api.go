@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"golang.org/x/sync/errgroup"
 )
@@ -534,7 +535,7 @@ func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 		// already enabled, because the operator's gate was the one that was closed.
 		"content_captured":   captured,
 		"capture_blocked_by": blockedBy,
-		"content_cap_bytes":  a.rec.Opts().ContentCap,
+		"content_cap_bytes":  effectiveContentCap(a.rec.Opts().ContentCap),
 		"archive":            arch,
 		"remote":             a.rec.RemoteName(),
 		"reachable":          a.rec.RemoteReachable(),
@@ -948,7 +949,7 @@ func (a *API) request(w http.ResponseWriter, r *http.Request) {
 		"content_visible":    trusted,
 		"content_captured":   captured,
 		"capture_blocked_by": blockedBy,
-		"content_cap_bytes":  a.rec.Opts().ContentCap,
+		"content_cap_bytes":  effectiveContentCap(a.rec.Opts().ContentCap),
 		"content_archived":   archived,
 	})
 }
@@ -1227,4 +1228,16 @@ func windowEvents(evs []*Event, after string, limit int) ([]*Event, string, int6
 		next = strconv.FormatInt(evs[limit-1].TS, 10) + ":" + strconv.FormatInt(evs[limit-1].ID, 10)
 	}
 	return evs, next, total
+}
+
+// effectiveContentCap is the cap that actually binds on captured text, which is not the
+// one this package configures. apply clips Change.Before/After to apply.TraceTextCap
+// before a row ever reaches capture, and that is 4,000 bytes against a --dashboard-content-cap
+// that defaults to 16 KiB — so the dashboard's own cap could never bind, and serving it as
+// content_cap_bytes told a reader a number no truncation had ever used. Report the minimum.
+func effectiveContentCap(dashCap int) int {
+	if dashCap <= 0 {
+		return apply.TraceTextCap
+	}
+	return min(dashCap, apply.TraceTextCap)
 }

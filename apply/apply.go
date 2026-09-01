@@ -1146,10 +1146,23 @@ type Change struct {
 	Components []string `json:"components,omitempty"`
 }
 
+// TraceTextCap bounds Change.Before/After — the copy of the text that goes into a trace
+// or a dashboard row. It is NOT a cap on the message: the pipeline rewrote the whole
+// thing, and BeforeTokens/AfterTokens are counted on the FULL string, so a Change can
+// legitimately report 2,658 tokens next to 4,000 bytes of text. clip() appends a visible
+// "…[+N bytes]" so a reader is told, and the original is recoverable through the expand
+// tool when the after-text carries a <<cg:HASH>> marker.
+//
+// It is exported because it is the cap that actually binds. apply is an importable
+// library — the bifrost plugin embeds it and has its own reason to bound trace size — so
+// an embedder that stores these rows must be able to report the EFFECTIVE limit rather
+// than assert its own, larger one. dash does exactly that for content_cap_bytes.
+const TraceTextCap = 4000
+
 func mkChange(path, before, after string, comps []string) Change {
 	return Change{
 		Path: path, BeforeTokens: schema.TextTokens(before), AfterTokens: schema.TextTokens(after),
-		Before: clip(before, 4000), After: clip(after, 4000), Components: comps,
+		Before: clip(before, TraceTextCap), After: clip(after, TraceTextCap), Components: comps,
 	}
 }
 

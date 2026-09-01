@@ -3020,6 +3020,45 @@ function renderDiff(host, before, after, mode, rows) {
   host.appendChild(frag);
 }
 
+/**
+ * CLIPPED matches the truncation sentinel apply.clip() appends to a trace text:
+ * "…[+2559 bytes]" at the very end of the LAST line. It means the pipeline rewrote the
+ * whole message but only the first apply.TraceTextCap bytes were captured — so the token
+ * counts in the block summary are for the full message while the text below is a prefix.
+ */
+const CLIPPED = /…\[\+(\d+) bytes\]$/;
+
+/**
+ * markClipped turns each truncation sentinel into its own `gap` row — the same op the
+ * elided-unchanged-run marker already uses, so all three renderers style it as a notice
+ * instead of tinting it like a line of transcript. Runs AFTER the diff, on the rows, so
+ * the diff itself is byte-for-byte what it was before.
+ *
+ * Returns the bytes not captured per side, for the block-level note.
+ */
+function markClipped(rows) {
+  const missing = { a: 0, b: 0 };
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (r.op === 'gap') continue;
+    const m = CLIPPED.exec(r.text || '');
+    if (!m) continue;
+    const n = Number(m[1]);
+    // op ' ' means the sentinel survived as an unchanged line, i.e. both sides carry it.
+    if (r.op === '-' || r.op === ' ') missing.a = Math.max(missing.a, n);
+    if (r.op === '+' || r.op === ' ') missing.b = Math.max(missing.b, n);
+    r.text = r.text.slice(0, -m[0].length);
+    rows.splice(i + 1, 0, { op: 'gap', text:
+      `… truncated here: ${num(n)} more bytes were not captured (the diff shows the first ` +
+      `${num(CONTENT_CAP)} bytes; token counts above are for the whole message) …` });
+  }
+  return missing;
+}
+
+/** The cap the server says actually binds, from any transcript/request answer. Defaults to
+ *  apply.TraceTextCap so a notice reads correctly before the first answer lands. */
+let CONTENT_CAP = 4000;
+
 /** Count added/removed lines, for the toolbar's tally, from rows the caller already has.
  *
  *  It counts the LCS result rather than deriving anything from before_tokens/after_tokens:
@@ -3202,6 +3241,7 @@ function diffBlock(c, components, opts = {}) {
     if (bodyHost) return;
     // The ONE LCS pass. The tally and every view mode read the same rows.
     rows = withHunks(diffLines((c.before || '').split('\n'), (c.after || '').split('\n')));
+    const missing = markClipped(rows);
     const t = diffTally(rows);
     const bar = el('div', { class: 'difftoolbar' });
     for (const [m, label, testid] of DIFF_MODES) {
@@ -3220,6 +3260,26 @@ function diffBlock(c, components, opts = {}) {
 
     const chips = attributionChips(c, components);
     if (chips) det.appendChild(el('div', { class: 'difftoolbar' }, chips));
+
+    // The header/body disagreement, said out loud: the token counts in the summary are the
+    // whole message's, the text below is a prefix. Without this the only signal was a
+    // sentinel tinted like an ordinary transcript line.
+    if (missing.a || missing.b) {
+      det.appendChild(el('div', { class: 'state blocked', 'data-testid': 'diff-truncated',
+        role: 'note' },
+        el('div', { class: 'state-body' },
+          el('strong', { text: 'Only the first ' + num(CONTENT_CAP) + ' bytes were captured' }),
+          el('span', { text:
+            [missing.a && num(missing.a) + ' bytes of the before-text',
+              missing.b && num(missing.b) + ' bytes of the after-text'].filter(Boolean).join(' and ')
+            + ' are not in this diff. The token counts in the heading above cover the whole '
+            + 'message, so they will not match the text you can see here. '
+            + (MARKER.test(c.after || '')
+              ? 'The after-text carries a <<cg:HASH>> marker, so the full original is still '
+                + 'recoverable through the expand tool.'
+              : 'This is a capture limit, not a rewrite: nothing was lost from what was sent '
+                + 'upstream.') }))));
+    }
 
     // tabindex: this box scrolls, and a scroll region a keyboard user cannot focus is a
     // part of the diff they cannot reach at all (axe scrollable-region-focusable). Same
@@ -3305,7 +3365,9 @@ async function openRequest(id, fromURL) {
     // capture_blocked_by names WHICH party's gate is shut, so the empty-diff panel can
     // stop telling people to change a setting that is not theirs.
     const { request: e, content_visible: visible, content_captured: captured,
-      content_archived: archived, capture_blocked_by: blockedBy } = await res.json();
+      content_archived: archived, capture_blocked_by: blockedBy,
+      content_cap_bytes: cap } = await res.json();
+    if (cap) CONTENT_CAP = cap;
     clear(body);
 
     // Four captioned bands rather than twenty-four pairs in one grid. Same data, same
@@ -3743,6 +3805,7 @@ async function openSessionDiff(session, fetchCold, fromURL, page) {
 
 function renderSessionDiff(body, session, out, offset = 0) {
   clear(body);
+  if (out.content_cap_bytes) CONTENT_CAP = out.content_cap_bytes;
   if (out.state === 'unknown_session') {
     contentBlockedState(body, 'unknown_session');
     return;

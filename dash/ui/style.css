@@ -698,9 +698,11 @@ details.why dd { margin: 0; }
      paint for the blocks off screen are work nobody asked for. `auto` on the intrinsic
      size means the placeholder height (a collapsed summary row) applies only until the
      block has been rendered once; after that the browser remembers its real size, so
-     scrollbar length and in-page find stay honest. */
+     scrollbar length and in-page find stay honest. 37px is the measured height of a
+     collapsed block (summary row + border + margin) at this type scale — guessing high
+     makes the scrollbar claim a longer page than there is. */
   content-visibility: auto;
-  contain-intrinsic-size: auto 44px;
+  contain-intrinsic-size: auto 37px;
 }
 .diff > summary {
   padding: var(--sp-2) var(--sp-3); cursor: pointer; font-size: var(--t-small);
