@@ -213,7 +213,10 @@ func TestTheKVCacheTabRespectsTheTimeRange(t *testing.T) {
 	if !strings.Contains(src, `id: 'view-kvcache'`) {
 		t.Error("the KV-cache view does not mount its own section")
 	}
-	if !strings.Contains(readUI(t, "ui/index.html"), `<script src="kvcache.js">`) {
+	// The attribute list is not the point — that the shared page loads the file is. Matched
+	// on the src alone so adding `defer` (or any other attribute) does not read as the tag
+	// having been removed.
+	if !strings.Contains(readUI(t, "ui/index.html"), `src="kvcache.js">`) {
 		t.Error("kvcache.js is not loaded by the shared page")
 	}
 }
