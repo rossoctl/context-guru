@@ -102,6 +102,35 @@ func TestResolveCampaignCellGatesThe1hTierPerTenantModel(t *testing.T) {
 	}
 }
 
+// A cell whose winner was picked on a subset of its own traffic must not activate a live
+// schedule. BestStrategy is an argmax over the PRICED requests only, so unpriced traffic in the
+// cell means the arm about to be enforced won a comparison the rest of that cell never entered.
+// This gate is the one dash.KVCacheSuggestion.UnpricedRequests exists to make possible: before
+// that field, nothing on this path could see the condition at all.
+func TestResolveCampaignCellRefusesACellWhoseArmWasPickedOnPricedRowsOnly(t *testing.T) {
+	partial := dash.KVCacheSuggestion{User: "t1", HourUTC: 9, Requests: 36,
+		UnpricedRequests: 20, BestStrategy: kvcache.StrategyStopReasonGated}
+	got := resolveCampaignCell(partial, func(string) bool { return true })
+	if got.activatable || got.skipReason == "" {
+		t.Errorf("got %+v, want not activatable with a reason: 20 of 36 requests unpriced means "+
+			"stop-reason-gated (which buys pings) won on 16 of them", got)
+	}
+	// Fully priced, everything else equal: still activatable, so the gate narrows rather than
+	// closes the path.
+	full := partial
+	full.UnpricedRequests = 0
+	if got := resolveCampaignCell(full, func(string) bool { return true }); !got.activatable {
+		t.Errorf("got %+v, want activatable once every request in the cell is priced", got)
+	}
+	// Baseline arms are exempt for the same reason InsufficientData exempts them: enforcing
+	// "change nothing" needs no evidence about which arm won.
+	base := partial
+	base.BestStrategy = kvcache.StrategyFixed5m
+	if got := resolveCampaignCell(base, func(string) bool { return true }); !got.activatable {
+		t.Errorf("got %+v, want a baseline arm to stay activatable regardless of coverage", got)
+	}
+}
+
 func TestResolveCampaignCellBaselineArmIsActivatableWithNoConfig(t *testing.T) {
 	cell := dash.KVCacheSuggestion{User: "t1", HourUTC: 9, BestStrategy: kvcache.StrategyFixed5m}
 	got := resolveCampaignCell(cell, func(string) bool { return true })

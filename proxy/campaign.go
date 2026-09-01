@@ -190,6 +190,22 @@ func resolveCampaignCell(cell dash.KVCacheSuggestion, honorsHeadTTL1h func(tenan
 		out.skipReason = "too few requests in this cell to trust its recommendation as a pattern"
 		return out
 	}
+	// The same objection, on the other axis: too few PRICED requests. BestStrategy is an argmax
+	// over whichever of the cell's requests had rates, so a cell with unpriced traffic hands us
+	// a winner chosen on a subset of the pattern we are about to enforce. This is not about the
+	// dollars — an unpriced request contributes $0 to the baseline and $0 to every arm, so
+	// SavingUSD is understated, not inflated — it is about the ranking, which really does move:
+	// pricing one missing model reordered ranks 5 through 8 and flipped stop-reason-gated from
+	// -0.35% to +0.75%, and stop-reason-gated buys 249 pings.
+	//
+	// Baseline arms are exempt for exactly the reason InsufficientData exempts them: "change
+	// nothing" needs no evidence. Everything else here is a live ping or write-tier schedule.
+	if cell.UnpricedRequests > 0 && !a.baseline {
+		out.skipReason = fmt.Sprintf("%d of this cell's %d requests could not be priced, so its "+
+			"winning arm was chosen on a subset of its own traffic",
+			cell.UnpricedRequests, cell.Requests)
+		return out
+	}
 	out.activatable = true
 	out.config = a
 	return out
