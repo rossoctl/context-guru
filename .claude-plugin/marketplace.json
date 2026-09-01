@@ -1,0 +1,21 @@
+{
+  "name": "context-guru",
+  "description": "Run context-guru in front of your Claude Code sessions in one command.",
+  "owner": {
+    "name": "rossoctl",
+    "url": "https://github.com/rossoctl/context-guru"
+  },
+  "plugins": [
+    {
+      "name": "context-guru",
+      "source": "./context-guru-plugin",
+      "displayName": "context-guru",
+      "description": "Install, route, inspect and remove a local context-guru proxy for Claude Code. Recovers prompt-cache misses on long sessions; no API key needed on a Pro/Max subscription.",
+      "homepage": "https://github.com/rossoctl/context-guru",
+      "repository": "https://github.com/rossoctl/context-guru",
+      "license": "Apache-2.0",
+      "keywords": ["cache", "cost", "proxy", "tokens", "prompt-caching"],
+      "category": "productivity"
+    }
+  ]
+}
