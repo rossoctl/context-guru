@@ -490,6 +490,9 @@ CREATE INDEX IF NOT EXISTS idx_tooldecl_session ON tool_declarations(session_id)
 -- GROUP BY only pay TOGETHER — either alone is neutral or a regression. Adding the index
 -- without changing the query leaves the plan on the table scan (measured 3,636 ms), which is
 -- the same trap idx_requests_session_tb fell into below.
+-- CROSS-FILE INVARIANT: this index is load-bearing for the GROUP BY in SelfRemovals
+-- (dash/toolapi.go). Dropping it does not merely slow that query down, it makes it 2.4x SLOWER
+-- than the plain scan it replaced. The two ship together or not at all.
 CREATE INDEX IF NOT EXISTS idx_tooldecl_inventory
   ON tool_declarations(tenant_id, session_id, kind, name, server, tokens);
 
