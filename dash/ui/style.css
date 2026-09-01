@@ -198,12 +198,16 @@ code, kbd { font-family: var(--mono); font-size: 0.92em; }
 .bad-text  { color: var(--bad); }
 
 /* ── top bar ──────────────────────────────────────────────────────────── */
+/* The whole chrome sticks as one box. It used to be three separately-stuck elements, each
+   needing the previous one's height as a magic `top` (.filters was `top: 41px`) — which a
+   second nav level breaks, and which nothing kept honest. Sticking the wrapper makes the
+   offsets the browser's arithmetic instead of ours. */
+.chrome { position: sticky; top: 0; z-index: 20; }
 .topbar {
   display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap;
   padding: var(--sp-2) var(--sp-4);
   background: var(--bg-raised);
   border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; z-index: 20;
 }
 .brand {
   display: flex; align-items: center; gap: var(--sp-2);
@@ -225,6 +229,33 @@ code, kbd { font-family: var(--mono); font-size: 0.92em; }
   box-shadow: inset 0 -2px 0 var(--accent);
   border-radius: var(--r-sm) var(--r-sm) 0 0;
 }
+/* A tab that exists but is not open to this sign-in. NOT `opacity`, which would take the
+   label to 1.2:1 against this surface — the muted foreground is a real token that passes,
+   and the padlock carries the same fact without relying on the colour (DESIGN 2.5). */
+.tab[aria-disabled="true"] { color: var(--fg-faint); cursor: default; font-weight: 500; }
+.tab[aria-disabled="true"]:hover { background: none; color: var(--fg-faint); }
+.tab[aria-disabled="true"]::after { content: " \1F512"; font-size: 0.85em; }
+
+/* ── the second nav level ──────────────────────────────────────────────────
+   A quieter bar than the topbar it hangs off: one level has to read as subordinate to the
+   other or two rows of buttons are just a longer flat list. */
+#subnav {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: 2px var(--sp-4);
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+/* min-width:0 so the group's tablist can shrink below its own content and wrap; a flex
+   item's default min-width:auto refuses to, which is what pushed the body 133px wider than
+   a 390px viewport on Admin's seven tabs. Same fix, same reason, as .topbar-right above. */
+.grouppanel { min-width: 0; }
+/* Wrapping rather than a horizontal scroller: seven tabs at 390px cost a second 44px row,
+   and a scroller costs a tab nobody can see is there. */
+.viewtabs { display: flex; gap: 1px; flex-wrap: wrap; }
+#subnav .tab { font-size: var(--t-small); }
+/* Why a tab in this group is locked. Beside the tabs rather than under them: it is one
+   short line and the bar is otherwise half empty. */
+.tab-note { color: var(--fg-muted); font-size: var(--t-small); }
 /* min-width:0 and wrap: this group's own content (an email, two buttons and the live
    pill) has a min-content width of ~260px, and without these it refused to shrink or
    break — which is what pushed the body 17px wider than a 360px viewport. */
@@ -280,7 +311,6 @@ button.subtle:hover { text-decoration: underline; }
   padding: var(--sp-2) var(--sp-4);
   background: var(--bg);
   border-bottom: 1px solid var(--border);
-  position: sticky; top: 41px; z-index: 19;
 }
 .filters input, .filters select {
   background: var(--bg-raised); color: var(--fg);
@@ -1017,6 +1047,13 @@ table.grid tr.revoked { opacity: 0.55; }
 @media (max-width: 900px) {
   .topbar { gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); }
   .tabs { order: 3; width: 100%; overflow-x: auto; padding-bottom: 2px; }
+  /* 44px is the floor for a target you hit with a thumb, and these were 28 at every
+     width — nothing about the nav reflowed at 390px, it just got narrower. Applied only
+     here so the desktop topbar stays one 41px row. */
+  .tab { min-height: 44px; display: inline-flex; align-items: center; }
+  #subnav { padding: 0 var(--sp-3); flex-wrap: wrap; }
+  /* The note goes under the tabs rather than competing with them for a 390px row. */
+  .tab-note { flex: 1 0 100%; padding-bottom: var(--sp-1); }
   .filters { padding: var(--sp-2) var(--sp-3); position: static; }
   .filters input, .filters select { max-width: none; flex: 1 1 140px; }
   main { padding: var(--sp-3) var(--sp-3) var(--sp-5); }

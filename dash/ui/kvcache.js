@@ -32,20 +32,13 @@
 document.head.appendChild(el('link', { rel: 'stylesheet', href: 'kvcache.css' }));
 
 // ── mount ──────────────────────────────────────────────────────────────────
-// Next to Keep-alive: both are about what a cached prefix costs to hold, and this one is the
-// measurement the other one's calculator is an application of.
-(function mountKVCacheTab() {
-  const tabs = $('.tabs');
-  const tab = el('button', {
-    role: 'tab', class: 'tab', 'data-view': 'kvcache', 'data-testid': 'tab-kvcache',
-    'aria-selected': 'false',
-  }, 'KV-cache');
-  const after = $('.tab[data-view="keepalive"]', tabs);
-  tabs.insertBefore(tab, after ? after.nextSibling : null);
-})();
-
-const kvView = el('section', { class: 'view', id: 'view-kvcache', hidden: 'hidden' });
-$('#main').appendChild(kvView);
+// Behaviour, next to Keep-alive: both are about what a cached prefix costs to hold, and this
+// one is the measurement the other one's calculator is an application of. mountTab (app.js)
+// is the single place that knows the nav's DOM shape; it returns the section, already
+// appended to #main and wired as this tab's tabpanel.
+const kvView = mountTab({
+  group: 'behaviour', after: 'keepalive', view: 'kvcache', label: 'KV-cache',
+});
 
 // ── local state ────────────────────────────────────────────────────────────
 // Its own state object, NOT app.js's: the shared one is mirrored into the URL for the views

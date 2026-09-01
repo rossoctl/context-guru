@@ -15,20 +15,17 @@
 'use strict';
 
 // ── mount ──────────────────────────────────────────────────────────────────
-// Right after Strategies: a campaign is a bulk way to create the same rows that tab
-// edits by hand.
-(function mountCampaignsTab() {
-  const tabs = $('.tabs');
-  const tab = el('button', {
-    role: 'tab', class: 'tab', 'data-view': 'campaigns', 'data-testid': 'tab-campaigns',
-    'data-manager': '', hidden: 'hidden', 'aria-selected': 'false',
-  }, 'Campaigns');
-  const after = $('.tab[data-view="strategies"]', tabs);
-  tabs.insertBefore(tab, after ? after.nextSibling : null);
-})();
-
-const campView = el('section', { class: 'view', id: 'view-campaigns', hidden: 'hidden' });
-$('#main').appendChild(campView);
+// Savings, right after Usage. A campaign is a bulk way to create the rows the Strategies
+// tab edits by hand, which is why it used to sit next to it — but what a reader comes here
+// to see is money it did or did not save, so it belongs beside the evidence for the
+// headline number rather than beside the editor. Still manager-only.
+//
+// mountTab (app.js) is the single place that knows the nav's DOM shape; it returns the
+// section, already appended to #main and wired as this tab's tabpanel.
+const campView = mountTab({
+  group: 'savings', after: 'usage', view: 'campaigns', label: 'Campaigns',
+  manager: true,
+});
 
 // ── local state ────────────────────────────────────────────────────────────
 // Its own object, not app.js's shared filter state: this view is in UNFILTERED_VIEWS,

@@ -10,26 +10,34 @@
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
+<!-- One sticky box for the whole chrome. Three separately-stuck elements needed the
+     next one's height as a magic `top` offset (.filters was `top: 41px`), which a second
+     nav level breaks. Sticking the wrapper instead makes the offsets the browser's
+     problem. -->
+<div class="chrome">
 <header class="topbar">
   <h1 class="brand">
     <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18 L10 6 L14 14 L20 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
     <span>context-guru</span>
   </h1>
-  <nav class="tabs" role="tablist" aria-label="Views">
-    <button role="tab" class="tab" data-view="overview" data-testid="tab-overview" aria-selected="true">Overview</button>
-    <button role="tab" class="tab" data-view="usage" data-testid="tab-usage">Usage</button>
-    <button role="tab" class="tab" data-view="keepalive" data-testid="tab-keepalive">Keep-alive</button>
-    <button role="tab" class="tab" data-view="components" data-testid="tab-components" data-manager data-local-ok>Components</button>
-    <button role="tab" class="tab" data-view="sessions" data-testid="tab-sessions">Sessions</button>
-    <button role="tab" class="tab" data-view="requests" data-testid="tab-requests">Requests</button>
-    <button role="tab" class="tab" data-view="benchmarks" data-testid="tab-benchmarks" data-manager data-local-ok>Benchmarks</button>
-    <button role="tab" class="tab" data-view="archive" data-testid="tab-archive" data-account hidden>Archive</button>
-    <button role="tab" class="tab" data-view="setup" data-testid="tab-setup" data-account hidden>Setup</button>
-    <button role="tab" class="tab" data-view="settings" data-testid="tab-settings" data-account hidden>Settings</button>
-    <button role="tab" class="tab" data-view="feedback" data-testid="tab-feedback" data-account hidden>Feedback</button>
-    <button role="tab" class="tab" data-view="tenants" data-testid="tab-tenants" data-manager hidden>Tenants</button>
-    <button role="tab" class="tab" data-view="strategies" data-testid="tab-strategies" data-manager hidden>Strategies</button>
-    <button role="tab" class="tab" data-view="config" data-testid="tab-config" data-manager data-local-ok>Config</button>
+  <!-- Level 1: five groups, one per question a viewer arrives with. A flat list of
+       seventeen co-equal tabs was a hierarchy in name only — every viewer scanned all
+       seventeen labels to find one, and the manager got no signal about which three
+       mattered. Group order is also the manager→operator gradient: a manager stops after
+       Savings, an operator carries on, and nobody is denied anything.
+
+       Both levels are real tablists, related the way nested tabs are meant to be: a group
+       tab controls the .grouppanel holding that group's tablist, and each view tab controls
+       its own .view section. Overview is the one group that is also a view — it answers a
+       question rather than naming a category, so it gets no sub-nav and its tab points
+       straight at #view-overview. That is why this button carries data-view as well, and
+       why tab-overview is still the testid for reaching the Overview view. -->
+  <nav class="groups tabs" role="tablist" aria-label="Sections">
+    <button role="tab" class="tab" id="tab-overview" data-group="overview" data-view="overview" data-testid="tab-overview" aria-controls="view-overview" aria-selected="true">Overview</button>
+    <button role="tab" class="tab" id="grp-savings" data-group="savings" data-testid="group-savings" aria-controls="grp-savings-panel" aria-selected="false" tabindex="-1">Savings</button>
+    <button role="tab" class="tab" id="grp-behaviour" data-group="behaviour" data-testid="group-behaviour" aria-controls="grp-behaviour-panel" aria-selected="false" tabindex="-1">Behaviour</button>
+    <button role="tab" class="tab" id="grp-traffic" data-group="traffic" data-testid="group-traffic" aria-controls="grp-traffic-panel" aria-selected="false" tabindex="-1">Traffic</button>
+    <button role="tab" class="tab" id="grp-admin" data-group="admin" data-testid="group-admin" aria-controls="grp-admin-panel" aria-selected="false" tabindex="-1">Admin</button>
   </nav>
   <div class="topbar-right">
     <span class="live" data-testid="live-indicator" title="Live event stream"><i class="dot"></i><span id="live-label">connecting…</span></span>
@@ -39,6 +47,50 @@
     <button id="theme" class="ghost small" data-testid="theme-toggle" aria-label="Colour theme">Auto</button>
   </div>
 </header>
+
+<!-- Level 2: the open group's views. One tablist per group rather than one tablist whose
+     membership changes, so each carries its own accessible name and each group tab has a
+     real panel to control. The three self-mounting views (Inventory, KV-cache, Campaigns)
+     splice themselves in here via mountTab() — do not hardcode them, that is what keeps
+     them independently loadable.
+
+     One tab per line, deliberately: dash/api_test.go's gating check reads the last line
+     carrying data-testid="tab-<name>" and requires data-manager / data-local-ok on that
+     same line. -->
+<div id="subnav" hidden>
+  <div class="grouppanel" role="tabpanel" id="grp-savings-panel" data-group="savings" aria-labelledby="grp-savings" hidden>
+    <div class="viewtabs" role="tablist" data-group="savings" aria-label="Savings views">
+      <button role="tab" class="tab" id="tab-usage" data-view="usage" data-testid="tab-usage" aria-controls="view-usage" aria-selected="false" tabindex="-1">Usage</button>
+      <button role="tab" class="tab" id="tab-benchmarks" data-view="benchmarks" data-testid="tab-benchmarks" aria-controls="view-benchmarks" aria-selected="false" tabindex="-1" data-manager data-local-ok>Benchmarks</button>
+    </div>
+  </div>
+  <div class="grouppanel" role="tabpanel" id="grp-behaviour-panel" data-group="behaviour" aria-labelledby="grp-behaviour" hidden>
+    <div class="viewtabs" role="tablist" data-group="behaviour" aria-label="Behaviour views">
+      <button role="tab" class="tab" id="tab-components" data-view="components" data-testid="tab-components" aria-controls="view-components" aria-selected="false" tabindex="-1" data-manager data-local-ok>Components</button>
+      <button role="tab" class="tab" id="tab-keepalive" data-view="keepalive" data-testid="tab-keepalive" aria-controls="view-keepalive" aria-selected="false" tabindex="-1">Keep-alive</button>
+    </div>
+  </div>
+  <div class="grouppanel" role="tabpanel" id="grp-traffic-panel" data-group="traffic" aria-labelledby="grp-traffic" hidden>
+    <div class="viewtabs" role="tablist" data-group="traffic" aria-label="Traffic views">
+      <button role="tab" class="tab" id="tab-sessions" data-view="sessions" data-testid="tab-sessions" aria-controls="view-sessions" aria-selected="false" tabindex="-1">Sessions</button>
+      <button role="tab" class="tab" id="tab-requests" data-view="requests" data-testid="tab-requests" aria-controls="view-requests" aria-selected="false" tabindex="-1">Requests</button>
+    </div>
+  </div>
+  <div class="grouppanel" role="tabpanel" id="grp-admin-panel" data-group="admin" aria-labelledby="grp-admin" hidden>
+    <div class="viewtabs" role="tablist" data-group="admin" aria-label="Admin views">
+      <button role="tab" class="tab" id="tab-config" data-view="config" data-testid="tab-config" aria-controls="view-config" aria-selected="false" tabindex="-1" data-manager data-local-ok>Config</button>
+      <button role="tab" class="tab" id="tab-strategies" data-view="strategies" data-testid="tab-strategies" aria-controls="view-strategies" aria-selected="false" tabindex="-1" data-manager hidden>Strategies</button>
+      <button role="tab" class="tab" id="tab-tenants" data-view="tenants" data-testid="tab-tenants" aria-controls="view-tenants" aria-selected="false" tabindex="-1" data-manager hidden>Tenants</button>
+      <button role="tab" class="tab" id="tab-setup" data-view="setup" data-testid="tab-setup" aria-controls="view-setup" aria-selected="false" tabindex="-1" data-account hidden>Setup</button>
+      <button role="tab" class="tab" id="tab-settings" data-view="settings" data-testid="tab-settings" aria-controls="view-settings" aria-selected="false" tabindex="-1" data-account hidden>Settings</button>
+      <button role="tab" class="tab" id="tab-archive" data-view="archive" data-testid="tab-archive" aria-controls="view-archive" aria-selected="false" tabindex="-1" data-account hidden>Archive</button>
+      <button role="tab" class="tab" id="tab-feedback" data-view="feedback" data-testid="tab-feedback" aria-controls="view-feedback" aria-selected="false" tabindex="-1" data-account hidden>Feedback</button>
+    </div>
+  </div>
+  <!-- Why a tab in this group is there but not usable. One line for the group, not a badge
+       per tab: the locked tabs share a reason and three copies of it is noise. -->
+  <p class="tab-note" id="tab-note" data-testid="tab-note" role="status" hidden></p>
+</div>
 
 <section class="filters" aria-label="Filters">
   <input id="f-q" type="search" placeholder="Search session, model, agent…" data-testid="filter-q" aria-label="Search">
@@ -116,6 +168,7 @@
        filter is one only "Clear" can undo. -->
   <div id="f-active" class="chips" data-testid="filter-chips" role="group" aria-label="Active filters" hidden></div>
 </section>
+</div><!-- .chrome -->
 
 <div id="capture-warning" class="banner warn" hidden data-testid="capture-warning"></div>
 <!-- Observe mode: above the fold, before any number, because in that mode every figure
@@ -233,7 +286,7 @@
 <main id="main">
 
 <!-- ── Overview ───────────────────────────────────────────────────────────── -->
-<section class="view" id="view-overview">
+<section class="view" id="view-overview" role="tabpanel" aria-labelledby="tab-overview"None>
   <!-- The freshness bar. This page used to repaint itself every ten seconds, which made
        every figure on it unreadable and every open explanation close under the reader.
        Now it refreshes when the reader asks, or when the SSE stream says a request was
@@ -391,7 +444,7 @@
      Spent against saved, three ways of cutting it: by day, and by any one dimension of
      the request — including the metadata the request itself carried. Both panels read the
      filter bar above, so the time range is the range selected there. -->
-<section class="view" id="view-usage" hidden>
+<section class="view" id="view-usage" role="tabpanel" aria-labelledby="tab-usage" hidden>
   <div class="panel">
     <h2>Per day <span class="section-note">UTC</span></h2>
     <!-- Two dollar figures, and they are NOT either of the token savings ratios above: this
@@ -444,7 +497,7 @@
 </section>
 
 <!-- ── Components ─────────────────────────────────────────────────────────── -->
-<section class="view" id="view-components" hidden>
+<section class="view" id="view-components" role="tabpanel" aria-labelledby="tab-components" hidden>
   <div class="panel">
     <h2>Per-component economics</h2>
     <p class="note">Which components earn their place. A row opens that component's requests.</p>
@@ -501,7 +554,7 @@
 </section>
 
 <!-- ── Sessions ───────────────────────────────────────────────────────────── -->
-<section class="view" id="view-sessions" hidden>
+<section class="view" id="view-sessions" role="tabpanel" aria-labelledby="tab-sessions" hidden>
   <div class="panel">
     <h2>Sessions</h2>
     <p class="note">A row opens its requests; <strong>Diff</strong> opens what compaction
@@ -534,7 +587,7 @@
      the 119 sessions this mechanism touched on our own traffic lost money, funding a large
      rebate on 34, and the requirement is to save money rather than to raise the bill. A page
      that led with the calculator would be selling. -->
-<section class="view" id="view-keepalive" hidden>
+<section class="view" id="view-keepalive" role="tabpanel" aria-labelledby="tab-keepalive" hidden>
   <div class="panel">
     <h2>Verdict</h2>
     <p class="note">What the idle keep-alive has spent on your traffic and what it has
@@ -667,7 +720,7 @@
 </section>
 
 <!-- ── Requests ───────────────────────────────────────────────────────────── -->
-<section class="view" id="view-requests" hidden>
+<section class="view" id="view-requests" role="tabpanel" aria-labelledby="tab-requests" hidden>
   <div class="panel">
     <h2>Requests</h2>
     <div class="tblwrap" tabindex="0">
@@ -690,7 +743,7 @@
 </section>
 
 <!-- ── Benchmarks ─────────────────────────────────────────────────────────── -->
-<section class="view" id="view-benchmarks" hidden>
+<section class="view" id="view-benchmarks" role="tabpanel" aria-labelledby="tab-benchmarks" hidden>
   <div class="panel">
     <h2>Benchmark runs</h2>
     <p class="note">From the harness artifacts. Reward sits beside cost on purpose: an arm
@@ -704,7 +757,7 @@
 <!-- Archive: what has moved to cold storage. The list comes from a LOCAL index, so it
      renders instantly and works even when the remote is unreachable; only opening one
      session costs a network round trip. -->
-<section class="view" id="view-archive" hidden>
+<section class="view" id="view-archive" role="tabpanel" aria-labelledby="tab-archive" hidden>
   <div class="card">
     <div class="card-head">
       <h2>Cold storage</h2>
@@ -717,7 +770,7 @@
 </section>
 
 <!-- Setup: the copy-paste block a user needs, with their own token substituted. -->
-<section class="view" id="view-setup" hidden>
+<section class="view" id="view-setup" role="tabpanel" aria-labelledby="tab-setup" hidden>
   <div class="card">
     <div class="card-head"><h2>Point Claude Code at context-guru</h2></div>
     <div id="setup-token-banner" class="banner" hidden data-testid="setup-token-banner"></div>
@@ -733,7 +786,7 @@
 </section>
 
 <!-- Settings: the tenant's own configuration and tokens. -->
-<section class="view" id="view-settings" hidden>
+<section class="view" id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
   <div class="card">
     <div class="card-head"><h2>Compaction</h2><span class="muted" id="settings-saved" data-testid="settings-saved"></span></div>
     <div id="settings-form" data-testid="settings-form"></div>
@@ -767,7 +820,7 @@
      carry data-manager, so a plain account sees the form and nothing else. The form
      itself is built in JS (buildFeedbackForm) from the questions the server serves, so
      there is one copy of the keys and one copy of the wording. -->
-<section class="view" id="view-feedback" hidden>
+<section class="view" id="view-feedback" role="tabpanel" aria-labelledby="tab-feedback" hidden>
   <div class="card">
     <div class="card-head"><h2>How is context-guru working for you?</h2></div>
     <p class="muted small">Answers go to whoever runs this deployment. Nobody else can
@@ -825,7 +878,7 @@
 </section>
 
 <!-- Tenants: the manager's roster. -->
-<section class="view" id="view-tenants" hidden>
+<section class="view" id="view-tenants" role="tabpanel" aria-labelledby="tab-tenants" hidden>
   <div class="card">
     <div class="card-head"><h2>A/B variants</h2>
       <select id="ab-range" data-testid="ab-range" aria-label="Comparison window">
@@ -862,7 +915,7 @@
      the Tenant editor are — an empty mount point here, so the fields, the window
      builder and the account picker cannot drift from the validation the control route
      itself enforces. -->
-<section class="view" id="view-strategies" hidden>
+<section class="view" id="view-strategies" role="tabpanel" aria-labelledby="tab-strategies" hidden>
   <div class="panel">
     <h2 id="strategy-form-title">New strategy</h2>
     <p class="note">A durable rule: "only during Israel business hours", or a service-wide
@@ -877,7 +930,7 @@
   </div>
 </section>
 
-<section class="view" id="view-config" hidden>
+<section class="view" id="view-config" role="tabpanel" aria-labelledby="tab-config" hidden>
   <!-- YOUR configuration first. The complaint this answers: a change saved on the Settings
        page never appeared here, because this tab only ever rendered the PROXY PROCESS's
        startup-resolved config while Settings writes the ACCOUNT's document — two different

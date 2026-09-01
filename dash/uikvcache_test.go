@@ -207,11 +207,17 @@ func TestTheKVCacheTabRespectsTheTimeRange(t *testing.T) {
 		t.Error("the KV-cache view has no loader")
 	}
 	// The tab and the section mount themselves, so the shared page has one line about it.
-	if !strings.Contains(src, `'data-view': 'kvcache'`) {
-		t.Error("the KV-cache view does not mount its own tab")
+	// It goes through mountTab (app.js), which is the only place that knows the nav's DOM
+	// shape — this file used to reach into `.tabs` and insertBefore a named sibling itself,
+	// and three copies of that were three things to fix when the nav grew a second level.
+	if !strings.Contains(src, "mountTab({") || !strings.Contains(src, "view: 'kvcache'") {
+		t.Error("the KV-cache view does not mount its own tab via mountTab()")
 	}
-	if !strings.Contains(src, `id: 'view-kvcache'`) {
-		t.Error("the KV-cache view does not mount its own section")
+	if !strings.Contains(src, "group: 'behaviour'") {
+		t.Error("the KV-cache tab does not name its nav group; mountTab would throw")
+	}
+	if strings.Contains(src, "$('.tabs')") || strings.Contains(src, "insertBefore(tab") {
+		t.Error("the KV-cache view builds the nav itself instead of calling mountTab()")
 	}
 	if !strings.Contains(readUI(t, "ui/index.html"), `<script src="kvcache.js">`) {
 		t.Error("kvcache.js is not loaded by the shared page")

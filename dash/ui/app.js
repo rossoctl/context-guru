@@ -159,6 +159,9 @@ function modeLabel(m) {
 // ── state ──────────────────────────────────────────────────────────────────
 const state = {
   view: 'overview',
+  // The open nav group, derived from `view` by go(). Held rather than recomputed because
+  // both nav levels read it on every switch.
+  group: 'overview',
   filter: {},
   // loadedAt is when the rollups on screen were fetched, and dirty is whether the server
   // has captured a request since. Together they are the whole freshness contract of a page
@@ -4209,6 +4212,168 @@ const loaders = {
   keepalive: loadKeepAlive,
 };
 
+// ── nav: two levels, five groups ───────────────────────────────────────────
+//
+// MODULE SEAM (app.js split, sequenced after this change): everything from here to the end
+// of `applyURL` is the SHELL + ROUTER — the nav, the hash contract and the view switch. It
+// depends on `loaders`, `DIMS`, `state` and the DOM helpers, and nothing below it depends on
+// its internals except through `go`, `mountTab` and `syncNav`. The other three seams are:
+// overview+usage+components (the rollup views), sessions+requests (the traffic views and the
+// request/diff drawer), and admin (setup/settings/tenants/strategies/archive/feedback/config).
+//
+/**
+ * GROUPS is the nav, and the ONLY place the two levels' shape is written down: the group
+ * buttons in index.html mirror it, the per-group tablists mirror it, and the hash's first
+ * path segment is a group name from it.
+ *
+ * It deliberately lists only the views index.html authors. Inventory, KV-cache and
+ * Campaigns are absent because they mount themselves (mountTab) — hardcoding them here
+ * would put back exactly the coupling that self-mounting exists to avoid.
+ */
+const GROUPS = [
+  ['overview', ['overview']],
+  ['savings', ['usage', 'benchmarks']],
+  ['behaviour', ['components', 'keepalive']],
+  ['traffic', ['sessions', 'requests']],
+  ['admin', ['config', 'strategies', 'tenants', 'setup', 'settings', 'archive', 'feedback']],
+];
+/** GROUP_OF maps a view onto its group. mountTab adds to it, which is how a self-mounted
+ *  view gets a group without this file naming it. */
+const GROUP_OF = new Map(GROUPS.flatMap(([g, views]) => views.map((v) => [v, g])));
+
+/** navTab is a view's tab button, in whichever level owns it: Overview's tab is a group
+ *  button (it is a group AND a view), every other view's tab is in a group's tablist. */
+function navTab(view) { return $(`[data-view="${view}"]`); }
+/** reachable is "this account can open it now" — the permission gate hides, the local-mode
+ *  lock only disables, and neither is navigable. */
+function reachable(tab) { return !tab.hidden && tab.getAttribute('aria-disabled') !== 'true'; }
+/** firstView is what a group opens on: its first REACHABLE tab, so Admin on a single-tenant
+ *  proxy lands on Config rather than on a locked Tenants. null = nothing in it is open to
+ *  this viewer, and the group button hides. */
+function firstView(group) {
+  if (group === 'overview') return 'overview';
+  const t = $$(`.viewtabs[data-group="${group}"] .tab`).find(reachable);
+  return t ? t.dataset.view : null;
+}
+
+/**
+ * mountTab adds one tab and its panel, and is the single place outside this section that
+ * knows the nav's DOM shape — tools.js, kvcache.js and campaigns.js each call it once.
+ *
+ * The tab button exists as soon as the caller runs, BEFORE the view's body is built, so
+ * lazy-loading those bodies later is a change to the caller and not to the nav.
+ *
+ * It returns the empty `<section class="view">`, already appended to #main and already
+ * wired as the tab's tabpanel, which is what each caller then fills.
+ */
+function mountTab({ group, after, view, label, manager }) {
+  const list = $(`.viewtabs[data-group="${group}"]`);
+  if (!list) throw new Error('mountTab: no such group: ' + group);
+  const tab = el('button', {
+    role: 'tab', class: 'tab', id: 'tab-' + view, 'data-view': view,
+    'data-testid': 'tab-' + view, 'aria-controls': 'view-' + view,
+    'aria-selected': 'false', tabindex: '-1',
+    // `manager` is the only gate any self-mounting view has needed. data-local-ok and
+    // data-account are markup-only for that reason; add a flag the day a caller wants one.
+    'data-manager': manager ? '' : null,
+    // A gated tab mounts hidden and applyAccount reveals it, exactly like the ones in the
+    // markup: a manager tab that is visible for the moment before /api/whoami answers is a
+    // manager tab a non-manager can click.
+    hidden: manager ? 'hidden' : null,
+  }, label);
+  const sib = after && $(`.tab[data-view="${after}"]`, list);
+  list.insertBefore(tab, sib ? sib.nextSibling : null);
+  GROUP_OF.set(view, group);
+  const panel = el('section', {
+    class: 'view', id: 'view-' + view, role: 'tabpanel',
+    'aria-labelledby': 'tab-' + view, hidden: 'hidden',
+  });
+  $('#main').appendChild(panel);
+  return panel;
+}
+
+/**
+ * syncNav makes both nav levels match state: which group is open, which of its tabs is
+ * selected, which groups this viewer has anything in, and ONE tab stop per level.
+ *
+ * That last part is the fix for a measured defect: seventeen `role="tab"` buttons were
+ * seventeen Tab stops, so reaching the filter bar by keyboard meant seventeen presses. The
+ * WAI-ARIA tabs pattern is one stop per tablist with the arrows moving inside it — navKeys.
+ */
+function syncNav() {
+  const group = state.group || 'overview';
+  for (const b of $$('.groups .tab')) {
+    b.hidden = !firstView(b.dataset.group);
+    const on = b.dataset.group === group;
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  const panel = $(`#subnav .grouppanel[data-group="${group}"]`);
+  for (const p of $$('#subnav .grouppanel')) p.hidden = p !== panel;
+  // Overview is a group with one view, so it has no second level at all rather than a
+  // sub-nav row holding a single tab that repeats the label above it. And nothing in the
+  // nav means anything while the gate is up — a stray sub-nav bar over a login form is
+  // worse than no nav, which is why showGate calls back into here.
+  $('#subnav').hidden = !panel || gated();
+  for (const t of $$('.viewtabs .tab')) {
+    const on = t.dataset.view === state.view;
+    t.setAttribute('aria-selected', String(on));
+    t.tabIndex = on ? 0 : -1;
+  }
+  // A tablist whose selected tab is not in it (mid-switch) would have no tab stop at all.
+  if (panel && !$('.tab[tabindex="0"]', panel)) {
+    const t = $$('.tab', panel).find(reachable) || $('.tab', panel);
+    if (t) t.tabIndex = 0;
+  }
+  renderTabNote(panel);
+}
+
+/**
+ * lockTab marks a tab present-but-not-now instead of hiding it. NN/g `empty-nav-state`: an
+ * unavailable destination should say why, and on a default single-tenant proxy only nine of
+ * the seventeen tabs are open, so silently hiding the rest makes the product look half its
+ * size and reads as a broken build. A locked tab keeps its place and stays focusable.
+ */
+function lockTab(tab, why) {
+  if (why) { tab.setAttribute('aria-disabled', 'true'); tab.dataset.why = why; } else { tab.removeAttribute('aria-disabled'); delete tab.dataset.why; }
+}
+
+/** renderTabNote is the one line under a group's tabs naming what is locked and why. All
+ *  current locks share one reason, so the note states it once; give it a per-reason split
+ *  the day a second reason exists. */
+function renderTabNote(panel) {
+  const note = $('#tab-note');
+  const locked = panel ? $$('.tab[aria-disabled="true"]', panel) : [];
+  note.hidden = !locked.length;
+  if (!locked.length) return;
+  const names = locked.map((t) => t.textContent);
+  const list = names.length > 1
+    ? names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1] + ' need'
+    : names[0] + ' needs';
+  note.textContent = list + ' ' + locked[0].dataset.why + '.';
+}
+
+/**
+ * navKeys is arrow-key movement inside a tablist, with MANUAL activation: the arrows move
+ * focus and Enter/Space (the button's own behaviour) opens it. Automatic activation is the
+ * pattern's default, but every tab here fires a data fetch, so scrubbing across Admin's
+ * seven tabs would issue seven queries nobody asked for.
+ */
+function navKeys(ev) {
+  const from = ev.target.closest('[role="tab"]');
+  if (!from) return;
+  const tabs = $$('[role="tab"]', ev.currentTarget).filter((t) => !t.hidden);
+  const i = tabs.indexOf(from);
+  const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[ev.key];
+  let j = -1;
+  if (step) j = (i + step + tabs.length) % tabs.length;
+  else if (ev.key === 'Home') j = 0;
+  else if (ev.key === 'End') j = tabs.length - 1;
+  if (j < 0 || j === i) return;
+  ev.preventDefault();
+  tabs[j].focus();
+}
+
 /**
  * DIMS is every filter dimension, and it is the single list the whole filter layer
  * reads: the URL, the chips, the facet dropdowns and the "why is this empty" copy.
@@ -4278,11 +4443,14 @@ function go(view, push = true) {
   if (!$('#gate').hidden) return;
   if (!Object.prototype.hasOwnProperty.call(loaders, view)) view = 'overview';
   // A view whose tab this account is not entitled to is not reachable by typing its
-  // hash either: its loader would 401/403 and paint an error nobody can act on.
-  const tab = $(`.tab[data-view="${view}"]`);
-  if (tab && tab.hidden) view = 'overview';
+  // hash either: its loader would 401/403 and paint an error nobody can act on. That
+  // covers a LOCKED tab as well as a hidden one — the lock says "not with this sign-in",
+  // and a 403 is not a better way to say it.
+  const tab = navTab(view);
+  if (tab && !reachable(tab)) view = 'overview';
   state.view = view;
-  for (const t of $$('.tab')) t.setAttribute('aria-selected', String(t.dataset.view === view));
+  state.group = GROUP_OF.get(view) || 'overview';
+  syncNav();
   for (const s of $$('.view')) s.hidden = s.id !== 'view-' + view;
   // A filter bar over a view with nothing to filter is thirteen controls inviting clicks
   // that change nothing — and on Settings it sat directly above a form, so the two read as
@@ -4493,7 +4661,34 @@ function urlFor() {
   // send each other, and Back must close the panel rather than undo a filter change.
   if (state.drawer && state.drawer.acct) p.set('acct', state.drawer.acct);
   const q = p.toString();
-  return location.pathname + '#' + state.view + (q ? '?' + q : '');
+  return location.pathname + '#/' + navPath(state.view) + (q ? '?' + q : '');
+}
+/**
+ * navPath is the canonical hash path for a view: `<group>/<view>`, collapsed to just the
+ * name when a group is also a view (Overview). So `#/savings/usage`, and `#/overview`.
+ *
+ * THE RULE, stated once: the LAST path segment is the view; anything before it is a group
+ * hint and is ignored whenever the view is known. That is what makes the old one-level
+ * `#usage` and the new `#/savings/usage` the same link, and it is decidable without a
+ * lookahead because no view name contains a slash. The leading slash is written, not
+ * required — `#savings/usage` resolves identically and is rewritten.
+ */
+function navPath(view) {
+  const g = GROUP_OF.get(view) || 'overview';
+  return g === view ? view : g + '/' + view;
+}
+/**
+ * resolveNav turns a hash path into a view name. Every link this dashboard has ever
+ * written is one segment, including the two the SERVER writes (dash/kvcache.go:510-511),
+ * so that branch is not a compatibility shim to be removed later — it is half the traffic.
+ */
+function resolveNav(path) {
+  const seg = String(path || '').split('/').filter(Boolean);
+  const view = seg[seg.length - 1] || '';
+  if (GROUP_OF.has(view)) return view;
+  // Only a group name survived (`#/admin`, or `#/savings/typo`): open its first tab.
+  const g = GROUPS.find(([n]) => n === seg[0]);
+  return (g && firstView(g[0])) || 'overview';
 }
 function syncURL(replace) {
   const url = urlFor();
@@ -4502,7 +4697,7 @@ function syncURL(replace) {
   else history.pushState(null, '', url);
 }
 function parseURL() {
-  const [view, query] = (location.hash || '').replace(/^#/, '').split('?');
+  const [path, query] = (location.hash || '').replace(/^#\/?/, '').split('?');
   const p = new URLSearchParams(query || '');
   const filter = {};
   for (const [k] of DIMS) if (p.get(k)) filter[k] = p.get(k);
@@ -4515,7 +4710,7 @@ function parseURL() {
   let from = p.get('from') || (legacy ? 'now-' + legacy + 'ms' : 0);
   if (legacy) from = legacyFrom(legacy);
   return {
-    view: view || 'overview', filter,
+    view: resolveNav(path), filter,
     from: numish(from), to: numish(p.get('to') || 'now'),
     sort: p.get('sort') || '', dir: p.get('dir') === 'asc' ? 'asc' : 'desc',
     drawer: req ? { req } : diff ? { diff } : acct ? { acct } : null,
@@ -4795,7 +4990,21 @@ function initTheme() {
 
 function init() {
   initTheme();
-  for (const t of $$('.tab')) t.addEventListener('click', () => go(t.dataset.view));
+  // Delegated, not one listener per tab: the three self-mounting views add their tabs
+  // while this file is still being parsed, so a per-tab loop here would either miss them
+  // or have to be re-run. A group button opens that group's first usable tab.
+  $('.groups').addEventListener('click', (ev) => {
+    const b = ev.target.closest('[data-group]');
+    if (b) go(firstView(b.dataset.group) || 'overview');
+  });
+  $('#subnav').addEventListener('click', (ev) => {
+    const t = ev.target.closest('.tab');
+    // A locked tab is inert; #tab-note beside it already says why, so a click that
+    // bounced to Overview would be a worse answer than no click at all.
+    if (t && reachable(t)) go(t.dataset.view);
+  });
+  $('.groups').addEventListener('keydown', navKeys);
+  $('#subnav').addEventListener('keydown', navKeys);
   // One control changes one filter. Nothing else in state.filter is touched, which is
   // what stops a filter with no control (session, tenant) from being wiped — or kept
   // invisibly — by a change to an unrelated dropdown.
@@ -5267,10 +5476,13 @@ function showGate(show) {
   // form invites clicking things that will 401 — and the TABS did exactly that, each
   // click firing a data fetch that answered 401 and logged a console error.
   $('#main').hidden = show;
-  for (const sel of ['.filters', '.tabs', '.live']) {
+  for (const sel of ['.filters', '.groups', '.live']) {
     const n = $(sel);
     if (n) n.hidden = show;
   }
+  // The second level is syncNav's, because whether it is shown at all depends on the open
+  // group as well as on the gate.
+  syncNav();
 }
 
 /** Reflect who is signed in, and which tabs that entitles them to. */
@@ -5287,9 +5499,18 @@ function applyAccount() {
   // fine on a single-tenant proxy, where there is no principal and nothing to scope:
   // /api/benchmarks is manager-gated in hosted mode but open locally, and hiding the tab
   // there would break the local dev path.
-  for (const el of $$('[data-manager]')) {
-    el.hidden = account.hosted ? !(t && t.role === 'manager') : !el.hasAttribute('data-local-ok');
+  //
+  // In HOSTED mode a non-manager still sees nothing: that is a permissions boundary over
+  // somebody else's data. In single-tenant local mode there is no other tenant to protect,
+  // so the manager-only tabs are LOCKED rather than hidden — see lockTab.
+  for (const b of $$('[data-manager]')) {
+    const ok = account.hosted ? !!(t && t.role === 'manager') : b.hasAttribute('data-local-ok');
+    b.hidden = account.hosted && !ok;
+    lockTab(b, ok || account.hosted ? '' : 'a manager sign-in');
   }
+  // data-account tabs stay silently hidden. A signed-out viewer has no use for a tab they
+  // cannot enable from here, which is the whole difference from the manager case above.
+  syncNav();
   loadTenantOptions();
 }
 function isManager() { return !!(account.tenant && account.tenant.role === 'manager'); }

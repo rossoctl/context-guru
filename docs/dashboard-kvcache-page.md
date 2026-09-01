@@ -19,7 +19,7 @@ line about it (`<script src="kvcache.js"></script>` in `dash/ui/index.html`). No
 ## Opening it
 
 The tab sits next to **Keep-alive** — both answer "what is the prompt cache doing to my bill" —
-at `/dashboard/#kvcache`. It respects the shared filter bar above it: every figure is "over this
+at `/dashboard/#/behaviour/kvcache` (and at `/dashboard/#kvcache`, which is rewritten to it). It respects the shared filter bar above it: every figure is "over this
 window", so the time range, the model, the agent and the account selector all narrow it. Three
 narrowings exist only here (time-of-day band, observed TTL tier, and whether a request has a
 successor at all) because all three are derived rather than columns. The tier one is deliberately

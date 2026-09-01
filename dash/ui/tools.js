@@ -35,22 +35,18 @@
 document.head.appendChild(el('link', { rel: 'stylesheet', href: 'tools.css' }));
 
 // ── mount ──────────────────────────────────────────────────────────────────
-// The tab goes next to Usage: both answer "where is the money", and this one is
-// actionable, so it does not belong at the far end behind the account tabs.
-(function mountToolsTab() {
-  const tabs = $('.tabs');
-  const tab = el('button', {
-    role: 'tab', class: 'tab', 'data-view': 'tools', 'data-testid': 'tab-tools',
-    'aria-selected': 'false',
-  }, 'Inventory');
-  const after = $('.tab[data-view="usage"]', tabs);
-  tabs.insertBefore(tab, after ? after.nextSibling : null);
-})();
-
-// The section is built here too, in DOM rather than markup, because every part of it is
-// conditional on what the report says can be answered.
-const toolsView = el('section', { class: 'view', id: 'view-tools', hidden: 'hidden' });
-$('#main').appendChild(toolsView);
+// Behaviour, right after Components: all four tabs in that group answer "what did the
+// proxy do to my traffic", and this is the actionable one. It used to sit after Usage
+// because that was the sibling this file happened to name — an implementation artefact,
+// not an IA decision.
+//
+// mountTab (app.js) is the single place that knows the nav's DOM shape, and it returns the
+// empty section already appended to #main and already wired as this tab's tabpanel. The
+// section is still built from JS rather than markup because every part of it is conditional
+// on what the report says can be answered.
+const toolsView = mountTab({
+  group: 'behaviour', after: 'components', view: 'tools', label: 'Inventory',
+});
 
 // ── local state ────────────────────────────────────────────────────────────
 // Its own sort state, NOT app.js's state.sort: that one is the components table's and is

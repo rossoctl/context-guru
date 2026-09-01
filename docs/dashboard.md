@@ -21,6 +21,74 @@ route, including [`/stats`](reference/routes.md), is byte-for-byte unchanged.
     hand-drawn SVG — no chart library, no framework, no npm. The page fetches nothing
     off-origin, so it works in a VPC or fully air-gapped, and a test asserts that.
 
+## Navigation — five groups, two levels
+
+Seventeen co-equal top-level tabs was a flat list pretending to be a hierarchy: every viewer
+scanned all seventeen labels to find one, and the manager got no signal about which three
+mattered. The nav is now two levels and five groups, chunked by **the question the viewer
+arrived with** rather than by subsystem — which is what puts the manager and the operator on
+one nav instead of two products.
+
+| Group | Views, in order | Answers |
+|---|---|---|
+| **Overview** | *(a single view, no sub-nav)* | what is this saving us, and what should I do about it |
+| **Savings** | `usage` · `campaigns` · `benchmarks` | where the money went, and the evidence for the headline |
+| **Behaviour** | `components` · `tools` (Inventory) · `keepalive` · `kvcache` | what the proxy did to my traffic |
+| **Traffic** | `sessions` · `requests` | what happened on this request |
+| **Admin** | `config` · `strategies` · `tenants` · `setup` · `settings` · `archive` · `feedback` | how this is tuned and who can see it |
+
+Group order is also the split between the two audiences: a manager stops after Savings, an
+operator carries on, and nobody is denied anything. Each group opens on its first tab, and
+each group's first tab is the manager-legible one — depth is the second tab onward. Overview
+gets no sub-nav because a sub-nav would make it read as a category rather than an answer.
+
+Both levels are real ARIA tablists, and there is **one Tab stop per level** with the arrow
+keys moving inside it — seventeen tab buttons used to be seventeen Tab stops, so reaching the
+filter bar by keyboard took seventeen presses. Activation is manual (arrows move focus,
+Enter/Space opens), because every tab fires a data fetch and scrubbing across Admin's seven
+would issue seven queries nobody asked for.
+
+### A tab you cannot open says why
+
+On a **single-tenant local proxy** the manager-gated tabs without `data-local-ok` are rendered
+disabled with a one-line reason under the tab row, not hidden. Only nine of the seventeen tabs
+are otherwise reachable there, so hiding the rest made the product look half its size and read
+as a broken build. The `data-account` tabs stay silently hidden: a signed-out viewer has no use
+for a tab they cannot enable from here, which is the whole difference between the two cases.
+
+A group whose every tab is unavailable to this viewer hides its group button too, rather than
+opening onto nothing.
+
+### The URL carries both levels
+
+The canonical hash is `#/<group>/<view>[?<filters>]` — `#/savings/usage`, `#/traffic/requests?req=9`
+— collapsed to `#/overview` for the one group that is also a view.
+
+**The rule, once: the last path segment is the view; anything before it is a group hint, and it
+is ignored whenever the view is known.** That is what makes the one-level `#usage` this
+dashboard has always written and the new `#/savings/usage` the same link, and it is decidable
+without a lookahead because no view name contains a slash. So all of these resolve, and the
+first three are rewritten in place with `replaceState`:
+
+| Written | Resolves to |
+|---|---|
+| `#usage` — every link ever pasted into an issue | `#/savings/usage` |
+| `#savings/usage` — the leading slash is written, not required | `#/savings/usage` |
+| `#/admin/campaigns` — a view that changed group | `#/savings/campaigns` |
+| `#/admin` — a group on its own | its first available tab, `#/admin/config` |
+| `#nonsense`, `#OVERVIEW` (case-sensitive), `#` | `#/overview` |
+
+Two of those one-level shapes are written by the **server**, not the UI — `dash/kvcache.go`
+builds `#requests?req=<id>` and `#sessions?diff=<escaped id>` for every row of the KV-cache
+table, and `dash/uikvcache_test.go` asserts the UI must *not* build them, so the server stays
+their sole author and they cannot be found by grepping the front end. The one-segment branch is
+therefore not a compatibility shim to be tidied away later.
+
+The whole contract — seventeen bare view names, all fourteen filter dimensions, `from`/`to`,
+`sort`/`dir`, the three drawer keys, legacy `range=<ms>`, the two server-authored shapes and
+every rewrite case — is a table in `dash/navhash.test.mjs`, run against the **real** resolver
+in `app.js` (`go test ./dash/ -run NavHash`, or `node --test dash/navhash.test.mjs`).
+
 ## What it shows
 
 ### Overview
@@ -892,9 +960,10 @@ Why a pair rather than one duration:
 
 On the wire this is `?since=`/`?until=` — `requests.ts` is epoch milliseconds UTC, `since`
 inclusive, `until` exclusive, both covered by `idx_requests_ts`. In the URL it is
-`#requests?from=now-24h&to=now`. Old `range=<ms>` bookmarks are still parsed and mapped to
-the nearest relative token, so a link pasted into an issue last month does not silently
-widen to all time.
+`#/traffic/requests?from=now-24h&to=now`. Old `range=<ms>` bookmarks are still parsed and
+mapped to the nearest relative token, so a link pasted into an issue last month does not
+silently widen to all time — `#usage?range=86400000` becomes `#/savings/usage?from=now-1d`,
+which is pinned in `dash/navhash.test.mjs`. `range=` is read and never written.
 
 The range params are written inside `qs()` rather than passed through its `extra` argument,
 because `extra` drops any value that is `''`, `0` or `undefined` — so `until: 0` could never
