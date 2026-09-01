@@ -8310,7 +8310,7 @@ Object.assign(loaders, { feedback: loadFeedback });
 // to an entity and never to a rank.
 
 /** kaState holds the tab's loaded payloads, so a control redraw need not refetch. */
-const kaState = { ledger: null, behaviour: null, sessions: [], calc: null, armed: [], live: null,
+const kaState = { ledger: null, recommend: null, behaviour: null, sessions: [], calc: null, armed: [], live: null,
   x: 280, k: 2,
   // canArm is false on a single-tenant deployment, which mounts no control plane at all — so
   // there is nothing to POST an arm to. Drawing the button anyway would put an affordance on the
@@ -8330,6 +8330,10 @@ async function loadKeepAlive() {
   try {
     kaState.ledger = await api('keepalive');
     renderKAVerdict(kaState.ledger);
+    // The decision row paints immediately with the ledger half, and again when the
+    // counterfactual lands. The ledger must not wait on a window function; the row must not
+    // wait on the ledger either, or the two halves flash in a different order every load.
+    renderKADecision(kaState.ledger, kaState.recommend);
     renderKADownside(kaState.ledger);
   } catch (e) {
     if (aborted(e)) return;
@@ -8370,20 +8374,102 @@ function renderKACoverage(o) {
   }
 }
 
+/**
+ * renderKADecision reconciles the THREE verdicts this tab used to give on one window, all of
+ * them reachable without touching a filter, two of them right, none of them labelled as the
+ * decision:
+ *
+ *   - the `ka-net` tile:      +$99.79, green, "Winner"
+ *   - the K ladder, rung 2:   −$83.33, and all four rungs negative
+ *   - "What should I set?":   "this would COST you money … entirely below zero"
+ *
+ * They are not contradictory measurements. They are three different questions and the tab never
+ * said so:
+ *
+ *   the LEDGER is retrospective and SELECTED — what the shipped policy did on the 36 sessions
+ *   it actually fired on, and its saving half is explicitly a CEILING (content-keyed cache);
+ *   the LADDER and the RECOMMENDATION are counterfactual over the WHOLE window — every ping the
+ *   gated policy would have sent across all 173 sessions with an expiry, 3,323 of them at K=2
+ *   against the 544 really sent.
+ *
+ * The decision "should this stay on across my traffic" is the counterfactual one, so that is the
+ * decision number, it is named as such, and the ledger is subordinate to it — still at full
+ * size, because a negative net is never demoted (DESIGN §3.7) and neither is an inconvenient
+ * positive one.
+ *
+ * It renders in the Verdict panel, ADJACENT to the ledger tiles, not 2,900 px below them: cost
+ * belongs beside its benefit. The counterfactual arrives from a slower endpoint, so the row is
+ * built with a placeholder and filled when that lands — the ledger must never wait on it
+ * (see loadKeepAlive).
+ */
+function renderKADecision(o, rec) {
+  const host = clear($('#ka-decision'));
+  const ledgerNet = o && o.keepalive_recorded_from ? o.net_usd : null;
+  // The three-part row: benefit, cost, signed net. A renderer that can emit one without the
+  // other is a bug, so all three come from one call.
+  const rows = [];
+  if (rec && !rec.refused && rec.lo_usd !== undefined) {
+    const mid = (rec.lo_usd + rec.hi_usd) / 2;
+    rows.push(['DECISION — expected across all your traffic',
+      usd(rec.lo_usd) + ' to ' + usd(rec.hi_usd),
+      '90% interval over ' + num(rec.n) + ' expiries in ' + num(rec.sessions) + ' sessions, at '
+      + rec.idle_seconds + 's / ' + rec.max_pings + ' pings',
+      mid < 0 ? 'bad' : 'good']);
+  } else if (rec && rec.refused) {
+    rows.push(['DECISION — expected across all your traffic',
+      rec.service_lo_usd !== undefined && rec.n
+        ? 'below zero'
+        : 'not computable',
+      rec.refused, 'bad']);
+  }
+  if (ledgerNet !== null) {
+    rows.push(['Measured on the sessions it already fired on', usd(ledgerNet),
+      num(o.sessions_touched) + ' of the sessions in this window · the saving half is a CEILING, '
+      + 'so this is an upper bound and it is not the decision',
+      '']);
+  }
+  if (!rows.length) { host.hidden = true; return; }
+  host.hidden = false;
+  host.appendChild(el('div', { class: 'panel', 'data-testid': 'ka-decision-panel' },
+    el('h2', {}, 'Which number is the decision?'),
+    el('p', { class: 'note' },
+      'These two answer different questions and the tab used to show them 2,900 px apart with '
+      + 'nothing saying which to act on. The ', el('strong', {}, 'first'), ' is the one a '
+      + 'decision rests on: it replays the gated policy over ',
+      el('strong', {}, 'every'), ' session in this window. The second is what the policy '
+      + 'actually did on the subset of sessions it fired on, which is a selected population and '
+      + 'a ceiling. The K ladder further down is the same counterfactual, per rung.'),
+    // Inside its own overflow-x wrapper: the third column is a sentence, and at 390 px an
+    // unwrapped 3-column table pushed the BODY sideways (DESIGN §3.1 — the page body never
+    // scrolls horizontally, the table does).
+    el('div', { class: 'tblwrap', tabindex: '0' },
+    el('table', { class: 'grid', 'data-testid': 'ka-decision-table' },
+      el('tbody', {}, ...rows.map(([label, value, note, cls]) => el('tr', {},
+        el('td', {}, el('strong', {}, label)),
+        el('td', { class: 'num ' + (cls === 'bad' ? 'bad-text' : cls === 'good' ? 'good-text' : ''),
+          style: 'font-weight:600' }, value),
+        el('td', { class: 'small' }, note))))))));
+}
+
 /** renderKAVerdict is panel 1: a handful of headline numbers, as tiles. Not a bar chart of four
  *  numbers — four values with different units are four figures, not a comparison. */
 function renderKAVerdict(o) {
   renderKACoverage(o);
   const host = clear($('#ka-tiles'));
   const ran = !!o.keepalive_recorded_from;
-  const position = !ran || !o.pings ? 'No pings yet' : (o.net_usd < 0 ? 'Losing' : 'Winner');
-  const cls = position === 'Winner' ? 'good' : position === 'Losing' ? 'bad' : '';
+  // "Winner" was decided by the LEDGER's sign alone, so this tab called a policy a winner on a
+  // window where its own ladder said every rung loses money and its own recommendation refused
+  // it outright. The position now states which population it describes, and the judgement — the
+  // --good/--bad colour — is deferred to the decision row above, which has the counterfactual.
+  const position = !ran || !o.pings ? 'No pings yet' : (o.net_usd < 0 ? 'Behind' : 'Ahead');
   host.appendChild(tileGroup(null, null, [
     // The words are beside the colour, always: a status must never rest on hue alone.
-    tile('ka-position', 'Your position', position,
-      ran ? num(o.sessions_touched) + ' sessions touched' : 'nothing to judge yet', cls),
-    tile('ka-net', 'Keep-alive net', ran ? usd(o.net_usd) : '—',
-      'avoided − spent', ran ? (o.net_usd < 0 ? 'bad' : 'good') : ''),
+    tile('ka-position', 'Where it stands so far', position,
+      ran ? num(o.sessions_touched) + ' sessions touched — see the decision row above'
+        : 'nothing to judge yet', ran ? 'accent' : ''),
+    tile('ka-net', 'Keep-alive net, measured', ran ? usd(o.net_usd) : '—',
+      'avoided − spent, on the sessions it fired on — an upper bound, not the decision',
+      ran ? (o.net_usd < 0 ? 'bad' : '') : ''),
     tile('ka-pings', 'Pings sent', ran ? num(o.pings) : '—',
       ran ? usd(o.ping_usd) + ' spent on your key' : 'none'),
     tile('ka-saved', 'Re-creations avoided', ran ? usd(o.saved_usd) : '—',
