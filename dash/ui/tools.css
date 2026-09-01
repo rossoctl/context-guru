@@ -334,15 +334,6 @@ details.why > .inv-prompt-regions { max-width: none; }
   #view-tools .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-/* The identifier wraps rather than truncating. `.trunc` ends-truncates at 34ch, and an
-   `mcp__server__tool` name differs at the END — so the ellipsis eats exactly the distinguishing
-   part, on the one column that decides whether a reader can tell two removable rows apart.
-   shortName() drops the shared prefix; this catches whatever is still long. Wrapping costs a row
-   of height in a folded table and hides no characters, which end-truncation cannot say. */
-#view-tools .comp-name.trunc {
-  max-width: 34ch; overflow-wrap: anywhere; white-space: normal; text-overflow: clip;
-}
-
 /* PRE-EXISTING on origin/main, measured on the 132-MCP-tool corpus: the body scrolls sideways
    159 px at 390 because the removal snippet asserts a min-width (260 px, and 22rem = 352 px for
    the folded one) inside a card that is already inside two levels of padding. The snippet's own

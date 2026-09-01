@@ -352,8 +352,13 @@ function renderHeadline(host, rep) {
       + t.requests_per_session.toFixed(1)
       + '× per session — the plain mean over all ' + num(c.sessions) + ' sessions here',
       t.unused_pct >= 25 ? 'bad' : ''),
+    // compact(), not num(), on the unpriced fallback. This is the file's own convention for the
+    // read counts that run to hundreds of millions (see readTd) and here it is load-bearing: on a
+    // mixed-pricing corpus the fallback is `645,662,264 tok`, 15 unbreakable characters of 26px
+    // mono, which is 175 px of content in a 143 px tile at 390 and the only reason the page body
+    // scrolled sideways 3 px. The exact figure is in the tables below.
     tile('inv-avoidable', 'Avoidable — projected',
-      t.priced ? usd(t.unused_usd) : num(t.unused_reads) + ' tok',
+      t.priced ? usd(t.unused_usd) : compact(t.unused_reads) + ' tok',
       t.priced ? 'if none of it had been carried' : 'no dollar: some models here are unpriced'),
   ], 'headline'));
   host.appendChild(gauge(t));
