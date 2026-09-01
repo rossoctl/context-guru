@@ -188,6 +188,12 @@ code, kbd { font-family: var(--mono); font-size: 0.92em; }
   color: var(--fg-muted); font-style: normal;
   border-bottom: 1px dotted var(--border); cursor: help;
 }
+/* The dotted rule works because "n/a" is a WORD wide enough to carry one. On the `†` footnote
+   mark (`.na small`, ~10px including its leading space) it renders as a four-dot fragment offset
+   under the space and reads as dirt on the screen rather than as "a reason exists here".
+   Measured at deviceScaleFactor 6. The upright weight, --fg-muted and cursor:help all stay --
+   `cursor: pointer` had implied the dagger was clickable, which it is not. */
+.na.small { border-bottom: 0; }
 /* Screen-reader-only. Used for the action columns' headers: a th with no text is a
    column with no name, and aria-label on a th is not a name a table walker reports. */
 /* No position:absolute here: inside a horizontally scrolling table an absolutely
