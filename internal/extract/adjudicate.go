@@ -146,6 +146,41 @@ above; do not put it in your reply.
 Reply with ONLY a JSON array, one object per output, no prose:
 [{"i": <label>, "needed_by": "a|b|c|none", "quote": "<verbatim text or empty>", "verdict": "keep|drop"}]`
 
+// adjudicationEvidence teaches the model to read the `evidence:` field, and is appended to the contract
+// ONLY when at least one item carries one.
+//
+// CONDITIONAL FOR A REASON. `main` shipped Evidence as an empty seam with the note that a prompt
+// teaching the model to interpret counters the prompt never carries would be teaching it to read a
+// field that does not exist. The converse is equally true and is why this text exists: counters carried
+// without an explanation invite the model to invent a reading of them. Both failures are avoided by
+// tying the paragraph to the data.
+//
+// IT FRAMES THE INDEX AS FALLIBLE, in its own words, on purpose. The index is an EXACT-MATCH
+// backward-looking counter: it sees an identifier reappear verbatim and nothing else. Reuse in
+// transformed form -- a number reformatted, a value paraphrased, a fact carried forward in the model's
+// own prose -- is invisible to it, and that blind spot is precisely what the model is here to cover.
+// Presenting the index's verdict as authoritative would collapse the mechanism into the pre-filter that
+// starved three iterations; presenting it as a fallible witness is the only framing under which the
+// model's disagreement is worth anything.
+const adjudicationEvidence = `
+HOW TO READ THE "evidence" FIELD. Each output may carry counters from a mechanical index that scanned
+the conversation for LITERAL reappearances of the identifiers inside that output:
+  novel            -- distinct identifiers this output introduced that nothing before it had.
+  refs             -- how many later messages repeated any of them, character for character.
+  ref_age          -- how long ago the most recent such repeat was, in messages.
+  used_frac        -- the fraction of this output's identifiers that reappeared at all.
+  later_turns      -- how many of your turns came after this output. A SMALL number means the output
+                      has barely had the CHANCE to be referenced, so "refs=0" says nothing about it.
+  verdict_of_index -- what the index concluded on its own.
+
+THE INDEX IS A WITNESS, NOT A JUDGE, AND IT IS BLIND IN A SPECIFIC WAY: it matches text exactly. When
+you used an output's information but wrote it differently -- reformatted a number, summarised a finding,
+carried a fact forward in your own words -- the index recorded NOTHING, and "refs=0" is then evidence of
+its blindness rather than of the output being spent. You can see that reuse and it cannot. Where you and
+the index disagree, YOUR reading of the conversation decides. Treat high refs as corroboration that an
+output is still live, and treat refs=0 as a question to answer from the conversation, never as an answer.
+"anything the index missed" is not a hypothetical -- it is the normal case, and it is why you are asked.`
+
 // BuildPrefixAsk renders the adjudication question for a PREFIX ASK — a call whose prefix is the
 // transcript the agent already sent, read from the provider's prompt cache.
 //
@@ -161,6 +196,9 @@ Reply with ONLY a JSON array, one object per output, no prose:
 func BuildPrefixAsk(items []AdjudicationItem) string {
 	var b strings.Builder
 	b.WriteString(adjudicationContract)
+	if anyEvidence(items) {
+		b.WriteString(adjudicationEvidence)
+	}
 	b.WriteString("\n\nThe conversation above is your own. Read the tool outputs from it directly.\n")
 	b.WriteString("\nTOOL OUTPUTS UNDER CONSIDERATION. Refer to them by these labels only:\n")
 	for _, it := range items {
@@ -205,6 +243,9 @@ const FallbackSampleChars = 2000
 func BuildFallbackAsk(goal string, items []AdjudicationItem) string {
 	var b strings.Builder
 	b.WriteString(adjudicationContract)
+	if anyEvidence(items) {
+		b.WriteString(adjudicationEvidence)
+	}
 	b.WriteString("\n\nWHAT YOU ARE DOING NOW (judge relevance toward this):\n")
 	g := strings.TrimSpace(goal)
 	if g == "" {
@@ -412,4 +453,17 @@ func transcriptHasQuote(transcript, q string) bool {
 		return true
 	}
 	return strings.Contains(wsRe.ReplaceAllString(transcript, " "), wsRe.ReplaceAllString(q, " "))
+}
+
+// anyEvidence reports whether the paragraph explaining the evidence counters has anything to explain.
+// Per-ASK rather than per-item: the contract is one block of text at the top, so a mixed inventory
+// (some candidates below the index's floor, some above) still gets one explanation, which is also what
+// makes "no index record" a readable line rather than an unexplained one.
+func anyEvidence(items []AdjudicationItem) bool {
+	for _, it := range items {
+		if it.Evidence != "" {
+			return true
+		}
+	}
+	return false
 }

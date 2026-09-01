@@ -15,6 +15,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/metrics"
@@ -62,6 +63,11 @@ type ExtractSweep struct {
 	// sweeping() for why the window is where it is, and why its WIDTH is the one number here that
 	// no measurement settles.
 	preExpiry time.Duration
+	// evidence adds the co-reference index's record to each inventory line. See renderEvidence.
+	evidence bool
+	// econTrigger enables the SECOND trigger: fire on economics even while the cache is live. See
+	// econPays() for the break-even, and why one trigger is not a superset of the other.
+	econTrigger bool
 
 	mode markerMode
 }
@@ -90,6 +96,15 @@ type extractSweepConfig struct {
 	MinInventory int `yaml:"min_inventory"`
 	// PreExpirySeconds is the width of the pre-expiry window (0 = defaultPreExpiry).
 	PreExpirySeconds int `yaml:"pre_expiry_seconds"`
+	// Evidence adds the co-reference index's record to each candidate's inventory line, as input the
+	// model weighs rather than a filter that pre-decides. OFF by default: it changes the adjudication
+	// CONTRACT (the prompt gains a paragraph teaching how to read the counters), and the contract is
+	// the part with measurements attached to it.
+	Evidence bool `yaml:"evidence"`
+	// EconTrigger adds the economic trigger alongside the pre-expiry window. OFF by default: it
+	// deliberately invalidates a LIVE cached prefix, which is a cost the pre-expiry trigger exists to
+	// avoid, and it is only worth paying when the saving is collected over enough remaining turns.
+	EconTrigger bool `yaml:"econ_trigger"`
 	// BlockFallback refuses the fallback path: when the prefix ask cannot read the cache, decline
 	// instead of asking again with the output content copied into the prompt.
 	//
@@ -205,7 +220,8 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 	return &ExtractSweep{
 		minTokens: cfg.MinTokens, minInventory: cfg.MinInventory,
 		preExpiry: pre, mode: parseMarkerMode(cfg.MarkerMode),
-		blockFallback: cfg.BlockFallback,
+		blockFallback: cfg.BlockFallback, econTrigger: cfg.EconTrigger,
+		evidence: cfg.Evidence,
 	}, nil
 }
 
@@ -245,6 +261,80 @@ func (e *ExtractSweep) sweeping(c *components.Ctx) bool {
 	return remaining > 0 && remaining <= e.preExpiry
 }
 
+// econPays is the SECOND trigger, and the claim this component's econ_trigger mode exists to test:
+// that deferring an output's removal to a deep sweep pays for itself even when the cached prefix is
+// still LIVE, because the removal is collected on every remaining turn while the cache-write it forces
+// is paid once.
+//
+// NEITHER TRIGGER IS A SUPERSET OF THE OTHER, which is why both are kept:
+//
+//	pre-expiry  fires on TIME and knows nothing about mass. It is nearly free — what it invalidates
+//	            is about to expire anyway — but it cannot fire at all on a session whose cache keeps
+//	            being refreshed, which is exactly the long agent run with the most to save.
+//	econ        fires on MASS and knows nothing about the clock. It reaches those sessions, and it
+//	            pays a real cache-write to do it, so it must clear S*T > 11.5*W first.
+//
+// See prefix_econ.go for the break-even itself; it is shared with coref rather than restated, because
+// two components pricing the same cache-write differently would be two answers to one question.
+//
+// S IS AN UPPER BOUND, and this is the trigger's known optimism. S is the inventory's whole token
+// mass, but the model drops only some of it, and how much is not known until after the call this test
+// is deciding whether to make. The counter-bias is in W: prefixRewriteWindow assumes the WHOLE
+// transcript is cached whenever the boundary is unknown, over-stating what the mutation rewrites. The
+// two lean opposite ways and neither is calibrated, so read a fired econ trigger as "this batch was
+// worth asking about", not as a realised saving. `prefix_rewrite_not_repaid` vs
+// `prefix_rewrite_repaid` is what makes the split observable.
+func (e *ExtractSweep) econPays(req *bschemas.BifrostChatRequest, c *components.Ctx, cands []sweepCand) (need, have int, ok bool) {
+	if !e.econTrigger || len(cands) == 0 {
+		return 0, 0, false
+	}
+	saved, shallowest := 0, cands[0].i
+	for _, cd := range cands {
+		saved += schema.TextTokens(cd.content)
+		if cd.i < shallowest {
+			shallowest = cd.i
+		}
+	}
+	return prefixRewritePays(req, saved, shallowest, c)
+}
+
+// renderEvidence formats one output's co-reference record for the inventory line. Counts only — no
+// identifier lists — because the measured win came from comparative RANKING, not from more detail, and
+// every token here is paid on every candidate on every sweeping turn.
+//
+// The classifier's own verdict is included deliberately. It is the index stating its conclusion, which
+// the model is free to overrule; that disagreement is the signal the design wants, and it is
+// unavailable if the index only ships raw counters and keeps its judgement to itself.
+func renderEvidence(r *coref.Record, laterTurns int) string {
+	if r == nil {
+		// No record: the output was below the index's size floor, so the index has no opinion. Say so
+		// plainly rather than emitting zeros, which would read as "nothing referenced it" — the one
+		// misreading that could turn a silent index into a drop.
+		return fmt.Sprintf("no index record (below size floor); later_turns=%d", laterTurns)
+	}
+	age := "never"
+	if r.RefAge >= 0 {
+		age = fmt.Sprintf("%d messages ago", r.RefAge)
+	}
+	return fmt.Sprintf("novel=%d refs=%d ref_age=%s used_frac=%.2f later_turns=%d verdict_of_index=%s",
+		r.Novel, r.Refs, age, r.UsedFrac, r.LaterTurns,
+		coref.Classify(*r, corefClosedDistDefault, corefOpenRepsDefault, corefMinLaterDefault))
+}
+
+// laterModelTurns counts assistant messages after index i — the opportunity an output has HAD to be
+// referenced. Only used when the index has no record, where it is the one honest thing still sayable:
+// an output with few later turns has not yet had a chance to be referenced, so "unreferenced" says
+// nothing about it.
+func laterModelTurns(req *bschemas.BifrostChatRequest, i int) int {
+	n := 0
+	for j := i + 1; j < len(req.Input); j++ {
+		if req.Input[j].Role == bschemas.ChatMessageRoleAssistant {
+			n++
+		}
+	}
+	return n
+}
+
 // sweepUnusableSamples bounds how many unparseable replies get logged in full. Process-wide, because
 // the question it answers — what is the model actually emitting? — is answered by the first few.
 //
@@ -258,8 +348,12 @@ var sweepUnusableSamples atomic.Int64
 const maxSweepUnusableSamples = 5
 
 func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
-	sweeping := e.sweeping(c)
-	if !sweeping {
+	// preExpiry is trigger one. Trigger two (econ) cannot be evaluated yet: it prices the candidate
+	// mass, and the mass is not known until the collection loop below has run. So collection runs
+	// whenever EITHER trigger could fire, and the econ decision is taken at the ask.
+	preExpiry := e.sweeping(c)
+	collecting := preExpiry || e.econTrigger
+	if !preExpiry {
 		// NOT a return. The frozen replays below still run, and they are the reason a sweep's saving
 		// survives past the turn that earned it: without them a later turn would re-send every
 		// removed output verbatim, undoing the removal AND breaking the byte-stability of the prefix
@@ -318,7 +412,7 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			}
 			continue
 		}
-		if !sweeping {
+		if !collecting {
 			// Outside the window no NEW decision is taken; the replays above already ran, which is
 			// all such a turn has to do.
 			continue
@@ -462,7 +556,24 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 
 	// Phase 2: ONE ASK for every candidate. Not a batch and not a call per output — nothing is
 	// copied per candidate, so there is nothing to divide.
-	if len(cands) > 0 && sweeping {
+	// Trigger two is decided HERE, where the mass exists. Only consulted when the pre-expiry window
+	// did not already fire: the two are OR'd, and pricing a rewrite the first trigger has already
+	// justified would let an unrepaid verdict veto a nearly-free removal.
+	asking := preExpiry
+	if !asking {
+		need, have, ok := e.econPays(req, c, cands)
+		if ok {
+			asking = true
+			rep.Event("prefix_rewrite_repaid")
+		} else if e.econTrigger {
+			rep.Gate("prefix_rewrite_not_repaid")
+		}
+		if e.econTrigger {
+			slog.Debug("cg.sweep.econ", "decision", ok, "needTurns", need, "haveTurns", have,
+				"candidates", len(cands))
+		}
+	}
+	if len(cands) > 0 && asking {
 		drop, call := e.adjudicate(req, c, rep, cands)
 		for _, g := range call.gates {
 			rep.Gate(g)
@@ -558,14 +669,45 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		r.event("sweep_inventory_of_one")
 	}
 
+	// FILL THE EVIDENCE SEAM. The co-reference index's record for each candidate goes into the
+	// inventory line as EVIDENCE for the model to weigh — never as a filter over `cands`. That
+	// distinction is the whole lesson of the `prefix_still_referenced` thinner documented above: a
+	// pre-filter left about one candidate per request, which silently turned a bulk arm into the
+	// per-output shape refuted at 6% live-kept, AND meant the model only ever saw what the index had
+	// already judged spent, destroying the veto on the index's blind spot that the mechanism exists to
+	// provide. Evidence preserves the veto: the index states what it saw, the model may disagree.
+	//
+	// Keyed by message index, which is what both sides already agree on — Record.Idx and sweepCand.i
+	// are the same coordinate. A candidate with no record is normal, not an error: the index applies
+	// its own size floor, and saying so beats emitting zeros that read as "nothing referenced it".
+	byIdx := map[int]*coref.Record{}
+	if e.evidence {
+		recs := coref.Index(flattenForCoref(req), e.minTokens, schema.TextTokens)
+		for i := range recs {
+			byIdx[recs[i].Idx] = &recs[i]
+		}
+	}
 	items := make([]extract.AdjudicationItem, 0, len(cands))
 	for k := range cands {
-		items = append(items, extract.AdjudicationItem{
+		it := extract.AdjudicationItem{
 			Label:      k,
 			ID:         cands[k].toolID, // the wire's id, not our content key — see #123
 			SizeTokens: schema.TextTokens(cands[k].content),
 			Head:       extract.HeadLine(cands[k].content, extract.AdjudicationHeadChars),
-		})
+		}
+		if e.evidence {
+			it.Evidence = renderEvidence(byIdx[cands[k].i], laterModelTurns(req, cands[k].i))
+		}
+		items = append(items, it)
+	}
+	if e.evidence {
+		// Counted, because "the index had an opinion" and "the index was silent" produce the same
+		// inventory line length and would otherwise be indistinguishable in a run's counters.
+		for k := range cands {
+			if byIdx[cands[k].i] == nil {
+				r.event("evidence_no_index_record")
+			}
+		}
 	}
 	// The transcript, flattened, so a claimed obligation quote is VERIFIED against what the agent was
 	// actually told rather than trusted. This is the only remaining signal that the model is
@@ -978,6 +1120,10 @@ func init() {
 			Hint: "How long before the prompt cache's believed expiry the sweep may fire. The window is where BOTH halves are cheap: the ask still reads a live cache, and the prefix it invalidates has little life left. The TTL itself is read from the request, never assumed. This WIDTH is the component's one unmeasured number — wider fires more often and invalidates more remaining TTL, narrower fires rarely, and nothing measures either side."},
 		{Key: "block_fallback", Type: components.FieldBool,
 			Hint: "Decline instead of falling back when the prefix ask could not read the cache. Unset = FALSE: the fallback asks again with a bounded sample of each output copied into the prompt, which keeps the component working on a session's first turn and whenever a cache entry has gone — but pays fresh for content the cached path reads for a tenth of the price. Set true where the bill matters more than the removal. The miss is counted either way."},
+		{Key: "evidence", Type: components.FieldBool,
+			Hint: "Add the co-reference index's record (novel/refs/ref_age/used_frac/later_turns and the index's own verdict) to each candidate's inventory line. Unset = FALSE. It is EVIDENCE the model weighs, never a filter over the candidates: a co-reference PRE-FILTER left about one candidate per request, which silently turned a bulk arm into the per-output shape refuted at 6% live-kept and meant the model only ever saw what the index had already judged spent — destroying the veto on the index's blind spot that the mechanism exists to provide. Enabling this also adds a paragraph to the adjudication contract teaching how to read the counters; a prompt carrying counters it never explains is worse than one carrying neither."},
+		{Key: "econ_trigger", Type: components.FieldBool,
+			Hint: "Add the ECONOMIC trigger alongside the pre-expiry window: sweep a LIVE cached prefix when the removal's saving, collected over the turns estimated to remain, exceeds the cache-write it forces (S*T > 11.5*W). Unset = FALSE, because it deliberately invalidates a prefix the provider still holds. The two triggers are OR'd and neither contains the other — pre-expiry fires on the clock and cannot reach a session whose cache keeps being refreshed, which is the long run with the most to save; econ fires on mass and cannot know how much time is left. S is the inventory's whole mass and so an upper bound on the batch's real saving; read prefix_rewrite_repaid / prefix_rewrite_not_repaid rather than assuming a fired trigger banked anything."},
 		markerModeField(),
 	})
 }
