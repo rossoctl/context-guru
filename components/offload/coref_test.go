@@ -368,9 +368,9 @@ func TestKeptVerbatimDoesNotLeakAcrossSessions(t *testing.T) {
 	// written by one session exempts the same bytes in every other session sharing the store —
 	// preferentially on content that recurs across sessions, which is exactly the content most worth
 	// cutting. The fix is a store key-format change in state.go affecting every offloader, plus a
-	// read-both-shapes migration for marks already on disk, so it does not belong to coref. Filed
-	// separately; un-skip with the three-argument MarkKeptVerbatim when that lands.
-	t.Skip("cross-session kept-verbatim scoping is a main-wide state.go fix, tracked separately")
+	// read-both-shapes migration for marks already on disk, so it does not belong to coref. Filed as
+	// issue #175; un-skip with the three-argument MarkKeptVerbatim when that lands.
+	t.Skip("cross-session kept-verbatim scoping is a main-wide state.go fix, issue #175")
 	// The body is preserved COMMENTED rather than adapted to the two-argument signature, because an
 	// adapted body would compile, read as a real test, and assert nothing — both sessions would share
 	// one global mark. Restore it verbatim when the scoped key lands.
@@ -403,7 +403,7 @@ func TestKeptVerbatimDoesNotLeakAcrossSessions(t *testing.T) {
 
 // An empty session must not fall back to a global mark — that is the leak, reinstated.
 func TestMarkKeptVerbatimIgnoresAnEmptySession(t *testing.T) {
-	t.Skip("same main-wide state.go fix as TestKeptVerbatimDoesNotLeakAcrossSessions")
+	t.Skip("same main-wide state.go fix as TestKeptVerbatimDoesNotLeakAcrossSessions, issue #175")
 
 	// st := store.NewMemory(store.Options{})
 	// MarkKeptVerbatim(st, "", "content expanded by nobody in particular")
