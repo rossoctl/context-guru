@@ -275,6 +275,133 @@ components:
 	}
 }
 
+// Regression for a real blocker an independent review found in an untyped read of `enabled`:
+// YAML 1.1 accepts yes/Yes/YES/on/On/ON/y/Y as true, but reading that value out of a
+// map[string]any with a bare `.(bool)` assertion silently gets false (the decoder resolved it
+// to a plain string, not a bool, when the target type was `any`) — an account whose sweep was
+// genuinely running pre-#118 would have had it dropped with nothing added, silently, the exact
+// same class of loss as the flow-pipeline bug this file's package comment already describes.
+// Decoding cold_cache through a typed struct (the same path config.LoadBytes itself uses)
+// fixes this by construction; this pins that it stays fixed.
+func TestMigrateDeprecatedExtractLLMConfigHandlesYAML11BoolWords(t *testing.T) {
+	for _, word := range []string{"yes", "Yes", "YES", "on", "On", "ON", "y", "Y"} {
+		t.Run(word, func(t *testing.T) {
+			cfg := "pipeline: [extract_llm]\ncomponents:\n  extract_llm:\n    cold_cache:\n" +
+				"      enabled: " + word + "\n      min_tokens: 1000\n"
+			out, changed, err := migrateDeprecatedExtractLLMConfig(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changed {
+				t.Fatal("changed = false, want true")
+			}
+			doc := asDoc(t, out)
+			pipe := pipelineOf(t, doc)
+			if indexOf(pipe, "extract_llm_sweep") < 0 {
+				t.Errorf("enabled: %s did not add extract_llm_sweep to the pipeline (got %v)", word, pipe)
+			}
+			comps := componentsOf(t, doc)
+			sweep, _ := comps["extract_llm_sweep"].(map[string]any)
+			if sweep == nil || sweep["min_tokens"] != 1000 {
+				t.Errorf("enabled: %s: extract_llm_sweep = %v, want {min_tokens: 1000}", word, sweep)
+			}
+		})
+	}
+}
+
+// Companion to the above: the falsy YAML 1.1 words must still drop cleanly, matching plain
+// `false` — these coincidentally already worked under the untyped read, but the typed decode
+// must not regress them.
+func TestMigrateDeprecatedExtractLLMConfigHandlesYAML11FalseWords(t *testing.T) {
+	for _, word := range []string{"no", "No", "NO", "off", "Off", "OFF", "n", "N"} {
+		t.Run(word, func(t *testing.T) {
+			cfg := "pipeline: [extract_llm]\ncomponents:\n  extract_llm:\n    cold_cache:\n" +
+				"      enabled: " + word + "\n      min_tokens: 1000\n"
+			out, changed, err := migrateDeprecatedExtractLLMConfig(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changed {
+				t.Fatal("changed = false, want true")
+			}
+			doc := asDoc(t, out)
+			comps := componentsOf(t, doc)
+			if comps["extract_llm_sweep"] != nil {
+				t.Errorf("enabled: %s added extract_llm_sweep; a false word must drop cleanly", word)
+			}
+		})
+	}
+}
+
+// Regression: cold_cache: (YAML null) and cold_cache: {} both mean the same thing a plain
+// `enabled: false` does — the typed decode's zero value is Enabled=false — so both must drop
+// cleanly rather than being refused as an unrecognized shape.
+func TestMigrateDeprecatedExtractLLMConfigDropsNullOrEmptyColdCache(t *testing.T) {
+	for name, cfg := range map[string]string{
+		"null":  "pipeline: [extract_llm]\ncomponents:\n  extract_llm:\n    cold_cache:\n    per_output: true\n",
+		"empty": "pipeline: [extract_llm]\ncomponents:\n  extract_llm:\n    cold_cache: {}\n    per_output: true\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, changed, err := migrateDeprecatedExtractLLMConfig(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changed {
+				t.Fatal("changed = false, want true")
+			}
+			doc := asDoc(t, out)
+			comps := componentsOf(t, doc)
+			if comps["extract_llm_sweep"] != nil {
+				t.Error("extract_llm_sweep added for a null/empty cold_cache")
+			}
+			extractLLM, _ := comps["extract_llm"].(map[string]any)
+			if _, present := extractLLM["cold_cache"]; present {
+				t.Error("cold_cache still present")
+			}
+		})
+	}
+}
+
+// Regression: a non-bool `enabled` (e.g. hand-edited to 1 or "true") must be refused and
+// logged, not silently coerced to false — such a config never built pre-#118 either (the typed
+// loader rejected it the same way), so refusing here costs nothing and matches that behavior.
+func TestMigrateDeprecatedExtractLLMConfigRefusesANonBoolEnabled(t *testing.T) {
+	for name, cfg := range map[string]string{
+		"integer": "pipeline: [extract_llm]\ncomponents:\n  extract_llm:\n    cold_cache:\n      enabled: 1\n      min_tokens: 1000\n",
+		"string":  `pipeline: [extract_llm]` + "\ncomponents:\n  extract_llm:\n    cold_cache:\n      enabled: \"true\"\n      min_tokens: 1000\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, changed, err := migrateDeprecatedExtractLLMConfig(cfg)
+			if err == nil {
+				t.Fatal("expected an error for a non-bool enabled value, got nil")
+			}
+			if changed {
+				t.Error("changed = true on a refused document")
+			}
+		})
+	}
+}
+
+// Regression: a fourth cold_cache field (max_calls, min_idle_seconds — the two the old
+// component had that the sweep has no equivalent for) must still be refused now that the extra-
+// field check is KnownFields(true) on the typed decode rather than hand-rolled counting.
+func TestMigrateDeprecatedExtractLLMConfigRefusesMaxCallsAndMinIdleSeconds(t *testing.T) {
+	for name, cfg := range map[string]string{
+		"max_calls":        "pipeline: [extract_llm]\ncomponents:\n  extract_llm:\n    cold_cache:\n      enabled: true\n      min_tokens: 1000\n      max_calls: 3\n",
+		"min_idle_seconds": "pipeline: [extract_llm]\ncomponents:\n  extract_llm:\n    cold_cache:\n      enabled: true\n      min_tokens: 1000\n      min_idle_seconds: 600\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, changed, err := migrateDeprecatedExtractLLMConfig(cfg)
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if changed {
+				t.Error("changed = true on a refused document")
+			}
+		})
+	}
+}
+
 // Regression: a "cold_cache:" substring that is not actually the key — inside a YAML comment,
 // for instance — must not be mistaken for the real thing. A parse-based rewrite only ever sees
 // what the document actually decodes to, so this is really a test that the migration looks at

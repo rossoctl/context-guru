@@ -75,34 +75,44 @@ func migrateDeprecatedExtractLLMConfig(cfg string) (rewritten string, changed bo
 	// component's presence in the pipeline" (per extract_llm.go's own migration note) means an
 	// account that had already turned the sweep off needs nothing added back — just the now-
 	// refused key removed, same as per_output.
-	var sweepMinTokens any
+	var sweepMinTokens int
 	addSweep := false
 	if hasColdCache {
-		coldCache, ok := coldCacheRaw.(map[string]any)
-		if !ok {
-			return cfg, false, fmt.Errorf("cold_cache present but is not itself a mapping")
+		// Decoded through a TYPED struct, not read as `any` — coldCacheRaw is a
+		// map[string]any at this point (the outer doc was decoded that way), and reading
+		// `["enabled"].(bool)` off it directly is wrong for a real config: YAML 1.1 accepts
+		// yes/Yes/YES/on/On/ON/y/Y as true (and their negatives as false), but decoding one of
+		// those into `any` yields a plain string, not a bool, so the type assertion silently
+		// reads it as false — exactly Bug 1's silent-loss shape again, just reached a
+		// different way. Re-marshaling the sub-map and decoding it through the same typed
+		// path config.LoadBytes itself would use fixes the bool words by construction, and
+		// KnownFields(true) gives the "nothing but enabled/min_tokens" check for free, so it
+		// replaces the extra-field bookkeeping a first draft of this had rather than adding
+		// to it — an account with `max_calls` or `min_idle_seconds` set is still refused, now
+		// because the decoder itself rejects the extra field.
+		raw, err := yaml.Marshal(coldCacheRaw)
+		if err != nil {
+			return cfg, false, fmt.Errorf("could not re-encode cold_cache for a typed re-read: %w", err)
 		}
-		enabled, _ := coldCache["enabled"].(bool)
-		minTokens, hasMinTokens := coldCache["min_tokens"]
-		extra := len(coldCache)
-		if _, ok := coldCache["enabled"]; ok {
-			extra--
+		var cc struct {
+			Enabled   bool `yaml:"enabled"`
+			MinTokens *int `yaml:"min_tokens"`
 		}
-		if hasMinTokens {
-			extra--
+		dec := yaml.NewDecoder(bytes.NewReader(raw))
+		dec.KnownFields(true)
+		if err := dec.Decode(&cc); err != nil {
+			return cfg, false, fmt.Errorf("cold_cache present but not in the enabled+min_tokens-only "+
+				"shape this migration knows how to translate: %w", err)
 		}
-		switch {
-		case enabled && hasMinTokens && extra == 0:
-			addSweep = true
-			sweepMinTokens = minTokens
-		case !enabled && extra == 0:
-			// Disabled, and nothing else set that would need translating: drop the whole
-			// block, add nothing. min_tokens may or may not be present here — it is moot
-			// either way, since the sweep it would have configured never ran.
-		default:
-			return cfg, false, fmt.Errorf("cold_cache present but not in the enabled+min_tokens-only " +
-				"shape this migration knows how to translate")
+		if cc.Enabled {
+			if cc.MinTokens == nil {
+				return cfg, false, fmt.Errorf("cold_cache enabled but min_tokens is unset")
+			}
+			addSweep, sweepMinTokens = true, *cc.MinTokens
 		}
+		// !cc.Enabled falls through with addSweep left false: disabled, and nothing else set
+		// that would need translating (KnownFields already refused anything else) — drop the
+		// whole block, add nothing, since the sweep it would have configured never ran.
 	}
 
 	if hasPerOutput {
