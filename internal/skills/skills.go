@@ -72,12 +72,28 @@ func Parse(body string) Listing {
 		if !ok {
 			continue
 		}
+		// A name-only line has an empty description BY DEFINITION, so the line after it is
+		// another entry, blank, or the end of the region — never its own indented continuation.
+		// A one-word bullet inside somebody else's description usually IS followed by one, and
+		// this is the only thing that tells the two apart: no charset can, because 47 of 245 real
+		// skill names are bare words (`report`, `loop`, `gate`) with exactly the shape of a prose
+		// bullet. It lives here rather than in EntryName because only Parse has the neighbours.
+		if !strings.Contains(ln, ": ") && n+1 < len(l.Lines) && indented(l.Lines[n+1]) {
+			continue
+		}
 		if k := len(l.Entries) - 1; k >= 0 {
 			l.Entries[k].To = n
 		}
 		l.Entries = append(l.Entries, Entry{Name: name, From: n, To: len(l.Lines)})
 	}
 	return l
+}
+
+// indented reports whether a line is a continuation: leading whitespace and something after it.
+// A blank line is not one — it ends an entry with no description rather than continuing it.
+func indented(line string) bool {
+	t := strings.TrimLeft(line, " \t")
+	return t != "" && t != line
 }
 
 // Text is one entry's own text, joined the way the inventory stores and measures it.
@@ -136,12 +152,18 @@ func (l Listing) Without(drop map[string]bool) (string, int) {
 // of real names to avoid a class of line whose incidence cannot be measured, because the listing
 // text is never stored (0 of 400,000 captured content rows carry the header).
 //
-// ponytail: accepts a column-0 one-word prose bullet as an entry. Upgrade path is a non-lexical
-// discriminator — a listing that marked entries structurally, or a generator-side change — not a
-// narrower charset. What IS refused is anything with whitespace in it, which is every multi-word
-// prose bullet, and anything indented, which is every continuation bullet in the fixtures.
-// Against the alternative: leaving the delimiter required drops 15 of 39 real entries and makes
-// the removal switch cut 15 while reporting 1, which is the defect this exists to fix.
+// So the discriminator is POSITION, and it lives in Parse, which has the neighbours: a name-only
+// line whose successor is an indented continuation is prose, because a name-only entry has no
+// description to continue. That closes the realistic case — a URL on its own line inside a
+// description, which ValidName admits precisely because `plugin:skill` and `apps/web:deploy`
+// need ':' and '/'.
+//
+// ponytail: a one-word prose bullet with NO continuation after it still parses as an entry.
+// Unclosable by spelling, and measured at zero incidence: 0 of 95 installed SKILL.md files
+// contain a space-free description bullet. Upgrade path is a structurally marked listing, not a
+// narrower charset — which would drop 19% of real names. Against the alternative: leaving the
+// delimiter required drops 15 of 39 real entries and makes the removal switch cut 15 while
+// reporting 1, which is the defect this exists to fix.
 func EntryName(line string) (string, bool) {
 	if !strings.HasPrefix(line, "- ") {
 		return "", false

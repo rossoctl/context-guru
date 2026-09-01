@@ -183,3 +183,55 @@ func TestEntryNameReadsANameOnlyLine(t *testing.T) {
 		}
 	}
 }
+
+// TestParseRefusesAProseBulletFollowedByItsOwnContinuation is the discriminator that no charset
+// can supply. 47 of 245 real skill names are bare words — report, loop, gate — so `- report` (a
+// skill) and `- Note` (prose) are the same string shape. What tells them apart is position: a
+// name-only entry has an empty description by definition, so the next line is another entry,
+// blank, or the region end; a one-word bullet inside somebody else's description is followed by
+// that description's own indented continuation.
+//
+// The body is the realistic case: a description ending in a colon, then a URL on its own line.
+// ValidName admits ':' and '/' because `plugin:skill` and `apps/web:deploy` need them, which is
+// exactly what lets a URL through.
+func TestParseRefusesAProseBulletFollowedByItsOwnContinuation(t *testing.T) {
+	body := "\n- alpha: does alpha things. See the docs:\n" +
+		"- https://example.com/alpha/guide\n" +
+		"  and then keep reading.\n" +
+		"- beta: does beta things.\n"
+	if got, want := names(Parse(body)), "alpha,beta"; strings.Join(got, ",") != want {
+		t.Errorf("entries = %v, want [%s] — the URL bullet is prose inside alpha", got, want)
+	}
+	// And the whole of alpha goes when alpha goes, leaving no orphaned prose in the prompt.
+	out, n := Parse(body).Without(map[string]bool{"alpha": true})
+	if n != 1 {
+		t.Fatalf("dropped %d, want 1", n)
+	}
+	for _, gone := range []string{"https://example.com", "and then keep reading"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("%q was orphaned in the listing: %q", gone, out)
+		}
+	}
+}
+
+// The lookahead must not cost a real name-only entry. Every legal successor: another entry, a
+// blank line, and the end of the region.
+func TestParseKeepsNameOnlyEntriesWhateverFollowsThem(t *testing.T) {
+	for name, body := range map[string]string{
+		"next is an entry": "\n- security-review\n- beta: x\n",
+		"next is blank":    "\n- security-review\n\n- beta: x\n",
+		"end of region":    "\n- beta: x\n- security-review\n",
+		"last line no NL":  "\n- beta: x\n- security-review",
+	} {
+		got := names(Parse(body))
+		found := false
+		for _, n := range got {
+			if n == "security-review" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: entries = %v, want security-review among them", name, got)
+		}
+	}
+}
