@@ -50,7 +50,10 @@
    which is the part that really does toggle — a whole row that looks clickable and is not is a
    worse affordance than one that never claimed to be. */
 .cg-item {
-  display: grid; grid-template-columns: auto 1fr; gap: var(--sp-1) var(--sp-2);
+  /* minmax(0, 1fr): a bare 1fr track floors at min-content, and min-content here is an
+     unbreakable tool name like mcp__sentry__analyze_issue_with_seer, so the row grew past
+     a 390px viewport and took the page with it. */
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--sp-1) var(--sp-2);
   align-items: baseline; padding: var(--sp-2); margin-left: calc(var(--sp-2) * -1);
   border-radius: var(--r-sm); font-size: var(--t-body);
 }
@@ -100,7 +103,7 @@
    The only thing that needs saying is that the checkbox row must not squeeze its evidence
    into a column two words wide. */
 @media (max-width: 560px) {
-  .cg-item { grid-template-columns: auto 1fr; }
+  .cg-item { grid-template-columns: auto minmax(0, 1fr); }
   .cg-item-weight, .cg-item-usd { flex: 1 0 100%; }
 }
 
@@ -140,7 +143,11 @@
 .inv-group {
   border: 1px solid var(--border-soft); border-radius: var(--r);
   padding: var(--sp-3); background: var(--bg-raised);
-  display: grid; gap: var(--sp-2);
+  /* minmax(0, 1fr), not the implicit auto track: an auto track floors at the widest
+     descendant's min-content, which here is the longest line of the `white-space: pre`
+     removal snippet — so the card grew past the viewport and .inv-snippet's own
+     overflow-x never got the chance to scroll. */
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-2);
 }
 .inv-group-head {
   display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4);
