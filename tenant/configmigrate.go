@@ -9,7 +9,7 @@ package tenant
 // on the very next request after the new binary shipped, buildTenantConfig started failing for
 // them, and the proxy's own fail-open guarantee took over — every one of their requests kept
 // being forwarded, just with NO compaction applied to any of them, silently, until an operator
-// happened to read the log line rather than the dashboard (see dash/api.go for the follow-up
+// happened to read the log line rather than the dashboard (see dash/overview.go for the follow-up
 // fix that makes a build failure visible there instead of only in the journal).
 //
 // This closes that gap the way it should have shipped with #118: not by loosening the refusal
@@ -18,119 +18,145 @@ package tenant
 // translation #118's own migration guidance already names, in code, so it happens once,
 // automatically, and is provably correct before anything is written back.
 //
+// A real YAML decode-modify-encode round trip, not a text-level rewrite: a first draft did this
+// with regexes and every one of its bugs traced back to the same cause — a regex has no idea
+// what it is looking at, so a trailing comma, a shared `trigger:` block another component also
+// owns, a comment line, or a key that sorts into a different position all broke it in a
+// different way, and some of those broke it SILENTLY (a config.Validate pass is not proof the
+// document still says what the account meant — it is only proof the document parses and
+// builds). config/form.go already decodes, edits, and re-encodes every settings-page save this
+// same way (see marshalConfig's own yaml.NewEncoder(&buf); enc.SetIndent(2)), so this is not a
+// new pattern in the codebase, just the first migration to use it instead of hand-rolled text
+// surgery.
+//
 // NOTHING IS DELETED and nothing is guessed: per_output is dropped outright (the sweep "now IS
 // the warm/tail pass, so there is nothing to switch off" — its presence changed nothing to begin
 // with), and cold_cache's settings are carried onto a new extract_llm_sweep entry — in both the
 // components map and the pipeline list, in the position config.go's own "housellm" preset uses
-// — rather than discarded. Every rewritten document is round-tripped through config.Validate
-// before it is ever written, and a tenant whose config does not match the exact shape this
-// expects is left untouched and logged, never guessed at.
+// — rather than discarded. Every rewritten document is round-tripped through the caller's own
+// validator before it is ever written, and a tenant whose config does not match the exact shape
+// this expects is left untouched and logged, never guessed at.
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"regexp"
-	"strings"
+
+	"gopkg.in/yaml.v3"
 )
-
-// coldCacheBlockRe matches extract_llm's cold_cache block IF it is exactly the two-field shape
-// every affected account shared (enabled, min_tokens) — group 1 is the inner fields' own
-// indentation, checked against what follows the match (see coldCacheExactlyTwoFields), and
-// group 2 is the min_tokens value, the one field of it any tenant here ever set. Go's regexp
-// (RE2) has no lookahead, so "nothing else in this block" cannot be expressed in the pattern
-// itself — a config with a third cold_cache field would otherwise match only its FIRST two
-// lines and silently leave the third dangling in the rewritten document, which is exactly the
-// unrecognized-shape case this whole file exists to refuse rather than mishandle.
-var coldCacheBlockRe = regexp.MustCompile(`(?m)^\s*cold_cache:\n(\s*)enabled:\s*true\n\s*min_tokens:\s*(\d+)\n`)
-
-// coldCacheExactlyTwoFields reports whether the text immediately following a coldCacheBlockRe
-// match continues the SAME block with a third field (same indentation as enabled/min_tokens)
-// rather than ending it. innerIndent is coldCacheBlockRe's captured group 1.
-func coldCacheExactlyTwoFields(rest, innerIndent string) bool {
-	if !strings.HasPrefix(rest, innerIndent) {
-		return true // de-indented (or EOF): the block ended after min_tokens.
-	}
-	afterIndent := rest[len(innerIndent):]
-	// A line that starts right back at column 0 of the inner indent, but is ITSELF further
-	// indented or blank, is not a sibling field — only literal same-level content is.
-	return afterIndent == "" || afterIndent[0] == ' ' || afterIndent[0] == '\t' || afterIndent[0] == '\n'
-}
-
-// perOutputLineRe matches extract_llm's per_output line, however it is indented.
-var perOutputLineRe = regexp.MustCompile(`(?m)^\s*per_output:\s*(?:true|false)\n`)
-
-// extractLLMTriggerRe anchors the new extract_llm_sweep entry immediately after extract_llm's
-// own trigger block, matching config.go's "housellm" preset's own ordering ("It sits immediately
-// after extract_llm so the two work disjoint regions of the same turn").
-var extractLLMTriggerRe = regexp.MustCompile(`(?m)(trigger:\n\s*min_request_tokens:\s*\d+\n)`)
-
-// flowPipelineRe matches a one-line `pipeline: [a, b, c]` list.
-var flowPipelineRe = regexp.MustCompile(`pipeline:\s*\[([^\]]*)\]`)
-
-// blockPipelineExtractLLMRe matches extract_llm's own line in a block-style (`- x` per line)
-// pipeline list, capturing its indentation so the inserted line matches it exactly.
-var blockPipelineExtractLLMRe = regexp.MustCompile(`(?m)^(\s*)- extract_llm\n`)
 
 // migrateDeprecatedExtractLLMConfig rewrites one tenant's config_yaml, moving per_output and
 // cold_cache onto extract_llm_sweep exactly as #118's own migration guidance names. Returns the
 // rewritten document and whether anything changed; an error means the document did not match
-// the shape this can safely rewrite (e.g. cold_cache present but not in the exact
-// enabled/min_tokens-only shape every affected account happened to share) — the caller's
-// response to that is to leave the tenant alone and log it, not to guess further.
+// the shape this can safely rewrite (extract_llm missing or not a map, cold_cache present but
+// not exactly {enabled, min_tokens}, or no components/pipeline to add extract_llm_sweep to) —
+// the caller's response to that is to leave the tenant alone and log it, not to guess further.
 func migrateDeprecatedExtractLLMConfig(cfg string) (rewritten string, changed bool, err error) {
-	hasPerOutput := perOutputLineRe.MatchString(cfg)
-	hasColdCache := strings.Contains(cfg, "cold_cache:")
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(cfg), &doc); err != nil {
+		return cfg, false, fmt.Errorf("could not parse as a YAML mapping: %w", err)
+	}
+
+	comps, _ := doc["components"].(map[string]any)
+	extractLLM, _ := comps["extract_llm"].(map[string]any)
+	_, hasPerOutput := extractLLM["per_output"]
+	coldCacheRaw, hasColdCache := extractLLM["cold_cache"]
 	if !hasPerOutput && !hasColdCache {
 		return cfg, false, nil
 	}
-
-	var sweepMinTokens string
-	if hasColdCache {
-		idx := coldCacheBlockRe.FindStringSubmatchIndex(cfg)
-		if idx == nil {
-			return cfg, false, fmt.Errorf("cold_cache present but not in the enabled+min_tokens-only shape this migration knows how to translate")
-		}
-		innerIndent := cfg[idx[2]:idx[3]]
-		if !coldCacheExactlyTwoFields(cfg[idx[1]:], innerIndent) {
-			return cfg, false, fmt.Errorf("cold_cache present with a field beyond enabled/min_tokens; " +
-				"this migration only knows the shape every affected account shared")
-		}
-		sweepMinTokens = cfg[idx[4]:idx[5]]
+	if extractLLM == nil {
+		// hasPerOutput/hasColdCache can only be true with a non-nil extractLLM, so reaching
+		// here at all would itself be a bug — kept as a hard stop rather than a silent no-op.
+		return cfg, false, fmt.Errorf("per_output or cold_cache present but extract_llm is not a mapping")
 	}
 
-	out := cfg
-	if hasPerOutput {
-		out = perOutputLineRe.ReplaceAllString(out, "")
-	}
+	// addSweep stays false when cold_cache was already off: "cold_cache.enabled becomes the
+	// component's presence in the pipeline" (per extract_llm.go's own migration note) means an
+	// account that had already turned the sweep off needs nothing added back — just the now-
+	// refused key removed, same as per_output.
+	var sweepMinTokens any
+	addSweep := false
 	if hasColdCache {
-		out = coldCacheBlockRe.ReplaceAllString(out, "")
-		sweepBlock := fmt.Sprintf("  extract_llm_sweep:\n    min_tokens: %s\n", sweepMinTokens)
-		if !extractLLMTriggerRe.MatchString(out) {
-			return cfg, false, fmt.Errorf("cold_cache present but extract_llm has no trigger block to anchor extract_llm_sweep after")
+		coldCache, ok := coldCacheRaw.(map[string]any)
+		if !ok {
+			return cfg, false, fmt.Errorf("cold_cache present but is not itself a mapping")
 		}
-		out = extractLLMTriggerRe.ReplaceAllString(out, "$1"+sweepBlock)
-
+		enabled, _ := coldCache["enabled"].(bool)
+		minTokens, hasMinTokens := coldCache["min_tokens"]
+		extra := len(coldCache)
+		if _, ok := coldCache["enabled"]; ok {
+			extra--
+		}
+		if hasMinTokens {
+			extra--
+		}
 		switch {
-		case flowPipelineRe.MatchString(out):
-			out = flowPipelineRe.ReplaceAllStringFunc(out, func(s string) string {
-				return strings.Replace(s, "extract_llm,", "extract_llm, extract_llm_sweep,", 1)
-			})
-		case blockPipelineExtractLLMRe.MatchString(out):
-			out = blockPipelineExtractLLMRe.ReplaceAllString(out, "${1}- extract_llm\n${1}- extract_llm_sweep\n")
+		case enabled && hasMinTokens && extra == 0:
+			addSweep = true
+			sweepMinTokens = minTokens
+		case !enabled && extra == 0:
+			// Disabled, and nothing else set that would need translating: drop the whole
+			// block, add nothing. min_tokens may or may not be present here — it is moot
+			// either way, since the sweep it would have configured never ran.
 		default:
-			return cfg, false, fmt.Errorf("cold_cache present but extract_llm does not appear in the pipeline list in a recognized form")
+			return cfg, false, fmt.Errorf("cold_cache present but not in the enabled+min_tokens-only " +
+				"shape this migration knows how to translate")
 		}
 	}
-	return out, true, nil
+
+	if hasPerOutput {
+		delete(extractLLM, "per_output")
+	}
+	if hasColdCache {
+		delete(extractLLM, "cold_cache")
+	}
+	if addSweep {
+		if comps["extract_llm_sweep"] != nil {
+			return cfg, false, fmt.Errorf("cold_cache present but extract_llm_sweep already exists in components")
+		}
+		comps["extract_llm_sweep"] = map[string]any{"min_tokens": sweepMinTokens}
+
+		pipeline, ok := doc["pipeline"].([]any)
+		if !ok {
+			return cfg, false, fmt.Errorf("cold_cache present but pipeline is missing or not a list")
+		}
+		idx := -1
+		for i, name := range pipeline {
+			if s, ok := name.(string); ok && s == "extract_llm" {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return cfg, false, fmt.Errorf("cold_cache present but extract_llm does not appear in the pipeline list")
+		}
+		grown := make([]any, 0, len(pipeline)+1)
+		grown = append(grown, pipeline[:idx+1]...)
+		grown = append(grown, "extract_llm_sweep")
+		grown = append(grown, pipeline[idx+1:]...)
+		doc["pipeline"] = grown
+	}
+
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(doc); err != nil {
+		return cfg, false, fmt.Errorf("could not re-encode the migrated document: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return cfg, false, fmt.Errorf("could not re-encode the migrated document: %w", err)
+	}
+	return buf.String(), true, nil
 }
 
 // fixDeprecatedExtractLLMConfigs runs the migration above against every stored tenant config
 // that still carries either deprecated key, once, at Open. Cheap by construction: this only
 // ever matches the handful of tenants configured before #118 shipped, and once each is fixed
-// (or logged as unfixable) there is nothing left for a future call to find — no meta marker is
-// needed the way dash's larger migrations need one, because the predicate itself is already
-// this narrow.
+// (or logged as unfixable) there is nothing left for a future call to find for THAT tenant — a
+// tenant this cannot safely rewrite is re-checked on every future Open, which costs one cheap
+// LIKE-filtered query and is the point: it stays visible rather than being forgotten after one
+// failed attempt.
 //
 // validate proves a rewritten document actually builds before it is ever written back — the
 // same Options.Validate a caller already supplies so a user's OWN settings-page save gets
@@ -141,9 +167,10 @@ func migrateDeprecatedExtractLLMConfig(cfg string) (rewritten string, changed bo
 // never set Options.Validate — skips this migration entirely rather than validating with
 // something that would rubber-stamp anything.
 //
-// Best-effort per tenant and never fatal to Open: a tenant this cannot safely rewrite keeps
-// its current (fail-open, uncompacted) behavior and is logged loudly, which is a strict
-// improvement over the silent version of that same outcome this is replacing.
+// Best-effort per tenant and never fatal to Open: a tenant this cannot safely rewrite, OR
+// whose rewrite fails to save, keeps its current (fail-open, uncompacted) behavior and is
+// logged loudly, which is a strict improvement over the silent version of that same outcome
+// this is replacing. A save failure for one tenant does not stop the rest from being tried.
 func fixDeprecatedExtractLLMConfigs(db *sql.DB, validate func([]byte) error) error {
 	if validate == nil {
 		return nil
@@ -190,7 +217,13 @@ func fixDeprecatedExtractLLMConfigs(db *sql.DB, validate func([]byte) error) err
 			continue
 		}
 		if _, err := db.Exec(`UPDATE tenants SET config_yaml = ? WHERE id = ?`, newCfg, c.id); err != nil {
-			return fmt.Errorf("tenant %s: %w", c.id, err)
+			// Logged, not returned: one account's write failing (a locked row, a disk error)
+			// must not stop every other candidate in this batch from getting its own turn —
+			// the same reason the two checks above use continue rather than return.
+			slog.Error("tenant: could not save a migrated extract_llm config; "+
+				"this account keeps failing to build a compaction pipeline until fixed by hand",
+				"tenant", c.id, "err", err)
+			continue
 		}
 		fixed++
 	}
