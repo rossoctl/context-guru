@@ -8,12 +8,37 @@ The proxy serves both provider dialects on one port (default `:4000`).
 |---|---|
 | `POST /openai/v1/chat/completions` | OpenAI chat dialect — runs the pipeline, forwards to the OpenAI upstream. |
 | `POST /anthropic/v1/messages` | Anthropic Messages dialect — runs the pipeline, forwards to the Anthropic upstream. |
+| `POST /anthropic/v1/messages/count_tokens` | Token counting, forwarded **verbatim** — the pipeline does not run. Absent this route a client falls back to counting context with *inference* requests, which a proxy sold on reducing spend must not cause. See the note below on what it costs. |
 | `POST /compact` | Stateless compaction: run the pipeline and return the rewritten body, no upstream call. `?provider=anthropic` switches dialect; `?preset=` / `x-context-guru-pipeline` override the pipeline; `?cache=on\|off\|auto` overrides cache-awareness. |
 | `GET /healthz` | Liveness check. |
 | `GET /stats` | Savings rollups and health counters — see below. |
 | `GET /metrics` | The same counters as Prometheus text, hand-serialised (`proxy/promexport.go`). Two families: in-process `cg_*` and database-backed `cg_tenant_*` — they answer different questions and [do not agree](#get-metrics-the-two-families-do-not-agree). In hosted mode it is gated exactly like `/stats`: loopback needs nothing, anything else needs the `METRICS_TOKEN` bearer. |
 | `GET /expand?id=` | Recover an offloaded original by its `<<cg:HASH>>` id. Scoped to the caller's session. |
 | `GET /favicon.ico` | `204`. Present so a browser's unprompted request does not fall through to the Bob catch-all below and answer `401`. |
+
+
+### `count_tokens` answers about the ORIGINAL body, and that is deliberate
+
+The route forwards the client's body unchanged, so the count it returns describes what the client
+sent — not what context-guru will forward. That is the safe direction and it is the literal API
+answer, but it has a cost worth stating plainly.
+
+Returning the *compacted* count would be smaller and would look better. It would also be wrong in
+the dangerous direction: the client would believe it has more room than it does, and because every
+component fails open (a reverted component forwards the full body), the very next request could
+send the uncompacted body and take a `400`. Over-reporting is recoverable; under-reporting is a
+failed turn.
+
+The cost: Claude Code uses this number to decide when to run **its own** compaction, so a routed
+session self-compacts earlier than it needs to — paying for a summarization call and discarding
+transcript the proxy was already handling. On a measured body: `115,933` tokens reported,
+`32,802` actually forwarded. The count also excludes any tool declaration the proxy adds.
+
+Two upstream caveats: on an implicit prefix-cache backend the numbers are unaffected because
+`cachesplit` is a no-op there, and at least one LiteLLM-fronted gateway answers this endpoint with
+an implausible count (`13` for a body whose system prompt alone is ~7,929 tokens) — the same answer
+it gives when called directly, so the undercount is upstream's, but it means the route's
+cheap-budgeting justification does not hold on that upstream.
 
 ### Bob (BobShell) gateway routes
 

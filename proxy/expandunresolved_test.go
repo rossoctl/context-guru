@@ -45,7 +45,7 @@ func TestAnExpandCallThatResolvesNothingStillFinishesTheTurn(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, _ := buildHandler(t, "pipeline: []\n", upstream.URL)
+	h, _ := buildHandler(t, offloadCapablePipeline, upstream.URL)
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 

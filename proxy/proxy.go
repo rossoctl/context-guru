@@ -82,9 +82,20 @@ type Options struct {
 	}
 	// InjectExpand controls advertising the context_guru_expand tool on outgoing
 	// requests so Offload markers are actually recoverable (expand.InjectAuto |
-	// InjectAlways | InjectNever). Empty defaults to auto. auto injects only when the
-	// request already declares tools, carries an expandable marker, and the store
-	// persists — safe for any agent.
+	// InjectAlways | InjectNever). Empty defaults to auto.
+	//
+	// `auto` injects when the request already declares tools, the store persists, and THE
+	// PIPELINE CONTAINS AT LEAST ONE OFFLOAD. It does NOT depend on the request carrying a
+	// marker — that would make the tools array vary turn to turn, and every variation is a
+	// whole-prefix cache miss (see the note on expand.InjectAuto).
+	//
+	// This comment used to claim a marker condition that expand.Inject explicitly disclaims,
+	// and the pipeline condition was missing entirely. The consequence was live: a
+	// cachesplit-only pipeline (the `cache` preset) forwarded `context_guru_expand` to the
+	// provider, a model that saw marker-shaped text in a file called it, and the call could
+	// only ever fail because nothing in that pipeline mints a marker to resolve.
+	//
+	// `always` still injects unconditionally — an operator asking for it by name gets it.
 	InjectExpand string
 	// CacheMode controls cache-aware compaction ("auto"|"on"|"off"; empty=auto).
 	// auto/on keep offloaders from mutating already-cached content on prompt-caching
@@ -346,6 +357,10 @@ func (h *Handler) Mux() *http.ServeMux {
 		path:   "/v1/messages",
 		setKey: headerKey("x-api-key", h.opts.AnthropicKey),
 	}, pickAnthropic))
+	// Token counting, forwarded verbatim with no pipeline. Absent this route, a client that
+	// asks how big its context is gets a 404 and falls back to working it out with inference
+	// requests — billed calls, added by a proxy sold on reducing them. See counttokens.go.
+	m.HandleFunc("POST /anthropic"+countTokensPath, h.countTokens(h.anthropicCountTokensUpstream()))
 	m.HandleFunc("POST /compact", h.compact)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	// A browser asks for /favicon.ico unprompted, and in hosted mode Bob's "/" catch-all
@@ -1145,7 +1160,18 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				if im == "" {
 					im = expand.InjectAuto
 				}
-				body, _ = expand.Inject(string(provider), im, body, tn.Store.Persists())
+				// Under `auto`, advertise only when THIS request's pipeline can actually mint a
+				// marker. Without this, an offloader-free pipeline (`cache`, `off`, `safe`,
+				// `mcp`) declared a tool whose every use is guaranteed to fail — measured:
+				// `[Read Bash]` in, `[Read Bash context_guru_expand]` out, and on a transcript
+				// containing marker-shaped text the model duly called it and got
+				// "[expand: original for id ... is no longer available]".
+				//
+				// `off` mattered most: it is the A/B control arm, and a control that carries an
+				// extra tool declaration is not a control.
+				if im != expand.InjectAuto || tn.Pipe.HasOffload() {
+					body, _ = expand.Inject(string(provider), im, body, tn.Store.Persists())
+				}
 			}
 		}()
 		// Load the request's one INFO line with everything the pipeline decided. serve

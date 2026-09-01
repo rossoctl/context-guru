@@ -17,7 +17,7 @@ module dependency — build straight from the repo root.
 2. Run it. It listens on `:4000`; set `LISTEN_ADDR` to change that.
 
     ```sh
-    ./bin/context-guru-proxy       # default preset: codesmart
+    ./bin/context-guru-proxy       # default preset: house
     ```
 
 3. Point your agent at it:

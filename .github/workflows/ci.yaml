@@ -33,6 +33,46 @@ jobs:
       - name: Build
         run: make build
 
+  # The binary needs no C toolchain — asserted, not asserted-in-a-comment.
+  #
+  # Our own docs told every evaluator to install one (`docs/setup.md` even named bifrost's
+  # tokenizer as a cgo dependency, which it never was). The only cgo dependency is tree-sitter,
+  # behind the `cg_skeleton` build tag. Nothing checked that, and the `build-test` job above runs
+  # exclusively with CGO_ENABLED=1 because `go test -race` requires it — so the configuration a
+  # user would actually build was never exercised.
+  #
+  # CC is pointed at a path that does not exist, so a cgo dependency escaping the build tag fails
+  # here rather than in a stranger's terminal.
+  purego:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+      CC: /nonexistent-c-compiler
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+      - name: Build with no C compiler available
+        run: |
+          go build -o /tmp/cg-purego ./cmd/context-guru-proxy
+          file /tmp/cg-purego | tee /dev/stderr | grep -q "statically linked"
+      - name: It has to start, not just link
+        run: |
+          LISTEN_ADDR=127.0.0.1:4471 CONTEXT_GURU_KEEPALIVE=off /tmp/cg-purego &
+          for _ in $(seq 1 40); do
+            sleep 0.25
+            curl -fsS http://127.0.0.1:4471/healthz && break
+          done
+          curl -fsS http://127.0.0.1:4471/healthz | grep -q ok
+      # And the guard that matters most to a CGO-free build: a preset naming a component which is
+      # not registered without cgo starts the proxy and then fails at pipeline build. That is the
+      # `preset: coding` / `unknown component "skeleton"` breakage, and TestEveryPresetBuilds
+      # covers it — but it had never run in this configuration.
+      - name: Test the packages whose behaviour depends on which components compile in
+        run: go test ./config/... ./components/... ./apply/... ./proxy/... ./store/...
+
   trivy:
     runs-on: ubuntu-latest
     steps:

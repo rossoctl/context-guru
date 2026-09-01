@@ -35,6 +35,19 @@ func buildHandler(t *testing.T, yaml string, upstream string) (*proxy.Handler, s
 	return proxy.New(pipe, st, agg, proxy.Options{OpenAIUpstream: upstream, AnthropicUpstream: upstream}), st
 }
 
+// offloadCapablePipeline is the fixture for any test whose premise is that content was
+// OFFLOADED — i.e. every test of the context_guru_expand loop.
+//
+// Advertising that tool is gated on the pipeline containing an Offload, because a pipeline that
+// mints no markers would be declaring a tool whose every call must fail (the defect that shipped
+// in the `cache` and `off` presets). A `pipeline: []` fixture therefore no longer advertises it,
+// and a test that hand-seeds the Store to simulate an offload has to use a pipeline where the
+// offload it is simulating could actually have happened.
+//
+// `linecap` is an Offload that does not act on the short bodies in these tests, so it leaves the
+// asserted bytes alone.
+const offloadCapablePipeline = "pipeline: [linecap]\n"
+
 func openAIBody(msgs ...map[string]any) []byte {
 	b, _ := json.Marshal(map[string]any{"model": "gpt-x", "temperature": 0.2, "messages": msgs})
 	return b
@@ -298,7 +311,7 @@ func TestExpandToolLoop(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 	st.Put("HASH", []byte("THE ORIGINAL CONTENT")) // as if a prior turn offloaded it
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -356,7 +369,7 @@ func TestExpandSSELoop(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -428,7 +441,7 @@ func TestExpandPartialResolutionWellFormed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 	st.Put("GOOD", []byte("RESOLVED ORIGINAL")) // only one of the two resolves
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -770,7 +783,7 @@ func TestExpandSSEMultiRoundCapped(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()

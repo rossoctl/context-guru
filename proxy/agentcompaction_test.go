@@ -229,7 +229,12 @@ func TestExpandToolAdvertisedOnEveryTurnButNeverOnACompaction(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+			// A pipeline that CAN offload: advertising is gated on that, because a pipeline
+			// which mints no markers would advertise a tool whose every call must fail. The
+			// premise of this test is that an offload happened (hence the store seed below),
+			// so the fixture has to be a pipeline where that is possible. `linecap` does not
+			// act on these short bodies, so the forwarded bytes are unchanged.
+			h, st := buildHandler(t, "pipeline: [linecap]\n", upstream.URL)
 			st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()

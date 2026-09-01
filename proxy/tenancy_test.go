@@ -179,6 +179,7 @@ func TestHostedRejectsUnauthenticated(t *testing.T) {
 	for _, path := range []string{
 		"/openai/v1/chat/completions",
 		"/anthropic/v1/messages",
+		"/anthropic/v1/messages/count_tokens",
 		"/inference/v1/chat/completions",
 		"/compact",
 	} {

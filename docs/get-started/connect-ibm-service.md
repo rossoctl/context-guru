@@ -19,7 +19,7 @@ your agent ──▶ https://contextguru.vpc.cloud9.ibm.com ──▶ the model 
 | Your provider key | **stays yours** — your agent keeps sending it, and the proxy forwards it upstream unchanged |
 | Cost control | none needed: every account's traffic is billed to that account's own provider credential |
 | Transcript capture | your account consents **on registration** — [what that means, and the off switch](#three-things-worth-knowing-before-you-rely-on-it) |
-| Default pipeline | `[format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]`, `mode: sync` |
+| Default pipeline | `[format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]` (the `house` preset), `mode: sync` |
 
 The default pipeline is **fully deterministic** — no cheap-model calls anywhere in it. That
 is why it is the default on a shared box: it adds no upstream spend, contends for no shared

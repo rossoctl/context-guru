@@ -86,7 +86,7 @@ Everything below was derived from the scripts in `deploy/service/`, which are th
 
 | For | You need |
 |---|---|
-| Building the binary | Go 1.26 and a C toolchain (`CGO_ENABLED=1`) — or an already-installed `/usr/local/bin/context-guru-proxy`, which `install` keeps if there is no fresh build |
+| Building the binary | Go 1.26 — no C toolchain: the binary is pure Go and statically linked (`make build-static`, which CI proves needs no C compiler). Or an already-installed `/usr/local/bin/context-guru-proxy`, which `install` keeps if there is no fresh build. A C toolchain is needed only for the optional `cg_skeleton` tag |
 | Installing | root, and systemd. The scripts are written for **RHEL 9** (`dnf`, and nginx 1.20's config dialect) |
 | The TLS front end | `nginx`, plus a certificate and key at `/etc/context-guru/tls/{fullchain,privkey}.pem` |
 | Each upstream | a host to send it to. A key only if you want the server to hold one — the default forwards each caller’s own |

@@ -76,7 +76,7 @@ for every component's config block.
 
 | Flag / env | Default | Purpose |
 |---|---|---|
-| `--preset` / `PRESET` | `codesmart` | Pipeline preset when no `--config`. |
+| `--preset` / `PRESET` | `house` | Pipeline preset when no `--config`. `codesmart` is the SWE-bench arm and must be asked for by name. |
 | `--config` / `CONFIG` | — | YAML config file (overrides preset). |
 | `LISTEN_ADDR` | `:4000` | Listen address. |
 | `--openai-upstream` / `OPENAI_UPSTREAM` | `https://api.openai.com` | OpenAI upstream base. |

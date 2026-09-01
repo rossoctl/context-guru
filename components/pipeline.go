@@ -286,6 +286,30 @@ func (p *Pipeline) Find(name string) Component {
 	return nil
 }
 
+// HasOffload reports whether any component in this pipeline is an Offload — i.e. whether a
+// request through it can produce a `<<cg:HASH>>` marker at all.
+//
+// Asked by the host to decide whether advertising `context_guru_expand` is meaningful. A
+// pipeline with no Offload mints no markers, so every expand call a model makes against it MUST
+// fail: there is nothing in the Store to resolve. Advertising it there costs a wasted round trip
+// and a step of the user's turn to learn that.
+//
+// A type assertion, deliberately, rather than a list of component names: a name list is a second
+// copy of "which components are lossy" that drifts the moment somebody adds one, and the
+// interface is the definition. `components.Offload` cannot be implemented by accident — it
+// requires returning cache keys that prove the original was stashed.
+func (p *Pipeline) HasOffload() bool {
+	if p == nil {
+		return false
+	}
+	for _, c := range p.comps {
+		if _, ok := c.(Offload); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // Has reports whether a component with this name is configured in the pipeline.
 // Hosts use it to gate body-level work that belongs to a component's concern but
 // cannot be done inside it — e.g. cacheinject's cache-prefix repair, which must

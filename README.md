@@ -108,7 +108,7 @@ docker build -t context-guru:local .
 
 ```sh
 # 1 — run the proxy (ships with the SWE-bench-winning cache-aware config by default)
-./bin/context-guru-proxy                          # --preset codesmart; listens on :4000 (LISTEN_ADDR to change)
+./bin/context-guru-proxy                          # --preset house (the default); listens on :4000
 
 # 2 — point any agent at it (one port serves both dialects)
 export ANTHROPIC_BASE_URL=http://localhost:4000/anthropic
@@ -129,9 +129,10 @@ curl -s localhost:4000/anthropic/v1/messages \
   -d '{"model":"...","max_tokens":64,"messages":[ ... ]}'
 ```
 
-Presets: **`codesmart`** (the default — the SWE-bench-winning cache-aware config
-`[format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]`), **`codesafe`** (the same
-minus the LLM pass — deterministic-only `[format, dedup, failed_run, cmdfilter, extract, collapse, cachesplit]`,
+Presets: **`house`** is the binary's default. **`codesmart`** is the SWE-bench-winning
+cache-aware config, `[format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, linecap, cachesplit]`, and is what the
+published benchmark numbers describe — pass `--preset codesmart` to run it. **`codesafe`** (the same
+minus the LLM pass — deterministic-only `[format, textclean, searchfold, dedup, failed_run, cmdfilter, extract, collapse, linecap, cachesplit]`,
 zero model calls by policy), plus `general`, `agent`, `aggressive`, `coding`, `mcp`, `balanced`, `safe`,
 `summarize`, `off`.
 `codesmart`'s LLM relevance-trimmer (`extract_llm`) engages only when a cheap model is configured
@@ -140,7 +141,7 @@ See [docs/components.md](docs/components.md) and [docs/reference/presets.md](doc
 
 | Flag / env | Default | Purpose |
 |---|---|---|
-| `--preset` / `PRESET` | `codesmart` | pipeline preset when no `--config` |
+| `--preset` / `PRESET` | `house` | pipeline preset when no `--config` |
 | `--config` / `CONFIG` | — | YAML config (overrides preset) |
 | `LISTEN_ADDR` | `:4000` | listen address |
 | `--anthropic-upstream` / `ANTHROPIC_UPSTREAM` | `https://api.anthropic.com` | Anthropic upstream base |

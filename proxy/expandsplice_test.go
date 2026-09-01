@@ -76,7 +76,7 @@ func TestExpandCalledAfterALeadingBlockIsNeverGivenToTheClient(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+			h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 			st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()
@@ -155,7 +155,7 @@ func TestTheStreamedPrefixReachesTheClientBeforeTheExpandCall(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -217,7 +217,7 @@ func TestTheClientsNoSuchToolErrorNeverReachesTheModel(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -299,7 +299,7 @@ func TestAFailedContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -357,7 +357,7 @@ func TestAJSONContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -404,7 +404,7 @@ func TestARoundPastTheRetainBoundCountsTheLeakAndDoesNotContinue(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 	st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
@@ -467,7 +467,7 @@ func TestEveryContinuationShapeStillClosesTheClientsMessage(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+			h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 			st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()
@@ -523,7 +523,7 @@ func TestASplicedRoundThatCallsExpandAgainStaysWellFormed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+	h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 	st.Put("HASH", []byte("ORIGINAL ONE"))
 	st.Put("HASH2", []byte("ORIGINAL TWO"))
 	srv := httptest.NewServer(h.Mux())
@@ -608,7 +608,7 @@ func TestATruncatedRoundStillGivesTheClientAnEnd(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			h, st := buildHandler(t, "pipeline: []\n", upstream.URL)
+			h, st := buildHandler(t, offloadCapablePipeline, upstream.URL)
 			st.Put("HASH", []byte("THE ORIGINAL CONTENT"))
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()

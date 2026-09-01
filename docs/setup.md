@@ -5,9 +5,13 @@ SWE-bench task driven by Claude Code.
 
 ## Prerequisites
 
-- **Go 1.26** and a **C toolchain** — `CGO_ENABLED=1` (bifrost's tokenizer and, with the
-  `cg_skeleton` tag, tree-sitter, use cgo). bifrost is an ordinary module dependency; nothing
-  to check out beside this repo.
+- **Go 1.26**. A **C toolchain** is needed only for the `cg_skeleton` tag used below
+  (tree-sitter), and for `make test`'s race detector — *not* for the binary itself, which is
+  pure Go and statically linked. bifrost's tokenizer does **not** use cgo: o200k_base is
+  embedded (`internal/tokens/tokens.go`), and a default `CGO_ENABLED=0` build of this repo
+  succeeds for all four `GOOS`/`GOARCH` targets we care about. CI asserts it on every PR with no C
+  compiler on `PATH` at all (`.github/workflows/ci.yaml`, the `purego` job), so this cannot rot
+  back into a false claim.
 - **Docker** (for the gateway image / eval-containers), and the **eval-containers** repo.
 
 ## Build
