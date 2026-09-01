@@ -1,4 +1,13 @@
-# Claude Code plugin as a third transport for context-guru
+# Claude Code plugin as a fourth transport for context-guru
+
+> **What this document is, and is not.** It evaluates **plugin-as-interceptor** — a plugin
+> that rewrites tool output in-process via `PostToolUse`, and is therefore a genuinely new
+> transport. That design is **unbuilt**, and this evaluation recommends building it.
+> [#130](https://github.com/rossoctl/context-guru/pull/130) proposes a **different** design
+> that reuses the same plugin surface — plugin-as-installer-for-the-proxy — and gives up none
+> of the component set. The two are not variants of one plan; see
+> [§Two candidates](#two-candidates-and-only-one-of-them-is-a-new-transport). This document is
+> not the justification for #130.
 
 Scope: can the existing `components` core be deployed as a [Claude Code
 plugin](https://code.claude.com/docs/en/plugins) — as a *thin* fourth host next to
@@ -11,11 +20,17 @@ Not a replacement for the proxy. Deployment/transport only.
 
 **No plugin surface can read or write the outbound Messages API request.** Confirmed
 against the [hooks reference](https://code.claude.com/docs/en/hooks#decision-control):
-across all ~34 hook events there is no field that rewrites `messages[]`, `system[]`,
+across all 33 hook events there is no field that rewrites `messages[]`, `system[]`,
 `tools[]`, or any `cache_control`. `UserPromptSubmit` explicitly "can't replace the
-prompt; it only injects `additionalContext` alongside it". Plugin `settings.json` accepts
-only `agent` and `subagentStatusLine`, so a plugin cannot even set `ANTHROPIC_BASE_URL`
-to point the session at the proxy.
+prompt; it only injects `additionalContext` alongside it".
+
+A plugin **manifest's** `settings.json` accepts only `agent` and `subagentStatusLine`, so a
+plugin cannot point the session at the proxy *declaratively, from its own manifest*. Read as
+"a plugin cannot set `ANTHROPIC_BASE_URL`" that would be wrong, and the distinction turns out
+to matter more than anything else here: a plugin **can** write the key into the user's real
+`settings.json` from an install skill, which is exactly the design #130 proposes and this
+document does not evaluate as a transport candidate. See
+[§Two candidates](#two-candidates-and-only-one-of-them-is-a-new-transport).
 
 Verified twice over during review of this PR, and by a stronger method than the docs: 11 hook
 events exercised live (including `PostToolBatch`, `PreModelSwitch`/`PostModelSwitch` and
@@ -41,13 +56,31 @@ enters context** — `PostToolUse` → `hookSpecificOutput.updatedToolOutput`, w
 docs name this use case directly: *"For redaction or transformation use cases, intercept
 at `PreToolUse` for outbound tool inputs and `PostToolUse` for inbound tool results."*
 
-**On the figures quoted throughout.** Component measurements cited below (`cachesplit`'s
-−34.1% / 0%→96.7%, `mask`'s 27.5% and 12.5%, the ~7,017-token system block in
-`prefixsplit.go`) are this repo's own recorded results, read from code comments and
-`docs/RESULTS.md`. They are quoted accurately but they are **frozen historical measurements,
-not re-verified against current traffic** by this evaluation. The comparisons here turn on
-their relative order of magnitude, which is robust to drift; anyone planning work on the
-strength of a specific number should re-measure it.
+**On the figures quoted throughout — and one correction to how this document used them.**
+Component measurements cited below are this repo's own recorded results, quoted accurately from
+code comments and `docs/RESULTS.md`. An earlier revision of this document called them "not
+re-verified against current traffic"; for `cachesplit` that is **false**, and the correction
+matters to a decision made at the end of this document.
+
+`cachesplit`'s **−34.1% / 0%→96.7%** is a *warm-regime* figure: `docs/components/cacheinject.md:203`
+records one Terminal-Bench task × 3 trials at Sonnet 5 rates, and `:209` says in terms *"treat
+34.1% as one task measured three times, not a fleet average"*. `docs/dashboard.md:219` states the
+A/B *"ran tasks back-to-back inside the TTL"*, which is the only regime where a volatile-tail split
+can pay. Against that, `docs/dashboard.md:204` records the *cold interactive* figure on this
+deployment: **$0.0298 across 1,127 sessions / 11,361 requests.** Both numbers are right. They
+differ by three orders of magnitude because they measure different regimes.
+
+Three facts bound the cold case further, all from `docs/dashboard.md`: the environment block is
+snapshotted **once per session** (a nine-turn session that created and committed four files
+produced *one* volatile-tail hash), **1,105 of 1,127** first requests read **zero** tokens from
+cache because the previous prefix had expired under the 5-minute TTL, and only 9 session starts had
+a warm prefix at all. `cachesplit` also does nothing outside a git repo, and is a no-op on implicit
+prefix-cache backends (`config/config.go:379-380`).
+
+So the rule for reading every figure below: **name the regime.** A plugin user is a human running
+interactive sessions minutes or hours apart — definitionally the cold regime — not a benchmark
+harness running tasks back-to-back. Asking the reader to trust "order of magnitude" is asking them
+to trust the one property that is regime-dependent.
 
 So the dividing line through our component set is not lossy-vs-lossless. It is:
 
@@ -133,9 +166,12 @@ message — the *shape* of the entire prefix:
   the decision from `CachedTokens`, which only the provider's response carries.
 
 None of that is a large tool output. It is the envelope, and the envelope is assembled after
-the plugin's last hook has run and is never written to disk (verified: a session transcript
-carries `messages` and `toolUseResult`, and no system prompt or tool schemas — see
-`scripts/inspect_transcript.py`).
+the plugin's last hook has run and is never written to disk. Verified: a session transcript carries
+`messages` and `toolUseResult`, and no system prompt or tool schemas — see
+`deploy/harbor/inspect_transcript.py`. Read its output carefully: it inspects transcript **key
+names**, so `system-ish keys: NONE` is the finding, while the `record types` tally it also prints
+does contain a `system` entry — a transcript *event* type, not a request `system` array. The wire
+capture in §0 is what establishes the point conclusively.
 
 So the rule is not "lossy vs lossless" or "cheap vs expensive". It is:
 
@@ -216,13 +252,57 @@ That splits the verdict by backend, and it is the crux of the whole evaluation:
 
 | Backend | Offensive half | Plugin's net cache position |
 |---|---|---|
-| Anthropic / Bedrock / Vertex (explicit `cache_control`) | `cachesplit` = **−34.1% cost, 0% → 96.7% hit** | **Real loss.** The best-evidenced component in the repo is unreachable. |
+| Anthropic / Bedrock / Vertex (explicit `cache_control`) | `cachesplit` is unreachable — worth **−34.1%** warm (one task, back-to-back inside the TTL) but **$0.0298 / 1,127 sessions** cold | **Loss of cents, in the regime a plugin user is actually in.** Real on a benchmark harness; close to the vLLM row for an interactive human. |
 | vLLM / llm-d / on-prem, OpenAI auto-cache (implicit longest-prefix) | `cachesplit` and `cacheinject` are **already no-ops** | **No loss at all** — and the defensive half, which is the *entire* cache story there, comes free. Strictly better than the proxy on the cache axis. |
 
 Given `extract_llm.go`'s "on-prem vLLM under KV-cache pressure" measurements and the llm-d
 TOON config, the implicit case is a real target, not a hypothetical. On that traffic a
 plugin is the better cache deployment. On Anthropic traffic — which is what Claude Code on
 DAM will actually be — it is not.
+
+## Two candidates, and only one of them is a new transport
+
+The whole document to this point analyses **one** way to use the plugin surface. There is a
+second, and it is the one #130 proposes. They share a package format and nothing else —
+different interception point, different capability set, different risk.
+
+| | **(A) plugin-as-interceptor** | **(B) plugin-as-installer-for-the-proxy** |
+|---|---|---|
+| Mechanism | `PostToolUse` → `updatedToolOutput`, in-process | `SessionStart` hook + an install skill that writes `env.ANTHROPIC_BASE_URL` into the user's real `settings.json` |
+| Where the work happens | inside Claude Code, upstream of the transcript | on the wire, in `proxy/` — unchanged |
+| Is it a new transport? | **Yes** — a fourth one, hence this document's title | **No.** It is transport #1 (the proxy) in new packaging |
+| Component set | offloaders only; the cache half is unreachable | **all of it.** Nothing is given up, because the proxy still sees the envelope |
+| `/stats`, cost tiers, benchmarks | unavailable — no provider response | unchanged |
+| Status | **unbuilt.** Recommended below | proposed in #130 |
+| Defensive KV-cache layer | obviated (the win in §KV-cache) | still required, exactly as today |
+
+**Everything in this document's component tables describes (A).** Every "unreachable from a
+plugin" verdict below is a statement about interception inside the harness, and is
+**irrelevant to (B)**, which runs the full proxy and therefore keeps `cachesplit`,
+`cacheinject`, `mask`, `failed_run` and `/stats`. A reader who takes the tables below as a
+description of the plugin #130 ships will be wrong about most of the component set.
+
+(B) also disposes of this document's own headline blocker, and it is worth being explicit that
+it does so *legitimately* rather than by a loophole: the manifest cannot carry
+`ANTHROPIC_BASE_URL`, but nothing stops a skill from merging that key into the settings file
+the user already owns. This document mentions settings-based installation only as a
+`promptCacheTtl` aside and never weighs it as a transport candidate. It is the option that won,
+and the reason it wins is that it pays none of the costs enumerated here.
+
+So the two are complementary rather than competing: **(B) is how you get the proxy onto a
+stranger's machine; (A) is a capability the proxy does not have** — offload at birth, and the
+defensive cache layer becoming unnecessary. (A) remains unbuilt and remains the live question.
+
+**On the transport count.** (A) would be a fourth transport beside `proxy/`, the AuthBridge
+plugin and `adapters/bifrost`. (B) adds none, so README's three-transport *Integrate* table is
+correct as it stands and should not change on account of #130.
+
+**Status, and why this document should not be read as a record of it.** (A) has never been
+built. (B) is specified in #130 — three skills over three scripts plus a `SessionStart` hook that
+self-gates on `$ANTHROPIC_BASE_URL` matching its own port — and its implementation is in flight, so
+the authority on what (B) actually ships is #130 and its implementing PR, never this page. What
+matters here is only the design distinction: **(B) does not need any of the interception this
+document analyses, and therefore pays none of its costs.**
 
 ## Component verdicts
 
@@ -253,9 +333,13 @@ fit in the repo:
    provider's cap of 4 is a hard 400.
 
 `cacheinject` is in no preset today (placement is unmeasured), so losing it costs nothing
-measured. **`cachesplit` is the real loss**: it is in *every* preset and it is the
-best-evidenced component we have — −34.1% cost, 0% → 96.7% cache hit in an isolated A/B.
-The plugin gives that up entirely.
+measured. **`cachesplit` is the larger loss of the two, and smaller than this document first
+claimed.** It is in every preset, and an earlier revision called it "the best-evidenced component
+we have" — which `docs/components/cacheinject.md:209` contradicts directly, since the −34.1% is one
+task measured three times. Priced in the regime a plugin user occupies it is **$0.0298 across 1,127
+sessions**, and on Terminal-Bench it recorded `cachesplit acted=0` for a *structural* reason
+(`docs/results/terminal-bench-comparison.md:155`: the SDK never appends the git/env snapshot the CLI
+does). The plugin gives up cents on interactive traffic and gains the free defensive half.
 
 ### Offload (lossy, reversible)
 
@@ -267,9 +351,10 @@ The plugin gives that up entirely.
 | `extract` | **Yes** | Deterministic per-output noise collapse. |
 | `skeleton` | **Yes — better than the proxy** | Per-output tree-sitter reduction, and the hook supplies `tool_input.file_path`, so language selection stops being content sniffing. Still needs the `cg_skeleton` build tag. |
 | `dedup` | **Yes, with state** | Replaces the *later* byte-identical output — forward-only, which is exactly what a hook can do. Needs cross-turn digests, so it needs a store that outlives one hook process. |
-| `extract_llm` | **Technically yes; leave it off** | The transform is per-output, but its economic gate needs the caching-backend fact and the fresh/cache-read token split, none of which a hook can see. Since #28 it declines on caching backends anyway (~8× underwater, break-even ~30,500 tokens/output). A synchronous cheap-model call inside a per-tool-call hook is also the worst place to put one. |
+| `extract_llm` | **Technically yes; leave it off** | The transform is per-output, but its economic gate needs the caching-backend fact and the fresh/cache-read token split, none of which a hook can see. Since #28 it declines on caching backends anyway (**82×** underwater on Terminal-Bench — 197,548 unique tokens saved, worth $0.0395 at the cache-read rate they actually bill at, for $3.26 spent; the earlier "~8×" priced those tokens as *fresh* when they sit in the cached prefix). A synchronous cheap-model call inside a per-tool-call hook is also the worst place to put one. |
+| `extract_llm_sweep` | **No** | Landed in #118 after this evaluation was written. It adjudicates *spent* tool outputs over the model's already-cached transcript, so it is retroactive by construction — it decides about messages that are already in Claude Code's history. Same wall as `mask` and `failed_run`, and for the same reason. |
 | `failed_run` | **No** | It keeps the newest run and collapses **earlier** runs. Retroactive by definition; at the moment run 2 is produced, run 1 is already in Claude Code's transcript and immutable. |
-| `mask` | **No** | Age-based GC of *older* tool outputs. Same retroactivity. This is the top measured lever on our target traffic — 27.5% on Terminal-Bench, 12.5% on SWE-bench — and it is unreachable. |
+| `mask` | **No** | Age-based GC of *older* tool outputs. Same retroactivity. It is the largest *known* token lever on our target traffic — **~27.5–29.5%, a single-task replay, never enforced in a benchmark arm** (`docs/components.md:439` says 27.5% Terminal-Bench / 12.5% SWE-bench; `docs/results/terminal-bench-comparison.md:86` says ~29.5%, from an arm where `mask` was **not** enabled) — and it is unreachable. Treat it as an unenforced upper bound, not a realized saving. |
 | `summarize` | **No** | Whole transcript, and it changes the message count. |
 
 ### Infrastructure
@@ -285,6 +370,35 @@ The plugin gives that up entirely.
 | `apply/` | **No — replaced by something much smaller** | No wire body, so `normalize`, the round-trip guard, the `metawrite` metadata exception, `wireBreakpoints` and `prefixsplit` all have nothing to do. A new `adapters/cchook` needs none of it. |
 | `proxy/` control plane — `spendgate`, `tenancy`, `limits`, `refusals`, `promexport` | **No** | Multi-tenant gateway concerns. A plugin is single-user and local. |
 | `adapters/bifrost` | N/A | |
+
+## Prior art: rtk already ships this architecture, and we already benchmarked it
+
+This document proposed a hook that rewrites tool output before it enters context without noting
+that **we have measured exactly that design** — as a competitor, in a full benchmark arm.
+[rtk](https://github.com/rtk-ai/rtk) (Rust Token Killer) is a shell-level Bash-output hook, and
+`docs/results/rtk.md:11` records it on SWE-bench Verified, 50 tasks:
+
+| arm | billed cost | vs baseline | reward | steps | request-path latency |
+|---|--:|---|--:|--:|---|
+| baseline (no compaction) | $31.98 | — | 43 solved | 36.1 | — |
+| **rtk** | **$29.09** | **−9.0%** | 43 solved (**neutral**) | 33.2 (−8%) | **zero** |
+| context-guru (proxy) | — | −13.2% | — | — | on the wire |
+
+So the expected value of candidate (A) is not unknown, and it is not the "−6,285 tokens on one
+session" figure quoted in §0 — that has no denominator, no percentage, no `acted` count and no
+paired arm, so by this repo's own conventions it is a demonstration that the mechanism works, not a
+savings measurement. **Use −9.0%, reward-neutral, at zero request-path latency as the floor.**
+
+**And this design should beat rtk, for a structural reason worth stating because it is the clearest
+unclaimed edge here.** rtk is a *shell* hook, so it only ever sees `Bash`. Claude Code's built-in
+`Read`, `Grep` and `Glob` bypass it entirely — that is rtk's ceiling, and on code traffic those tools
+carry a large share of the tokens. `updatedToolOutput` has no such ceiling: the hook manifest
+proposed below uses matcher `".*"`, so `skeleton` on a `Read` and `extract` on a `Grep` are reachable
+where rtk cannot go. Expected value: **≥ −9.0%, because matcher `.*` reaches the built-in file tools
+rtk cannot**, and because `expand/` gives back a reversibility rtk does not have.
+
+The honest counterweight: rtk achieves its −9.0% with no store, no MCP server and no expand path, so
+it is also the argument that the *first* useful version of (A) is small.
 
 ## Permanence cuts both ways
 
@@ -394,8 +508,9 @@ plugin is the #32 bug in a new costume.
 2. **Oversized emissions degrade rather than fail — and the earlier "10,000-char cap" figure
    in this doc was wrong.** Measured by bisection with distinct-letter payload segments:
    `updatedToolOutput.stdout` goes out verbatim and uncapped up to ~30,000 chars, with the
-   real threshold in **(30,000, 40,000]** — most likely 32,768, i.e. 3–4× the figure this doc
-   first cited from the `additionalContext` / `systemMessage` / plain-stdout cap, which does
+   real threshold somewhere in **(30,000, 40,000]** — a bracket 10,000 wide, deliberately not
+   narrowed to a round guess, since no governing constant appears near `updatedToolOutput` in the
+   binary. That is 3–4× the figure this doc first cited from the `additionalContext` / `systemMessage` / plain-stdout cap, which does
    not govern this field. Above the threshold there is neither truncation nor rejection: the
    CLI's ordinary large-tool-output handler takes over, so the wire `tool_result` becomes a
    ~2,260-char `<persisted-output>` wrapper carrying a 2 KB preview plus a pointer to the full
@@ -422,11 +537,14 @@ credentials the runtime never sees.
   the gateway, agent holds a placeholder. `proxy/` drops into that path introducing no new
   concept; the plugin would have to be installed and force-enabled per harness, per pod.
 - Long-lived agents are DAM's headline, which makes **cache economics** the dominant cost
-  term. Claude Code on DAM means Anthropic/Bedrock — the explicit-breakpoint column, where
-  the offensive half is worth −34.1% and is unreachable from a plugin. (Were DAM routing to
-  an on-prem vLLM/llm-d backend, this row would flip: there the offensive half is already a
-  no-op and the plugin's free defensive half would be the better cache deployment. Worth
-  confirming which backends DAM actually targets before treating this as settled.)
+  term. Claude Code on DAM means Anthropic/Bedrock — the explicit-breakpoint column, where the
+  offensive half is unreachable from a plugin. **But price this carefully rather than at −34.1%:**
+  long-lived agents on a platform are closer to the *warm* regime than a human's interactive
+  sessions are, so this is the one place the benchmark figure is the more relevant one — and it is
+  still a single-task measurement, not a fleet average. (Were DAM routing to an on-prem vLLM/llm-d
+  backend, this row would flip: there the offensive half is already a no-op and the plugin's free
+  defensive half would be the better cache deployment. Worth confirming which backends DAM actually
+  targets before treating this as settled.)
 - `spendgate`, `tenancy`, `limits`, `promexport` are what a platform actually needs to
   enforce, and they are proxy-only. A plugin is user-installable and user-disableable; a
   platform wants a policy.
@@ -451,12 +569,12 @@ other reasons. If the list below doesn't stand up, don't build it.
 Ranked by what the plugin uniquely provides — things the proxy *cannot* do, not things it
 already does:
 
-1. **Offload at birth, permanently** *(the whole case — and it is conditional)*. Rewriting a
-   tool output before it enters the transcript means the reduction is realized once and
-   re-sent free forever, and the entire defensive KV-cache layer — `state.go`'s
-   freeze/replay, `MaxCachedIdx`, `Tracker`, `frozen_flips`, sticky ids — stops being
-   necessary rather than being ported. That is the only item here that changes the
-   architecture. **It rests entirely on the unverified persistence check (§0).**
+1. **Offload at birth, permanently** *(the whole case)*. Rewriting a tool output before it
+   enters the transcript means the reduction is realized once and re-sent free forever, and the
+   entire defensive KV-cache layer — `state.go`'s freeze/replay, `MaxCachedIdx`, `Tracker`,
+   `frozen_flips`, sticky ids — stops being necessary rather than being ported. That is the only
+   item here that changes the architecture. **§0 settled the persistence question it used to rest
+   on: the replacement is what Claude Code stores and re-sends.**
 2. **`context_guru_expand` as an MCP tool.** Deletes the 3-round `maxExpandRounds` cap, the
    response parsing, and the whole-SSE-buffering penalty. Worth doing *even with no hook at
    all*, and it works alongside the proxy rather than instead of it.
@@ -473,8 +591,7 @@ already does:
    proxy". Real, but packaging, not capability.
 
 Items 3–6 are worth a few hundred lines. They do not justify the project on their own. **The
-project is item 1, or it is item 2 alone.** Decide it with the §0 experiment before writing
-adapter code.
+project is item 1, or it is item 2 alone.** §0 settled item 1; decide item 2 on its own merits.
 
 ## Recommendation
 
@@ -489,7 +606,14 @@ Build it, scoped as a transport for that half:
   accounting in plugin form. Cache work and multi-tenant policy stay in the proxy, which
   remains the only place they are possible.
 - **For DAM**: land the proxy in the gateway. Ship the plugin as the Claude-Code-session
-  layer on top of it — never as the DAM integration.
+  layer on top of it — never as the DAM integration. Note that this call now rests on
+  `spendgate` / `tenancy` / `limits` / `promexport` and harness-plurality, **not** on the −34.1%
+  figure an earlier revision leaned on: DAM is closer to the warm regime than a human is, but the
+  figure is still one task, and the platform-policy argument is the one that carries weight.
+- **Not a substitute for (B).** If the goal is "an evaluator tries context-guru in one command",
+  that is candidate (B) in [§Two candidates](#two-candidates-and-only-one-of-them-is-a-new-transport)
+  and #130, which keeps the whole component set. (A) is a capability argument, not a distribution
+  one — item 6 below is packaging, and (B) does packaging better.
 - **Gate 0 is now closed** (persistence confirmed on the wire, plus a −6,285-token A/B on a
   real session), so the build is no longer conditional. Carry forward one hard requirement
   instead: the adapter emits the **object** `tool_response` shape and counts its own
