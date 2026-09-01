@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -324,46 +325,128 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 	return e, trows.Err()
 }
 
-// SessionEvents returns one session's requests oldest-first, scoped by f — so a
-// hosted caller can only ever name a session that is theirs, and a session id
-// belonging to somebody else comes back as zero rows rather than as a 403 that
-// confirms it exists.
-//
-// withContent=false skips the transcript blobs entirely, which is what the list
-// views and the metrics-only states want: the content columns are the bulk of the
-// bytes and gunzipping a whole session to render a token count is pure waste.
+// TranscriptPage is one page of a session's turns plus the cursor for the next one.
+type TranscriptPage struct {
+	Requests []*Event `json:"requests"`
+	// NextCursor is the `after` value for the following page; "" = no more turns.
+	NextCursor string `json:"next_cursor"`
+	// Total is the turn count for the WHOLE session, so a page can say which slice of
+	// what it is showing rather than presenting a page as if it were the session.
+	Total int64 `json:"total"`
+	// HasContent answers "does this session have stored before/after text ANYWHERE",
+	// not "on this page". The state machine above this needs the session's answer: a
+	// first page of unstored turns would otherwise render "transcript storage is off"
+	// over a session whose later turns ARE stored, which is exactly the wrong answer
+	// that sends a user to switch on a setting they already have on.
+	HasContent bool `json:"has_content"`
+}
+
+// transcriptCursor encodes one keyset boundary. The sort is (ts, id) and the cursor
+// carries both: ts alone is not unique within a session and id alone is not the sort
+// key, so either half on its own can skip or repeat a turn.
+func parseTranscriptCursor(s string) (ts, id int64, ok bool) {
+	before, after, found := strings.Cut(s, ":")
+	if !found {
+		return 0, 0, false
+	}
+	ts, err := strconv.ParseInt(before, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	id, err = strconv.ParseInt(after, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return ts, id, true
+}
+
+// SessionEvents returns ALL of one session's requests oldest-first, scoped by f. It is
+// the ARCHIVE path's read: an upload has to carry the whole session, or the object it
+// writes misreports what was captured. Anything user-facing wants SessionEventsPage —
+// one session in this corpus reaches 31,425 diff blocks and ~78 MB of JSON, which is a
+// browser crash rather than a page.
 func (d *DB) SessionEvents(f Filter, sessionID string, withContent bool) ([]*Event, error) {
-	cond, args := f.where()
-	rows, err := d.sql.Query(`SELECT r.id FROM requests r WHERE `+cond+
-		` AND r.session_id = ? ORDER BY r.ts ASC, r.id ASC`, append(args, sessionID)...)
+	p, err := d.SessionEventsPage(f, sessionID, withContent, "", 0)
 	if err != nil {
 		return nil, err
 	}
-	var ids []int64
+	return p.Requests, nil
+}
+
+// SessionEventsPage returns one page of a session's requests oldest-first, scoped by f
+// — so a hosted caller can only ever name a session that is theirs, and a session id
+// belonging to somebody else comes back as zero rows rather than as a 403 that
+// confirms it exists.
+//
+// Pagination is KEYSET, the same shape Requests already uses: `after` is the last
+// (ts, id) seen, not an OFFSET, so page 50 of a long session costs what page 1 costs
+// and no turn is skipped or repeated while the session is still being written to.
+// limit <= 0 means unlimited, and is for the archive path only.
+func (d *DB) SessionEventsPage(f Filter, sessionID string, withContent bool, after string, limit int) (*TranscriptPage, error) {
+	cond, args := f.where()
+	sessArgs := append(append([]any(nil), args...), sessionID)
+
+	q := `SELECT r.id, r.ts FROM requests r WHERE ` + cond + ` AND r.session_id = ?`
+	pageArgs := append([]any(nil), sessArgs...)
+	if ts, id, ok := parseTranscriptCursor(after); ok {
+		q += ` AND (r.ts > ? OR (r.ts = ? AND r.id > ?))`
+		pageArgs = append(pageArgs, ts, ts, id)
+	}
+	q += ` ORDER BY r.ts ASC, r.id ASC`
+	if limit > 0 {
+		// One extra row, as in Requests: it says whether another page exists without a
+		// second COUNT against a table that is still being written to.
+		q += ` LIMIT ?`
+		pageArgs = append(pageArgs, limit+1)
+	}
+	rows, err := d.sql.Query(q, pageArgs...)
+	if err != nil {
+		return nil, err
+	}
+	type key struct{ id, ts int64 }
+	var keys []key
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var k key
+		if err := rows.Scan(&k.id, &k.ts); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		ids = append(ids, id)
+		keys = append(keys, k)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := make([]*Event, 0, len(ids))
-	for _, id := range ids {
+
+	page := &TranscriptPage{Requests: []*Event{}}
+	if limit > 0 && len(keys) > limit {
+		keys = keys[:limit]
+		last := keys[limit-1]
+		page.NextCursor = strconv.FormatInt(last.ts, 10) + ":" + strconv.FormatInt(last.id, 10)
+	}
+	for _, k := range keys {
 		// Reusing Request rather than a bespoke join: it is the tested path that
 		// assembles an Event with its components and content, and a second parallel
 		// query is one that can quietly diverge from what the request view shows.
-		e, err := d.Request(id, withContent)
+		e, err := d.Request(k.id, withContent)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, e)
+		page.Requests = append(page.Requests, e)
 	}
-	return out, nil
+
+	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+
+		` AND r.session_id = ?`, sessArgs...).Scan(&page.Total); err != nil {
+		return nil, err
+	}
+	// Session-wide, not page-wide, and cheap: idx_content_request makes it an index
+	// probe and EXISTS stops at the first hit.
+	if err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests r
+		JOIN request_content c ON c.request_id = r.id
+		WHERE `+cond+` AND r.session_id = ?)`, sessArgs...).Scan(&page.HasContent); err != nil {
+		return nil, err
+	}
+	return page, nil
 }
 
 // SessionRow is one row of the session list — the view neither reference

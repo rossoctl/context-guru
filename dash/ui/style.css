@@ -694,6 +694,13 @@ details.why dd { margin: 0; }
 .diff {
   border: 1px solid var(--border-soft); border-radius: var(--r);
   margin-bottom: var(--sp-3); overflow: hidden; background: var(--bg-raised);
+  /* A session page is hundreds of these and an expand-all opens every one, so layout and
+     paint for the blocks off screen are work nobody asked for. `auto` on the intrinsic
+     size means the placeholder height (a collapsed summary row) applies only until the
+     block has been rendered once; after that the browser remembers its real size, so
+     scrollbar length and in-page find stay honest. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 44px;
 }
 .diff > summary {
   padding: var(--sp-2) var(--sp-3); cursor: pointer; font-size: var(--t-small);

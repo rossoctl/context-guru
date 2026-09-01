@@ -388,6 +388,17 @@ const (
 	TranscriptUnknownSession = "unknown_session"
 )
 
+// transcriptPageSize is how many TURNS one page of the compaction-diff view carries.
+// It is a render budget, not a taste: blocks-per-turn measured max 24 / avg 7.9 on our
+// own corpus, and the client crosses a second of synchronous work somewhere past ~2,000
+// blocks, so 50 turns is ~400 blocks typical and ~1,200 worst case. transcriptPageMax is
+// what an explicit ?limit= may ask for — a caller may choose to wait, but not to ask for
+// 78 MB.
+const (
+	transcriptPageSize = 50
+	transcriptPageMax  = 200
+)
+
 // sessionTranscript serves one session's before/after content for the compaction-diff
 // view: every message context-guru rewrote in the session, oldest first, with the
 // component rows that ran on each request.
@@ -419,11 +430,21 @@ func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 		visible = p.Manager || (!f.TenantAll && f.Tenant == p.TenantID)
 	}
 
-	evs, err := a.rec.DB().SessionEvents(f, session, visible)
+	// PAGED, and the cap is not optional. The worst session in our own corpus holds
+	// 1,310 turns / 31,425 rewritten messages / ~78 MB of JSON; serving that in one
+	// response killed the renderer in 1.9 s. Keyset, exactly as /api/requests does it.
+	limit := transcriptPageSize
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = min(n, transcriptPageMax)
+		}
+	}
+	tp, err := a.rec.DB().SessionEventsPage(f, session, visible, r.URL.Query().Get("after"), limit)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	evs := tp.Requests
 	// A session id is unique per ACCOUNT, not per service, so under a manager's
 	// service-wide scope SessionEvents matches the id in every account that has one —
 	// interleaving two people's code into a single diff. Pin the view to the account
@@ -455,13 +476,9 @@ func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hot := false
-	for _, e := range evs {
-		if len(e.Content) > 0 {
-			hot = true
-			break
-		}
-	}
+	// Session-wide, from the DB, NOT from this page: a first page of unstored turns in a
+	// partially-stored session must not report "storage is off" for the whole session.
+	hot := tp.HasContent
 	inCold := arch != nil && (arch.ContentPath != "" || arch.FullPath != "")
 
 	// The EFFECTIVE decision for the tenant whose transcripts these are, not the process
@@ -495,11 +512,23 @@ func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 		state = TranscriptNotCaptured
 	}
 
+	// A FULL archive left no local metric rows, so the fetched events are the whole
+	// session and SessionEventsPage had nothing to cap. Apply the same window in memory
+	// rather than handing back every turn through the one path that skipped the LIMIT.
+	if len(tp.Requests) == 0 && len(evs) > 0 {
+		evs, tp.NextCursor, tp.Total = windowEvents(evs, r.URL.Query().Get("after"), limit)
+	}
+
 	writeJSON(w, map[string]any{
 		"session":         session,
 		"state":           state,
 		"requests":        evs,
 		"content_visible": visible,
+		// The page's own coordinates. `total` is the session's turn count so the panel can
+		// say which slice of what it is showing; `next_cursor` is "" on the last page.
+		"next_cursor": tp.NextCursor,
+		"total":       tp.Total,
+		"page_size":   limit,
 		// The effective decision, plus WHICH party's gate is off when it is false. The UI
 		// used to read the process flag and tell a user to enable a setting they had
 		// already enabled, because the operator's gate was the one that was closed.
@@ -1177,4 +1206,25 @@ func (a *API) capture(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{"capture": s, "description": description})
+}
+
+// windowEvents applies the transcript route's keyset window to events that came from
+// cold storage rather than from SQL — the full-archive case, where there is no local row
+// to page over. Same cursor format, same (ts, id) order, so the client cannot tell the
+// two sources apart.
+func windowEvents(evs []*Event, after string, limit int) ([]*Event, string, int64) {
+	total := int64(len(evs))
+	if ts, id, ok := parseTranscriptCursor(after); ok {
+		i := 0
+		for i < len(evs) && !(evs[i].TS > ts || (evs[i].TS == ts && evs[i].ID > id)) {
+			i++
+		}
+		evs = evs[i:]
+	}
+	next := ""
+	if limit > 0 && len(evs) > limit {
+		evs = evs[:limit]
+		next = strconv.FormatInt(evs[limit-1].TS, 10) + ":" + strconv.FormatInt(evs[limit-1].ID, 10)
+	}
+	return evs, next, total
 }

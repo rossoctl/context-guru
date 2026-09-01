@@ -2,6 +2,7 @@ package dash
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -296,4 +297,253 @@ func TestSessionEventsIsOldestFirst(t *testing.T) {
 			t.Fatalf("row %d (ts %d) precedes row %d (ts %d)", i, got[i].TS, i-1, got[i-1].TS)
 		}
 	}
+}
+
+// The transcript route used to have no LIMIT: one session in the production corpus is
+// 1,310 turns / 31,425 rewritten messages / ~78 MB of JSON, and rendering it killed the
+// browser tab. Paging is the fix, so the page has to be exact — walking every page must
+// visit every turn once, in order, and never twice.
+func TestSessionEventsPageWalksEveryTurnExactlyOnce(t *testing.T) {
+	db := openTestDB(t)
+	base := time.Now().UnixMilli()
+	const n = 37
+	var evs []*Event
+	for i := 0; i < n; i++ {
+		// Two turns share a ts on purpose: a keyset on ts alone would skip or repeat here,
+		// which is exactly the bug a naive cursor introduces.
+		ts := base + int64(i/2)*1000
+		e := mkEvent(ts, "s", "m", 100, 90)
+		e.Content = []ContentRow{{Path: "messages.0", Before: "b", After: "a"}}
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[int64]int{}
+	var order []int64
+	cursor, pages := "", 0
+	for {
+		p, err := db.SessionEventsPage(Filter{TenantAll: true}, "s", false, cursor, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Total != n {
+			t.Fatalf("page %d: Total = %d, want %d (the session's turn count, not the page's)", pages, p.Total, n)
+		}
+		if len(p.Requests) > 10 {
+			t.Fatalf("page %d returned %d rows, over the limit of 10", pages, len(p.Requests))
+		}
+		for _, e := range p.Requests {
+			seen[e.ID]++
+			order = append(order, e.TS)
+		}
+		pages++
+		if p.NextCursor == "" {
+			break
+		}
+		cursor = p.NextCursor
+		if pages > 10 {
+			t.Fatal("cursor never terminated")
+		}
+	}
+	if pages != 4 {
+		t.Errorf("walked %d pages of 10 over %d turns, want 4", pages, n)
+	}
+	if len(seen) != n {
+		t.Errorf("saw %d distinct turns, want %d", len(seen), n)
+	}
+	for id, c := range seen {
+		if c != 1 {
+			t.Errorf("turn %d returned %d times", id, c)
+		}
+	}
+	for i := 1; i < len(order); i++ {
+		if order[i] < order[i-1] {
+			t.Errorf("turn %d (ts %d) precedes turn %d (ts %d) across the page boundary",
+				i, order[i], i-1, order[i-1])
+		}
+	}
+}
+
+// limit <= 0 is the archive path: an upload that carried one page would misreport what
+// was captured, so the unlimited wrapper must stay unlimited.
+func TestSessionEventsIsStillUnlimited(t *testing.T) {
+	db := openTestDB(t)
+	base := time.Now().UnixMilli()
+	var evs []*Event
+	for i := 0; i < 120; i++ {
+		evs = append(evs, mkEvent(base+int64(i), "s", "m", 100, 90))
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.SessionEvents(Filter{TenantAll: true}, "s", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 120 {
+		t.Fatalf("SessionEvents returned %d of 120 turns — the archive would upload a page", len(got))
+	}
+}
+
+// HasContent answers the SESSION's question, not the page's. A first page of turns with
+// no stored text over a session whose later turns ARE stored used to make the route say
+// "transcript storage is off", i.e. tell a user to switch on a setting they already have on.
+func TestSessionEventsPageHasContentIsSessionWide(t *testing.T) {
+	db := openTestDB(t)
+	base := time.Now().UnixMilli()
+	var evs []*Event
+	for i := 0; i < 12; i++ {
+		e := mkEvent(base+int64(i)*1000, "s", "m", 100, 90)
+		if i >= 10 { // only the LAST page carries text
+			e.Content = []ContentRow{{Path: "messages.0", Before: "b", After: "a"}}
+		}
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	p, err := db.SessionEventsPage(Filter{TenantAll: true}, "s", true, "", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Requests) != 5 {
+		t.Fatalf("page 1 has %d rows, want 5", len(p.Requests))
+	}
+	for _, e := range p.Requests {
+		if len(e.Content) != 0 {
+			t.Fatal("fixture assumption: page 1 was supposed to have no stored text")
+		}
+	}
+	if !p.HasContent {
+		t.Error("HasContent = false on a session with stored text on a later page")
+	}
+
+	// And it stays false when the session really has none.
+	empty := openTestDB(t)
+	if err := empty.insertBatch([]*Event{mkEvent(base, "s", "m", 100, 90)}); err != nil {
+		t.Fatal(err)
+	}
+	q, err := empty.SessionEventsPage(Filter{TenantAll: true}, "s", true, "", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.HasContent {
+		t.Error("HasContent = true on a session with no stored text")
+	}
+}
+
+// A garbage cursor must be ignored (page 1), never turned into a SQL error or an empty
+// page — a stale link is not an error the reader caused.
+func TestTranscriptCursorGarbageFallsBackToPageOne(t *testing.T) {
+	for _, bad := range []string{"", "abc", "abc:def", "12", ":", "1:", ":2"} {
+		if _, _, ok := parseTranscriptCursor(bad); ok {
+			t.Errorf("parseTranscriptCursor(%q) accepted it", bad)
+		}
+	}
+	if ts, id, ok := parseTranscriptCursor("1700000000000:42"); !ok || ts != 1700000000000 || id != 42 {
+		t.Errorf("parseTranscriptCursor round trip = %d,%d,%v", ts, id, ok)
+	}
+}
+
+// The route's own contract: default page size, an explicit ?limit=, and the cap.
+func TestTranscriptRouteIsCapped(t *testing.T) {
+	a, rec, _ := transcriptAPI(t, Options{CaptureContent: true})
+	base := time.Now().UnixMilli()
+	var evs []*Event
+	for i := 0; i < transcriptPageSize+7; i++ {
+		e := mkEvent(base+int64(i)*1000, "s", "m", 100, 90)
+		e.Content = []ContentRow{{Path: "messages.0", Before: "b", After: "a"}}
+		evs = append(evs, e)
+	}
+	seed(t, rec, evs...)
+
+	var page struct {
+		Requests   []*Event `json:"requests"`
+		NextCursor string   `json:"next_cursor"`
+		Total      int64    `json:"total"`
+		PageSize   int      `json:"page_size"`
+	}
+	w, _ := get(t, a, "/api/sessions/s/transcript", "127.0.0.1:1")
+	if w.Code != 200 {
+		t.Fatalf("status %d", w.Code)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Requests) != transcriptPageSize {
+		t.Errorf("default page served %d turns, want %d", len(page.Requests), transcriptPageSize)
+	}
+	if page.Total != int64(transcriptPageSize+7) {
+		t.Errorf("total = %d, want %d", page.Total, transcriptPageSize+7)
+	}
+	if page.NextCursor == "" {
+		t.Error("no next_cursor with 7 turns left to read")
+	}
+
+	// The last page: the cursor resolves and the walk terminates.
+	w2, _ := get(t, a, "/api/sessions/s/transcript?after="+page.NextCursor, "127.0.0.1:1")
+	var p2 = page
+	if err := json.Unmarshal(w2.Body.Bytes(), &p2); err != nil {
+		t.Fatal(err)
+	}
+	if len(p2.Requests) != 7 || p2.NextCursor != "" {
+		t.Errorf("last page: %d turns, next_cursor %q; want 7 and \"\"", len(p2.Requests), p2.NextCursor)
+	}
+
+	// An explicit ?limit= is honoured, and cannot ask for the whole 78 MB.
+	w3, _ := get(t, a, "/api/sessions/s/transcript?limit=3", "127.0.0.1:1")
+	var p3 = page
+	if err := json.Unmarshal(w3.Body.Bytes(), &p3); err != nil {
+		t.Fatal(err)
+	}
+	if len(p3.Requests) != 3 || p3.PageSize != 3 {
+		t.Errorf("?limit=3 served %d turns (page_size %d)", len(p3.Requests), p3.PageSize)
+	}
+	w4, _ := get(t, a, "/api/sessions/s/transcript?limit=100000", "127.0.0.1:1")
+	var p4 = page
+	if err := json.Unmarshal(w4.Body.Bytes(), &p4); err != nil {
+		t.Fatal(err)
+	}
+	if p4.PageSize != transcriptPageMax {
+		t.Errorf("?limit=100000 gave page_size %d, want the cap %d", p4.PageSize, transcriptPageMax)
+	}
+}
+
+// windowEvents is the cold-storage half of the same cap: a FULL archive leaves no local
+// row for SQL to page over, so without this the one path that skipped the LIMIT would
+// still hand back every turn.
+func TestWindowEventsPagesArchivedTurns(t *testing.T) {
+	mk := func(ts, id int64) *Event { return &Event{ID: id, TS: ts} }
+	all := []*Event{mk(10, 1), mk(10, 2), mk(20, 3), mk(30, 4), mk(30, 5)}
+
+	got, next, total := windowEvents(all, "", 2)
+	if total != 5 || len(got) != 2 || got[1].ID != 2 || next != "10:2" {
+		t.Fatalf("page 1 = %d rows, next %q, total %d", len(got), next, total)
+	}
+	// Two turns share ts 10, so a cursor on ts alone would drop or repeat one.
+	got, next, _ = windowEvents(all, next, 2)
+	if len(got) != 2 || got[0].ID != 3 || got[1].ID != 4 || next != "30:4" {
+		t.Fatalf("page 2 = %v, next %q", eventIDs(got), next)
+	}
+	got, next, _ = windowEvents(all, next, 2)
+	if len(got) != 1 || got[0].ID != 5 || next != "" {
+		t.Fatalf("page 3 = %v, next %q; want [5] and \"\"", eventIDs(got), next)
+	}
+	// Unlimited and a garbage cursor both mean "everything, from the start".
+	if got, next, _ = windowEvents(all, "", 0); len(got) != 5 || next != "" {
+		t.Errorf("limit 0 = %d rows, next %q", len(got), next)
+	}
+	if got, _, _ = windowEvents(all, "nonsense", 2); len(got) != 2 || got[0].ID != 1 {
+		t.Errorf("garbage cursor did not fall back to page 1: %v", eventIDs(got))
+	}
+}
+
+func eventIDs(evs []*Event) []int64 {
+	out := make([]int64, 0, len(evs))
+	for _, e := range evs {
+		out = append(out, e.ID)
+	}
+	return out
 }
