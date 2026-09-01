@@ -3,6 +3,7 @@ package apply
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -25,8 +26,19 @@ import (
 // The list checked is the NORMALIZED view — the shape components mutate, with Anthropic
 // `tool_use` blocks lifted into ToolCalls and each `tool_result` block its own synthetic
 // role=tool message. Re-normalizing the EMITTED wire is what makes this an end-to-end check:
-// it validates the bytes the proxy would actually send, after apply's rebuild, not the
-// in-memory slice a component happened to hand back.
+// it starts from the bytes the proxy would actually send, after apply's rebuild, rather than
+// from the in-memory slice a component happened to hand back.
+//
+// WHAT THE ROUND-TRIP CANNOT SEE, and why the raw-body check below exists. normalize() is
+// lossy in exactly the direction that matters for one defect: it maps a legal Anthropic wire
+// and a wire carrying the illegal `"role":"tool"` onto the IDENTICAL normalized list, because
+// a tool_result block and a leaked role=tool message both become one synthetic role=tool
+// message. So the one wire-level defect this repo has actually paid a 400 for
+// (`Unexpected role "tool"`, fixed on main, recorded in apply/toolrole_wire_test.go) is
+// structurally invisible to ValidateShape here — the round-trip destroys the evidence before
+// the validator runs. Roles are therefore asserted on the RAW BODY, before normalization, by
+// assertWireRolesLegal. Shape rules go through the validator; byte-level role legality does
+// not, and cannot.
 
 // shapeModel is a canned summarizer, so these tests assert on SHAPE and never on wording.
 type shapeModel struct{}
@@ -40,6 +52,22 @@ func assertShapeValid(t *testing.T, what string, msgs []bschemas.ChatMessage) {
 	if vs := schema.ValidateShape(msgs); len(vs) != 0 {
 		t.Errorf("%s: %d shape violation(s) — a provider rejects this request:\n%s",
 			what, len(vs), schema.FormatShapeViolations(vs, msgs))
+	}
+}
+
+// assertWireRolesLegal checks role legality on the RAW body, which is the only place it is
+// decidable: Anthropic accepts exactly "user", "assistant" and "system" in `messages`, and
+// normalize() cannot distinguish a legal wire from one carrying this package's internal
+// role=tool. Three lines, no walk, and it closes the gap the comment above describes.
+func assertWireRolesLegal(t *testing.T, what string, body []byte) {
+	t.Helper()
+	for i, m := range gjson.GetBytes(body, "messages").Array() {
+		switch r := m.Get("role").String(); r {
+		case "user", "assistant", "system":
+		default:
+			t.Errorf("%s: messages.%d role %q reaches the Anthropic wire — a 400 "+
+				"(`Unexpected role`), and normalize() would hide it", what, i, r)
+		}
 	}
 }
 
@@ -114,7 +142,20 @@ func TestRealCapturedTrafficIsShapeValid(t *testing.T) {
 //	fb5c460  the tail beginning on a tool_result whose call was cut   -> paired-tool-result
 //	e7d1aa8  an assistant tool-call head kept while its results were cut -> answered-tool-use
 func TestSummarizeEmittedWireIsShapeValid(t *testing.T) {
-	big := strings.Repeat("verbose parallel tool output line\n", 60)
+	// INDENTED JSON, so the second pipeline's extract_llm performs a real rewrite of a RETAINED
+	// tool output. Prose or already-compact content is left alone, which is what made two
+	// earlier versions of the toolrole test vacuous — see apply/toolrole_wire_test.go.
+	rec := make([]map[string]any, 0, 40)
+	for i := 0; i < 40; i++ {
+		rec = append(rec, map[string]any{
+			"ts": "2024-01-01T00:00:00Z", "path": "src/api/users.py", "level": "INFO",
+			"msg": "request served", "seq": i,
+			"detail": strings.Repeat("verbose parallel tool output ", 6),
+		})
+	}
+	rb, _ := json.MarshalIndent(rec, "", "  ")
+	big := string(rb)
+
 	msgs := []map[string]any{{"role": "user", "content": "start the task"}}
 	for i := 0; i < 8; i++ {
 		a, b := "pa_"+string(rune('a'+i)), "pb_"+string(rune('a'+i))
@@ -133,32 +174,58 @@ func TestSummarizeEmittedWireIsShapeValid(t *testing.T) {
 	msgs = append(msgs, map[string]any{"role": "user", "content": "final question"})
 	body, _ := json.Marshal(map[string]any{"model": "claude-x", "messages": msgs})
 
-	acted, sawParallelCall, sawResult := false, false, false
-	for _, keep := range []int{1, 2, 3, 4, 5} {
-		cfg, err := config.LoadBytes([]byte("pipeline: [summarize]\ncomponents:\n" +
-			"  summarize: {keep_last: " + string(rune('0'+keep)) +
-			", start_from_message: 0, min_tokens: 1}\n"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		p, _ := cfg.Build(nil)
-		out, changed := BodyWithModel(context.Background(), p, store.NewMemory(store.Options{}),
-			bschemas.Anthropic, body, "", false,
-			components.ModelSpec{Incoming: shapeModel{}})
-		if !changed {
-			continue
-		}
-		acted = true
-		norm, _ := normalize(bschemas.Anthropic, gjson.GetBytes(out, "messages").Array())
-		for _, m := range norm {
-			if a := m.ChatAssistantMessage; a != nil && len(a.ToolCalls) >= 2 {
-				sawParallelCall = true
+	// TWO PIPELINES, because the role predicate is only non-vacuous in the second one. The
+	// role="tool" leak needs TWO components in one turn: summarize to change the message count
+	// (so rebuildCountChanged runs at all) and a second component to rewrite a tool message
+	// summarize KEPT (so that message no longer byte-matches its pre-image and gets marshaled
+	// fresh, internal role and all). With summarize alone every retained tool message still
+	// byte-matches and is emitted from its original bytes, so no role can leak and the predicate
+	// proves nothing. Verified by mutation: reverting 6e503e2 leaves [summarize] passing and
+	// fails [summarize, extract_llm].
+	//
+	// extract_llm with strategy=deterministic keeps this hermetic — a real rewrite of the kept
+	// message's bytes with no model reply to stub.
+	pipelines := []struct{ name, yaml string }{
+		{"summarize", "pipeline: [summarize]\ncomponents:\n" +
+			"  summarize: {keep_last: %d, start_from_message: 0, min_tokens: 1}\n"},
+		{"summarize+extract_llm", "pipeline: [summarize, extract_llm]\ncomponents:\n" +
+			"  summarize: {keep_last: %d, start_from_message: 0, min_tokens: 1}\n" +
+			"  extract_llm: {strategy: deterministic, min_tokens: 1, economic_gate: false, " +
+			"allow_on_caching_backend: true}\n"},
+	}
+
+	acted, sawParallelCall, sawResult, sawRewritingRun := false, false, false, false
+	for _, pl := range pipelines {
+		for _, keep := range []int{1, 2, 3, 4, 5} {
+			what := fmt.Sprintf("%s keep_last=%d", pl.name, keep)
+			cfg, err := config.LoadBytes([]byte(fmt.Sprintf(pl.yaml, keep)))
+			if err != nil {
+				t.Fatal(err)
 			}
-			if m.Role == bschemas.ChatMessageRoleTool {
-				sawResult = true
+			p, _ := cfg.Build(nil)
+			out, changed := BodyWithModel(context.Background(), p, store.NewMemory(store.Options{}),
+				bschemas.Anthropic, body, "", false,
+				components.ModelSpec{Incoming: shapeModel{}})
+			if !changed {
+				continue
 			}
+			acted = true
+			assertWireRolesLegal(t, what, out)
+			arr := gjson.GetBytes(out, "messages").Array()
+			if len(arr) != len(msgs) && pl.name == "summarize+extract_llm" {
+				sawRewritingRun = true
+			}
+			norm, _ := normalize(bschemas.Anthropic, arr)
+			for _, m := range norm {
+				if a := m.ChatAssistantMessage; a != nil && len(a.ToolCalls) >= 2 {
+					sawParallelCall = true
+				}
+				if m.Role == bschemas.ChatMessageRoleTool {
+					sawResult = true
+				}
+			}
+			assertShapeValid(t, what, norm)
 		}
-		assertShapeValid(t, "keep_last="+string(rune('0'+keep)), norm)
 	}
 	// Vacuity guards: this test is worthless if summarize never acted, and it does not
 	// exercise the shape it exists for unless a parallel exchange survived onto the wire.
@@ -171,5 +238,11 @@ func TestSummarizeEmittedWireIsShapeValid(t *testing.T) {
 	}
 	if !sawResult {
 		t.Fatal("no tool_result reached the wire, so paired-tool-result was never exercised")
+	}
+	// The role predicate is only meaningful over a count-changing run of the two-component
+	// pipeline; without one it is a check that cannot fail.
+	if !sawRewritingRun {
+		t.Fatal("the two-component pipeline never changed the message count, so the " +
+			"count-change rebuild never ran and assertWireRolesLegal cannot fail")
 	}
 }

@@ -7,46 +7,6 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
-// Static validation of a message list against the provider's message-SHAPE rules — the
-// rules that make a request well-formed regardless of its content.
-//
-// WHY THIS EXISTS. Four separate shape violations shipped in `summarize` and every one of
-// them was found REACTIVELY, by a live provider rejection or a benchmark failure, each
-// masked by the one before it:
-//
-//	2edb9d4  400 messages.1: role 'system' must precede an 'assistant' message or end the array
-//	fb5c460  400 messages.N.content.M: unexpected `tool_use_id` found in `tool_result` blocks
-//	e7d1aa8  400 messages.N: `tool_use` ids were found without `tool_result` blocks immediately after
-//	e9bf3a7  panic: index out of range [-1]   (a short transcript; see NOT COVERED below)
-//
-// None was findable by the project's existing methods. No test asserted the shape of what a
-// component emitted, and every offline measurement replayed through the `/compact` endpoint,
-// which runs the pipeline and returns the rewritten body WITHOUT forwarding it upstream — so
-// no provider ever validated it. Replay can tell you what a component removed; it is
-// structurally incapable of telling you whether the result is a sendable request.
-//
-// The first three are checkable statically, with no provider and no model, because they are
-// properties of the message list alone. That is what this is for: a component that mutates a
-// message list can be asserted well-formed in a unit test, closing the blind spot without
-// paying for live traffic on every change.
-//
-// WHERE IT RUNS. Unit tests, over the pipeline's NORMALIZED view of a transcript — the shape
-// apply.normalize produces and components mutate, where an Anthropic `tool_use` block has
-// been lifted into bifrost's ToolCalls and each `tool_result` block is its own synthetic
-// role=tool message. It is deliberately NOT on the request hot path: it walks the whole
-// transcript and allocates per tool exchange, which is not free enough to spend on every
-// request, and a validator that can only fail open adds latency without adding a decision.
-//
-// NOT COVERED, and worth being explicit about: e9bf3a7 was a PANIC inside boundary
-// arithmetic, not a malformed list. No check on the output list can see it — by the time
-// there is a list to inspect, the panic has already happened (and pipeline.runOne swallowed
-// it into verdict=reverted). Shape validation is not a substitute for exercising a component
-// on transcripts shorter than its own thresholds.
-//
-// DELIBERATELY NOT A REQUEST VALIDATOR. It checks shape invariants that hold across
-// providers with an Anthropic-style tool protocol; it does not check token limits, model
-// names, sampling parameters, or anything content-dependent.
-
 // ShapeViolation is one broken invariant, phrased to point at the message that broke it.
 type ShapeViolation struct {
 	Index int    // message index, or -1 when the violation is about the list as a whole
@@ -67,36 +27,79 @@ const (
 	RuleSystemPosition   = "system-position"
 	RuleAnsweredToolUse  = "answered-tool-use"
 	RulePairedToolResult = "paired-tool-result"
+	RuleNonEmptyContent  = "non-empty-content"
 )
 
-// ValidateShape reports every message-shape invariant the list breaks. An empty result
-// means the list is well-formed in the ways a provider enforces structurally.
+// ValidateShape reports every message-shape invariant the list breaks, judged as an
+// ANTHROPIC request. It is the Anthropic-dialect shorthand for ValidateShapeFor; see there
+// for the invariants and for why the dialect matters.
+func ValidateShape(msgs []schemas.ChatMessage) []ShapeViolation {
+	return ValidateShapeFor(schemas.Anthropic, msgs)
+}
+
+// ValidateShapeFor reports every message-shape invariant the list breaks when sent to
+// `provider`. An empty result means the list is well-formed in the ways that provider
+// enforces structurally.
+//
+// THE PROVIDER ARGUMENT IS NOT DECORATION. Two of the four invariants are properties of the
+// Anthropic-style tool protocol and hold for every provider that speaks it; the other two are
+// Anthropic's own rules and are simply FALSE elsewhere. OpenAI imposes no positional
+// constraint on system/developer messages, so checking system-position against an OpenAI
+// transcript reports a violation on every turn where the client re-injects a system message —
+// ordinary traffic, and `/compact` defaults to OpenAI (proxy/proxy.go:566). An ungated rule
+// would therefore be a savings regression the moment this is used on the request path, which
+// is why the gate is a prerequisite for that wiring rather than a nicety.
 //
 // The invariants, and why each one exists:
 //
-//  1. system-position — a system-role message away from index 0 must be immediately
-//     followed by an assistant message, or end the array. This is the provider's own
-//     wording, and it is the defect that made `summarize` unusable on every call: it
+//  1. system-position — ANTHROPIC ONLY. A system-role message away from index 0 must be
+//     immediately followed by an assistant message, or end the array. This is the provider's
+//     own wording, and it is the defect that made `summarize` unusable on every call: it
 //     emitted [msgs[0], summary(system), tail...], so with the usual system prompt at
 //     index 0 a second system role landed at index 1 in front of the kept tail.
-//  2. answered-tool-use — every `tool_use` must be answered by a `tool_result` in the
-//     messages immediately following it. Removing a span can delete the answer while
-//     keeping the call: preserving msgs[0] when it is an assistant tool-call message does
-//     exactly that.
-//  3. paired-tool-result — every `tool_result` must answer a `tool_use` that appeared
-//     earlier. Removing a span can delete the call while keeping the answer. The mirror of
-//     (2), and the reason both are checked: e7d1aa8 showed they are one mistake seen from
-//     either side, and fixing one alone leaves the other live — which is what happened.
-func ValidateShape(msgs []schemas.ChatMessage) []ShapeViolation {
+//  2. answered-tool-use — ALL PROVIDERS. Every `tool_use` must be answered by a
+//     `tool_result` in the messages immediately following it. Removing a span can delete the
+//     answer while keeping the call: preserving msgs[0] when it is an assistant tool-call
+//     message does exactly that.
+//  3. paired-tool-result — ALL PROVIDERS. Every `tool_result` must answer a `tool_use` that
+//     appeared earlier. Removing a span can delete the call while keeping the answer. The
+//     mirror of (2), and the reason both are checked: e7d1aa8 showed they are one mistake
+//     seen from either side, and fixing one alone leaves the other live — which is what
+//     happened.
+//  4. non-empty-content — ANTHROPIC ONLY, on the evidence available. A message that CARRIES
+//     content whose text is blank is a hard 400 ("text content blocks must be non-empty"),
+//     and this pipeline has ~20 places that can produce one: every component that rewrites a
+//     message does it through SetMessageText, and any of them reducing a message to the empty
+//     string writes `""` straight onto the wire. `summarize` itself is NOT one of them — it
+//     refuses a blank summary (components/offload/summarize.go:201), confirmed by mutation:
+//     making its model return "" makes it decline rather than emit empty content. So this rule
+//     guards the OTHER rewriters (cmdfilter, dedup, skeleton, textclean and the rest), which
+//     have no such guard. Gated to Anthropic because an Anthropic rejection is what is on
+//     record; widen it when another provider's 400 is.
+//
+// The rule is deliberately narrow in three ways, to preserve the property that makes this
+// validator usable at all — content-shape false positives being impossible rather than
+// merely absent. It fires only when Content is non-nil (a pure tool-call assistant message
+// has nil content and is legal), only when the message carries no non-text block (Rewritable,
+// so an image-only, thinking-only or tool_result-payload message is never judged by its text),
+// and never on a role=tool message or an assistant message carrying ToolCalls, whose meaning
+// lives in fields other than their text.
+func ValidateShapeFor(provider schemas.ModelProvider, msgs []schemas.ChatMessage) []ShapeViolation {
 	var out []ShapeViolation
 	seenCall := map[string]bool{}
 
 	for i := range msgs {
 		m := msgs[i]
 
-		if m.Role == schemas.ChatMessageRoleSystem && i != 0 && !systemPositionOK(msgs, i) {
+		if provider == schemas.Anthropic &&
+			m.Role == schemas.ChatMessageRoleSystem && i != 0 && !systemPositionOK(msgs, i) {
 			out = append(out, ShapeViolation{Index: i, Rule: RuleSystemPosition,
 				Msg: "role 'system' must precede an 'assistant' message or end the array"})
+		}
+
+		if provider == schemas.Anthropic && contentPresentButBlank(m) {
+			out = append(out, ShapeViolation{Index: i, Rule: RuleNonEmptyContent,
+				Msg: "text content blocks must be non-empty"})
 		}
 
 		// A result must answer a call seen earlier.
@@ -128,6 +131,23 @@ func ValidateShape(msgs []schemas.ChatMessage) []ShapeViolation {
 		}
 	}
 	return out
+}
+
+// contentPresentButBlank reports whether m has content that a provider will read as empty.
+//
+// The guards are the whole point (see ValidateShapeFor rule 4): a message with a non-text
+// block is never judged by MessageText, because MessageText cannot see an image, a thinking
+// block or an Anthropic tool_result payload and would call every one of them blank. Restricting
+// this to Rewritable messages keeps the "content-shape false positives are impossible" property
+// intact — this rule cannot fire on any shape it does not fully understand.
+func contentPresentButBlank(m schemas.ChatMessage) bool {
+	if m.Content == nil || m.Role == schemas.ChatMessageRoleTool {
+		return false
+	}
+	if a := m.ChatAssistantMessage; a != nil && len(a.ToolCalls) > 0 {
+		return false
+	}
+	return Rewritable(m) && strings.TrimSpace(MessageText(m)) == ""
 }
 
 // systemPositionOK applies the provider's rule for a system role inside `messages`, which is

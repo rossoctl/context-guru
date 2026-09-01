@@ -210,3 +210,137 @@ func TestShapeViolationString(t *testing.T) {
 		t.Errorf("list-level violation rendered %q", s)
 	}
 }
+
+// THE DIALECT GATE. system-position is Anthropic's rule and is FALSE for OpenAI, which
+// imposes no positional constraint on system/developer messages. The transcript below is the
+// exact shape a Claude-Agent-SDK-style client produces when it re-injects a system message
+// mid-array ahead of a user turn — ordinary traffic, and `/compact` defaults to OpenAI
+// (proxy/proxy.go:566). Ungated, this rule would report a violation on every such turn, and
+// on the request path that means reverting the request and silently losing its saving.
+//
+// The two pairing rules are protocol properties, not dialect ones, so they must keep firing
+// for BOTH providers — asserted here, because a gate that swept them up with it would trade
+// one wrong answer for a worse one.
+func TestValidateShapeForGatesSystemPositionToAnthropic(t *testing.T) {
+	systemMidArray := []bschemas.ChatMessage{
+		vsys("you are a helpful assistant"),
+		vuser("start"),
+		vasst("working"),
+		vsys("<system-reminder>1200 tokens left</system-reminder>"),
+		vuser("continue"),
+	}
+
+	if got := rules(ValidateShapeFor(bschemas.Anthropic, systemMidArray)); got != RuleSystemPosition {
+		t.Errorf("Anthropic: want %q, got %q", RuleSystemPosition, got)
+	}
+	if vs := ValidateShapeFor(bschemas.OpenAI, systemMidArray); len(vs) != 0 {
+		t.Errorf("OpenAI imposes no positional constraint on system messages, but got: %s",
+			FormatShapeViolations(vs, systemMidArray))
+	}
+
+	// ValidateShape is the Anthropic shorthand, so it must agree with the Anthropic call.
+	if got := rules(ValidateShape(systemMidArray)); got != RuleSystemPosition {
+		t.Errorf("ValidateShape must delegate as Anthropic: want %q, got %q", RuleSystemPosition, got)
+	}
+
+	// The pairing rules are provider-independent and must survive the gate.
+	pairing := []bschemas.ChatMessage{vuser("go"), vcall("call_a"), vuser("thanks")}
+	for _, p := range []bschemas.ModelProvider{bschemas.Anthropic, bschemas.OpenAI} {
+		if got := rules(ValidateShapeFor(p, pairing)); got != RuleAnsweredToolUse {
+			t.Errorf("%s: pairing rules must not be gated: want %q, got %q",
+				p, RuleAnsweredToolUse, got)
+		}
+	}
+}
+
+// EMPTY CONTENT. Anthropic rejects a blank text block, and this pipeline can produce one:
+// every rewriting component goes through SetMessageText, so a summarizer or extractor that
+// returns "" writes it straight onto the wire.
+//
+// The acceptance half is the important half. MessageText cannot see an image, a thinking
+// block or an Anthropic tool_result payload and reports every one of them as blank, so an
+// unguarded version of this rule would fire on legal traffic — the exact failure mode that
+// made the first system-position rule worthless. The guards (Rewritable, nil content, tool
+// role, ToolCalls) are what keep "content-shape false positives are impossible" true.
+func TestValidateShapeRejectsEmptyContentWithoutFalsePositives(t *testing.T) {
+	blank := func(role bschemas.ChatMessageRole, text string) bschemas.ChatMessage {
+		m := bschemas.ChatMessage{Role: role}
+		SetMessageText(&m, text)
+		return m
+	}
+	nonText := func(bt bschemas.ChatContentBlockType) bschemas.ChatMessage {
+		return bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser,
+			Content: &bschemas.ChatMessageContent{
+				ContentBlocks: []bschemas.ChatContentBlock{{Type: bt}}}}
+	}
+
+	reject := []struct {
+		name string
+		msgs []bschemas.ChatMessage
+	}{
+		{"summary rewritten to the empty string", []bschemas.ChatMessage{
+			vuser("start"), blank(bschemas.ChatMessageRoleUser, "")}},
+		{"whitespace only is still empty to the provider", []bschemas.ChatMessage{
+			vuser("start"), blank(bschemas.ChatMessageRoleUser, "  \n\t ")}},
+		{"assistant turn with no text and no tool calls", []bschemas.ChatMessage{
+			vuser("start"), blank(bschemas.ChatMessageRoleAssistant, "")}},
+		{"empty content block array", []bschemas.ChatMessage{vuser("start"),
+			{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{}}}},
+	}
+	for _, tc := range reject {
+		t.Run("reject/"+tc.name, func(t *testing.T) {
+			if got := rules(ValidateShapeFor(bschemas.Anthropic, tc.msgs)); got != RuleNonEmptyContent {
+				t.Errorf("want %q, got %q", RuleNonEmptyContent, got)
+			}
+		})
+	}
+
+	accept := []struct {
+		name string
+		msgs []bschemas.ChatMessage
+	}{
+		{"nil content on a pure tool-call assistant turn", []bschemas.ChatMessage{
+			vuser("go"), vcall("call_a"), vresult("call_a")}},
+		// Deliberately exempt rather than asserted legal: an assistant turn whose text is
+		// blank but which carries tool calls means something through the calls, and this rule
+		// fails open on shapes whose meaning it does not fully read.
+		{"blank text alongside tool calls is exempt", func() []bschemas.ChatMessage {
+			c := vcall("call_a")
+			SetMessageText(&c, "")
+			return []bschemas.ChatMessage{vuser("go"), c, vresult("call_a")}
+		}()},
+		{"image-only message: MessageText is blank, the content is not", []bschemas.ChatMessage{
+			vuser("look"), nonText(bschemas.ChatContentBlockTypeImage)}},
+		{"thinking-only assistant turn", []bschemas.ChatMessage{vuser("go"),
+			{Role: bschemas.ChatMessageRoleAssistant,
+				Content: &bschemas.ChatMessageContent{ContentBlocks: []bschemas.ChatContentBlock{
+					{Type: bschemas.ChatContentBlockType("thinking")}}}}}},
+		{"tool_result payload lives outside MessageText", []bschemas.ChatMessage{
+			vuser("look"), nonText(bschemas.ChatContentBlockType("tool_result"))}},
+	}
+	for _, tc := range accept {
+		t.Run("accept/"+tc.name, func(t *testing.T) {
+			if vs := ValidateShapeFor(bschemas.Anthropic, tc.msgs); len(vs) != 0 {
+				t.Errorf("false positive: %s", FormatShapeViolations(vs, tc.msgs))
+			}
+		})
+	}
+}
+
+// CONSECUTIVE SAME-ROLE MUST STAY UNCHECKED, and this test is the guard rail against a future
+// reader "completing" the validator with an alternation rule. `summarize`'s own legal output
+// is [msgs[0], summary(user), user-tail...] — consecutive user messages, which Anthropic
+// accepts. An alternation rule would reject the very output this validator exists to bless.
+func TestValidateShapeAcceptsConsecutiveSameRoleBecauseSummarizeEmitsIt(t *testing.T) {
+	summarizeOutput := []bschemas.ChatMessage{
+		vuser("original first turn"),
+		vuser("[summary] essential facts from the earlier trajectory"),
+		vuser("the kept tail's first user turn"),
+	}
+	for _, p := range []bschemas.ModelProvider{bschemas.Anthropic, bschemas.OpenAI} {
+		if vs := ValidateShapeFor(p, summarizeOutput); len(vs) != 0 {
+			t.Errorf("%s: consecutive same-role must be accepted — it is summarize's own "+
+				"legal output:\n%s", p, FormatShapeViolations(vs, summarizeOutput))
+		}
+	}
+}

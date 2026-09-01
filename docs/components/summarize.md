@@ -40,6 +40,37 @@ after:   [system, "=== History Summary === … <summary> … <<cg:…>>", uN-1, 
 Lossy but reversible — the replaced span is stashed under the summary message's marker and
 recovered via `context_guru_expand` / `GET /expand`.
 
+## Shape invariants
+
+Rewriting a transcript can make it *unsendable*, and this component has done so four times —
+each found only when a provider returned a 400 on live traffic:
+
+| Symptom | Cause |
+|---|---|
+| `400 messages.1: role 'system' must precede an 'assistant' message or end the array` | the summary was emitted with role `system` and spliced in front of the kept tail |
+| `400 … unexpected tool_use_id found in tool_result blocks` | the span boundary cut a `tool_use` while keeping its `tool_result` |
+| `400 … tool_use ids were found without tool_result blocks immediately after` | the mirror: the boundary kept an assistant tool-call turn and cut its results |
+| `panic: index out of range [-1]` | a transcript shorter than `keep_last` |
+
+So the output is held to invariants that are properties of the message list alone, checked
+offline by `schema.ValidateShapeFor` (see `components/offload/summarize_shape_test.go` and
+`apply/shape_validate_test.go`):
+
+- a system-role message away from index 0 is followed by an assistant turn, or ends the array
+  (Anthropic's rule; **not** "system only at index 0" — the Claude Agent SDK legitimately
+  re-injects a system message every turn);
+- every `tool_use` is answered in the contiguous run of tool results that follows it, and every
+  `tool_result` answers an earlier `tool_use` — so the span boundary never splits an exchange;
+- no message reaches the wire with blank content — a hard Anthropic 400. This component
+  already refuses a blank summary itself; the invariant is what catches a *later* component
+  in the same pipeline reducing a message `summarize` kept down to nothing.
+
+Two things are deliberately **not** invariants. **Consecutive same-role messages are legal**:
+this component's own correct output is `[msgs[0], summary(user), tail…]`, i.e. consecutive user
+messages, and Anthropic accepts it — an alternation rule would reject correct output. And role
+legality on the wire (`role:"tool"` never reaching Anthropic) is a property of the *bytes*, not
+of the normalized list, so it is asserted on the raw body instead (`apply/toolrole_wire_test.go`).
+
 ## Configuration
 
 | Key | Default | Meaning |
