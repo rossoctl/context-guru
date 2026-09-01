@@ -1046,7 +1046,10 @@ table.grid tr.revoked { opacity: 0.55; }
 }
 @media (max-width: 900px) {
   .topbar { gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); }
-  .tabs { order: 3; width: 100%; overflow-x: auto; padding-bottom: 2px; }
+  /* nowrap so the existing overflow-x actually does something: five groups wrapped to two
+     44px rows, and the group names are a fixed set of five that a reader learns, which is
+     what makes a scroller acceptable here and not on the second level. */
+  .tabs { order: 3; width: 100%; overflow-x: auto; padding-bottom: 2px; flex-wrap: nowrap; }
   /* 44px is the floor for a target you hit with a thumb, and these were 28 at every
      width — nothing about the nav reflowed at 390px, it just got narrower. Applied only
      here so the desktop topbar stays one 41px row. */

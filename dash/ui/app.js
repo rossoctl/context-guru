@@ -4307,6 +4307,9 @@ function syncNav() {
     const on = b.dataset.group === group;
     b.setAttribute('aria-selected', String(on));
     b.tabIndex = on ? 0 : -1;
+    // Level 1 scrolls sideways below 900px rather than wrapping to a second 44px row, so
+    // the open group can be half off the edge. A no-op when it is already fully visible.
+    if (on) b.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
   const panel = $(`#subnav .grouppanel[data-group="${group}"]`);
   for (const p of $$('#subnav .grouppanel')) p.hidden = p !== panel;
