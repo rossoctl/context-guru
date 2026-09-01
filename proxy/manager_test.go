@@ -90,18 +90,30 @@ func (f *mgrFixture) record(t *testing.T, tenantID, session string, e *dash.Even
 	if e.TokenAccounting == "" {
 		e.TokenAccounting = dash.AccountingComplete
 	}
+	// Wait for the row THIS call recorded, by count, not for "some row on this session to
+	// exist". The old condition was len(p.Requests) > 0, which is already true the moment a
+	// caller records a SECOND event on the same (tenant, session) — so every row after the
+	// first returned immediately with its write still in the recorder's queue, and a test
+	// asserting on it read whatever had landed. That is a flake, not a delay: it reproduces on
+	// origin/main, which is where it was found rather than on the branch that exposed it.
+	before, err := f.rec.DB().Requests(dash.Filter{Tenant: tenantID, Session: session}, 0, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := before.Total + 1
 	f.rec.Record(e)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		p, err := f.rec.DB().Requests(dash.Filter{Tenant: tenantID, Session: session}, 0, 10)
+		p, err := f.rec.DB().Requests(dash.Filter{Tenant: tenantID, Session: session}, 0, 500)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(p.Requests) > 0 {
+		if p.Total >= want && len(p.Requests) > 0 {
 			return p.Requests[len(p.Requests)-1].ID
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the writer did not persist %s/%s", tenantID, session)
+			t.Fatalf("the writer did not persist %s/%s (%d rows, want %d)",
+				tenantID, session, p.Total, want)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
