@@ -42,7 +42,17 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 | `housellm` | `format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter` |
 
 Order is deliberate: lossless repack first, then the cheap structural offloaders, then
-anything that costs a model call, cache directives last.
+anything that costs a model call, cache directives last — except in `house` and `housellm`,
+whose order is the operator's on purpose: `dedup` and `cmdfilter` run ahead of the lossless
+pair and `toolfilter` sits after `cachesplit`. That costs per-component attribution in
+`/stats`, never content; the reasons are recorded in
+[`config/config.go`](../design.md#config-registry) and the exemption is noted in the
+[preset reference](../reference/presets.md).
+
+The last three rows are not options in the chooser above. `house` and `housellm` are the
+**service** configs — what a hosted account runs unless it asks otherwise — and `agentdiet`
+reproduces a published baseline for A/B comparison, not a recommendation. They are in the
+table so it lists every preset that exists; pick from the table above this one.
 
 ## Notes on the ones people pick
 

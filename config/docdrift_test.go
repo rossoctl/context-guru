@@ -3,24 +3,40 @@ package config
 import (
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
 
-// The preset tables in the docs must match the presets the product actually ships.
+// The preset tables in the docs must match the presets the product actually ships — as a SET,
+// in both directions: every preset has a row, every row is a preset, and every row's pipeline is
+// the one that runs.
 //
 // This guard exists because they did not. Auditing the "What each one runs" table in
-// docs/how-to/choose-a-preset.md against the `presets` map above found EVERY row stale: three
-// presets (`codesmart`, `coding`, `general`) were still documented as running `toon`, which was
-// retired from them after it acted 0 times on 5,752 production requests and converted 0
-// candidates in 11.67M measured tokens, and every row omitted components that do run — the
-// lossless pair (`textclean`, `searchfold`) and `linecap`. docs/reference/presets.md was correct
-// at the same moment, so the two documents contradicted each other and a reader had no way to
-// tell which one was lying.
+// docs/how-to/choose-a-preset.md against the `presets` map in config/config.go found EVERY row
+// stale: three presets (`codesmart`, `coding`, `general`) were still documented as running
+// `toon`, which was retired from them after it acted 0 times on 5,752 production requests and
+// converted 0 candidates in 11.67M measured tokens, and every row omitted components that do
+// run — the lossless pair (`textclean`, `searchfold`) and `linecap`. Three presets had no row at
+// all (`agentdiet`, `house`, `housellm`). docs/reference/presets.md was correct at the same
+// moment, so the two documents contradicted each other and a reader had no way to tell which one
+// was lying.
 //
 // That is worse than an out-of-date sentence: the table is what somebody reads to decide whether
 // a preset does anything they object to, and the answer it gave was wrong in the direction that
 // matters — it named a component that does not run and omitted three that do.
+//
+// The set check in BOTH directions is deliberate, and it is what the first version of this guard
+// got wrong: it iterated the rows it happened to find and asked only "is this row right?", with a
+// hand-tuned coverage floor standing in for completeness. Against 12 multi-component presets that
+// floor tolerated deleting seven rows, and a preset that ships with no row is exactly the defect
+// this PR fixed by hand. The reverse direction matters just as much: a documented preset that
+// does not exist is not a cosmetic error, it is a STARTUP failure —
+//
+//	$ PRESET=cache ./context-guru-proxy
+//	config: config: unknown preset "cache"      # process exits
+//
+// the same class as the `skeleton`/`coding` incident this repo's own comments describe.
 //
 // Same reasoning as deploy/harbor/pipeline_drift_test.go, applied to the docs instead of the
 // benchmark harnesses.
@@ -33,7 +49,11 @@ var presetTableDocs = []string{
 // captures the rest of the row (where the component list lives, in either `a, b` or `a → b`
 // form — the two files use different separators on purpose, so the check reads component names
 // rather than trying to normalise the formatting).
-var docRow = regexp.MustCompile("(?m)^\\|\\s*`([a-z_]+)`\\s*\\|(.*)$")
+//
+// The name class is deliberately wider than the presets that exist today: a row naming
+// `code-smart` or `preset2` must be REPORTED as documenting a preset that does not exist, not
+// skipped for failing to look like a name this file recognises.
+var docRow = regexp.MustCompile("(?m)^\\|\\s*`([a-z0-9_-]+)`\\s*\\|(.*)$")
 
 // componentToken matches one component name in a pipeline cell.
 //
@@ -61,21 +81,16 @@ func pipelineFromCell(cell string) []string {
 	return out
 }
 
-func TestDocumentedPresetPipelinesMatchTheShippedOnes(t *testing.T) {
+func TestPresetDocsDoNotDrift(t *testing.T) {
 	for _, path := range presetTableDocs {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("%s: %v", path, err)
 		}
-		seen := map[string]bool{}
+
+		documented := map[string][]string{}
 		for _, m := range docRow.FindAllStringSubmatch(string(b), -1) {
 			name, row := m[1], m[2]
-			want, ok := presets[name]
-			if !ok {
-				// A row for something that is not a preset (a component reference table, a
-				// config key) is not this test's business.
-				continue
-			}
 			// The pipeline cell is the one that lists components. In choose-a-preset.md it is
 			// the whole rest of the row; in presets.md the prose that follows also mentions
 			// component names, so only the FIRST cell after the name is read.
@@ -83,37 +98,53 @@ func TestDocumentedPresetPipelinesMatchTheShippedOnes(t *testing.T) {
 			if i := strings.Index(row, "|"); i >= 0 {
 				cell = row[:i]
 			}
-			names := pipelineFromCell(cell)
-			// A row that lists no components at all is either the `off` passthrough or a row
-			// that documents something else about the preset; only check the ones that claim
-			// to list a pipeline.
-			if len(names) == 0 {
-				if len(want) > 0 && strings.Contains(cell, "empty") {
-					t.Errorf("%s: preset %q is documented as empty but runs %v", path, name, want)
-				}
+			documented[name] = pipelineFromCell(cell)
+		}
+
+		// Direction 1: every preset that ships is documented, with the pipeline it runs.
+		// Iterated over the map, not over the rows, so a missing row FAILS instead of simply
+		// not being checked.
+		names := make([]string, 0, len(presets))
+		for name := range presets {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			want := presets[name]
+			got, ok := documented[name]
+			if !ok {
+				t.Errorf("%s: preset %q ships %v but has no row in this table. "+
+					"An undocumented preset is the same defect as a misdocumented one: a reader "+
+					"cannot tell it exists, or what it would do to their context.", path, name, want)
 				continue
 			}
-			seen[name] = true
-			if strings.Join(names, ",") != strings.Join(want, ",") {
+			// `off` is the passthrough: no components on either side, and the table writes it
+			// as *(empty)*. Anything else that documents an empty pipeline for a preset which
+			// runs components is caught by the comparison below.
+			if len(want) == 0 && len(got) == 0 {
+				continue
+			}
+			if strings.Join(got, ",") != strings.Join(want, ",") {
 				t.Errorf("%s: preset %q is documented as running\n  %v\nbut ships\n  %v\n"+
 					"A reader uses this table to decide what a preset will do to their context; "+
 					"naming a component that does not run, or omitting one that does, is the "+
-					"failure this guard exists for.", path, name, names, want)
+					"failure this guard exists for.", path, name, got, want)
 			}
 		}
-		// Coverage, not just "something matched". The previous version of this guard passed
-		// while checking only the single-component presets in one of these files, so a count
-		// is asserted: the multi-component rows are exactly the ones that were rotting.
-		multi := 0
-		for name := range seen {
-			if len(presets[name]) > 1 {
-				multi++
-			}
+
+		// Direction 2: nothing is documented that does not exist. `--preset <name>` for a name
+		// that is not in the map does not degrade, it exits at startup, so a row inviting one is
+		// a break dressed as documentation.
+		rows := make([]string, 0, len(documented))
+		for name := range documented {
+			rows = append(rows, name)
 		}
-		if len(seen) == 0 || multi < 5 {
-			t.Errorf("%s: this guard only checked %d preset rows (%d of them multi-component). "+
-				"The table's shape must have changed and the check has silently stopped covering "+
-				"it — which is how the stale rows survived in the first place.", path, len(seen), multi)
+		sort.Strings(rows)
+		for _, name := range rows {
+			if _, ok := presets[name]; !ok {
+				t.Errorf("%s: preset %q is documented but does not exist in the presets map; "+
+					"`--preset %s` exits at startup with `unknown preset %q`.", path, name, name, name)
+			}
 		}
 	}
 }
