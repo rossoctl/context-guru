@@ -99,6 +99,17 @@ type Overview struct {
 	AttemptedTokens int64 `json:"attempted_tokens"`
 	FrozenTokens    int64 `json:"frozen_tokens"`
 
+	// SavedGrossAttempted is SavedGross counted over ONLY the requests that recorded a nonzero
+	// attempted_tokens, and AttemptedRequests is how many those are. They exist because
+	// AttemptedTokens is not a total over the same population as SavedGross: it is an additive
+	// column, so every row written before it shipped reads 0, and cache-aware turns that were
+	// allowed to touch nothing read 0 legitimately. Summing a numerator over all rows and a
+	// denominator over that subset is the same basis mismatch the "attempted" denominator was
+	// already repaired for once (see denominators()) — repaired on the numerator's DEFINITION
+	// and not on its row population, which left the residual these two fields close.
+	SavedGrossAttempted int64 `json:"saved_gross_attempted"`
+	AttemptedRequests   int64 `json:"attempted_requests"`
+
 	FreshInput   int64 `json:"fresh_input"`
 	CacheRead    int64 `json:"cache_read"`
 	CacheWrite   int64 `json:"cache_write"`
@@ -467,6 +478,11 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	err := d.sql.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT r.session_id),
 		COALESCE(SUM(r.tokens_before),0), COALESCE(SUM(r.tokens_after),0), COALESCE(SUM(r.saved_unique),0),
 		COALESCE(SUM(r.attempted_tokens),0), COALESCE(SUM(r.frozen_tokens),0),
+		-- The gross saving over ONLY the rows that recorded an attempted_tokens denominator, so
+		-- the "gross, of what we tried to compact" ratio has one population on both sides. See
+		-- Overview.SavedGrossAttempted.
+		COALESCE(SUM(CASE WHEN r.attempted_tokens > 0 THEN r.tokens_before - r.tokens_after END),0),
+		COALESCE(SUM(CASE WHEN r.attempted_tokens > 0 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.fresh_input),0), COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
 		COALESCE(SUM(r.output_tokens),0),
 		COALESCE(SUM(r.cost_usd),0), COALESCE(SUM(r.baseline_cost_usd),0), COALESCE(SUM(r.cg_llm_cost_usd),0),
@@ -541,7 +557,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(r.cache_write_1h),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
-		&o.AttemptedTokens, &o.FrozenTokens, &o.FreshInput, &o.CacheRead, &o.CacheWrite,
+		&o.AttemptedTokens, &o.FrozenTokens, &o.SavedGrossAttempted, &o.AttemptedRequests,
+		&o.FreshInput, &o.CacheRead, &o.CacheWrite,
 		&o.OutputTokens, &o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD,
 		&o.CachesplitSavedUSD, &o.SplitRequests, &o.SplitTailMoved, &o.SplitCredited,
 		&o.SplitCreditedMoved,
@@ -909,20 +926,33 @@ func (o *Overview) denominators() []Denominator {
 		newInput = o.FreshInput + o.CacheWrite + o.SavedUnique
 	}
 	ds := []Denominator{
-		// GROSS over attempted, not unique over attempted. Both sides of this ratio are now
-		// per-turn quantities: attempted_tokens is what compaction was allowed to touch on
-		// each turn, re-counted every turn, so the numerator has to be the saving counted the
-		// same way. Dividing a numerator deduplicated ACROSS turns by a denominator recounted
-		// on every turn is a basis mismatch, and it made this ratio 13x too small (0.140%
-		// where the same-basis figure is 1.838% on production traffic) — the one bar on the
-		// page whose job is to answer "are we any good when we do have something to work
-		// with" was the one reading closest to zero. unique_whole below is still there for
-		// the conservative view.
-		denom("attempted", "gross, of what we tried to compact", o.SavedGross, o.AttemptedTokens,
+		// GROSS over attempted, not unique over attempted, and over ONE ROW POPULATION on both
+		// sides. Both sides of this ratio are per-turn quantities: attempted_tokens is what
+		// compaction was allowed to touch on each turn, re-counted every turn, so the numerator
+		// has to be the saving counted the same way. Dividing a numerator deduplicated ACROSS
+		// turns by a denominator recounted on every turn is a basis mismatch, and it made this
+		// ratio 13x too small (0.140% where the same-basis figure is 1.838% on production
+		// traffic) — the one bar on the page whose job is to answer "are we any good when we do
+		// have something to work with" was the one reading closest to zero.
+		//
+		// That repair fixed the numerator's DEFINITION and not the rows it was summed over, and
+		// the residual ran the other way. attempted_tokens is an additive column, so a row
+		// written before it shipped reads 0 while still carrying a saving, and 7,032 rows on
+		// production traffic do exactly that: they raise the numerator and cannot raise the
+		// denominator. Measured over all rows the ratio served 2.101%; over the 118,823 rows
+		// that actually recorded a denominator it is 1.824%, which is the figure the comment
+		// above independently names as the intended one. So the numerator is
+		// SavedGrossAttempted, not SavedGross.
+		//
+		// unique_whole below is still there for the conservative view.
+		denom("attempted", "gross, of what we tried to compact", o.SavedGrossAttempted, o.AttemptedTokens,
 			"GROSS savings ÷ the tokens compaction was ALLOWED to touch this turn (the "+
 				"uncached tail when cache-aware). Both sides are per-turn quantities — the "+
-				"denominator is re-counted every turn, so the numerator is too. Answers 'are "+
-				"we good when we have something to work with?' Excludes the frozen prefix we "+
+				"denominator is re-counted every turn, so the numerator is too — and both are "+
+				"summed over the SAME requests: only the ones that recorded a denominator at "+
+				"all, so a request whose attempted_tokens predates that column cannot "+
+				"contribute a saving to a ratio it has no divisor for. Answers 'are we good "+
+				"when we have something to work with?' Excludes the frozen prefix we "+
 				"deliberately never touched."),
 		denom("new_input", "of new provider-billed input", o.SavedUnique, newInput,
 			"Unique savings ÷ (fresh input + cache writes + what we removed). The most "+

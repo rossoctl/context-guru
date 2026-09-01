@@ -46,3 +46,44 @@ func TestFrozenTokensArePricedOnlyUpToWhatTheRequestActuallyRead(t *testing.T) {
 			tc.FrozenWriteRiskUSD, 3000*spread)
 	}
 }
+
+// The "gross, of what we tried to compact" ratio summed its numerator over every row and its
+// denominator over the rows that recorded one. attempted_tokens is additive, so a row written
+// before it shipped reads 0 while still carrying a saving — 7,032 such rows on real traffic,
+// which served 2.101% where the same-basis figure is 1.824%.
+func TestAttemptedRatioCountsSavingsOnlyWhereItCountsTheDenominator(t *testing.T) {
+	db := openTestDB(t)
+	old := mkEvent(1000, "s-old", "m", 10000, 1000) // pre-column row: a saving, no denominator
+	old.AttemptedTokens = 0
+	fresh := mkEvent(2000, "s-new", "m", 3000, 1000)
+	fresh.AttemptedTokens = 4000
+	if err := db.insertBatch([]*Event{old, fresh}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := db.Overview(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *Denominator
+	for i := range o.Denominators {
+		if o.Denominators[i].Key == "attempted" {
+			got = &o.Denominators[i]
+		}
+	}
+	if got == nil {
+		t.Fatal(`no "attempted" denominator`)
+	}
+	// Only the instrumented row may contribute to either side: 2000 saved of 4000 attempted.
+	if got.Numerator != 2000 || got.Denominator != 4000 {
+		t.Errorf("attempted ratio = %d/%d (%.3f%%), want 2000/4000 (50.000%%): the "+
+			"pre-instrumentation row's 9000-token saving has no denominator and may not "+
+			"inflate a ratio it cannot divide into", got.Numerator, got.Denominator, got.Percent)
+	}
+	if o.SavedGross != 11000 {
+		t.Errorf("SavedGross = %d, want 11000 — the all-rows figure is still reported as "+
+			"itself; only the ratio's basis changed", o.SavedGross)
+	}
+	if o.AttemptedRequests != 1 {
+		t.Errorf("AttemptedRequests = %d, want 1", o.AttemptedRequests)
+	}
+}
