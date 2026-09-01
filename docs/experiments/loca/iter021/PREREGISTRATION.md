@@ -71,8 +71,15 @@ Accuracy is not binary on this benchmark (observed values 0.0, 0.2, 0.6, 0.8, 1.
 
 ## AMENDMENT 1 — errored runs score ZERO (written before any solve count was read)
 
-Arm A produced **16 upstream 400s in 3,347 requests (0.5%)**, all `"prompt is too long"`, on bodies of
+Arm A produced **17 upstream 400s in 3,347 requests (0.5%)**, all `"prompt is too long"`, on bodies of
 2.6 MB to 14.8 MB. Diagnosed while arm A was still running and before its results existed.
+
+> **CORRECTION (2026-09-01).** This section first said **16** 400s. Re-counting
+> `capfail-i21A.jsonl` gives **19 records: 17 oversize-prompt 400s plus 2 transport failures**. The
+> original 16 could not be reconstructed from any filter over that file. The digests record per-message
+> STRUCTURE only — no content, no per-message sizes, `rig_seq` null throughout — so the related
+> inference that those bodies had few enough lines for `collapse`'s line window to miss them
+> **cannot be tested from this record in either direction**, and should not be relied on.
 
 **Cause, and it is mine.** A single tool output arrives larger than any component can reduce: `extract`
 matched no noise pattern (`acted` = 0, `no_obvious_noise` 16,891), `cmdfilter` matched nothing
