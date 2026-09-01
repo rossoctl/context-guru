@@ -110,6 +110,28 @@ func (c *jsonCache) set(key string, body []byte) {
 	c.entries[key] = jsonCacheEntry{at: time.Now(), body: body}
 }
 
+// serveCached writes a cached body if there is one, and labels every response either way.
+//
+// X-Cache exists because this cache is a masking layer over a real cost, and an unlabelled
+// response makes that cost unmeasurable. /api/facets survived at ~1.5s per call precisely
+// because the 5s TTL hid it: it is requested on every tab switch (app.js calls loadFacets()
+// from every go() but setup/settings), so one miss followed by eleven hits reads as a fast
+// endpoint. Any before/after taken through this API without knowing which side of the TTL each
+// sample landed on can compare a miss against a hit and report the ratio as an optimisation --
+// measured on this corpus, /api/facets is 380ms on a miss and 2.4ms on a hit, a 158x difference
+// that no code change produced. The header costs one line per response and makes the harness
+// able to tell the two apart.
+func serveCached(w http.ResponseWriter, c *jsonCache, key string) bool {
+	if body, ok := c.get(key); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "hit")
+		w.Write(body)
+		return true
+	}
+	w.Header().Set("X-Cache", "miss")
+	return false
+}
+
 // cacheKey scopes a cache entry to the actual caller, not just the URL: a manager and a
 // tenant hitting the same query string must never share a cached body.
 //
@@ -724,9 +746,7 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := cacheKey(p, r)
-	if body, ok := a.statsCache.get(key); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+	if serveCached(w, &a.statsCache, key) {
 		return
 	}
 	// The four calls below are independent of each other — none reads another's result, only
@@ -947,9 +967,7 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := cacheKey(p, r)
-	if body, ok := a.componentsCache.get(key); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+	if serveCached(w, &a.componentsCache, key) {
 		return
 	}
 	rows, err := a.rec.DB().Components(f)
@@ -1029,9 +1047,7 @@ func (a *API) facets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := cacheKey(p, r)
-	if body, ok := a.facetsCache.get(key); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
+	if serveCached(w, &a.facetsCache, key) {
 		return
 	}
 	f, err := a.rec.DB().Facets(flt)
