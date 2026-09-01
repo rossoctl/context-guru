@@ -207,4 +207,10 @@ details.why > .inv-prompt-regions { max-width: none; }
 .inv-part-name { font-weight: 600; }
 /* The per-row removal fold sits in a table cell, so it must not stretch the row. */
 .inv-removal-fold > summary { white-space: nowrap; }
+/* ...but in the card layout there is no row to stretch, and "Remove just
+   mcp__postgres__describe_table" is one unbreakable 414px line in a 390px viewport. Must sit
+   AFTER the rule above: same specificity, and a media query adds none. */
+@media (max-width: 560px) {
+  .inv-removal-fold > summary { white-space: normal; }
+}
 .inv-removal-fold .inv-removal { min-width: 22rem; }
