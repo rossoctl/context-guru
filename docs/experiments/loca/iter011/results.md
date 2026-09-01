@@ -1,0 +1,339 @@
+# Iteration 011 — ABORTED at arm 1: `summarize` has a fourth shape defect
+
+**Date:** 2026-08-21 · **Pre-registered:** `77f36e3` · **Arms run:** `s3-sum` only (75 runs, ~$8)
+**Arms 2 and 3 cancelled before spending**, per the pre-registration's own rule.
+
+## What happened
+
+Arm 1 (`[format, summarize]`) completed 75 runs. **28 of them — 37% — failed**, all with the same
+provider rejection:
+
+```
+400 messages.1: `tool_use` ids were found without `tool_result` blocks immediately after: toolu_…
+     Each `tool_use` block must have a corresponding `tool_result`…
+```
+
+The pre-registration named this exact case: *"`summarize` errors or emits invalid requests → the
+iteration-005 failure recurred; fix, do not interpret."* So arms 2 and 3 were stopped rather than run
+at a 37% failure rate, saving roughly $180.
+
+~~**This is a fourth message-shape defect in `summarize`.**~~ **WRONG ATTRIBUTION — see the root cause
+below. `summarize` is not at fault**; the defect is in `apply`, and it is one cause with two faces.
+
+## Two things the aborted arm did establish
+
+**1. `summarize` works mechanically, and the trigger was chosen correctly.** It fired **48 times**
+across 1,201 requests with **35 model calls**, removing **1,668,795 tokens** and lifting total removal
+to **29.6%** (against `format`-alone's 24.2% in [iteration 010](../iter010/results.md)). The
+data-driven trigger — `min_request_tokens: 30000`, from measured p50/p75/p90 of 14k/34k/44k — put
+firing where it was intended. Nothing about the *gating* needs revisiting.
+
+**2. The HTML-400 from iteration 010 is a DIFFERENT error, and remains unattributed.** The 29 captured
+failures are all proper JSON Anthropic errors (28 pairing + 1 timeout), served by `Server: uvicorn`.
+The iteration-010 failures were raw HTML with no Anthropic body. Two distinct faults were being
+conflated; this iteration separates them and solves neither.
+
+## Why reasoning from the source did not converge
+
+Both splice sites in `summarize.go` (the fresh path at 257–259 and the checkpoint-replay path at
+315–317) *do* advance their boundary past leading tool messages, and `summarizeSpan` already drops the
+head when `msgs[0]` is an assistant tool-call message. With `headCount = 1` the emitted layout is
+`[msgs[0], summary, tail…]`, so index 1 is the *summary* — which cannot carry tool calls. The reported
+orphan is at `messages.1` in **all 28** cases, so the emitted list is not the list the code appears to
+produce.
+
+**Diagnosis by reading was therefore abandoned in favour of instrumentation**, which is the lesson
+from the day's earlier failures rather than a new one.
+
+## Instrumentation: the capture had to move
+
+`loca_repair_shim.py` sits **upstream** of context-guru, so it records the request *before* compaction —
+the innocent copy — and it *repairs* tool pairing, which would mask this very defect. Its capture also
+stored headers but not the body.
+
+`deploy/harbor/capture_hop.py` (new) sits on the other side:
+
+```
+LOCA → repair shim → cg-proxy → [capture hop] → gateway
+```
+
+It repairs nothing and, on any ≥400, records a **structural digest** of the outgoing message list —
+per message: index, role, block types, `tool_use` ids declared, `tool_result` ids answered — plus the
+provider's error. That digest is what identifies an orphaned pair; the bodies run to hundreds of
+kilobytes and are mostly irrelevant.
+
+## Status
+
+- Arm 1's reward numbers are **not reported**: a 37% invalid-request rate is a broken arm, not a result.
+- The **deferral question remains unmeasured on live traffic**, for the second time, and for the same
+  component's shape handling.
+- Next: read the captured digest, fix the defect, extend `ValidateShape` and its test to cover the
+  shape that escaped, rebuild, then re-run all three arms.
+
+## ROOT CAUSE (found, fixed, `62126f4`): bifrost cannot represent an Anthropic tool call
+
+Found by instrumenting the rebuild rather than reading it, after three rounds of source-reading failed
+to converge.
+
+**`bschemas.ChatContentBlock` has no `tool_use` type.** Its enum is `text` / `image_url` /
+`input_audio` / `file` / `refusal`. An Anthropic assistant turn carries its calls as `tool_use`
+**content blocks**, so after unmarshaling, the ids are simply *absent*. Everything that reasons about
+tool pairing saw an assistant message with **zero calls** on every Anthropic request.
+
+One cause, two defects:
+
+| defect | consequence |
+|---|---|
+| `dropOrphanedToolResults` builds its answerable set from `ToolCalls` alone | that set was **always empty** on Anthropic traffic, so **every** `tool_result` looked orphaned and the "repair" **deleted all of them**. The provider then rejected the request for the unanswered calls left behind. |
+| `schema.ValidateShape` was blind to the same ids | it could not see the breakage — which is why a test asserting **all 11 presets** emit shape-valid requests stayed green while 37% of live runs failed |
+
+The instrumented rebuild made it plain — `summarize`'s output contained **no tool messages at all**:
+
+```
+out[0] user      bi=0   EMIT     (head)
+out[1] user      NO-MATCH        (the summary)
+out[2] assistant bi=1   EMIT     ← declares pa_a, pb_a
+out[3] user      bi=17  EMIT     ("final question")
+```
+
+**Why every unit test passed while live traffic failed 28/75:** the offload tests hand-build
+`ChatMessage`s with `ToolCalls` populated — the *OpenAI*-shaped representation — so they never
+exercised the Anthropic path. The validator I had built to prevent exactly this class of bug was
+validating a dialect the rig does not use.
+
+**Fix:** `normalize` recovers the ids where the dialect is still known, rather than teaching every
+consumer about Anthropic. It deliberately marks such messages non-lossless — honest, since bifrost
+genuinely cannot round-trip them — which only makes the write-back guard more conservative. Full suite:
+24 packages, 0 failures.
+
+Also fixed on the way (`2ec2445`): `ValidateShape` rejected every ordinary **parallel** exchange,
+because it inspected only `msgs[i+1]` while bifrost splits one Anthropic results message into a run of
+`tool` messages. It emitted the *same error text* as the real defect, making it useless precisely where
+it was needed.
+
+## A verification that proved nothing, caught before it was believed
+
+The first live check of the fix reported **`captured failures: 0`** and looked like a clean pass. It
+was not: the same output showed `llm_calls=0` and no `[summarize]` line — **`summarize` never fired**,
+so zero failures said nothing about the fixed path. Trajectory length varies, and the earlier
+reproduction had happened to fire it twice.
+
+Re-verified with a diagnostic-only trigger (`min_request_tokens: 5000` instead of 30000) so the
+component is forced to act. **This is the same failure as iteration 012's vacuous baseline-reuse
+check**: a check that cannot fail is not evidence, and both were written by the same reasoning — asking
+"did the run come back clean?" instead of "would this have detected the problem?"
+
+## Re-run with both fixes: verified on live traffic
+
+The fix landed in two stages, because the first unmasked the second.
+
+| stage | arm-1 failure rate | failure mode |
+|---|---|---|
+| pre-fix | **28/75 (37%)** | `tool_use` ids without `tool_result` — results all deleted |
+| after fix 1 (`62126f4`, tool-call ids) | 13/39 (33%) | **different**: `messages: Unexpected role "tool"` |
+| after fix 2 (`caf32d7`, role leak) | **0/16 (0%)** | none |
+
+Fix 1 stopped `dropOrphanedToolResults` deleting every result. Those surviving synthetic `role=tool`
+messages then reached the rebuild, which had never had to serialize one — and while the results were
+being deleted, nothing could. **One defect had been masking the other.**
+
+**The verification is not vacuous, and was checked for that specifically.** In the clean run
+`summarize` is firing hard — **316 component log entries**, up to **39,313 tokens removed in a single
+request** — with **zero** `Unexpected role` or pairing errors reaching the wire. That check exists
+because two earlier "clean" verifications this session proved nothing: one where `summarize` never
+fired, and one comparing a reused baseline against itself.
+
+A 5-task probe **cannot** verify this fix: its trajectories are too shallow to meet `summarize`'s
+`min_messages` and span floor, so it never fires even with the trigger lowered to 5,000 tokens. Arm 1
+of the real experiment is therefore the verification, run behind a hard gate — more than 5 failures
+and arms 2 and 3 are cancelled — so a failed fix costs one arm rather than three.
+
+## A THIRD defect, same family, found in the clean run — documented, not fixed
+
+The re-run's arm 1 shows 2 failures in 38 runs, and **neither is the pairing bug**:
+
+| count | error |
+|---|---|
+| 1 | the still-unattributed `<html>400 Bad request` transport fault (6/75 in [iteration 010](../iter010/results.md)) |
+| 1 | **new:** `messages.7.content.1.thinking: each thinking block must contain thinking` |
+
+**Root cause hypothesis, same as the tool-call defect:** `bschemas.ChatContentBlock`'s type enum is
+`text` / `image_url` / `input_audio` / `file` / `refusal`. It cannot represent a `thinking` block any
+more than it can a `tool_use` one. So **any path that re-marshals an assistant message instead of
+emitting its original raw bytes silently drops the thinking content**, and the provider rejects the
+empty block.
+
+In `rebuildCountChanged` that path is reached whenever a body-derived message fails to byte-match its
+pre-pipeline form — the `matched < 0` branch, which exists for genuinely new messages (the summary)
+and cannot currently tell them apart from a modified survivor.
+
+**The general shape of all three defects is one fact:** bifrost's schema is a lossy model of an
+Anthropic request, so *correctness depends on never re-serialising a message that came from the body*.
+Two of the three defects are instances of that rule being broken; the third (`ValidateShape` blindness)
+is the same gap in the checker.
+
+**Deliberately not fixed now.** It is rare (1 in 38), it does not block the experiment, and two
+substantive changes to this package already landed tonight without review. Stacking a third unreviewed
+change to the byte-losslessness machinery raises the risk of a fourth defect more than it lowers the
+risk of this one. A likely fix is to match assistant messages by their tool-call id set — as tool
+messages now are — and to **decline the rebuild** rather than fresh-marshal anything body-derived.
+
+## Arm 1 (`[format, summarize]`) — 94.7% "savings", 63% MORE money, same solves
+
+Gate passed: **4 failures of 75**, against 28 before the fixes.
+
+| | `[format]` (iter010) | `[format, summarize]` |
+|---|---|---|
+| solved | 33 / 69 clean (47.8%) | **33 / 71 clean (46.5%)** |
+| **total cost** | **$93.23** | **~$152.09** ($148.89 LOCA + $3.20 CG calls) — **+63%** |
+| requests | 2,362 | 2,613 |
+| mean pre-compaction request | **~12.2k tokens** | **~141k tokens** — **11.5×** |
+| reported `savings_pct` | 24.2% | **94.7%** (349.6M of 369.0M) |
+| `summarize` unique saved | — | **129.0M** of 288.2M reported (**2.23× overcount**) |
+| `compaction_resets` | — | **777** |
+
+**This is the sharpest demonstration yet that removing tokens is not saving money.** `summarize`
+reports removing 94.7% of all tokens and costs **63% more** for the **same number of solved tasks**.
+
+**The mechanism is not the expand loop.** That was the obvious hypothesis — the marker invites the
+model to call `cg_expand`, restoring the span and regrowing context — and it is **not supported**:
+`expand` appears just **twice** in the whole run log.
+
+What the counters do show is that the *trajectories diverged enormously*: mean pre-compaction request
+size is **11.5× larger** than the lossless arm's on the identical tasks and band. A plausible reading,
+**not established here**, is that lossy summarisation makes the agent redo work — re-reading files and
+re-querying tools it can no longer see — so total context grows even as each individual request is
+smaller. `cache_write=2.3M` against `fresh_input=59.4M` and `cache_read=53.9M` is consistent with the
+prefix being invalidated repeatedly, billing fresh where the lossless arm billed cache reads.
+
+**Two cautions on the 94.7%.** First, `tokens_before` = 369M is a *counterfactual* — it assumes the
+same trajectory would have occurred without compaction, and the trajectory is exactly what changed.
+Second, `summarize`'s own overcount ratio is **2.23×**, so its unique contribution is 129M, not 288M.
+Both push the honest figure well below the headline.
+
+**Bearing on the deferral question:** if this holds in arms 2 and 3, it strengthens rather than weakens
+the case for *deferring* summarisation — a summary here is not merely lossy, it appears to be actively
+expensive. Whether `coref` and the fold reduce `summarize`'s firing rate, and whether cost falls with
+it, is precisely what the remaining arms measure.
+
+## ALL THREE ARMS — deferral is real, monotonic, and tracks cost
+
+**Cost: ~$372** for the three arms ($361.12 LOCA + $8.40 CG model calls).
+
+| arm | `summarize` fired | **per request** | mean request | total cost | solved | errors |
+|---|---|---|---|---|---|---|
+| `[format]` *(iteration 010)* | – | – | 12.2k | **$93.23** | 33 / 69 | 6 |
+| 1 `[format, summarize]` | 1,466 | **56.1%** | 141k | **$152.08** | 33 / 71 | 4 |
+| 2 `[format, coref, summarize]` | 805 | **42.3%** | 72.9k | **$125.00** | 32 / 75 | **0** |
+| 3 `[format, coref, extract_llm, summarize]` | 647 | **36.9%** | 99.3k | **$92.44** | **35 / 71** | 4 |
+
+### The deferral claim is supported — this is the headline
+
+**Each layer of selective compaction makes the blunt summariser fire less often, monotonically:
+56.1% → 42.3% → 36.9% of requests.** That is the mechanism the whole project was premised on, measured
+live for the first time, and it is not subtle — the fold cuts summarisation by **a third** relative to
+summarising alone.
+
+**Cost tracks deferral almost exactly:** $152.08 → $125.00 → $92.44. Less summarising, less money.
+
+**And the fold arm is best on every axis at once** — most tasks solved (35), lowest cost ($92.44),
+most deferral (36.9%). It is the only configuration in this entire body of work that beats the lossless
+baseline on cost *and* solves while removing substantially more content.
+
+### Four things that must be said against the headline
+
+**1. The cost margins over lossless are inside the noise.** $92.44 vs $93.23 is 0.8%, and
+[iteration 012](../iter012/results.md) established that per-arm LOCA cost cannot price a component —
+two arms differing by one component came out 4.9% apart in *opposite directions* across successive
+iterations, driven by trajectory length. The $152 → $92 *ordering* is large enough to believe; the
+final 0.8% is not.
+
+**2. No reward difference is detectable.** Paired, task-clustered:
+
+| comparison | harm | gain | p | bound |
+|---|---|---|---|---|
+| arm 1 → arm 2 | 3 | 2 | 1.000 | ≤44% |
+| arm 1 → arm 3 | 4 | 6 | 0.754 | ≤51% |
+
+Solve counts across all four configurations are 32–35 of 75 — indistinguishable. **Deferral buys cost,
+not accuracy**, on this evidence. Note arm 1 → arm 2 is confounded (4 errors vs 0, asymmetric), while
+arm 1 → arm 3 is balanced (4 vs 4) and therefore the cleaner comparison.
+
+**3. `summarize` is never NECESSARY at this band, which limits what this can mean.** Contexts run
+12–44k against Sonnet-5's 1M window, so nothing here is close to exhausting. The trigger
+(`min_request_tokens: 30000`) was chosen *specifically to make `summarize` fire*, so these arms measure
+**summarising when it is not needed** — which is why arm 1 is so much worse than lossless. The question
+originally asked — *does deferral pay when summarisation is genuinely forced?* — **cannot be answered
+here**, because these tasks never run out of context. That needs a band where context truly exhausts,
+and iteration 008 showed the 128k data is unreliable. **This is a limitation of the design chosen, not
+of the result.**
+
+**4. Mean request size is not monotonic** — 141k → 72.9k → 99.3k. The fold defers *most* while carrying
+*larger* requests than arm 2, so "defers more" and "smaller contexts" are not the same axis. Unexplained.
+
+### The overcounting caution, again
+
+Reported `savings_pct` reaches **94.7% / 88.1% / 92.1%**, and it should not be quoted. `summarize`'s
+overcount ratio is **2.23×**, and `tokens_before` (369M in arm 1) is a *counterfactual* assuming an
+unchanged trajectory — when the trajectory is exactly what changed. Unique contributions are far
+smaller, and `coref`'s is tiny throughout: **414,724** tokens in arm 2, **233,424** in arm 3.
+
+That last figure deserves emphasis. **`coref`'s own unique removal is ~0.2–0.4M tokens, yet its presence
+cut summarisation by 25% per request and cost by $27.** If that is causal, the value of `coref` is not
+the tokens it removes but the *summarisation it prevents* — a leverage effect no yield metric in this
+repo would ever have shown. It could equally be trajectory divergence; distinguishing them needs a
+design that holds trajectory fixed, which no arm here does.
+
+## RETRACTION of the economic magnitude: the summarize config was unrealistic
+
+Raised in review, and correct: **`resummarize_tokens: 6000` is far too small for this workload, and the
+first-summary trigger was ~30× too eager.**
+
+Measured, from this arm's own traffic:
+
+| single tool output | tokens |
+|---|---|
+| p50 | 192 |
+| **p90** | **6,419** |
+| max | 20,720 |
+
+**12% of individual tool outputs exceed 6,000 on their own**, and p90 sits *at* the threshold. So the
+un-summarised tail crosses it within a turn or two — which is why arm 1 produced **10 fresh summaries
+per run** (751 across 75 runs). It was not summarising once near a limit; it was re-summarising
+continuously.
+
+And the first trigger, `min_request_tokens: 30000`, was set against Sonnet-5's **1M** window — **3% of
+it**. Claude Code compacts near ~90%. **Arm 1 is therefore NOT the `/compact` analogue this document
+called it**; it is "summarise at 3% of the window, then re-summarise every 6k". The trigger was chosen
+from the observed size distribution *specifically to make `summarize` fire*, because at the 32k band
+contexts (12–44k) never approach a 1M window — and in forcing it to fire, a configuration nobody would
+deploy was built.
+
+**What is retracted:** the economic magnitude. Summarisation's **+63% cost penalty is largely an
+artifact of this configuration**, not a property of summarisation. The $152 → $125 → $92 ordering
+measures the cost of *over-eager resummarisation* and how much `coref` relieves it, and **does not
+transfer to a realistic deployment.**
+
+**What stands:** the deferral *mechanism* and its quantitative fit. `coref` removes ~2,490 tokens per
+request against a 6,000-token threshold — 41% of the rollforward budget — and produced **−42% fresh
+summaries** against a predicted −41%. Threshold leverage is real. But what it defers is over-eager
+resummarisation.
+
+Also under-weighted at first: in the summarize arm requests reached **769,874 tokens**, genuinely
+approaching the 1M window, against ~110k in the lossless arm. Summarisation did not merely cost more —
+it drove contexts *toward* exhaustion.
+
+### What a sound re-run requires (→ iteration 013)
+
+| knob | this run | corrected |
+|---|---|---|
+| declared context window | 1M (Sonnet-5's real window) | **128k**, via `MODEL_INFO_URL` (key `max_input_tokens`) |
+| enforcement of that window | **none** — requests reached 770k | LOCA `--clear-trigger-tokens 128000` + `--use-clear-tool-uses` |
+| first summary trigger | 30k = **3%** of window | **~100k = 78%** of 128k |
+| `resummarize_tokens` | **6,000** (= p90 of ONE tool output) | **~20,000**, so the tail must accumulate several outputs |
+| band | 32k (contexts 12–44k, never pressured) | **128k**, where contexts naturally approach the limit |
+
+The enforcement row matters most and was missing entirely here: with LOCA's clearing active the baseline
+becomes **genuinely lossy**, which is the case iteration 010 could not test at all — its shim reported
+`repairs=0`, meaning LOCA's trimmer never fired and the baseline kept everything. Only against a lossy
+baseline can selective compaction show a *gain* rather than at best breaking even.
