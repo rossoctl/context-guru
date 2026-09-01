@@ -87,3 +87,65 @@ func TestAttemptedRatioCountsSavingsOnlyWhereItCountsTheDenominator(t *testing.T
 		t.Errorf("AttemptedRequests = %d, want 1", o.AttemptedRequests)
 	}
 }
+
+// CachesplitHistoricalUSD retro-applies one model's stable half to the rows that never recorded
+// one. That is only legitimate while the stable half is CONSTANT for the model — the premise its
+// own header asserted and CachesplitSizeSpread disproves: 7 of 9 models on real traffic have a
+// spread, up to 5.5x. The two ends differ by 31x in what they credit, so a model with a spread
+// is refused into Uncovered rather than valued at either end.
+func TestHistoricalSplitRefusesAModelWhoseStableHalfIsNotConstant(t *testing.T) {
+	db := openTestDB(t)
+	// "spread" records two different stable halves; "flat" records one, twice.
+	lo := mkEvent(3000, "s-lo", "spread", 100, 100)
+	lo.SplitStableTokens = 1000
+	hi := mkEvent(4000, "s-hi", "spread", 100, 100)
+	hi.SplitStableTokens = 6000
+	f1 := mkEvent(3000, "s-f1", "flat", 100, 100)
+	f1.SplitStableTokens = 2000
+	f2 := mkEvent(4000, "s-f2", "flat", 100, 100)
+	f2.SplitStableTokens = 2000
+	// Two session-first, pre-instrumentation rows that BOTH pass the read/write gate at the
+	// smaller end of the spread — the only difference between them is the model.
+	preSpread := mkEvent(1000, "s-pre-spread", "spread", 100, 100)
+	preSpread.SplitStableTokens, preSpread.CacheRead, preSpread.CacheWrite = 0, 50000, 0
+	preFlat := mkEvent(1000, "s-pre-flat", "flat", 100, 100)
+	preFlat.SplitStableTokens, preFlat.CacheRead, preFlat.CacheWrite = 0, 50000, 0
+	if err := db.insertBatch([]*Event{lo, hi, f1, f2, preSpread, preFlat}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := db.CachesplitHistoricalUSD(Filter{}, staticPricer{ibmSonnet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the flat model is valued, priced at its single recorded stable half.
+	miss := ibmSonnet.CacheWrite
+	if miss < ibmSonnet.Input {
+		miss = ibmSonnet.Input
+	}
+	want := 2000 * (miss - ibmSonnet.CacheRead)
+	if h.Requests != 1 || h.Models != 1 {
+		t.Errorf("valued %d request(s) over %d model(s), want 1 and 1: the model whose "+
+			"recorded min (1000) and max (6000) disagree has no constant stable half to "+
+			"retro-apply", h.Requests, h.Models)
+	}
+	if h.USD != want {
+		t.Errorf("credit $%.9f, want $%.9f (the flat model's 2000 tokens only)", h.USD, want)
+	}
+	if h.Uncovered != 1 {
+		t.Errorf("Uncovered = %d, want 1 — a refused model must be REPORTED as unvaluable, "+
+			"not silently dropped; that is what this counter is for", h.Uncovered)
+	}
+	// Same refusal on the per-tenant pass, which is a second copy of the same arithmetic.
+	byTenant, err := db.CachesplitHistoricalUSDByTenant(0, staticPricer{ibmSonnet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reqs, unc int64
+	for _, v := range byTenant {
+		reqs, unc = reqs+v.Requests, unc+v.Uncovered
+	}
+	if reqs != 1 || unc != 1 {
+		t.Errorf("per-tenant pass valued %d and refused %d, want 1 and 1 — it must agree with "+
+			"CachesplitHistoricalUSD, not drift from it", reqs, unc)
+	}
+}

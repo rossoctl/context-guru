@@ -15,14 +15,29 @@ import (
 // over the stored history without touching a single stored row: history stays exactly as it was
 // recorded, and the estimate is recomputed from it on every query.
 //
-// What makes a retroactive value legitimate rather than a guess: the stable half is a property
-// of the AGENT'S SYSTEM PROMPT, not of the request, and it is measurably constant. Per model on
-// this deployment the recorded minimum and maximum are the same number (5,697 / 2,256 / 2,175 /
-// 1,634 tokens) — see CachesplitSizeSpread, which is how an operator checks that rather than
-// taking it on trust.
+// What would make a retroactive value legitimate rather than a guess: the stable half is a
+// property of the AGENT'S SYSTEM PROMPT, not of the request, so where it is measurably constant
+// for a model, the constant may stand in for the rows that never recorded it.
 //
-// Three limits, all of them in the direction of under-crediting:
+// It is NOT measurably constant. This comment used to assert that per model the recorded minimum
+// and maximum are the same number; that was checked with CachesplitSizeSpread — the very query
+// written so an operator would not have to take it on trust — and it is false on every corpus
+// large enough to test: 7 of 9 models on production traffic have a spread, the widest 5.5x
+// (1,301..7,190 tokens). So this estimate no longer values those models at all. Where the spread
+// is real the request is counted in Uncovered and skipped, which is what Uncovered is for: "we
+// cannot value this model's history" is an answer, and picking an end of a 5.5x spread is not.
 //
+// Why not simply pick the conservative end. `stable` is not only a price here, it is also the
+// GATE (read >= stable > write): a smaller constant admits far more rows, a larger one admits
+// far fewer, and the two roles want opposite ends. On production traffic the two ends differ by
+// 31x in what they credit — MIN admits 280 qualifying requests, MAX admits 11 — so any choice
+// is a 31x swing on a dollar figure resting on a premise that has been disproved. Refusing is
+// the only reading of that spread that does not invent one.
+//
+// Four limits, all of them in the direction of under-crediting:
+//
+//   - Only models whose stable half is actually CONSTANT. A model whose recorded minimum and
+//     maximum disagree has no single stable half to retro-apply, and none is guessed for it.
 //   - Only the SESSION'S FIRST request. Mid-session the credit has to know whether the snapshot
 //     had moved, and that comparison needs the tail hash these rows do not carry. A first
 //     request needs no comparison: there was nothing there to match.
@@ -39,12 +54,13 @@ type CachesplitHistorical struct {
 	// USD is the value, and Requests the number of session-first requests behind it.
 	USD      float64 `json:"usd"`
 	Requests int64   `json:"requests"`
-	// Models is how many models contributed. Zero means nothing could be valued — either no
-	// model has a measured stable half yet, or none is priced.
+	// Models is how many models contributed. Zero means nothing could be valued — no model has
+	// a measured stable half yet, none has a CONSTANT one, or none is priced.
 	Models int `json:"models"`
-	// Uncovered counts pre-instrumentation session-first requests that could NOT be valued
-	// because their model has no measured stable half. Reported so the figure is never
-	// mistaken for complete.
+	// Uncovered counts pre-instrumentation session-first requests that could NOT be valued —
+	// their model has no measured stable half, or the one it has is not a single number
+	// (recorded min != max, so there is nothing constant to retro-apply). Reported so the
+	// figure is never mistaken for complete.
 	Uncovered int64 `json:"uncovered"`
 }
 
@@ -88,11 +104,14 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 			return out, err
 		}
 		sp, ok := sizes[model]
-		if !ok {
+		if !ok || sp[0] != sp[1] {
+			// No measured stable half, or no CONSTANT one. See the file comment: min != max
+			// on most models here, and the two ends of that spread differ by 31x in what they
+			// credit, so neither end may stand in for the rows that recorded nothing.
 			out.Uncovered++
 			continue
 		}
-		stable := int64(sp[1])
+		stable := int64(sp[0])
 		if read < stable || write >= stable {
 			continue // the stable half was not what the provider served from cache
 		}
@@ -168,11 +187,11 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 			seen[tenant] = map[string]bool{}
 		}
 		sp, ok := sizes[model]
-		if !ok {
-			h.Uncovered++
+		if !ok || sp[0] != sp[1] {
+			h.Uncovered++ // same refusal as CachesplitHistoricalUSD; see its file comment
 			continue
 		}
-		stable := int64(sp[1])
+		stable := int64(sp[0])
 		if read < stable || write >= stable {
 			continue // the stable half was not what the provider served from cache
 		}
@@ -211,7 +230,8 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 }
 
 // CachesplitSizeSpread reports the recorded minimum and maximum stable half per model. The
-// estimate above rests on those being equal; this is how that gets checked instead of assumed.
+// estimate above credits a model only where those are equal; this is where that gets checked
+// instead of assumed, and it is what decides the refusal rather than merely reporting on it.
 func (d *DB) CachesplitSizeSpread() (map[string][2]int, error) {
 	out := map[string][2]int{}
 	rows, err := d.sql.Query(`SELECT model, MIN(split_stable_tokens), MAX(split_stable_tokens)
