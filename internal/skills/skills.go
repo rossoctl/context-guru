@@ -127,9 +127,21 @@ func (l Listing) Without(drop map[string]bool) (string, int) {
 // answers for a name that is not its own — and a declaration filter acting on that entry then
 // cuts every line it swallowed. One real entry swallowed 14 names.
 //
-// The charset is the whole gate on a name-only line, so it has to stay narrow: it is what stops
-// a description's own "\n- " bullet from being read as an entry. Anything with a space in it —
-// which is every prose bullet observed — is refused.
+// The charset is the whole gate on a name-only line, and it is NOT sufficient — measured, not
+// feared. A column-0 one-word bullet inside a description ("- charts", "- optional", "- Note")
+// parses as a name here and would split the entry it belongs to. There is no lexical fix: 47 of
+// 245 real skill names in production are bare words with no separator — loop, simplify, run,
+// report, tools, gate — so `- report` (a real skill) and `- Note` (prose) are the same string
+// shape, and any test that rejects one rejects the other. Tightening the charset would drop 19%
+// of real names to avoid a class of line whose incidence cannot be measured, because the listing
+// text is never stored (0 of 400,000 captured content rows carry the header).
+//
+// ponytail: accepts a column-0 one-word prose bullet as an entry. Upgrade path is a non-lexical
+// discriminator — a listing that marked entries structurally, or a generator-side change — not a
+// narrower charset. What IS refused is anything with whitespace in it, which is every multi-word
+// prose bullet, and anything indented, which is every continuation bullet in the fixtures.
+// Against the alternative: leaving the delimiter required drops 15 of 39 real entries and makes
+// the removal switch cut 15 while reporting 1, which is the defect this exists to fix.
 func EntryName(line string) (string, bool) {
 	if !strings.HasPrefix(line, "- ") {
 		return "", false
