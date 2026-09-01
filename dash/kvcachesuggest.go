@@ -115,7 +115,14 @@ type KVCacheSuggestion struct {
 	SavingKnown bool    `json:"saving_known"`
 	// Valued is false where neither the baseline nor the winner could be priced — every dollar
 	// figure on this cell is then 0.00 for want of a rate, not because nothing was spent.
-	Valued bool `json:"valued"`
+	//
+	// It is a floor, not a coverage measure: kvcache.Result.Valued is `Unpriced < Requests`, so
+	// ANY one priced request in the cell sets it. UnpricedRequests is the coverage — how many of
+	// this cell's own Requests contributed nothing to SavingUSD because their model has no
+	// rates. Nonzero means SavingUSD describes only part of this cell, which is why the
+	// service-wide total refuses such a cell rather than adding it (see KVCacheSuggestions).
+	Valued           bool  `json:"valued"`
+	UnpricedRequests int64 `json:"unpriced_requests"`
 
 	// OptimalUSD and OptimalSavingUSD are the exact ceiling's own cost on this cell's rows,
 	// and its saving over Baseline — computed and frozen ALONGSIDE the winner, never as one
@@ -144,10 +151,38 @@ type KVCacheSuggestions struct {
 	// Cells is one entry per (user, hour) that had any Sunday–Thursday traffic at all, ordered
 	// by user then hour so the same window renders the same list twice.
 	Cells []KVCacheSuggestion `json:"cells"`
-	// TotalSavingUSD sums SavingUSD over the cells that both cleared MinRequests and were
-	// priced — the aggregate this deployment would have kept had every cell run its own winner
+	// TotalSavingUSD sums SavingUSD over the cells that cleared MinRequests and were priced in
+	// FULL — the aggregate this deployment would have kept had every cell run its own winner
 	// instead of the baseline, over exactly the history read.
-	TotalSavingUSD float64 `json:"total_saving_usd"`
+	//
+	// In full, because a cell's own Valued flag is `Unpriced < Requests` (kvcache/simulate.go):
+	// a cell with 99 of its 100 requests unpriced is Valued, and its SavingUSD is then measured
+	// on the one priced request while being labelled with the whole cell.
+	//
+	// The dollars themselves are not inflated by this, and it matters that the comment says so:
+	// an unpriced request contributes $0 to the baseline AND $0 to the winning arm, so a
+	// partially-priced cell UNDERSTATES its own saving. What is actually damaged is the CHOICE.
+	// BestStrategy is an argmax over the priced subset, and that ranking moves: pricing one
+	// missing model was measured to flip keepalive-5m-once from -0.07% to +1.07% and
+	// stop-reason-gated from -0.35% to +0.75%, reordering ranks 5 through 8 — and
+	// stop-reason-gated buys 249 pings. So the defect is a total that claims coverage it does
+	// not have, over cells whose winner was picked on a fraction of their own traffic.
+	//
+	// A cell therefore enters this total only when nothing in it went unpriced, which makes the
+	// figure a floor over fully-covered cells rather than a blend of two populations.
+	//
+	// TotalSavingKnown is false when NO cell qualified. The figure is then n/a, not $0.00 — a
+	// zero here would claim that switching every cell to its own winner saves nothing, which is
+	// the opposite of "we could not price it". TotalSavingCells is how many cells are behind the
+	// figure and TotalUnpricedRequests how many requests were left out of it for want of a rate,
+	// so the coverage is on the payload rather than inferred from it. Before this field existed
+	// `grep -n Unpriced dash/kvcachesuggest.go` returned nothing: no UI could disclose the
+	// coverage because the payload did not carry it, while the sibling table on the same tab
+	// does (kvcache.js:1136).
+	TotalSavingUSD        float64 `json:"total_saving_usd"`
+	TotalSavingKnown      bool    `json:"total_saving_known"`
+	TotalSavingCells      int64   `json:"total_saving_cells"`
+	TotalUnpricedRequests int64   `json:"total_unpriced_requests"`
 
 	Scanned   int64 `json:"scanned"`
 	Total     int64 `json:"total"`
@@ -223,8 +258,12 @@ func (d *DB) KVCacheSuggest(f Filter, o KVCacheOptions, p modelinfo.Pricer,
 			}
 			cell := kvSuggestCell(u, h, grp, candidates, baseName, prices, cfg)
 			out.Cells = append(out.Cells, cell)
-			if cell.Valued && !cell.InsufficientData {
+			out.TotalUnpricedRequests += cell.UnpricedRequests
+			// SavingKnown and full pricing coverage, not just Valued: see TotalSavingUSD.
+			if cell.Valued && cell.SavingKnown && cell.UnpricedRequests == 0 && !cell.InsufficientData {
 				out.TotalSavingUSD += cell.SavingUSD
+				out.TotalSavingCells++
+				out.TotalSavingKnown = true
 			}
 		}
 	}
@@ -313,5 +352,8 @@ func kvSuggestCell(user string, hour int, rows []*kvcache.Request, candidates []
 	cell.SavingPct = best.PercentUSD
 	cell.SavingKnown = best.Known
 	cell.Valued = baseline.Valued && bestResult.Valued
+	// Every arm replays the SAME rows through the same PriceList, so an unpriced request is
+	// unpriced under all of them; the baseline's count is the cell's.
+	cell.UnpricedRequests = baseline.Unpriced
 	return cell
 }

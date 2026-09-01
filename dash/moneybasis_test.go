@@ -2,6 +2,9 @@ package dash
 
 import (
 	"testing"
+	"time"
+
+	"github.com/rossoctl/context-guru/kvcache"
 )
 
 // Four money figures on this dashboard were each computed over a population that was not the
@@ -147,5 +150,97 @@ func TestHistoricalSplitRefusesAModelWhoseStableHalfIsNotConstant(t *testing.T) 
 	if reqs != 1 || unc != 1 {
 		t.Errorf("per-tenant pass valued %d and refused %d, want 1 and 1 — it must agree with "+
 			"CachesplitHistoricalUSD, not drift from it", reqs, unc)
+	}
+}
+
+// KVCacheSuggest's headline total gated on cell.Valued, which is kvcache.Result's
+// `Unpriced < Requests` — ANY one priced request. A cell can therefore contribute a saving
+// measured on a fraction of itself while being labelled with the whole cell.
+func TestKVCacheSuggestTotalRefusesAPartiallyPricedCell(t *testing.T) {
+	start := time.Date(2023, 1, 1, 9, 0, 0, 0, time.UTC).UnixMilli() // Sunday 09:00
+	var evs []*Event
+	for i := int64(0); i < 6; i++ {
+		// One priced model, five on the model staticPricer has no rates for. Valued is true
+		// (one request priced); the coverage is 1 in 6.
+		model := "some/unmeasured-model"
+		if i == 0 {
+			model = "m"
+		}
+		evs = append(evs, kvEvent("mixed", "s1", model, start+i*600_000, 0, 100_000))
+	}
+	db := seedKV(t, evs...)
+	out, err := db.KVCacheSuggest(allTenants(), KVCacheOptions{}, staticPricer{ibmSonnet},
+		KVCacheSimConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := findSuggestCell(out, "mixed", 9)
+	if c == nil {
+		t.Fatal("no cell for hour 9")
+	}
+	if c.UnpricedRequests != 5 {
+		t.Fatalf("cell reports %d unpriced of %d requests, want 5 — without this the reader "+
+			"cannot see the coverage at all", c.UnpricedRequests, c.Requests)
+	}
+	if !c.Valued {
+		t.Fatalf("fixture no longer reproduces the condition: Valued is false, so the cell " +
+			"would have been excluded by the old gate too")
+	}
+	if out.TotalSavingUSD != 0 || out.TotalSavingCells != 0 {
+		t.Errorf("total = $%.6f over %d cell(s); a cell with %d of %d requests unpriced "+
+			"describes only a sixth of itself and may not be summed into a service-wide "+
+			"headline", out.TotalSavingUSD, out.TotalSavingCells, c.UnpricedRequests, c.Requests)
+	}
+	if out.TotalSavingKnown {
+		t.Error("TotalSavingKnown is true with no qualifying cell — the figure must read n/a, " +
+			"never $0.00, which would claim that switching every cell to its winner saves nothing")
+	}
+	if out.TotalUnpricedRequests != 5 {
+		t.Errorf("TotalUnpricedRequests = %d, want 5", out.TotalUnpricedRequests)
+	}
+}
+
+// The same total still adds a cell that IS fully priced, so the gate above narrows the
+// population rather than emptying it.
+func TestKVCacheSuggestTotalStillCountsAFullyPricedCell(t *testing.T) {
+	start := time.Date(2023, 1, 1, 9, 0, 0, 0, time.UTC).UnixMilli()
+	var evs []*Event
+	for i := int64(0); i < 6; i++ {
+		evs = append(evs, kvEvent("priced", "s1", "m", start+i*600_000, 0, 100_000))
+	}
+	db := seedKV(t, evs...)
+	out, err := db.KVCacheSuggest(allTenants(), KVCacheOptions{}, staticPricer{ibmSonnet},
+		KVCacheSimConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := findSuggestCell(out, "priced", 9)
+	if c == nil {
+		t.Fatal("no cell for hour 9")
+	}
+	if c.UnpricedRequests != 0 || c.SavingUSD <= 0 {
+		t.Fatalf("fixture: unpriced=%d saving=$%.6f", c.UnpricedRequests, c.SavingUSD)
+	}
+	if !out.TotalSavingKnown || out.TotalSavingCells != 1 || out.TotalSavingUSD != c.SavingUSD {
+		t.Errorf("total = $%.6f known=%v cells=%d, want the cell's own $%.6f over 1 cell",
+			out.TotalSavingUSD, out.TotalSavingKnown, out.TotalSavingCells, c.SavingUSD)
+	}
+}
+
+// Compile-time anchor for the claim the two tests above rest on: kvcache.Result.Valued is a
+// floor ("any request priced"), never a coverage measure, so a caller that gates a total on it
+// alone is gating on the wrong thing. If this ever stops holding, the gate can be simplified.
+func TestResultValuedIsAFloorNotCoverage(t *testing.T) {
+	r := &kvcache.Result{Requests: 100, Unpriced: 99}
+	r.Valued = r.Requests > 0 && r.Unpriced < r.Requests // the expression at simulate.go:610
+	if !r.Valued {
+		t.Fatal("kvcache.Result.Valued no longer admits a 1-in-100 coverage cell; " +
+			"KVCacheSuggest's coverage gate can be reconsidered")
+	}
+	// And Savings.Known does not close the hole either: it is only "the percentage has a
+	// divisor", which one priced request is enough to give.
+	s := kvcache.Compare(&kvcache.Result{TotalUSD: 1}, &kvcache.Result{TotalUSD: 0.5})
+	if !s.Known {
+		t.Fatal("Savings.Known is no longer baseline-nonzero; recheck the gate")
 	}
 }
