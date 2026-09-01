@@ -1170,9 +1170,30 @@ func (d *DB) Facets(f Filter) (map[string][]string, error) {
 	// missing here, which made one tenant's dropdown an enumeration of every component
 	// every OTHER tenant runs.
 	ccond, cargs := selfBlanked(f, "component").where()
-	rows, err := d.sql.Query(`SELECT DISTINCT c.component
-		FROM request_components c JOIN requests r ON r.id = c.request_id
-		WHERE `+ccond+` ORDER BY 1 LIMIT 200`, cargs...)
+	// Probed once per DISTINCT COMPONENT, not once per component row.
+	//
+	// The straightforward join — request_components JOIN requests, DISTINCT the component —
+	// makes SQLite scan idx_rc_comp and probe the requests primary key for EVERY component row
+	// to apply a filter that lives on requests. There are 14 distinct components and 155,757
+	// component rows on the 16,428-request corpus (1,210,932 on the production one), so that is
+	// ~11,000 probes per answer it could possibly return. Measured, 5 runs, that corpus:
+	// 278 ms for the join against 17 ms for the form below, which is 16x, and it is the same
+	// invocation-count shape as CompactionResets (see overview.go) rather than an I/O problem —
+	// the plan was already index-driven.
+	//
+	// The rewrite asks the question the dropdown actually asks: for each component NAME, does
+	// any in-scope request carry it? That is 14 EXISTS probes, each stopping at its first match.
+	// Worst case — a component present in the table but in no in-scope request — degenerates to
+	// scanning that one component's rows, which is bounded by what the join did unconditionally.
+	//
+	// The scoping is unchanged: the join and its predicate are intact inside the EXISTS, which
+	// is what keeps one tenant's dropdown from enumerating every component every OTHER tenant
+	// runs (the bug the comment below records).
+	rows, err := d.sql.Query(`SELECT names.component
+		FROM (SELECT DISTINCT component FROM request_components) names
+		WHERE EXISTS (SELECT 1 FROM request_components c JOIN requests r ON r.id = c.request_id
+			WHERE c.component = names.component AND `+ccond+`)
+		ORDER BY 1 LIMIT 200`, cargs...)
 	if err != nil {
 		return nil, err
 	}

@@ -471,6 +471,28 @@ CREATE INDEX IF NOT EXISTS idx_tooldecl_name   ON tool_declarations(name);
 -- the production corpus for a query with no other reason to be slow.
 CREATE INDEX IF NOT EXISTS idx_tooldecl_session ON tool_declarations(session_id);
 
+-- SelfRemovals' declaration pass (dash/toolapi.go) reads (tenant_id, session_id, kind, name,
+-- server, tokens) for every declaration row and reduces them, in Go, to one fact per
+-- (tenant, session, kind, name, server). The grain of this table is one row per DIGEST, so
+-- that reduction is 33.5:1 on the production corpus — 1,811,405 rows collapsing to 54,030.
+--
+-- This index makes the reduction SQL's job instead of Go's. Its column order is exactly the
+-- GROUP BY, so SQLite streams the groups out of the index in order: no temp b-tree, and no
+-- table fetch, because the index carries the only six columns the query wants. That matters
+-- because this table is the widest in the schema — 695 MB of pages on production against
+-- 205 MB for this index, most of the difference being digest, text_hash and the free space
+-- left behind when text_gz moved to declaration_text.
+--
+-- Measured on a synthetic corpus built to production's cardinalities (1,843,616 rows,
+-- 54,224 distinct groups, 280 MB primary-key index against production's 286 MB), median of
+-- 3 runs: the shipped full scan 4,498 ms; a GROUP BY WITHOUT this index 10,749 ms, worse,
+-- because it sorts into a temp b-tree; the GROUP BY WITH it 1,229 ms. So the index and the
+-- GROUP BY only pay TOGETHER — either alone is neutral or a regression. Adding the index
+-- without changing the query leaves the plan on the table scan (measured 3,636 ms), which is
+-- the same trap idx_requests_session_tb fell into below.
+CREATE INDEX IF NOT EXISTS idx_tooldecl_inventory
+  ON tool_declarations(tenant_id, session_id, kind, name, server, tokens);
+
 -- What a session actually INVOKED: one row per distinct tool name (and, for the Skill
 -- tool, per skill — input.skill is the only place a skill invocation is identifiable,
 -- since the Skill tool's schema carries no enum). Counted from the LAST tool-using turn
