@@ -505,7 +505,10 @@ function barRows(host, rows, opts = {}) {
       onclick: r.onclick || null,
     },
       el('div', { class: 'bar-label', text: r.label }),
-      el('div', { class: 'bar-track' }, el('div', {
+      // `ratio` drops the fill: a figure over 100% is not a share, and this track is a 100%
+      // scale, so any bar drawn for it is a bar that disagrees with its own label. The empty
+      // track keeps the three-column grid intact.
+      el('div', { class: 'bar-track' + (r.ratio ? ' none' : '') }, r.ratio ? null : el('div', {
         class: 'bar-fill' + (r.value < 0 ? ' neg' : '') + (r.value === 0 ? ' zero' : ''),
         style: 'width:' + width + '%' + (r.color ? ';background:' + r.color : ''),
       })),
@@ -1741,9 +1744,17 @@ function renderTiles(o) {
 function renderDenominators(o) {
   barRows($('#denominators'), (o.denominators || []).map((d) => ({
     label: d.label,
+    // Over 100% the figure is a RATIO, not a share, and the track is a share scale by
+    // construction — so the bar pinned full while the number beside it said 158.17%, each
+    // contradicting the other. The arithmetic is right (see the gross-over-attempted
+    // description: the denominator is re-counted every turn), so only the presentation
+    // changes: no track, and a multiple rather than a percentage. The three ratios that ARE
+    // shares keep their bar.
+    ratio: d.available && d.percent > 100,
     value: d.available ? d.percent : 0,
     max: 100,
-    display: d.available ? pct(d.percent, 2) : 'n/a',
+    display: !d.available ? 'n/a'
+      : d.percent > 100 ? (d.percent / 100).toFixed(2) + '×' : pct(d.percent, 2),
     available: d.available,
     // The divisor is what makes these four bars four different measurements, so it is the
     // half that stays visible. The prose folds.
@@ -1753,6 +1764,41 @@ function renderDenominators(o) {
     desc: d.description,
     descSummary: 'Why this denominator',
   })), { emptyDetail: 'No requests match the filter.' });
+  renderFrozenCeiling(o);
+}
+
+/**
+ * renderFrozenCeiling states the cache-frozen share as what it is: the explanation for the
+ * savings percentages directly above it. ~86% of a warm agent transcript sits in the prompt
+ * prefix the provider already cached, and compaction is forbidden to touch it (invariant 5) —
+ * which is why those bars read as low as they do. Until now that share appeared only as a
+ * COST row in the safety panel, with nothing connecting it to the ratios it caps.
+ *
+ * No new capture: both figures already ride on /api/overview and are already tiled under
+ * "What compaction could reach". This is the same quotient, named as a ceiling.
+ *
+ * Zero frozen tokens is NOT rendered as "0% frozen". A window can read zero either because
+ * nothing was frozen or because the requests were not cache-aware at all (compaction is then
+ * allowed the whole request), and /api/overview carries no cache-awareness aggregate that
+ * would separate them — so it says it cannot compute the ceiling instead of claiming there
+ * is none.
+ */
+function renderFrozenCeiling(o) {
+  const host = $('#frozen-ceiling');
+  if (!host) return;
+  const reach = (o.attempted_tokens || 0) + (o.frozen_tokens || 0);
+  if (!reach || !o.frozen_tokens) {
+    host.textContent = reach
+      ? 'No tokens were frozen in this window, so no cache-safety ceiling is computable — '
+        + 'either nothing was frozen or these requests did not run cache-aware.'
+      : 'No cache-safety ceiling computable: this window records neither attempted nor frozen '
+        + 'tokens.';
+    return;
+  }
+  const touchable = (100 * o.attempted_tokens) / reach;
+  host.textContent = `Compaction was allowed to touch ${pct(touchable, 1)} of these tokens; the `
+    + `other ${pct(100 - touchable, 1)} sat in the already-cached prefix `
+    + `(${compact(o.frozen_tokens)} frozen ÷ ${compact(reach)} attempted + frozen).`;
 }
 
 function renderWaterfall(o) {
@@ -2017,8 +2063,14 @@ async function loadValueBreakdown() {
       return;
     }
     panel.hidden = false;
-    const tiles = active.map((c) => tile('vb-' + c.component, c.component,
-      usd(c.net_usd_with_estimate), num(c.runs) + ' runs', c.net_usd_with_estimate < 0 ? 'bad' : 'good'));
+    // Same priced-ness fallback as the declaration-filter tile below: an unpriced model must
+    // not make a real saving read as "$0.00" in --good. A component with unpriceable rows
+    // states the tokens it removed, with no tone — "unknown" is not "worthless".
+    const tiles = active.map((c) => (c.saved_usd_unpriced_rows > 0
+      ? tile('vb-' + c.component, c.component, compact(c.saved_unique) + ' tok',
+        num(c.runs) + ' runs', '')
+      : tile('vb-' + c.component, c.component, usd(c.net_usd_with_estimate),
+        num(c.runs) + ' runs', c.net_usd_with_estimate < 0 ? 'bad' : 'good')));
     if (hasKeepAlive) {
       tiles.push(tile('vb-keepalive', 'Keep-alive (net)', usd(o.keepalive_net_usd),
         num(o.keepalive_pings) + ' pings', o.keepalive_net_usd < 0 ? 'bad' : 'good'));
@@ -2300,10 +2352,10 @@ function activitySummary(gates, events) {
  * a column with nothing orderable in it (the gate summary, the verdict prose).
  */
 const COMPONENT_SORT = ['component', 'kind', 'runs', 'acted_tokens', 'acted_structural',
-  'act_rate', 'reverted',
+  'act_rate', null, 'reverted',
   'saved_unique', 'saved_gross', 'overcount_ratio', 'duration_ms_total', 'duration_ms_avg',
   'llm_calls', 'llm_cost_usd', 'saved_usd', 'net_usd_with_estimate',
-  'net_usd_first_removal', 'replay_multiple', 'errors', null, null];
+  'net_usd_first_removal', 'replay_multiple', 'errors', null];
 
 /**
  * renderNetReconcile prints the two verdicts side by side, and the one step between them.
@@ -2541,6 +2593,10 @@ async function loadComponents() {
             + 'markers, breakpoints. Not a failure to act.',
         }, num(c.acted_structural) || '—'),
         el('td', { class: 'num', text: pct(c.act_rate * 100, 1) }),
+        // Beside the act rate, not twenty columns to its right. This is the cell that makes a
+        // 0.0% act rate falsifiable (docs/dashboard.md), and at 1600px wide it sat at x=2087
+        // in a 2628px table — off-screen for the reader who needs it most.
+        el('td', {}, activitySummary(c.gates, c.events)),
         el('td', { class: 'num', text: num(c.reverted) }),
         // An unkeyed component's `unique` is identically its `gross`, so the cell is marked:
         // without it the column reads as "this component never repeated a removal", which is a
@@ -2619,7 +2675,6 @@ async function loadComponents() {
               + 'there is no repeat business to amortize.',
         }, c.replay_multiple ? c.replay_multiple.toFixed(1) + '×' : '—'),
         el('td', { class: 'num', text: num(c.errors) }),
-        el('td', {}, activitySummary(c.gates, c.events)),
         el('td', {}, el('span', { class: 'pill ' + vcls, text: vtext }))));
     }
     renderNetReconcile(components);
@@ -3309,7 +3364,7 @@ async function openRequest(id, fromURL) {
           el('th', { text: '#' }), el('th', { text: 'Component' }), el('th', { text: 'Kind' }),
           el('th', { class: 'num', text: 'Saved' }), el('th', { class: 'num', text: 'Unique' }),
           el('th', { class: 'num', text: 'Latency' }), el('th', { text: 'Outcome' }),
-          el('th', { text: 'Why declined' }))));
+          el('th', { text: 'Why / what happened' }))));
       const tb = el('tbody');
       e.components.forEach((c, i) => {
         const outcome = c.reverted ? ['reverted', 'missing'] : c.skipped ? ['skipped', 'neutral']

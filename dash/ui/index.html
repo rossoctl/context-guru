@@ -281,6 +281,10 @@
          .bar-formula) and only the prose folds away. -->
     <p class="note">Four denominators, four questions. Missing inputs read <em>n/a</em>, never 0.</p>
     <div id="denominators" data-testid="denominators"></div>
+    <!-- The ceiling those four ratios are measured against. It was on the page only as a COST
+         row in the safety panel, so nothing told a reader that the frozen prefix is the
+         EXPLANATION for the numbers directly above. renderFrozenCeiling fills it. -->
+    <p class="note" id="frozen-ceiling" data-testid="frozen-ceiling"></p>
   </div>
 
   <div class="panel">
@@ -472,13 +476,13 @@
         <thead><tr>
           <th>Component</th><th>Kind</th><th class="num">Runs</th><th class="num">Acted</th>
           <th class="num">Structural</th>
-          <th class="num">Act rate</th><th class="num">Reverted</th>
+          <th class="num">Act rate</th><th>Why / what happened</th><th class="num">Reverted</th>
           <th class="num">Unique saved</th><th class="num">Gross saved</th><th class="num">Overcount</th>
           <th class="num">Own latency</th><th class="num">Avg ms</th>
           <th class="num">LLM calls</th><th class="num">LLM cost</th>
           <th class="num">Saved $</th><th class="num">Net $</th>
           <th class="num">Net $ (counted once)</th><th class="num">Replay ×</th>
-          <th class="num">Errors</th><th>Why declined</th><th>Verdict</th>
+          <th class="num">Errors</th><th>Verdict</th>
         </tr></thead>
         <tbody id="components-body"></tbody>
       </table>

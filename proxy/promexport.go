@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/components/offload"
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/store"
 )
 
 // Prometheus exposition at /metrics, for Grafana.
@@ -388,11 +390,44 @@ func (h *Handler) renderMetrics() string {
 		promHeaderProc(&b, "cg_wasted_tokens_total", "Tokens spent recovering offloaded content.", "counter")
 		promLine(&b, "cg_wasted_tokens_total", "", float64(s.WastedTokens))
 
-		promHeaderProc(&b, "cg_frozen_decisions_total", "Freeze-replay outcomes for compaction decisions.", "counter")
-		promLine(&b, "cg_frozen_decisions_total", `outcome="hit"`, float64(s.FrozenHits))
-		promLine(&b, "cg_frozen_decisions_total", `outcome="miss"`, float64(s.FrozenMisses))
-		promLine(&b, "cg_frozen_decisions_total", `outcome="dropped"`, float64(s.FrozenDropped))
-		promLine(&b, "cg_frozen_decisions_total", `outcome="repaired"`, float64(s.FrozenRepaired))
+		// Beside the bounces, because this is the failure the bounces CANNOT show: a bounce
+		// is a successful recovery, so a broken stash and an agent that never asked read
+		// identically there. The two causes are split because they call for opposite
+		// responses, and only one of them is ours.
+		//
+		// Read from expand's own counters, like the cg_llm_* family reads offload's, and NOT
+		// off the Snapshot: Snapshot.ExpandUnresolved* are host-filled and the only host that
+		// fills them is the /stats handler, so a promLine off `s` here would export a
+		// hard-wired 0 forever. (cg_frozen_decisions_total has exactly that bug today.)
+		malformed, missing := expand.Unresolved()
+		promHeaderProc(&b, "cg_expand_unresolved_total",
+			`Expand attempts that recovered nothing, by cause. reason="missing" is the ALERTABLE one: an id this proxy could have minted resolved to no stash, so a cut advertised as reversible was not and content the agent asked back for is gone. reason="malformed" means the model invented a marker id and there is nothing to fix. Neither is visible in cg_expand_bounces_total, which counts SUCCESSFUL re-serves.`, "counter")
+		promLine(&b, "cg_expand_unresolved_total", `reason="malformed"`, float64(malformed))
+		promLine(&b, "cg_expand_unresolved_total", `reason="missing"`, float64(missing))
+
+		// Same rule as the unresolved counters above, and it bit this family first: all four
+		// outcomes used to read s.Frozen*, which nothing fills here, so the series exported a
+		// hard-wired 0 on every scrape however badly freeze-replay was doing. Sourced now
+		// exactly as the /stats handler sources it.
+		promHeaderProc(&b, "cg_frozen_decisions_total",
+			`Freeze-replay outcomes for compaction decisions. hit/miss count the replay path and are complete. dropped/repaired are counted by the STORE that owns the frozen set, so they are present only where this process holds it: on a hosted deployment each tenant has its own store and those two outcomes are ABSENT here rather than 0 — read them per tenant from the dashboard. An absent series is "this process cannot tell you"; a 0 would claim no frozen decision was lost.`, "counter")
+		hits, misses := offload.FrozenStats()
+		promLine(&b, "cg_frozen_decisions_total", `outcome="hit"`, float64(hits))
+		promLine(&b, "cg_frozen_decisions_total", `outcome="miss"`, float64(misses))
+		// A failed cast means NOT COMPUTABLE HERE, not zero — which is why these two lines are
+		// inside it and not defaulted. The drop/repair counters live in the store instance,
+		// and a hosted deployment gives each tenant its own, so this process's store knows
+		// nothing about them; emitting 0 would assert the one thing an operator watches this
+		// series for ("no frozen decision was lost") on no evidence. Absence is the `n/a` the
+		// exposition format does not have. hit/miss above need no such guard: they are
+		// package-level counters in offload, incremented on every replay in the process
+		// whatever the tenant, so they are complete under exactly the procCaveat already
+		// attached — process-wide, summed over tenants, reset on restart.
+		if fl, ok := h.store.(*store.Memory); ok {
+			dropped, repaired := fl.FrozenLossStats()
+			promLine(&b, "cg_frozen_decisions_total", `outcome="dropped"`, float64(dropped))
+			promLine(&b, "cg_frozen_decisions_total", `outcome="repaired"`, float64(repaired))
+		}
 
 		promHeaderProc(&b, "cg_sse_streams_total", "Responses by streaming path.", "counter")
 		promLine(&b, "cg_sse_streams_total", `path="streamed"`, float64(s.SSEStreamed))

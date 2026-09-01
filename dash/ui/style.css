@@ -99,7 +99,16 @@
 /* Dark mode. Tokens only. Applies to an explicit choice and to the system
    preference, so the toggle wins in both directions. The series steps are a
    SEPARATE validated set against the dark surface, not an automatic lightening —
-   flipping the light steps puts them outside the dark lightness band. */
+   flipping the light steps puts them outside the dark lightness band.
+
+   --good/--bad are re-stepped for the same reason, and they are the one pair a reader is
+   asked to TELL APART as adjacent bars (the waterfall's reductions vs its penalties). The
+   previous pair (#3fbe7f / #ef6f63) failed twice on #0d1117: deutan ΔE 4.1 against each
+   other, and L 0.716 / 0.693 above the dark band's 0.48–0.67 ceiling. These measure deutan
+   ΔE 9.7 with L 0.650 / 0.663, and hold 4.5:1 on --bg, --bg-raised and their own soft tint
+   (they are used as TEXT, not just as fills). Re-run the dataviz palette validator before
+   touching either — the light pair sits at ΔE 6.4, legal only because every waterfall row
+   also carries a signed value, so nothing here is colour-alone. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) { color-scheme: dark; }
   :root:not([data-theme="light"]) {
@@ -107,9 +116,9 @@
     --border: #2a313c; --border-soft: #21272f;
     --fg: #e8ebf0; --fg-muted: #9aa4b2; --fg-faint: #8792a1;
     --accent: #4f96f6; --accent-soft: #14243b; --on-accent: #08111e;
-    --good: #3fbe7f; --good-soft: #10301f;
+    --good: #52a27a; --good-soft: #10301f;
     --warn: #dba43c; --warn-soft: #2f2510;
-    --bad: #ef6f63; --bad-soft: #351815;
+    --bad: #f84e3a; --bad-soft: #351815;
     --info: #6ba3ec; --info-soft: #13223a;
     --s1: #4a90e2; --s2: #d9703c; --s3: #1ba676; --s4: #9a68d6;
     /* Stepped for the dark surface rather than flipped: 4.59:1 against --bg-raised. */
@@ -123,9 +132,9 @@
   --border: #2a313c; --border-soft: #21272f;
   --fg: #e8ebf0; --fg-muted: #9aa4b2; --fg-faint: #8792a1;
   --accent: #4f96f6; --accent-soft: #14243b; --on-accent: #08111e;
-  --good: #3fbe7f; --good-soft: #10301f;
+  --good: #52a27a; --good-soft: #10301f;
   --warn: #dba43c; --warn-soft: #2f2510;
-  --bad: #ef6f63; --bad-soft: #351815;
+  --bad: #f84e3a; --bad-soft: #351815;
   --info: #6ba3ec; --info-soft: #13223a;
   --s1: #4a90e2; --s2: #d9703c; --s3: #1ba676; --s4: #9a68d6;
   --s-mute: #7a8496;
@@ -479,6 +488,8 @@ details.why dd { margin: 0; }
 /* Rounded on the data end only, square against the baseline: a pill-shaped bar
    reads as shorter than it is at small values. */
 .bar-fill { height: 100%; background: var(--s1); border-radius: 0 var(--r-sm) var(--r-sm) 0; min-width: 2px; }
+/* A ratio over 100% gets no track at all — see barRows(): a 100% scale cannot draw it. */
+.bar-track.none { background: none; }
 .bar-fill.neg { background: var(--bad); }
 .bar-val {
   font-variant-numeric: tabular-nums; font-size: var(--t-small); font-weight: 600;

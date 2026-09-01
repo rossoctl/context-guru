@@ -569,6 +569,10 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pipe := tn.Pipe
+	// effPreset is what the captured row must be LABELLED with: the pipeline that actually
+	// ran on this request. Empty means no override took effect, so the tenant default
+	// newCapture already recorded stands. See capture.notePreset.
+	effPreset := ""
 	if h.opts.PipelineFor != nil {
 		preset := r.URL.Query().Get("preset")
 		var names []string
@@ -579,6 +583,14 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 			// ponytail: rebuild per override request; add an LRU cache if override QPS ever matters.
 			if p, err := h.opts.PipelineFor(preset, names); err == nil {
 				pipe = p
+				// Same precedence PipelineFor itself applies: an explicit component list wins
+				// over ?preset=. Such a list has no preset name, so it is labelled "custom",
+				// exactly as a configuration document with a bare `pipeline:` is (see
+				// buildTenantConfig) — never the preset name that did NOT run.
+				effPreset = preset
+				if len(names) != 0 {
+					effPreset = "custom"
+				}
 			} // build error => fall back to the configured pipeline (fail open)
 		}
 	}
@@ -615,6 +627,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// divergence as the window this handler used to hard-code as unknown, a few lines above —
 	// and it went unnoticed for the same reason, because both are silent.
 	cp := h.newCapture(r, string(provider), "/compact", tn)
+	cp.notePreset(effPreset)
 	cp.noteModel(gjson.GetBytes(body, "model").String())
 	start := time.Now()
 	// cp.llmCtx: our own compaction-model spend under this context is charged to THIS

@@ -77,7 +77,11 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 	}
 	// The preset comes from the TENANCY, not from Options: in a hosted deployment
 	// the configuration in effect is the tenant's, and labelling every row with the
-	// server default would make the dashboard's preset comparison a lie.
+	// server default would make the dashboard's preset comparison a lie. That is the
+	// DEFAULT, not the last word: /compact lets one request swap the pipeline, and a
+	// row labelled with the tenant default while another preset ran is the same lie a
+	// level down — so the handler overrides this label via notePreset once the
+	// override has resolved.
 	return &capture{
 		rec: h.rec, pricer: h.opts.Prices, preset: tn.Preset, tenant: tn.ID,
 		route: route, provider: provider,
@@ -85,6 +89,21 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		llm:    &cheapmodel.Sink{},
 		unique: map[string]int{},
 	}
+}
+
+// notePreset relabels the row with the pipeline this ONE request ran, for /compact's
+// per-request override (?preset=<name>, or x-context-guru-pipeline with an explicit
+// component list, which is labelled "custom" because it has no preset name). The
+// dashboard's preset facet is the whole point of an eval sweep across presets, and it can
+// only compare configurations if each row names the one that actually ran.
+//
+// An empty name means no override took effect, so the tenancy's default — the label
+// newCapture set — is the honest one and stays.
+func (c *capture) notePreset(name string) {
+	if c == nil || name == "" {
+		return
+	}
+	c.preset = name
 }
 
 // llmCtx scopes context-guru's own cheap-model accounting to THIS request. Every
