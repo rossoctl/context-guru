@@ -334,12 +334,3 @@ details.why > .inv-prompt-regions { max-width: none; }
   #view-tools .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-/* PRE-EXISTING on origin/main, measured on the 132-MCP-tool corpus: the body scrolls sideways
-   159 px at 390 because the removal snippet asserts a min-width (260 px, and 22rem = 352 px for
-   the folded one) inside a card that is already inside two levels of padding. The snippet's own
-   <pre> scrolls internally, so the min-width buys nothing on a phone and costs the whole page its
-   horizontal lock. Zero here; the desktop values are untouched. */
-@media (max-width: 560px) {
-  .inv-removal, .inv-removal-fold .inv-removal { min-width: 0; }
-  .inv-removal-fold > summary { white-space: normal; }
-}
