@@ -70,8 +70,17 @@ jobs:
       # not registered without cgo starts the proxy and then fails at pipeline build. That is the
       # `preset: coding` / `unknown component "skeleton"` breakage, and TestEveryPresetBuilds
       # covers it — but it had never run in this configuration.
+      # -p 1: run one package binary at a time.
+      #
+      # A CI runner has 2 cores, and `go test` otherwise starts up to GOMAXPROCS package binaries
+      # in parallel. Adding this job therefore added a SECOND heavily-parallel run of the proxy
+      # package per PR, and under that contention a timing-sensitive control-plane test
+      # (TestCtlGetCampaignAggregatesPredictedAndRealPerTenant, see the issue linked below) failed
+      # twice on unrelated PRs, then passed on re-run and passes 3/3 locally on main and on the
+      # branch. That flake is not this job's business to hunt, but it IS this job's business not to
+      # provoke it: serialising costs about a minute and removes the contention this job added.
       - name: Test the packages whose behaviour depends on which components compile in
-        run: go test ./config/... ./components/... ./apply/... ./proxy/... ./store/...
+        run: go test -p 1 ./config/... ./components/... ./apply/... ./proxy/... ./store/...
 
   trivy:
     runs-on: ubuntu-latest
