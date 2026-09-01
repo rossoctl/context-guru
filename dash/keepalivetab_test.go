@@ -1104,3 +1104,67 @@ func TestKeepAliveLatencyDiagnosticReportsTheGapAboveTheSizeThreshold(t *testing
 		t.Errorf("PerMissMs = %v, want 1000 (2000 - 1000)", l.PerMissMs)
 	}
 }
+
+// TestLedgerRefusesCreditOnAGapNoPingCovered is the reachability gate the capture path cannot
+// apply. keepalive_saved_usd is written on the strength of keepalive_pings > 0 and a gap that
+// EXCEEDED the provider's lifetime — a floor, with no matching ceiling — so a row whose idle span
+// contained no ping at all is credited anyway. Measured on a production corpus: 7 of 105 credited
+// rows, $11.81 of $167.28.
+//
+// Three rows, one legitimate and two not, all with the same $1.00 written to the column:
+//   - a ping 60s before the request: covered, credited.
+//   - a ping 20 minutes before: the entry it refreshed was gone 15 minutes before the request
+//     arrived, so whatever kept the prefix alive, it was not us.
+//   - no ping row on the session at all, and keepalive_pings claiming one anyway.
+func TestLedgerRefusesCreditOnAGapNoPingCovered(t *testing.T) {
+	const base = 10_000_000
+	covered := kaCredit(base, "covered", 1.00)
+	coveredPing := kaPing(base-60_000, "covered", 0.01, 40_000, 0)
+
+	stale := kaCredit(base, "stale", 1.00)
+	stalePing := kaPing(base-20*60_000, "stale", 0.01, 40_000, 0)
+
+	phantom := kaCredit(base, "phantom", 1.00) // keepalive_pings > 0, no ping row anywhere
+
+	f := newKAFixture(t, covered, coveredPing, stale, stalePing, phantom)
+	led, err := f.db.KeepAliveLedger(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Absolute dollars, not a share: the uncorrected figure is $3.00 and the corrected one $1.00.
+	if led.SavedUSD < 0.99 || led.SavedUSD > 1.01 {
+		t.Errorf("SavedUSD = %v, want ~1.00 — only the row a ping actually covered "+
+			"(3.00 is the sum of the column, credit included for two gaps no ping bridged)",
+			led.SavedUSD)
+	}
+	// A row credited $0 is not a miss avoided either, or the count and the dollars disagree
+	// about how many requests the mechanism rescued.
+	if led.MissesAvoided != 1 {
+		t.Errorf("MissesAvoided = %d, want 1", led.MissesAvoided)
+	}
+	// The ping COST is untouched: both pings were sent and both were billed. Under-crediting the
+	// saving while quietly dropping the spend would flatter the same verdict from the other side.
+	if led.PingUSD < 0.019 || led.PingUSD > 0.021 {
+		t.Errorf("PingUSD = %v, want ~0.02 (both pings still cost what they cost)", led.PingUSD)
+	}
+	if led.NetUSD != led.SavedUSD-led.PingUSD {
+		t.Errorf("NetUSD %v != SavedUSD %v - PingUSD %v", led.NetUSD, led.SavedUSD, led.PingUSD)
+	}
+}
+
+// A ping the provider never answered refreshed nothing, so it cannot cover a gap. Two of 741 real
+// ping rows are 502/503, and they are stored like any other ping.
+func TestLedgerRefusesCreditFromAFailedPing(t *testing.T) {
+	const base = 10_000_000
+	credit := kaCredit(base, "s1", 1.00)
+	ping := kaPing(base-60_000, "s1", 0.01, 0, 0)
+	ping.Status = 503
+	f := newKAFixture(t, credit, ping)
+	led, err := f.db.KeepAliveLedger(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if led.SavedUSD != 0 {
+		t.Errorf("SavedUSD = %v, want 0 — a 503 ping did not refresh anything", led.SavedUSD)
+	}
+}

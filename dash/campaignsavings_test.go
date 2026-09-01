@@ -218,7 +218,19 @@ func TestCampaignRealSavingsAttributesCreditToOneStrategyOnly(t *testing.T) {
 	unowned := kaCredit(hourUTC(1, 9), "s3", 4.00)
 	unowned.TenantID = "t1"
 
-	if err := db.insertBatch([]*Event{mine, theirs, unowned}); err != nil {
+	// Each credit needs the ping row that earned it. A credited row with no ping row anywhere on
+	// its session is not a state the write path can legitimately produce — the keeper only sets
+	// keepalive_pings after sending pings, and a ping is itself a stored row — and kaSaved is
+	// what stops such a row from being credited. Seven real rows on a production corpus looked
+	// like this; they were the bug, not the fixture.
+	pings := []*Event{}
+	for _, session := range []string{"s1", "s2", "s3"} {
+		p := kaPing(hourUTC(1, 9), session, 0.01, 40_000, 0)
+		p.TenantID = "t1"
+		pings = append(pings, p)
+	}
+
+	if err := db.insertBatch(append([]*Event{mine, theirs, unowned}, pings...)); err != nil {
 		t.Fatal(err)
 	}
 

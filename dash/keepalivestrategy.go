@@ -65,8 +65,8 @@ func (d *DB) StrategyLedger(strategyID string) (*StrategyLedgerView, error) {
 	for i := range out.Tenants {
 		row := &out.Tenants[i]
 		var saved sql.NullFloat64
-		if err := d.sql.QueryRow(`SELECT SUM(keepalive_saved_usd) FROM requests
-			WHERE tenant_id = ? AND keepalive_saved_usd > 0 AND keepalive_strategy_id = ?`,
+		if err := d.sql.QueryRow(`SELECT SUM(`+kaSaved("r.")+`) FROM requests r
+			WHERE r.tenant_id = ? AND r.keepalive_saved_usd > 0 AND r.keepalive_strategy_id = ?`,
 			row.TenantID, strategyID).Scan(&saved); err != nil {
 			return nil, err
 		}

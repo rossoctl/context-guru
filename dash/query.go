@@ -118,12 +118,16 @@ func (f Filter) where() (string, []any) {
 
 // requestCols is the column list Event rows are scanned from, in one place so the
 // SELECT and the Scan cannot drift.
-const requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r.agent, r.preset, r.mode, r.route,
+//
+// A var rather than a const because keepalive_saved_usd is read through kaSaved, which is
+// computed. Both users are read paths (the Requests list and one request by id); nothing
+// re-inserts what it scanned, so the correction stays a correction and never becomes a write.
+var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r.agent, r.preset, r.mode, r.route,
 	r.status, r.bypassed, r.cache_aware, r.messages, r.tokens_before, r.tokens_after,
 	r.attempted_tokens, r.frozen_tokens, r.saved_unique, r.fresh_input, r.cache_read,
 	r.cache_write, r.output_tokens, r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd,
 	r.cache_saved_usd, r.cachesplit_saved_usd, r.split_stable_tokens,
-	r.cache_write_1h, r.keepalive, r.keepalive_pings, r.keepalive_saved_usd,
+	r.cache_write_1h, r.keepalive, r.keepalive_pings, ` + kaSaved("r.") + `,
 	r.cg_latency_ms, r.upstream_ms, r.expands, r.expand_tokens, r.reverts,
 	r.token_accounting, r.cache_miss_reason, r.uncompressed_reason,
 	r.reasoning_effort, r.thinking_mode, r.thinking_budget, r.temperature, r.top_p,
@@ -449,7 +453,7 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 		-- The keep-alive's SAVING half, which lives on the real request that benefited. The COST
 		-- half cannot be summed here: this query excludes ping rows, and that exclusion is what
 		-- keeps Turns and every average on the row agent-only. It has its own query below.
-		COALESCE(SUM(r.keepalive_saved_usd),0)
+		COALESCE(SUM(` + kaSaved("r.") + `),0)
 		FROM requests r WHERE ` + cond + `
 		GROUP BY r.session_id ORDER BY MAX(r.ts) DESC LIMIT ? OFFSET ?`
 	rows, err := d.sql.Query(q, append(args, limit, offset)...)

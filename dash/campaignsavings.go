@@ -158,9 +158,8 @@ func (d *DB) CampaignRealSavings(strategyIDs, tenantIDs []string, since int64) (
 		savedExpr := `0`
 		savingArgs := make([]any, 0, len(strategyIDs)+len(tenantIDs)+1)
 		if len(strategyIDs) > 0 {
-			savedExpr = `COALESCE(SUM(CASE WHEN keepalive_saved_usd > 0
-				AND keepalive_strategy_id IN (` + placeholders(len(strategyIDs)) + `)
-				THEN keepalive_saved_usd ELSE 0 END),0)`
+			savedExpr = `COALESCE(SUM(CASE WHEN r.keepalive_strategy_id IN (` +
+				placeholders(len(strategyIDs)) + `) THEN ` + kaSaved("r.") + ` ELSE 0 END),0)`
 			// Bound before the tenant list because the CASE sits in the SELECT clause,
 			// which SQLite binds ahead of the WHERE — the args must follow the ORDER THE
 			// TEXT reads, not the order the two lists are named in this function's own
@@ -176,12 +175,12 @@ func (d *DB) CampaignRealSavings(strategyIDs, tenantIDs []string, since int64) (
 			savingArgs = append(savingArgs, id)
 		}
 		savingArgs = append(savingArgs, since)
-		savingRows, err := d.sql.Query(`SELECT tenant_id,
-				CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER) h,
-				COUNT(*), COUNT(DISTINCT ts/86400000), `+savedExpr+`
-			FROM requests WHERE keepalive = 0 AND tenant_id IN (`+
-			placeholders(len(tenantIDs))+`) AND ts >= ?
-			GROUP BY tenant_id, h`, savingArgs...)
+		savingRows, err := d.sql.Query(`SELECT r.tenant_id,
+				CAST(strftime('%H', r.ts/1000, 'unixepoch') AS INTEGER) h,
+				COUNT(*), COUNT(DISTINCT r.ts/86400000), `+savedExpr+`
+			FROM requests r WHERE r.keepalive = 0 AND r.tenant_id IN (`+
+			placeholders(len(tenantIDs))+`) AND r.ts >= ?
+			GROUP BY r.tenant_id, h`, savingArgs...)
 		if err != nil {
 			return nil, err
 		}
