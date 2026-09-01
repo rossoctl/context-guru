@@ -204,6 +204,54 @@ func (r *Registry) ArchiveCampaign(id string) error {
 	return nil
 }
 
+// CampaignCellOwner names which ACTIVE campaign already enforces one (tenant, hour) — the
+// input the create flow needs to refuse enforcing it a second time.
+type CampaignCellOwner struct {
+	TenantID     string
+	HourUTC      int
+	CampaignID   string
+	CampaignName string
+}
+
+// ActiveCampaignCellOwners returns every (tenant, hour) that an active campaign already
+// has a real strategy for.
+//
+// The campaign_cells primary key already stops one campaign from naming a (tenant, hour)
+// twice, but says nothing across campaigns — so two campaigns created from overlapping
+// suggest runs each got their own live strategy for the same tenant in the same hour.
+// Nothing crashed: the resolution chain simply picks the highest-priority match and the
+// loser never fires. But both campaigns then reported that hour as theirs, one of them
+// claiming a prediction for a strategy that never actually ran, and a manager reading
+// either one had no way to tell which. Refusing the second enforcement (see
+// proxy/campaign.go's overlap gate) is what makes "this campaign's cells" and "the
+// strategies actually running" the same set.
+//
+// ARCHIVED campaigns are excluded on purpose. Archiving does not delete the strategies a
+// campaign created (see ArchiveCampaign), so an archived campaign's hours may well still
+// be served — but archiving is exactly how a manager says "stop managing this as a group",
+// and treating it as a permanent claim on those hours would leave no way to ever re-issue
+// them short of deleting each strategy by hand. The narrower risk of an overlap with a
+// deliberately archived campaign is the better trade than an un-releasable lock.
+func (r *Registry) ActiveCampaignCellOwners() ([]CampaignCellOwner, error) {
+	rows, err := r.db.Query(`SELECT c.tenant_id, c.hour_utc, s.id, s.name
+	  FROM campaign_cells c JOIN strategy_campaigns s ON s.id = c.campaign_id
+	  WHERE s.status = ? AND c.strategy_id IS NOT NULL
+	  ORDER BY c.tenant_id, c.hour_utc`, CampaignStatusActive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CampaignCellOwner{}
+	for rows.Next() {
+		var o CampaignCellOwner
+		if err := rows.Scan(&o.TenantID, &o.HourUTC, &o.CampaignID, &o.CampaignName); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
 // CampaignCells returns every frozen cell for one campaign, ordered by tenant then
 // hour — the same order the suggest payload it came from already used.
 func (r *Registry) CampaignCells(campaignID string) ([]CampaignCell, error) {

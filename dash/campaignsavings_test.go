@@ -18,12 +18,12 @@ func TestCampaignRealSavingsGroupsByTenantAndHour(t *testing.T) {
 	t1ping9 := kaPing(hourUTC(1, 9), "s1", 0.02, 40_000, 0)
 	t1ping9.TenantID, t1ping9.KeepAliveStrategyID = "t1", "camp-strat-1"
 	t1credit9 := kaCredit(hourUTC(1, 9), "s1", 0.10)
-	t1credit9.TenantID = "t1"
+	t1credit9.TenantID, t1credit9.KeepAliveStrategyID = "t1", "camp-strat-1"
 
 	t1ping10 := kaPing(hourUTC(1, 10), "s1", 0.03, 40_000, 0)
 	t1ping10.TenantID, t1ping10.KeepAliveStrategyID = "t1", "camp-strat-1"
 	t1credit10 := kaCredit(hourUTC(1, 10), "s1", 0.07)
-	t1credit10.TenantID = "t1"
+	t1credit10.TenantID, t1credit10.KeepAliveStrategyID = "t1", "camp-strat-1"
 
 	// A ping under a strategy this campaign does NOT own — must not be counted.
 	otherStrategyPing := kaPing(hourUTC(1, 9), "s2", 0.09, 90_000, 0)
@@ -78,12 +78,12 @@ func TestCampaignRealSavingsRespectsTheSinceBound(t *testing.T) {
 	before := kaPing(hourUTC(1, 9), "s1", 0.02, 40_000, 0)
 	before.TenantID, before.KeepAliveStrategyID = "t1", "camp-strat-1"
 	beforeCredit := kaCredit(hourUTC(1, 9), "s1", 0.10)
-	beforeCredit.TenantID = "t1"
+	beforeCredit.TenantID, beforeCredit.KeepAliveStrategyID = "t1", "camp-strat-1"
 
 	after := kaPing(hourUTC(2, 9), "s2", 0.05, 40_000, 0)
 	after.TenantID, after.KeepAliveStrategyID = "t1", "camp-strat-1"
 	afterCredit := kaCredit(hourUTC(2, 9), "s2", 0.20)
-	afterCredit.TenantID = "t1"
+	afterCredit.TenantID, afterCredit.KeepAliveStrategyID = "t1", "camp-strat-1"
 
 	if err := db.insertBatch([]*Event{before, beforeCredit, after, afterCredit}); err != nil {
 		t.Fatal(err)
@@ -152,23 +152,35 @@ func TestCampaignRealSavingsOnEmptyInputs(t *testing.T) {
 // The cost half only needs strategyIDs and the saving half only needs tenantIDs — they
 // must run independently of each other, not both be skipped just because the OTHER
 // list happened to be empty. A campaign whose every cell resolved to a non-activatable
-// arm has strategyIDs=nil but a real, non-empty tenantIDs list, and its tenants can
-// still have real credited savings that this call must not silently omit.
+// arm has strategyIDs=nil but a real, non-empty tenantIDs list, and its traffic VOLUME
+// must still be reported.
+//
+// It must report $0.00 CREDIT in that case, though, which is the assertion this test
+// used to make backwards: it asserted a campaign owning no strategy at all still
+// collected $0.10 of a tenant's credit, because the query summed the tenant's whole
+// keep-alive saving. That was the double-count, encoded as an expectation — so the
+// numbers here changed with the fix while the "both halves still run" property it exists
+// to protect did not.
 func TestCampaignRealSavingsHalvesRunIndependentlyOfEachOther(t *testing.T) {
 	db := openTestDB(t)
 	credit := kaCredit(hourUTC(1, 9), "s1", 0.10)
-	credit.TenantID = "t1"
+	credit.TenantID, credit.KeepAliveStrategyID = "t1", "someone-elses-strategy"
 	if err := db.insertBatch([]*Event{credit}); err != nil {
 		t.Fatal(err)
 	}
 
-	// No strategy ids at all — the saving half must still run and find t1's credit.
+	// No strategy ids at all — the saving half must still run and report the traffic, but
+	// claim none of its credit.
 	cells, err := db.CampaignRealSavings(nil, []string{"t1"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cells) != 1 || cells[0].SavedUSD < 0.099 || cells[0].SavedUSD > 0.101 {
-		t.Errorf("got %+v, want 1 cell with ~$0.10 saved even with no strategy ids given", cells)
+	if len(cells) != 1 || cells[0].Requests != 1 {
+		t.Fatalf("got %+v, want 1 cell with 1 request even with no strategy ids given", cells)
+	}
+	if cells[0].SavedUSD != 0 {
+		t.Errorf("SavedUSD = %v, want exactly 0: a campaign that created no strategy has "+
+			"no claim on this tenant's credit", cells[0].SavedUSD)
 	}
 
 	ping := kaPing(hourUTC(1, 9), "s2", 0.02, 40_000, 0)
@@ -183,5 +195,56 @@ func TestCampaignRealSavingsHalvesRunIndependentlyOfEachOther(t *testing.T) {
 	}
 	if len(cells) != 1 || cells[0].Pings != 1 || cells[0].PingUSD < 0.019 || cells[0].PingUSD > 0.021 {
 		t.Errorf("got %+v, want 1 cell with 1 ping at ~$0.02 even with no tenant ids given", cells)
+	}
+}
+
+// The regression this file's whole strategy-id scoping exists for: one tenant credited
+// under two different strategies, read by two campaigns that own one strategy each. Each
+// campaign must see only its own strategy's credit, and the two must SUM to the tenant's
+// total rather than each reporting all of it.
+//
+// On the live deployment every credited tenant is credited under three to six distinct
+// strategies, so the pre-fix behaviour was not an edge case — it was every row.
+func TestCampaignRealSavingsAttributesCreditToOneStrategyOnly(t *testing.T) {
+	db := openTestDB(t)
+
+	// Same tenant, same hour, two strategies — one owned by each of two campaigns.
+	mine := kaCredit(hourUTC(1, 9), "s1", 0.10)
+	mine.TenantID, mine.KeepAliveStrategyID = "t1", "strat-mine"
+	theirs := kaCredit(hourUTC(1, 9), "s2", 0.25)
+	theirs.TenantID, theirs.KeepAliveStrategyID = "t1", "strat-theirs"
+	// A credit with NO strategy at all: plain account config or a session override. It
+	// belongs to neither campaign and must be claimed by neither.
+	unowned := kaCredit(hourUTC(1, 9), "s3", 4.00)
+	unowned.TenantID = "t1"
+
+	if err := db.insertBatch([]*Event{mine, theirs, unowned}); err != nil {
+		t.Fatal(err)
+	}
+
+	one, err := db.CampaignRealSavings([]string{"strat-mine"}, []string{"t1"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := db.CampaignRealSavings([]string{"strat-theirs"}, []string{"t1"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one) != 1 || len(two) != 1 {
+		t.Fatalf("got %d and %d cells, want 1 each", len(one), len(two))
+	}
+	if one[0].SavedUSD < 0.099 || one[0].SavedUSD > 0.101 {
+		t.Errorf("campaign one SavedUSD = %v, want ~0.10 (its own strategy only, not the "+
+			"tenant's whole $4.35 of credit)", one[0].SavedUSD)
+	}
+	if two[0].SavedUSD < 0.249 || two[0].SavedUSD > 0.251 {
+		t.Errorf("campaign two SavedUSD = %v, want ~0.25", two[0].SavedUSD)
+	}
+	// Requests is a denominator, not credit: it stays the tenant's whole traffic in the
+	// cell for both readers, so a $-per-1k-requests rate divides by all the traffic a
+	// strategy was exposed to rather than only the requests it managed to rescue.
+	if one[0].Requests != 3 || two[0].Requests != 3 {
+		t.Errorf("Requests = %d and %d, want 3 each: the denominator is all real traffic "+
+			"in the cell, not the rescued subset", one[0].Requests, two[0].Requests)
 	}
 }

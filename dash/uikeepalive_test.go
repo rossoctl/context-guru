@@ -263,7 +263,11 @@ func TestNoUIScriptShadowsAWindowMethod(t *testing.T) {
 		"getComputedStyle", "matchMedia", "getSelection", "name", "status", "length",
 	}
 	decl := regexp.MustCompile(`(?m)^(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)`)
-	for _, f := range []string{"ui/app.js", "ui/tools.js"} {
+	// Every classic script on the page: the shadow this guards against is a whole-bundle
+	// property "in any load order", so a file left out of the loop is a file that can
+	// introduce one freely. campaigns.js is the pointed case — it calls bare confirm() and
+	// alert(), both on the list below.
+	for _, f := range []string{"ui/app.js", "ui/tools.js", "ui/kvcache.js", "ui/campaigns.js"} {
 		src := stripJSComments(readUI(t, f))
 		for _, m := range decl.FindAllStringSubmatch(src, -1) {
 			for _, bad := range shadowable {

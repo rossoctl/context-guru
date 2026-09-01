@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,6 +107,58 @@ func TestResolveCampaignCellBaselineArmIsActivatableWithNoConfig(t *testing.T) {
 	got := resolveCampaignCell(cell, func(string) bool { return true })
 	if !got.activatable || !got.config.baseline {
 		t.Errorf("got %+v, want an activatable baseline cell", got)
+	}
+}
+
+// An (tenant, hour) an active campaign already enforces must not be enforced a second
+// time: only one of the two strategies can win the resolution chain, so the loser's
+// campaign would report a prediction for a policy that never actually ran.
+func TestMarkCampaignOverlapsSkipsHoursAnActiveCampaignAlreadyHolds(t *testing.T) {
+	held := []tenant.CampaignCellOwner{
+		{TenantID: "t1", HourUTC: 9, CampaignID: "c-old", CampaignName: "morning push"},
+	}
+	taken := &resolvedCampaignCell{tenantID: "t1", hourUTC: 9, activatable: true,
+		config: campaignArmFor(kvcache.StrategyKeepAlive5m)}
+	// Same hour, different tenant — no conflict: a strategy's Target names accounts, so
+	// t2's hour 9 is not the hour t1's strategy holds.
+	otherTenant := &resolvedCampaignCell{tenantID: "t2", hourUTC: 9, activatable: true,
+		config: campaignArmFor(kvcache.StrategyKeepAlive5m)}
+	// Same tenant, different hour — no conflict either.
+	otherHour := &resolvedCampaignCell{tenantID: "t1", hourUTC: 10, activatable: true,
+		config: campaignArmFor(kvcache.StrategyKeepAlive5m)}
+	// A baseline cell creates no strategy, so it cannot collide with one.
+	baseline := &resolvedCampaignCell{tenantID: "t1", hourUTC: 9, activatable: true,
+		config: campaignArmFor(kvcache.StrategyFixed5m)}
+
+	markCampaignOverlaps([]*resolvedCampaignCell{taken, otherTenant, otherHour, baseline}, held)
+
+	if taken.activatable || taken.skipReason == "" {
+		t.Errorf("held cell = %+v, want not activatable with a reason", taken)
+	}
+	if !strings.Contains(taken.skipReason, "morning push") {
+		t.Errorf("skip reason %q does not name the campaign holding the hour", taken.skipReason)
+	}
+	for _, c := range []*resolvedCampaignCell{otherTenant, otherHour, baseline} {
+		if !c.activatable {
+			t.Errorf("cell %+v was skipped, want still activatable", c)
+		}
+	}
+}
+
+// A DIFFERENT arm for an already-held hour is still a conflict, not a refinement — see
+// markCampaignOverlaps' own doc comment. Pinned because "the arms differ, so let it
+// through" is the plausible-looking relaxation that would silently restore two competing
+// strategies for one hour.
+func TestMarkCampaignOverlapsIsBlindToTheArm(t *testing.T) {
+	held := []tenant.CampaignCellOwner{
+		{TenantID: "t1", HourUTC: 9, CampaignID: "c-old", CampaignName: "old"},
+	}
+	differentArm := &resolvedCampaignCell{tenantID: "t1", hourUTC: 9, activatable: true,
+		arm: kvcache.StrategyStopReasonGated, config: campaignArmFor(kvcache.StrategyStopReasonGated)}
+	markCampaignOverlaps([]*resolvedCampaignCell{differentArm}, held)
+	if differentArm.activatable {
+		t.Errorf("got %+v, want not activatable: a different arm for a held hour is still a conflict",
+			differentArm)
 	}
 }
 
@@ -538,8 +591,21 @@ func TestCtlGetCampaignAggregatesPredictedAndRealPerTenant(t *testing.T) {
 		KeepAlive: true, KeepAliveStrategyID: strategyID, CostUSD: 0.02,
 		CacheRead: 40_000, Model: "aws/claude-sonnet-5", TokenAccounting: dash.AccountingComplete,
 	})
+	// The credited row carries the same strategy id its rescuing ping did — which is what
+	// makes it THIS campaign's saving rather than merely this tenant's. Before
+	// dash.CampaignRealSavings scoped the credited half by strategy id, an untagged row
+	// here was collected all the same, so this test passed while proving something weaker
+	// than it claimed: that a campaign picks up any credit its tenant happens to have.
 	f.record(t, tenantA, "s1", &dash.Event{
-		KeepAliveSavedUSD: 0.10, Model: "aws/claude-sonnet-5", TokenAccounting: dash.AccountingComplete,
+		KeepAliveSavedUSD: 0.10, KeepAliveStrategyID: strategyID,
+		Model: "aws/claude-sonnet-5", TokenAccounting: dash.AccountingComplete,
+	})
+	// A second credited row for the same tenant, under a strategy this campaign does NOT
+	// own — the manually-created strategies this deployment already runs alongside any
+	// campaign. It must not reach real_saved_usd below.
+	f.record(t, tenantA, "s1", &dash.Event{
+		KeepAliveSavedUSD: 5.00, KeepAliveStrategyID: "someone-elses-strategy",
+		Model: "aws/claude-sonnet-5", TokenAccounting: dash.AccountingComplete,
 	})
 
 	w, out := f.do(t, "GET", "/api/keepalive/campaigns/"+campaignID, "", mgrJar)
@@ -558,13 +624,14 @@ func TestCtlGetCampaignAggregatesPredictedAndRealPerTenant(t *testing.T) {
 		t.Errorf("predicted_usd = %v, want ~1.50", row["predicted_usd"])
 	}
 	if s, _ := row["real_saved_usd"].(float64); s < 0.099 || s > 0.101 {
-		t.Errorf("real_saved_usd = %v, want ~0.10", row["real_saved_usd"])
+		t.Errorf("real_saved_usd = %v, want ~0.10 — this campaign's own strategy only, not "+
+			"the $5.10 of credit this tenant has in total", row["real_saved_usd"])
 	}
 	if total, _ := out["total_predicted_usd"].(float64); total < 1.49 || total > 1.51 {
 		t.Errorf("total_predicted_usd = %v, want ~1.50", out["total_predicted_usd"])
 	}
 	if out["caveat"] == "" || out["caveat"] == nil {
-		t.Error("the ceiling caveat was not carried onto the response")
+		t.Error("the attribution caveat was not carried onto the response")
 	}
 }
 

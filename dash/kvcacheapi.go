@@ -36,6 +36,7 @@ func (a *API) kvCacheRoutes() []route {
 		{"GET /api/kvcache/simulate", scopeTenant, a.kvCacheSimulate},
 		{"GET /api/kvcache/pricing", scopeTenant, a.kvCachePricing},
 		{"GET /api/kvcache/suggest", scopeTenant, a.kvCacheSuggest},
+		{"GET /api/kvcache/suggest/holdout", scopeTenant, a.kvCacheSuggestHoldout},
 	}
 }
 
@@ -125,6 +126,47 @@ func (a *API) kvCacheSuggest(w http.ResponseWriter, r *http.Request) {
 			code = http.StatusBadRequest
 		}
 		httpErr(w, code, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+// kvCacheSuggestHoldout serves the train/test split of that same suggestion: the arm each
+// cell's TRAIN window chose, scored on a disjoint TEST window it was not chosen on.
+//
+// Its four time bounds come from their own query parameters, NOT from the shared
+// since/until the rest of this package reads through a.scope: a holdout needs two windows
+// and the filter carries one. The scope's own bounds are deliberately ignored rather than
+// intersected with these — a global "last 24h" silently narrowing both halves of a
+// month-long split would produce a real-looking answer to a question nobody asked.
+func (a *API) kvCacheSuggestHoldout(w http.ResponseWriter, r *http.Request) {
+	f, _, ok := a.scope(r)
+	if !ok {
+		unauthorized(w)
+		return
+	}
+	// Two full dataset reads, so it takes the same slot the single-window routes do — and
+	// needs it more, not less.
+	if err := acquireKVCache(r.Context()); err != nil {
+		return
+	}
+	defer releaseKVCache()
+	q := r.URL.Query()
+	train := Window{Since: atoi64(q.Get("train_since")), Until: atoi64(q.Get("train_until"))}
+	test := Window{Since: atoi64(q.Get("test_since")), Until: atoi64(q.Get("test_until"))}
+	out, err := a.rec.DB().WithContext(r.Context()).KVCacheSuggestHoldout(
+		f, kvCacheOptionsFrom(r), a.pricer, kvCacheConfigFrom(r), train, test)
+	if err != nil {
+		// Every error validHoldoutWindows returns is the caller's own malformed window, and
+		// an unknown baseline is the caller's mistake exactly as on /api/kvcache/suggest.
+		// Anything else came from the store and must stay a 5xx so an alert can fire on it.
+		code := http.StatusInternalServerError
+		msg := err.Error()
+		if strings.Contains(msg, "unknown baseline strategy") ||
+			strings.Contains(msg, "window") {
+			code = http.StatusBadRequest
+		}
+		httpErr(w, code, msg)
 		return
 	}
 	writeJSON(w, out)

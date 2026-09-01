@@ -195,6 +195,51 @@ func resolveCampaignCell(cell dash.KVCacheSuggestion, honorsHeadTTL1h func(tenan
 	return out
 }
 
+// markCampaignOverlaps turns any cell whose (tenant, hour) an ACTIVE campaign already
+// enforces into a non-activatable one, naming the campaign that holds it.
+//
+// A per-cell skip, not a refusal of the whole request. The two alternatives are both
+// worse: rejecting the campaign outright makes one already-covered hour block a batch of
+// two hundred good cells, and a manager's only recovery is to hand-edit the payload to
+// remove it — while creating the strategy anyway leaves two live strategies competing for
+// one hour, where the resolution chain silently picks one and both campaigns claim it.
+// Skipping reuses the machinery every other unenforceable cell already flows through:
+// recorded with a reason, grouped by that reason in the create result, never hidden.
+//
+// Deliberately blind to the ARM: a second campaign recommending a DIFFERENT arm for an
+// hour is still a conflict, not a refinement. Only one of the two strategies can win the
+// resolution chain, so letting the different-arm case through would recreate exactly the
+// ambiguity this gate exists to remove. Re-issuing an hour under a new arm is a real
+// need, and the honest path for it is to archive the campaign that holds it first.
+func markCampaignOverlaps(resolved []*resolvedCampaignCell, owners []tenant.CampaignCellOwner) {
+	type key struct {
+		tenantID string
+		hour     int
+	}
+	held := make(map[key]tenant.CampaignCellOwner, len(owners))
+	for _, o := range owners {
+		held[key{o.TenantID, o.HourUTC}] = o
+	}
+	for _, c := range resolved {
+		if !c.activatable {
+			continue
+		}
+		// Baseline cells ("change nothing") create no strategy at all, so they cannot
+		// collide with one — excluding them keeps a campaign whose recommendation for an
+		// hour is "keep the current policy" from being reported as conflicting with the
+		// campaign that already decided the same thing.
+		if c.config.baseline {
+			continue
+		}
+		if o, ok := held[key{c.tenantID, c.hourUTC}]; ok {
+			c.activatable = false
+			c.skipReason = fmt.Sprintf(
+				"the active campaign %q already enforces this tenant's hour %02d:00 UTC — "+
+					"archive it first to re-issue this hour", o.CampaignName, c.hourUTC)
+		}
+	}
+}
+
 // duplicateCampaignCell reports the first cell whose (tenantID, hourUTC) pair also
 // appears earlier in resolved, or nil if every pair is unique — the same key shape
 // tenant.CreateCampaign's own guard checks, run here up front so a duplicate is
@@ -612,6 +657,20 @@ func (h *Handler) ctlCreateCampaign(w http.ResponseWriter, r *http.Request) {
 			"duplicate cell for tenant %q at hour %d", dup.tenantID, dup.hourUTC))
 		return
 	}
+	// Cross-campaign overlap, checked in the same place and for the same reason the
+	// within-payload duplicate above is: before any strategy exists. A failure to READ the
+	// existing owners aborts the whole create rather than proceeding unchecked — a
+	// campaign created while this gate was blind is exactly the double-enforcement it
+	// exists to prevent, and it cannot be un-created without hunting down its strategies
+	// by hand afterwards.
+	owners, err := h.registry().ActiveCampaignCellOwners()
+	if err != nil {
+		slog.Error("context-guru: could not read active campaign cell owners", "err", err)
+		ctlErr(w, http.StatusInternalServerError,
+			"could not check this campaign against the hours already enforced")
+		return
+	}
+	markCampaignOverlaps(resolved, owners)
 
 	days := weekdaysFromNames(suggest.Weekdays)
 	groups := coalesceCampaignCells(resolved)
@@ -960,11 +1019,23 @@ func (h *Handler) ctlGetCampaignTenant(w http.ResponseWriter, r *http.Request) {
 }
 
 // campaignRealSavingsCaveat is carried on every response that includes a real-saving
-// figure, the same ceiling caveat dash.StrategyLedgerView already declares — see
-// dash/campaignsavings.go's own file doc comment for the full reasoning.
-const campaignRealSavingsCaveat = "Real saved-$ figures are a CEILING, not an exact " +
-	"per-strategy attribution: the credit lands on the tenant's whole keep-alive " +
-	"saving in that hour, not only the share this campaign's own strategies produced."
+// figure. It used to declare the figure a CEILING, on the premise that a credited request
+// carried no strategy id and so could only ever be attributed to a tenant — which was
+// already untrue when it shipped, and had the campaigns tab reporting every strategy's
+// saving under whichever campaign named the tenant. dash/campaignsavings.go now scopes the
+// credit by strategy id, so the number is exact and this says so instead.
+//
+// What replaces the old warning is the one caveat that IS still true and is easy for a
+// reader to trip over: these figures do not add up to the Keep-Alive or Overview totals,
+// because a credit whose ping matched no strategy belongs to no campaign. That is the same
+// sentence renderStrategiesList already shows for a single strategy's ledger, deliberately
+// worded the same way so the two tabs read as one product.
+const campaignRealSavingsCaveat = "Real saved-$ figures are EXACT and additive across " +
+	"campaigns: each credited request is attributed once, to whichever strategy's pings " +
+	"actually rescued it. They will not sum to the Overview or Keep-Alive tab's total, " +
+	"though — a credit whose ping matched no strategy (plain account config or a session " +
+	"override) belongs to no campaign, and neither does traffic from before this campaign " +
+	"was activated."
 
 // campaignRealSavings computes real savings for every strategy this campaign created,
 // bounded to since tenantID is only used to filter which cells to bother computing —
