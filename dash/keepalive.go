@@ -134,6 +134,12 @@ func addressable(f Filter) (string, []any) {
 // becomes that bug. It seeks idx_requests_tenant_session (tenant_id, session_id, ts), which
 // already exists.
 //
+// Same reason sumBySession's row FILTER stays `keepalive_saved_usd > 0` while its VALUE is this
+// expression. The filter is a superset of the value's condition, so no contributing row is lost —
+// a session whose credit is entirely unreachable reports $0.00, and all three callers look up by
+// session id rather than treating map presence as "credited". Narrowing the filter would move the
+// EXISTS into the WHERE, once per row IN SCOPE instead of once per credited row: the 61.9s one.
+//
 // Two deliberate looseness's, both stated rather than hidden. `kp.ts <= r.ts` rather than `<`,
 // because a ping and the request it rescued can land in the same millisecond and the tie is
 // harmless — kp.keepalive = 1 makes a row matching itself impossible. And ts is the row's
