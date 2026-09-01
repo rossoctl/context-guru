@@ -31,6 +31,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -318,6 +319,13 @@ func Open(path string, o Options) (*Registry, error) {
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("tenant: migrate: %w", err)
+	}
+	// Schema migrations above are DDL; this is a one-time DATA fix for the config documents
+	// #118 broke — see configmigrate.go. Never fatal to Open: an account this cannot safely
+	// rewrite is logged and left running exactly as it is now (fail-open, uncompacted) rather
+	// than blocking every other account from starting.
+	if err := fixDeprecatedExtractLLMConfigs(db, o.Validate); err != nil {
+		slog.Error("tenant: deprecated extract_llm config recovery failed; continuing without it", "err", err)
 	}
 	return &Registry{db: db, path: path, opts: o, cache: map[string]cacheEntry{}}, nil
 }

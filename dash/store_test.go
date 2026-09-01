@@ -462,6 +462,33 @@ func TestOverviewDenominatorsAndSafety(t *testing.T) {
 	}
 }
 
+// TestOverviewCountsInvalidConfigRequests pins the property the #118 incident showed was
+// missing: a request forwarded uncompacted because its account's own configuration failed to
+// build (proxy/tenancy.go's build() marks that row's preset "invalid" on purpose, rather than
+// taking the account offline) must be visible from Overview, not only from a log line.
+func TestOverviewCountsInvalidConfigRequests(t *testing.T) {
+	db := openTestDB(t)
+	ok1 := mkEvent(1000, "s1", "m", 100, 90)
+	ok1.Preset = "codesmart"
+	broken := mkEvent(2000, "s2", "m", 100, 100)
+	broken.Preset = "invalid"
+	ok2 := mkEvent(3000, "s3", "m", 100, 90)
+	ok2.Preset = "housellm"
+	if err := db.insertBatch([]*Event{ok1, broken, ok2}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := db.Overview(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Requests != 3 {
+		t.Fatalf("requests = %d, want 3", o.Requests)
+	}
+	if o.InvalidConfigRequests != 1 {
+		t.Errorf("invalid_config_requests = %d, want 1", o.InvalidConfigRequests)
+	}
+}
+
 // TestNewInputRatioNeverDividesSavingsByThemselves is the guard the issue calls
 // non-negotiable: with no provider usage data the denominator would be `saved`
 // alone and the ratio would read ~100%. It must read n/a.

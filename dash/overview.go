@@ -55,6 +55,17 @@ type Overview struct {
 	Requests int64 `json:"requests"`
 	Sessions int64 `json:"sessions"`
 
+	// InvalidConfigRequests is how many of Requests ran with NO compaction because this
+	// account's stored configuration failed to build — proxy/tenancy.go's build() fails open
+	// on purpose (a bad config row must never take someone's agent offline) by forwarding
+	// uncompacted and marking the row's preset "invalid", but until now that marker was only
+	// ever visible in the proxy's own log, never on the page an account owner or a manager
+	// actually looks at. A real incident (#118 removed a config key with no migration for the
+	// accounts already using it) ran for hours as nine accounts' compaction silently went to
+	// zero before anyone noticed from a log line rather than from here. Nonzero here means the
+	// account's Settings page needs attention now, not "check the logs".
+	InvalidConfigRequests int64 `json:"invalid_config_requests"`
+
 	TokensBefore int64 `json:"tokens_before"`
 	TokensAfter  int64 `json:"tokens_after"`
 	// SavedGross re-counts the same compaction every turn the agent re-sends the
@@ -616,8 +627,18 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		keepAlivePingUSD                       float64
 		accountingM, cacheMissM, uncompressedM map[string]int64
 		p95cg, p95up                           float64
+		invalidConfigRequests                  int64
 	)
 	var g errgroup.Group
+	// See InvalidConfigRequests' own comment: preset is set to "invalid" by
+	// proxy/tenancy.go's build() exactly when this account's stored configuration failed to
+	// build, on every request forwarded uncompacted while that lasts. Cheap: cond already
+	// scopes this to the tenant/window idx_requests_tenant covers, so this is a filter over an
+	// already-narrow row set, not a fresh scan.
+	g.Go(func() error {
+		return d.sql.QueryRow(`SELECT COUNT(*) FROM requests r
+			WHERE `+cond+` AND r.preset = 'invalid'`, args...).Scan(&invalidConfigRequests)
+	})
 	// The replay ceiling's raw form, corrected below by the inflation query once both are in —
 	// see the comment above `splitMoved` usage earlier in this function for the ceiling's own
 	// derivation, and see the correlated-vs-window-function tradeoff explained where this query
@@ -819,6 +840,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.CacheMiss = cacheMissM
 	o.Uncompressed = uncompressedM
 	o.CGLatencyMsP95, o.UpstreamMsP95 = p95cg, p95up
+	o.InvalidConfigRequests = invalidConfigRequests
 
 	o.SafetyCost.FrozenTokens = o.FrozenTokens
 	o.SafetyCost.RestoredTokens = o.ExpandTokens

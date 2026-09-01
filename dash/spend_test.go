@@ -8,13 +8,34 @@ import (
 
 // spendEvents builds n priced requests for one tenant, split across sessions so the
 // quota path has whole sessions to evict.
+//
+// Spread one hour apart by default — comfortably distinguishable, and far enough in the
+// past to satisfy every retention-age check these tests also run. MonthToDateUSD always
+// asks for the CURRENT real calendar month (time.Now(), not an injectable clock — see its
+// own comment on why the rollup has to be real-time), so the naive version of this that
+// unconditionally went `sessions` hours into the past would occasionally split its own
+// fixture across two different tenant_spend rows: measured failing, deterministically,
+// the first ~10 hours of a new calendar month, because the oldest sessions land in the
+// PREVIOUS month while the newest still land in this one. Clamped to the room actually
+// available since local UTC midnight on the 1st, so this is exact for the ~99.9% of the
+// month that isn't within `sessions` hours of the boundary, and still correct — just more
+// tightly packed — for the sliver that is.
 func spendEvents(tenant string, sessions, turns int, usdEach float64) []*Event {
-	base := time.Now().Add(-time.Duration(sessions) * time.Hour).UnixMilli()
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	spacing := time.Hour
+	if avail := now.Sub(monthStart); avail < time.Duration(sessions)*spacing {
+		if spacing = avail / time.Duration(sessions+1); spacing < 10*time.Second {
+			spacing = 10 * time.Second // floor: keep sessions and their turns from overlapping
+		}
+	}
+	base := now.Add(-time.Duration(sessions) * spacing).UnixMilli()
+	spacingMs := spacing.Milliseconds()
 	var evs []*Event
 	for s := 0; s < sessions; s++ {
 		for k := 0; k < turns; k++ {
 			evs = append(evs, &Event{
-				TS: base + int64(s)*3600_000 + int64(k)*1000, TenantID: tenant,
+				TS: base + int64(s)*spacingMs + int64(k)*1000, TenantID: tenant,
 				SessionID: tenant + ":s" + string(rune('a'+s)), Model: "m", Status: 200,
 				CostUSD: usdEach, TokenAccounting: AccountingComplete,
 			})
