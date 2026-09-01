@@ -294,14 +294,29 @@ func perComponentEvent(read, write, fresh int64) *Event {
 // tierCases are the three billing outcomes a removed token can be valued at, which is the
 // whole of the tier rule: a warm turn replays from cache, a cold/TTL-expired turn has the
 // entire prompt re-billed as creation, and a non-caching backend bills fresh.
+//
+// `tier` is Event.repeatRate — what the RE-SENT part was billed at. `unique` is
+// Event.uniqueRate — what content entering this prompt for the FIRST time would have been
+// billed at. They coincide only on the cold turn: cache creation is what a first entry costs
+// when the write covered the prompt, and where nothing was written a first entry is fresh
+// INPUT, never a cache read (that content was never in the cache to read from). The two
+// columns exist separately because the two questions are separate; conflating them is what
+// priced every warm turn's first removal 25% high.
 var tierCases = []struct {
 	name               string
 	read, write, fresh int64
 	tier               func(modelinfo.Price) float64
+	unique             func(modelinfo.Price) float64
 }{
-	{"warm", 80_000, 0, 10, func(p modelinfo.Price) float64 { return p.CacheRead }},
-	{"cold_ttl", 0, 80_000, 10, func(p modelinfo.Price) float64 { return p.CacheWrite }},
-	{"non_caching", 0, 0, 80_000, func(p modelinfo.Price) float64 { return p.Input }},
+	{"warm", 80_000, 0, 10,
+		func(p modelinfo.Price) float64 { return p.CacheRead },
+		func(p modelinfo.Price) float64 { return p.Input }},
+	{"cold_ttl", 0, 80_000, 10,
+		func(p modelinfo.Price) float64 { return p.CacheWrite },
+		func(p modelinfo.Price) float64 { return p.CacheWrite }},
+	{"non_caching", 0, 0, 80_000,
+		func(p modelinfo.Price) float64 { return p.Input },
+		func(p modelinfo.Price) float64 { return p.Input }},
 }
 
 // TestPerComponentSavedUSDReconcilesWithTheBaseline is the identity that makes the
@@ -341,7 +356,7 @@ func TestComponentSavingUsesTheTierTheRequestPaid(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := perComponentEvent(tc.read, tc.write, tc.fresh)
 			e.Price(ibmOpus, true)
-			tier := tc.tier(ibmOpus)
+			tier, urate := tc.tier(ibmOpus), tc.unique(ibmOpus)
 			for _, want := range []struct {
 				comp           string
 				unique, replay float64
@@ -352,10 +367,11 @@ func TestComponentSavingUsesTheTierTheRequestPaid(t *testing.T) {
 				{"cacheinject", 0, 0},
 			} {
 				got := compByName(t, e, want.comp).SavedUSD
-				exp := want.unique*ibmOpus.CacheWrite + want.replay*tier
+				exp := want.unique*urate + want.replay*tier
 				if math.Abs(got-exp) > 1e-12 {
-					t.Errorf("%s saved_usd = %.10f, want %.10f (unique at the write rate, "+
-						"replay at this request's %s tier)", want.comp, got, exp, tc.name)
+					t.Errorf("%s saved_usd = %.10f, want %.10f (unique at the rate it would "+
+						"have ENTERED this %s turn at, replay at that turn's own tier)",
+						want.comp, got, exp, tc.name)
 				}
 			}
 			// And on a warm turn the replay term must NOT be the creation rate, which is the

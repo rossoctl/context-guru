@@ -169,6 +169,12 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 	// Event.repeatRate, deliberately duplicated as constants rather than shared through a
 	// helper: if these two queries ever disagree the reconciliation below silently stops
 	// meaning anything, so they are written to be diffed by eye.
+	//
+	// The FOURTH grouping key, wcov, is Event.uniqueRate's test — did the write cover the
+	// prompt — and it cannot be read off `tier`. That CASE is three-way and READ-WINS, so
+	// every row with cache_read > 0 lands in 'read' whatever its write did, and 'read' is
+	// exactly the population where uniqueRate has to decide between CacheWrite and Input.
+	// Reusing tier here would have silently priced every warm turn's first removal fresh.
 	const gross = `max(c.saved_gross,0)`
 	const uniq = `min(max(c.saved_unique,0), max(c.saved_gross,0))`
 	// Grouped by whether the row carried a STORED saved_usd, because that is what decides
@@ -177,21 +183,22 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 		CASE WHEN r.cache_read > 0 THEN 'read'
 		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
 		     ELSE 'fresh' END,
+		CASE WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 1 ELSE 0 END,
 		CASE WHEN c.saved_usd <> 0 THEN 1 ELSE 0 END,
 		COALESCE(SUM(`+uniq+`),0), COALESCE(SUM(`+gross+` - `+uniq+`),0),
 		COUNT(*), SUM(CASE WHEN c.saved_gross <> c.saved_unique THEN 1 ELSE 0 END)
 		FROM request_components c JOIN requests r ON r.id = c.request_id
 		WHERE `+cond+` AND c.saved_gross > 0 AND r.token_accounting = 'complete'
-		GROUP BY 1, 2, 3, 4`, args...)
+		GROUP BY 1, 2, 3, 4, 5`, args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var name, model, tier string
-		var storedRow int
+		var wcov, storedRow int
 		var unique, replay, nRows, nDiff int64
-		if err := rows.Scan(&name, &model, &tier, &storedRow, &unique, &replay,
+		if err := rows.Scan(&name, &model, &tier, &wcov, &storedRow, &unique, &replay,
 			&nRows, &nDiff); err != nil {
 			return err
 		}
@@ -212,12 +219,18 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 		case "write":
 			rate = price.CacheWrite
 		}
-		// The first removal enters at the CACHE-WRITE rate because that is the tier content
-		// entering a prompt for the first time is billed at. The replay is priced at the tier
-		// the later turn actually paid, which on warm traffic is the cache-read rate — a tenth
-		// of the write rate. That asymmetry is why a large replay multiple still adds up to
-		// very little money, and the UI has to be able to say so.
-		first, rep := float64(unique)*price.CacheWrite, float64(replay)*rate
+		// The first removal enters at the tier content entering a prompt for the first time
+		// would have been billed at — the CACHE-WRITE rate only where the write covered the
+		// prompt, the FRESH rate otherwise, never the read rate. Event.uniqueRate, written out
+		// here rather than called, for the same diff-by-eye reason as the constants above. The
+		// replay is priced at the tier the later turn actually paid, which on warm traffic is
+		// the cache-read rate — a tenth of the write rate. That asymmetry is why a large replay
+		// multiple still adds up to very little money, and the UI has to be able to say so.
+		urate := price.Input
+		if urate == 0 || wcov == 1 {
+			urate = price.CacheWrite
+		}
+		first, rep := float64(unique)*urate, float64(replay)*rate
 		c.SavedUSDFirstRemoval += first
 		c.SavedUSDReplay += rep
 		// The subset that a stored figure exists for. Only this part of the decomposition is a
@@ -297,26 +310,29 @@ func (d *DB) EstimateComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Comp
 	//
 	// The tier bucket is Event.repeatRate's three cases, evaluated per request and grouped,
 	// so the estimate is priced at the tier each request actually paid rather than at a
-	// window-wide average that would flatter warm traffic.
+	// window-wide average that would flatter warm traffic. wcov beside it is Event.uniqueRate's
+	// own test, which the read-wins tier CASE cannot answer — see DecomposeComponentSavedUSD.
 	const gross = `max(c.saved_gross,0)`
 	const uniq = `min(max(c.saved_unique,0), max(c.saved_gross,0))`
 	rows, err := d.sql.Query(`SELECT c.component, r.model,
 		CASE WHEN r.cache_read > 0 THEN 'read'
 		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
 		     ELSE 'fresh' END,
+		CASE WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 1 ELSE 0 END,
 		COUNT(*), COALESCE(SUM(`+uniq+`),0), COALESCE(SUM(`+gross+` - `+uniq+`),0)
 		FROM request_components c JOIN requests r ON r.id = c.request_id
 		WHERE `+cond+` AND c.saved_usd = 0 AND c.saved_gross > 0
 		  AND r.token_accounting = 'complete'
-		GROUP BY 1, 2, 3`, args...)
+		GROUP BY 1, 2, 3, 4`, args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var name, model, tier string
+		var wcov int
 		var n, unique, replay int64
-		if err := rows.Scan(&name, &model, &tier, &n, &unique, &replay); err != nil {
+		if err := rows.Scan(&name, &model, &tier, &wcov, &n, &unique, &replay); err != nil {
 			return err
 		}
 		c, ok := by[name]
@@ -335,7 +351,11 @@ func (d *DB) EstimateComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Comp
 		case "write":
 			rate = price.CacheWrite
 		}
-		c.SavedUSDEstimated += float64(unique)*price.CacheWrite + float64(replay)*rate
+		urate := price.Input // Event.uniqueRate, written out; see DecomposeComponentSavedUSD
+		if urate == 0 || wcov == 1 {
+			urate = price.CacheWrite
+		}
+		c.SavedUSDEstimated += float64(unique)*urate + float64(replay)*rate
 		c.SavedUSDEstimatedRows += n
 	}
 	if err := rows.Err(); err != nil {

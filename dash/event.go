@@ -653,8 +653,8 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	e.CachesplitSavedUSD = e.cachesplitSavedUSD(p)
 	e.KeepAliveSavedUSD = e.keepaliveSavedUSD(p)
 	// Per-component dollars, same rule and same rates as baselineDeltaUSD above: the unique
-	// part at the write rate it would have entered as, the re-sent remainder at the tier this
-	// request actually paid. Summed over a component's turns this IS the amortization — value
+	// part at the tier it would have ENTERED at (uniqueRate — the write rate only where the
+	// write covered the prompt), the re-sent remainder at the tier this request actually paid. Summed over a component's turns this IS the amortization — value
 	// realized turn by turn as the frozen reduction replays, not a projection.
 	for i := range e.Components {
 		c := &e.Components[i]
@@ -668,7 +668,7 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 		if unique < 0 {
 			unique = 0
 		}
-		c.SavedUSD = float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)
+		c.SavedUSD = float64(unique)*e.uniqueRate(p) + float64(gross-unique)*e.repeatRate(p)
 	}
 }
 
@@ -838,8 +838,9 @@ func (e *Event) keepaliveSavedUSD(p modelinfo.Price) float64 {
 const providerCacheTTLMs int64 = 5 * 60 * 1000
 
 // baselineDeltaUSD is what the removed content would have cost had it been sent:
-// the unique part as new input (cache-write rate), the re-sent remainder as a
-// cache read.
+// the unique part at the tier content entering this prompt for the FIRST time would
+// have been billed at (uniqueRate), the re-sent remainder at the tier this request
+// actually paid (repeatRate).
 func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
 	unique := e.SavedUnique
 	gross := e.Saved()
@@ -852,7 +853,32 @@ func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
 	if unique < 0 {
 		unique = 0
 	}
-	return float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)
+	return float64(unique)*e.uniqueRate(p) + float64(gross-unique)*e.repeatRate(p)
+}
+
+// uniqueRate is what content removed on THIS turn would have been billed at had it been sent.
+//
+// It was p.CacheWrite unconditionally, on the reasoning that content entering a prompt for the
+// first time enters as a cache write. That holds only where the write actually covered the
+// prompt. It is the SAME question repeatRate already asks one line below for the other term,
+// and the asymmetry was the defect: on a turn that read cache and wrote none, the removed tail
+// would have been billed FRESH, not at the 1.25x cache-creation rate, so that term read 25%
+// high. Replay is ~93% of realized value, so the headline moves ~1.8%.
+//
+// Never CacheRead, in either branch. This content was never in the cache to be read FROM — that
+// is precisely what makes it the unique term rather than the replay term — and pricing brand-new
+// content as a cache read would understate it ~12x on the Anthropic family. The two-way test is
+// deliberate: there is no third case here, unlike repeatRate, whose read case is about content
+// that really is in the prefix.
+//
+// The p.Input == 0 guard is not defensive noise: a model can carry cache rates with no fresh
+// rate at all (fixture at capture_test.go:414), and falling through to a zero would price the
+// first removal of real content at $0.00 — a claim, not an absence.
+func (e *Event) uniqueRate(p modelinfo.Price) float64 {
+	if p.Input == 0 || (e.CacheWrite > 0 && e.CacheWrite >= e.FreshInput) {
+		return p.CacheWrite
+	}
+	return p.Input
 }
 
 // repeatRate is what the RE-SENT part of the removed content would have been billed

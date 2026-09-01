@@ -48,11 +48,15 @@ func insertReq(t *testing.T, db *DB, e *Event) int64 {
 //
 // Totals: gross 4,000, unique 1,500, replay 2,500.
 //
-// FIRST-REMOVAL value  = 1,500 x cache_write = 1,500 x 1.25e-6 = $0.001875
-// REPLAY value         = 2,500 x cache_read  = 2,500 x 1.0e-7  = $0.000250
-// AMORTIZED total      = $0.002125
+// Every turn here READ cache and wrote none, so Event.uniqueRate is the FRESH rate: content
+// entering these prompts for the first time would have been billed as input, not as cache
+// creation, because nothing on these turns created cache.
 //
-// The replay is 62.5% of the tokens and 11.8% of the money, which is the asymmetry the whole
+// FIRST-REMOVAL value  = 1,500 x input      = 1,500 x 1.0e-6  = $0.001500
+// REPLAY value         = 2,500 x cache_read = 2,500 x 1.0e-7  = $0.000250
+// AMORTIZED total      = $0.001750
+//
+// The replay is 62.5% of the tokens and 14.3% of the money, which is the asymmetry the whole
 // decomposition exists to show: a large token overcount ratio is a small dollar multiple,
 // because a re-removal is worth a tenth of a first removal.
 func TestReplayDecompositionIsHandCheckable(t *testing.T) {
@@ -87,12 +91,12 @@ func TestReplayDecompositionIsHandCheckable(t *testing.T) {
 	if c.SavedGross != 4000 || c.SavedUnique != 1500 {
 		t.Fatalf("gross/unique = %d/%d, want 4000/1500", c.SavedGross, c.SavedUnique)
 	}
-	nearEq(t, "first removal", c.SavedUSDFirstRemoval, 0.001875)
+	nearEq(t, "first removal", c.SavedUSDFirstRemoval, 0.001500)
 	nearEq(t, "replay", c.SavedUSDReplay, 0.000250)
-	nearEq(t, "decomposed total", c.SavedUSDDecomposed, 0.002125)
-	// The multiple the sign flip turns on, and the number a reader needs: 1.13x in dollars
+	nearEq(t, "decomposed total", c.SavedUSDDecomposed, 0.001750)
+	// The multiple the sign flip turns on, and the number a reader needs: 1.17x in dollars
 	// against a 2.67x token overcount ratio.
-	nearEq(t, "replay multiple", c.ReplayMultiple, 0.002125/0.001875)
+	nearEq(t, "replay multiple", c.ReplayMultiple, 0.001750/0.001500)
 	if got := float64(c.SavedGross) / float64(c.SavedUnique); math.Abs(got-2.6666666667) > 1e-6 {
 		t.Errorf("token overcount ratio = %.4f, want 2.6667", got)
 	}
@@ -142,8 +146,10 @@ func TestReplayIsPricedAtTheTierTheTurnActuallyPaid(t *testing.T) {
 				t.Fatal(err)
 			}
 			nearEq(t, "replay", rows[0].SavedUSDReplay, 1000*tc.wantReplayRatePerToken)
-			// The first removal is always the cache-write rate regardless of the replay tier.
-			nearEq(t, "first removal", rows[0].SavedUSDFirstRemoval, 1000*1.25e-6)
+			// The first removal is priced at TURN 1's own tier and is unaffected by the replay
+			// tier under test — turn 1 read 50k and wrote nothing, so Event.uniqueRate is the
+			// fresh rate, not cache creation. Same 1,000 tokens in all three cases.
+			nearEq(t, "first removal", rows[0].SavedUSDFirstRemoval, 1000*1e-6)
 		})
 	}
 }
@@ -774,13 +780,15 @@ func TestUnkeyedComponentsAreFlaggedNotRepriced(t *testing.T) {
 	if keyed.UniqueUnkeyed {
 		t.Error("an offload component does set content keys and must NOT be flagged")
 	}
-	// Not repriced: the flagged component's whole saving is still at the write rate, exactly as
-	// the stored figures say. Flagging is a disclosure, not an adjustment.
-	nearEq(t, "keyless first removal", kl.SavedUSDFirstRemoval, 25*1000*1.25e-6)
+	// Not repriced: the flagged component's whole saving is still valued as a first removal on
+	// every turn, exactly as the stored figures say. Flagging is a disclosure, not an
+	// adjustment. These turns read cache and wrote none, so the first-removal rate is the FRESH
+	// rate (Event.uniqueRate) — the flag's meaning is unchanged by which rate that is.
+	nearEq(t, "keyless first removal", kl.SavedUSDFirstRemoval, 25*1000*1e-6)
 	nearEq(t, "keyless replay", kl.SavedUSDReplay, 0)
 	nearEq(t, "keyless replay multiple", kl.ReplayMultiple, 1)
-	// The keyed one behaves as before: 1,000 unique at the write rate, 2,000 replayed at read.
-	nearEq(t, "keyed first removal", keyed.SavedUSDFirstRemoval, 1000*1.25e-6)
+	// The keyed one behaves as before: 1,000 unique at this turn's entry rate, 2,000 at read.
+	nearEq(t, "keyed first removal", keyed.SavedUSDFirstRemoval, 1000*1e-6)
 	nearEq(t, "keyed replay", keyed.SavedUSDReplay, 24*1000*1e-7)
 }
 
@@ -881,8 +889,9 @@ func TestUnkeyedFlagClearsOnceRowsDedup(t *testing.T) {
 			"otherwise the warning outlives the defect it describes")
 	}
 	// And the money moves to where a real dedup measurement puts it: one first removal at the
-	// write rate, 24 replays at the read rate.
-	nearEq(t, "first removal", rows[0].SavedUSDFirstRemoval, 1000*1.25e-6)
+	// tier that turn would have entered content at (read-only turn, so fresh), 24 replays at the
+	// read rate.
+	nearEq(t, "first removal", rows[0].SavedUSDFirstRemoval, 1000*1e-6)
 	nearEq(t, "replay", rows[0].SavedUSDReplay, 24*1000*1e-7)
 
 	// Below the row floor the flag stays OFF even with no differing rows: a handful of rows that
