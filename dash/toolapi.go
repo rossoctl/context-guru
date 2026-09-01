@@ -1038,6 +1038,16 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 	// covering index — no temp b-tree, no table fetch — and hands Go the 54k facts instead of
 	// the 1.8M rows. Measured on a corpus built to production's cardinalities: 4,498 ms to
 	// 1,229 ms, and 10,749 ms if the GROUP BY runs WITHOUT the index, so the two ship together.
+	//
+	// CROSS-FILE INVARIANT: this GROUP BY and idx_tooldecl_inventory in schema.go are only
+	// correct together and either half alone is a regression -- the index without the GROUP BY
+	// leaves the plan on the table scan (3,636 ms, buys nothing), the GROUP BY without the index
+	// sorts into a temp b-tree (10,749 ms, 2.4x SLOWER than the scan it replaced). Removing
+	// either half looks independently safe and is not.
+	//
+	// `started` is deliberately NOT in this SELECT: it comes from the requests-side sessByKey
+	// lookup below, not from this table. Adding MAX(started) here without also adding it to the
+	// GROUP BY would silently change the grouping -- the same trap in the other direction.
 	dq := `SELECT tenant_id, session_id, kind, name, server, MAX(tokens) FROM tool_declarations`
 	var dargs []any
 	if !f.TenantAll {

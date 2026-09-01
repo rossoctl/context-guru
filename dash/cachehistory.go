@@ -70,11 +70,22 @@ func (d *DB) CachesplitHistoricalUSD(f Filter, p modelinfo.Pricer) (CachesplitHi
 	// ROW_NUMBER ranks EVERY row in the table by session, unfiltered, so rn=1 means exactly
 	// what the old subquery's NOT EXISTS meant — "nothing earlier in this session, filtered or
 	// not" — before the outer WHERE narrows to the rows this query actually values.
-	rows, err := d.sql.Query(`WITH s AS (
-		SELECT r.*, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS rn
+	// The ranking CTE emits (id, rn) and is joined back on the primary key, rather than pulling
+	// `r.*` through the PARTITION BY sort for the sake of one integer per row. Same rewrite as
+	// CompactionResets in overview.go, same reason, and the same caveat: the CTE stays UNFILTERED,
+	// which is the whole correctness argument above — rn=1 has to mean "nothing earlier in this
+	// session, filtered or not", so the filter may only ever be applied outside it.
+	//
+	// Measured: 199-208 ms to 38-44 ms on the 16,444-request corpus, and 1,103 ms to 270 ms
+	// read-only against the production database. Results identical, checked on the 6,697 rows
+	// this predicate actually returns there and on 16,167 rows with the split/cache filters
+	// dropped, plus each tenant scope separately -- the frozen corpus returns ZERO rows for the
+	// shipped predicate, so a check against it alone proves nothing.
+	rows, err := d.sql.Query(`WITH rn AS (
+		SELECT r.id AS rid, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
 		FROM requests r
-	) SELECT r.model, r.cache_read, r.cache_write FROM s r
-		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0 AND r.rn = 1`, args...)
+	) SELECT r.model, r.cache_read, r.cache_write FROM requests r JOIN rn ON rn.rid = r.id AND rn.n = 1
+		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0`, args...)
 	if err != nil {
 		return out, err
 	}
@@ -143,11 +154,22 @@ func (d *DB) CachesplitHistoricalUSDByTenant(since int64, p modelinfo.Pricer) (m
 		return out, err
 	}
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
-	rows, err := d.sql.Query(`WITH s AS (
-		SELECT r.*, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS rn
+	// The ranking CTE emits (id, rn) and is joined back on the primary key, rather than pulling
+	// `r.*` through the PARTITION BY sort for the sake of one integer per row. Same rewrite as
+	// CompactionResets in overview.go, same reason, and the same caveat: the CTE stays UNFILTERED,
+	// which is the whole correctness argument above — rn=1 has to mean "nothing earlier in this
+	// session, filtered or not", so the filter may only ever be applied outside it.
+	//
+	// Measured: 199-208 ms to 38-44 ms on the 16,444-request corpus, and 1,103 ms to 270 ms
+	// read-only against the production database. Results identical, checked on the 6,697 rows
+	// this predicate actually returns there and on 16,167 rows with the split/cache filters
+	// dropped, plus each tenant scope separately -- the frozen corpus returns ZERO rows for the
+	// shipped predicate, so a check against it alone proves nothing.
+	rows, err := d.sql.Query(`WITH rn AS (
+		SELECT r.id AS rid, ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
 		FROM requests r
-	) SELECT r.tenant_id, r.model, r.cache_read, r.cache_write FROM s r
-		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0 AND r.rn = 1`, args...)
+	) SELECT r.tenant_id, r.model, r.cache_read, r.cache_write FROM requests r JOIN rn ON rn.rid = r.id AND rn.n = 1
+		WHERE `+cond+` AND r.split_stable_tokens = 0 AND r.cache_read > 0`, args...)
 	if err != nil {
 		return out, err
 	}

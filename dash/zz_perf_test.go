@@ -26,9 +26,22 @@ import (
 //     from moving one term. That expression is now inlined at ten read sites — do not let a
 //     tidy-up normalise the order.
 //
-// So: measure the selectivity of the outer predicate before reaching for a window function, and
-// put the cheap term first. An index that leaves the plan alone buys nothing, and a plan change
-// that leaves the invocation count alone buys nothing either.
+// A fourth, added on the same sweep: splitMoved's two correlated LIMIT-1 subqueries rewritten as
+// a LAG over only the non-zero rows is byte-identical and WITHIN NOISE on time (80.3 vs 94.1 ms,
+// then 77.6 vs 71.9 ms, two 5-run passes). Rejected. Three of the four say do not rewrite it.
+//
+// And one that cuts the other way, so the lesson is not "never touch a window function":
+// CompactionResets' CTE selected `r.*` and carried ~56 columns through the PARTITION BY sort to
+// produce one LAG value per row. Narrowing it to (id, prev) and joining back on the primary key
+// is 242-316 ms to 59-63 ms here and 1,324 ms to 553 ms on production. That trade ADDS ~16k
+// primary-key probes and still wins, which is the exact opposite of Facets' component list
+// (query.go), where removing ~1.2M probes is the whole win. So:
+//
+// Measure the selectivity of the outer predicate before reaching for a window function, and put
+// the cheap term first. Then ask which of the two costs you are actually paying -- invocation
+// count or sort payload -- because in this package both have won, and the shape of the query
+// does not tell you which. An index that leaves the plan alone buys nothing, and a plan change
+// that leaves the dominant cost alone buys nothing either.
 
 // The gate aggregation expands request_components through json_each, so it could have
 // turned a dashboard load into a table scan.

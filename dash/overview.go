@@ -607,16 +607,29 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// Everything from here to the percentiles below is a separate, independent read against
 	// the same filter — none of these queries consumes another's result (the two exceptions,
 	// the inflation correction and the estimator median, are noted where they are), so nothing
-	// stops them running concurrently instead of one after another. That is not an optimization
-	// for its own sake: measured against a production-sized copy of this table with zero write
-	// contention, this stretch alone summed to ~9s run sequentially — CompactionResets and the
-	// replay estimate each multiple seconds by themselves — which is why /api/stats was timing
-	// out its 10s caller-facing deadline on every single call, not just under load. Run
-	// concurrently against the same pooled *sql.DB (store.go's SetMaxOpenConns already sizes
-	// the pool for this), wall time drops to roughly the slowest single query rather than their
-	// sum. SQLite's WAL mode already gave each of these its own read snapshot when they ran
-	// sequentially — nothing here was ever one atomic view of the table — so concurrency changes
-	// only how long the caller waits, never what any individual query reads.
+	// stops them running concurrently instead of one after another.
+	//
+	// THE GROUP BUYS NO WALL TIME AT TODAY'S SIZES, and the claim that it does — that this
+	// "drops to roughly the slowest single query rather than their sum" — is retracted. Measured
+	// on a 16,444-request corpus: the sixteen queries in this function sum to 587 ms and the
+	// slowest is 186 ms, and Overview() measures 520-556 ms. That is the sum. The reason is the
+	// driver: `modernc.org/sqlite` reads do not run in parallel here. N copies of one ~280 ms
+	// query, 16 cores, SetMaxOpenConns(100) — n=2 is 1.05x, n=4 is 0.68x, n=8 is 0.51x, so
+	// concurrency is SLOWER than sequential once there is any of it.
+	//
+	// What is NOT established: the ~9s this comment used to attribute to sequential execution,
+	// and the /api/stats timeouts attributed to that. Both figures predate the LAG rewrite below
+	// and idx_tooldecl_session, and nobody has re-measured this stretch sequentially either side
+	// of those two changes — so which change earned that improvement is an open question, not
+	// something this comment gets to answer. Note also that 0.51x at n=8 is a measurement of
+	// TODAY's sizes; it does not establish that concurrency never helped at 9s scale, where the
+	// contention profile may genuinely have differed. So the group stays: a deletion needs its
+	// own before/after, which nobody has run.
+	//
+	// Still true, and unaffected by any of the above: SQLite's WAL mode already gave each of
+	// these its own read snapshot when they ran sequentially — nothing here was ever one atomic
+	// view of the table — so concurrency changes only how long the caller waits, never what any
+	// individual query reads.
 	var (
 		replayProjectedRaw, inflation          int64
 		ttl                                    map[string]int64
@@ -714,13 +727,26 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// happens (tokens_before > 0 holds for every row measured), so this is not a behavior
 	// change in practice, but it is not a byte-for-byte port of the old query's guarantee.
 	g.Go(func() error {
-		q := `WITH s AS (
-			SELECT r.*, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
+		// Two columns through the window sort, not `r.*`. The CTE used to select every column
+		// of `requests` and carry all of them through the PARTITION BY sort, when the only thing
+		// the outer query wants from it is one LAG value per row. Emitting (id, prev) and joining
+		// back on the primary key sorts ~2 columns instead of ~56; the 16k primary-key probes
+		// that costs are cheaper than the payload they replace, which is the opposite of the
+		// tradeoff Facets' component list turns on (see query.go) — invocation count wins there,
+		// sort payload wins here, so neither is a rule.
+		//
+		// Measured: 242-316 ms to 59-63 ms on the 16,444-request corpus (5 runs), and 1,324 ms
+		// to 553 ms read-only against the production database. Result identical service-wide
+		// (37,954 rows there, 526 here) and under each tenant scope separately. Keeping the CTE
+		// self-contained but listing only the filterable columns was also tried and is the worse
+		// of the two at 135 ms.
+		q := `WITH prev AS (
+			SELECT r.id AS rid, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
 				OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
 			FROM requests r
-		) SELECT COUNT(*) FROM s r WHERE ` + cond + `
-			AND r.tokens_before > 0 AND r.prev_tokens_before IS NOT NULL
-			AND r.tokens_before < r.prev_tokens_before`
+		) SELECT COUNT(*) FROM requests r JOIN prev ON prev.rid = r.id WHERE ` + cond + `
+			AND r.tokens_before > 0 AND prev.prev_tokens_before IS NOT NULL
+			AND r.tokens_before < prev.prev_tokens_before`
 		return d.sql.QueryRow(q, args...).Scan(&o.CompactionResets)
 	})
 	// The estimator check, on the only population where the two counts are comparable: requests
