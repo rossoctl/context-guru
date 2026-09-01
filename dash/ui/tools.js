@@ -208,7 +208,10 @@ Object.assign(TILE_INFO, {
       + 'prefix, full input price where there was no cache at all.',
     catch: 'It is a PROJECTION, not a saving: it is what would not have been billed had none '
       + 'of it ever been carried. Nothing here has been saved. What removals actually avoided '
-      + 'is a different panel and is never copied into this one.',
+      + 'is a different panel and is never copied into this one. And it covers only the sessions '
+      + 'that ran on a model with known rates — the sub-line says how many of your sessions those '
+      + 'are. Sessions on an unpriced model contribute their TOKENS to every count on this page '
+      + 'and no dollars to this one.',
   },
   'inv-prompt-tokens': {
     what: 'The size of your system prompt — the standing instructions sent ahead of every '
@@ -325,6 +328,8 @@ function renderHeadline(host, rep) {
     return;
   }
   const used = Math.max(0, t.declared_tokens - t.unused_tokens);
+  // The population a dollar figure on this page actually covers.
+  const pricedSessions = Math.max(0, c.sessions - (c.unpriced_sessions || 0));
   host.appendChild(tileGroup('What you carry that you can change, and what you use',
     'per session, averaged over the ' + num(c.captured) + ' session'
     + (c.captured === 1 ? '' : 's') + ' whose inventory was captured — MCP tools and skills only, '
@@ -357,9 +362,22 @@ function renderHeadline(host, rep) {
     // mixed-pricing corpus the fallback is `645,662,264 tok`, 15 unbreakable characters of 26px
     // mono, which is 175 px of content in a 143 px tile at 390 and the only reason the page body
     // scrolled sideways 3 px. The exact figure is in the tables below.
+    // NOT `totals.priced`. That flag is false whenever ANY part of the population is unpriced, so
+    // on a corpus with 17 unpriced sessions out of 200 it is false in steady state and never flips
+    // — and gating on it labelled a CORRECT $247.20 as "no dollar", permanently. A number that is
+    // right, shown as unknown, is its own kind of dishonesty, and it is worse here than it was
+    // before this change because this figure is now in the reader's first screen.
+    //
+    // What the dollar actually covers is the PRICED SUBSET, so that is what the sub-line names.
+    // Only when NOTHING is priced is there no subset to report, and then the token fallback is the
+    // honest answer rather than a $0 over an empty set.
     tile('inv-avoidable', 'Avoidable — projected',
-      t.priced ? usd(t.unused_usd) : compact(t.unused_reads) + ' tok',
-      t.priced ? 'if none of it had been carried' : 'no dollar: some models here are unpriced'),
+      pricedSessions ? usd(t.unused_usd) : compact(t.unused_reads) + ' tok',
+      pricedSessions
+        ? 'if none of it had been carried' + (c.unpriced_sessions
+          ? ' — over the ' + num(pricedSessions) + ' of ' + num(c.sessions)
+            + ' sessions that ran on a priced model' : '')
+        : 'no dollar: no model in this window has known rates'),
   ], 'headline'));
   host.appendChild(gauge(t));
   // What these tiles LEFT OUT, and how big it is. Without this line the reader meets a
@@ -1323,6 +1341,7 @@ function serverTable(host, rep) {
  */
 function skillsPanel(host, rep) {
   const s = rep.skills;
+  const skillPriced = Math.max(0, rep.coverage.sessions - (rep.coverage.unpriced_sessions || 0));
   const panel = foldPanel('inv-skills', 'Skills, one row each, with the listing’s own figures',
     num((s.skills || []).length) + ' skill' + ((s.skills || []).length === 1 ? '' : 's')
     + ' · listing ' + num(s.listing_tokens) + ' tok/request');
@@ -1359,10 +1378,13 @@ function skillsPanel(host, rep) {
       'in sessions that invoked no skill'),
     // `priced` and not "is the figure non-zero": a zero on a priced corpus means the
     // listing was never wasted, and a zero on an unpriced one means nobody knows.
+    // Same correction as the headline: `totals.priced` is false as soon as one session in scope is
+    // unpriced, so it cannot be the gate for whether a dollar exists.
     tile('inv-skill-usd', 'Cost of that',
-      rep.totals.priced ? usd(s.unused_listing_usd) : 'unpriced',
-      rep.totals.priced ? 'the listing\'s own weight, priced'
-        : 'no rates for the model that carried it')));
+      skillPriced ? usd(s.unused_listing_usd) : 'unpriced',
+      skillPriced ? 'the listing\'s own weight, priced, over the '
+        + num(skillPriced) + ' priced session' + (skillPriced === 1 ? '' : 's')
+        : 'no rates for any model that carried it')));
   if (!(s.skills || []).length) return;
   if (!SKILL_SWITCH_SAFE) {
     // ONE visible block, not 24 tooltips. A hover-only reason does not exist on a phone, in a
