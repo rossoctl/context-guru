@@ -511,12 +511,22 @@
         <strong>&dagger;</strong> means some of that session's turns carried no usable provider
         usage data, so the dollar figure covers its priced turns only — while the token
         columns beside it cover every turn.</p>
+      <p><strong>Saved tokens carries two denominators, and on some sessions they are
+        orders of magnitude apart.</strong> <em>Gross</em> counts a removed span once per turn
+        it was absent from: an agent re-sends its whole transcript every turn, so one removal
+        keeps being counted for the rest of the session. <em>Unique</em> counts that same text
+        once. On a short session the two agree; on a long one gross can be hundreds of times
+        larger, and which is "the saving" depends on the question — <em>gross</em> answers
+        "how much smaller was every request we sent", <em>unique</em> answers "how much
+        distinct text did we drop". Both are shown because a single unlabelled figure here
+        reads correctly right up to the session where it is wrong by a factor of 500.</p>
     </details>
     <div class="tblwrap" tabindex="0">
       <table class="tbl" data-testid="sessions-table">
         <thead><tr>
           <th>Session</th><th data-scope-col hidden>Account</th><th>Model</th><th>Agent</th><th>Preset</th>
-          <th class="num">Turns</th><th class="num">Before</th><th class="num">Saved (gross)</th>
+          <th class="num">Turns</th><th class="num">Before</th>
+          <th class="num">Saved tokens<br><span class="hint">gross / unique</span></th>
           <th class="num">Net saved $</th><th class="num">Cache r/w</th>
           <th class="num">Keep-alive net</th><th class="num">Expands</th>
           <th class="num">CG ms</th><th>Started</th><th><span class="vh">Row actions</span></th>

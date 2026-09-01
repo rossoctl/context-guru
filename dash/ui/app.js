@@ -2745,7 +2745,16 @@ async function loadSessions() {
         el('td', { text: firstOf(s.presets) }),
         el('td', { class: 'num', text: num(s.turns) }),
         el('td', { class: 'num', text: compact(s.tokens_before) }),
-        el('td', { class: 'num', text: compact(s.saved) }),
+        // BOTH denominators, in one cell rather than a 16th column, and in the order the
+        // <details> above the table explains them. Gross alone was the only savings figure
+        // on this row and it overstates by 27.7x overall / up to 572.9x on one session.
+        el('td', {
+          class: 'num',
+          title: 'gross ' + num(s.saved) + ' tokens: a removed span counted once per turn it '
+            + 'was absent from. unique ' + num(s.saved_unique) + ' tokens: the same text '
+            + 'counted once. Gross is the size of every request we sent; unique is how much '
+            + 'distinct text was dropped.',
+        }, compact(s.saved) + ' / ' + compact(s.saved_unique)),
         // A dollar figure over a session whose turns are not all priced is a figure with
         // a different denominator from the token columns beside it: it covers the priced
         // turns only. The dagger says so rather than letting the two read as one total.
