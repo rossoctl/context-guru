@@ -1170,7 +1170,8 @@ function renderKVFeatureImportance() {
         el('td', { class: 'num' }, r.score.toFixed(3))));
     }
     tbl.appendChild(body);
-    cols.appendChild(el('div', {}, el('h4', {}, label), tbl));
+    cols.appendChild(el('div', {}, el('h4', {}, label),
+      el('div', { class: 'tblwrap', tabindex: '0' }, tbl)));
   }
   host.appendChild(cols);
   if (fi.logistic_regression && fi.gradient_boosted

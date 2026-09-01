@@ -8719,7 +8719,7 @@ async function loadKACalc() {
         c.priced ? usd(r.net_usd) : 'not priced')));
   }
   tbl.appendChild(tb);
-  host.appendChild(tbl);
+  host.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
   // Reach and cost side by side, so the flattening is visible: on our own traffic K=1→K=2 takes
   // reach from 30% to 51% of the recoverable dollars and K=3, K=4 add 6 and 4 points, while
   // ping count keeps climbing.

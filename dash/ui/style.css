@@ -531,6 +531,10 @@ details.why dd { margin: 0; }
 .tblwrap { overflow-x: auto; max-width: 100%; }
 .panel, .card, .grid-2, .tiles, main { min-width: 0; }
 .panel > *, .card > * { min-width: 0; }
+/* A grid child defaults to min-width:auto, so a wide table inside one pushes the COLUMN
+   wider than its track and the page scrolls sideways — .tblwrap on the table cannot help
+   while its own parent refuses to shrink. */
+.grid-2 > * { min-width: 0; }
 .tbl { width: 100%; border-collapse: collapse; font-size: var(--t-body); }
 .tbl th, .tbl td {
   text-align: left; padding: var(--sp-2) var(--sp-3);
@@ -933,8 +937,13 @@ pre.code {
 .field select, .field textarea {
   padding: var(--sp-2) var(--sp-3); font: inherit;
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--fg);
-  max-width: 520px;
+  max-width: min(520px, 100%);
 }
+/* A <select> is as wide as its widest option and a <fieldset> will not shrink below its
+   own min-content, so one long option in the strategy form pushed the page 183px sideways
+   at 390px. min-inline-size:0 overrides the UA's min-content floor; min() keeps the 520px
+   cap on a wide screen. */
+fieldset { min-inline-size: 0; }
 .field textarea { font-family: var(--mono); font-size: var(--t-small); max-width: none; line-height: 1.6; }
 details.field > summary { font-size: var(--t-small); color: var(--fg-muted); font-weight: 600; cursor: pointer; margin-bottom: var(--sp-2); }
 .hint { margin: 0; font-size: var(--t-small); color: var(--fg-muted); line-height: 1.55; max-width: 82ch; }
@@ -1153,7 +1162,7 @@ table.grid tr.revoked { opacity: 0.55; }
    the account editor's boxes would have been the browser default next to styled ones. */
 .field input[type=text], .field input[type=number], .field input[type=password],
 .field input[type=email] {
-  padding: var(--sp-2) var(--sp-3); font: inherit; max-width: 520px;
+  padding: var(--sp-2) var(--sp-3); font: inherit; max-width: min(520px, 100%);
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--fg);
 }
 /* The two irreversible actions, folded away and visibly not part of the form above it.
