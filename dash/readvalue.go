@@ -53,10 +53,18 @@ type TierCosts struct {
 	TotalUSD  float64 `json:"total_usd"`
 	StoredUSD float64 `json:"stored_usd"`
 	// FrozenReadUSD prices the tokens cache-aware compaction deliberately left alone at the
-	// cache-READ rate they were actually billed at. This is the benefit half of SafetyCost,
-	// which the panel has always promised ("its benefit is the cache reads it preserved") and
-	// never computed. FrozenWriteRiskUSD is what re-creating that same prefix instead would
-	// have ADDED — the spread between the write and read rates, i.e. what the freeze bought.
+	// cache-READ rate they were actually billed at — per row, min(frozen_tokens, cache_read).
+	// The clamp is load-bearing, not defensive: the frozen count is what compaction DECLINED to
+	// touch and cache_read is what the provider actually served from cache, and the first is not
+	// bounded by the second. On 4.0% of the rows that recorded a freeze (3,004 of 75,185) the
+	// frozen count EXCEEDS that request's cache_read, by 73.2M tokens in total; those tokens were
+	// billed fresh or written, so pricing them at the read rate prices a tier they were never
+	// charged at. Clamped rather than dropped, which is the conservative direction this file
+	// already errs in. This is the benefit half of SafetyCost, which the panel has always
+	// promised ("its benefit is the cache reads it preserved") and never computed.
+	// FrozenWriteRiskUSD is what re-creating that same prefix instead would have ADDED — the
+	// spread between the write and read rates, i.e. what the freeze bought. It is built from the
+	// same clamped count, so it inherits the clamp rather than the error.
 	FrozenReadUSD      float64 `json:"frozen_read_usd"`
 	FrozenWriteRiskUSD float64 `json:"frozen_write_risk_usd"`
 	// Requests is how many priced requests are behind these figures; Uncovered is how many
@@ -76,7 +84,8 @@ func (d *DB) TierCosts(f Filter, p modelinfo.Pricer) (*TierCosts, error) {
 	// smaller bill than the one that was billed.
 	rows, err := d.sql.Query(`SELECT r.model, COUNT(*),
 		COALESCE(SUM(r.fresh_input),0), COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
-		COALESCE(SUM(r.output_tokens),0), COALESCE(SUM(r.frozen_tokens),0), COALESCE(SUM(r.cost_usd),0)
+		COALESCE(SUM(r.output_tokens),0), COALESCE(SUM(MIN(r.frozen_tokens, r.cache_read)),0),
+		COALESCE(SUM(r.cost_usd),0)
 		FROM requests r WHERE `+cond+` AND r.token_accounting = 'complete' GROUP BY r.model`, args...)
 	if err != nil {
 		return nil, err
