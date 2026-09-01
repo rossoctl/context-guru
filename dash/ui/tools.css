@@ -201,3 +201,135 @@ details.why > .inv-prompt-regions { max-width: none; }
 /* The per-row removal fold sits in a table cell, so it must not stretch the row. */
 .inv-removal-fold > summary { white-space: nowrap; }
 .inv-removal-fold .inv-removal { min-width: 22rem; }
+
+/* ── the call to action ─────────────────────────────────────────────────────
+ * The one thing to DO, at the top of the list rather than inferred from eleven cards. It gets
+ * the raised surface and the accent edge because it is the only block on the page that is an
+ * instruction rather than a measurement — and it is deliberately NOT a button: the action is a
+ * config edit the reader makes in their own file, so the affordance is a snippet they can read
+ * before they run it. A dashboard that offers a one-click "fix everything" for a change that
+ * rebuilds a cached prompt prefix is offering a click nobody can review.
+ */
+.inv-cta {
+  display: grid; gap: var(--sp-2); margin-top: var(--sp-3);
+  padding: var(--sp-3); border-radius: var(--r);
+  background: var(--accent-soft); border-left: 3px solid var(--accent);
+}
+.inv-cta-head { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); align-items: baseline; }
+.inv-cta-head strong { font-size: var(--t-h3); }
+/* The snippet keeps the raised surface it has everywhere else on the page, so it reads as the
+   same component here as in a group card rather than as a differently-coloured one. */
+.inv-cta .inv-copy { background: var(--bg-raised); }
+
+/* ── benefit, cost, net ─────────────────────────────────────────────────────
+ * DESIGN §3.7 as one three-part grid. It is a grid rather than three lines of prose so the three
+ * figures share a column and can be compared by position, which is the whole reason the cost has
+ * to sit beside the benefit instead of below it. The sign is in the text, never in the colour
+ * alone (§2.5), so this survives greyscale and a printout.
+ */
+.inv-pb-label { font-size: var(--t-small); font-weight: 500; color: var(--fg-muted); }
+.inv-pb-val {
+  font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: var(--t-body);
+  color: var(--fg);
+}
+.inv-pb-val.good { color: var(--good); }
+.inv-pb-val.bad  { color: var(--bad); }
+/* The net is the row a reader acts on, so it is the one in bold — including when it is negative,
+   which on most scopes it is for the first session. A negative net demoted to a footnote is the
+   defect §3.7 names by hand. */
+.inv-pb-note { font-size: var(--t-small); color: var(--fg-muted); line-height: 1.5; max-width: 74ch; }
+
+/* n/a, per DESIGN §3.6: the same size as the number it replaces, muted rather than red — it is a
+   refusal to guess, not an error — and dotted-underlined so the reader knows a reason exists.
+   Local rather than style.css's `.na`, which is --fg-faint and italic; a shrunken italic n/a
+   reads as a rendering failure. currentColor for the rule so it tracks the ink and cannot fall
+   below the ink's own measured ratio. */
+.inv-na {
+  color: var(--fg-muted); font-style: normal;
+  border-bottom: 1px dotted currentColor; cursor: help;
+}
+
+/* ── the folded re-answers ──────────────────────────────────────────────────
+ * Four tables answering the same declarations at four granularities. Folded, with the row count
+ * on the closed summary so a reader can tell whether opening one is worth it — the only honest
+ * way to hide a table. Same shape as .inv-builtins, so this adds no nesting level.
+ */
+.inv-fold > summary {
+  cursor: pointer; display: flex; align-items: baseline; gap: var(--sp-2) var(--sp-3);
+  flex-wrap: wrap;
+}
+.inv-fold-title { font-weight: 600; font-size: var(--t-h3); }
+.inv-fold[open] > summary { margin-bottom: var(--sp-3); }
+.inv-fold-body > .note:first-child { margin-top: 0; }
+
+/* ── the headline's one-line qualifier ──────────────────────────────────────
+ * The qualifier stays visible; only its reasoning folds. Inline-flex so the disclosure sits at
+ * the end of the sentence rather than on a line of its own, which is what made this 93 px.
+ */
+.inv-aside { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-2); align-items: baseline; }
+.inv-aside > details.why { margin: 0; }
+
+/* ── the region list ───────────────────────────────────────────────────────
+ * Now the panel's subject rather than a wall behind a click, so it needs a heading rhythm and a
+ * proportion cue per row.
+ */
+.inv-regions-h {
+  display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-2); align-items: baseline;
+  margin: var(--sp-4) 0 var(--sp-1); font-size: var(--t-h3);
+}
+.inv-regions-h .section-note { font-weight: 400; }
+.inv-regions-skel { min-height: 240px; }
+/* The one run that folds is the agent's own tools: the heaviest group and the one where acting on
+   the number is a mistake. Same asymmetry as the built-ins section at the end of the page. */
+/* NOT display:flex on the summary. Flex suppresses the native disclosure marker, and without it a
+   folded run of regions is indistinguishable from an open one — the reader has no way to know the
+   twenty-four skill entries are there at all, which is worse than the wall it replaced. The h3
+   goes inline-flex instead, so the marker sits beside it and the heading still lays out as a row. */
+.inv-regions-fold > summary { cursor: pointer; }
+.inv-regions-fold > summary > .inv-regions-h { display: inline-flex; }
+.inv-regions-fold > summary > .pill { margin-right: var(--sp-2); }
+
+/* The share, drawn. Normalised to the heaviest region (the panel's note says so), because every
+   region here is under a fifth of the prefix and a 100% track draws sixty-three slivers. One hue:
+   the bars are one measure, so a per-bar colour would encode nothing. */
+.inv-region-bar {
+  flex: 1 0 60px; min-width: 60px; max-width: 220px; height: 6px;
+  background: var(--bg-sunken); border-radius: 3px; overflow: hidden;
+}
+.inv-region-bar > i { display: block; height: 100%; background: var(--s1); }
+
+/* The three parts sit on ONE line, and each carries its own label and sign, so the row survives
+   both greyscale and a 390 px viewport where it wraps into three lines of its own accord. */
+.inv-payback {
+  display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-4); align-items: baseline;
+  padding: var(--sp-2) 0; border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+.inv-pb { display: flex; flex-wrap: wrap; gap: var(--sp-1); align-items: baseline; }
+.inv-pb:last-child .inv-pb-label, .inv-pb:last-child .inv-pb-val { font-weight: 700; }
+/* The CTA's combined snippet is 26 lines of skillOverrides on a real catalogue. Bounded and
+   scrolling inside itself rather than 400 px of the reader's first screen; the text stays fully
+   selectable and the Copy button copies all of it either way. */
+.inv-cta .inv-snippet { max-height: 6em; overflow: auto; }
+
+/* The ordered names, in the first screen. An <ol> because the order is the message — it is the
+   order the reader should work down, and it is the order the cards below are in. */
+/* The numbers are the point — this is the order to work down — and the shell resets ol markers,
+   so decimal is asserted here rather than inherited. */
+.inv-lead { margin: 0; padding-left: var(--sp-5); list-style: decimal; }
+/* The li stays display:list-item, so ::marker renders. A flex li is not a list item and silently
+   loses its number, which for a list whose whole point is the ORDER is the one thing it cannot
+   lose. The children are inline spans and flow on one line without help. */
+.inv-lead > li { margin: 0; }
+.inv-lead-name, .inv-lead-usd { margin-right: var(--sp-2); }
+.inv-lead-name { font-weight: 600; font-size: var(--t-body); }
+.inv-lead-usd { font-weight: 600; font-variant-numeric: tabular-nums; font-family: var(--mono); }
+.inv-lead-rest { list-style: none; margin-left: calc(var(--sp-5) * -1); }
+
+/* At 390 the shell's tile grid gives each tile a full row, so four headline tiles plus a gauge is
+   four screens of abstractions before the first name — the same inversion this whole change is
+   about, one axis over. Two per row halves it. Scoped to this view: .tiles is the shell's class
+   and every other view's use of it is somebody else's call. */
+@media (max-width: 560px) {
+  #view-tools .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
