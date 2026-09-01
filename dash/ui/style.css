@@ -180,7 +180,14 @@ code, kbd { font-family: var(--mono); font-size: 0.92em; }
    here is emitted by index.html or app.js; three unused ones were deleted. */
 .muted { color: var(--fg-muted); }
 .small { font-size: var(--t-small); }
-.na { color: var(--fg-faint); font-style: italic; }
+/* DESIGN §3.6 rules 1-2: an `n/a` is the same size as the number it replaces, and it is ink
+   (--fg-muted) rather than faint italic, which reads as a rendering failure. The dotted
+   underline is what tells the reader a reason exists in the title/aria-label. --fg-faint was
+   already legal (4.64-6.00:1); --fg-muted is 5.46-7.50:1. */
+.na {
+  color: var(--fg-muted); font-style: normal;
+  border-bottom: 1px dotted var(--border); cursor: help;
+}
 /* Screen-reader-only. Used for the action columns' headers: a th with no text is a
    column with no name, and aria-label on a th is not a name a table walker reports. */
 /* No position:absolute here: inside a horizontally scrolling table an absolutely
@@ -290,6 +297,11 @@ button.subtle:hover { text-decoration: underline; }
 }
 .filters input[type="search"] { min-width: 200px; flex: 1 1 200px; max-width: 320px; }
 .filters select:hover, .filters input:hover { border-color: var(--fg-faint); }
+/* An <option> in the popup list does NOT inherit its select's color: the UA paints it with its
+   own default, measured 3.68:1 (#808080 on --bg) in the tenant picker in light mode. Both halves
+   set explicitly, on bare `option` rather than per-select, so every dropdown in the app is
+   covered once. --fg on --bg-raised is 18.13:1 light / 14.49:1 dark. */
+option { color: var(--fg); background: var(--bg-raised); }
 /* The filter bar is hidden on the views that have nothing to filter (Setup, Settings,
    Tenants, Archive, Config). Fourteen dropdowns over a settings form invite clicks that
    change nothing. */
@@ -1133,7 +1145,13 @@ table.grid tr.revoked { opacity: 0.55; }
 .score-dim { color: var(--fg-muted); }
 .star-read { white-space: nowrap; letter-spacing: 0.5px; }
 .star-read .on { color: var(--accent); }
-.star-read .off { color: var(--border); }
+/* --fg-muted, not --border. The hairline measures 1.22-1.44:1 against every surface it can
+   land on, in both themes, which makes an unfilled star invisible: a 3-of-5 rating read as a
+   3-star rating with no sign that 5 was possible, 41 times over on Feedback. --fg-muted is
+   5.46-7.50:1 on all four surfaces in both themes. The glyph also changes from a filled star
+   to an outline one (starText), so the two states differ in SHAPE as well as hue and the row
+   survives greyscale and CVD (DESIGN §2.5). */
+.star-read .off { color: var(--fg-muted); }
 .answer-block { margin-top: var(--sp-2); }
 .answer-block h4 {
   margin: 0 0 2px; font-size: var(--t-micro); font-weight: 600; color: var(--fg-muted);

@@ -2988,7 +2988,14 @@ async function loadSessions() {
         // A dollar figure over a session whose turns are not all priced is a figure with
         // a different denominator from the token columns beside it: it covers the priced
         // turns only. The dagger says so rather than letting the two read as one total.
-        el('td', { class: 'num' }, s.baseline_cost_usd ? usd(s.saved_usd) : '—',
+        // `—` was standing in for an uncomputable value, which DESIGN §3.6 rule 3 rules out the
+        // same way it rules out `$0`: neither carries a reason, and a dash reads as "nothing
+        // here" rather than "we cannot say". Routed through the same helper as the Components
+        // dollar cells so there is one answer to this in the codebase.
+        el('td', { class: 'num' },
+          usdOrNA(s.saved_usd, !!s.baseline_cost_usd,
+            'no turn in this session reported the provider usage a baseline cost needs, so there '
+            + 'is nothing to subtract an actual cost from'),
           s.baseline_cost_usd && s.incomplete_rows > 0
             ? el('span', {
               class: 'na small',
@@ -2998,15 +3005,19 @@ async function loadSessions() {
             }, ' †')
             : null),
         el('td', { class: 'num', text: compact(s.cache_read) + ' / ' + compact(s.cache_write) }),
-        // The keep-alive's net for this session, from its own ping rows. Blank rather than $0
-        // where it never ran: a zero would read as "it broke even here", which it did not do.
+        // The keep-alive's net for this session, from its own ping rows. `n/a` rather than $0
+        // where it never ran — a zero would read as "it broke even here", which it did not do —
+        // and rather than the `—` that was here, which carried the reason only in a title.
         el('td', {
           class: 'num ' + (s.keepalive_net_usd < 0 ? 'bad-text' : s.keepalive_net_usd > 0 ? 'good-text' : ''),
           title: s.keepalive_pings || s.keepalive_saved_usd
             ? `${num(s.keepalive_pings)} pings cost ${usd(s.keepalive_ping_usd)}; `
               + `${usd(s.keepalive_saved_usd)} of re-creations avoided (a ceiling)`
-            : 'the keep-alive did not run on this session',
-        }, s.keepalive_pings || s.keepalive_saved_usd ? usd(s.keepalive_net_usd) : '—'),
+            : '',
+        }, usdOrNA(s.keepalive_net_usd,
+          !!(s.keepalive_pings || s.keepalive_saved_usd),
+          'the keep-alive did not run on this session, so it neither spent nor avoided anything '
+          + 'here — this is an absence, not a break-even')),
         el('td', { class: 'num', text: num(s.expands) }),
         el('td', { class: 'num', text: ms(s.cg_latency_ms_avg) }),
         el('td', { text: when(s.start) }),
@@ -4434,7 +4445,7 @@ async function toggleBenchTasks(sec, runID, arm) {
             : el('span', { class: 'pill neutral', text: 'unsolved' }))));
     }
     tbl.appendChild(tb);
-    host.appendChild(tbl);
+    host.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
   } catch (err) {
     errorState(host, 'Could not load tasks', err);
   }
@@ -8302,11 +8313,18 @@ function npsBar(host, nps) {
     el('span', {}, el('i', { class: 'sw ' + cls }), `${label}: ${n}`))));
 }
 
-/** starText renders a stored rating as filled and empty stars plus its number. */
+/**
+ * starText renders a stored rating as filled and empty stars plus its number.
+ *
+ * The empty half is U+2606 WHITE STAR (an outline), not a recoloured U+2605. Both halves were
+ * the same filled glyph separated only by colour, which fails WCAG 1.4.1 / DESIGN §2.5 for a
+ * colour-blind reader even after the unfilled colour was fixed — and at the old 1.32:1 it was
+ * invisible outright, so the SCALE of the rating was unreadable.
+ */
 function starText(v) {
   return el('span', { class: 'star-read', title: `${v} of 5` },
     el('span', { class: 'on', text: '★'.repeat(v) }),
-    el('span', { class: 'off', text: '★'.repeat(5 - v) }),
+    el('span', { class: 'off', text: '☆'.repeat(5 - v) }),
     el('span', { class: 'vh', text: ` ${v} of 5` }));
 }
 
@@ -9022,7 +9040,7 @@ async function loadKAArmed() {
       }, 'Disarm'))));
   }
   tbl.appendChild(tb);
-  host.appendChild(tbl);
+  host.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
 }
 
 /** loadKABehaviour fills panels 3a–3e. */
@@ -9112,7 +9130,7 @@ async function loadKABehaviour() {
         el('td', {}, g.median_hours.toFixed(2) + ' h'), el('td', {}, g.max_hours.toFixed(2) + ' h')));
     }
     tbl.appendChild(tb);
-    gaps.appendChild(tbl);
+    gaps.appendChild(el('div', { class: 'tblwrap', tabindex: '0' }, tbl));
   }
 }
 
