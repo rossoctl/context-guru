@@ -2,6 +2,7 @@ package dash
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,5 +72,56 @@ func TestOverviewStaysFastOnALargeWindow(t *testing.T) {
 	// lost index at this size cannot pass.
 	if existing > 20*time.Second {
 		t.Errorf("too slow overall: overview %v, components %v", overview, comps)
+	}
+}
+
+// Both of the query-cost fixes in this package are PLAN changes whose whole value is a lower
+// invocation count, and both are the kind of thing a later tidy-up reverts by accident while
+// keeping the results identical. A timing assertion cannot catch that at test-fixture size, so
+// this asserts the plan instead — which is also the check the CompactionResets round taught
+// this package to run: an index that leaves the plan alone buys nothing (dash/CLAUDE.local.md,
+// and idx_requests_session_tb in schema.go, which measurably did nothing).
+func TestQueryPlansStayOnTheCheapShape(t *testing.T) {
+	db := openTestDB(t)
+	plan := func(q string, args ...any) string {
+		rows, err := db.sql.Query("EXPLAIN QUERY PLAN "+q, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out string
+		for rows.Next() {
+			var a, b, c int
+			var detail string
+			if err := rows.Scan(&a, &b, &c, &detail); err != nil {
+				t.Fatal(err)
+			}
+			out += detail + "\n"
+		}
+		return out
+	}
+	// Facets' component list must not probe the requests primary key once per component row.
+	// Measured on the production database read-only, 1,210,932 component rows for 12 distinct
+	// components: 1,533 ms for the per-row form against 73 ms for this one.
+	cond, args := selfBlanked(Filter{TenantAll: true}, "component").where()
+	got := plan(`SELECT names.component
+		FROM (SELECT DISTINCT component FROM request_components) names
+		WHERE EXISTS (SELECT 1 FROM request_components c JOIN requests r ON r.id = c.request_id
+			WHERE c.component = names.component AND `+cond+`)
+		ORDER BY 1 LIMIT 200`, args...)
+	if !strings.Contains(got, "CORRELATED SCALAR SUBQUERY") {
+		t.Errorf("Facets' component list is no longer probed per distinct component:\n%s", got)
+	}
+	// SelfRemovals' declaration pass must group off idx_tooldecl_inventory. Without that index
+	// the same GROUP BY sorts into a temp b-tree and is 2.4x SLOWER than the scan it replaced
+	// (10,192 ms against 4,189 ms on a corpus built to production's cardinalities), so the
+	// index and the GROUP BY are only correct together.
+	got = plan(`SELECT tenant_id, session_id, kind, name, server, MAX(tokens) FROM tool_declarations
+		GROUP BY tenant_id, session_id, kind, name, server`)
+	if !strings.Contains(got, "COVERING INDEX idx_tooldecl_inventory") {
+		t.Errorf("SelfRemovals' declaration pass is not covered by idx_tooldecl_inventory:\n%s", got)
+	}
+	if strings.Contains(got, "TEMP B-TREE") {
+		t.Errorf("SelfRemovals' declaration pass sorts into a temp b-tree:\n%s", got)
 	}
 }
