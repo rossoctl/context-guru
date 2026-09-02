@@ -109,6 +109,13 @@ var statsGoldenTopLevel = []string{
 // by name.
 var statsGoldenComponent = []string{
 	"acted",
+	// acted_fresh / acted_replay partition acted by whether the saving cost anything (#176).
+	// `acted` alone counted a frozen decision replayed on a later turn — free, no model call —
+	// in the same figure as the call that derived it, so a measured `acted: 239` beside
+	// `reapplied_same_session: 2,291` was read as 239 paid extractions on a component that
+	// made none. Added to the reviewed contract rather than loosening the assertion.
+	"acted_fresh",
+	"acted_replay",
 	"discarded_changes",
 	"duration_ms",
 	"mutated",

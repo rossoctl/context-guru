@@ -676,22 +676,48 @@ questions at a flat rate.
 
 ## Metrics
 
-`/stats` gains an `extract` block (purely additive — every pre-existing field keeps its name, so
-`deploy/harbor/*.py` keeps parsing unchanged):
+`/stats` gains an `extract` block (purely additive — every pre-existing field keeps its name).
+
+!!! danger "These are NOT this component's figures. Read `extract.by_component`."
+    The block's top-level keys are the **sum across every extraction component** — this one and
+    [`extract_llm_sweep`](extract_llm_sweep.md), which both write the same counters. The two have
+    opposite economics: per-output calls on a cheap model here, one call on the request's own
+    frontier model there.
+
+    This document used to present the keys below as `extract_llm`'s own, and that reading cost a
+    whole investigation. On a measured 45-run benchmark the block reported **101 calls at 59,009 ms
+    mean latency and a net value of −$1.162**, which was attributed to `extract_llm` and used to
+    charge it a 5,452 ms/request latency cost — while this component's own debug record showed
+    **zero surviving candidates on all 374 requests**, i.e. not one call. The 101 were very nearly
+    the sweep's 96 asks. Any per-component cost, latency or call claim must come from
+    `extract.by_component.extract_llm`.
+
+    Names are frozen for `/metrics` (`cg_extract_calls_total`, `cg_extract_cost_usd`,
+    `cg_extract_net_value_usd`, `cg_extract_latency_ms`), which off-repo alert rules query — **not**
+    because the benchmark harness parses them. It does not: nothing under `deploy/` reads any key
+    in this block.
 
 | Field | Meaning |
 |---|---|
-| `calls` | Extraction LLM calls made |
+| `by_component` | Every field below, keyed by the component that recorded it. **The per-component-safe figures.** |
+| `calls` | Extraction LLM calls made — *summed across extraction components* |
 | `calls_avoided` | Calls avoided by the global result cache |
 | `calls_suppressed` | Calls declined by the economic gate |
 | `cache_hit_rate` | `calls_avoided / cache_lookups` |
 | `prompt_cache_read_tokens` / `..._write_tokens` | Preamble caching behavior — **0 read means the breakpoint is inert** |
-| `extraction_cost_usd` | What the component spent |
+| `extraction_cost_usd` | What was spent. Read `cost_source` before quoting it |
+| `cost_source` | Where that figure came from: `component` (each call priced itself — trust it), `host_total` (the host's process-global cheap-model spend, a superset that also carries `summarize` and `agentdiet`), `partial` (some calls unpriced, so the total is a **floor**), `unpriced` (this row made calls and priced none — nothing is known), `none` (no calls; `0` is true) |
+| `unpriced_components` | On the aggregate: which components' calls priced nothing, i.e. what a `partial` or `host_total` total is **short of**. Omitted when everything priced itself |
 | `gross_value_usd` | What its saved tokens are worth at the rate they'd have been billed |
-| **`net_value_usd`** | **The honest headline. Negative = the component is underwater.** |
+| **`net_value_usd`** | **The honest headline. Negative = underwater.** `null` when the spend is not known |
 | `avg_latency_ms` | Mean wall time per call (latency cost on the hot path) |
 | `gross_saved_tokens` | Tokens removed |
 | `reasons` / `top_reason` | Why extraction ran or was suppressed |
+
+Per-component, in `components.extract_llm`: **`acted` counts free replays.** A frozen decision
+re-spliced on a later turn saves tokens and costs nothing, and it landed in the same counter as the
+call that derived it — `acted: 239` beside `reapplied_same_session: 2,291` was read as 239 paid
+extractions. Use `acted_fresh` (paid work) and `acted_replay` (free) instead.
 
 Plus, at the top level of `/stats`: **`llm_truncated`** — replies that stopped at the model's
 output cap. That is the worst outcome available, full price for zero result, and it used to be

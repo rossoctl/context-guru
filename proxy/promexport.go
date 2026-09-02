@@ -611,7 +611,13 @@ func (h *Handler) renderMetrics() string {
 	promLine(&b, "cg_extract_cost_usd", "", xs.ExtractionCostUSD)
 	promHeader(&b, "cg_extract_net_value_usd",
 		"What extraction's own saved tokens are worth at the rate they would have been billed, MINUS what it spent. NEGATIVE means the component is underwater and should be turned off — alert on it.", "gauge")
-	promLine(&b, "cg_extract_net_value_usd", "", xs.NetValueUSD)
+	// The aggregate always has a determined spend behind it (the components', the host's, or none
+	// at all), so this is never the unknown case — but read it through Net() rather than
+	// dereferencing, so a future snapshot that cannot price the total omits the series instead of
+	// publishing an unknown as 0, which on this gauge reads as exactly break-even.
+	if net, known := xs.Net(); known {
+		promLine(&b, "cg_extract_net_value_usd", "", net)
+	}
 	promHeader(&b, "cg_extract_latency_ms",
 		"Mean wall time per extraction call. The gate stops speculative calls once this is observed to be slow, so it is an input as well as a symptom.", "gauge")
 	promLine(&b, "cg_extract_latency_ms", "", xs.AvgLatencyMs)

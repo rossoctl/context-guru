@@ -703,7 +703,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	if model != nil && !pressureFires {
 		model = nil // no model call this request; frozen reapplications still run below
 	}
-	metrics.RecordExtractionReason(triggerReason)
+	metrics.RecordExtractionReason(rep.Component, triggerReason)
 
 	floor := e.outputFloor(c.CtxWindow)
 	// Without an explicit min_tokens, derive the per-output floor from context pressure so
@@ -866,18 +866,18 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// independent TTLs and pin slots, so a replay could hit one and miss the other and
 		// emit HALF a decision — projected text with the summary segment silently gone.
 		if cached, hit := getResult(c, id); hit {
-			metrics.RecordExtractionCacheLookup(true)
+			metrics.RecordExtractionCacheLookup(rep.Component, true)
 			// A REPLAY is where the amortization actually happens, so credit it — at the rate
 			// a re-sent token would have been billed at, which on a caching backend is the
 			// cache-read rate. This is the other half of the honest net figure: the first
 			// application alone under-reports the value, and pricing the replays at the first
 			// application's rate over-reports it by 12.5x.
 			if saved := schema.TextTokens(content) - schema.TextTokens(cached.Projected); saved > 0 {
-				metrics.RecordExtractionValue(float64(saved) * val.repeatPerToken)
+				metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
 			}
 			apply(i, content, cached.Projected, cached.Summary)
 			dbgReapply++
-			rep.Event("reapplied_same_session")
+			rep.Replay("reapplied_same_session")
 			continue
 		}
 		// A NEW compaction, on the UNCACHED region only (cache-safe): when cache-aware that
@@ -942,13 +942,13 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// projected text with the summary segment silently gone.
 		if !e.rewrite || effectiveMode(c, e.mode) == markerFull {
 			if cached, hit := getResultGlobal(c, extract.ResultKey(id, e.modelName, extCfg)); hit {
-				metrics.RecordExtractionCacheLookup(true)
+				metrics.RecordExtractionCacheLookup(rep.Component, true)
 				// Freeze into this session so later turns replay it byte-for-byte from the
 				// same-session path above, at any depth.
 				putResult(c, id, cached.Projected, cached.Summary)
 				apply(i, content, cached.Projected, cached.Summary)
 				dbgReapply++
-				rep.Event("reapplied_cross_session")
+				rep.Replay("reapplied_cross_session")
 				continue
 			}
 		}
@@ -964,7 +964,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// whose real rate over reachable candidates is 24.0% — 30 replays per model call, one
 		// of the few parts of this component that unambiguously pays. A metric that argues for
 		// optimizing something already working is worse than no metric.
-		metrics.RecordExtractionCacheLookup(false)
+		metrics.RecordExtractionCacheLookup(rep.Component, false)
 		// The operator's REQUEST-level trigger, honored on every turn this component sees.
 		//
 		// This condition used to carry a cold-sweep carve-out, and before that `!c.CacheAware`.
@@ -1018,7 +1018,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		if e.gate {
 			// Stop exploring once calls are observed to be slow: exploration spends wall
 			// clock as well as money, and an agent on a task deadline feels the former more.
-			explore := !tooSlowToExplore(metrics.ExtractionP50LatencyMs()) &&
+			explore := !tooSlowToExplore(metrics.ExtractionP50LatencyMs(rep.Component)) &&
 				e.ratios.exploring(c.Session)
 			// goalOverhead, not promptOverhead: the gate needs the VARIABLE part of the
 			// prompt, because callCost adds the static preamble itself. promptOverhead is
@@ -1058,7 +1058,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				// nothing was suppressed, and inflating that would make the gate look
 				// like it was working when it has been overridden.
 				d.reason = "advisory: " + d.reason
-				metrics.RecordExtractionReason(d.reason)
+				metrics.RecordExtractionReason(rep.Component, d.reason)
 				rep.Gate("economic_gate_advisory")
 				if dbg {
 					logging.From(c.Ctx).Debug("cg.extract_llm.gate", "decision", "advisory",
@@ -1068,7 +1068,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				d.allow = true
 			}
 			if !d.allow {
-				metrics.RecordExtractionSuppressed(d.reason)
+				metrics.RecordExtractionSuppressed(rep.Component, d.reason)
 				// Just the gate name here: the per-reason breakdown already ships in
 				// /stats via RecordExtractionSuppressed, and a full sentence makes a
 				// poor histogram key.
@@ -1090,7 +1090,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				}
 				continue
 			}
-			metrics.RecordExtractionReason(d.reason)
+			metrics.RecordExtractionReason(rep.Component, d.reason)
 			gateReason = d.reason
 		}
 		// A class whose measured reduction cannot support a fixed-size window must not be
@@ -1220,7 +1220,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				return
 			}
 			latency := float64(time.Since(start).Milliseconds())
-			metrics.RecordExtractionCall(latency)
+			metrics.RecordExtractionCall(rep.Component, latency)
 			_, inTok, outTok := callSink.Totals()
 			cw, cr := callSink.CacheTotals()
 			calls[k] = components.ModelCall{
@@ -1235,6 +1235,12 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				Before:     cands[k].content,
 				Rejection:  why,
 			}
+			// THIS component's spend, at THIS component's rates. /stats used to derive
+			// extraction cost from cheapmodel's process-global token totals through one rate
+			// card, which is neither this component's spend nor extraction's: `summarize` and
+			// `agentdiet` land in the same totals, and extract_llm_sweep pays the request's own
+			// frontier model while the card is haiku's. See metrics.RecordExtractionSpend.
+			metrics.RecordExtractionSpend(rep.Component, calls[k].CostUSD)
 			// A reply that stopped exactly at the output cap was TRUNCATED, so the
 			// Starlark program is incomplete, unparseable, and the whole call — its
 			// money and its seconds — bought nothing. It is indistinguishable from
@@ -1276,10 +1282,10 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				// Feed the observed ratio so the gate prices future calls on what this
 				// workload actually achieves, not on an assumption.
 				e.ratios.observe(before-schema.TextTokens(res), before)
-				metrics.RecordExtractionSaving(before - schema.TextTokens(res))
+				metrics.RecordExtractionSaving(rep.Component, before-schema.TextTokens(res))
 				// What the removal was WORTH, at this turn's regime. On a cold sweep that is
 				// the cache-write rate; the replays below are credited at the read rate.
-				metrics.RecordExtractionValue(float64(before-schema.TextTokens(res)) * val.perToken)
+				metrics.RecordExtractionValue(rep.Component, float64(before-schema.TextTokens(res))*val.perToken)
 			} else if !timedOut {
 				e.ratios.observe(0, before) // a miss is real evidence: ratio 0
 			}
@@ -1304,6 +1310,38 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// observation leaves the gate's estimate untouched; the timeouts are still
 			// counted (above) and still brake exploration via slowCallMs, which is the
 			// latency-aware layer that SHOULD react to a slow server.
+
+			// ONE RECORD PER CALL (#177). Until this existed the component's only message was
+			// `cg.extract_llm`, one per request, carrying the DECISION and nothing about the
+			// CALL — so a run credited with 101 calls at 59,009 ms mean latency and a net value
+			// of -$1.162 had no per-request trace at all. Three things were unanswerable and
+			// each of them stopped an investigation: which requests made the calls, whether a
+			// 59-second mean was 101 slow calls or a few multi-minute outliers dragging it (the
+			// two have opposite fixes), and which candidates lost money. extract_llm_sweep's
+			// `cg.sweep.ask` already makes its economics reconstructable; this is the same for
+			// the tail pass.
+			//
+			// `accepted` is the never-worse outcome — the same condition that spliced the result
+			// above, so the log cannot say accepted while the request kept the original — and
+			// `rejection` is why a call produced nothing when it did not. Both, not one: an
+			// empty rejection on a rejected call is what made timeout, sandbox refusal and
+			// "nothing shrank" indistinguishable.
+			//
+			// DEBUG-gated by `dbg`, resolved once per request: the strings below are cheap but
+			// they are per CALL, and the repo's rule is that a payload costing anything to build
+			// is guarded. `content_key` rather than the content — the key is what the result
+			// cache, the freeze and the cross-session lookup are all keyed on, so it is the
+			// identity that joins this record to every other one about the same candidate.
+			if dbg {
+				logging.From(c.Ctx).Debug("cg.extract_llm.call",
+					"session", c.Session, "content_key", cands[k].id,
+					"candidate_tokens", before, "model", callModel,
+					"latency_ms", latency, "input_tokens", inTok, "output_tokens", outTok,
+					"cache_read", cr, "cache_write", cw, "cost_usd", calls[k].CostUSD,
+					"accepted", calls[k].Accepted, "saved_tokens", calls[k].SavedTokens,
+					"rejection", calls[k].Rejection, "gate", cands[k].gate,
+					"strategy", strategy, "timed_out", timedOut)
+			}
 		}
 		for k := 0; k < len(cands); k++ {
 			wg.Add(1)

@@ -530,6 +530,21 @@ type Report struct {
 	// extract_llm fans out into a pre-sized slice and assigns the result once, which is the
 	// same shape its projected-output collection already uses.
 	Calls []ModelCall
+	// Replays counts changes this component made by REPLAYING a decision it had already taken
+	// and frozen — the same bytes it emitted on an earlier turn, spliced again with no model
+	// call and no new spend.
+	//
+	// It exists because /stats could not tell a replay from an act (#176). `acted` is
+	// `Saved() > 0`, and a replay saves tokens, so a component whose every activation was a
+	// free replay of work done days ago reported `acted: 239` — indistinguishable from 239
+	// paid extractions. MEASURED (iteration 023, arm B): 239 acts, 2,291 replays, and the
+	// component's own record showing zero surviving candidates, i.e. not one fresh call. The
+	// two readings have opposite consequences ("this component is expensive, turn it off"
+	// against "this component is amortizing, leave it on"), so they cannot share a counter.
+	//
+	// Set via Replay(), which also files the descriptive Event, so the count and the histogram
+	// cannot drift apart.
+	Replays int
 }
 
 // TokenRates are per-token USD rates for the model a component would call ITSELF, so a
@@ -652,6 +667,22 @@ func (r *Report) Event(name string) {
 		r.Events = map[string]int{}
 	}
 	r.Events[name]++
+}
+
+// Replay records that one change on this request came from replaying an already-frozen
+// decision, under the descriptive event name the component uses for it.
+//
+// It files BOTH the Event and Report.Replays deliberately, in one call: the Events histogram is
+// the operator-facing vocabulary ("reapplied_same_session" vs "reapplied_cross_session") and
+// Replays is the machine-readable "this cost nothing" that /stats needs to keep replays out of
+// `acted`. Two separate calls at each site is how one of them gets forgotten when a third
+// replay path is added — which is precisely how the free path came to be counted as paid work.
+func (r *Report) Replay(name string) {
+	if r == nil {
+		return
+	}
+	r.Event(name)
+	r.Replays++
 }
 
 // EventN records n at once, for an event whose subject is a COUNT rather than a single candidate —

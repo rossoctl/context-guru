@@ -61,8 +61,8 @@ func TestMutatedAndGateDeclinesAreExported(t *testing.T) {
 // TestExtractEconomicsAreExported. NetValueUSD was -$0.7085 live and appeared only in
 // /stats, which nothing scrapes and nothing alerts on.
 func TestExtractEconomicsAreExported(t *testing.T) {
-	metrics.RecordExtractionSuppressed("gate:not_worth_it")
-	metrics.RecordExtractionCacheLookup(true)
+	metrics.RecordExtractionSuppressed("extract_llm", "gate:not_worth_it")
+	metrics.RecordExtractionCacheLookup("extract_llm", true)
 	h := New(nil, nil, metrics.NewAggregator(), Options{})
 	body := h.renderMetrics()
 	for _, want := range []string{

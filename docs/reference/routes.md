@@ -57,8 +57,11 @@ either, an unknown path still 404s exactly as before.
 
 ## `GET /stats`
 
-Fields are only ever **added** to this payload (harnesses in `deploy/harbor` parse it), so a
-consumer that reads by key keeps working. The tables below group the `Snapshot` struct in
+Fields are only ever **added** to this payload, so a consumer that reads by key keeps working.
+Two different consumers make that a hard rule: `deploy/harbor/*.py` reads `runs`, `acted` and
+`saved_tokens` off the per-component objects (`measure.py` by direct index, so a removal is a
+`KeyError`), and `/metrics` re-publishes much of the rest as `cg_*` series that off-repo alert
+rules and dashboards are written against — where a rename breaks monitoring *silently*. The tables below group the `Snapshot` struct in
 `metrics/metrics.go`; that struct is the authority, and it grows.
 
 ### Savings
@@ -81,7 +84,9 @@ Per-component (`components.<name>` and `potential_components.<name>`):
 | Field | Meaning |
 |---|---|
 | `runs` | Times the component ran. |
-| `acted` | Runs that actually saved tokens. |
+| `acted` | Runs that actually saved tokens. **Includes free replays** — see the two fields below before reading this as work the component paid for. |
+| `acted_fresh` | Runs that saved tokens by doing new work. Every deterministic component's `acted` is entirely this. |
+| `acted_replay` | Runs whose whole saving came from **replaying a decision already frozen** — the same bytes re-spliced, no model call, no spend. `acted_fresh + acted_replay == acted`. A component with `acted: 239` and `acted_replay: 239` made no calls at all; one with the same `acted` and `acted_replay: 0` paid for every one. |
 | `mutated` | Runs that changed the request at all — may save 0 content tokens. |
 | `reverted` | Runs the pipeline rolled back (error, panic, or grew the request). |
 | `saved_tokens` | **Cumulative** — re-counted every turn the compaction re-appears. |
@@ -90,6 +95,26 @@ Per-component (`components.<name>` and `potential_components.<name>`):
 | `duration_ms` | Cumulative wall time this component spent on the hot path. |
 | `discarded_changes` | Changes the writeback layer threw away, attributed back to this component. |
 | `gates` | Rejection histogram, gate name → candidates that gate declined. Omitted when empty. It is what turns `acted: 0` into a diagnosis: the component saw no candidates, or saw them and a named guard refused. |
+
+### Extraction economics (`extract`)
+
+Present only when an extraction component has recorded something. See
+[`extract_llm`](../components/extract_llm.md) for the field meanings.
+
+!!! warning "The `extract` block is a SUM across components, not one component's figures"
+    `extract_llm` and `extract_llm_sweep` both write these counters, and the enclosing block is
+    their **total**. It reads like one component's numbers and is not: a measured run attributed
+    101 calls at 59,009 ms and a net value of −$1.162 to `extract_llm` when that component had
+    made no call at all and the figures were the sweep's. **Read `extract.by_component`** for any
+    per-component cost, latency or call claim. The enclosing keys are kept for `/metrics`
+    compatibility (`cg_extract_*`), not because they are the figure to quote.
+
+| Field | Meaning |
+|---|---|
+| `by_component` | The same fields again, keyed by the component that recorded them. The only per-component-safe figures here. Omitted when nothing recorded. |
+| `cost_source` | Where `extraction_cost_usd` came from, because `$0` and *no evidence* are the same number and the opposite claim. `component` = every call priced itself at the rates of the model it called (trust it). `host_total` = the host's process-global cheap-model spend, a **superset** that also carries `summarize` and `agentdiet` and prices everything through one card. `partial` = some calls priced themselves and some did not, so the total is a **floor**. `unpriced` = this row made calls and priced none, so nothing is known about what it spent. `none` = no calls, no spend; `0` is true. |
+| `net_value_usd` | `null` when the spend behind it is not known (`cost_source: unpriced`). The aggregate is never null. |
+| `unpriced_components` | Which components' calls priced nothing, so `partial` and `host_total` say what the total is **short of** rather than only that it is incomplete. Aggregate only; omitted when every call priced itself. |
 
 !!! warning "Cumulative is not unique"
     `saved_tokens` counts the same compaction again on every later turn that carries it. A

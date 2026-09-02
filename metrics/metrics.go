@@ -213,8 +213,24 @@ func (a *Aggregator) SetMode(m components.Mode) {
 }
 
 type compStat struct {
-	Runs        int64 `json:"runs"`
-	Acted       int64 `json:"acted"`   // runs that actually saved tokens
+	Runs  int64 `json:"runs"`
+	Acted int64 `json:"acted"` // runs that actually saved tokens
+	// ActedFresh and ActedReplay partition Acted by whether the saving cost anything (#176).
+	//
+	// `acted` alone cannot answer the only question an operator asks about an expensive
+	// component — "is it still spending?" — because a frozen decision replayed on every
+	// subsequent turn saves tokens for free and lands in the same counter as the call that
+	// derived it. MEASURED (iteration 023, arm B): `acted: 239` beside `reapplied_same_session:
+	// 2,291` on a component whose own debug record showed no candidate surviving its gates on
+	// any of 374 requests. The reading taken from `acted` was "this component made 239 paid
+	// extractions"; the truth was zero.
+	//
+	// A run is ActedReplay when it saved tokens, made NO model call, and replayed at least one
+	// frozen decision — free work. Everything else that saved tokens is ActedFresh, which is
+	// therefore also what every deterministic component reports (it does fresh work every time
+	// it runs, it just does not pay a model for it).
+	ActedFresh  int64 `json:"acted_fresh"`
+	ActedReplay int64 `json:"acted_replay"`
 	Mutated     int64 `json:"mutated"` // runs that changed the request at all (may save 0 content tokens, e.g. cacheinject)
 	Reverted    int64 `json:"reverted"`
 	Saved       int64 `json:"saved_tokens"`        // CUMULATIVE: summed every turn the compaction re-appears
@@ -294,6 +310,22 @@ func (cs compStat) forSnapshot() compStat {
 		cs.Events = ev
 	}
 	return cs
+}
+
+// act credits one run that saved tokens, and classifies it as FRESH work or a free REPLAY.
+//
+// One method called from both the enforced and the observe loop, rather than the same three
+// lines written twice: the two loops in this file already drifted once over copying Gates, and
+// the whole point of this counter is that a wrong reading of it is not visible in the output.
+// A replay is a run that saved tokens without making a model call, off a decision the
+// component had already frozen — see components.Report.Replays.
+func (cs *compStat) act(r components.Report) {
+	cs.Acted++
+	if len(r.Calls) == 0 && r.Replays > 0 {
+		cs.ActedReplay++
+		return
+	}
+	cs.ActedFresh++
 }
 
 // verdict reads the counters. See compStat.Verdict for why this exists rather than leaving
@@ -406,7 +438,7 @@ func (a *Aggregator) Component(r components.Report) {
 		cs.Mutated++ // did something, even if it saved no content tokens
 	}
 	if r.Saved() > 0 && !r.Reverted && !r.Skipped {
-		cs.Acted++
+		cs.act(r)
 	}
 }
 
@@ -486,7 +518,7 @@ func (a *Aggregator) observeComp(r components.Report) {
 		cs.Mutated++
 	}
 	if r.Saved() > 0 && !r.Reverted && !r.Skipped {
-		cs.Acted++
+		cs.act(r)
 	}
 }
 
