@@ -298,6 +298,62 @@ func (e *ExtractSweep) econPays(req *bschemas.BifrostChatRequest, c *components.
 	return prefixRewritePays(req, saved, shallowest, c)
 }
 
+// selectAffordableDrops chooses WHICH of the model's votes to actually apply.
+//
+// THE PROBLEM THIS FIXES. `min_tokens` was doing two unrelated jobs at once: deciding which outputs are
+// worth NAMING in the inventory, and standing in for whether a drop is worth its cost. Those want
+// opposite settings. Naming is nearly free -- the model reads each output from the cached prefix, so one
+// more candidate costs one inventory line, on the order of thirty tokens -- and more candidates is the
+// axis the mechanism lives on (6% live-kept shown one output, 58% at ~15). But a high floor was the only
+// thing standing between the model and an expensive drop, so it had to be set for the second job, which
+// starved the first. Measured on iteration 022: the shipped floor of 1000 named 4.5 of the 23.6 tool
+// outputs a request carried, holding the batch at 4.4 against a cap of 12.
+//
+// WHY SIZE WAS THE WRONG DISCRIMINATOR ANYWAY. A drop's real cost is not its marker -- tryMark already
+// refuses any drop whose replacement would not shrink the message, marker-inclusive. It is the
+// cache-WRITE that mutating the prefix forces, and that is charged on the span from the EARLIEST dropped
+// index to the cached boundary, once per pass. So a small output dropped after something already being
+// dropped costs its descriptor and nothing more; the same output dropped EARLIER than everything else
+// sets W for the whole batch and must repay the entire rewrite by itself. Depth relative to the rest of
+// the batch decides, not size.
+//
+// THE WALK. Votes are ordered latest-first and accumulated. Each step reaches further back, so S and W
+// both grow, and the subset maximising S*T - 11.5*W is chosen. Not the largest clearing subset: the
+// objective is not monotonic in k -- one early, tiny drop can extend W past what several later ones
+// repay -- so it is maximised rather than thresholded.
+//
+// ONLY ON THE ECON PATH, and that is not an oversight. The pre-expiry window fires precisely because the
+// cached prefix is about to expire, which makes W nearly worthless; pruning drops to protect a cache
+// entry with seconds to live would forgo real savings to preserve nothing. Under pre-expiry every vote
+// is applied, exactly as on `main`.
+func (e *ExtractSweep) selectAffordableDrops(req *bschemas.BifrostChatRequest, c *components.Ctx,
+	cands []sweepCand, drop []int) (kept []int, pruned int) {
+
+	if len(drop) < 2 || c == nil || c.CtxWindow <= 0 {
+		return drop, 0
+	}
+	ord := append([]int(nil), drop...)
+	sort.Slice(ord, func(a, b int) bool { return cands[ord[a]].i > cands[ord[b]].i }) // latest first
+	bestNet, bestK := 0.0, 0
+	saved, shallowest := 0, 0
+	for k := 1; k <= len(ord); k++ {
+		cd := cands[ord[k-1]]
+		saved += schema.TextTokens(cd.content)
+		if k == 1 || cd.i < shallowest {
+			shallowest = cd.i
+		}
+		net, _, _ := prefixRewriteNet(req, saved, shallowest, c)
+		if k == 1 || net > bestNet {
+			bestNet, bestK = net, k
+		}
+	}
+	if bestK == len(ord) {
+		return drop, 0
+	}
+	kept = append(kept, ord[:bestK]...)
+	return kept, len(ord) - bestK
+}
+
 // renderEvidence formats one output's co-reference record for the inventory line. Counts only — no
 // identifier lists — because the measured win came from comparative RANKING, not from more detail, and
 // every token here is paid on every candidate on every sweeping turn.
@@ -575,6 +631,16 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	}
 	if len(cands) > 0 && asking {
 		drop, call := e.adjudicate(req, c, rep, cands)
+		// Which votes are affordable is a separate question from which outputs were worth asking about.
+		// See selectAffordableDrops -- and note it runs ONLY when econ fired, because the pre-expiry
+		// window's whole premise is that the prefix it invalidates is nearly worthless.
+		if !preExpiry {
+			var pruned int
+			drop, pruned = e.selectAffordableDrops(req, c, cands, drop)
+			if pruned > 0 {
+				rep.GateN("drop_unaffordable_pruned", pruned)
+			}
+		}
 		for _, g := range call.gates {
 			rep.Gate(g)
 		}
@@ -1123,7 +1189,7 @@ func flattenTranscript(req *bschemas.BifrostChatRequest) string {
 func init() {
 	components.RegisterFields("extract_llm_sweep", extractSweepConfig{}, []components.Field{
 		{Key: "min_tokens", Type: components.FieldInt, Default: defaultSweepFloor, Min: 1,
-			Hint: "Per-output floor for naming a candidate in the inventory. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 the shipped preset produced ZERO extractions across 3,437 production requests."},
+			Hint: "Per-output floor for naming a candidate in the inventory. NOTE this no longer has to price a drop as well: selectAffordableDrops decides which votes are worth their cache-write, on DEPTH relative to the rest of the batch rather than on size, so a low floor is safe on the econ path. Measured on iteration 022, a floor of 1000 named 4.5 of the 23.6 tool outputs a request carried and held the batch at 4.4 against a cap of 12, while a floor of 100 reaches 11.6 for 8% more mass -- candidates are nearly free (one inventory line) and are the axis the mechanism lives on. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 the shipped preset produced ZERO extractions across 3,437 production requests."},
 		{Key: "min_inventory", Type: components.FieldInt, Default: defaultMinInventory, Min: 1,
 			Hint: "Fewest candidates worth asking about; below it the sweep declines without asking. The model's judgement is a function of how many candidates it COMPARES, and the numbers are far apart: shown one output it scored 6% live-kept on haiku and 14% on sonnet, both inside the drop-everything null model's error bar, while ~15 together reached 58% at the lowest cost per output. At batch 3-6 it dropped a genuinely-spent output 2 times in 4; at 10, 4 in 4. Below the floor a removal is a guess, and a wrong removal costs content the agent still needs while a wrong keep costs one turn's tokens. Lower it only to trade that asymmetry away deliberately."},
 		{Key: "pre_expiry_seconds", Type: components.FieldInt, Default: int(defaultPreExpiry / time.Second),

@@ -111,3 +111,32 @@ func modelTurns(req *bschemas.BifrostChatRequest) int {
 	}
 	return n
 }
+
+// prefixRewriteNet is prefixRewritePays' arithmetic with the terms exposed rather than reduced to a
+// verdict: the NET benefit, in cache-read-equivalents, of removing `saved` tokens whose shallowest
+// touched index is `shallowest`.
+//
+//	net = S*T - 11.5*W
+//
+// Exposed because choosing WHICH drops to apply is an optimisation over subsets, not a yes/no test, and
+// a bool cannot be maximised. See selectAffordableDrops.
+//
+// Note the sign convention that makes the walk work: `shallowest` is the SMALLEST index, i.e. the
+// EARLIEST message. Removing something earlier forces the provider to re-write everything after it, so
+// W grows as the drop set reaches further back. A drop late in the cached region is nearly free; the
+// same drop early in it can cost more than every other drop in the batch combined.
+func prefixRewriteNet(req *bschemas.BifrostChatRequest, saved, shallowest int, c *components.Ctx) (net float64, rewritten, turns int) {
+	if c == nil || c.CtxWindow <= 0 || saved <= 0 {
+		return 0, 0, 0
+	}
+	end := prefixRewriteWindow(req, c)
+	for j := shallowest; j <= end && j < len(req.Input); j++ {
+		rewritten += schema.TextTokens(schema.MessageText(req.Input[j]))
+	}
+	rewritten -= saved // the removed mass is not written back
+	if rewritten < 0 {
+		rewritten = 0
+	}
+	turns = estimateTurnsRemaining(schema.MessagesTokens(req), modelTurns(req), c.CtxWindow)
+	return float64(saved)*float64(turns) - cacheWriteX*float64(rewritten), rewritten, turns
+}
