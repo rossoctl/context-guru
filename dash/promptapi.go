@@ -107,7 +107,7 @@ func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
 	if a.auth != nil {
 		trusted = true
 	}
-	view, err := a.rec.DB().PromptViewFor(f)
+	view, err := a.db(r).PromptViewFor(f)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "could not read the prompt text")
 		return
@@ -183,7 +183,7 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 	}
 	tq += ` GROUP BY d.session_id, d.kind, d.name, d.server)`
 	var rows, textRows *int
-	if err := d.sql.QueryRow(tq, ta...).Scan(&rows, &textRows); err != nil {
+	if err := d.sql.QueryRowContext(d.readCtx(), tq, ta...).Scan(&rows, &textRows); err != nil {
 		return nil, err
 	}
 	if rows != nil {
@@ -207,7 +207,7 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 	var tenant, session, digest string
 	var ts int64
 	var txt int
-	switch err := d.sql.QueryRow(pq, pa...).Scan(&tenant, &session, &digest, &ts, &txt); {
+	switch err := d.sql.QueryRowContext(d.readCtx(), pq, pa...).Scan(&tenant, &session, &digest, &ts, &txt); {
 	case err == sql.ErrNoRows:
 		return v, nil // nothing captured in scope at all
 	case err != nil:
@@ -224,7 +224,7 @@ func (d *DB) PromptViewFor(f Filter) (*PromptView, error) {
 		FROM tool_declarations d ` + declTextJoin + `
 		WHERE d.tenant_id = ? AND d.session_id = ? AND d.digest = ?`
 	ra := []any{tenant, session, digest}
-	rs, err := d.sql.Query(rq, ra...)
+	rs, err := d.sql.QueryContext(d.readCtx(), rq, ra...)
 	if err != nil {
 		return nil, err
 	}

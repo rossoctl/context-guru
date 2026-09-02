@@ -2,9 +2,46 @@ package dash
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
+
+// Three measured counter-examples to "a correlated subquery is the slow shape", collected
+// here because this package keeps rediscovering the same lesson from the wrong end. The cost of
+// a correlated subquery is its INVOCATION COUNT, which is set by how selective the OUTER
+// predicate is and by where that predicate sits — not by the subquery being correlated.
+//
+//  1. CompactionResets' outer filter (tokens_before > 0) matched ~100% of rows, so the subquery
+//     ran 65k+ times and a covering index changed the plan without moving the measured time at
+//     all. A LAG window function took ~25s to ~3.3s. Correlated form lost.
+//  2. ReplayProjectedTokens looks identical in shape, and the same rewrite makes it WORSE:
+//     byte-identical result, consistently 50-70% slower on live data (0.9s correlated against
+//     1.5s windowed, 5 runs), because its outer filter (saved_unique > 0) matches only 8.5% of
+//     rows — so the subquery runs for that 8.5% while a window function must still sort the
+//     whole table first. Correlated form won. See the comment at that query.
+//  3. Predicate ORDER inside one AND is worth more than either: in kaSaved (dash/keepalive.go)
+//     the cheap `keepalive_saved_usd > 0` guard placed before the reachability EXISTS makes a
+//     full-table SUM 314 ms; placed after it, the identical answer takes 61.9 SECONDS. 197x,
+//     from moving one term. That expression is now inlined at ten read sites — do not let a
+//     tidy-up normalise the order.
+//
+// A fourth, added on the same sweep: splitMoved's two correlated LIMIT-1 subqueries rewritten as
+// a LAG over only the non-zero rows is byte-identical and WITHIN NOISE on time (80.3 vs 94.1 ms,
+// then 77.6 vs 71.9 ms, two 5-run passes). Rejected. Three of the four say do not rewrite it.
+//
+// And one that cuts the other way, so the lesson is not "never touch a window function":
+// CompactionResets' CTE selected `r.*` and carried ~56 columns through the PARTITION BY sort to
+// produce one LAG value per row. Narrowing it to (id, prev) and joining back on the primary key
+// is 242-316 ms to 59-63 ms here and 1,324 ms to 553 ms on production. That trade ADDS ~16k
+// primary-key probes and still wins, which is the exact opposite of Facets' component list
+// (query.go), where removing ~1.2M probes is the whole win. So:
+//
+// Measure the selectivity of the outer predicate before reaching for a window function, and put
+// the cheap term first. Then ask which of the two costs you are actually paying -- invocation
+// count or sort payload -- because in this package both have won, and the shape of the query
+// does not tell you which. An index that leaves the plan alone buys nothing, and a plan change
+// that leaves the dominant cost alone buys nothing either.
 
 // The gate aggregation expands request_components through json_each, so it could have
 // turned a dashboard load into a table scan.
@@ -71,5 +108,56 @@ func TestOverviewStaysFastOnALargeWindow(t *testing.T) {
 	// lost index at this size cannot pass.
 	if existing > 20*time.Second {
 		t.Errorf("too slow overall: overview %v, components %v", overview, comps)
+	}
+}
+
+// Both of the query-cost fixes in this package are PLAN changes whose whole value is a lower
+// invocation count, and both are the kind of thing a later tidy-up reverts by accident while
+// keeping the results identical. A timing assertion cannot catch that at test-fixture size, so
+// this asserts the plan instead — which is also the check the CompactionResets round taught
+// this package to run: an index that leaves the plan alone buys nothing (dash/CLAUDE.local.md,
+// and idx_requests_session_tb in schema.go, which measurably did nothing).
+func TestQueryPlansStayOnTheCheapShape(t *testing.T) {
+	db := openTestDB(t)
+	plan := func(q string, args ...any) string {
+		rows, err := db.sql.Query("EXPLAIN QUERY PLAN "+q, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out string
+		for rows.Next() {
+			var a, b, c int
+			var detail string
+			if err := rows.Scan(&a, &b, &c, &detail); err != nil {
+				t.Fatal(err)
+			}
+			out += detail + "\n"
+		}
+		return out
+	}
+	// Facets' component list must not probe the requests primary key once per component row.
+	// Measured on the production database read-only, 1,210,932 component rows for 12 distinct
+	// components: 1,533 ms for the per-row form against 73 ms for this one.
+	cond, args := selfBlanked(Filter{TenantAll: true}, "component").where()
+	got := plan(`SELECT names.component
+		FROM (SELECT DISTINCT component FROM request_components) names
+		WHERE EXISTS (SELECT 1 FROM request_components c JOIN requests r ON r.id = c.request_id
+			WHERE c.component = names.component AND `+cond+`)
+		ORDER BY 1 LIMIT 200`, args...)
+	if !strings.Contains(got, "CORRELATED SCALAR SUBQUERY") {
+		t.Errorf("Facets' component list is no longer probed per distinct component:\n%s", got)
+	}
+	// SelfRemovals' declaration pass must group off idx_tooldecl_inventory. Without that index
+	// the same GROUP BY sorts into a temp b-tree and is 2.4x SLOWER than the scan it replaced
+	// (10,192 ms against 4,189 ms on a corpus built to production's cardinalities), so the
+	// index and the GROUP BY are only correct together.
+	got = plan(`SELECT tenant_id, session_id, kind, name, server, MAX(tokens) FROM tool_declarations
+		GROUP BY tenant_id, session_id, kind, name, server`)
+	if !strings.Contains(got, "COVERING INDEX idx_tooldecl_inventory") {
+		t.Errorf("SelfRemovals' declaration pass is not covered by idx_tooldecl_inventory:\n%s", got)
+	}
+	if strings.Contains(got, "TEMP B-TREE") {
+		t.Errorf("SelfRemovals' declaration pass sorts into a temp b-tree:\n%s", got)
 	}
 }

@@ -207,7 +207,7 @@ type BenchArm struct {
 
 // BenchRuns returns every ingested run with its per-arm aggregates.
 func (d *DB) BenchRuns() ([]*BenchRun, error) {
-	rows, err := d.sql.Query(`SELECT id, name, ts, dataset, model, summary FROM bench_runs ORDER BY ts DESC`)
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT id, name, ts, dataset, model, summary FROM bench_runs ORDER BY ts DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +236,7 @@ func (d *DB) BenchRuns() ([]*BenchRun, error) {
 }
 
 func (d *DB) benchArms(runID int64) ([]BenchArm, error) {
-	rows, err := d.sql.Query(`SELECT arm, COUNT(*),
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT arm, COUNT(*),
 		SUM(CASE WHEN exception = 0 THEN 1 ELSE 0 END),
 		SUM(CASE WHEN reward >= 1 THEN 1 ELSE 0 END),
 		AVG(reward), AVG(steps), SUM(cost_usd), AVG(cost_usd), SUM(norm_cost_usd),
@@ -295,7 +295,7 @@ func (d *DB) BenchTasks(runID int64, arm string) ([]*BenchTask, error) {
 		args = append(args, arm)
 	}
 	q += " ORDER BY task, arm"
-	rows, err := d.sql.Query(q, args...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
 	}

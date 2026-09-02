@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"golang.org/x/sync/singleflight"
 	"time"
 
 	"github.com/rossoctl/context-guru/apply"
@@ -49,25 +51,54 @@ type API struct {
 	// its own 5 queries (Components, DecomposeComponentSavedUSD, EstimateComponentSavedUSD)
 	// measured ~4.4s cold on a comparable corpus, uncached, on the dashboard's most-read tab.
 	statsCache, facetsCache, componentsCache jsonCache
+	// jsonInflight collapses concurrent COLD reads of the same cache key onto one computation.
+	// Keyed by the same principal-scoped cacheKey as the caches, so two tenants never share a
+	// computation and a manager never shares one with a tenant.
+	jsonInflight singleflight.Group
 }
 
-// dashCacheTTL bounds how stale a cached /api/stats or /api/facets body may be. Short enough
-// that a real change shows up almost immediately; long enough that a page's own auto-refresh,
-// or a second tab open on the same window, does not each pay for a separate expensive read.
-const dashCacheTTL = 5 * time.Second
-
-// dashHandlerTimeout bounds /api/stats, /api/facets and /api/components — the three DB-heaviest
-// dashboard reads. The connection pool they share (dash/store.go) is now bounded, so a burst
-// past it queues for a connection rather than growing unbounded — better than the OOM crash
-// that replaced, but unbounded on its own: without this, a queued request hangs the caller
-// indefinitely instead of returning. Matches Prometheus's own scrape_timeout, so a slow tab and
-// a slow scrape fail the same way.
+// dashCacheTTL bounds how fresh a cached /api/stats, /api/facets or /api/components body is before
+// a request triggers a refresh.
 //
-// This bounds the CALLER's wait, not the query itself: Overview() and Facets() run on plain
-// d.sql.Query/QueryRow (context.Background()), so a canceled request context does not cancel
-// the in-flight query or release its pooled connection early — the goroutine keeps running
-// until the query finishes on its own. A caller gets a fast, honest timeout instead of hanging;
-// backend pressure from a genuinely stuck query is not relieved by this alone.
+// It was 5s, which was SHORTER THAN THE WORK IT CACHED and therefore cached almost nothing. On the
+// production corpus Components() alone measures ~6s and the stats set ~5s, so an entry expired at
+// or before the moment the next reader arrived: nearly every request was a miss and paid full
+// price, and with no collapsing, nineteen readers meant nineteen concurrent multi-second scans
+// competing for one connection pool — which is how a query that fits inside the 10s timeout on its
+// own produced 503s all day. /metrics had the identical bug against its scrape interval
+// (proxy/promexport.go); this is the same mistake in the same codebase, so it gets the same fix.
+//
+// 30s is chosen against the CLIENT's behaviour, not picked round: the dashboard's own auto-refresh
+// defaults to 5 minutes and its SSE feed tells it when anything actually changed
+// (dash/ui/app.js), so a rollup up to 30s old is well inside what the page already displays. The
+// numbers here are aggregates over hours or a month; none of them turns on a single second.
+const dashCacheTTL = 30 * time.Second
+
+// dashCacheStale is how far PAST the TTL a body may still be served while its replacement is being
+// computed. Beyond it a reader waits for fresh numbers instead.
+//
+// The cap is what keeps stale-while-revalidate honest. Without one, a deployment that goes quiet
+// serves the last body it ever built, indefinitely, and the page reports it as current — the
+// dashboard's freshness line is stamped when the BROWSER fetched, so it cannot see server-side
+// staleness. 30s past a 30s TTL bounds the worst case at one minute, which is smaller than the
+// client's own refresh interval, so no reader can be shown anything older than they would have
+// been shown anyway by not clicking refresh.
+const dashCacheStale = 30 * time.Second
+
+// dashHandlerTimeout bounds every dashboard read except the four in unboundedRoutes. It used to
+// bound three of them, named by hand at their route entries — see Mount, which now applies it by
+// default, and unboundedRoutes for why the default is the safe direction.
+//
+// It bounds the QUERY as well as the caller's wait, which it did not before and which is the
+// difference between an honest error and an outage. http.TimeoutHandler cancels the request
+// context when it fires; reads now run under that context (a.db(r) -> WithContext -> readCtx,
+// dash/store.go), so a caller who has given up takes their query and its pooled connection with
+// them. Previously Overview() and Facets() ran on context.Background(): the caller got a fast 503
+// and the query kept going, so a browser retrying a failing load accumulated concurrent scans
+// nobody was waiting for until the pool and the memory cap were both exhausted. That is the shape
+// this constant now prevents rather than merely reports.
+//
+// Still matches Prometheus's own scrape_timeout, so a slow tab and a slow scrape fail alike.
 const dashHandlerTimeout = 10 * time.Second
 
 const dashTimeoutMsg = "dashboard query timed out; try again in a moment"
@@ -96,6 +127,26 @@ func (c *jsonCache) get(key string) ([]byte, bool) {
 	return e.body, true
 }
 
+// load returns the entry whether or not it is still fresh, which get cannot express and
+// stale-while-revalidate needs: the difference between "no body" and "a body worth serving while a
+// better one is computed" is the difference between a reader waiting six seconds and not waiting.
+//
+// A body past dashCacheTTL+dashCacheStale is reported as absent, so the staleness cap is enforced
+// here rather than trusted to each caller.
+func (c *jsonCache) load(key string) (body []byte, fresh bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+	age := time.Since(e.at)
+	if age >= dashCacheTTL+dashCacheStale {
+		return nil, false
+	}
+	return e.body, age < dashCacheTTL
+}
+
 func (c *jsonCache) set(key string, body []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -109,6 +160,96 @@ func (c *jsonCache) set(key string, body []byte) {
 		c.entries = make(map[string]jsonCacheEntry)
 	}
 	c.entries[key] = jsonCacheEntry{at: time.Now(), body: body}
+}
+
+// serveCached writes a cached body if there is one, and labels every response either way.
+//
+// X-Cache exists because this cache is a masking layer over a real cost, and an unlabelled
+// response makes that cost unmeasurable. /api/facets survived at ~1.5s per call precisely
+// because the 5s TTL hid it: it is requested on every tab switch (app.js calls loadFacets()
+// from every go() but setup/settings), so one miss followed by eleven hits reads as a fast
+// endpoint. Any before/after taken through this API without knowing which side of the TTL each
+// sample landed on can compare a miss against a hit and report the ratio as an optimisation --
+// measured on this corpus, /api/facets is 380ms on a miss and 2.4ms on a hit, a 158x difference
+// that no code change produced. The header costs one line per response and makes the harness
+// able to tell the two apart.
+func serveCached(w http.ResponseWriter, c *jsonCache, key string) bool {
+	if body, ok := c.get(key); ok {
+		writeCachedJSON(w, body, "hit")
+		return true
+	}
+	w.Header().Set("X-Cache", "miss")
+	return false
+}
+
+func writeCachedJSON(w http.ResponseWriter, body []byte, state string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Cache", state)
+	_, _ = w.Write(body)
+}
+
+// serveJSON answers one expensive, cacheable dashboard read.
+//
+// Three cases, and only the third is allowed to cost the reader anything:
+//
+//   - FRESH: serve it. X-Cache: hit.
+//   - STALE but inside dashCacheStale: serve it immediately and compute the replacement behind the
+//     response. X-Cache: stale. This is the case that was missing, and it is the common one — with
+//     a TTL shorter than the query, essentially every request landed here and was treated as cold.
+//   - COLD: compute, and collapse every concurrent request for the same key onto ONE computation.
+//     Without collapsing, N readers arriving together each ran the whole query; they then contended
+//     for the same pool and every one of them got slower, so the busiest moment was the slowest —
+//     the shape that turns a 6s query into a 10s timeout.
+//
+// compute is given its own *DB rather than closing over one, because the two cases need different
+// lifetimes: a foreground computation must die with its caller, and a background refresh must NOT
+// — r.Context() is already cancelled by the time the refresh runs, so a refresh bound to it would
+// be killed instantly and the entry could never become fresh again.
+func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, key string,
+	compute func(db *DB) ([]byte, error)) {
+	if body, fresh := c.load(key); body != nil {
+		if fresh {
+			writeCachedJSON(w, body, "hit")
+			return
+		}
+		go a.refreshJSON(c, key, compute)
+		writeCachedJSON(w, body, "stale")
+		return
+	}
+	w.Header().Set("X-Cache", "miss")
+	v, err, _ := a.jsonInflight.Do(key, func() (any, error) {
+		body, err := compute(a.db(r))
+		if err == nil {
+			c.set(key, body)
+		}
+		return body, err
+	})
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(v.([]byte))
+}
+
+// refreshJSON recomputes one cache entry off the request path.
+//
+// Its context is detached and separately bounded: the request that triggered it has already been
+// answered, so r.Context() is cancelled and inheriting it would cancel this immediately. The bound
+// is generous rather than dashHandlerTimeout because nobody is waiting — the only thing that must
+// not happen is a refresh living forever and holding a connection.
+func (a *API) refreshJSON(c *jsonCache, key string, compute func(db *DB) ([]byte, error)) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	body, err := compute(a.rec.DB().WithContext(ctx))
+	if err != nil {
+		// Keep the stale entry: it is still servable and still inside its cap. Dropping it would
+		// turn a transient failure into a cold miss for the next reader, which is strictly worse.
+		slog.Warn("context-guru: dashboard cache refresh failed; serving the previous body until it expires",
+			"err", err)
+		return
+	}
+	c.set(key, body)
 }
 
 // cacheKey scopes a cache entry to the actual caller, not just the URL: a manager and a
@@ -307,15 +448,15 @@ func (a *API) routes() []route {
 			http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
 		}},
 		{"GET /dashboard/", scopePublic, http.StripPrefix("/dashboard/", uiHandler()).ServeHTTP},
-		{"GET /api/stats", scopeTenant, http.TimeoutHandler(http.HandlerFunc(a.stats), dashHandlerTimeout, dashTimeoutMsg).ServeHTTP},
+		{"GET /api/stats", scopeTenant, a.stats},
 		{"GET /api/series", scopeTenant, a.series},
 		{"GET /api/requests", scopeTenant, a.requests},
 		{"GET /api/requests/{id}", scopeTenant, a.request},
 		{"GET /api/sessions", scopeTenant, a.sessions},
 		{"GET /api/sessions/{session}/transcript", scopeTenant, a.sessionTranscript},
-		{"GET /api/components", scopeTenant, http.TimeoutHandler(http.HandlerFunc(a.components), dashHandlerTimeout, dashTimeoutMsg).ServeHTTP},
+		{"GET /api/components", scopeTenant, a.components},
 		{"GET /api/breakdown", scopeTenant, a.breakdown},
-		{"GET /api/facets", scopeTenant, http.TimeoutHandler(http.HandlerFunc(a.facets), dashHandlerTimeout, dashTimeoutMsg).ServeHTTP},
+		{"GET /api/facets", scopeTenant, a.facets},
 		{"GET /api/config", scopeManager, a.config},
 		{"GET /api/benchmarks", scopeManager, a.benchmarks},
 		{"GET /api/benchmarks/{id}/tasks", scopeManager, a.benchmarkTasks},
@@ -344,8 +485,37 @@ func (a *API) routes() []route {
 // (typically "/dashboard" for the UI and "/api" for the data).
 func (a *API) Mount(m *http.ServeMux) {
 	for _, rt := range a.routes() {
-		m.HandleFunc(rt.pattern, rt.h)
+		h := rt.h
+		if !unboundedRoutes[rt.pattern] {
+			h = http.TimeoutHandler(h, dashHandlerTimeout, dashTimeoutMsg).ServeHTTP
+		}
+		m.HandleFunc(rt.pattern, h)
 	}
+}
+
+// unboundedRoutes are the routes Mount does NOT put a handler timeout on.
+//
+// The bound is applied by DEFAULT and named here as an opt-out, which is the whole point:
+// dashHandlerTimeout used to be attached to three routes by hand, so every route added after it
+// silently had none. /api/series and /api/capture were two of those, and in the outage this fixes
+// they were the endpoints that hung longest — 4,049 and 3,549 gateway timeouts in a single day,
+// each burning 60s of nginx patience, because nothing in the process ever gave up. A route is now
+// bounded whether or not its author thought about it, and exempting one takes a deliberate line.
+//
+// Only two shapes qualify, and "this one is slow" is not among them:
+//
+//   - A STREAMED response. http.TimeoutHandler buffers the whole body before writing, so
+//     wrapping an SSE feed would withhold every event and then discard them all.
+//   - A read that legitimately outlasts the bound because it crosses the NETWORK to cold
+//     storage, under its own explicit and longer timeout.
+//
+// The static UI is listed for neither reason: it touches no database, and buffering an embedded
+// asset only to time it is pure overhead.
+var unboundedRoutes = map[string]bool{
+	"GET /api/events":                        true, // SSE: a buffered stream is not a stream
+	"GET /api/archive/{session}":             true, // rclone fetch, own 60s bound
+	"GET /api/sessions/{session}/transcript": true, // reaches cold storage
+	"GET /dashboard/":                        true, // embedded assets, no DB
 }
 
 // requireManager gates a route serving server-wide or process-wide facts.
@@ -440,7 +610,7 @@ func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 			limit = min(n, transcriptPageMax)
 		}
 	}
-	tp, err := a.rec.DB().SessionEventsPage(f, session, visible, r.URL.Query().Get("after"), limit)
+	tp, err := a.db(r).SessionEventsPage(f, session, visible, r.URL.Query().Get("after"), limit)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -462,7 +632,7 @@ func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 		evs, f.Tenant, f.TenantAll = keep, owner, false
 	}
 	var arch *ArchivedSession
-	if meta, mErr := a.rec.DB().ArchivedSessionByID(session); mErr == nil {
+	if meta, mErr := a.db(r).ArchivedSessionByID(session); mErr == nil {
 		// Ownership again: the index is keyed by an id a caller could guess, and this
 		// row is the thing that says "there is something to fetch".
 		if a.auth == nil || f.TenantAll || meta.TenantID == f.Tenant {
@@ -574,7 +744,7 @@ func (a *API) archive(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	rows, err := a.rec.DB().ArchivedSessions(f, atoiDefault(r.URL.Query().Get("limit"), 100))
+	rows, err := a.db(r).ArchivedSessions(f, atoiDefault(r.URL.Query().Get("limit"), 100))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -605,7 +775,7 @@ func (a *API) archivedSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := r.PathValue("session")
-	meta, err := a.rec.DB().ArchivedSessionByID(session)
+	meta, err := a.db(r).ArchivedSessionByID(session)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "no such archived session")
 		return
@@ -655,6 +825,21 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 	}
 	a.rec.Hub().ServeScoped(w, r, f.Tenant, f.TenantAll)
 }
+
+// db is the store handle every read handler must use, rather than a.rec.DB() directly.
+//
+// It binds the read to the REQUEST's context, so work the caller has abandoned stops instead of
+// running to completion on a pooled connection nobody is waiting for. That mattered here: the
+// dashboard's own refresh timer re-issued a failing load every 5s, and because reads were
+// uncancellable each retry occupied a connection and its allocations until it finished on its
+// own — a pileup that pinned the process at its memory cap and made every subsequent query
+// slower, which produced more retries. WithContext already existed for the KV-cache routes
+// (dash/store.go) and was simply never wired to the rest.
+//
+// It is a method taking r, not a field, because the context is per-request; and reads go through
+// this ONE accessor so a new handler cannot quietly reintroduce the uncancellable shape. Writes
+// are deliberately NOT routed here — a write must complete even if the caller has gone.
+func (a *API) db(r *http.Request) *DB { return a.rec.DB().WithContext(r.Context()) }
 
 // trusted reports whether a request may see per-request CONTENT and the effective
 // configuration. Loopback always may; otherwise the peer must be in a configured
@@ -753,104 +938,92 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	key := cacheKey(p, r)
-	if body, ok := a.statsCache.get(key); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
-		return
-	}
-	// The four calls below are independent of each other — none reads another's result, only
-	// this handler's own fields afterward do — so they run concurrently rather than one after
-	// another. Sequentially, on a production-sized DB, Overview() alone measured ~5-10s (see its
-	// own errgroup for why) and DeclCreditFor another ~4-16s (see SelfRemovals' own comment for
-	// why it was rewritten), which summed past this handler's 10s caller-facing timeout on every
-	// call. Run concurrently, wall time drops to roughly the slowest of the four rather than
-	// their sum.
-	var (
-		o              *Overview
-		overviewErr    error
-		cachesplitHist *CachesplitHistorical
-		tierCosts      *TierCosts
-		declCredit     *DeclCredit
-	)
-	var g errgroup.Group
-	g.Go(func() error {
-		var err error
-		o, err = a.rec.DB().Overview(f)
-		overviewErr = err
-		return nil // Overview's own error is reported below, not folded into the group's error:
-		// a pricing failure in one of the other three must not mask it, and it must not mask them.
-	})
-	// Best-effort, and omitted rather than zeroed when it cannot be computed: a figure the
-	// dashboard cannot value must read as absent, never as "saved nothing".
-	if a.pricer != nil {
+	a.serveJSON(w, r, &a.statsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
+		// The four calls below are independent of each other — none reads another's result, only
+		// this handler's own fields afterward do — so they run concurrently rather than one after
+		// another. Sequentially, on a production-sized DB, Overview() alone measured ~5-10s (see its
+		// own errgroup for why) and DeclCreditFor another ~4-16s (see SelfRemovals' own comment for
+		// why it was rewritten), which summed past this handler's 10s caller-facing timeout on every
+		// call. Run concurrently, wall time drops to roughly the slowest of the four rather than
+		// their sum.
+		var (
+			o              *Overview
+			overviewErr    error
+			cachesplitHist *CachesplitHistorical
+			tierCosts      *TierCosts
+			declCredit     *DeclCredit
+		)
+		var g errgroup.Group
 		g.Go(func() error {
-			if h, err := a.rec.DB().CachesplitHistoricalUSD(f, a.pricer); err == nil {
-				cachesplitHist = &h
-			}
-			return nil
+			var err error
+			o, err = db.Overview(f)
+			overviewErr = err
+			return nil // Overview's own error is reported below, not folded into the group's error:
+			// a pricing failure in one of the other three must not mask it, and it must not mask them.
 		})
-		// The bill split by tier, and with it the addressable share and the safety panel's
-		// benefit half. Same rule: absent when it cannot be priced, never a zeroed bill.
-		g.Go(func() error {
-			if t, err := a.rec.DB().TierCosts(f, a.pricer); err == nil {
-				tierCosts = t
-			}
-			return nil
-		})
-	}
-	// The declarations no longer sent, both halves. Needs no pricer for the token counts, so it
-	// runs outside the block above; best-effort and non-fatal, because it is an addition to the
-	// walk and a deployment where it fails should still get the walk. NEVER silent, though: an
-	// error swallowed here returns zeros, and a zero in a savings figure is a claim.
-	g.Go(func() error {
-		c, err := a.rec.DB().DeclCreditFor(f, a.priceFn(r), a.toolFilterStateForScope(f).Removed)
-		if err != nil {
-			slog.Warn("dash: declaration-removal credit unavailable", "err", err)
-			return nil
+		// Best-effort, and omitted rather than zeroed when it cannot be computed: a figure the
+		// dashboard cannot value must read as absent, never as "saved nothing".
+		if a.pricer != nil {
+			g.Go(func() error {
+				if h, err := db.CachesplitHistoricalUSD(f, a.pricer); err == nil {
+					cachesplitHist = &h
+				}
+				return nil
+			})
+			// The bill split by tier, and with it the addressable share and the safety panel's
+			// benefit half. Same rule: absent when it cannot be priced, never a zeroed bill.
+			g.Go(func() error {
+				if t, err := db.TierCosts(f, a.pricer); err == nil {
+					tierCosts = t
+				}
+				return nil
+			})
 		}
-		declCredit = c
-		return nil
+		// The declarations no longer sent, both halves. Needs no pricer for the token counts, so it
+		// runs outside the block above; best-effort and non-fatal, because it is an addition to the
+		// walk and a deployment where it fails should still get the walk. NEVER silent, though: an
+		// error swallowed here returns zeros, and a zero in a savings figure is a claim.
+		g.Go(func() error {
+			c, err := db.DeclCreditFor(f, a.priceFn(r), a.toolFilterStateForScope(f).Removed)
+			if err != nil {
+				slog.Warn("dash: declaration-removal credit unavailable", "err", err)
+				return nil
+			}
+			declCredit = c
+			return nil
+		})
+		g.Wait() //nolint:errcheck // every goroutine above always returns nil; see each one's own error handling
+		if overviewErr != nil {
+			return nil, overviewErr
+		}
+		if cachesplitHist != nil {
+			o.CachesplitHistorical = cachesplitHist
+			// Folded into the running total here, not inside Overview() itself, because
+			// pricing it needs a.pricer — Overview() returns before this figure exists, the
+			// same reason DeclCreditFor's addition below happens out here too. Leaving it out
+			// was the actual inconsistency, not a deliberate scoping choice: the page's own
+			// "Prefix-cache savings" tile (dash/ui/app.js) already adds CachesplitSavedUSD and
+			// this historical figure together and calls the sum ours — the headline total
+			// should agree with the tile two inches to its right, not exclude half of it.
+			o.TotalSavedUSD += cachesplitHist.USD
+		}
+		if tierCosts != nil {
+			o.SetTiers(tierCosts)
+		}
+		if declCredit != nil {
+			o.SetDeclCredit(declCredit)
+		}
+		// Rebuilt here, not left as Overview()'s own snapshot: o.Waterfall was materialized
+		// before any of the priced additions above existed, so its "declarations no longer
+		// sent" step baked in a zero (SetDeclCredit had not run yet) and its own "total_saved"
+		// step baked in a total short by both the historical split figure and the decl-filter
+		// credit — silently disagreeing with the headline tile two inches above it, which reads
+		// o.TotalSavedUSD directly rather than through the waterfall. waterfall() only reads
+		// current field values, so calling it again here is exactly as correct as the first
+		// call and now sees everything this handler has since added.
+		o.Waterfall = o.waterfall()
+		return json.Marshal(o)
 	})
-	g.Wait() //nolint:errcheck // every goroutine above always returns nil; see each one's own error handling
-	if overviewErr != nil {
-		httpErr(w, http.StatusInternalServerError, overviewErr.Error())
-		return
-	}
-	if cachesplitHist != nil {
-		o.CachesplitHistorical = cachesplitHist
-		// Folded into the running total here, not inside Overview() itself, because
-		// pricing it needs a.pricer — Overview() returns before this figure exists, the
-		// same reason DeclCreditFor's addition below happens out here too. Leaving it out
-		// was the actual inconsistency, not a deliberate scoping choice: the page's own
-		// "Prefix-cache savings" tile (dash/ui/app.js) already adds CachesplitSavedUSD and
-		// this historical figure together and calls the sum ours — the headline total
-		// should agree with the tile two inches to its right, not exclude half of it.
-		o.TotalSavedUSD += cachesplitHist.USD
-	}
-	if tierCosts != nil {
-		o.SetTiers(tierCosts)
-	}
-	if declCredit != nil {
-		o.SetDeclCredit(declCredit)
-	}
-	// Rebuilt here, not left as Overview()'s own snapshot: o.Waterfall was materialized
-	// before any of the priced additions above existed, so its "declarations no longer
-	// sent" step baked in a zero (SetDeclCredit had not run yet) and its own "total_saved"
-	// step baked in a total short by both the historical split figure and the decl-filter
-	// credit — silently disagreeing with the headline tile two inches above it, which reads
-	// o.TotalSavedUSD directly rather than through the waterfall. waterfall() only reads
-	// current field values, so calling it again here is exactly as correct as the first
-	// call and now sees everything this handler has since added.
-	o.Waterfall = o.waterfall()
-	body, err := json.Marshal(o)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	a.statsCache.set(key, body)
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(body)
 }
 
 func (a *API) series(w http.ResponseWriter, r *http.Request) {
@@ -860,7 +1033,7 @@ func (a *API) series(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bucket := atoi64(r.URL.Query().Get("bucket"))
-	b, err := a.rec.DB().Series(f, bucket)
+	b, err := a.db(r).Series(f, bucket)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -875,7 +1048,7 @@ func (a *API) requests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	p, err := a.rec.DB().Requests(f, atoi64(q.Get("before")), atoiDefault(q.Get("limit"), 50))
+	p, err := a.db(r).Requests(f, atoi64(q.Get("before")), atoiDefault(q.Get("limit"), 50))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -903,7 +1076,7 @@ func (a *API) request(w http.ResponseWriter, r *http.Request) {
 	if a.auth != nil {
 		trusted = true // hosted: the ownership 404 below is the gate, not the address
 	}
-	e, err := a.rec.DB().Request(id, trusted)
+	e, err := a.db(r).Request(id, trusted)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "no such request")
 		return
@@ -925,7 +1098,7 @@ func (a *API) request(w http.ResponseWriter, r *http.Request) {
 	// discover and call — is more moving parts for the same wait.
 	archived := false
 	if trusted && len(e.Content) == 0 && e.SessionID != "" {
-		if meta, err := a.rec.DB().ArchivedSessionByID(e.SessionID); err == nil && meta.ContentPath != "" {
+		if meta, err := a.db(r).ArchivedSessionByID(e.SessionID); err == nil && meta.ContentPath != "" {
 			archived = true
 			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 			rows, ferr := a.rec.FetchArchivedContent(ctx, e.SessionID, e.ID)
@@ -961,7 +1134,7 @@ func (a *API) sessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	rows, total, err := a.rec.DB().Sessions(f,
+	rows, total, err := a.db(r).Sessions(f,
 		atoiDefault(q.Get("limit"), 50), atoiDefault(q.Get("offset"), 0))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -976,43 +1149,30 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	key := cacheKey(p, r)
-	if body, ok := a.componentsCache.get(key); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
-		return
-	}
-	rows, err := a.rec.DB().Components(f)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	// Value the rows whose saved_usd predates the column, into their own field. Without this
-	// the most-read tab in the dashboard reports $0.00 for every component over all history
-	// that predates the last restart — measured, 6 populated rows out of 100,579.
-	if a.pricer != nil {
-		// Both read-time valuations, in order: the estimate fills history that predates the
-		// saved_usd column, the decomposition splits every priced row into its first-removal
-		// and replay halves so the two opposite-signed verdicts can be shown together.
-		if err := a.rec.DB().DecomposeComponentSavedUSD(f, a.pricer, rows); err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
-			return
+	a.serveJSON(w, r, &a.componentsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
+		rows, err := db.Components(f)
+		if err != nil {
+			return nil, err
 		}
-		if err := a.rec.DB().EstimateComponentSavedUSD(f, a.pricer, rows); err != nil {
-			// Best effort, like every other read-time valuation: the stored figures are
-			// already in `rows` and a failed estimate must not cost the caller the tab.
-			slog.Warn("context-guru: component saved_usd estimate failed; pre-column rows read $0.00",
-				"err", err)
+		// Value the rows whose saved_usd predates the column, into their own field. Without this
+		// the most-read tab in the dashboard reports $0.00 for every component over all history
+		// that predates the last restart — measured, 6 populated rows out of 100,579.
+		if a.pricer != nil {
+			// Both read-time valuations, in order: the estimate fills history that predates the
+			// saved_usd column, the decomposition splits every priced row into its first-removal
+			// and replay halves so the two opposite-signed verdicts can be shown together.
+			if err := db.DecomposeComponentSavedUSD(f, a.pricer, rows); err != nil {
+				return nil, err
+			}
+			if err := db.EstimateComponentSavedUSD(f, a.pricer, rows); err != nil {
+				// Best effort, like every other read-time valuation: the stored figures are
+				// already in `rows` and a failed estimate must not cost the caller the tab.
+				slog.Warn("context-guru: component saved_usd estimate failed; pre-column rows read $0.00",
+					"err", err)
+			}
 		}
-	}
-	body, err := json.Marshal(map[string]any{"components": rows})
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	a.componentsCache.set(key, body)
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(body)
+		return json.Marshal(map[string]any{"components": rows})
+	})
 }
 
 // breakdown serves spent-vs-saved and usage aggregated by ONE dimension — per model, per
@@ -1033,7 +1193,7 @@ func (a *API) breakdown(w http.ResponseWriter, r *http.Request) {
 	if dim == "" {
 		dim = "model"
 	}
-	rows, err := a.rec.DB().Breakdown(f, dim)
+	rows, err := a.db(r).Breakdown(f, dim)
 	if err != nil {
 		// A bad dimension is the CALLER's error, not a server fault, and the answer names
 		// the dimensions that do exist rather than making the UI guess.
@@ -1058,25 +1218,13 @@ func (a *API) facets(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	key := cacheKey(p, r)
-	if body, ok := a.facetsCache.get(key); ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
-		return
-	}
-	f, err := a.rec.DB().Facets(flt)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	body, err := json.Marshal(f)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	a.facetsCache.set(key, body)
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(body)
+	a.serveJSON(w, r, &a.facetsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
+		f, err := db.Facets(flt)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(f)
+	})
 }
 
 // The two /api/config descriptions. This route serves the PROCESS's own resolved
@@ -1146,11 +1294,11 @@ func (a *API) benchmarks(w http.ResponseWriter, r *http.Request) {
 		// correct scan of an empty directory are the same response — and the UI reported both
 		// as "nothing happened" because it discarded the body entirely.
 		dirs := a.rec.Opts().BenchDirs
-		runs, tasks := a.rec.DB().IngestBenchRoots(dirs)
+		runs, tasks := a.db(r).IngestBenchRoots(dirs)
 		writeJSON(w, map[string]any{"ingested_runs": runs, "ingested_tasks": tasks, "dirs": dirs})
 		return
 	}
-	runs, err := a.rec.DB().BenchRuns()
+	runs, err := a.db(r).BenchRuns()
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1162,7 +1310,7 @@ func (a *API) benchmarkTasks(w http.ResponseWriter, r *http.Request) {
 	if !a.requireManager(w, r, "benchmark runs") {
 		return
 	}
-	rows, err := a.rec.DB().BenchTasks(atoi64(r.PathValue("id")), r.URL.Query().Get("arm"))
+	rows, err := a.db(r).BenchTasks(atoi64(r.PathValue("id")), r.URL.Query().Get("arm"))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return

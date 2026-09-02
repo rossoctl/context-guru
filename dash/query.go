@@ -193,7 +193,7 @@ func (d *DB) Requests(f Filter, before int64, limit int) (*Page, error) {
 		pageArgs = append(pageArgs, before)
 	}
 	q += " ORDER BY r.id DESC LIMIT ?"
-	rows, err := d.sql.Query(q, append(pageArgs, limit+1)...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, append(pageArgs, limit+1)...)
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +215,7 @@ func (d *DB) Requests(f Filter, before int64, limit int) (*Page, error) {
 		page.Requests = page.Requests[:limit]
 		page.NextCursor = page.Requests[limit-1].ID
 	}
-	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond, filterArgs...).Scan(&page.Total); err != nil {
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond, filterArgs...).Scan(&page.Total); err != nil {
 		return nil, err
 	}
 	return page, nil
@@ -225,12 +225,12 @@ func (d *DB) Requests(f Filter, before int64, limit int) (*Page, error) {
 // captured, its before/after blobs. withContent=false omits the content entirely
 // (the caller decides, based on the access gate).
 func (d *DB) Request(id int64, withContent bool) (*Event, error) {
-	row := d.sql.QueryRow(`SELECT `+requestCols+` FROM requests r WHERE r.id = ?`, id)
+	row := d.sql.QueryRowContext(d.readCtx(), `SELECT `+requestCols+` FROM requests r WHERE r.id = ?`, id)
 	e, err := scanRequest(row)
 	if err != nil {
 		return nil, err
 	}
-	crows, err := d.sql.Query(`SELECT component, kind, acted, mutated, reverted, skipped,
+	crows, err := d.sql.QueryContext(d.readCtx(), `SELECT component, kind, acted, mutated, reverted, skipped,
 		saved_gross, saved_unique, saved_usd, duration_ms, err, gates, events FROM request_components
 		WHERE request_id = ? ORDER BY rowid`, id)
 	if err != nil {
@@ -275,7 +275,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 	// rows (cost, latency, tokens, gate reason, saving) are operational metrics rather than
 	// transcript content, and they are what answers "was this call worth it?". The text
 	// halves are loaded only WITH content access, below.
-	xrows, err := d.sql.Query(`SELECT component, model, strategy, aggressiveness, cold, escalated,
+	xrows, err := d.sql.QueryContext(d.readCtx(), `SELECT component, model, strategy, aggressiveness, cold, escalated,
 		candidate_tokens, saved_tokens, prompt_tokens, completion_tokens, cache_read, cache_write,
 		cost_usd, latency_ms, accepted, gate_reason, rejection, summary, before_gz, after_gz
 		FROM extraction_calls WHERE request_id = ? ORDER BY seq`, id)
@@ -307,7 +307,7 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 	if !withContent {
 		return e, nil
 	}
-	trows, err := d.sql.Query(`SELECT path, before_tokens, after_tokens, before_gz, after_gz, components
+	trows, err := d.sql.QueryContext(d.readCtx(), `SELECT path, before_tokens, after_tokens, before_gz, after_gz, components
 		FROM request_content WHERE request_id = ? ORDER BY seq`, id)
 	if err != nil {
 		return nil, err
@@ -403,7 +403,7 @@ func (d *DB) SessionEventsPage(f Filter, sessionID string, withContent bool, aft
 		q += ` LIMIT ?`
 		pageArgs = append(pageArgs, limit+1)
 	}
-	rows, err := d.sql.Query(q, pageArgs...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, pageArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -439,13 +439,13 @@ func (d *DB) SessionEventsPage(f Filter, sessionID string, withContent bool, aft
 		page.Requests = append(page.Requests, e)
 	}
 
-	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+
 		` AND r.session_id = ?`, sessArgs...).Scan(&page.Total); err != nil {
 		return nil, err
 	}
 	// Session-wide, not page-wide, and cheap: idx_content_request makes it an index
 	// probe and EXISTS stops at the first hit.
-	if err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests r
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT EXISTS(SELECT 1 FROM requests r
 		JOIN request_content c ON c.request_id = r.id
 		WHERE `+cond+` AND r.session_id = ?)`, sessArgs...).Scan(&page.HasContent); err != nil {
 		return nil, err
@@ -539,7 +539,7 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 		COALESCE(SUM(` + kaSaved("r.") + `),0)
 		FROM requests r WHERE ` + cond + `
 		GROUP BY r.session_id ORDER BY MAX(r.ts) DESC LIMIT ? OFFSET ?`
-	rows, err := d.sql.Query(q, append(args, limit, offset)...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -586,7 +586,7 @@ func (d *DB) Sessions(f Filter, limit, offset int) ([]*SessionRow, int64, error)
 		}
 	}
 	var total int64
-	err = d.sql.QueryRow(`SELECT COUNT(DISTINCT r.session_id) FROM requests r WHERE `+cond, args...).Scan(&total)
+	err = d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(DISTINCT r.session_id) FROM requests r WHERE `+cond, args...).Scan(&total)
 	return out, total, err
 }
 
@@ -598,7 +598,7 @@ type pingCount struct {
 
 // pingsBySession groups the ping rows by session. The caller passes a filter that INCLUDES them.
 func (d *DB) pingsBySession(cond string, args []any) (map[string]pingCount, error) {
-	rows, err := d.sql.Query(`SELECT r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
 		FROM requests r WHERE `+cond+` AND r.keepalive = 1 GROUP BY 1`, args...)
 	if err != nil {
 		return nil, err
@@ -754,7 +754,7 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 		SUM(CASE WHEN c.err <> '' THEN 1 ELSE 0 END)
 		FROM request_components c JOIN requests r ON r.id = c.request_id
 		WHERE ` + cond + ` GROUP BY c.component ORDER BY SUM(c.saved_unique) DESC, c.component`
-	rows, err := d.sql.Query(q, args...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -794,7 +794,7 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 		AVG(x.latency_ms), SUM(x.saved_tokens)
 		FROM extraction_calls x JOIN requests r ON r.id = x.request_id
 		WHERE ` + cond + ` GROUP BY x.component`
-	xrows, err := d.sql.Query(xq, args...)
+	xrows, err := d.sql.QueryContext(d.readCtx(), xq, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -845,7 +845,7 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 			SUM(r.cg_llm_cost_usd * CASE WHEN tot.tcost > 0 THEN per.ccost / tot.tcost ELSE 0 END)
 		FROM per JOIN tot ON tot.rid = per.rid JOIN requests r ON r.id = per.rid
 		WHERE ` + cond + ` GROUP BY 1`
-	irows, err := d.sql.Query(iq, args...)
+	irows, err := d.sql.QueryContext(d.readCtx(), iq, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -881,10 +881,25 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	// Gate totals, summed in SQL with json_each rather than by decoding a map per row in
 	// Go: a filtered window is hundreds of thousands of component rows and the gate map is
 	// the widest text on each of them.
+	//
+	// CROSS JOIN is an OPTIMISER BARRIER here, not a different join — in SQLite it forbids
+	// reordering, and that is the entire point. Written as a plain JOIN, the planner drove this
+	// from request_components (SCAN ... USING INDEX idx_rc_comp: all 1,576,383 rows) and probed
+	// requests by rowid to apply the time filter afterwards, so a 24-hour window paid for the
+	// whole table. Pinning requests first makes it SEARCH idx_requests_ts and touch only the
+	// 303,770 component rows actually in the window. Measured on the production database, warm,
+	// with identical result rows: 2.862s -> 0.527s for gates, same shape for events, and
+	// Components() overall 13.2s -> 6.0s.
+	//
+	// The plain-JOIN form was ALSO tried with requests written first (FROM requests r JOIN
+	// request_components c ...) and measured 2.807s — no change, because the planner reorders it
+	// straight back. Only the barrier holds. Query 1 above needs none: with no json_each
+	// cross-join to cost around, the planner already picks requests first.
 	gq := `SELECT c.component, j.key, SUM(CAST(j.value AS INTEGER))
-		FROM request_components c JOIN requests r ON r.id = c.request_id, json_each(c.gates) j
+		FROM requests r CROSS JOIN request_components c ON c.request_id = r.id
+		CROSS JOIN json_each(c.gates) j
 		WHERE ` + cond + ` AND json_valid(c.gates) GROUP BY 1, 2`
-	grows, err := d.sql.Query(gq, args...)
+	grows, err := d.sql.QueryContext(d.readCtx(), gq, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -915,9 +930,10 @@ func (d *DB) Components(f Filter) ([]*ComponentRow, error) {
 	// duplication is four lines and the alternative is a discriminator column threaded through the
 	// scan.
 	eq := `SELECT c.component, j.key, SUM(CAST(j.value AS INTEGER))
-		FROM request_components c JOIN requests r ON r.id = c.request_id, json_each(c.events) j
+		FROM requests r CROSS JOIN request_components c ON c.request_id = r.id
+		CROSS JOIN json_each(c.events) j
 		WHERE ` + cond + ` AND json_valid(c.events) GROUP BY 1, 2`
-	erows, err := d.sql.Query(eq, args...)
+	erows, err := d.sql.QueryContext(d.readCtx(), eq, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1002,7 +1018,7 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		SUM(r.expands), SUM(r.expand_tokens),
 		SUM(CASE WHEN r.cache_miss_reason NOT IN ('hit','') THEN 1 ELSE 0 END)
 		FROM requests r WHERE %s GROUP BY b ORDER BY b`, bucketMs, bucketMs, cond)
-	rows, err := d.sql.Query(q, args...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1150,7 +1166,7 @@ func (d *DB) Breakdown(f Filter, dim string) ([]*GroupRow, error) {
 		COALESCE(SUM(CASE WHEN r.token_accounting <> 'complete' THEN 1 ELSE 0 END),0)
 		FROM requests r WHERE ` + cond + `
 		GROUP BY k ORDER BY SUM(r.cost_usd) DESC, COUNT(*) DESC, k LIMIT 200`
-	rows, err := d.sql.Query(q, args...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1232,7 +1248,7 @@ func (d *DB) Facets(f Filter) (map[string][]string, error) {
 	out := map[string][]string{}
 	for name, col := range facetQueries {
 		cond, args := selfBlanked(f, name).where()
-		rows, err := d.sql.Query(
+		rows, err := d.sql.QueryContext(d.readCtx(),
 			`SELECT DISTINCT r.`+col+` FROM requests r WHERE `+cond+` AND r.`+col+` <> '' ORDER BY 1 LIMIT 200`, args...)
 		if err != nil {
 			return nil, err
@@ -1257,9 +1273,30 @@ func (d *DB) Facets(f Filter) (map[string][]string, error) {
 	// missing here, which made one tenant's dropdown an enumeration of every component
 	// every OTHER tenant runs.
 	ccond, cargs := selfBlanked(f, "component").where()
-	rows, err := d.sql.Query(`SELECT DISTINCT c.component
-		FROM request_components c JOIN requests r ON r.id = c.request_id
-		WHERE `+ccond+` ORDER BY 1 LIMIT 200`, cargs...)
+	// Probed once per DISTINCT COMPONENT, not once per component row.
+	//
+	// The straightforward join — request_components JOIN requests, DISTINCT the component —
+	// makes SQLite scan idx_rc_comp and probe the requests primary key for EVERY component row
+	// to apply a filter that lives on requests. There are 14 distinct components and 155,757
+	// component rows on the 16,428-request corpus (1,210,932 on the production one), so that is
+	// ~11,000 probes per answer it could possibly return. Measured, 5 runs, that corpus:
+	// 278 ms for the join against 17 ms for the form below, which is 16x, and it is the same
+	// invocation-count shape as CompactionResets (see overview.go) rather than an I/O problem —
+	// the plan was already index-driven.
+	//
+	// The rewrite asks the question the dropdown actually asks: for each component NAME, does
+	// any in-scope request carry it? That is 14 EXISTS probes, each stopping at its first match.
+	// Worst case — a component present in the table but in no in-scope request — degenerates to
+	// scanning that one component's rows, which is bounded by what the join did unconditionally.
+	//
+	// The scoping is unchanged: the join and its predicate are intact inside the EXISTS, which
+	// is what keeps one tenant's dropdown from enumerating every component every OTHER tenant
+	// runs (the bug the comment below records).
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT names.component
+		FROM (SELECT DISTINCT component FROM request_components) names
+		WHERE EXISTS (SELECT 1 FROM request_components c JOIN requests r ON r.id = c.request_id
+			WHERE c.component = names.component AND `+ccond+`)
+		ORDER BY 1 LIMIT 200`, cargs...)
 	if err != nil {
 		return nil, err
 	}

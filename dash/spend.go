@@ -42,7 +42,7 @@ import (
 // be.
 func (d *DB) MonthToDateUSD(tenantID string) (float64, error) {
 	var usd float64
-	err := d.sql.QueryRow(`SELECT usd FROM tenant_spend WHERE tenant_id = ? AND month = ?`,
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT usd FROM tenant_spend WHERE tenant_id = ? AND month = ?`,
 		tenantID, monthKey(time.Now().UnixMilli())).Scan(&usd)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil

@@ -54,7 +54,7 @@ func (a *API) kvCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseKVCache()
-	out, err := a.rec.DB().WithContext(r.Context()).
+	out, err := a.db(r).
 		KVCacheAnalyze(f, kvCacheOptionsFrom(r), a.pricer, kvCacheConfigFrom(r))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -70,7 +70,7 @@ func (a *API) kvCacheRows(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	out, err := a.rec.DB().WithContext(r.Context()).KVCacheRows(f, kvCacheOptionsFrom(r))
+	out, err := a.db(r).KVCacheRows(f, kvCacheOptionsFrom(r))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -89,7 +89,7 @@ func (a *API) kvCacheSimulate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseKVCache()
-	out, err := a.rec.DB().WithContext(r.Context()).
+	out, err := a.db(r).
 		KVCacheSimulate(f, kvCacheOptionsFrom(r), a.pricer, kvCacheConfigFrom(r))
 	if err != nil {
 		// An unknown arm or baseline is the caller's mistake; anything else came from the store.
@@ -117,7 +117,7 @@ func (a *API) kvCacheSuggest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseKVCache()
-	out, err := a.rec.DB().WithContext(r.Context()).
+	out, err := a.db(r).
 		KVCacheSuggest(f, kvCacheOptionsFrom(r), a.pricer, kvCacheConfigFrom(r))
 	if err != nil {
 		// An unknown baseline is the caller's mistake, same as on /api/kvcache/simulate.
@@ -154,7 +154,7 @@ func (a *API) kvCacheSuggestHoldout(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	train := Window{Since: atoi64(q.Get("train_since")), Until: atoi64(q.Get("train_until"))}
 	test := Window{Since: atoi64(q.Get("test_since")), Until: atoi64(q.Get("test_until"))}
-	out, err := a.rec.DB().WithContext(r.Context()).KVCacheSuggestHoldout(
+	out, err := a.db(r).KVCacheSuggestHoldout(
 		f, kvCacheOptionsFrom(r), a.pricer, kvCacheConfigFrom(r), train, test)
 	if err != nil {
 		// Every error validHoldoutWindows returns is the caller's own malformed window, and
@@ -187,7 +187,7 @@ func (a *API) kvCachePricing(w http.ResponseWriter, r *http.Request) {
 	// both captioned "this window's own median".
 	o := kvCacheOptionsFrom(r)
 	cfg := kvCacheConfigFrom(r)
-	db := a.rec.DB().WithContext(r.Context())
+	db := a.db(r)
 	models, err := db.KVCacheModels(f)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())

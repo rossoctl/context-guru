@@ -138,7 +138,7 @@ const dedupeMigrationDoneKey = "dedupe_declaration_text_done"
 // that silently never runs.
 func (d *DB) dedupeMigrationDone() (bool, error) {
 	var v string
-	err := d.sql.QueryRow(`SELECT value FROM meta WHERE key = ?`, dedupeMigrationDoneKey).Scan(&v)
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT value FROM meta WHERE key = ?`, dedupeMigrationDoneKey).Scan(&v)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -164,7 +164,7 @@ type declBlob struct {
 // pendingDedupe reads the next batch of rows whose text is still on the row itself. rowid is
 // the table's own key, so `rowid > ?` is a seek rather than a scan of what came before it.
 func (d *DB) pendingDedupe(after int64, limit int) ([]declBlob, error) {
-	rows, err := d.sql.Query(`SELECT rowid, text_gz FROM tool_declarations
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT rowid, text_gz FROM tool_declarations
 		WHERE rowid > ? AND text_gz IS NOT NULL ORDER BY rowid LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, err

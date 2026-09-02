@@ -114,7 +114,7 @@ func (d *DB) backfillKeepAliveStrategyID(stop <-chan struct{}, batch int, pause 
 // (keepalive_pings > 0) that have never been tagged with the strategy that sent the ping.
 // id is the table's own rowid, so `id > ?` is a seek rather than a rescan of what came before.
 func (d *DB) pendingKeepAliveStrategyBackfill(after int64, limit int) ([]int64, error) {
-	rows, err := d.sql.Query(`SELECT id FROM requests
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT id FROM requests
 		WHERE id > ? AND keepalive = 0 AND keepalive_pings > 0 AND keepalive_strategy_id IS NULL
 		ORDER BY id LIMIT ?`, after, limit)
 	if err != nil {
@@ -197,7 +197,7 @@ func (d *DB) backfillOneKeepAliveStrategyBatch(ids []int64) (int64, error) {
 // recoverable rows.
 func (d *DB) keepAliveStrategyBackfillDone() (bool, error) {
 	var v string
-	err := d.sql.QueryRow(`SELECT value FROM meta WHERE key = ?`, keepAliveStrategyBackfillDoneKey).Scan(&v)
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT value FROM meta WHERE key = ?`, keepAliveStrategyBackfillDoneKey).Scan(&v)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}

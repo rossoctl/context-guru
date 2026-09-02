@@ -229,7 +229,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	// request that benefited, never on the ping.
 	cond, args := f.where()
 	var from sql.NullInt64
-	if err := d.sql.QueryRow(`SELECT
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
 		COALESCE(SUM(`+kaSaved("r.")+`),0),
 		COALESCE(SUM(CASE WHEN `+kaSaved("r.")+` > 0 THEN 1 ELSE 0 END),0),
 		COUNT(*)
@@ -240,7 +240,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	// The COST half, with ping rows included. A second query and not a CASE: one predicate,
 	// one meaning.
 	kaCond, kaArgs := withKeepAlive(f).where()
-	if err := d.sql.QueryRow(`SELECT
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
 		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.keepalive = 1 AND r.cache_read = 0 THEN 1 ELSE 0 END),0),
@@ -254,7 +254,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	o.NetUSD = o.SavedUSD - o.PingUSD
 	o.RecordedFrom = from.Int64
 	if o.RecordedFrom > 0 {
-		if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+` AND r.ts >= ?`,
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+` AND r.ts >= ?`,
 			append(append([]any(nil), args...), o.RecordedFrom)...).Scan(&o.RecordedRows); err != nil {
 			return nil, err
 		}
@@ -291,7 +291,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	}
 	// What is still on the table: the addressable expiries in this window, and their bill.
 	aCond, aArgs := addressable(f)
-	if err := d.sql.QueryRow(aCond+`
+	if err := d.sql.QueryRowContext(d.readCtx(), aCond+`
 		SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM addressable`, aArgs...).Scan(
 		&o.Addressable, &o.AddressableUSD); err != nil {
 		return nil, err
@@ -317,7 +317,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 func (d *DB) KeepAliveNetUSDByTenant(since int64) (map[string]float64, error) {
 	out := map[string]float64{}
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
-	rows, err := d.sql.Query(`SELECT r.tenant_id, COALESCE(SUM(`+kaSaved("r.")+`),0)
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, COALESCE(SUM(`+kaSaved("r.")+`),0)
 		FROM requests r WHERE `+cond+` GROUP BY r.tenant_id`, args...)
 	if err != nil {
 		return nil, err
@@ -336,7 +336,7 @@ func (d *DB) KeepAliveNetUSDByTenant(since int64) (map[string]float64, error) {
 		return nil, err
 	}
 	kaCond, kaArgs := withKeepAlive(Filter{Since: since, TenantAll: true}).where()
-	rows2, err := d.sql.Query(`SELECT r.tenant_id, COALESCE(SUM(r.cost_usd),0)
+	rows2, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, COALESCE(SUM(r.cost_usd),0)
 		FROM requests r WHERE `+kaCond+` AND r.keepalive = 1 GROUP BY r.tenant_id`, kaArgs...)
 	if err != nil {
 		return nil, err
@@ -372,7 +372,7 @@ func (d *DB) KeepAliveLatencyDiagnostic(f Filter) (kvcache.Latency, error) {
 	var l kvcache.Latency
 	cond, args := f.where()
 	var hitSum, missSum sql.NullFloat64
-	row := d.sql.QueryRow(`SELECT
+	row := d.sql.QueryRowContext(d.readCtx(), `SELECT
 			SUM(CASE WHEN r.cache_read > r.cache_write AND r.cache_read > 0 THEN r.upstream_ms END),
 			COALESCE(SUM(CASE WHEN r.cache_read > r.cache_write AND r.cache_read > 0 THEN 1 ELSE 0 END),0),
 			SUM(CASE WHEN r.cache_write >= r.cache_read AND r.cache_write > 0 THEN r.upstream_ms END),
@@ -396,7 +396,7 @@ func (d *DB) KeepAliveLatencyDiagnostic(f Filter) (kvcache.Latency, error) {
 
 // sumBySession groups one column by session under an extra predicate.
 func (d *DB) sumBySession(cond string, args []any, col, extra string) (map[string]float64, error) {
-	rows, err := d.sql.Query(`SELECT r.session_id, COALESCE(SUM(`+col+`),0) FROM requests r
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COALESCE(SUM(`+col+`),0) FROM requests r
 		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1`, args...)
 	if err != nil {
 		return nil, err
@@ -419,7 +419,7 @@ func (d *DB) sumBySession(cond string, args []any, col, extra string) (map[strin
 // report a rate per day of traffic that did not happen.
 func (d *DB) windowDays(cond string, args []any) float64 {
 	var lo, hi sql.NullInt64
-	if err := d.sql.QueryRow(`SELECT MIN(r.ts), MAX(r.ts) FROM requests r WHERE `+cond,
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT MIN(r.ts), MAX(r.ts) FROM requests r WHERE `+cond,
 		args...).Scan(&lo, &hi); err != nil {
 		return 0
 	}
@@ -550,7 +550,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 		n   int64
 		usd float64
 	}{}
-	rows, err := d.sql.Query(`SELECT date(r.ts/1000,'unixepoch'), COUNT(*), COALESCE(SUM(r.cost_usd),0)
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT date(r.ts/1000,'unixepoch'), COUNT(*), COALESCE(SUM(r.cost_usd),0)
 		FROM requests r WHERE `+cond+` GROUP BY 1`, args...)
 	if err != nil {
 		return nil, err
@@ -572,7 +572,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = d.sql.Query(aCond+`
+	rows, err = d.sql.QueryContext(d.readCtx(), aCond+`
 		SELECT date(ts/1000,'unixepoch'), MIN(ts), COUNT(*), COALESCE(SUM(cost_usd),0)
 		FROM addressable GROUP BY 1 ORDER BY 1`, aArgs...)
 	if err != nil {
@@ -610,7 +610,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	hourN := make([]int64, 24)
 	hourUSD := make([]float64, 24)
 	var gaps, prefixes []float64
-	rows, err = d.sql.Query(aCond+`
+	rows, err = d.sql.QueryContext(d.readCtx(), aCond+`
 		SELECT gap_s, COALESCE(prev_prefix,0), cost_usd,
 		       CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER)
 		FROM addressable`, aArgs...)
@@ -682,14 +682,14 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	// The phantoms, named rather than silently dropped: a reader comparing this panel with the
 	// cache-miss breakdown on Usage will see two different `ttl_expiry` counts, and the
 	// difference has to be explicable.
-	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+`
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+`
 		AND r.cache_miss_reason = 'ttl_expiry' AND r.cache_write = 0`, args...).Scan(
 		&out.Phantom); err != nil {
 		return nil, err
 	}
 
 	// 3d: gaps BETWEEN expiries, per account.
-	rows, err = d.sql.Query(aCond+`, e AS (
+	rows, err = d.sql.QueryContext(d.readCtx(), aCond+`, e AS (
 		SELECT tenant_id, (ts - LAG(ts) OVER (PARTITION BY tenant_id ORDER BY ts)) / 3600000.0 AS h
 		FROM addressable)
 		SELECT tenant_id, COUNT(h), AVG(h), MAX(h) FROM e WHERE h IS NOT NULL GROUP BY 1
@@ -718,7 +718,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	for i := range out.Gaps {
 		g := &out.Gaps[i]
 		var hs []float64
-		r2, err := d.sql.Query(aCond+`, e AS (
+		r2, err := d.sql.QueryContext(d.readCtx(), aCond+`, e AS (
 			SELECT tenant_id, (ts - LAG(ts) OVER (PARTITION BY tenant_id ORDER BY ts)) / 3600000.0 AS h
 			FROM addressable)
 			SELECT h FROM e WHERE h IS NOT NULL AND tenant_id = ?`,
@@ -755,18 +755,18 @@ func (d *DB) keepAliveCoverage(f Filter) (*KeepAliveCoverage, error) {
 	cond, args := f.where()
 	kaCond, kaArgs := withKeepAlive(f).where()
 	var from sql.NullInt64
-	if err := d.sql.QueryRow(`SELECT MIN(CASE WHEN r.keepalive = 1 OR r.keepalive_pings > 0
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT MIN(CASE WHEN r.keepalive = 1 OR r.keepalive_pings > 0
 		OR r.keepalive_saved_usd > 0 THEN r.ts END) FROM requests r WHERE `+kaCond,
 		kaArgs...).Scan(&from); err != nil {
 		return nil, err
 	}
 	c.RecordedFrom = from.Int64
-	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond, args...).Scan(
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond, args...).Scan(
 		&c.Requests); err != nil {
 		return nil, err
 	}
 	if c.RecordedFrom > 0 {
-		if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+` AND r.ts >= ?`,
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+` AND r.ts >= ?`,
 			append(append([]any(nil), args...), c.RecordedFrom)...).Scan(&c.RecordedRows); err != nil {
 			return nil, err
 		}
@@ -816,7 +816,7 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 		limit = 20
 	}
 	aCond, aArgs := addressable(f)
-	rows, err := d.sql.Query(aCond+`
+	rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
 		SELECT session_id, MIN(tenant_id), COUNT(*), COALESCE(SUM(cost_usd),0)
 		FROM addressable WHERE session_id <> ''
 		GROUP BY session_id ORDER BY 4 DESC LIMIT ?`,
@@ -846,14 +846,14 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	// count as a turn or re-date the session.
 	cond, args := f.where()
 	for _, s := range out {
-		if err := d.sql.QueryRow(`SELECT COUNT(*), MAX(r.ts) FROM requests r
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*), MAX(r.ts) FROM requests r
 			WHERE `+cond+` AND r.session_id = ?`,
 			append(append([]any(nil), args...), s.SessionID)...).Scan(&s.Turns, &s.Last); err != nil {
 			return nil, err
 		}
 		var prefix sql.NullInt64
 		var model sql.NullString
-		if err := d.sql.QueryRow(`SELECT r.cache_read + r.cache_write, r.model FROM requests r
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.cache_read + r.cache_write, r.model FROM requests r
 			WHERE `+cond+` AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
 			append(append([]any(nil), args...), s.SessionID)...).Scan(&prefix, &model); err != nil &&
 			err != sql.ErrNoRows {
@@ -1005,7 +1005,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	// the three window MAXes answer "which tier is in force" without a query per row: the entry's
 	// lifetime is the one it was WRITTEN at, and a read refreshes it at that same tier, so the
 	// tell is whether this session's most recent write was a one-hour write.
-	rows, err := d.sql.Query(`WITH t AS (
+	rows, err := d.sql.QueryContext(d.readCtx(), `WITH t AS (
 		SELECT r.session_id AS session_id, r.tenant_id AS tenant_id, r.ts AS ts, r.model AS model,
 		       r.cache_read + r.cache_write AS prefix,
 		       ROW_NUMBER() OVER w AS rn,
@@ -1105,7 +1105,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 
 // countBySession counts rows per session under an extra predicate.
 func (d *DB) countBySession(cond string, args []any, extra string) (map[string]int64, error) {
-	rows, err := d.sql.Query(`SELECT r.session_id, COUNT(*) FROM requests r
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COUNT(*) FROM requests r
 		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1`, args...)
 	if err != nil {
 		return nil, err
@@ -1203,7 +1203,7 @@ func (d *DB) pingSpans(f Filter, minPrefix int64) ([]pingSpan, error) {
 	cond, args := f.where()
 	// LEAD, not LAG: a span belongs to the request that OPENS it, which is the request the gate
 	// is evaluated on, and LEAD is NULL exactly on the session-final row.
-	rows, err := d.sql.Query(`WITH s AS (
+	rows, err := d.sql.QueryContext(d.readCtx(), `WITH s AS (
 		SELECT r.session_id AS session_id,
 		       ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id
 		                          ORDER BY r.ts, r.id) - 1 AS turn,
@@ -1294,7 +1294,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 	aCond, aArgs := addressable(f)
 	var gaps []float64
 	var usd []float64
-	rows, err := d.sql.Query(aCond+` SELECT gap_s, cost_usd FROM addressable`, aArgs...)
+	rows, err := d.sql.QueryContext(d.readCtx(), aCond+` SELECT gap_s, cost_usd FROM addressable`, aArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -1365,7 +1365,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 // Returns 0 and "" when the account has no addressable expiry.
 func (d *DB) AccountMedianPrefix(f Filter) (int64, string, error) {
 	aCond, aArgs := addressable(f)
-	rows, err := d.sql.Query(aCond+` SELECT COALESCE(prev_prefix,0), model FROM addressable`, aArgs...)
+	rows, err := d.sql.QueryContext(d.readCtx(), aCond+` SELECT COALESCE(prev_prefix,0), model FROM addressable`, aArgs...)
 	if err != nil {
 		return 0, "", err
 	}
@@ -1412,7 +1412,7 @@ func (d *DB) LastBilledPrefix(f Filter, session string) (int64, string, error) {
 	cond, args := f.where()
 	var prefix sql.NullInt64
 	var model sql.NullString
-	err := d.sql.QueryRow(`SELECT r.cache_read + r.cache_write, r.model FROM requests r
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.cache_read + r.cache_write, r.model FROM requests r
 		WHERE `+cond+` AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
 		append(append([]any(nil), args...), session)...).Scan(&prefix, &model)
 	if err == sql.ErrNoRows {
@@ -1501,7 +1501,7 @@ func (d *DB) KeepAliveRecommend(f Filter) (*KeepAliveRecommendation, error) {
 
 	// The account's own addressable expiries, grouped by session — the resampling unit.
 	aCond, aArgs := addressable(f)
-	rows, err := d.sql.Query(aCond+`
+	rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
 		SELECT session_id, gap_s, cost_usd FROM addressable`, aArgs...)
 	if err != nil {
 		return nil, err
@@ -1662,7 +1662,7 @@ func (d *DB) medianPingUSD(f Filter) (float64, error) {
 	aCond, aArgs := addressable(f)
 	// cost_usd on an addressable miss is dominated by the re-creation of prev_prefix at 1.25x
 	// base input, so cost/prefix/1.25 recovers the base rate and 0.1x of it is the read.
-	rows, err := d.sql.Query(aCond+`
+	rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
 		SELECT cost_usd, COALESCE(prev_prefix,0) FROM addressable WHERE prev_prefix > 0`, aArgs...)
 	if err != nil {
 		return 0, err

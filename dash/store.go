@@ -553,7 +553,7 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 			return deleted, err
 		}
 		var total int64
-		if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&total); err != nil {
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests`).Scan(&total); err != nil {
 			return deleted, err
 		}
 		if total == 0 {
@@ -595,10 +595,10 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 // have nothing to look at).
 func (d *DB) sizeBytes() (int64, error) {
 	var pages, pageSize int64
-	if err := d.sql.QueryRow(`PRAGMA page_count`).Scan(&pages); err != nil {
+	if err := d.sql.QueryRowContext(d.readCtx(), `PRAGMA page_count`).Scan(&pages); err != nil {
 		return 0, err
 	}
-	if err := d.sql.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
+	if err := d.sql.QueryRowContext(d.readCtx(), `PRAGMA page_size`).Scan(&pageSize); err != nil {
 		return 0, err
 	}
 	total := pages * pageSize
@@ -625,7 +625,7 @@ func (d *DB) reclaim() error {
 	// then reads its own progress backwards and deletes again.
 	d.checkpoint()
 	var mode int
-	if err := d.sql.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err == nil && mode == 2 {
+	if err := d.sql.QueryRowContext(d.readCtx(), `PRAGMA auto_vacuum`).Scan(&mode); err == nil && mode == 2 {
 		if _, err := d.sql.Exec(`PRAGMA incremental_vacuum(2000)`); err != nil {
 			return err
 		}
@@ -678,7 +678,7 @@ func (d *DB) DropOldestSessions(n int) (int64, error) {
 // traffic evict everyone else's history, which is the shared-service failure where the
 // person causing the problem is the last to notice it.
 func (d *DB) TenantRowCounts() (map[string]int64, error) {
-	rows, err := d.sql.Query(`SELECT tenant_id, COUNT(*) c FROM requests
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT tenant_id, COUNT(*) c FROM requests
 		WHERE tenant_id <> '' GROUP BY tenant_id ORDER BY c DESC`)
 	if err != nil {
 		return nil, err
@@ -699,7 +699,7 @@ func (d *DB) TenantRowCounts() (map[string]int64, error) {
 // tenantRowCount counts one tenant's request rows.
 func (d *DB) tenantRowCount(tenant string) (int64, error) {
 	var n int64
-	err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests WHERE tenant_id = ?`, tenant).Scan(&n)
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests WHERE tenant_id = ?`, tenant).Scan(&n)
 	return n, err
 }
 

@@ -163,7 +163,7 @@ type ToolFilterState struct {
 // to none.
 func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bool)) (*DeclFilterSaving, error) {
 	where, args := f.where()
-	rows, err := d.sql.Query(`SELECT r.session_id, r.model, r.filtered_decl_tokens,
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, r.model, r.filtered_decl_tokens,
 		r.cache_read, r.cache_write, r.ts FROM requests r
 		WHERE `+where+` AND r.filtered_decl_tokens > 0`, args...)
 	if err != nil {
@@ -233,7 +233,7 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 // (dash/cachehistory.go) for why a query per tenant re-pays the same table scan N times over.
 func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinfo.Price, bool)) (map[string]*DeclFilterSaving, error) {
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
-	rows, err := d.sql.Query(`SELECT r.tenant_id, r.session_id, r.model, r.filtered_decl_tokens,
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.model, r.filtered_decl_tokens,
 		r.cache_read, r.cache_write, r.ts FROM requests r
 		WHERE `+cond+` AND r.filtered_decl_tokens > 0`, args...)
 	if err != nil {
@@ -286,7 +286,7 @@ func (d *DB) declWindows(f Filter) (map[statKey]declWindow, error) {
 		a = append(a, f.Tenant)
 	}
 	q += ` GROUP BY 1, 2`
-	rows, err := d.sql.Query(q, a...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, a...)
 	if err != nil {
 		return nil, err
 	}
@@ -544,7 +544,7 @@ func (a *API) ToolFilterDocument(r *http.Request) (*ToolFilterDoc, error) {
 	if !ok {
 		return nil, errNotPermitted
 	}
-	return a.rec.DB().ToolFilterDocFor(f, a.priceFn(r), a.toolFilterStateForScope(f))
+	return a.db(r).ToolFilterDocFor(f, a.priceFn(r), a.toolFilterStateForScope(f))
 }
 
 // errNotPermitted is returned to a caller that has no scope, so the control plane can tell
@@ -558,7 +558,7 @@ func (a *API) toolFilterDoc(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	doc, err := a.rec.DB().ToolFilterDocFor(f, a.priceFn(r), a.toolFilterStateForScope(f))
+	doc, err := a.db(r).ToolFilterDocFor(f, a.priceFn(r), a.toolFilterStateForScope(f))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "could not read the removal report")
 		return

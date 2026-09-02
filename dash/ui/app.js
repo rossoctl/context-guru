@@ -194,6 +194,21 @@ const state = {
   // that no longer repaints itself every ten seconds: the reader can always see how old
   // what they are looking at is, and whether refreshing would change it. See initRefresh.
   loadedAt: 0,
+  // lastTryAt is when a load last FINISHED, succeeded or not, and loadingOverview is whether one is
+  // in flight. They exist because loadedAt alone cannot pace the timer: it only advances on
+  // success, so once a load started failing the timer's own backoff guards — which both measure
+  // `now - loadedAt` — were permanently satisfied and it re-fired on every 5s tick instead of every
+  // 5 minutes. Worse, the repaint error path calls markDirty(), which set dirty and so ALSO removed
+  // the staleness cap that was the second brake. A dashboard left open therefore hammered two
+  // expensive endpoints 12x a minute for as long as they kept failing, which is how a slow query
+  // became a service-wide outage.
+  //
+  // They are separate from loadedAt rather than a redefinition of it because loadedAt has a second
+  // job: paintFreshness() reports it to the reader as "Updated 3m ago", and that line must keep
+  // meaning "when the numbers on screen were fetched". Pacing and freshness are two different
+  // questions and one timestamp cannot answer both honestly.
+  lastTryAt: 0,
+  loadingOverview: false,
   dirty: false,
   // The time range, Grafana's model: `from` and `to` are each EITHER a relative token
   // ('now-6h', 'now') or an absolute epoch-ms number. 0 means unbounded, which is what
@@ -2018,6 +2033,7 @@ async function loadOverview(opts = {}) {
   // moves. `silent` is implicit rather than a caller's flag: having data already IS the
   // condition, so no call site has to remember.
   const first = !state.overview;
+  state.loadingOverview = true;
   if (first) loadingState($('#tiles'), 4);
   const scroll = window.scrollY;
   try {
@@ -2074,6 +2090,13 @@ async function loadOverview(opts = {}) {
     // the old code replaced the tiles with an error state, so one blip wiped the numbers.
     if (!first) { markDirty(); return; }
     errorState($('#tiles'), 'Could not load statistics', err);
+  } finally {
+    // In `finally`, so a failure and an abort pace the timer exactly like a success does. Every
+    // early `return` above — including the abort check at the top of the catch — passes through
+    // here, which is the point: there is no exit from this function that leaves the timer believing
+    // no attempt was made.
+    state.loadingOverview = false;
+    state.lastTryAt = Date.now();
   }
 }
 
@@ -5784,7 +5807,17 @@ function initRefresh() {
     // `dirty` is the same argument applied to a window that CAN: no captured request means
     // no changed rollup, and the SSE stream already tells us.
     if (busyReading()) return; // try again on the next tick; the button is always available
-    const age = Date.now() - state.loadedAt;
+    // Never stack. A load slower than this tick would otherwise have another started on top of it
+    // every 5s, and since a failing load is also a SLOW one, the failure case stacked hardest: an
+    // abandoned request still costs the server a connection and a full query, so a pileup on the
+    // client is a pileup on the server.
+    if (state.loadingOverview) return;
+    // Paced on the last ATTEMPT, not the last success. Using loadedAt here is what let a failing
+    // dashboard poll every 5s forever: it only advances when a load works, so `age` grew without
+    // bound and both of these guards stopped guarding. lastTryAt advances in loadOverview's
+    // `finally`, so a run of failures backs off to the reader's chosen interval exactly like a run
+    // of successes.
+    const age = Date.now() - Math.max(state.loadedAt, state.lastTryAt);
     if (age < every) return;
     // The staleness cap, and it is the honest half of this design.
     //
