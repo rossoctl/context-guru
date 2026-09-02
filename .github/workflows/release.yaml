@@ -24,8 +24,9 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
-          check-latest: true
+          # Same source as CI (go.mod), deliberately: an artifact people download must be built
+          # with the toolchain CI validated, and a literal here is how that drifts apart.
+          go-version-file: go.mod
 
       # The claim the release rests on, asserted in CI rather than trusted: the shipped
       # binary needs no C toolchain. CGO_ENABLED=0 with no compiler on PATH would fail loudly
