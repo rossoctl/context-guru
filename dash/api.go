@@ -101,6 +101,35 @@ const dashCacheStale = 30 * time.Second
 // Still matches Prometheus's own scrape_timeout, so a slow tab and a slow scrape fail alike.
 const dashHandlerTimeout = 10 * time.Second
 
+// dashHeavyTimeout bounds the three cached aggregate reads — /api/stats, /api/facets and
+// /api/components — which the default is simply too short for on a large database.
+//
+// The default's own comment used to justify 10s as "matches Prometheus's own scrape_timeout, so a
+// slow tab and a slow scrape fail the same way". That was the wrong reason for these three: nothing
+// scrapes them. Prometheus reads /metrics. Tying a HUMAN's page load to a scraper's patience is how
+// /api/components came to fail 100% of the time on its default view — measured on the production
+// database, the UNFILTERED all-time Components() aggregate takes 10.2-10.4s, so it crossed a bound
+// set for an unrelated reason by a fraction of a second and returned 503 on every single request.
+//
+// The honest bound is what the CALLER can tolerate. This one is a person who has just clicked a tab
+// showing every component over all history, and who is not helped by being told to try again. 45s is
+// well inside nginx's 600s proxy_read_timeout, so the answer reaches them rather than dying in the
+// hop. It is not a licence for slow queries: the same view is ~2.9s over 24 hours and ~7.5s over 7
+// days, the cache and its single-flight mean at most one reader per interval ever waits at all, and
+// cg_metrics_render_seconds and the X-Cache header make the real cost visible instead of hidden
+// behind a retry.
+const dashHeavyTimeout = 45 * time.Second
+
+// dashComputeTimeout bounds the SHARED, detached computation behind serveJSON — the work itself
+// rather than any one caller's wait for it.
+//
+// It has to exist and it has to be larger than the callers' bounds: the computation is deliberately
+// not tied to a request (see serveJSON), so nothing else would ever stop it, and a read that hangs
+// forever holds a pooled connection forever. Larger than dashHeavyTimeout because the point of
+// detaching is that the work survives the reader who triggered it and lands in the cache for the
+// next one; a bound below theirs would kill it just as it became useful.
+const dashComputeTimeout = 2 * time.Minute
+
 const dashTimeoutMsg = "dashboard query timed out; try again in a moment"
 
 // jsonCache is a short-TTL cache for one expensive, filter-keyed JSON response. Unlike
@@ -217,8 +246,21 @@ func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, ke
 		return
 	}
 	w.Header().Set("X-Cache", "miss")
+	// The shared computation is DETACHED from every caller, and that is deliberate rather than
+	// careless. Bound to the leader's r.Context() it inherits the leader's deadline and the leader's
+	// abandonment: when the leader timed out, compute failed with a cancelled context and
+	// singleflight handed that same error to every waiter — so one reader closing a tab failed the
+	// tab for everyone else, and the work already done was thrown away instead of being cached.
+	// That is the same "one caller's abandonment costs everyone" shape this whole change set exists
+	// to remove, and it would have been reintroduced here by the obvious code.
+	//
+	// Detaching it means the result is always cached even if nobody is left to receive it, so the
+	// next reader gets a hit rather than starting again. Each caller still gets its own deadline
+	// from the handler timeout, which is what bounds THEIR wait; this bounds the WORK.
 	v, err, _ := a.jsonInflight.Do(key, func() (any, error) {
-		body, err := compute(a.db(r))
+		ctx, cancel := context.WithTimeout(context.Background(), dashComputeTimeout)
+		defer cancel()
+		body, err := compute(a.rec.DB().WithContext(ctx))
 		if err == nil {
 			c.set(key, body)
 		}
@@ -239,7 +281,7 @@ func (a *API) serveJSON(w http.ResponseWriter, r *http.Request, c *jsonCache, ke
 // is generous rather than dashHandlerTimeout because nobody is waiting — the only thing that must
 // not happen is a refresh living forever and holding a connection.
 func (a *API) refreshJSON(c *jsonCache, key string, compute func(db *DB) ([]byte, error)) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), dashComputeTimeout)
 	defer cancel()
 	body, err := compute(a.rec.DB().WithContext(ctx))
 	if err != nil {
@@ -486,36 +528,47 @@ func (a *API) routes() []route {
 func (a *API) Mount(m *http.ServeMux) {
 	for _, rt := range a.routes() {
 		h := rt.h
-		if !unboundedRoutes[rt.pattern] {
-			h = http.TimeoutHandler(h, dashHandlerTimeout, dashTimeoutMsg).ServeHTTP
+		if d := routeBound(rt.pattern); d > 0 {
+			h = http.TimeoutHandler(h, d, dashTimeoutMsg).ServeHTTP
 		}
 		m.HandleFunc(rt.pattern, h)
 	}
 }
 
-// unboundedRoutes are the routes Mount does NOT put a handler timeout on.
+// routeBounds overrides the default handler timeout for particular routes. 0 means NO timeout.
 //
-// The bound is applied by DEFAULT and named here as an opt-out, which is the whole point:
-// dashHandlerTimeout used to be attached to three routes by hand, so every route added after it
-// silently had none. /api/series and /api/capture were two of those, and in the outage this fixes
-// they were the endpoints that hung longest — 4,049 and 3,549 gateway timeouts in a single day,
-// each burning 60s of nginx patience, because nothing in the process ever gave up. A route is now
-// bounded whether or not its author thought about it, and exempting one takes a deliberate line.
+// The default is applied to every route by Mount and this map is the only way out, which is the
+// whole point: dashHandlerTimeout used to be attached to three routes by hand, so every route added
+// after it silently had none. /api/series and /api/capture were two of those, and in the outage this
+// fixes they were the endpoints that hung longest — 4,049 and 3,549 gateway timeouts in a single
+// day, because nothing in the process ever gave up. A route is now bounded whether or not its author
+// thought about it.
 //
-// Only two shapes qualify, and "this one is slow" is not among them:
+// Two reasons to appear here, and they are different:
 //
-//   - A STREAMED response. http.TimeoutHandler buffers the whole body before writing, so
-//     wrapping an SSE feed would withhold every event and then discard them all.
-//   - A read that legitimately outlasts the bound because it crosses the NETWORK to cold
-//     storage, under its own explicit and longer timeout.
-//
-// The static UI is listed for neither reason: it touches no database, and buffering an embedded
-// asset only to time it is pure overhead.
-var unboundedRoutes = map[string]bool{
-	"GET /api/events":                        true, // SSE: a buffered stream is not a stream
-	"GET /api/archive/{session}":             true, // rclone fetch, own 60s bound
-	"GET /api/sessions/{session}/transcript": true, // reaches cold storage
-	"GET /dashboard/":                        true, // embedded assets, no DB
+//   - 0, UNBOUNDED. Either the response is STREAMED — http.TimeoutHandler buffers the whole body
+//     before writing, so wrapping an SSE feed would withhold every event and then discard them all
+//     — or the read crosses the NETWORK to cold storage under its own explicit, longer timeout. The
+//     static UI is here for neither reason: it touches no database, and buffering an embedded asset
+//     only to time it is pure overhead.
+//   - LONGER, for the three cached aggregate reads. See dashHeavyTimeout.
+var routeBounds = map[string]time.Duration{
+	"GET /api/events":                        0, // SSE: a buffered stream is not a stream
+	"GET /api/archive/{session}":             0, // rclone fetch, own 60s bound
+	"GET /api/sessions/{session}/transcript": 0, // reaches cold storage
+	"GET /dashboard/":                        0, // embedded assets, no DB
+	"GET /api/stats":                         dashHeavyTimeout,
+	"GET /api/facets":                        dashHeavyTimeout,
+	"GET /api/components":                    dashHeavyTimeout,
+}
+
+// routeBound is the timeout Mount applies to one route: its override if it has one, otherwise the
+// default. Written as a function so an absent key and an explicit 0 stay distinguishable.
+func routeBound(pattern string) time.Duration {
+	if d, ok := routeBounds[pattern]; ok {
+		return d
+	}
+	return dashHandlerTimeout
 }
 
 // requireManager gates a route serving server-wide or process-wide facts.
