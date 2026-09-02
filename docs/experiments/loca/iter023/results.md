@@ -73,14 +73,34 @@ It does not. The hypothesis is refuted rather than merely unconfirmed.
 consistent with `skip_tail` absorbing 7,487 of them. But a component with no surviving candidates cannot
 make 101 calls. `cands` was 0 in **every one of 692 records** across the two arms checked.
 
-The likely resolution is that the `extract` nested map is not scoped to one component: the sweep made **96
-asks** in this arm, close to the 101 `calls`, and `saved_tokens: 6,077,421` against
-`saved_tokens_unique: 597,764` is an overcount ratio of **31.58**, the signature of replays being counted
-repeatedly (`reapplied_same_session: 2,291`). If so, the 59-second latency and the −$1.162 are the
-**sweep's** figures, not the tail pass's — which is why the earlier attribution of 5,452 ms/request to the
-sweep, then to `extract_llm`, was wrong in both directions.
+**RESOLVED, and the answer is worse than the guess above.** Filed as **#176** (counters disagree) and
+**#177** (no per-call record to arbitrate them with); root-caused in **#178**.
 
-Filed as **#176** (counters disagree) and **#177** (no per-call record to arbitrate them with).
+The `extract` nested map was **process-global** — one set of package-level atomics that BOTH
+`extract_llm` and `extract_sweep` wrote every field of. So `calls`, `avg_latency_ms`, `calls_avoided` and
+the entire net-value block were two components with opposite economics summed under a name that reads as
+one of them. `extraction_cost_usd` was scoped wider still: derived from `cheapmodel.Usage()`, which
+catches every cheap-model call in the process — `summarize` and `agentdiet` included — and priced through
+the haiku card even though the sweep's asks go to the request's own frontier model.
+
+So **the −$1.162 is not the sweep's figure and not the tail pass's**: it is two components' savings against
+three components' spend at one component's rates. The 59,009 ms mean is likewise pooled. Every
+per-component cost and latency number in this file is therefore **unattributed**, and no re-reading of
+these logs can repair it — the pooling happened at write time.
+
+Two things the resolution corrected in the analysis above:
+
+* **`cands: 0` was not the wrong side.** A frozen replay `continue`s before its candidate is appended, so
+  `cands: 0` on all 692 records and `acted: 239` are *consistent and both true*: `extract_llm` acted 239
+  times without one fresh call. The wrong number was `calls`, because it was pooled — the 101 are nearly
+  the sweep's 96 asks.
+* **The 31.58 overcount is not a defect.** It is the designed cumulative-versus-unique contrast working as
+  intended, and was correctly left alone.
+
+A side finding with behavioural teeth, not just display: the exploration brake `tooSlowToExplore` read the
+**global** p50, so the sweep's ~59-second asks were braking `extract_llm`'s cheap-model exploration. That
+is a decision path, and it means the tail pass's own firing behaviour in this iteration was influenced by
+the sweep's latency through a channel nobody was looking at.
 
 **What survives about the 0/239/0 split.** Only the replay explanation: `reapplied_same_session: 2,291`
 with `calls_avoided: 2,291` and 10,538 cache lookups at a 66.8% hit rate, all arm-B-only. The sweep's
