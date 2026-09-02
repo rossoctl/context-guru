@@ -60,7 +60,7 @@ This is the endpoint iteration 021 could not produce, and the reason it was buil
 | **B** merged | **18.9** (−9%) | **19.8** (−1.5%) | 18.5 (−12%) | **1,396** |
 | **C** coref | 26.1 (+26%) | 25.5 (+27%) | 26.7 (+27%) | 353 |
 
-**Arm B's turn reduction is almost entirely among runs that FAILED.** Among solved runs it is 20.1 →
+**Arm B's turn reduction is almost entirely among runs that FAILED** (but see §2b: this arm is confounded, and the reduction is not attributable to the treatment). Among solved runs it is 20.1 →
 19.8, which is 1.5% and inside noise; among unsolved runs it is 21.1 → 18.5. B also solved *fewer*
 tasks (5 vs 7). So the shape of B's "efficiency" is **giving up sooner on tasks it does not solve**, not
 solving faster — precisely the alternative reading pre-registered for this outcome.
@@ -75,6 +75,64 @@ turns on the runs that matter. B's own model spend is 962k input tokens against 
 
 **Arm C moved the other way**: +26% turns, and 62% more LOCA cost ($55.35 vs $34.06). Its median is 17
 against A's 19, so the mean is carried by a long tail — a few runs that went much longer.
+
+## 2b. ARM B IS CONFOUNDED — B−A does not isolate the treatment
+
+Raised by David on reading §1–§2, and it invalidates the attribution in §2 rather than qualifying it.
+
+**The sweep acted 11 times.** 30 econ firings, 30 asks, 132 candidates offered, 132 verdicts, and only
+**11 asks removed anything** (37%) for 187,472 tokens. Eleven removal events across 284 requests and 15
+runs cannot carry a −2 solve difference or a turn profile.
+
+**And a much larger uncontrolled change sits in the same arm.** `extract_llm` acted **108** times in B
+against **15** in A — 38.0% of requests against 4.8% — saving 1.19M tokens against 0.32M, on a
+byte-identical config:
+
+| act rate / request | A | B | C |
+|---|---|---|---|
+| `extract_llm` | 4.8% | **38.0%** | 9.5% |
+| `extract_llm_sweep` | 0% | 3.9% | 0% |
+| `collapse` | 62.7% | **33.5%** | 54.2% |
+
+`extract_llm` runs BEFORE `collapse`, so it — not the sweep — is what left `collapse` half as much to do
+(collapse's truncation savings fell 3.10M → 1.49M). **The collapse reduction is real and is a deferral of
+exactly the wanted kind — blunt head/tail truncation displaced by model-guided compaction — but it is not
+attributable to `evidence` or `econ_trigger`.**
+
+Why extract_llm's activity swung 7× on an identical config is **unexplained**. It cannot be the pressure
+trigger, which #134 forces on in both arms. The plausible route is trajectory divergence seeded by the
+sweep's 11 removals, but a 93-event downstream swing from 11 upstream events is not something this run's
+aggregate counters can establish.
+
+**Consequence for §2.** The turn figures there are correct as measurements, and the outcome split is
+still the right way to read them. But attributing B's turn profile to the merged design is NOT supported:
+the arm differs from A in two ways, and the larger one is not the treatment. A clean B−A needs
+`extract_llm` controlled — most simply removed from all arms, since #134 makes it fire on every request
+regardless.
+
+## 2c. What IS attributable, and one anomaly worth chasing
+
+**Coverage: 132 of 132 verdicts, 100%, at mean batch 4.4.** Iteration 021 measured **61% at batch 12**
+and its conclusion named a smaller batch as the untested lead, on a probe that answered 6 of 6 at six
+candidates. This confirms it at n=132 candidates. Coverage is a property of the ask itself, so unlike the
+reward and turn numbers it does not depend on trajectory.
+
+**Latency is the sweep, and it is 15.2 s per ask.** `extract_llm_sweep.duration_ms` is 454,661 ms in B
+against 35 ms in A — 1,601 ms per request once amortised over 284, which accounts for the whole
+`cg_added_ms_avg` gap (203 → 1,396). Concentrated, not spread: 30 requests paid ~15 s each. And 19 of
+those 30 asks returned "keep everything", so roughly 290 s of it bought nothing.
+
+**The anomaly: 40% of every ask is paid FRESH.** Mean input per ask is 42,409 cache-read **plus 28,764
+fresh**. A prefix ask appends a question to a byte-identical prefix, so fresh should be little more than
+the question itself. The likely cause is self-inflicted — each removal mutates the prefix, so the next
+ask no longer matches what the provider cached — which would make the mechanism progressively more
+expensive the more it succeeds. This is the design's central economic premise and it is not behaving as
+designed. It deserves an issue of its own.
+
+At list price the 30 asks cost **$3.44** (cache-read $0.38 + fresh $2.59 + output $0.47) to remove
+187,472 tokens, i.e. 54,465 tokens per dollar. B's end-to-end LOCA spend was still lower than A's
+($27.49 vs $34.06), so total cost fell ~$3 — but at 5 solves against 7 that is **$6.19 per solve against
+A's $4.88**.
 
 ## 3. Reward — both arms blocked by the pre-registered harm gate
 
