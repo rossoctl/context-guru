@@ -646,6 +646,35 @@ func (d *DB) checkpoint() {
 	_, _ = d.sql.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 }
 
+// optimize refreshes the query planner's statistics for tables whose statistics are missing or
+// stale. Called from the janitor's recurring pass; see janitorPass for the measurement and for
+// why it is not done at Open.
+//
+// The 0x10002 MASK IS LOAD-BEARING and a bare `PRAGMA optimize` here is a silent no-op. 0x00002 is
+// "run ANALYZE where it would help"; 0x10000 is what lifts the restriction that a table must have
+// been queried BY THIS CONNECTION to be considered. The janitor takes a fresh connection from the
+// pool and runs no queries of its own, so under the default mask SQLite correctly concludes this
+// connection has used nothing and analyses nothing. Measured on a copy of the production database,
+// on a cold connection: bare `PRAGMA optimize` completes in 0.00s and leaves sqlite_stat1 absent;
+// `PRAGMA optimize(0x10002)` produces all 26 statistic rows, also in 0.00s.
+//
+// It is fast because it SAMPLES rather than doing a full scan — which is the whole reason it can
+// live on a recurring pass, where a bare ANALYZE (72s on this database) could not. The sampled
+// statistics are good enough for the decision that actually matters here, join order: with them the
+// component aggregate plans as SEARCH requests USING idx_requests_ts -> SEARCH request_components
+// USING idx_rc_request and runs in 0.209s, against 2.0s and a full 1.58M-row scan without them.
+//
+// Errors are logged rather than returned: out-of-date statistics make queries slower, never wrong,
+// so a failure here must not stop the rest of a janitor pass.
+func (d *DB) optimize() {
+	if d.path == "" || d.path == ":memory:" {
+		return
+	}
+	if _, err := d.sql.Exec(`PRAGMA optimize(0x10002)`); err != nil {
+		slog.Warn("dash: PRAGMA optimize failed; query plans will use whatever statistics exist", "err", err)
+	}
+}
+
 // DropOldestSessions deletes the n least-recently-active SESSIONS and returns how
 // many request rows went with them. Component and content rows follow via
 // ON DELETE CASCADE.

@@ -62,6 +62,29 @@ func (r *Recorder) janitorPass() {
 	// pruneInterval, keeps the backlog small enough that neither this call nor
 	// SQLite's own auto-checkpoint in between is ever slow.
 	r.db.checkpoint()
+	// Keep the query planner's statistics current. Cheap, and the one thing here that makes
+	// existing indexes get USED rather than merely exist.
+	//
+	// This database had never been ANALYZEd at all — sqlite_stat1 did not exist — so SQLite was
+	// planning every join in this package on hard-coded guesses. Measured on a copy of the
+	// production database, /api/components over a 24-hour window: 3.59s without statistics,
+	// 0.81s with them, a 4.4x difference from no code change and no new index. The guess it was
+	// getting wrong is join ORDER: with no row counts it scanned all 1.58M request_components
+	// rows and probed requests per row, instead of driving from the filtered requests window
+	// through idx_rc_request. Two of those queries are pinned explicitly with a CROSS JOIN
+	// barrier (see Components in dash/query.go); statistics fix the rest, including
+	// DecomposeComponentSavedUSD, EstimateComponentSavedUSD and Facets' component list.
+	//
+	// PRAGMA optimize rather than a bare ANALYZE, and here rather than at Open: it re-analyses
+	// only tables whose statistics are missing or stale, so the steady-state cost is near zero
+	// and only the first pass does real work. A bare ANALYZE on this database measures 72s —
+	// fine on a background timer, and exactly what must never sit in front of the listener,
+	// which Open does (cmd/context-guru-proxy opens the store long before it serves).
+	//
+	// Statistics going stale is the failure mode to keep in mind: they are a snapshot, and a
+	// database that doubles in size between passes plans against the old shape. That is what
+	// makes this belong on the recurring pass rather than being run once by hand.
+	r.db.optimize()
 }
 
 // diskWatermarks resolves the configured watermarks, applying defaults and
