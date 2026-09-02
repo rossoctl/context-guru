@@ -975,9 +975,19 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		r.rec.Rejection = "adjudicated: nothing was spent"
 	}
 	if debugExtractLLM(c) {
+		// SESSION AND BOUNDARY ARE HERE SO THIS LINE CAN BE JOINED, which it could not be before.
+		// This is the only record carrying the ask's economics, and without a session it cannot be tied
+		// to the request that produced it -- so "why was 40% of this ask charged fresh?" was
+		// unanswerable from a completed run's logs. It has exactly one benign explanation (the client's
+		// last cache_control breakpoint sits before the end of the body, so the tail past it is
+		// uncached and our appended question pays for it) and one alarming one (the prefix we send no
+		// longer matches what the provider cached), and they are distinguished by max_cached_idx and
+		// the request size, both of which are already in hand here.
 		logging.From(c.Ctx).Debug("cg.sweep.ask", "offered", len(items),
 			"verdicts", len(verdicts), "dropped", len(drop), "candidate_tokens", before,
-			"removed_tokens", removed, "cache_read", usage.CacheRead, "fresh", usage.Fresh)
+			"removed_tokens", removed, "cache_read", usage.CacheRead, "fresh", usage.Fresh,
+			"session", c.Session, "max_cached_idx", c.MaxCachedIdx,
+			"req_tokens", schema.MessagesTokens(req), "messages", len(req.Input))
 	}
 	return drop, r
 }

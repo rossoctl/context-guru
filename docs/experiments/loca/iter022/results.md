@@ -114,8 +114,26 @@ regardless.
 
 **Coverage: 132 of 132 verdicts, 100%, at mean batch 4.4.** Iteration 021 measured **61% at batch 12**
 and its conclusion named a smaller batch as the untested lead, on a probe that answered 6 of 6 at six
-candidates. This confirms it at n=132 candidates. Coverage is a property of the ask itself, so unlike the
-reward and turn numbers it does not depend on trajectory.
+candidates. Coverage is a property of the ask itself, so unlike the reward and turn numbers it does not
+depend on trajectory.
+
+**But the batch size is a CONFIG choice, not a property of the band, and that partly confounds the
+coverage result.** The cap is `maxAskItems = 12` here and was 12 in iteration 021, so the difference is
+candidate availability, and availability at 64k is set by the sweep's floor. Measured on arm B's own
+traffic (6,708 tool outputs, 23.6 per request):
+
+| sweep `min_tokens` | candidates per request | vs the cap of 12 |
+|---|---|---|
+| **1000** (what this ran, "as shipped") | **4.5** — matches the observed 4.4 | far below |
+| 300 | 8.6 | |
+| **100** | **11.6** | at the cap |
+
+So 64k does supply a batch of ~12; the 1000-token floor excluded it. Iteration 021 reached ~12 because
+its `extract_llm` ran with `min_tokens` UNPINNED, letting the derived pressure floor fall low. **The
+honest statement is therefore "coverage was 100% at batch 4.4", not "the smaller batch fixed coverage"**
+-- batch size and the rest of the configuration moved together. Lowering the floor to 100-300 and
+re-measuring coverage at batch ~12 is a one-config-line experiment and is the single most informative
+cheap follow-up this iteration suggests.
 
 **Latency is the sweep, and it is 15.2 s per ask.** `extract_llm_sweep.duration_ms` is 454,661 ms in B
 against 35 ms in A — 1,601 ms per request once amortised over 284, which accounts for the whole
