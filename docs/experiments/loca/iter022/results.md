@@ -122,16 +122,31 @@ coverage result.** The cap is `maxAskItems = 12` here and was 12 in iteration 02
 candidate availability, and availability at 64k is set by the sweep's floor. Measured on arm B's own
 traffic (6,708 tool outputs, 23.6 per request):
 
-| sweep `min_tokens` | candidates per request | vs the cap of 12 |
-|---|---|---|
-| **1000** (what this ran, "as shipped") | **4.5** — matches the observed 4.4 | far below |
-| 300 | 8.6 | |
-| **100** | **11.6** | at the cap |
+| sweep `min_tokens` | candidates per request | total candidate tokens/request | mean candidate size |
+|---|---|---|---|
+| 3000 | 2.7 | 35,278 | 13,097 |
+| **1000** (what this ran, "as shipped") | **4.5** — matches the observed 4.4 | 38,077 | 8,370 |
+| 600 | 6.1 | 39,294 | 6,439 |
+| 300 | 8.6 | 40,386 | 4,699 |
+| **100** | **11.6** — at the cap | **41,001** | 3,530 |
+
+**The count and the mass move at completely different rates, and that decides what a lower floor is
+FOR.** `min_tokens` is a per-output bar, not a budget, so lowering it can only admit more outputs --
+monotonically, since the set at 100 is a strict superset of the set at 1000. But the outputs it newly
+admits are by definition the smallest ones: the 2,007 additions between 100 and 1000 average **414
+tokens** against **8,370** for those already in. So 1000 -> 100 is **+155% candidates for +8% mass**.
+
+In a prefix ask the model reads each output from cache, so the marginal wire cost of naming one more
+candidate is one inventory line, on the order of thirty tokens -- not the output. A lower floor therefore
+buys **peers to compare against** almost free, which is the axis this mechanism lives on (6% live-kept at
+a batch of one against 58% at ~15). What it does NOT buy is removable mass, and a dropped 414-token
+output leaves a descriptor behind, so its net recovery is small. Same mechanism
+`docs/results/min-tokens-vs-economic-gate.md` records from the economic gate's side.
 
 So 64k does supply a batch of ~12; the 1000-token floor excluded it. Iteration 021 reached ~12 because
 its `extract_llm` ran with `min_tokens` UNPINNED, letting the derived pressure floor fall low. **The
 honest statement is therefore "coverage was 100% at batch 4.4", not "the smaller batch fixed coverage"**
--- batch size and the rest of the configuration moved together. Lowering the floor to 100-300 and
+-- batch size and the rest of the configuration moved together. Lowering the floor to **100** (300 reaches only 8.6) and
 re-measuring coverage at batch ~12 is a one-config-line experiment and is the single most informative
 cheap follow-up this iteration suggests.
 
