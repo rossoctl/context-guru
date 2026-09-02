@@ -728,6 +728,219 @@
    }
   },
   {
+   "id": 17,
+   "type": "stat",
+   "title": "Metrics exposition age",
+   "description": "How old the /metrics body being served is. Rises above the refresh interval (60s) only if refreshes have stopped \u2014 the outage this row exists to catch: a stale-but-served body reads as healthy on every other panel here. Alert: cg-metrics-stale.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 0,
+    "y": 21
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "cg_metrics_age_seconds",
+     "editorMode": "code",
+     "legendFormat": "age"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 120
+       },
+       {
+        "color": "#e66767",
+        "value": 300
+       }
+      ]
+     },
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 18,
+   "type": "stat",
+   "title": "Metrics render duration",
+   "description": "How long the last exposition render took. Approaching the 15s scrape interval is the early warning that the per-tenant queries need attention, before a render slow enough to matter ever causes a gap.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 6,
+    "x": 6,
+    "y": 21
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "cg_metrics_render_seconds",
+     "editorMode": "code",
+     "legendFormat": "render"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#199e70",
+        "value": null
+       },
+       {
+        "color": "#c98500",
+        "value": 8
+       },
+       {
+        "color": "#e66767",
+        "value": 15
+       }
+      ]
+     },
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto"
+   }
+  },
+  {
+   "id": 19,
+   "type": "timeseries",
+   "title": "Metrics exposition age over time",
+   "description": "A sawtooth under ~65s is healthy: the cache refreshes on a scrape once it turns 60s old. A climb with no reset means refreshes have stopped and every dashboard reading these series is going stale, silently.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "cg-prom"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 12,
+    "x": 12,
+    "y": 21
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "cg-prom"
+     },
+     "expr": "cg_metrics_age_seconds",
+     "editorMode": "code",
+     "legendFormat": "age"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "pointSize": 8,
+      "spanNulls": true,
+      "axisSoftMin": 0,
+      "axisGridShow": true,
+      "axisBorderShow": false,
+      "lineInterpolation": "linear",
+      "gradientMode": "none",
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "mappings": [],
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "text",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#3987e5"
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": false,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "single",
+     "sort": "none"
+    }
+   }
+  },
+  {
    "id": 13,
    "type": "row",
    "title": "Requests refused",
@@ -736,7 +949,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 21
+    "y": 27
    },
    "panels": []
   },
@@ -753,7 +966,7 @@
     "h": 6,
     "w": 6,
     "x": 0,
-    "y": 22
+    "y": 28
    },
    "targets": [
     {
@@ -823,7 +1036,7 @@
     "h": 6,
     "w": 6,
     "x": 6,
-    "y": 22
+    "y": 28
    },
    "targets": [
     {
@@ -884,7 +1097,7 @@
     "h": 6,
     "w": 12,
     "x": 12,
-    "y": 22
+    "y": 28
    },
    "targets": [
     {

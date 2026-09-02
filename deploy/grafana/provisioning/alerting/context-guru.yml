@@ -3,10 +3,11 @@
 #   cp -r deploy/grafana/provisioning/* /etc/grafana/provisioning/
 #   systemctl restart grafana-server        # or: docker restart cg-grafana
 #
-# The alerting directory shipped EMPTY, so nothing paged. Two rules, both chosen because
+# The alerting directory shipped EMPTY, so nothing paged. Three rules, all chosen because
 # they are the failures a dashboard cannot catch: nobody is watching a screen when the
-# service dies at 03:00, and a refusal rate is invisible on every panel that plots only
-# the requests that got through.
+# service dies at 03:00, a refusal rate is invisible on every panel that plots only the
+# requests that got through, and a stale-but-served /metrics body (2026-09-02's dashboard
+# outage) reads as a perfectly healthy scrape on every panel downstream of it.
 #
 # Rules fire into whatever notification policy the instance already has (Grafana's default
 # one if none was provisioned) — deliberately not overridden here, because a contact point
@@ -121,3 +122,57 @@ groups:
                 - evaluator:
                     type: gt
                     params: [0.1]
+
+      # --- the exposition is stale, even though the scrape looks fine --------
+      #
+      # 2026-09-02: promCacheTTL (10s) was shorter than the 15s scrape_interval, so the
+      # cached body was always already expired when a scrape arrived, every scrape paid a
+      # full render, and once a render exceeded scrape_timeout the target went down and
+      # STAYED down — every dashboard built on cg_* series read "No data" for a whole day
+      # before anyone noticed. Fixed in the render path (promCacheTTL now 60s,
+      # stale-while-revalidate instead of render-on-miss), but the failure mode this alert
+      # exists for is more general than that one bug: /metrics can start serving a body
+      # that stopped updating while `up{job="context-guru"}` still reads 1, because the
+      # scrape itself succeeds — cg-service-down cannot see this by construction.
+      # NoData is Alerting, same reasoning as cg-service-down: an absent series is at least
+      # as bad as a stale one.
+      - uid: cg-metrics-stale
+        title: context-guru's own metrics have stopped refreshing
+        condition: B
+        for: 5m
+        noDataState: Alerting
+        execErrState: Alerting
+        annotations:
+          summary: The /metrics exposition has not refreshed in over 2 minutes.
+          description: >-
+            cg_metrics_age_seconds is above 120s: whatever this dashboard shows for every
+            cg_* series is that old or older, even though Prometheus itself is scraping
+            fine. Check cg_metrics_render_seconds for whether a render is stuck (per-tenant
+            store queries are the usual suspect — see CachesplitHistoricalUSD's history)
+            and `journalctl -u context-guru` for what the render is stuck on.
+        labels:
+          severity: critical
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: cg-prom
+            model:
+              refId: A
+              editorMode: code
+              expr: max(cg_metrics_age_seconds)
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [120]
