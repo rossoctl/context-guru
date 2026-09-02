@@ -2,7 +2,9 @@
 
 **Status: COMPLETE.** 9 passes, 45 runs, 3 arms × 15 tasks (seed 42) at 64k. **Zero** errored runs and
 **zero** HTML 400s in every arm — the first iteration in this series with a clean error column, which
-matters because errored runs score 0 in ITT and had been the dominant noise term.
+matters because errored runs score 0 in ITT and had been the dominant noise term. That came from adding
+`collapse`, and §4b records what it cost: `summarize` never fired, so iteration 021's deferral endpoint
+is not measurable here.
 
 ## Frozen inputs
 
@@ -100,6 +102,43 @@ property of `coref`. But Cp1 was also arm C's worst pass (1/5 solves against A's
 unresolvable expand means the agent asked for removed content back and did not get it, which is the one
 failure the "every lossy Offload must be reversible" invariant exists to prevent. The correlation
 between the two is unexplained and is the first thing to chase.
+
+## 4b. `summarize` never fired — the deferral endpoint is dead, and `collapse` is why
+
+**summarize acted 0 times in 986 requests**, across all three arms: 311 / 284 / 391 runs, every one
+`verdict: declined`, and it appears in `top_passthrough` in all nine snapshots. So iteration 021's
+clearest operational result — summarization falling from 71% to 56% of requests — **cannot be measured
+here at all**. It was kept in the baseline specifically to make that measurable, and it is inert instead.
+
+**Not the trigger.** 129 of arm A's 311 requests exceeded `min_request_frac: 0.78`, and requests reached
+228k–453k tokens (the declared 64k window governs the proxy's pressure maths; the real model window is
+far larger, which is also why there were no 400s). summarize was eligible and declined anyway.
+
+**The likely cause is `collapse`, which this iteration added.** What acted, per arm:
+
+| arm | components that acted |
+|---|---|
+| A | **collapse 195**, format 163, dedup 52, toon 16, extract_llm 15, searchfold 6 |
+| B | format 141, extract_llm 108, **collapse 95**, dedup 54, extract_llm_sweep 11 |
+| C | **collapse 212**, format 202, coref 78, extract_llm 37, dedup 27 |
+
+Iteration 021 had no `collapse` and summarize fired on 71% of requests. `collapse` is documented as "the
+last-resort catch-all for anything still oversized"; it takes the big outputs first and leaves a marker,
+and summarize skips marked content while protecting `keep_last`. By the time it runs there is nothing
+oversized left.
+
+**So the two results reported above are the same intervention, and the trade must be stated as one.**
+Adding `collapse` bought the clean error column — 0 errored runs and 0 HTML 400s, against iteration 021's
+17 and 10 — *and* it cost the summarize endpoint. In iteration 021 those oversized single-line outputs
+became runaway 400s; here they are capped before summarize sees them. `collapse` was chosen as a shared
+control on the grounds that being identical across arms means it cannot bias B−A or C−A. That reasoning
+holds and is not the error. The error was not checking whether it left summarize any substrate.
+
+**This is a hypothesis, not a measurement.** The component records carry no gate field, so `declined` is
+unattributed — the decline reason is not in this run's data. Confirming it needs gate-level logging for
+summarize, or a fourth arm identical but for `collapse`. Until then the honest statement is: summarize
+was inert in all three arms, `collapse` acted heavily in all three, and iteration 021's only comparable
+run had `collapse` absent.
 
 ## 5. Reading against the pre-registration
 
