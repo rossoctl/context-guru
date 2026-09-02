@@ -50,20 +50,15 @@ func (r *Recorder) janitorPass() {
 		slog.Info("dash: pruned old dashboard rows", "requests", n)
 	}
 	r.relieveDiskPressure()
-	// Checkpoint on every pass, not only as reclaim()'s side effect of an actual
-	// deletion above: a deployment comfortably inside its retention budget never
-	// deletes anything, so without this the WAL was left to grow until SQLite's own
-	// default wal_autocheckpoint (1000 pages) forced an inline checkpoint on an
-	// ordinary writer commit — paying off the WHOLE accumulated backlog inside that
-	// one commit. Measured against a WAL bloated to the production scale (~40k
-	// pages): that single commit took 5.5s, and a concurrent reader sharing this
-	// *sql.DB (e.g. /metrics) blocked for the same 5.2s — this driver does not give
-	// non-blocking WAL reads across a commit. Checkpointing here, every
-	// pruneInterval, keeps the backlog small enough that neither this call nor
-	// SQLite's own auto-checkpoint in between is ever slow.
-	r.db.checkpoint()
 	// Keep the query planner's statistics current. Cheap, and the one thing here that makes
 	// existing indexes get USED rather than merely exist.
+	//
+	// BEFORE the checkpoint below, not after, and that ordering is load-bearing: PRAGMA optimize
+	// runs ANALYZE, which WRITES sqlite_stat1. Run after the checkpoint, those writes land in a
+	// freshly truncated WAL and stay there until the next pass — so every pass would leave the WAL
+	// growing again, which is the exact thing the checkpoint exists to prevent.
+	// TestJanitorPassCheckpointsWAL caught this, and it is the reason that test asserts on WAL size
+	// rather than on the checkpoint merely having been called.
 	//
 	// This database had never been ANALYZEd at all — sqlite_stat1 did not exist — so SQLite was
 	// planning every join in this package on hard-coded guesses. Measured on a copy of the
@@ -85,6 +80,18 @@ func (r *Recorder) janitorPass() {
 	// database that doubles in size between passes plans against the old shape. That is what
 	// makes this belong on the recurring pass rather than being run once by hand.
 	r.db.optimize()
+	// Checkpoint on every pass, not only as reclaim()'s side effect of an actual
+	// deletion above: a deployment comfortably inside its retention budget never
+	// deletes anything, so without this the WAL was left to grow until SQLite's own
+	// default wal_autocheckpoint (1000 pages) forced an inline checkpoint on an
+	// ordinary writer commit — paying off the WHOLE accumulated backlog inside that
+	// one commit. Measured against a WAL bloated to the production scale (~40k
+	// pages): that single commit took 5.5s, and a concurrent reader sharing this
+	// *sql.DB (e.g. /metrics) blocked for the same 5.2s — this driver does not give
+	// non-blocking WAL reads across a commit. Checkpointing here, every
+	// pruneInterval, keeps the backlog small enough that neither this call nor
+	// SQLite's own auto-checkpoint in between is ever slow.
+	r.db.checkpoint()
 }
 
 // diskWatermarks resolves the configured watermarks, applying defaults and

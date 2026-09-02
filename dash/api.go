@@ -51,6 +51,12 @@ type API struct {
 	// its own 5 queries (Components, DecomposeComponentSavedUSD, EstimateComponentSavedUSD)
 	// measured ~4.4s cold on a comparable corpus, uncached, on the dashboard's most-read tab.
 	statsCache, facetsCache, componentsCache jsonCache
+	// toolsCache and toolFilterCache cover the Inventory tab's two aggregate reads. They are here
+	// for the same reason as the three above and were found the same way: both read over
+	// tool_declarations (2.18M rows) with no cache at all, and both returned 503 on 100% of
+	// requests to the default all-time view — /api/tools and /api/toolfilter each appear in the
+	// outage's nginx log. /api/prompt is deliberately NOT cached beside them; see routeBounds.
+	toolsCache, toolFilterCache jsonCache
 	// jsonInflight collapses concurrent COLD reads of the same cache key onto one computation.
 	// Keyed by the same principal-scoped cacheKey as the caches, so two tenants never share a
 	// computation and a manager never shares one with a tenant.
@@ -560,6 +566,21 @@ var routeBounds = map[string]time.Duration{
 	"GET /api/stats":                         dashHeavyTimeout,
 	"GET /api/facets":                        dashHeavyTimeout,
 	"GET /api/components":                    dashHeavyTimeout,
+	// The Inventory tab's reads, all three over tool_declarations (2.18M rows). Measured on the
+	// production database through the real handlers, unfiltered all-time: every one exceeded the
+	// 10s default, so all three returned 503 on 100% of requests to that tab's default view.
+	// /api/tools and /api/toolfilter both appear in the outage's nginx log; /api/prompt escaped it
+	// only because nobody opened that view while it was being recorded.
+	"GET /api/tools":      dashHeavyTimeout,
+	"GET /api/toolfilter": dashHeavyTimeout,
+	// /api/prompt gets the longer bound but NOT a response cache, and the asymmetry is deliberate.
+	// It serves prompt CONTENT — a user's own system prompt and CLAUDE.md text — behind a gate that
+	// depends on the caller's ADDRESS (a.trusted, a CIDR check in single-tenant mode), not only on
+	// its principal. cacheKey scopes by principal, so a body built for a trusted caller could be
+	// handed to an untrusted one on the same account. Caching it correctly means keying on
+	// trustedness too; that is a change to a content gate and does not belong in an outage fix, so
+	// it waits, and meanwhile it simply gets long enough to finish.
+	"GET /api/prompt": dashHeavyTimeout,
 }
 
 // routeBound is the timeout Mount applies to one route: its override if it has one, otherwise the

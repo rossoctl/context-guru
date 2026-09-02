@@ -21,6 +21,7 @@ package dash
 
 import (
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -902,33 +903,34 @@ func (a *API) MountTools(m *http.ServeMux) {
 // to one session (through the standard filter, so an id belonging to someone else
 // simply selects nothing rather than 403-ing and confirming that it exists).
 func (a *API) tools(w http.ResponseWriter, r *http.Request) {
-	f, _, ok := a.scope(r)
+	f, p, ok := a.scope(r)
 	if !ok {
 		unauthorized(w)
 		return
 	}
 	price := a.priceFn(r)
-	rep, err := a.db(r).ToolReportFor(f, price)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "could not read the tool inventory")
-		return
-	}
-	// Credit for what the USER removed themselves. Best-effort and non-fatal: it is an
-	// addition to the report, so a deployment where it fails still gets the inventory rather
-	// than an error page. Needs a pricer to put a dollar on, and the token counts stand
-	// without one.
-	if price != nil {
-		// The account's own server-side removal list, so a reduction that the tool filter is
-		// ALREADY credited for can be marked as overlapping instead of counted twice.
-		sr, err := a.db(r).SelfRemovals(f, price, a.toolFilterStateForScope(f).Removed)
+	a.serveJSON(w, r, &a.toolsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
+		rep, err := db.ToolReportFor(f, price)
 		if err != nil {
-			// Non-fatal, but never silent: swallowing this returned an empty list that was
-			// indistinguishable from "the account removed nothing", which is a claim.
-			slog.Warn("dash: self-removal credit unavailable", "err", err)
+			return nil, err
 		}
-		rep.SelfRemoved = sr
-	}
-	writeJSON(w, rep)
+		// Credit for what the USER removed themselves. Best-effort and non-fatal: it is an
+		// addition to the report, so a deployment where it fails still gets the inventory rather
+		// than an error page. Needs a pricer to put a dollar on, and the token counts stand
+		// without one.
+		if price != nil {
+			// The account's own server-side removal list, so a reduction that the tool filter is
+			// ALREADY credited for can be marked as overlapping instead of counted twice.
+			sr, err := db.SelfRemovals(f, price, a.toolFilterStateForScope(f).Removed)
+			if err != nil {
+				// Non-fatal, but never silent: swallowing this returned an empty list that was
+				// indistinguishable from "the account removed nothing", which is a claim.
+				slog.Warn("dash: self-removal credit unavailable", "err", err)
+			}
+			rep.SelfRemoved = sr
+		}
+		return json.Marshal(rep)
+	})
 }
 
 // priceFn resolves a model's rates for the duration of one request, or nil when the

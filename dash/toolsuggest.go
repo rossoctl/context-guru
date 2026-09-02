@@ -48,6 +48,7 @@ package dash
 // Basis string says so in words.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -553,15 +554,18 @@ var errNotPermitted = errors.New("not permitted")
 
 // toolFilter serves the removal control document for the caller's scope.
 func (a *API) toolFilterDoc(w http.ResponseWriter, r *http.Request) {
-	f, _, ok := a.scope(r)
+	f, p, ok := a.scope(r)
 	if !ok {
 		unauthorized(w)
 		return
 	}
-	doc, err := a.db(r).ToolFilterDocFor(f, a.priceFn(r), a.toolFilterStateForScope(f))
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "could not read the removal report")
-		return
-	}
-	writeJSON(w, doc)
+	price := a.priceFn(r)
+	state := a.toolFilterStateForScope(f)
+	a.serveJSON(w, r, &a.toolFilterCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
+		doc, err := db.ToolFilterDocFor(f, price, state)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(doc)
+	})
 }
