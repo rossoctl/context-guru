@@ -39,42 +39,58 @@ does bite on real traffic: five voted drops would have extended the rewrite span
 and were withheld. Small, but it is the difference between a rule that is exercised and one that is
 merely present.
 
-## 3. ARM B IS STILL CONFOUNDED, and now systematically rather than noisily
+## 3. The `extract_llm` asymmetry — traced, and the counters do not survive the trace
 
-| arm | `extract_llm` runs | acted | extraction calls |
-|---|---|---|---|
-| A | 333 | **0** | 0 |
-| B | 389 | **239** | 101 |
-| C | 413 | **0** | 0 |
+**This section replaces an earlier version that called arm B "still confounded" and attributed a
+5,452 ms/request latency cost to it. Both claims are withdrawn.** The trace below is what changed them.
 
-`extract_llm` ran in all three arms on an identical, unpinned config, and its pressure trigger fired
-**only in arm B**. Zero in A, zero in C, 239 acts and 101 extraction calls in B.
+The observation: `extract_llm` ran in all three arms on an identical unpinned config, and `/stats`
+credited it with 0 acts in A, **239** in B, 0 in C, plus 101 model calls in B alone.
 
-This is worse than iteration 022's confound, not better. There the swing (15 vs 108) was concentrated in a
-few long runs and read as a high-variance statistic. Here it is perfectly segregated by arm across 1,135
-component runs — which is not variance. Unpinning removed the #134 forcing as intended, and in doing so
-exposed a systematic interaction between the sweep and `extract_llm`'s pressure trigger.
+**Hypothesis, and it is REFUTED.** The proposed mechanism was that the sweep mutates the prefix, moving
+the cached boundary so that content A and C skip as `cached_prefix` becomes tail-eligible in B.
+`cg.extract_llm` already carries the boundary, so this was directly testable:
 
-**Unexplained, and stated as such.** The obvious direction is wrong: the sweep *removes* content, which
-should *lower* context pressure and make `extract_llm` fire less, not more. Candidate mechanisms, none
-established:
+| arm | `maxCachedIdx` median | mean | max | share unknown (−1) |
+|---|---|---|---|---|
+| A | 31.0 | 44.6 | 164 | **0.0%** |
+| B | **34.0** | 49.3 | 286 | **0.0%** |
+| C | 38.5 | 46.4 | 154 | **0.0%** |
 
-* **expand.** The sweep's markers get expanded by the agent, restoring full outputs into the transcript,
-  which raises pressure and hands `extract_llm` fresh candidates. But `coref` leaves markers too (68 acts
-  in arm C) and arm C shows zero, so markers alone do not explain it.
-* **the economic gate.** `extract_llm` runs with `economic_gate: true`, and the gate prices a candidate by
-  POSITION against cache state. The sweep mutates the prefix, changing `max_cached_idx` and cold-cache
-  status on later turns, which changes how the gate prices tail candidates — plausibly unlocking a path
-  that stays shut in A and C.
+The boundary is essentially identical across arms, B sits between A and C, and it was **never** unknown in
+any arm. If the sweep were moving the boundary or pushing the cache cold, this is where it would appear.
+It does not. The hypothesis is refuted rather than merely unconfirmed.
 
-The second is the more likely and is testable from the logs now that `cg.sweep.ask` carries
-`max_cached_idx`.
+**And the trace found something worse: the counters contradict each other.** For the same arm and run:
 
-**So B−A still does not isolate `evidence` + `econ_trigger`**, and the cost of the confound is visible:
-arm B added **5,452 ms per request** against arm A's 53 ms. Whatever that buys, it is not attributable to
-the two knobs under test while 239 uncontrolled extraction acts sit in the same arm.
+| source | says |
+|---|---|
+| `components.extract_llm` | `runs: 389`, `acted: 239`, `saved_tokens: 6,077,421` |
+| `extract` nested map | `calls: 101`, `avg_latency_ms: 59,009`, `net_value_usd: −1.162` |
+| `cg.extract_llm` records | **`cands: 0` on all 374**, `skip_tail: 7,487`, `skip_floor: 692` |
 
-Arm B also carried the run's only **5 capture-hop 400s**, against 0 in A and C.
+`cands` is `len(cands)` logged after the gate loop, so `cands: 0` plausibly means no candidate survived —
+consistent with `skip_tail` absorbing 7,487 of them. But a component with no surviving candidates cannot
+make 101 calls. `cands` was 0 in **every one of 692 records** across the two arms checked.
+
+The likely resolution is that the `extract` nested map is not scoped to one component: the sweep made **96
+asks** in this arm, close to the 101 `calls`, and `saved_tokens: 6,077,421` against
+`saved_tokens_unique: 597,764` is an overcount ratio of **31.58**, the signature of replays being counted
+repeatedly (`reapplied_same_session: 2,291`). If so, the 59-second latency and the −$1.162 are the
+**sweep's** figures, not the tail pass's — which is why the earlier attribution of 5,452 ms/request to the
+sweep, then to `extract_llm`, was wrong in both directions.
+
+Filed as **#176** (counters disagree) and **#177** (no per-call record to arbitrate them with).
+
+**What survives about the 0/239/0 split.** Only the replay explanation: `reapplied_same_session: 2,291`
+with `calls_avoided: 2,291` and 10,538 cache lookups at a 66.8% hit rate, all arm-B-only. The sweep's
+`putResult` populates the shared extraction result cache and the tail pass replays those decisions. That
+is the treatment's own verdicts persisting, which is what freezing exists to do — **not an independent
+confound.** The 101 real calls remain unexplained and, per #177, are currently untraceable.
+
+**Consequence for this iteration's cost and latency figures: treat them as unattributed.** The mechanism
+results in sections 1 and 2 are unaffected — coverage, batch size, prunes and removed tokens all come from
+`cg.sweep.ask`, which is per-ask and self-consistent.
 
 ## 4. Reward — null again, both bounds still block
 
