@@ -516,9 +516,16 @@ func (h *Handler) renderMetrics() string {
 				"What the held rewind payloads cost, and the reserve's byte budget (stash_max_bytes). Read against cg_stash_reserve_entries: entries near capacity means raise max_entries, bytes near the budget means raise stash_max_bytes.", "gauge")
 			promLine(&b, "cg_stash_reserve_bytes", `state="live"`, float64(st.Bytes))
 			promLine(&b, "cg_stash_reserve_bytes", `state="capacity"`, float64(st.MaxBytes))
+			// Payloads carry their OWN, shorter TTL (stash_ttl_seconds), because a payload is
+			// re-derivable from the transcript and a frozen decision is not — so reclaiming one is
+			// ordinarily absorbed by the next turn's replay rather than being a loss. That makes
+			// this counter on its own ambiguous, which is why the revived series ships with it.
 			promHeaderProc(&b, "cg_stash_expired_total",
-				"Rewind payloads reclaimed by the TTL. The one remaining way an outstanding marker stops resolving; raise ttl_seconds.", "counter")
+				"Rewind payloads reclaimed by their TTL (stash_ttl_seconds). NOT an alert on its own: read against cg_stash_revived_total, and alert on cg_stash_missing_total instead.", "counter")
 			promLine(&b, "cg_stash_expired_total", "", float64(st.Expired))
+			promHeaderProc(&b, "cg_stash_revived_total",
+				"Reclaimed payloads written again by a later replay, which re-derives them from the transcript before the marker goes upstream: reclamation absorbed at no cost. Tracking cg_stash_expired_total means the shorter payload TTL is working; lagging it while cg_stash_missing_total rises means raise stash_ttl_seconds.", "counter")
+			promLine(&b, "cg_stash_revived_total", "", float64(st.Revived))
 		}
 		// Process-wide, so outside the cast for the same reason hit/miss are: a component
 		// declines the removal, whichever store instance refused the payload. This is the
@@ -532,7 +539,7 @@ func (h *Handler) renderMetrics() string {
 		// that one. It grows with turn count rather than with distinct dangling markers,
 		// because a payload that has gone cannot be restored and every later turn replays it.
 		promHeaderProc(&b, "cg_stash_missing_total",
-			"Marker replays that found NO payload behind them: a dangling <<cg:HASH>> went upstream, so this is a broken reversibility promise rather than a declined removal. Raise ttl_seconds. Grows per turn per affected message, not per distinct marker.", "counter")
+			"Marker replays that found NO payload behind them: a dangling <<cg:HASH>> went upstream, so this is a broken reversibility promise rather than a declined removal. A replay re-stashes the payload it re-derived, so this only fires when that write was ALSO refused — raise max_entries/stash_max_bytes, and stash_ttl_seconds if cg_stash_expired_total is what is taking them. Grows per turn per affected message, not per distinct marker.", "counter")
 		promLine(&b, "cg_stash_missing_total", "", float64(offload.StashMissing()))
 
 		// Same rule as the two families above, and this counter would have had the same bug:

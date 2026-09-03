@@ -174,8 +174,12 @@ type entry struct {
 // mirroring headroom's 1800s CCR store: a frozen compaction that dies mid-task is
 // a cache-destructive event, not a saving.
 type Memory struct {
-	mu          sync.Mutex
+	mu sync.Mutex
+	// ttl is every other namespace's lifetime; stashTTL is the rewind payloads', and it is
+	// shorter because a payload is re-derivable from the transcript and a frozen decision is
+	// not. See DefaultStashTTL.
 	ttl         time.Duration
+	stashTTL    time.Duration
 	max         int
 	ll          *list.List               // LRU, front = most recent
 	items       map[string]*list.Element // key -> element(*entry)
@@ -207,6 +211,18 @@ type Memory struct {
 	// pressure cannot evict one.
 	stashRefusedN int64
 	stashExpiredN int64
+	// reclaimed remembers keys whose PAYLOAD the TTL took, so a later PutStash under the same
+	// key can be recognised as a REVIVAL rather than a first stash. That distinction is the
+	// evidence for the whole shorter-payload-TTL trade (see DefaultStashTTL): a reclamation the
+	// next replay re-creates cost nothing, and one it does not shows up as stash_missing.
+	// Without it stash_expired reports both outcomes at once and an operator cannot tell which
+	// they have — the ambiguous-counter shape #188 split stash_refused/stash_missing over.
+	//
+	// Bounded and FIFO exactly like lostFrozen, for the same reason: it is a diagnostic set, so
+	// dropping the oldest mark costs at most one uncounted revival.
+	reclaimed      map[string]struct{}
+	reclaimedOrder []string
+	stashRevivedN  int64
 	// lostFrozen remembers keys whose FROZEN entry was dropped anyway (TTL expiry, or
 	// the pin cap). It is the "was frozen, now LOST" signal a caller cannot otherwise
 	// distinguish from "never frozen" — see FrozenLost. Bounded like sticky.
@@ -234,7 +250,12 @@ type Options struct {
 	// StashMaxBytes caps the rewind reserve in BYTES. Zero => DefaultStashMaxBytes. See
 	// Memory.stashBytes for why this namespace is budgeted in bytes and the rest in entries.
 	StashMaxBytes int64 `yaml:"stash_max_bytes"`
-	MaxSessions   int   `yaml:"max_sessions"`
+	// StashTTLSeconds is the REWIND PAYLOADS' own entry lifetime, shorter than TTLSeconds.
+	// Zero => DefaultStashTTL. Capped at TTLSeconds, since a payload outliving the decision
+	// that names it is memory nothing can ever read. See DefaultStashTTL for why the two
+	// namespaces do not want the same horizon.
+	StashTTLSeconds int `yaml:"stash_ttl_seconds"`
+	MaxSessions     int `yaml:"max_sessions"`
 }
 
 // Nop is a Store that persists nothing: Put discards, Get/Sticky always miss.
@@ -263,6 +284,41 @@ func (Nop) Persists() bool                    { return false }
 // live frozen decisions mid-task; ~2.8h covers a long-horizon task's idle gaps
 // (test suites, training runs) with the sliding refresh doing the rest.
 const DefaultTTL = 10000 * time.Second
+
+// DefaultStashTTL is how long a REWIND PAYLOAD lives: 1800s, a fifth of DefaultTTL.
+//
+// The two namespaces have genuinely different horizons, and giving them one TTL is what made a
+// saturated reserve hold for ~2.8h after the busy period that filled it (#190). A slot was
+// released only by the TTL, the store is one process-wide instance, and while the reserve is
+// saturated every new removal is refused for every session at once — so savings fell to zero
+// long after the load that caused it was gone.
+//
+// WHAT MAKES THE SHORT HORIZON SAFE is that a payload, unlike a frozen decision, is
+// RE-DERIVABLE from the request in flight:
+//
+//   - A frozen decision is the replacement bytes the provider ALREADY CACHED. Nothing else
+//     holds them; losing one flips an already-cached message and re-writes the suffix at ~11.5x
+//     the read price. It needs to survive a whole long-horizon task, idle gaps included, which
+//     is what DefaultTTL is sized for.
+//   - A payload is a copy of content the AGENT RE-SENDS every turn. Every offloader replays its
+//     frozen decision on every turn regardless of the cache-tail gate — it must, or the message
+//     reverts full→compacted→full and churns the KV cache — and that replay path calls
+//     components/offload.commitRefresh, which PutStashes the payload again from the message text
+//     it just read. So a live marker's payload has its expiry slid every turn, and one already
+//     reclaimed is RE-CREATED on the REQUEST path, before the request goes upstream and
+//     therefore before any expand call in the response could ask for it.
+//
+// The horizon a payload actually needs is one INTER-TURN GAP, not one session. 1800s is the
+// value DefaultTTL's own comment records as too short for a frozen decision (headroom's CCR
+// store) — reused here, in the one namespace whose horizon it does fit, rather than invented.
+//
+// The residual exposure, stated rather than waved at: a turn that runs NO pipeline performs no
+// refresh (an x-context-guru-bypass request, or the agent-compaction bypass), so a long
+// unbroken run of bypassed turns could outlive a payload while its marker is still live in the
+// transcript. Both are single-request events in practice. If it happens the outcome is the
+// already-reported one — stash_missing on the next replay — not a silent loss, and
+// stash_revived is what says whether reclamation is being absorbed as designed.
+const DefaultStashTTL = 1800 * time.Second
 
 // DefaultMaxEntries is the store's default entry cap.
 //
@@ -314,6 +370,17 @@ func NewMemory(o Options) *Memory {
 	if stashMax <= 0 {
 		stashMax = DefaultStashMaxBytes
 	}
+	stashTTL := time.Duration(o.StashTTLSeconds) * time.Second
+	if o.StashTTLSeconds <= 0 {
+		stashTTL = DefaultStashTTL
+	}
+	// A payload outliving the frozen decision that names its marker is memory nothing can read:
+	// once the decision is gone no replay stamps that marker again. So an operator who shortens
+	// ttl_seconds below the payload default gets the shorter of the two rather than a reserve
+	// held open by dead payloads.
+	if stashTTL > ttl {
+		stashTTL = ttl
+	}
 	stick := o.MaxSessions
 	if stick <= 0 {
 		stick = 100
@@ -323,11 +390,12 @@ func NewMemory(o Options) *Memory {
 		pins = DefaultPinPrefixes
 	}
 	return &Memory{
-		ttl: ttl, max: max, maxStick: stick, pinPrefixes: pins,
+		ttl: ttl, stashTTL: stashTTL, max: max, maxStick: stick, pinPrefixes: pins,
 		stashMaxBytes: stashMax,
 		ll:            list.New(), items: map[string]*list.Element{},
 		sticky:     map[string]map[string]struct{}{},
 		lostFrozen: map[string]struct{}{},
+		reclaimed:  map[string]struct{}{},
 		now:        time.Now,
 	}
 }
@@ -410,6 +478,16 @@ func (m *Memory) DisableSlidingTTLForTest() {
 // own existing over-cap behavior: a pin degrades to an ordinary evictable entry (it is still
 // readable, and its loss is reported where losses happen), a stash is REFUSED (so the caller
 // declines the removal rather than promising what it cannot deliver). No new failure shape.
+// ttlFor is the lifetime an entry gets when it is written or read. Rewind payloads take the
+// shorter stashTTL, everything else the full ttl — keyed on the STASH FLAG rather than on the
+// key, because a payload's key is a bare content hash the store cannot recognise (see Stasher).
+func (m *Memory) ttlFor(e *entry) time.Duration {
+	if e.stash {
+		return m.stashTTL
+	}
+	return m.ttl
+}
+
 func (m *Memory) pinCap() int   { return m.max / 2 }
 func (m *Memory) stashCap() int { return m.max / 2 }
 
@@ -478,7 +556,6 @@ func (m *Memory) PutStash(key string, payload []byte) bool {
 			m.stashBytes += int64(len(payload)) - int64(len(e.payload))
 		}
 		e.payload = payload
-		e.expires = m.now().Add(m.ttl)
 		// Claim a reserve slot if one has freed, exactly as Put re-claims a pin slot. An
 		// entry already present is retained whatever the reserve says: refusing a REFRESH
 		// would make a component decline to replay a marker it has already stamped, which
@@ -491,6 +568,13 @@ func (m *Memory) PutStash(key string, payload []byte) bool {
 			m.stashN++
 			m.stashBytes += int64(len(payload))
 		}
+		// Set AFTER the slot claim above, so an entry that just became a stash gets the payload
+		// horizon rather than keeping the one it was written with. noteExpiry because that case
+		// moves the deadline EARLIER — an ordinary refresh only ever pushes it out, and a bound
+		// that is too low costs one wasted sweep, but a bound left above an entry's real expiry
+		// makes sweepExpired skip it and the reserve slot is never reclaimed.
+		e.expires = m.now().Add(m.ttlFor(e))
+		m.noteExpiry(e.expires)
 		m.ll.MoveToFront(el)
 		return true
 	}
@@ -505,7 +589,22 @@ func (m *Memory) PutStash(key string, payload []byte) bool {
 		m.stashRefusedN++
 		return false
 	}
-	e := &entry{key: key, payload: payload, expires: m.now().Add(m.ttl), stash: true}
+	e := &entry{key: key, payload: payload, stash: true}
+	e.expires = m.now().Add(m.ttlFor(e))
+	// A key the TTL took and a caller has now written again is the shorter payload horizon
+	// working as designed: the replay re-derived the payload from the transcript, and the marker
+	// it is about to send resolves. Counted here — the one place that knows the entry was absent
+	// — because "reclaimed" and "reclaimed and absorbed" call for opposite operator responses.
+	if _, wasReclaimed := m.reclaimed[key]; wasReclaimed {
+		delete(m.reclaimed, key)
+		for i, k := range m.reclaimedOrder {
+			if k == key {
+				m.reclaimedOrder = append(m.reclaimedOrder[:i], m.reclaimedOrder[i+1:]...)
+				break
+			}
+		}
+		m.stashRevivedN++
+	}
 	m.stashN++
 	m.stashBytes += int64(len(payload))
 	m.noteExpiry(e.expires)
@@ -530,6 +629,19 @@ type StashStat struct {
 	// stash leaves now that LRU pressure cannot evict one.
 	Refused int64
 	Expired int64
+	// Revived counts payloads WRITTEN AGAIN under a key the TTL had reclaimed — a replay
+	// re-derived the payload from the transcript before its marker went upstream, so the
+	// reclamation cost nothing. It is the half of Expired that is benign, split out for the same
+	// reason stash_refused and stash_missing are: Expired alone reports both "the reserve
+	// released a payload nobody wanted" and "an outstanding marker just lost its payload", and
+	// those call for opposite responses (nothing vs. raise stash_ttl_seconds).
+	//
+	// Read it as a RATE against Expired. Revived tracking Expired means the shorter payload
+	// horizon is being absorbed as designed; Expired climbing while Revived stays flat means
+	// payloads are being reclaimed from sessions that then never came back — also fine, that is
+	// the reclamation this exists to do — and the outcome to alert on is neither of these but
+	// stash_missing, which is what a reclamation that was NOT absorbed produces.
+	Revived int64
 }
 
 // StashStats reports the rewind reserve against both of its budgets.
@@ -548,7 +660,7 @@ func (m *Memory) StashStats() StashStat {
 	return StashStat{
 		Live: m.stashN, Capacity: m.stashCap(),
 		Bytes: m.stashBytes, MaxBytes: m.stashMaxBytes,
-		Refused: m.stashRefusedN, Expired: m.stashExpiredN,
+		Refused: m.stashRefusedN, Expired: m.stashExpiredN, Revived: m.stashRevivedN,
 	}
 }
 
@@ -573,7 +685,10 @@ func (m *Memory) Put(key string, payload []byte) {
 	if el, ok := m.items[key]; ok {
 		e := el.Value.(*entry)
 		e.payload = payload
-		e.expires = m.now().Add(m.ttl)
+		// ttlFor, not m.ttl: a plain Put must not hand a rewind payload the long horizon and
+		// undo the split. Namespaces do not collide today (a payload's key is a bare hash), so
+		// this is the invariant held at the write rather than a fix for an observed path.
+		e.expires = m.now().Add(m.ttlFor(e))
 		// Claim a pin slot if one has since freed (an earlier session's decisions expired):
 		// the cap is a live-entry budget, not a lifetime quota, so re-freezing every turn
 		// eventually protects this decision instead of leaving it permanently second-class.
@@ -625,6 +740,22 @@ func (m *Memory) noteLost(key string) {
 	m.lostN++
 }
 
+// noteReclaimed records that the TTL took the payload under key, so a later PutStash of the
+// same key is recognisable as a revival. Bounded FIFO like noteLost: oldest mark goes first, so
+// a busy session cannot delete another's fresh mark and under-count its revival.
+func (m *Memory) noteReclaimed(key string) {
+	if _, dup := m.reclaimed[key]; dup {
+		return
+	}
+	for len(m.reclaimed) >= m.max && len(m.reclaimedOrder) > 0 {
+		oldest := m.reclaimedOrder[0]
+		m.reclaimedOrder = m.reclaimedOrder[1:]
+		delete(m.reclaimed, oldest)
+	}
+	m.reclaimed[key] = struct{}{}
+	m.reclaimedOrder = append(m.reclaimedOrder, key)
+}
+
 // FrozenLost reports whether a frozen entry under key existed and was dropped (TTL
 // expiry or the pin cap) — the "was frozen, now lost" signal. See FrozenLoser.
 func (m *Memory) FrozenLost(key string) bool {
@@ -667,7 +798,7 @@ func (m *Memory) Get(key string) ([]byte, bool) {
 	// message's representation and forces the provider to re-write the whole suffix
 	// (one cache-write costs 11.5 cache-reads). Recency and lifetime refresh together.
 	if !m.noSlide {
-		e.expires = m.now().Add(m.ttl)
+		e.expires = m.now().Add(m.ttlFor(e))
 	}
 	m.ll.MoveToFront(el)
 	return e.payload, true
@@ -703,10 +834,15 @@ func (m *Memory) MarkSticky(session, id string) {
 	s[id] = struct{}{}
 }
 
-// noteExpiry keeps nextExpiry a valid LOWER BOUND on the earliest expires in the store. Every
-// write sets its entry's expiry to now+ttl — the latest of any live entry — so the bound only
-// ever needs seeding, never raising: the first write after a sweep supplies it, and a sweep
-// recomputes it exactly.
+// noteExpiry keeps nextExpiry a valid LOWER BOUND on the earliest expires in the store: it only
+// ever lowers the bound, so a sweep is skipped only when nothing can possibly have expired.
+//
+// Being too LOW is safe — it costs one wasted sweep. Being too HIGH is not: sweepExpired returns
+// early and an expired entry is never reclaimed, which for a payload means a reserve slot held
+// forever. That is why every write that can move a deadline earlier must come through here. Two
+// horizons make this less obvious than it was: a plain write's now+ttl is no longer "the latest
+// of any live entry", because a payload written a moment later gets now+stashTTL, which is
+// sooner. A sweep recomputes the bound exactly from what survived.
 func (m *Memory) noteExpiry(t time.Time) {
 	if m.nextExpiry.IsZero() || t.Before(m.nextExpiry) {
 		m.nextExpiry = t
@@ -775,6 +911,7 @@ func (m *Memory) remove(el *list.Element) {
 	if e.stash {
 		m.stashN--
 		m.stashBytes -= int64(len(e.payload))
+		m.noteReclaimed(e.key)
 		// A stash only reaches here via sweepExpired (LRU pressure cannot take one), so
 		// this counts TTL reclamation. Counted rather than silent because it is the one
 		// remaining way an outstanding marker can stop resolving, and an operator seeing

@@ -208,8 +208,9 @@ reversibility it destroyed, silently.
 | `stash_live` / `stash_capacity` | Payloads held now, and the reserve's entry cap (`max_entries / 2`). `live` approaching `capacity` is the warning. |
 | `stash_bytes` / `stash_max_bytes` | What those payloads cost, and the byte budget (`stash_max_bytes`). Entries are a poor proxy for memory here — a payload is a whole tool output, every other exempt entry is a marker line — so read both pairs to see **which** budget bound. |
 | `stash_refused` | Removals **declined** because the reserve was full. The content was left verbatim and nothing became irreversible — raise `max_entries` or `stash_max_bytes`. |
-| `stash_missing` | Marker replays that found **no payload** behind them: a dangling `<<cg:HASH>>` went upstream. This one *is* a broken promise — raise `ttl_seconds`. |
-| `stash_expired` | Payloads reclaimed by the TTL. With `stash_missing`, the remaining way an outstanding marker stops resolving — raise `ttl_seconds`. |
+| `stash_missing` | Marker replays that found **no payload** behind them: a dangling `<<cg:HASH>>` went upstream. This one *is* a broken promise. A replay re-stashes the payload it re-derived, so this fires only when that write was **also** refused — raise the reserve, and `stash_ttl_seconds` if `stash_expired` is what is taking them. |
+| `stash_expired` | Payloads reclaimed by their own TTL (`stash_ttl_seconds`, shorter than `ttl_seconds`). **Not an alert on its own** — read it against `stash_revived`. |
+| `stash_revived` | Reclaimed payloads written again by a later replay, which re-derives them from the transcript **before** the marker goes upstream: reclamation absorbed at no cost. Tracking `stash_expired` means the shorter payload TTL is working as designed; see [why payloads expire sooner](config.md#why-payloads-expire-sooner-than-decisions). |
 
 `stash_refused` is the **leading** indicator for `expand_unresolved_missing`: that counter cannot
 move until the agent happens to call `expand`, so a proxy that had stopped being able to promise

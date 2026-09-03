@@ -101,6 +101,7 @@ var statsGoldenTopLevel = []string{
 	"stash_bytes",
 	"stash_capacity",
 	"stash_expired",
+	"stash_revived",
 	"stash_live",
 	"stash_max_bytes",
 	"stash_missing",
