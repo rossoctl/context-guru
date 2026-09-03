@@ -58,7 +58,10 @@ sessions — and holds, per session:
 - **Rewind** — `cache_key → original bytes`, what the expand loop resolves. These live in a
   **reserve** that is never evicted to admit a new payload: once a marker has been sent the
   promise is outstanding, so a full reserve makes the pipeline **decline the next removal**
-  (counted as `stash_refused`) instead of quietly breaking an older one.
+  (counted as `stash_refused`) instead of quietly breaking an older one. Payloads carry a
+  **shorter TTL** than everything else (`stash_ttl_seconds`, 1800 s) because each turn's replay
+  re-derives them from the transcript — see
+  [why payloads expire sooner](../reference/config.md#why-payloads-expire-sooner-than-decisions).
 - **Sticky** — content ids already reduced on earlier turns, so output stays byte-stable
   across turns.
 - **Frozen decisions** — the exact replacement bytes an offloader replays so an
@@ -78,10 +81,13 @@ deliberately (with `marker_mode: off`) so `/compact` returns a clean, marker-fre
 **The model called expand and got a placeholder back.** The original expired or was evicted
 from the store. The provider requires one `tool_result` per `tool_call_id`, so an explicit
 placeholder is sent rather than nothing — which turns that offload lossy. Check `stash_missing`
-and `stash_expired` at [`/stats`](../reference/routes.md#get-stats): both mean a payload left the
-store, so raise `store.ttl_seconds`. `stash_refused` is the *other* case and needs
-`store.max_entries` or `store.stash_max_bytes` — there nothing became irreversible, because the
-removals were declined.
+at [`/stats`](../reference/routes.md#get-stats): that is the one that means a marker went out with
+nothing behind it. `stash_expired` on its own does **not** — a reclaimed payload is normally
+re-derived by the next turn's replay, counted as `stash_revived` — so the remedy is the reserve
+(`store.max_entries` / `store.stash_max_bytes`), which is what refused the re-stash, and
+`store.stash_ttl_seconds` only if `stash_expired` is running far ahead of `stash_revived`.
+`stash_refused` is the *other* case and needs `store.max_entries` or `store.stash_max_bytes` —
+there nothing became irreversible, because the removals were declined.
 
 The turn still **completes**: the placeholder continuation is sent even when *nothing*
 resolved, so the model reads "no longer available" and finishes with text. It used to replay

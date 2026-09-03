@@ -25,6 +25,7 @@ The document has six top-level fields (from the `Config` struct in
 | `enabled` | `true` | Toggles the state store. `false` wires a `store.Nop`: nothing is stashed, so offloads become **one-way** and must run `marker_mode: off`. |
 | `ttl_seconds` | `10000` | Entry lifetime, and it **slides** — a `Get` refreshes the deadline, so an entry replayed every turn never ages out. Raised from 1800 because Terminal-Bench tasks average ~1975 s of wall clock and run to 4 h, so the old default expired live frozen decisions mid-task. |
 | `max_entries` | `5000` | LRU cap. Two groups of keys are **exempt** from LRU eviction, and they behave differently when full — see below. Eviction reclaims **expired** entries first, exempt ones included. Raised from 1,000: one process-wide store serves every concurrent session, and a single reversible removal writes five entries (the payload, `cg:own:`, `cg:xseen:`, and the two pinned decision records), so 1,000 was an order of magnitude under the observed volume. |
+| `stash_ttl_seconds` | `1800` | The **rewind payloads'** own entry lifetime, shorter than `ttl_seconds` and capped by it. A payload is re-derivable from the transcript, a frozen decision is not — see [the two horizons](#why-payloads-expire-sooner-than-decisions) below. |
 | `stash_max_bytes` | `268435456` (256 MiB) | What the **rewind reserve** may cost in memory. Entries are a poor proxy for it in this one namespace: every other exempt entry is a marker line or an integer, a rewind payload is a whole tool output. Whichever of `max_entries` and this binds first, binds. |
 | `max_sessions` | `100` | Cap on per-session sticky-id sets. |
 
@@ -40,7 +41,8 @@ ordinary evictable entry.
 prefix — a payload key *is* the marker id, a bare content hash the model reads out of the
 request — so it is claimed explicitly and, unlike a pin, a payload that cannot be admitted is
 **refused**: the component declines the removal and leaves the content verbatim rather than
-stamping a marker nothing can resolve. Only the TTL releases a slot.
+stamping a marker nothing can resolve. Only the TTL releases a slot — which is why payloads get a
+shorter one than everything else.
 
 Each exemption is capped at half `max_entries`, and **a quarter of `max_entries` is held back
 from both** so something is always evictable. Without that floor the two could occupy the whole
@@ -53,7 +55,33 @@ no-ops.
 against `stash_capacity` and `stash_bytes` against `stash_max_bytes` at
 [`/stats`](routes.md#get-stats) to see which budget bound. Nothing became irreversible: the
 removals did not happen. `stash_missing` is the different, worse number — a marker replayed with
-no payload behind it — and its fix is `ttl_seconds`.
+no payload behind it. A replay re-stashes the payload it re-derived, so `stash_missing` only fires
+when that write was **also** refused: raise the reserve first, and `stash_ttl_seconds` if
+`stash_expired` is what is taking the payloads.
+
+#### Why payloads expire sooner than decisions
+
+`ttl_seconds` is sized for a **frozen decision** — the replacement bytes the provider already
+cached. Nothing else holds them, so losing one flips an already-cached message and re-writes the
+whole suffix at ~11.5x the read price; it has to survive a long-horizon task, idle gaps included.
+
+A **payload** is a copy of content the agent re-sends every turn, so it needs a much shorter
+horizon. Every offloader replays its frozen decision on **every turn**, regardless of the
+cache-tail gate (it must, or the message reverts full→compacted→full and churns the KV cache), and
+that replay re-stashes the payload from the message text it just read. So a live marker's payload
+has its deadline slid every turn, and one the TTL already took is **re-created on the request
+path** — before the request goes upstream, and therefore before any `expand` call in the response
+could ask for it. `stash_revived` counts exactly that.
+
+Giving both namespaces `ttl_seconds` meant one busy period could hold the reserve saturated for
+~2.8 h after the load that filled it, refusing every removal process-wide the whole time. The
+split shrinks that hangover to `stash_ttl_seconds` without making any removal irreversible.
+
+The exposure it leaves, stated plainly: a turn that runs **no pipeline** performs no refresh (an
+`x-context-guru-bypass` request, or the agent-compaction bypass), so an unbroken run of bypassed
+turns longer than `stash_ttl_seconds` could outlive a payload whose marker is still live. Both are
+single-request events in practice, and the outcome if it happens is the reported one —
+`stash_missing` — not a silent loss.
 
 The pinned prefixes are a code-level property of the key layout, supplied by their owners via
 `store.Options.PinPrefixes` — not a YAML knob.
