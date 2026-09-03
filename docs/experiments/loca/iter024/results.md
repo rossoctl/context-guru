@@ -96,22 +96,38 @@ for none of "(a) the step you are on right now" among others. A re-fetch is fair
 (a) has changed. If a tag is ever added here it should distinguish **compaction from drop**, which carries
 meaning, rather than component from component, which does not.
 
-*Cost — the replays may not be free.* This section records the channel as **$11.58 at $0.00**, free
-because a replay makes no model call. But the replay path reaches `apply` **without passing the cache-tail
-depth gate** (`extract_llm.go`: replay at :890, gate at :932), and that bypass is justified per-MESSAGE —
-"this session already sent these compacted bytes" — while the lookup is keyed per-CONTENT. At a fresh
-position the provider holds the **original**, not the compacted bytes. Splicing the compaction there
-changes bytes inside the cached prefix and forces a cache-write of the suffix: a real cost, on a ledger
-`extract_llm` does not carry, and the same cost the sweep's econ trigger prices at 11.5x a cache read.
+*Cost — a bounded subpopulation of replays may splice at depth into uncached content.* **An earlier
+version of this section claimed all 364 replays were at fresh positions and that the 57% recovery might
+therefore be paying a cache-write per replay. That inference was invalid and is withdrawn.**
 
-**All 364 replays are in that category** — the marker skip at :848 precedes the lookup at :868, so a marked
-message never reaches `getResult`. This is not a tail of the channel; it is the whole of it. If the
-hypothesis holds, the 57% recovery is not free but charged somewhere nobody was reading.
+The invalid step was "the marker skip precedes the lookup, so every replay landed on unmarked content at a
+fresh position." **Unmarked does not imply fresh**, and in this codebase the dominant reason for unmarked
+is the opposite: the client re-sends its own original transcript every turn, which the package states
+repeatedly — *"the agent re-sends the original each turn, so the only way the representation stays stable
+is to re-derive the same bytes"* (`collapse.go:108`, and the same in `failed_run.go:121`,
+`agentdiet.go:393`). So a message compacted last turn arrives **unmarked again this turn at the same
+position**, and the replay re-derives identical bytes. That is the steady state at every position on every
+turn, and it is exactly the case the depth bypass was built for — the provider *does* hold the compacted
+form there, because we sent it last turn. Nothing is re-written, so no cache-write cost arises.
 
-**It cannot be settled from this run:** `cache_read_tokens`, `cache_write_tokens` and `fresh_input_tokens`
-all read **0** in every arm-seed — unpopulated in this build, not measured as zero. So the one measurement
-that would decide it is absent from the run that raises it. A re-run with those live settles it directly:
-cache-write volume in arm B against arm A, where no replays exist.
+What remains is real but bounded. The bypass is justified per-MESSAGE (`extract_llm.go`: replay at :890,
+cache-tail gate at :932) while the lookup is keyed per-CONTENT, so a **subpopulation** of replays can splice
+at depth into content the provider holds in original form. That subpopulation is self-limiting: genuinely
+new content is *appended*, so its index exceeds `MaxCachedIdx` and `TailOnly(i)` (`component.go:414-419`)
+puts it in the tail on the turn it arrives, where the gate would permit acting anyway and the bypass buys
+nothing. Reaching "fresh content at a position already at depth" requires the boundary to have **moved** (an
+agent compaction reset) or the component not to have acted on the arrival turn (throttle, per-request call
+cap, floor, or a decline).
+
+**Iteration 024 cannot size that subpopulation.** 364 is the total replay count, not the fresh-position
+count, and the direct measurement is missing: `cache_read_tokens`, `cache_write_tokens` and
+`fresh_input_tokens` all read **0** in every arm-seed — unpopulated in this build, not measured as zero.
+Sizing it needs, per replay, whether that (content id, position) pair had been compacted on an earlier turn;
+`compaction_resets` is the counter that would flag the boundary-moved case specifically.
+
+So the honest statement is: **the recovery channel's $11.58-at-$0.00 stands for the steady-state replays**,
+and an unsized minority of replays may carry a cache-write that no ledger records. Correction owed to the
+#188 review, which caught the bad inference before it propagated further than this file.
 
 One thing review did establish in the channel's favour: the **bytes are identical**. A sweep record
 replayed by `extract_llm` produces exactly what the sweep's own splice produces — same descriptor, the
