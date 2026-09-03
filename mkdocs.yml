@@ -132,6 +132,8 @@ nav:
           - extract: components/extract.md
           - extract_llm: components/extract_llm.md
           - extract_llm_sweep: components/extract_llm_sweep.md
+          - coref: components/coref.md
+          - "coref cheat sheet": reference/coref-glossary.md
           - smartcrush: components/smartcrush.md
           - mask: components/mask.md
           - summarize: components/summarize.md
@@ -180,6 +182,49 @@ nav:
           - context-guru: results/terminal-bench-context-guru.md
           - headroom: results/terminal-bench-headroom.md
           - rtk: results/terminal-bench-rtk.md
+      - "Co-reference density (measurement)": results/coref-density.md
+      - "Co-reference selection (experiment)": results/coref-selection-experiment.md
+      - "Co-reference reachability (measurement)": results/coref-reachability.md
+      - "Co-reference on the eval box": results/coref-evalbox.md
+      - "coref on LOCA-bench": results/coref-loca.md
+      - "What can and cannot be measured": results/measurement-limits.md
+      - "What actually fires (component gating)": results/component-gating.md
+      - "The floor and the economic gate": results/min-tokens-vs-economic-gate.md
+  - Experiment log:
+      - "Overview": experiments/README.md
+      - "captures — iter001": experiments/captures/iter001/results.md
+      - "LOCA — iter001": experiments/loca/iter001/results.md
+      - "LOCA — iter002": experiments/loca/iter002/results.md
+      - "LOCA — iter003": experiments/loca/iter003/results.md
+      - "LOCA — iter004": experiments/loca/iter004/results.md
+      - "LOCA — iter004b": experiments/loca/iter004b/results.md
+      - "LOCA — iter005": experiments/loca/iter005/results.md
+      - "LOCA — iter006": experiments/loca/iter006/results.md
+      - "LOCA — iter007": experiments/loca/iter007/results.md
+      - "LOCA — iter008": experiments/loca/iter008/results.md
+      - "LOCA — iter009": experiments/loca/iter009/results.md
+      - "LOCA — iter010 (preregistration)": experiments/loca/iter010/PREREGISTRATION.md
+      - "LOCA — iter010": experiments/loca/iter010/results.md
+      - "LOCA — iter011 (preregistration)": experiments/loca/iter011/PREREGISTRATION.md
+      - "LOCA — iter011": experiments/loca/iter011/results.md
+      - "LOCA — iter012 (preregistration)": experiments/loca/iter012/PREREGISTRATION.md
+      - "LOCA — iter012": experiments/loca/iter012/results.md
+      - "LOCA — iter013": experiments/loca/iter013/results.md
+      - "LOCA — iter014 (preregistration)": experiments/loca/iter014/PREREGISTRATION.md
+      - "LOCA — iter014": experiments/loca/iter014/results.md
+      - "LOCA — iter016 (preregistration)": experiments/loca/iter016/PREREGISTRATION.md
+      - "LOCA — iter016": experiments/loca/iter016/results.md
+      - "LOCA — iter017 (preregistration)": experiments/loca/iter017/PREREGISTRATION.md
+      - "LOCA — iter019": experiments/loca/iter019/results.md
+      - "LOCA — iter020 (preregistration)": experiments/loca/iter020/PREREGISTRATION.md
+      - "LOCA — iter020": experiments/loca/iter020/results.md
+      - "LOCA — iter021 (preregistration)": experiments/loca/iter021/PREREGISTRATION.md
+      - "LOCA — iter021": experiments/loca/iter021/results.md
+      - "LOCA — iter022 (preregistration)": experiments/loca/iter022/PREREGISTRATION.md
+      - "LOCA — iter022": experiments/loca/iter022/results.md
+      - "LOCA — iter023": experiments/loca/iter023/results.md
+      - "LOCA — iter024 (preregistration)": experiments/loca/iter024/PREREGISTRATION.md
+      - "LOCA — iter024": experiments/loca/iter024/results.md
   - Integrations:
       - Host adapters: integrations.md
       - bifrost plugin: how-to/bifrost-plugin.md
