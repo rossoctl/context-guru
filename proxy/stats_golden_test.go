@@ -120,6 +120,11 @@ var statsGoldenTopLevel = []string{
 	"top_passthrough",
 	"upstream_ms_avg",
 	"upstream_ms_avg_bypassed",
+	// The two accounting-outage counters (#200). Added to the reviewed contract rather than
+	// loosening the assertion: fresh/cache_read/cache_write reading 0 on a healthy request is
+	// exactly the kind of silence a golden test exists to make someone notice.
+	"usage_unparsed",
+	"usage_unreadable",
 	"wasted_tokens",
 }
 
