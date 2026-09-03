@@ -1461,12 +1461,31 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			//
 			// THE COST OF NOT OBSERVING, stated because the choice is a trade and not a free win:
 			// under a persistently saturated reserve nothing advances r.total, so ratio() stays
-			// pinned to its prior and exploring() keeps granting maxExploreCalls per session
-			// instead of self-terminating once the sample is large enough. That is a small
-			// permanent spend on exactly the deployments this change is for. It is bounded per
-			// session and it buys a tracker that is not lying, which is the better side of the
-			// trade — but the previous behaviour did terminate exploration, and pretending
-			// otherwise would misread the diff.
+			// pinned to its prior and exploring() keeps granting maxExploreCalls instead of
+			// self-terminating once the sample is large enough.
+			//
+			// AND THE COST IS NOT PER-SESSION-BOUNDED, which is the easy thing to assume and the
+			// wrong thing to write down. The store is ONE process-wide instance, so saturation is
+			// CORRELATED rather than independent: when the reserve is full it is full for every
+			// session at once. The spend is therefore maxExploreCalls x every concurrent session,
+			// repeating for as long as the episode lasts — and with a sliding 10,000 s TTL an
+			// episode can run for hours. The deployments that pay it are the under-provisioned
+			// ones (see #190), which are the least able to absorb it.
+			//
+			// Still small beside the cache writes this gate's honesty prevents, so the trade stands:
+			// observing the achieved ratio would authorise calls whose output is discarded, and
+			// observing 0 would assert the workload is incompressible, which is false and would
+			// also suppress calls that WOULD land once the reserve frees. Observing nothing is the
+			// only one of the three that does not lie. But the previous behaviour did terminate
+			// exploration, and a reader reasoning from a "bounded per session" claim would
+			// under-count this by the number of concurrent sessions.
+			//
+			// The option that gets both properties is to gate exploring() on RESERVE HEALTH rather
+			// than on r.total — stash_refused already distinguishes "cannot learn because we are
+			// refusing" from "no evidence yet", which is the distinction r.total cannot express.
+			// Deliberately not done here: it is the same question as #190 (what a component should
+			// do while the reserve is saturated) and wants the re-run's numbers, so it is on that
+			// issue's candidate list rather than guessed at in this diff.
 			//
 			// Only for a slot that actually made a call. A single-flight FOLLOWER returns before
 			// filling its slot, so before is 0 there and the three lines below would book zeros —
