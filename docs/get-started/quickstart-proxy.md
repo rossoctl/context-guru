@@ -8,9 +8,10 @@ compiler, no Go install, no runtime dependencies. Grab it from
 [Releases](https://github.com/rossoctl/context-guru/releases):
 
 ```sh
-# Pick your platform: linux/darwin × amd64/arm64
+# Pick your platform: linux/darwin × amd64/arm64. The archive unpacks into its own
+# directory, so this is safe to run from anywhere — including a project checkout.
 tar xzf context-guru_*_darwin_arm64.tar.gz
-install -m 755 context-guru-proxy ~/.local/bin/
+install -m 755 context-guru_*/context-guru-proxy ~/.local/bin/
 ```
 
 To build from source instead you need **Go 1.26** — and still no C toolchain: `make build` builds

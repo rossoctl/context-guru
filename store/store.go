@@ -340,18 +340,37 @@ func IdleExitFloor(o Options) time.Duration {
 // means the watchdog is off, which is always valid — a gateway or eval-containers
 // deployment must never self-terminate, so off is the default and the only way to a
 // self-killing proxy is to ask for one.
+//
+// The message says WHICH of the floor's two terms produced the number, and offers only remediations
+// that actually lower it. An earlier version did neither: it credited the floor to "2x the store's
+// entry lifetime" even when the 1h term was the binding one (with ttl_seconds: 30 it printed a 1h
+// floor attributed to 2x30s), and it advised raising ttl_seconds — which raises the floor, so an
+// operator who followed it got the same refusal with a larger number. Startup-fatal messages are the
+// only evidence anyone gathers, so being exactly right here matters more than it looks.
 func ValidateIdleExit(d time.Duration, o Options) error {
 	if d <= 0 {
 		return nil
 	}
-	if floor := IdleExitFloor(o); d < floor {
-		return fmt.Errorf("idle-exit %s is below the floor of %s (2x the store's %s entry "+
-			"lifetime): exiting wipes the in-memory store, so a shorter threshold drops live "+
-			"frozen decisions and re-bills their prefix as cache creation instead of a cache "+
-			"read. Raise --idle-exit, or raise store.ttl_seconds if the short lifetime is "+
-			"deliberate", d, floor, o.EffectiveTTL())
+	floor := IdleExitFloor(o)
+	if d >= floor {
+		return nil
 	}
-	return nil
+	ttl := o.EffectiveTTL()
+	if 2*ttl > time.Hour {
+		// The store term binds: lowering the TTL lowers the floor with it.
+		return fmt.Errorf("idle-exit %s is below the floor of %s, which is 2x the store's %s entry "+
+			"lifetime: exiting wipes the in-memory store, so a shorter threshold drops live frozen "+
+			"decisions and re-bills their prefix as cache creation instead of a cache read. Raise "+
+			"--idle-exit to at least %s, or LOWER store.ttl_seconds if the short threshold is what "+
+			"you want (the floor follows it)", d, floor, ttl, floor)
+	}
+	// The absolute term binds: ttl_seconds is not what is stopping this, so do not mention it as a
+	// lever. 2x this TTL is only %s, which is why the 1h minimum is doing the work.
+	return fmt.Errorf("idle-exit %s is below the absolute minimum of %s. The store's entry lifetime "+
+		"is %s, so the 2x-TTL floor would only be %s and is not what refuses this: a threshold "+
+		"under an hour is shorter than the keep-alive's own ping window, and exiting inside it "+
+		"drops live frozen decisions. Raise --idle-exit to at least %s",
+		d, floor, ttl, 2*ttl, floor)
 }
 
 // NewMemory builds an in-memory store. Zero/negative option fields fall back to

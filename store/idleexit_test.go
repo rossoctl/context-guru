@@ -80,3 +80,46 @@ func TestEffectiveTTLIsWhatNewMemoryUses(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateIdleExitMessageNamesTheBindingTerm: this refusal is startup-fatal, so its message is
+// the only evidence anyone gathers — and it was wrong in both halves.
+//
+// It credited the floor to "2x the store's entry lifetime" even when the absolute 1h term was the
+// binding one (with ttl_seconds: 30 it announced a 1h floor derived from 2x30s, which is 1m), and it
+// advised raising ttl_seconds — the one change that RAISES the floor, so an operator who followed it
+// got the same refusal with a bigger number.
+func TestValidateIdleExitMessageNamesTheBindingTerm(t *testing.T) {
+	// (a) the store term binds: default TTL of 10000s puts the floor at 5h33m20s.
+	err := ValidateIdleExit(30*time.Minute, Options{})
+	if err == nil {
+		t.Fatal("30m accepted against the default floor")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "2x the store's") {
+		t.Errorf("the store term binds but the message does not say so: %v", err)
+	}
+	if !strings.Contains(msg, "LOWER store.ttl_seconds") {
+		t.Errorf("message does not offer the remediation that actually lowers the floor: %v", err)
+	}
+	if strings.Contains(msg, "raise store.ttl_seconds") {
+		t.Errorf("message still advises RAISING ttl_seconds, which raises the floor: %v", err)
+	}
+
+	// (b) the absolute term binds: a 30s TTL makes 2x TTL 1m, so the 1h minimum is doing the work
+	// and ttl_seconds is not the lever.
+	err = ValidateIdleExit(30*time.Minute, Options{TTLSeconds: 30})
+	if err == nil {
+		t.Fatal("30m accepted against the 1h minimum")
+	}
+	msg = err.Error()
+	if !strings.Contains(msg, "absolute minimum") {
+		t.Errorf("the 1h term binds but the message does not say so: %v", err)
+	}
+	if strings.Contains(msg, "which is 2x the store's") {
+		t.Errorf("message attributes a 1h floor to 2x a 30s lifetime, which is 1m: %v", err)
+	}
+	// It should still tell the operator what 2x TTL actually is, so the arithmetic is checkable.
+	if !strings.Contains(msg, "1m0s") {
+		t.Errorf("message does not show what the 2x-TTL floor would be (1m0s): %v", err)
+	}
+}

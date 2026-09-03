@@ -150,7 +150,7 @@ See [docs/components.md](docs/components.md) and [docs/reference/presets.md](doc
 | `--idle-exit` / `IDLE_EXIT` | `0` (never) | exit after this long unused; floor `max(2 × store.ttl_seconds, 1h)`, refused with `--upstreams` |
 | `--version` | — | print version and commit, then exit |
 | `--config` / `CONFIG` | — | YAML config (overrides preset) |
-| `LISTEN_ADDR` | `:4000` | listen address |
+| `--listen` / `LISTEN_ADDR` | `:4000` | listen address. The flag exists so the port is visible in `ps` and to a supervisor |
 | `--anthropic-upstream` / `ANTHROPIC_UPSTREAM` | `https://api.anthropic.com` | Anthropic upstream base |
 | `--openai-upstream` / `OPENAI_UPSTREAM` | `https://api.openai.com` | OpenAI upstream base |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | — | real key injected on forward (gateway mode); empty = pass client auth through |

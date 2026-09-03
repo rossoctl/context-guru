@@ -253,7 +253,7 @@ func main() {
 	// `--idle-exit 30m` got both SQLite files created and migrated and then an abrupt exit with
 	// WAL/-shm left behind. Everything the check reads (the flags, cfg.Store) is known right
 	// here, so the refusal costs nothing and leaves nothing behind.
-	if err := checkIdleExit(*idleExit, *upstreamsPath, cfg.Store); err != nil {
+	if err := checkIdleExit(*idleExit, *upstreamsPath, *bob, cfg.Store); err != nil {
 		log.Fatalf("context-guru: %v", err)
 	}
 

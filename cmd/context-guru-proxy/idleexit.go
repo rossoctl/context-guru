@@ -86,6 +86,21 @@ func patternPath(pattern string) string {
 	return pattern
 }
 
+// isCatchAll reports whether this pattern is the "/" route, which matches anything nothing else
+// claimed.
+//
+// Bob mode and hosted mode both register one (proxy.Mux, `m.HandleFunc("/", h.passthrough(…))`), and
+// with it present `mux.Handler` answers "/" — not the empty pattern — for `/healthz/`, `/nope` and
+// every port-scan path. So the 404 branch above stops working and the activity clock is stamped
+// forever: --idle-exit never fires, silently, exactly as it did before any of this.
+//
+// checkIdleExit now refuses --idle-exit alongside --bob-upstream as well as --upstreams, which
+// closes the hole by construction — a proxy with a catch-all cannot also have a watchdog. This check
+// is the belt to that braces: the two conditions live in different files, and if they ever drift
+// apart, over-counting the catch-all as "not use" fails toward exiting a laptop proxy rather than
+// toward a gateway that never exits.
+func isCatchAll(pattern string) bool { return patternPath(pattern) == "/" }
+
 // stampActivity records a request as activity, unless its route is a machine probe.
 //
 // Stamped on entry AND on completion. The entry stamp is what makes a burst of short requests
@@ -103,19 +118,25 @@ func stampActivity(mux *http.ServeMux, act *activityClock, now func() time.Time)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Ask the mux which pattern this request resolves to, rather than comparing r.URL.Path.
 		//
-		// An exact path compare had two holes, and the first is the one that mattered: ServeMux
-		// answers `/healthz/` with a 301 to `/healthz`, which a Kubernetes httpGet probe treats as
-		// healthy — so a probe configured with a trailing slash was counted as use and the exit
-		// never fired. ServeMux.Handler reports, for an internally-generated redirect, the pattern
-		// that will match after following it, so `/healthz/` resolves to `/healthz` here.
+		// What an exact path compare got wrong: `/healthz/` was not exempt, so a monitoring loop or
+		// a Kubernetes httpGet probe configured with a trailing slash counted as use and the exit
+		// never fired. Asking the mux covers that case and every other spelling — `//healthz`, dot
+		// segments, a typo — with one question, using the matcher that will actually route the
+		// request rather than a second copy of the rules.
 		//
-		// The second: an unmatched path reports the EMPTY pattern, so a 404 — a port scanner, a
-		// stray `/health` probe, a typo'd URL — is no longer mistaken for somebody using the proxy.
+		// Be precise about the MECHANISM, because an earlier version of this comment was not and the
+		// claim is what justifies the approach: ServeMux does NOT redirect `/healthz/` to `/healthz`.
+		// cleanPath re-appends a trailing slash, and matchOrRedirect only ever ADDS one (`/tree` ->
+		// `/tree/`), never strips it. With this route table `/healthz/` is a plain 404 and Handler
+		// reports the EMPTY pattern — which is what exempts it. The redirect Go does generate, for a
+		// subtree root, also reports an empty pattern, so nothing here may assume that a redirect
+		// resolves to its post-redirect pattern.
 		//
-		// This asks the same matcher that will route the request, which is the point: no second
-		// copy of the routing rules to drift.
+		// So the rule is: a request counts as use only when it matched a REAL route that is not a
+		// probe. An unmatched path — a port scanner, a stray `/health`, a trailing slash — reports
+		// the empty pattern and does not count.
 		_, pattern := mux.Handler(r)
-		use := pattern != "" && !probeRoutes[patternPath(pattern)]
+		use := pattern != "" && !probeRoutes[patternPath(pattern)] && !isCatchAll(pattern)
 		if use {
 			act.touch(now())
 		}
@@ -220,7 +241,7 @@ func idleCheckInterval(threshold time.Duration) time.Duration {
 // A function rather than two inline `if`s in main so both refusals are testable: they are
 // startup-fatal, which is the one class of check where "it looked right" is the only evidence
 // anyone ever gathers.
-func checkIdleExit(d time.Duration, upstreamsPath string, o store.Options) error {
+func checkIdleExit(d time.Duration, upstreamsPath, bobUpstream string, o store.Options) error {
 	// The floor has two terms and only one of them is about the store.
 	//
 	// `2 x store.ttl_seconds` protects the in-memory store: exiting clears it, and losing a live
@@ -245,7 +266,7 @@ func checkIdleExit(d time.Duration, upstreamsPath string, o store.Options) error
 	} else if err := store.ValidateIdleExit(d, o); err != nil {
 		return err
 	}
-	if d > 0 && upstreamsPath != "" {
+	if d > 0 && (upstreamsPath != "" || bobUpstream != "") {
 		// A self-terminating GATEWAY is a different kind of wrong: --upstreams means this
 		// process serves other people's agents, where "the proxy vanished overnight" is far
 		// worse than a process left running on a laptop.
@@ -254,9 +275,16 @@ func checkIdleExit(d time.Duration, upstreamsPath string, o store.Options) error
 		// a liveness probe, and every probe stamped the activity clock. That is no longer true
 		// (probeRoutes above deliberately excludes them), so what was accidentally safe is now
 		// explicitly refused rather than quietly reintroduced.
-		return fmt.Errorf("--idle-exit cannot be combined with --upstreams: a gateway serving " +
-			"other people's agents must not self-terminate. Drop --idle-exit, or run this " +
-			"instance without --upstreams")
+		flag := "--upstreams"
+		if upstreamsPath == "" {
+			flag = "--bob-upstream"
+		}
+		return fmt.Errorf("--idle-exit cannot be combined with %s: a gateway serving other "+
+			"people's agents must not self-terminate. Drop --idle-exit, or run this instance "+
+			"without %s.\n\nBoth flags also mount a `/` catch-all route, which is the second "+
+			"reason: with one registered, every unmatched path — including a probe with a trailing "+
+			"slash — matches a real pattern and counts as activity, so the watchdog would never "+
+			"fire and nothing would say so", flag, flag)
 	}
 	return nil
 }

@@ -327,7 +327,7 @@ func TestCheckIdleExitRefusesAGatewaySelfTerminating(t *testing.T) {
 		{"below the floor", 30 * time.Minute, "", "floor"},
 		{"below the floor on a gateway", 30 * time.Minute, "/etc/x.yaml", "floor"},
 	} {
-		err := checkIdleExit(c.d, c.upstreams, ok)
+		err := checkIdleExit(c.d, c.upstreams, "", ok)
 		switch {
 		case c.wantErr == "" && err != nil:
 			t.Errorf("%s: refused a valid configuration: %v", c.name, err)
@@ -458,14 +458,18 @@ func probeMux() *http.ServeMux {
 // TestProbeExemptionSurvivesATrailingSlash is the hole an exact path compare left open, and it is
 // the one that matters most because it fails SILENTLY in the safe-looking direction.
 //
-// http.ServeMux answers `/healthz/` with a 301 to `/healthz`, and a Kubernetes httpGet probe (and
-// most monitoring loops) treats a 301 as healthy. With the stamp taken before the mux ever saw the
-// request, such a probe refreshed the activity clock forever: --idle-exit never fired, and the only
-// log line was `idle-exit armed` at startup.
+// A probe configured with a trailing slash — `GET /healthz/` — used to count as activity, so it
+// refreshed the clock forever: --idle-exit never fired, and the only log line was `idle-exit armed`
+// at startup.
 //
-// A 404 is the same class: a port scanner, a typo'd URL or a stray `/health` probe is not somebody
-// using the proxy. Both are answered by asking the mux which pattern matches, rather than comparing
-// the raw path.
+// Be exact about WHY it is exempt now, because the first version of this comment was not:
+// http.ServeMux does NOT redirect `/healthz/` to `/healthz`. cleanPath re-appends the trailing slash
+// and matchOrRedirect only ever ADDS one, so with this route table `/healthz/` is a plain 404 and
+// `Handler` reports the EMPTY pattern. That is what exempts it — the same branch that exempts
+// `/nope`. (The redirect Go does generate, for a subtree root, also reports an empty pattern, so
+// nothing here relies on a redirect resolving to its post-redirect pattern.)
+//
+// So every row below that is not a real route is exempt for one reason: no pattern matched.
 func TestProbeExemptionSurvivesATrailingSlash(t *testing.T) {
 	for _, c := range []struct {
 		method, path string
@@ -473,10 +477,10 @@ func TestProbeExemptionSurvivesATrailingSlash(t *testing.T) {
 		why          string
 	}{
 		{"GET", "/healthz", false, "the probe itself"},
-		{"GET", "/healthz/", false, "301 to /healthz — a k8s probe reads this as healthy"},
+		{"GET", "/healthz/", false, "404, empty pattern — and a k8s probe spelled this way must not count"},
 		{"GET", "/metrics", false, "a Prometheus scrape"},
-		{"GET", "/metrics/", false, "301 to /metrics"},
-		{"GET", "//healthz", false, "doubled slash, cleaned by the mux to /healthz"},
+		{"GET", "/metrics/", false, "404, empty pattern"},
+		{"GET", "//healthz", false, "cleanPath collapses this to /healthz, which IS the probe pattern"},
 		{"GET", "/health", false, "404 — a stray probe is not use"},
 		{"GET", "/nope", false, "404 — a port scanner is not use"},
 		{"GET", "/api/events", true, "the dashboard's SSE stream: a person is watching"},
@@ -511,38 +515,38 @@ func TestCheckIdleExitKeepsTheOneHourMinimumWithNoStore(t *testing.T) {
 	noStore := store.Options{Enabled: &off}
 
 	// The 2x TTL term does not apply: ~5h34m would otherwise be the floor.
-	if err := checkIdleExit(2*time.Hour, "", noStore); err != nil {
+	if err := checkIdleExit(2*time.Hour, "", "", noStore); err != nil {
 		t.Errorf("2h refused with the store disabled, where only the 1h minimum applies: %v", err)
 	}
 	// The 1h term still does.
 	for _, d := range []time.Duration{10 * time.Nanosecond, time.Millisecond, 30 * time.Minute,
 		time.Hour - time.Nanosecond} {
-		if err := checkIdleExit(d, "", noStore); err == nil {
+		if err := checkIdleExit(d, "", "", noStore); err == nil {
 			t.Errorf("accepted --idle-exit=%s with the store disabled; anything under an hour is "+
 				"shorter than the keep-alive's ping window, and a sub-second value cannot be "+
 				"scheduled at all", d)
 		}
 	}
 	// Off is still always valid, and a gateway is still refused.
-	if err := checkIdleExit(0, "", noStore); err != nil {
+	if err := checkIdleExit(0, "", "", noStore); err != nil {
 		t.Errorf("off refused: %v", err)
 	}
-	if err := checkIdleExit(24*time.Hour, "/etc/x.yaml", noStore); err == nil {
+	if err := checkIdleExit(24*time.Hour, "/etc/x.yaml", "", noStore); err == nil {
 		t.Error("a gateway with the store off may still not self-terminate")
 	}
 
 	// And the store-off path must not become an escape hatch from the FULL floor: a store that is
 	// explicitly on, or simply unconfigured (which means on), is still protected by 2x the TTL.
 	on := true
-	if err := checkIdleExit(30*time.Minute, "", store.Options{Enabled: &on}); err == nil {
+	if err := checkIdleExit(30*time.Minute, "", "", store.Options{Enabled: &on}); err == nil {
 		t.Error("accepted a threshold below the floor with the store explicitly enabled")
 	}
-	if err := checkIdleExit(30*time.Minute, "", store.Options{}); err == nil {
+	if err := checkIdleExit(30*time.Minute, "", "", store.Options{}); err == nil {
 		t.Error("accepted a threshold below the floor with the store unconfigured (which is on)")
 	}
 	// 2h clears the 1h minimum but not 2x the default TTL (~5h34m), so it must be refused when the
 	// store is on and accepted when it is off — that difference IS the store-off exemption.
-	if err := checkIdleExit(2*time.Hour, "", store.Options{}); err == nil {
+	if err := checkIdleExit(2*time.Hour, "", "", store.Options{}); err == nil {
 		t.Error("accepted 2h with the store on, where the floor is ~5h34m")
 	}
 }
@@ -556,6 +560,97 @@ func TestIdleCheckIntervalIsAlwaysPositive(t *testing.T) {
 	for _, d := range []time.Duration{0, 1, 5, 19 * time.Nanosecond, time.Nanosecond, time.Second} {
 		if got := idleCheckInterval(d); got <= 0 {
 			t.Errorf("idleCheckInterval(%s) = %s; time.NewTicker would panic", d, got)
+		}
+	}
+}
+
+// TestCheckIdleExitRefusesBobModeToo closes the hole the third review found: --bob-upstream is a
+// gateway flag too, and it was not covered.
+//
+// Two reasons it must be refused, and the second is the one that makes it urgent. First, Bob mode
+// serves other people's agents, so self-terminating is as wrong there as with --upstreams. Second,
+// proxy.Mux registers a `/` catch-all whenever BobUpstream is set — and with a catch-all present,
+// mux.Handler answers "/" rather than the empty pattern for EVERY unmatched path, so `/healthz/`,
+// `/nope` and every port-scan path count as activity and the watchdog never fires. Silently, with
+// `idle-exit armed` as the only log line.
+func TestCheckIdleExitRefusesBobModeToo(t *testing.T) {
+	good := 24 * time.Hour
+	for _, c := range []struct {
+		name, upstreams, bob string
+		wantRefused          bool
+	}{
+		{"laptop: neither", "", "", false},
+		{"bob gateway", "", "https://api.us-east.bob.ibm.com", true},
+		{"hosted gateway", "/etc/context-guru/upstreams.yaml", "", true},
+		{"both", "/etc/context-guru/upstreams.yaml", "https://api.us-east.bob.ibm.com", true},
+	} {
+		err := checkIdleExit(good, c.upstreams, c.bob, store.Options{})
+		if c.wantRefused && err == nil {
+			t.Errorf("%s: accepted --idle-exit; a proxy with a `/` catch-all cannot also have a "+
+				"watchdog, because every unmatched path would count as activity", c.name)
+		}
+		if !c.wantRefused && err != nil {
+			t.Errorf("%s: refused a valid laptop configuration: %v", c.name, err)
+		}
+		// The message must name the flag the operator actually passed, since that is the one they
+		// have to drop.
+		if c.wantRefused && err != nil {
+			want := "--upstreams"
+			if c.upstreams == "" {
+				want = "--bob-upstream"
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: message does not name %s: %v", c.name, want, err)
+			}
+		}
+	}
+	// Off is always fine, in any mode.
+	if err := checkIdleExit(0, "", "https://api.us-east.bob.ibm.com", store.Options{}); err != nil {
+		t.Errorf("off refused in Bob mode: %v", err)
+	}
+}
+
+// TestCatchAllRouteIsNotActivity is the belt to that braces.
+//
+// checkIdleExit now refuses --idle-exit alongside the flags that mount a `/` catch-all, so this
+// combination is unreachable in a shipped configuration — but the two rules live in different files,
+// and this is the one whose failure is silent. Over-counting a catch-all as "not use" errs toward
+// exiting a laptop proxy; under-counting errs toward a gateway that never exits, which is the
+// failure nobody notices.
+func TestCatchAllRouteIsNotActivity(t *testing.T) {
+	clk := newFakeClock(time.Unix(1_700_000_000, 0))
+	var act activityClock
+
+	mux := http.NewServeMux()
+	nop := func(w http.ResponseWriter, r *http.Request) {}
+	mux.HandleFunc("GET /healthz", nop)
+	mux.HandleFunc("POST /anthropic/v1/messages", nop)
+	// Bob mode's catch-all, and the explicit Bob route beside it.
+	mux.HandleFunc("POST /inference/v1/chat/completions", nop)
+	mux.HandleFunc("/", nop)
+	h := stampActivity(mux, &act, clk.now)
+
+	for _, c := range []struct {
+		method, path string
+		isUse        bool
+		why          string
+	}{
+		{"GET", "/healthz", false, "the probe itself"},
+		{"GET", "/healthz/", false, "falls through to the catch-all, and must still not count"},
+		{"GET", "/nope", false, "a port scanner matching `/` is not somebody using the proxy"},
+		{"POST", "/anthropic/v1/messages", true, "a real agent request"},
+		{"POST", "/inference/v1/chat/completions", true, "Bob's own model route is explicit"},
+	} {
+		act = activityClock{}
+		clk.advance(time.Minute)
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(c.method, c.path, nil))
+		if stamped := !act.last().IsZero(); stamped != c.isUse {
+			verb := "did not count"
+			if stamped {
+				verb = "counted"
+			}
+			t.Errorf("with a `/` catch-all registered, %s %s %s as activity, want the opposite — %s",
+				c.method, c.path, verb, c.why)
 		}
 	}
 }

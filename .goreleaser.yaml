@@ -55,6 +55,14 @@ archives:
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     formats: [tar.gz]
+    # Everything unpacks into ONE directory named after the archive.
+    #
+    # Without this GoReleaser writes a flat archive, so LICENSE, README.md and THIRD-PARTY-NOTICES
+    # land at the root — and the extraction command in the footer below (and in the quickstart) has
+    # no -C, so running it in a project directory silently overwrites that project's own README.md
+    # and LICENSE. A person evaluating a proxy for their coding agent is standing in exactly such a
+    # directory.
+    wrap_in_directory: true
     files:
       - LICENSE
       - README.md
@@ -93,11 +101,11 @@ release:
     No Go toolchain and no C compiler are needed — the binary is statically linked.
 
     Download the tarball for your platform, untar it, and put `context-guru-proxy` on your
-    `PATH`:
+    `PATH`. The archive unpacks into its own directory, so this is safe to run anywhere:
 
     ```
     tar xzf context-guru_*_darwin_arm64.tar.gz
-    install -m 755 context-guru-proxy ~/.local/bin/
+    install -m 755 context-guru_*/context-guru-proxy ~/.local/bin/
     ```
 
     Then see `docs/get-started/quickstart-proxy.md`.
