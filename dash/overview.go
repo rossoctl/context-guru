@@ -3,6 +3,7 @@ package dash
 import (
 	"database/sql"
 	"fmt"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -49,6 +50,16 @@ type WaterfallStep struct {
 // Overview is the payload behind the dashboard's headline. Every percentage here
 // is derived at read time from stored absolutes, so a rate change never rewrites
 // history and a filter change never needs a rebuild.
+// invalidConfigRecentWindow is how recently a request must have run with a failed configuration
+// for the dashboard to still call it a live problem.
+//
+// An hour, because the thing being detected is a stored config that cannot build: while it lasts
+// EVERY request for that account is affected, so on any account with traffic the signal appears
+// within seconds and keeps appearing. An hour is therefore long enough that a quiet account still
+// trips it, and short enough that the banner clears on its own once someone fixes the config —
+// without anyone having to know that clearing it is a thing that needs doing.
+const invalidConfigRecentWindow = time.Hour
+
 type Overview struct {
 	Since    int64 `json:"since"`
 	Until    int64 `json:"until"`
@@ -65,6 +76,21 @@ type Overview struct {
 	// zero before anyone noticed from a log line rather than from here. Nonzero here means the
 	// account's Settings page needs attention now, not "check the logs".
 	InvalidConfigRequests int64 `json:"invalid_config_requests"`
+	// InvalidConfigRecent is the same count over the last invalidConfigRecentWindow, scoped to
+	// the account but NOT to the filter's time range or any of its facets. It exists because
+	// InvalidConfigRequests alone cannot answer the question the banner above the headline asks,
+	// which is "is compaction broken RIGHT NOW".
+	//
+	// The dashboard's default view has no time filter at all, so a window-scoped count keeps
+	// reporting an incident forever after it is over: this deployment carried 1,752 such requests
+	// from a single afternoon (a config key removed with no migration, since fixed), and the page
+	// went on telling every viewer to "open Settings and fix the configuration" for days, about a
+	// configuration that was already correct. An alarm that cannot switch itself off is one people
+	// learn to scroll past, which costs exactly what it was built to buy.
+	//
+	// Facets are deliberately ignored, not just the time range: filtering to one model must not be
+	// able to hide a live breakage that happens to be showing up on another.
+	InvalidConfigRecent int64 `json:"invalid_config_recent"`
 
 	TokensBefore int64 `json:"tokens_before"`
 	TokensAfter  int64 `json:"tokens_after"`
@@ -680,6 +706,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		accountingM, cacheMissM, uncompressedM map[string]int64
 		p95cg, p95up                           float64
 		invalidConfigRequests                  int64
+		invalidConfigRecent                    int64
 	)
 	var g errgroup.Group
 	// See InvalidConfigRequests' own comment: preset is set to "invalid" by
@@ -690,6 +717,20 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	g.Go(func() error {
 		return d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r
 			WHERE `+cond+` AND r.preset = 'invalid'`, args...).Scan(&invalidConfigRequests)
+	})
+	// The same fact over a fixed recent window, which is what the banner is actually about. Built
+	// here rather than by copying f and overriding Since, so that it demonstrably carries the
+	// TENANT scope and nothing else: a facet leaking in could hide a live breakage, and dropping
+	// the tenant term would show one account another's problem.
+	g.Go(func() error {
+		rcond := "r.keepalive = 0 AND r.ts >= ? AND r.preset = 'invalid'"
+		rargs := []any{time.Now().Add(-invalidConfigRecentWindow).UnixMilli()}
+		if !f.TenantAll {
+			rcond += " AND r.tenant_id = ?"
+			rargs = append(rargs, f.Tenant)
+		}
+		return d.sql.QueryRowContext(d.readCtx(),
+			`SELECT COUNT(*) FROM requests r WHERE `+rcond, rargs...).Scan(&invalidConfigRecent)
 	})
 	// The replay ceiling's raw form, corrected below by the inflation query once both are in —
 	// see the comment above `splitMoved` usage earlier in this function for the ceiling's own
@@ -906,6 +947,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.Uncompressed = uncompressedM
 	o.CGLatencyMsP95, o.UpstreamMsP95 = p95cg, p95up
 	o.InvalidConfigRequests = invalidConfigRequests
+	o.InvalidConfigRecent = invalidConfigRecent
 
 	o.SafetyCost.FrozenTokens = o.FrozenTokens
 	o.SafetyCost.RestoredTokens = o.ExpandTokens

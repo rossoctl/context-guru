@@ -1477,10 +1477,16 @@ function renderTiles(o) {
   // proxy's own log. Shown above the headline, not folded into Diagnostics: the number it
   // reports is "your bill was bigger than it needed to be, right now", which is exactly what
   // this page exists to prevent from going unnoticed.
-  if (o.invalid_config_requests > 0) {
+  // Gated on the RECENT count, not the window's total, and that distinction is the whole point.
+  // The default view has no time filter, so a total keeps reporting an incident forever after it
+  // is fixed: this deployment carried 1,752 such requests from one afternoon and then told every
+  // viewer for days to go and fix a configuration that was already correct. The banner asks a
+  // present-tense question, so it reads a present-tense number and clears itself once someone
+  // fixes the config — see InvalidConfigRecent in dash/overview.go.
+  if (o.invalid_config_recent > 0) {
     host.appendChild(el('div', { class: 'banner bad', 'data-testid': 'invalid-config' },
-      el('div', {}, el('strong', {}, num(o.invalid_config_requests) + ' request'
-        + (o.invalid_config_requests === 1 ? '' : 's') + ' ran with NO compaction. '),
+      el('div', {}, el('strong', {}, num(o.invalid_config_recent) + ' request'
+        + (o.invalid_config_recent === 1 ? '' : 's') + ' ran with NO compaction in the last hour. '),
         'This account’s stored configuration failed to build, so every one of them was ' +
         'forwarded as-is instead — traffic kept working, but none of it was compacted. ' +
         'Open Settings, fix the configuration, and save it again.')));
