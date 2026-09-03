@@ -233,17 +233,28 @@ func TestIdleExitStartsItsClockAtLaunch(t *testing.T) {
 	w.mustExit("an hour after launch with no traffic at all")
 }
 
-// TestIdleCheckIntervalStaysUseful pins the resolution at both ends: a 24h default must not
-// mean an hour of slack past the threshold, and the 1h floor must not mean a check every few
-// minutes for nothing.
+// TestIdleCheckIntervalStaysUseful pins one rule and one cap: the watchdog looks every
+// threshold/20 — 5% of what was asked for — until that would exceed five minutes.
+//
+// The third case here used to be labelled "clamped low" and asserted 10m -> 30s, which is exactly
+// 10m/20: it passed whether or not the clamp existed, and the clamp it claimed to cover could
+// never fire anyway, because checkIdleExit refuses any threshold under an hour. The clamp is gone
+// and so is the case that pretended to test it.
 func TestIdleCheckIntervalStaysUseful(t *testing.T) {
-	for _, c := range []struct{ threshold, want time.Duration }{
-		{24 * time.Hour, 5 * time.Minute},    // clamped high
-		{time.Hour, 3 * time.Minute},         // threshold/20
-		{10 * time.Minute, 30 * time.Second}, // clamped low
+	for _, c := range []struct {
+		threshold, want time.Duration
+		why             string
+	}{
+		{24 * time.Hour, 5 * time.Minute, "capped: 24h/20 is 72m, which would be an hour of slack"},
+		{100 * time.Hour, 5 * time.Minute, "capped, well past the cap"},
+		{time.Hour, 3 * time.Minute, "the floor: 5% of an hour, and the finest resolution reachable"},
+		{80 * time.Minute, 4 * time.Minute, "threshold/20 while under the cap"},
+		// Below the floor checkIdleExit refuses to start, so nothing here can be reached in
+		// production. Asserted anyway so the function stays total rather than surprising.
+		{10 * time.Minute, 30 * time.Second, "unreachable in production (below the floor)"},
 	} {
 		if got := idleCheckInterval(c.threshold); got != c.want {
-			t.Errorf("idleCheckInterval(%s) = %s, want %s", c.threshold, got, c.want)
+			t.Errorf("idleCheckInterval(%s) = %s, want %s — %s", c.threshold, got, c.want, c.why)
 		}
 	}
 }
@@ -324,6 +335,137 @@ func TestCheckIdleExitRefusesAGatewaySelfTerminating(t *testing.T) {
 			t.Errorf("%s: accepted a configuration that must not start", c.name)
 		case c.wantErr != "" && err != nil && !strings.Contains(err.Error(), c.wantErr):
 			t.Errorf("%s: message does not mention %q: %v", c.name, c.wantErr, err)
+		}
+	}
+}
+
+// TestCheckIdleExitSkipsTheFloorWithNoStore: the floor protects the in-memory store, so with the
+// store explicitly OFF there is nothing for it to protect.
+//
+// `--store=false` resolves to store.Nop, which persists nothing and holds no frozen decisions.
+// Refusing `--store=false --idle-exit=30m` cited a consequence — "exiting drops live frozen
+// decisions and re-bills their prefix" — that cannot occur in that configuration. A store-less
+// proxy may exit whenever it likes.
+func TestCheckIdleExitSkipsTheFloorWithNoStore(t *testing.T) {
+	off, on := false, true
+	short := 30 * time.Minute // far below the ~5h34m floor
+
+	if err := checkIdleExit(short, "", store.Options{Enabled: &off}); err != nil {
+		t.Errorf("refused a short threshold with the store disabled, citing a store that does not "+
+			"exist: %v", err)
+	}
+	// Explicitly ON, and nil (= not configured, which means on) must both still be protected.
+	if err := checkIdleExit(short, "", store.Options{Enabled: &on}); err == nil {
+		t.Error("accepted a threshold below the floor with the store explicitly enabled")
+	}
+	if err := checkIdleExit(short, "", store.Options{}); err == nil {
+		t.Error("accepted a threshold below the floor with the store unconfigured (which is on)")
+	}
+	// The gateway refusal is independent of the store: a self-terminating gateway is wrong
+	// whether or not it keeps state.
+	if err := checkIdleExit(24*time.Hour, "/etc/context-guru/upstreams.yaml",
+		store.Options{Enabled: &off}); err == nil {
+		t.Error("a gateway with the store off may still not self-terminate")
+	}
+}
+
+// TestActivityClockKeepsItsMonotonicReading is the guard for a defect that no other test here can
+// see, because they all inject a fake clock built from time.Unix — which has no monotonic reading
+// to lose.
+//
+// The clock stored `now.UnixNano()` and rebuilt the instant with `time.Unix(0, ns)`. That value
+// carries no monotonic reading, so `now.Sub(act.last())` was wall-clock arithmetic: a laptop
+// suspend/resume or an NTP step counts as idleness, and the watchdog can fire on its first tick
+// after a lid-open, racing the user's first request. On the laptop this feature exists for,
+// suspend is the normal case rather than an edge one.
+//
+// `t.Round(0)` strips the monotonic reading, and time.Time's == compares wall, monotonic and
+// location — so `stored.Round(0) != stored` is precisely "this value still has a monotonic
+// reading".
+func TestActivityClockKeepsItsMonotonicReading(t *testing.T) {
+	var act activityClock
+	act.touch(time.Now())
+
+	stored := act.last()
+	if stored.Round(0) == stored {
+		t.Error("the stored instant has no monotonic reading, so idleness is measured against the " +
+			"wall clock: a suspend/resume or an NTP step is counted as idle time")
+	}
+	// And the subtraction the watchdog actually performs must stay monotonic end to end.
+	if elapsed := time.Now().Sub(act.last()); elapsed < 0 {
+		t.Errorf("elapsed since the stamp is negative (%s), which wall-clock arithmetic permits "+
+			"and a monotonic reading does not", elapsed)
+	}
+}
+
+// TestStampActivityRefreshesOnCompletion: a request that takes a while must not leave the clock
+// reading from the moment it STARTED.
+//
+// Stamping only on entry meant a long request looked like a gap in use the moment it finished. The
+// residual — that the clock is not refreshed DURING a request, so a single request outliving the
+// whole threshold with no other traffic can still age out — is documented on stampActivity rather
+// than fixed, and is unreachable in practice because the dashboard UI polls every 30s.
+func TestStampActivityRefreshesOnCompletion(t *testing.T) {
+	clk := newFakeClock(time.Unix(1_700_000_000, 0))
+	var act activityClock
+	h := stampActivity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The request takes 20 minutes of wall clock, as far as the injected clock is concerned.
+		clk.advance(20 * time.Minute)
+		w.WriteHeader(http.StatusOK)
+	}), &act, clk.now)
+
+	start := clk.now()
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/anthropic/v1/messages", nil))
+
+	if got := act.last(); !got.After(start) {
+		t.Errorf("clock reads %s, the moment the request STARTED (%s) — a long request then looks "+
+			"like 20 minutes of idleness the instant it completes", got, start)
+	}
+	if want := start.Add(20 * time.Minute); !act.last().Equal(want) {
+		t.Errorf("clock = %s, want the completion time %s", act.last(), want)
+	}
+	// A probe must still be stamped on neither edge.
+	before := act.last()
+	clk.advance(time.Hour)
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/healthz", nil))
+	if !act.last().Equal(before) {
+		t.Errorf("a /healthz probe moved the clock to %s; probes count as neither entry nor "+
+			"completion activity", act.last())
+	}
+}
+
+// TestParseEnvDurationRefusesAUnitlessValue: `IDLE_EXIT=86400` is the natural mistake for something
+// documented as a duration, and it used to mean "never exit" — silently, because the
+// `idle-exit armed` line is only logged for a value above zero, so the evidence was the ABSENCE of
+// a log line.
+func TestParseEnvDurationRefusesAUnitlessValue(t *testing.T) {
+	const def = 7 * time.Hour
+	for _, c := range []struct {
+		raw     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"", def, false},    // not set
+		{"   ", def, false}, // whitespace only
+		{"24h", 24 * time.Hour, false},
+		{"30m", 30 * time.Minute, false},
+		{"1500ms", 1500 * time.Millisecond, false},
+		{"86400", 0, true}, // seconds, unitless — the reported mistake
+		{"24", 0, true},    // hours, unitless
+		{"forever", 0, true},
+	} {
+		got, err := parseEnvDuration(c.raw, def)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("parseEnvDuration(%q) returned %s and no error; a typo must not silently "+
+					"become a different configuration", c.raw, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseEnvDuration(%q): unexpected error %v", c.raw, err)
+		} else if got != c.want {
+			t.Errorf("parseEnvDuration(%q) = %s, want %s", c.raw, got, c.want)
 		}
 	}
 }

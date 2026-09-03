@@ -159,9 +159,9 @@ func TestCachePresetDoesNotBufferSSE(t *testing.T) {
 // cachesplit MOVES a breakpoint onto the stable half of a block it splits; it must never add
 // one. The body below arrives at the cap, so any addition at all is a 400.
 func TestCachePresetNeverAddsACacheControlBreakpoint(t *testing.T) {
-	var forwarded []byte
+	var rec recordedRequest
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		forwarded, _ = io.ReadAll(r.Body)
+		rec.record(r)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"type":"message","usage":{"input_tokens":1}}`)
 	}))
@@ -193,6 +193,7 @@ func TestCachePresetNeverAddsACacheControlBreakpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
+	forwarded := rec.forwarded()
 	if len(forwarded) == 0 {
 		t.Fatal("upstream received nothing")
 	}
@@ -260,9 +261,9 @@ func TestCachePresetLeavesTheAttributionBlockUntouched(t *testing.T) {
 			attributionText + "\nCurrent branch: whatever the user was talking about\n"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			var forwarded []byte
+			var rec recordedRequest
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				forwarded, _ = io.ReadAll(r.Body)
+				rec.record(r)
 				w.Header().Set("Content-Type", "application/json")
 				fmt.Fprint(w, `{"type":"message","usage":{"input_tokens":1}}`)
 			}))
@@ -281,6 +282,7 @@ func TestCachePresetLeavesTheAttributionBlockUntouched(t *testing.T) {
 				t.Fatal(err)
 			}
 			resp.Body.Close()
+			forwarded := rec.forwarded()
 			if len(forwarded) == 0 {
 				t.Fatal("upstream received nothing")
 			}

@@ -61,9 +61,14 @@ archives:
       - THIRD-PARTY-NOTICES
 
 checksums:
-  # scripts/install.sh verifies the downloaded tarball against this file. macOS quarantines
-  # an unsigned download and the installer strips the attribute, so a checksum is the only
-  # integrity check left in that path — it is not optional decoration.
+  # The integrity check for every downloaded artifact, and the ONLY one: these binaries are
+  # unsigned (the tap and signing ownership are still open), so nothing else stands between a
+  # tampered tarball and a proxy that handles the user's LLM traffic.
+  #
+  # The plugin's installer verifies against this file and strips macOS quarantine from the
+  # download, which is what makes it load-bearing rather than decorative. That installer is NOT in
+  # this change — it ships with the plugin — so today this file is what a human curling a release
+  # should check by hand.
   name_template: checksums.txt
   algorithm: sha256
 

@@ -86,9 +86,14 @@ func main() {
 		modeFlag  = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | observe (overrides the config's mode:)")
 		// OFF by default, and it must stay that way: a gateway or eval-containers deployment
 		// that self-terminates is a much worse failure than a laptop process left running.
-		// Set only by the plugin installer, which pairs it with a SessionStart hook that
-		// starts the proxy again on demand — self-kill without that resurrection is a
-		// footgun, so they ship together. The floor is enforced below, not documented.
+		//
+		// It is meant to be paired with something that starts the proxy again on demand — the
+		// Claude Code plugin's SessionStart hook does that, and self-kill without a
+		// resurrection path is a footgun. That hook is NOT in this change: it ships with the
+		// plugin. Until then, anyone setting this by hand is choosing a proxy that will exit
+		// and stay exited, and the docs say so rather than implying a pairing that is not here.
+		//
+		// The floor and the gateway refusal are enforced in checkIdleExit, not documented.
 		idleExit = flag.Duration("idle-exit", envDuration("IDLE_EXIT", 0),
 			"exit after this long with no requests and no keep-alive ping pending (0 = never; "+
 				"must be at least 2x store.ttl_seconds, see store.IdleExitFloor)")
@@ -234,6 +239,19 @@ func main() {
 	}
 	if v, ok := parseBool(*storeFlag); ok {
 		cfg.Store.Enabled = &v // flag/env wins over the config file when set
+	}
+
+	// Refuse a bad --idle-exit HERE, immediately after the config is resolved and before
+	// anything is opened.
+	//
+	// It moved twice. First it sat after the "listening" line, so a rejected configuration read
+	// as a crash. Then it sat after the dashboard and control databases are opened — and
+	// log.Fatalf calls os.Exit, which runs no defers, so a first-time user who typed
+	// `--idle-exit 30m` got both SQLite files created and migrated and then an abrupt exit with
+	// WAL/-shm left behind. Everything the check reads (the flags, cfg.Store) is known right
+	// here, so the refusal costs nothing and leaves nothing behind.
+	if err := checkIdleExit(*idleExit, *upstreamsPath, cfg.Store); err != nil {
+		log.Fatalf("context-guru: %v", err)
 	}
 
 	agg := metrics.NewAggregator()
@@ -596,17 +614,6 @@ func main() {
 		slog.Warn("context-guru: OBSERVE MODE — requests are forwarded UNMODIFIED; " +
 			"/stats reports what compaction WOULD have saved under potential_*/projected_* keys")
 	}
-	// Idle-exit validation goes BEFORE the "listening" line, because a fatal here used to be
-	// logged after it: the operator saw `context-guru-proxy listening` and then an exit, which
-	// reads as a crash rather than as a rejected configuration.
-	//
-	// Refused rather than warned about: a threshold below the store's entry lifetime does not
-	// degrade gracefully, it re-bills live prefixes as cache creation (the 11.5x regression
-	// FrozenLost exists to catch). A misconfigured value must not start.
-	if err := checkIdleExit(*idleExit, *upstreamsPath, cfg.Store); err != nil {
-		log.Fatalf("context-guru: %v", err)
-	}
-
 	// The sink last, so it is the line just above the traffic: "where are the logs and
 	// what level am I getting" is the first question when something looks quiet.
 	ln, err := listenAndAnnounce(addr, "pipeline", cfg.Pipeline, "mode", mode, "logs", sink)
@@ -1021,11 +1028,34 @@ func envInt(key string, def int) int {
 }
 
 // envDuration reads a Go duration environment variable (e.g. "72h").
+// envDuration reads a duration from the environment, falling back to def.
+//
+// A NON-EMPTY value that does not parse is fatal, and that is a deliberate change from silently
+// falling back. The failure it prevents is specific: `IDLE_EXIT=86400` or `IDLE_EXIT=24` — the
+// natural mistake for something documented as a duration — parsed as an error, returned the
+// zero default, and meant "never exit". Nothing said so, because the `idle-exit armed` line is
+// only logged for a value above zero, so the operator's evidence was the ABSENCE of a line.
+//
+// Fatal rather than a warning: every caller here is a timeout, a retention window or a process
+// lifetime. A typo in any of them silently changes behaviour in a direction nobody chose, and a
+// warning in a startup log is not something anyone reads on a laptop.
 func envDuration(key string, def time.Duration) time.Duration {
-	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv(key))); err == nil {
-		return d
+	d, err := parseEnvDuration(os.Getenv(key), def)
+	if err != nil {
+		log.Fatalf("context-guru: %s=%q is not a duration (%v). Use a unit — 24h, 30m, 1500ms — "+
+			"or unset it to accept the default of %s.", key, os.Getenv(key), err, def)
 	}
-	return def
+	return d
+}
+
+// parseEnvDuration is envDuration's decision, split out so it can be tested without a process
+// that calls os.Exit. Empty means "not set" and yields the default; anything else must parse.
+func parseEnvDuration(raw string, def time.Duration) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def, nil
+	}
+	return time.ParseDuration(raw)
 }
 
 func envOr(key, def string) string {

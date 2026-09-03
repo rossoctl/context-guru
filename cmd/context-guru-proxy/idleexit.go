@@ -33,11 +33,28 @@ import (
 //     refused at startup, not documented — see store.ValidateIdleExit.
 
 // activityClock is the last moment this process did something a user would call "in use".
-// Nanoseconds in an atomic so the request path pays one store and no lock.
-type activityClock struct{ ns atomic.Int64 }
+//
+// It stores the time.Time itself, not its Unix nanoseconds, and that is the whole point: a
+// time.Time from time.Now() carries a MONOTONIC reading, and Sub between two such values uses it.
+// Rebuilding the instant with time.Unix(0, ns) throws that reading away, leaving wall-clock
+// arithmetic — so a laptop suspend/resume or an NTP step counts as idleness, and the watchdog can
+// fire on its first tick after a lid-open, racing the user's first request. On the laptop this
+// feature exists for, suspend is not an edge case.
+//
+// An atomic.Pointer costs one small allocation per request instead of one integer store. That is
+// noise beside what net/http already allocates per request, and it buys a clock that measures
+// elapsed time rather than calendar time.
+type activityClock struct{ at atomic.Pointer[time.Time] }
 
-func (a *activityClock) touch(now time.Time) { a.ns.Store(now.UnixNano()) }
-func (a *activityClock) last() time.Time     { return time.Unix(0, a.ns.Load()) }
+func (a *activityClock) touch(now time.Time) { a.at.Store(&now) }
+
+// last returns the stored instant, or the zero Time if nothing has been stamped yet.
+func (a *activityClock) last() time.Time {
+	if p := a.at.Load(); p != nil {
+		return *p
+	}
+	return time.Time{}
+}
 
 // probeRoutes are the paths that do NOT count as use.
 //
@@ -59,16 +76,27 @@ var probeRoutes = map[string]bool{
 
 // stampActivity records a request as activity, unless its route is a machine probe.
 //
-// The stamp happens BEFORE the handler runs, so a long streaming response cannot age out while
-// it is still being served — its own duration is not idleness. (The stream also cannot be cut
-// off mid-flight regardless: srv.Shutdown waits for in-flight requests, which is why this
-// reuses that path rather than calling os.Exit.)
+// Stamped on entry AND on completion. The entry stamp is what makes a burst of short requests
+// keep the process alive; the completion stamp is what stops a long request from being treated as
+// a gap in use once it finishes.
+//
+// Be precise about what this does NOT fix, because an earlier version of this comment claimed the
+// opposite: the clock is not refreshed DURING a request, so a single request that outlives the
+// whole threshold with no other traffic can still age out mid-flight — the shape being a lone SSE
+// consumer on /api/events, which armShutdown deliberately severs so srv.Shutdown can finish.
+// Periodic stamping from inside a handler is the only thing that would close that, and it is not
+// worth the machinery: the dashboard UI polls every 30s, so its SSE stream is never the only
+// traffic in practice, and the threshold's floor is an hour.
 func stampActivity(next http.Handler, act *activityClock, now func() time.Time) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !probeRoutes[r.URL.Path] {
+		probe := probeRoutes[r.URL.Path]
+		if !probe {
 			act.touch(now())
 		}
 		next.ServeHTTP(w, r)
+		if !probe {
+			act.touch(now())
+		}
 	})
 }
 
@@ -107,7 +135,12 @@ func watchIdle(o idleExitOptions) (string, bool) {
 	// whenever this goroutine happened to get scheduled, which is both later and unknowable.
 	// It stays because the failure mode of an unstamped clock is the worst one available — a
 	// zero clock reads as "idle since 1970" and exits on the first tick.
-	if o.act.last().UnixNano() == 0 {
+	// IsZero, not UnixNano()==0: the clock now stores a time.Time to keep its monotonic reading,
+	// and time.Time{}.UnixNano() is a large NEGATIVE number, not zero. Testing the old way made
+	// this backstop stop firing, and an unstamped clock then read as "idle since the zero year" —
+	// the watchdog exited on its first tick, reporting "idle for 2562047h47m16s". Caught by
+	// TestIdleExitStartsItsClockAtLaunch, which exists for exactly this failure.
+	if o.act.last().IsZero() {
 		o.act.touch(o.now())
 	}
 	for {
@@ -130,18 +163,20 @@ func watchIdle(o idleExitOptions) (string, bool) {
 	}
 }
 
-// idleCheckInterval is how often the watchdog looks. A twentieth of the threshold keeps the
-// exit within 5% of what was asked for, clamped so a 24h default does not mean an hour of
-// slack and a 1h floor does not mean a check every three minutes.
+// idleCheckInterval is how often the watchdog looks: a twentieth of the threshold, capped at five
+// minutes so a 24h threshold does not mean an hour of slack past the moment it was asked for.
+//
+// There is no lower clamp, and there was one that could never fire. checkIdleExit refuses any
+// threshold below an hour, so threshold/20 is at least three minutes for every value that reaches
+// here — the old `if d < 30*time.Second` branch was unreachable in production, and the comment
+// above it claimed the clamps stopped "a 1h floor meaning a check every three minutes" when three
+// minutes is exactly what an hour yields. Removing it is the honest version: the resolution at the
+// floor IS three minutes, which is 5% of the threshold, which is the rule.
 func idleCheckInterval(threshold time.Duration) time.Duration {
-	d := threshold / 20
-	if d < 30*time.Second {
-		d = 30 * time.Second
+	if d := threshold / 20; d < 5*time.Minute {
+		return d
 	}
-	if d > 5*time.Minute {
-		d = 5 * time.Minute
-	}
-	return d
+	return 5 * time.Minute
 }
 
 // checkIdleExit is every reason a requested idle-exit threshold must not start.
@@ -150,10 +185,21 @@ func idleCheckInterval(threshold time.Duration) time.Duration {
 // startup-fatal, which is the one class of check where "it looked right" is the only evidence
 // anyone ever gathers.
 func checkIdleExit(d time.Duration, upstreamsPath string, o store.Options) error {
-	// The floor. Exiting clears the in-memory store, and losing a live frozen decision re-bills
-	// its whole prefix as cache creation — the 11.5x regression FrozenLost exists to catch.
-	if err := store.ValidateIdleExit(d, o); err != nil {
-		return err
+	// The floor exists to protect the in-memory store: exiting clears it, and losing a live frozen
+	// decision re-bills its whole prefix as cache creation — the 11.5x regression FrozenLost
+	// exists to catch.
+	//
+	// So it must not fire when there is no store to protect. `--store=false` / `STORE=false`
+	// resolves to store.Nop, which persists nothing and holds no frozen decisions, and refusing
+	// `--store=false --idle-exit=30m` cited a consequence that cannot occur in that configuration.
+	// A store-less proxy is free to exit whenever it likes.
+	//
+	// `Enabled == nil` means "not configured", which is ON — the default — so only an explicit
+	// false skips this.
+	if o.Enabled == nil || *o.Enabled {
+		if err := store.ValidateIdleExit(d, o); err != nil {
+			return err
+		}
 	}
 	if d > 0 && upstreamsPath != "" {
 		// A self-terminating GATEWAY is a different kind of wrong: --upstreams means this

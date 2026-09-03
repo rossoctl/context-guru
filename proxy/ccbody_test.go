@@ -6,7 +6,10 @@ package proxy_test
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -57,4 +60,39 @@ func claudeCodeBodyWithFirst(t *testing.T, stream bool, first string) []byte {
 		t.Fatalf("test fixture is not valid JSON: %s", body)
 	}
 	return []byte(body)
+}
+
+// recordedRequest carries what an upstream handler saw back to the test goroutine, with the
+// synchronisation the race detector needs.
+//
+// The pattern it replaces looked ordered and was not: a `var forwarded []byte` written inside the
+// handler and read after the round trip. The response arriving does not establish a happens-before
+// edge across the loopback connection, so `-race` — which `make cover` runs — can flag it. It
+// passed on every run so far, which is the least reassuring property a racy test has.
+//
+// A mutex rather than a channel: several tests read the capture more than once, and a mutex reads
+// the same way at each use site.
+type recordedRequest struct {
+	mu   sync.Mutex
+	body []byte
+	path string
+}
+
+func (r *recordedRequest) record(req *http.Request) {
+	b, _ := io.ReadAll(req.Body)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.body, r.path = b, req.URL.Path
+}
+
+func (r *recordedRequest) forwarded() []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.body
+}
+
+func (r *recordedRequest) requestPath() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.path
 }

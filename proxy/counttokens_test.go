@@ -18,11 +18,9 @@ import (
 // unmodified (the client is asking about the context IT holds, and uses the answer to budget its
 // own transcript), and the answer must come back verbatim.
 func TestCountTokensIsServed(t *testing.T) {
-	var gotPath string
-	var gotBody []byte
+	var rec recordedRequest
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		gotBody, _ = io.ReadAll(r.Body)
+		rec.record(r)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"input_tokens":4321}`)
 	}))
@@ -45,6 +43,7 @@ func TestCountTokensIsServed(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (a 404 here sends the client back to counting with "+
 			"inference requests): %s", resp.StatusCode, out)
 	}
+	gotPath, gotBody := rec.requestPath(), rec.forwarded()
 	if gotPath != "/v1/messages/count_tokens" {
 		t.Errorf("upstream path = %q, want /v1/messages/count_tokens", gotPath)
 	}
