@@ -200,7 +200,7 @@ func frozenLost(c *components.Ctx, key string) bool {
 // exists and still shrinks it. It also refreshes the expand originals for any markers
 // in the replacement (the agent re-sent the full original as m's content), so
 // restoration keeps working across turns. Returns the marker keys + whether it acted.
-func reapplyFrozen(c *components.Ctx, comp string, m *bschemas.ChatMessage) ([]string, int, bool) {
+func reapplyFrozen(c *components.Ctx, rep *components.Report, comp string, m *bschemas.ChatMessage) ([]string, int, bool) {
 	content := schema.MessageText(*m)
 	if isKeptVerbatim(c, contentKey(content)) {
 		return nil, 0, false // agent expanded this; replaying the collapse would loop
@@ -217,6 +217,26 @@ func reapplyFrozen(c *components.Ctx, comp string, m *bschemas.ChatMessage) ([]s
 		return nil, 0, false
 	}
 	keys := expand.ParseMarkers(rs)
+	if len(keys) == 0 {
+		// A REPLAY WITH NO MARKERS IS A DEGRADED-MODE REPLAY, and it has to say so.
+		//
+		// Under marker_mode summary/off nothing was stashed, so the frozen replacement carries no
+		// <<cg:HASH>> to parse and this returns no cache keys — while still shrinking the message.
+		// components/pipeline.go reverts exactly that combination ("dropped content without
+		// stashing a cache_key") unless rep.Irreversible says the loss was chosen.
+		//
+		// The turn that MADE the decision sets it, through commitMark's non-full branch. Every
+		// later turn replays it through here and did not, so from turn 2 onward a summary-mode
+		// offloader had its whole component reverted and the transcript sent verbatim — a
+		// full-suffix cache write at ~11.5x the read price, on every turn, for the rest of the
+		// session. Measured on a two-turn mask fixture: turn 1 Irreversible=true, turn 2
+		// Irreversible=false with the message rewritten and no keys returned.
+		//
+		// The blanket flag cannot mask a FULL-mode bug: every freeze() site is downstream of a
+		// tryMark/commitMark pair, so a full-mode frozen replacement always carries a marker and
+		// len(keys) == 0 implies a degraded mode.
+		rep.Irreversible = true
+	}
 	for _, k := range keys {
 		c.Store.Put(k, []byte(content)) // refresh the stashed original for expand
 	}

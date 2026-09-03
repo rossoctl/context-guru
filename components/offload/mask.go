@@ -77,7 +77,7 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 		// the tail boundary: the agent re-sends the original, so we must re-mask it to the
 		// same bytes or it reverts full→masked→full and churns the provider KV cache. This
 		// also skips kept-verbatim content (see reapplyFrozen).
-		if fk, _, ok := reapplyFrozen(c, m.Name(), msg); ok {
+		if fk, _, ok := reapplyFrozen(c, rep, m.Name(), msg); ok {
 			changed++
 			keys = append(keys, fk...)
 			continue

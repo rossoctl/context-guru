@@ -148,7 +148,7 @@ func (s *Skeleton) Offload(req *schemas.BifrostChatRequest, rep *components.Repo
 		// Replay a frozen decision at ANY depth: the agent re-sends the original every
 		// turn, so not re-eliding it would flip the message skeleton→full→skeleton and
 		// churn the provider's KV cache. Same contract as mask/failed_run/readlifecycle.
-		if fk, _, ok := reapplyFrozen(c, s.Name(), m); ok {
+		if fk, _, ok := reapplyFrozen(c, rep, s.Name(), m); ok {
 			emitted++
 			keys = append(keys, fk...)
 			continue

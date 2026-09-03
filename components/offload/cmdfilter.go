@@ -140,7 +140,7 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 		// reapplyFrozen also re-Puts the stashed original for every marker in the
 		// replacement, so the expand loop keeps working across turns, and it declines
 		// content the agent has expanded (kept-verbatim).
-		if fk, _, ok := reapplyFrozen(c, f.Name(), m); ok {
+		if fk, _, ok := reapplyFrozen(c, rep, f.Name(), m); ok {
 			changed++
 			keys = append(keys, fk...)
 			continue

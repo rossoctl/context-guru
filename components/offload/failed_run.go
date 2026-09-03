@@ -120,7 +120,7 @@ func (fr *FailedRun) Offload(req *schemas.BifrostChatRequest, rep *components.Re
 		// Reapply a previously-frozen collapse on EVERY turn (cache-stable), regardless
 		// of the tail boundary — the agent re-sends the original, so we must re-collapse
 		// it to the same bytes or it reverts to full and churns the cache.
-		if fk, _, ok := reapplyFrozen(c, fr.Name(), m); ok {
+		if fk, _, ok := reapplyFrozen(c, rep, fr.Name(), m); ok {
 			changed++
 			keys = append(keys, fk...)
 			continue
