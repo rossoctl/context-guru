@@ -71,6 +71,9 @@ func TestAnExhaustedRewindReserveNeitherStampsUnbackedMarkersNorHidesItself(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Captured before the request, so the dangling-marker assertion below measures what THIS
+	// fixture did rather than what the whole test binary has accumulated.
+	missingBefore := offloadStashMissing()
 	resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
@@ -158,9 +161,14 @@ func TestAnExhaustedRewindReserveNeitherStampsUnbackedMarkersNorHidesItself(t *t
 		t.Error(`/stats does not render a "stash_missing" key, so the one reserve outcome that ` +
 			`genuinely breaks reversibility is indistinguishable from the safe one`)
 	}
-	if snap.StashMissing != 0 {
-		t.Errorf("/stats stash_missing = %d in a fixture where every refusal left the content "+
-			"verbatim; a declined removal is being counted as a dangling marker", snap.StashMissing)
+	// BASELINE-RELATIVE, because StashMissing is a PROCESS-WIDE counter shared with every other
+	// test in this binary — TestStatsPublishesDanglingReplaysFromTheLiveCounter below deliberately
+	// drives it non-zero. An absolute `!= 0` therefore passed on the first run and failed on the
+	// second under -count=2, which is the class of defect #192 already documents; this assertion
+	// was a third instance of it.
+	if got := snap.StashMissing - missingBefore; got != 0 {
+		t.Errorf("/stats stash_missing moved by %d in a fixture where every refusal left the "+
+			"content verbatim; a declined removal is being counted as a dangling marker", got)
 	}
 }
 
