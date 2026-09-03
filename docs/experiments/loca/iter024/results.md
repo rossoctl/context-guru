@@ -45,34 +45,49 @@ attributable figures, which nothing before iteration 024 could produce. Across 7
 **$0.72**, because a removal banks at cache-read rates. So the mechanism's return does not show up in its
 token ledger at all — it shows up in reward. −$19.53 of measured loss bought +10 solves.
 
-**Two caches share a keyspace, and it recovers 57% of the spend — accounting confirmed, MECHANISM NOT.**
+**Two components share one result cache, and it recovers 57% of the spend. MECHANISM NOW ESTABLISHED.**
 
 What is measured: `extract_llm` books **$11.58 at $0.00**, from **0 fresh calls and 364 replays**, in arm B
-only — 4,749 calls avoided at a 99.2% cache hit rate. The sweep is the only writer to that extraction
-result cache (its drop path calls `putResult(c, cands[k].id, desc, "")`, keyed by content id, so its
-verdicts replay on later turns), and `extract_llm` reads the same cache so the tail pass does not re-call
-the model on content it already compacted. So the entries come from the sweep, across turns.
+only — 4,749 calls avoided at a 99.2% cache hit rate.
 
-**What is NOT established is the path.** An earlier draft of this file asserted one, and it does not
-survive its own pipeline order: `extract_llm` runs **before** `extract_llm_sweep` within a request, so the
-sweep's same-turn decisions cannot feed it. Two candidate cross-turn paths were checked and both are
-closed by the counters:
+**The sharing is documented, not accidental.** `store.ResultPrefix` carries its own comment:
 
-* **expand-restore** — sweep drops, the agent expands, the restored content becomes a fresh tail candidate.
-  Expansion *is* far higher in arm B (`kept_verbatim_after_expand` **9,478 against 3,522**), so the
-  expanding happens — but that gate means `extract_llm` **skips** expanded content rather than compacting
-  it, so the path is closed.
-* **the tail/prefix boundary moving as the transcript grows** — closed by `cached_prefix` dominating at
-  **29,302**, i.e. candidates are overwhelmingly skipped as *not tail*.
+```go
+ResultPrefix = "cg:res:" // extract_llm's replayed result (projection + summary, one key)
+```
 
-So the recovery is real in its accounting and unexplained in its mechanism. **That matters commercially,
-not just intellectually:** 57% of this configuration's cost recovery rests on a behaviour nobody has
-identified, in a cache neither component documents sharing. If either component's keying changes it could
-vanish with no change to the sweep at all, taking the cost story with it. It needs the mechanism found and
-then either a test pinning it or an explicit decision to depend on it.
+The sweep's drop path calls `putResult(...)`, and `putResult`/`getResult` are **shared helpers** in
+`components/offload/state.go`, keyed `cg:res:<session>:<content-id>`. So the sweep writes its verdicts into
+a namespace the code names as *extract_llm's*, through a helper both components call. Not a keyspace
+collision — one cache with two writers, by construction.
 
-`acted_fresh` vs `acted_replay` is what separates the two: `extract_llm` is 364 replay / **0 fresh**; the
-sweep is 95 fresh / 0 replay (seed 1). Before #178 both were pooled and neither was visible.
+**Which resolves the ordering objection.** `extract_llm` runs BEFORE `extract_llm_sweep` within a request,
+so the sweep cannot feed it in the same turn — and an earlier draft of this file asserted a mechanism that
+foundered on exactly that. The resolution is that the cache is **content-addressed, not positional**, and
+persists across turns: `extract_llm` never needs to have seen the content first, only to encounter a
+content id on some later turn that the sweep already ruled on.
+
+**And the control flow says which ids those are.** In `extract_llm.go` the marker skip is at **line 848**
+and the cache lookup at **line 868** — the skip comes first, so a marker-bearing message never reaches
+`getResult`. Every one of the 364 replays was therefore on content carrying **no marker**, which leaves one
+possibility: the same content recurring at a fresh position, which is routine agent behaviour (re-reading a
+file, re-running a command) and is consistent with a 99.2% hit rate.
+
+Two candidate paths were checked and closed on the way here, and are recorded so they are not re-proposed:
+**expand-restore** fails because expansion is far higher in arm B (`kept_verbatim_after_expand` **9,478
+against 3,522**) but that gate makes `extract_llm` *skip* expanded content; **the tail/prefix boundary
+moving** fails because `cached_prefix` dominates at **29,302**, so candidates are overwhelmingly skipped as
+not-tail.
+
+**What this means for the cost figure, and it is not reassuring.** Those `cg:res:` entries are *pinned*, so
+#187's eviction defect never touched them — but #188's fix **refuses removals** when the payload reserve is
+full, and no removal means no `putResult`, which means no entry to replay. So the recovery scales with how
+often the sweep actually acts, and it moves in both directions under that fix: a larger store
+(1,000 → 5,000 entries) admits more removals and more recovery, while refusals under pressure suppress
+both. **The −$7.95 should not be expected to reproduce.**
+
+`acted_fresh` vs `acted_replay` is what separates the two components: `extract_llm` is 364 replay / **0
+fresh**; the sweep is 95 fresh / 0 replay (seed 1). Before #178 both were pooled and neither was visible.
 
 ## 2b. A reversibility failure, arm B only — 175 expands the agent could not resolve
 
@@ -137,8 +152,9 @@ about the shipped configuration. Nor is it a claim about `coref`-the-component, 
 
 1. **Not the shipped config.** See above; identical across arms so it cannot bias B−A, but B is not
    `housellm` and `extract_llm` runs unpinned (#120/#134).
-2. **The recovery channel's mechanism is unidentified** (section 2). Its accounting is confirmed, its
-   cause is not, and two candidate paths were checked and closed. 57% of the cost recovery rests on it.
+2. **The recovery channel is a shared-cache behaviour that nothing tests** (section 2). The mechanism is
+   now established, but no test pins it, and #188's refusal path can suppress it. 57% of the cost recovery
+   rests on a documented-but-unguarded interaction between two components.
 3. **175 unresolved expands in arm B, 0 in arm A** (section 2b), recurring from iteration 023's 60. Under
    investigation as a suspected defect.
 4. **`coref` was not measured.** Its own question is still open from iteration 023.
