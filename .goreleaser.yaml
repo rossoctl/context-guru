@@ -1,0 +1,111 @@
+# GoReleaser: the release artifacts an evaluator downloads instead of installing a toolchain.
+#
+# The whole file is a plain GOOS/GOARCH matrix with no C cross-toolchains, no zig, and no
+# libc coupling, because `CGO_ENABLED=0` builds the shipped binary. That is verified rather
+# than assumed — the `Assert the binary is pure Go` step in .github/workflows/release.yaml fails
+# the release if a cgo dependency ever escapes the cg_skeleton build tag. Measured directly on
+# go 1.26.4:
+# all four targets build, the artifact is 27–34 MB stripped, `file` reports "statically
+# linked" and `ldd` "not a dynamic executable", and the resulting binary serves /healthz.
+#
+# `cg_skeleton` is the ONE thing that needs cgo (tree-sitter), and it is deliberately not
+# built here: it is in no default preset, not in the cache story, and shipping it would mean
+# per-platform C cross-compilation for a component this funnel never runs. Source build is
+# documented in docs/components/skeleton.md.
+#
+# There is no `brews:` block yet — the tap repo and release signing are an open ownership
+# question (spec §"Open questions", 3). Until it is answered the funnel installs from the
+# release tarball, so nothing here depends on a repo that does not exist. Adding the tap
+# later is additive and changes none of the below.
+version: 2
+
+project_name: context-guru
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: context-guru-proxy
+    main: ./cmd/context-guru-proxy
+    binary: context-guru-proxy
+    env:
+      # The point of the whole file. Not inherited from the Makefile, which sets
+      # CGO_ENABLED=1 because `go test -race` needs it — a test-time requirement that was
+      # being read as a shipping requirement.
+      - CGO_ENABLED=0
+    flags:
+      # Reproducible paths in panics, and no VCS stamping (the checkout is shallow in CI).
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      # Same two symbols the Makefile stamps, so `/stats` build_version is populated in a
+      # released binary exactly as it is in a locally built one.
+      - -s -w
+      - -X github.com/rossoctl/context-guru/internal/buildinfo.Version={{ .Version }}
+      - -X github.com/rossoctl/context-guru/internal/buildinfo.Commit={{ .ShortCommit }}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    ids: [context-guru-proxy]
+    # An evaluator untars this into ~/.local/bin, so the archive name is what they see and
+    # the binary inside must be the plain name with no version in it.
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    # Everything unpacks into ONE directory named after the archive.
+    #
+    # Without this GoReleaser writes a flat archive, so LICENSE, README.md and THIRD-PARTY-NOTICES
+    # land at the root — and the extraction command in the footer below (and in the quickstart) has
+    # no -C, so running it in a project directory silently overwrites that project's own README.md
+    # and LICENSE. A person evaluating a proxy for their coding agent is standing in exactly such a
+    # directory.
+    wrap_in_directory: true
+    files:
+      - LICENSE
+      - README.md
+      - THIRD-PARTY-NOTICES
+
+checksums:
+  # The integrity check for every downloaded artifact, and the ONLY one: these binaries are
+  # unsigned (the tap and signing ownership are still open), so nothing else stands between a
+  # tampered tarball and a proxy that handles the user's LLM traffic.
+  #
+  # The plugin's installer verifies against this file and strips macOS quarantine from the
+  # download, which is what makes it load-bearing rather than decorative. That installer is NOT in
+  # this change — it ships with the plugin — so today this file is what a human curling a release
+  # should check by hand.
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+release:
+  prerelease: auto
+  footer: |
+    ## Install
+
+    No Go toolchain and no C compiler are needed — the binary is statically linked.
+
+    Download the tarball for your platform, untar it, and put `context-guru-proxy` on your
+    `PATH`. The archive unpacks into its own directory, so this is safe to run anywhere:
+
+    ```
+    tar xzf context-guru_*_darwin_arm64.tar.gz
+    install -m 755 context-guru_*/context-guru-proxy ~/.local/bin/
+    ```
+
+    Then see `docs/get-started/quickstart-proxy.md`.

@@ -1,0 +1,95 @@
+name: Release
+
+# Tag-driven, so a release is something a maintainer does on purpose. The `workflow_dispatch`
+# entry builds the same matrix WITHOUT publishing (snapshot mode), which is how the release
+# path gets exercised before there is a tag to regret.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # Only the tag path publishes, and only this job needs the write.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # GoReleaser's changelog needs the history the default shallow clone does not have.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          # Same source as CI (go.mod), deliberately: an artifact people download must be built
+          # with the toolchain CI validated, and a literal here is how that drifts apart.
+          go-version-file: go.mod
+
+      # The claim the release rests on, asserted in CI rather than trusted: the shipped
+      # binary needs no C toolchain. CGO_ENABLED=0 with no compiler on PATH would fail loudly
+      # here if a cgo dependency ever escaped the cg_skeleton build tag — which is exactly the
+      # regression that would otherwise be discovered by an evaluator, at install time.
+      - name: Assert the binary is pure Go
+        env:
+          CGO_ENABLED: "0"
+          CC: /nonexistent-c-compiler
+        run: |
+          go build -o /tmp/cg-purego ./cmd/context-guru-proxy
+          file /tmp/cg-purego | tee /dev/stderr | grep -q "statically linked"
+          # And it has to actually start, not just link.
+          /tmp/cg-purego --listen 127.0.0.1:4471 --preset cache &
+          for _ in $(seq 1 40); do
+            sleep 0.25
+            curl -fsS http://127.0.0.1:4471/healthz && break
+          done
+          curl -fsS http://127.0.0.1:4471/healthz | grep -q ok
+          # An installer asks the binary what it is; make sure it can answer.
+          /tmp/cg-purego --version | tee /dev/stderr | grep -q context-guru-proxy
+
+      # Nothing tested the configuration we actually SHIP.
+      #
+      # ci.yaml runs the suite only with CGO_ENABLED=1, and a tag push previously published
+      # without running any tests at all. So the one guard that matters most to a released
+      # artifact — TestEveryPresetBuilds, which catches a preset naming a component that is not
+      # registered in a CGO-free binary — was never executed in the CGO-free configuration. That
+      # is exactly the `preset: coding` / `unknown component "skeleton"` failure, in a build no
+      # developer runs locally.
+      #
+      # The race detector needs cgo, so this cannot be the whole suite; it is the packages whose
+      # behaviour depends on which components are compiled in.
+      - name: Test the shipped configuration (CGO off, no race detector)
+        env:
+          CGO_ENABLED: "0"
+        # -p 1 for the reason ci.yaml's purego job documents: on a 2-core runner, parallel package
+        # binaries provoked a real flake (#163), and this workflow runs the full suite a few steps
+        # below as well, so the contention here is at least as bad. A tag push must not fail to
+        # publish for a cause already diagnosed and mitigated one file over.
+        run: go test -p 1 ./config/... ./components/... ./apply/... ./proxy/... ./store/...
+
+      # A tag must not publish something the full suite has not seen.
+      - name: Full test suite
+        env:
+          CGO_ENABLED: "1"
+        run: go test ./...
+
+      - name: Release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          # A tag publishes; a manual run builds the full matrix and publishes nothing.
+          args: ${{ startsWith(github.ref, 'refs/tags/v') && 'release --clean' || 'release --clean --snapshot' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload snapshot artifacts
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-dist
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          retention-days: 7

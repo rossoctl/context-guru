@@ -3,19 +3,31 @@
 Run context-guru in front of your provider and point an agent at it. One port serves both
 the OpenAI and Anthropic dialects.
 
-You need **Go 1.26**. You do **not** need a C toolchain: `make build` builds with cgo disabled, and
-the result is a statically linked binary with no runtime dependencies. Everything else is a normal
-module dependency — build straight from the repo root.
+**You need no toolchain at all to run it.** The shipped binary is statically linked pure Go — no C
+compiler, no Go install, no runtime dependencies. Grab it from
+[Releases](https://github.com/rossoctl/context-guru/releases):
+
+```sh
+# Pick your platform: linux/darwin × amd64/arm64. The archive unpacks into its own
+# directory, so this is safe to run from anywhere — including a project checkout.
+tar xzf context-guru_*_darwin_arm64.tar.gz
+install -m 755 context-guru_*/context-guru-proxy ~/.local/bin/
+```
+
+To build from source instead you need **Go 1.26** — and still no C toolchain: `make build` builds
+with cgo disabled and produces the same statically linked binary. CI asserts that natively for
+linux/amd64 (the `purego` job), and the release workflow asserts it again before publishing.
 
 A C compiler is needed for exactly two things: `make test` (the race detector requires cgo) and the
 optional [`skeleton`](../components/skeleton.md) component's `cg_skeleton` build tag.
 
 ## Steps
 
-1. Build:
+1. Build (source path only — skip if you downloaded a release):
 
     ```sh
     make build                     # → bin/context-guru-proxy
+    make build-static              # the pure-Go build releases ship (CGO_ENABLED=0)
     ```
 
 2. Run it. It listens on `:4000`; set `LISTEN_ADDR` to change that.

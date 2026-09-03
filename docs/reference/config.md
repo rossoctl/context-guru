@@ -106,7 +106,9 @@ for every component's config block.
 |---|---|---|
 | `--preset` / `PRESET` | `house` | Pipeline preset when no `--config`. `codesmart` is the SWE-bench arm and must be asked for by name. |
 | `--config` / `CONFIG` | — | YAML config file (overrides preset). |
-| `LISTEN_ADDR` | `:4000` | Listen address. |
+| `--listen` / `LISTEN_ADDR` | `:4000` | Listen address. The flag exists so the port is visible in `ps` and to a supervisor; before it, the address reached the process only through the environment. |
+| `--version` | — | Print version and commit, then exit. |
+| `--idle-exit` / `IDLE_EXIT` | `0` (never) | Exit after this long with **no requests and no keep-alive ping pending**, so a proxy started on demand does not outlive its use. Refused at startup below `max(2 × store.ttl_seconds, 1h)` — 5h33m20s at the default TTL — because exiting clears the in-memory store, and losing a frozen decision re-bills its whole prefix as cache creation. Also refused together with `--upstreams`: a gateway serving other people's agents must not self-terminate. Liveness probes (`/healthz`, `/metrics`) deliberately do **not** count as activity; anything else does, including the dashboard's own polling. |
 | `--openai-upstream` / `OPENAI_UPSTREAM` | `https://api.openai.com` | OpenAI upstream base. |
 | `--anthropic-upstream` / `ANTHROPIC_UPSTREAM` | `https://api.anthropic.com` | Anthropic upstream base. |
 | `--bob-upstream` / `BOB_UPSTREAM` | — | Bob (BobShell) backend base. Setting it mounts the [Bob gateway routes](routes.md#bob-bobshell-gateway-routes); unset, an unknown path 404s as before. |

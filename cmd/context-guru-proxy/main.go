@@ -63,7 +63,13 @@ func listenAndAnnounce(addr string, attrs ...any) (net.Listener, error) {
 
 func main() {
 	var (
-		addr      = envOr("LISTEN_ADDR", ":4000")
+		// --listen, not just LISTEN_ADDR. Two reasons beyond taste: an operator reading `ps`
+		// could not tell which port an instance held (the address reached it only through the
+		// environment), and a supervisor that needs to stop ONE instance among several had
+		// nothing in the command line to match on. Pattern-matching a process for shutdown is
+		// still the wrong tool — but when it happens, the port must at least be visible.
+		addrFlag  = flag.String("listen", envOr("LISTEN_ADDR", ":4000"), "address to listen on")
+		showVer   = flag.Bool("version", false, "print version and exit")
 		cfgPath   = flag.String("config", envOr("CONFIG", ""), "path to context-guru YAML config")
 		preset    = flag.String("preset", envOr("PRESET", "house"), "preset to use when --config is absent (house = the service default, deterministic; housellm = the same plus the compaction-model pass; codesmart/codesafe = the SWE-bench study's configs, kept so its published numbers stay reproducible)")
 		openai    = flag.String("openai-upstream", envOr("OPENAI_UPSTREAM", "https://api.openai.com"), "OpenAI upstream base URL")
@@ -78,6 +84,19 @@ func main() {
 		bob       = flag.String("bob-upstream", envOr("BOB_UPSTREAM", ""), "Bob (BobShell) backend base URL; enables the Bob gateway routes when set (e.g. https://api.us-east.bob.ibm.com)")
 		storeFlag = flag.String("store", envOr("STORE", ""), "override state store: true|false (default: config store.enabled, else on)")
 		modeFlag  = flag.String("mode", envOr("MODE", ""), "operating mode: sync (default) | observe (overrides the config's mode:)")
+		// OFF by default, and it must stay that way: a gateway or eval-containers deployment
+		// that self-terminates is a much worse failure than a laptop process left running.
+		//
+		// It is meant to be paired with something that starts the proxy again on demand — the
+		// Claude Code plugin's SessionStart hook does that, and self-kill without a
+		// resurrection path is a footgun. That hook is NOT in this change: it ships with the
+		// plugin. Until then, anyone setting this by hand is choosing a proxy that will exit
+		// and stay exited, and the docs say so rather than implying a pairing that is not here.
+		//
+		// The floor and the gateway refusal are enforced in checkIdleExit, not documented.
+		idleExit = flag.Duration("idle-exit", envDuration("IDLE_EXIT", 0),
+			"exit after this long with no requests and no keep-alive ping pending (0 = never; "+
+				"must be at least 2x store.ttl_seconds, see store.IdleExitFloor)")
 
 		// Dashboard. Off by default so an existing deployment's behavior and route
 		// table are unchanged until asked for; on, it adds /dashboard/ + /api/*.
@@ -190,11 +209,25 @@ func main() {
 	)
 	flag.Parse()
 
+	// --version before anything else: an installer asks a binary what it is, and it must be
+	// able to ask without starting a server or needing a config. buildinfo.Version was already
+	// compiled in and reachable only via /stats, which requires a running proxy — so
+	// `context-guru-proxy --version` was answered by the flag package's usage text, and an
+	// installer parsing it recorded "Usage of context-guru-proxy:" as the installed version.
+	if *showVer {
+		fmt.Printf("context-guru-proxy %s (commit %s)\n", buildinfo.Version, buildinfo.Commit)
+		return
+	}
+	addr := *addrFlag
+
 	// Logging first, before anything can want to log. Level, format and sink come from
 	// the environment (CG_LOG_LEVEL / CG_LOG_FORMAT / CG_LOG_FILE / CG_LOG_PLAIN) rather
 	// than flags, because the two places that set them are a systemd drop-in and a shell,
 	// and both already speak environment. See internal/logging.
 	sink := logging.Setup()
+	// Now that --version has returned and the log sink exists, refuse any malformed duration the
+	// var(...) block recorded. Deliberately before the config load and before anything is opened.
+	checkEnvDurations()
 
 	cfg, err := loadConfig(*cfgPath, *preset)
 	if err != nil {
@@ -209,6 +242,19 @@ func main() {
 	}
 	if v, ok := parseBool(*storeFlag); ok {
 		cfg.Store.Enabled = &v // flag/env wins over the config file when set
+	}
+
+	// Refuse a bad --idle-exit HERE, immediately after the config is resolved and before
+	// anything is opened.
+	//
+	// It moved twice. First it sat after the "listening" line, so a rejected configuration read
+	// as a crash. Then it sat after the dashboard and control databases are opened — and
+	// log.Fatalf calls os.Exit, which runs no defers, so a first-time user who typed
+	// `--idle-exit 30m` got both SQLite files created and migrated and then an abrupt exit with
+	// WAL/-shm left behind. Everything the check reads (the flags, cfg.Store) is known right
+	// here, so the refusal costs nothing and leaves nothing behind.
+	if err := checkIdleExit(*idleExit, *upstreamsPath, *bob, cfg.Store); err != nil {
+		log.Fatalf("context-guru: %v", err)
 	}
 
 	agg := metrics.NewAggregator()
@@ -578,9 +624,23 @@ func main() {
 		log.Fatalf("listen: %v", err)
 	}
 
+	// Activity stamping is wired ONLY when the watchdog is on, so an ordinary deployment's
+	// handler chain is byte-identical to before.
+	mux := h.Mux()
+	var handler http.Handler = mux
+	act := &activityClock{}
+	if *idleExit > 0 {
+		// Launch counts as activity, so the threshold is measured from a moment that means
+		// something rather than from whenever the watchdog goroutine is first scheduled.
+		act.touch(time.Now())
+		handler = stampActivity(mux, act, time.Now)
+		slog.Info("context-guru: idle-exit armed", "after", *idleExit,
+			"check_every", idleCheckInterval(*idleExit))
+	}
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: h.Mux(),
+		Handler: handler,
 		// ReadHeaderTimeout is the one that matters for a service on a network: without
 		// it, a client that opens a connection and never finishes its headers holds a
 		// goroutine and a file descriptor indefinitely.
@@ -600,12 +660,36 @@ func main() {
 	// Graceful shutdown, so the dashboard's writer goroutine flushes its batch and any
 	// in-flight archive upload is not abandoned halfway. Without this, a restart loses
 	// the last few hundred milliseconds of captured requests every time.
+	//
+	// Both reasons to stop — a signal, and the idle watchdog — converge on ONE teardown, so
+	// the self-terminating path cannot drift from the one that is known to work.
 	idle := make(chan struct{})
+	why := make(chan string, 2)
+	stopWatch := make(chan struct{})
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		s := <-sig
-		slog.Info("context-guru: shutting down", "signal", s.String())
+		why <- "signal " + s.String()
+	}()
+	if *idleExit > 0 {
+		t := time.NewTicker(idleCheckInterval(*idleExit))
+		go func() {
+			defer t.Stop()
+			// h.PendingPings is the half of "idle" that requests cannot express: the
+			// keep-alive works precisely when no client traffic is arriving.
+			if reason, ok := watchIdle(idleExitOptions{
+				threshold: *idleExit, act: act, pending: h.PendingPings,
+				now: time.Now, tick: t.C, stop: stopWatch,
+			}); ok {
+				why <- reason
+			}
+		}()
+	}
+	go func() {
+		reason := <-why
+		close(stopWatch)
+		slog.Info("context-guru: shutting down", "reason", reason)
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
@@ -947,12 +1031,54 @@ func envInt(key string, def int) int {
 	return def
 }
 
-// envDuration reads a Go duration environment variable (e.g. "72h").
+// badDurations collects environment variables whose value is not a duration, so the refusal can
+// happen at a moment where it is safe to refuse. See checkEnvDurations.
+var badDurations []string
+
+// envDuration reads a duration from the environment, falling back to def.
+//
+// A NON-EMPTY value that does not parse is REFUSED — but not here, and that distinction is the
+// whole point. Every call site is a default expression in main's var(...) block, which Go evaluates
+// before flag.Parse, so exiting from inside this function ran before the --version short-circuit
+// existed to be reached: `IDLE_EXIT=86400 context-guru-proxy --version` died with a parse error
+// instead of printing the version, which is exactly what an installer asks for and what the release
+// workflow greps. It also ran before logging.Setup(), so the message never reached CG_LOG_FILE.
+//
+// So the value is recorded and checkEnvDurations refuses later, past --version and past the log
+// sink. Refusing at all — rather than silently falling back, which is what this used to do — is
+// still the right behaviour: every caller is a timeout, a retention window or a process lifetime,
+// and `IDLE_EXIT=86400` meant "never exit" with no output whose absence anyone would notice.
 func envDuration(key string, def time.Duration) time.Duration {
-	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv(key))); err == nil {
-		return d
+	d, err := parseEnvDuration(os.Getenv(key), def)
+	if err != nil {
+		badDurations = append(badDurations,
+			fmt.Sprintf("%s=%q (%v)", key, strings.TrimSpace(os.Getenv(key)), err))
+		return def
 	}
-	return def
+	return d
+}
+
+// checkEnvDurations refuses every malformed duration at once, or returns.
+//
+// All of them, not the first: an operator fixing a typo should not have to restart to discover the
+// next one. Called after flag.Parse and after the log sink is up, so `--version` and `--help` still
+// work and the message lands wherever the logs go.
+func checkEnvDurations() {
+	if len(badDurations) == 0 {
+		return
+	}
+	log.Fatalf("context-guru: not a duration: %s. Use a unit — 24h, 30m, 1500ms — or unset it to "+
+		"accept the default.", strings.Join(badDurations, "; "))
+}
+
+// parseEnvDuration is envDuration's decision, split out so it can be tested without a process
+// that calls os.Exit. Empty means "not set" and yields the default; anything else must parse.
+func parseEnvDuration(raw string, def time.Duration) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def, nil
+	}
+	return time.ParseDuration(raw)
 }
 
 func envOr(key, def string) string {
