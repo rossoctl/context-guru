@@ -1915,6 +1915,10 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		snap.FrozenFlips = snap.FrozenDropped - snap.FrozenRepaired
 		st := fl.StashStats()
 		snap.StashLive, snap.StashCapacity, snap.StashExpired = st.Live, st.Capacity, st.Expired
+		// Published alongside Expired, never instead of it: the pair is what says whether the
+		// shorter payload TTL is being absorbed by the per-turn re-stash or is running ahead of
+		// it. Expired alone reported both outcomes at once.
+		snap.StashRevived = st.Revived
 		snap.StashBytes, snap.StashMaxBytes = st.Bytes, st.MaxBytes
 	}
 	// Cached-prefix restarts after an agent compaction. Same layering as the pool counters

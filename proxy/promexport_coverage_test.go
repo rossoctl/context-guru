@@ -96,6 +96,7 @@ var notExportedWhy = map[string]string{
 	"StashRefused":              "cg_stash_refused_total, from offload.StashRefusals()",
 	"StashMissing":              "cg_stash_missing_total, from offload.StashMissing()",
 	"StashExpired":              "cg_stash_expired_total, from store.Memory.StashStats()",
+	"StashRevived":              "cg_stash_revived_total, from store.Memory.StashStats()",
 	"StashLive":                 `cg_stash_reserve_entries{state="live"}, from store.Memory.StashStats()`,
 	"StashCapacity":             `cg_stash_reserve_entries{state="capacity"}, from store.Memory.StashStats()`,
 	"StashBytes":                `cg_stash_reserve_bytes{state="live"}, from store.Memory.StashStats()`,
