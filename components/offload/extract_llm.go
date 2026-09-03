@@ -1452,19 +1452,36 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// is documented as "the never-worse outcome — the same condition that spliced the
 			// result above, so the log cannot say accepted while the request kept the original",
 			// and that claim is only true if it is set here.
-			calls[k].Accepted = true
-			calls[k].SavedTokens = out[k].saved
 			// Feed the observed ratio so the gate prices future calls on what this workload
 			// actually achieves. Only a splice is evidence of that: a result the reserve refused
 			// tells us the model CAN shrink this content and that we could not use it, and a
 			// future call will be refused the same way — so crediting the ratio would keep the
 			// gate authorising calls whose output is discarded. A model that produced nothing is
 			// separate evidence and is still observed as ratio 0, in runCall.
-			e.ratios.observe(out[k].saved, out[k].before)
-			metrics.RecordExtractionSaving(rep.Component, out[k].saved)
-			// What the removal was WORTH, at this turn's regime. On a cold sweep that is the
-			// cache-write rate; the replays above are credited at the read rate.
-			metrics.RecordExtractionValue(rep.Component, float64(out[k].saved)*val.perToken)
+			//
+			// THE COST OF NOT OBSERVING, stated because the choice is a trade and not a free win:
+			// under a persistently saturated reserve nothing advances r.total, so ratio() stays
+			// pinned to its prior and exploring() keeps granting maxExploreCalls per session
+			// instead of self-terminating once the sample is large enough. That is a small
+			// permanent spend on exactly the deployments this change is for. It is bounded per
+			// session and it buys a tracker that is not lying, which is the better side of the
+			// trade — but the previous behaviour did terminate exploration, and pretending
+			// otherwise would misread the diff.
+			//
+			// Only for a slot that actually made a call. A single-flight FOLLOWER returns before
+			// filling its slot, so before is 0 there and the three lines below would book zeros —
+			// and set Accepted on a row whose Component is "" — for a splice that did happen. The
+			// follower's saving goes unbooked either way (its leader books the shared result once);
+			// what this guard removes is the pretence of measuring it.
+			if out[k].before > 0 {
+				calls[k].Accepted = true
+				calls[k].SavedTokens = out[k].saved
+				e.ratios.observe(out[k].saved, out[k].before)
+				metrics.RecordExtractionSaving(rep.Component, out[k].saved)
+				// What the removal was WORTH, at this turn's regime. On a cold sweep that is the
+				// cache-write rate; the replays above are credited at the read rate.
+				metrics.RecordExtractionValue(rep.Component, float64(out[k].saved)*val.perToken)
+			}
 			putResult(c, cands[k].id, out[k].projected, out[k].summary)
 			if !e.rewrite || effectiveMode(c, e.mode) == markerFull {
 				putResultGlobal(c, extract.ResultKey(cands[k].id, e.modelName, extCfg),

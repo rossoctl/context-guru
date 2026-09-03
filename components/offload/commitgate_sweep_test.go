@@ -55,6 +55,69 @@ func TestSweepFreezesNoDecisionForADropThatDidNotHappen(t *testing.T) {
 	}
 }
 
+// The two rejection reasons must be TELLABLE APART, and one of them was unreachable.
+//
+// `adjudicate` names what it judged spent; phase 3 decides what actually got dropped. When the
+// adjudicator found nothing, the row says "nothing was spent". When it found plenty and the reserve
+// refused every one, the row has to say something else — otherwise the reserve-exhausted case reads
+// as a plain rejection, which is the whole reason the second reason exists.
+//
+// It was dead code on arrival: moving the metrics out of the verdict loop deleted `removed`'s only
+// assignment, so `removed == 0` was always true, every adjudication stamped "nothing was spent",
+// and the `Rejection == ""` guard on the second reason never opened. Nothing caught it because the
+// variable was still read, so it compiled and the suite stayed green.
+func TestSweepTellsAReserveRefusalApartFromNothingSpent(t *testing.T) {
+	t.Run("nothing was spent", func(t *testing.T) {
+		asker := &labelAsker{verdict: "keep", needed: "none"}
+		asker.cacheRead = 19595
+		e := newSweepSmall(t, "")
+		st := store.NewMemory(store.Options{MaxEntries: 400})
+		rep := &components.Report{Component: "extract_llm_sweep"}
+		if _, err := e.Offload(sweepReqStocked(), rep, preExpiryCtx("s", asker, st)); err != nil {
+			t.Fatal(err)
+		}
+		assertSweepRejection(t, rep, "adjudicated: nothing was spent")
+	})
+	t.Run("spent but no drop could be applied", func(t *testing.T) {
+		asker := &labelAsker{verdict: "drop", needed: "none"}
+		asker.cacheRead = 19595
+		e := newSweepSmall(t, "")
+		// A store that refuses every payload: the adjudicator judges outputs spent and phase 3
+		// declines all of them.
+		spy := &spyStore{Memory: store.NewMemory(store.Options{MaxEntries: 400})}
+		rep := &components.Report{Component: "extract_llm_sweep"}
+		if _, err := e.Offload(sweepReqStocked(), rep, preExpiryCtx("s", asker, spy)); err != nil {
+			t.Fatal(err)
+		}
+		if rep.Events["sweep_dropped"] == 0 {
+			t.Fatal("the adjudicator judged nothing spent, so this is the OTHER case and the " +
+				"assertion below would pass for the wrong reason")
+		}
+		if rep.Gates["stash_reserve_exhausted"] == 0 {
+			t.Fatalf("no drop was refused for want of a reserve slot (gates: %v)", rep.Gates)
+		}
+		assertSweepRejection(t, rep, "adjudicated spent, but no drop could be applied")
+	})
+}
+
+func assertSweepRejection(t *testing.T, rep *components.Report, want string) {
+	t.Helper()
+	if len(rep.Calls) == 0 {
+		t.Fatal("no ModelCall row was reported, so there is no rejection reason to assert on")
+	}
+	for _, call := range rep.Calls {
+		if call.Rejection != want {
+			t.Errorf("rejection = %q, want %q.\nAn operator reading the ledger cannot tell a "+
+				"turn where nothing was worth dropping from a turn where everything was and the "+
+				"store had no room — and those want opposite responses", call.Rejection, want)
+		}
+		if call.Accepted {
+			t.Error("the row says accepted=true alongside a rejection reason: the same " +
+				"self-contradictory row this change set out to remove")
+		}
+	}
+}
+
 // The metrics half on the sweep path: a refused drop must not book its token savings.
 //
 // RecordExtractionValue sat ABOVE the ok check on applySweepDrop's return, so a drop the reserve
@@ -187,5 +250,74 @@ func TestAgentDietDoesNotPayForAReflectionItCannotStash(t *testing.T) {
 	if rep.Gates["stash_reserve_exhausted"] == 0 {
 		t.Errorf("the skip was not recorded as stash_reserve_exhausted, so a run that stopped "+
 			"reducing looks like a run with nothing to reduce (gates: %v)", rep.Gates)
+	}
+}
+
+// The sweep's debug row must carry its OWN economics, and the ledger must carry the WIRE's.
+//
+// Two separate numbers that a single variable used to serve, which is how one of them was lost:
+//
+//   - `removed_tokens` on cg.sweep.ask is what the ADJUDICATOR judged it was freeing. Moving the
+//     metrics out of the verdict loop deleted that variable's only assignment, so the field went
+//     permanently 0 and the sweep's economics vanished from the debug log while everything still
+//     compiled and passed.
+//   - the ledger's SavedTokens is what actually reached the wire. Measured against the spliced
+//     message rather than the descriptor, because in markerFull the text written is
+//     descriptor + marker + recovery hint — a descriptor-only subtraction overstates every
+//     candidate by the marker's tokens, and the comment on that line claims it is the wire figure.
+func TestSweepReportsItsOwnEconomicsAndTheWiresSeparately(t *testing.T) {
+	asker := &labelAsker{verdict: "drop", needed: "none"}
+	asker.cacheRead = 19595
+	e := newSweepSmall(t, "")
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	req := sweepReqStocked()
+	originals := make([]string, len(req.Input))
+	for i := range req.Input {
+		originals[i] = schema.MessageText(req.Input[i])
+	}
+	ctx, buf := debugCtx(t)
+	c := preExpiryCtx("s", asker, st)
+	c.Ctx = ctx
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(req, rep, c); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Events["sweep_dropped"] == 0 {
+		t.Fatal("nothing was dropped, so neither figure has anything to report")
+	}
+
+	// --- The adjudicator's own figure reaches the debug row.
+	rows := records(t, buf, "cg.sweep.ask")
+	if len(rows) != 1 {
+		t.Fatalf("expected one cg.sweep.ask record, got %d", len(rows))
+	}
+	removedTokens, ok := rows[0]["removed_tokens"].(float64)
+	if !ok {
+		t.Fatalf("cg.sweep.ask has no numeric removed_tokens field: %v", rows[0])
+	}
+	if removedTokens == 0 {
+		t.Error("cg.sweep.ask reports removed_tokens=0 on a turn that dropped content: the " +
+			"adjudicator's own economics are no longer in the debug log, which is the only place " +
+			"a run's sweep decisions can be reconstructed from")
+	}
+
+	// --- The ledger's figure is the wire's, to the token.
+	wantWire := 0
+	for i := range req.Input {
+		if got := schema.MessageText(req.Input[i]); got != originals[i] {
+			wantWire += schema.TextTokens(originals[i]) - schema.TextTokens(got)
+		}
+	}
+	if wantWire <= 0 {
+		t.Fatal("no message shrank, so there is no wire figure to compare against")
+	}
+	var ledger int
+	for _, call := range rep.Calls {
+		ledger += call.SavedTokens
+	}
+	if ledger != wantWire {
+		t.Errorf("the ledger claims %d saved tokens; the messages actually sent shrank by %d.\n"+
+			"A descriptor-only subtraction ignores the marker and recovery hint that go out with "+
+			"every drop, so the figure overstates by that much per candidate", ledger, wantWire)
 	}
 }

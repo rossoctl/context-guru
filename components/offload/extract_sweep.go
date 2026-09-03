@@ -495,8 +495,14 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			putResult(c, cands[k].id, sweepDescriptor(cands[k].content), "")
 			// Booked here, where the drop is a fact. rep.Replay on the replay path above was
 			// already guarded this way; the fresh path was not.
+			//
+			// Measured against the message AS SPLICED, not against the descriptor. In markerFull
+			// the text written is descriptor + marker + recovery hint, so a descriptor-only
+			// subtraction overstates every candidate by the marker's tokens — and the comment
+			// below claims this figure is what reached the wire, which is the one thing a
+			// descriptor-only number is not.
 			saved := schema.TextTokens(cands[k].content) -
-				schema.TextTokens(sweepDescriptor(cands[k].content))
+				schema.TextTokens(schema.MessageText(req.Input[cands[k].i]))
 			if saved > 0 {
 				applied += saved
 				metrics.RecordExtractionSaving(rep.Component, saved)
@@ -895,7 +901,10 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 
 	var drop []int
 	seen := map[int]bool{}
-	var removed int
+	// judgedTokens is the adjudicator's OWN arithmetic, for the debug row only: what it believed
+	// it was freeing, descriptor-only and before phase 3 has had a chance to refuse any of it.
+	// Deliberately not the ledger's figure — see the rejection test below.
+	var judgedTokens int
 	for _, v := range verdicts {
 		if v.Label < 0 || v.Label >= len(cands) {
 			// A verdict for something we did not offer. NEVER acted on: the label is how a decision is
@@ -949,6 +958,7 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		}
 		r.event("sweep_dropped")
 		drop = append(drop, v.Label)
+		judgedTokens += sz - after
 		// NOT BOOKED HERE. A verdict is a decision, not a removal: phase 3 still has to apply it,
 		// and that can decline — the reserve refuses the payload, or the marker-inclusive
 		// never-worse check fails. The descriptor-only pre-check above catches neither (it is not
@@ -965,17 +975,24 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 			r.gate("sweep_verdict_missing")
 		}
 	}
-	// `removed` is what the ADJUDICATOR judged spent, which is why Accepted/SavedTokens are filled
-	// by the caller after phase 3 rather than here: they describe drops that actually happened, and
-	// the two numbers diverge exactly when the reserve is refusing. The rejection reason is still
-	// this function's to state — it is about the verdict, not about the splice.
-	if removed == 0 {
+	// THE VERDICT SET, not a token total. Accepted/SavedTokens are filled by the caller after
+	// phase 3, because they describe drops that actually HAPPENED and the two diverge exactly when
+	// the reserve is refusing. What is this function's to state is whether the adjudicator judged
+	// anything spent at all — and `drop` IS that set, so it is what the test reads.
+	//
+	// It used to read `removed == 0`, and moving the metrics out of this loop deleted `removed`'s
+	// only assignment while leaving the read: Go then guarantees it stays 0, so EVERY adjudication
+	// stamped "nothing was spent", including ones that dropped content. A row could carry
+	// accepted=true, a large saved_tokens, and "nothing was spent" at once — the same
+	// self-contradictory shape this change set out to remove, arrived at from the other side. The
+	// compiler cannot see it because `removed` is still read.
+	if len(drop) == 0 {
 		r.rec.Rejection = "adjudicated: nothing was spent"
 	}
 	if debugExtractLLM(c) {
 		logging.From(c.Ctx).Debug("cg.sweep.ask", "offered", len(items),
 			"verdicts", len(verdicts), "dropped", len(drop), "candidate_tokens", before,
-			"removed_tokens", removed, "cache_read", usage.CacheRead, "fresh", usage.Fresh)
+			"removed_tokens", judgedTokens, "cache_read", usage.CacheRead, "fresh", usage.Fresh)
 	}
 	return drop, r
 }
