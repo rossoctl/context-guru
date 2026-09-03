@@ -169,6 +169,14 @@ Only the last two are failures, and only they are counted — the number an oper
 confirm accounting is healthy must not be incremented by it being broken. The reason for every
 miss, benign ones included, rides on the `cg.request` log line as `usage_miss`.
 
+**Which of the two you can even get depends on the response path**, and this has already misled
+two readers, so: `unreadable_body` can arise **only** on the sniffed path — the one taken when
+neither proxy-injected tool is advertised on the request (`proxy.go`, `if !advertised`), where usage
+is read from a bounded head+tail window instead of the whole body. When either tool *is* advertised
+— which `inject_expand: always` guarantees from the first turn — a non-streamed response is read
+whole and the window never applies, so a miss there is a dialect or a genuine absence and nothing
+else. `valid_json` in the record below settles it either way without needing to know the path.
+
 **The shape record.** On the first unaccounted response per process, `cg.usage_unaccounted` is
 logged at DEBUG with the response's **key names** — top-level keys, where a usage block was found,
 and the key names inside it — and nothing else. No values and no body: a body dump on agent traffic
