@@ -79,32 +79,41 @@ against 3,522**) but that gate makes `extract_llm` *skip* expanded content; **th
 moving** fails because `cached_prefix` dominates at **29,302**, so candidates are overwhelmingly skipped as
 not-tail.
 
-> **The 9,478 / 3,522 figures are superseded — MEASURED properly below, and both wrong in the same
-> direction.** Two defects. Only **3 of 11** offloaders raise `kept_verbatim_after_expand`
-> (`extract_sweep`, `extract_llm`, `failed_run`); the other eight raise the conflated
-> `marker_or_kept_verbatim` for the same condition. And those figures were **not normalised per request**,
-> while arm B served 2,207 requests against arm A's 1,808.
+> **The 9,478 / 3,522 figures are superseded. The best expansion estimate is B/A = 1.91, and the
+> "combined 1.68" in an earlier version of this note is WITHDRAWN.** Three corrections, each from review:
 >
-> Both gates, all five seeds, per request:
+> | | arm A | arm B | B/A | what it measures |
+> |---|---|---|---|---|
+> | `kept_verbatim_after_expand` (3 components) | 6.63/req | 12.68/req | **1.91** | expansion — a **floor** |
+> | `marker_or_kept_verbatim` (other 8) | 13.09/req | 20.40/req | 1.56 | expansion **mixed with** cross-component marker presence |
+> | ~~combined~~ | ~~19.72~~ | ~~33.08~~ | ~~1.68~~ | **not an expansion rate — do not use** |
 >
-> | | arm A | arm B | B/A |
-> |---|---|---|---|
-> | `kept_verbatim_after_expand` (3 components) | 6.63/req | 12.68/req | **1.91** |
-> | `marker_or_kept_verbatim` (the other 8) | 13.09/req | 20.40/req | **1.56** |
-> | **combined** | **19.72/req** | **33.08/req** | **1.68** |
+> The original counts were split-only **and** unnormalised (arm B served 2,207 requests to arm A's 1,808).
+> But summing the two gates is worse, not better, and the reason is control flow. `marker_or_kept_verbatim`
+> is the *conflated* label — it fires for "already carries a marker" as well as "the agent expanded it" —
+> and on an eleven-component pipeline the first term dominates:
 >
-> So **arm B expands about 1.68x more per request than arm A** — the direction is confirmed by
-> measurement rather than assumed, but the magnitude is smaller than the split-only gate implied (1.91)
-> and much smaller than the raw unnormalised counts implied (2.69).
+> * `mask`, `collapse`, `cmdfilter`, `skeleton`, `readlifecycle` and `agentdiet` call `reapplyFrozen`
+>   **first** and `continue` on a hit (e.g. `collapse.go:113-117`), so a message *that component* compacted
+>   never reaches the gate. What reaches it is content compacted by a **different** component — every turn,
+>   for the rest of the session.
+> * `dedup`, `extract` and `linecap` have **no `reapplyFrozen` at all** (verified: zero call sites), so
+>   their gate fires for any placeholder-bearing content whatever produced it, including their own.
 >
-> The assumption behind "both arms undercount identically" is **false in detail**: `cmdfilter` (3.32 →
-> 6.17) and `dedup` (3.32 → 6.33) roughly double in arm B while `collapse` is flat (3.14 → 3.27). The
-> aggregate direction survives that; a per-component claim would not.
+> Cross-component marker presence is a per-turn, per-message population that **grows with the transcript**;
+> expansion is an occasional event. So summing pulls the ratio toward the marker-presence ratio rather than
+> toward truth — and 1.68 is the more dangerous number to publish precisely because it *looks* like the
+> more conservative one.
 >
-> Separately, `reapplyFrozen`'s kept-verbatim early return raises **no gate at all**, so a turn-N+1 replay
-> flip is attributed to a declined *new* reduction rather than an abandoned *established* compaction —
-> meaning even the combined figure is a floor. Found while #201 was examined; the fourth instance of the
-> counter-splitting rule in **#200**, and the first to reach a published experimental figure.
+> **The per-component spread is a real signal that cannot yet be attributed.** `cmdfilter` 3.32 → 6.17 and
+> `dedup` 3.32 → 6.33 against `collapse` 3.14 → 3.27 is variation in the *conflated* gate, so none of it
+> can be assigned to expansion versus marker presence — and for `dedup` it cannot be expansion-driven in
+> any clean sense, since `dedup` never consults a frozen decision. That is the sharpest available argument
+> for the eight-site split in **#201**: this run produced a real signal the current counters cannot
+> interpret.
+>
+> Even 1.91 is a floor, because `reapplyFrozen`'s kept-verbatim early return raises no gate at all. Fourth
+> instance of the counter-splitting rule in **#200**, and the first to reach a published experimental figure.
 
 
 **TWO CAVEATS ADDED AFTER REVIEW OF #188, and the second one may make the recovery partly illusory.**
