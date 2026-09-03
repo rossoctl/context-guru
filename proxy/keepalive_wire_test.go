@@ -26,14 +26,20 @@ func TestPingWireBytesEndToEndThroughRealSend(t *testing.T) {
 	const cred = "Bearer sk-caller-END-TO-END"
 	const marker = "MY-PRIVATE-SOURCE-CODE-MARKER"
 
-	var got struct {
+	// The handler runs on the test server's goroutine, and the HTTP round trip is not a
+	// happens-before edge, so what it saw comes back over a buffered channel. k.dispatch is
+	// k.fire (inline), so by the time sweep() returns the ping has completed and the value is
+	// already queued -- hence a non-blocking receive, which keeps "no ping fired" observable
+	// as the zero value rather than turning it into a deadlock.
+	type seen struct {
 		body []byte
 		auth string
 	}
+	seenCh := make(chan seen, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b := make([]byte, 1<<20)
 		n, _ := r.Body.Read(b)
-		got.body, got.auth = append([]byte(nil), b[:n]...), r.Header.Get("Authorization")
+		seenCh <- seen{append([]byte(nil), b[:n]...), r.Header.Get("Authorization")}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"usage":{"input_tokens":0,"output_tokens":1,` +
 			`"cache_read_input_tokens":48576,"cache_creation_input_tokens":0}}`))
@@ -82,6 +88,11 @@ func TestPingWireBytesEndToEndThroughRealSend(t *testing.T) {
 
 	if n := k.sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("sweep fired %d pings", n)
+	}
+	var got seen
+	select {
+	case got = <-seenCh:
+	default:
 	}
 	if got.body == nil {
 		t.Fatal("the upstream received no ping")

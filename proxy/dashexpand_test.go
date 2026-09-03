@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rossoctl/context-guru/dash"
@@ -15,12 +16,11 @@ import (
 // tile read zero while /stats showed the true count, and Overview.SavedAdjusted
 // (SavedUnique − ExpandTokens) OVER-REPORTED net savings by the whole bounce.
 func TestDashboardRecordsExpands(t *testing.T) {
-	var calls int
+	var calls atomic.Int64 // an atomic carries the happens-before edge the round trip does not
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
-		calls++
 		w.Header().Set("Content-Type", "application/json")
-		if calls == 1 {
+		if calls.Add(1) == 1 {
 			// The model asks for the offloaded original back.
 			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[` +
 				`{"id":"call_1","type":"function","function":{"name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"}}` +
@@ -46,8 +46,8 @@ func TestDashboardRecordsExpands(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if calls != 2 {
-		t.Fatalf("expected the expand continuation (2 upstream calls), got %d", calls)
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("expected the expand continuation (2 upstream calls), got %d", n)
 	}
 	waitForRows(t, rec, 1)
 
