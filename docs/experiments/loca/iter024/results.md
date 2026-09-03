@@ -98,10 +98,16 @@ arm without the treatment, and it recurs across two iterations.
 | paired turns, **both arms solved** (33) | 29.3 | **33.2** | **+13%** |
 
 The standing hypothesis — from iteration 021's −28% requests — was that the mechanism reaches the same
-reward in fewer turns, so end-user latency improves. **It does not.** Composition explains about half the
-gap (B does solve longer tasks A abandons), but on the 33 pairs where *both* arms solved, B still takes
-**13% more turns**. The mechanism buys accuracy by letting the agent work longer on a managed context, not
-by making it faster.
+reward in fewer turns, so end-user latency improves. **This run does not support it, and cannot cleanly
+test it.** Composition explains about half the gap (B does solve longer tasks A abandons), but on the 33
+pairs where *both* arms solved, B still takes 13% more turns.
+
+**CONFOUNDED, and an earlier draft of this file called it "refuted" — that was too strong.** Section 2b's
+209 unresolved expands are ~2.8 per run against ~33 turns per run, and every one of them is a turn the
+agent spent asking for content and receiving a placeholder, possibly asking again. That could account for
+a meaningful share of the 13%. So the honest statement is **not supported, and partly attributable to a
+reversibility defect** (#187) rather than to the mechanism. Separating them needs a re-run after that fix;
+until then no latency claim should be made in either direction.
 
 That closes a question open since iteration 021, which could not make this split at all. Iteration 023
 found the turn saving sitting on the *failure* path; with five seeds and a paired both-solved comparison,
@@ -120,7 +126,8 @@ axis, and this iteration is the first able to see both at once.
 1. `evidence` + `econ_trigger` improve task success on LOCA at 64k: +10 solves over 75 pairs, 8 tasks
    better and 0 worse, clustered p = 0.0078, harm bounded at 11.2%.
 2. It costs about 9% net, after a recovery channel returns 57% of the spend.
-3. It costs 13% more turns on comparable work. The latency claim is refuted, not merely unsupported.
+3. It costs 13% more turns on comparable work — but that figure is confounded by #187 and cannot yet be
+   attributed to the mechanism. The latency claim is unsupported, not refuted.
 
 **What it does not establish.** One benchmark, one band, 15 clusters. And the arms carry
 `min_inventory: 3` and sweep `min_tokens: 100` — neither a shipped default — so this is **not** a claim
