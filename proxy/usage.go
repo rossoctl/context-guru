@@ -140,6 +140,12 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 		// as an unrecognised dialect would send someone hunting for a field-name gap that is not
 		// there. See sniffer.bytes.
 		//
+		// Reachable only from the SNIFFED path — Handler.stream, taken when neither proxy-injected
+		// tool is advertised. With one advertised (inject_expand: always makes that true from the
+		// first turn) a non-streamed response is read whole and this cannot fire, which is worth
+		// knowing before treating it as a competing explanation for a miss: that mistake has been
+		// made twice, in both directions, from reading the call sites out of order.
+		//
 		// Narrower than "the response was truncated", and deliberately so: gjson SCANS rather
 		// than walking a tree, so a spliced document whose top-level `usage` survived is read
 		// correctly above and never reaches here. This fires only when the splice actually hid
