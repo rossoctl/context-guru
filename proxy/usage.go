@@ -1,7 +1,11 @@
 package proxy
 
 import (
+	"log/slog"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/tidwall/gjson"
 )
@@ -40,6 +44,61 @@ type Usage struct {
 	StopReason string
 }
 
+// usageMiss says WHY no billed tiers came back, because "ok=false" meant five different things
+// and nothing distinguished them (#200). Only two of the five are benign, and the other three
+// call for THREE DIFFERENT REMEDIES — which is the whole argument for classifying rather than
+// counting: a shared signal reports "nothing to account" and "token accounting is offline" with
+// one value, and the second is silent by construction (a healthy 200, correct savings counters,
+// correct latency, and three token fields quietly at 0).
+//
+// It ran for 4,015 of 4,015 requests in one benchmark iteration and was found two iterations
+// later, in a post-mortem chasing a different question.
+type usageMiss uint8
+
+const (
+	usageMissNone       usageMiss = iota // tiers were read; not a miss
+	usageMissNoBody                      // nothing to look at (empty response). BENIGN
+	usageMissAbsent                      // no usage block anywhere we know to look. BENIGN
+	usageMissZero                        // a recognised block, every tier zero. LEGITIMATE
+	usageMissUnparsed                    // a block IS there, no recognised spelling read it
+	usageMissUnreadable                  // the bytes are not parseable, so nothing could be sought
+)
+
+// String is the reason as it appears in the lifecycle log line, so an operator reading
+// `usage_reported=false` can see which of the five it was without a body dump.
+func (m usageMiss) String() string {
+	switch m {
+	case usageMissNone:
+		return "parsed"
+	case usageMissNoBody:
+		return "no_body"
+	case usageMissAbsent:
+		return "absent"
+	case usageMissZero:
+		return "all_zero"
+	case usageMissUnparsed:
+		return "unparsed_dialect"
+	case usageMissUnreadable:
+		return "unreadable_body"
+	}
+	return "unknown"
+}
+
+// alertable reports whether this miss means TOKEN ACCOUNTING IS OFFLINE, as opposed to a
+// provider that legitimately said nothing. The two benign cases must never share a counter with
+// these, or the number an operator watches to confirm accounting is healthy is incremented by it
+// being broken.
+func (m usageMiss) alertable() bool {
+	return m == usageMissUnparsed || m == usageMissUnreadable
+}
+
+// nestedUsagePaths are places a usage block is known to live OTHER than the top level. They are
+// probed for EXISTENCE ONLY — never read — which is what keeps this dialect-agnostic: knowing
+// that a block is there is enough to say the parser has a gap, and guessing at the field names
+// inside would produce a parser that looks correct and reads zero, which is the failure this
+// classification exists to expose, reproduced in the code meant to report it.
+var nestedUsagePaths = [...]string{"response.usage", "usageMetadata", "data.usage", "message.usage"}
+
 // parseUsage extracts the four billed token tiers from a buffered response body,
 // in whichever dialect it is written. This is the number that actually matters on
 // this workload — the request is ~99.95% cached and a cache write bills ~11.5x a
@@ -57,9 +116,38 @@ type Usage struct {
 // the difference — getting this backwards double-counts the whole transcript on
 // every turn, which is exactly the kind of error a "savings" number hides.
 func parseUsage(body []byte) (Usage, bool) {
+	u, why := parseUsageWhy(body)
+	return u, why == usageMissNone
+}
+
+// parseUsageWhy is parseUsage plus the classification. Split out rather than folded in because
+// parseSSEUsage calls the boolean form per event and must not have its skips classified — only
+// responseUsage, which sees the whole response, is in a position to say anything about it.
+func parseUsageWhy(body []byte) (Usage, usageMiss) {
 	u := gjson.GetBytes(body, "usage")
 	if !u.Exists() {
-		return Usage{}, false
+		// A block SOMEWHERE ELSE is a parser gap; nothing anywhere is a provider that said
+		// nothing. Distinguishing them is the point: the first is a measurement outage whose fix
+		// is a dialect, the second needs no action at all.
+		for _, p := range nestedUsagePaths {
+			if gjson.GetBytes(body, p).Exists() {
+				return Usage{}, usageMissUnparsed
+			}
+		}
+		// And bytes we cannot parse are a THIRD thing, with its own remedy: nothing could be
+		// looked for, so "no usage block" is not a finding about the provider. This is what a
+		// spliced sniffer window looks like — head+"\n"+tail is not valid JSON — so reporting it
+		// as an unrecognised dialect would send someone hunting for a field-name gap that is not
+		// there. See sniffer.bytes.
+		//
+		// Narrower than "the response was truncated", and deliberately so: gjson SCANS rather
+		// than walking a tree, so a spliced document whose top-level `usage` survived is read
+		// correctly above and never reaches here. This fires only when the splice actually hid
+		// the block, which is the only case where anything is lost.
+		if !gjson.ValidBytes(body) {
+			return Usage{}, usageMissUnreadable
+		}
+		return Usage{}, usageMissAbsent
 	}
 	var out Usage
 	switch {
@@ -86,12 +174,20 @@ func parseUsage(body []byte) (Usage, bool) {
 		// under-reports every streamed response's output tokens.
 		out.Output = u.Get("output_tokens").Int()
 	default:
-		return Usage{}, false
+		// A usage block IS here and this parser read nothing out of it — the Bedrock Converse
+		// camelCase shape (`usage.inputTokens`) is the known instance. The DIALECT is deliberately
+		// not added here: getting the field names wrong (`cacheWriteInputTokens` vs
+		// `cacheCreationInputTokens`) yields a parser that looks correct and reads zero. What
+		// closes that gap is the shape record in responseUsage, which needs no guess.
+		return Usage{}, usageMissUnparsed
 	}
 	if out.FreshInput|out.CacheRead|out.CacheWrite|out.Output == 0 {
-		return Usage{}, false
+		// Recognised and genuinely zero, which is legitimate on some responses. Kept out of the
+		// unparsed counter, or every such response would inflate the one number that means a
+		// dialect is missing.
+		return Usage{}, usageMissZero
 	}
-	return out, true
+	return out, usageMissNone
 }
 
 // parseSSEUsage pulls usage out of a streamed response. Both dialects report it in
@@ -100,8 +196,17 @@ func parseUsage(body []byte) (Usage, bool) {
 // merged across events, taking the maximum of each — a later event repeating a
 // value must not double it.
 func parseSSEUsage(raw []byte) (Usage, bool) {
+	u, why := parseSSEUsageWhy(raw)
+	return u, why == usageMissNone
+}
+
+// parseSSEUsageWhy is parseSSEUsage plus #200's classification. An event stream that carried a
+// usage block no event of it could be read is the streamed form of the dialect gap, and it must
+// not be reported as "the provider streamed no usage" — the remedies differ.
+func parseSSEUsageWhy(raw []byte) (Usage, usageMiss) {
 	var out Usage
 	found := false
+	sawBlock := false // some event HAD a usage block, whatever came of reading it
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "data:") {
@@ -117,6 +222,7 @@ func parseSSEUsage(raw []byte) (Usage, bool) {
 			if !u.Exists() {
 				continue
 			}
+			sawBlock = true
 			one, ok := parseUsage([]byte(`{"usage":` + u.Raw + `}`))
 			if !ok {
 				continue
@@ -129,25 +235,158 @@ func parseSSEUsage(raw []byte) (Usage, bool) {
 			out.Output = max64(out.Output, one.Output)
 		}
 	}
-	return out, found
+	switch {
+	case found:
+		return out, usageMissNone
+	case sawBlock:
+		// Every block that appeared was rejected. All-zero is the benign version of that and is
+		// indistinguishable here without re-reading each one, so this stays the coarser
+		// `unparsed` rather than being split on a guess — a stream whose only usage block is
+		// all-zero over-reports by one, and a stream in an unrecognised dialect is reported at
+		// all, which it was not before.
+		return out, usageMissUnparsed
+	}
+	return out, usageMissAbsent
 }
 
 // responseUsage picks the right parser for a response's content type. The returned
 // Usage carries the stop reason whatever `ok` says — see Usage.StopReason.
 func responseUsage(contentType string, body []byte) (Usage, bool) {
+	u, _, ok := responseUsageWhy(contentType, body)
+	return u, ok
+}
+
+// responseUsageWhy is responseUsage plus the reason, and it is the ONE place a miss is counted
+// and recorded — the whole response is in scope here, which is what it takes to say anything
+// about it (parseUsage is also called per-event by the SSE path, where a skip means nothing).
+//
+// The reason reaches the lifecycle log line beside `usage_reported`, so a deployment that has
+// quietly stopped accounting tokens says which of the five cases it is at the moment it happens,
+// instead of being reconstructed two iterations later from a cost figure.
+func responseUsageWhy(contentType string, body []byte) (Usage, usageMiss, bool) {
 	if len(body) == 0 {
-		return Usage{}, false
+		return Usage{}, usageMissNoBody, false
 	}
 	sse := strings.Contains(contentType, "event-stream")
 	var u Usage
-	var ok bool
+	var why usageMiss
 	if sse {
-		u, ok = parseSSEUsage(body)
+		u, why = parseSSEUsageWhy(body)
 	} else {
-		u, ok = parseUsage(body)
+		u, why = parseUsageWhy(body)
 	}
 	u.StopReason = responseStopReason(sse, body)
-	return u, ok
+	if why.alertable() {
+		switch why {
+		case usageMissUnparsed:
+			usageUnparsed.Add(1)
+		case usageMissUnreadable:
+			usageUnreadable.Add(1)
+		}
+		recordUsageShape(sse, body)
+	}
+	return u, why, why == usageMissNone
+}
+
+// The two alertable misses, counted apart because their REMEDIES are opposite: `unparsed` means
+// add the dialect the provider is speaking, `unreadable` means the bytes we looked at were not a
+// whole document (a spliced sniffer window) and the fix is upstream of any parser. A single
+// counter would have said "token accounting is offline" without saying which half of the stack
+// to look at.
+//
+// Neither counts the two benign cases. Every operator-facing description of them would otherwise
+// make a promise the dangerous case violates — the same reason #188 split stash_refused from
+// stash_missing, and expand/unresolved.go splits malformed from missing.
+var (
+	usageUnparsed   atomic.Int64
+	usageUnreadable atomic.Int64
+)
+
+// UsageGaps returns how many responses carried usage this proxy could not read (an unrecognised
+// dialect) and how many carried bytes it could not parse at all. Non-zero on either means
+// fresh_input_tokens / cache_read_tokens / cache_write_tokens are 0 for some route or provider
+// while everything else about the request looks healthy.
+func UsageGaps() (unparsed, unreadable int64) {
+	return usageUnparsed.Load(), usageUnreadable.Load()
+}
+
+// usageShapeOnce keeps the shape record to the FIRST alertable response per process. It is a
+// diagnostic, not a metric: one record names the gap, and one per response would put a line in
+// the log for every request of a run that has the gap on all of them (4,015 of 4,015, in the
+// iteration that motivated this).
+var usageShapeOnce sync.Once
+
+// recordUsageShape logs the response's SHAPE — the top-level key names, plus the key names under
+// any usage block found — and nothing else.
+//
+// KEY NAMES ONLY, NEVER VALUES AND NEVER THE BODY. A body dump on this workload writes several
+// kilobytes of transcript content to disk per response; a key-shape record cannot, by
+// construction. And it is the datum that actually answers the question: it turns "usage_reported
+// is false" into "the provider is sending camelCase", which is the difference between an open
+// question and a one-line fix — without needing a captured body, an instrumented capture hop, or
+// any extra request.
+func recordUsageShape(sse bool, body []byte) {
+	usageShapeOnce.Do(func() {
+		slog.Default().Debug("cg.usage_unaccounted", usageShapeAttrs(sse, body)...)
+	})
+}
+
+// ResetUsageShapeRecordForTest re-arms the once-per-process shape record. For TESTS only: the
+// record is the diagnostic this whole change exists to produce, so a test has to be able to
+// observe it, and the Once makes that a one-shot for the entire binary.
+func ResetUsageShapeRecordForTest() { usageShapeOnce = sync.Once{} }
+
+// usageShapeAttrs builds the shape record's key/value pairs. Separated from the logging so a test
+// can assert what it does and — more to the point — what it does NOT contain.
+func usageShapeAttrs(sse bool, body []byte) []any {
+	doc := body
+	if sse {
+		// One event, so the record describes a JSON object rather than a transport. The last
+		// data: line is where both dialects put their terminal usage.
+		doc = []byte(lastSSEPayload(body))
+	}
+	attrs := []any{"sse", sse, "bytes", len(body),
+		// Not parseable means the window was spliced rather than the dialect being strange —
+		// stated in the record so it cannot be misread as a field-name gap.
+		"valid_json", gjson.ValidBytes(doc),
+		"top_level_keys", objectKeys(gjson.ParseBytes(doc))}
+	for _, p := range append([]string{"usage"}, nestedUsagePaths[:]...) {
+		if u := gjson.GetBytes(doc, p); u.Exists() {
+			return append(attrs, "usage_at", p, "usage_keys", objectKeys(u))
+		}
+	}
+	return attrs
+}
+
+// objectKeys lists a JSON object's immediate key NAMES, sorted so two records compare, and
+// bounded so a pathological object cannot write an unbounded log line. Values are never touched.
+func objectKeys(v gjson.Result) []string {
+	if !v.IsObject() {
+		return nil
+	}
+	var keys []string
+	v.ForEach(func(k, _ gjson.Result) bool {
+		keys = append(keys, k.String())
+		return len(keys) < 64
+	})
+	sort.Strings(keys)
+	return keys
+}
+
+// lastSSEPayload returns the last non-empty `data:` payload in an event stream, which is where
+// both dialects put the terminal usage. Empty when there is none.
+func lastSSEPayload(body []byte) string {
+	lines := strings.Split(string(body), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		if p := strings.TrimSpace(strings.TrimPrefix(line, "data:")); p != "" && p != "[DONE]" {
+			return p
+		}
+	}
+	return ""
 }
 
 // stopReasonPaths are where a terminal reason lives, per dialect and per transport:
