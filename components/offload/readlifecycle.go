@@ -157,7 +157,7 @@ func (rl *ReadLifecycle) Offload(req *bschemas.BifrostChatRequest, rep *componen
 		// Replay a frozen decision on EVERY turn, at any depth: the agent re-sends the
 		// original each turn, so not re-offloading it would flip the message
 		// offloaded→full→offloaded and churn the provider's KV cache.
-		if fk, _, ok := reapplyFrozen(c, rl.Name(), msg); ok {
+		if fk, _, ok := reapplyFrozen(c, rep, rl.Name(), msg); ok {
 			changed++
 			keys = append(keys, fk...)
 			continue

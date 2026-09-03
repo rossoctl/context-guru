@@ -110,7 +110,7 @@ func (cl *Collapse) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 		// on purpose — with max_frac set, CtxWindow can resolve differently mid-session
 		// (model swap, refreshed modelinfo), and a threshold that drifts above this output
 		// would otherwise flip it collapsed→full inside the cached prefix.
-		if fk, _, ok := reapplyFrozen(c, cl.Name(), m); ok {
+		if fk, _, ok := reapplyFrozen(c, rep, cl.Name(), m); ok {
 			changed++
 			keys = append(keys, fk...)
 			continue

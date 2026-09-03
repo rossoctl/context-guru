@@ -399,7 +399,7 @@ func (d *AgentDiet) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 			if !schema.Rewritable(*msg) {
 				continue
 			}
-			if fk, saved, ok := reapplyFrozen(c, d.Name(), msg); ok {
+			if fk, saved, ok := reapplyFrozen(c, rep, d.Name(), msg); ok {
 				rep.TokensBefore += saved // best-effort; the pipeline recomputes exactly
 				keys = append(keys, fk...)
 				changed++
