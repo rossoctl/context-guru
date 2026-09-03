@@ -79,7 +79,8 @@ var configAllowlist = map[string]bool{
 	"preset": true, "pipeline": true, "mode": true, "cache_mode": true,
 	"inject_expand": true, "store": true, "components": true,
 	"store_enabled": true, "store_ttl_seconds": true, "store_max_entries": true,
-	"listen_addr": true, "openai_upstream": true, "anthropic_upstream": true,
+	"store_stash_max_bytes": true,
+	"listen_addr":           true, "openai_upstream": true, "anthropic_upstream": true,
 	"bob_upstream": true, "force_model": true, "cheap_model": true,
 	"cheap_model_provider": true, "cheap_model_base": true,
 	"dashboard": true, "db_path": true, "retention": true, "capture_content": true,
@@ -88,7 +89,7 @@ var configAllowlist = map[string]bool{
 	"strategy": true, "source": true, "model": true, "trigger": true,
 	"min_request_tokens": true, "llm_every_n_requests": true, "llm_max_per_request": true,
 	"marker_mode": true, "min_items": true, "keep_first": true, "keep_last": true,
-	"enabled": true, "ttl_seconds": true, "max_entries": true,
+	"enabled": true, "ttl_seconds": true, "max_entries": true, "stash_max_bytes": true,
 }
 
 // openKeys name subtrees whose immediate child keys are USER-CHOSEN and therefore

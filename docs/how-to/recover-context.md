@@ -52,17 +52,21 @@ sequenceDiagram
 ## Recovery needs the store
 
 The store *is* the reversibility mechanism. It defaults to in-memory TTL+LRU — 10000s
-sliding TTL (refreshed on every read), 1000 entries, 100 sticky sessions — and holds, per
-session:
+sliding TTL (refreshed on every read), 5000 entries, a 256 MiB rewind reserve, 100 sticky
+sessions — and holds, per session:
 
-- **Rewind** — `cache_key → original bytes`, what the expand loop resolves.
+- **Rewind** — `cache_key → original bytes`, what the expand loop resolves. These live in a
+  **reserve** that is never evicted to admit a new payload: once a marker has been sent the
+  promise is outstanding, so a full reserve makes the pipeline **decline the next removal**
+  (counted as `stash_refused`) instead of quietly breaking an older one.
 - **Sticky** — content ids already reduced on earlier turns, so output stays byte-stable
   across turns.
 - **Frozen decisions** — the exact replacement bytes an offloader replays so an
   already-cached message stays byte-identical. These are pinned against eviction: losing one
   flips a message inside the provider's cached prefix and rewrites the whole suffix at
-  ~11.5× the read price. The pin is capped at half `max_entries` so one session cannot
-  starve the rewind stashes.
+  ~11.5× the read price. The pin is capped at half `max_entries`, and pins plus rewind
+  payloads together leave a quarter of `max_entries` always evictable, so neither exemption
+  can starve the other or the plain cache.
 
 Set `store.enabled: false` and offloads become **one-way** — nothing is stashed and nothing
 can be recovered. The [llm-d compaction service](../examples/llm-d-service.md) does this
@@ -73,8 +77,11 @@ deliberately (with `marker_mode: off`) so `/compact` returns a clean, marker-fre
 
 **The model called expand and got a placeholder back.** The original expired or was evicted
 from the store. The provider requires one `tool_result` per `tool_call_id`, so an explicit
-placeholder is sent rather than nothing — which turns that offload lossy. Raise
-`store.ttl` / `store.max_entries` if you see it often.
+placeholder is sent rather than nothing — which turns that offload lossy. Check `stash_missing`
+and `stash_expired` at [`/stats`](../reference/routes.md#get-stats): both mean a payload left the
+store, so raise `store.ttl_seconds`. `stash_refused` is the *other* case and needs
+`store.max_entries` or `store.stash_max_bytes` — there nothing became irreversible, because the
+removals were declined.
 
 The turn still **completes**: the placeholder continuation is sent even when *nothing*
 resolved, so the model reads "no longer available" and finishes with text. It used to replay

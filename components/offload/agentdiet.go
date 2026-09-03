@@ -12,6 +12,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
 )
 
 func init() { components.Register("agentdiet", newAgentDiet) }
@@ -473,6 +474,29 @@ func (d *AgentDiet) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		model = c.Model.For(d.modelSource)
 	}
 	if model == nil { // no model configured: replay-only, never an error
+		if changed == 0 {
+			rep.Skipped = true
+		}
+		return keys, nil
+	}
+
+	// The reserve, before the model call — the same ordering summarize needs and for the same
+	// reason, one step weaker because this component acts per message.
+	//
+	// Every plan this reflection produces will want a payload of its own, so if the reserve
+	// cannot take even the smallest of them the call is paid and every plan is then declined at
+	// commitMark: a model call for a step that is guaranteed to be left verbatim. Probing with
+	// the smallest candidate is deliberately the WEAKEST useful test — it skips only when
+	// nothing at all can be admitted, and never declines a step whose plans might still fit.
+	// A partial fit stays the per-message decision it already is.
+	smallest := 0
+	for _, it := range items {
+		if n := len(it.content); smallest == 0 || n < smallest {
+			smallest = n
+		}
+	}
+	if effectiveMode(c, d.mode) == markerFull && !store.StashRoom(c.Store, smallest) {
+		rep.Gate("stash_reserve_exhausted")
 		if changed == 0 {
 			rep.Skipped = true
 		}

@@ -8,9 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/store"
 )
 
 // TestEverySnapshotFieldIsExportedOrExempt.
@@ -92,9 +94,12 @@ var notExportedWhy = map[string]string{
 	"FrozenDropped":             `cg_frozen_decisions_total{outcome="dropped"}, from store.Memory.FrozenLossStats()`,
 	"FrozenRepaired":            `cg_frozen_decisions_total{outcome="repaired"}, from store.Memory.FrozenLossStats()`,
 	"StashRefused":              "cg_stash_refused_total, from offload.StashRefusals()",
+	"StashMissing":              "cg_stash_missing_total, from offload.StashMissing()",
 	"StashExpired":              "cg_stash_expired_total, from store.Memory.StashStats()",
 	"StashLive":                 `cg_stash_reserve_entries{state="live"}, from store.Memory.StashStats()`,
 	"StashCapacity":             `cg_stash_reserve_entries{state="capacity"}, from store.Memory.StashStats()`,
+	"StashBytes":                `cg_stash_reserve_bytes{state="live"}, from store.Memory.StashStats()`,
+	"StashMaxBytes":             `cg_stash_reserve_bytes{state="capacity"}, from store.Memory.StashStats()`,
 	"Extract":                   "the cg_extract_* family, from metrics.ExtractSnapshot()",
 
 	// Not numbers. Prometheus has no string sample, and a list of names would have to
@@ -242,4 +247,57 @@ func containsLine(body, line string) bool {
 		}
 	}
 	return false
+}
+
+// TestStashReserveSeriesRender applies the same guard as TestExpandUnresolvedSeriesRender and
+// TestAdjudicateStraySeriesRender to the two series #188's review added, and for the same reason
+// those two exist: TestEverySnapshotFieldIsExportedOrExempt cannot catch a dropped series. By its
+// own documented design it checks that the exporter READS a field, and both of these are read
+// live from their owner (store.Memory.StashStats, offload.StashMissing) rather than off `s`, so
+// they are listed in notExportedWhy and the reflection check never looks at them at all.
+//
+// Two properties, and the second is the one a coverage map cannot express:
+//
+//  1. The lines RENDER, so an operator can build a dashboard panel before anything has gone wrong.
+//  2. cg_stash_missing_total MOVES with the counter behind it. A dangling marker is the one
+//     reserve outcome that genuinely breaks reversibility, so a series that renders a hard-wired
+//     zero would be worse than no series: it is the panel that says "nothing broke".
+func TestStashReserveSeriesRender(t *testing.T) {
+	h := New(nil, nil, metrics.NewAggregator(), Options{})
+	// A real store, so the reserve gauges have something to report. Without one the whole block
+	// is skipped (the handler casts to *store.Memory) and the byte gauge would be absent for a
+	// reason unrelated to the exporter.
+	h.store = store.NewMemory(store.Options{MaxEntries: 100, StashMaxBytes: 4096})
+	body := h.renderMetrics()
+	for _, want := range []string{
+		`cg_stash_reserve_bytes{state="live"} 0`,
+		`cg_stash_reserve_bytes{state="capacity"} 4096`,
+		`cg_stash_reserve_entries{state="capacity"} 50`,
+	} {
+		if !containsLine(body, want) {
+			t.Errorf("/metrics is missing the line %q: an operator told to raise a budget "+
+				"cannot see which budget bound", want)
+		}
+	}
+	// The byte gauge must read the STORE, not a snapshot field the aggregator never fills.
+	st := h.store.(*store.Memory)
+	if !st.PutStash("aaaaaaaaaaaaaaa1", make([]byte, 512)) {
+		t.Fatal("the fixture's payload was refused, so the gauge has nothing to move")
+	}
+	if containsLine(h.renderMetrics(), `cg_stash_reserve_bytes{state="live"} 0`) {
+		t.Error(`cg_stash_reserve_bytes{state="live"} still reads 0 after a payload was stored: ` +
+			`the series is not reading the store's own accounting`)
+	}
+
+	// cg_stash_missing_total: renders, and moves. Baseline-relative because StashMissing is a
+	// process-wide counter shared with every other test in this binary.
+	before := offload.StashMissing()
+	if !containsLine(h.renderMetrics(), fmt.Sprintf("cg_stash_missing_total %d", before)) {
+		t.Errorf("/metrics does not render cg_stash_missing_total at %d; the one reserve outcome "+
+			"that breaks a promise has no series", before)
+	}
+	if help := helpLine(h.renderMetrics(), "cg_stash_missing_total"); !strings.Contains(help, "dangling") {
+		t.Errorf("HELP does not distinguish a dangling marker from a declined removal, which is "+
+			"the whole reason this counter is separate from cg_stash_refused_total:\n  %s", help)
+	}
 }

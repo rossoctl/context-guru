@@ -104,6 +104,21 @@ func tryMark(c *components.Ctx, mode markerMode, original, hint string, assemble
 // it with a marker", which is the bug. Leaving it verbatim costs tokens the pipeline wanted to
 // save and keeps the invariant CLAUDE.md states as a hard boundary — every lossy Offload is
 // reversible — true regardless of load.
+//
+// THE CALLER'S HALF OF THE CONTRACT, and it is an invariant rather than a courtesy: NOTHING
+// DERIVED FROM THE REMOVAL MAY BE RECORDED BEFORE THIS RETURNS TRUE. Not the splice, not a
+// frozen decision (putResult / putResultGlobal / freeze), not a metric, not a debug counter,
+// not rep.Replay, not a saved token figure. This function is now the only place that knows
+// whether the removal is happening at all, so anything written ahead of it describes work that
+// may not occur — and a frozen decision with no splice behind it is the SAME broken promise
+// one layer up: a later turn's replay path reads it, deliberately bypasses the cache-tail gate
+// on the reasoning that these bytes were already sent, and splices into a message that is by
+// then inside the provider's cached prefix, forcing a full-suffix cache write at ~11.5x the
+// read price. TestNoStateIsRecordedBeforeTheCommitGate holds every registered Offload to this.
+//
+// Replaying a decision ALREADY stamped and already sent is the other case, and it is not this
+// function — see commitRefresh, which never refuses because refusing there is itself the
+// cache-destructive move.
 func commitMark(c *components.Ctx, rep *components.Report, eff markerMode, key, original string) bool {
 	if eff == markerFull {
 		if !store.PutStash(c.Store, key, []byte(original)) {
@@ -115,6 +130,36 @@ func commitMark(c *components.Ctx, rep *components.Report, eff markerMode, key, 
 		return true
 	}
 	rep.Irreversible = true
+	return true
+}
+
+// commitRefresh refreshes the payload behind a marker THIS SESSION HAS ALREADY STAMPED AND
+// SENT, and reports whether the payload is actually there.
+//
+// It never refuses, and that is the point of it being a different function from commitMark.
+// The two look alike — both write a payload for a marker — but they sit on opposite sides of
+// the decision:
+//
+//   - commitMark is asked "may I make this promise?", and a no costs only the tokens the
+//     removal would have saved.
+//   - commitRefresh is telling the store about a promise ALREADY OUTSTANDING. The marker is in
+//     the provider's cached prefix. Declining here would mean sending the message verbatim
+//     instead — flipping already-cached content and re-writing the whole suffix — to protect a
+//     reversibility guarantee that a refusal cannot restore anyway, because the marker went out
+//     turns ago. So the replay always proceeds.
+//
+// The return value is therefore not a permission but a DIAGNOSIS: false means the payload has
+// left the store (the TTL reclaimed it) and the marker on the wire is dangling. That is the
+// genuinely broken promise, and it is counted apart from stashRefusals — see stashMissing for
+// why conflating them made the one dangerous outcome invisible.
+func commitRefresh(c *components.Ctx, key, original string) bool {
+	if key == "" {
+		return true // summary/off: no payload was ever promised
+	}
+	if !store.PutStash(c.Store, key, []byte(original)) {
+		stashMissing.Add(1)
+		return false
+	}
 	return true
 }
 
@@ -134,6 +179,29 @@ var stashRefusals atomic.Int64
 // was full. Non-zero means max_entries is too small for what this configuration removes;
 // the removals did not happen, so nothing became irreversible.
 func StashRefusals() int64 { return stashRefusals.Load() }
+
+// stashMissing counts REPLAYS of a marker whose payload has left the store — a dangling marker
+// that just went out on the wire.
+//
+// It is separate from stashRefusals because the two are opposite outcomes, and one shared
+// counter made the dangerous one unreadable. Every operator-facing description of a refusal —
+// /stats, cg_stash_refused_total, docs/reference/routes.md — promises that "the content was
+// left verbatim and nothing became irreversible". That is true of a declined removal and FALSE
+// of a dangling replay, which is the only case that actually breaks the guarantee #187 was
+// about. Counting them together meant the number an operator watches to confirm nothing broke
+// was incremented by things breaking.
+//
+// They also have different shapes over time. A refusal is one event per declined removal. A
+// missing payload cannot be restored — the replayed bytes must stay byte-identical to the turn
+// that created them — so it re-reports on every turn for every affected message: this counter
+// grows with TURN COUNT, not with distinct broken markers. Read it as "dangling replays are
+// happening", not as "N markers are dangling", and raise ttl_seconds rather than max_entries.
+var stashMissing atomic.Int64
+
+// StashMissing returns how many marker replays found no payload behind them. Non-zero means
+// markers ARE on the wire that the store cannot resolve — unlike StashRefusals, this is a
+// broken promise, and the leading indicator for expand_unresolved_missing.
+func StashMissing() int64 { return stashMissing.Load() }
 
 // markerModeField is the marker_mode descriptor, shared by every Offload that honors the
 // key. Declared once because the accepted values are parseMarkerMode's, above.

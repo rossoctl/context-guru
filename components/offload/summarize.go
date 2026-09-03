@@ -171,18 +171,47 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// that checkpoint is still small — no LLM call, and the summary message stays
 	// byte-identical (KV-cache stable). Roll the checkpoint forward only once the
 	// tail grows past resummarize_tokens.
-	if out, keys, ok := s.tryReuse(c, msgs, headCount, start, end); ok {
-		if len(keys) == 0 {
+	reusedMsgs, reusedKeys, reused, stale := s.tryReuse(c, msgs, headCount, start, end)
+	if reused {
+		if len(reusedKeys) == 0 {
 			rep.Irreversible = true // reused a non-full checkpoint (nothing stashed)
 		}
-		req.Input = out
-		return keys, nil
+		req.Input = reusedMsgs
+		return reusedKeys, nil
 	}
 
 	span := msgs[start:end]
 	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: span}) < s.minTokens {
 		rep.Skipped = true
 		return nil, nil
+	}
+
+	// THE RESERVE IS CONSULTED BEFORE THE MODEL CALL, not after it.
+	//
+	// The span is all the marker key depends on (key = hashKey(spanJSON)), and the payload is
+	// the span itself — so nothing about the stash needs the summary to exist. The check used
+	// to sit after s.summarize, which meant a saturated reserve paid the call (measured at ~57k
+	// prompt tokens) and threw the result away, then did it again on the NEXT turn, and every
+	// turn after, because a refusal saves no checkpoint and so changes nothing about the next
+	// turn's inputs. Asking first turns an unbounded stream of wasted calls into a skip.
+	//
+	// A probe, not a claim: StashRoom reserves nothing, so the real PutStash below can still
+	// refuse if another session took the slot in between. That is a rare race rather than the
+	// steady state, and it lands on the same refusal path. Claiming the slot up here instead
+	// would leak one payload's worth of reserve every time the model call then failed — the
+	// resource this whole change exists to protect.
+	mode := effectiveMode(c, s.mode)
+	var spanJSON []byte
+	var key string
+	if mode == markerFull {
+		var err error
+		if spanJSON, err = json.Marshal(span); err != nil {
+			return nil, err
+		}
+		key = hashKey(string(spanJSON))
+		if !store.StashRoom(c.Store, len(spanJSON)) {
+			return s.refuse(c, rep, req, msgs, headCount, start, stale)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(c.Ctx, summarizeCallTimeout)
@@ -209,23 +238,17 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// pipeline's dropped-without-stash guard permits it.
 	// full is reversible only if the store persists the stash; otherwise degrade
 	// to an irreversible off-style drop (no unresolvable marker).
-	mode := effectiveMode(c, s.mode)
-	var key string
 	if mode == markerFull {
-		spanJSON, err := json.Marshal(span)
-		if err != nil {
-			return nil, err
-		}
-		key = hashKey(string(spanJSON))
 		// A summary REPLACES the span it covers, so the marker in the summary text is the
 		// only route back to it. If the store's rewind reserve cannot hold the span, this
 		// component must not summarize at all: unlike the per-message offloaders it cannot
 		// leave "this message" verbatim, so refusing means skipping the whole checkpoint.
+		//
+		// Reachable despite the StashRoom probe above (the probe claims nothing and another
+		// session can take the slot in between), which is why the refusal path still exists
+		// here — the probe removes the steady-state waste, not the race.
 		if !store.PutStash(c.Store, key, spanJSON) {
-			stashRefusals.Add(1)
-			rep.Gate("stash_reserve_exhausted")
-			rep.Skipped = true
-			return nil, nil
+			return s.refuse(c, rep, req, msgs, headCount, start, stale)
 		}
 	} else {
 		rep.Irreversible = true
@@ -276,49 +299,75 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	return nil, nil
 }
 
-// tryReuse re-emits the previous summary if (1) a checkpoint exists, (2) the
-// covered prefix (msgs[1:1+CoveredCount]) is byte-unchanged, and (3) the tail
-// since that boundary is below resummarize_tokens. It returns the rebuilt
-// [msg0, priorSummary, msgs[boundary:]] and the (refreshed) stash key. No LLM
-// call. ok=false means "re-summarize fresh".
-func (s *Summarize) tryReuse(c *components.Ctx, msgs []bschemas.ChatMessage, headCount, start, end int) ([]bschemas.ChatMessage, []string, bool) {
-	if s.resummarizeTokens <= 0 {
-		return nil, nil, false
+// refuse is what summarize does when the rewind reserve will not hold the span: no new
+// checkpoint is made, and the transcript is left in the most cache-stable shape available.
+//
+// That last part is the whole reason this is a function rather than `return nil, nil`. Plain
+// `nil, nil` sends the transcript FULL, and when this session had already emitted a checkpoint
+// on earlier turns — [msg0, summary, tail] — that is a flip of already-cached content in the
+// exact direction #188 exists to avoid, triggered by #188's own new refusal path. The provider
+// re-writes the whole suffix at ~11.5x the read price, for a request that saves nothing.
+//
+// So when a checkpoint is STALE-BUT-VALID (tryReuse confirmed the covered prefix is
+// byte-unchanged and declined only because the tail grew past resummarize_tokens), re-emit it.
+// Rolling it forward was an improvement that is now unavailable; the old checkpoint's bytes are
+// still the ones the provider has cached. A checkpoint that is absent or genuinely diverged has
+// nothing to fall back to, and there the full transcript is correct: nothing was cached in the
+// summarized shape.
+func (s *Summarize) refuse(c *components.Ctx, rep *components.Report, req *bschemas.BifrostChatRequest,
+	msgs []bschemas.ChatMessage, headCount, start int, stale bool) ([]string, error) {
+	stashRefusals.Add(1)
+	rep.Gate("stash_reserve_exhausted")
+	if !stale {
+		rep.Skipped = true
+		return nil, nil
 	}
 	cp, ok := loadCheckpoint(c)
 	if !ok || cp.CoveredCount <= 0 {
-		return nil, nil, false
+		rep.Skipped = true
+		return nil, nil // nothing to fall back to
 	}
 	boundary := start + cp.CoveredCount
-	if boundary > end { // covered prefix would overlap the kept tail — can't reuse
-		return nil, nil, false
+	if boundary > len(msgs) {
+		rep.Skipped = true
+		return nil, nil
 	}
-	covered := msgs[start:boundary]
-	if spanHash(covered) != cp.CoveredHash {
-		return nil, nil, false // prefix diverged (different session / edited) → fresh
-	}
-	// The un-summarized middle since the checkpoint (excludes the kept last-K).
-	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: msgs[boundary:end]}) >= s.resummarizeTokens {
-		return nil, nil, false // grown enough — roll the checkpoint forward
-	}
-	// Refresh the stashed original span so expand keeps resolving it (full-mode
-	// checkpoints only — summary/off never stashed, so Key is empty).
+	// The stash refresh, and the reason it is a refresh rather than a new claim: this payload
+	// was accepted on the turn the checkpoint was made, so a key already present is retained
+	// whatever the reserve says (see store.Stasher) and this cannot be the thing that refuses.
+	// A false answer means the payload has since expired and the replayed marker is dangling —
+	// counted as stash_missing, and the replay proceeds because the summary text must stay
+	// byte-identical to the turn that created it.
 	if cp.Key != "" {
-		if b, err := json.Marshal(covered); err == nil {
-			// A refresh of a key already present always succeeds (see store.Stasher), so a
-			// refusal here means the payload had ALREADY left the store — the marker in the
-			// replayed summary is dangling and cannot be un-dangled, because the summary
-			// text must stay byte-identical to the turn that created it. Count it; the
-			// alternative (re-summarizing to avoid the marker) is the cache-write this
-			// checkpoint exists to prevent.
-			if !store.PutStash(c.Store, cp.Key, b) {
-				stashRefusals.Add(1)
-			}
+		if b, err := json.Marshal(msgs[start:boundary]); err == nil {
+			commitRefresh(c, cp.Key, string(b))
 		}
 	}
-	// USER for the same reason as the fresh-summary path above: a system role at index 1
-	// is rejected by the provider. The replayed checkpoint must match that shape exactly,
-	// or a replayed turn would emit different bytes from the turn that created it.
+	out, keys := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	if len(keys) == 0 {
+		rep.Irreversible = true
+	}
+	rep.Event("reserve_exhausted_replayed_checkpoint")
+	// The component DID act — it rewrote the transcript — so it is not Skipped. Saying
+	// otherwise would report a turn that emitted a summary as a turn that did nothing.
+	replaced := len(msgs) - len(out)
+	if replaced <= 0 {
+		rep.Skipped = true
+		return nil, nil
+	}
+	req.Input = out
+	return keys, nil
+}
+
+// emitCheckpoint builds [head, priorSummary, msgs[boundary:]] from a checkpoint, with the
+// boundary walked past any leading tool messages and orphaned tool_results dropped. Shared by
+// tryReuse and the refusal fallback so a replayed checkpoint is byte-identical whichever path
+// emits it — a difference between them would itself be a cache flip.
+func (s *Summarize) emitCheckpoint(cp sumCheckpoint, msgs []bschemas.ChatMessage,
+	headCount, boundary int) ([]bschemas.ChatMessage, []string) {
+	// USER for the same reason as the fresh-summary path: a system role at index 1 is rejected
+	// by the provider. The replayed checkpoint must match that shape exactly, or a replayed
+	// turn would emit different bytes from the turn that created it.
 	summaryMsg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
 	schema.SetMessageText(&summaryMsg, cp.SummaryMsg)
 	// The replayed boundary must respect exchange atomicity exactly as the fresh path does,
@@ -336,9 +385,61 @@ func (s *Summarize) tryReuse(c *components.Ctx, msgs []bschemas.ChatMessage, hea
 		out = repaired
 	}
 	if cp.Key != "" {
-		return out, []string{cp.Key}, true
+		return out, []string{cp.Key}
 	}
-	return out, nil, true
+	return out, nil
+}
+
+// tryReuse re-emits the previous summary if (1) a checkpoint exists, (2) the
+// covered prefix (msgs[1:1+CoveredCount]) is byte-unchanged, and (3) the tail
+// since that boundary is below resummarize_tokens. It returns the rebuilt
+// [msg0, priorSummary, msgs[boundary:]] and the (refreshed) stash key. No LLM
+// call. ok=false means "re-summarize fresh".
+//
+// stale reports WHICH kind of ok=false this was: true means the checkpoint is still VALID and
+// only the size test declined it (the tail grew past resummarize_tokens), so re-emitting it is
+// still byte-correct. The fresh path needs that distinction, because if it cannot produce a new
+// checkpoint its only cache-safe fallback is the old one — see the refusal path in Offload.
+func (s *Summarize) tryReuse(c *components.Ctx, msgs []bschemas.ChatMessage, headCount, start, end int) (out []bschemas.ChatMessage, keys []string, ok, stale bool) {
+	if s.resummarizeTokens <= 0 {
+		return nil, nil, false, false
+	}
+	cp, ok := loadCheckpoint(c)
+	if !ok || cp.CoveredCount <= 0 {
+		return nil, nil, false, false
+	}
+	boundary := start + cp.CoveredCount
+	if boundary > end { // covered prefix would overlap the kept tail — can't reuse
+		return nil, nil, false, false
+	}
+	covered := msgs[start:boundary]
+	if spanHash(covered) != cp.CoveredHash {
+		return nil, nil, false, false // prefix diverged (different session / edited) → fresh
+	}
+	// The un-summarized middle since the checkpoint (excludes the kept last-K).
+	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: msgs[boundary:end]}) >= s.resummarizeTokens {
+		// STALE, not invalid: the prefix hash matched just above, so this checkpoint is still a
+		// faithful summary of msgs[start:boundary] and re-emitting it produces the same bytes
+		// earlier turns sent. Rolling it forward is merely BETTER, so a fresh attempt that
+		// cannot complete may fall back to it instead of sending the transcript full.
+		return nil, nil, false, true
+	}
+	// Refresh the stashed original span so expand keeps resolving it (full-mode
+	// checkpoints only — summary/off never stashed, so Key is empty).
+	if cp.Key != "" {
+		if b, err := json.Marshal(covered); err == nil {
+			// A refresh of a key already present always succeeds (see store.Stasher), so a
+			// false answer here means the payload had ALREADY left the store — the marker in
+			// the replayed summary is dangling and cannot be un-dangled, because the summary
+			// text must stay byte-identical to the turn that created it. Counted as
+			// stash_missing (a broken promise) rather than stash_refused (a removal declined);
+			// the alternative, re-summarizing to avoid the marker, is the cache-write this
+			// checkpoint exists to prevent.
+			commitRefresh(c, cp.Key, string(b))
+		}
+	}
+	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	return emitted, ks, true, false
 }
 
 // summarize builds the trajectory string and asks the model once (bounded retry).

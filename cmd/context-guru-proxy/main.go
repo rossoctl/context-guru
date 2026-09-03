@@ -916,10 +916,11 @@ func effectiveConfig(cfg *config.Config, addr, openai, anthropic, bob, dbPath st
 		"inject_expand":        envOr("INJECT_EXPAND", "auto"),
 		"cheap_model":          os.Getenv("CHEAP_MODEL"),
 		"cheap_model_provider": envOr("CHEAP_MODEL_PROVIDER", "anthropic"),
-		"store":                map[string]any{"ttl_seconds": cfg.Store.TTLSeconds, "max_entries": cfg.Store.MaxEntries},
-		"dashboard":            map[string]any{"db_path": dbPath, "capture_content": content, "trusted_cidrs": cidrs},
-		"build_version":        buildinfo.Version,
-		"build_commit":         buildinfo.Commit,
+		"store": map[string]any{"ttl_seconds": cfg.Store.TTLSeconds,
+			"max_entries": cfg.Store.MaxEntries, "stash_max_bytes": cfg.Store.StashMaxBytes},
+		"dashboard":     map[string]any{"db_path": dbPath, "capture_content": content, "trusted_cidrs": cidrs},
+		"build_version": buildinfo.Version,
+		"build_commit":  buildinfo.Commit,
 	}
 }
 

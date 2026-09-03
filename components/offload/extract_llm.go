@@ -780,9 +780,21 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 
 	// apply splices a compacted projection + marker into message i (serial: store writes
 	// and message mutation are not concurrency-safe).
-	apply := func(i int, content, projected, summary string) {
+	//
+	// IT REPORTS WHETHER THE SPLICE HAPPENED, and every caller must gate on that. It can
+	// decline for three reasons now — the projection does not shrink, the marker-inclusive
+	// never-worse check fails, or the store's rewind reserve refuses the payload — and after
+	// #188 the last of those makes it a silent no-op on a path whose callers used to assume it
+	// always acted. What they recorded ahead of it (a frozen cg:res: decision, a token-savings
+	// metric, a replay event) then described a splice that did not occur. See commitMark.
+	//
+	// replay=true marks a decision this session already stamped and sent on an earlier turn.
+	// Then the payload write is a REFRESH, which must never refuse: declining would send the
+	// message verbatim where the provider's cached prefix holds the compacted bytes, which is
+	// the cache-destructive direction and cannot un-send the marker anyway. See commitRefresh.
+	apply := func(i int, content, projected, summary string, replay bool) bool {
 		if projected == "" || schema.TextTokens(projected) >= schema.TextTokens(content) {
-			return
+			return false
 		}
 		hint := " [full output: call " + expand.ToolName + "]"
 		newText, key, eff, ok := tryMark(c, e.mode, content, hint, func(tok string) string {
@@ -792,16 +804,22 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			return projected + "\n" + tok
 		})
 		if !ok {
-			return
+			return false
 		}
-		if !commitMark(c, rep, eff, key, content) {
-			return // the store cannot back the marker; leave this output verbatim
+		if replay {
+			// Never refuses; a false answer means the payload is gone and the marker being
+			// replayed is dangling. Counted there, and the replay proceeds regardless.
+			commitRefresh(c, key, content)
+			recordOwner(c, key)
+		} else if !commitMark(c, rep, eff, key, content) {
+			return false // the store cannot back the marker; leave this output verbatim
 		}
 		schema.SetMessageText(&req.Input[i], newText)
 		changed++
 		if key != "" {
 			keys = append(keys, key)
 		}
+		return true
 	}
 
 	// Phase 1 (serial, cheap): reapply frozen compactions on every turn (keeps the
@@ -874,12 +892,18 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// cache-read rate. This is the other half of the honest net figure: the first
 			// application alone under-reports the value, and pricing the replays at the first
 			// application's rate over-reports it by 12.5x.
-			if saved := schema.TextTokens(content) - schema.TextTokens(cached.Projected); saved > 0 {
-				metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
+			// Every one of these three describes a splice, so all three wait for it. Before
+			// #188 apply always acted, so recording ahead of it was merely untidy; now it can
+			// decline, and a run with an exhausted reserve reported replays and token savings
+			// that never happened — over-reporting the exact figure the iteration-024 re-run
+			// will be judged on.
+			if apply(i, content, cached.Projected, cached.Summary, true) {
+				if saved := schema.TextTokens(content) - schema.TextTokens(cached.Projected); saved > 0 {
+					metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
+				}
+				dbgReapply++
+				rep.Replay("reapplied_same_session")
 			}
-			apply(i, content, cached.Projected, cached.Summary)
-			dbgReapply++
-			rep.Replay("reapplied_same_session")
 			continue
 		}
 		// A NEW compaction, on the UNCACHED region only (cache-safe): when cache-aware that
@@ -945,10 +969,19 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		if !e.rewrite || effectiveMode(c, e.mode) == markerFull {
 			if cached, hit := getResultGlobal(c, extract.ResultKey(id, e.modelName, extCfg)); hit {
 				metrics.RecordExtractionCacheLookup(rep.Component, true)
+				// A cross-session hit is a NEW decision for THIS session — the comment above
+				// is explicit that this session never sent these compacted bytes — so the
+				// payload write is a commitMark that may refuse, and the splice comes before
+				// the freeze for the same reason it does in phase 3. Freezing a decision this
+				// session never spliced is what lets the same-session replay path above splice
+				// it at depth on a later turn, inside the cached prefix, which is the harm the
+				// tail gate two blocks up exists to prevent.
+				if !apply(i, content, cached.Projected, cached.Summary, false) {
+					continue
+				}
 				// Freeze into this session so later turns replay it byte-for-byte from the
 				// same-session path above, at any depth.
 				putResult(c, id, cached.Projected, cached.Summary)
-				apply(i, content, cached.Projected, cached.Summary)
 				dbgReapply++
 				rep.Replay("reapplied_cross_session")
 				continue
@@ -1382,12 +1415,24 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// result also qualified for cross-session sharing. Then publish globally only when
 			// recoverable. One key per decision (#40) — projected text and summary travel
 			// together, so a replay can never emit half a decision.
+			// THE SPLICE FIRST, then the decision. The order was the other way, and the
+			// reserve's new ability to refuse made that a defect: a declined removal left a
+			// pinned cg:res: record claiming "this session sent these compacted bytes" for a
+			// message that went upstream unchanged. On a later turn the same-session replay
+			// path above reads that record and deliberately bypasses the cache-tail gate —
+			// its reasoning is that the bytes were already sent — so once a reserve slot
+			// freed, the compaction was spliced into a message by then inside the provider's
+			// cached prefix, forcing a full-suffix cache write at ~11.5x the read price. That
+			// is exactly what TestGlobalCacheHitIsNotSplicedAtDepth exists to prevent, arrived
+			// at from the other side.
+			if !apply(cands[k].i, cands[k].content, out[k].projected, out[k].summary, false) {
+				continue
+			}
 			putResult(c, cands[k].id, out[k].projected, out[k].summary)
 			if !e.rewrite || effectiveMode(c, e.mode) == markerFull {
 				putResultGlobal(c, extract.ResultKey(cands[k].id, e.modelName, extCfg),
 					out[k].projected, out[k].summary)
 			}
-			apply(cands[k].i, cands[k].content, out[k].projected, out[k].summary)
 		}
 	}
 

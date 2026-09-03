@@ -758,15 +758,29 @@ type Snapshot struct {
 	// the arm where the sweep was inert).
 	//
 	// StashRefused counts removals DECLINED because the reserve was full: content left
-	// verbatim, nothing became irreversible, and the fix is a larger max_entries.
+	// verbatim, nothing became irreversible, and the fix is a larger max_entries (or
+	// stash_max_bytes — read Bytes against MaxBytes to see which budget bound).
+	//
+	// StashMissing is the OPPOSITE outcome and must not be read as a refusal: a marker was
+	// replayed with no payload behind it, so a dangling marker went out on the wire. It is the
+	// one case here that genuinely breaks reversibility. The two shared a counter until the
+	// #188 review, which meant the number an operator watches to confirm nothing broke was
+	// being incremented by things breaking. It also grows with TURN COUNT rather than with
+	// distinct broken markers — a missing payload cannot be restored, so every later turn
+	// re-reports it for every affected message.
+	//
 	// StashExpired counts payloads the TTL reclaimed, which is the one remaining way an
 	// outstanding marker stops resolving; the fix for that is a larger ttl_seconds. Live
-	// against Capacity says how close the reserve is to binding before either fires.
+	// against Capacity, and Bytes against MaxBytes, say how close each budget is to binding
+	// before any of them fires.
 	// Filled by the host at serve time (offload + store live below metrics).
 	StashRefused  int64 `json:"stash_refused"`
+	StashMissing  int64 `json:"stash_missing"`
 	StashExpired  int64 `json:"stash_expired"`
 	StashLive     int   `json:"stash_live"`
 	StashCapacity int   `json:"stash_capacity"`
+	StashBytes    int64 `json:"stash_bytes"`
+	StashMaxBytes int64 `json:"stash_max_bytes"`
 	// CompactionResets counts turns whose cached-prefix boundary restarted because the
 	// AGENT compacted its own transcript (it shrank under a stable session id). The
 	// session id deliberately survives that compaction so one conversation is one

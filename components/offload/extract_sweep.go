@@ -306,10 +306,15 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		// can never emit different bytes than the turn that decided it.
 		if cached, hit := getResult(c, id); hit {
 			metrics.RecordExtractionCacheLookup(rep.Component, true)
-			if saved := schema.TextTokens(content) - schema.TextTokens(cached.Projected); saved > 0 {
-				metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
-			}
-			if k, ok := applySweepDrop(c, rep, e.mode, msg, content); ok {
+			// Inside the ok branch, with rep.Replay. It used to sit above the call, so a drop
+			// applySweepDrop declined still booked its token savings — and after #188 that
+			// call can decline for a new reason (the reserve), on precisely the runs where the
+			// savings figure is being measured. rep.Replay on this path was already guarded
+			// correctly; this is the metric matching it.
+			if k, ok := applySweepDropReplay(c, rep, e.mode, msg, content); ok {
+				if saved := schema.TextTokens(content) - schema.TextTokens(cached.Projected); saved > 0 {
+					metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
+				}
 				changed++
 				if k != "" {
 					keys = append(keys, k)
@@ -475,17 +480,24 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		}
 		// Phase 3 (serial): freeze + splice.
 		for _, k := range drop {
-			desc := sweepDescriptor(cands[k].content)
+			// THE DROP FIRST, then the decision. putResult ran ahead of applySweepDrop, and
+			// once the reserve could refuse that left a frozen cg:res: record for a drop that
+			// never happened — the same dangling-decision-then-late-splice shape as
+			// extract_llm's phase 3: the same-session replay path above reads the record,
+			// bypasses the depth gate because the bytes were "already sent", and removes the
+			// output from inside the provider's cached prefix on some later turn.
+			key, ok := applySweepDrop(c, rep, e.mode, &req.Input[cands[k].i], cands[k].content)
+			if !ok {
+				continue
+			}
 			// Freeze the decision so every later turn replays it byte-for-byte from the same-session
 			// path above, at any depth. Session-scoped only: unlike a compaction, a drop is a
 			// judgement about THIS transcript's obligations, so it must never be served to another
 			// session whose agent may still need the output.
-			putResult(c, cands[k].id, desc, "")
-			if key, ok := applySweepDrop(c, rep, e.mode, &req.Input[cands[k].i], cands[k].content); ok {
-				changed++
-				if key != "" {
-					keys = append(keys, key)
-				}
+			putResult(c, cands[k].id, sweepDescriptor(cands[k].content), "")
+			changed++
+			if key != "" {
+				keys = append(keys, key)
 			}
 		}
 	}

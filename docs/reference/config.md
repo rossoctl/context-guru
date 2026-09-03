@@ -24,8 +24,36 @@ The document has six top-level fields (from the `Config` struct in
 |---|---|---|
 | `enabled` | `true` | Toggles the state store. `false` wires a `store.Nop`: nothing is stashed, so offloads become **one-way** and must run `marker_mode: off`. |
 | `ttl_seconds` | `10000` | Entry lifetime, and it **slides** — a `Get` refreshes the deadline, so an entry replayed every turn never ages out. Raised from 1800 because Terminal-Bench tasks average ~1975 s of wall clock and run to 4 h, so the old default expired live frozen decisions mid-task. |
-| `max_entries` | `1000` | LRU cap. Frozen-decision keys (`cg:frz:`, `cg:res:`, `cg:len:`) are **pinned** — exempt from LRU eviction, because losing one is cache-destructive rather than merely a miss. The pin is capped at half `max_entries`, and eviction reclaims **expired** entries first (pinned included). |
+| `max_entries` | `5000` | LRU cap. Two groups of keys are **exempt** from LRU eviction, and they behave differently when full — see below. Eviction reclaims **expired** entries first, exempt ones included. Raised from 1,000: one process-wide store serves every concurrent session, and a single reversible removal writes five entries (the payload, `cg:own:`, `cg:xseen:`, and the two pinned decision records), so 1,000 was an order of magnitude under the observed volume. |
+| `stash_max_bytes` | `268435456` (256 MiB) | What the **rewind reserve** may cost in memory. Entries are a poor proxy for it in this one namespace: every other exempt entry is a marker line or an integer, a rewind payload is a whole tool output. Whichever of `max_entries` and this binds first, binds. |
 | `max_sessions` | `100` | Cap on per-session sticky-id sets. |
+
+#### The two exemptions, and the floor under them
+
+**Pinned decisions** (`cg:frz:`, `cg:res:`, `cg:xres:`, `cg:len:`, `cg:ttl:`, `cg:seen:`) are
+exempt because losing one is cache-destructive rather than merely a miss: the replacement bytes
+for an already-cached message stop being reproducible, so the message flips and the provider
+re-writes the whole suffix at ~11.5x the read price. Over its cap a pin simply becomes an
+ordinary evictable entry.
+
+**The rewind reserve** holds the payloads behind `<<cg:HASH>>` markers. It cannot be a pin
+prefix — a payload key *is* the marker id, a bare content hash the model reads out of the
+request — so it is claimed explicitly and, unlike a pin, a payload that cannot be admitted is
+**refused**: the component declines the removal and leaves the content verbatim rather than
+stamping a marker nothing can resolve. Only the TTL releases a slot.
+
+Each exemption is capped at half `max_entries`, and **a quarter of `max_entries` is held back
+from both** so something is always evictable. Without that floor the two could occupy the whole
+cap, and a cache with nothing evictable does not fail loudly: the next write to an unpinned
+namespace is evicted by its own insert, silently turning `cg:keep:` (the flag that stops the
+expand loop), `cg:sum:` (summarize checkpoints) and `cg:own:` (which gates `GET /expand`) into
+no-ops.
+
+**When `stash_refused` rises**, raise `max_entries` or `stash_max_bytes` — read `stash_live`
+against `stash_capacity` and `stash_bytes` against `stash_max_bytes` at
+[`/stats`](routes.md#get-stats) to see which budget bound. Nothing became irreversible: the
+removals did not happen. `stash_missing` is the different, worse number — a marker replayed with
+no payload behind it — and its fix is `ttl_seconds`.
 
 The pinned prefixes are a code-level property of the key layout, supplied by their owners via
 `store.Options.PinPrefixes` — not a YAML knob.
@@ -64,7 +92,7 @@ components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }
   smartcrush: { min_items: 5, keep_first: 3, keep_last: 2 }
   cmdfilter:  { min_size: 400 }   # the default; measured, see components/cmdfilter.md
-store: { ttl_seconds: 10000, max_entries: 1000 }
+store: { ttl_seconds: 10000, max_entries: 5000 }
 mode: sync                          # sync | observe
 ```
 

@@ -502,22 +502,38 @@ func (h *Handler) renderMetrics() string {
 			dropped, repaired := fl.FrozenLossStats()
 			promLine(&b, "cg_frozen_decisions_total", `outcome="dropped"`, float64(dropped))
 			promLine(&b, "cg_frozen_decisions_total", `outcome="repaired"`, float64(repaired))
-			live, capacity, _, expired := fl.StashStats()
+			st := fl.StashStats()
 			promHeaderProc(&b, "cg_stash_reserve_entries",
 				"Rewind payloads (the originals behind <<cg:HASH>> markers) held now, and the reserve's size. live approaching capacity is the warning; reaching it turns into declined removals, not broken markers.", "gauge")
-			promLine(&b, "cg_stash_reserve_entries", `state="live"`, float64(live))
-			promLine(&b, "cg_stash_reserve_entries", `state="capacity"`, float64(capacity))
+			promLine(&b, "cg_stash_reserve_entries", `state="live"`, float64(st.Live))
+			promLine(&b, "cg_stash_reserve_entries", `state="capacity"`, float64(st.Capacity))
+			// The reserve's OTHER budget, and the one that binds first for large payloads: a
+			// payload is a whole tool output while every other exempt entry is a marker line, so
+			// an entry count alone names a memory figure anywhere across two orders of
+			// magnitude. Paired with the entry gauge so an operator can see WHICH budget bound
+			// and therefore which knob to turn.
+			promHeaderProc(&b, "cg_stash_reserve_bytes",
+				"What the held rewind payloads cost, and the reserve's byte budget (stash_max_bytes). Read against cg_stash_reserve_entries: entries near capacity means raise max_entries, bytes near the budget means raise stash_max_bytes.", "gauge")
+			promLine(&b, "cg_stash_reserve_bytes", `state="live"`, float64(st.Bytes))
+			promLine(&b, "cg_stash_reserve_bytes", `state="capacity"`, float64(st.MaxBytes))
 			promHeaderProc(&b, "cg_stash_expired_total",
 				"Rewind payloads reclaimed by the TTL. The one remaining way an outstanding marker stops resolving; raise ttl_seconds.", "counter")
-			promLine(&b, "cg_stash_expired_total", "", float64(expired))
+			promLine(&b, "cg_stash_expired_total", "", float64(st.Expired))
 		}
 		// Process-wide, so outside the cast for the same reason hit/miss are: a component
 		// declines the removal, whichever store instance refused the payload. This is the
 		// LEADING indicator for cg_expand_unresolved_total{cause="missing"}, which cannot move
 		// until the agent happens to call expand.
 		promHeaderProc(&b, "cg_stash_refused_total",
-			"Removals declined because the store's rewind reserve was full. The content was left verbatim and nothing became irreversible; raise max_entries.", "counter")
+			"Removals declined because the store's rewind reserve was full. The content was left verbatim and nothing became irreversible; raise max_entries or stash_max_bytes.", "counter")
 		promLine(&b, "cg_stash_refused_total", "", float64(offload.StashRefusals()))
+		// The counter that means the promise DID break, kept apart from the one above because
+		// the help text above makes a guarantee this case violates. Alert on this one; watch
+		// that one. It grows with turn count rather than with distinct dangling markers,
+		// because a payload that has gone cannot be restored and every later turn replays it.
+		promHeaderProc(&b, "cg_stash_missing_total",
+			"Marker replays that found NO payload behind them: a dangling <<cg:HASH>> went upstream, so this is a broken reversibility promise rather than a declined removal. Raise ttl_seconds. Grows per turn per affected message, not per distinct marker.", "counter")
+		promLine(&b, "cg_stash_missing_total", "", float64(offload.StashMissing()))
 
 		// Same rule as the two families above, and this counter would have had the same bug:
 		// Snapshot.AdjudicateStray is filled only by the /stats handler (proxy.go), so a promLine
