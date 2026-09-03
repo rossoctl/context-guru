@@ -178,7 +178,9 @@ func (s *Skeleton) Offload(req *schemas.BifrostChatRequest, rep *components.Repo
 			rep.Gate("marker_no_win") // skeleton+marker wouldn't shrink this message; leave it verbatim
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(m, newText)
 		freeze(c, s.Name(), content, newText)
 		emitted++

@@ -146,7 +146,9 @@ func (cl *Collapse) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 			rep.Gate("marker_no_win") // head/tail window+marker wouldn't shrink this output
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(m, newText)
 		freeze(c, cl.Name(), content, newText) // freeze so later turns replay it (no churn)
 		if byChars {

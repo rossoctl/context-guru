@@ -780,9 +780,21 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 
 	// apply splices a compacted projection + marker into message i (serial: store writes
 	// and message mutation are not concurrency-safe).
-	apply := func(i int, content, projected, summary string) {
+	//
+	// IT REPORTS WHETHER THE SPLICE HAPPENED, and every caller must gate on that. It can
+	// decline for three reasons now — the projection does not shrink, the marker-inclusive
+	// never-worse check fails, or the store's rewind reserve refuses the payload — and after
+	// #188 the last of those makes it a silent no-op on a path whose callers used to assume it
+	// always acted. What they recorded ahead of it (a frozen cg:res: decision, a token-savings
+	// metric, a replay event) then described a splice that did not occur. See commitMark.
+	//
+	// replay=true marks a decision this session already stamped and sent on an earlier turn.
+	// Then the payload write is a REFRESH, which must never refuse: declining would send the
+	// message verbatim where the provider's cached prefix holds the compacted bytes, which is
+	// the cache-destructive direction and cannot un-send the marker anyway. See commitRefresh.
+	apply := func(i int, content, projected, summary string, replay bool) bool {
 		if projected == "" || schema.TextTokens(projected) >= schema.TextTokens(content) {
-			return
+			return false
 		}
 		hint := " [full output: call " + expand.ToolName + "]"
 		newText, key, eff, ok := tryMark(c, e.mode, content, hint, func(tok string) string {
@@ -792,14 +804,24 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			return projected + "\n" + tok
 		})
 		if !ok {
-			return
+			return false
 		}
-		commitMark(c, rep, eff, key, content)
+		if replay {
+			// Never refuses; a false answer means the payload is gone and the marker being
+			// replayed is dangling. Counted there, and the replay proceeds regardless. It also
+			// owns rep.Irreversible for the degraded marker modes, which commitMark used to set
+			// on this path — see commitRefresh.
+			commitRefresh(c, rep, eff, key, content)
+			recordOwner(c, key)
+		} else if !commitMark(c, rep, eff, key, content) {
+			return false // the store cannot back the marker; leave this output verbatim
+		}
 		schema.SetMessageText(&req.Input[i], newText)
 		changed++
 		if key != "" {
 			keys = append(keys, key)
 		}
+		return true
 	}
 
 	// Phase 1 (serial, cheap): reapply frozen compactions on every turn (keeps the
@@ -872,12 +894,18 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// cache-read rate. This is the other half of the honest net figure: the first
 			// application alone under-reports the value, and pricing the replays at the first
 			// application's rate over-reports it by 12.5x.
-			if saved := schema.TextTokens(content) - schema.TextTokens(cached.Projected); saved > 0 {
-				metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
+			// Every one of these three describes a splice, so all three wait for it. Before
+			// #188 apply always acted, so recording ahead of it was merely untidy; now it can
+			// decline, and a run with an exhausted reserve reported replays and token savings
+			// that never happened — over-reporting the exact figure the iteration-024 re-run
+			// will be judged on.
+			if apply(i, content, cached.Projected, cached.Summary, true) {
+				if saved := schema.TextTokens(content) - schema.TextTokens(cached.Projected); saved > 0 {
+					metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
+				}
+				dbgReapply++
+				rep.Replay("reapplied_same_session")
 			}
-			apply(i, content, cached.Projected, cached.Summary)
-			dbgReapply++
-			rep.Replay("reapplied_same_session")
 			continue
 		}
 		// A NEW compaction, on the UNCACHED region only (cache-safe): when cache-aware that
@@ -943,10 +971,19 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		if !e.rewrite || effectiveMode(c, e.mode) == markerFull {
 			if cached, hit := getResultGlobal(c, extract.ResultKey(id, e.modelName, extCfg)); hit {
 				metrics.RecordExtractionCacheLookup(rep.Component, true)
+				// A cross-session hit is a NEW decision for THIS session — the comment above
+				// is explicit that this session never sent these compacted bytes — so the
+				// payload write is a commitMark that may refuse, and the splice comes before
+				// the freeze for the same reason it does in phase 3. Freezing a decision this
+				// session never spliced is what lets the same-session replay path above splice
+				// it at depth on a later turn, inside the cached prefix, which is the harm the
+				// tail gate two blocks up exists to prevent.
+				if !apply(i, content, cached.Projected, cached.Summary, false) {
+					continue
+				}
 				// Freeze into this session so later turns replay it byte-for-byte from the
 				// same-session path above, at any depth.
 				putResult(c, id, cached.Projected, cached.Summary)
-				apply(i, content, cached.Projected, cached.Summary)
 				dbgReapply++
 				rep.Replay("reapplied_cross_session")
 				continue
@@ -1147,8 +1184,30 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// overwhelming: a turn whose entire transcript re-bills at 1.25x fresh. On this warm
 		// per-output path the extra second buys a fraction of a cent, so it stays fully concurrent
 		// and the flag above is best-effort.
-		type outT struct{ projected, summary string }
+		// saved/before carry the CALL's arithmetic to phase 3 rather than letting the goroutine
+		// that computed it book the outcome — see the accept branch in runCall.
+		type outT struct {
+			projected, summary string
+			saved, before      int
+			// called marks a slot that actually issued a model call. A single-flight FOLLOWER
+			// returns before filling its slot, so the accounting in phase 3 must skip it.
+			//
+			// An explicit flag rather than a proxy. `before > 0` was indirect — `before` is in
+			// scope in the follower branch, so filling it there would silently re-enable the
+			// booking — and `calls[k].Component != ""` traded that for a worse coupling: it is
+			// just rep.Component, which components/pipeline.go always sets in production but which
+			// most of this package's tests leave empty on a bare &components.Report{}. That made
+			// the whole booking block unreachable from those fixtures, so a future regression
+			// inside it could not be caught from them. Given how much of this change's value came
+			// from tests that catch exactly that class, coupling accounting to a labelling field
+			// was the wrong trade.
+			called bool
+		}
 		out := make([]outT, len(cands))
+		// One deferred debug record per call, invoked after phase 3 so `accepted` describes the
+		// splice rather than the model reply. nil for a call that never ran (a single-flight
+		// follower) or when DEBUG is off.
+		logRows := make([]func(), len(cands))
 		// One record per call, written to its own slot so the goroutines need no lock (a
 		// Report is copied by value across this codebase and cannot carry one).
 		calls := make([]components.ModelCall, len(cands))
@@ -1223,6 +1282,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			metrics.RecordExtractionCall(rep.Component, latency)
 			_, inTok, outTok := callSink.Totals()
 			cw, cr := callSink.CacheTotals()
+			out[k].called = true
 			calls[k] = components.ModelCall{
 				Component: rep.Component, Model: callModel,
 				Strategy: strategy, Aggressiveness: string(e.aggro),
@@ -1275,17 +1335,25 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				}
 			}
 			if res != "" && res != cands[k].content {
-				out[k] = outT{res, sum}
-				calls[k].Accepted = true
-				calls[k].SavedTokens = before - schema.TextTokens(res)
+				// FIELD ASSIGNMENT, not a fresh struct: `called` was set above and a struct literal
+				// here silently reset it, so phase 3 skipped the booking for every real call. The
+				// follower path above may use a literal because it has no `called` to preserve —
+				// which is exactly what made this easy to miss.
+				out[k].projected, out[k].summary = res, sum
 				calls[k].Summary, calls[k].After = sum, res
-				// Feed the observed ratio so the gate prices future calls on what this
-				// workload actually achieves, not on an assumption.
-				e.ratios.observe(before-schema.TextTokens(res), before)
-				metrics.RecordExtractionSaving(rep.Component, before-schema.TextTokens(res))
-				// What the removal was WORTH, at this turn's regime. On a cold sweep that is
-				// the cache-write rate; the replays below are credited at the read rate.
-				metrics.RecordExtractionValue(rep.Component, float64(before-schema.TextTokens(res))*val.perToken)
+				// THE OUTCOME IS CARRIED, NOT BOOKED. A model result is not a removal: phase 3
+				// still has to splice it, and after #188 that can decline — the reserve refuses
+				// the payload, or the never-worse check fails with the marker included. Recording
+				// here meant a saturated reserve reported the full saving, credited the gross
+				// value, logged `accepted=true` for a request that kept its original, and fed the
+				// ratio tracker a saving that never happened. That last one is the worst of them:
+				// the ratio prices FUTURE calls, so the mis-recording propagated into decisions
+				// about work not yet done.
+				//
+				// Recorded in phase 3 instead, per candidate, once the splice is a fact. This
+				// runs in a goroutine, so the value simply rides in the slot phase 3 already reads.
+				out[k].saved = before - schema.TextTokens(res)
+				out[k].before = before
 			} else if !timedOut {
 				e.ratios.observe(0, before) // a miss is real evidence: ratio 0
 			}
@@ -1332,15 +1400,23 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// is guarded. `content_key` rather than the content — the key is what the result
 			// cache, the freeze and the cross-session lookup are all keyed on, so it is the
 			// identity that joins this record to every other one about the same candidate.
+			// DEFERRED TO AFTER PHASE 3, not emitted here, and the comment above is why: `accepted`
+			// is only the never-worse outcome if it is read after the splice has been attempted.
+			// Phase 3 now fills Accepted/SavedTokens, so a record emitted in this goroutine would
+			// report accepted=false on every call — the mirror image of the overclaim it used to
+			// make. A closure rather than a struct because each goroutine's locals (latency, the
+			// token tiers, timedOut) are exactly what the record needs, and they are already here.
 			if dbg {
-				logging.From(c.Ctx).Debug("cg.extract_llm.call",
-					"session", c.Session, "content_key", cands[k].id,
-					"candidate_tokens", before, "model", callModel,
-					"latency_ms", latency, "input_tokens", inTok, "output_tokens", outTok,
-					"cache_read", cr, "cache_write", cw, "cost_usd", calls[k].CostUSD,
-					"accepted", calls[k].Accepted, "saved_tokens", calls[k].SavedTokens,
-					"rejection", calls[k].Rejection, "gate", cands[k].gate,
-					"strategy", strategy, "timed_out", timedOut)
+				logRows[k] = func() {
+					logging.From(c.Ctx).Debug("cg.extract_llm.call",
+						"session", c.Session, "content_key", cands[k].id,
+						"candidate_tokens", before, "model", callModel,
+						"latency_ms", latency, "input_tokens", inTok, "output_tokens", outTok,
+						"cache_read", cr, "cache_write", cw, "cost_usd", calls[k].CostUSD,
+						"accepted", calls[k].Accepted, "saved_tokens", calls[k].SavedTokens,
+						"rejection", calls[k].Rejection, "gate", cands[k].gate,
+						"strategy", strategy, "timed_out", timedOut)
+				}
 			}
 		}
 		for k := 0; k < len(cands); k++ {
@@ -1363,9 +1439,6 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			for _, g := range gateNames[k] {
 				rep.Gate(g)
 			}
-			if calls[k].Component != "" {
-				rep.Calls = append(rep.Calls, calls[k])
-			}
 		}
 		for k := range cands { // Phase 3 (serial): freeze + splice.
 			if out[k].projected == "" {
@@ -1380,12 +1453,97 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// result also qualified for cross-session sharing. Then publish globally only when
 			// recoverable. One key per decision (#40) — projected text and summary travel
 			// together, so a replay can never emit half a decision.
+			// THE SPLICE FIRST, then the decision. The order was the other way, and the
+			// reserve's new ability to refuse made that a defect: a declined removal left a
+			// pinned cg:res: record claiming "this session sent these compacted bytes" for a
+			// message that went upstream unchanged. On a later turn the same-session replay
+			// path above reads that record and deliberately bypasses the cache-tail gate —
+			// its reasoning is that the bytes were already sent — so once a reserve slot
+			// freed, the compaction was spliced into a message by then inside the provider's
+			// cached prefix, forcing a full-suffix cache write at ~11.5x the read price. That
+			// is exactly what TestGlobalCacheHitIsNotSplicedAtDepth exists to prevent, arrived
+			// at from the other side.
+			if !apply(cands[k].i, cands[k].content, out[k].projected, out[k].summary, false) {
+				continue
+			}
+			// The splice is a fact, so the outcome may now be booked. `accepted` in the ledger row
+			// is documented as "the never-worse outcome — the same condition that spliced the
+			// result above, so the log cannot say accepted while the request kept the original",
+			// and that claim is only true if it is set here.
+			// Feed the observed ratio so the gate prices future calls on what this workload
+			// actually achieves. Only a splice is evidence of that: a result the reserve refused
+			// tells us the model CAN shrink this content and that we could not use it, and a
+			// future call will be refused the same way — so crediting the ratio would keep the
+			// gate authorising calls whose output is discarded. A model that produced nothing is
+			// separate evidence and is still observed as ratio 0, in runCall.
+			//
+			// THE COST OF NOT OBSERVING, stated because the choice is a trade and not a free win:
+			// under a persistently saturated reserve nothing advances r.total, so ratio() stays
+			// pinned to its prior and exploring() keeps granting maxExploreCalls instead of
+			// self-terminating once the sample is large enough.
+			//
+			// AND THE COST IS NOT PER-SESSION-BOUNDED, which is the easy thing to assume and the
+			// wrong thing to write down. The store is ONE process-wide instance, so saturation is
+			// CORRELATED rather than independent: when the reserve is full it is full for every
+			// session at once. The spend is therefore maxExploreCalls x every concurrent session,
+			// repeating for as long as the episode lasts — and with a sliding 10,000 s TTL an
+			// episode can run for hours. The deployments that pay it are the under-provisioned
+			// ones (see #190), which are the least able to absorb it.
+			//
+			// Still small beside the cache writes this gate's honesty prevents, so the trade stands:
+			// observing the achieved ratio would authorise calls whose output is discarded, and
+			// observing 0 would assert the workload is incompressible, which is false and would
+			// also suppress calls that WOULD land once the reserve frees. Observing nothing is the
+			// only one of the three that does not lie. But the previous behaviour did terminate
+			// exploration, and a reader reasoning from a "bounded per session" claim would
+			// under-count this by the number of concurrent sessions.
+			//
+			// The option that gets both properties is to gate exploring() on RESERVE HEALTH rather
+			// than on r.total — stash_refused already distinguishes "cannot learn because we are
+			// refusing" from "no evidence yet", which is the distinction r.total cannot express.
+			// Deliberately not done here: it is the same question as #190 (what a component should
+			// do while the reserve is saturated) and wants the re-run's numbers, so it is on that
+			// issue's candidate list rather than guessed at in this diff.
+			//
+			// Only for a slot that actually MADE A CALL — see outT.called for why the condition is
+			// an explicit flag rather than a proxy.
+			//
+			// A DEFENCE, NOT A FIX: nothing was escaping before it. ratioTracker.observe returns
+			// early on totalTok <= 0, both recorders are no-ops at 0, out[k].saved is already 0 in
+			// a follower slot, and a follower's row is dropped by the Component filter on the
+			// append below. So this prevents no live defect, and saying otherwise would leave a
+			// future reader reasoning from a false premise. What it buys is that the booking no
+			// longer depends on three unrelated zero-guards staying zero-guards, and that the
+			// condition is stated where the booking happens.
+			//
+			// The follower's saving stays UNBOOKED — its leader books the shared result once, and
+			// attributing it twice would over-count. Booking per spliced message rather than per
+			// call is the real fix and is larger than this change.
+			if out[k].called {
+				calls[k].Accepted = true
+				calls[k].SavedTokens = out[k].saved
+				e.ratios.observe(out[k].saved, out[k].before)
+				metrics.RecordExtractionSaving(rep.Component, out[k].saved)
+				// What the removal was WORTH, at this turn's regime. On a cold sweep that is the
+				// cache-write rate; the replays above are credited at the read rate.
+				metrics.RecordExtractionValue(rep.Component, float64(out[k].saved)*val.perToken)
+			}
 			putResult(c, cands[k].id, out[k].projected, out[k].summary)
 			if !e.rewrite || effectiveMode(c, e.mode) == markerFull {
 				putResultGlobal(c, extract.ResultKey(cands[k].id, e.modelName, extCfg),
 					out[k].projected, out[k].summary)
 			}
-			apply(cands[k].i, cands[k].content, out[k].projected, out[k].summary)
+		}
+		// AFTER phase 3, because rep.Calls takes a COPY of each row and phase 3 is what sets
+		// Accepted/SavedTokens now. Appending before it exported a ledger of rows that all read
+		// accepted=false, which is the mirror image of the bug being fixed.
+		for k := range calls {
+			if calls[k].Component != "" {
+				rep.Calls = append(rep.Calls, calls[k])
+			}
+			if logRows[k] != nil {
+				logRows[k]()
+			}
 		}
 	}
 

@@ -176,41 +176,46 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 			rep.Gate("filter_matched_no_change")
 			continue
 		}
-		// Build the token that goes where the restoration marker would (per
-		// marker_mode) WITHOUT stashing yet, so the never-worse check below can
-		// still bail. Compare the FULL rewritten text (token included) against the
-		// original — the marker costs tokens too, so filtering that barely wins can
-		// still make the message larger (rtk never_worse, at the message level).
-		stashKey := hashKey(content)
-		// degrade full→off when the store can't persist (no unresolvable marker).
-		mode := effectiveMode(c, f.mode)
-		var token string
-		switch mode {
-		case markerFull:
-			token = expand.Marker(stashKey) + recoveryHint(loss, len(strings.Split(out, "\n")))
-		case markerSummary:
-			token = expand.SummaryMarker
-		} // off: no token
-		newText := out
-		if token != "" {
-			newText += "\n" + token
-		}
-		before, after := schema.TextTokens(content), schema.TextTokens(newText)
-		if after >= before {
+		// Through tryMark/commitMark, like every other offloader.
+		//
+		// This block used to build its marker token, run its own never-worse check and call
+		// store.PutStash itself — a hand-rolled copy of the shared pair, differing only in the
+		// recovery hint it appends. The copy is why #188's reserve gate had to be applied here
+		// separately, and it is what let the mutation that stamps an unbacked marker survive a
+		// whole review round in this file alone. The hint is the only thing that was ever
+		// component-specific, and tryMark already takes it as a parameter, so there is nothing
+		// left for a copy to be for. Now the gate cannot be missed here without being missed
+		// everywhere, which is a failure a single test catches.
+		//
+		// Note the hint is computed from the FILTERED text (its line count), so it must be
+		// built before tryMark rather than inside the assemble closure — assemble receives the
+		// finished token.
+		hint := recoveryHint(loss, len(strings.Split(out, "\n")))
+		newText, key, eff, ok := tryMark(c, f.mode, content, hint,
+			func(tok string) string {
+				if tok == "" {
+					return out
+				}
+				return out + "\n" + tok
+			})
+		if !ok {
 			rep.Gate("marker_no_win")
 			continue
 		}
-		if mode == markerFull {
-			c.Store.Put(stashKey, []byte(content))
-			recordOwner(c, stashKey) // scope GET /expand retrieval to this session
-			keys = append(keys, stashKey)
-		} else {
-			rep.Irreversible = true
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
+		before, after := schema.TextTokens(content), schema.TextTokens(newText)
+		if key != "" {
+			keys = append(keys, key)
 		}
 		schema.SetMessageText(m, newText)
 		freeze(c, f.Name(), content, newText) // memoize: later turns replay these bytes
 		if fs := c.Stats(); fs != nil {
-			fs.FilterAct(filt.Family(), filt.Name, stashKey, before-after)
+			// hashKey(content), not tryMark's key: the ledger identifies the message the
+			// filter acted on, and it must keep doing so in the degraded marker modes where
+			// nothing is stashed and there is no store key at all.
+			fs.FilterAct(filt.Family(), filt.Name, hashKey(content), before-after)
 		}
 		changed++
 	}

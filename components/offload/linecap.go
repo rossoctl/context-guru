@@ -143,7 +143,9 @@ func (lc *Linecap) Offload(req *schemas.BifrostChatRequest, rep *components.Repo
 			rep.Gate("marker_no_win")
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(m, newText)
 		if key != "" {
 			keys = append(keys, key)

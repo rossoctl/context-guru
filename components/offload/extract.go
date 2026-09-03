@@ -79,7 +79,9 @@ func (e *Extract) Offload(req *bschemas.BifrostChatRequest, rep *components.Repo
 			rep.Gate("marker_no_win") // projection+marker wouldn't shrink this message
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(msg, newText)
 		changed++
 		if key != "" {

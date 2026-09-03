@@ -85,7 +85,9 @@ func (s *SmartCrush) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		if !ok {
 			continue // crushed array+marker wouldn't shrink this message; leave it verbatim
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(msg, newText)
 		changed++
 		if key != "" {

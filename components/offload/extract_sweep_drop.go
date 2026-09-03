@@ -85,6 +85,25 @@ func recordCount(content string) (int, bool) {
 // without this a drop just above the floor could grow the message it was meant to shrink.
 func applySweepDrop(c *components.Ctx, rep *components.Report, mode markerMode,
 	msg *bschemas.ChatMessage, content string) (key string, ok bool) {
+	return sweepDrop(c, rep, mode, msg, content, false)
+}
+
+// applySweepDropReplay is applySweepDrop for a drop THIS SESSION ALREADY MADE on an earlier
+// turn, replayed to keep the request prefix byte-stable.
+//
+// It exists because the two cases must answer a refused payload differently, and sharing one
+// function made them answer it the same way. A NEW drop declines — nothing has been promised
+// yet, so leaving the output verbatim costs only tokens. A REPLAY cannot decline: the provider's
+// cached prefix already holds the removed form, so sending the output back in full is itself the
+// cache-destructive move, and it cannot un-send the marker that went out turns ago. So the
+// replay proceeds and a missing payload is diagnosed rather than obeyed (see commitRefresh).
+func applySweepDropReplay(c *components.Ctx, rep *components.Report, mode markerMode,
+	msg *bschemas.ChatMessage, content string) (key string, ok bool) {
+	return sweepDrop(c, rep, mode, msg, content, true)
+}
+
+func sweepDrop(c *components.Ctx, rep *components.Report, mode markerMode,
+	msg *bschemas.ChatMessage, content string, replay bool) (key string, ok bool) {
 	desc := sweepDescriptor(content)
 	hint := " [full output: call " + expand.ToolName + "]"
 	newText, key, eff, ok := tryMark(c, mode, content, hint, func(tok string) string {
@@ -96,7 +115,14 @@ func applySweepDrop(c *components.Ctx, rep *components.Report, mode markerMode,
 	if !ok {
 		return "", false
 	}
-	commitMark(c, rep, eff, key, content)
+	if replay {
+		// Never refuses; a false answer is counted as dangling. Also sets rep.Irreversible in the
+		// degraded marker modes, which commitMark used to do on this path.
+		commitRefresh(c, rep, eff, key, content)
+		recordOwner(c, key)
+	} else if !commitMark(c, rep, eff, key, content) {
+		return "", false // the store cannot back the marker; the drop does not happen
+	}
 	schema.SetMessageText(msg, newText)
 	return key, true
 }

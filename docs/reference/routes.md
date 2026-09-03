@@ -195,6 +195,35 @@ A healthy long-horizon run shows `frozen_hits` climbing with turn count and `fro
 0; a rising `frozen_dropped` means decisions are dying mid-session (TTL too short for the task,
 or the entry cap too small for the session's working set).
 
+### Rewind reserve (reversibility health)
+
+The store holds the **originals** behind `<<cg:HASH>>` markers in a reserve of its own that LRU
+pressure cannot evict, bounded by two budgets: half the entry cap, and `stash_max_bytes`. Before
+#187 those payloads shared the cache's evictable half with per-removal bookkeeping while the
+*decisions* naming them were pinned, so the more a configuration removed the more of its own
+reversibility it destroyed, silently.
+
+| Field | Meaning |
+|---|---|
+| `stash_live` / `stash_capacity` | Payloads held now, and the reserve's entry cap (`max_entries / 2`). `live` approaching `capacity` is the warning. |
+| `stash_bytes` / `stash_max_bytes` | What those payloads cost, and the byte budget (`stash_max_bytes`). Entries are a poor proxy for memory here — a payload is a whole tool output, every other exempt entry is a marker line — so read both pairs to see **which** budget bound. |
+| `stash_refused` | Removals **declined** because the reserve was full. The content was left verbatim and nothing became irreversible — raise `max_entries` or `stash_max_bytes`. |
+| `stash_missing` | Marker replays that found **no payload** behind them: a dangling `<<cg:HASH>>` went upstream. This one *is* a broken promise — raise `ttl_seconds`. |
+| `stash_expired` | Payloads reclaimed by the TTL. With `stash_missing`, the remaining way an outstanding marker stops resolving — raise `ttl_seconds`. |
+
+`stash_refused` is the **leading** indicator for `expand_unresolved_missing`: that counter cannot
+move until the agent happens to call `expand`, so a proxy that had stopped being able to promise
+reversibility read as perfectly healthy until one did. This one moves when the budget binds.
+
+**Do not read `stash_refused` and `stash_missing` as the same thing.** They are opposite outcomes,
+and they were one counter until the #188 review pointed out that made the safe case
+indistinguishable from the dangerous one. A refusal means a removal did **not** happen — the
+content went upstream verbatim, and the cost is tokens. A missing payload means a marker went out
+with nothing behind it, which is the failure #187 was about. Alert on `stash_missing`; watch
+`stash_refused`. `stash_missing` also grows with **turn count** rather than with distinct dangling
+markers: a payload that has gone cannot be restored (the replayed bytes must stay byte-identical to
+the turn that created them), so every later turn re-reports it for every affected message.
+
 ### cmdfilter attribution
 
 | Field | Meaning |

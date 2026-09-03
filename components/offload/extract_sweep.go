@@ -304,12 +304,40 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		// That is what makes the replay safe in the sense TailOnlyCold's doc requires: the DECISION
 		// came from a model, but the REPLACEMENT is a pure function of (content, config), so a replay
 		// can never emit different bytes than the turn that decided it.
-		if cached, hit := getResult(c, id); hit {
+		// The cached VALUE is no longer read: the saving is measured against the message as
+		// replayed, not against the stored descriptor. Only the HIT is consulted.
+		//
+		// WHAT THE HIT ACTUALLY PROVES, stated precisely because the depth bypass below rests on it
+		// and the key cannot carry the stronger claim. resultKey is cg:res:<session>:<id> — session
+		// and content hash, no component tag (state.go) — and extract_llm keys the same namespace
+		// off the same extract.ContentKey. The shipped `housellm` preset runs extract_llm
+		// immediately before this component in one pipeline (config/config.go), so a record written
+		// by extract_llm for content M is indistinguishable from one written here.
+		//
+		// So a hit proves "SOME component in this session recorded a decision for these bytes",
+		// not "this component already sent this descriptor". The bypass is still sound in practice —
+		// the replacement is a pure function of (content, config), so a replay emits the same bytes
+		// whichever component decided — but the sequence that would exercise the difference (M
+		// verbatim, at cached depth, with a live cg:res: from extract_llm and no marker on it) has
+		// not been constructed, and unreachability has not been established either. Filed rather
+		// than asserted here (#197); namespacing the record or storing a component tag would make
+		// the stronger claim true by construction.
+		if _, hit := getResult(c, id); hit {
 			metrics.RecordExtractionCacheLookup(rep.Component, true)
-			if saved := schema.TextTokens(content) - schema.TextTokens(cached.Projected); saved > 0 {
-				metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
-			}
-			if k, ok := applySweepDrop(c, rep, e.mode, msg, content); ok {
+			// Inside the ok branch, with rep.Replay. It used to sit above the call, so a drop
+			// applySweepDrop declined still booked its token savings — and after #188 that
+			// call can decline for a new reason (the reserve), on precisely the runs where the
+			// savings figure is being measured. rep.Replay on this path was already guarded
+			// correctly; this is the metric matching it.
+			if k, ok := applySweepDropReplay(c, rep, e.mode, msg, content); ok {
+				// Measured against the message AS REPLAYED, for the same reason the fresh path is:
+				// the text written is descriptor + marker + hint. Correcting only the fresh path
+				// left this component contradicting ITSELF — the same drop valued higher on every
+				// replay turn than on the turn it was made, and replays are the steady state, so
+				// most of the reported value came from the overstated side.
+				if saved := schema.TextTokens(content) - schema.TextTokens(schema.MessageText(*msg)); saved > 0 {
+					metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
+				}
 				changed++
 				if k != "" {
 					keys = append(keys, k)
@@ -470,23 +498,58 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		for _, ev := range call.events {
 			rep.Event(ev)
 		}
-		if call.rec.Component != "" {
-			rep.Calls = append(rep.Calls, call.rec)
-		}
 		// Phase 3 (serial): freeze + splice.
+		applied := 0
 		for _, k := range drop {
-			desc := sweepDescriptor(cands[k].content)
+			// THE DROP FIRST, then the decision. putResult ran ahead of applySweepDrop, and
+			// once the reserve could refuse that left a frozen cg:res: record for a drop that
+			// never happened — the same dangling-decision-then-late-splice shape as
+			// extract_llm's phase 3: the same-session replay path above reads the record,
+			// bypasses the depth gate because the bytes were "already sent", and removes the
+			// output from inside the provider's cached prefix on some later turn.
+			key, ok := applySweepDrop(c, rep, e.mode, &req.Input[cands[k].i], cands[k].content)
+			if !ok {
+				continue
+			}
 			// Freeze the decision so every later turn replays it byte-for-byte from the same-session
 			// path above, at any depth. Session-scoped only: unlike a compaction, a drop is a
 			// judgement about THIS transcript's obligations, so it must never be served to another
 			// session whose agent may still need the output.
-			putResult(c, cands[k].id, desc, "")
-			if key, ok := applySweepDrop(c, rep, e.mode, &req.Input[cands[k].i], cands[k].content); ok {
-				changed++
-				if key != "" {
-					keys = append(keys, key)
-				}
+			putResult(c, cands[k].id, sweepDescriptor(cands[k].content), "")
+			// Booked here, where the drop is a fact. rep.Replay on the replay path above was
+			// already guarded this way; the fresh path was not.
+			//
+			// Measured against the message AS SPLICED, not against the descriptor. In markerFull
+			// the text written is descriptor + marker + recovery hint, so a descriptor-only
+			// subtraction overstates every candidate by the marker's tokens — and the comment
+			// below claims this figure is what reached the wire, which is the one thing a
+			// descriptor-only number is not.
+			saved := schema.TextTokens(cands[k].content) -
+				schema.TextTokens(schema.MessageText(req.Input[cands[k].i]))
+			if saved > 0 {
+				applied += saved
+				metrics.RecordExtractionSaving(rep.Component, saved)
+				metrics.RecordExtractionValue(rep.Component, float64(saved)*val.perToken)
 			}
+			changed++
+			if key != "" {
+				keys = append(keys, key)
+			}
+		}
+		// AFTER phase 3: rep.Calls takes a COPY of the row, and Accepted/SavedTokens are only
+		// knowable once the drops have been applied. `applied` is what reached the wire, which is
+		// the figure the ledger's own doc claims it carries.
+		if applied > 0 {
+			call.rec.Accepted = true
+			call.rec.SavedTokens = applied
+		} else if call.rec.Rejection == "" {
+			// The adjudicator named spent outputs and NONE of them could be dropped. Distinct
+			// from "nothing was spent", and it is the reserve-exhausted shape: without its own
+			// reason the row read as a plain rejection.
+			call.rec.Rejection = "adjudicated spent, but no drop could be applied"
+		}
+		if call.rec.Component != "" {
+			rep.Calls = append(rep.Calls, call.rec)
 		}
 	}
 
@@ -535,6 +598,18 @@ type sweepResult struct {
 
 func (r *sweepResult) gate(name string)  { r.gates = append(r.gates, name) }
 func (r *sweepResult) event(name string) { r.events = append(r.events, name) }
+
+// raised reports whether a gate was recorded. The gates are carried as a SLICE because the raise
+// happens on the serial path, so this is a scan rather than a map lookup — the list is one entry
+// per declined candidate, which is bounded by the inventory.
+func (r *sweepResult) raised(name string) bool {
+	for _, g := range r.gates {
+		if g == name {
+			return true
+		}
+	}
+	return false
+}
 
 // adjudicate makes ONE prefix ask about every candidate and returns the labels it authorised
 // dropping.
@@ -861,7 +936,13 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 
 	var drop []int
 	seen := map[int]bool{}
-	var removed int
+	// judgedTokens is the adjudicator's OWN arithmetic, for the debug row only: what it believed
+	// it was freeing, descriptor-only and before phase 3 has had a chance to refuse any of it.
+	// Deliberately not the ledger's figure — see the rejection test below.
+	// spentJudged counts verdicts that said "drop", whether or not we then acted on them. See its
+	// increment for why the ledger's reason is derived from this rather than from the skip gates.
+	var spentJudged int
+	var judgedTokens int
 	for _, v := range verdicts {
 		if v.Label < 0 || v.Label >= len(cands) {
 			// A verdict for something we did not offer. NEVER acted on: the label is how a decision is
@@ -897,6 +978,18 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		// but "the model judged this still needed" and "the model tried to remove something it had
 		// just said was needed" are different events, and folding the second into the keep total is
 		// what would make the alertable one invisible in the ratio an operator actually looks at.
+		// WHAT THE MODEL ANSWERED, not what validation concluded — and the difference is the whole
+		// point. extract.Judge returns early on a self-contradictory drop WITHOUT setting a.Drop
+		// (adjudicate.go: `RefusedObligation = true; return a`), so counting a.Drop alone misses
+		// precisely the path that made this reason wrong: a model answering "drop" with a needed_by
+		// for every candidate produced a ledger row saying the adjudicator found nothing spent.
+		//
+		// Counted before the skips below, because each of those is OUR decision not to act on a
+		// judgement the model did make. VerdictUnusable is deliberately NOT counted: there the model
+		// answered something other than drop or keep, so it did not judge the output spent.
+		if a.Drop || a.RefusedObligation {
+			spentJudged++
+		}
 		if a.RefusedObligation {
 			r.gate("sweep_drop_refused_obligation")
 			continue
@@ -915,9 +1008,13 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		}
 		r.event("sweep_dropped")
 		drop = append(drop, v.Label)
-		removed += sz - after
-		metrics.RecordExtractionSaving(rep.Component, sz-after)
-		metrics.RecordExtractionValue(rep.Component, float64(sz-after)*savedTokenValue(c).perToken)
+		judgedTokens += sz - after
+		// NOT BOOKED HERE. A verdict is a decision, not a removal: phase 3 still has to apply it,
+		// and that can decline — the reserve refuses the payload, or the marker-inclusive
+		// never-worse check fails. The descriptor-only pre-check above catches neither (it is not
+		// marker-inclusive, and it cannot see the reserve at all), so a saturated reserve booked
+		// the full saving for outputs that went upstream untouched. Recorded in phase 3 instead,
+		// per candidate, once the drop is a fact.
 	}
 	// An output named in the inventory that no verdict mentioned is UNJUDGED, and it must not look
 	// like a keep: 4ca1f13 found a live arm where the model silently omitted labels and the missing
@@ -928,16 +1025,46 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 			r.gate("sweep_verdict_missing")
 		}
 	}
-	if removed > 0 {
-		r.rec.Accepted = true
-		r.rec.SavedTokens = removed
-	} else {
-		r.rec.Rejection = "adjudicated: nothing was spent"
+	// THE VERDICT SET, not a token total. Accepted/SavedTokens are filled by the caller after
+	// phase 3, because they describe drops that actually HAPPENED and the two diverge exactly when
+	// the reserve is refusing. What is this function's to state is whether the adjudicator judged
+	// anything spent at all — and `drop` IS that set, so it is what the test reads.
+	//
+	// It used to read `removed == 0`, and moving the metrics out of this loop deleted `removed`'s
+	// only assignment while leaving the read: Go then guarantees it stays 0, so EVERY adjudication
+	// stamped "nothing was spent", including ones that dropped content. A row could carry
+	// accepted=true, a large saved_tokens, and "nothing was spent" at once — the same
+	// self-contradictory shape this change set out to remove, arrived at from the other side. The
+	// compiler cannot see it because `removed` is still read.
+	if len(drop) == 0 {
+		// TWO QUESTIONS, and only the first is the adjudicator's: did the model judge anything
+		// spent, and if it did, why did none of it become a drop?
+		//
+		// Enumerating the second was the mistake. An earlier version tested only the never-worse
+		// pre-check and reported every other skip — refused obligation, unusable verdict, unknown
+		// or duplicate label — as "the adjudicator found nothing spent", which tells an operator
+		// the model saw nothing worth removing when it judged EVERY output spent and we declined
+		// each one. Concretely: a model that answers drop with a needed_by for every candidate
+		// trips RefusedObligation throughout and produced exactly that row.
+		//
+		// So the reason is derived from spentJudged, which cannot miss a skip path, and the GATES
+		// carry which skip it was — they are already raised, already exported, and unlike a
+		// hand-written reason string they stay correct when a skip is added.
+		// A verdict we could not key to an output (unknown or duplicate label) is skipped above
+		// before Judge runs, so its answer is unknown and it cannot be counted either way. It raises
+		// its own gate, which is the honest record: the reason below speaks only for verdicts that
+		// were actually read.
+		if spentJudged == 0 {
+			r.rec.Rejection = "adjudicated: nothing was spent"
+		} else {
+			r.rec.Rejection = fmt.Sprintf(
+				"adjudicated %d spent, but none became a drop (see gates)", spentJudged)
+		}
 	}
 	if debugExtractLLM(c) {
 		logging.From(c.Ctx).Debug("cg.sweep.ask", "offered", len(items),
 			"verdicts", len(verdicts), "dropped", len(drop), "candidate_tokens", before,
-			"removed_tokens", removed, "cache_read", usage.CacheRead, "fresh", usage.Fresh)
+			"removed_tokens", judgedTokens, "cache_read", usage.CacheRead, "fresh", usage.Fresh)
 	}
 	return drop, r
 }

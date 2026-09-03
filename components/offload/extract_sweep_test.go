@@ -70,6 +70,15 @@ func (m *labelAsker) Ask(ctx context.Context, session, ask string) (string, comp
 // newSweep builds the component through its registered constructor, so the config surface under test
 // is the real one. The floor is above the filler outputs in sweepReq, so exactly the intended
 // candidates reach the inventory.
+//
+// IT PREPENDS ITS OWN min_tokens, so passing one in extraYAML does not override it — YAML rejects
+// the duplicate key and newExtractSweep fails with
+//
+//	yaml: unmarshal errors: line 3: mapping key "min_tokens" already defined at line 1
+//
+// which reads as a broken component rather than as a fixture mistake. A test that needs a different
+// floor — e.g. one BELOW the shape descriptor's own size, to reach the never-worse pre-check —
+// should call newExtractSweep directly rather than routing through here.
 func newSweep(t *testing.T, extraYAML string) *ExtractSweep {
 	t.Helper()
 	c, err := newExtractSweep([]byte("min_tokens: 2000\n" + extraYAML))

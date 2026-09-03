@@ -238,7 +238,14 @@ func reapplyFrozen(c *components.Ctx, rep *components.Report, comp string, m *bs
 		rep.Irreversible = true
 	}
 	for _, k := range keys {
-		c.Store.Put(k, []byte(content)) // refresh the stashed original for expand
+		// Refresh the stashed original for expand. A key already present is always retained
+		// (see store.Stasher), so a false answer means this replayed decision's payload had
+		// already left the store: the marker about to go out is DANGLING. The replacement
+		// bytes are replayed anyway — declining would flip an already-cached message and
+		// cannot un-send the marker — and commitRefresh counts it as stash_missing, which is
+		// the counter for a broken promise. It used to increment stashRefusals, the counter
+		// whose whole operator-facing meaning is "nothing became irreversible".
+		commitRefresh(c, rep, markerFull, k, content)
 	}
 	schema.SetMessageText(m, rs)
 	return keys, saved, true

@@ -116,7 +116,9 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 			rep.Gate("marker_no_win") // rewrite+marker wouldn't shrink this message
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(msg, newText)
 		freeze(c, m.Name(), content, newText) // freeze so later turns replay it (no churn)
 		changed++
