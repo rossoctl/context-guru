@@ -805,17 +805,23 @@ func stallingPort(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Closing the listener is registered from the TEST goroutine; that is what unblocks Accept
+	// below and lets the goroutine tear down its own connections.
 	t.Cleanup(func() { ln.Close() })
 	go func() {
+		// `held` is touched by this goroutine only — appended here, closed by this deferred func.
+		// An earlier version registered that cleanup with t.Cleanup from inside here, which reads
+		// the slice from the test goroutine while this one appends to it: a data race that -race
+		// caught in CI and a non-race run cannot see.
 		var held []net.Conn
-		t.Cleanup(func() {
+		defer func() {
 			for _, c := range held {
 				c.Close()
 			}
-		})
+		}()
 		for {
 			c, err := ln.Accept()
-			if err != nil {
+			if err != nil { // the listener was closed by the cleanup above
 				return
 			}
 			held = append(held, c) // hold it open, answer nothing
@@ -1196,5 +1202,134 @@ func TestBackupPruningSurvivesAGlobbyPath(t *testing.T) {
 	t.Logf("%d backups left under a path containing [ ]", backups)
 	if backups > 11 { // KEEP_BACKUPS plus the one just written
 		t.Errorf("%d backups accumulated under a globby path — pruning never matched anything", backups)
+	}
+}
+
+// skillBlock returns the fenced ```bash block in a skill file that contains `needle`.
+//
+// The skills are prompts, but the destructive steps in them are shell that gets run verbatim. So
+// the ones that can hurt somebody are extracted and EXECUTED here rather than reviewed by reading:
+// reading is exactly what missed the ordering defect this covers, twice.
+func skillBlock(t *testing.T, skill, needle string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("skills", skill, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("reading skill: %v", err)
+	}
+	var blocks []string
+	var cur []string
+	in := false
+	for _, line := range strings.Split(string(b), "\n") {
+		switch {
+		case !in && strings.HasPrefix(line, "```bash"):
+			in, cur = true, nil
+		case in && strings.HasPrefix(line, "```"):
+			in = false
+			blocks = append(blocks, strings.Join(cur, "\n"))
+		case in:
+			cur = append(cur, line)
+		}
+	}
+	found := ""
+	for _, blk := range blocks {
+		if strings.Contains(blk, needle) {
+			if found != "" {
+				t.Fatalf("%s/SKILL.md has more than one bash block containing %q; the test cannot "+
+					"tell which one is the destructive path", skill, needle)
+			}
+			found = blk
+		}
+	}
+	if found == "" {
+		t.Fatalf("no bash block in %s/SKILL.md contains %q", skill, needle)
+	}
+	return found
+}
+
+// TestUninstallDoesNotSignalAProcessThatIsNotOurs executes the uninstall skill's stop-the-proxy
+// block against a PID that is NOT a context-guru proxy.
+//
+// The block used to send the signal first and document the ownership check as a SEPARATE snippet
+// below it — so executed the way it reads, top to bottom, `kill "$pid"` had already run by the time
+// the guard was reached. That matters most on the lsof/ss fallback, which exists precisely for a
+// stale pidfile or a hand-started proxy: the cases where the PID may belong to something else. A
+// recycled PID satisfies `kill -0` perfectly well.
+//
+// This is the same shape as the defect that had uninstall killing the user's own Claude Code
+// session, which is the reason it gets an executing test rather than careful prose.
+func TestUninstallDoesNotSignalAProcessThatIsNotOurs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell snippet is POSIX-only")
+	}
+	requireTool(t, "bash")
+	block := skillBlock(t, "uninstall", `kill "$pid"`)
+
+	for _, c := range []struct {
+		name       string
+		psReports  string // what `ps -p <pid> -o command=` prints
+		wantKilled bool
+	}{
+		{"a stranger's process on our port", "/usr/bin/postgres -D /var/lib/postgres", false},
+		{"a proxy of ours", "context-guru-proxy --listen 127.0.0.1:8787 --preset cache", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stubs := filepath.Join(dir, "bin")
+			if err := os.MkdirAll(stubs, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			killLog := filepath.Join(dir, "kill.log")
+			write := func(name, body string) {
+				if err := os.WriteFile(filepath.Join(stubs, name), []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("ps", "#!/usr/bin/env bash\nprintf '%s\\n' "+strconv.Quote(c.psReports)+"\n")
+			// No socket-owner lookup: the pidfile below is what supplies the PID.
+			write("lsof", "#!/usr/bin/env bash\nexit 1\n")
+			write("ss", "#!/usr/bin/env bash\nexit 1\n")
+
+			state := filepath.Join(dir, "state", "context-guru")
+			if err := os.MkdirAll(state, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(state, "proxy-8787.pid"), []byte("424242\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			// `kill` must be intercepted by a FUNCTION, not a file on PATH: it is a bash builtin,
+			// so a PATH stub is never consulted — the first version of this test stubbed a file,
+			// the block's `kill -0` liveness probe therefore failed for a pid that does not exist,
+			// it fell through to the socket-owner lookup and the run exercised none of the branch
+			// under test. It records the signal rather than sending one, and answers `kill -0` as
+			// "alive" so the pidfile path is the one taken.
+			preamble := "kill() {\n" +
+				"  if [ \"$1\" = -0 ]; then return 0; fi\n" +
+				"  printf '%s\\n' \"$*\" >> " + strconv.Quote(killLog) + "\n" +
+				"}\n"
+			cmd := exec.Command("bash", "-c", preamble+block)
+			cmd.Env = append(os.Environ(),
+				"PATH="+stubs+":"+os.Getenv("PATH"),
+				"CLAUDE_PLUGIN_OPTION_PORT=8787",
+				"XDG_STATE_HOME="+filepath.Join(dir, "state"))
+			out, err := cmd.CombinedOutput()
+			t.Logf("uninstall stop-block -> %v, output:\n%s", err, out)
+
+			logged, _ := os.ReadFile(killLog)
+			killed := strings.Contains(string(logged), "424242")
+			if killed != c.wantKilled {
+				t.Errorf("kill invoked = %v, want %v (ps reported %q). kill log: %q\nblock output:\n%s",
+					killed, c.wantKilled, c.psReports, logged, out)
+			}
+			if !c.wantKilled && !strings.Contains(string(out), "NOT OURS") {
+				t.Errorf("the block signalled nothing but also said nothing about why:\n%s", out)
+			}
+			// A pidfile belonging to someone else's process must survive: removing it would strand
+			// a proxy of ours that is still running under a different pid.
+			_, statErr := os.Stat(filepath.Join(state, "proxy-8787.pid"))
+			if !c.wantKilled && statErr != nil {
+				t.Errorf("the pidfile was removed for a process we refused to touch: %v", statErr)
+			}
+		})
 	}
 }

@@ -71,19 +71,29 @@ if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
   fi
 fi
 
-if [ -n "$pid" ]; then
-  kill "$pid" && rm -f "$PIDFILE"
-else
+# The ownership check GATES the signal — one branch, so the order cannot be got wrong.
+#
+# This used to be two blocks: `kill "$pid"` here, and "confirm the PID is ours" as prose with its
+# own snippet BELOW. Executed the way it reads, top to bottom, the signal was already sent by the
+# time the guard was reached. It matters most on the lsof/ss fallback above, which exists for a
+# stale pidfile or a hand-started proxy — i.e. exactly the cases where the PID may belong to
+# something else, and a recycled PID satisfies `kill -0` perfectly well.
+#
+# Same shape as the defect that made uninstall kill the user's own session: a destructive command
+# whose safety condition lived somewhere the reader got to afterwards.
+if [ -z "$pid" ]; then
   echo "(nothing listening on ${PORT})"
+elif ! ps -p "$pid" -o command= 2>/dev/null | grep -q context-guru-proxy; then
+  echo "NOT OURS — pid ${pid} holds port ${PORT} and is not a context-guru-proxy; leaving it alone"
+  ps -p "$pid" -o command= 2>/dev/null
+else
+  kill "$pid" && rm -f "$PIDFILE"
 fi
 ```
 
-Before killing anything, **confirm the PID is ours** — the port may be held by something else
-entirely, and this step must not kill a stranger's process:
-
-```bash
-ps -p "$pid" -o command= | grep -q context-guru-proxy && echo "ours" || echo "NOT OURS — stop"
-```
+If it reports **NOT OURS**, stop here and tell the user what is on the port. Do not kill it, and do
+not remove the pidfile: something else owns that port, and the routing change alone already stops
+this project using it.
 
 Then confirm it is actually gone, rather than assuming the kill worked:
 
