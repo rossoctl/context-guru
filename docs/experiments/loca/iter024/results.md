@@ -163,6 +163,15 @@ first-class limit rather than a footnote, and it raises a question that has to b
 production claim: **is the mechanism winning partly by removing content irrecoverably?** A drop the agent
 can undo and a drop it cannot are different products, and the reward number cannot tell them apart.
 
+**Why it went unnoticed for two iterations is itself the finding**, and it is not specific to this
+counter. `expand_unresolved_missing` sat at 209 looking like ordinary expand traffic, because the benign
+reading is what its description promises — so the dangerous case hid behind a reassuring one and the
+failure was silent by construction. The same shape produced `usage_reported=false` on **4,015 of 4,015**
+requests here, found two iterations later while chasing a different question. The generalised rule — when
+adding a counter, ask what else could increment it and whether any of those wants the *opposite* operator
+response — is stated citably in **#200**, in the comment headed *"The generalised rule, stated here so it
+can be cited"*, with this iteration's two data points as its supporting evidence.
+
 Filed for investigation. On this evidence it looks like a defect rather than a tuning artifact — 0 in the
 arm without the treatment, and it recurs across two iterations.
 
