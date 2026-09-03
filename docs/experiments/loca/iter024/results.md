@@ -45,17 +45,50 @@ attributable figures, which nothing before iteration 024 could produce. Across 7
 **$0.72**, because a removal banks at cache-read rates. So the mechanism's return does not show up in its
 token ledger at all — it shows up in reward. −$19.53 of measured loss bought +10 solves.
 
-**Two caches turn out to be one cache, and it recovers 57% of the spend.** The sweep's drop path calls
-`putResult(c, cands[k].id, desc, "")`, writing its descriptor into the extraction **result cache** keyed by
-content id, so its verdicts replay on later turns. `extract_llm` reads that same cache, for its own reason
-— not re-calling the model on content it already compacted. They share a keyspace, so the sweep's *paid*
-decisions become the tail pass's *free* cache hits: **4,749 calls avoided at a 99.2% hit rate, 364 acts,
-zero fresh calls, $11.58 at $0.00**.
+**Two caches share a keyspace, and it recovers 57% of the spend — accounting confirmed, MECHANISM NOT.**
 
-Stated carefully: the sharing is measurable, but nothing in the code shows the economic consequence was
-intended, and it is documented nowhere. It was **invisible before #178** — pooled counters showed one net
-figure rather than one component spending and another earning. `acted_fresh` vs `acted_replay` is what
-separates them: `extract_llm` is 364 replay / **0 fresh**; the sweep is 95 fresh / 0 replay (seed 1).
+What is measured: `extract_llm` books **$11.58 at $0.00**, from **0 fresh calls and 364 replays**, in arm B
+only — 4,749 calls avoided at a 99.2% cache hit rate. The sweep is the only writer to that extraction
+result cache (its drop path calls `putResult(c, cands[k].id, desc, "")`, keyed by content id, so its
+verdicts replay on later turns), and `extract_llm` reads the same cache so the tail pass does not re-call
+the model on content it already compacted. So the entries come from the sweep, across turns.
+
+**What is NOT established is the path.** An earlier draft of this file asserted one, and it does not
+survive its own pipeline order: `extract_llm` runs **before** `extract_llm_sweep` within a request, so the
+sweep's same-turn decisions cannot feed it. Two candidate cross-turn paths were checked and both are
+closed by the counters:
+
+* **expand-restore** — sweep drops, the agent expands, the restored content becomes a fresh tail candidate.
+  Expansion *is* far higher in arm B (`kept_verbatim_after_expand` **9,478 against 3,522**), so the
+  expanding happens — but that gate means `extract_llm` **skips** expanded content rather than compacting
+  it, so the path is closed.
+* **the tail/prefix boundary moving as the transcript grows** — closed by `cached_prefix` dominating at
+  **29,302**, i.e. candidates are overwhelmingly skipped as *not tail*.
+
+So the recovery is real in its accounting and unexplained in its mechanism. **That matters commercially,
+not just intellectually:** 57% of this configuration's cost recovery rests on a behaviour nobody has
+identified, in a cache neither component documents sharing. If either component's keying changes it could
+vanish with no change to the sweep at all, taking the cost story with it. It needs the mechanism found and
+then either a test pinning it or an explicit decision to depend on it.
+
+`acted_fresh` vs `acted_replay` is what separates the two: `extract_llm` is 364 replay / **0 fresh**; the
+sweep is 95 fresh / 0 replay (seed 1). Before #178 both were pooled and neither was visible.
+
+## 2b. A reversibility failure, arm B only — 175 expands the agent could not resolve
+
+`expand_unresolved_missing`: **175 in arm B, 0 in arm A** (seeds 1-3).
+
+The agent asked for removed content back 175 times and did not get it. That is the single failure the
+"every lossy Offload must be reversible" invariant exists to prevent, and it is not new — iteration 023
+recorded **60** in its Cp1 pass, against 0 everywhere else, in that iteration's worst-scoring pass.
+
+It does not invalidate section 1: arm B still won 8 tasks to 0 with the harm bound at 11.2%. But it is a
+first-class limit rather than a footnote, and it raises a question that has to be answered before any
+production claim: **is the mechanism winning partly by removing content irrecoverably?** A drop the agent
+can undo and a drop it cannot are different products, and the reward number cannot tell them apart.
+
+Filed for investigation. On this evidence it looks like a defect rather than a tuning artifact — 0 in the
+arm without the treatment, and it recurs across two iterations.
 
 ## 3. Latency — the hypothesis does not hold
 
@@ -97,11 +130,12 @@ about the shipped configuration. Nor is it a claim about `coref`-the-component, 
 
 1. **Not the shipped config.** See above; identical across arms so it cannot bias B−A, but B is not
    `housellm` and `extract_llm` runs unpinned (#120/#134).
-2. **The recovery channel is a shared-cache artifact.** If either component's cache keying changes, the
-   57% recovery could vanish without any change to the sweep, taking the cost story with it. It deserves a
-   test pinning the behaviour, or an explicit decision to depend on it.
-3. **`coref` was not measured.** Its own question is still open from iteration 023.
-4. **The sweep's ~18s/ask stands unexplained in one respect** — whether that mean is uniform or
+2. **The recovery channel's mechanism is unidentified** (section 2). Its accounting is confirmed, its
+   cause is not, and two candidate paths were checked and closed. 57% of the cost recovery rests on it.
+3. **175 unresolved expands in arm B, 0 in arm A** (section 2b), recurring from iteration 023's 60. Under
+   investigation as a suspected defect.
+4. **`coref` was not measured.** Its own question is still open from iteration 023.
+5. **The sweep's ~18s/ask stands unexplained in one respect** — whether that mean is uniform or
    tail-driven. #177's per-call record makes it answerable but this run's sample was not examined for it.
 
 ## 6. Next
