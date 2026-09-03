@@ -161,10 +161,22 @@ else
 fi
 
 tar xzf "$TMP/$TARBALL" -C "$TMP" || die "untar_failed"
-[ -f "$TMP/$BIN" ] || die "binary_not_in_tarball"
+
+# FIND the binary rather than assuming where it sits.
+#
+# The release archive wraps its contents in a directory (goreleaser `wrap_in_directory: true`), so
+# the binary is at `<archive-name>/context-guru-proxy` and not at the root. It is wrapped for a
+# reason worth not undoing: a flat archive plus the documented `tar xzf` with no `-C` overwrites the
+# README.md and LICENSE of whatever directory the user is standing in.
+#
+# Searching handles both layouts, so this script does not break the next time the packaging changes
+# — and the failure it avoids is the worst-placed one there is: a stranger's first install, reporting
+# `binary_not_in_tarball`, which reads as a broken release rather than a moved file.
+found=$(find "$TMP" -type f -name "$BIN" 2>/dev/null | head -1)
+[ -n "$found" ] || die "binary_not_in_tarball: no $BIN anywhere in $TARBALL"
 
 mkdir -p "$DEST" || die "cannot_create_$DEST"
-install -m 755 "$TMP/$BIN" "$DEST/$BIN" || die "install_failed_to_$DEST"
+install -m 755 "$found" "$DEST/$BIN" || die "install_failed_to_$DEST"
 
 # macOS: without this, the first run dies with "cannot be verified" and the evaluator concludes
 # the project is broken. Notarization would remove the need and requires a paid Apple account.
