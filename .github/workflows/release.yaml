@@ -63,7 +63,11 @@ jobs:
       - name: Test the shipped configuration (CGO off, no race detector)
         env:
           CGO_ENABLED: "0"
-        run: go test ./config/... ./components/... ./apply/... ./proxy/... ./store/...
+        # -p 1 for the reason ci.yaml's purego job documents: on a 2-core runner, parallel package
+        # binaries provoked a real flake (#163), and this workflow runs the full suite a few steps
+        # below as well, so the contention here is at least as bad. A tag push must not fail to
+        # publish for a cause already diagnosed and mitigated one file over.
+        run: go test -p 1 ./config/... ./components/... ./apply/... ./proxy/... ./store/...
 
       # A tag must not publish something the full suite has not seen.
       - name: Full test suite

@@ -1167,10 +1167,18 @@ type KeepAliveStats struct {
 // of the recoverable dollars sit. So "no requests recently" is not sufficient to exit; "and
 // nothing is waiting to be pinged" is the other half.
 //
-// The conditions are `due`'s minus the timing term: an entry that is stopped, or has spent
-// its MaxPings, or whose policy is off will never be pinged again and must not hold the
-// process open. Everything else is gated at record time (see pingable), so a live entry is by
-// construction one we intend to ping.
+// The conditions are `due`'s minus the timing term: an entry that is stopped, or has spent its
+// MaxPings, or whose policy is off will never be pinged again and must not hold the process open.
+//
+// One caveat, because "a live entry is by construction one we intend to ping" is very nearly true
+// and not exactly: `sweep` also drops entries whose `pingable()` has since gone false, and it only
+// looks once `now >= startedAt + Idle`. Inside that window this counts an entry that will never
+// actually be pinged, which resets the activity clock and delays the exit by up to one `Idle`.
+// Bounded by the entry's own retire timer at `(MaxPings+1) * Idle`, and immaterial against a 24h
+// threshold — but the honest statement is "outside that window", not "by construction".
+//
+// Erring toward counting is the right direction anyway: over-counting delays an exit by minutes,
+// while under-counting kills the process during the quiet gap the keep-alive exists to work in.
 func (h *Handler) PendingPings() int {
 	if h == nil {
 		return 0

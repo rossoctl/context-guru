@@ -225,6 +225,9 @@ func main() {
 	// than flags, because the two places that set them are a systemd drop-in and a shell,
 	// and both already speak environment. See internal/logging.
 	sink := logging.Setup()
+	// Now that --version has returned and the log sink exists, refuse any malformed duration the
+	// var(...) block recorded. Deliberately before the config load and before anything is opened.
+	checkEnvDurations()
 
 	cfg, err := loadConfig(*cfgPath, *preset)
 	if err != nil {
@@ -623,13 +626,14 @@ func main() {
 
 	// Activity stamping is wired ONLY when the watchdog is on, so an ordinary deployment's
 	// handler chain is byte-identical to before.
-	var handler http.Handler = h.Mux()
+	mux := h.Mux()
+	var handler http.Handler = mux
 	act := &activityClock{}
 	if *idleExit > 0 {
 		// Launch counts as activity, so the threshold is measured from a moment that means
 		// something rather than from whenever the watchdog goroutine is first scheduled.
 		act.touch(time.Now())
-		handler = stampActivity(handler, act, time.Now)
+		handler = stampActivity(mux, act, time.Now)
 		slog.Info("context-guru: idle-exit armed", "after", *idleExit,
 			"check_every", idleCheckInterval(*idleExit))
 	}
@@ -1027,25 +1031,44 @@ func envInt(key string, def int) int {
 	return def
 }
 
-// envDuration reads a Go duration environment variable (e.g. "72h").
+// badDurations collects environment variables whose value is not a duration, so the refusal can
+// happen at a moment where it is safe to refuse. See checkEnvDurations.
+var badDurations []string
+
 // envDuration reads a duration from the environment, falling back to def.
 //
-// A NON-EMPTY value that does not parse is fatal, and that is a deliberate change from silently
-// falling back. The failure it prevents is specific: `IDLE_EXIT=86400` or `IDLE_EXIT=24` — the
-// natural mistake for something documented as a duration — parsed as an error, returned the
-// zero default, and meant "never exit". Nothing said so, because the `idle-exit armed` line is
-// only logged for a value above zero, so the operator's evidence was the ABSENCE of a line.
+// A NON-EMPTY value that does not parse is REFUSED — but not here, and that distinction is the
+// whole point. Every call site is a default expression in main's var(...) block, which Go evaluates
+// before flag.Parse, so exiting from inside this function ran before the --version short-circuit
+// existed to be reached: `IDLE_EXIT=86400 context-guru-proxy --version` died with a parse error
+// instead of printing the version, which is exactly what an installer asks for and what the release
+// workflow greps. It also ran before logging.Setup(), so the message never reached CG_LOG_FILE.
 //
-// Fatal rather than a warning: every caller here is a timeout, a retention window or a process
-// lifetime. A typo in any of them silently changes behaviour in a direction nobody chose, and a
-// warning in a startup log is not something anyone reads on a laptop.
+// So the value is recorded and checkEnvDurations refuses later, past --version and past the log
+// sink. Refusing at all — rather than silently falling back, which is what this used to do — is
+// still the right behaviour: every caller is a timeout, a retention window or a process lifetime,
+// and `IDLE_EXIT=86400` meant "never exit" with no output whose absence anyone would notice.
 func envDuration(key string, def time.Duration) time.Duration {
 	d, err := parseEnvDuration(os.Getenv(key), def)
 	if err != nil {
-		log.Fatalf("context-guru: %s=%q is not a duration (%v). Use a unit — 24h, 30m, 1500ms — "+
-			"or unset it to accept the default of %s.", key, os.Getenv(key), err, def)
+		badDurations = append(badDurations,
+			fmt.Sprintf("%s=%q (%v)", key, strings.TrimSpace(os.Getenv(key)), err))
+		return def
 	}
 	return d
+}
+
+// checkEnvDurations refuses every malformed duration at once, or returns.
+//
+// All of them, not the first: an operator fixing a typo should not have to restart to discover the
+// next one. Called after flag.Parse and after the log sink is up, so `--version` and `--help` still
+// work and the message lands wherever the logs go.
+func checkEnvDurations() {
+	if len(badDurations) == 0 {
+		return
+	}
+	log.Fatalf("context-guru: not a duration: %s. Use a unit — 24h, 30m, 1500ms — or unset it to "+
+		"accept the default.", strings.Join(badDurations, "; "))
 }
 
 // parseEnvDuration is envDuration's decision, split out so it can be tested without a process

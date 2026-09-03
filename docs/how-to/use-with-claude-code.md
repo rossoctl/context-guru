@@ -18,6 +18,14 @@ Two honest caveats:
   moves you onto metered API billing. Only do it deliberately — see
   [Keep the API key out of Claude Code](#keep-the-api-key-out-of-claude-code), which is about
   the *proxy* holding the key, not Claude Code.
+- **"No API key" does not mean the proxy sees less.** Routing subscription-authenticated Claude Code
+  through it means the proxy receives your claude.ai OAuth credential on every request and forwards
+  it upstream — that is what keeps your subscription working. If the prompt-cache keep-alive is
+  enabled, the proxy also RETAINS that credential in memory for the life of a tracked session, so it
+  can replay a request on your behalf; those pings are billed to you, spending the same usage limits
+  as your own turns. The credential is zeroised when the entry is dropped
+  ([keep-alive](cache-keepalive.md)) and never written to disk, but a local proxy holding a live
+  credential is the trade being made, and the section below is about a different one.
 
 ## Steps
 

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -56,22 +57,33 @@ func (a *activityClock) last() time.Time {
 	return time.Time{}
 }
 
-// probeRoutes are the paths that do NOT count as use.
+// probeRoutes are the request PATHS that do not count as use.
 //
-// They are what a machine asks, not what a person or an agent does: a Kubernetes liveness
-// probe, a Prometheus scrape, a `curl /healthz` in a monitoring loop, and the session hook's
-// own start-up check. Counting them was a bug that disabled the whole feature rather than
-// weakening it — measured: a proxy with a 1h threshold logged
-// `idle-exit armed after=1h0m0s`, then reported `idle for 1h3m0s` after 2h03m of wall clock,
-// because a /healthz poller had been stamping the clock for the first hour. Any probe on a
-// schedule shorter than the threshold means the exit NEVER fires, and logs nothing to say so.
+// They are what a machine asks, not what a person or an agent does: a Kubernetes liveness probe, a
+// Prometheus scrape, a `curl /healthz` in a monitoring loop, the session hook's own start-up check.
+// Counting them disabled the whole feature rather than weakening it — measured: a proxy with a 1h
+// threshold logged `idle-exit armed after=1h0m0s` and then reported `idle for 1h3m0s` after 2h03m of
+// wall clock, because a /healthz poller had been stamping the clock for the first hour. Any probe on
+// a schedule shorter than the threshold means the exit NEVER fires, and nothing logs that it stopped
+// working.
 //
-// Everything else still counts, including the dashboard's own polling: a person with the
-// dashboard open is using this process, and exiting under them is a worse failure than a
-// process left running. That is a deliberate asymmetry — a probe is not a viewer.
+// Everything else still counts, including the dashboard's own polling: a person with the dashboard
+// open is using this process, and exiting under them is a worse failure than a process left running.
+// That asymmetry is deliberate — a probe is not a viewer.
+//
+// Matched against the MUX PATTERN rather than r.URL.Path; see stampActivity for why.
 var probeRoutes = map[string]bool{
 	"/healthz": true,
 	"/metrics": true,
+}
+
+// patternPath strips the optional method from a ServeMux pattern: Go 1.22 patterns may be
+// "GET /healthz", and this proxy registers them that way.
+func patternPath(pattern string) string {
+	if i := strings.LastIndexByte(pattern, ' '); i >= 0 {
+		return pattern[i+1:]
+	}
+	return pattern
 }
 
 // stampActivity records a request as activity, unless its route is a machine probe.
@@ -87,14 +99,28 @@ var probeRoutes = map[string]bool{
 // Periodic stamping from inside a handler is the only thing that would close that, and it is not
 // worth the machinery: the dashboard UI polls every 30s, so its SSE stream is never the only
 // traffic in practice, and the threshold's floor is an hour.
-func stampActivity(next http.Handler, act *activityClock, now func() time.Time) http.Handler {
+func stampActivity(mux *http.ServeMux, act *activityClock, now func() time.Time) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		probe := probeRoutes[r.URL.Path]
-		if !probe {
+		// Ask the mux which pattern this request resolves to, rather than comparing r.URL.Path.
+		//
+		// An exact path compare had two holes, and the first is the one that mattered: ServeMux
+		// answers `/healthz/` with a 301 to `/healthz`, which a Kubernetes httpGet probe treats as
+		// healthy — so a probe configured with a trailing slash was counted as use and the exit
+		// never fired. ServeMux.Handler reports, for an internally-generated redirect, the pattern
+		// that will match after following it, so `/healthz/` resolves to `/healthz` here.
+		//
+		// The second: an unmatched path reports the EMPTY pattern, so a 404 — a port scanner, a
+		// stray `/health` probe, a typo'd URL — is no longer mistaken for somebody using the proxy.
+		//
+		// This asks the same matcher that will route the request, which is the point: no second
+		// copy of the routing rules to drift.
+		_, pattern := mux.Handler(r)
+		use := pattern != "" && !probeRoutes[patternPath(pattern)]
+		if use {
 			act.touch(now())
 		}
-		next.ServeHTTP(w, r)
-		if !probe {
+		mux.ServeHTTP(w, r)
+		if use {
 			act.touch(now())
 		}
 	})
@@ -173,10 +199,20 @@ func watchIdle(o idleExitOptions) (string, bool) {
 // minutes is exactly what an hour yields. Removing it is the honest version: the resolution at the
 // floor IS three minutes, which is 5% of the threshold, which is the rule.
 func idleCheckInterval(threshold time.Duration) time.Duration {
-	if d := threshold / 20; d < 5*time.Minute {
-		return d
+	d := threshold / 20
+	// A panic guard, not policy. time.NewTicker panics on a non-positive duration, and integer
+	// division makes that reachable for any threshold under 20ns — which checkIdleExit refuses, so
+	// this cannot fire in production. It exists because the last version of this function reasoned
+	// "checkIdleExit refuses anything under an hour" and was then reached with 10ns through a path
+	// that skipped the floor entirely: a crash is the wrong failure mode for a helper, whatever the
+	// caller did.
+	if d <= 0 {
+		return time.Nanosecond
 	}
-	return 5 * time.Minute
+	if d > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return d
 }
 
 // checkIdleExit is every reason a requested idle-exit threshold must not start.
@@ -185,21 +221,29 @@ func idleCheckInterval(threshold time.Duration) time.Duration {
 // startup-fatal, which is the one class of check where "it looked right" is the only evidence
 // anyone ever gathers.
 func checkIdleExit(d time.Duration, upstreamsPath string, o store.Options) error {
-	// The floor exists to protect the in-memory store: exiting clears it, and losing a live frozen
-	// decision re-bills its whole prefix as cache creation — the 11.5x regression FrozenLost
-	// exists to catch.
+	// The floor has two terms and only one of them is about the store.
 	//
-	// So it must not fire when there is no store to protect. `--store=false` / `STORE=false`
-	// resolves to store.Nop, which persists nothing and holds no frozen decisions, and refusing
-	// `--store=false --idle-exit=30m` cited a consequence that cannot occur in that configuration.
-	// A store-less proxy is free to exit whenever it likes.
+	// `2 x store.ttl_seconds` protects the in-memory store: exiting clears it, and losing a live
+	// frozen decision re-bills its whole prefix as cache creation (the 11.5x regression FrozenLost
+	// exists to catch). That term genuinely does not apply with `--store=false` / `STORE=false`,
+	// which resolves to store.Nop and holds no frozen decisions.
 	//
-	// `Enabled == nil` means "not configured", which is ON — the default — so only an explicit
-	// false skips this.
-	if o.Enabled == nil || *o.Enabled {
-		if err := store.ValidateIdleExit(d, o); err != nil {
-			return err
+	// The bare 1h term is not about the store at all, and dropping it was a mistake: skipping the
+	// whole check let `STORE=false --idle-exit=10ns` through, and threshold/20 then reached
+	// time.NewTicker as 0, which PANICS. An intended startup refusal became a crash. It also broke
+	// the invariant README and docs/reference/config.md state unconditionally.
+	//
+	// So: store off means the 1h minimum still applies, and the TTL term is what is skipped.
+	// `Enabled == nil` is "not configured", which is ON, so only an explicit false takes this path.
+	if o.Enabled != nil && !*o.Enabled {
+		if d > 0 && d < time.Hour {
+			return fmt.Errorf("idle-exit %s is below the 1h minimum. The store is disabled, so the "+
+				"usual floor of 2x store.ttl_seconds does not apply — but a threshold this short is "+
+				"still shorter than the keep-alive's own ping window, and a sub-second one cannot be "+
+				"scheduled at all", d)
 		}
+	} else if err := store.ValidateIdleExit(d, o); err != nil {
+		return err
 	}
 	if d > 0 && upstreamsPath != "" {
 		// A self-terminating GATEWAY is a different kind of wrong: --upstreams means this

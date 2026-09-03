@@ -178,12 +178,14 @@ func TestRequestsDeferIdleExit(t *testing.T) {
 	clk := newFakeClock(time.Unix(1_700_000_000, 0))
 	act := &activityClock{}
 	stampedBeforeHandler := false
-	h := stampActivity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The stamp must land BEFORE the handler runs, so a long streaming response cannot
-		// age out while it is still being served.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /anthropic/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		// The stamp must land BEFORE the handler runs, so a burst of requests keeps the clock warm
+		// without waiting for each to finish.
 		stampedBeforeHandler = act.last().Equal(clk.now())
 		w.WriteHeader(http.StatusOK)
-	}), act, clk.now)
+	})
+	h := stampActivity(mux, act, clk.now)
 
 	w := start(t, clk, idleExitOptions{threshold: time.Hour, act: act,
 		pending: func() int { return 0 }, stop: make(chan struct{})})
@@ -270,9 +272,7 @@ func TestIdleCheckIntervalStaysUseful(t *testing.T) {
 func TestProbesDoNotDeferIdleExit(t *testing.T) {
 	clk := newFakeClock(time.Unix(1_700_000_000, 0))
 	act := &activityClock{}
-	h := stampActivity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}), act, clk.now)
+	h := stampActivity(probeMux(), act, clk.now)
 
 	w := start(t, clk, idleExitOptions{threshold: time.Hour, act: act,
 		pending: func() int { return 0 }, stop: make(chan struct{})})
@@ -292,7 +292,7 @@ func TestProbesDoNotDeferIdleExit(t *testing.T) {
 	// somebody who is watching is a worse failure than a process left running.
 	clk2 := newFakeClock(time.Unix(1_700_000_000, 0))
 	act2 := &activityClock{}
-	h2 := stampActivity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), act2, clk2.now)
+	h2 := stampActivity(probeMux(), act2, clk2.now)
 	w2 := start(t, clk2, idleExitOptions{threshold: time.Hour, act: act2,
 		pending: func() int { return 0 }, stop: make(chan struct{})})
 	clk2.advance(50 * time.Minute)
@@ -339,36 +339,6 @@ func TestCheckIdleExitRefusesAGatewaySelfTerminating(t *testing.T) {
 	}
 }
 
-// TestCheckIdleExitSkipsTheFloorWithNoStore: the floor protects the in-memory store, so with the
-// store explicitly OFF there is nothing for it to protect.
-//
-// `--store=false` resolves to store.Nop, which persists nothing and holds no frozen decisions.
-// Refusing `--store=false --idle-exit=30m` cited a consequence — "exiting drops live frozen
-// decisions and re-bills their prefix" — that cannot occur in that configuration. A store-less
-// proxy may exit whenever it likes.
-func TestCheckIdleExitSkipsTheFloorWithNoStore(t *testing.T) {
-	off, on := false, true
-	short := 30 * time.Minute // far below the ~5h34m floor
-
-	if err := checkIdleExit(short, "", store.Options{Enabled: &off}); err != nil {
-		t.Errorf("refused a short threshold with the store disabled, citing a store that does not "+
-			"exist: %v", err)
-	}
-	// Explicitly ON, and nil (= not configured, which means on) must both still be protected.
-	if err := checkIdleExit(short, "", store.Options{Enabled: &on}); err == nil {
-		t.Error("accepted a threshold below the floor with the store explicitly enabled")
-	}
-	if err := checkIdleExit(short, "", store.Options{}); err == nil {
-		t.Error("accepted a threshold below the floor with the store unconfigured (which is on)")
-	}
-	// The gateway refusal is independent of the store: a self-terminating gateway is wrong
-	// whether or not it keeps state.
-	if err := checkIdleExit(24*time.Hour, "/etc/context-guru/upstreams.yaml",
-		store.Options{Enabled: &off}); err == nil {
-		t.Error("a gateway with the store off may still not self-terminate")
-	}
-}
-
 // TestActivityClockKeepsItsMonotonicReading is the guard for a defect that no other test here can
 // see, because they all inject a fake clock built from time.Unix — which has no monotonic reading
 // to lose.
@@ -408,11 +378,14 @@ func TestActivityClockKeepsItsMonotonicReading(t *testing.T) {
 func TestStampActivityRefreshesOnCompletion(t *testing.T) {
 	clk := newFakeClock(time.Unix(1_700_000_000, 0))
 	var act activityClock
-	h := stampActivity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /anthropic/v1/messages", func(w http.ResponseWriter, r *http.Request) {
 		// The request takes 20 minutes of wall clock, as far as the injected clock is concerned.
 		clk.advance(20 * time.Minute)
 		w.WriteHeader(http.StatusOK)
-	}), &act, clk.now)
+	})
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {})
+	h := stampActivity(mux, &act, clk.now)
 
 	start := clk.now()
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/anthropic/v1/messages", nil))
@@ -466,6 +439,123 @@ func TestParseEnvDurationRefusesAUnitlessValue(t *testing.T) {
 			t.Errorf("parseEnvDuration(%q): unexpected error %v", c.raw, err)
 		} else if got != c.want {
 			t.Errorf("parseEnvDuration(%q) = %s, want %s", c.raw, got, c.want)
+		}
+	}
+}
+
+// probeMux is the route shape stampActivity is asked about: the two machine probes, one real API
+// route, and the dashboard's SSE endpoint. Registered with methods, as the proxy registers them.
+func probeMux() *http.ServeMux {
+	m := http.NewServeMux()
+	nop := func(w http.ResponseWriter, r *http.Request) {}
+	m.HandleFunc("GET /healthz", nop)
+	m.HandleFunc("GET /metrics", nop)
+	m.HandleFunc("GET /api/events", nop)
+	m.HandleFunc("POST /anthropic/v1/messages", nop)
+	return m
+}
+
+// TestProbeExemptionSurvivesATrailingSlash is the hole an exact path compare left open, and it is
+// the one that matters most because it fails SILENTLY in the safe-looking direction.
+//
+// http.ServeMux answers `/healthz/` with a 301 to `/healthz`, and a Kubernetes httpGet probe (and
+// most monitoring loops) treats a 301 as healthy. With the stamp taken before the mux ever saw the
+// request, such a probe refreshed the activity clock forever: --idle-exit never fired, and the only
+// log line was `idle-exit armed` at startup.
+//
+// A 404 is the same class: a port scanner, a typo'd URL or a stray `/health` probe is not somebody
+// using the proxy. Both are answered by asking the mux which pattern matches, rather than comparing
+// the raw path.
+func TestProbeExemptionSurvivesATrailingSlash(t *testing.T) {
+	for _, c := range []struct {
+		method, path string
+		isUse        bool
+		why          string
+	}{
+		{"GET", "/healthz", false, "the probe itself"},
+		{"GET", "/healthz/", false, "301 to /healthz — a k8s probe reads this as healthy"},
+		{"GET", "/metrics", false, "a Prometheus scrape"},
+		{"GET", "/metrics/", false, "301 to /metrics"},
+		{"GET", "//healthz", false, "doubled slash, cleaned by the mux to /healthz"},
+		{"GET", "/health", false, "404 — a stray probe is not use"},
+		{"GET", "/nope", false, "404 — a port scanner is not use"},
+		{"GET", "/api/events", true, "the dashboard's SSE stream: a person is watching"},
+		{"POST", "/anthropic/v1/messages", true, "an actual agent request"},
+	} {
+		clk := newFakeClock(time.Unix(1_700_000_000, 0))
+		var act activityClock
+		h := stampActivity(probeMux(), &act, clk.now)
+
+		clk.advance(time.Minute)
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(c.method, c.path, nil))
+
+		stamped := !act.last().IsZero()
+		if stamped != c.isUse {
+			verb := "did not count"
+			if stamped {
+				verb = "counted"
+			}
+			t.Errorf("%s %s %s as activity, want the opposite — %s", c.method, c.path, verb, c.why)
+		}
+	}
+}
+
+// TestCheckIdleExitKeepsTheOneHourMinimumWithNoStore: skipping the floor when the store is off
+// removed it ENTIRELY, and a startup refusal became a startup PANIC.
+//
+// `STORE=false --idle-exit=10ns` passed the check, and threshold/20 then reached time.NewTicker as
+// 0, which panics. Only the `2 x ttl_seconds` term is about the store; the bare 1h term is not, and
+// dropping it also broke the invariant README and docs/reference/config.md state unconditionally.
+func TestCheckIdleExitKeepsTheOneHourMinimumWithNoStore(t *testing.T) {
+	off := false
+	noStore := store.Options{Enabled: &off}
+
+	// The 2x TTL term does not apply: ~5h34m would otherwise be the floor.
+	if err := checkIdleExit(2*time.Hour, "", noStore); err != nil {
+		t.Errorf("2h refused with the store disabled, where only the 1h minimum applies: %v", err)
+	}
+	// The 1h term still does.
+	for _, d := range []time.Duration{10 * time.Nanosecond, time.Millisecond, 30 * time.Minute,
+		time.Hour - time.Nanosecond} {
+		if err := checkIdleExit(d, "", noStore); err == nil {
+			t.Errorf("accepted --idle-exit=%s with the store disabled; anything under an hour is "+
+				"shorter than the keep-alive's ping window, and a sub-second value cannot be "+
+				"scheduled at all", d)
+		}
+	}
+	// Off is still always valid, and a gateway is still refused.
+	if err := checkIdleExit(0, "", noStore); err != nil {
+		t.Errorf("off refused: %v", err)
+	}
+	if err := checkIdleExit(24*time.Hour, "/etc/x.yaml", noStore); err == nil {
+		t.Error("a gateway with the store off may still not self-terminate")
+	}
+
+	// And the store-off path must not become an escape hatch from the FULL floor: a store that is
+	// explicitly on, or simply unconfigured (which means on), is still protected by 2x the TTL.
+	on := true
+	if err := checkIdleExit(30*time.Minute, "", store.Options{Enabled: &on}); err == nil {
+		t.Error("accepted a threshold below the floor with the store explicitly enabled")
+	}
+	if err := checkIdleExit(30*time.Minute, "", store.Options{}); err == nil {
+		t.Error("accepted a threshold below the floor with the store unconfigured (which is on)")
+	}
+	// 2h clears the 1h minimum but not 2x the default TTL (~5h34m), so it must be refused when the
+	// store is on and accepted when it is off — that difference IS the store-off exemption.
+	if err := checkIdleExit(2*time.Hour, "", store.Options{}); err == nil {
+		t.Error("accepted 2h with the store on, where the floor is ~5h34m")
+	}
+}
+
+// TestIdleCheckIntervalIsAlwaysPositive: time.NewTicker panics on a non-positive duration, and
+// integer division makes zero reachable for a small enough threshold. checkIdleExit refuses those,
+// so this cannot fire in production — but the previous version of the function reasoned exactly that
+// way and was then reached with 10ns through a path that skipped the floor. A crash is the wrong
+// failure mode for a helper, whatever its caller did.
+func TestIdleCheckIntervalIsAlwaysPositive(t *testing.T) {
+	for _, d := range []time.Duration{0, 1, 5, 19 * time.Nanosecond, time.Nanosecond, time.Second} {
+		if got := idleCheckInterval(d); got <= 0 {
+			t.Errorf("idleCheckInterval(%s) = %s; time.NewTicker would panic", d, got)
 		}
 	}
 }
