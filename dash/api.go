@@ -581,6 +581,37 @@ var routeBounds = map[string]time.Duration{
 	// trustedness too; that is a change to a content gate and does not belong in an outage fix, so
 	// it waits, and meanwhile it simply gets long enough to finish.
 	"GET /api/prompt": dashHeavyTimeout,
+	// The KV-cache and keep-alive tabs. Every one of these is an aggregate over the same large
+	// tables, and measured on the production database on an IDLE box with no contention they run
+	// at 2-8.6s against the 10s default — /api/kvcache/simulate alone at 7.7-8.6s, i.e. 86% of the
+	// bound spent before any other reader exists. So they succeed alone and fail under exactly the
+	// load a shared dashboard has, which is what the live log showed: 11 successes and 6 timeouts
+	// on simulate in one morning, plus timeouts on /api/kvcache, /api/kvcache/rows and
+	// /api/keepalive. Intermittent-by-load is the signature of a bound set too close to the work,
+	// not of work that is unbounded.
+	//
+	// Listed as a family rather than individually pruned to the ones seen failing: they read the
+	// same rows through the same shapes, so the ones that have not timed out yet are the ones
+	// nobody has opened under load. Half of these are already cancellable (kvcacheapi.go has
+	// always passed the request context), so a caller who gives up still releases the work.
+	//
+	// They are NOT cached, unlike the aggregates above, and that is a deliberate stopping point:
+	// they complete in seconds, so a longer bound is sufficient to stop the 503s, and caching nine
+	// more routes would mean nine more keys to get right for a problem the bound already solves.
+	// If they get slower, caching is the next move, not a longer bound.
+	"GET /api/kvcache":                          dashHeavyTimeout,
+	"GET /api/kvcache/rows":                     dashHeavyTimeout,
+	"GET /api/kvcache/simulate":                 dashHeavyTimeout,
+	"GET /api/kvcache/pricing":                  dashHeavyTimeout,
+	"GET /api/kvcache/suggest":                  dashHeavyTimeout,
+	"GET /api/kvcache/suggest/holdout":          dashHeavyTimeout,
+	"GET /api/keepalive":                        dashHeavyTimeout,
+	"GET /api/keepalive/behaviour":              dashHeavyTimeout,
+	"GET /api/keepalive/sessions":               dashHeavyTimeout,
+	"GET /api/keepalive/calc":                   dashHeavyTimeout,
+	"GET /api/keepalive/live":                   dashHeavyTimeout,
+	"GET /api/keepalive/recommend":              dashHeavyTimeout,
+	"GET /api/keepalive/strategies/{id}/ledger": dashHeavyTimeout,
 }
 
 // routeBound is the timeout Mount applies to one route: its override if it has one, otherwise the
