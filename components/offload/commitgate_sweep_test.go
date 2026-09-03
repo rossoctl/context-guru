@@ -78,6 +78,39 @@ func TestSweepTellsAReserveRefusalApartFromNothingSpent(t *testing.T) {
 		}
 		assertSweepRejection(t, rep, "adjudicated: nothing was spent")
 	})
+	t.Run("spent but no descriptor was smaller", func(t *testing.T) {
+		// The third path into an empty `drop`, and the one that used to be reported as the
+		// adjudicator finding nothing: it judged outputs spent and the descriptor-only never-worse
+		// pre-check removed every one of them. Reachable on outputs barely above the floor, where a
+		// shape descriptor can be larger than the output it describes.
+		asker := &labelAsker{verdict: "drop", needed: "none"}
+		asker.cacheRead = 19595
+		// Built directly rather than through newSweep, which prepends its own min_tokens: 2000 —
+		// this case needs a floor BELOW the descriptor's size, which is the whole point of it.
+		built, err := newExtractSweep([]byte("min_tokens: 5\nmin_inventory: 1\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := built.(*ExtractSweep)
+		st := store.NewMemory(store.Options{MaxEntries: 400})
+		req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+			userMsg("do the thing"),
+			toolResultMsgWithID("t1", "six little words right here now\n"),
+			toolResultMsgWithID("t2", "seven other little words right here\n"),
+		}}
+		rep := &components.Report{Component: "extract_llm_sweep"}
+		if _, err := e.Offload(req, rep, preExpiryCtx("s", asker, st)); err != nil {
+			t.Fatal(err)
+		}
+		if rep.Gates["sweep_drop_would_not_shrink"] == 0 {
+			t.Fatalf("the never-worse pre-check never fired, so this is not the case under test "+
+				"(gates: %v, events: %v)", rep.Gates, rep.Events)
+		}
+		if rep.Events["sweep_dropped"] != 0 {
+			t.Fatalf("a drop got through, so `drop` was not empty for the reason under test")
+		}
+		assertSweepRejection(t, rep, "adjudicated spent, but no descriptor was smaller than its output")
+	})
 	t.Run("spent but no drop could be applied", func(t *testing.T) {
 		asker := &labelAsker{verdict: "drop", needed: "none"}
 		asker.cacheRead = 19595
@@ -319,5 +352,61 @@ func TestSweepReportsItsOwnEconomicsAndTheWiresSeparately(t *testing.T) {
 		t.Errorf("the ledger claims %d saved tokens; the messages actually sent shrank by %d.\n"+
 			"A descriptor-only subtraction ignores the marker and recovery hint that go out with "+
 			"every drop, so the figure overstates by that much per candidate", ledger, wantWire)
+	}
+}
+
+// A REPLAY must be valued the same way the turn that made the decision was.
+//
+// The fresh path was corrected to measure against the spliced message; the replay path was left
+// measuring against the stored descriptor. That made the component contradict ITSELF — the same
+// drop worth more on every replay turn than on the turn it was made — and replays are the steady
+// state, so most of the reported value came from the overstated side.
+func TestSweepReplayBooksWhatTheReplayedMessageActuallySaved(t *testing.T) {
+	asker := &labelAsker{verdict: "drop", needed: "none"}
+	asker.cacheRead = 19595
+	e := newSweepSmall(t, "")
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	c := preExpiryCtx("s", asker, st)
+	// CacheRead 1 USD/token, so the recorded value equals the token count and clears round4's
+	// 1e-4 step. repeatPerToken is the read rate on a warm cache-aware turn, which is what the
+	// replay path credits at.
+	c.SelfRates = components.TokenRates{Input: 10, CacheRead: 1, CacheWrite: 12.5, Output: 50}
+
+	// Turn 1 takes the decisions.
+	var r1 components.Report
+	r1.Component = "extract_llm_sweep"
+	if _, err := e.Offload(sweepReqStocked(), &r1, c); err != nil {
+		t.Fatal(err)
+	}
+	if r1.Events["sweep_dropped"] == 0 {
+		t.Fatal("turn 1 dropped nothing, so turn 2 has no decision to replay")
+	}
+
+	// Turn 2 replays them, and only turn 2's booking is measured.
+	req2 := sweepReqStocked()
+	before := capturedText(req2)
+	valueBefore := extractGrossValue("extract_llm_sweep")
+	r2 := components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(req2, &r2, c); err != nil {
+		t.Fatal(err)
+	}
+	if r2.Replays == 0 {
+		t.Fatalf("turn 2 replayed nothing (gates: %v, events: %v)", r2.Gates, r2.Events)
+	}
+	wire := 0
+	for i := range req2.Input {
+		if got := schema.MessageText(req2.Input[i]); got != before[i] {
+			wire += schema.TextTokens(before[i]) - schema.TextTokens(got)
+		}
+	}
+	if wire <= 0 {
+		t.Fatal("no message shrank on the replay turn, so there is no wire figure to compare")
+	}
+	booked := extractGrossValue("extract_llm_sweep") - valueBefore
+	if int(booked+0.5) != wire {
+		t.Errorf("the replay booked %v tokens of value; the messages it sent shrank by %d.\n"+
+			"Measuring the replay against the stored descriptor instead of the replayed message "+
+			"makes the same drop worth more on every replay turn than on the turn it was made — "+
+			"and replays are the steady state", booked, wire)
 	}
 }

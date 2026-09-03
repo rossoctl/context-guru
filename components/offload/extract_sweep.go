@@ -304,7 +304,10 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		// That is what makes the replay safe in the sense TailOnlyCold's doc requires: the DECISION
 		// came from a model, but the REPLACEMENT is a pure function of (content, config), so a replay
 		// can never emit different bytes than the turn that decided it.
-		if cached, hit := getResult(c, id); hit {
+		// The cached VALUE is no longer read: the saving is measured against the message as
+		// replayed, not against the stored descriptor. Only the HIT matters here — it is what says
+		// this session already sent these bytes and may replay them at any depth.
+		if _, hit := getResult(c, id); hit {
 			metrics.RecordExtractionCacheLookup(rep.Component, true)
 			// Inside the ok branch, with rep.Replay. It used to sit above the call, so a drop
 			// applySweepDrop declined still booked its token savings — and after #188 that
@@ -312,7 +315,12 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			// savings figure is being measured. rep.Replay on this path was already guarded
 			// correctly; this is the metric matching it.
 			if k, ok := applySweepDropReplay(c, rep, e.mode, msg, content); ok {
-				if saved := schema.TextTokens(content) - schema.TextTokens(cached.Projected); saved > 0 {
+				// Measured against the message AS REPLAYED, for the same reason the fresh path is:
+				// the text written is descriptor + marker + hint. Correcting only the fresh path
+				// left this component contradicting ITSELF — the same drop valued higher on every
+				// replay turn than on the turn it was made, and replays are the steady state, so
+				// most of the reported value came from the overstated side.
+				if saved := schema.TextTokens(content) - schema.TextTokens(schema.MessageText(*msg)); saved > 0 {
 					metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
 				}
 				changed++
@@ -575,6 +583,18 @@ type sweepResult struct {
 
 func (r *sweepResult) gate(name string)  { r.gates = append(r.gates, name) }
 func (r *sweepResult) event(name string) { r.events = append(r.events, name) }
+
+// raised reports whether a gate was recorded. The gates are carried as a SLICE because the raise
+// happens on the serial path, so this is a scan rather than a map lookup — the list is one entry
+// per declined candidate, which is bounded by the inventory.
+func (r *sweepResult) raised(name string) bool {
+	for _, g := range r.gates {
+		if g == name {
+			return true
+		}
+	}
+	return false
+}
 
 // adjudicate makes ONE prefix ask about every candidate and returns the labels it authorised
 // dropping.
@@ -987,7 +1007,17 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 	// self-contradictory shape this change set out to remove, arrived at from the other side. The
 	// compiler cannot see it because `removed` is still read.
 	if len(drop) == 0 {
-		r.rec.Rejection = "adjudicated: nothing was spent"
+		// THREE reasons, not two. `drop` being empty means the adjudicator judged nothing spent —
+		// UNLESS the never-worse pre-check above removed everything it did judge spent, which is
+		// reachable on a transcript of just-above-floor outputs whose shape descriptors are close
+		// to their own size. Reporting that as "nothing was spent" tells the operator the model
+		// found nothing worth removing when it found plenty and the descriptors were not smaller:
+		// the same conflation the two reasons exist to prevent, one path further back.
+		if r.raised("sweep_drop_would_not_shrink") {
+			r.rec.Rejection = "adjudicated spent, but no descriptor was smaller than its output"
+		} else {
+			r.rec.Rejection = "adjudicated: nothing was spent"
+		}
 	}
 	if debugExtractLLM(c) {
 		logging.From(c.Ctx).Debug("cg.sweep.ask", "offered", len(items),

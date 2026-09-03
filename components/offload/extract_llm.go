@@ -1487,12 +1487,26 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// do while the reserve is saturated) and wants the re-run's numbers, so it is on that
 			// issue's candidate list rather than guessed at in this diff.
 			//
-			// Only for a slot that actually made a call. A single-flight FOLLOWER returns before
-			// filling its slot, so before is 0 there and the three lines below would book zeros —
-			// and set Accepted on a row whose Component is "" — for a splice that did happen. The
-			// follower's saving goes unbooked either way (its leader books the shared result once);
-			// what this guard removes is the pretence of measuring it.
-			if out[k].before > 0 {
+			// Only for a slot that actually MADE A CALL — a single-flight FOLLOWER returns before
+			// filling its slot, and Component is what says so (it is also what the ledger append
+			// below filters on, so the two agree by construction).
+			//
+			// A DEFENCE, NOT A FIX: nothing was escaping before it. ratioTracker.observe returns
+			// early on totalTok <= 0, both recorders are no-ops at 0, out[k].saved is already 0 in
+			// a follower slot, and a follower's row was dropped by the same Component filter. So
+			// this prevents no live defect, and saying otherwise would leave a future reader
+			// reasoning from a false premise. What it does buy is that the booking no longer
+			// depends on three unrelated zero-guards staying zero-guards, and that the condition is
+			// stated where the booking happens.
+			//
+			// Keyed on Component rather than on `before` deliberately: `before` is in scope in the
+			// follower branch, so anyone who later fills it there would silently re-enable this
+			// booking. Component cannot be set by a slot that made no call.
+			//
+			// The follower's saving stays UNBOOKED either way — its leader books the shared result
+			// once, and attributing it twice would over-count. Booking per spliced message rather
+			// than per call is the real fix and is larger than this change.
+			if calls[k].Component != "" {
 				calls[k].Accepted = true
 				calls[k].SavedTokens = out[k].saved
 				e.ratios.observe(out[k].saved, out[k].before)
