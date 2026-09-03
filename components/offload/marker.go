@@ -152,9 +152,20 @@ func commitMark(c *components.Ctx, rep *components.Report, eff markerMode, key, 
 // left the store (the TTL reclaimed it) and the marker on the wire is dangling. That is the
 // genuinely broken promise, and it is counted apart from stashRefusals — see stashMissing for
 // why conflating them made the one dangerous outcome invisible.
-func commitRefresh(c *components.Ctx, key, original string) bool {
-	if key == "" {
-		return true // summary/off: no payload was ever promised
+func commitRefresh(c *components.Ctx, rep *components.Report, eff markerMode, key, original string) bool {
+	if eff != markerFull {
+		// THE DEGRADED MODES STILL NEED rep.Irreversible, and this is the whole reason the
+		// parameters are here. commitMark's non-full branch sets it, so when the replay branches
+		// stopped calling commitMark they stopped setting it — and a replay-only turn under
+		// marker_mode summary/off then spliced with no keys, rep.Skipped false and
+		// rep.Irreversible false, which is exactly the shape components/pipeline.go reverts as
+		// "offload dropped content without stashing a cache_key". The transcript went upstream
+		// verbatim on EVERY turn: a full-suffix cache write, the harm this change exists to stop.
+		//
+		// Owned here rather than at each call site because there are four of them and the last
+		// two got it wrong.
+		rep.Irreversible = true
+		return true
 	}
 	if !store.PutStash(c.Store, key, []byte(original)) {
 		stashMissing.Add(1)

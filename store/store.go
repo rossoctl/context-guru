@@ -410,9 +410,19 @@ func (m *Memory) DisableSlidingTTLForTest() {
 // own existing over-cap behavior: a pin degrades to an ordinary evictable entry (it is still
 // readable, and its loss is reported where losses happen), a stash is REFUSED (so the caller
 // declines the removal rather than promising what it cannot deliver). No new failure shape.
-func (m *Memory) pinCap() int         { return m.max / 2 }
-func (m *Memory) stashCap() int       { return m.max / 2 }
-func (m *Memory) evictableFloor() int { return m.max / 4 }
+func (m *Memory) pinCap() int   { return m.max / 2 }
+func (m *Memory) stashCap() int { return m.max / 2 }
+
+// evictableFloor is at least ONE entry. max/4 alone is 0 for max_entries of 2 or 3, and the
+// exemptions (max/2 each) could then reach the whole cap — so the guarantee this comment and
+// docs/reference/config.md both describe as unconditional had a hole at the bottom of the range.
+// Only absurd configs reach it, but "unconditional" is either true or it is not.
+func (m *Memory) evictableFloor() int {
+	if f := m.max / 4; f > 0 {
+		return f
+	}
+	return 1
+}
 
 // exemptRoom reports whether one more exempt entry can be admitted without eating into the
 // evictable floor. Consulted by both exemptions, which is what makes the floor a floor.

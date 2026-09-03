@@ -100,7 +100,15 @@ func TestExtractLLMReportsNoSavingsForASpliceItDeclined(t *testing.T) {
 	model := &shrinkingModel{}
 	e := newTimeoutTestComponent(t, model)
 	c := &components.Ctx{Session: "replay-test", Store: st, Ctx: context.Background(),
-		Model: components.ModelSpec{Static: model, Incoming: model}}
+		Model: components.ModelSpec{Static: model, Incoming: model},
+		// PRICED HIGH, and without this the savings half of this test does not bind at all.
+		// GrossValueUSD is round4, i.e. 1e-4 granularity, and this fixture saves ~4 tokens; at the
+		// agentFreshPerMTok fallback that is ~1.2e-5 USD, two orders of magnitude below the
+		// rounding step, so `after > before` stays false even with the gate removed. It is the same
+		// trap the sweep counterpart documents — recorded here too because it was missed a second
+		// time in the same change, which is what makes it a trap rather than an oversight.
+		SelfRates:  components.TokenRates{Input: 10, CacheRead: 1, CacheWrite: 12.5, Output: 50},
+		CacheAware: true, MaxCachedIdx: -1}
 	id := extract.ContentKey(original)
 	putResult(c, id, projected, "")
 	if _, hit := getResult(c, id); !hit {
@@ -204,7 +212,8 @@ func TestADanglingReplayIsCountedApartFromADeclinedRemoval(t *testing.T) {
 	st.Memory.Put(frozenKey("s", "mask", contentKey(original)), []byte(replacement))
 	m := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleTool}
 	schema.SetMessageText(&m, original)
-	keys, _, ok := reapplyFrozen(c, "mask", &m)
+	var rep components.Report
+	keys, _, ok := reapplyFrozen(c, &rep, "mask", &m)
 	if !ok || len(keys) == 0 {
 		t.Fatal("the frozen decision was not replayed, so no marker was re-sent and this test " +
 			"proves nothing about a dangling one")

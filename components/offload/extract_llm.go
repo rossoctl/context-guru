@@ -808,8 +808,10 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		}
 		if replay {
 			// Never refuses; a false answer means the payload is gone and the marker being
-			// replayed is dangling. Counted there, and the replay proceeds regardless.
-			commitRefresh(c, key, content)
+			// replayed is dangling. Counted there, and the replay proceeds regardless. It also
+			// owns rep.Irreversible for the degraded marker modes, which commitMark used to set
+			// on this path — see commitRefresh.
+			commitRefresh(c, rep, eff, key, content)
 			recordOwner(c, key)
 		} else if !commitMark(c, rep, eff, key, content) {
 			return false // the store cannot back the marker; leave this output verbatim
@@ -1182,8 +1184,17 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// overwhelming: a turn whose entire transcript re-bills at 1.25x fresh. On this warm
 		// per-output path the extra second buys a fraction of a cent, so it stays fully concurrent
 		// and the flag above is best-effort.
-		type outT struct{ projected, summary string }
+		// saved/before carry the CALL's arithmetic to phase 3 rather than letting the goroutine
+		// that computed it book the outcome — see the accept branch in runCall.
+		type outT struct {
+			projected, summary string
+			saved, before      int
+		}
 		out := make([]outT, len(cands))
+		// One deferred debug record per call, invoked after phase 3 so `accepted` describes the
+		// splice rather than the model reply. nil for a call that never ran (a single-flight
+		// follower) or when DEBUG is off.
+		logRows := make([]func(), len(cands))
 		// One record per call, written to its own slot so the goroutines need no lock (a
 		// Report is copied by value across this codebase and cannot carry one).
 		calls := make([]components.ModelCall, len(cands))
@@ -1310,17 +1321,21 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				}
 			}
 			if res != "" && res != cands[k].content {
-				out[k] = outT{res, sum}
-				calls[k].Accepted = true
-				calls[k].SavedTokens = before - schema.TextTokens(res)
+				out[k] = outT{projected: res, summary: sum}
 				calls[k].Summary, calls[k].After = sum, res
-				// Feed the observed ratio so the gate prices future calls on what this
-				// workload actually achieves, not on an assumption.
-				e.ratios.observe(before-schema.TextTokens(res), before)
-				metrics.RecordExtractionSaving(rep.Component, before-schema.TextTokens(res))
-				// What the removal was WORTH, at this turn's regime. On a cold sweep that is
-				// the cache-write rate; the replays below are credited at the read rate.
-				metrics.RecordExtractionValue(rep.Component, float64(before-schema.TextTokens(res))*val.perToken)
+				// THE OUTCOME IS CARRIED, NOT BOOKED. A model result is not a removal: phase 3
+				// still has to splice it, and after #188 that can decline — the reserve refuses
+				// the payload, or the never-worse check fails with the marker included. Recording
+				// here meant a saturated reserve reported the full saving, credited the gross
+				// value, logged `accepted=true` for a request that kept its original, and fed the
+				// ratio tracker a saving that never happened. That last one is the worst of them:
+				// the ratio prices FUTURE calls, so the mis-recording propagated into decisions
+				// about work not yet done.
+				//
+				// Recorded in phase 3 instead, per candidate, once the splice is a fact. This
+				// runs in a goroutine, so the value simply rides in the slot phase 3 already reads.
+				out[k].saved = before - schema.TextTokens(res)
+				out[k].before = before
 			} else if !timedOut {
 				e.ratios.observe(0, before) // a miss is real evidence: ratio 0
 			}
@@ -1367,15 +1382,23 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// is guarded. `content_key` rather than the content — the key is what the result
 			// cache, the freeze and the cross-session lookup are all keyed on, so it is the
 			// identity that joins this record to every other one about the same candidate.
+			// DEFERRED TO AFTER PHASE 3, not emitted here, and the comment above is why: `accepted`
+			// is only the never-worse outcome if it is read after the splice has been attempted.
+			// Phase 3 now fills Accepted/SavedTokens, so a record emitted in this goroutine would
+			// report accepted=false on every call — the mirror image of the overclaim it used to
+			// make. A closure rather than a struct because each goroutine's locals (latency, the
+			// token tiers, timedOut) are exactly what the record needs, and they are already here.
 			if dbg {
-				logging.From(c.Ctx).Debug("cg.extract_llm.call",
-					"session", c.Session, "content_key", cands[k].id,
-					"candidate_tokens", before, "model", callModel,
-					"latency_ms", latency, "input_tokens", inTok, "output_tokens", outTok,
-					"cache_read", cr, "cache_write", cw, "cost_usd", calls[k].CostUSD,
-					"accepted", calls[k].Accepted, "saved_tokens", calls[k].SavedTokens,
-					"rejection", calls[k].Rejection, "gate", cands[k].gate,
-					"strategy", strategy, "timed_out", timedOut)
+				logRows[k] = func() {
+					logging.From(c.Ctx).Debug("cg.extract_llm.call",
+						"session", c.Session, "content_key", cands[k].id,
+						"candidate_tokens", before, "model", callModel,
+						"latency_ms", latency, "input_tokens", inTok, "output_tokens", outTok,
+						"cache_read", cr, "cache_write", cw, "cost_usd", calls[k].CostUSD,
+						"accepted", calls[k].Accepted, "saved_tokens", calls[k].SavedTokens,
+						"rejection", calls[k].Rejection, "gate", cands[k].gate,
+						"strategy", strategy, "timed_out", timedOut)
+				}
 			}
 		}
 		for k := 0; k < len(cands); k++ {
@@ -1397,9 +1420,6 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// filling its ModelCall slot, and its gate is precisely the one that says so.
 			for _, g := range gateNames[k] {
 				rep.Gate(g)
-			}
-			if calls[k].Component != "" {
-				rep.Calls = append(rep.Calls, calls[k])
 			}
 		}
 		for k := range cands { // Phase 3 (serial): freeze + splice.
@@ -1428,10 +1448,38 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if !apply(cands[k].i, cands[k].content, out[k].projected, out[k].summary, false) {
 				continue
 			}
+			// The splice is a fact, so the outcome may now be booked. `accepted` in the ledger row
+			// is documented as "the never-worse outcome — the same condition that spliced the
+			// result above, so the log cannot say accepted while the request kept the original",
+			// and that claim is only true if it is set here.
+			calls[k].Accepted = true
+			calls[k].SavedTokens = out[k].saved
+			// Feed the observed ratio so the gate prices future calls on what this workload
+			// actually achieves. Only a splice is evidence of that: a result the reserve refused
+			// tells us the model CAN shrink this content and that we could not use it, and a
+			// future call will be refused the same way — so crediting the ratio would keep the
+			// gate authorising calls whose output is discarded. A model that produced nothing is
+			// separate evidence and is still observed as ratio 0, in runCall.
+			e.ratios.observe(out[k].saved, out[k].before)
+			metrics.RecordExtractionSaving(rep.Component, out[k].saved)
+			// What the removal was WORTH, at this turn's regime. On a cold sweep that is the
+			// cache-write rate; the replays above are credited at the read rate.
+			metrics.RecordExtractionValue(rep.Component, float64(out[k].saved)*val.perToken)
 			putResult(c, cands[k].id, out[k].projected, out[k].summary)
 			if !e.rewrite || effectiveMode(c, e.mode) == markerFull {
 				putResultGlobal(c, extract.ResultKey(cands[k].id, e.modelName, extCfg),
 					out[k].projected, out[k].summary)
+			}
+		}
+		// AFTER phase 3, because rep.Calls takes a COPY of each row and phase 3 is what sets
+		// Accepted/SavedTokens now. Appending before it exported a ledger of rows that all read
+		// accepted=false, which is the mirror image of the bug being fixed.
+		for k := range calls {
+			if calls[k].Component != "" {
+				rep.Calls = append(rep.Calls, calls[k])
+			}
+			if logRows[k] != nil {
+				logRows[k]()
 			}
 		}
 	}

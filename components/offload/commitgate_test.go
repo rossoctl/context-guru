@@ -121,16 +121,13 @@ var gateExempt = map[string]string{
 		"tree-sitter recognises, so a fixture depends on the cg_skeleton build tag",
 	"smartcrush": "acts only on a JSON array of records above its floor; same commit path " +
 		"as dedup",
-	"agentdiet": "reached only through a reflection model call over a multi-STEP trajectory; " +
-		"its reserve behavior is pinned by TestAgentDietDoesNotPayForAReflectionItCannotStash",
-	"extract_llm_sweep": "the adjudicator needs a model verdict naming candidates; its two " +
-		"pre-gate sites are pinned by TestSweepFreezesNoDecisionForADropThatDidNotHappen",
+	"agentdiet": "reached only through a reflection model call over a multi-STEP trajectory, so " +
+		"its candidates are steps rather than messages; pinned by " +
+		"TestAgentDietDoesNotPayForAReflectionItCannotStash and " +
+		"TestAgentDietRefusalsReachTheRefusalCounter",
 	"summarize": "replaces a span rather than one message, so 'left verbatim' means a whole " +
 		"skipped checkpoint; pinned by TestSummarizeSkipsTheCheckpointWhenTheSpanCannotBeStashed " +
 		"and TestSummarizeReplaysItsCheckpointRatherThanFlippingCachedContent",
-	"extract_llm": "needs an extraction model; its three pre-gate sites are pinned by " +
-		"TestExtractLLMFreezesNoDecisionForASpliceThatDidNotHappen and " +
-		"TestExtractLLMReportsNoSavingsForARefusedReplay",
 }
 
 func ctxFor(st store.Store) *components.Ctx {
@@ -196,6 +193,27 @@ func gateCases() []gateCase {
 			}
 			return c.(components.Offload), toolMsgs(noisyLines("a"), noisyLines("b")), ctxFor(st)
 		}},
+		{"extract_llm", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
+			// In the table rather than exempt, because the metric assertions below are the whole
+			// point for this one: its savings, its ratio feed and its ledger row are all computed
+			// in a goroutine before phase 3 exists, and the first fix round moved only the replay
+			// path's. A model is the only reason it was ever exempt.
+			model := &shrinkingModel{}
+			e := newTimeoutTestComponent(t, model)
+			body := strings.Repeat("2026-08-31T10:00:00Z INFO worker: processed batch\n", 400)
+			req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+				userMsg("summarize the worker log"), toolResultMsg(body),
+			}}
+			return e, req, pricedCtx("gate-table", st, model)
+		}},
+		{"extract_llm_sweep", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
+			asker := &labelAsker{verdict: "drop", needed: "none"}
+			asker.cacheRead = 19595
+			e := newSweepSmall(t, "")
+			c := preExpiryCtx("gate-table-sweep", asker, st)
+			c.SelfRates = components.TokenRates{Input: 10, CacheRead: 1, CacheWrite: 12.5, Output: 50}
+			return e, sweepReqStocked(), c
+		}},
 		{"cmdfilter", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
 			c, err := newCmdfilter([]byte("min_size: 1\n"))
 			if err != nil {
@@ -228,7 +246,7 @@ func TestNoStateIsRecordedBeforeTheCommitGate(t *testing.T) {
 			// something, stamps a resolvable marker, and records a decision.
 			healthy := store.NewMemory(store.Options{MaxEntries: 400})
 			comp, req, c := tc.build(t, healthy)
-			var rep components.Report
+			rep := components.Report{Component: tc.name}
 			if _, err := comp.Offload(req, &rep, c); err != nil {
 				t.Fatalf("healthy run: %v", err)
 			}
@@ -253,13 +271,38 @@ func TestNoStateIsRecordedBeforeTheCommitGate(t *testing.T) {
 			for i := range req.Input {
 				before[i] = schema.MessageText(req.Input[i])
 			}
-			rep = components.Report{}
+			rep = components.Report{Component: tc.name}
+			valueBefore, savedBefore := extractGrossValue(tc.name), extractGrossSaved(tc.name)
 			if _, err := comp.Offload(req, &rep, c); err != nil {
 				t.Fatalf("saturated run: %v", err)
 			}
 			if got := markersOnWire(t, req.Input); len(got) != 0 {
 				t.Errorf("%d marker(s) reached the wire with no payload behind them: %v. A "+
 					"refused removal must leave the message VERBATIM", len(got), got)
+			}
+			// METRICS, not only store writes. A saving booked for a removal that did not happen
+			// is the same invariant one layer over: /stats reports value the run never delivered,
+			// and for extract_llm the ratio tracker it also feeds prices FUTURE calls, so the
+			// mis-recording outlives the turn that caused it. Asserted for every case in the
+			// table rather than per component, because "which components record savings" is
+			// exactly the kind of fact that changes without the test being revisited.
+			if got := extractGrossSaved(tc.name) - savedBefore; got != 0 {
+				t.Errorf("%d saved tokens were booked for removals that did not happen: the run "+
+					"reports a saving it did not deliver", got)
+			}
+			if got := extractGrossValue(tc.name); got > valueBefore {
+				t.Errorf("gross value rose from %v to %v for removals that did not happen",
+					valueBefore, got)
+			}
+			for _, call := range rep.Calls {
+				if call.Accepted {
+					t.Error("a ledger row says accepted=true while every candidate went upstream " +
+						"verbatim")
+				}
+				if call.SavedTokens != 0 {
+					t.Errorf("a ledger row claims %d saved tokens for candidates left verbatim",
+						call.SavedTokens)
+				}
 			}
 			if got := spy.decisionWrites(); len(got) != 0 {
 				t.Errorf("the component recorded %d decision(s) for a removal that did not "+

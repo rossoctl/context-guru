@@ -171,7 +171,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// that checkpoint is still small — no LLM call, and the summary message stays
 	// byte-identical (KV-cache stable). Roll the checkpoint forward only once the
 	// tail grows past resummarize_tokens.
-	reusedMsgs, reusedKeys, reused, stale := s.tryReuse(c, msgs, headCount, start, end)
+	reusedMsgs, reusedKeys, reused, stale := s.tryReuse(c, rep, msgs, headCount, start, end)
 	if reused {
 		if len(reusedKeys) == 0 {
 			rep.Irreversible = true // reused a non-full checkpoint (nothing stashed)
@@ -340,7 +340,7 @@ func (s *Summarize) refuse(c *components.Ctx, rep *components.Report, req *bsche
 	// byte-identical to the turn that created it.
 	if cp.Key != "" {
 		if b, err := json.Marshal(msgs[start:boundary]); err == nil {
-			commitRefresh(c, cp.Key, string(b))
+			commitRefresh(c, rep, markerFull, cp.Key, string(b))
 		}
 	}
 	out, keys := s.emitCheckpoint(cp, msgs, headCount, boundary)
@@ -400,7 +400,8 @@ func (s *Summarize) emitCheckpoint(cp sumCheckpoint, msgs []bschemas.ChatMessage
 // only the size test declined it (the tail grew past resummarize_tokens), so re-emitting it is
 // still byte-correct. The fresh path needs that distinction, because if it cannot produce a new
 // checkpoint its only cache-safe fallback is the old one — see the refusal path in Offload.
-func (s *Summarize) tryReuse(c *components.Ctx, msgs []bschemas.ChatMessage, headCount, start, end int) (out []bschemas.ChatMessage, keys []string, ok, stale bool) {
+func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []bschemas.ChatMessage,
+	headCount, start, end int) (out []bschemas.ChatMessage, keys []string, ok, stale bool) {
 	if s.resummarizeTokens <= 0 {
 		return nil, nil, false, false
 	}
@@ -435,7 +436,7 @@ func (s *Summarize) tryReuse(c *components.Ctx, msgs []bschemas.ChatMessage, hea
 			// stash_missing (a broken promise) rather than stash_refused (a removal declined);
 			// the alternative, re-summarizing to avoid the marker, is the cache-write this
 			// checkpoint exists to prevent.
-			commitRefresh(c, cp.Key, string(b))
+			commitRefresh(c, rep, markerFull, cp.Key, string(b))
 		}
 	}
 	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary)

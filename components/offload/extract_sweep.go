@@ -475,10 +475,8 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		for _, ev := range call.events {
 			rep.Event(ev)
 		}
-		if call.rec.Component != "" {
-			rep.Calls = append(rep.Calls, call.rec)
-		}
 		// Phase 3 (serial): freeze + splice.
+		applied := 0
 		for _, k := range drop {
 			// THE DROP FIRST, then the decision. putResult ran ahead of applySweepDrop, and
 			// once the reserve could refuse that left a frozen cg:res: record for a drop that
@@ -495,10 +493,34 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			// judgement about THIS transcript's obligations, so it must never be served to another
 			// session whose agent may still need the output.
 			putResult(c, cands[k].id, sweepDescriptor(cands[k].content), "")
+			// Booked here, where the drop is a fact. rep.Replay on the replay path above was
+			// already guarded this way; the fresh path was not.
+			saved := schema.TextTokens(cands[k].content) -
+				schema.TextTokens(sweepDescriptor(cands[k].content))
+			if saved > 0 {
+				applied += saved
+				metrics.RecordExtractionSaving(rep.Component, saved)
+				metrics.RecordExtractionValue(rep.Component, float64(saved)*val.perToken)
+			}
 			changed++
 			if key != "" {
 				keys = append(keys, key)
 			}
+		}
+		// AFTER phase 3: rep.Calls takes a COPY of the row, and Accepted/SavedTokens are only
+		// knowable once the drops have been applied. `applied` is what reached the wire, which is
+		// the figure the ledger's own doc claims it carries.
+		if applied > 0 {
+			call.rec.Accepted = true
+			call.rec.SavedTokens = applied
+		} else if call.rec.Rejection == "" {
+			// The adjudicator named spent outputs and NONE of them could be dropped. Distinct
+			// from "nothing was spent", and it is the reserve-exhausted shape: without its own
+			// reason the row read as a plain rejection.
+			call.rec.Rejection = "adjudicated spent, but no drop could be applied"
+		}
+		if call.rec.Component != "" {
+			rep.Calls = append(rep.Calls, call.rec)
 		}
 	}
 
@@ -927,9 +949,12 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		}
 		r.event("sweep_dropped")
 		drop = append(drop, v.Label)
-		removed += sz - after
-		metrics.RecordExtractionSaving(rep.Component, sz-after)
-		metrics.RecordExtractionValue(rep.Component, float64(sz-after)*savedTokenValue(c).perToken)
+		// NOT BOOKED HERE. A verdict is a decision, not a removal: phase 3 still has to apply it,
+		// and that can decline — the reserve refuses the payload, or the marker-inclusive
+		// never-worse check fails. The descriptor-only pre-check above catches neither (it is not
+		// marker-inclusive, and it cannot see the reserve at all), so a saturated reserve booked
+		// the full saving for outputs that went upstream untouched. Recorded in phase 3 instead,
+		// per candidate, once the drop is a fact.
 	}
 	// An output named in the inventory that no verdict mentioned is UNJUDGED, and it must not look
 	// like a keep: 4ca1f13 found a live arm where the model silently omitted labels and the missing
@@ -940,10 +965,11 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 			r.gate("sweep_verdict_missing")
 		}
 	}
-	if removed > 0 {
-		r.rec.Accepted = true
-		r.rec.SavedTokens = removed
-	} else {
+	// `removed` is what the ADJUDICATOR judged spent, which is why Accepted/SavedTokens are filled
+	// by the caller after phase 3 rather than here: they describe drops that actually happened, and
+	// the two numbers diverge exactly when the reserve is refusing. The rejection reason is still
+	// this function's to state — it is about the verdict, not about the splice.
+	if removed == 0 {
 		r.rec.Rejection = "adjudicated: nothing was spent"
 	}
 	if debugExtractLLM(c) {

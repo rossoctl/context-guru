@@ -496,6 +496,12 @@ func (d *AgentDiet) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		}
 	}
 	if effectiveMode(c, d.mode) == markerFull && !store.StashRoom(c.Store, smallest) {
+		// Counted, not just gated. stash_refused is documented — in config.md, in routes.md and on
+		// the counter itself — as THE signal to raise a budget, and deliberately upstream of
+		// expand_unresolved_missing. A component whose refusals are invisible to it undercuts that:
+		// a deployment starving agentdiet would decline a whole step's removals every turn while
+		// /stats read 0. One increment per declined step, which is what was declined.
+		stashRefusals.Add(1)
 		rep.Gate("stash_reserve_exhausted")
 		if changed == 0 {
 			rep.Skipped = true

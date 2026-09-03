@@ -245,7 +245,7 @@ func reapplyFrozen(c *components.Ctx, rep *components.Report, comp string, m *bs
 		// cannot un-send the marker — and commitRefresh counts it as stash_missing, which is
 		// the counter for a broken promise. It used to increment stashRefusals, the counter
 		// whose whole operator-facing meaning is "nothing became irreversible".
-		commitRefresh(c, k, content)
+		commitRefresh(c, rep, markerFull, k, content)
 	}
 	schema.SetMessageText(m, rs)
 	return keys, saved, true

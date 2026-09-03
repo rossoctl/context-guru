@@ -116,7 +116,9 @@ func sweepDrop(c *components.Ctx, rep *components.Report, mode markerMode,
 		return "", false
 	}
 	if replay {
-		commitRefresh(c, key, content) // never refuses; a false answer is counted as dangling
+		// Never refuses; a false answer is counted as dangling. Also sets rep.Irreversible in the
+		// degraded marker modes, which commitMark used to do on this path.
+		commitRefresh(c, rep, eff, key, content)
 		recordOwner(c, key)
 	} else if !commitMark(c, rep, eff, key, content) {
 		return "", false // the store cannot back the marker; the drop does not happen

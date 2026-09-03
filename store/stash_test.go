@@ -339,3 +339,33 @@ func TestStashRoomAnswersBeforeThePayloadIsBuilt(t *testing.T) {
 			"staler than PutStash's, so summarize skips checkpoints the store would accept")
 	}
 }
+
+// The floor has to be a floor at EVERY max_entries, not only where max/4 rounds up.
+//
+// max/4 is 0 for max_entries of 2 or 3, and each exemption is capped at max/2 — so the two could
+// reach the whole cap and the "unconditional" guarantee that something is always evictable, which
+// both store.go and docs/reference/config.md state as unconditional, had a hole at the bottom of
+// the range. Only absurd configs reach it; the documented claim is still either true or it is not.
+func TestTheEvictableFloorHoldsAtEveryEntryCap(t *testing.T) {
+	for _, max := range []int{2, 3, 4, 8, 100} {
+		m := NewMemory(Options{MaxEntries: max})
+		// Saturate both exemptions as hard as this cap allows.
+		payload := []byte("x")
+		for i := 0; i < max*2; i++ {
+			id := strconv.Itoa(i)
+			m.PutStash("aaaaaaaaaaaaaaaa"+id, payload)
+			m.Put(ResultPrefix+"sess:"+id, payload)
+			m.Put(FrozenPrefix+"sess:"+id, payload)
+		}
+		// The property: a write to an unpinned namespace survives its own Put.
+		m.Put("cg:keep:probe", []byte{1})
+		if _, ok := m.Get("cg:keep:probe"); !ok {
+			t.Errorf("max_entries %d: a cg:keep: write did not survive its own Put, so the "+
+				"exemptions have taken the whole cap and writes to the unpinned namespaces are "+
+				"silent no-ops", max)
+		}
+		if got := m.evictableEntriesForTest(); got < 1 {
+			t.Errorf("max_entries %d: %d entries are evictable, want at least 1", max, got)
+		}
+	}
+}
