@@ -60,18 +60,15 @@ const round2Answer = "event: message_start\ndata: {\"type\":\"message_start\",\"
 func TestExpandCalledAfterALeadingBlockIsNeverGivenToTheClient(t *testing.T) {
 	for _, leadType := range []string{"text", "thinking"} {
 		t.Run(leadType, func(t *testing.T) {
-			var calls int
-			var secondBody []byte
+			var up upstreamCapture
 			head, tail := leadThenExpand(leadType)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				b, _ := io.ReadAll(r.Body)
-				calls++
+				round := up.record(r)
 				w.Header().Set("Content-Type", "text/event-stream")
-				if calls == 1 {
+				if round == 1 {
 					w.Write([]byte(head + tail))
 					return
 				}
-				secondBody = b
 				w.Write([]byte(round2Answer))
 			}))
 			defer upstream.Close()
@@ -93,9 +90,10 @@ func TestExpandCalledAfterALeadingBlockIsNeverGivenToTheClient(t *testing.T) {
 				t.Fatalf("the client received a raw tool_use for OUR tool — this is the "+
 					"reported bug (`No such tool available: context_guru_expand`):\n%s", out)
 			}
-			if calls != 2 {
+			if calls := up.hits(); calls != 2 {
 				t.Fatalf("the expand call must drive a continuation round, got %d upstream calls", calls)
 			}
+			secondBody := up.body(2)
 			if !strings.Contains(string(secondBody), "THE ORIGINAL CONTENT") {
 				t.Fatalf("continuation must carry the resolved original: %s", secondBody)
 			}
@@ -135,13 +133,16 @@ func TestExpandCalledAfterALeadingBlockIsNeverGivenToTheClient(t *testing.T) {
 // cannot pass this, which is the whole difference between splicing and re-buffering.
 func TestTheStreamedPrefixReachesTheClientBeforeTheExpandCall(t *testing.T) {
 	release := make(chan struct{})
-	var calls int
+	// Two rounds, each served from a goroutine of upstream's own: the counter is read on a
+	// different goroutine from the one that last wrote it, never mind that the proxy issues the
+	// rounds one after the other. Which conn goroutine serves round 2 is net/http's business,
+	// not something the test may assume, so the counter carries its own edge.
+	var calls atomic.Int64
 	head, tail := leadThenExpand("text")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
-		calls++
 		w.Header().Set("Content-Type", "text/event-stream")
-		if calls > 1 {
+		if calls.Add(1) > 1 {
 			w.Write([]byte(round2Answer))
 			return
 		}
@@ -202,9 +203,9 @@ func TestTheStreamedPrefixReachesTheClientBeforeTheExpandCall(t *testing.T) {
 // This is the whole sequence a user lives through, in two requests, because that is the only
 // place it is visible: the leak on the first and the repair on the second.
 func TestTheClientsNoSuchToolErrorNeverReachesTheModel(t *testing.T) {
-	var lastUpstream []byte
+	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lastUpstream, _ = io.ReadAll(r.Body)
+		up.record(r)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n" +
 			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
@@ -260,6 +261,7 @@ func TestTheClientsNoSuchToolErrorNeverReachesTheModel(t *testing.T) {
 	io.Copy(io.Discard, resp2.Body)
 	resp2.Body.Close()
 
+	lastUpstream := up.last().body
 	if strings.Contains(string(lastUpstream), "No such tool available") {
 		t.Fatalf("the model received the client's error for OUR tool:\n%s", lastUpstream)
 	}
@@ -277,9 +279,9 @@ func TestTheClientsNoSuchToolErrorNeverReachesTheModel(t *testing.T) {
 // while the response was buffered and nothing had been written, and is garbage appended to
 // the model's turn now that the prefix has already streamed.
 func TestAFailedContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
-	// atomic, unlike the counters in the tests above: the second round's connection is closed
-	// without a response, so there is no happens-before edge between the handler's write and
-	// the assertion's read.
+	// The second round's connection is closed without a response, so not even a completed round
+	// trip stands between the handler's write and the assertion's read; the atomic carries the
+	// edge itself.
 	var calls atomic.Int64
 	head, tail := leadThenExpand("text")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -342,12 +344,11 @@ func TestAFailedContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
 // client's turn must still terminate: it gets the events the splice withheld, which is a
 // complete message, rather than a stream cut off mid-block.
 func TestAJSONContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
-	var calls int
+	var calls atomic.Int64
 	head, tail := leadThenExpand("text")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
-		calls++
-		if calls > 1 {
+		if calls.Add(1) > 1 {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"type":"message","role":"assistant","content":[{"type":"text","text":"ANSWERED"}]}`))
 			return
@@ -370,8 +371,8 @@ func TestAJSONContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
 	out, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if calls != 2 {
-		t.Fatalf("expected the continuation round, got %d upstream calls", calls)
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("expected the continuation round, got %d upstream calls", n)
 	}
 	if strings.Contains(string(out), `{"type":"message","role":"assistant"`) {
 		t.Fatalf("a JSON body was appended to an open event stream:\n%s", out)

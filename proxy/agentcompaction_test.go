@@ -98,9 +98,9 @@ func TestAgentCompactionIsBypassed(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var got []byte
+			var up upstreamCapture
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				got, _ = io.ReadAll(r.Body)
+				up.record(r)
 				w.Header().Set("Content-Type", "application/json")
 				w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
 			}))
@@ -126,6 +126,7 @@ func TestAgentCompactionIsBypassed(t *testing.T) {
 			}
 			resp.Body.Close()
 
+			got := up.last().body
 			if tc.wantBypass {
 				if !bytes.Equal(got, body) {
 					t.Fatalf("a compaction request must be forwarded byte-identical.\n sent: %s\n  got: %s", body, got)
@@ -221,9 +222,9 @@ func TestExpandToolAdvertisedOnEveryTurnButNeverOnACompaction(t *testing.T) {
 			[]map[string]any{marked, {"role": "user", "content": ccCompactPrompt}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var got []byte
+			var up upstreamCapture
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				got, _ = io.ReadAll(r.Body)
+				up.record(r)
 				w.Header().Set("Content-Type", "application/json")
 				w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
 			}))
@@ -253,9 +254,9 @@ func TestExpandToolAdvertisedOnEveryTurnButNeverOnACompaction(t *testing.T) {
 			}
 			resp.Body.Close()
 
-			advertised := strings.Contains(string(got), "context_guru_expand")
+			advertised := strings.Contains(string(up.last().body), "context_guru_expand")
 			if advertised != tc.want {
-				t.Fatalf("expand tool advertised=%v, want %v: %s", advertised, tc.want, got)
+				t.Fatalf("expand tool advertised=%v, want %v: %s", advertised, tc.want, up.last().body)
 			}
 		})
 	}

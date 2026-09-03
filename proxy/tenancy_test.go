@@ -488,9 +488,11 @@ func TestUnboundBobKeyRefusalNamesTheMissingCredential(t *testing.T) {
 
 // Single-tenant mode must be untouched: no token needed, static upstream used.
 func TestSingleTenantUnchanged(t *testing.T) {
-	var got *http.Request
+	// The handler runs on up's own goroutine; the round trip through h.Mux() is not a
+	// happens-before edge, so the clone comes back over a buffered channel.
+	seen := make(chan *http.Request, 1)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.Clone(r.Context())
+		seen <- r.Clone(r.Context())
 		w.Write([]byte(`{"ok":true}`))
 	}))
 	defer up.Close()
@@ -508,8 +510,14 @@ func TestSingleTenantUnchanged(t *testing.T) {
 		t.Fatalf("single-tenant request = %d %s", w.Code, w.Body)
 	}
 	// With no key configured the client's own auth passes through, as documented.
-	if got == nil || got.Header.Get("Authorization") != "Bearer client-own-key" {
-		t.Errorf("single-tenant pass-through changed: %v", got.Header.Get("Authorization"))
+	var got *http.Request
+	select {
+	case got = <-seen:
+	default:
+		t.Fatal("single-tenant request never reached the upstream")
+	}
+	if auth := got.Header.Get("Authorization"); auth != "Bearer client-own-key" {
+		t.Errorf("single-tenant pass-through changed: %v", auth)
 	}
 }
 

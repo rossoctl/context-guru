@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -23,8 +24,18 @@ import (
 // capturePrefixed stands in for the provider and records the body it was sent, so a test can assert
 // what actually reached the wire rather than what the caller intended.
 type capturePrefixed struct {
+	mu   sync.Mutex
 	body []byte
 	srv  *httptest.Server
+}
+
+// forwarded is what the fixture last received. The handler runs on the test server's own
+// goroutine and the HTTP round trip is not a happens-before edge, so the capture goes
+// through c.mu -- the shape tenancy_test.go's hostedFixture uses.
+func (c *capturePrefixed) forwarded() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.body
 }
 
 func newCapturePrefixed(t *testing.T, cacheRead int) *capturePrefixed {
@@ -33,7 +44,9 @@ func newCapturePrefixed(t *testing.T, cacheRead int) *capturePrefixed {
 	c.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b := make([]byte, r.ContentLength)
 		_, _ = r.Body.Read(b)
+		c.mu.Lock()
 		c.body = b
+		c.mu.Unlock()
 		w.Header().Set("content-type", "application/json")
 		_, _ = w.Write([]byte(`{"content":[{"text":"[]"}],"usage":{"input_tokens":12,` +
 			`"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":` +
@@ -74,7 +87,7 @@ func TestCompletePrefixedAppendsWithoutDisturbingThePrefix(t *testing.T) {
 		t.Fatalf("CompletePrefixed: %v", err)
 	}
 	// PRECONDITION: the call reached the stub at all, or every assertion below is about nothing.
-	if len(srv.body) == 0 {
+	if len(srv.forwarded()) == 0 {
 		t.Fatal("no body reached the provider")
 	}
 	if reply != "[]" {
@@ -94,8 +107,8 @@ func TestCompletePrefixedAppendsWithoutDisturbingThePrefix(t *testing.T) {
 			Content any    `json:"content"`
 		} `json:"messages"`
 	}
-	if err := json.Unmarshal(srv.body, &sent); err != nil {
-		t.Fatalf("the body sent is not JSON: %v\n%s", err, srv.body)
+	if err := json.Unmarshal(srv.forwarded(), &sent); err != nil {
+		t.Fatalf("the body sent is not JSON: %v\n%s", err, srv.forwarded())
 	}
 	// The ask is the LAST message and a USER one. The route rejects assistant prefill, which this
 	// satisfies by construction — and it is why the prefix must not be extended any other way.
@@ -218,7 +231,7 @@ func TestCompletePrefixedRefusesABodyWithNoMessages(t *testing.T) {
 	if _, _, err := cli.CompletePrefixed(context.Background(), []byte(`{"model":"m"}`), "ask"); err == nil {
 		t.Fatal("a body with no messages array was accepted")
 	}
-	if len(srv.body) != 0 {
+	if len(srv.forwarded()) != 0 {
 		t.Error("a malformed prefix was still sent to the provider")
 	}
 }
@@ -255,10 +268,10 @@ func TestAskUsesTheStashedBodyForThatSession(t *testing.T) {
 	if u.CacheRead != 4242 {
 		t.Fatalf("CacheRead = %d; the caller cannot gate on a figure that does not arrive", u.CacheRead)
 	}
-	if !strings.Contains(string(srv.body), "THE-ASK") {
+	if !strings.Contains(string(srv.forwarded()), "THE-ASK") {
 		t.Error("the ask did not reach the wire")
 	}
-	if !strings.Contains(string(srv.body), "find the flaky test") {
+	if !strings.Contains(string(srv.forwarded()), "find the flaky test") {
 		t.Error("the stashed transcript did not reach the wire, so there was no prefix to read")
 	}
 	// A DIFFERENT session must not read this one's prefix: it is another cache namespace, and

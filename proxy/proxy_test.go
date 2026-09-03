@@ -3,10 +3,13 @@ package proxy_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +20,94 @@ import (
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 )
+
+// upstreamRound is one request a fixture upstream served.
+type upstreamRound struct {
+	method, path string
+	header       http.Header
+	body         []byte
+}
+
+// String renders the round for a failure message with the body as text. Plain %+v on a []byte
+// field prints a list of decimal byte values, which defeats the point of dumping it at all.
+func (r upstreamRound) String() string {
+	return fmt.Sprintf("%s %s header=%v body=%s", r.method, r.path, r.header, r.body)
+}
+
+// upstreamCapture records what a fixture upstream saw, under a mutex.
+//
+// A fixture handler runs on the test server's own goroutine. The HTTP round trip that follows
+// LOOKS like it orders the handler's writes before the test goroutine's reads, but it is not a
+// happens-before edge: a captured variable written in the handler and read by the test after the
+// round trip is an unsynchronised access, and `make cover` runs the suite with -race. Every field
+// here therefore goes through u.mu, the shape tenancy_test.go's hostedFixture already uses.
+//
+// Counter-only fixtures do not need this: an atomic.Int64 carries its own edge and is a smaller
+// change at the call site.
+type upstreamCapture struct {
+	mu     sync.Mutex
+	rounds []upstreamRound
+}
+
+// record snapshots the request (draining its body) and returns the 1-based round number, so a
+// handler that must answer differently per round reads its own count from the return value
+// rather than from a captured counter.
+func (u *upstreamCapture) record(r *http.Request) int {
+	b, _ := io.ReadAll(r.Body)
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.rounds = append(u.rounds, upstreamRound{r.Method, r.URL.Path, r.Header.Clone(), b})
+	return len(u.rounds)
+}
+
+// hits is the number of rounds served.
+func (u *upstreamCapture) hits() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return len(u.rounds)
+}
+
+// round returns the n-th round, 1-based; the zero value if there was no such round.
+func (u *upstreamCapture) round(n int) upstreamRound {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if n < 1 || n > len(u.rounds) {
+		return upstreamRound{}
+	}
+	return u.rounds[n-1]
+}
+
+// body is the n-th round's body, 1-based; nil if there was no such round.
+func (u *upstreamCapture) body(n int) []byte { return u.round(n).body }
+
+// served is a copy of every round, in order, for failure messages that should say what did
+// arrive rather than only how many things did.
+func (u *upstreamCapture) served() []upstreamRound {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]upstreamRound(nil), u.rounds...)
+}
+
+// bodies is the served bodies in order — the view captureUpstream hands its callers.
+func (u *upstreamCapture) bodies() [][]byte {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	out := make([][]byte, len(u.rounds))
+	for i, r := range u.rounds {
+		out[i] = r.body
+	}
+	return out
+}
+
+// last is the most recent round; the zero value if nothing was served.
+func (u *upstreamCapture) last() upstreamRound {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if len(u.rounds) == 0 {
+		return upstreamRound{}
+	}
+	return u.rounds[len(u.rounds)-1]
+}
 
 // buildHandler wires a real config->pipeline->proxy against a mock upstream that
 // records the body it receives.
@@ -72,9 +163,9 @@ func expandableBody(hash string) []byte {
 }
 
 func TestProxyReducesThenForwards(t *testing.T) {
-	var got []byte
+	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = io.ReadAll(r.Body)
+		up.record(r)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	}))
@@ -98,6 +189,7 @@ func TestProxyReducesThenForwards(t *testing.T) {
 
 	// Upstream must have received a SMALLER messages array (dedup collapsed the dup),
 	// while non-message fields (model, temperature) survive verbatim (I1).
+	got := up.last().body
 	if len(got) == 0 {
 		t.Fatal("upstream received nothing")
 	}
@@ -117,9 +209,9 @@ func TestProxyReducesThenForwards(t *testing.T) {
 // gateway route with a Claude-Code-shaped body (tool outputs as tool_result
 // blocks in user messages) and asserts the offloader fires end-to-end.
 func TestAnthropicRouteReducesToolResult(t *testing.T) {
-	var got []byte
+	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = io.ReadAll(r.Body)
+		up.record(r)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"type":"message","content":[{"type":"text","text":"ok"}]}`))
 	}))
@@ -148,6 +240,7 @@ func TestAnthropicRouteReducesToolResult(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	got := up.last().body
 	if len(got) == 0 {
 		t.Fatal("upstream received nothing")
 	}
@@ -167,14 +260,9 @@ func TestAnthropicRouteReducesToolResult(t *testing.T) {
 // reduced like any chat and forwarded to the same path, while a control-plane
 // call (GET /admin/v1/profile) passes through to the upstream verbatim.
 func TestBobGatewayReducesModelAndPassesControlPlane(t *testing.T) {
-	type hit struct {
-		method, path string
-		body         []byte
-	}
-	var hits []hit
+	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		hits = append(hits, hit{r.Method, r.URL.Path, b})
+		up.record(r)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	}))
@@ -213,10 +301,10 @@ func TestBobGatewayReducesModelAndPassesControlPlane(t *testing.T) {
 	}
 	cp.Body.Close()
 
-	if len(hits) != 2 {
-		t.Fatalf("want 2 upstream hits, got %d: %+v", len(hits), hits)
+	if n := up.hits(); n != 2 {
+		t.Fatalf("want 2 upstream hits, got %d: %+v", n, up.served())
 	}
-	model, control := hits[0], hits[1]
+	model, control := up.round(1), up.round(2)
 	if model.path != "/inference/v1/chat/completions" {
 		t.Fatalf("model call forwarded to wrong path: %q", model.path)
 	}
@@ -235,9 +323,9 @@ func TestBobGatewayReducesModelAndPassesControlPlane(t *testing.T) {
 }
 
 func TestBypassHeaderForwardsUnchanged(t *testing.T) {
-	var got []byte
+	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = io.ReadAll(r.Body)
+		up.record(r)
 		w.Write([]byte(`{}`))
 	}))
 	defer upstream.Close()
@@ -257,16 +345,15 @@ func TestBypassHeaderForwardsUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if gjson.GetBytes(got, "messages.1.content").String() != dump {
+	if gjson.GetBytes(up.last().body, "messages.1.content").String() != dump {
 		t.Fatal("bypass should forward messages unchanged")
 	}
 }
 
 func TestGatewayInjectsRealKey(t *testing.T) {
-	var gotAuth, gotXAPI string
+	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		gotXAPI = r.Header.Get("x-api-key")
+		up.record(r)
 		w.Write([]byte(`{}`))
 	}))
 	defer upstream.Close()
@@ -287,27 +374,29 @@ func TestGatewayInjectsRealKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if gotAuth != "Bearer real-openai-key" {
+	hdr := up.last().header
+	if gotAuth := hdr.Get("Authorization"); gotAuth != "Bearer real-openai-key" {
 		t.Fatalf("gateway should inject the real key, upstream saw %q", gotAuth)
 	}
-	_ = gotXAPI
+	// And only that one slot: an OpenAI upstream has no business receiving Anthropic's header,
+	// least of all a copy of the key.
+	if gotXAPI := hdr.Get("x-api-key"); gotXAPI != "" {
+		t.Fatalf("gateway sent x-api-key to an OpenAI upstream: %q", gotXAPI)
+	}
 }
 
 func TestExpandToolLoop(t *testing.T) {
-	var calls int
-	var secondBody []byte
+	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		calls++
+		round := up.record(r)
 		w.Header().Set("Content-Type", "application/json")
-		if calls == 1 {
+		if round == 1 {
 			// model asks to expand the offloaded content
 			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[` +
 				`{"id":"call_1","type":"function","function":{"name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"}}` +
 				`]},"finish_reason":"tool_calls"}]}`))
 			return
 		}
-		secondBody = b
 		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`))
 	}))
 	defer upstream.Close()
@@ -325,12 +414,13 @@ func TestExpandToolLoop(t *testing.T) {
 	final, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if calls != 2 {
+	if calls := up.hits(); calls != 2 {
 		t.Fatalf("expected 2 upstream calls (initial + continuation), got %d", calls)
 	}
 	if !strings.Contains(string(final), "done") {
 		t.Fatalf("proxy should return the final answer, got %s", final)
 	}
+	secondBody := up.body(2)
 	if !strings.Contains(string(secondBody), "THE ORIGINAL CONTENT") {
 		t.Fatalf("continuation must carry the resolved original, got %s", secondBody)
 	}
@@ -344,12 +434,10 @@ func TestExpandToolLoop(t *testing.T) {
 // tool_use is context_guru_expand; the request carries a <<cg:HASH>> marker so the
 // proxy buffers+aggregates the SSE, resolves the original, and re-invokes upstream.
 func TestExpandSSELoop(t *testing.T) {
-	var calls int
-	var secondBody []byte
+	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		calls++
-		if calls == 1 {
+		round := up.record(r)
+		if round == 1 {
 			w.Header().Set("Content-Type", "text/event-stream")
 			// A minimal Anthropic tool_use SSE: start, block start (tool_use), the input
 			// json as one delta, stops.
@@ -361,7 +449,6 @@ func TestExpandSSELoop(t *testing.T) {
 				"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 			return
 		}
-		secondBody = b
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n" +
 			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
@@ -397,9 +484,10 @@ func TestExpandSSELoop(t *testing.T) {
 	final, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if calls != 2 {
+	if calls := up.hits(); calls != 2 {
 		t.Fatalf("expected 2 upstream calls (SSE expand + continuation), got %d", calls)
 	}
+	secondBody := up.body(2)
 	if !strings.Contains(string(secondBody), "THE ORIGINAL CONTENT") {
 		t.Fatalf("continuation must carry the resolved original, got %s", secondBody)
 	}
@@ -424,20 +512,17 @@ func TestExpandSSELoop(t *testing.T) {
 // must still carry a tool_result for BOTH call ids (the missing one gets a
 // placeholder) or the provider rejects the request.
 func TestExpandPartialResolutionWellFormed(t *testing.T) {
-	var calls int
-	var secondBody []byte
+	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		calls++
+		round := up.record(r)
 		w.Header().Set("Content-Type", "application/json")
-		if calls == 1 {
+		if round == 1 {
 			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[` +
 				`{"id":"call_1","type":"function","function":{"name":"context_guru_expand","arguments":"{\"id\":\"GOOD\"}"}},` +
 				`{"id":"call_2","type":"function","function":{"name":"context_guru_expand","arguments":"{\"id\":\"GONE\"}"}}` +
 				`]},"finish_reason":"tool_calls"}]}`))
 			return
 		}
-		secondBody = b
 		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
 	}))
 	defer upstream.Close()
@@ -454,9 +539,10 @@ func TestExpandPartialResolutionWellFormed(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if calls != 2 {
+	if calls := up.hits(); calls != 2 {
 		t.Fatalf("expected a continuation round, got %d upstream calls", calls)
 	}
+	secondBody := up.body(2)
 	// One tool message per EXPAND tool_call_id (both call_1 and call_2), or the provider
 	// errors. Counted by call id: the request already carried an unrelated tool turn (the
 	// one holding the marker), which is not a result for this round.
@@ -725,9 +811,9 @@ func TestMarkerBearingSSEStreamsWhenItOpensWithText(t *testing.T) {
 // answer only half a batch (the client owns Bash), so it must replay the stream
 // unchanged rather than continue — and the client's stream must stay well-formed.
 func TestExpandSSEWithOtherToolReplaysVerbatim(t *testing.T) {
-	var calls int
+	var calls atomic.Int64 // an atomic carries the happens-before edge the round trip does not
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls++
+		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n" +
 			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"context_guru_expand\"}}\n\n" +
@@ -754,7 +840,7 @@ func TestExpandSSEWithOtherToolReplaysVerbatim(t *testing.T) {
 	out, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if calls != 1 {
+	if calls := calls.Load(); calls != 1 {
 		t.Fatalf("batched expand+Bash must NOT trigger a continuation, got %d upstream calls", calls)
 	}
 	// Verbatim replay: both blocks intact, indices unrenumbered, no injected content.
@@ -770,10 +856,10 @@ func TestExpandSSEWithOtherToolReplaysVerbatim(t *testing.T) {
 // upstream that answers every request with another expand call must be cut off, and
 // the client must still get a well-formed stream (the model's own last call).
 func TestExpandSSEMultiRoundCapped(t *testing.T) {
-	var calls int
+	var calls atomic.Int64 // an atomic carries the happens-before edge the round trip does not
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
-		calls++
+		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n" +
 			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"context_guru_expand\"}}\n\n" +
@@ -798,7 +884,7 @@ func TestExpandSSEMultiRoundCapped(t *testing.T) {
 	resp.Body.Close()
 
 	// maxExpandRounds continuations, then one final pass-through: 4 upstream calls.
-	if calls != 4 {
+	if calls := calls.Load(); calls != 4 {
 		t.Fatalf("round cap not honored: %d upstream calls (want 4 = 3 rounds + terminal)", calls)
 	}
 	if !strings.Contains(string(out), "message_stop") {
@@ -832,9 +918,9 @@ func TestExpandSSEMultiRoundCapped(t *testing.T) {
 // provider IS anthropic — a different branch from the provider gate at sse.go:21.
 // The client must still receive the original bytes unchanged.
 func TestExpandSSEAggregateFailureReplaysRaw(t *testing.T) {
-	var calls int
+	var calls atomic.Int64 // an atomic carries the happens-before edge the round trip does not
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls++
+		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		// partial_json is TRUNCATED — it cannot reconstruct to valid JSON.
 		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n" +
@@ -857,7 +943,7 @@ func TestExpandSSEAggregateFailureReplaysRaw(t *testing.T) {
 	out, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if calls != 1 {
+	if calls := calls.Load(); calls != 1 {
 		t.Fatalf("an unreconstructable stream must not drive a continuation: %d calls", calls)
 	}
 	if !strings.Contains(string(out), `\"id\":\"HA`) || !strings.Contains(string(out), "message_stop") {
@@ -873,9 +959,9 @@ func TestExpandSSEAggregateFailureReplaysRaw(t *testing.T) {
 // marker-bearing OpenAI SSE response is replayed raw and restoration does not fire.
 // Correctness is preserved (fail-open); only the feature is absent.
 func TestExpandOpenAISSEFallsBackToRaw(t *testing.T) {
-	var calls int
+	var calls atomic.Int64 // an atomic carries the happens-before edge the round trip does not
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls++
+		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Write([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"}}]}}]}` + "\n\n" +
 			"data: [DONE]\n\n"))
@@ -903,7 +989,7 @@ func TestExpandOpenAISSEFallsBackToRaw(t *testing.T) {
 	out, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if calls != 1 {
+	if calls := calls.Load(); calls != 1 {
 		t.Fatalf("OpenAI SSE cannot be aggregated, so no continuation is possible: %d calls", calls)
 	}
 	if !strings.Contains(string(out), "[DONE]") || strings.Contains(string(out), "THE ORIGINAL CONTENT") {
