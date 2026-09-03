@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,9 +29,18 @@ func (stubTenantMetrics) TenantMetrics(int64) ([]TenantMetricRow, error) {
 // and the exporter is hand-written, so the two drift silently and the first symptom is an
 // operator reading a blank panel as "no problem".
 //
-// So: every cg_* name any dashboard queries must appear in the rendered exposition. The
-// per-tenant families need a tenant to have traffic, so the HELP line is what is checked
-// for those — it is emitted with the header regardless of whether any series follows.
+// So: every cg_* name any dashboard queries must appear in the exposition. The per-tenant
+// families need a tenant to have traffic, so the HELP line is what is checked for those — it
+// is emitted with the header regardless of whether any series follows.
+//
+// It checks the SERVED RESPONSE, not renderMetrics() alone, and the difference is load-bearing.
+// Not every series lives in the cached body: cg_metrics_age_seconds and
+// cg_metrics_render_seconds are appended per response, because the body is shared by every
+// scrape served from one render and its age differs for each of them — baking an age into the
+// cached body would make it report the same figure to every scrape, which is the exact lie
+// those two series exist to expose. Asserting against renderMetrics() would therefore fail on
+// series that a scraper does in fact receive. What Prometheus actually gets is the response, so
+// that is what this asserts on, and it now covers both kinds.
 func TestDashboardsOnlyQueryMetricsWeExport(t *testing.T) {
 	// A recorder and a tenant-metrics source, because whole families of series are
 	// emitted only when those are wired — which is also why this test needs to exist:
@@ -43,7 +54,15 @@ func TestDashboardsOnlyQueryMetricsWeExport(t *testing.T) {
 	h := New(nil, nil, metrics.NewAggregator(), Options{
 		Dashboard: rec, TenantMetrics: stubTenantMetrics{},
 	})
-	body := h.renderMetrics()
+	// Loopback, because metricsAllowed gates the endpoint on it when no METRICS_TOKEN is set.
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	w := httptest.NewRecorder()
+	h.metricsHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/metrics returned %d, want 200: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
 
 	files, err := filepath.Glob("../deploy/grafana/dashboards/*.json")
 	if err != nil || len(files) == 0 {
