@@ -109,7 +109,48 @@ func TestSweepTellsAReserveRefusalApartFromNothingSpent(t *testing.T) {
 		if rep.Events["sweep_dropped"] != 0 {
 			t.Fatalf("a drop got through, so `drop` was not empty for the reason under test")
 		}
-		assertSweepRejection(t, rep, "adjudicated spent, but no descriptor was smaller than its output")
+		// The reason no longer names the skip — the GATES do, and they cannot fall out of date when
+		// a skip path is added. What the reason owes the operator is that the model judged output
+		// spent, which is the distinction "nothing was spent" destroyed.
+		assertSweepRejection(t, rep, "adjudicated 2 spent, but none became a drop (see gates)")
+		if rep.Gates["sweep_drop_would_not_shrink"] == 0 {
+			t.Error("the reason defers to the gates for WHICH skip it was, so the gate has to be there")
+		}
+	})
+	t.Run("spent but every verdict refused its own obligation", func(t *testing.T) {
+		// The path the enumerating version reported as "nothing was spent": the model answers drop
+		// while naming something that still needs the output, so extract.Judge sets
+		// RefusedObligation and every candidate is skipped. Included because deriving the reason
+		// from the verdict is only worth anything if it covers a skip the enumeration missed.
+		asker := &labelAsker{verdict: "drop", needed: "the pytest run in step 4"}
+		asker.cacheRead = 19595
+		e := newSweepSmall(t, "")
+		st := store.NewMemory(store.Options{MaxEntries: 400})
+		rep := &components.Report{Component: "extract_llm_sweep"}
+		if _, err := e.Offload(sweepReqStocked(), rep, preExpiryCtx("s", asker, st)); err != nil {
+			t.Fatal(err)
+		}
+		if rep.Gates["sweep_drop_refused_obligation"] == 0 {
+			t.Fatalf("no verdict refused its obligation, so this is not the case under test "+
+				"(gates: %v, events: %v)", rep.Gates, rep.Events)
+		}
+		if rep.Events["sweep_dropped"] != 0 {
+			t.Fatal("a drop got through, so `drop` was not empty for the reason under test")
+		}
+		if len(rep.Calls) == 0 {
+			t.Fatal("no ModelCall row was reported")
+		}
+		for _, call := range rep.Calls {
+			if call.Rejection == "adjudicated: nothing was spent" {
+				t.Error("the ledger says the adjudicator found nothing spent, when it judged " +
+					"EVERY output spent and we declined each one for self-contradiction. That is " +
+					"the conflation these reasons exist to prevent, and the enumerating version " +
+					"reported exactly this")
+			}
+			if !strings.Contains(call.Rejection, "spent, but none became a drop") {
+				t.Errorf("rejection = %q, want the spent-but-not-dropped reason", call.Rejection)
+			}
+		}
 	})
 	t.Run("spent but no drop could be applied", func(t *testing.T) {
 		asker := &labelAsker{verdict: "drop", needed: "none"}
@@ -151,12 +192,26 @@ func assertSweepRejection(t *testing.T, rep *components.Report, want string) {
 	}
 }
 
-// The metrics half on the sweep path: a refused drop must not book its token savings.
+// A declined replay must record nothing — and the honest statement of what this test still pins is
+// narrower than what it was written for.
 //
-// RecordExtractionValue sat ABOVE the ok check on applySweepDrop's return, so a drop the reserve
-// declined still credited the tokens it would have saved. rep.Replay on that path was already
-// guarded correctly, which is what made the unguarded metric next to it easy to miss.
-func TestSweepReportsNoSavingsForARefusedReplay(t *testing.T) {
+// It was written when the saving was computed from the stored DESCRIPTOR, so a declined replay could
+// book a non-zero figure and moving the recorder above the ok gate was observable. Measuring the
+// spliced message instead — the right fix, and one the review asked for — made `saved == 0` TRUE BY
+// CONSTRUCTION on a decline, because sweepDrop only calls SetMessageText on success. So the savings
+// half of this test cannot fail any more, whatever the recorder's position.
+//
+// That is worth stating rather than quietly leaving a test that looks like a guard:
+//
+//   - What still BINDS here is rep.Replay, which sits inside the ok branch and would fire for a
+//     message that was never rewritten. The mutation below is what proves it.
+//   - What guards the SAVING is now TestSweepReplayBooksWhatTheReplayedMessageActuallySaved: revert
+//     the basis to descriptor-only and it fails, which also restores this test's original premise.
+//
+// The general lesson, and the reason for this comment: a measurement change can void a test that
+// never mentioned the measurement. Nothing in this function referred to the basis, and correcting
+// the basis silently removed its only signal.
+func TestSweepRecordsNoReplayForADropItDeclined(t *testing.T) {
 	// The fixture has to sit in a NARROW gap, and getting it wrong makes this test vacuous: the
 	// saving is computed from the descriptor ALONE, so the descriptor must be smaller than the
 	// content (or no saving would be booked either way and the mutation escapes), while
@@ -202,11 +257,14 @@ func TestSweepReportsNoSavingsForARefusedReplay(t *testing.T) {
 			"assert about", got)
 	}
 	if rep.Replays != 0 {
-		t.Errorf("rep.Replay fired %d time(s) for a replay that did not splice", rep.Replays)
+		t.Errorf("rep.Replay fired %d time(s) for a replay that did not splice: the message went "+
+			"upstream verbatim, so no replay reached the model", rep.Replays)
 	}
+	// Kept, but no longer load-bearing: with the wire basis a declined replay cannot book a saving,
+	// so this asserts a structural property rather than guarding a reachable defect. See the doc
+	// above for which test guards the basis itself.
 	if after := sweepValueUSD(); after > before {
-		t.Errorf("sweep gross value rose from %v to %v for a drop that did not happen; the "+
-			"savings figure now includes tokens that were never saved", before, after)
+		t.Errorf("sweep gross value rose from %v to %v for a drop that did not happen", before, after)
 	}
 }
 

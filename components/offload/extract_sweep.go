@@ -305,8 +305,23 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		// came from a model, but the REPLACEMENT is a pure function of (content, config), so a replay
 		// can never emit different bytes than the turn that decided it.
 		// The cached VALUE is no longer read: the saving is measured against the message as
-		// replayed, not against the stored descriptor. Only the HIT matters here — it is what says
-		// this session already sent these bytes and may replay them at any depth.
+		// replayed, not against the stored descriptor. Only the HIT is consulted.
+		//
+		// WHAT THE HIT ACTUALLY PROVES, stated precisely because the depth bypass below rests on it
+		// and the key cannot carry the stronger claim. resultKey is cg:res:<session>:<id> — session
+		// and content hash, no component tag (state.go) — and extract_llm keys the same namespace
+		// off the same extract.ContentKey. The shipped `housellm` preset runs extract_llm
+		// immediately before this component in one pipeline (config/config.go), so a record written
+		// by extract_llm for content M is indistinguishable from one written here.
+		//
+		// So a hit proves "SOME component in this session recorded a decision for these bytes",
+		// not "this component already sent this descriptor". The bypass is still sound in practice —
+		// the replacement is a pure function of (content, config), so a replay emits the same bytes
+		// whichever component decided — but the sequence that would exercise the difference (M
+		// verbatim, at cached depth, with a live cg:res: from extract_llm and no marker on it) has
+		// not been constructed, and unreachability has not been established either. Filed rather
+		// than asserted here (#197); namespacing the record or storing a component tag would make
+		// the stronger claim true by construction.
 		if _, hit := getResult(c, id); hit {
 			metrics.RecordExtractionCacheLookup(rep.Component, true)
 			// Inside the ok branch, with rep.Replay. It used to sit above the call, so a drop
@@ -924,6 +939,9 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 	// judgedTokens is the adjudicator's OWN arithmetic, for the debug row only: what it believed
 	// it was freeing, descriptor-only and before phase 3 has had a chance to refuse any of it.
 	// Deliberately not the ledger's figure — see the rejection test below.
+	// spentJudged counts verdicts that said "drop", whether or not we then acted on them. See its
+	// increment for why the ledger's reason is derived from this rather than from the skip gates.
+	var spentJudged int
 	var judgedTokens int
 	for _, v := range verdicts {
 		if v.Label < 0 || v.Label >= len(cands) {
@@ -960,6 +978,18 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		// but "the model judged this still needed" and "the model tried to remove something it had
 		// just said was needed" are different events, and folding the second into the keep total is
 		// what would make the alertable one invisible in the ratio an operator actually looks at.
+		// WHAT THE MODEL ANSWERED, not what validation concluded — and the difference is the whole
+		// point. extract.Judge returns early on a self-contradictory drop WITHOUT setting a.Drop
+		// (adjudicate.go: `RefusedObligation = true; return a`), so counting a.Drop alone misses
+		// precisely the path that made this reason wrong: a model answering "drop" with a needed_by
+		// for every candidate produced a ledger row saying the adjudicator found nothing spent.
+		//
+		// Counted before the skips below, because each of those is OUR decision not to act on a
+		// judgement the model did make. VerdictUnusable is deliberately NOT counted: there the model
+		// answered something other than drop or keep, so it did not judge the output spent.
+		if a.Drop || a.RefusedObligation {
+			spentJudged++
+		}
 		if a.RefusedObligation {
 			r.gate("sweep_drop_refused_obligation")
 			continue
@@ -1007,16 +1037,28 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 	// self-contradictory shape this change set out to remove, arrived at from the other side. The
 	// compiler cannot see it because `removed` is still read.
 	if len(drop) == 0 {
-		// THREE reasons, not two. `drop` being empty means the adjudicator judged nothing spent —
-		// UNLESS the never-worse pre-check above removed everything it did judge spent, which is
-		// reachable on a transcript of just-above-floor outputs whose shape descriptors are close
-		// to their own size. Reporting that as "nothing was spent" tells the operator the model
-		// found nothing worth removing when it found plenty and the descriptors were not smaller:
-		// the same conflation the two reasons exist to prevent, one path further back.
-		if r.raised("sweep_drop_would_not_shrink") {
-			r.rec.Rejection = "adjudicated spent, but no descriptor was smaller than its output"
-		} else {
+		// TWO QUESTIONS, and only the first is the adjudicator's: did the model judge anything
+		// spent, and if it did, why did none of it become a drop?
+		//
+		// Enumerating the second was the mistake. An earlier version tested only the never-worse
+		// pre-check and reported every other skip — refused obligation, unusable verdict, unknown
+		// or duplicate label — as "the adjudicator found nothing spent", which tells an operator
+		// the model saw nothing worth removing when it judged EVERY output spent and we declined
+		// each one. Concretely: a model that answers drop with a needed_by for every candidate
+		// trips RefusedObligation throughout and produced exactly that row.
+		//
+		// So the reason is derived from spentJudged, which cannot miss a skip path, and the GATES
+		// carry which skip it was — they are already raised, already exported, and unlike a
+		// hand-written reason string they stay correct when a skip is added.
+		// A verdict we could not key to an output (unknown or duplicate label) is skipped above
+		// before Judge runs, so its answer is unknown and it cannot be counted either way. It raises
+		// its own gate, which is the honest record: the reason below speaks only for verdicts that
+		// were actually read.
+		if spentJudged == 0 {
 			r.rec.Rejection = "adjudicated: nothing was spent"
+		} else {
+			r.rec.Rejection = fmt.Sprintf(
+				"adjudicated %d spent, but none became a drop (see gates)", spentJudged)
 		}
 	}
 	if debugExtractLLM(c) {

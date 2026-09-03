@@ -1189,6 +1189,19 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		type outT struct {
 			projected, summary string
 			saved, before      int
+			// called marks a slot that actually issued a model call. A single-flight FOLLOWER
+			// returns before filling its slot, so the accounting in phase 3 must skip it.
+			//
+			// An explicit flag rather than a proxy. `before > 0` was indirect — `before` is in
+			// scope in the follower branch, so filling it there would silently re-enable the
+			// booking — and `calls[k].Component != ""` traded that for a worse coupling: it is
+			// just rep.Component, which components/pipeline.go always sets in production but which
+			// most of this package's tests leave empty on a bare &components.Report{}. That made
+			// the whole booking block unreachable from those fixtures, so a future regression
+			// inside it could not be caught from them. Given how much of this change's value came
+			// from tests that catch exactly that class, coupling accounting to a labelling field
+			// was the wrong trade.
+			called bool
 		}
 		out := make([]outT, len(cands))
 		// One deferred debug record per call, invoked after phase 3 so `accepted` describes the
@@ -1269,6 +1282,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			metrics.RecordExtractionCall(rep.Component, latency)
 			_, inTok, outTok := callSink.Totals()
 			cw, cr := callSink.CacheTotals()
+			out[k].called = true
 			calls[k] = components.ModelCall{
 				Component: rep.Component, Model: callModel,
 				Strategy: strategy, Aggressiveness: string(e.aggro),
@@ -1321,7 +1335,11 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				}
 			}
 			if res != "" && res != cands[k].content {
-				out[k] = outT{projected: res, summary: sum}
+				// FIELD ASSIGNMENT, not a fresh struct: `called` was set above and a struct literal
+				// here silently reset it, so phase 3 skipped the booking for every real call. The
+				// follower path above may use a literal because it has no `called` to preserve —
+				// which is exactly what made this easy to miss.
+				out[k].projected, out[k].summary = res, sum
 				calls[k].Summary, calls[k].After = sum, res
 				// THE OUTCOME IS CARRIED, NOT BOOKED. A model result is not a removal: phase 3
 				// still has to splice it, and after #188 that can decline — the reserve refuses
@@ -1487,26 +1505,21 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// do while the reserve is saturated) and wants the re-run's numbers, so it is on that
 			// issue's candidate list rather than guessed at in this diff.
 			//
-			// Only for a slot that actually MADE A CALL — a single-flight FOLLOWER returns before
-			// filling its slot, and Component is what says so (it is also what the ledger append
-			// below filters on, so the two agree by construction).
+			// Only for a slot that actually MADE A CALL — see outT.called for why the condition is
+			// an explicit flag rather than a proxy.
 			//
 			// A DEFENCE, NOT A FIX: nothing was escaping before it. ratioTracker.observe returns
 			// early on totalTok <= 0, both recorders are no-ops at 0, out[k].saved is already 0 in
-			// a follower slot, and a follower's row was dropped by the same Component filter. So
-			// this prevents no live defect, and saying otherwise would leave a future reader
-			// reasoning from a false premise. What it does buy is that the booking no longer
-			// depends on three unrelated zero-guards staying zero-guards, and that the condition is
-			// stated where the booking happens.
+			// a follower slot, and a follower's row is dropped by the Component filter on the
+			// append below. So this prevents no live defect, and saying otherwise would leave a
+			// future reader reasoning from a false premise. What it buys is that the booking no
+			// longer depends on three unrelated zero-guards staying zero-guards, and that the
+			// condition is stated where the booking happens.
 			//
-			// Keyed on Component rather than on `before` deliberately: `before` is in scope in the
-			// follower branch, so anyone who later fills it there would silently re-enable this
-			// booking. Component cannot be set by a slot that made no call.
-			//
-			// The follower's saving stays UNBOOKED either way — its leader books the shared result
-			// once, and attributing it twice would over-count. Booking per spliced message rather
-			// than per call is the real fix and is larger than this change.
-			if calls[k].Component != "" {
+			// The follower's saving stays UNBOOKED — its leader books the shared result once, and
+			// attributing it twice would over-count. Booking per spliced message rather than per
+			// call is the real fix and is larger than this change.
+			if out[k].called {
 				calls[k].Accepted = true
 				calls[k].SavedTokens = out[k].saved
 				e.ratios.observe(out[k].saved, out[k].before)

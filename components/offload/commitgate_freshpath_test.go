@@ -194,3 +194,47 @@ func extractGrossSaved(name string) int64 {
 	}
 	return 0
 }
+
+// THE POSITIVE COUNTERPART: a successful splice must book its outcome even from a fixture whose
+// Report carries no Component.
+//
+// Every "books nothing when declined" test in this package can be satisfied by a component that
+// books nothing ever, so the guard on the booking block needs a test from the other side. This one
+// exists because of the specific way that guard was wrong: it was briefly keyed on
+// `calls[k].Component != ""`, which is just `rep.Component`. components/pipeline.go always sets it
+// in production, so the coupling was invisible there — but most of this package's tests drive
+// Offload with a bare &components.Report{}, and from those fixtures the whole booking block was
+// skipped. A regression inside it could not have been caught from them.
+//
+// So the fixture here deliberately uses a bare Report, and asserts on the RATIO TRACKER rather than
+// on rep.Calls: the ledger append is legitimately filtered on Component, so with an unnamed
+// component there is no row to inspect — which is exactly why the accounting must not depend on the
+// same field.
+func TestExtractLLMBooksItsOutcomeEvenWithAnUnnamedReport(t *testing.T) {
+	model := &shrinkingModel{}
+	e := newTimeoutTestComponent(t, model)
+	st := store.NewMemory(store.Options{MaxEntries: 400}) // healthy: the splice will succeed
+	body := strings.Repeat("2026-08-31T10:00:00Z INFO worker: processed batch\n", 400)
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+		userMsg("summarize the worker log"), toolResultMsg(body),
+	}}
+	c := pricedCtx("unnamed-report", st, model)
+	rep := &components.Report{} // NO Component, as most fixtures in this package do
+	ratioBefore := e.ratios.ratio()
+	if _, err := e.Offload(req, rep, c); err != nil {
+		t.Fatal(err)
+	}
+	// PRECONDITIONS: the call happened and the splice happened, so there IS an outcome to book.
+	if model.calls == 0 {
+		t.Fatal("the extraction model was never called, so nothing could be booked")
+	}
+	if got := schema.MessageText(req.Input[1]); got == body {
+		t.Fatalf("the candidate was not spliced, so this asserts nothing about booking a splice")
+	}
+	if e.ratios.ratio() == ratioBefore {
+		t.Error("the ratio tracker did not move after a successful splice from a Report with no " +
+			"Component. The accounting is keyed on something only production sets, so every " +
+			"in-package fixture using a bare &components.Report{} silently skips the booking " +
+			"block — and a regression inside it cannot be caught from those tests")
+	}
+}
