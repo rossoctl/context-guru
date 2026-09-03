@@ -129,6 +129,11 @@ So the honest statement is: **the recovery channel's $11.58-at-$0.00 stands for 
 and an unsized minority of replays may carry a cache-write that no ledger records. Correction owed to the
 #188 review, which caught the bad inference before it propagated further than this file.
 
+Tracked as **#199**, which carries the sizing recipe and both withdrawn claims. One consequence recorded
+there matters for planning: **iteration 024's logs carry no content ids at all**, so the recipe cannot be
+applied retroactively — sizing that subpopulation needs a fresh instrumented run, not a re-read of this
+one. #177's per-call record already carries `content_key`; the missing half is the position.
+
 One thing review did establish in the channel's favour: the **bytes are identical**. A sweep record
 replayed by `extract_llm` produces exactly what the sweep's own splice produces — same descriptor, the
 sweep's empty summary taking the no-summary branch, the same `tryMark` key, the same literal recovery hint.
