@@ -32,6 +32,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 
 KEY = "ANTHROPIC_BASE_URL"
 
@@ -119,7 +120,12 @@ def prune_backups(path: str) -> None:
     import glob
 
     try:
-        found = sorted(glob.glob(f"{path}.context-guru-backup-*"), key=os.path.getmtime)
+        # glob.escape on the PATH: `[`, `?` and `*` in a directory name are pattern syntax, so
+        # for a settings file under e.g. `~/projects/foo[1]/.claude/` this matched nothing and
+        # pruning silently did nothing forever — invisible, because pruning is best-effort by
+        # design, and the backups it exists to bound then accumulate without limit.
+        found = sorted(glob.glob(glob.escape(path) + ".context-guru-backup-*"),
+                       key=os.path.getmtime)
     except OSError:
         return
     for old in found[:-KEEP_BACKUPS]:
@@ -146,15 +152,36 @@ def save(path: str, data: dict) -> None:
     """
     real = os.path.realpath(path)
     os.makedirs(os.path.dirname(os.path.abspath(real)) or ".", exist_ok=True)
-    tmp = f"{real}.context-guru-tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, ensure_ascii=False)
-        fh.write("\n")
-    if os.path.exists(real):
-        shutil.copymode(real, tmp)
-    else:
-        os.chmod(tmp, 0o600)
-    os.replace(tmp, real)
+    # 0600 from the instant the file exists, not from copymode() below.
+    #
+    # `open(tmp, "w")` creates with 0666 & ~umask — typically 0644 — and the mode was corrected
+    # only after the entire file had been written and flushed. For a settings.json holding
+    # ANTHROPIC_AUTH_TOKEN (the reason the mode is preserved at all, per the docstring above) that
+    # is a window in which the replacement sits world-readable on disk. Start private, then widen
+    # with copymode; never the other way round.
+    #
+    # mkstemp rather than O_EXCL on the fixed name `.context-guru-tmp`: O_EXCL would close the
+    # mode window too, but a leftover temp file from a crash or a full disk would then make every
+    # later save fail until somebody deleted it by hand — trading a mode window for a permanent
+    # lockout of the file this script exists to edit. A unique name has neither problem.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(real)) or ".",
+                               prefix=os.path.basename(real) + ".context-guru-tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        if os.path.exists(real):
+            shutil.copymode(real, tmp)
+        else:
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, real)
+    except BaseException:
+        # Leave no litter on the failure paths — this directory is the user's ~/.claude.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -243,7 +270,23 @@ def cmd_remove(args: argparse.Namespace) -> int:
     # Ours is the URL passed in, or the one we recorded at install time — which covers the case
     # where the configured port changed since. It is NOT "any loopback /anthropic URL": litellm's
     # default is one of those, and uninstall must not delete somebody else's routing.
-    if args.url and current != args.url and not is_ours(data, current):
+    #
+    # This check is UNCONDITIONAL, and that is the fix for the worst defect this script has had.
+    # It used to read `if args.url and ...`, so omitting --url — an invocation this module's own
+    # docstring advertises as supported — skipped the check entirely and deleted whatever was
+    # there. Measured against a corporate gateway with no context-guru record: `result=removed`,
+    # `restored=` empty, exit 0. The user's gateway was gone and the exit code said success.
+    #
+    # What made that severe was not the branch, it was WHERE the safety lived: uninstall/SKILL.md
+    # passes --url and its prose said that flag "is what keeps this safe". So the property
+    # protecting the user's configuration depended on a model remembering a flag in a prompt.
+    # This script is the deterministic half precisely so that it does not have to.
+    #
+    # With no --url, `current != args.url` is trivially true and is_ours() decides alone — i.e.
+    # remove only what we recorded installing, which is what is_ours() is documented to be for.
+    # The escape hatch for a record we never wrote (hand-edited settings, or an install predating
+    # the record) is to pass --url naming the URL to delete, which the skill already does.
+    if current != args.url and not is_ours(data, current):
         # Refuse to remove a base URL that is not ours: the user may have pointed this at
         # something else since, and uninstall must not take that with it.
         emit(result="conflict", file=args.file, existing=current, expected=args.url,

@@ -52,7 +52,8 @@ It prints `key=value` lines. Read them rather than guessing:
   it worked.
 - `result=error reason=download_failed` — the release tag exists but carries no asset for this
   platform, which is what a repo looks like before its first build is attached. The script tries a
-  `go install` fallback first and reports `fallback=go_install`; if that is in the output and the
+  `go install` fallback first and reports `fallback=go_install_attempted` (printed before the
+  attempt, so read it with `result=`, not as proof the build worked); if that is in the output and the
   result is still an error, there was no toolchain either.
 - `reason=checksum_mismatch`, `checksum_unavailable`, `checksum_absent` — **stop, and do not
   install.** All three mean the download could not be verified against the release's
@@ -133,8 +134,18 @@ than declaring victory:
 context-guru-proxy \
   --listen "127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT:-8787}" \
   --preset "${CLAUDE_PLUGIN_OPTION_PRESET:-cache}" \
-  --idle-exit="${CLAUDE_PLUGIN_OPTION_IDLE_EXIT:-24h}"
+  --idle-exit="${CLAUDE_PLUGIN_OPTION_IDLE_EXIT:-24h}" \
+  --dashboard \
+  --dashboard-db "${XDG_STATE_HOME:-$HOME/.local/state}/context-guru/dashboard-${CLAUDE_PLUGIN_OPTION_PORT:-8787}.db"
 ```
+
+**Both dashboard flags are required, and leaving them off is not cosmetic.** `--dashboard`
+defaults to false, so a proxy started without it serves a 404 at `/dashboard/` — the URL step 6
+below tells the user to open. And because `start-proxy.sh` is idempotent on `/healthz`, the
+session hook will never replace this hand-started proxy: with `--idle-exit 24h` the user's
+dashboard stays broken for a day with nothing to connect it to. `--dashboard-db` must be set
+because its default is `./context-guru-dashboard.db`, i.e. a database dropped in the user's
+repository.
 
 Pass the port as `--listen`, not through `LISTEN_ADDR`: the port has to be visible in the process
 command line, or nothing — including `/context-guru:uninstall` — can identify this proxy among

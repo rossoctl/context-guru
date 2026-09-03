@@ -99,14 +99,34 @@ emit "version=${VERSION}"
 # It is a FALLBACK, not a path anyone is steered to: it needs a toolchain, which is the gate this
 # whole change exists to remove. But when there is no downloadable asset and a toolchain is right
 # there, refusing to use it is worse than using it.
+# report_path emits the two facts every successful install owes the caller, from BOTH install
+# paths. The `go install` fallback used to return straight out of the script, so a user who landed
+# on it got no `on_path` line at all — and ~/.local/bin frequently is not on PATH. The install
+# looked clean, then a LATER session's hook said "the proxy binary is not on PATH", with nothing
+# connecting the two. install/SKILL.md reads on_path to warn them, so the skill was silent too.
+report_path() {
+  emit "result=installed"
+  emit "path=${DEST}/${BIN}"
+  # Report — do not fix — a PATH that will not find it. Editing the user's shell rc is a bigger
+  # intrusion than this script is entitled to, and the skill can tell them in context.
+  case ":${PATH}:" in
+    *":${DEST}:"*) emit "on_path=true" ;;
+    *)             emit "on_path=false"
+                   emit "note=add ${DEST} to your PATH, or the session hook will not find the proxy" ;;
+  esac
+}
+
 try_source_build() {
   command -v go >/dev/null 2>&1 || return 1
-  emit "fallback=go_install"
+  # "attempted", because this line is printed BEFORE the build runs: it appears even when the
+  # build then fails, and `result=` is what says whether anything was installed.
+  emit "fallback=go_install_attempted"
   # CGO off: the binary is pure Go, and requiring a C toolchain here would reintroduce the gate.
+  # GOBIN does not need creating first: checked on Linux with Go 1.26.4 — `go install` creates a
+  # missing GOBIN directory itself, so the tarball path's `mkdir -p` is not needed here.
   if CGO_ENABLED=0 GOBIN="$DEST" go install "github.com/${REPO}/cmd/context-guru-proxy@${VERSION}" 2>"$TMP/go.err"; then
-    emit "result=installed"
-    emit "path=${DEST}/${BIN}"
     emit "built_from=source"
+    report_path
     return 0
   fi
   emit "go_install_failed=$(tail -1 "$TMP/go.err" 2>/dev/null | tr -d '\n')"
@@ -176,7 +196,16 @@ found=$(find "$TMP" -type f -name "$BIN" 2>/dev/null | head -1)
 [ -n "$found" ] || die "binary_not_in_tarball: no $BIN anywhere in $TARBALL"
 
 mkdir -p "$DEST" || die "cannot_create_$DEST"
-install -m 755 "$found" "$DEST/$BIN" || die "install_failed_to_$DEST"
+# Install to a temp name and RENAME into place, so the destination is never absent or partial.
+#
+# Not for the reason it was suggested: the review's premise was ETXTBSY on Linux when writing over
+# a running binary, and that was tested on Linux and does NOT happen — coreutils `install` unlinks
+# the destination first, so the upgrade succeeds. But that unlink is itself the window worth
+# closing: between it and the new file appearing, a SessionStart hook firing in another project
+# finds no binary and reports "not on PATH". rename(2) swaps the directory entry in one step, so
+# there is no instant at which $DEST/$BIN does not exist.
+install -m 755 "$found" "$DEST/$BIN.new" || die "install_failed_to_$DEST"
+mv -f "$DEST/$BIN.new" "$DEST/$BIN" || die "install_failed_to_$DEST"
 
 # macOS: without this, the first run dies with "cannot be verified" and the evaluator concludes
 # the project is broken. Notarization would remove the need and requires a paid Apple account.
@@ -185,13 +214,4 @@ if [ "$OS" = darwin ] && command -v xattr >/dev/null 2>&1; then
   emit "quarantine=cleared"
 fi
 
-emit "result=installed"
-emit "path=${DEST}/${BIN}"
-
-# Report — do not fix — a PATH that will not find it. Editing the user's shell rc is a bigger
-# intrusion than this script is entitled to, and the skill can tell them in context.
-case ":${PATH}:" in
-  *":${DEST}:"*) emit "on_path=true" ;;
-  *)             emit "on_path=false"
-                 emit "note=add ${DEST} to your PATH, or the session hook will not find the proxy" ;;
-esac
+report_path

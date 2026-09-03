@@ -1,6 +1,6 @@
 {
   "name": "context-guru",
-  "description": "Run context-guru in front of your Claude Code sessions in one command.",
+  "description": "Run context-guru in front of your Claude Code sessions: install once, route per repo.",
   "owner": {
     "name": "rossoctl",
     "url": "https://github.com/rossoctl/context-guru"

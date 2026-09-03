@@ -108,8 +108,8 @@ docker build -t context-guru:local .
 
 ## Quickstart (60 seconds)
 
-**Claude Code users — two commands, no toolchain, and no API key needed on a Pro/Max
-subscription** ([details](docs/how-to/install-plugin.md)):
+**Claude Code users — two commands to install, one per repo to route; no toolchain, and no API key
+needed on a Pro/Max subscription** ([details](docs/how-to/install-plugin.md)):
 
 ```
 /plugin marketplace add rossoctl/context-guru

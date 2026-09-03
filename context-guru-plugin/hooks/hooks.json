@@ -6,7 +6,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/check-proxy.sh",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       }

@@ -35,11 +35,23 @@ func scriptsDir(t *testing.T) string {
 	return abs
 }
 
+// requireTool fails rather than skips for the two interpreters these tests are built on.
+//
+// A skip and a pass are indistinguishable in CI output, and this whole package exists because
+// these scripts warrant coverage their blast radius demands — so on a runner without python3 or
+// bash, EVERY test in this file used to skip and `go test` was green. ubuntu-latest has both, so
+// an absence means the image changed, and that is something to hear about rather than sail past.
+// Genuinely optional tools keep using t.Skipf via requireOptionalTool.
 func requireTool(t *testing.T, name string) string {
 	t.Helper()
 	p, err := exec.LookPath(name)
 	if err != nil {
-		t.Skipf("%s not available: %v", name, err)
+		switch name {
+		case "python3", "bash":
+			t.Fatalf("%s is required to test the plugin scripts and is not on PATH: %v", name, err)
+		default:
+			t.Skipf("%s not available: %v", name, err)
+		}
 	}
 	return p
 }
@@ -282,6 +294,9 @@ func TestHookIsSilentAndInertWhereRoutingIsNotConfigured(t *testing.T) {
 		{"another local proxy on a different port (e.g. litellm)", "http://localhost:4000/anthropic"},
 		{"a remote gateway", "https://gateway.corp.example/anthropic"},
 		{"our port number appearing in a REMOTE host", "https://8787.example.com/anthropic"},
+		// The gate matched on the port as a PREFIX, so 8787 also matched 87871 — and this hook
+		// would start our proxy on 8787 under a user routed to a different local proxy there.
+		{"our port as a PREFIX of a longer port", "http://127.0.0.1:87871/anthropic"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			env := map[string]string{"CLAUDE_PLUGIN_OPTION_PORT": "8787"}
@@ -741,4 +756,445 @@ func freePort(t *testing.T) string {
 	p := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
 	ln.Close()
 	return p
+}
+
+// --- fixes from the review of #160 ---------------------------------------------------------
+
+// hookTimeout reads a hook's timeout out of hooks.json rather than hardcoding it here.
+//
+// Read from the config on purpose: the defect below was a mismatch BETWEEN this file's budget and
+// that file's timeout, so a test with the number retyped into it could pass while the pair drifted
+// apart again. This way, lowering the timeout in hooks.json fails the test that depends on it.
+func hookTimeout(t *testing.T, event string) time.Duration {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("reading hooks.json: %v", err)
+	}
+	var cfg struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatalf("hooks.json does not parse: %v", err)
+	}
+	group, ok := cfg.Hooks[event]
+	if !ok || len(group) == 0 || len(group[0].Hooks) == 0 {
+		t.Fatalf("hooks.json has no %s hook", event)
+	}
+	secs := group[0].Hooks[0].Timeout
+	if secs <= 0 {
+		t.Fatalf("%s hook has no timeout in hooks.json", event)
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// stallingPort returns a port with a listener that ACCEPTS connections and never answers.
+//
+// This is the shape that made the old iteration-counted health loop pathological: curl cannot
+// return early, so every probe burns its full --max-time instead of failing instantly the way a
+// refused port does. A hung proxy, a half-open socket, and an unrelated service holding the port
+// all look like this, and none of them are exotic.
+func stallingPort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		var held []net.Conn
+		t.Cleanup(func() {
+			for _, c := range held {
+				c.Close()
+			}
+		})
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			held = append(held, c) // hold it open, answer nothing
+		}
+	}()
+	return fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+}
+
+// runCheck runs check-proxy.sh the way the UserPromptSubmit hook does, with a stand-in binary.
+//
+// `bin` is the script body of the fake proxy; the caller decides whether it ever binds the port.
+func runCheck(t *testing.T, port, binBody string) (out string, code int, elapsed time.Duration) {
+	t.Helper()
+	requireTool(t, "bash")
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-proxy")
+	if err := os.WriteFile(fake, []byte(binBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "check-proxy.sh"))
+	cmd.Env = append(os.Environ(),
+		"CLAUDE_PLUGIN_ROOT="+root,
+		"CLAUDE_PLUGIN_OPTION_PORT="+port,
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+		"CONTEXT_GURU_BIN="+fake,
+		"XDG_STATE_HOME="+filepath.Join(dir, "state"),
+		"TMPDIR="+dir)
+	start := time.Now()
+	b, err := cmd.CombinedOutput()
+	elapsed = time.Since(start)
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("running check-proxy.sh: %v (%s)", err, b)
+	}
+	t.Logf("check-proxy.sh -> exit %d in %v, output:\n%s", code, elapsed.Round(time.Millisecond), b)
+	return string(b), code, elapsed
+}
+
+// TestCheckHookFinishesInsideItsOwnTimeout is the test whose absence hid a defect that defeated
+// the hook's entire purpose.
+//
+// check-proxy.sh exists for one case: routing configured, nothing listening, and therefore a
+// prompt that produces NOTHING — no error, no timeout the user can read. The hook replaces that
+// silence with an explanation. But the explanation is the LAST thing the script prints, after it
+// has tried to recover, and recovery called start-proxy.sh with its default 15s health wait. The
+// measured total was 19s against a 10s hook timeout, so on exactly the path the hook was written
+// for, Claude Code killed it first and the user saw nothing at all — the same symptom, now with a
+// hook that was supposed to have fixed it.
+//
+// Asserted with real margin rather than "under the timeout": a check that only just fits is a
+// check that fails on a loaded CI runner, and a flaky test here would get muted, which is how the
+// property would be lost a second time.
+func TestCheckHookFinishesInsideItsOwnTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook is POSIX-only")
+	}
+	limit := hookTimeout(t, "UserPromptSubmit")
+	// The WORST shape, deliberately: a port that accepts and never answers, so each of the three
+	// probes costs its full --max-time on top of the health budget. Measuring the cheap shape (a
+	// refused port, where curl returns instantly) would have let this assertion pass at almost any
+	// timeout, which is the opposite of what it is for.
+	port := stallingPort(t)
+	out, code, elapsed := runCheck(t, port, "#!/usr/bin/env bash\nsleep 60\n")
+
+	if code != 0 {
+		t.Errorf("the hook exited %d; it must never fail a prompt", code)
+	}
+	if margin := limit / 2; elapsed > margin {
+		t.Errorf("check-proxy.sh took %v on the dead-proxy path; hooks.json allows %v for "+
+			"UserPromptSubmit, and this must finish inside half of that so a loaded machine "+
+			"still gets the diagnostic (it is printed last, so a kill means the user sees nothing)",
+			elapsed.Round(time.Millisecond), limit)
+	}
+	// The whole point of surviving is what it says. Compare on collapsed whitespace: the note is
+	// hard-wrapped for a terminal, so a plain substring match depends on where the wrap lands.
+	flat := strings.Join(strings.Fields(out), " ")
+	for _, want := range []string{
+		"nothing is answering there",
+		"Your request will hang with no error message",
+		"--dashboard", // the printed recovery command must not recreate the 404 dashboard
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("the diagnostic is missing %q; output was:\n%s", want, out)
+		}
+	}
+}
+
+// TestCheckHookIsSilentWhereRoutingIsNotConfigured mirrors the SessionStart property, and matters
+// more here: this hook runs on EVERY PROMPT in every project on the machine, not once per session.
+// Anything it prints lands in the model's context for that turn, so a regression is noise on every
+// turn the user takes, in projects that have nothing to do with context-guru.
+func TestCheckHookIsSilentWhereRoutingIsNotConfigured(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook is POSIX-only")
+	}
+	requireTool(t, "bash")
+	for _, c := range []struct{ name, baseURL string }{
+		{"unset", ""},
+		{"another local proxy on a different port (e.g. litellm)", "http://localhost:4000/anthropic"},
+		{"a remote gateway", "https://gateway.corp.example/anthropic"},
+		// The gate was a PREFIX match, so port 8787 also matched 87871 — and this hook would then
+		// probe and start our proxy underneath a user routed elsewhere on that port.
+		{"our port as a PREFIX of a longer port", "http://127.0.0.1:87871/anthropic"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "check-proxy.sh"))
+			cmd.Env = append(os.Environ(),
+				"CLAUDE_PLUGIN_OPTION_PORT=8787",
+				"CONTEXT_GURU_BIN=/nonexistent/never-run-me",
+				"TMPDIR="+dir)
+			if c.baseURL == "" {
+				cmd.Env = append(cmd.Env, "ANTHROPIC_BASE_URL=")
+			} else {
+				cmd.Env = append(cmd.Env, "ANTHROPIC_BASE_URL="+c.baseURL)
+			}
+			b, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("the hook must exit 0 everywhere: %v\n%s", err, b)
+			}
+			if len(strings.TrimSpace(string(b))) != 0 {
+				t.Errorf("the hook spoke in an unrouted project (base URL %q):\n%s", c.baseURL, b)
+			}
+		})
+	}
+}
+
+// TestCheckHookRecoversSilently pins the deliberate choice to keep the diagnostic LAST.
+//
+// The common case for this hook is an --idle-exit between two prompts: the proxy is gone, it comes
+// back, and the user should never know. Printing the note up front would guarantee it is seen when
+// the hook is killed, but it would also put a paragraph about a dead proxy into the context of
+// every successful recovery. Silence on success is what makes the ordering worth defending — and
+// it is only safe because the recovery is now budgeted, which the timeout test above enforces.
+func TestCheckHookRecoversSilently(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook is POSIX-only")
+	}
+	py := requireTool(t, "python3")
+	port := freePort(t)
+	fake := "#!/usr/bin/env bash\nexec " + py + " -c '\n" +
+		"import http.server\n" +
+		"class H(http.server.BaseHTTPRequestHandler):\n" +
+		"    def do_GET(self):\n" +
+		"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+		"    def log_message(self, *a): pass\n" +
+		"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n'\n"
+
+	t.Cleanup(func() { exec.Command("pkill", "-f", "127.0.0.1\", "+port).Run() }) //nolint:errcheck
+	out, code, _ := runCheck(t, port, fake)
+	if code != 0 {
+		t.Errorf("exit %d; the hook must never fail a prompt", code)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("the hook recovered the proxy but still spoke — this output goes into the "+
+			"model's context on a turn where nothing is wrong:\n%s", out)
+	}
+	resp, err := http.Get("http://127.0.0.1:" + port + "/healthz")
+	if err != nil {
+		t.Fatalf("the hook was silent but the proxy is not up — silence must mean success: %v", err)
+	}
+	resp.Body.Close()
+}
+
+// TestStartHookBudgetsOnWallClockNotIterations covers the shape that made the failure report
+// unreachable.
+//
+// The health wait was `for _ in $(seq 1 60)` with `--max-time 2`, commented "up to ~15s". That is
+// only true when the port is REFUSED, where curl returns instantly. Against a socket that accepts
+// and never answers — a hung proxy, or an unrelated service on the port — each probe burned its
+// full timeout: measured 2046ms, so ~122s against a 60s SessionStart timeout. The hook was killed,
+// so the block that prints the log path and the /context-guru:status pointer never ran. A hung
+// port is one of the likeliest reasons to need that block, and it was the one case that never
+// produced it.
+func TestStartHookBudgetsOnWallClockNotIterations(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook is POSIX-only")
+	}
+	requireTool(t, "bash")
+	port := stallingPort(t)
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-proxy")
+	if err := os.WriteFile(fake, []byte("#!/usr/bin/env bash\nsleep 60\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	limit := hookTimeout(t, "SessionStart")
+	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	cmd.Env = append(os.Environ(),
+		"CLAUDE_PLUGIN_OPTION_PORT="+port,
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+		"CONTEXT_GURU_BIN="+fake,
+		"CONTEXT_GURU_HEALTH_BUDGET=3",
+		"XDG_STATE_HOME="+filepath.Join(dir, "state"),
+		"TMPDIR="+dir)
+	start := time.Now()
+	b, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+	t.Logf("start-proxy.sh against an accept-and-stall port -> %v in %v, output:\n%s",
+		err, elapsed.Round(time.Millisecond), b)
+	if err != nil {
+		t.Fatalf("the hook must exit 0 even here: %v", err)
+	}
+	if elapsed > limit/2 {
+		t.Errorf("took %v against a stalling port; SessionStart allows %v, and the budget was 3s "+
+			"— an iteration-counted loop reaches ~122s here and gets killed", elapsed, limit)
+	}
+	// The point of finishing early is that this actually gets said.
+	if !strings.Contains(string(b), "did not come up") {
+		t.Errorf("the failure report never ran — that is the whole defect:\n%s", b)
+	}
+}
+
+// TestUninstallRefusesAForeignBaseURLEvenWithNoURLGiven is the regression test for the worst
+// defect this plugin has had.
+//
+// `remove` guarded its conflict check with `if args.url and ...`, so the documented invocation
+// with no --url skipped the check entirely and deleted whatever base URL was configured. Measured
+// before the fix: a corporate gateway with no context-guru record came out `result=removed`,
+// `restored=` empty, exit 0 — the user's gateway silently gone, reported as success.
+//
+// The file must come back BYTE-IDENTICAL, not merely "still have a base URL": a refusal that
+// rewrites the file has already done the thing it refused.
+func TestUninstallRefusesAForeignBaseURLEvenWithNoURLGiven(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	const foreign = `{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://gateway.corp.example.com",
+    "ANTHROPIC_AUTH_TOKEN": "sk-corp-secret"
+  },
+  "permissions": {"allow": ["Bash(ls:*)"]}
+}
+`
+	if err := os.WriteFile(path, []byte(foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	facts, code := settings(t, "remove", "--file", path)
+	if code != 2 {
+		t.Errorf("exit %d for a base URL we never installed; want 2 (conflict). facts=%v", code, facts)
+	}
+	if facts["result"] != "conflict" {
+		t.Errorf("result=%q, want conflict", facts["result"])
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != foreign {
+		t.Errorf("the file was rewritten while refusing to change it:\n--- got ---\n%s\n--- want ---\n%s",
+			got, foreign)
+	}
+	// And with no --url, a URL we DID record must still be removable, or uninstall is broken.
+	facts, code = settings(t, "add", "--file", path, "--url", "http://127.0.0.1:8787/anthropic", "--force")
+	if code != 0 {
+		t.Fatalf("add --force failed: %v", facts)
+	}
+	facts, code = settings(t, "remove", "--file", path)
+	if code != 0 || facts["result"] != "removed" {
+		t.Errorf("a recorded URL must be removable with no --url: exit %d, facts=%v", code, facts)
+	}
+}
+
+// TestInstallReportsPATHFromTheSourceFallbackToo covers a silence, which is why it went unnoticed.
+//
+// try_source_build returned success and the script exited right there, bypassing the shared tail —
+// so a user who landed on the `go install` fallback got `result=installed` and NO `on_path` line.
+// ~/.local/bin frequently is not on PATH, and install/SKILL.md only warns when it reads on_path=false,
+// so nothing said anything. The failure surfaced later, in a different session, as the SessionStart
+// hook reporting "the proxy binary is not on PATH", with nothing tying it back to the install.
+func TestInstallReportsPATHFromTheSourceFallbackToo(t *testing.T) {
+	requireTool(t, "bash")
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// curl: resolve a release, then 404 the tarball — a published tag with no asset for this
+	// platform, which is exactly what sends the script to the source fallback.
+	stub := "#!/usr/bin/env bash\n" +
+		"dest=\"\"; url=\"\"\n" +
+		"while [ $# -gt 0 ]; do case \"$1\" in -o) dest=$2; shift 2;; -*) shift;; *) url=$1; shift;; esac; done\n" +
+		"case \"$url\" in\n" +
+		"  *api.github.com*) printf '{\"tag_name\": \"v9.9.9\"}' ${dest:+> \"$dest\"}; exit 0;;\n" +
+		"esac\nexit 22\n"
+	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A stand-in `go` that installs into GOBIN the way the real one does, without a toolchain.
+	goStub := "#!/usr/bin/env bash\n" +
+		"[ \"$1\" = install ] || exit 1\n" +
+		"mkdir -p \"$GOBIN\" && printf '#!/bin/sh\\ntrue\\n' > \"$GOBIN/context-guru-proxy\"\n" +
+		"chmod 755 \"$GOBIN/context-guru-proxy\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(goStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := filepath.Join(dir, "dest")
+	run := func(pathHasDest bool) map[string]string {
+		path := bin + ":" + os.Getenv("PATH")
+		if pathHasDest {
+			path = dest + ":" + path
+		}
+		cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "install.sh"))
+		cmd.Env = append(os.Environ(), "PATH="+path, "CONTEXT_GURU_DEST="+dest, "HOME="+dir)
+		out, err := cmd.CombinedOutput()
+		t.Logf("install.sh (dest on PATH=%v) -> %v, output:\n%s", pathHasDest, err, out)
+		if err != nil {
+			t.Fatalf("the source fallback should have succeeded: %v", err)
+		}
+		facts := map[string]string{}
+		for _, line := range strings.Split(string(out), "\n") {
+			if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+				facts[k] = v
+			}
+		}
+		return facts
+	}
+
+	facts := run(false)
+	if facts["result"] != "installed" || facts["built_from"] != "source" {
+		t.Fatalf("the fallback did not report a source install: %v", facts)
+	}
+	if facts["on_path"] != "false" {
+		t.Errorf("on_path=%q with $DEST off PATH; the fallback must report this or the user only "+
+			"finds out from a hook in a later session: %v", facts["on_path"], facts)
+	}
+	if facts["note"] == "" {
+		t.Errorf("no actionable note accompanied on_path=false: %v", facts)
+	}
+	if facts["fallback"] != "go_install_attempted" {
+		t.Errorf("fallback=%q — the line is printed before the build, so it must not read as "+
+			"proof the build worked: %v", facts["fallback"], facts)
+	}
+
+	if facts := run(true); facts["on_path"] != "true" {
+		t.Errorf("on_path=%q with $DEST on PATH: %v", facts["on_path"], facts)
+	}
+}
+
+// TestBackupPruningSurvivesAGlobbyPath: `glob.glob` reads `[`, `?` and `*` in the PATH as pattern
+// syntax, so for a settings file under a directory like `foo[1]` the prune matched nothing and
+// silently did nothing — forever. Invisible by construction, because pruning is best-effort, and
+// the backups KEEP_BACKUPS exists to bound then grow without limit in the user's ~/.claude.
+func TestBackupPruningSurvivesAGlobbyPath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "proj[1]", ".claude")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "settings.json")
+	writeJSON(t, path, map[string]any{"env": map[string]any{"KEEP": "yes"}})
+
+	// Each add/remove pair takes a backup, so this comfortably exceeds KEEP_BACKUPS (10).
+	for i := 0; i < 8; i++ {
+		if _, code := settings(t, "add", "--file", path, "--url", ourURL); code != 0 {
+			t.Fatalf("add %d failed", i)
+		}
+		if _, code := settings(t, "remove", "--file", path, "--url", ourURL); code != 0 {
+			t.Fatalf("remove %d failed", i)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backups := 0
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".context-guru-backup-") {
+			backups++
+		}
+	}
+	t.Logf("%d backups left under a path containing [ ]", backups)
+	if backups > 11 { // KEEP_BACKUPS plus the one just written
+		t.Errorf("%d backups accumulated under a globby path — pruning never matched anything", backups)
+	}
 }

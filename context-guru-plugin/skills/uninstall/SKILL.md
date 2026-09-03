@@ -25,9 +25,18 @@ for f in .claude/settings.local.json .claude/settings.json ~/.claude/settings.js
 done
 ```
 
-Passing `--url` is what keeps this safe: the script removes the key only if it holds **our**
-base URL, and reports `result=conflict` instead of deleting a value the user has since pointed
-somewhere else. If you see a conflict, leave it alone and tell them what is there.
+The script removes the key only if it holds **our** base URL — the one passed as `--url`, or the
+one it recorded at install time — and reports `result=conflict` instead of deleting a value the
+user has since pointed somewhere else. If you see a conflict, leave it alone and tell them what
+is there.
+
+`--url` is worth passing (it also covers a port that changed since install), but it is **not**
+what makes this safe, and the earlier version of this line said it was. That put the property
+protecting the user's `ANTHROPIC_BASE_URL` in a prompt — i.e. dependent on this file being read
+and followed. `settings.py` now refuses unconditionally: invoked with no `--url` at all it
+removes only what it has a record of installing, and exits 2 over anything else. Deleting a
+stranger's gateway is not a mistake a skill instruction should be the last line of defence
+against.
 
 Every change writes a timestamped backup — report those paths.
 
