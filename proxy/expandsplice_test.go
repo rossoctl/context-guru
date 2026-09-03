@@ -133,13 +133,16 @@ func TestExpandCalledAfterALeadingBlockIsNeverGivenToTheClient(t *testing.T) {
 // cannot pass this, which is the whole difference between splicing and re-buffering.
 func TestTheStreamedPrefixReachesTheClientBeforeTheExpandCall(t *testing.T) {
 	release := make(chan struct{})
-	var calls int
+	// Two rounds, each served from a goroutine of upstream's own: the counter is read on a
+	// different goroutine from the one that last wrote it, never mind that the proxy issues the
+	// rounds one after the other. Which conn goroutine serves round 2 is net/http's business,
+	// not something the test may assume, so the counter carries its own edge.
+	var calls atomic.Int64
 	head, tail := leadThenExpand("text")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
-		calls++
 		w.Header().Set("Content-Type", "text/event-stream")
-		if calls > 1 {
+		if calls.Add(1) > 1 {
 			w.Write([]byte(round2Answer))
 			return
 		}
@@ -276,9 +279,9 @@ func TestTheClientsNoSuchToolErrorNeverReachesTheModel(t *testing.T) {
 // while the response was buffered and nothing had been written, and is garbage appended to
 // the model's turn now that the prefix has already streamed.
 func TestAFailedContinuationRoundStillEndsTheClientsTurn(t *testing.T) {
-	// atomic, unlike the counters in the tests above: the second round's connection is closed
-	// without a response, so there is no happens-before edge between the handler's write and
-	// the assertion's read.
+	// The second round's connection is closed without a response, so not even a completed round
+	// trip stands between the handler's write and the assertion's read; the atomic carries the
+	// edge itself.
 	var calls atomic.Int64
 	head, tail := leadThenExpand("text")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -514,9 +514,10 @@ func TestSingleTenantUnchanged(t *testing.T) {
 	select {
 	case got = <-seen:
 	default:
+		t.Fatal("single-tenant request never reached the upstream")
 	}
-	if got == nil || got.Header.Get("Authorization") != "Bearer client-own-key" {
-		t.Errorf("single-tenant pass-through changed: %v", got.Header.Get("Authorization"))
+	if auth := got.Header.Get("Authorization"); auth != "Bearer client-own-key" {
+		t.Errorf("single-tenant pass-through changed: %v", auth)
 	}
 }
 

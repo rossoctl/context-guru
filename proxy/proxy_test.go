@@ -3,6 +3,7 @@ package proxy_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,12 @@ type upstreamRound struct {
 	method, path string
 	header       http.Header
 	body         []byte
+}
+
+// String renders the round for a failure message with the body as text. Plain %+v on a []byte
+// field prints a list of decimal byte values, which defeats the point of dumping it at all.
+func (r upstreamRound) String() string {
+	return fmt.Sprintf("%s %s header=%v body=%s", r.method, r.path, r.header, r.body)
 }
 
 // upstreamCapture records what a fixture upstream saw, under a mutex.
@@ -72,6 +79,25 @@ func (u *upstreamCapture) round(n int) upstreamRound {
 
 // body is the n-th round's body, 1-based; nil if there was no such round.
 func (u *upstreamCapture) body(n int) []byte { return u.round(n).body }
+
+// served is a copy of every round, in order, for failure messages that should say what did
+// arrive rather than only how many things did.
+func (u *upstreamCapture) served() []upstreamRound {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]upstreamRound(nil), u.rounds...)
+}
+
+// bodies is the served bodies in order — the view captureUpstream hands its callers.
+func (u *upstreamCapture) bodies() [][]byte {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	out := make([][]byte, len(u.rounds))
+	for i, r := range u.rounds {
+		out[i] = r.body
+	}
+	return out
+}
 
 // last is the most recent round; the zero value if nothing was served.
 func (u *upstreamCapture) last() upstreamRound {
@@ -276,7 +302,7 @@ func TestBobGatewayReducesModelAndPassesControlPlane(t *testing.T) {
 	cp.Body.Close()
 
 	if n := up.hits(); n != 2 {
-		t.Fatalf("want 2 upstream hits, got %d", n)
+		t.Fatalf("want 2 upstream hits, got %d: %+v", n, up.served())
 	}
 	model, control := up.round(1), up.round(2)
 	if model.path != "/inference/v1/chat/completions" {
@@ -352,7 +378,11 @@ func TestGatewayInjectsRealKey(t *testing.T) {
 	if gotAuth := hdr.Get("Authorization"); gotAuth != "Bearer real-openai-key" {
 		t.Fatalf("gateway should inject the real key, upstream saw %q", gotAuth)
 	}
-	_ = hdr.Get("x-api-key")
+	// And only that one slot: an OpenAI upstream has no business receiving Anthropic's header,
+	// least of all a copy of the key.
+	if gotXAPI := hdr.Get("x-api-key"); gotXAPI != "" {
+		t.Fatalf("gateway sent x-api-key to an OpenAI upstream: %q", gotXAPI)
+	}
 }
 
 func TestExpandToolLoop(t *testing.T) {
