@@ -79,6 +79,46 @@ against 3,522**) but that gate makes `extract_llm` *skip* expanded content; **th
 moving** fails because `cached_prefix` dominates at **29,302**, so candidates are overwhelmingly skipped as
 not-tail.
 
+**TWO CAVEATS ADDED AFTER REVIEW OF #188, and the second one may make the recovery partly illusory.**
+
+*Semantics — a drop replayed as a compaction.* `extract_llm` stores a **compaction** (a property of the
+content, reusable wherever that content appears); the sweep stores a **drop** — "spent for this
+transcript's obligations" — which is why the sweep never publishes to the cross-session `cg:xres:`
+namespace. When `extract_llm` replays a sweep record it applies an *obligation* judgement as a *content*
+projection, at a fresh position, possibly many turns later.
+
+The specific hazard is not staleness in general but its direction: **recurrence is evidence against
+spentness.** Those replays can only land on unmarked content, so the ids are content reappearing at a
+fresh position — and content reappears because the agent re-ran the command or re-read the file. An agent
+re-fetches because it needs it *now*. So the replay applies "was spent when the sweep looked" at precisely
+the moment the agent has demonstrated renewed need, and the sweep's own contract defines spent as needed
+for none of "(a) the step you are on right now" among others. A re-fetch is fairly direct evidence that
+(a) has changed. If a tag is ever added here it should distinguish **compaction from drop**, which carries
+meaning, rather than component from component, which does not.
+
+*Cost — the replays may not be free.* This section records the channel as **$11.58 at $0.00**, free
+because a replay makes no model call. But the replay path reaches `apply` **without passing the cache-tail
+depth gate** (`extract_llm.go`: replay at :890, gate at :932), and that bypass is justified per-MESSAGE —
+"this session already sent these compacted bytes" — while the lookup is keyed per-CONTENT. At a fresh
+position the provider holds the **original**, not the compacted bytes. Splicing the compaction there
+changes bytes inside the cached prefix and forces a cache-write of the suffix: a real cost, on a ledger
+`extract_llm` does not carry, and the same cost the sweep's econ trigger prices at 11.5x a cache read.
+
+**All 364 replays are in that category** — the marker skip at :848 precedes the lookup at :868, so a marked
+message never reaches `getResult`. This is not a tail of the channel; it is the whole of it. If the
+hypothesis holds, the 57% recovery is not free but charged somewhere nobody was reading.
+
+**It cannot be settled from this run:** `cache_read_tokens`, `cache_write_tokens` and `fresh_input_tokens`
+all read **0** in every arm-seed — unpopulated in this build, not measured as zero. So the one measurement
+that would decide it is absent from the run that raises it. A re-run with those live settles it directly:
+cache-write volume in arm B against arm A, where no replays exist.
+
+One thing review did establish in the channel's favour: the **bytes are identical**. A sweep record
+replayed by `extract_llm` produces exactly what the sweep's own splice produces — same descriptor, the
+sweep's empty summary taking the no-summary branch, the same `tryMark` key, the same literal recovery hint.
+So the cross-component path cannot flip content, and a component tag would prevent no byte difference. The
+open questions are semantic and economic, not correctness.
+
 **What this means for the cost figure, and it is not reassuring.** Those `cg:res:` entries are *pinned*, so
 #187's eviction defect never touched them — but #188's fix **refuses removals** when the payload reserve is
 full, and no removal means no `putResult`, which means no entry to replay. So the recovery scales with how
