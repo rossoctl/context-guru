@@ -79,14 +79,32 @@ against 3,522**) but that gate makes `extract_llm` *skip* expanded content; **th
 moving** fails because `cached_prefix` dominates at **29,302**, so candidates are overwhelmingly skipped as
 not-tail.
 
-> **The 9,478 / 3,522 figures UNDERCOUNT expansion, established after publication.** Only **3 of 11**
-> offloaders raise `kept_verbatim_after_expand` — `extract_sweep`, `extract_llm` and `failed_run`; the other
-> eight raise the conflated `marker_or_kept_verbatim` for the same condition, so those expansions are
-> invisible in this figure. And `reapplyFrozen`'s kept-verbatim early return raises **no gate at all**, so a
-> turn-N+1 replay flip is attributed to a declined *new* reduction rather than to an abandoned *established*
-> compaction. Both found while examining #201, which is the fourth instance of the counter-splitting rule
-> in **#200**. The arm-B-versus-arm-A *direction* is unaffected — both arms are undercounted the same way —
-> but the magnitudes are floors, not measurements.
+> **The 9,478 / 3,522 figures are superseded — MEASURED properly below, and both wrong in the same
+> direction.** Two defects. Only **3 of 11** offloaders raise `kept_verbatim_after_expand`
+> (`extract_sweep`, `extract_llm`, `failed_run`); the other eight raise the conflated
+> `marker_or_kept_verbatim` for the same condition. And those figures were **not normalised per request**,
+> while arm B served 2,207 requests against arm A's 1,808.
+>
+> Both gates, all five seeds, per request:
+>
+> | | arm A | arm B | B/A |
+> |---|---|---|---|
+> | `kept_verbatim_after_expand` (3 components) | 6.63/req | 12.68/req | **1.91** |
+> | `marker_or_kept_verbatim` (the other 8) | 13.09/req | 20.40/req | **1.56** |
+> | **combined** | **19.72/req** | **33.08/req** | **1.68** |
+>
+> So **arm B expands about 1.68x more per request than arm A** — the direction is confirmed by
+> measurement rather than assumed, but the magnitude is smaller than the split-only gate implied (1.91)
+> and much smaller than the raw unnormalised counts implied (2.69).
+>
+> The assumption behind "both arms undercount identically" is **false in detail**: `cmdfilter` (3.32 →
+> 6.17) and `dedup` (3.32 → 6.33) roughly double in arm B while `collapse` is flat (3.14 → 3.27). The
+> aggregate direction survives that; a per-component claim would not.
+>
+> Separately, `reapplyFrozen`'s kept-verbatim early return raises **no gate at all**, so a turn-N+1 replay
+> flip is attributed to a declined *new* reduction rather than an abandoned *established* compaction —
+> meaning even the combined figure is a floor. Found while #201 was examined; the fourth instance of the
+> counter-splitting rule in **#200**, and the first to reach a published experimental figure.
 
 
 **TWO CAVEATS ADDED AFTER REVIEW OF #188, and the second one may make the recovery partly illusory.**
