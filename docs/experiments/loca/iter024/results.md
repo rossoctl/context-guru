@@ -79,6 +79,16 @@ against 3,522**) but that gate makes `extract_llm` *skip* expanded content; **th
 moving** fails because `cached_prefix` dominates at **29,302**, so candidates are overwhelmingly skipped as
 not-tail.
 
+> **The 9,478 / 3,522 figures UNDERCOUNT expansion, established after publication.** Only **3 of 11**
+> offloaders raise `kept_verbatim_after_expand` — `extract_sweep`, `extract_llm` and `failed_run`; the other
+> eight raise the conflated `marker_or_kept_verbatim` for the same condition, so those expansions are
+> invisible in this figure. And `reapplyFrozen`'s kept-verbatim early return raises **no gate at all**, so a
+> turn-N+1 replay flip is attributed to a declined *new* reduction rather than to an abandoned *established*
+> compaction. Both found while examining #201, which is the fourth instance of the counter-splitting rule
+> in **#200**. The arm-B-versus-arm-A *direction* is unaffected — both arms are undercounted the same way —
+> but the magnitudes are floors, not measurements.
+
+
 **TWO CAVEATS ADDED AFTER REVIEW OF #188, and the second one may make the recovery partly illusory.**
 
 *Semantics — a drop replayed as a compaction.* `extract_llm` stores a **compaction** (a property of the
