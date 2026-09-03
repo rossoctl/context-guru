@@ -31,6 +31,17 @@ import (
 // working: it acts, it computes a replacement, and the pipeline throws it away afterwards.
 //
 // Found while auditing replay paths for a related review; the defect is independent of that work.
+//
+// NOT A SUBSTITUTE for the `mask via reapplyFrozen` subtest of
+// TestADegradedModeReplayDeclaresItselfIrreversible, and do not delete that one as redundant to
+// this. The two have different SUBJECTS that happen to share an assertion: this asserts a property
+// of reapplyFrozen, while the subtest asserts that all four replay branches are held to the same
+// assertion through the same helper — uniformity, not the property.
+//
+// They fail differently, which is the test of whether both are needed. Special-case the helper so it
+// suits extract_llm and extract_sweep_drop but not reapplyFrozen and the table catches it while this
+// test stays green; break reapplyFrozen itself and both fire. Dropping the subtest loses the first
+// case entirely, and that is the case that matters for a helper three other branches depend on.
 func TestASummaryModeReplayIsNotRevertedFromTurnTwoOnward(t *testing.T) {
 	body := strings.Repeat("a line of log output that goes on for a while\n", 60)
 	st := store.NewMemory(store.Options{})

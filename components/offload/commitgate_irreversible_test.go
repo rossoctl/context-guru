@@ -25,6 +25,12 @@ import (
 //
 // Asserted on rep rather than through the pipeline because rep is what the pipeline reads; the
 // revert itself is pipeline.go's behaviour and already covered there.
+// NO COMPLETENESS CHECK, unlike TestNoStateIsRecordedBeforeTheCommitGate's gateExempt: the three
+// subtests below are hand-maintained, and nothing fails if a sixth commitRefresh caller is added
+// that passes a computed eff and is not listed here. The coverage is complete today — only the two
+// sites passing a computed eff can reach the eff != markerFull branch; state.go and summarize.go's
+// two sites pass markerFull and handle the degraded case themselves — but that rests on reading
+// five call sites rather than on anything mechanical. #198 carries the mechanism.
 func TestADegradedModeReplayDeclaresItselfIrreversible(t *testing.T) {
 	body := strings.Repeat("2026-08-31T10:00:00Z INFO worker: processed batch\n", 200)
 
@@ -89,6 +95,10 @@ func TestADegradedModeReplayDeclaresItselfIrreversible(t *testing.T) {
 	})
 
 	t.Run("mask via reapplyFrozen", func(t *testing.T) {
+		// Overlaps TestASummaryModeReplayIsNotRevertedFromTurnTwoOnward deliberately, and neither
+		// replaces the other: that test's subject is reapplyFrozen's behaviour, this entry's is
+		// that reapplyFrozen is held to the SAME assertion as the other three replay branches,
+		// through the same helper. See that test's doc for how the two fail differently.
 		// Pre-existing rather than a regression, and the same omission: every turn AFTER the one
 		// that took the decision replays through reapplyFrozen, which never set Irreversible.
 		st := store.NewMemory(store.Options{MaxEntries: 400})
