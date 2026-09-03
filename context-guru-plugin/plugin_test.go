@@ -289,30 +289,62 @@ func runStart(t *testing.T, env map[string]string) (out string, code int, starte
 // nothing to do with it. It also must not hijack a user who routes to a different local proxy on
 // another port, which is why the gate matches the port and not merely "localhost".
 func TestHookIsSilentAndInertWhereRoutingIsNotConfigured(t *testing.T) {
-	for _, c := range []struct{ name, baseURL string }{
-		{"unset", ""},
-		{"another local proxy on a different port (e.g. litellm)", "http://localhost:4000/anthropic"},
-		{"a remote gateway", "https://gateway.corp.example/anthropic"},
-		{"our port number appearing in a REMOTE host", "https://8787.example.com/anthropic"},
+	// The last row is a POSITIVE CONTROL and it is not decoration.
+	//
+	// Every other assertion here is an absence, so without it this test cannot distinguish "the
+	// gate declined" from "the script exited before reaching the gate" — gut start-proxy.sh to a
+	// bare `exit 0` and every silent row still passes. The control did exist, in
+	// TestHookStartsTheProxyAndWaitsForHealthz, but a control in a different test is one that a
+	// later change can narrow or skip without anything here failing. Keep it local to the test
+	// whose meaning depends on it.
+	for _, c := range []struct {
+		name, baseURL string
+		routed        bool
+	}{
+		{name: "unset"},
+		{name: "another local proxy on a different port (e.g. litellm)", baseURL: "http://localhost:4000/anthropic"},
+		{name: "a remote gateway", baseURL: "https://gateway.corp.example/anthropic"},
+		{name: "our port number appearing in a REMOTE host", baseURL: "https://8787.example.com/anthropic"},
 		// The gate matched on the port as a PREFIX, so 8787 also matched 87871 — and this hook
 		// would start our proxy on 8787 under a user routed to a different local proxy there.
-		{"our port as a PREFIX of a longer port", "http://127.0.0.1:87871/anthropic"},
+		{name: "our port as a PREFIX of a longer port", baseURL: "http://127.0.0.1:87871/anthropic"},
+		{name: "POSITIVE CONTROL: a routed project, where it must act", routed: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			env := map[string]string{"CLAUDE_PLUGIN_OPTION_PORT": "8787"}
-			if c.baseURL != "" {
-				env["ANTHROPIC_BASE_URL"] = c.baseURL
-			} else {
-				env["ANTHROPIC_BASE_URL"] = ""
+			port := "8787"
+			baseURL := c.baseURL
+			if c.routed {
+				// A port of our own, so this never probes or starts anything on a developer's
+				// real 8787, and a short budget because the stand-in never answers /healthz.
+				port = freePort(t)
+				baseURL = "http://127.0.0.1:" + port + "/anthropic"
+			}
+			env := map[string]string{
+				"CLAUDE_PLUGIN_OPTION_PORT":  port,
+				"ANTHROPIC_BASE_URL":         baseURL,
+				"CONTEXT_GURU_HEALTH_BUDGET": "1",
+				"XDG_STATE_HOME":             t.TempDir(),
 			}
 			out, code, sentinel := runStart(t, env)
 			if code != 0 {
 				t.Errorf("exit %d; the hook must never fail a session", code)
 			}
+			_, started := os.Stat(sentinel)
+			if c.routed {
+				if started != nil {
+					t.Errorf("the hook did NOT start a proxy in a routed project — so every "+
+						"silent row above proves nothing: %v\noutput:\n%s", started, out)
+				}
+				if strings.TrimSpace(out) == "" {
+					t.Errorf("the hook said nothing in a routed project where the proxy never " +
+						"came up; the failure report is the only diagnostic that path has")
+				}
+				return
+			}
 			if strings.TrimSpace(out) != "" {
 				t.Errorf("the hook printed output in an unrouted project: %q", out)
 			}
-			if _, err := os.Stat(sentinel); err == nil {
+			if started == nil {
 				t.Error("the hook started a proxy in a project that is not routed to it")
 			}
 		})
@@ -923,31 +955,51 @@ func TestCheckHookIsSilentWhereRoutingIsNotConfigured(t *testing.T) {
 		t.Skip("shell hook is POSIX-only")
 	}
 	requireTool(t, "bash")
-	for _, c := range []struct{ name, baseURL string }{
-		{"unset", ""},
-		{"another local proxy on a different port (e.g. litellm)", "http://localhost:4000/anthropic"},
-		{"a remote gateway", "https://gateway.corp.example/anthropic"},
+	// Last row is a POSITIVE CONTROL: without it every assertion here is an absence, and a
+	// check-proxy.sh gutted to `exit 0` passes all of them. See the note in the SessionStart
+	// equivalent — a control living in another test is one this test cannot rely on.
+	for _, c := range []struct {
+		name, baseURL string
+		routed        bool
+	}{
+		{name: "unset"},
+		{name: "another local proxy on a different port (e.g. litellm)", baseURL: "http://localhost:4000/anthropic"},
+		{name: "a remote gateway", baseURL: "https://gateway.corp.example/anthropic"},
 		// The gate was a PREFIX match, so port 8787 also matched 87871 — and this hook would then
 		// probe and start our proxy underneath a user routed elsewhere on that port.
-		{"our port as a PREFIX of a longer port", "http://127.0.0.1:87871/anthropic"},
+		{name: "our port as a PREFIX of a longer port", baseURL: "http://127.0.0.1:87871/anthropic"},
+		{name: "POSITIVE CONTROL: a routed project with a dead proxy, where it must speak", routed: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
+			port := "8787"
+			baseURL := c.baseURL
+			if c.routed {
+				port = freePort(t) // our own port, so a developer's real 8787 is never touched
+				baseURL = "http://127.0.0.1:" + port + "/anthropic"
+			}
 			cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "check-proxy.sh"))
 			cmd.Env = append(os.Environ(),
-				"CLAUDE_PLUGIN_OPTION_PORT=8787",
+				"CLAUDE_PLUGIN_OPTION_PORT="+port,
+				"ANTHROPIC_BASE_URL="+baseURL,
+				// No recovery attempt: the binary is absent, so this exercises the gate and the
+				// diagnostic without waiting on a health budget.
 				"CONTEXT_GURU_BIN=/nonexistent/never-run-me",
+				"XDG_STATE_HOME="+dir,
 				"TMPDIR="+dir)
-			if c.baseURL == "" {
-				cmd.Env = append(cmd.Env, "ANTHROPIC_BASE_URL=")
-			} else {
-				cmd.Env = append(cmd.Env, "ANTHROPIC_BASE_URL="+c.baseURL)
-			}
 			b, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("the hook must exit 0 everywhere: %v\n%s", err, b)
 			}
-			if len(strings.TrimSpace(string(b))) != 0 {
+			spoke := len(strings.TrimSpace(string(b))) != 0
+			if c.routed {
+				if !spoke {
+					t.Error("the hook said nothing about a dead proxy in a ROUTED project — so " +
+						"every silent row above is consistent with the script doing nothing at all")
+				}
+				return
+			}
+			if spoke {
 				t.Errorf("the hook spoke in an unrouted project (base URL %q):\n%s", c.baseURL, b)
 			}
 		})
