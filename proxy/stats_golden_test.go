@@ -78,6 +78,14 @@ var statsGoldenTopLevel = []string{
 	"requests",
 	"saved_tokens",
 	"savings_pct",
+	// The rewind reserve (#187). stash_refused is the LEADING indicator for
+	// expand_unresolved_missing, which cannot move until the agent happens to call expand —
+	// so a run that had stopped being able to promise reversibility read as healthy. Added to
+	// the reviewed contract rather than loosening the assertion, per the rule above.
+	"stash_capacity",
+	"stash_expired",
+	"stash_live",
+	"stash_refused",
 	"savings_pct_attempted",
 	"savings_pct_new_input",
 	"sse_buffered",

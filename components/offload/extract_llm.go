@@ -794,7 +794,9 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		if !ok {
 			return
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			return // the store cannot back the marker; leave this output verbatim
+		}
 		schema.SetMessageText(&req.Input[i], newText)
 		changed++
 		if key != "" {

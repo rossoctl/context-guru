@@ -96,7 +96,9 @@ func applySweepDrop(c *components.Ctx, rep *components.Report, mode markerMode,
 	if !ok {
 		return "", false
 	}
-	commitMark(c, rep, eff, key, content)
+	if !commitMark(c, rep, eff, key, content) {
+		return "", false // the store cannot back the marker; the drop does not happen
+	}
 	schema.SetMessageText(msg, newText)
 	return key, true
 }

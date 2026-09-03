@@ -35,6 +35,44 @@ type Store interface {
 	Persists() bool
 }
 
+// Stasher is an OPTIONAL Store capability: writing a REWIND PAYLOAD — the original bytes
+// behind a <<cg:HASH>> marker — under its own reserved budget, and reporting whether the
+// payload was actually retained.
+//
+// It exists because a rewind payload cannot be recognised from its key. The pin namespaces
+// below all carry a "cg:" prefix, but a stash key IS the marker id: a bare lowercase-hex
+// content hash the model reads out of the request and hands back to the expand tool (see
+// expand.Marker). Prefixing it would rewrite every marker's bytes, and marker bytes sit
+// inside the provider's cached prefix — so the only way for the store to tell a payload from
+// any other entry is for the writer to say so. That is this method.
+//
+// The RETURN VALUE is the load-bearing half. Before it, a payload was written with Put and
+// then evicted as the least-recently-used entry of a cache whose pinned half held the
+// DECISIONS referring to it, so a removal advertised as reversible (a marker was stamped)
+// became irreversible with nothing reported — issue #187. false now means "this payload is
+// NOT stored", and the caller's contract is to not advertise reversibility: refuse the
+// removal and leave the content verbatim. See components/offload.commitMark.
+//
+// Stores that do not implement it degrade to the legacy behavior (Put, always "retained"),
+// which is why writers go through the PutStash helper rather than asserting at each site.
+type Stasher interface {
+	// PutStash stores a rewind payload under key and reports whether it is now retained.
+	// Refreshing a payload already present always succeeds — a live entry must never be
+	// refused, or a replay of an already-stamped marker would flip that message's bytes.
+	PutStash(key string, payload []byte) bool
+}
+
+// PutStash writes a rewind payload through the Stasher capability when the store has it,
+// and reports whether the payload is retained. A store without the capability keeps the
+// legacy behavior: an ordinary Put, reported as retained.
+func PutStash(s Store, key string, payload []byte) bool {
+	if st, ok := s.(Stasher); ok {
+		return st.PutStash(key, payload)
+	}
+	s.Put(key, payload)
+	return true
+}
+
 // FrozenLoser is an OPTIONAL Store capability: reporting that a frozen decision
 // under key was dropped (TTL expiry / pin cap) rather than never taken. A bare Get
 // miss cannot tell those apart, and they call for opposite behavior — "never frozen"
@@ -56,11 +94,16 @@ type FrozenLoser interface {
 // inside the provider's cached prefix and the whole suffix is re-written at 11.5x the
 // read price. They are small (a marker line, a compacted projection, an integer), still
 // honor the sliding TTL, and the exemption is capped at half the entry cap so a
-// pathological session can never pin the whole cache. The rewind stashes (bare content
-// hashes, the large payloads the expand loop resolves) stay fully evictable.
+// pathological session can never pin the whole cache.
 //
 // The prefixes are declared by their OWNERS (components/offload, apply) and passed in via
 // Options.PinPrefixes — the store must not know what a component names its keys.
+//
+// The rewind stashes are NOT in this list and never can be (their keys are bare marker ids —
+// see Stasher), which used to mean they were "fully evictable". That was the bug in #187:
+// this cache kept "that output was dropped" while evicting "here is what it was", so the
+// reversibility guarantee degraded exactly as the pipeline removed more. They now have their
+// own reserve, claimed through PutStash and bounded by stashCap.
 const (
 	FrozenPrefix = "cg:frz:" // mask / failed_run freeze decisions
 	ResultPrefix = "cg:res:" // extract_llm's replayed result (projection + summary, one key)
@@ -100,6 +143,11 @@ type entry struct {
 	payload []byte
 	expires time.Time
 	pinned  bool // exempt from LRU eviction (frozen decision); TTL still applies
+	// stash marks a REWIND PAYLOAD written through PutStash. Also exempt from LRU
+	// eviction, and — unlike a pin, which silently degrades to an evictable entry once
+	// over its cap — a stash that cannot be admitted is REFUSED, so the caller declines
+	// the removal instead of stamping a marker nothing can resolve. TTL still applies.
+	stash bool
 }
 
 // Memory is an in-memory Store: a TTL+LRU cache for rewind payloads plus a
@@ -118,6 +166,13 @@ type Memory struct {
 	pinPrefixes []string
 	now         func() time.Time // injectable for tests
 	pinnedN     int              // live pinned (frozen) entries, capped at max/2
+	stashN      int              // live rewind payloads, capped at stashCap()
+	// stashRefusedN counts payloads PutStash DECLINED because the reserve was full — i.e.
+	// removals that were not made, rather than removals made irreversibly. stashExpiredN
+	// counts payloads the TTL reclaimed, which is the only way a stash leaves now that LRU
+	// pressure cannot evict one.
+	stashRefusedN int64
+	stashExpiredN int64
 	// lostFrozen remembers keys whose FROZEN entry was dropped anyway (TTL expiry, or
 	// the pin cap). It is the "was frozen, now LOST" signal a caller cannot otherwise
 	// distinguish from "never frozen" — see FrozenLost. Bounded like sticky.
@@ -150,7 +205,13 @@ type Options struct {
 // offloads become irreversible, which is why they must use marker_mode: off.
 type Nop struct{}
 
-func (Nop) Put(string, []byte)                {}
+func (Nop) Put(string, []byte) {}
+
+// PutStash retains nothing, so it reports nothing retained. Reachable only if a caller
+// skips effectiveMode (which already degrades a full marker to off when !Persists()), and
+// the answer is the same either way: do not advertise reversibility.
+func (Nop) PutStash(string, []byte) bool { return false }
+
 func (Nop) Get(string) ([]byte, bool)         { return nil, false }
 func (Nop) Sticky(string) map[string]struct{} { return nil }
 func (Nop) MarkSticky(string, string)         {}
@@ -162,8 +223,25 @@ func (Nop) Persists() bool                    { return false }
 // (test suites, training runs) with the sliding refresh doing the rest.
 const DefaultTTL = 10000 * time.Second
 
+// DefaultMaxEntries is the store's default entry cap.
+//
+// It was 1,000, and that was the quantity #187 was measured against: ONE process-wide store
+// serves every concurrent session (cmd/context-guru-proxy builds it once), and each
+// reversible removal writes FIVE entries — the payload, cg:own:, cg:xseen:, and two pinned
+// decision records (cg:res:, cg:xres:). So a 1,000-entry cache held roughly 1/5 of half its
+// slots' worth of payloads while the decisions naming them were pinned, and iteration 024's
+// arm B — hundreds of removals across eight concurrent workers — overran it by an order of
+// magnitude. 5,000 puts the cap in the same order as the observed volume; PutStash's refusal
+// is what makes overrunning it visible rather than silent, so this number does not have to be
+// right, only sane.
+//
+// Entry count is a PROXY for memory, and a poor one for this namespace: pinned decisions and
+// the bookkeeping flags are tiny, a stashed payload is a whole tool output. An operator
+// running large payloads should set max_entries against bytes they can afford, not entries.
+const DefaultMaxEntries = 5000
+
 // NewMemory builds an in-memory store. Zero/negative option fields fall back to
-// defaults (DefaultTTL, 1000 entries, 100 sessions of sticky sets).
+// defaults (DefaultTTL, DefaultMaxEntries, 100 sessions of sticky sets).
 func NewMemory(o Options) *Memory {
 	ttl := time.Duration(o.TTLSeconds) * time.Second
 	if o.TTLSeconds <= 0 {
@@ -171,7 +249,7 @@ func NewMemory(o Options) *Memory {
 	}
 	max := o.MaxEntries
 	if max <= 0 {
-		max = 1000
+		max = DefaultMaxEntries
 	}
 	stick := o.MaxSessions
 	if stick <= 0 {
@@ -207,6 +285,76 @@ func (m *Memory) DisableSlidingTTLForTest() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.noSlide = true
+}
+
+// stashCap bounds the rewind reserve at half the entry cap, the same share the pins get.
+// Half and not more because the two halves are the two things reversibility needs at once:
+// the payload to serve, and the decision that keeps the message it came out of byte-stable.
+func (m *Memory) stashCap() int { return m.max / 2 }
+
+// PutStash stores a rewind payload under its marker key and reports whether it is retained.
+// See Stasher for why the store cannot recognise these keys on its own, and why the boolean
+// is the point.
+//
+// The policy, and the property it is chosen for: a live stash is NEVER evicted to make room
+// for a new one. Under the old plain-Put behavior the guarantee decayed as the pipeline
+// succeeded — every extra removal both consumed a slot and added a pinned decision, so more
+// compaction meant more BROKEN promises. Refusing instead moves that pressure onto the
+// removals not yet made: promises already outstanding stay good however long the run gets,
+// and the mechanism declines new work rather than doing it irreversibly. Capacity becomes a
+// configured quantity (max_entries) and exhaustion becomes a counter, in exchange for
+// reversibility no longer being load-dependent.
+func (m *Memory) PutStash(key string, payload []byte) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if el, ok := m.items[key]; ok {
+		e := el.Value.(*entry)
+		e.payload = payload
+		e.expires = m.now().Add(m.ttl)
+		// Claim a reserve slot if one has freed, exactly as Put re-claims a pin slot. An
+		// entry already present is retained whatever the reserve says: refusing a REFRESH
+		// would make a component decline to replay a marker it has already stamped, which
+		// flips the message inside the provider's cached prefix — the cache-destructive
+		// direction, and for content that is sitting right there.
+		if !e.stash && m.stashN < m.stashCap() {
+			e.stash = true
+			m.stashN++
+		}
+		m.ll.MoveToFront(el)
+		return true
+	}
+	// The TTL is the only thing that releases a reserve slot now, so collect what it has
+	// released before declaring the reserve full — otherwise a long-lived process refuses
+	// forever on the strength of payloads that expired hours ago.
+	for m.stashN >= m.stashCap() && m.reclaimExpired() {
+	}
+	if m.stashN >= m.stashCap() {
+		m.stashRefusedN++
+		return false
+	}
+	e := &entry{key: key, payload: payload, expires: m.now().Add(m.ttl), stash: true}
+	m.stashN++
+	m.items[key] = m.ll.PushFront(e)
+	for m.ll.Len() > m.max {
+		if !m.evictOldest() {
+			break // everything left is pinned or stashed
+		}
+	}
+	return true
+}
+
+// StashStats reports the rewind reserve: payloads live now, the reserve's size, how many
+// payloads PutStash REFUSED (removals declined, not removals made irreversibly), and how many
+// the TTL reclaimed.
+//
+// refused is the operator-facing number, and it is deliberately upstream of
+// expand_unresolved_missing: that counter only moves when the AGENT asks for content and is
+// told it is gone, so a run could exhaust the reserve for an hour and read as healthy until
+// something happened to request an expand. This one moves at the moment the budget binds.
+func (m *Memory) StashStats() (live, capacity int, refused, expired int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stashN, m.stashCap(), m.stashRefusedN, m.stashExpiredN
 }
 
 func (m *Memory) Put(key string, payload []byte) {
@@ -359,14 +507,13 @@ func (m *Memory) MarkSticky(session, id string) {
 	s[id] = struct{}{}
 }
 
-// evictOldest drops the least-recently-used UNPINNED entry, walking back over pinned
-// (frozen) ones. Reports false when nothing is evictable.
-func (m *Memory) evictOldest() bool {
+// reclaimExpired removes one already-EXPIRED entry, pinned or stashed included, and reports
+// whether it found one. Without it an exempt entry is immortal — the TTL is otherwise only
+// enforced in Get, and a dead session is never read again — so pinnedN/stashN would ratchet
+// to their caps and stay there, leaking the reserve and silently disabling the exemption for
+// every later session.
+func (m *Memory) reclaimExpired() bool {
 	now := m.now()
-	// Pass 1: reclaim anything already EXPIRED, pinned included. Without this a pinned
-	// entry is immortal — the TTL is only enforced in Get, and a dead session is never
-	// read again — so pinnedN would ratchet to max/2 and stay there, leaking half the
-	// cache and silently disabling pinning for every later session.
 	for el := m.ll.Back(); el != nil; {
 		prev := el.Prev()
 		if e := el.Value.(*entry); now.After(e.expires) {
@@ -375,9 +522,22 @@ func (m *Memory) evictOldest() bool {
 		}
 		el = prev
 	}
-	// Pass 2: nothing expired, so take the LRU entry that is not pinned.
+	return false
+}
+
+// evictOldest drops the least-recently-used entry that is neither pinned nor stashed,
+// walking back over the exempt ones. Reports false when nothing is evictable.
+func (m *Memory) evictOldest() bool {
+	if m.reclaimExpired() {
+		return true
+	}
+	// Nothing expired, so take the LRU entry that is not exempt. Stashes are exempt for a
+	// DIFFERENT reason from pins: a pin protects the bytes of an already-cached message, a
+	// stash protects a promise this proxy made to the model in a marker it has already sent.
+	// Evicting one here is what #187 was — the cheap decision record survived, the payload it
+	// pointed at did not, and the removal became irreversible with nothing reported.
 	for el := m.ll.Back(); el != nil; el = el.Prev() {
-		if !el.Value.(*entry).pinned {
+		if e := el.Value.(*entry); !e.pinned && !e.stash {
 			m.remove(el)
 			return true
 		}
@@ -389,6 +549,15 @@ func (m *Memory) remove(el *list.Element) {
 	e := el.Value.(*entry)
 	if e.pinned {
 		m.pinnedN--
+	}
+	if e.stash {
+		m.stashN--
+		// A stash only reaches here via reclaimExpired (LRU pressure cannot take one), so
+		// this counts TTL reclamation. Counted rather than silent because it is the one
+		// remaining way an outstanding marker can stop resolving, and an operator seeing
+		// expand_unresolved_missing needs to know whether the answer is "raise max_entries"
+		// (refused) or "raise ttl_seconds" (expired).
+		m.stashExpiredN++
 	}
 	// Any replay decision disappearing must be detectable — keyed on the NAMESPACE, not on
 	// the pin flag. An entry that missed the pin cap is exactly the one most likely to be

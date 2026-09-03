@@ -194,7 +194,9 @@ func (rl *ReadLifecycle) Offload(req *bschemas.BifrostChatRequest, rep *componen
 			rep.Gate("marker_no_win")
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(msg, newText)
 		freeze(c, rl.Name(), content, newText)
 		changed++

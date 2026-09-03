@@ -12,6 +12,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
 )
 
 func init() { components.Register("summarize", newSummarize) }
@@ -216,7 +217,16 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 			return nil, err
 		}
 		key = hashKey(string(spanJSON))
-		c.Store.Put(key, spanJSON)
+		// A summary REPLACES the span it covers, so the marker in the summary text is the
+		// only route back to it. If the store's rewind reserve cannot hold the span, this
+		// component must not summarize at all: unlike the per-message offloaders it cannot
+		// leave "this message" verbatim, so refusing means skipping the whole checkpoint.
+		if !store.PutStash(c.Store, key, spanJSON) {
+			stashRefusals.Add(1)
+			rep.Gate("stash_reserve_exhausted")
+			rep.Skipped = true
+			return nil, nil
+		}
 	} else {
 		rep.Irreversible = true
 	}
@@ -295,7 +305,15 @@ func (s *Summarize) tryReuse(c *components.Ctx, msgs []bschemas.ChatMessage, hea
 	// checkpoints only — summary/off never stashed, so Key is empty).
 	if cp.Key != "" {
 		if b, err := json.Marshal(covered); err == nil {
-			c.Store.Put(cp.Key, b)
+			// A refresh of a key already present always succeeds (see store.Stasher), so a
+			// refusal here means the payload had ALREADY left the store — the marker in the
+			// replayed summary is dangling and cannot be un-dangled, because the summary
+			// text must stay byte-identical to the turn that created it. Count it; the
+			// alternative (re-summarizing to avoid the marker) is the cache-write this
+			// checkpoint exists to prevent.
+			if !store.PutStash(c.Store, cp.Key, b) {
+				stashRefusals.Add(1)
+			}
 		}
 	}
 	// USER for the same reason as the fresh-summary path above: a system role at index 1

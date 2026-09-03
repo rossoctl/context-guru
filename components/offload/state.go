@@ -238,7 +238,14 @@ func reapplyFrozen(c *components.Ctx, rep *components.Report, comp string, m *bs
 		rep.Irreversible = true
 	}
 	for _, k := range keys {
-		c.Store.Put(k, []byte(content)) // refresh the stashed original for expand
+		// Refresh the stashed original for expand. A key already present is always
+		// retained (see store.Stasher), so a refusal means this replayed decision's
+		// payload had already left the store — the replacement bytes must still be
+		// replayed verbatim (declining would flip an already-cached message), so the
+		// marker stays and the refusal is counted instead of hidden.
+		if !store.PutStash(c.Store, k, []byte(content)) {
+			stashRefusals.Add(1)
+		}
 	}
 	schema.SetMessageText(m, rs)
 	return keys, saved, true

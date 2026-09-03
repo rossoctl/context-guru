@@ -1,9 +1,12 @@
 package offload
 
 import (
+	"sync/atomic"
+
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
 )
 
 // markerMode selects what an Offload component leaves behind in place of the
@@ -87,14 +90,50 @@ func tryMark(c *components.Ctx, mode markerMode, original, hint string, assemble
 // stash the original under key (full mode) or record the deliberate lossy drop
 // (summary/off set rep.Irreversible so the pipeline's "dropped without stashing"
 // guard doesn't revert them). Call only when tryMark returned ok.
-func commitMark(c *components.Ctx, rep *components.Report, eff markerMode, key, original string) {
+//
+// It reports whether the removal MAY PROCEED, and a caller that ignores the answer
+// reintroduces #187. In full mode the marker about to be written is a promise that the
+// original can be produced on request, so the stash write is the point at which that promise
+// is either backed or not: when the store's rewind reserve cannot take the payload
+// (store.PutStash false) there is nothing to serve, and stamping the marker anyway is how a
+// reversible removal silently became an irreversible one — 209 times in iteration 024's arm B,
+// where the agent asked for content back and got a placeholder.
+//
+// false therefore means REFUSE the removal: leave the content verbatim. Not "drop it without a
+// marker" (marker_mode: off), which is a lossy drop the operator did not ask for, and not "drop
+// it with a marker", which is the bug. Leaving it verbatim costs tokens the pipeline wanted to
+// save and keeps the invariant CLAUDE.md states as a hard boundary — every lossy Offload is
+// reversible — true regardless of load.
+func commitMark(c *components.Ctx, rep *components.Report, eff markerMode, key, original string) bool {
 	if eff == markerFull {
-		c.Store.Put(key, []byte(original))
+		if !store.PutStash(c.Store, key, []byte(original)) {
+			stashRefusals.Add(1)
+			rep.Gate("stash_reserve_exhausted")
+			return false
+		}
 		recordOwner(c, key) // scope GET /expand retrieval to this session
-		return
+		return true
 	}
 	rep.Irreversible = true
+	return true
 }
+
+// stashRefusals counts removals declined because the store could not hold the original.
+//
+// Process-wide, like frozenHits, and reported separately from the store's own
+// StashStats: the store counts refusals its reserve issued, this counts removals a
+// COMPONENT abandoned because of one, and the two differ whenever a caller consults the
+// answer and does something other than skip. It is the leading indicator for
+// expand_unresolved_missing — which cannot move until the agent happens to ask for
+// something — so a run that has quietly stopped being able to promise reversibility is
+// visible here at the moment the budget binds rather than whenever the model next calls
+// expand.
+var stashRefusals atomic.Int64
+
+// StashRefusals returns how many removals were declined because the store's rewind reserve
+// was full. Non-zero means max_entries is too small for what this configuration removes;
+// the removals did not happen, so nothing became irreversible.
+func StashRefusals() int64 { return stashRefusals.Load() }
 
 // markerModeField is the marker_mode descriptor, shared by every Offload that honors the
 // key. Declared once because the accepted values are parseMarkerMode's, above.

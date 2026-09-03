@@ -16,6 +16,7 @@ import (
 	"github.com/rossoctl/context-guru/components/dsl"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
 )
 
 func init() { components.Register("cmdfilter", newCmdfilter) }
@@ -201,7 +202,16 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 			continue
 		}
 		if mode == markerFull {
-			c.Store.Put(stashKey, []byte(content))
+			// Same contract as commitMark's: the marker is a promise, and a payload the
+			// store's rewind reserve will not take cannot back it. Refuse the filter for
+			// this message rather than emitting a marker nothing resolves (#187). This
+			// path builds its own token instead of calling commitMark, which is exactly
+			// how it would have been missed.
+			if !store.PutStash(c.Store, stashKey, []byte(content)) {
+				stashRefusals.Add(1)
+				rep.Gate("stash_reserve_exhausted")
+				continue
+			}
 			recordOwner(c, stashKey) // scope GET /expand retrieval to this session
 			keys = append(keys, stashKey)
 		} else {

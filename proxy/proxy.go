@@ -1903,9 +1903,13 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// the description stopped working — which nothing else in this snapshot can reveal.
 	snap.AdjudicateStray = adjudicate.StrayAnswered()
 	snap.FrozenHits, snap.FrozenMisses = offload.FrozenStats()
+	// Process-wide, like FrozenHits, and so filled outside the cast below: a removal declined
+	// for want of a stash slot is counted by the COMPONENT, whatever store instance refused it.
+	snap.StashRefused = offload.StashRefusals()
 	if fl, ok := h.store.(*store.Memory); ok { // process store; hosted per-tenant stores report via the dashboard
 		snap.FrozenDropped, snap.FrozenRepaired = fl.FrozenLossStats()
 		snap.FrozenFlips = snap.FrozenDropped - snap.FrozenRepaired
+		snap.StashLive, snap.StashCapacity, _, snap.StashExpired = fl.StashStats()
 	}
 	// Cached-prefix restarts after an agent compaction. Same layering as the pool counters
 	// below: the counter lives in `modes`, so the host merges it here.

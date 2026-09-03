@@ -195,6 +195,23 @@ A healthy long-horizon run shows `frozen_hits` climbing with turn count and `fro
 0; a rising `frozen_dropped` means decisions are dying mid-session (TTL too short for the task,
 or the entry cap too small for the session's working set).
 
+### Rewind reserve (reversibility health)
+
+The store holds the **originals** behind `<<cg:HASH>>` markers in a reserve of its own — half the
+entry cap — that LRU pressure cannot evict. Before #187 those payloads shared the cache's evictable
+half with per-removal bookkeeping while the *decisions* naming them were pinned, so the more a
+configuration removed the more of its own reversibility it destroyed, silently.
+
+| Field | Meaning |
+|---|---|
+| `stash_live` / `stash_capacity` | Payloads held now, and the reserve's size (`max_entries / 2`). `live` approaching `capacity` is the warning. |
+| `stash_refused` | Removals **declined** because the reserve was full. The content was left verbatim and nothing became irreversible — raise `max_entries`. |
+| `stash_expired` | Payloads reclaimed by the TTL. The one remaining way an outstanding marker stops resolving — raise `ttl_seconds`. |
+
+`stash_refused` is the **leading** indicator for `expand_unresolved_missing`: that counter cannot
+move until the agent happens to call `expand`, so a proxy that had stopped being able to promise
+reversibility read as perfectly healthy until one did. This one moves when the budget binds.
+
 ### cmdfilter attribution
 
 | Field | Meaning |

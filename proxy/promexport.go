@@ -502,7 +502,22 @@ func (h *Handler) renderMetrics() string {
 			dropped, repaired := fl.FrozenLossStats()
 			promLine(&b, "cg_frozen_decisions_total", `outcome="dropped"`, float64(dropped))
 			promLine(&b, "cg_frozen_decisions_total", `outcome="repaired"`, float64(repaired))
+			live, capacity, _, expired := fl.StashStats()
+			promHeaderProc(&b, "cg_stash_reserve_entries",
+				"Rewind payloads (the originals behind <<cg:HASH>> markers) held now, and the reserve's size. live approaching capacity is the warning; reaching it turns into declined removals, not broken markers.", "gauge")
+			promLine(&b, "cg_stash_reserve_entries", `state="live"`, float64(live))
+			promLine(&b, "cg_stash_reserve_entries", `state="capacity"`, float64(capacity))
+			promHeaderProc(&b, "cg_stash_expired_total",
+				"Rewind payloads reclaimed by the TTL. The one remaining way an outstanding marker stops resolving; raise ttl_seconds.", "counter")
+			promLine(&b, "cg_stash_expired_total", "", float64(expired))
 		}
+		// Process-wide, so outside the cast for the same reason hit/miss are: a component
+		// declines the removal, whichever store instance refused the payload. This is the
+		// LEADING indicator for cg_expand_unresolved_total{cause="missing"}, which cannot move
+		// until the agent happens to call expand.
+		promHeaderProc(&b, "cg_stash_refused_total",
+			"Removals declined because the store's rewind reserve was full. The content was left verbatim and nothing became irreversible; raise max_entries.", "counter")
+		promLine(&b, "cg_stash_refused_total", "", float64(offload.StashRefusals()))
 
 		// Same rule as the two families above, and this counter would have had the same bug:
 		// Snapshot.AdjudicateStray is filled only by the /stats handler (proxy.go), so a promLine

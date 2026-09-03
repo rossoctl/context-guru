@@ -91,6 +91,10 @@ var notExportedWhy = map[string]string{
 	"FrozenMisses":              `cg_frozen_decisions_total{outcome="miss"}, from offload.FrozenStats()`,
 	"FrozenDropped":             `cg_frozen_decisions_total{outcome="dropped"}, from store.Memory.FrozenLossStats()`,
 	"FrozenRepaired":            `cg_frozen_decisions_total{outcome="repaired"}, from store.Memory.FrozenLossStats()`,
+	"StashRefused":              "cg_stash_refused_total, from offload.StashRefusals()",
+	"StashExpired":              "cg_stash_expired_total, from store.Memory.StashStats()",
+	"StashLive":                 `cg_stash_reserve_entries{state="live"}, from store.Memory.StashStats()`,
+	"StashCapacity":             `cg_stash_reserve_entries{state="capacity"}, from store.Memory.StashStats()`,
 	"Extract":                   "the cg_extract_* family, from metrics.ExtractSnapshot()",
 
 	// Not numbers. Prometheus has no string sample, and a list of names would have to

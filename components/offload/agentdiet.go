@@ -558,7 +558,9 @@ func (d *AgentDiet) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		if !ok {
 			continue
 		}
-		commitMark(c, rep, eff, key, p.content)
+		if !commitMark(c, rep, eff, key, p.content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(&req.Input[p.i], newText)
 		freeze(c, d.Name(), p.content, newText)
 		changed++

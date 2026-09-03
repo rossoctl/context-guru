@@ -67,7 +67,9 @@ func (d *Dedup) Offload(req *schemas.BifrostChatRequest, rep *components.Report,
 			rep.Gate("marker_no_win") // pointer+marker wouldn't shrink this duplicate
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(m, newText)
 		changed++
 		if key != "" {

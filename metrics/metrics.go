@@ -751,6 +751,22 @@ type Snapshot struct {
 	FrozenDropped  int64 `json:"frozen_dropped"`
 	FrozenRepaired int64 `json:"frozen_repaired"`
 	FrozenFlips    int64 `json:"frozen_flips"`
+	// Rewind-reserve health — the REVERSIBILITY cost line, and the leading indicator for
+	// expand_unresolved_missing. That counter can only move when the agent happens to ask
+	// for removed content, so a run whose store could no longer hold payloads read as
+	// perfectly healthy until it did (#187: 209 failed expands in one benchmark arm, 0 in
+	// the arm where the sweep was inert).
+	//
+	// StashRefused counts removals DECLINED because the reserve was full: content left
+	// verbatim, nothing became irreversible, and the fix is a larger max_entries.
+	// StashExpired counts payloads the TTL reclaimed, which is the one remaining way an
+	// outstanding marker stops resolving; the fix for that is a larger ttl_seconds. Live
+	// against Capacity says how close the reserve is to binding before either fires.
+	// Filled by the host at serve time (offload + store live below metrics).
+	StashRefused  int64 `json:"stash_refused"`
+	StashExpired  int64 `json:"stash_expired"`
+	StashLive     int   `json:"stash_live"`
+	StashCapacity int   `json:"stash_capacity"`
 	// CompactionResets counts turns whose cached-prefix boundary restarted because the
 	// AGENT compacted its own transcript (it shrank under a stable session id). The
 	// session id deliberately survives that compaction so one conversation is one
