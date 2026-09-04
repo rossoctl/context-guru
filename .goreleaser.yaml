@@ -68,7 +68,7 @@ archives:
       - README.md
       - THIRD-PARTY-NOTICES
 
-checksums:
+checksum:
   # The integrity check for every downloaded artifact, and the ONLY one: these binaries are
   # unsigned (the tap and signing ownership are still open), so nothing else stands between a
   # tampered tarball and a proxy that handles the user's LLM traffic.
