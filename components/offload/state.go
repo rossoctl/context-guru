@@ -217,9 +217,17 @@ func reapplyFrozen(c *components.Ctx, rep *components.Report, comp string, m *bs
 		// nothing distinguished them before — so an expand-induced cache-write was indistinguishable
 		// from any other, which is #201's second bullet.
 		//
-		// One extra Get on rare content: this branch is reached only for content the agent actually
-		// expanded, not on the hot path.
-		if _, wasFrozen := c.Store.Get(frozenKey(c.Session, comp, contentKey(content))); wasFrozen {
+		// store.Peek, NOT Get, and this is the load-bearing part of the probe rather than a
+		// micro-optimisation. Memory.Get SLIDES the TTL and reorders the LRU, and FrozenPrefix is
+		// one of the PINNED namespaces — so probing with Get renewed a pinned entry that this
+		// branch has just decided will never be replayed, and pinned entries count against the
+		// shared exempt budget that gates rewind-reserve admission. A diagnostic would have been
+		// applying back-pressure to the reserve. Measured: with a 100s TTL and ten turns 60s apart,
+		// the probe kept a frozen decision alive 600s in.
+		//
+		// One extra lookup on rare content: this branch is reached only for content the agent
+		// actually expanded, not on the hot path.
+		if store.Peek(c.Store, frozenKey(c.Session, comp, contentKey(content))) {
 			expandFlips.Add(1)
 		}
 		return nil, 0, false

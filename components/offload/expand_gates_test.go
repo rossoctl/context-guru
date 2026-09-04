@@ -3,6 +3,7 @@ package offload
 import (
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
@@ -173,4 +174,49 @@ func TestOnlyAnAbandonedEstablishedCompactionCountsAsAFlip(t *testing.T) {
 				"indistinguishable from any other cache-write", got)
 		}
 	})
+}
+
+// AND THE PROBE MUST NOT KEEP ALIVE WHAT IT ASKS ABOUT.
+//
+// store.Peek exists for this call site, but a store-side test cannot fail if this call site goes back
+// to Get: the drift is between what the probe uses and what the store offers, so the assertion has to
+// live where the probe is. Memory.Get slides the TTL and FrozenPrefix is a PINNED namespace, so a
+// Get-based probe renews a pinned entry the branch has just decided will never be replayed — and
+// pinned entries count against the shared exempt budget that gates rewind-reserve admission.
+func TestTheFlipProbeDoesNotRenewTheDecisionItAsksAbout(t *testing.T) {
+	body := strings.Repeat("verbose tool output line\n", 30)
+	now := time.Unix(0, 0)
+	st := store.NewMemory(store.Options{TTLSeconds: 100})
+	st.SetClock(func() time.Time { return now })
+	m := maskFor(t)
+
+	// Turn 1 freezes a decision, then the agent expands the content.
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{tool(body), tool("tail")}}
+	c := &components.Ctx{Session: "s", Store: st, CacheAware: true, MaxCachedIdx: -1}
+	var rep components.Report
+	if _, err := m.Offload(req, &rep, c); err != nil {
+		t.Fatal(err)
+	}
+	MarkKeptVerbatim(st, body)
+	key := frozenKey("s", m.Name(), contentKey(body))
+	if !st.Peek(key) {
+		t.Fatal("no frozen decision after turn 1; the fixture is not exercising the probe")
+	}
+
+	// Ten turns 60s apart: each takes the kept-verbatim branch and probes the decision. 600s total
+	// against a 100s TTL, never more than 60s between probes.
+	for i := 0; i < 10; i++ {
+		now = now.Add(60 * time.Second)
+		r := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{tool(body), tool("tail")}}
+		cc := &components.Ctx{Session: "s", Store: st, CacheAware: true, MaxCachedIdx: 0}
+		var rr components.Report
+		if _, err := m.Offload(r, &rr, cc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st.Peek(key) {
+		t.Fatal("the frozen decision survived 600s of a 100s TTL: the flip probe is renewing a " +
+			"PINNED entry it has just decided will never be replayed, which is back-pressure on " +
+			"the rewind reserve from a diagnostic")
+	}
 }

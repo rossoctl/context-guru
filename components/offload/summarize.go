@@ -152,6 +152,14 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// Keep msg0 (system/first) + the last keepLast; summarize the span between — with both
 	// boundaries aligned so neither cuts inside a tool exchange. See summarizeSpan.
 	headCount, start, end := summarizeSpan(msgs, s.keepLast)
+	// Never summarize away content the agent EXPANDED. summarize replaces the span wholesale
+	// rather than editing in place, so it is the one offloader skipReduce cannot protect — see
+	// trimSpanForKeptVerbatim for why that is both a bounce loop and a broken pointer.
+	if trimmed := trimSpanForKeptVerbatim(msgs, start, end,
+		func(text string) bool { return isKeptVerbatim(c, contentKey(text)) }); trimmed != end {
+		rep.Gate(GateKeptVerbatim)
+		end = trimmed
+	}
 	// Request-level trigger: don't summarize (an LLM call) until the transcript
 	// is genuinely large / deep. Zero thresholds fire always (back-compat).
 	if !s.trigger.Fires(req, c.CtxWindow) || end <= start {

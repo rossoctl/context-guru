@@ -781,16 +781,6 @@ type Snapshot struct {
 	StashCapacity int   `json:"stash_capacity"`
 	StashBytes    int64 `json:"stash_bytes"`
 	StashMaxBytes int64 `json:"stash_max_bytes"`
-	// CompactionResets counts turns whose cached-prefix boundary restarted because the
-	// AGENT compacted its own transcript (it shrank under a stable session id). The
-	// session id deliberately survives that compaction so one conversation is one
-	// session in the dashboard — which means the boundary is the only thing left that can
-	// notice, and if it does not, every message of every later turn is treated as already
-	// cached and no component can act for the rest of the session. So this is the counter
-	// that says "these sessions restarted their prefix N times"; a long run with real
-	// auto-compaction should be non-zero, and a run where it stays 0 while savings fall
-	// off a cliff mid-session is the regression it exists to expose. Filled by the host at
-	// serve time (the counter lives in `modes`, which metrics cannot import).
 	// ExpandPrefixFlips counts turns where an ESTABLISHED compaction was abandoned because the
 	// agent had expanded that content: a frozen decision existed, so the provider holds the
 	// compacted bytes, and the turn sends the original in full at the same position. That is a
@@ -807,7 +797,17 @@ type Snapshot struct {
 	// "expansion is churning cached prefixes here", not as a count of cache-writes. Filled by the
 	// host at serve time (the counter lives in components/offload).
 	ExpandPrefixFlips int64 `json:"expand_prefix_flips"`
-	CompactionResets  int64 `json:"compaction_resets"`
+	// CompactionResets counts turns whose cached-prefix boundary restarted because the
+	// AGENT compacted its own transcript (it shrank under a stable session id). The
+	// session id deliberately survives that compaction so one conversation is one
+	// session in the dashboard — which means the boundary is the only thing left that can
+	// notice, and if it does not, every message of every later turn is treated as already
+	// cached and no component can act for the rest of the session. So this is the counter
+	// that says "these sessions restarted their prefix N times"; a long run with real
+	// auto-compaction should be non-zero, and a run where it stays 0 while savings fall
+	// off a cliff mid-session is the regression it exists to expose. Filled by the host at
+	// serve time (the counter lives in `modes`, which metrics cannot import).
+	CompactionResets int64 `json:"compaction_resets"`
 	// cmdfilter attribution: which command FAMILIES pay off (builds/tests/iac/pkg/net),
 	// which individual filters fire, and which output shapes matched no filter (the
 	// backlog of filters worth writing). Additive fields — nothing above is renamed.
