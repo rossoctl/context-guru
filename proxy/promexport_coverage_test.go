@@ -141,13 +141,18 @@ var notExportedWhy = map[string]string{
 	// silent: this change deliberately adds ONE family (cg_expand_unresolved_total, the
 	// alertable one) instead of growing the exposition by fourteen series inside a
 	// dashboard PR. Moving any entry out of this map is a small, self-contained change.
-	"LLMTruncated":          "NOT EXPORTED YET — full price, zero result; a real alert candidate",
-	"SummarizeTimeouts":     "NOT EXPORTED YET — summarize's fail-open path is invisible in Prometheus",
-	"SummarizeErrors":       "NOT EXPORTED YET — as above",
-	"AgentDietTimeouts":     "NOT EXPORTED YET — agentdiet's fail-open path, same gap",
-	"AgentDietErrors":       "NOT EXPORTED YET — as above",
-	"SyncEnforced":          "NOT EXPORTED YET — the machine-readable 'we did modify requests'",
-	"CompactionResets":      "NOT EXPORTED YET — agent self-compaction restarting the cached prefix",
+	"LLMTruncated":      "NOT EXPORTED YET — full price, zero result; a real alert candidate",
+	"SummarizeTimeouts": "NOT EXPORTED YET — summarize's fail-open path is invisible in Prometheus",
+	"SummarizeErrors":   "NOT EXPORTED YET — as above",
+	"AgentDietTimeouts": "NOT EXPORTED YET — agentdiet's fail-open path, same gap",
+	"AgentDietErrors":   "NOT EXPORTED YET — as above",
+	"SyncEnforced":      "NOT EXPORTED YET — the machine-readable 'we did modify requests'",
+	"CompactionResets":  "NOT EXPORTED YET — agent self-compaction restarting the cached prefix",
+	// Exported as cg_expand_prefix_flips_total, read from offload.ExpandPrefixFlips() rather than
+	// off `s` for the reason this map's preamble gives: the /stats handler fills the field AFTER
+	// renderMetrics takes its snapshot, so a promLine off `s` would export a permanent 0 while
+	// passing this test.
+	"ExpandPrefixFlips":     "cg_expand_prefix_flips_total, from offload.ExpandPrefixFlips()",
 	"UpstreamMsAvgBypassed": "NOT EXPORTED YET — the bypassed baseline half of cg_upstream_latency_ms",
 	"SSETTFBMsAvgBuf":       "NOT EXPORTED YET — buffered responses' time-to-last-byte",
 	"SSEExpandAfterStream":  "NOT EXPORTED YET — the SSE peek's price; alert candidate",

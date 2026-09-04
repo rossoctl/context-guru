@@ -439,7 +439,10 @@ func (d *AgentDiet) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 			continue
 		}
 		content := schema.MessageText(msg)
-		if content == "" || skipReduce(c, content) {
+		if gate, skip := skipReduce(c, content); content == "" || skip {
+			if skip {
+				rep.Gate(gate)
+			}
 			continue
 		}
 		// A frozen decision was replayed above; a second reduction of the same bytes

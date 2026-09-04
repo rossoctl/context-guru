@@ -1903,6 +1903,10 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// the description stopped working — which nothing else in this snapshot can reveal.
 	snap.AdjudicateStray = adjudicate.StrayAnswered()
 	snap.FrozenHits, snap.FrozenMisses = offload.FrozenStats()
+	// The expand-induced prefix flip, published beside the freeze-replay counters because it is the
+	// same mechanism seen from the other side: a replay that DIDN'T happen because the agent
+	// expanded content that was compacted before. See metrics.Snapshot.
+	snap.ExpandPrefixFlips = offload.ExpandPrefixFlips()
 	// Process-wide, like FrozenHits, and so filled outside the cast below: a removal declined
 	// for want of a stash slot is counted by the COMPONENT, whatever store instance refused it.
 	snap.StashRefused = offload.StashRefusals()

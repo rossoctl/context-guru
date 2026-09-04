@@ -293,7 +293,7 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		// If the agent recently EXPANDED this content, leave it verbatim — removing it again would
 		// just trigger another expand.
 		if isKeptVerbatim(c, id) {
-			rep.Gate("kept_verbatim_after_expand")
+			rep.Gate(GateKeptVerbatim)
 			continue
 		}
 		// SAME-SESSION REPLAY, and it bypasses the depth gate legitimately: this session already

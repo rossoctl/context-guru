@@ -145,10 +145,10 @@ func (f *Cmdfilter) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 			keys = append(keys, fk...)
 			continue
 		}
-		if skipReduce(c, content) {
+		if gate, skip := skipReduce(c, content); skip {
 			// marker-bearing (a filter rule could drop the marker line and orphan the
-			// stash) or expanded by the agent — leave it verbatim
-			rep.Gate("marker_or_kept_verbatim")
+			// stash) or expanded by the agent — leave it verbatim. The gate says WHICH.
+			rep.Gate(gate)
 			continue
 		}
 		key := selectorKey(content)

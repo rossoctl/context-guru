@@ -117,10 +117,10 @@ func (lc *Linecap) Offload(req *schemas.BifrostChatRequest, rep *components.Repo
 			rep.Gate("below_min_size")
 			continue
 		}
-		if skipReduce(c, content) {
+		if gate, skip := skipReduce(c, content); skip {
 			// marker-bearing (a cap could cut the marker line and orphan the stash) or
-			// expanded by the agent — leave it verbatim.
-			rep.Gate("marker_or_kept_verbatim")
+			// expanded by the agent — leave it verbatim. The gate says WHICH.
+			rep.Gate(gate)
 			continue
 		}
 		out, folds := lc.rewrite(content)

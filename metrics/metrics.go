@@ -791,7 +791,23 @@ type Snapshot struct {
 	// auto-compaction should be non-zero, and a run where it stays 0 while savings fall
 	// off a cliff mid-session is the regression it exists to expose. Filled by the host at
 	// serve time (the counter lives in `modes`, which metrics cannot import).
-	CompactionResets int64 `json:"compaction_resets"`
+	// ExpandPrefixFlips counts turns where an ESTABLISHED compaction was abandoned because the
+	// agent had expanded that content: a frozen decision existed, so the provider holds the
+	// compacted bytes, and the turn sends the original in full at the same position. That is a
+	// cache-write of the whole suffix at ~11.5x a read — the cost the cache-tail gate exists to
+	// avoid everywhere else — and until now no counter distinguished it from any other cache-write,
+	// so an operator could not see it and a benchmark could not attribute it (#201).
+	//
+	// It is a DELIBERATE cost, not a defect: re-compacting would bounce the agent into another
+	// expand, and one cache-write is cheaper than an unbounded loop. This makes the trade visible
+	// rather than assumed.
+	//
+	// Per turn per message, not per distinct content — every later turn re-sends the same original
+	// and re-observes the same abandonment, and only the FIRST is a real cache-write. Read it as
+	// "expansion is churning cached prefixes here", not as a count of cache-writes. Filled by the
+	// host at serve time (the counter lives in components/offload).
+	ExpandPrefixFlips int64 `json:"expand_prefix_flips"`
+	CompactionResets  int64 `json:"compaction_resets"`
 	// cmdfilter attribution: which command FAMILIES pay off (builds/tests/iac/pkg/net),
 	// which individual filters fire, and which output shapes matched no filter (the
 	// backlog of filters worth writing). Additive fields — nothing above is renamed.

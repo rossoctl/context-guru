@@ -39,6 +39,7 @@ var statsGoldenTopLevel = []string{
 	"cg_added_ms_avg",
 	"compaction_resets",
 	"components",
+	"expand_prefix_flips",
 	"expand_unresolved_malformed",
 	// The alertable half of reversibility: a marker id this proxy could have minted that resolved
 	// to nothing, i.e. a cut advertised as reversible that was not. Added to the reviewed contract

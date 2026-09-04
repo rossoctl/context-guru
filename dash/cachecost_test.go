@@ -275,7 +275,7 @@ func TestGatesReachTheDashboard(t *testing.T) {
 	e := &Event{TS: 1000, SessionID: "s", Model: "m", TokensBefore: 9000, TokensAfter: 9000,
 		Components: []CompRow{
 			{Component: "cmdfilter", Kind: "offload", Skipped: true,
-				Gates: map[string]int{"no_filter_match": 15, "marker_or_kept_verbatim": 4}},
+				Gates: map[string]int{"no_filter_match": 15, "already_marked": 4}},
 			{Component: "extract", Kind: "offload", Skipped: true,
 				Gates: map[string]int{"no_obvious_noise": 14}},
 		}}
@@ -296,8 +296,8 @@ func TestGatesReachTheDashboard(t *testing.T) {
 	if got := byName["cmdfilter"].Gates["no_filter_match"]; got != 20 {
 		t.Errorf("aggregated no_filter_match = %d, want 20 (15 + 5)", got)
 	}
-	if got := byName["cmdfilter"].Gates["marker_or_kept_verbatim"]; got != 4 {
-		t.Errorf("aggregated marker_or_kept_verbatim = %d, want 4", got)
+	if got := byName["cmdfilter"].Gates["already_marked"]; got != 4 {
+		t.Errorf("aggregated already_marked = %d, want 4", got)
 	}
 	if got := byName["extract"].Gates["no_filter_match"]; got != 0 {
 		t.Errorf("a gate leaked across components: %d", got)

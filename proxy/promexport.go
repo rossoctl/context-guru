@@ -524,6 +524,11 @@ func (h *Handler) renderMetrics() string {
 		// declines the removal, whichever store instance refused the payload. This is the
 		// LEADING indicator for cg_expand_unresolved_total{cause="missing"}, which cannot move
 		// until the agent happens to call expand.
+		// The one cache-write an operator can attribute to a cause (#201). Process-wide like the
+		// frozen hit/miss pair above and sourced from offload's own counter for the same reason.
+		promHeaderProc(&b, "cg_expand_prefix_flips_total",
+			"Turns where an established compaction was abandoned because the agent had expanded that content, so the original went upstream in full at its cached position: a suffix cache-write attributable to expansion. Deliberate (re-compacting would loop the agent into another expand) but not free. Per turn per message, not per distinct content - only the first is a real cache-write.", "counter")
+		promLine(&b, "cg_expand_prefix_flips_total", "", float64(offload.ExpandPrefixFlips()))
 		promHeaderProc(&b, "cg_stash_refused_total",
 			"Removals declined because the store's rewind reserve was full. The content was left verbatim and nothing became irreversible; raise max_entries or stash_max_bytes.", "counter")
 		promLine(&b, "cg_stash_refused_total", "", float64(offload.StashRefusals()))
