@@ -152,19 +152,30 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// Keep msg0 (system/first) + the last keepLast; summarize the span between — with both
 	// boundaries aligned so neither cuts inside a tool exchange. See summarizeSpan.
 	headCount, start, end := summarizeSpan(msgs, s.keepLast)
-	// Never summarize away content the agent EXPANDED. summarize replaces the span wholesale
-	// rather than editing in place, so it is the one offloader skipReduce cannot protect — see
-	// trimSpanForKeptVerbatim for why that is both a bounce loop and a broken pointer.
-	if trimmed := trimSpanForKeptVerbatim(msgs, start, end,
-		func(text string) bool { return isKeptVerbatim(c, contentKey(text)) }); trimmed != end {
-		rep.Gate(GateKeptVerbatim)
-		end = trimmed
-	}
 	// Request-level trigger: don't summarize (an LLM call) until the transcript
 	// is genuinely large / deep. Zero thresholds fire always (back-compat).
 	if !s.trigger.Fires(req, c.CtxWindow) || end <= start {
 		rep.Skipped = true
 		return nil, nil
+	}
+	// Never summarize away content the agent EXPANDED. summarize replaces the span wholesale
+	// rather than editing in place, so it is the one offloader skipReduce cannot protect — see
+	// trimSpanForKeptVerbatim for why that is both a bounce loop and a broken pointer.
+	//
+	// BELOW the trigger gate, not above it: the trim costs a contentKey hash plus a store Get per
+	// span message, and paying that on a turn summarize was never going to act on is waste — it
+	// also raised kept_verbatim_after_expand on those turns, reporting a decision nothing made.
+	// The re-test of end <= start below is what keeps the original ordering's guarantee.
+	if trimmed := trimSpanForKeptVerbatim(msgs, start, end,
+		func(text string) bool { return isKeptVerbatim(c, contentKey(text)) }); trimmed != end {
+		rep.Gate(GateKeptVerbatim)
+		end = trimmed
+		if end <= start {
+			// Nothing summarizable is left once expanded content is protected. Declining is the
+			// outcome summarize already has for an empty span, and the safe direction.
+			rep.Skipped = true
+			return nil, nil
+		}
 	}
 	model := s.modelClient // config-pinned client wins
 	if model == nil {

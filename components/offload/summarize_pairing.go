@@ -145,6 +145,10 @@ func summarizeSpan(msgs []bschemas.ChatMessage, keepLast int) (headCount, start,
 // A caller that gets end <= start skips, which is an outcome summarize already supports — the safe
 // direction, and better than either summarizing expanded content away or emitting a request the
 // provider rejects.
+// The scan stops at the FIRST kept-verbatim message, since everything after it is protected by the
+// retreat anyway — so the common case (nothing expanded) is one store lookup per span message and no
+// allocation, and the acting case is fewer. The caller runs this below its trigger gate so a turn
+// that was never going to summarize pays none of it.
 func trimSpanForKeptVerbatim(msgs []bschemas.ChatMessage, start, end int, kept func(string) bool) int {
 	first := -1
 	for i := start; i < end; i++ {
