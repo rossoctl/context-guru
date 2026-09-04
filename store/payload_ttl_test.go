@@ -156,18 +156,15 @@ func TestTheConfigSurfaceReportsTheEffectivePayloadHorizon(t *testing.T) {
 	if got := EffectiveStashTTLSeconds(Options{}); got != int(DefaultStashTTL/time.Second) {
 		t.Errorf("reported %d, want DefaultStashTTL in seconds", got)
 	}
-	// It must agree with the store built from the same Options, which is the whole point of it
-	// existing rather than the caller re-deriving the rule.
-	for _, o := range []Options{
-		{TTLSeconds: 10000, StashTTLSeconds: 20000},
-		{TTLSeconds: 60},
-		{},
-		{StashTTLSeconds: 42},
-	} {
-		if got, want := EffectiveStashTTLSeconds(o), int(NewMemory(o).stashTTL/time.Second); got != want {
-			t.Errorf("EffectiveStashTTLSeconds(%+v) = %d but the store uses %d", o, got, want)
-		}
-	}
+	// NO CROSS-CHECK AGAINST NewMemory HERE, deliberately. EffectiveStashTTLSeconds IS
+	// `NewMemory(o).stashTTL`, so comparing the two is A == A: it cannot fail, and a reader
+	// scanning for coverage would count it as evidence. The three assertions above are the whole
+	// test on this side.
+	//
+	// The drift this helper exists to prevent is between the value /config PUBLISHES and the value
+	// the store uses, and nothing in this package can span that — main.go could go back to
+	// publishing the raw field with every test here still green. That assertion lives where it can
+	// fail: cmd/context-guru-proxy.TestConfigPublishesTheEffectivePayloadHorizon.
 }
 
 // The constants' RELATIONSHIP is the design, so it is asserted rather than left to whoever next
