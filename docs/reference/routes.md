@@ -250,10 +250,6 @@ reversibility it destroyed, silently.
 | `stash_expired` | Payloads reclaimed by their own TTL (`stash_ttl_seconds`, shorter than `ttl_seconds`). **Not an alert on its own** — read it against `stash_revived`. |
 | `stash_revived` | Reclaimed payloads written again by a later replay, which re-derives them from the transcript **before** the marker goes upstream: reclamation absorbed at no cost. Tracking `stash_expired` means the shorter payload TTL is working as designed; see [why payloads expire sooner](config.md#why-payloads-expire-sooner-than-decisions). |
 
-| Field | Meaning |
-|---|---|
-| `expand_prefix_flips` | Turns where an **established** compaction was abandoned because the agent had expanded that content, so the original went upstream in full at its cached position — a suffix cache-write attributable to expansion, at ~11.5× a read. Deliberate: re-compacting would loop the agent into another expand, and one cache-write is cheaper than an unbounded loop. **Per turn per message**, not per distinct content — only the first is a real cache-write. See [what an expand costs](../how-to/recover-context.md#what-an-expand-costs-across-turns). |
-
 `stash_refused` is the **leading** indicator for `expand_unresolved_missing`: that counter cannot
 move until the agent happens to call `expand`, so a proxy that had stopped being able to promise
 reversibility read as perfectly healthy until one did. This one moves when the budget binds.
@@ -266,6 +262,23 @@ with nothing behind it, which is the failure #187 was about. Alert on `stash_mis
 `stash_refused`. `stash_missing` also grows with **turn count** rather than with distinct dangling
 markers: a payload that has gone cannot be restored (the replayed bytes must stay byte-identical to
 the turn that created them), so every later turn re-reports it for every affected message.
+
+### What an expand costs
+
+| Field | Meaning |
+|---|---|
+| `expand_prefix_flips` | Turns where an **established** compaction was abandoned because the agent had expanded that content, so the original went upstream in full at its cached position — a suffix cache-write attributable to expansion, at ~11.5× a read. |
+
+Deliberate rather than a defect: re-compacting would loop the agent into another expand, and one
+cache-write is cheaper than an unbounded loop. Counting it makes the trade visible, since no other
+counter distinguishes an expand-induced cache-write from any other.
+
+It grows **per turn per message**, not per distinct content: every later turn re-sends the same
+original and the same abandonment is observed again, while only the first is a real cache-write. Read
+it as "expansion is churning cached prefixes here". The per-component gate
+`kept_verbatim_after_expand` is the per-message view, and `already_marked` is its benign sibling —
+the two were one label (`marker_or_kept_verbatim`) until they were split. Full picture in
+[what an expand costs](../how-to/recover-context.md#what-an-expand-costs-across-turns).
 
 ### cmdfilter attribution
 
