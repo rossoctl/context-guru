@@ -240,14 +240,22 @@ func parseUsageWhy(body []byte) (Usage, usageMiss) {
 // merged across events, taking the maximum of each — a later event repeating a
 // value must not double it.
 func parseSSEUsage(raw []byte) (Usage, bool) {
-	u, why := parseSSEUsageWhy(raw)
+	u, why, _ := parseSSEUsageWhy(raw)
 	return u, why == usageMissNone
 }
 
 // parseSSEUsageWhy is parseSSEUsage plus #200's classification. An event stream that carried a
 // usage block no event of it could be read is the streamed form of the dialect gap, and it must
 // not be reported as "the provider streamed no usage" — the remedies differ.
-func parseSSEUsageWhy(raw []byte) (Usage, usageMiss) {
+// The third return is the PAYLOAD OF THE EVENT THAT SET THE REASON, for the shape record.
+//
+// The record used to describe the stream's LAST data: event, which on the Anthropic-family
+// transport is `message_stop` — usage arrives in `message_start`. So a streamed unrecognised
+// dialect produced a record of the terminal event: no usage_at, no usage_keys, nothing about the
+// dialect, and it consumed one of the bounded record slots to say it. That is exactly the shape a
+// streamed Bedrock aws/claude-* response has, which is where the gap this record exists to
+// diagnose would sit. Returning it from here also collapses two walks over the transport into one.
+func parseSSEUsageWhy(raw []byte) (Usage, usageMiss, string) {
 	var out Usage
 	found := false
 	// The WORST reason any event produced, which is what makes a streamed miss as precise as a
@@ -256,6 +264,7 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss) {
 	// parseUsageWhy costs nothing extra (the boolean form called it anyway) and each event's own
 	// reason is already exact.
 	worst := usageMissAbsent
+	worstPayload := "" // the event `worst` came from, so the record describes the right one
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "data:") {
@@ -276,6 +285,7 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss) {
 			one, why := parseUsageWhy([]byte(`{"usage":` + u.Raw + `}`))
 			if why > worst {
 				worst = why // usageMiss is ordered benign -> alertable; see its constants
+				worstPayload = payload
 			}
 			if why != usageMissNone {
 				continue
@@ -289,12 +299,12 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss) {
 		}
 	}
 	if found {
-		return out, usageMissNone
+		return out, usageMissNone, ""
 	}
 	// Every block that appeared was rejected, and `worst` says why — an unrecognised spelling is
 	// alertable, an all-zero block is not, and no block at all is `absent` because that is what
 	// `worst` starts as.
-	return out, worst
+	return out, worst, worstPayload
 }
 
 // responseUsage picks the right parser for a response's content type. The returned
@@ -318,8 +328,13 @@ func responseUsageWhy(contentType string, body []byte) (Usage, usageMiss, bool) 
 	sse := strings.Contains(contentType, "event-stream")
 	var u Usage
 	var why usageMiss
+	// doc is the JSON document the shape record should DESCRIBE, which for a stream is the one
+	// event that produced the reason rather than the whole transport or its last event.
+	doc := body
 	if sse {
-		u, why = parseSSEUsageWhy(body)
+		var judged string
+		u, why, judged = parseSSEUsageWhy(body)
+		doc = []byte(judged)
 	} else {
 		u, why = parseUsageWhy(body)
 	}
@@ -331,7 +346,9 @@ func responseUsageWhy(contentType string, body []byte) (Usage, usageMiss, bool) 
 		case usageMissUnreadable:
 			usageUnreadable.Add(1)
 		}
-		recordUsageShape(sse, body)
+		// len(body) so the record still reports the whole response's size — that is what says a
+		// window was spliced — while describing the document that actually failed to parse.
+		recordUsageShape(sse, len(body), doc)
 	}
 	return u, why, why == usageMissNone
 }
@@ -424,8 +441,8 @@ func noteUsageShape(key string) bool {
 // is false" into "the provider is sending camelCase", which is the difference between an open
 // question and a one-line fix — without needing a captured body, an instrumented capture hop, or
 // any extra request.
-func recordUsageShape(sse bool, body []byte) {
-	attrs := usageShapeAttrs(sse, body)
+func recordUsageShape(sse bool, total int, doc []byte) {
+	attrs := usageShapeAttrs(sse, total, doc)
 	if !noteUsageShape(usageShapeKey(attrs)) {
 		return
 	}
@@ -464,20 +481,24 @@ func ResetUsageShapeRecordForTest() {
 
 // usageShapeAttrs builds the shape record's key/value pairs. Separated from the logging so a test
 // can assert what it does and — more to the point — what it does NOT contain.
-func usageShapeAttrs(sse bool, body []byte) []any {
-	doc := body
-	if sse {
-		// One event, so the record describes a JSON object rather than a transport. The last
-		// data: line is where both dialects put their terminal usage.
-		doc = []byte(lastSSEPayload(body))
-	}
-	attrs := []any{"sse", sse, "bytes", len(body),
+//
+// doc is the JSON document that failed to parse: the whole body for a buffered response, and for a
+// stream the ONE EVENT the classifier judged (see parseSSEUsageWhy) rather than the transport or its
+// last event. total is the whole response's size, which is the figure that says a window was
+// spliced.
+func usageShapeAttrs(sse bool, total int, doc []byte) []any {
+	attrs := []any{"sse", sse, "bytes", total,
 		// Not parseable means the window was spliced rather than the dialect being strange —
 		// stated in the record so it cannot be misread as a field-name gap.
 		"valid_json", gjson.ValidBytes(doc),
 		"top_level_keys", objectKeys(gjson.ParseBytes(doc))}
 	for _, p := range append([]string{"usage"}, nestedUsagePaths[:]...) {
-		if u := gjson.GetBytes(doc, p); u.Exists() {
+		// usagePresent, not Exists, and for the same reason the classifier uses it: a null or empty
+		// block resolves but names no fields, so the record pointed at `usage` and printed
+		// usage_keys=[] while a real nested block held the answer — and keyed as `usage|`, which
+		// collides with a genuinely empty top-level block. The record must look where the
+		// CLASSIFIER looked.
+		if u := gjson.GetBytes(doc, p); usagePresent(u) {
 			return append(attrs, "usage_at", p, "usage_keys", objectKeys(u))
 		}
 	}
@@ -497,22 +518,6 @@ func objectKeys(v gjson.Result) []string {
 	})
 	sort.Strings(keys)
 	return keys
-}
-
-// lastSSEPayload returns the last non-empty `data:` payload in an event stream, which is where
-// both dialects put the terminal usage. Empty when there is none.
-func lastSSEPayload(body []byte) string {
-	lines := strings.Split(string(body), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		if p := strings.TrimSpace(strings.TrimPrefix(line, "data:")); p != "" && p != "[DONE]" {
-			return p
-		}
-	}
-	return ""
 }
 
 // stopReasonPaths are where a terminal reason lives, per dialect and per transport:
