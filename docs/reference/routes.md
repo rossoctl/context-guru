@@ -250,6 +250,10 @@ reversibility it destroyed, silently.
 | `stash_expired` | Payloads reclaimed by their own TTL (`stash_ttl_seconds`, shorter than `ttl_seconds`). **Not an alert on its own** — read it against `stash_revived`. |
 | `stash_revived` | Reclaimed payloads written again by a later replay, which re-derives them from the transcript **before** the marker goes upstream: reclamation absorbed at no cost. Tracking `stash_expired` means the shorter payload TTL is working as designed; see [why payloads expire sooner](config.md#why-payloads-expire-sooner-than-decisions). |
 
+| Field | Meaning |
+|---|---|
+| `expand_prefix_flips` | Turns where an **established** compaction was abandoned because the agent had expanded that content, so the original went upstream in full at its cached position — a suffix cache-write attributable to expansion, at ~11.5× a read. Deliberate: re-compacting would loop the agent into another expand, and one cache-write is cheaper than an unbounded loop. **Per turn per message**, not per distinct content — only the first is a real cache-write. See [what an expand costs](../how-to/recover-context.md#what-an-expand-costs-across-turns). |
+
 `stash_refused` is the **leading** indicator for `expand_unresolved_missing`: that counter cannot
 move until the agent happens to call `expand`, so a proxy that had stopped being able to promise
 reversibility read as perfectly healthy until one did. This one moves when the budget binds.

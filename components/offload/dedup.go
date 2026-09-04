@@ -50,8 +50,8 @@ func (d *Dedup) Offload(req *schemas.BifrostChatRequest, rep *components.Report,
 			rep.Gate("below_min_tokens")
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim") // don't re-reduce
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate) // don't re-reduce; the gate says which reason
 			continue
 		}
 		h := hashKey(content)

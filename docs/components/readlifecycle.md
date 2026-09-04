@@ -169,7 +169,7 @@ components:
 ```
 
 Gate reasons on `/stats`: `no_file_reads`, `fresh_read`, `non_text_blocks`,
-`marker_or_kept_verbatim`, `below_min_tokens`, `cached_prefix`, `marker_no_win`.
+`already_marked`, `kept_verbatim_after_expand`, `below_min_tokens`, `cached_prefix`, `marker_no_win`.
 
 ## Recommendation
 

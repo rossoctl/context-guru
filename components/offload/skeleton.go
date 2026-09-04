@@ -153,8 +153,8 @@ func (s *Skeleton) Offload(req *schemas.BifrostChatRequest, rep *components.Repo
 			keys = append(keys, fk...)
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim") // already carries a marker, or the agent expanded it
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate) // already carries a marker, or the agent expanded it — the gate says which
 			continue
 		}
 		if schema.TextTokens(content) < s.minTokens {

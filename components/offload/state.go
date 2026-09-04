@@ -203,7 +203,26 @@ func frozenLost(c *components.Ctx, key string) bool {
 func reapplyFrozen(c *components.Ctx, rep *components.Report, comp string, m *bschemas.ChatMessage) ([]string, int, bool) {
 	content := schema.MessageText(*m)
 	if isKeptVerbatim(c, contentKey(content)) {
-		return nil, 0, false // agent expanded this; replaying the collapse would loop
+		// The agent expanded this; replaying the collapse would loop it into another expand.
+		//
+		// COUNT THE FLIP, which needs one more lookup than declining does. Whether this turn
+		// costs anything depends on something this branch did not previously ask: was there a
+		// frozen decision? If there was, the provider is holding COMPACTED bytes for this
+		// message and we are about to send the original in full at the same position — a change
+		// inside the cached prefix, so the whole suffix is re-written at ~11.5x a read. If there
+		// was not, the message was never compacted and nothing flips.
+		//
+		// Both cases raise the same gate at the caller (kept_verbatim_after_expand), because from
+		// the offloader's point of view they are the same decision. Only this one has a price, and
+		// nothing distinguished them before — so an expand-induced cache-write was indistinguishable
+		// from any other, which is #201's second bullet.
+		//
+		// One extra Get on rare content: this branch is reached only for content the agent actually
+		// expanded, not on the hot path.
+		if _, wasFrozen := c.Store.Get(frozenKey(c.Session, comp, contentKey(content))); wasFrozen {
+			expandFlips.Add(1)
+		}
+		return nil, 0, false
 	}
 	repl, ok := c.Store.Get(frozenKey(c.Session, comp, contentKey(content)))
 	if !ok {
@@ -286,6 +305,31 @@ var (
 // Exported for the host's /stats, which pairs them with the store's drop/repair counts.
 func FrozenStats() (hits, misses int64) { return frozenHits.Load(), frozenMisses.Load() }
 
+// expandFlips counts turns where an ESTABLISHED compaction was abandoned because the agent had
+// expanded that content: a frozen decision existed, so the provider is holding the compacted bytes,
+// and this turn sends the original in full at the same position.
+//
+// That costs a cache-write of the whole suffix at ~11.5x a read — the exact cost the cache-tail
+// gate exists to avoid everywhere else — and it was undocumented, uncounted and invisible: no
+// counter distinguished "the prefix flipped because the agent expanded" from any other cache-write,
+// so an operator could not see it and a benchmark could not attribute it (#201).
+//
+// It is a deliberate cost, not a bug. Re-compacting would bounce the agent straight into another
+// expand, and one cache-write is cheaper than an unbounded expand loop — which is why cg:keep:
+// exists. Counting it makes the trade visible instead of assumed.
+//
+// ONE PER TURN PER MESSAGE, not one per distinct content: every later turn re-sends the same
+// original and re-observes the same abandonment, so this grows with turn count. Only the FIRST is
+// a real cache-write — after that the provider has cached the full form — so read it as "expansion
+// is costing prefix churn in this deployment", not as a count of cache-writes. Distinct content is
+// what kept_verbatim_after_expand's per-component gate approximates.
+var expandFlips atomic.Int64
+
+// ExpandPrefixFlips returns how many times a replay declined because the agent had expanded content
+// that WAS compacted before. Non-zero means expansion is re-writing cached prefixes; see
+// expandFlips for why it is per turn per message rather than per distinct content.
+func ExpandPrefixFlips() int64 { return expandFlips.Load() }
+
 // contentKey is a marker/whitespace-insensitive content hash (shared with extract's
 // result cache), so the same output re-sent across turns maps to one frozen decision.
 func contentKey(s string) string { return extract.ContentKey(s) }
@@ -326,9 +370,40 @@ func isKeptVerbatim(c *components.Ctx, ck string) bool {
 // orphan the earlier stash), or the agent expanded it and re-compacting would just
 // trigger another expand — a per-turn bounce loop. Every offloader consults this on
 // each candidate so the kept-verbatim / never-double-reduce guarantees hold uniformly.
-func skipReduce(c *components.Ctx, content string) bool {
-	return expand.HasPlaceholder(content) || isKeptVerbatim(c, contentKey(content))
+// It returns WHICH of the two, because the caller publishes it as a gate and the two reasons want
+// opposite readings (#201). "Already carries a marker" is benign — that content is already
+// compacted, and nothing about this turn changes. "The agent expanded it" is an established
+// compaction being abandoned: from this turn on the original goes upstream in full at its own
+// position, which is a change inside the provider's cached prefix.
+//
+// They shared the label `marker_or_kept_verbatim` at eight of eleven sites while three offloaders
+// (extract_sweep, extract_llm, failed_run) already raised `kept_verbatim_after_expand` for exactly
+// the same condition. Gates reach /stats per component, so that was a published counter reporting
+// both a benign outcome and a real cost — and a published experimental figure was corrected twice
+// off it before anyone noticed the label was the problem. Same rule as #200 and #188.
+func skipReduce(c *components.Ctx, content string) (gate string, skip bool) {
+	// Marker first: content that already carries one was compacted by some component, and asking
+	// the store about kept-verbatim would be a wasted Get on the common path.
+	if expand.HasPlaceholder(content) {
+		return GateAlreadyMarked, true
+	}
+	if isKeptVerbatim(c, contentKey(content)) {
+		return GateKeptVerbatim, true
+	}
+	return "", false
 }
+
+// The two gate labels skipReduce distinguishes, named constants because eleven offloaders raise
+// them and a typo in one would silently split a counter in two.
+const (
+	// GateAlreadyMarked: this content already carries an offload marker, so reducing again would
+	// double-compact and can orphan the earlier stash. Benign — nothing flips.
+	GateAlreadyMarked = "already_marked"
+	// GateKeptVerbatim: the agent expanded this content, so it must not be re-compacted (that
+	// would bounce it straight into another expand). The turn this first appears is the turn the
+	// message reverts to its full form inside the cached prefix — see ExpandPrefixFlips.
+	GateKeptVerbatim = "kept_verbatim_after_expand"
+)
 
 // --- Stash ownership (scoping GET /expand by session) ----------------------
 //

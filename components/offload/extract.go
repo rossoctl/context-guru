@@ -64,8 +64,8 @@ func (e *Extract) Offload(req *bschemas.BifrostChatRequest, rep *components.Repo
 			rep.Gate("below_output_floor")
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim") // don't re-reduce
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate) // don't re-reduce; the gate says which reason
 			continue
 		}
 		projected, ok := collapseObviousNoise(content)
