@@ -118,7 +118,11 @@ func TestTheTrimIsANoOpWithoutExpandedContent(t *testing.T) {
 // (TestTheFlipProbeDoesNotRenewTheDecisionItAsksAbout) is the version that gets it right: the
 // assertion has to live where the behaviour is.
 func TestSummarizeOffloadKeepsExpandedContent(t *testing.T) {
-	expanded := strings.Repeat("ran pytest tests/test_t2.py, 3 failures in src/mod/file.go\n", 40)
+	// Derived from bulkResult rather than hand-copied from its format string. The precondition
+	// below would fail loudly if the two drifted apart, so a copy was safe — but it was safe
+	// because of a guard elsewhere rather than by construction, and the next person editing
+	// bulkResult has no reason to look here.
+	expanded := schema.MessageText(bulkResult("t2"))
 	build := func() []bschemas.ChatMessage {
 		msgs := []bschemas.ChatMessage{
 			{Role: bschemas.ChatMessageRoleUser},
