@@ -331,6 +331,13 @@ func FrozenStats() (hits, misses int64) { return frozenHits.Load(), frozenMisses
 // a real cache-write — after that the provider has cached the full form — so read it as "expansion
 // is costing prefix churn in this deployment", not as a count of cache-writes. Distinct content is
 // what kept_verbatim_after_expand's per-component gate approximates.
+//
+// AND ONE EVENT, not every expand-induced cache-write. This is its only increment site: a replay
+// declined because the content was expanded. summarize has a sibling that is NOT counted here —
+// trimSpanForKeptVerbatim shortens the span to protect expanded content, which can invalidate a
+// checkpoint whose boundary reached past the new end, and re-summarizing emits different summary
+// text at a fixed prefix position. Same class of cost, correct trade, deliberately uncounted:
+// a second increment site changes what this number means and wants its own decision.
 var expandFlips atomic.Int64
 
 // ExpandPrefixFlips returns how many times a replay declined because the agent had expanded content

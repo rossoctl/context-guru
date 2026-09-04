@@ -796,6 +796,15 @@ type Snapshot struct {
 	// and re-observes the same abandonment, and only the FIRST is a real cache-write. Read it as
 	// "expansion is churning cached prefixes here", not as a count of cache-writes. Filled by the
 	// host at serve time (the counter lives in components/offload).
+	//
+	// IT COUNTS ONE EVENT, not every expand-induced cache-write: a REPLAY DECLINED because the
+	// content was expanded (components/offload.reapplyFrozen, its only increment site). At least one
+	// sibling is not counted — protecting expanded content shortens summarize's span, which can
+	// invalidate a checkpoint whose boundary reached past it, and re-summarizing produces different
+	// summary text at a fixed prefix position, i.e. another suffix cache-write. That is the correct
+	// trade (content loss for one cache-write) and the same class of event, but a second increment
+	// site would change what this number means, so it is deliberately left to its own decision. Do
+	// not read a zero here as "expansion cost nothing".
 	ExpandPrefixFlips int64 `json:"expand_prefix_flips"`
 	// CompactionResets counts turns whose cached-prefix boundary restarted because the
 	// AGENT compacted its own transcript (it shrank under a stable session id). The

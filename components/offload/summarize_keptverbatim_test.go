@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -31,12 +32,14 @@ func asstWithCall(id string) bschemas.ChatMessage {
 //   - expand.RestoredInPlace's pointer says the content is in the transcript, on the strength of the
 //     body BEFORE the pipeline runs. If summarize removes it, the model is left with a pointer to
 //     nothing where it previously got the content.
+//
+// THIS TEST AND THE TWO BELOW EXERCISE THE BOUNDARY ARITHMETIC IN ISOLATION, with a stub predicate
+// and no store — deliberately, because the retreat rule is worth pinning on its own. They do NOT
+// establish that Offload calls it: see TestSummarizeOffloadKeepsExpandedContent, which is the test
+// that fails if the call goes away.
 func TestSummarizeLeavesExpandedContentInTheTranscript(t *testing.T) {
 	expanded := strings.Repeat("the content the agent asked to have back\n", 40)
 	filler := strings.Repeat("older chatter that is fine to summarize\n", 40)
-
-	st := store.NewMemory(store.Options{})
-	MarkKeptVerbatim(st, expanded)
 
 	// msg0, then a summarizable stretch, then the expanded output inside its own exchange, then a
 	// tail. keep_last is 1 so `end` starts well past the expanded message.
@@ -99,5 +102,69 @@ func TestTheTrimIsANoOpWithoutExpandedContent(t *testing.T) {
 	_, start, end := summarizeSpan(msgs, 1)
 	if got := trimSpanForKeptVerbatim(msgs, start, end, func(string) bool { return false }); got != end {
 		t.Fatalf("trimmed a span with nothing expanded in it: %d -> %d", end, got)
+	}
+}
+
+// AND THE ARITHMETIC MUST ACTUALLY BE REACHED, which the three tests above do not establish.
+//
+// They call trimSpanForKeptVerbatim directly with a stub predicate, so deleting the call from
+// Offload — or passing a predicate that never consults the store, or moving the call below the point
+// end is used — leaves all three green and the whole suite green, and the regression is back. The
+// tell was in the fixture: the first test built a store and marked content, then never used it,
+// because the stub had replaced it. Dead setup is what an assertion that stopped reaching its
+// subject looks like.
+//
+// This is the same shape as the vacuous cross-check on #204, and its sibling in this package
+// (TestTheFlipProbeDoesNotRenewTheDecisionItAsksAbout) is the version that gets it right: the
+// assertion has to live where the behaviour is.
+func TestSummarizeOffloadKeepsExpandedContent(t *testing.T) {
+	expanded := strings.Repeat("ran pytest tests/test_t2.py, 3 failures in src/mod/file.go\n", 40)
+	build := func() []bschemas.ChatMessage {
+		msgs := []bschemas.ChatMessage{
+			{Role: bschemas.ChatMessageRoleUser},
+			callMsg("t1"), bulkResult("t1"),
+			callMsg("t2"), bulkResult("t2"),
+			callMsg("t3"), bulkResult("t3"),
+		}
+		schema.SetMessageText(&msgs[0], "fix the failing tests")
+		return msgs
+	}
+	present := func(msgs []bschemas.ChatMessage) bool {
+		for _, m := range msgs {
+			if schema.MessageText(m) == expanded {
+				return true
+			}
+		}
+		return false
+	}
+
+	// PRECONDITION: with nothing marked, this fixture DOES summarize that message away. Without
+	// this, "the content survived" would also pass on a fixture summarize never touched.
+	s := newSummarizeKeepLast(t, 1)
+	plain := &bschemas.BifrostChatRequest{Input: build()}
+	if !present(plain.Input) {
+		t.Fatal("the fixture does not contain the content to begin with")
+	}
+	var rep components.Report
+	if _, err := s.Offload(plain, &rep, ctxFor(store.NewMemory(store.Options{}))); err != nil {
+		t.Fatal(err)
+	}
+	if present(plain.Input) {
+		t.Fatal("summarize did not remove this message even unmarked, so the assertion below " +
+			"would pass vacuously — the fixture is not exercising the span")
+	}
+
+	// THE PROPERTY: marked kept-verbatim, the same fixture must keep it.
+	st := store.NewMemory(store.Options{})
+	MarkKeptVerbatim(st, expanded)
+	req := &bschemas.BifrostChatRequest{Input: build()}
+	rep = components.Report{}
+	if _, err := s.Offload(req, &rep, ctxFor(st)); err != nil {
+		t.Fatal(err)
+	}
+	if !present(req.Input) {
+		t.Fatalf("summarize removed content the agent had expanded: the model is left with a "+
+			"pointer to nothing where it used to get the content, and the agent will expand it "+
+			"again next turn. gates=%v", rep.Gates)
 	}
 }

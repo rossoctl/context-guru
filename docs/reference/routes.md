@@ -236,7 +236,13 @@ counter distinguishes an expand-induced cache-write from any other.
 
 It grows **per turn per message**, not per distinct content: every later turn re-sends the same
 original and the same abandonment is observed again, while only the first is a real cache-write. Read
-it as "expansion is churning cached prefixes here". The per-component gate
+it as "expansion is churning cached prefixes here".
+
+It also counts **one event**, not every expand-induced cache-write: a replay declined because the
+content was expanded. At least one sibling is uncounted — protecting expanded content shortens
+`summarize`'s span, which can invalidate a checkpoint and force a re-summary, and different summary
+text at a fixed prefix position is another suffix cache-write. So a zero here does not mean expansion
+cost nothing. The per-component gate
 `kept_verbatim_after_expand` is the per-message view, and `already_marked` is its benign sibling —
 the two were one label (`marker_or_kept_verbatim`) until they were split. Full picture in
 [what an expand costs](../how-to/recover-context.md#what-an-expand-costs-across-turns).
