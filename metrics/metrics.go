@@ -780,6 +780,17 @@ type Snapshot struct {
 	// StashMissing, and the remedy for a rising StashMissing is stash_ttl_seconds (the payload
 	// was reclaimed too eagerly) or a larger reserve (the re-stash was refused) — read Live
 	// against Capacity and Bytes against MaxBytes to tell which.
+	//
+	// BOTH AT ZERO IS NOT EVIDENCE THAT THE HORIZON WORKS. It means the reserve never bound.
+	// sweepExpired runs only from StashRoom, PutStash's pre-refusal path and evictOldest — i.e.
+	// only once the reserve, the shared exempt budget or the entry cap is already binding — and
+	// PutStash's refresh branch does not check expiry, so on an unsaturated run an
+	// expired-but-unswept payload is resurrected in place and NEITHER counter moves. That is the
+	// intended behaviour (a slot is released when a slot is wanted), but it means a run must
+	// actually saturate the reserve before this pair says anything, which is the same precondition
+	// iteration 024 failed to meet for stash_refused — and failing it is how #190 became
+	// undecidable from data. What distinguishes "never bound" from "working" is StashRefused and
+	// StashLive against StashCapacity.
 	// Filled by the host at serve time (offload + store live below metrics).
 	StashRefused  int64 `json:"stash_refused"`
 	StashMissing  int64 `json:"stash_missing"`

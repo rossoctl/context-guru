@@ -25,7 +25,7 @@ The document has six top-level fields (from the `Config` struct in
 | `enabled` | `true` | Toggles the state store. `false` wires a `store.Nop`: nothing is stashed, so offloads become **one-way** and must run `marker_mode: off`. |
 | `ttl_seconds` | `10000` | Entry lifetime, and it **slides** — a `Get` refreshes the deadline, so an entry replayed every turn never ages out. Raised from 1800 because Terminal-Bench tasks average ~1975 s of wall clock and run to 4 h, so the old default expired live frozen decisions mid-task. |
 | `max_entries` | `5000` | LRU cap. Two groups of keys are **exempt** from LRU eviction, and they behave differently when full — see below. Eviction reclaims **expired** entries first, exempt ones included. Raised from 1,000: one process-wide store serves every concurrent session, and a single reversible removal writes five entries (the payload, `cg:own:`, `cg:xseen:`, and the two pinned decision records), so 1,000 was an order of magnitude under the observed volume. |
-| `stash_ttl_seconds` | `1800` | The **rewind payloads'** own entry lifetime, shorter than `ttl_seconds` and capped by it. A payload is re-derivable from the transcript, a frozen decision is not — see [the two horizons](#why-payloads-expire-sooner-than-decisions) below. |
+| `stash_ttl_seconds` | `1800` | The **rewind payloads'** own entry lifetime, shorter than `ttl_seconds` and capped by it (the cap is silent, so `/config` reports the **effective** value, not the configured one). A payload is re-derivable from the transcript, a frozen decision is not — see [the two horizons](#why-payloads-expire-sooner-than-decisions) below. |
 | `stash_max_bytes` | `268435456` (256 MiB) | What the **rewind reserve** may cost in memory. Entries are a poor proxy for it in this one namespace: every other exempt entry is a marker line or an integer, a rewind payload is a whole tool output. Whichever of `max_entries` and this binds first, binds. |
 | `max_sessions` | `100` | Cap on per-session sticky-id sets. |
 
@@ -77,11 +77,33 @@ Giving both namespaces `ttl_seconds` meant one busy period could hold the reserv
 ~2.8 h after the load that filled it, refusing every removal process-wide the whole time. The
 split shrinks that hangover to `stash_ttl_seconds` without making any removal irreversible.
 
-The exposure it leaves, stated plainly: a turn that runs **no pipeline** performs no refresh (an
+**Which offloaders re-derive, because it is not all of them:**
+
+| Offloader | Per-turn re-stash | If its payload is reclaimed |
+|---|---|---|
+| `mask`, `cmdfilter`, `collapse`, `failed_run`, `skeleton`, `readlifecycle`, `agentdiet` | `reapplyFrozen` → `commitRefresh`, every turn regardless of the tail gate | re-created on the request path; `stash_revived` |
+| `summarize`, `extract_llm` | only past their own gates — `summarize`'s trigger and model-availability checks, `extract_llm`'s `no_goal_keywords` | a skipped turn refreshes nothing, but it splices nothing either, so no marker of theirs dangles while the skip lasts |
+| `dedup`, `extract`, `linecap`, `smartcrush` | **none** — no replay path at all; they redo the transformation from the re-sent original through the *refusable* `commitMark` | once reclaimed it is a new stash, so a saturated reserve **refuses** and the message goes upstream verbatim after earlier turns sent it compacted: `stash_refused` **plus a representation flip** |
+
+That last row is worth reading twice, because `stash_refused`'s own description promises "nothing
+became irreversible" — true about reversibility, and silent about the cache-write actually paid. It
+is reachable at `ttl_seconds` too, so it is not new; a shorter payload horizon shortens the distance
+to it.
+
+`summarize`'s trigger skip is **recurring**, not a one-off: the agent's own compaction shrinks the
+incoming request and can drop it back under the trigger's `min_request_tokens` for several
+consecutive turns.
+
+The exposure this leaves, stated plainly: a turn that runs **no pipeline** performs no refresh (an
 `x-context-guru-bypass` request, or the agent-compaction bypass), so an unbroken run of bypassed
 turns longer than `stash_ttl_seconds` could outlive a payload whose marker is still live. Both are
-single-request events in practice, and the outcome if it happens is the reported one —
+single-request events in practice, and on the first row above the outcome is the reported one —
 `stash_missing` — not a silent loss.
+
+**`stash_expired` and `stash_revived` both at zero means the reserve never bound**, not that the
+horizon is working: the sweep runs only once a budget is already binding, and an expired-but-unswept
+payload is resurrected in place by the next write. What tells the two apart is `stash_refused` and
+`stash_live` against `stash_capacity`.
 
 The pinned prefixes are a code-level property of the key layout, supplied by their owners via
 `store.Options.PinPrefixes` — not a YAML knob.
