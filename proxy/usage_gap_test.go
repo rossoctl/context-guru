@@ -198,6 +198,62 @@ func TestTheShapeRecordNamesTheDialectAndCarriesNoContent(t *testing.T) {
 	}
 }
 
+// THE RECORD MUST DESCRIBE THE EVENT THAT WAS UNREADABLE, not the last event of the stream.
+//
+// parseSSEUsageWhy scans every event; the record described only the final `data:` payload. On the
+// Anthropic-family transport the usage block arrives in `message_start` and the stream ENDS with
+// `message_stop`, so an unrecognised streamed dialect produced `why=unparsed_dialect` and a record
+// of the terminal event — no usage_at, no usage_keys, nothing about the dialect. Worse, it took the
+// "no block found" key slot, so the bounded budget was spent on a record that says nothing.
+//
+// That is precisely where the motivating gap would sit: a streamed Bedrock aws/claude-* response.
+// The record is this change's deliverable, so failing on that shape is failing at the one job.
+func TestTheShapeRecordDescribesTheUnreadableEventNotTheLastOne(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+	ResetUsageShapeRecordForTest()
+
+	// The Anthropic-family shape: usage in the FIRST event, a terminal event carrying none.
+	stream := "data: {\"type\":\"message_start\",\"message\":{\"usage\":" +
+		"{\"inputTokens\":10,\"cacheReadInputTokens\":9}}}\n" +
+		"data: {\"type\":\"message_stop\"}\n"
+	_, why, _ := responseUsageWhy("text/event-stream", []byte(stream))
+	if why != usageMissUnparsed {
+		t.Fatalf("classified %v, want unparsed_dialect — the fixture is not exercising the gap", why)
+	}
+
+	got := buf.String()
+	for _, want := range []string{"usage_at=message.usage", "inputTokens", "cacheReadInputTokens"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the record does not contain %q: it describes the terminal event instead of "+
+				"the one no spelling could read, so a streamed dialect gap produces a record that "+
+				"names no dialect:\n%s", want, got)
+		}
+	}
+}
+
+// And the record must look where the CLASSIFIER looked. usageShapeAttrs used Exists() where
+// parseUsageWhy now uses usagePresent, so a response with a null top-level usage AND a real nested
+// one recorded `usage_at=usage usage_keys=[]` — pointing at the null, naming no fields, while the
+// nested block held the answer. It also keyed as `usage|`, colliding with a genuinely empty block.
+func TestTheShapeRecordSkipsANullBlockForTheOneThatHasTheAnswer(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+	ResetUsageShapeRecordForTest()
+
+	responseUsageWhy("application/json",
+		[]byte(`{"usage":null,"response":{"usage":{"inputTokens":10,"outputTokens":2}}}`))
+	got := buf.String()
+	if !strings.Contains(got, "usage_at=response.usage") || !strings.Contains(got, "inputTokens") {
+		t.Fatalf("the record points at the null block instead of the one carrying the fields, so "+
+			"it names no dialect:\n%s", got)
+	}
+}
+
 // The record must be useful for the SPLICED-WINDOW case too, and must say so — that is the
 // distinction between "add a dialect" and "stop truncating", which is the whole reason the two
 // counters are separate.
