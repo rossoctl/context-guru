@@ -27,7 +27,7 @@ The choice between the two windows is made on **bytes, not on the line count**. 
 than the window says nothing about their size: an output with a multi-megabyte line inside the kept
 head or tail survived a line-count gate untouched, and *worse than being declined* — dropping the
 small filler lines in the middle counts as acting, which stamps a marker, which then makes `linecap`
-decline `marker_or_kept_verbatim`. Measured at 4,195,111 B in and 4,194,922 B out, 189 bytes saved
+decline `already_marked`. Measured at 4,195,111 B in and 4,194,922 B out, 189 bytes saved
 on a body forwarding 1.57 M tokens. The line window is therefore taken only when it at least halves
 the output; anything else falls through to the character window. The test is in bytes rather than
 tokens deliberately: `max_tokens` is resolved through `max_frac` × the model's context window, which
@@ -86,7 +86,7 @@ A catch-all last stage for huge outputs.
 
 It now names its reason instead of passing silently: `below_max_tokens`,
 `too_few_lines_and_chars` (no window that shrinks it: no usable line window *and* fewer characters
-than the character window's floor — the only genuine decline left), `marker_or_kept_verbatim`, `non_text_blocks`, `marker_no_win`,
+than the character window's floor — the only genuine decline left), `already_marked`, `kept_verbatim_after_expand`, `non_text_blocks`, `marker_no_win`,
 or `cached_prefix`.
 
 `too_few_lines` is **gone** and was not renamed: its population is now either handled (the

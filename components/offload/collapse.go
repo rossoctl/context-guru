@@ -40,7 +40,7 @@ func init() { components.Register("collapse", newCollapse) }
 // multi-megabyte takes the CHARACTER window too. Gating on the line count alone left the
 // motivating shape alive above 40 lines — measured at 4,195,111 B in, 4,194,922 B out, and
 // worse than declining, because dropping the small filler lines in the middle counts as
-// acting and stamps a marker, which then makes linecap decline (marker_or_kept_verbatim)
+// acting and stamps a marker, which then makes linecap decline (already_marked)
 // and forwards 1.57 M tokens. linecap could not have capped it even without the marker:
 // its neverTruncate allow-list exempts any line matching `^\S+:\d+`, which one-line JSON
 // matches by accident (issue #151), so the mitigation this comment used to name is void
@@ -119,8 +119,8 @@ func (cl *Collapse) Offload(req *schemas.BifrostChatRequest, rep *components.Rep
 			rep.Gate("below_max_tokens")
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim") // already offloaded, or expanded by the agent
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate) // already offloaded, or expanded by the agent — the gate says which
 			continue
 		}
 		// Pick the window BEFORE the depth gate so a message that has no usable window is

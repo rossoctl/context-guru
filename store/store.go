@@ -92,6 +92,37 @@ func StashRoom(s Store, size int) bool {
 	return true
 }
 
+// Peeker is an OPTIONAL Store capability: asking whether a key is live WITHOUT touching it.
+//
+// It exists because Get is not a read-only operation on this store. Get slides the TTL and moves
+// the entry to the front of the LRU, which is right for a caller that is about to USE the value and
+// wrong for one that only wants to know a fact about it. A DIAGNOSTIC that renews an entry's
+// lifetime is making a resource decision by accident — and for the pinned namespaces it is not even
+// a cheap one: pinned entries count against the shared exempt budget (exemptRoom), so a pin that no
+// longer expires is pressure on the rewind reserve.
+//
+// The case that motivated it: components/offload.reapplyFrozen asks whether a frozen decision
+// exists purely to decide whether abandoning it costs a cache-write (see ExpandPrefixFlips). It has
+// already decided NOT to replay that decision, so renewing it is the opposite of what the answer
+// means.
+type Peeker interface {
+	// Peek reports whether key is present and unexpired, without sliding the TTL or reordering
+	// the LRU. It never resurrects an expired entry, and never removes one either — expiry is
+	// still enforced where it always was.
+	Peek(key string) bool
+}
+
+// Peek reports whether key is live, without touching it. A store without the capability falls back
+// to Get, which is the answer the caller wanted at the cost of the side effects it wanted to avoid —
+// the same direction every other optional capability degrades in.
+func Peek(s Store, key string) bool {
+	if pk, ok := s.(Peeker); ok {
+		return pk.Peek(key)
+	}
+	_, ok := s.Get(key)
+	return ok
+}
+
 // FrozenLoser is an OPTIONAL Store capability: reporting that a frozen decision
 // under key was dropped (TTL expiry / pin cap) rather than never taken. A bare Get
 // miss cannot tell those apart, and they call for opposite behavior — "never frozen"
@@ -718,6 +749,21 @@ func (m *Memory) FrozenLossStats() (dropped, repaired int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lostN, m.repairedN
+}
+
+// Peek reports whether key is live without sliding its TTL or reordering the LRU. See Peeker.
+//
+// It deliberately does NOT remove an entry it finds expired, unlike Get. Removing would make a
+// read-only probe mutate the store's accounting — including stash_expired and the reserve's byte
+// total — from a caller that only asked a question. The sweep reclaims it at the normal time.
+func (m *Memory) Peek(key string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	el, ok := m.items[key]
+	if !ok {
+		return false
+	}
+	return !m.now().After(el.Value.(*entry).expires)
 }
 
 func (m *Memory) Get(key string) ([]byte, bool) {

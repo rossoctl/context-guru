@@ -158,6 +158,25 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		rep.Skipped = true
 		return nil, nil
 	}
+	// Never summarize away content the agent EXPANDED. summarize replaces the span wholesale
+	// rather than editing in place, so it is the one offloader skipReduce cannot protect — see
+	// trimSpanForKeptVerbatim for why that is both a bounce loop and a broken pointer.
+	//
+	// BELOW the trigger gate, not above it: the trim costs a contentKey hash plus a store Get per
+	// span message, and paying that on a turn summarize was never going to act on is waste — it
+	// also raised kept_verbatim_after_expand on those turns, reporting a decision nothing made.
+	// The re-test of end <= start below is what keeps the original ordering's guarantee.
+	if trimmed := trimSpanForKeptVerbatim(msgs, start, end,
+		func(text string) bool { return isKeptVerbatim(c, contentKey(text)) }); trimmed != end {
+		rep.Gate(GateKeptVerbatim)
+		end = trimmed
+		if end <= start {
+			// Nothing summarizable is left once expanded content is protected. Declining is the
+			// outcome summarize already has for an empty span, and the safe direction.
+			rep.Skipped = true
+			return nil, nil
+		}
+	}
 	model := s.modelClient // config-pinned client wins
 	if model == nil {
 		model = c.Model.For(s.modelSource)

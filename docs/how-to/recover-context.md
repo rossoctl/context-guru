@@ -49,6 +49,53 @@ sequenceDiagram
 
 **3. Out of band.** `GET /expand?id=<hash>` returns an offloaded original directly.
 
+## What an expand costs, across turns
+
+Everything above is about a single turn. Across turns an expand has two consequences that are
+easy to miss, because the in-turn behaviour is deliberately cache-safe and the cross-turn
+behaviour is not the same thing.
+
+**An expand permanently un-compacts that content.** The handler marks the restored original
+kept-verbatim (`cg:keep:`), and every offloader then skips it — otherwise re-compacting would
+bounce the agent straight into another expand, which is the loop that mark exists to prevent. So
+from the next turn onward the original goes upstream **in full, at its original position**.
+
+**That costs one cache-write of the suffix.** Turn N sent compacted bytes at that position and turn
+N+1 sends the full original, which is a change inside the provider's cached prefix — at ~11.5× a
+cache read, the cost the [cache-tail gate](../reference/config.md) exists to avoid everywhere else.
+It happens once per expanded content, on the turn after the expand, and it is counted:
+`expand_prefix_flips` at [`/stats`](../reference/routes.md#get-stats) and
+`cg_expand_prefix_flips_total` at `/metrics`.
+
+That figure is **per turn per message**, not per distinct content — every later turn re-sends the
+same original and the same abandonment is observed again, while only the first is a real
+cache-write. Read it as "expansion is churning cached prefixes in this deployment", not as a count
+of cache-writes. The per-component gate `kept_verbatim_after_expand` is the per-message view; its
+sibling `already_marked` is the benign case (content some component had already compacted), and the
+two were one label until they were split, which is why an older dashboard may show neither.
+
+**The in-turn expansion does not persist as its own turn.** On the intercepted path the client never
+sees the tool_use/tool_result pair — the proxy answers it and returns only the final assistant
+response — so the next turn the client re-sends its own transcript without the expansion. What
+persists is the *flag*, not the content. There is no in-place replacement of a marker by its
+content, and `inject_expand` controls only whether the tool is **advertised**, never how a call is
+answered.
+
+**The repair path is the exception, and it is a fallback for a failure rather than a mode.** When
+interception structurally cannot work — a client tool batched alongside expand, the round cap, a
+stream that will not reconstruct, a non-Anthropic stream, or a bypassed turn carrying older markers
+— the client did see the call and answered `No such tool available`. The proxy repairs that
+tool_result on every later turn, so this is the only configuration in which the round-trip lives in
+the client's transcript.
+
+On that path the repaired tool_result carries a **pointer**, not a second copy: the content is
+already in the transcript at its own position (kept-verbatim, above), so repeating it there sent the
+same tool output upstream twice on every turn. Measured on a 200-line output: 252 bytes when the
+content is compacted and no expand round-trip exists, against 21,511 bytes with one — two full
+copies, permanently. If the original is *not* in the transcript (the agent's own compaction can drop
+that message while keeping the round-trip) the tool_result carries the content, exactly as before,
+because then it is the model's only copy.
+
 ## Recovery needs the store
 
 The store *is* the reversibility mechanism. It defaults to in-memory TTL+LRU — 10000s

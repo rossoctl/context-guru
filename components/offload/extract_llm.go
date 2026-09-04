@@ -876,7 +876,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// If the agent recently EXPANDED this content, leave it verbatim (re-compacting it
 		// would just trigger another expand — a loop). The expand handler marks it.
 		if isKeptVerbatim(c, id) {
-			rep.Gate("kept_verbatim_after_expand")
+			rep.Gate(GateKeptVerbatim)
 			continue
 		}
 		// SAME-SESSION replay first. This session already sent these compacted bytes on an
