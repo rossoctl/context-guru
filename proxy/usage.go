@@ -263,6 +263,20 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss, string) {
 	// a dialect gap, so a streamed all-zero block — legitimate — read as an outage. Per-event
 	// parseUsageWhy costs nothing extra (the boolean form called it anyway) and each event's own
 	// reason is already exact.
+	// THE TWO PARSERS ARE NOT SYMMETRIC, and the asymmetry is here: this one can never return
+	// usageMissUnreadable. It only calls parseUsageWhy with a block usagePresent already accepted,
+	// and that function reaches its ValidBytes branch only when no block was found anywhere — so
+	// `worst` ranges over absent/all_zero/unparsed_dialect and nothing else. A `data:` line cut
+	// mid-JSON yields no present block, so the stream reads as "the provider streamed no usage".
+	//
+	// That leaves usage_unreadable reachable for a sniffed JSON response and structurally
+	// unreachable for a sniffed STREAM, which is where a head+tail window would hide a block —
+	// #200's own defect, in the corner this classification does not cover. Narrow in practice:
+	// Anthropic puts input_tokens in message_start at the front of the head window, so `found` is
+	// true and the answer is `parsed`. Closing it properly means passing the sniffer's own
+	// knowledge that it spliced (s.total > len(s.head)) into responseUsageWhy, which would also
+	// make the buffered case exact instead of inferred from ValidBytes. Filed rather than guessed
+	// at here.
 	worst := usageMissAbsent
 	worstPayload := "" // the event `worst` came from, so the record describes the right one
 	for _, line := range strings.Split(string(raw), "\n") {
