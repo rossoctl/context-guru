@@ -1360,6 +1360,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// can never delay or fail a request.
 	var usage Usage
 	var usageOK bool
+	// WHY, when the answer is no. `usage_reported=false` meant five different things — two
+	// benign, three a measurement outage — and nothing distinguished them, so a run that had
+	// stopped accounting tokens on every request read as healthy (#200). See usageMiss.
+	usageWhy := usageMissNoBody
 	// status/rounds/expanded exist for the lifecycle log line: the upstream status is
 	// the one fact about a request an operator asks for first, and until now it reached
 	// the dashboard row and nothing else.
@@ -1407,7 +1411,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		lg.Info("cg.request", "status", status, "serve_ms", msSince(reqStart, time.Time{}),
 			"upstream_rounds", rounds, "expands", expanded, "sse", sse, "sse_buffered", sseBuffered,
 			"fresh_input", usage.FreshInput, "cache_read", usage.CacheRead,
-			"cache_write", usage.CacheWrite, "output", usage.Output, "usage_reported", usageOK)
+			"cache_write", usage.CacheWrite, "output", usage.Output, "usage_reported", usageOK,
+			"usage_miss", usageWhy.String())
 	}()
 	for round := 0; ; round++ {
 		rounds = round + 1
@@ -1479,10 +1484,15 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			sse = sse || isSSE
 			// Stream straight through, sniffing usage from a bounded head+tail window as
 			// the bytes go by (no buffering of the whole response, no added latency).
-			first, u, ok := h.stream(w, resp)
+			first, u, why, ok := h.stream(w, resp)
 			if !sseBuffered {
 				sseFirstByte = first
 			}
+			// noteUsageMiss, not a bare assignment: usageOK is sticky-true across expand rounds
+			// while this was last-write-wins, so a request whose round 1 parsed usage and whose
+			// round 2 continuation carried none logged `usage_reported=true usage_miss=absent`.
+			// A pair that can contradict itself undoes the reason for having the reason.
+			usageWhy = noteUsageMiss(usageWhy, why, usageOK || ok)
 			if ok {
 				usage, usageOK = u, true
 			} else {
@@ -1530,10 +1540,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// A raw expand call on this path is repaired on the REQUEST side instead
 			// (expand.RepairToolResults).
 			sse = true
-			first, u, ok := h.stream(w, resp)
+			first, u, why, ok := h.stream(w, resp)
 			if !sseBuffered {
 				sseFirstByte = first
 			}
+			usageWhy = noteUsageMiss(usageWhy, why, usageOK || ok) // see the other stream path
 			if ok {
 				usage, usageOK = u, true
 			} else {
@@ -1549,10 +1560,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// bail below ends the client's turn with a complete stream rather than cutting
 			// it off mid-message.
 		}
-		if u, ok := responseUsage(resp.Header.Get("Content-Type"), respBody); ok {
-			usage, usageOK = u, true
+		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody); ok {
+			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
+			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
 		}
 		if isSSE && withheld == nil {
 			// The whole round is already on the wire. Either it never called expand, or it
@@ -1772,7 +1784,7 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 //
 // It also returns the instant the client got its first byte (zero if the body was
 // empty), which is the SSE TTFB accounting in serve.
-func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (firstByte time.Time, u Usage, ok bool) {
+func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -1795,8 +1807,11 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (firstByte 
 			break
 		}
 	}
-	u, ok = responseUsage(resp.Header.Get("Content-Type"), sn.bytes())
-	return firstByte, u, ok
+	// The window, not the response: over sniffMax each way this is head+"\n"+tail, which is not a
+	// whole JSON document. responseUsageWhy reports that as `unreadable_body` rather than as an
+	// unrecognised dialect, because the remedy is here and not in any parser.
+	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), sn.bytes())
+	return firstByte, u, why, ok
 }
 
 // msSince returns milliseconds from start to at (falling back to now if the
@@ -1905,6 +1920,9 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.FrozenHits, snap.FrozenMisses = offload.FrozenStats()
 	// Process-wide, like FrozenHits, and so filled outside the cast below: a removal declined
 	// for want of a stash slot is counted by the COMPONENT, whatever store instance refused it.
+	// Process-wide like the counters below: the parser is package-level, so whatever tenant's
+	// response carried the unreadable usage, this is the process's total.
+	snap.UsageUnparsed, snap.UsageUnreadable = UsageGaps()
 	snap.StashRefused = offload.StashRefusals()
 	// The dangling-marker counter, process-wide for the same reason: it is a COMPONENT that
 	// replayed a marker whose payload had gone, whichever store instance lost it. Reported

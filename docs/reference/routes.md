@@ -139,15 +139,53 @@ Present only when an extraction component has recorded something. See
 ### Provider-billed token tiers, and the honest ratios
 
 Summed from response `usage` blocks, so all four are zero against an upstream that
-reports no usage.
+reports no usage — **or against one whose usage this proxy could not read**, which is a different
+thing and is counted separately. See [when the tiers read zero](#when-the-tiers-read-zero).
 
 | Field | Meaning |
 |---|---|
 | `fresh_input_tokens` · `cache_read_tokens` · `cache_write_tokens` · `output_tokens` | The four billed tiers. |
+| `usage_unparsed` | Responses that carried a usage block in a **spelling this proxy does not recognise**, so the four tiers above were recorded as 0 on an otherwise healthy request. Non-zero means token accounting is offline for some route or provider. Counts **responses**, not requests — one request can drive several upstream rounds through the expand loop — so do not read it as a fraction of `requests`. |
+| `usage_unreadable` | Responses whose examined bytes would not parse at all, so usage could not be sought — a spliced head+tail sniffer window rather than an unrecognised dialect. Different fix; see below. |
 | `attempted_tokens` | What compaction was **allowed** to touch this window — the uncached tail when cache-aware. |
 | `frozen_tokens` | What cache-awareness deliberately left alone. Its benefit is the cache reads that stayed cheap; this is its cost. |
 | `savings_pct_attempted` | `saved ÷ attempted`. The ratio to quote: `savings_pct`'s whole-request denominator recounts the transcript every turn and trends to ~0% on a long session. `0` when nothing was attempted. |
 | `savings_pct_new_input` | `saved ÷ (fresh + cache_write + saved)` — savings as a fraction of what would newly have entered the provider. Reported as `0`, **never 100**, when the provider reported no usage: savings must not be divided by themselves. |
+
+#### When the tiers read zero
+
+Four token fields at 0 on a 200 with correct savings, correct latency and correct everything else
+used to mean **five** different things, with nothing to tell them apart:
+
+| Cause | `usage_miss` in the log | Counted | What to do |
+|---|---|---|---|
+| The provider genuinely reported no usage (an OpenAI response without `stream_options`) | `absent` | — | nothing |
+| A recognised block whose every tier is zero | `all_zero` | — | nothing; legitimate on some responses |
+| Empty response body | `no_body` | — | nothing |
+| A usage block in an **unrecognised dialect** (Bedrock Converse camelCase `usage.inputTokens`, or a nested `response.usage`) | `unparsed_dialect` | `usage_unparsed` | **alert.** Add the dialect — the DEBUG record below names it |
+| The examined bytes were not a whole document, so the block was hidden | `unreadable_body` | `usage_unreadable` | **alert.** Raise `sniffMax` or buffer the body; do *not* go hunting for a missing field name |
+
+Only the last two are failures, and only they are counted — the number an operator watches to
+confirm accounting is healthy must not be incremented by it being broken. The reason for every
+miss, benign ones included, rides on the `cg.request` log line as `usage_miss`.
+
+**Which of the two you can even get depends on the response path**, and this has already misled
+two readers, so: `unreadable_body` can arise **only** on the sniffed path — the one taken when
+neither proxy-injected tool is advertised on the request (`proxy.go`, `if !advertised`), where usage
+is read from a bounded head+tail window instead of the whole body. When either tool *is* advertised
+— which `inject_expand: always` guarantees from the first turn — a non-streamed response is read
+whole and the window never applies, so a miss there is a dialect or a genuine absence and nothing
+else. `valid_json` in the record below settles it either way without needing to know the path.
+
+**The shape record.** On the first unaccounted response per process, `cg.usage_unaccounted` is
+logged at DEBUG with the response's **key names** — top-level keys, where a usage block was found,
+and the key names inside it — and nothing else. No values and no body: a body dump on agent traffic
+writes kilobytes of transcript per response, and this record cannot, by construction. It is what
+turns "usage_reported is false" into "the provider is sending camelCase", from any deployment that
+hits the gap, without a capture rig or an extra request.
+
+This ran undetected for **4,015 of 4,015 requests** in one benchmark iteration and was found two
+iterations later, in a post-mortem chasing a different question.
 
 ### SSE streaming health
 

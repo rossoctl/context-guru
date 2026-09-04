@@ -96,11 +96,18 @@ var notExportedWhy = map[string]string{
 	"StashRefused":              "cg_stash_refused_total, from offload.StashRefusals()",
 	"StashMissing":              "cg_stash_missing_total, from offload.StashMissing()",
 	"StashExpired":              "cg_stash_expired_total, from store.Memory.StashStats()",
-	"StashLive":                 `cg_stash_reserve_entries{state="live"}, from store.Memory.StashStats()`,
-	"StashCapacity":             `cg_stash_reserve_entries{state="capacity"}, from store.Memory.StashStats()`,
-	"StashBytes":                `cg_stash_reserve_bytes{state="live"}, from store.Memory.StashStats()`,
-	"StashMaxBytes":             `cg_stash_reserve_bytes{state="capacity"}, from store.Memory.StashStats()`,
-	"Extract":                   "the cg_extract_* family, from metrics.ExtractSnapshot()",
+	// Exported as cg_usage_unparsed_total / cg_usage_unreadable_total, but read from UsageGaps()
+	// rather than off `s` for the reason the block above this map gives: the /stats handler fills
+	// these AFTER renderMetrics takes its snapshot, so a promLine off `s` would export a permanent
+	// 0 while passing this test — which is precisely the silent-zero failure #200 is about, and it
+	// would be embarrassing to reproduce it in the counter meant to report it.
+	"UsageUnparsed":   "cg_usage_unparsed_total, from proxy.UsageGaps()",
+	"UsageUnreadable": "cg_usage_unreadable_total, from proxy.UsageGaps()",
+	"StashLive":       `cg_stash_reserve_entries{state="live"}, from store.Memory.StashStats()`,
+	"StashCapacity":   `cg_stash_reserve_entries{state="capacity"}, from store.Memory.StashStats()`,
+	"StashBytes":      `cg_stash_reserve_bytes{state="live"}, from store.Memory.StashStats()`,
+	"StashMaxBytes":   `cg_stash_reserve_bytes{state="capacity"}, from store.Memory.StashStats()`,
+	"Extract":         "the cg_extract_* family, from metrics.ExtractSnapshot()",
 
 	// Not numbers. Prometheus has no string sample, and a list of names would have to
 	// become a label — which is what the cg_component_* family already is.

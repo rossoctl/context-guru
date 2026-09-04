@@ -774,13 +774,27 @@ type Snapshot struct {
 	// against Capacity, and Bytes against MaxBytes, say how close each budget is to binding
 	// before any of them fires.
 	// Filled by the host at serve time (offload + store live below metrics).
-	StashRefused  int64 `json:"stash_refused"`
-	StashMissing  int64 `json:"stash_missing"`
-	StashExpired  int64 `json:"stash_expired"`
-	StashLive     int   `json:"stash_live"`
-	StashCapacity int   `json:"stash_capacity"`
-	StashBytes    int64 `json:"stash_bytes"`
-	StashMaxBytes int64 `json:"stash_max_bytes"`
+	// UsageUnparsed and UsageUnreadable are the two ways this proxy failed to ACCOUNT a response
+	// it otherwise served perfectly: the provider sent a usage block in a spelling the parser does
+	// not recognise, or the bytes examined were not a whole document (a spliced sniffer window).
+	// Either way fresh_input_tokens / cache_read_tokens / cache_write_tokens read 0 on a healthy
+	// 200 with correct savings, correct latency and correct everything else — which ran for 4,015
+	// of 4,015 requests in one benchmark iteration and was found two iterations later, in a
+	// post-mortem chasing a different question (#200).
+	//
+	// Counted apart because the REMEDIES are opposite — add the dialect vs. stop truncating the
+	// window — and kept out of the benign cases (a provider that genuinely reported no usage, and
+	// a recognised block whose tiers are all zero), which are reported as `usage_miss` on the
+	// lifecycle log line and are not alertable. Filled by the host at serve time.
+	UsageUnparsed   int64 `json:"usage_unparsed"`
+	UsageUnreadable int64 `json:"usage_unreadable"`
+	StashRefused    int64 `json:"stash_refused"`
+	StashMissing    int64 `json:"stash_missing"`
+	StashExpired    int64 `json:"stash_expired"`
+	StashLive       int   `json:"stash_live"`
+	StashCapacity   int   `json:"stash_capacity"`
+	StashBytes      int64 `json:"stash_bytes"`
+	StashMaxBytes   int64 `json:"stash_max_bytes"`
 	// CompactionResets counts turns whose cached-prefix boundary restarted because the
 	// AGENT compacted its own transcript (it shrank under a stable session id). The
 	// session id deliberately survives that compaction so one conversation is one

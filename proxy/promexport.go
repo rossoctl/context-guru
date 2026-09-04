@@ -524,6 +524,17 @@ func (h *Handler) renderMetrics() string {
 		// declines the removal, whichever store instance refused the payload. This is the
 		// LEADING indicator for cg_expand_unresolved_total{cause="missing"}, which cannot move
 		// until the agent happens to call expand.
+		unparsedUsage, unreadableUsage := UsageGaps()
+		// The two accounting-outage counters (#200). Process-wide, so outside the store cast for
+		// the same reason the stash pair is: the parser is package-level.
+		promHeaderProc(&b, "cg_usage_unparsed_total",
+			"Responses that carried a usage block in a spelling this proxy does not recognise, so fresh/cache_read/cache_write tokens were recorded as 0 on an otherwise healthy request. Non-zero means token accounting is offline for some route or provider; the DEBUG record cg.usage_unaccounted names the dialect (key names only).", "counter")
+		promLine(&b, "cg_usage_unparsed_total", "", float64(unparsedUsage))
+		// Split from the above because the fix is in a different place entirely: these bytes were
+		// not a whole document, so no parser could have read them.
+		promHeaderProc(&b, "cg_usage_unreadable_total",
+			"Responses whose examined bytes would not parse at all, so usage could not be sought — a spliced head+tail sniffer window, not an unrecognised dialect. Raise sniffMax or buffer the body; do NOT go looking for a missing field name.", "counter")
+		promLine(&b, "cg_usage_unreadable_total", "", float64(unreadableUsage))
 		promHeaderProc(&b, "cg_stash_refused_total",
 			"Removals declined because the store's rewind reserve was full. The content was left verbatim and nothing became irreversible; raise max_entries or stash_max_bytes.", "counter")
 		promLine(&b, "cg_stash_refused_total", "", float64(offload.StashRefusals()))
