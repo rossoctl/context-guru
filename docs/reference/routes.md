@@ -145,7 +145,7 @@ thing and is counted separately. See [when the tiers read zero](#when-the-tiers-
 | Field | Meaning |
 |---|---|
 | `fresh_input_tokens` · `cache_read_tokens` · `cache_write_tokens` · `output_tokens` | The four billed tiers. |
-| `usage_unparsed` | Responses that carried a usage block in a **spelling this proxy does not recognise**, so the four tiers above were recorded as 0 on an otherwise healthy request. Non-zero means token accounting is offline for some route or provider. |
+| `usage_unparsed` | Responses that carried a usage block in a **spelling this proxy does not recognise**, so the four tiers above were recorded as 0 on an otherwise healthy request. Non-zero means token accounting is offline for some route or provider. Counts **responses**, not requests — one request can drive several upstream rounds through the expand loop — so do not read it as a fraction of `requests`. |
 | `usage_unreadable` | Responses whose examined bytes would not parse at all, so usage could not be sought — a spliced head+tail sniffer window rather than an unrecognised dialect. Different fix; see below. |
 | `attempted_tokens` | What compaction was **allowed** to touch this window — the uncached tail when cache-aware. |
 | `frozen_tokens` | What cache-awareness deliberately left alone. Its benefit is the cache reads that stayed cheap; this is its cost. |

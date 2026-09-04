@@ -55,6 +55,9 @@ type Usage struct {
 // later, in a post-mortem chasing a different question.
 type usageMiss uint8
 
+// THE ORDER IS PART OF THE TYPE, ascending in severity: parseSSEUsageWhy compares two reasons
+// with `>` to keep the worst one any event of a stream produced. A new value goes at its severity
+// position, not at the end.
 const (
 	usageMissNone       usageMiss = iota // tiers were read; not a miss
 	usageMissNoBody                      // nothing to look at (empty response). BENIGN
@@ -99,6 +102,32 @@ func (m usageMiss) alertable() bool {
 // classification exists to expose, reproduced in the code meant to report it.
 var nestedUsagePaths = [...]string{"response.usage", "usageMetadata", "data.usage", "message.usage"}
 
+// usagePresent reports whether a usage block is actually THERE — an object carrying at least one
+// field — as opposed to merely resolving.
+//
+// gjson's Exists() is `Type != Null || len(Raw) != 0`, and a JSON null has Raw == "null", so
+// `"usage": null` LOOKED like a present block that no recognised spelling could read: classified
+// `unparsed_dialect`, counted as a measurement outage. OpenAI-dialect streaming sends exactly
+// `"usage": null` on every chunk unless the caller sets stream_options.include_usage, so on the
+// openai_upstream route the counter documented as "add the dialect the provider is speaking" was
+// incremented by ordinary healthy traffic.
+//
+// That is #200's own defect with the sign flipped — instead of an outage reading as healthy,
+// healthy traffic reads as an outage — and it costs the same thing: an operator who cannot tell
+// from the counter which one they have. `{}` is treated the same way for the same reason: a
+// provider that sent an empty object told us nothing, which is `absent`, not a missing spelling.
+func usagePresent(v gjson.Result) bool {
+	if !v.IsObject() {
+		return false
+	}
+	empty := true
+	v.ForEach(func(gjson.Result, gjson.Result) bool {
+		empty = false
+		return false // one field is enough
+	})
+	return !empty
+}
+
 // parseUsage extracts the four billed token tiers from a buffered response body,
 // in whichever dialect it is written. This is the number that actually matters on
 // this workload — the request is ~99.95% cached and a cache write bills ~11.5x a
@@ -125,12 +154,21 @@ func parseUsage(body []byte) (Usage, bool) {
 // responseUsage, which sees the whole response, is in a position to say anything about it.
 func parseUsageWhy(body []byte) (Usage, usageMiss) {
 	u := gjson.GetBytes(body, "usage")
-	if !u.Exists() {
+	if !usagePresent(u) {
 		// A block SOMEWHERE ELSE is a parser gap; nothing anywhere is a provider that said
 		// nothing. Distinguishing them is the point: the first is a measurement outage whose fix
 		// is a dialect, the second needs no action at all.
+		//
+		// PRECEDENCE, and it is chosen rather than accidental: a found block wins over an
+		// unparseable document. These probes run BEFORE ValidBytes below, so a spliced window that
+		// hid the top-level `usage` while leaving `response.usage` scannable is reported as a
+		// dialect gap, not as unreadable bytes. That is the right way round — a block we DID find
+		// really does mean a spelling is missing, whatever else is wrong with the bytes — and
+		// `valid_json` in the shape record tells the reader the document was also truncated. Do
+		// not "fix" this by testing ValidBytes first: that would hide a real dialect behind a
+		// transport problem.
 		for _, p := range nestedUsagePaths {
-			if gjson.GetBytes(body, p).Exists() {
+			if usagePresent(gjson.GetBytes(body, p)) {
 				return Usage{}, usageMissUnparsed
 			}
 		}
@@ -212,7 +250,12 @@ func parseSSEUsage(raw []byte) (Usage, bool) {
 func parseSSEUsageWhy(raw []byte) (Usage, usageMiss) {
 	var out Usage
 	found := false
-	sawBlock := false // some event HAD a usage block, whatever came of reading it
+	// The WORST reason any event produced, which is what makes a streamed miss as precise as a
+	// buffered one. The predecessor kept a bare sawBlock flag and reported every rejected block as
+	// a dialect gap, so a streamed all-zero block — legitimate — read as an outage. Per-event
+	// parseUsageWhy costs nothing extra (the boolean form called it anyway) and each event's own
+	// reason is already exact.
+	worst := usageMissAbsent
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "data:") {
@@ -225,12 +268,16 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss) {
 		// Anthropic nests the first usage under message.usage; OpenAI puts it at the top.
 		for _, path := range []string{"usage", "message.usage"} {
 			u := gjson.Get(payload, path)
-			if !u.Exists() {
+			// usagePresent, not Exists: `"usage": null` on every chunk is what OpenAI-dialect
+			// streaming sends absent stream_options.include_usage, and it is not a block.
+			if !usagePresent(u) {
 				continue
 			}
-			sawBlock = true
-			one, ok := parseUsage([]byte(`{"usage":` + u.Raw + `}`))
-			if !ok {
+			one, why := parseUsageWhy([]byte(`{"usage":` + u.Raw + `}`))
+			if why > worst {
+				worst = why // usageMiss is ordered benign -> alertable; see its constants
+			}
+			if why != usageMissNone {
 				continue
 			}
 			found = true
@@ -241,18 +288,13 @@ func parseSSEUsageWhy(raw []byte) (Usage, usageMiss) {
 			out.Output = max64(out.Output, one.Output)
 		}
 	}
-	switch {
-	case found:
+	if found {
 		return out, usageMissNone
-	case sawBlock:
-		// Every block that appeared was rejected. All-zero is the benign version of that and is
-		// indistinguishable here without re-reading each one, so this stays the coarser
-		// `unparsed` rather than being split on a guess — a stream whose only usage block is
-		// all-zero over-reports by one, and a stream in an unrecognised dialect is reported at
-		// all, which it was not before.
-		return out, usageMissUnparsed
 	}
-	return out, usageMissAbsent
+	// Every block that appeared was rejected, and `worst` says why — an unrecognised spelling is
+	// alertable, an all-zero block is not, and no block at all is `absent` because that is what
+	// `worst` starts as.
+	return out, worst
 }
 
 // responseUsage picks the right parser for a response's content type. The returned
@@ -294,6 +336,25 @@ func responseUsageWhy(contentType string, body []byte) (Usage, usageMiss, bool) 
 	return u, why, why == usageMissNone
 }
 
+// noteUsageMiss folds one round's reason into the request's, so `usage_miss` cannot contradict
+// `usage_reported` on the log line.
+//
+// A request can drive several upstream rounds (the expand continuation loop). usageOK is sticky —
+// it is only ever set true and never reset, because a request whose usage was read once IS
+// accounted — but the reason was last-write-wins, so round 2 carrying no usage relabelled an
+// accounted request `absent`. The rule that removes the contradiction: once anything accounted the
+// request, the reason is `parsed`; while nothing has, keep the WORST reason seen, for the same
+// severity-ordering reason parseSSEUsageWhy keeps one.
+func noteUsageMiss(sofar, this usageMiss, accounted bool) usageMiss {
+	if accounted {
+		return usageMissNone
+	}
+	if this > sofar {
+		return this
+	}
+	return sofar
+}
+
 // The two alertable misses, counted apart because their REMEDIES are opposite: `unparsed` means
 // add the dialect the provider is speaking, `unreadable` means the bytes we looked at were not a
 // whole document (a spliced sniffer window) and the fix is upstream of any parser. A single
@@ -312,15 +373,47 @@ var (
 // dialect) and how many carried bytes it could not parse at all. Non-zero on either means
 // fresh_input_tokens / cache_read_tokens / cache_write_tokens are 0 for some route or provider
 // while everything else about the request looks healthy.
+//
+// RESPONSES, not requests, and the distinction matters when reading them against traffic: one
+// request can drive several upstream rounds through the expand continuation loop, so a single
+// unaccounted request can move these more than once. The 4,015-of-4,015 figure this was filed
+// against is a per-REQUEST count, so it is not directly comparable.
 func UsageGaps() (unparsed, unreadable int64) {
 	return usageUnparsed.Load(), usageUnreadable.Load()
 }
 
-// usageShapeOnce keeps the shape record to the FIRST alertable response per process. It is a
-// diagnostic, not a metric: one record names the gap, and one per response would put a line in
-// the log for every request of a run that has the gap on all of them (4,015 of 4,015, in the
-// iteration that motivated this).
-var usageShapeOnce sync.Once
+// One record per DISTINCT SHAPE, bounded — not one per process.
+//
+// A single process-wide sync.Once was wrong in a way that defeated the diagnostic: both alertable
+// classes shared it, so whichever response came first spent it. A spliced window followed by the
+// camelCase response produced a record about the window and left the dialect question unanswered —
+// and the dialect question is what this record exists for. A multi-provider deployment has more
+// than one answer, so "one line per process" was the wrong quantity as well as the wrong one.
+//
+// Keyed on the record's own identity (where the block was, plus its sorted key names), which is
+// exactly the granularity that distinguishes two dialects while collapsing a run that has the same
+// gap on every request: 4,015 of 4,015 identical responses still produce ONE line. Capped so a
+// pathological provider varying its keys cannot turn this into a line per request.
+const usageShapeMax = 8
+
+var (
+	usageShapeMu   sync.Mutex
+	usageShapeSeen = map[string]struct{}{}
+)
+
+// noteUsageShape reports whether this shape has not been recorded before and there is room for it.
+// Under the mutex so the reset below is not a data race — the predecessor's
+// `usageShapeOnce = sync.Once{}` raced any concurrent Do, which -race would have found the moment
+// one of those tests was marked t.Parallel().
+func noteUsageShape(key string) bool {
+	usageShapeMu.Lock()
+	defer usageShapeMu.Unlock()
+	if _, dup := usageShapeSeen[key]; dup || len(usageShapeSeen) >= usageShapeMax {
+		return false
+	}
+	usageShapeSeen[key] = struct{}{}
+	return true
+}
 
 // recordUsageShape logs the response's SHAPE — the top-level key names, plus the key names under
 // any usage block found — and nothing else.
@@ -332,15 +425,42 @@ var usageShapeOnce sync.Once
 // question and a one-line fix — without needing a captured body, an instrumented capture hop, or
 // any extra request.
 func recordUsageShape(sse bool, body []byte) {
-	usageShapeOnce.Do(func() {
-		slog.Default().Debug("cg.usage_unaccounted", usageShapeAttrs(sse, body)...)
-	})
+	attrs := usageShapeAttrs(sse, body)
+	if !noteUsageShape(usageShapeKey(attrs)) {
+		return
+	}
+	slog.Default().Debug("cg.usage_unaccounted", attrs...)
 }
 
-// ResetUsageShapeRecordForTest re-arms the once-per-process shape record. For TESTS only: the
-// record is the diagnostic this whole change exists to produce, so a test has to be able to
-// observe it, and the Once makes that a one-shot for the entire binary.
-func ResetUsageShapeRecordForTest() { usageShapeOnce = sync.Once{} }
+// usageShapeKey identifies a shape by WHERE the block was and what its fields are called — the two
+// things that differ between dialects. Deliberately not the top-level keys: those vary with the
+// response's content (an Anthropic body with a tool_use block has different top-level keys from one
+// without), so keying on them would let one dialect burn the whole budget.
+func usageShapeKey(attrs []any) string {
+	var at, keys string
+	for i := 0; i+1 < len(attrs); i += 2 {
+		switch attrs[i] {
+		case "usage_at":
+			at, _ = attrs[i+1].(string)
+		case "usage_keys":
+			if ks, ok := attrs[i+1].([]string); ok {
+				keys = strings.Join(ks, ",")
+			}
+		}
+	}
+	// No block found at all (the unreadable case) still deserves exactly one line, so it gets a
+	// stable key of its own rather than colliding with a real dialect.
+	return at + "|" + keys
+}
+
+// ResetUsageShapeRecordForTest forgets the shapes recorded so far. For TESTS only: the record is
+// the diagnostic this whole change exists to produce, so a test has to be able to observe it, and
+// the per-process bound makes that a one-shot for the entire binary otherwise.
+func ResetUsageShapeRecordForTest() {
+	usageShapeMu.Lock()
+	defer usageShapeMu.Unlock()
+	usageShapeSeen = map[string]struct{}{}
+}
 
 // usageShapeAttrs builds the shape record's key/value pairs. Separated from the logging so a test
 // can assert what it does and — more to the point — what it does NOT contain.
