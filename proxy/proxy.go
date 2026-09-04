@@ -1488,7 +1488,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if !sseBuffered {
 				sseFirstByte = first
 			}
-			usageWhy = why
+			// noteUsageMiss, not a bare assignment: usageOK is sticky-true across expand rounds
+			// while this was last-write-wins, so a request whose round 1 parsed usage and whose
+			// round 2 continuation carried none logged `usage_reported=true usage_miss=absent`.
+			// A pair that can contradict itself undoes the reason for having the reason.
+			usageWhy = noteUsageMiss(usageWhy, why, usageOK || ok)
 			if ok {
 				usage, usageOK = u, true
 			} else {
@@ -1540,7 +1544,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if !sseBuffered {
 				sseFirstByte = first
 			}
-			usageWhy = why
+			usageWhy = noteUsageMiss(usageWhy, why, usageOK || ok) // see the other stream path
 			if ok {
 				usage, usageOK = u, true
 			} else {
@@ -1557,10 +1561,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// it off mid-message.
 		}
 		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody); ok {
-			usage, usageOK, usageWhy = u, true, why
+			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
-			usageWhy = why
+			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
 		}
 		if isSSE && withheld == nil {
 			// The whole round is already on the wire. Either it never called expand, or it

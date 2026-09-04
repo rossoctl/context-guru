@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,24 @@ func TestEveryUsageOutcomeIsDistinguishable(t *testing.T) {
 			"data: {\"usage\":{\"inputTokens\":10}}\n", usageMissUnparsed},
 		{"sse with no usage event", "text/event-stream",
 			"data: {\"type\":\"ping\"}\n", usageMissAbsent},
+
+		// The transport axis was SAMPLED here rather than covered: usageMissZero had no streamed
+		// row, so the one value that is benign-but-block-bearing was untested on the transport
+		// where it was misclassified as a dialect gap. Same for a null field, which is what
+		// OpenAI-dialect streaming sends on every chunk without stream_options.include_usage.
+		{"sse recognised but all zero", "text/event-stream",
+			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":0}}\n", usageMissZero},
+		{"sse with a null usage field", "text/event-stream",
+			"data: {\"choices\":[{\"delta\":{}}],\"usage\":null}\n", usageMissAbsent},
+		{"sse with an empty usage object", "text/event-stream",
+			"data: {\"usage\":{}}\n", usageMissAbsent},
+		{"a null usage field", "application/json", `{"usage":null}`, usageMissAbsent},
+		{"an empty usage object", "application/json", `{"usage":{}}`, usageMissAbsent},
+		// A stream that says nothing readable in one event and the real tiers in another must take
+		// the GOOD outcome, not the worst — `worst` is only the answer when nothing parsed.
+		{"sse null chunk then real usage", "text/event-stream",
+			"data: {\"choices\":[{\"delta\":{}}],\"usage\":null}\n" +
+				"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n", usageMissNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, why, ok := responseUsageWhy(tc.ct, []byte(tc.body))
@@ -92,6 +111,27 @@ func TestOnlyAnAccountingOutageMovesTheUsageCounters(t *testing.T) {
 		{"a recognised all-zero block", "application/json", `{"usage":{"input_tokens":0}}`, 0, 0},
 		{"an empty body", "application/json", "", 0, 0},
 		{"a healthy response", "application/json", `{"usage":{"input_tokens":10}}`, 0, 0},
+
+		// THE TRANSPORT AXIS, which this table sampled rather than covered. Every row above is
+		// application/json, so the rule was asserted only where parseUsageWhy runs and never where
+		// parseSSEUsageWhy does — and the stream path is the half that broke it.
+		//
+		// `usage: null` is not a hypothetical shape. gjson's Exists() is `Type != Null ||
+		// len(Raw) != 0`, and a JSON null has Raw == "null", so a null field looked present; and
+		// OpenAI-dialect streaming sends exactly `"usage": null` on every chunk unless the caller
+		// sets stream_options.include_usage. So this row is ordinary healthy traffic on the
+		// openai_upstream route, and it was moving the counter that means "add a dialect".
+		{"a streamed null usage field", "text/event-stream",
+			"data: {\"choices\":[{\"delta\":{}}],\"usage\":null}\n", 0, 0},
+		{"a streamed all-zero block", "text/event-stream",
+			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":0}}\n", 0, 0},
+		{"a streamed empty usage object", "text/event-stream", "data: {\"usage\":{}}\n", 0, 0},
+		{"a non-streamed null usage field", "application/json", `{"usage":null}`, 0, 0},
+		{"a non-streamed empty usage object", "application/json", `{"usage":{}}`, 0, 0},
+		// And the positive control for the transport, so "no benign row moves it" cannot pass by
+		// the classifier having stopped counting on this path altogether.
+		{"a streamed unrecognised dialect", "text/event-stream",
+			"data: {\"usage\":{\"inputTokens\":10}}\n", 1, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			unpBefore, unrBefore := UsageGaps()
@@ -176,5 +216,82 @@ func TestTheShapeRecordSaysWhenTheBytesWereNotAWholeDocument(t *testing.T) {
 	if !strings.Contains(got, "valid_json=false") {
 		t.Fatalf("the record does not say the bytes would not parse, so it reads as a dialect "+
 			"problem when the fix is in the sniffer:\n%s", got)
+	}
+}
+
+// ONE EARLIER RESPONSE MUST NOT SPEND THE DIAGNOSTIC.
+//
+// The record is the part of this change that unblocks the dialect fix, and it was gated on a single
+// process-wide sync.Once shared by both alertable classes — so whichever response came first
+// consumed it. A spliced window followed by the camelCase response produced a record about the
+// window and left the dialect question, the one the record exists to answer, unanswered.
+//
+// Worse in combination with the null-usage defect that shared this review: a benign OpenAI-dialect
+// chunk was alertable, so on any deployment carrying streamed OpenAI traffic the record was almost
+// certain to be spent on it before an interesting response ever arrived.
+func TestAnEarlierShapeDoesNotSpendTheRecordForALaterDialect(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+	ResetUsageShapeRecordForTest()
+
+	// First: a spliced window, which is alertable but says nothing about any dialect.
+	responseUsageWhy("application/json",
+		[]byte(`{"content":[{"text":"x"`+"\n"+`"usage":{"input_tokens":10}}`))
+	// Then: the response whose shape somebody actually needs.
+	responseUsageWhy("application/json",
+		[]byte(`{"id":"msg_1","usage":{"inputTokens":10,"cacheReadInputTokens":9}}`))
+
+	got := buf.String()
+	if !strings.Contains(got, "inputTokens") || !strings.Contains(got, "cacheReadInputTokens") {
+		t.Fatalf("the camelCase shape was never recorded — an earlier unrelated response spent "+
+			"the one record, so the dialect question this record exists to answer is still open:\n%s", got)
+	}
+
+	// And still bounded: the SAME shape again writes nothing, so a run with the gap on every
+	// request produces one line, not one per request.
+	buf.Reset()
+	responseUsageWhy("application/json",
+		[]byte(`{"id":"msg_2","usage":{"inputTokens":11,"cacheReadInputTokens":8}}`))
+	if strings.Contains(buf.String(), "cg.usage_unaccounted") {
+		t.Fatalf("a second response of an ALREADY RECORDED shape logged again; a run with this gap "+
+			"on 4,015 of 4,015 requests would write 4,015 lines:\n%s", buf.String())
+	}
+
+	// The bound is on distinct shapes, not on responses, and it holds.
+	buf.Reset()
+	for i := 0; i < usageShapeMax+4; i++ {
+		responseUsageWhy("application/json",
+			[]byte(`{"usage":{"tokensVariant`+strconv.Itoa(i)+`":1}}`))
+	}
+	if n := strings.Count(buf.String(), "cg.usage_unaccounted"); n > usageShapeMax {
+		t.Fatalf("recorded %d shapes with a cap of %d: a provider varying its key names could "+
+			"turn the diagnostic into a line per request", n, usageShapeMax)
+	}
+}
+
+// The log line's two halves must not contradict each other across expand rounds. usageOK is
+// sticky-true — a request whose usage was read once IS accounted — while the reason was
+// last-write-wins, so a round 2 continuation carrying no usage relabelled an accounted request
+// `absent`, and `usage_reported=true usage_miss=absent` is a line that undoes the reason for
+// having the reason.
+func TestTheMissReasonNeverContradictsUsageReported(t *testing.T) {
+	// Accounted by any round => parsed, whatever a later round found.
+	if got := noteUsageMiss(usageMissNone, usageMissAbsent, true); got != usageMissNone {
+		t.Errorf("an accounted request reported %v; usage_reported=true with a miss reason is a "+
+			"self-contradicting log line", got)
+	}
+	if got := noteUsageMiss(usageMissUnparsed, usageMissAbsent, true); got != usageMissNone {
+		t.Errorf("a request accounted by a later round still reported %v", got)
+	}
+	// Unaccounted => keep the WORST reason seen, so a benign later round cannot mask a dialect gap
+	// an earlier one found.
+	if got := noteUsageMiss(usageMissUnparsed, usageMissAbsent, false); got != usageMissUnparsed {
+		t.Errorf("reported %v, want unparsed_dialect: a later benign round masked the round that "+
+			"found a dialect gap", got)
+	}
+	if got := noteUsageMiss(usageMissAbsent, usageMissUnparsed, false); got != usageMissUnparsed {
+		t.Errorf("reported %v, want unparsed_dialect", got)
 	}
 }
