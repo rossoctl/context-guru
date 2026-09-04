@@ -37,6 +37,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/proxy"
+	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -916,9 +917,14 @@ func effectiveConfig(cfg *config.Config, addr, openai, anthropic, bob, dbPath st
 		"inject_expand":        envOr("INJECT_EXPAND", "auto"),
 		"cheap_model":          os.Getenv("CHEAP_MODEL"),
 		"cheap_model_provider": envOr("CHEAP_MODEL_PROVIDER", "anthropic"),
+		// stash_ttl_seconds is the EFFECTIVE value, not the configured one: it is capped at
+		// ttl_seconds, silently, so publishing the raw field showed 20000 on the dashboard while
+		// the store used 10000. A config surface that disagrees with the running store is the same
+		// silent divergence #200 is about. The other three need no such treatment — their defaults
+		// are filled in but nothing overrides an explicit value.
 		"store": map[string]any{"ttl_seconds": cfg.Store.TTLSeconds,
 			"max_entries": cfg.Store.MaxEntries, "stash_max_bytes": cfg.Store.StashMaxBytes,
-			"stash_ttl_seconds": cfg.Store.StashTTLSeconds},
+			"stash_ttl_seconds": store.EffectiveStashTTLSeconds(cfg.Store)},
 		"dashboard":     map[string]any{"db_path": dbPath, "capture_content": content, "trusted_cidrs": cidrs},
 		"build_version": buildinfo.Version,
 		"build_commit":  buildinfo.Commit,

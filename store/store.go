@@ -251,9 +251,11 @@ type Options struct {
 	// Memory.stashBytes for why this namespace is budgeted in bytes and the rest in entries.
 	StashMaxBytes int64 `yaml:"stash_max_bytes"`
 	// StashTTLSeconds is the REWIND PAYLOADS' own entry lifetime, shorter than TTLSeconds.
-	// Zero => DefaultStashTTL. Capped at TTLSeconds, since a payload outliving the decision
-	// that names it is memory nothing can ever read. See DefaultStashTTL for why the two
-	// namespaces do not want the same horizon.
+	// Zero => DefaultStashTTL. Capped at TTLSeconds, since a payload outliving the decision that
+	// names it is a reserve slot held for almost nothing. Report it through
+	// EffectiveStashTTLSeconds, never raw: the cap is applied silently, and publishing the
+	// configured value while the store uses another is the same silent divergence #200 is about.
+	// See DefaultStashTTL for why the two namespaces do not want the same horizon.
 	StashTTLSeconds int `yaml:"stash_ttl_seconds"`
 	MaxSessions     int `yaml:"max_sessions"`
 }
@@ -300,9 +302,7 @@ const DefaultTTL = 10000 * time.Second
 //     holds them; losing one flips an already-cached message and re-writes the suffix at ~11.5x
 //     the read price. It needs to survive a whole long-horizon task, idle gaps included, which
 //     is what DefaultTTL is sized for.
-//   - A payload is a copy of content the AGENT RE-SENDS every turn. Every offloader replays its
-//     frozen decision on every turn regardless of the cache-tail gate — it must, or the message
-//     reverts full→compacted→full and churns the KV cache — and that replay path calls
+//   - A payload is a copy of content the AGENT RE-SENDS every turn. The replay path calls
 //     components/offload.commitRefresh, which PutStashes the payload again from the message text
 //     it just read. So a live marker's payload has its expiry slid every turn, and one already
 //     reclaimed is RE-CREATED on the REQUEST path, before the request goes upstream and
@@ -312,11 +312,38 @@ const DefaultTTL = 10000 * time.Second
 // value DefaultTTL's own comment records as too short for a frozen decision (headroom's CCR
 // store) — reused here, in the one namespace whose horizon it does fit, rather than invented.
 //
+// WHICH OFFLOADERS ACTUALLY DO THAT, because an earlier version of this comment said "every
+// offloader on every turn" and that quantifier is false in two ways with different consequences:
+//
+//   - The reapplyFrozen family (mask, cmdfilter, collapse, failed_run, skeleton, readlifecycle,
+//     agentdiet) does behave as described: the replay runs on every turn regardless of the
+//     cache-tail gate, because it must, or the message reverts full→compacted→full.
+//   - summarize and extract_llm have GATES AHEAD of their replay phase — summarize returns at
+//     summarize.go:157 on its trigger and at :162/:165 when no model client resolves, both before
+//     tryReuse; extract_llm returns at extract_llm.go:659 on no_goal_keywords, before Phase 1.
+//     A skipped turn refreshes none of their payloads. summarize's trigger skip is RECURRING
+//     rather than a one-off, because the agent's own compaction shrinks the incoming request and
+//     can drop it back under Trigger.MinRequestTokens for several consecutive turns; "the cheap
+//     model is down" likewise persists for many turns by nature. A skipped component splices
+//     nothing, so no marker of its goes upstream on those turns and no marker dangles — the
+//     payload's reclamation is harmless while the skip lasts, and the exposure is only that its
+//     next firing may find the payload gone and the reserve full at the same moment.
+//   - dedup, extract, linecap and smartcrush have NO replay path at all (no reapplyFrozen and no
+//     commitRefresh). They redo the transformation from the re-sent original every turn, so their
+//     per-turn write goes through the REFUSABLE commitMark. While the payload is live that lands
+//     in PutStash's refresh branch and is retained unconditionally; once reclaimed it is a NEW
+//     stash, and a new stash into a saturated reserve is refused, the component declines, and the
+//     message goes upstream verbatim after earlier turns sent it compacted. So for these four the
+//     outcome is stash_refused PLUS a representation flip, not stash_missing — and stash_refused's
+//     operator-facing text promises "nothing became irreversible", which is true about
+//     reversibility and silent about the cache-write actually paid. Reachable at 10,000s too, so
+//     not introduced here; this horizon shortens the distance to it by 5.5x.
+//
 // The residual exposure, stated rather than waved at: a turn that runs NO pipeline performs no
 // refresh (an x-context-guru-bypass request, or the agent-compaction bypass), so a long
 // unbroken run of bypassed turns could outlive a payload while its marker is still live in the
-// transcript. Both are single-request events in practice. If it happens the outcome is the
-// already-reported one — stash_missing on the next replay — not a silent loss, and
+// transcript. Both are single-request events in practice. On the reapplyFrozen family the outcome
+// is then the already-reported one — stash_missing on the next replay — not a silent loss, and
 // stash_revived is what says whether reclamation is being absorbed as designed.
 const DefaultStashTTL = 1800 * time.Second
 
@@ -355,6 +382,18 @@ const DefaultMaxEntries = 5000
 // (stash_refused), instead of quietly making them irreversible.
 const DefaultStashMaxBytes = 256 << 20
 
+// EffectiveStashTTLSeconds is the payload horizon a store built from these Options will ACTUALLY
+// use, in seconds — the default filled in and the ttl_seconds cap applied.
+//
+// It exists so the config surface cannot drift from the store. /config published the configured
+// value, so `stash_ttl_seconds: 20000` with `ttl_seconds: 10000` displayed 20000 on the dashboard
+// while the store used 10000 — a silent divergence between what an operator is told and what runs,
+// which is the shape #200 is about, in the config surface instead of the metrics one. Derived from
+// the same code path NewMemory uses rather than re-implemented, so the two cannot disagree.
+func EffectiveStashTTLSeconds(o Options) int {
+	return int(NewMemory(o).stashTTL / time.Second)
+}
+
 // NewMemory builds an in-memory store. Zero/negative option fields fall back to
 // defaults (DefaultTTL, DefaultMaxEntries, 100 sessions of sticky sets).
 func NewMemory(o Options) *Memory {
@@ -374,10 +413,18 @@ func NewMemory(o Options) *Memory {
 	if o.StashTTLSeconds <= 0 {
 		stashTTL = DefaultStashTTL
 	}
-	// A payload outliving the frozen decision that names its marker is memory nothing can read:
-	// once the decision is gone no replay stamps that marker again. So an operator who shortens
-	// ttl_seconds below the payload default gets the shorter of the two rather than a reserve
-	// held open by dead payloads.
+	// A payload outliving the frozen decision that names its marker is a reserve slot held for
+	// almost nothing: once the decision is gone, no replay stamps that marker again. Not "nothing
+	// can EVER read it" — the model can still call expand on a marker it read in an earlier turn's
+	// context, because the marker lives in the conversation it is reasoning over and not only in
+	// the request the proxy just built. That path is rare and short-lived and does not change the
+	// conclusion, so the cap stands; the claim is just narrower than it was.
+	//
+	// So an operator who shortens ttl_seconds below the payload default gets the shorter of the
+	// two rather than a reserve held open by dead payloads — which would be #190's saturation
+	// arrived at by configuration. Deliberately no escape hatch: a workload that wants payloads to
+	// outlive decisions is better served by raising ttl_seconds. EffectiveStashTTLSeconds is what
+	// the config surface must report, so the cap is not silent.
 	if stashTTL > ttl {
 		stashTTL = ttl
 	}
@@ -488,6 +535,23 @@ func (m *Memory) ttlFor(e *entry) time.Duration {
 	return m.ttl
 }
 
+// setExpiry stamps an entry's deadline from its own horizon and keeps nextExpiry a valid lower
+// bound. EVERY write that can move a deadline goes through here.
+//
+// It exists because the correctness argument otherwise has to be redone per site. Three of the five
+// sites can only move a deadline LATER, where noteExpiry is a no-op by construction, and two can
+// move it EARLIER (a plain entry claimed as a stash, ttl -> stashTTL). Getting that wrong is not a
+// visible bug: a bound left above an entry's real expiry makes sweepExpired return early, so the
+// entry is never reclaimed and — for a payload — the reserve slot is held for the life of the
+// process, which is the permanent version of the saturation this whole change is about. The safety
+// of the later-only sites also rests on stashTTL <= ttl and a monotonic clock, so it is a
+// consequence of a cap elsewhere rather than a local property. One helper, one comparison, and a
+// sixth site cannot get it wrong.
+func (m *Memory) setExpiry(e *entry) {
+	e.expires = m.now().Add(m.ttlFor(e))
+	m.noteExpiry(e.expires)
+}
+
 func (m *Memory) pinCap() int   { return m.max / 2 }
 func (m *Memory) stashCap() int { return m.max / 2 }
 
@@ -568,13 +632,10 @@ func (m *Memory) PutStash(key string, payload []byte) bool {
 			m.stashN++
 			m.stashBytes += int64(len(payload))
 		}
-		// Set AFTER the slot claim above, so an entry that just became a stash gets the payload
-		// horizon rather than keeping the one it was written with. noteExpiry because that case
-		// moves the deadline EARLIER — an ordinary refresh only ever pushes it out, and a bound
-		// that is too low costs one wasted sweep, but a bound left above an entry's real expiry
-		// makes sweepExpired skip it and the reserve slot is never reclaimed.
-		e.expires = m.now().Add(m.ttlFor(e))
-		m.noteExpiry(e.expires)
+		// AFTER the slot claim above, so an entry that just became a stash gets the payload horizon
+		// rather than keeping the one it was written with — the one refresh that moves a deadline
+		// EARLIER, which is why setExpiry lowers the sweep bound unconditionally.
+		m.setExpiry(e)
 		m.ll.MoveToFront(el)
 		return true
 	}
@@ -590,7 +651,7 @@ func (m *Memory) PutStash(key string, payload []byte) bool {
 		return false
 	}
 	e := &entry{key: key, payload: payload, stash: true}
-	e.expires = m.now().Add(m.ttlFor(e))
+	m.setExpiry(e)
 	// A key the TTL took and a caller has now written again is the shorter payload horizon
 	// working as designed: the replay re-derived the payload from the transcript, and the marker
 	// it is about to send resolves. Counted here — the one place that knows the entry was absent
@@ -607,7 +668,6 @@ func (m *Memory) PutStash(key string, payload []byte) bool {
 	}
 	m.stashN++
 	m.stashBytes += int64(len(payload))
-	m.noteExpiry(e.expires)
 	m.items[key] = m.ll.PushFront(e)
 	for m.ll.Len() > m.max {
 		if !m.evictOldest() {
@@ -685,10 +745,10 @@ func (m *Memory) Put(key string, payload []byte) {
 	if el, ok := m.items[key]; ok {
 		e := el.Value.(*entry)
 		e.payload = payload
-		// ttlFor, not m.ttl: a plain Put must not hand a rewind payload the long horizon and
+		// setExpiry, not m.ttl: a plain Put must not hand a rewind payload the long horizon and
 		// undo the split. Namespaces do not collide today (a payload's key is a bare hash), so
 		// this is the invariant held at the write rather than a fix for an observed path.
-		e.expires = m.now().Add(m.ttlFor(e))
+		m.setExpiry(e)
 		// Claim a pin slot if one has since freed (an earlier session's decisions expired):
 		// the cap is a live-entry budget, not a lifetime quota, so re-freezing every turn
 		// eventually protects this decision instead of leaving it permanently second-class.
@@ -699,7 +759,7 @@ func (m *Memory) Put(key string, payload []byte) {
 		m.ll.MoveToFront(el)
 		return
 	}
-	e := &entry{key: key, payload: payload, expires: m.now().Add(m.ttl)}
+	e := &entry{key: key, payload: payload}
 	// Pin frozen decisions, but never more than half the cache: past that the marginal
 	// pin protects one message while starving the rewind stashes the expand loop needs.
 	// Over the cap the entry is simply evictable — NOT recorded as lost: it is present and
@@ -710,7 +770,7 @@ func (m *Memory) Put(key string, payload []byte) {
 		e.pinned = true
 		m.pinnedN++
 	}
-	m.noteExpiry(e.expires)
+	m.setExpiry(e)
 	m.items[key] = m.ll.PushFront(e)
 	for m.ll.Len() > m.max {
 		if !m.evictOldest() {
@@ -798,7 +858,7 @@ func (m *Memory) Get(key string) ([]byte, bool) {
 	// message's representation and forces the provider to re-write the whole suffix
 	// (one cache-write costs 11.5 cache-reads). Recency and lifetime refresh together.
 	if !m.noSlide {
-		e.expires = m.now().Add(m.ttlFor(e))
+		m.setExpiry(e)
 	}
 	m.ll.MoveToFront(el)
 	return e.payload, true

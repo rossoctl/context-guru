@@ -136,6 +136,40 @@ func TestThePayloadHorizonNeverOutlivesTheDecisionHorizon(t *testing.T) {
 	}
 }
 
+// The config surface must report what the store WILL USE, not what was configured.
+//
+// The cap is applied silently inside NewMemory, so `/config` publishing the raw field showed
+// stash_ttl_seconds: 20000 on the dashboard while the store used 10000 — an operator told one thing
+// while another runs, which is the same silent divergence #200 is about, in the config surface
+// instead of the metrics one. EffectiveStashTTLSeconds derives it from the same code path NewMemory
+// uses, so the two cannot drift apart.
+func TestTheConfigSurfaceReportsTheEffectivePayloadHorizon(t *testing.T) {
+	// The case that diverged: a payload horizon longer than the decision horizon.
+	if got := EffectiveStashTTLSeconds(Options{TTLSeconds: 10000, StashTTLSeconds: 20000}); got != 10000 {
+		t.Errorf("reported %d, want the capped 10000: /config would advertise a horizon the store "+
+			"does not use", got)
+	}
+	// And the cases that did not, which must keep working.
+	if got := EffectiveStashTTLSeconds(Options{TTLSeconds: 10000, StashTTLSeconds: 600}); got != 600 {
+		t.Errorf("reported %d, want the configured 600", got)
+	}
+	if got := EffectiveStashTTLSeconds(Options{}); got != int(DefaultStashTTL/time.Second) {
+		t.Errorf("reported %d, want DefaultStashTTL in seconds", got)
+	}
+	// It must agree with the store built from the same Options, which is the whole point of it
+	// existing rather than the caller re-deriving the rule.
+	for _, o := range []Options{
+		{TTLSeconds: 10000, StashTTLSeconds: 20000},
+		{TTLSeconds: 60},
+		{},
+		{StashTTLSeconds: 42},
+	} {
+		if got, want := EffectiveStashTTLSeconds(o), int(NewMemory(o).stashTTL/time.Second); got != want {
+			t.Errorf("EffectiveStashTTLSeconds(%+v) = %d but the store uses %d", o, got, want)
+		}
+	}
+}
+
 // The constants' RELATIONSHIP is the design, so it is asserted rather than left to whoever next
 // edits one of them: payloads short because a replay re-derives them, decisions long because
 // nothing else holds the bytes the provider cached.
