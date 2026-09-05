@@ -6,7 +6,9 @@ them — per request, per conversation, per account — is a policy, and until n
 no way to price one.
 
 This page is that way. It covers the cost model, the strategies, the offline predictor, and
-what the whole thing measured on this service's own traffic. The short version:
+what the whole thing measured on this service's own traffic. For the *other* lever — how many
+keep-alive pings to spend holding an entry once it exists — see
+[Budget keep-alive pings](kv-cache-keepalive-budget.md). The short version:
 
 - **Prompt caching itself is already earning 77.4%** of the uncached bill, and that is banked.
 - **The reachable TTL headroom on top of it is 7.44%**, taken by a blind keep-alive with no model
