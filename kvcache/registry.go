@@ -479,7 +479,7 @@ func stepCost(prev *Request, prevAction Action, row *Request, action Action, cfg
 	if prev != nil {
 		tokens, tier, expires = entryAfter(prev, prevAction)
 		span := pingSpan(tokens, tier, expires, prev.TS, prevAction, row.TS,
-			cfg.Prices.For(prev.Model), cfg.Semantics, cfg)
+			cfg.Prices.For(prev.Model), cfg.Semantics, cfg, cfg.MaxPings)
 		pingCost, expires = span.cost, span.expires
 	}
 	alive := tokens > 0 && row.TS < expires
@@ -513,7 +513,7 @@ func stepCost(prev *Request, prevAction Action, row *Request, action Action, cfg
 func openSpanCost(last *Request, action Action, cfg Config) float64 {
 	tokens, tier, expires := entryAfter(last, action)
 	return pingSpan(tokens, tier, expires, last.TS, action, cfg.WindowEnd,
-		cfg.Prices.For(last.Model), cfg.Semantics, cfg).cost
+		cfg.Prices.For(last.Model), cfg.Semantics, cfg, cfg.MaxPings).cost
 }
 
 // timeMillisecond is time.Millisecond as an int64, so the conversions above read as

@@ -354,6 +354,14 @@ type convState struct {
 	// closes it, which is why it is held rather than applied immediately: a ping's cost
 	// depends on how long the span turned out to be, and that is scoring, not deciding.
 	pending Action
+	// pendingBudget is the keep-alive budget a PingBudgeter strategy chose for THIS span, and
+	// budgeted says whether it chose one at all. An explicit bool rather than a zero sentinel
+	// for Pricing.Known's reason: a strategy that genuinely decided "no pings" and a strategy
+	// with no opinion are different facts, and reading the first as the second would silently
+	// restore Config.MaxPings on exactly the spans a model asked to leave alone. Held beside
+	// pending and cleared with it.
+	pendingBudget int
+	budgeted      bool
 	// coveredUntil is the far end of the union of alive intervals so far, for RetainedMs.
 	coveredUntil int64
 	// user and model are the last request's, so the OPEN-span pass can price its pings at the
@@ -476,6 +484,19 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 		out.StatsLevels[level]++
 		action := s.Decide(o)
 		out.Decisions[action]++
+		// A strategy that budgets per conversation is asked here, at the same instant and from
+		// the same Observation the action came from, so the budget cannot be computed from
+		// anything the action could not see either. Only asked when the action actually pings —
+		// a budget for a span that will not ping is a number nobody reads.
+		//
+		// A strategy whose Decide already consulted its own PingBudget is therefore asked twice.
+		// That is deliberate: keeping the two independent is what lets an arm implement one
+		// without the other, and a strategy for which the second call is expensive can memoize
+		// on o.RequestID.
+		spanBudget, budgeted := 0, false
+		if b, isBudgeter := s.(PingBudgeter); isBudgeter && action.Pings() {
+			spanBudget, budgeted = b.PingBudget(o)
+		}
 		// HIT IS DECIDED HERE, after the action, and it needs the action to be decided at all.
 		//
 		// A request whose action is ActionExpire writes no cache_control, so the provider reads
@@ -583,6 +604,7 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 			retain(out, st, r.TS, st.expires, cfg.WindowEnd)
 		}
 		st.lastTS, st.pending, st.turn = r.TS, action, st.turn+1
+		st.pendingBudget, st.budgeted = spanBudget, budgeted
 		st.user, st.model = r.User, r.Model
 	}
 
@@ -654,15 +676,19 @@ type pingOutcome struct {
 // land inside five minutes and the rest need only land inside an hour. For every other action
 // the tier never moves and this is the same fixed cadence as before, which is what the ping
 // schedule table in deploy/harbor/kv_ttl_cost_drift_test.go pins.
+//
+// maxPings is the budget for THIS span rather than cfg.MaxPings, so that a PingBudgeter
+// strategy can ask for fewer on one conversation than on another. Callers with no
+// per-conversation opinion pass cfg.MaxPings and get the previous behaviour exactly.
 func pingSpan(tokens int64, tier TTL, expires, lastTS int64, pending Action, spanEnd int64,
-	price Pricing, sem Semantics, cfg Config) pingOutcome {
+	price Pricing, sem Semantics, cfg Config, maxPings int) pingOutcome {
 	out := pingOutcome{tier: tier, expires: expires}
 	if !pending.Pings() || spanEnd <= lastTS || tokens <= 0 {
 		return out
 	}
 	want := pending.PingTier()
 	at := lastTS
-	for i := 0; i < cfg.MaxPings; i++ {
+	for i := 0; i < maxPings; i++ {
 		step := int64(cfg.pingInterval(out.tier) / time.Millisecond)
 		if step <= 0 {
 			break
@@ -714,9 +740,15 @@ func simulatePings(out *Result, ug, mg *groupAcc, st *convState, price Pricing, 
 	cfg Config, spanEnd int64, open bool) {
 	// Whatever happens below, this span is now settled: clearing the pending action is what
 	// stops a conversation being charged twice if the open-span pass visits it as well.
-	pending := st.pending
-	st.pending = ActionExpire
-	r := pingSpan(st.tokens, st.tier, st.expires, st.lastTS, pending, spanEnd, price, sem, cfg)
+	pending, budget, budgeted := st.pending, st.pendingBudget, st.budgeted
+	st.pending, st.pendingBudget, st.budgeted = ActionExpire, 0, false
+	// Config.MaxPings is the ceiling either way: a PingBudgeter can ask for fewer, never more,
+	// so an operator's cap is never raised by a model.
+	if !budgeted || budget > cfg.MaxPings {
+		budget = cfg.MaxPings
+	}
+	r := pingSpan(st.tokens, st.tier, st.expires, st.lastTS, pending, spanEnd, price, sem, cfg,
+		budget)
 	if r.fired == 0 {
 		return
 	}
