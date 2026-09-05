@@ -35,6 +35,9 @@ import sys
 import tempfile
 
 KEY = "ANTHROPIC_BASE_URL"
+# The second key, written only when the proxy has to chain behind an existing gateway. It lives in
+# the same env block because that block is what the SessionStart hook inherits — see cmd_add.
+UPSTREAM_KEY = "ANTHROPIC_UPSTREAM"
 
 # Where this script records what it did, so a later run can tell its own work from the user's.
 META = "$context-guru"
@@ -237,6 +240,18 @@ def cmd_add(args: argparse.Namespace) -> int:
 
     saved = backup(args.file) if existed else ""
     env[KEY] = args.url
+    # --upstream writes the SECOND key that chaining needs, in the same atomic save.
+    #
+    # Not scope creep: without it, chaining survives only as long as the proxy that is already
+    # running. A later session's SessionStart hook reads its configuration from this env block, so a
+    # missing ANTHROPIC_UPSTREAM means that hook starts a proxy aimed at api.anthropic.com — and on a
+    # platform whose gateway holds the credential and rewrites model names, every request in that
+    # session fails. The first real install on a hosted agent ended exactly here, with the skill
+    # telling the user to paste the key in by hand.
+    #
+    # Recorded in our own metadata as well, so uninstall removes only an upstream WE wrote.
+    if getattr(args, "upstream", ""):
+        env[UPSTREAM_KEY] = args.upstream
     data["env"] = env
     # Remember what we took over, so uninstall can hand it back.
     #
@@ -248,6 +263,8 @@ def cmd_add(args: argparse.Namespace) -> int:
     # uninstall can hand it back.
     meta = data.setdefault(META, {})
     meta["installed_base_url"] = args.url
+    if getattr(args, "upstream", ""):
+        meta["installed_upstream"] = args.upstream
     if current:
         meta["previous_base_url"] = current
     save(args.file, data)
@@ -294,6 +311,15 @@ def cmd_remove(args: argparse.Namespace) -> int:
         return 2
     saved = backup(args.file)
     del env[KEY]
+    # Take our upstream key with it, but ONLY the value we recorded writing. An ANTHROPIC_UPSTREAM
+    # the user set themselves is theirs, and uninstall removing it would be the same class of
+    # overreach as deleting a base URL we never installed.
+    recorded_upstream = ""
+    _meta = data.get(META)
+    if isinstance(_meta, dict):
+        recorded_upstream = _meta.get("installed_upstream") or ""
+    if recorded_upstream and env.get(UPSTREAM_KEY) == recorded_upstream:
+        del env[UPSTREAM_KEY]
     # Put back whatever we took over at install time. Deleting the key was leaving a user who had
     # a gateway configured with nothing at all — a worse state than before they installed.
     restored = ""
@@ -306,6 +332,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         # had written a URL it did not.
         meta.pop("previous_base_url", None)
         meta.pop("installed_base_url", None)
+        meta.pop("installed_upstream", None)
         if not meta:
             data.pop(META, None)
     # Leave no litter: an `env: {}` we created is removed with the key. An env block that
@@ -328,6 +355,9 @@ def main() -> int:
         p.add_argument("--file", required=True)
         p.add_argument("--url", default="")
         p.add_argument("--force", action="store_true")
+        p.add_argument("--upstream", default="",
+                       help="also write env.ANTHROPIC_UPSTREAM, so the proxy chains behind an "
+                            "existing gateway in LATER sessions too (the hook reads this block)")
     args = ap.parse_args()
     if args.cmd == "add" and not args.url:
         ap.error("add needs --url")

@@ -95,12 +95,31 @@ STATE="${XDG_STATE_HOME:-$HOME/.local/state}/context-guru"
 mkdir -p "$STATE" 2>/dev/null || STATE="${TMPDIR:-/tmp}"
 PIDFILE="${STATE}/proxy-${PORT}.pid"
 
+# --anthropic-upstream, when something else is already the gateway.
+#
+# On a hosted agent (a coding-agent pod, a managed workspace) $ANTHROPIC_BASE_URL is set by the
+# PLATFORM to its own local gateway, and that gateway is not decoration: it holds the credential and
+# it rewrites model names. One such pod maps `claude/haiku…` to the real model id, so a proxy that
+# forwards straight to api.anthropic.com sends model names Anthropic has never heard of, and every
+# request fails. Chaining behind it is the only configuration that works there.
+#
+# The binary already honours the ANTHROPIC_UPSTREAM environment variable (verified against the
+# released v0.1.1 binary: with it set and no flag, requests arrive at the configured upstream). But
+# relying on inheritance alone is fragile — this hook only sees what the session's env block passes
+# it — so pass it EXPLICITLY when it is configured, and let the plugin option name it too.
+UPSTREAM="${CLAUDE_PLUGIN_OPTION_UPSTREAM:-${ANTHROPIC_UPSTREAM:-}}"
+UPSTREAM_ARGS=()
+if [ -n "$UPSTREAM" ]; then
+  UPSTREAM_ARGS=(--anthropic-upstream "$UPSTREAM")
+fi
+
 PRESET="$PRESET" \
   "${STARTER[@]}" "$BIN" \
   --listen "127.0.0.1:${PORT}" \
   --idle-exit="$IDLE_EXIT" \
   --dashboard \
   --dashboard-db "${STATE}/dashboard-${PORT}.db" \
+  "${UPSTREAM_ARGS[@]+"${UPSTREAM_ARGS[@]}"}" \
   >>"$LOG" 2>&1 &
 started=$!
 disown 2>/dev/null || true
@@ -132,6 +151,11 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # timeout belongs on the idempotence probe above (where a false negative starts a SECOND proxy
   # and overwrites the pidfile with a pid that immediately exits), not on this one.
   if curl -fsS --max-time 1 "$HEALTH" >/dev/null 2>&1; then
+      if [ -n "$UPSTREAM" ]; then
+      note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET}, idle-exit ${IDLE_EXIT}), chained behind ${UPSTREAM}."
+      note "dashboard: http://127.0.0.1:${PORT}/dashboard/"
+      exit 0
+    fi
     note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET}, idle-exit ${IDLE_EXIT})."
     note "dashboard: http://127.0.0.1:${PORT}/dashboard/"
     exit 0

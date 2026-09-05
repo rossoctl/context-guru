@@ -10,12 +10,18 @@
   "homepage": "https://github.com/rossoctl/context-guru",
   "repository": "https://github.com/rossoctl/context-guru",
   "license": "Apache-2.0",
-  "keywords": ["cache", "cost", "proxy", "tokens", "prompt-caching"],
+  "keywords": [
+    "cache",
+    "cost",
+    "proxy",
+    "tokens",
+    "prompt-caching"
+  ],
   "userConfig": {
     "port": {
       "type": "number",
       "title": "Proxy port",
-      "description": "Local port the proxy listens on. The port must be FIXED rather than negotiated: the ANTHROPIC_BASE_URL written into your settings and the session hook that starts the proxy have to agree, and a URL cannot be renegotiated after it is written. Default 8787 — deliberately not 4000, which collides with litellm.",
+      "description": "Local port the proxy listens on. The port must be FIXED rather than negotiated: the ANTHROPIC_BASE_URL written into your settings and the session hook that starts the proxy have to agree, and a URL cannot be renegotiated after it is written. Default 8787 \u2014 deliberately not 4000, which collides with litellm.",
       "default": 8787,
       "min": 1024,
       "max": 65535
@@ -31,6 +37,12 @@
       "title": "Idle exit",
       "description": "Exit the proxy after this long with no requests and no keep-alive ping pending, so nothing is left running on your machine. Must be at least 2x the store's entry lifetime (~5h34m at the default), because exiting clears in-memory cache state.",
       "default": "24h"
+    },
+    "upstream": {
+      "title": "Upstream base URL",
+      "type": "string",
+      "default": "",
+      "description": "Forward to this Anthropic-compatible base URL instead of api.anthropic.com. Set it when something else is already the gateway \u2014 a hosted agent pod, a corporate gateway \u2014 so the proxy CHAINS behind it rather than replacing it. That gateway keeps holding the credential and, on at least one pod, rewriting model names: bypassing it sends model ids the real API has never heard of and every request fails. Empty means go straight to Anthropic."
     }
   }
 }

@@ -13,26 +13,48 @@ settings the user already depends on, noticing a base URL that is already set, a
 the result. The deterministic steps are scripts in `${CLAUDE_PLUGIN_ROOT}/scripts/`. Run them;
 do not reimplement them inline.
 
-## What the user is agreeing to
+**Be decisive. This should feel like one command, not an interview.** The user asked for an install —
+run the steps, then report what happened in a handful of lines. Do not narrate each step before
+taking it, do not explain what a proxy is, and do not ask permission for the default path:
+project-local routing is already the safe choice, which is why it is the default.
 
-Say this plainly before touching anything, because it is the part that matters and it is short:
+There are exactly three things worth stopping for, and in all three continuing would damage
+something:
 
-- Every Claude Code API request in the chosen scope will go through a **local** proxy on
-  `127.0.0.1`. Nothing is sent anywhere else, and the proxy forwards to Anthropic itself.
-- **No API key is needed.** Setting `ANTHROPIC_BASE_URL` without a credential variable keeps
-  their claude.ai login working — a Pro/Max subscription continues to apply, with their usage
-  limits and billing unchanged. (On a subscription the saving lands in usage limits rather than
-  dollars, so `/context-guru:status` cost figures are list-price estimates, not their bill.)
-- The default preset is `cache`: the prompt-cache split and nothing else. No content dropped,
-  no markers, no extra tool in their requests, no model calls.
-- **If the proxy is down, requests in the routed scope do not fail cleanly — they HANG.** With
-  routing configured and nothing listening, a prompt produces no output and no error on either
-  stream, indefinitely. That is the state after a crash, a reboot, or an idle-exit, and it is the
-  whole risk of routing at all; it is why the default scope is this project rather than the machine.
-  The plugin installs a `UserPromptSubmit` hook that detects it, tries to restart the proxy, and
-  otherwise prints what to do — a hook rather than a skill because invoking a skill needs a model
-  call, which is the thing that is broken.
-- `/context-guru:uninstall` removes the key and stops the proxy.
+1. a checksum that could not be verified — never install anyway;
+2. `--global`, which puts every session on the machine behind the proxy — confirm once, naming that;
+3. a base URL already set to somebody else's endpoint — see step 3, where the usual answer is to
+   chain behind it rather than to ask.
+
+Everything else: act, then say what you did.
+
+## What to say before you start
+
+Three lines, not an essay. The user asked for an install; deliver one, and let them ask for detail.
+
+- Routes this project's Claude Code requests through a **local** proxy (`127.0.0.1`), which forwards
+  to Anthropic. **No API key added** — a Pro/Max login keeps working unchanged.
+- **The real risk: if the proxy is down, requests HANG** rather than failing — no output, no error.
+  A `UserPromptSubmit` hook detects that and restarts it. This is why the default scope is one
+  project, not the machine.
+- `/context-guru:uninstall` reverses it, restoring any base URL it replaced.
+
+Fuller detail — preset behaviour, subscription vs metered billing, scope trade-offs — is in
+`docs/how-to/install-plugin.md`. Point at it; do not recite it.
+
+## Do not investigate the user's machine
+
+Bounded on purpose, because an unbounded version of this step got denied as
+`[Credential Exploration]` by Claude Code's own auto-mode classifier on the first real install:
+
+- **Never enumerate, print or test credential variables** — not `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `AWS_*`, nor any `env | grep` over them. This
+  plugin does not read credentials and must not appear to. A proxy plugin sweeping for API keys is
+  indistinguishable from the thing everyone is right to fear.
+- **Do not profile other processes** — no `ps aux`, `ss`, `lsof` or port scanning to identify what
+  else is running. If something else holds the port, the scripts report it; that is enough.
+- The only environment fact you need is whether `$ANTHROPIC_BASE_URL` already names our port, and
+  `echo "${ANTHROPIC_BASE_URL:-unset}"` answers it.
 
 ## Steps
 
@@ -93,7 +115,75 @@ their company gateway, a benchmark endpoint, or another proxy — replacing it s
 break their setup while looking like success. Offer: keep theirs (abandon the install), or
 replace it (and tell them the old value, so they can put it back).
 
-### 4. Write the one key
+**Also check the environment, not only the file.** On a hosted or containerised agent the base URL
+is often set in the process environment rather than in any settings file, so `show` reports
+`exists=false` while the session is already routed elsewhere:
+
+```bash
+echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}"
+```
+
+If that names a port other than ours, **chain rather than replace, and just do it** — run our proxy
+in front of theirs so their gateway still handles auth and upstream routing. On a hosted agent this
+is the normal shape rather than an anomaly to escalate; one line saying what you are chaining behind
+is the right amount of ceremony:
+
+```bash
+ANTHROPIC_UPSTREAM="<their base URL>" "${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"
+```
+
+`ANTHROPIC_UPSTREAM` is the proxy's own environment fallback for `--anthropic-upstream`, and the
+caller's `Authorization` / `x-api-key` passes straight through to it — so their gateway still
+authenticates. For it to survive into later sessions the variable has to be in the settings `env`
+block beside our key, since that is what the SessionStart hook inherits:
+
+```json
+{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787/anthropic",
+         "ANTHROPIC_UPSTREAM": "http://127.0.0.1:<their port>"}}
+```
+
+`settings.py` writes only our one key, so add that second key by hand and say that you did.
+
+Say what you are doing and why in one line, then continue. Replacing a platform-provided gateway
+outright will usually break that agent's authentication, so do not offer it as the default.
+
+### 4. START THE PROXY FIRST, before writing any settings
+
+**This order is not a preference, and getting it wrong breaks the session doing the install.**
+
+Claude Code picks up a settings `env` change **while the session is running** — it does not wait for
+a restart. Observed, in a fresh session driving this very skill: the key was written, the proxy had
+not been started yet, and the session's next API call went to `127.0.0.1:8787` and died with
+`API Error: Connection refused`. It never reached the step that starts the proxy. That left the
+project routed with nothing listening — the hang state this whole design exists to avoid, produced
+by the installer itself.
+
+So: proxy up and answering `/healthz` first, settings second. Then the instant routing takes effect,
+something is already there.
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"
+```
+
+This hook self-gates on `$ANTHROPIC_BASE_URL` naming our port, which is not yet true — so pass the
+routed URL for this one manual invocation:
+
+```bash
+ANTHROPIC_BASE_URL="http://127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT:-8787}/anthropic" \
+  "${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"
+```
+
+Add `ANTHROPIC_UPSTREAM=<their gateway>` here too if step 3 found one to chain behind. Confirm it is
+actually up before continuing — `proxy up on 127.0.0.1:<port>` in the output, or:
+
+```bash
+curl -fsS "http://127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT:-8787}/healthz"
+```
+
+If it did not come up, **stop and do not write the settings key.** An unrouted project with no proxy
+is a working project; a routed one with no proxy is a broken one.
+
+### 5. Write the one key
 
 The port comes from the plugin's configuration (`CLAUDE_PLUGIN_OPTION_PORT`, default `8787`).
 The URL must end in `/anthropic` — that is the path the proxy serves the Anthropic dialect on.
@@ -102,6 +192,11 @@ The URL must end in `/anthropic` — that is the path the proxy serves the Anthr
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add \
   --file <target> --url "http://127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT:-8787}/anthropic"
 ```
+
+If step 3 found a gateway to chain behind, add `--upstream <their base URL>` to that same command.
+Do **not** hand-edit the file to add it: one atomic write, one backup, and uninstall removes only an
+upstream it recorded writing. Skipping it leaves chaining working *only* until the running proxy
+idles out — the next session's hook would start one aimed at `api.anthropic.com`.
 
 - `result=added` — report the `backup=` path to the user. That is their undo.
 - `result=conflict` — you skipped step 3, or the file changed. Go back and ask; only pass
@@ -113,22 +208,21 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add \
 - `result=error reason=unparseable_json` — their settings file is already broken. Do not
   rewrite it. Tell them where and let them fix it.
 
-### 5. Start it and prove it works
+### 6. Prove it, and only then say it worked
 
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"
-```
-
-The script is idempotent and gated: it starts the proxy only if nothing answers `/healthz`, and
-does nothing at all unless `ANTHROPIC_BASE_URL` names our port. In this session that variable is
-**not yet set** — the settings change applies to the *next* session — so verify by hand:
+The proxy went up in step 4, so this is a re-check after the routing change rather than a first
+start — confirm rather than assume:
 
 ```bash
 curl -fsS "http://127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT:-8787}/healthz"
 ```
 
-If nothing answers, start it in the foreground of a background shell and read the log rather
-than declaring victory:
+`start-proxy.sh` is idempotent and gated: it starts the proxy only if nothing answers `/healthz`, and
+does nothing at all unless `ANTHROPIC_BASE_URL` names our port — so re-running it is free.
+
+If nothing answers, **say so and offer to remove the routing key**, because a routed project with no
+proxy is worse than an unrouted one. To diagnose, start it in the foreground of a background shell
+and read the log rather than declaring victory:
 
 ```bash
 context-guru-proxy \
@@ -157,9 +251,10 @@ purpose — exiting clears in-memory cache state. If they want a shorter one, th
 
 ### 6. Tell them what happens next
 
-- The setting takes effect in a **new session** — this one is already running with the old
-  environment. Say so explicitly; otherwise the natural next question is "why is `/status`
-  showing nothing?"
+- **Do not tell them it only takes effect next session.** That was this skill's claim and it is
+  wrong: Claude Code picks the `env` change up live, which is exactly why step 4 starts the proxy
+  first. What IS true is that this session began before the proxy existed, so `/context-guru:status`
+  may have nothing to show yet — say that instead, and that a new session is the clean way to see it.
 - From then on the plugin's `SessionStart` hook starts the proxy automatically if it is not
   running, in the projects that are routed and nowhere else.
 - The proxy exits by itself after `--idle-exit` of no use, so nothing is left running.

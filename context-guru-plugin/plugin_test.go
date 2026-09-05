@@ -1385,3 +1385,71 @@ func TestUninstallDoesNotSignalAProcessThatIsNotOurs(t *testing.T) {
 		})
 	}
 }
+
+// TestChainingUpstreamSurvivesIntoLaterSessions covers the gap the first hosted-agent install hit.
+//
+// On a platform whose own gateway holds the credential and rewrites model names, the proxy has to
+// chain behind it — and the SessionStart hook reads its configuration from the settings env block.
+// With ANTHROPIC_UPSTREAM set only in the installing shell's environment, chaining worked until the
+// proxy idled out; the next session's hook then started one aimed at api.anthropic.com, where every
+// request fails. So `add --upstream` writes both keys in one atomic save.
+//
+// The removal half matters as much: uninstall must take back only an upstream it recorded writing.
+// Deleting one the user set themselves is the same overreach as deleting a base URL we never
+// installed.
+func TestChainingUpstreamSurvivesIntoLaterSessions(t *testing.T) {
+	const theirGateway = "http://127.0.0.1:24180"
+
+	t.Run("written and removed as a pair", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.json")
+		writeJSON(t, path, map[string]any{"env": map[string]any{"MINE": "keep"}})
+
+		if facts, code := settings(t, "add", "--file", path, "--url", ourURL,
+			"--upstream", theirGateway); code != 0 || facts["result"] != "added" {
+			t.Fatalf("add --upstream failed: %v", facts)
+		}
+		env := readJSON(t, path)["env"].(map[string]any)
+		if env["ANTHROPIC_UPSTREAM"] != theirGateway {
+			t.Errorf("ANTHROPIC_UPSTREAM = %v, want %q — without it the hook starts an unchained "+
+				"proxy in every later session", env["ANTHROPIC_UPSTREAM"], theirGateway)
+		}
+		if env["MINE"] != "keep" {
+			t.Error("the user's own env var was lost")
+		}
+
+		if facts, code := settings(t, "remove", "--file", path); code != 0 {
+			t.Fatalf("remove failed: %v", facts)
+		}
+		env = readJSON(t, path)["env"].(map[string]any)
+		if _, still := env["ANTHROPIC_UPSTREAM"]; still {
+			t.Error("uninstall left our upstream key behind")
+		}
+		if env["MINE"] != "keep" {
+			t.Error("removal took the user's own env var with it")
+		}
+	})
+
+	t.Run("an upstream we did NOT write is left alone", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.json")
+		writeJSON(t, path, map[string]any{"env": map[string]any{"MINE": "keep"}})
+
+		// Routed by us, but the upstream is the user's own — no --upstream on the add.
+		if _, code := settings(t, "add", "--file", path, "--url", ourURL); code != 0 {
+			t.Fatal("add failed")
+		}
+		data := readJSON(t, path)
+		env := data["env"].(map[string]any)
+		env["ANTHROPIC_UPSTREAM"] = "https://their-own-choice.example"
+		writeJSON(t, path, data)
+
+		if _, code := settings(t, "remove", "--file", path); code != 0 {
+			t.Fatal("remove failed")
+		}
+		env = readJSON(t, path)["env"].(map[string]any)
+		if env["ANTHROPIC_UPSTREAM"] != "https://their-own-choice.example" {
+			t.Errorf("uninstall deleted an upstream it never wrote: %v", env)
+		}
+	})
+}

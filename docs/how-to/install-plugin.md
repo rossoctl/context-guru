@@ -1,15 +1,21 @@
 # Install as a Claude Code plugin
 
-Two commands, no toolchain, reversible.
+No toolchain, reversible, and the routing decision is per repo.
 
 ```
 /plugin marketplace add rossoctl/context-guru
 /plugin install context-guru@context-guru
+/reload-plugins
 /context-guru:install
 ```
 
-The first two are once per machine. The third is once per repo, and it is the one that decides
-which sessions get routed.
+The first two are once per machine. The last is once per repo, and it is the one that decides which
+sessions get routed.
+
+**`/reload-plugins` is not optional, and skipping it looks like a broken plugin.** `/plugin install`
+tells you to run it, and until you do, this session has no `/context-guru:*` skills — so the next
+line answers `Unknown command: /context-guru:install` on a perfectly good install. Starting a fresh
+session works too; reloading is just quicker.
 
 ## You do not need an API key
 

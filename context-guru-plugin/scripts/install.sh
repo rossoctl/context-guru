@@ -81,12 +81,39 @@ command -v curl >/dev/null 2>&1 || die "no_curl"
 
 # --- 2. release tarball -------------------------------------------------------------------
 if [ "$VERSION" = latest ]; then
-  # Resolve the tag rather than relying on /latest/download redirects, because the checksum
-  # file has to come from the SAME release as the tarball. Two separate redirect follows could
-  # straddle a release published between them.
-  VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null |
-            sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
-  [ -n "$VERSION" ] || die "no_release_found: no published release yet for ${REPO}; build from source or set CONTEXT_GURU_VERSION"
+  # Resolve to a CONCRETE tag once, then use it for both the tarball and checksums.txt — the two
+  # must come from the same release, and two independent /latest/download follows could straddle a
+  # release published between them.
+  #
+  # The web redirect FIRST, not the API. `api.github.com` allows 60 requests/hour for unauthenticated
+  # callers, counted PER IP — so the budget is shared by everyone behind the same address: a corporate
+  # NAT, a CI fleet, a shared dev box. Exhausted, it answers 403, this resolution produced the empty
+  # string, and the script then reported `no_release_found: no published release yet`. That message is
+  # not just unhelpful, it is FALSE — it sent people off to build from source while a perfectly good
+  # release sat published. Observed on a corporate IP: `{"limit":60,"remaining":0,"used":60}` with
+  # v0.1.1 released and downloadable.
+  #
+  # The releases/latest web redirect carries no such budget and lands on /releases/tag/<tag>.
+  VERSION=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+              "https://github.com/${REPO}/releases/latest" 2>/dev/null)
+  VERSION="${VERSION##*/}"
+  # With no releases at all the redirect lands on /releases, so guard against taking that as a tag.
+  case "$VERSION" in
+    ''|releases|latest) VERSION="" ;;
+  esac
+  if [ -z "$VERSION" ]; then
+    # Only now the API, and report WHICH failure it was: "rate limited" and "no release" call for
+    # completely different actions, and conflating them is what made the old message misleading.
+    api=$(curl -sSL -w '\n%{http_code}' "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null)
+    code=$(printf '%s' "$api" | tail -1)
+    VERSION=$(printf '%s' "$api" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+    if [ -z "$VERSION" ]; then
+      case "$code" in
+        403|429) die "github_rate_limited: GitHub's API is rate limited for this IP (60/hour, shared with everything behind the same address), so the latest version could not be resolved. This says NOTHING about whether a release exists. Wait for the window to reset, or set CONTEXT_GURU_VERSION=vX.Y.Z to skip resolution entirely." ;;
+        *)       die "no_release_found: no published release for ${REPO} (HTTP ${code}); build from source or set CONTEXT_GURU_VERSION" ;;
+      esac
+    fi
+  fi
 fi
 NUM="${VERSION#v}"
 TARBALL="context-guru_${NUM}_${OS}_${ARCH}.tar.gz"
