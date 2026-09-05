@@ -271,6 +271,18 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	var cands []sweepCand
 	var keys []string
 	changed := 0
+	// Skipped is a property of the OUTCOME, not of one exit, and this function has two: the
+	// inventory floor below returns early, and every turn outside the pre-expiry window reaches
+	// it with no candidates at all. Setting it only on the tail return made 29,321 of 29,372
+	// production rows report `mutated=1` for a component that had DECLINED -- because
+	// dash/event.go computes Mutated as !Reverted && !Skipped, and GateN is a no-op at n<=0, so
+	// those turns recorded neither a gate nor a skip. A deferred guard covers both exits and any
+	// future one; the alternative, a copy of the check at each return, is what went wrong here.
+	defer func() {
+		if changed == 0 {
+			rep.Skipped = true
+		}
+	}()
 	// eligible counts candidates that cleared every gate this component knows about. Compared with the
 	// inventory's size below, to catch a pre-filter that thinned it -- see the comment at the append
 	// site for why that is the failure worth a tripwire.
@@ -553,9 +565,6 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		}
 	}
 
-	if changed == 0 {
-		rep.Skipped = true
-	}
 	return keys, nil
 }
 
@@ -856,8 +865,21 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 	//
 	// Note what neither mode can do: prevent the fresh read that already happened on THIS call. The
 	// counter is what tells an operator the window is mistimed.
-	if !fellBack && usage.CacheRead == 0 {
-		r.gate("sweep_prefix_cache_read_ZERO")
+	//
+	// A WRITE trips it as surely as a zero read, and testing the read alone let the harm through.
+	// Production: three asks re-created the agent's prefix for 704,925 opus cache_write tokens,
+	// $3.42 and 73% of this component's entire spend -- and two of them had read 39,805 tokens of
+	// a stable sub-prefix, so `CacheRead == 0` was false and the counter stayed silent on $2.26 of
+	// it. A partial hit is not evidence of safety: the write is the harm, at 1.25x fresh on the
+	// AGENT's model rather than a tenth of it, and it is exactly what extract_econ.go cited when
+	// it rejected prefix reuse.
+	if !fellBack && (usage.CacheRead == 0 || usage.CacheWrite > 0) {
+		if usage.CacheWrite > 0 {
+			r.gate("sweep_prefix_cache_write")
+		}
+		if usage.CacheRead == 0 {
+			r.gate("sweep_prefix_cache_read_ZERO")
+		}
 		if e.blockFallback {
 			r.gate("sweep_fallback_blocked")
 			r.rec.Rejection = "the prefix ask read nothing from cache and block_fallback is set; " +

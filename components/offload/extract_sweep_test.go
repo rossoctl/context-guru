@@ -23,7 +23,11 @@ import (
 type fakeAsker struct {
 	reply     string
 	cacheRead int
-	err       error
+	// cacheWrite is what the provider says it WROTE for this ask. Non-zero means the agent's own
+	// prefix was re-created at the agent model's write rate, which is the harm the component's
+	// counters exist to catch -- see TestSweepPrefixWriteTripsTheCounterEvenOnAPartialHit.
+	cacheWrite int
+	err        error
 	// viaTool reports the reply as having arrived through the proxy's structured-answer tool rather
 	// than as text, which is the one thing about a reply the parser CANNOT infer: it reads a
 	// tool_use input and a JSON array in prose identically.
@@ -40,8 +44,8 @@ func (f *fakeAsker) Ask(_ context.Context, session, ask string) (string, compone
 	if f.err != nil {
 		return "", components.PrefixUsage{}, f.err
 	}
-	return f.reply, components.PrefixUsage{CacheRead: f.cacheRead, Fresh: 40, Output: 90,
-		ViaTool: f.viaTool}, nil
+	return f.reply, components.PrefixUsage{CacheRead: f.cacheRead, CacheWrite: f.cacheWrite,
+		Fresh: 40, Output: 90, ViaTool: f.viaTool}, nil
 }
 
 func (f *fakeAsker) ask() string  { s, _ := f.lastAsk.Load().(string); return s }
@@ -912,5 +916,77 @@ func TestSweepDoesNotAttributeAReplyShapeToTheFallback(t *testing.T) {
 	if rep.Events["sweep_answered_via_tool"] != 0 || rep.Events["sweep_answered_via_prose"] != 0 {
 		t.Errorf("the fallback was attributed a reply shape it could not have had (events: %v)",
 			rep.Events)
+	}
+}
+
+// A component that DECLINED must not report itself as having mutated the request, and the inventory
+// floor is a decline. It returns early, so the tail's `changed == 0` check never saw it: 29,321 of
+// 29,372 production rows read `mutated=1, acted=0, skipped=0`, which dash/event.go's
+// `Mutated = !Reverted && !Skipped` makes impossible for a component that actually skipped. Both
+// exits are asserted, because the two reach the floor with different candidate counts and only one
+// of them records a gate at all (GateN is a no-op at n<=0).
+func TestSweepDeclinedAtInventoryFloorReportsSkipped(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		idleMs   int64
+		wantGate string
+	}{
+		// In the window, but sweepReq offers 2 candidates against the default floor of 10.
+		{"in the window, below the inventory floor", 4 * 60 * 1000, "sweep_inventory_below_min"},
+		// Outside it, phase 1 collects nothing, so BOTH counters are suppressed at zero and the
+		// only record of the turn is the window gate.
+		{"outside the window, no candidates at all", 30 * 1000, "not_in_pre_expiry_window"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asker := &labelAsker{verdict: "drop", needed: "none"}
+			asker.cacheRead = 19595
+			e := newSweep(t, "") // defaultMinInventory, NOT newSweepSmall's floor of 1
+			req := sweepReq()
+			c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
+			c.IdleMs = tc.idleMs
+			rep := &components.Report{}
+			if _, err := e.Offload(req, rep, c); err != nil {
+				t.Fatalf("Offload must fail open: %v", err)
+			}
+			if n := atomic.LoadInt64(&asker.calls); n != 0 {
+				t.Fatalf("a declining turn made %d asks", n)
+			}
+			if !rep.Skipped {
+				t.Errorf("a component that declined reports Skipped=false, so dash reads mutated=1 "+
+					"for a turn that changed nothing (gates: %v)", rep.Gates)
+			}
+			if rep.Gates[tc.wantGate] == 0 {
+				t.Errorf("no %s gate recorded (gates: %v)", tc.wantGate, rep.Gates)
+			}
+		})
+	}
+}
+
+// The prefix ask's whole justification is that it READS the agent's cached prefix. When the entry has
+// gone it WRITES it instead, at 1.25x fresh on the agent's own model -- 704,925 opus tokens and $3.42
+// across three production calls, 73% of this component's entire spend. Testing `CacheRead == 0` alone
+// missed two of those three: they read 39,805 tokens of a stable sub-prefix and wrote a quarter of a
+// million, so the counter stayed silent on $2.26 of the harm. A partial hit is not evidence of safety.
+func TestSweepPrefixWriteTripsTheCounterEvenOnAPartialHit(t *testing.T) {
+	asker := &labelAsker{verdict: "keep", needed: "none"}
+	asker.cacheRead = 39805 // a real partial hit, so CacheRead == 0 is FALSE
+	asker.cacheWrite = 260604
+	e := newSweepSmall(t, "")
+	rep := &components.Report{}
+	if _, err := e.Offload(sweepReq(), rep,
+		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
+		t.Fatal(err)
+	}
+	if n := atomic.LoadInt64(&asker.calls); n != 1 {
+		t.Fatalf("expected ONE ask, got %d (gates: %v)", n, rep.Gates)
+	}
+	if rep.Gates["sweep_prefix_cache_write"] == 0 {
+		t.Errorf("an ask that re-created the agent's prefix for %d tokens recorded nothing "+
+			"(gates: %v)", asker.cacheWrite, rep.Gates)
+	}
+	// And the pre-existing zero-read counter must NOT fire, because the read did happen. The two
+	// name different failures and collapsing them would lose the distinction the fix is for.
+	if rep.Gates["sweep_prefix_cache_read_ZERO"] != 0 {
+		t.Errorf("a partial HIT was counted as a zero read (gates: %v)", rep.Gates)
 	}
 }
