@@ -3,6 +3,9 @@
 Route [Claude Code](https://docs.claude.com/en/docs/claude-code) through context-guru with
 one environment variable — no changes to Claude Code itself.
 
+**The plugin does all of this for you**, including installing the binary and choosing a scope:
+[Install the Claude Code plugin](install-plugin.md). What follows is the same thing by hand.
+
 ## You do not need an API key
 
 Setting `ANTHROPIC_BASE_URL` **without** a credential variable leaves your claude.ai login in
@@ -64,6 +67,9 @@ Add to `.claude/settings.json` so you don't export anything by hand:
 
 Use `.claude/settings.local.json` instead if you do not want to commit it: a base URL pointing at
 `localhost` breaks Claude Code for everyone who clones the repo whenever the proxy is not running.
+
+That is what the plugin writes by default, on port **8787** rather than 4000 — litellm's default is
+4000, and a collision there is silent and confusing.
 
 ## Keep the API key out of Claude Code
 
