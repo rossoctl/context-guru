@@ -882,7 +882,16 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		}
 		if e.blockFallback {
 			r.gate("sweep_fallback_blocked")
-			r.rec.Rejection = "the prefix ask read nothing from cache and block_fallback is set; " +
+			// SAY WHICH FAILURE THIS WAS. The condition above now admits a partial hit that WROTE,
+			// and on such a call "read nothing from cache" is simply false -- CacheRead can be 39,805.
+			// This string is persisted to extraction_calls.rejection, which is the column the whole
+			// rejection taxonomy is built from and which has already been mis-analysed twice, so a
+			// wrong reason here becomes a wrong finding later.
+			why := "read nothing from cache"
+			if usage.CacheWrite > 0 {
+				why = "re-created the agent's prefix instead of reading it"
+			}
+			r.rec.Rejection = "the prefix ask " + why + " and block_fallback is set; " +
 				"declining rather than paying again for a full-price transcript read"
 			return nil, r
 		}

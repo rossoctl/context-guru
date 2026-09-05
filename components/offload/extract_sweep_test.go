@@ -990,3 +990,48 @@ func TestSweepPrefixWriteTripsTheCounterEvenOnAPartialHit(t *testing.T) {
 		t.Errorf("a partial HIT was counted as a zero read (gates: %v)", rep.Gates)
 	}
 }
+
+// block_fallback now declines on a partial hit that WROTE, not only on a zero read, so the two cases
+// must stay distinguishable. The counters are what a reader actually gets: on this path the call row
+// is DROPPED (foldFallback returns early because the fallback deliberately never ran, so
+// rec.Component stays "" and Offload's `call.rec.Component != ""` guard discards it), which means the
+// Rejection string built alongside is unreachable today. That is a pre-existing hole of the same class
+// the comment at foldFallback documents for the no-asker path -- recorded here rather than fixed,
+// because adding a row where none existed is a behaviour change this evidence does not cover.
+func TestBlockFallbackDistinguishesAZeroReadFromAWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		read, write int
+		wantGate    string
+		notGate     string
+	}{
+		{"zero read", 0, 0, "sweep_prefix_cache_read_ZERO", "sweep_prefix_cache_write"},
+		{"partial hit that wrote", 39805, 260604, "sweep_prefix_cache_write", "sweep_prefix_cache_read_ZERO"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asker := &labelAsker{verdict: "drop", needed: "none"}
+			asker.cacheRead, asker.cacheWrite = tc.read, tc.write
+			e := newSweepSmall(t, "block_fallback: true\n")
+			req := sweepReq()
+			original := schema.MessageText(req.Input[1])
+			rep := &components.Report{}
+			if _, err := e.Offload(req, rep,
+				preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
+				t.Fatal(err)
+			}
+			if rep.Gates["sweep_fallback_blocked"] != 1 {
+				t.Fatalf("block_fallback did not decline (gates: %v)", rep.Gates)
+			}
+			if rep.Gates[tc.wantGate] == 0 {
+				t.Errorf("did not record %s (gates: %v)", tc.wantGate, rep.Gates)
+			}
+			if rep.Gates[tc.notGate] != 0 {
+				t.Errorf("recorded %s for the wrong failure (gates: %v)", tc.notGate, rep.Gates)
+			}
+			// And declining must leave the transcript alone, which is the point of the switch.
+			if schema.MessageText(req.Input[1]) != original {
+				t.Error("a declined ask modified a message")
+			}
+		})
+	}
+}
