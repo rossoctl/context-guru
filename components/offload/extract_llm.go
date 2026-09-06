@@ -1191,17 +1191,21 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// overwhelming: a turn whose entire transcript re-bills at 1.25x fresh. On this warm
 		// per-output path the extra second buys a fraction of a cent, so it stays fully concurrent
 		// and the flag above is best-effort.
-		// saved/before carry the CALL's arithmetic to phase 3 rather than letting the goroutine
-		// that computed it book the outcome — see the accept branch in runCall.
+		// The outcome is carried to phase 3 rather than booked by the goroutine that produced it
+		// — see the accept branch in runCall.
 		type outT struct {
 			projected, summary string
-			saved, before      int
+			// saved is the WIRE saving, filled by phase 3 once the splice is a fact — not by the
+			// goroutine that made the call. There is no `before` beside it: phase 3 derives the
+			// denominator from cands[k].content, which is the same number. See the assignment.
+			saved int
 			// called marks a slot that actually issued a model call. A single-flight FOLLOWER
 			// returns before filling its slot, so the accounting in phase 3 must skip it.
 			//
-			// An explicit flag rather than a proxy. `before > 0` was indirect — `before` is in
-			// scope in the follower branch, so filling it there would silently re-enable the
-			// booking — and `calls[k].Component != ""` traded that for a worse coupling: it is
+			// An explicit flag rather than a proxy. `out[k].before > 0` was indirect — `before` was
+			// then a field of this struct and is in scope in the follower branch, so filling it
+			// there would silently re-enable the booking; the field itself is gone as of #195 —
+			// and `calls[k].Component != ""` traded that for a worse coupling: it is
 			// just rep.Component, which components/pipeline.go always sets in production but which
 			// most of this package's tests leave empty on a bare &components.Report{}. That made
 			// the whole booking block unreachable from those fixtures, so a future regression
@@ -1368,8 +1372,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				// output compacted to 100 with a 60-token summary booked 800 where the message
 				// shrank by ~715). It is also a model output, so the overstatement varies per
 				// candidate and does not average out across a run. Phase 3 measures the spliced
-				// message instead — see #195. Only `before` rides along, as the ratio's denominator.
-				out[k].before = before
+				// message instead, and derives the ratio's denominator there too — see #195, and
+				// the assignment in phase 3 for why neither term rides in the slot.
 			} else if !timedOut {
 				e.ratios.observe(0, before) // a miss is real evidence: ratio 0
 			}
@@ -1482,22 +1486,23 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if !apply(cands[k].i, cands[k].content, out[k].projected, out[k].summary, false) {
 				continue
 			}
-			// MEASURED AGAINST THE MESSAGE AS SPLICED, which is what the request actually shrank
-			// by — the figure an operator can check against their bill, and the basis
-			// extract_llm_sweep already books on. Carrying `before - TextTokens(projection)` out of
-			// runCall instead omitted the summary, the marker and the recovery hint, so the two
-			// extraction components' per-arm savings were not comparable (#195). Not merely a
-			// reporting artefact: this feeds e.ratios.observe, which is what the economic gate
-			// consults to decide whether the NEXT call is worth making, so an optimistic saving
-			// biased that decision towards spending.
+			// MEASURED AGAINST THE MESSAGE AS SPLICED, which is what this request's message actually
+			// shrank by, and the basis extract_llm_sweep already books on. Carrying
+			// `before - TextTokens(projection)` out of runCall instead omitted the summary, the
+			// marker and the recovery hint, so the two extraction components' per-arm savings were
+			// not comparable (#195). Not merely a reporting artefact: this feeds e.ratios.observe,
+			// which is what the economic gate consults to decide whether the NEXT call is worth
+			// making, so an optimistic saving biased that decision towards spending.
 			//
-			// From cands[k].content rather than out[k].before, which is the same number for a slot
-			// that made a call but is 0 in a single-flight FOLLOWER's slot — and a follower does
-			// reach this splice, so the subtraction would go negative there. Nothing books it (the
-			// guard below is out[k].called), but a stored negative saving is one refactor away from
-			// being read by something that does.
-			out[k].saved = schema.TextTokens(cands[k].content) -
-				schema.TextTokens(schema.MessageText(req.Input[cands[k].i]))
+			// Both terms are derived HERE rather than carried in the slot. `before` is
+			// TextTokens(cands[k].content) — the same number runCall computes for
+			// calls[k].CandidateTokens — so once `saved` stopped riding along there was nothing
+			// left for the slot to hold but a denominator, and a field is a worse place for it: a
+			// single-flight FOLLOWER's slot has before == 0 while its message is spliced like any
+			// other, so the field's value did not mean what its name says on every slot that
+			// reaches this line.
+			before := schema.TextTokens(cands[k].content)
+			out[k].saved = before - schema.TextTokens(schema.MessageText(req.Input[cands[k].i]))
 			// The splice is a fact, so the outcome may now be booked. `accepted` in the ledger row
 			// is documented as "the never-worse outcome — the same condition that spliced the
 			// result above, so the log cannot say accepted while the request kept the original",
@@ -1540,13 +1545,25 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// Only for a slot that actually MADE A CALL — see outT.called for why the condition is
 			// an explicit flag rather than a proxy.
 			//
-			// A DEFENCE, NOT A FIX: nothing was escaping before it. ratioTracker.observe returns
-			// early on totalTok <= 0, both recorders are no-ops at 0, out[k].saved is already 0 in
-			// a follower slot, and a follower's row is dropped by the Component filter on the
-			// append below. So this prevents no live defect, and saying otherwise would leave a
-			// future reader reasoning from a false premise. What it buys is that the booking no
-			// longer depends on three unrelated zero-guards staying zero-guards, and that the
-			// condition is stated where the booking happens.
+			// LOAD-BEARING AS OF #195, and it was a defence before that — the change is worth
+			// stating because the paragraph a reader consults before relaxing this guard used to
+			// say the opposite.
+			//
+			// It was written when `saved` was computed in runCall's accept branch, which a
+			// single-flight FOLLOWER returns before reaching, so a follower's slot carried
+			// saved == 0 and the guard prevented no live defect: three unrelated zero-guards
+			// already did (ratioTracker.observe returns early on totalTok <= 0, both recorders are
+			// no-ops at 0, and a follower's ledger row is dropped by the Component filter on the
+			// append below).
+			//
+			// The wire measurement moved to phase 3, and a follower DOES reach phase 3: its slot is
+			// filled with a non-empty `projected`, so it does not take the `projected == ""` skip,
+			// it splices, and the line above stores a POSITIVE saving for it (tryMark guarantees
+			// the spliced text is strictly smaller). Two of the three zero-guards therefore no
+			// longer apply, and this condition is the only thing between a follower's saving and
+			// RecordExtractionSaving, e.ratios.observe and calls[k].SavedTokens. Removing it books
+			// a saving for a request that made no call — and through the ratio, prices future calls
+			// on it.
 			//
 			// The follower's saving stays UNBOOKED — its leader books the shared result once, and
 			// attributing it twice would over-count. Booking per spliced message rather than per
@@ -1554,7 +1571,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if out[k].called {
 				calls[k].Accepted = true
 				calls[k].SavedTokens = out[k].saved
-				e.ratios.observe(out[k].saved, out[k].before)
+				e.ratios.observe(out[k].saved, before)
 				metrics.RecordExtractionSaving(rep.Component, out[k].saved)
 				// What the removal was WORTH, at this turn's regime. On a cold sweep that is the
 				// cache-write rate; the replays above are credited at the read rate.

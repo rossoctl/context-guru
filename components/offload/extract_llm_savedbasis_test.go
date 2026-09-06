@@ -192,3 +192,85 @@ func TestExtractLLMReplayBooksWhatTheReplayedMessageActuallySaved(t *testing.T) 
 			"replays are the steady state", booked, wire, projected)
 	}
 }
+
+// A SINGLE-FLIGHT FOLLOWER's message shrinks too, and its saving must NOT be booked a second time.
+//
+// This test exists because of what the wire measurement did to the `out[k].called` guard. While
+// `saved` was computed in runCall's accept branch, a follower — which returns before that branch —
+// carried saved == 0, so the guard prevented nothing and its own comment said as much. Phase 3 is a
+// different matter: a follower's slot holds a non-empty `projected`, so it does not take the
+// `projected == ""` skip, it splices, and the wire measurement stores a POSITIVE saving for it.
+// `called` is now the only thing between that number and RecordExtractionSaving, e.ratios.observe
+// and calls[k].SavedTokens — so the guard needs a test, and it had none.
+//
+// The contract it upholds is metrics.RecordExtractionSaving's own: "count each distinct compaction
+// once — the caller dedups by content key". Four byte-identical outputs are one compaction derived
+// by one call, spliced into four messages. Booking four would quadruple the reported saving of one
+// model call, and would feed the ratio tracker four observations of work done once.
+func TestExtractLLMDoesNotBookASingleFlightFollowersSaving(t *testing.T) {
+	// Byte-identical bodies, so all four share one extraction key and three become followers.
+	// The text is distinct from every other fixture here because extractInflight's group is
+	// process-wide and a collision would make this test measure another test's call.
+	body := strings.Repeat("savedbasis follower fixture, identical across all four candidates\n", 400)
+	const identical = 4
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+		userMsg("summarize these four identical outputs"),
+	}}
+	for i := 0; i < identical; i++ {
+		req.Input = append(req.Input, toolResultMsg(body))
+	}
+	model := &summarizingModel{summary: basisSummary}
+	e := newTimeoutTestComponent(t, model)
+	rep := &components.Report{Component: "extract_llm"}
+	c := &components.Ctx{
+		Session: "savedbasis-follower", Ctx: context.Background(),
+		Store: store.NewMemory(store.Options{MaxEntries: 400}), CtxWindow: 1_000_000,
+		Model: components.ModelSpec{Static: model, Incoming: model},
+		// Caching off, so the tail gate lets every candidate through and all four reach the
+		// concurrent phase — the same reason TestConcurrentCallsDoNotRaceOnTheGateHistogram does it.
+		CacheAware: false, MaxCachedIdx: -1,
+	}
+	savedBefore := extractGrossSaved("extract_llm")
+	if _, err := e.Offload(req, rep, c); err != nil {
+		t.Fatalf("Offload must fail open: %v", err)
+	}
+
+	// PRECONDITIONS. Followers ran, one call was made, and — the one that makes this test about
+	// phase 3 rather than about a slot that never got there — EVERY message was spliced,
+	// followers included.
+	if got := rep.Gates["deduped_inflight_extraction"]; got != identical-1 {
+		t.Fatalf("deduped_inflight_extraction = %d, want %d: without followers there is no "+
+			"double-booking to prevent (gates: %v)", got, identical-1, rep.Gates)
+	}
+	if model.calls != 1 {
+		t.Fatalf("the model was called %d times; single-flight was supposed to collapse the four "+
+			"identical candidates into one call", model.calls)
+	}
+	spliced := schema.MessageText(req.Input[1])
+	for i := 1; i <= identical; i++ {
+		if got := schema.MessageText(req.Input[i]); got == body {
+			t.Fatalf("message %d went upstream verbatim, so this fixture does not exercise a "+
+				"follower whose message shrank", i)
+		}
+	}
+	oneWire := schema.TextTokens(body) - schema.TextTokens(spliced)
+	if oneWire <= 0 {
+		t.Fatal("no message shrank, so there is no saving to book once or four times")
+	}
+
+	// THE POSITIVE: one compaction's worth is booked, from four spliced messages.
+	if got := int(extractGrossSaved("extract_llm") - savedBefore); got != oneWire {
+		t.Errorf("RecordExtractionSaving booked %d tokens for %d messages spliced from ONE model "+
+			"call; one compaction is worth %d. RecordExtractionSaving's contract is to count each "+
+			"distinct compaction once, and the ratio tracker that prices future calls is fed from "+
+			"the same place — so booking a follower's saving both inflates the reported figure and "+
+			"argues for making more calls on evidence of work done once", got, identical, oneWire)
+	}
+	if len(rep.Calls) != 1 {
+		t.Fatalf("got %d ledger rows for one model call: %+v", len(rep.Calls), rep.Calls)
+	}
+	if rep.Calls[0].SavedTokens != oneWire {
+		t.Errorf("the ledger row claims %d saved tokens; the message its call compacted shrank by "+
+			"%d", rep.Calls[0].SavedTokens, oneWire)
+	}
+}

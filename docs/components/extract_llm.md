@@ -724,10 +724,17 @@ booked the candidate minus the model's PROJECTION, while the text written is the
 summary segment, the marker and the recovery hint — so its figure overstated by all three, with the
 summary the dominant term. Since the summary is a model output, the overstatement varied per
 candidate rather than averaging out, and two arms of a comparison read side by side were not
-measuring the same thing (#195). Both components now subtract the message that was actually sent,
-which is the number an operator can check against their bill. It matters beyond reporting: the same
-figure feeds the ratio tracker the economic gate spends against, so an optimistic saving argued for
-making more calls.
+measuring the same thing (#195). Both components now subtract the message that was actually sent, so
+the row is the number of tokens the requests it counts genuinely shrank by. **It is not the bill
+delta**, for two reasons that predate that fix and are unchanged by it: `RecordExtractionSaving`
+counts each *distinct* compaction once, so when single-flight hands two concurrent requests the same
+result two messages shrink and one saving is booked; and replays feed `gross_value_usd` but never
+this row, so the tokens are fresh removals only while the dollars beside them are fresh plus replay
+— the same `acted_fresh` / `acted_replay` split, one column over. Take the money question to
+`gross_value_usd` and `net_value_usd`.
+
+The basis matters beyond reporting: the same figure feeds the ratio tracker the economic gate spends
+against, so an optimistic saving argued for making more calls.
 
 Plus, at the top level of `/stats`: **`llm_truncated`** — replies that stopped at the model's
 output cap. That is the worst outcome available, full price for zero result, and it used to be
