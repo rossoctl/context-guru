@@ -91,7 +91,7 @@ Three ways through, in the order worth trying:
 2. **Run the two commands yourself** with the `!` prefix in Claude Code, which makes the consent
    yours rather than the agent's. The skill prints them if it is blocked.
 3. **Add a permission rule** if you would rather not be asked each time. Rules match by command
-   prefix, so name the script:
+   prefix, so name the script's directory:
 
    ```json
    {"permissions": {"allow": ["Bash(~/.claude/plugins/cache/context-guru/**)"]}}
@@ -99,6 +99,19 @@ Three ways through, in the order worth trying:
 
    Adjust the path to what your install actually reports. The plugin cannot grant this to itself, by
    design — a plugin that could approve its own traffic interception would be worth distrusting.
+
+**Why prefix matching is worth knowing here.** A rule naming this script covers
+`.../start-proxy.sh --force` but **not** `SOMEVAR=1 .../start-proxy.sh`, because the second command
+does not begin with the script path. That is why the proxy is started with `--force` as an argument and
+why the upstream belongs in the **Upstream base URL** option rather than an `ANTHROPIC_UPSTREAM=`
+prefix: an env-prefixed command is one nobody can approve. If a skill ever prints you a command with
+env prefixes in front of the script, a permission rule will not help and you are back to approving each
+time.
+
+**On a hosted agent, expect to approve once.** Under auto mode this denial is not a misfire — the pod's
+own gateway is doing the authenticating, and putting a third-party proxy in front of it is exactly the
+kind of thing a classifier should stop an agent from doing unilaterally. One `!`-prefixed command, or
+one rule, and it is done.
 
 ## You do not need an API key
 

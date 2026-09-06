@@ -58,7 +58,25 @@ note() { printf 'context-guru: %s\n' "$*"; }
 #
 # So the install asks for what it means — "start the proxy" — and nothing in the command line
 # reassigns the variable that routes traffic.
-if [ "${CONTEXT_GURU_FORCE:-}" = 1 ]; then
+# --force as an ARGUMENT, not only an environment variable.
+#
+# Bash permission rules match by command PREFIX, so `FOO=1 /path/to/start-proxy.sh` cannot be covered
+# by any rule naming this script — the command does not begin with it. Every env-prefixed form is
+# therefore ungrantable: a user who wants to approve "this plugin may start its proxy" has no way to
+# say so. As an argument it is `<script> --force`, which `Bash(<scripts dir>/**)` covers.
+#
+# This does not make the classifier's objection go away, and it is not meant to. Starting a proxy that
+# intercepts the session's model traffic is a decision for the user, and auto mode denying it on the
+# agent's behalf is the correct outcome. What this changes is that the user now has a way to GRANT it
+# — which is the difference between friction and a dead end.
+FORCE="${CONTEXT_GURU_FORCE:-}"
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+  esac
+done
+
+if [ "$FORCE" = 1 ]; then
   :
 else
 case "${ANTHROPIC_BASE_URL:-}" in

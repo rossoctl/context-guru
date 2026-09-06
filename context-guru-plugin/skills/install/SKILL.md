@@ -169,8 +169,35 @@ The script self-gates on `$ANTHROPIC_BASE_URL` naming our port, which is not yet
 so ask it to start anyway:
 
 ```bash
-CONTEXT_GURU_FORCE=1 "${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"
+"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh" --force
 ```
+
+**Use no environment prefixes on this command — that is the whole point of `--force` being an
+argument.** Bash permission rules match by command PREFIX, so `FOO=1 /path/to/start-proxy.sh` cannot
+be covered by any rule naming this script, and the user has no way to approve it even if they want to.
+If chaining is needed, the upstream belongs in the plugin's **Upstream base URL** option (this script
+reads `CLAUDE_PLUGIN_OPTION_UPSTREAM` itself), not in an `ANTHROPIC_UPSTREAM=` prefix.
+
+**Expect this to be denied under auto mode, and do not try to get around it.** Observed twice on a
+hosted agent:
+
+```
+Denied by auto mode classifier ∙ [Traffic Redirection] Starting a third-party plugin's local proxy
+that intercepts and forwards the agent's own Anthropic API traffic ... reroutes model traffic through
+unvetted code without the user having named or reviewed that specific interception.
+```
+
+That is the correct outcome, not a bug: installing a plugin by name is not the same as consenting to
+have your model traffic intercepted, and an agent should not make that call for its user. When it
+happens, stop, report exactly what is and is not done, and hand the user their three options:
+
+1. approve the prompt (interactive sessions get one);
+2. run this one command themselves with the `!` prefix — print it ready to paste, with no env
+   prefixes so it matches what a rule would allow;
+3. add a permission rule, e.g. `Bash(<the scripts dir>/**)`, if they would rather not be asked again.
+
+Do not offer a fourth way, do not reword the command to look less like what it is, and never write the
+routing key while the proxy is not up.
 
 **Do not satisfy the gate by prefixing `ANTHROPIC_BASE_URL=…` instead.** That is what this step used
 to say, and it was denied outright on a hosted agent:
