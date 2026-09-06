@@ -207,6 +207,18 @@ func TestExtractLLMReplayBooksWhatTheReplayedMessageActuallySaved(t *testing.T) 
 // once — the caller dedups by content key". Four byte-identical outputs are one compaction derived
 // by one call, spliced into four messages. Booking four would quadruple the reported saving of one
 // model call, and would feed the ratio tracker four observations of work done once.
+//
+// IT ALSO GUARDS THE BASIS, beyond the purpose stated above, and that is worth writing down because
+// a reader deciding what this test protects will otherwise under-read it: changing phase 3's basis
+// in place — `before - TextTokens(out[k].projected)` rather than the spliced message — fails this
+// test too, at 3,953 against 3,907. Found by the reviewing session on #216 with a variant mutation.
+//
+// AND THE DEDUP RIDES A SCHEDULING RACE: the leader must still hold the single-flight key when the
+// three followers reach extractInflight.Do, and summarizingModel.Complete is pure string work that
+// returns immediately. Verified 50/50 at -count=50. Deliberately left as is, because a lost race
+// FATALS on the deduped_inflight_extraction and model.calls preconditions rather than passing
+// vacuously — so a red here says whether the guard broke or the race was simply lost, which is the
+// property that matters. Do not read a failure on those two lines as a defect in the guard.
 func TestExtractLLMDoesNotBookASingleFlightFollowersSaving(t *testing.T) {
 	// Byte-identical bodies, so all four share one extraction key and three become followers.
 	// The text is distinct from every other fixture here because extractInflight's group is
