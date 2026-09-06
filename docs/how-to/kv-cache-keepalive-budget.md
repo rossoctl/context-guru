@@ -149,9 +149,15 @@ mistake was made and corrected during this work.
 
 | feature set | n | AUC (dollar-weighted) | off the bill | vs unrestricted |
 |---|---:|---:|---:|---:|
-| unrestricted (adds `stop_reason`, `agent`, `tools`, …) | 21 | 0.7051 | 6.11% | — |
+| unrestricted (adds `agent`, `tools`, …) | 21 | 0.7051 | 6.11% | — |
 | **`Observation` + `Stats`** | **13** | **0.7004** | **6.07%** | **−0.04 pp** |
 | `Observation` alone | 11 | 0.6916 | 5.71% | −0.40 pp |
+
+`stop_reason` was one of the unrestricted set's features when this ran, and has since
+joined the seam as `Observation.StopReason` — on the same footing as `CachedTokens`, and read
+by the registry's `stop-reason-gated` arm. So the 13-feature column predates it and the
+comparison above was not re-run against the wider seam; the numbers are the ones measured,
+not the ones a rerun would produce.
 
 The restriction is free (−0.04 pp is inside the noise floor). Dropping the two `Stats` features
 is *not* free. The historical accumulator is doing most of the work the excluded
