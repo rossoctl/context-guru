@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Add or remove exactly ONE key in a Claude Code settings file: env.ANTHROPIC_BASE_URL.
+"""Add or remove settings keys for the context-guru plugin: env.ANTHROPIC_BASE_URL (routing) and,
+optionally, the top-level statusLine key.
 
 This is the deterministic half of the install. The skill decides WHICH file and what to do
 about a conflict; this script does the edit and refuses to guess.
@@ -19,7 +20,8 @@ Output is one `key=value` line per fact on stdout, so the skill can act on the r
 re-reading the file or parsing prose.
 
 Usage:
-  settings.py add    --file PATH --url URL [--force]
+  settings.py add    --file PATH --url URL [--force] [--upstream URL] [--bin PATH] [--statusline CMD]
+  settings.py add    --file PATH --statusline CMD [--force]   # statusline only, no routing change
   settings.py remove --file PATH [--url URL]
   settings.py show   --file PATH
 """
@@ -47,6 +49,16 @@ BIN_KEY = "CONTEXT_GURU_BIN"
 # keys where the user owned 1, and /context-guru:status repeated the wrong number back to them.
 OURS = (KEY, UPSTREAM_KEY, BIN_KEY)
 
+# statusLine is a TOP-LEVEL settings key — a sibling of `env`, not a member of it — so it needs its
+# own record rather than fitting into OURS/env above. --statusline is optional on `add`: most
+# installs never pass it, and every add/remove call that omits it must behave exactly as it did
+# before this key existed.
+STATUSLINE_KEY = "statusLine"
+STATUSLINE_META = "installed_statusline"      # the command string we wrote, so a later run
+                                               # recognises its own work even if it is about to
+                                               # write a DIFFERENT command (the plugin moved).
+STATUSLINE_PREV_META = "previous_statusline"  # what we replaced, so uninstall can hand it back.
+
 # Where this script records what it did, so a later run can tell its own work from the user's.
 META = "$context-guru"
 
@@ -66,6 +78,37 @@ def is_ours(data: dict, url: str) -> bool:
     if isinstance(meta, dict) and meta.get("installed_base_url"):
         return url == meta["installed_base_url"]
     return False
+
+
+def is_ours_statusline(data: dict, current: object) -> bool:
+    """Did WE write the CURRENT statusLine value? Same shape as is_ours() above and for the same
+    reason: answered from a record of what we wrote, never from guessing at the value's shape —
+    a hand-written statusLine that happens to run a script named similarly to ours is still the
+    user's, and uninstall must not take it.
+    """
+    meta = data.get(META)
+    if isinstance(meta, dict) and meta.get(STATUSLINE_META):
+        return current == {"type": "command", "command": meta[STATUSLINE_META]}
+    return False
+
+
+def apply_statusline(data: dict, command: str) -> None:
+    """Write our statusLine into `data`, in place. A no-op if `command` is empty (the flag was not
+    passed on this call) or the file already holds exactly what we would write. Records what it
+    replaced, but only when that value was not already ours (a re-run that only changes the
+    command path must not overwrite the ORIGINAL previous_statusline with our own prior value).
+    """
+    if not command:
+        return
+    desired = {"type": "command", "command": command}
+    current = data.get(STATUSLINE_KEY)
+    if current == desired:
+        return
+    meta = data.setdefault(META, {})
+    if current is not None and not is_ours_statusline(data, current):
+        meta[STATUSLINE_PREV_META] = current
+    data[STATUSLINE_KEY] = desired
+    meta[STATUSLINE_META] = command
 
 
 def emit(**facts: object) -> None:
@@ -198,6 +241,7 @@ def save(path: str, data: dict) -> None:
 def cmd_show(args: argparse.Namespace) -> int:
     data, existed = load(args.file)
     current = (data.get("env") or {}).get(KEY)
+    sl = data.get(STATUSLINE_KEY)
     emit(
         result="ok",
         file=args.file,
@@ -205,6 +249,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         base_url=current if current else "(unset)",
         other_env_keys=len([k for k in (data.get("env") or {}) if k not in OURS]),
         top_level_keys=len(data),
+        statusline=json.dumps(sl, sort_keys=True) if sl else "(unset)",
     )
     return 0
 
@@ -238,8 +283,40 @@ def cmd_add(args: argparse.Namespace) -> int:
     if getattr(args, "bin", ""):
         desired[BIN_KEY] = args.bin
 
+    # --statusline is checked here, ahead of every base_url branch below, for the same reason the
+    # `desired` set above exists at all: a conflict on it must stop the WHOLE call, including the
+    # base_url side, rather than writing half an install and reporting success. It is a TOP-LEVEL
+    # key (see apply_statusline), so it cannot join `desired`/`env` above; this is its own gate.
+    sl_command = getattr(args, "statusline", "")
+    sl_desired = {"type": "command", "command": sl_command} if sl_command else None
+    if sl_command:
+        existing_sl = data.get(STATUSLINE_KEY)
+        if existing_sl is not None and not is_ours_statusline(data, existing_sl) and not args.force:
+            emit(result="conflict", file=args.file, existing=json.dumps(existing_sl, sort_keys=True),
+                 proposed=sl_command, conflict_on="statusline",
+                 note="a statusLine is already configured in this file; ask before replacing it, "
+                      "then re-run with --force")
+            return 2
+    sl_unchanged = sl_desired is None or data.get(STATUSLINE_KEY) == sl_desired
+
+    # --url is optional when --statusline is present WITHOUT it: this is a statusline-only call
+    # (the /context-guru:statusline skill uses it) and must touch nothing about routing — a
+    # missing --url must never fall through to the branches below, which all assume a real URL
+    # and would otherwise write env.ANTHROPIC_BASE_URL="" or treat an existing one as a conflict
+    # with an empty string neither the user nor this call asked to set.
+    if not args.url:
+        if sl_unchanged:
+            emit(result="unchanged", file=args.file,
+                 note="statusline already installed, nothing to add")
+            return 0
+        saved = backup(args.file) if existed else ""
+        apply_statusline(data, sl_command)
+        save(args.file, data)
+        emit(result="added", file=args.file, backup=saved or "(new file)", statusline=sl_command)
+        return 0
+
     current = env.get(KEY)
-    if current == args.url and all(env.get(k) == v for k, v in desired.items()):
+    if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged:
         emit(result="unchanged", file=args.file, base_url=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
              note="already routed to this proxy, with nothing left to add")
@@ -249,6 +326,8 @@ def cmd_add(args: argparse.Namespace) -> int:
         # absent or different, and say which, since "added" would misdescribe it.
         saved = backup(args.file) if existed else ""
         changed = [k for k, v in desired.items() if env.get(k) != v]
+        if not sl_unchanged:
+            changed.append("statusLine")
         env.update(desired)
         data["env"] = env
         meta = data.setdefault(META, {})
@@ -257,6 +336,7 @@ def cmd_add(args: argparse.Namespace) -> int:
             meta["installed_upstream"] = args.upstream
         if getattr(args, "bin", ""):
             meta["installed_bin"] = args.bin
+        apply_statusline(data, sl_command)
         save(args.file, data)
         emit(result="completed", file=args.file, base_url=args.url, added_keys=",".join(changed),
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""), backup=saved,
@@ -275,6 +355,7 @@ def cmd_add(args: argparse.Namespace) -> int:
             meta["installed_upstream"] = args.upstream
         if getattr(args, "bin", ""):
             meta["installed_bin"] = args.bin
+        apply_statusline(data, sl_command)
         save(args.file, data)
         emit(result="repointed", file=args.file, base_url=args.url, previous=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
@@ -333,6 +414,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         meta["installed_bin"] = args.bin
     if current:
         meta["previous_base_url"] = current
+    apply_statusline(data, sl_command)
     save(args.file, data)
     emit(result="added", file=args.file, base_url=args.url,
          replaced=current if current else "", backup=saved or "(new file)",
@@ -347,6 +429,26 @@ def cmd_remove(args: argparse.Namespace) -> int:
         return 0
     env = data.get("env")
     if not isinstance(env, dict) or KEY not in env:
+        # No routing to remove here — but a STATUSLINE-ONLY install (the /context-guru:statusline
+        # skill's `add --statusline` with no --url) never touches env at all, so it must not be
+        # missed just because there is no base_url in this file to key off.
+        meta0 = data.get(META)
+        recorded_sl0 = meta0.get(STATUSLINE_META) if isinstance(meta0, dict) else None
+        if recorded_sl0 and data.get(STATUSLINE_KEY) == {"type": "command", "command": recorded_sl0}:
+            saved = backup(args.file)
+            restored_sl = ""
+            del data[STATUSLINE_KEY]
+            if meta0.get(STATUSLINE_PREV_META):
+                data[STATUSLINE_KEY] = meta0[STATUSLINE_PREV_META]
+                restored_sl = json.dumps(meta0[STATUSLINE_PREV_META], sort_keys=True)
+            meta0.pop(STATUSLINE_META, None)
+            meta0.pop(STATUSLINE_PREV_META, None)
+            if not meta0:
+                data.pop(META, None)
+            save(args.file, data)
+            emit(result="removed", file=args.file, backup=saved, statusline_restored=restored_sl,
+                 note="statusline-only removal; no routing was present to touch")
+            return 0
         emit(result="unchanged", file=args.file, note=f"no env.{KEY} here")
         return 0
     current = env[KEY]
@@ -391,6 +493,20 @@ def cmd_remove(args: argparse.Namespace) -> int:
         recorded_bin = _meta.get("installed_bin") or ""
     if recorded_bin and env.get(BIN_KEY) == recorded_bin:
         del env[BIN_KEY]
+    # statusLine is a TOP-LEVEL key (not part of `env`), tracked the same way upstream/bin are
+    # above: taken back only if it is exactly what we recorded writing, restored to whatever it
+    # replaced. NOTE: like upstream/bin, this only runs when env.KEY was present above — the
+    # normal case, since `add` always writes them together in one call — so a statusLine left
+    # behind by a base_url that was already removed some other way will not be found here.
+    recorded_sl = ""
+    if isinstance(_meta, dict):
+        recorded_sl = _meta.get(STATUSLINE_META) or ""
+    restored_sl = ""
+    if recorded_sl and data.get(STATUSLINE_KEY) == {"type": "command", "command": recorded_sl}:
+        del data[STATUSLINE_KEY]
+        if isinstance(_meta, dict) and _meta.get(STATUSLINE_PREV_META):
+            data[STATUSLINE_KEY] = _meta[STATUSLINE_PREV_META]
+            restored_sl = json.dumps(_meta[STATUSLINE_PREV_META], sort_keys=True)
     # Put back whatever we took over at install time. Deleting the key was leaving a user who had
     # a gateway configured with nothing at all — a worse state than before they installed.
     restored = ""
@@ -405,6 +521,8 @@ def cmd_remove(args: argparse.Namespace) -> int:
         meta.pop("installed_base_url", None)
         meta.pop("installed_upstream", None)
         meta.pop("installed_bin", None)
+        meta.pop(STATUSLINE_META, None)
+        meta.pop(STATUSLINE_PREV_META, None)
         if not meta:
             data.pop(META, None)
     # Leave no litter: an `env: {}` we created is removed with the key. An env block that
@@ -415,7 +533,8 @@ def cmd_remove(args: argparse.Namespace) -> int:
         data["env"] = env
     save(args.file, data)
     emit(result="removed", file=args.file, was=current, backup=saved,
-         restored=restored, env_block_left=str(bool(env)).lower())
+         restored=restored, env_block_left=str(bool(env)).lower(),
+         statusline_restored=restored_sl)
     return 0
 
 
@@ -433,9 +552,14 @@ def main() -> int:
         p.add_argument("--upstream", default="",
                        help="also write env.ANTHROPIC_UPSTREAM, so the proxy chains behind an "
                             "existing gateway in LATER sessions too (the hook reads this block)")
+        p.add_argument("--statusline", default="",
+                       help="on add: also write the TOP-LEVEL statusLine key ({\"type\": "
+                            "\"command\", \"command\": <this value>}), refusing to replace one "
+                            "that is not ours unless --force. on remove: taken back only if it "
+                            "is exactly what a previous --statusline install recorded writing.")
     args = ap.parse_args()
-    if args.cmd == "add" and not args.url:
-        ap.error("add needs --url")
+    if args.cmd == "add" and not args.url and not args.statusline:
+        ap.error("add needs --url, or --statusline on its own for a statusline-only call")
     return {"add": cmd_add, "remove": cmd_remove, "show": cmd_show}[args.cmd](args)
 
 

@@ -227,6 +227,22 @@ if [ -n "$UPSTREAM" ]; then
   UPSTREAM_ARGS=(--anthropic-upstream "$UPSTREAM")
 fi
 
+# --config, ONLY when a keep-alive config exists for this port — the opt-in toggle
+# skills/keepalive/SKILL.md writes. Nothing on the RENDER path (statusline.py) ever creates or
+# touches this file; a display hook that fires on every keystroke must not be what decides to
+# start spending the caller's credential on idle pings.
+#
+# --config REPLACES the preset entirely rather than layering over it (see loadConfig in
+# cmd/context-guru-proxy/main.go: `--config` bypasses the `--preset` flag/PRESET env var above
+# completely once it is set). That is why the file the keepalive skill writes always states its
+# OWN `preset:` line — a config that forgot it would silently turn off cachesplit the moment
+# keep-alive was turned on, the exact opposite of what enabling it is supposed to do.
+CONFIG_ARGS=()
+KEEPALIVE_CFG="${STATE}/keepalive-${PORT}.yaml"
+if [ -f "$KEEPALIVE_CFG" ]; then
+  CONFIG_ARGS=(--config "$KEEPALIVE_CFG")
+fi
+
 PRESET="$PRESET" \
   "${STARTER[@]}" "$BIN" \
   --listen "127.0.0.1:${PORT}" \
@@ -234,6 +250,7 @@ PRESET="$PRESET" \
   --dashboard \
   --dashboard-db "${STATE}/dashboard-${PORT}.db" \
   "${UPSTREAM_ARGS[@]+"${UPSTREAM_ARGS[@]}"}" \
+  "${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"}" \
   >>"$LOG" 2>&1 &
 started=$!
 disown 2>/dev/null || true
