@@ -542,14 +542,23 @@ func TestUninstallRestoresTheBaseURLItReplaced(t *testing.T) {
 // TestSettingsPreservesFileMode: the file holds a credential often enough that widening its mode
 // is a real leak. The temp file is created fresh, so os.replace took the UMASK mode rather than
 // the replaced file's — a 600 settings file came back 644 under the common default.
+//
+// The fixture mode is 0640 and MUST NOT be 0600. At 0600 this test passed with the copymode/chmod
+// block deleted entirely — because 0600 is exactly what `tempfile.mkstemp()` creates on its own, so
+// the assertion held whether or not the mode was preserved. Confirmed by a reviewer who deleted that
+// block and watched this test stay green while a real 0640 file was silently narrowed to 0600.
+//
+// 0640 is neither the mkstemp default nor a umask-derived mode, so passing it requires copymode to
+// have run. The umask case the test was written for is still covered: 0640 is not 0644 either.
 func TestSettingsPreservesFileMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX modes only")
 	}
+	const fixtureMode = 0o640 // deliberately not 0600 — see above
 	dir := t.TempDir()
 	path := filepath.Join(dir, "settings.json")
 	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_AUTH_TOKEN": "secret"}})
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := os.Chmod(path, fixtureMode); err != nil {
 		t.Fatal(err)
 	}
 	if _, code := settings(t, "add", "--file", path, "--url", ourURL); code != 0 {
@@ -559,8 +568,9 @@ func TestSettingsPreservesFileMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fi.Mode().Perm(); got != 0o600 {
-		t.Errorf("mode after add = %o, want 600: this file holds a credential", got)
+	if got := fi.Mode().Perm(); got != fixtureMode {
+		t.Errorf("mode after add = %o, want %o: this file holds a credential, and a mode that "+
+			"merely happens to match mkstemp's default would prove nothing", got, fixtureMode)
 	}
 }
 
@@ -1316,6 +1326,17 @@ func TestUninstallDoesNotSignalAProcessThatIsNotOurs(t *testing.T) {
 	}
 	requireTool(t, "bash")
 	block := skillBlock(t, "uninstall", `kill "$pid"`)
+	// The block is a TEMPLATE: the skill tells the model to obtain the configured port (from
+	// `settings.py config`, because CLAUDE_PLUGIN_OPTION_* is invisible to a Bash tool call) and put it
+	// in. So fill the placeholder exactly as the model is instructed to, and fail loudly if it is
+	// missing — an unsubstituted `PORT="<port>"` would make every path below look inert for the wrong
+	// reason, which is what happened when the placeholder was introduced.
+	const placeholder = `PORT="<port>"`
+	if !strings.Contains(block, placeholder) {
+		t.Fatalf("the uninstall block no longer carries %s; if the port is obtained differently now, "+
+			"this test needs to follow suit rather than execute a stale template:\n%s", placeholder, block)
+	}
+	block = strings.Replace(block, placeholder, `PORT="8787"`, 1)
 
 	for _, c := range []struct {
 		name       string
@@ -2464,5 +2485,152 @@ func TestStartProxyPicksUpAKeepaliveConfig(t *testing.T) {
 				t.Errorf("no keepalive config was written, but --config appeared anyway: %q", argv)
 			}
 		})
+	}
+}
+
+// --- findings from Osher's end-to-end review of #160 ------------------------------------------
+
+// TestTheConfiguredPortCanActuallyBeHonoured is the blocker, and it is about a silent mismatch rather
+// than a wrong default.
+//
+// PORT came only from CLAUDE_PLUGIN_OPTION_PORT, which Claude Code puts into HOOK environments and NOT
+// into a Bash tool call — so an install skill reading `${CLAUDE_PLUGIN_OPTION_PORT:-8787}` always got
+// 8787 whatever the user configured, and start-proxy.sh had no argument form to override it. The
+// consequence is the failure this plugin exists to prevent: the routing key names 8787 while every
+// later hook reads the CONFIGURED port and self-gates on it, so the hooks treat the project as
+// unrouted and do nothing. The one running proxy has no auto-restart behind it, and once it idle-exits
+// nothing brings it back, silently.
+//
+// Two halves, both tested: the port must be discoverable from disk, and it must be passable as an
+// argument a permission rule can cover.
+func TestTheConfiguredPortCanActuallyBeHonoured(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook is POSIX-only")
+	}
+
+	t.Run("discoverable from the settings file, with no env var present", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := filepath.Join(dir, "cfg")
+		if err := os.MkdirAll(cfg, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// The shape Claude Code writes for `--config port=4041`.
+		writeJSON(t, filepath.Join(cfg, "settings.json"), map[string]any{
+			"pluginConfigs": map[string]any{
+				"context-guru@context-guru": map[string]any{
+					"options": map[string]any{"port": 4041, "preset": "house"},
+				},
+			},
+		})
+		py := requireTool(t, "python3")
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "config")
+		cmd.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+cfg)
+		cmd.Dir = dir // so the project-scope candidates do not accidentally match
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("config failed: %v\n%s", err, out)
+		}
+		got := string(out)
+		t.Logf("config ->\n%s", got)
+		if !strings.Contains(got, "option_port=4041") {
+			t.Errorf("the configured port was not discovered; without this the install can only ever "+
+				"use 8787:\n%s", got)
+		}
+		if !strings.Contains(got, "option_preset=house") {
+			t.Errorf("other options are not reported either:\n%s", got)
+		}
+	})
+
+	t.Run("passable as an argument, and everything derived from it follows", func(t *testing.T) {
+		requireTool(t, "bash")
+		dir := t.TempDir()
+		argv := filepath.Join(dir, "argv.log")
+		fake := filepath.Join(dir, "fake")
+		body := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> " + argv + "\nsleep 30\n"
+		if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		port := freePort(t)
+		state := filepath.Join(dir, "state")
+		cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"),
+			"--unrouted", "--bin", fake, "--port", port)
+		// Deliberately NO CLAUDE_PLUGIN_OPTION_PORT: that is the situation a Bash tool call is in.
+		cmd.Env = append(os.Environ(),
+			"CLAUDE_PLUGIN_OPTION_PORT=",
+			"ANTHROPIC_BASE_URL=",
+			"CONTEXT_GURU_BIN=",
+			"CONTEXT_GURU_HEALTH_BUDGET=1",
+			"XDG_STATE_HOME="+state,
+			"TMPDIR="+dir)
+		out, err := cmd.CombinedOutput()
+		t.Cleanup(func() { exec.Command("pkill", "-f", fake).Run() }) //nolint:errcheck
+		if err != nil {
+			t.Fatalf("must never fail a session: %v\n%s", err, out)
+		}
+		launched, _ := os.ReadFile(argv)
+		if !strings.Contains(string(launched), "--listen 127.0.0.1:"+port) {
+			t.Errorf("the proxy did not listen on the port passed as an argument: %s\n%s", launched, out)
+		}
+		// The pidfile is what uninstall uses, and it is named after the port — so a port that reached
+		// --listen but not the pidfile would leave an unstoppable proxy.
+		if _, err := os.Stat(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); err != nil {
+			t.Errorf("no pidfile for the configured port, so uninstall could not find this proxy: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "context-guru-proxy-"+port+".log")); err != nil {
+			t.Errorf("the log is not named after the configured port: %v", err)
+		}
+	})
+
+	t.Run("a non-numeric port is reported, not used", func(t *testing.T) {
+		requireTool(t, "bash")
+		dir := t.TempDir()
+		cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"),
+			"--unrouted", "--port", "not-a-port")
+		cmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL=", "CONTEXT_GURU_BIN=/nonexistent/x",
+			"CONTEXT_GURU_HEALTH_BUDGET=1", "XDG_STATE_HOME="+dir, "TMPDIR="+dir)
+		out, _ := cmd.CombinedOutput()
+		if !strings.Contains(string(out), "ignoring --port") {
+			t.Errorf("a junk port was accepted silently:\n%s", out)
+		}
+	})
+}
+
+// TestSettingsReportsOSErrorsAsData: the module docstring promises one key=value line per fact, and the
+// calling skill is told to read those rather than guess. Every failure path honoured that EXCEPT genuine
+// OS errors in backup()/save(), which produced a raw Python traceback and no `result=` line at all —
+// so the caller had nothing to act on precisely when something was already wrong.
+//
+// Non-destructive in every case observed, but "it did not damage anything" is not "the caller can tell
+// what happened".
+func TestSettingsReportsOSErrorsAsData(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX modes only")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory mode this test relies on")
+	}
+	dir := t.TempDir()
+	ro := filepath.Join(dir, "ro")
+	if err := os.MkdirAll(ro, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(ro, "settings.json")
+	writeJSON(t, path, map[string]any{"env": map[string]any{"MINE": "keep"}})
+	if err := os.Chmod(ro, 0o555); err != nil { // no writes in this directory: backup() cannot create
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ro, 0o755) })
+
+	facts, code := settings(t, "add", "--file", path, "--url", ourURL)
+	if code == 0 {
+		t.Errorf("an unwritable directory reported success: %v", facts)
+	}
+	if facts["result"] != "error" || facts["reason"] != "os_error" {
+		t.Errorf("result=%q reason=%q, want error/os_error — a traceback breaks the key=value contract "+
+			"the skill is told to rely on", facts["result"], facts["reason"])
+	}
+	// And it must not have damaged the file it could not replace.
+	if env := readJSON(t, path)["env"].(map[string]any); env["MINE"] != "keep" {
+		t.Errorf("the original file was altered on a failed write: %v", env)
 	}
 }

@@ -538,6 +538,44 @@ def cmd_remove(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_config(args: argparse.Namespace) -> int:
+    """Print the plugin's CONFIGURED option values, which the install cannot otherwise see.
+
+    This exists because of a defect that made the `port` option impossible to honour. Claude Code does
+    not put `CLAUDE_PLUGIN_OPTION_*` into the environment of a Bash tool call — only of a hook — so an
+    install skill reading `${CLAUDE_PLUGIN_OPTION_PORT:-8787}` in a shell command always saw the
+    default. The consequence was not a cosmetic default: the routing key named 8787 while every later
+    hook read the CONFIGURED port and self-gated on it, so the hooks treated the project as unrouted,
+    and the one running proxy had no auto-restart behind it. Once it idle-exited, nothing brought it
+    back — silently, which is the exact failure this plugin exists to prevent.
+
+    The values are on disk, so read them: Claude Code stores them under
+    `pluginConfigs["<plugin>@<marketplace>"].options` in a settings file. Checked in precedence order,
+    most specific first, because a project-scope install writes them into the project's file.
+    """
+    candidates = [
+        os.path.join(".claude", "settings.local.json"),
+        os.path.join(".claude", "settings.json"),
+        os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or
+                     os.path.join(os.path.expanduser("~"), ".claude"), "settings.json"),
+    ]
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        opts = (((data.get("pluginConfigs") or {}).get(args.plugin) or {}).get("options") or {})
+        if isinstance(opts, dict) and opts:
+            emit(result="ok", source=path, **{f"option_{k}": v for k, v in sorted(opts.items())})
+            return 0
+    emit(result="ok", source="(none)",
+         note="no configured options found; the defaults in plugin.json apply")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -557,11 +595,28 @@ def main() -> int:
                             "\"command\", \"command\": <this value>}), refusing to replace one "
                             "that is not ours unless --force. on remove: taken back only if it "
                             "is exactly what a previous --statusline install recorded writing.")
+    cfg = sub.add_parser("config")
+    cfg.add_argument("--plugin", default="context-guru@context-guru")
+
     args = ap.parse_args()
     if args.cmd == "add" and not args.url and not args.statusline:
         ap.error("add needs --url, or --statusline on its own for a statusline-only call")
-    return {"add": cmd_add, "remove": cmd_remove, "show": cmd_show}[args.cmd](args)
+    return {"add": cmd_add, "remove": cmd_remove, "show": cmd_show,
+            "config": cmd_config}[args.cmd](args)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Every failure is a key=value line, including the ones nobody planned for.
+    #
+    # The docstring promises "one key=value line per fact on stdout", and every failure path honoured
+    # that EXCEPT genuine OS errors in backup()/save(): an unwritable directory produced a raw Python
+    # traceback and no `result=` line at all. The calling skill is told to read these lines rather than
+    # guess, so a traceback breaks the contract it depends on precisely when something is already wrong.
+    #
+    # Non-destructive in every case observed — the original file was untouched — but "it did not damage
+    # anything" is not the same as "the caller can tell what happened".
+    try:
+        sys.exit(main())
+    except OSError as exc:
+        emit(result="error", reason="os_error", detail=f"{exc}")
+        sys.exit(4)

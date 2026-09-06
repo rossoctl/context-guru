@@ -96,11 +96,19 @@ var notExportedWhy = map[string]string{
 	"StashRefused":              "cg_stash_refused_total, from offload.StashRefusals()",
 	"StashMissing":              "cg_stash_missing_total, from offload.StashMissing()",
 	"StashExpired":              "cg_stash_expired_total, from store.Memory.StashStats()",
-	"StashLive":                 `cg_stash_reserve_entries{state="live"}, from store.Memory.StashStats()`,
-	"StashCapacity":             `cg_stash_reserve_entries{state="capacity"}, from store.Memory.StashStats()`,
-	"StashBytes":                `cg_stash_reserve_bytes{state="live"}, from store.Memory.StashStats()`,
-	"StashMaxBytes":             `cg_stash_reserve_bytes{state="capacity"}, from store.Memory.StashStats()`,
-	"Extract":                   "the cg_extract_* family, from metrics.ExtractSnapshot()",
+	"StashRevived":              "cg_stash_revived_total, from store.Memory.StashStats()",
+	// Exported as cg_usage_unparsed_total / cg_usage_unreadable_total, but read from UsageGaps()
+	// rather than off `s` for the reason the block above this map gives: the /stats handler fills
+	// these AFTER renderMetrics takes its snapshot, so a promLine off `s` would export a permanent
+	// 0 while passing this test — which is precisely the silent-zero failure #200 is about, and it
+	// would be embarrassing to reproduce it in the counter meant to report it.
+	"UsageUnparsed":   "cg_usage_unparsed_total, from proxy.UsageGaps()",
+	"UsageUnreadable": "cg_usage_unreadable_total, from proxy.UsageGaps()",
+	"StashLive":       `cg_stash_reserve_entries{state="live"}, from store.Memory.StashStats()`,
+	"StashCapacity":   `cg_stash_reserve_entries{state="capacity"}, from store.Memory.StashStats()`,
+	"StashBytes":      `cg_stash_reserve_bytes{state="live"}, from store.Memory.StashStats()`,
+	"StashMaxBytes":   `cg_stash_reserve_bytes{state="capacity"}, from store.Memory.StashStats()`,
+	"Extract":         "the cg_extract_* family, from metrics.ExtractSnapshot()",
 
 	// Not numbers. Prometheus has no string sample, and a list of names would have to
 	// become a label — which is what the cg_component_* family already is.
@@ -141,13 +149,18 @@ var notExportedWhy = map[string]string{
 	// silent: this change deliberately adds ONE family (cg_expand_unresolved_total, the
 	// alertable one) instead of growing the exposition by fourteen series inside a
 	// dashboard PR. Moving any entry out of this map is a small, self-contained change.
-	"LLMTruncated":          "NOT EXPORTED YET — full price, zero result; a real alert candidate",
-	"SummarizeTimeouts":     "NOT EXPORTED YET — summarize's fail-open path is invisible in Prometheus",
-	"SummarizeErrors":       "NOT EXPORTED YET — as above",
-	"AgentDietTimeouts":     "NOT EXPORTED YET — agentdiet's fail-open path, same gap",
-	"AgentDietErrors":       "NOT EXPORTED YET — as above",
-	"SyncEnforced":          "NOT EXPORTED YET — the machine-readable 'we did modify requests'",
-	"CompactionResets":      "NOT EXPORTED YET — agent self-compaction restarting the cached prefix",
+	"LLMTruncated":      "NOT EXPORTED YET — full price, zero result; a real alert candidate",
+	"SummarizeTimeouts": "NOT EXPORTED YET — summarize's fail-open path is invisible in Prometheus",
+	"SummarizeErrors":   "NOT EXPORTED YET — as above",
+	"AgentDietTimeouts": "NOT EXPORTED YET — agentdiet's fail-open path, same gap",
+	"AgentDietErrors":   "NOT EXPORTED YET — as above",
+	"SyncEnforced":      "NOT EXPORTED YET — the machine-readable 'we did modify requests'",
+	"CompactionResets":  "NOT EXPORTED YET — agent self-compaction restarting the cached prefix",
+	// Exported as cg_expand_prefix_flips_total, read from offload.ExpandPrefixFlips() rather than
+	// off `s` for the reason this map's preamble gives: the /stats handler fills the field AFTER
+	// renderMetrics takes its snapshot, so a promLine off `s` would export a permanent 0 while
+	// passing this test.
+	"ExpandPrefixFlips":     "cg_expand_prefix_flips_total, from offload.ExpandPrefixFlips()",
 	"UpstreamMsAvgBypassed": "NOT EXPORTED YET — the bypassed baseline half of cg_upstream_latency_ms",
 	"SSETTFBMsAvgBuf":       "NOT EXPORTED YET — buffered responses' time-to-last-byte",
 	"SSEExpandAfterStream":  "NOT EXPORTED YET — the SSE peek's price; alert candidate",

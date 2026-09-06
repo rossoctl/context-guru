@@ -17,8 +17,17 @@ If the user is here because something is broken, do step 1 first and explain aft
 Check all three scopes: the install may have written any of them, and a `--global` install
 plus a per-project one can both exist.
 
+Get the configured port first — `CLAUDE_PLUGIN_OPTION_*` reaches hook environments only, so a shell
+default would build the wrong URL and the removal would find nothing to remove:
+
 ```bash
-PORT="${CLAUDE_PLUGIN_OPTION_PORT:-8787}"
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" config
+```
+
+Use its `option_port=`, or 8787 if it reports `source=(none)`. Then:
+
+```bash
+PORT="<port>"
 for f in .claude/settings.local.json .claude/settings.json ~/.claude/settings.json; do
   [ -f "$f" ] && "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" remove \
       --file "$f" --url "http://127.0.0.1:${PORT}/anthropic"
@@ -55,7 +64,7 @@ and left the proxy holding the port.
 Use the pidfile the starter writes, and fall back to the socket's owner:
 
 ```bash
-PORT="${CLAUDE_PLUGIN_OPTION_PORT:-8787}"
+PORT="<port>"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/context-guru"
 PIDFILE="${STATE}/proxy-${PORT}.pid"
 

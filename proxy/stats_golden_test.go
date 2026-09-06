@@ -39,6 +39,7 @@ var statsGoldenTopLevel = []string{
 	"cg_added_ms_avg",
 	"compaction_resets",
 	"components",
+	"expand_prefix_flips",
 	"expand_unresolved_malformed",
 	// The alertable half of reversibility: a marker id this proxy could have minted that resolved
 	// to nothing, i.e. a cut advertised as reversible that was not. Added to the reviewed contract
@@ -105,6 +106,7 @@ var statsGoldenTopLevel = []string{
 	"stash_max_bytes",
 	"stash_missing",
 	"stash_refused",
+	"stash_revived",
 	// summarize_* are the same three figures for `summarize`, which owns a SEPARATE
 	// budget: its call covers the whole middle of the transcript (~57k prompt tokens
 	// measured) rather than one tool output, so the two components cannot share a
@@ -120,6 +122,11 @@ var statsGoldenTopLevel = []string{
 	"top_passthrough",
 	"upstream_ms_avg",
 	"upstream_ms_avg_bypassed",
+	// The two accounting-outage counters (#200). Added to the reviewed contract rather than
+	// loosening the assertion: fresh/cache_read/cache_write reading 0 on a healthy request is
+	// exactly the kind of silence a golden test exists to make someone notice.
+	"usage_unparsed",
+	"usage_unreadable",
 	"wasted_tokens",
 }
 

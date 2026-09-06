@@ -49,6 +49,53 @@ sequenceDiagram
 
 **3. Out of band.** `GET /expand?id=<hash>` returns an offloaded original directly.
 
+## What an expand costs, across turns
+
+Everything above is about a single turn. Across turns an expand has two consequences that are
+easy to miss, because the in-turn behaviour is deliberately cache-safe and the cross-turn
+behaviour is not the same thing.
+
+**An expand permanently un-compacts that content.** The handler marks the restored original
+kept-verbatim (`cg:keep:`), and every offloader then skips it — otherwise re-compacting would
+bounce the agent straight into another expand, which is the loop that mark exists to prevent. So
+from the next turn onward the original goes upstream **in full, at its original position**.
+
+**That costs one cache-write of the suffix.** Turn N sent compacted bytes at that position and turn
+N+1 sends the full original, which is a change inside the provider's cached prefix — at ~11.5× a
+cache read, the cost the [cache-tail gate](../reference/config.md) exists to avoid everywhere else.
+It happens once per expanded content, on the turn after the expand, and it is counted:
+`expand_prefix_flips` at [`/stats`](../reference/routes.md#get-stats) and
+`cg_expand_prefix_flips_total` at `/metrics`.
+
+That figure is **per turn per message**, not per distinct content — every later turn re-sends the
+same original and the same abandonment is observed again, while only the first is a real
+cache-write. Read it as "expansion is churning cached prefixes in this deployment", not as a count
+of cache-writes. The per-component gate `kept_verbatim_after_expand` is the per-message view; its
+sibling `already_marked` is the benign case (content some component had already compacted), and the
+two were one label until they were split, which is why an older dashboard may show neither.
+
+**The in-turn expansion does not persist as its own turn.** On the intercepted path the client never
+sees the tool_use/tool_result pair — the proxy answers it and returns only the final assistant
+response — so the next turn the client re-sends its own transcript without the expansion. What
+persists is the *flag*, not the content. There is no in-place replacement of a marker by its
+content, and `inject_expand` controls only whether the tool is **advertised**, never how a call is
+answered.
+
+**The repair path is the exception, and it is a fallback for a failure rather than a mode.** When
+interception structurally cannot work — a client tool batched alongside expand, the round cap, a
+stream that will not reconstruct, a non-Anthropic stream, or a bypassed turn carrying older markers
+— the client did see the call and answered `No such tool available`. The proxy repairs that
+tool_result on every later turn, so this is the only configuration in which the round-trip lives in
+the client's transcript.
+
+On that path the repaired tool_result carries a **pointer**, not a second copy: the content is
+already in the transcript at its own position (kept-verbatim, above), so repeating it there sent the
+same tool output upstream twice on every turn. Measured on a 200-line output: 252 bytes when the
+content is compacted and no expand round-trip exists, against 21,511 bytes with one — two full
+copies, permanently. If the original is *not* in the transcript (the agent's own compaction can drop
+that message while keeping the round-trip) the tool_result carries the content, exactly as before,
+because then it is the model's only copy.
+
 ## Recovery needs the store
 
 The store *is* the reversibility mechanism. It defaults to in-memory TTL+LRU — 10000s
@@ -58,7 +105,10 @@ sessions — and holds, per session:
 - **Rewind** — `cache_key → original bytes`, what the expand loop resolves. These live in a
   **reserve** that is never evicted to admit a new payload: once a marker has been sent the
   promise is outstanding, so a full reserve makes the pipeline **decline the next removal**
-  (counted as `stash_refused`) instead of quietly breaking an older one.
+  (counted as `stash_refused`) instead of quietly breaking an older one. Payloads carry a
+  **shorter TTL** than everything else (`stash_ttl_seconds`, 1800 s) because each turn's replay
+  re-derives them from the transcript — see
+  [why payloads expire sooner](../reference/config.md#why-payloads-expire-sooner-than-decisions).
 - **Sticky** — content ids already reduced on earlier turns, so output stays byte-stable
   across turns.
 - **Frozen decisions** — the exact replacement bytes an offloader replays so an
@@ -78,10 +128,13 @@ deliberately (with `marker_mode: off`) so `/compact` returns a clean, marker-fre
 **The model called expand and got a placeholder back.** The original expired or was evicted
 from the store. The provider requires one `tool_result` per `tool_call_id`, so an explicit
 placeholder is sent rather than nothing — which turns that offload lossy. Check `stash_missing`
-and `stash_expired` at [`/stats`](../reference/routes.md#get-stats): both mean a payload left the
-store, so raise `store.ttl_seconds`. `stash_refused` is the *other* case and needs
-`store.max_entries` or `store.stash_max_bytes` — there nothing became irreversible, because the
-removals were declined.
+at [`/stats`](../reference/routes.md#get-stats): that is the one that means a marker went out with
+nothing behind it. `stash_expired` on its own does **not** — a reclaimed payload is normally
+re-derived by the next turn's replay, counted as `stash_revived` — so the remedy is the reserve
+(`store.max_entries` / `store.stash_max_bytes`), which is what refused the re-stash, and
+`store.stash_ttl_seconds` only if `stash_expired` is running far ahead of `stash_revived`.
+`stash_refused` is the *other* case and needs `store.max_entries` or `store.stash_max_bytes` —
+there nothing became irreversible, because the removals were declined.
 
 The turn still **completes**: the placeholder continuation is sent even when *nothing*
 resolved, so the model reads "no longer available" and finishes with text. It used to replay

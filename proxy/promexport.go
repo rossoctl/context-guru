@@ -516,14 +516,37 @@ func (h *Handler) renderMetrics() string {
 				"What the held rewind payloads cost, and the reserve's byte budget (stash_max_bytes). Read against cg_stash_reserve_entries: entries near capacity means raise max_entries, bytes near the budget means raise stash_max_bytes.", "gauge")
 			promLine(&b, "cg_stash_reserve_bytes", `state="live"`, float64(st.Bytes))
 			promLine(&b, "cg_stash_reserve_bytes", `state="capacity"`, float64(st.MaxBytes))
+			// Payloads carry their OWN, shorter TTL (stash_ttl_seconds), because a payload is
+			// re-derivable from the transcript and a frozen decision is not — so reclaiming one is
+			// ordinarily absorbed by the next turn's replay rather than being a loss. That makes
+			// this counter on its own ambiguous, which is why the revived series ships with it.
 			promHeaderProc(&b, "cg_stash_expired_total",
-				"Rewind payloads reclaimed by the TTL. The one remaining way an outstanding marker stops resolving; raise ttl_seconds.", "counter")
+				"Rewind payloads reclaimed by their TTL (stash_ttl_seconds). NOT an alert on its own: read against cg_stash_revived_total, and alert on cg_stash_missing_total instead.", "counter")
 			promLine(&b, "cg_stash_expired_total", "", float64(st.Expired))
+			promHeaderProc(&b, "cg_stash_revived_total",
+				"Reclaimed payloads written again by a later replay, which re-derives them from the transcript before the marker goes upstream: reclamation absorbed at no cost. Tracking cg_stash_expired_total means the shorter payload TTL is working; lagging it while cg_stash_missing_total rises means raise stash_ttl_seconds.", "counter")
+			promLine(&b, "cg_stash_revived_total", "", float64(st.Revived))
 		}
 		// Process-wide, so outside the cast for the same reason hit/miss are: a component
 		// declines the removal, whichever store instance refused the payload. This is the
 		// LEADING indicator for cg_expand_unresolved_total{cause="missing"}, which cannot move
 		// until the agent happens to call expand.
+		unparsedUsage, unreadableUsage := UsageGaps()
+		// The two accounting-outage counters (#200). Process-wide, so outside the store cast for
+		// the same reason the stash pair is: the parser is package-level.
+		promHeaderProc(&b, "cg_usage_unparsed_total",
+			"Responses that carried a usage block in a spelling this proxy does not recognise, so fresh/cache_read/cache_write tokens were recorded as 0 on an otherwise healthy request. Non-zero means token accounting is offline for some route or provider; the DEBUG record cg.usage_unaccounted names the dialect (key names only).", "counter")
+		promLine(&b, "cg_usage_unparsed_total", "", float64(unparsedUsage))
+		// Split from the above because the fix is in a different place entirely: these bytes were
+		// not a whole document, so no parser could have read them.
+		promHeaderProc(&b, "cg_usage_unreadable_total",
+			"Responses whose examined bytes would not parse at all, so usage could not be sought — a spliced head+tail sniffer window, not an unrecognised dialect. Raise sniffMax or buffer the body; do NOT go looking for a missing field name.", "counter")
+		promLine(&b, "cg_usage_unreadable_total", "", float64(unreadableUsage))
+		// The one cache-write an operator can attribute to a cause (#201). Process-wide like the
+		// frozen hit/miss pair above and sourced from offload's own counter for the same reason.
+		promHeaderProc(&b, "cg_expand_prefix_flips_total",
+			"Turns where an established compaction was abandoned because the agent had expanded that content, so the original went upstream in full at its cached position: a suffix cache-write attributable to expansion. Deliberate (re-compacting would loop the agent into another expand) but not free. Per turn per message, not per distinct content - only the first is a real cache-write.", "counter")
+		promLine(&b, "cg_expand_prefix_flips_total", "", float64(offload.ExpandPrefixFlips()))
 		promHeaderProc(&b, "cg_stash_refused_total",
 			"Removals declined because the store's rewind reserve was full. The content was left verbatim and nothing became irreversible; raise max_entries or stash_max_bytes.", "counter")
 		promLine(&b, "cg_stash_refused_total", "", float64(offload.StashRefusals()))
@@ -532,7 +555,7 @@ func (h *Handler) renderMetrics() string {
 		// that one. It grows with turn count rather than with distinct dangling markers,
 		// because a payload that has gone cannot be restored and every later turn replays it.
 		promHeaderProc(&b, "cg_stash_missing_total",
-			"Marker replays that found NO payload behind them: a dangling <<cg:HASH>> went upstream, so this is a broken reversibility promise rather than a declined removal. Raise ttl_seconds. Grows per turn per affected message, not per distinct marker.", "counter")
+			"Marker replays that found NO payload behind them: a dangling <<cg:HASH>> went upstream, so this is a broken reversibility promise rather than a declined removal. A replay re-stashes the payload it re-derived, so this only fires when that write was ALSO refused — raise max_entries/stash_max_bytes, and stash_ttl_seconds if cg_stash_expired_total is what is taking them. Grows per turn per affected message, not per distinct marker.", "counter")
 		promLine(&b, "cg_stash_missing_total", "", float64(offload.StashMissing()))
 
 		// Same rule as the two families above, and this counter would have had the same bug:

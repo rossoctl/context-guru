@@ -97,6 +97,7 @@ UPSTREAM_ARG=""
 # install.sh already prints `path=` on every successful install. Passing it here is one argument, is
 # covered by the same permission rule as the rest of the command, and needs no symlink.
 BIN_ARG=""
+PORT_ARG=""
 # Every discarded or malformed argument is REPORTED, never swallowed.
 #
 # The first version of this loop had no `*)` branch and took `$2` for `--upstream` on faith. All three
@@ -132,6 +133,17 @@ while [ $# -gt 0 ]; do
     --upstream=*) if takes_value --upstream "${1#--upstream=}"; then UPSTREAM_ARG="${1#--upstream=}"; fi ;;
     --bin) if takes_value --bin "${2:-}"; then BIN_ARG="$2"; shift; fi ;;
     --bin=*) if takes_value --bin "${1#--bin=}"; then BIN_ARG="${1#--bin=}"; fi ;;
+    # --port, the one option that had no argument form and could therefore never be honoured.
+    #
+    # PORT came only from CLAUDE_PLUGIN_OPTION_PORT, which is absent from a Bash tool call — so an
+    # install could only ever start a proxy on 8787 while the user had configured something else. That
+    # is not a cosmetic default: the routing key then named 8787 while every later hook read the
+    # CONFIGURED port and self-gated on it, so the hooks saw an unrouted project and did nothing. The
+    # running proxy had no auto-restart behind it, and once it idle-exited nothing brought it back —
+    # silently, which is the failure this plugin exists to prevent. Every other option got an argument
+    # form twice over; this one was missed both times.
+    --port) if takes_value --port "${2:-}"; then PORT_ARG="$2"; shift; fi ;;
+    --port=*) if takes_value --port "${1#--port=}"; then PORT_ARG="${1#--port=}"; fi ;;
     *) note "ignoring unrecognised argument '$1'" ;;
   esac
   shift
@@ -141,6 +153,18 @@ FORCE="$START_UNROUTED"
 if [ -n "$BIN_ARG" ]; then
   BIN="$BIN_ARG"
 fi
+# PORT likewise, and everything derived from it has to be recomputed — the gate below compares against
+# it, and the log, pidfile, health URL and dashboard DB are all named after it. Re-deriving them here
+# rather than moving their definitions is deliberate: they are read in several places above and below.
+case "$PORT_ARG" in
+  '') ;;
+  *[!0-9]*) note "ignoring --port '$PORT_ARG': not a number" ;;
+  *)
+    PORT="$PORT_ARG"
+    LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log"
+    HEALTH="http://127.0.0.1:${PORT}/healthz"
+    ;;
+esac
 
 if [ "$FORCE" = 1 ]; then
   :
