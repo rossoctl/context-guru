@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1767,6 +1768,954 @@ func TestRejectingAValueDoesNotEatTheNextFlag(t *testing.T) {
 	}
 	if strings.Contains(string(launched), "--anthropic-upstream") {
 		t.Errorf("an upstream reached argv from a rejected value: %s", launched)
+	}
+}
+
+// --- settings.py's statusLine key ---------------------------------------------------------
+
+// TestSettingsStatuslineRoundTrips: add --statusline writes the top-level key alongside the
+// existing env changes in ONE atomic save, and remove takes back only what it recorded writing —
+// the exact shape already proven for env.CONTEXT_GURU_BIN and env.ANTHROPIC_UPSTREAM above,
+// applied to a key that lives outside `env` entirely.
+func TestSettingsStatuslineRoundTrips(t *testing.T) {
+	const cmdPath = "/opt/cg/statusline.py"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	writeJSON(t, path, map[string]any{"theme": "dark"})
+
+	facts, code := settings(t, "add", "--file", path, "--url", ourURL, "--statusline", cmdPath)
+	if code != 0 || facts["result"] != "added" {
+		t.Fatalf("add --statusline failed: exit %d, %v", code, facts)
+	}
+	got := readJSON(t, path)
+	sl, _ := got["statusLine"].(map[string]any)
+	if sl["type"] != "command" || sl["command"] != cmdPath {
+		t.Fatalf("statusLine = %v, want {type: command, command: %q}", got["statusLine"], cmdPath)
+	}
+	if got["theme"] != "dark" {
+		t.Error("an unrelated top-level setting was lost")
+	}
+
+	// Re-adding the identical install is a no-op, same as the base_url side.
+	facts, code = settings(t, "add", "--file", path, "--url", ourURL, "--statusline", cmdPath)
+	if code != 0 || facts["result"] != "unchanged" {
+		t.Fatalf("re-adding the same statusline should be unchanged: exit %d, %v", code, facts)
+	}
+
+	facts, code = settings(t, "remove", "--file", path, "--url", ourURL)
+	if code != 0 || facts["result"] != "removed" {
+		t.Fatalf("remove failed: exit %d, %v", code, facts)
+	}
+	if _, still := readJSON(t, path)["statusLine"]; still {
+		t.Error("the statusLine key survived removal")
+	}
+	if readJSON(t, path)["theme"] != "dark" {
+		t.Error("removal took more than its own keys")
+	}
+}
+
+// TestSettingsStatuslineRefusesToStealAnExisting mirrors
+// TestSettingsAddRefusesToStealAnExistingBaseURL for the statusLine key: a statusLine already in
+// the file may be the user's own, or another plugin's, and taking it over silently would break
+// whatever it drives while reporting success.
+func TestSettingsStatuslineRefusesToStealAnExisting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	theirs := map[string]any{"type": "command", "command": "~/.claude/my-own-statusline.sh"}
+	writeJSON(t, path, map[string]any{"statusLine": theirs})
+
+	facts, code := settings(t, "add", "--file", path, "--url", ourURL, "--statusline", "/opt/cg/statusline.py")
+	if code != 2 || facts["result"] != "conflict" {
+		t.Fatalf("expected a conflict (exit 2), got exit %d, %v", code, facts)
+	}
+	got := readJSON(t, path)
+	if sl, _ := got["statusLine"].(map[string]any); sl["command"] != theirs["command"] {
+		t.Fatalf("the file was modified despite the conflict: %v", got["statusLine"])
+	}
+	// The base_url side must not have been written either — one conflict stops the WHOLE call.
+	if env, _ := got["env"].(map[string]any); env != nil {
+		t.Errorf("env was written even though the statusline conflict should have stopped everything: %v", env)
+	}
+
+	// --force is the explicit decision, same as the base_url side, and it must be recoverable.
+	facts, code = settings(t, "add", "--file", path, "--url", ourURL, "--statusline", "/opt/cg/statusline.py", "--force")
+	if code != 0 || facts["result"] != "added" {
+		t.Fatalf("--force did not proceed: exit %d, %v", code, facts)
+	}
+	facts, code = settings(t, "remove", "--file", path, "--url", ourURL)
+	if code != 0 {
+		t.Fatalf("remove failed: %v", facts)
+	}
+	got = readJSON(t, path)
+	if sl, _ := got["statusLine"].(map[string]any); sl["command"] != theirs["command"] {
+		t.Errorf("uninstall did not restore the statusLine it replaced: %v", got["statusLine"])
+	}
+}
+
+// TestSettingsStatuslineOmittedWhenFlagAbsent proves the feature is fully additive: every
+// existing call site that never passes --statusline (which is most of them, including every
+// pre-existing test in this file) must behave exactly as it did before this key existed.
+func TestSettingsStatuslineOmittedWhenFlagAbsent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	writeJSON(t, path, map[string]any{"env": map[string]any{}})
+	if _, code := settings(t, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	if _, ok := readJSON(t, path)["statusLine"]; ok {
+		t.Error("a statusLine key appeared without --statusline ever being passed")
+	}
+}
+
+// TestSettingsStatuslineOnlyInstallTouchesNoRouting covers the /context-guru:statusline skill's
+// own call shape: --statusline with NO --url, so a user who wants the status line (typically at
+// USER scope, since it renders regardless of which project is open) does not accidentally start
+// routing that scope's sessions through the proxy as a side effect.
+func TestSettingsStatuslineOnlyInstallTouchesNoRouting(t *testing.T) {
+	const cmdPath = "/opt/cg/statusline.py"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	writeJSON(t, path, map[string]any{"theme": "dark"})
+
+	facts, code := settings(t, "add", "--file", path, "--statusline", cmdPath)
+	if code != 0 || facts["result"] != "added" {
+		t.Fatalf("statusline-only add failed: exit %d, %v", code, facts)
+	}
+	got := readJSON(t, path)
+	if _, hasEnv := got["env"]; hasEnv {
+		t.Errorf("env appeared from a call that never passed --url: %v", got)
+	}
+	sl, _ := got["statusLine"].(map[string]any)
+	if sl["command"] != cmdPath {
+		t.Fatalf("statusLine = %v, want command %q", got["statusLine"], cmdPath)
+	}
+
+	// Re-running is a no-op.
+	if _, code := settings(t, "add", "--file", path, "--statusline", cmdPath); code != 0 {
+		t.Fatal("re-add failed")
+	}
+
+	// Removing it with no --url must find it anyway — there is no env.ANTHROPIC_BASE_URL to key
+	// off, which is exactly the shape the base_url removal path's early return would otherwise
+	// mistake for "nothing installed here".
+	facts, code = settings(t, "remove", "--file", path)
+	if code != 0 || facts["result"] != "removed" {
+		t.Fatalf("statusline-only remove failed: exit %d, %v", code, facts)
+	}
+	if _, still := readJSON(t, path)["statusLine"]; still {
+		t.Error("the statusLine key survived a statusline-only removal")
+	}
+	if readJSON(t, path)["theme"] != "dark" {
+		t.Error("removal took more than its own key")
+	}
+}
+
+// TestSettingsAddRequiresUrlOrStatusline: with neither flag, `add` has nothing to do and must
+// say so rather than silently writing an empty ANTHROPIC_BASE_URL.
+func TestSettingsAddRequiresUrlOrStatusline(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	py := requireTool(t, "python3")
+	cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "add", "--file", path)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("add with neither --url nor --statusline should fail, got: %s", out)
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("a file was created by a call that should have refused before writing anything")
+	}
+}
+
+// --- the statusLine command --------------------------------------------------------------
+
+// runStatusline runs statusline.py with a controlled environment and stdin, and returns its
+// output, exit code and wall-clock time. Trailing args (e.g. "--cache", "--keepalive") are
+// passed straight through to the script, exactly as settings.py would install them.
+//
+// TMPDIR is pinned to a fresh t.TempDir() so the /api/stats response cache the script keeps
+// there (keyed by port AND session_id) cannot leak between tests that happen to reuse either.
+func runStatusline(t *testing.T, env map[string]string, stdin string, args ...string) (out string, code int, elapsed time.Duration) {
+	t.Helper()
+	py := requireTool(t, "python3")
+	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "statusline.py")}, args...)...)
+	cmd.Env = append(os.Environ(), "TMPDIR="+t.TempDir())
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	cmd.Stdin = strings.NewReader(stdin)
+	start := time.Now()
+	b, err := cmd.CombinedOutput()
+	elapsed = time.Since(start)
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("running statusline.py: %v (%s)", err, b)
+	}
+	t.Logf("statusline.py args=%v env=%v stdin=%q -> exit %d in %v, output %q",
+		args, env, stdin, code, elapsed.Round(time.Millisecond), b)
+	return string(b), code, elapsed
+}
+
+// statsStub is a stand-in /api/stats that always answers the same JSON body, so tests can drive
+// statusline.py against a controlled savings/keepalive shape without a real proxy.
+func statsStub(t *testing.T, body string) (port string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	return fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+}
+
+// routedEnv is the one env var that makes statusline.py act at all: it self-gates on
+// ANTHROPIC_BASE_URL naming our own port, exactly like the two hooks above.
+func routedEnv(port string) map[string]string {
+	return map[string]string{
+		"ANTHROPIC_BASE_URL":        "http://127.0.0.1:" + port + "/anthropic",
+		"CLAUDE_PLUGIN_OPTION_PORT": port,
+	}
+}
+
+// statuslinePayload builds a stdin payload carrying real session totals — the shape confirmed
+// against the installed Claude Code CLI binary and a live capture (see report-pr217.md):
+// session_id, cost.total_cost_usd, and context_window.total_input_tokens/total_output_tokens.
+// This is what makes _default_segment able to compute anything at all; the bare "{}" used by the
+// tests above this one is deliberately what a malformed/pre-first-response payload looks like.
+func statuslinePayload(sessionID string, totalUSD float64, inputTokens, outputTokens int) string {
+	return fmt.Sprintf(`{"session_id":%q,"cost":{"total_cost_usd":%v},`+
+		`"context_window":{"total_input_tokens":%d,"total_output_tokens":%d}}`,
+		sessionID, totalUSD, inputTokens, outputTokens)
+}
+
+// statsStubCapturingQuery is statsStub plus a hook that hands the request's raw query string to
+// the caller — used to prove /api/stats is actually called with ?session=<id> rather than
+// unscoped, which a passing statsStub test alone cannot show (it ignores the query entirely).
+func statsStubCapturingQuery(t *testing.T, body string, gotQuery *string) (port string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		*gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	return fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+}
+
+// TestStatuslineIsSilentWhereRoutingIsNotConfigured is the same property the two hooks have,
+// and for the same reason: this plugin installs a statusLine at USER scope (see
+// skills/statusline/SKILL.md), so it renders in every project on the machine, including every one
+// that never routed through context-guru. Printing anything there — even "not routed" — would be
+// permanent noise in somebody's terminal for a plugin they are not using in that project.
+func TestStatuslineIsSilentWhereRoutingIsNotConfigured(t *testing.T) {
+	for _, c := range []struct {
+		name, baseURL string
+	}{
+		{"unset", ""},
+		{"another local proxy on a different port (e.g. litellm)", "http://localhost:4000/anthropic"},
+		{"a remote gateway", "https://gateway.corp.example/anthropic"},
+		{"our port number appearing in a REMOTE host", "https://8787.example.com/anthropic"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out, code, _ := runStatusline(t, map[string]string{"ANTHROPIC_BASE_URL": c.baseURL}, "{}")
+			if code != 0 {
+				t.Errorf("exit %d; the status line command must never fail a render", code)
+			}
+			if strings.TrimSpace(out) != "" {
+				t.Errorf("printed %q for a project that is not routed through us", out)
+			}
+		})
+	}
+}
+
+// TestStatuslineReportsADownProxyInThreeCharacters covers the ACCEPT-AND-STALL shape, the same
+// one stallingPort exists for above: a hung proxy, a half-open socket, or an unrelated service on
+// the port all look like this to a client, and none of them are exotic. The render path must
+// notice inside its own short timeout rather than hang the status line.
+func TestStatuslineReportsADownProxyInThreeCharacters(t *testing.T) {
+	port := stallingPort(t)
+	out, code, elapsed := runStatusline(t, routedEnv(port), "{}")
+	if code != 0 {
+		t.Errorf("exit %d; must never fail a render", code)
+	}
+	if strings.TrimSpace(out) != "cg!" {
+		t.Errorf("got %q, want the down indicator %q", strings.TrimSpace(out), "cg!")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("took %v against a stalling port; the HTTP fetch carries its own ~0.6s timeout, "+
+			"so this should return in well under the script's own 2s backstop", elapsed)
+	}
+}
+
+// TestStatuslineNeverFailsOnAConnectionRefusal is the cheap, common shape of "down" — nothing
+// listening at all — kept distinct from the stalling-port test above because a refused
+// connection returns instantly and must not be confused with a slow one in the code path.
+func TestStatuslineNeverFailsOnAConnectionRefusal(t *testing.T) {
+	port := freePort(t) // freed immediately: nothing is listening
+	out, code, _ := runStatusline(t, routedEnv(port), "{}")
+	if code != 0 {
+		t.Errorf("exit %d; must never fail a render", code)
+	}
+	if strings.TrimSpace(out) != "cg!" {
+		t.Errorf("got %q, want %q", strings.TrimSpace(out), "cg!")
+	}
+}
+
+// TestStatuslineSurvivesMalformedStdin: Claude Code's own payload shape is trusted, but this
+// script must not crash if it is ever handed something else — a truncated pipe, a future
+// incompatible change, a manual invocation while testing. Passes --cache so the fallback cache
+// segment this asserts on is actually turned on; without it every one of these malformed
+// payloads also carries no session totals, so the default segment stays silent too and the
+// script would (correctly) print nothing at all — which this test is not the one checking.
+func TestStatuslineSurvivesMalformedStdin(t *testing.T) {
+	port := statsStub(t, `{"total_saved_usd": 0, "saved_unique": 0}`)
+	for _, stdin := range []string{"", "not json{{{", "null", "[1,2,3]", `{"prompt_cache": "not an object"}`} {
+		out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache")
+		if code != 0 {
+			t.Errorf("stdin %q: exit %d; must never fail a render", stdin, code)
+		}
+		if !strings.Contains(out, "cache") {
+			t.Errorf("stdin %q: expected a graceful fallback cache segment, got %q", stdin, out)
+		}
+	}
+}
+
+// TestStatuslineSurvivesAMalformedStatsResponse: the proxy answered, but not with anything this
+// script can parse (a future field-shape change, a body truncated by an intermediary). The cache
+// stopper comes from stdin and owes the network nothing, so it must still render once turned on.
+func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
+	port := statsStub(t, `not valid json at all`)
+	stdin := `{"prompt_cache": {"warm": true, "expires_at": ` +
+		fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache")
+	if code != 0 {
+		t.Errorf("exit %d; must never fail a render", code)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(out), "cache 1:") {
+		t.Errorf("got %q; the cache stopper must still render off a malformed /api/stats body", out)
+	}
+	if strings.Contains(out, "saved") {
+		t.Errorf("a savings segment appeared from an unparseable stats body: %q", out)
+	}
+}
+
+// parseCacheSeconds reads back "cache M:SS" as a second count, for boundary assertions that have
+// to tolerate the real (small, sub-second) delay between this test computing `expires_at` and the
+// subprocess evaluating `time.time()` against it — a fixed-string comparison at a tight margin is
+// flaky by construction, not a property of the script.
+func parseCacheSeconds(t *testing.T, seg string) int {
+	t.Helper()
+	m, s := 0, 0
+	if _, err := fmt.Sscanf(seg, "cache %d:%d", &m, &s); err != nil {
+		t.Fatalf("%q does not parse as a cache countdown: %v", seg, err)
+	}
+	return m*60 + s
+}
+
+// TestStatuslineCacheCountdownMath is the boundary table for the TTL "stopper" — the single most
+// valuable element of this whole feature, per its own design brief. Every row is a way the
+// countdown could be wrong, including the one a naive `remaining < 0` check gets backwards: a
+// prefix that expires AT this exact instant (remaining == 0) has already gone cold, not "still
+// has zero seconds left".
+func TestStatuslineCacheCountdownMath(t *testing.T) {
+	port := statsStub(t, `{}`)
+	for _, c := range []struct {
+		name         string
+		remainingSec float64
+		wantCold     bool
+	}{
+		{"fresh: about 4m50s left", 290, false},
+		{"a few seconds left", 3, false},
+		{"boundary: expires exactly now", 0, true},
+		{"just expired", -5, true},
+		{"clock skew: far in the past", -100000, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			expiresAt := time.Now().Add(time.Duration(c.remainingSec * float64(time.Second))).Unix()
+			stdin := fmt.Sprintf(`{"prompt_cache": {"warm": true, "expires_at": %d}}`, expiresAt)
+			out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache")
+			if code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+			got := strings.SplitN(strings.TrimSpace(out), " | ", 2)[0]
+			if c.wantCold {
+				if got != "cache cold" {
+					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache cold")
+				}
+				return
+			}
+			if got == "cache cold" {
+				t.Fatalf("remaining=%.0fs: reported cold while still positive", c.remainingSec)
+			}
+			gotSec := parseCacheSeconds(t, got)
+			// Truncation only ever rounds DOWN (never up, never negative here), so the tolerance
+			// is asymmetric: at most the subprocess's own wall-clock overhead behind the expected
+			// value, never ahead of it.
+			if gotSec > int(c.remainingSec) || gotSec < int(c.remainingSec)-2 {
+				t.Errorf("remaining=%.0fs: got %q (%ds), want within 2s below that", c.remainingSec, got, gotSec)
+			}
+		})
+	}
+}
+
+// TestStatuslineOmitsPromptCacheWhenAbsent covers the normal, expected "no data yet" state —
+// before a session's first response has usage to track — as distinct from an error. It must
+// read calmly, never as a hang or a missing feature.
+// TestStatuslineCacheCountdownExactBoundary isolates remaining==0 EXACTLY, which the table test
+// above cannot reliably do: a subprocess always burns some real wall-clock time between this test
+// computing `expires_at` and the script evaluating `time.time()` against it, so "expires right
+// now" always lands very slightly negative in practice by the time it's checked — which happens
+// to satisfy BOTH `remaining <= 0` and the off-by-one `remaining < 0`, so that table row cannot
+// catch the boundary bug on its own. This freezes time.time() inside the interpreter instead, so
+// remaining is exactly 0.0, not "usually a hair negative".
+func TestStatuslineCacheCountdownExactBoundary(t *testing.T) {
+	py := requireTool(t, "python3")
+	script := `
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.time.time = lambda: 1_700_000_000.0
+print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.0}}))        # remaining == 0
+print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.5}}))        # remaining +0.5s
+print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.0 - 0.5}}))  # remaining -0.5s
+`
+	out, err := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the boundary check: %v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	want := []string{"cache cold", "cache 0:00", "cache cold"}
+	if len(lines) != len(want) {
+		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
+	}
+	for i, w := range want {
+		if lines[i] != w {
+			t.Errorf("line %d: got %q, want %q (remaining==0 must already read cold, not "+
+				"\"0:00\" — a prefix that expires AT this instant has no time left)", i, lines[i], w)
+		}
+	}
+}
+
+func TestStatuslineOmitsPromptCacheWhenAbsent(t *testing.T) {
+	port := statsStub(t, `{}`)
+	out, code, _ := runStatusline(t, routedEnv(port), `{}`, "--cache")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.TrimSpace(out) != "cache –" {
+		t.Errorf("got %q, want the neutral placeholder %q", strings.TrimSpace(out), "cache –")
+	}
+}
+
+// TestStatuslineOmitsZeroSavings covers a payload with NO session totals at all (the same "{}"
+// shape used above) — before the first response of a session, there is nothing to show and
+// nothing to divide by. Distinct from TestStatuslineDefaultSegmentZeroTotal below, which drives
+// a REAL zero total (cost and tokens both explicitly 0, as Claude Code's own payload reads
+// before any usage exists) through the same "nothing to divide by" path.
+func TestStatuslineOmitsZeroSavings(t *testing.T) {
+	port := statsStub(t, `{"total_saved_usd": 0, "saved_unique": 0, "keepalive_pings": 0}`)
+	out, code, _ := runStatusline(t, routedEnv(port), `{}`, "--cache", "--keepalive")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.TrimSpace(out) != "cache –" {
+		t.Errorf("got %q, want only the neutral cache placeholder (no session totals to show, no "+
+			"keep-alive pings to report)", out)
+	}
+}
+
+// TestStatuslineDefaultSegmentZeroTotal is the "a brand-new session divides by nothing" case
+// called out by name: cost.total_cost_usd and context_window's token pair are all explicitly 0,
+// exactly like Claude Code's own real payload before the first response has anything to track
+// (confirmed by a live capture — see report-pr217.md). Must render nothing, never "$0.00/0 saved
+// of $0.00/0", a crash, or a NaN/Inf from a division this must never even attempt.
+func TestStatuslineDefaultSegmentZeroTotal(t *testing.T) {
+	port := statsStub(t, `{"total_saved_usd": 0, "saved_unique": 0}`)
+	stdin := `{"session_id":"sess-zero","cost":{"total_cost_usd":0},` +
+		`"context_window":{"total_input_tokens":0,"total_output_tokens":0}}`
+	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("got %q, want nothing — a zero session total is a fresh session, not a fault", out)
+	}
+	if strings.Contains(strings.ToLower(out), "nan") || strings.Contains(strings.ToLower(out), "inf") {
+		t.Fatalf("a zero-total render produced %q — this must never divide by the total at all", out)
+	}
+}
+
+// TestStatuslineDefaultShowsOnlySavings is the shape the feature is FOR: real, non-trivial
+// session totals (matching the live capture) paired with a real savings figure, and — with
+// neither --cache nor --keepalive passed — nothing else in the line at all. This is also the
+// positive control for TestStatuslineOmitsZeroSavings above: without a working default segment,
+// that test's "" assertion (once --cache/--keepalive are added there) would pass for the wrong
+// reason — a statusline.py that rendered NO segment ever would look identical.
+func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
+	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4}`)
+	stdin := statuslinePayload("sess-real", 0.41, 180000, 7000)
+	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	got := strings.TrimSpace(out)
+	if got != "$0.03/12.0k saved of $0.41/187.0k" {
+		t.Errorf("got %q, want the savings-vs-session-total segment exactly", got)
+	}
+	if strings.Contains(got, "cache") || strings.Contains(got, "ka ") {
+		t.Errorf("got %q — an extra segment appeared without its flag", got)
+	}
+}
+
+// TestStatuslineExtrasHiddenByDefault is the OTHER half of the toggle: the same conditions that
+// would make each extra segment render (a real prompt_cache in stdin, real keepalive_pings in
+// stats) must produce NEITHER of them without the flag that turns them on — proven alongside
+// TestStatuslineExtrasShownWhenEnabled below so that "hidden by default" cannot pass merely
+// because the segment is broken.
+func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
+	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4}`)
+	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
+		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
+		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
+	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.Contains(out, "cache") {
+		t.Errorf("got %q — the cache segment showed without --cache", out)
+	}
+	if strings.Contains(out, "ka ") {
+		t.Errorf("got %q — the keep-alive segment showed without --keepalive", out)
+	}
+}
+
+// TestStatuslineExtrasShownWhenEnabled is the positive control for the test above: the SAME
+// conditions, with both flags passed, must show both extras — otherwise "hidden by default"
+// would be indistinguishable from "permanently broken".
+func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
+	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4}`)
+	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
+		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
+		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache", "--keepalive")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out, "cache 1:") {
+		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
+	}
+	if !strings.Contains(out, "ka 4p") {
+		t.Errorf("got %q, want %q with --keepalive passed", out, "ka 4p")
+	}
+	if !strings.Contains(out, "$0.03/12.0k saved of $0.41/187.0k") {
+		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
+	}
+}
+
+// TestStatuslineShowsANegativeNetHonestly: total_saved_usd can go genuinely negative — an idle
+// keep-alive spending more than it recovers nets the whole figure negative (dash/overview.go's
+// own waterfall calls this "a real outcome the dashboard will not hide"). The default segment
+// must not fold that into the same omission as a fresh session with nothing to report yet: a
+// nonzero SESSION TOTAL with a negative saving is a real fact, not "nothing happened".
+func TestStatuslineShowsANegativeNetHonestly(t *testing.T) {
+	port := statsStub(t, `{"total_saved_usd": -0.05, "saved_unique": 0}`)
+	stdin := statuslinePayload("sess-neg", 1.00, 40000, 1000)
+	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out, "$-0.05/0 saved of $1.00/41.0k") {
+		t.Errorf("got %q, want a segment showing the negative net, not an omission", out)
+	}
+}
+
+// TestStatuslineScopesStatsToItsOwnSession proves /api/stats is actually called with
+// ?session=<this session's id> — the fix for mixing a process-wide savings figure into a
+// segment that claims to be THIS session's own. A statsStub alone (used by every test above)
+// cannot show this: it ignores the query string entirely, so a regression to the old unscoped
+// URL would still pass every one of them.
+func TestStatuslineScopesStatsToItsOwnSession(t *testing.T) {
+	var gotQuery string
+	port := statsStubCapturingQuery(t, `{"total_saved_usd": 0.01, "saved_unique": 1}`, &gotQuery)
+	stdin := statuslinePayload("abc-123-session", 0.10, 1000, 100)
+	_, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if gotQuery != "session=abc-123-session" {
+		t.Errorf("got query %q, want %q", gotQuery, "session=abc-123-session")
+	}
+}
+
+// TestStatuslineDefaultSegmentRequiresStats: a real, nonzero session total with NO savings
+// figure to pair it with (the proxy answered, but /api/stats has nothing — e.g. --dashboard is
+// off) must render nothing, not a session total with a fabricated or missing "saved" half.
+func TestStatuslineDefaultSegmentRequiresStats(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "dashboard disabled", http.StatusNotFound)
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+
+	stdin := statuslinePayload("sess-nodash", 0.41, 180000, 7000)
+	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("got %q, want nothing — a real session total with no savings figure to pair "+
+			"it with must not render half a claim", out)
+	}
+}
+
+// TestStatuslineRejectsAMalformedSessionId: session_id is a string this script did not generate,
+// carried straight from stdin into a URL query and a tempfile path. One that does not look like
+// the UUID Claude Code actually sends must be treated as absent rather than passed through
+// verbatim — proven here by a session_id containing characters that would otherwise inject a
+// second query parameter.
+func TestStatuslineRejectsAMalformedSessionId(t *testing.T) {
+	var gotQuery string
+	port := statsStubCapturingQuery(t, `{"total_saved_usd": 0.01, "saved_unique": 1}`, &gotQuery)
+	stdin := statuslinePayload("legit-id&session=someone-elses-session", 0.10, 1000, 100)
+	_, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.Contains(gotQuery, "someone-elses-session") {
+		t.Fatalf("got query %q — an unsanitised session_id reached the request", gotQuery)
+	}
+	if gotQuery != "" {
+		t.Errorf("got query %q, want an unscoped request (empty query) for a session_id this "+
+			"script does not trust", gotQuery)
+	}
+}
+
+// TestStatuslineCachesPerSession is TestStatuslineCachesStatsAcrossQuickRenders' sibling for the
+// defect its own fix could reintroduce: caching /api/stats by PORT ALONE would let one terminal
+// read back another terminal's session's cached savings figure whenever both share a proxy (a
+// single local proxy commonly serves every project on a machine). Two session ids, same port,
+// same TMPDIR, a stub whose body depends on which session was requested — each render must get
+// its OWN session's figure, never the other's.
+func TestStatuslineCachesPerSession(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.RawQuery {
+		case "session=sess-a":
+			w.Write([]byte(`{"total_saved_usd": 0.01, "saved_unique": 100}`))
+		case "session=sess-b":
+			w.Write([]byte(`{"total_saved_usd": 9.99, "saved_unique": 9000}`))
+		default:
+			t.Errorf("unexpected query %q", r.URL.RawQuery)
+		}
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+
+	py := requireTool(t, "python3")
+	tmp := t.TempDir() // shared TMPDIR on purpose: this is what could let the cache files collide
+	run := func(sessionID string) string {
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
+		cmd.Env = append(os.Environ(), "TMPDIR="+tmp,
+			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+			"CLAUDE_PLUGIN_OPTION_PORT="+port)
+		cmd.Stdin = strings.NewReader(statuslinePayload(sessionID, 1.00, 10000, 1000))
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("statusline.py: %v (%s)", err, b)
+		}
+		return string(b)
+	}
+	a := run("sess-a")
+	b := run("sess-b")
+	if !strings.Contains(a, "$0.01/100 saved") {
+		t.Errorf("session a: got %q, want its own $0.01/100 saved", a)
+	}
+	if !strings.Contains(b, "$9.99/9.0k saved") {
+		t.Errorf("session b: got %q, want its own $9.99/9.0k saved — not session a's cached figure", b)
+	}
+}
+
+// TestStatuslineCachesStatsAcrossQuickRenders is the "cheap" requirement made concrete: Claude
+// Code can re-render on every token of a streamed response, and without a cache this would be
+// one HTTP request per render against the user's own local proxy.
+func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
+	var hits int64
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"total_saved_usd": 0.01, "saved_unique": 1}`))
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+
+	// Same TMPDIR for every call in this test, deliberately — that is what makes the on-disk
+	// cache file shared between them. runStatusline gives each call a FRESH TMPDIR (correct
+	// isolation between different tests), so this test drives the script directly instead.
+	py := requireTool(t, "python3")
+	tmp := t.TempDir()
+	run := func() string {
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
+		cmd.Env = append(os.Environ(), "TMPDIR="+tmp,
+			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+			"CLAUDE_PLUGIN_OPTION_PORT="+port)
+		cmd.Stdin = strings.NewReader("{}")
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("statusline.py: %v (%s)", err, b)
+		}
+		return string(b)
+	}
+	for i := 0; i < 5; i++ {
+		run()
+	}
+	if got := atomic.LoadInt64(&hits); got != 1 {
+		t.Errorf("5 renders inside the cache TTL produced %d requests to /api/stats, want 1", got)
+	}
+}
+
+// --- the keep-alive opt-in toggle -----------------------------------------------------------
+
+// runKeepaliveBlock executes one bash block from skills/keepalive/SKILL.md with a controlled
+// environment, the same way runCheck/skillBlock drive the other skills' destructive snippets.
+func runKeepaliveBlock(t *testing.T, needle string, env map[string]string) (out string, code int) {
+	t.Helper()
+	requireTool(t, "bash")
+	block := skillBlock(t, "keepalive", needle)
+	cmd := exec.Command("bash", "-c", block)
+	cmd.Env = os.Environ()
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	b, err := cmd.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("running keepalive block: %v (%s)", err, b)
+	}
+	t.Logf("keepalive block (needle %q) env=%v -> exit %d, output:\n%s", needle, env, code, b)
+	return string(b), code
+}
+
+// TestKeepaliveEnableWritesAPresetPreservingConfig is the fix for the defect the config toggle
+// would otherwise reintroduce: --config REPLACES --preset entirely (loadConfig in
+// cmd/context-guru-proxy/main.go only reads --preset when --config is ABSENT), so a keep-alive
+// config that omitted its own `preset:` line would silently turn compaction off the moment
+// keep-alive turned on — the opposite of what enabling it is supposed to do.
+func TestKeepaliveEnableWritesAPresetPreservingConfig(t *testing.T) {
+	state := t.TempDir()
+	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PORT":   "8787",
+		"CLAUDE_PLUGIN_OPTION_PRESET": "codesmart",
+		"XDG_STATE_HOME":              state,
+	})
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	cfg := filepath.Join(state, "context-guru", "keepalive-8787.yaml")
+	b, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatalf("config was not written at %s: %v", cfg, err)
+	}
+	if !strings.Contains(string(b), "preset: codesmart") {
+		t.Errorf("the configured PRESET did not survive into the config file, which would "+
+			"silently drop compaction the moment --config is passed:\n%s", b)
+	}
+	if !strings.Contains(string(b), "keepalive: true") {
+		t.Errorf("cache.keepalive: true is missing from the written config:\n%s", b)
+	}
+}
+
+// TestKeepaliveEnableRefusesToClobberAForeignFile: a file at the same path that this skill did
+// not write (no marker) might be something else entirely — refuse rather than overwrite it.
+func TestKeepaliveEnableRefusesToClobberAForeignFile(t *testing.T) {
+	state := t.TempDir()
+	stateDir := filepath.Join(state, "context-guru")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(stateDir, "keepalive-8787.yaml")
+	foreign := "# hand-written, not ours\npreset: cache\n"
+	if err := os.WriteFile(cfg, []byte(foreign), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, map[string]string{
+		"CLAUDE_PLUGIN_OPTION_PORT": "8787",
+		"XDG_STATE_HOME":            state,
+	})
+	if code != 0 {
+		t.Fatalf("must not fail outright, just refuse: exit %d: %s", code, out)
+	}
+	if !strings.Contains(out, "REFUSING") {
+		t.Errorf("no refusal reported for a foreign file: %s", out)
+	}
+	got, err := os.ReadFile(cfg)
+	if err != nil || string(got) != foreign {
+		t.Errorf("the foreign file was modified: %v, %q", err, got)
+	}
+}
+
+// TestKeepaliveDisableOnlyRemovesOurOwnFile mirrors the same ownership discipline
+// settings.py enforces for everything else this plugin writes.
+func TestKeepaliveDisableOnlyRemovesOurOwnFile(t *testing.T) {
+	t.Run("removes what we wrote", func(t *testing.T) {
+		state := t.TempDir()
+		stateDir := filepath.Join(state, "context-guru")
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cfg := filepath.Join(stateDir, "keepalive-8787.yaml")
+		ours := "# context-guru: written by /context-guru:keepalive\npreset: cache\ncache:\n  keepalive: true\n"
+		if err := os.WriteFile(cfg, []byte(ours), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, code := runKeepaliveBlock(t, `rm -f "$CFG"`, map[string]string{
+			"CLAUDE_PLUGIN_OPTION_PORT": "8787",
+			"XDG_STATE_HOME":            state,
+		})
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, out)
+		}
+		if _, err := os.Stat(cfg); err == nil {
+			t.Error("our own config survived the disable block")
+		}
+	})
+
+	t.Run("leaves a foreign file alone", func(t *testing.T) {
+		state := t.TempDir()
+		stateDir := filepath.Join(state, "context-guru")
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cfg := filepath.Join(stateDir, "keepalive-8787.yaml")
+		foreign := "# hand-written\npreset: cache\n"
+		if err := os.WriteFile(cfg, []byte(foreign), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, code := runKeepaliveBlock(t, `rm -f "$CFG"`, map[string]string{
+			"CLAUDE_PLUGIN_OPTION_PORT": "8787",
+			"XDG_STATE_HOME":            state,
+		})
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, out)
+		}
+		got, err := os.ReadFile(cfg)
+		if err != nil || string(got) != foreign {
+			t.Errorf("a config this skill never wrote was removed: %v, %q, output: %s", err, got, out)
+		}
+	})
+}
+
+// TestStartProxyPicksUpAKeepaliveConfig proves the wiring between the opt-in toggle above and the
+// hook that actually launches the proxy: presence of the file is what decides, and it is the ONLY
+// thing that decides — nothing else about this test's environment names keep-alive at all.
+func TestStartProxyPicksUpAKeepaliveConfig(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		writeCfg   bool
+		wantConfig bool
+	}{
+		{"no keepalive config: --config is never passed", false, false},
+		{"a keepalive config exists: --config names it", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			requireTool(t, "bash")
+			dir := t.TempDir()
+			argvFile := filepath.Join(dir, "argv")
+			fake := filepath.Join(dir, "fake-proxy")
+			port := freePort(t)
+			py := requireTool(t, "python3")
+			script := "#!/usr/bin/env bash\n" +
+				"printf '%s\\n' \"$*\" > " + argvFile + "\n" +
+				"exec " + py + " -c '\n" +
+				"import http.server\n" +
+				"class H(http.server.BaseHTTPRequestHandler):\n" +
+				"    def do_GET(self):\n" +
+				"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+				"    def log_message(self, *a): pass\n" +
+				"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n'\n"
+			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			state := filepath.Join(dir, "state")
+			var cfgPath string
+			if c.writeCfg {
+				stateDir := filepath.Join(state, "context-guru")
+				if err := os.MkdirAll(stateDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath = filepath.Join(stateDir, "keepalive-"+port+".yaml")
+				if err := os.WriteFile(cfgPath, []byte("preset: cache\ncache:\n  keepalive: true\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+			cmd.Env = append(os.Environ(),
+				"CLAUDE_PLUGIN_OPTION_PORT="+port,
+				"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+				"CONTEXT_GURU_BIN="+fake,
+				"XDG_STATE_HOME="+state,
+				"TMPDIR="+dir)
+			out, err := cmd.CombinedOutput()
+			t.Cleanup(func() {
+				if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+					exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+				}
+			})
+			if err != nil {
+				t.Fatalf("start-proxy.sh failed: %v\n%s", err, out)
+			}
+			argv, rerr := os.ReadFile(argvFile)
+			if rerr != nil {
+				t.Fatalf("the fake proxy never ran: %v", rerr)
+			}
+			gotConfig := strings.Contains(string(argv), "--config "+cfgPath) ||
+				(c.writeCfg && strings.Contains(string(argv), "--config"))
+			hasAnyConfig := strings.Contains(string(argv), "--config")
+			if c.wantConfig && !gotConfig {
+				t.Errorf("wanted --config %s in argv, got %q", cfgPath, argv)
+			}
+			if !c.wantConfig && hasAnyConfig {
+				t.Errorf("no keepalive config was written, but --config appeared anyway: %q", argv)
+			}
+		})
 	}
 }
 
