@@ -16,7 +16,7 @@ one of them is expensive.
 | axis | the regression | what covers it today |
 |---|---|---|
 | **Configuration** | a default, preset, env var, route or auth class changes — or the *deployed* config stops matching what the binary reads | `pipeline_drift_test.go` (2 preset arms), `config/docdrift_test.go` (preset doc tables). Nothing checks the deployed host. |
-| **Expensiveness** | savings shrink, or cost *rises* while content falls (cache-write growth, our own LLM spend) | nothing automated |
+| **Expensiveness** | savings shrink, or cost *rises* while content falls (cache-write growth, our own LLM spend) | nothing automated. Note the two halves need different tiers — content is free to check, billing is not (§4.2) |
 | **Capability** | the agent solves fewer tasks — corrupted `tool_result`, a broken expand round trip, a cache-busting splice | nothing automated |
 
 The configuration axis is the one that has already bitten this deployment, twice, in ways no
@@ -83,6 +83,10 @@ its natural closure — every preset named anywhere in the tree (harness arms, d
 `presetnames.go`, examples) resolves to the shipped pipeline, checked as a set in both
 directions, the way `config/docdrift_test.go` already does for the doc tables.
 
+Add one cheap assertion while there: **no shipped preset names a test-only component**
+(`testreorder`, `testrevert`, `testrewrite` are registered in the same namespace as the real
+ones, so a typo or a copy-paste can ship one).
+
 ### 3.2 Env-var contract — the `TENANT_MONTHLY_CAP_USD` gate
 
 Generate the inventory from the AST (`os.Getenv` / `os.LookupEnv` call sites), not a grep, and
@@ -132,31 +136,114 @@ A `CONTEXT_GURU_CAPTURE` JSONL recorded from a real baseline agent run, pinned b
 fetched by the gate rather than committed (size, and it is real traffic — see §11). It must
 cover the shapes that carry the money: large `tool_result` blobs, repeated file reads, bash
 output, MCP tool schemas, and a realistic cached-prefix layout. A corpus on which the pipeline
-never fires measures nothing, so corpus adequacy is itself asserted: each gated component must
-act at least once, or the run fails as *unmeasured* rather than passing as *unchanged*.
+never fires measures nothing, so corpus adequacy is itself asserted: each **in-scope** component
+(§4.3) must act at least once, or the run fails as *unmeasured* rather than passing as
+*unchanged*.
 
-### 4.2 What it measures
+The replay must also be **hermetic**. Fraction-based triggers scale with the model's context
+window, which is resolved over the network and cached (`proxy.go:1040`) — so a change in the
+model-info service silently shifts which candidates trip a trigger, and the gate reports a
+savings regression that is not one. Pin `MODEL_INFO` / `MODEL_INFO_URL` / `MODEL_PRICES` to files
+in the repo, hash them into the baseline, and point the upstream at a dead port for the
+class-A pass: nothing should call it, and a dead port turns "should not" into "cannot".
 
-Per component and per preset: `tokens_before/after`, `saved_tokens`, `saved_tokens_unique`,
-act counts, and — the part that matters most — the **cache-tier split**. `measured-2026-08.md`
-records that 90.74% of input tokens bill as cache reads at 12.6× less than fresh input, and
-that compaction can therefore *raise* the bill while cutting content. So the gated number is
-**net dollars at the live price list, including our own LLM spend**, not a token percentage,
-plus a separate hard gate on cache-write growth (the published arms were a four-way wash within
-1.1%; a regression here is the expensive one).
+One mechanical improvement over `replay.py`: it restarts the proxy per config, because `/stats`
+counters are cumulative per process. `/compact` takes a per-request pipeline override
+(`?preset=`, or `x-context-guru-pipeline`, `proxy.go:592`) and every captured row is labelled
+with the pipeline that actually ran (`notePreset`, `dashcapture.go:94`), so one process can serve
+the whole sweep and the per-request rows say *which* request changed, not merely that a total
+moved. Its restart also does `pkill -x <binary>`, which on a shared eval box kills whatever else
+is running that binary; the gate should own a uniquely-named process and kill by PID.
 
-Two more zero-tolerance checks: every rewritten body is still structurally valid for the next
-call (`replay.py` does this), and every `<<cg:HASH>>` emitted resolves through `/expand` back to
-the original bytes. The "fail open, always" and "every lossy Offload must be reversible"
-boundaries in `CLAUDE.md` are exactly the invariants a gate should hold, and both are testable
-here for free.
+### 4.2 What it measures — and what it cannot
 
-### 4.3 Determinism
+Per component and per preset: `tokens_before/after`, `saved_gross`, `saved_unique`, act counts.
+Those are exact and free.
 
-Deterministic components get **exact** baselines, zero tolerance — a 1% savings regression is
-invisible on a 12-task live run and unmissable here. The LLM components (`extract_llm`,
-`summarize`) are not deterministic; give them a recorded-response cache so this tier stays free
-and exact, and measure them live only in tier 2.
+**Dollars are not directly gateable here, and neither is cache.** The dollar valuation
+classifies each request into a billing tier from `r.cache_read` / `r.cache_write` /
+`r.fresh_input` (`dash/readvalue.go:176`), and those come from the *upstream response's* usage
+block. `/compact` never calls upstream, so all three are zero and every row classifies as
+`fresh` — the most expensive tier — systematically overstating savings. `measured-2026-08.md`
+records that 90.74% of input tokens actually bill as cache reads at 12.6× less than fresh, so
+that error is not small.
+
+So the money question splits three ways:
+
+- **content tokens removed** — exact here, zero tolerance;
+- **dollars** — computable here only under a *frozen tier mix* carried in the baseline. The same
+  assumption applied to both sides is a valid regression detector; it is **not** a claim about
+  the bill;
+- **billed tiers and cache-write growth** — tier 2 only. This is the failure mode that raises
+  the bill while cutting content, and replay can only *model* it via `kvcache.Simulate`, which
+  is why §3.5's cost-model drift test belongs in the gate.
+
+Two zero-tolerance checks do apply to everything that acts: every rewritten body is still
+structurally valid for the next call (`replay.py` does this), and every `<<cg:HASH>>` resolves
+through `/expand` back to the original bytes. The "fail open, always" and "every lossy Offload
+must be reversible" boundaries in `CLAUDE.md` are exactly the invariants a gate should hold, and
+both are free here.
+
+### 4.3 Scope: this tier gates SOME components, and the rest must be declared out
+
+The pipeline has 26 registered components. They divide by *what they depend on*, and only the
+first class is a savings-gate candidate.
+
+| class | components | savings gateable in tier 1? |
+|---|---|---|
+| **A — pure function of the request body** | `format`, `textclean`, `searchfold`, `toolschema`, `toolfilter`, `toon`, `dedup`, `mask`, `collapse`, `cmdfilter`, `linecap`, `extract`, `smartcrush`, `skeleton`, `failed_run`, `readlifecycle` | **yes, exact, $0** |
+| **B — calls a model on the request body** | `extract_llm`, `summarize`, `agentdiet` | only against recorded responses, and then the baseline is on the plumbing, not the savings (§4.4) |
+| **C — depends on live cross-turn or cache state** | `extract_llm_sweep`, `cachesplit`, `cacheinject` | **no — structurally impossible** |
+| **D — test-only** | `testreorder`, `testrevert`, `testrewrite` | n/a; tier 0 asserts no shipped preset names one |
+
+Class C is the important one, because measuring it here does not merely fail — **it passes
+vacuously**:
+
+- **`extract_llm_sweep`** asks the request's own model over its cached transcript, and
+  `prefixAsker.Ask` needs the previous turn's forwarded body from the session stash
+  (`proxy/prefixask.go:112`). A `/compact` replay forwards nothing, so nothing is ever stashed,
+  so every record is a session's first turn: `ErrNoPrefix`, refused locally, no request made
+  (`extract_sweep.go:795`). It declines on 100% of a replay corpus and removes 0 tokens. A gate
+  that included it would report `0 → 0, unchanged, pass` on a component that was entirely
+  broken.
+- **`cachesplit`** is a marker that always skips: the real edit is body-level in
+  `apply/prefixsplit.go` on the top-level `system` array, which components never see. Its
+  measured value — −34.1% cost, 0% → 96.7% cache hit — is a pure billing phenomenon.
+- **`cacheinject`** places breakpoints. Their effect exists only in the provider's cache
+  accounting.
+
+That is a real limit on the tier's authority, and it lands on the biggest measured lever in the
+product. **Tier 1 is therefore not "the expensiveness gate."** It is the savings gate for the
+16 deterministic offloaders, plus a universal integrity-and-reversibility gate, and the cache
+pair and the adjudicators are tier-2 business.
+
+The gate must carry this as an **explicit scope list**, and assert that a class-C component is
+*excluded* rather than measured. Any component that reaches replay and never acts reports
+`unmeasured`, never `pass` — the three-way verdict in §8 exists for exactly this case.
+
+**Optional extension (tier 1.5), if class B and C coverage is worth the build:** replay through
+the *chat* route against a stub upstream serving recorded responses, rather than through
+`/compact`. Forwarding populates the session stash, so `extract_llm_sweep` can act, and the
+recorded `usage` blocks supply real tiers. The honest caveat: those tiers record the *baseline*
+pipeline's cache behaviour, not the candidate's — so this reaches the sweep's decisions and
+plumbing, and still not cache economics under a changed pipeline.
+
+### 4.4 Determinism, and the limit of a recorded-response cache
+
+Class A gets **exact** baselines, zero tolerance — a 1% savings regression is invisible on a
+12-task live run and unmissable here.
+
+Class B cannot. Their output varies run to run, so an exact baseline is impossible, and a
+tolerance wide enough to absorb model variance is wide enough to hide a regression. A
+recorded-response cache makes the numbers repeatable, but then the gate is measuring a
+*recording*: it catches the plumbing breaking (candidate selection, trigger arithmetic, splice,
+marker round trip) and cannot catch the component getting worse at its job. Worth having, worth
+labelling as such in the report, and not worth confusing with a savings gate. Their savings
+belong to tier 2.
+
+Cost note: `replay.py` currently sets `CHEAP_MODEL=aws/claude-sonnet-5`. Replaying class B live
+over a few thousand records at that rate is not "cents" — a recorded-response cache is what
+keeps this tier cheap, not an aspiration.
 
 ## 5. Tier 2 — the live subset, per release candidate (~$10, ~1 h)
 
@@ -288,7 +375,7 @@ a config file.
 | phase | content | cost | value |
 |---|---|---|---|
 | 1 | tier 0 + `selftest` | free | covers the axis that has actually broken this deployment twice |
-| 2 | corpus + replay baseline | cents/run | catches expensiveness regressions with near-zero variance |
+| 2 | corpus + replay baseline | cents/run | catches content-savings regressions in the 16 class-A components with near-zero variance (§4.3) |
 | 3 | selection run + live baseline | one-off ~$25, then ~$10/RC | catches gross capability breakage |
 | 4 | `verify-deployed`, release checklist doc, `release.yaml` wiring | free | closes the manual runbook |
 
@@ -302,3 +389,6 @@ Phase 1 is worth shipping alone.
 - **Who accepts a baseline update** — and whether a reviewing agent may, or only a human.
 - **Does reward get a hard gate at all**, given §5.3, or is it advisory with the full run as the
   only blocking authority?
+- **Is tier 1.5 worth building** (§4.3)? Without it, `extract_llm_sweep` and the cache pair are
+  gated only per release candidate, at tier-2 cost — and those are the components carrying the
+  largest measured effects in the product.
