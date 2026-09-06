@@ -711,13 +711,23 @@ questions at a flat rate.
 | `gross_value_usd` | What its saved tokens are worth at the rate they'd have been billed |
 | **`net_value_usd`** | **The honest headline. Negative = underwater.** `null` when the spend is not known |
 | `avg_latency_ms` | Mean wall time per call (latency cost on the hot path) |
-| `gross_saved_tokens` | Tokens removed |
+| `gross_saved_tokens` | Tokens removed, measured on the message **as spliced** — the candidate minus what actually went upstream, marker and summary segment included |
 | `reasons` / `top_reason` | Why extraction ran or was suppressed |
 
 Per-component, in `components.extract_llm`: **`acted` counts free replays.** A frozen decision
 re-spliced on a later turn saves tokens and costs nothing, and it landed in the same counter as the
 call that derived it — `acted: 239` beside `reapplied_same_session: 2,291` was read as 239 paid
 extractions. Use `acted_fresh` (paid work) and `acted_replay` (free) instead.
+
+**Both extraction components measure a saving the same way**, and they did not always. `extract_llm`
+booked the candidate minus the model's PROJECTION, while the text written is the projection plus the
+summary segment, the marker and the recovery hint — so its figure overstated by all three, with the
+summary the dominant term. Since the summary is a model output, the overstatement varied per
+candidate rather than averaging out, and two arms of a comparison read side by side were not
+measuring the same thing (#195). Both components now subtract the message that was actually sent,
+which is the number an operator can check against their bill. It matters beyond reporting: the same
+figure feeds the ratio tracker the economic gate spends against, so an optimistic saving argued for
+making more calls.
 
 Plus, at the top level of `/stats`: **`llm_truncated`** — replies that stopped at the model's
 output cap. That is the worst outcome available, full price for zero result, and it used to be

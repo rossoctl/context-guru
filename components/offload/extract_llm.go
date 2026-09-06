@@ -900,7 +900,14 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// that never happened — over-reporting the exact figure the iteration-024 re-run
 			// will be judged on.
 			if apply(i, content, cached.Projected, cached.Summary, true) {
-				if saved := schema.TextTokens(content) - schema.TextTokens(cached.Projected); saved > 0 {
+				// Measured against the message AS REPLAYED, for the same reason the fresh path is
+				// (#195): the text written is the projection PLUS the summary, the marker and the
+				// recovery hint, and the summary dominates that overhead. Correcting only the fresh
+				// path would leave this component contradicting itself — the same compaction valued
+				// higher on every replay turn than on the turn it was made, and replays are the
+				// steady state, so most of the reported value would come from the overstated side.
+				// That is the shape extract_llm_sweep was in for one commit; see its two sites.
+				if saved := schema.TextTokens(content) - schema.TextTokens(schema.MessageText(req.Input[i])); saved > 0 {
 					metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
 				}
 				dbgReapply++
@@ -1352,7 +1359,16 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				//
 				// Recorded in phase 3 instead, per candidate, once the splice is a fact. This
 				// runs in a goroutine, so the value simply rides in the slot phase 3 already reads.
-				out[k].saved = before - schema.TextTokens(res)
+				//
+				// `saved` is NOT computed here, and that is the second half of the same rule: the
+				// projection is not what the message becomes. apply splices
+				// `projected + "\n[" + summary + "] " + marker + hint`, so `before - TextTokens(res)`
+				// omits the summary, the marker and the recovery hint — and the summary is the
+				// dominant term by an order of magnitude, not the marker's ~23 tokens (a 900-token
+				// output compacted to 100 with a 60-token summary booked 800 where the message
+				// shrank by ~715). It is also a model output, so the overstatement varies per
+				// candidate and does not average out across a run. Phase 3 measures the spliced
+				// message instead — see #195. Only `before` rides along, as the ratio's denominator.
 				out[k].before = before
 			} else if !timedOut {
 				e.ratios.observe(0, before) // a miss is real evidence: ratio 0
@@ -1466,6 +1482,22 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if !apply(cands[k].i, cands[k].content, out[k].projected, out[k].summary, false) {
 				continue
 			}
+			// MEASURED AGAINST THE MESSAGE AS SPLICED, which is what the request actually shrank
+			// by — the figure an operator can check against their bill, and the basis
+			// extract_llm_sweep already books on. Carrying `before - TextTokens(projection)` out of
+			// runCall instead omitted the summary, the marker and the recovery hint, so the two
+			// extraction components' per-arm savings were not comparable (#195). Not merely a
+			// reporting artefact: this feeds e.ratios.observe, which is what the economic gate
+			// consults to decide whether the NEXT call is worth making, so an optimistic saving
+			// biased that decision towards spending.
+			//
+			// From cands[k].content rather than out[k].before, which is the same number for a slot
+			// that made a call but is 0 in a single-flight FOLLOWER's slot — and a follower does
+			// reach this splice, so the subtraction would go negative there. Nothing books it (the
+			// guard below is out[k].called), but a stored negative saving is one refactor away from
+			// being read by something that does.
+			out[k].saved = schema.TextTokens(cands[k].content) -
+				schema.TextTokens(schema.MessageText(req.Input[cands[k].i]))
 			// The splice is a fact, so the outcome may now be booked. `accepted` in the ledger row
 			// is documented as "the never-worse outcome — the same condition that spliced the
 			// result above, so the log cannot say accepted while the request kept the original",
