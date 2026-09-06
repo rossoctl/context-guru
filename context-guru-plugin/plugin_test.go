@@ -1633,8 +1633,9 @@ func TestStartProxyReportsArgumentsItCannotUse(t *testing.T) {
 		{"good", []string{"--upstream", "http://gw:4000"}, "", "http://gw:4000"},
 		{"typo", []string{"--upsteam", "http://gw:4000"}, "unrecognised argument '--upsteam'", ""},
 		{"no value", []string{"--upstream"}, "needs a value", ""},
-		{"swallowed flag", []string{"--upstream", "--bin", "/nope/x"}, "needs a value", ""},
 		{"nonsense", []string{"--nonsense"}, "unrecognised argument '--nonsense'", ""},
+		// The empty `=` forms, which are how a caller interpolating an unset variable arrives here.
+		{"empty =value", []string{"--upstream="}, "needs a value", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -1678,5 +1679,72 @@ func TestStartProxyReportsArgumentsItCannotUse(t *testing.T) {
 				t.Errorf("argv missing the upstream: %s", launched)
 			}
 		})
+	}
+}
+
+// TestRejectingAValueDoesNotEatTheNextFlag is the row that used to prove nothing.
+//
+// `--upstream --bin <path>` was in the table above with assertions "it says 'needs a value'" and "no
+// upstream reaches argv" — and the BUGGY parser satisfies both. Reconstructed and measured by the
+// reviewer: with the shift outside the accepted branch, rejecting the value still consumed `--bin`, so
+// the message appeared, no upstream reached argv, and the row was green either way.
+//
+// What actually separates the two versions is `--bin`: the buggy parser eats it (falling back to
+// resolving the binary by name, which fails on the machines --bin exists for), the fixed one rejects
+// `--upstream` alone and then parses `--bin <path>` normally.
+//
+// So this asserts the POSITIVE — the proxy was launched via the binary that --bin named. A test whose
+// only assertions are absences cannot distinguish "handled correctly" from "handled wrongly in a way
+// that happens to be quiet", which is the lesson three of this week's defects share.
+func TestRejectingAValueDoesNotEatTheNextFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook is POSIX-only")
+	}
+	requireTool(t, "bash")
+	dir := t.TempDir()
+	argv := filepath.Join(dir, "argv.log")
+	fake := filepath.Join(dir, "fake-proxy")
+	body := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> " + argv + "\nsleep 30\n"
+	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	port := freePort(t)
+
+	// --upstream has no value; --bin follows it and must survive.
+	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"),
+		"--unrouted", "--upstream", "--bin", fake)
+	cmd.Env = append(os.Environ(),
+		"CLAUDE_PLUGIN_OPTION_PORT="+port,
+		"ANTHROPIC_BASE_URL=",
+		"ANTHROPIC_UPSTREAM=",
+		"CLAUDE_PLUGIN_OPTION_UPSTREAM=",
+		"CONTEXT_GURU_BIN=",
+		"CONTEXT_GURU_HEALTH_BUDGET=1",
+		"XDG_STATE_HOME="+filepath.Join(dir, "state"),
+		"TMPDIR="+dir)
+	out, err := cmd.CombinedOutput()
+	t.Cleanup(func() { exec.Command("pkill", "-f", fake).Run() }) //nolint:errcheck
+	if err != nil {
+		t.Fatalf("must never fail a session: %v\n%s", err, out)
+	}
+	t.Logf("output:\n%s", out)
+
+	// The positive: --bin was honoured, so the proxy actually started from that path.
+	launched, _ := os.ReadFile(argv)
+	if len(launched) == 0 {
+		t.Errorf("--bin was eaten as --upstream's rejected value, so the binary fell back to name "+
+			"resolution and nothing started. Output was:\n%s", out)
+	}
+	// And the rejection still had to be reported.
+	if !strings.Contains(string(out), "needs a value") {
+		t.Errorf("the rejected --upstream was not reported:\n%s", out)
+	}
+	// The buggy parser reports the path as a stray argument; the fixed one consumes it as --bin's value.
+	if strings.Contains(string(out), "unrecognised argument '"+fake+"'") {
+		t.Errorf("the path after --bin was treated as a stray argument, which means --bin was "+
+			"consumed by the rejected --upstream:\n%s", out)
+	}
+	if strings.Contains(string(launched), "--anthropic-upstream") {
+		t.Errorf("an upstream reached argv from a rejected value: %s", launched)
 	}
 }

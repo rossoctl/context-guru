@@ -123,9 +123,15 @@ while [ $# -gt 0 ]; do
     # consume the next FLAG too, so `--upstream --bin /path` lost --bin as well and reported
     # '/some/path' as an unrecognised argument. Reject the value, keep the flag that followed it.
     --upstream) if takes_value --upstream "${2:-}"; then UPSTREAM_ARG="$2"; shift; fi ;;
-    --upstream=*) UPSTREAM_ARG="${1#--upstream=}" ;;
+    # The `=` forms go through the same check, because the realistic way to arrive here with an empty
+    # value is not somebody typing `--upstream=` — it is a caller interpolating one:
+    # `--upstream="$GATEWAY"` with GATEWAY unset expands to exactly that, and the install skill builds
+    # these command lines from what it discovered a step earlier. Accepting it silently would leave a
+    # proxy pointed at api.anthropic.com with nothing said, which is the failure this reporting exists
+    # to prevent.
+    --upstream=*) if takes_value --upstream "${1#--upstream=}"; then UPSTREAM_ARG="${1#--upstream=}"; fi ;;
     --bin) if takes_value --bin "${2:-}"; then BIN_ARG="$2"; shift; fi ;;
-    --bin=*) BIN_ARG="${1#--bin=}" ;;
+    --bin=*) if takes_value --bin "${1#--bin=}"; then BIN_ARG="${1#--bin=}"; fi ;;
     *) note "ignoring unrecognised argument '$1'" ;;
   esac
   shift
