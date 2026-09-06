@@ -167,7 +167,7 @@ would overstate every figure below.
 
 A span is one idle stretch of a trajectory, and a trajectory is `(account, session, MODEL)` — a
 cache entry does not transfer between models, so a session that switches model is two
-trajectories. Pings are at 290 s throughout, which is a parameter and not a law: it is inside
+trajectories. Pings are at 280 s throughout, which is a parameter and not a law: it is inside
 the 300 s lifetime it protects, so every ping is a read rather than a re-creation.
 
 Savings are given as a share of the window's **total bill**, of which 87.1% is the prefix

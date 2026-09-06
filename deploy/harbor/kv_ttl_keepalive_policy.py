@@ -69,7 +69,7 @@ effective bar at the first sweep falls to ~7.4%, worth ~6% of the policy's net.
 WHAT IT IS WORTH, INCLUDING WHERE IT LOSES
 ------------------------------------------
 Measured on the hosted deployment's capture: 34,577 idle spans over 16.9 days, 5-fold
-rolling-origin, pings at 290s. Given as a share of the window's bill and of what `optimal`
+rolling-origin, pings at 280s. Given as a share of the window's bill and of what `optimal`
 reaches, with per-ping efficiency indexed to flat MaxPings=6.
 
     arm                     pings   off the bill   of the ceiling   net per ping

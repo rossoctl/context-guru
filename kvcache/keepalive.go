@@ -84,7 +84,7 @@ type PingBudgeter interface {
 // # WHAT IT IS WORTH
 //
 // Measured on the hosted deployment's capture: 34,577 idle spans over 16.9 days, 5-fold rolling
-// origin, pings at 290s. Given as a share of the window's bill and of what `optimal` reaches,
+// origin, pings at 280s. Given as a share of the window's bill and of what `optimal` reaches,
 // with per-ping efficiency indexed to flat MaxPings=6:
 //
 //	arm                     pings   off the bill   of the ceiling   net per ping
