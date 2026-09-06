@@ -239,6 +239,15 @@ Do **not** hand-edit the file to add it: one atomic write, one backup, and unins
 upstream it recorded writing. Skipping it leaves chaining working *only* until the running proxy
 idles out — the next session's hook would start one aimed at `api.anthropic.com`.
 
+**If step 1 reported `on_path=false`, add `--bin <the absolute path it reported>` as well.** Telling
+the user to fix their `PATH` is not enough on its own: the `SessionStart` hook resolves the proxy BY
+NAME, so until the shell profile is edited the install looks successful, works for this session, and
+the auto-restart safety net silently never fires — with a hang as the failure mode it was there to
+catch. On a hosted agent it is worse, because the writable directories reset on restart, so a profile
+edit does not survive. `--bin` writes the absolute path into the same `env` block the hook inherits,
+which fixes it without touching the user's shell at all. Still mention the `PATH` gap, since they will
+want `context-guru-proxy` on the command line too.
+
 - `result=added` — report the `backup=` path to the user. That is their undo.
 - `result=conflict` — you skipped step 3, or the file changed. Go back and ask; only pass
   `--force` once the user has said to replace that specific value. When they do, the replaced

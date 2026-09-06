@@ -38,6 +38,9 @@ KEY = "ANTHROPIC_BASE_URL"
 # The second key, written only when the proxy has to chain behind an existing gateway. It lives in
 # the same env block because that block is what the SessionStart hook inherits — see cmd_add.
 UPSTREAM_KEY = "ANTHROPIC_UPSTREAM"
+# The absolute path to the proxy, for machines where its directory is not on PATH — the hook
+# resolves the binary by name, so on those machines this is what makes auto-start work at all.
+BIN_KEY = "CONTEXT_GURU_BIN"
 
 # Where this script records what it did, so a later run can tell its own work from the user's.
 META = "$context-guru"
@@ -252,6 +255,17 @@ def cmd_add(args: argparse.Namespace) -> int:
     # Recorded in our own metadata as well, so uninstall removes only an upstream WE wrote.
     if getattr(args, "upstream", ""):
         env[UPSTREAM_KEY] = args.upstream
+    # --bin persists an ABSOLUTE path to the proxy, for machines where $DEST is not on PATH.
+    #
+    # `~/.local/bin` frequently is not, and on a hosted agent it is worse than an inconvenience: the
+    # writable directories there reset on pod restart, so "add it to your shell profile" is advice
+    # that does not survive. The SessionStart hook resolves the binary BY NAME, so without this the
+    # install succeeds, routing works for the session that set it up, and the auto-restart safety net
+    # silently never fires afterwards — and the failure mode it exists to catch is a hang with no
+    # error. start-proxy.sh already honours CONTEXT_GURU_BIN and accepts an absolute path, so the fix
+    # is to write it where the hook will inherit it rather than to ask for a PATH change.
+    if getattr(args, "bin", ""):
+        env[BIN_KEY] = args.bin
     data["env"] = env
     # Remember what we took over, so uninstall can hand it back.
     #
@@ -265,6 +279,8 @@ def cmd_add(args: argparse.Namespace) -> int:
     meta["installed_base_url"] = args.url
     if getattr(args, "upstream", ""):
         meta["installed_upstream"] = args.upstream
+    if getattr(args, "bin", ""):
+        meta["installed_bin"] = args.bin
     if current:
         meta["previous_base_url"] = current
     save(args.file, data)
@@ -320,6 +336,11 @@ def cmd_remove(args: argparse.Namespace) -> int:
         recorded_upstream = _meta.get("installed_upstream") or ""
     if recorded_upstream and env.get(UPSTREAM_KEY) == recorded_upstream:
         del env[UPSTREAM_KEY]
+    recorded_bin = ""
+    if isinstance(_meta, dict):
+        recorded_bin = _meta.get("installed_bin") or ""
+    if recorded_bin and env.get(BIN_KEY) == recorded_bin:
+        del env[BIN_KEY]
     # Put back whatever we took over at install time. Deleting the key was leaving a user who had
     # a gateway configured with nothing at all — a worse state than before they installed.
     restored = ""
@@ -333,6 +354,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         meta.pop("previous_base_url", None)
         meta.pop("installed_base_url", None)
         meta.pop("installed_upstream", None)
+        meta.pop("installed_bin", None)
         if not meta:
             data.pop(META, None)
     # Leave no litter: an `env: {}` we created is removed with the key. An env block that
@@ -355,6 +377,9 @@ def main() -> int:
         p.add_argument("--file", required=True)
         p.add_argument("--url", default="")
         p.add_argument("--force", action="store_true")
+        p.add_argument("--bin", default="",
+                       help="also write env.CONTEXT_GURU_BIN (absolute path to the proxy), for "
+                            "machines where its directory is not on PATH")
         p.add_argument("--upstream", default="",
                        help="also write env.ANTHROPIC_UPSTREAM, so the proxy chains behind an "
                             "existing gateway in LATER sessions too (the hook reads this block)")

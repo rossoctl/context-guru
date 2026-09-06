@@ -1453,3 +1453,58 @@ func TestChainingUpstreamSurvivesIntoLaterSessions(t *testing.T) {
 		}
 	})
 }
+
+// TestBinPathSurvivesAMachineWhereItIsNotOnPATH is the hosted-agent case, and it is about a
+// SILENT failure rather than a visible one.
+//
+// The SessionStart hook resolves the proxy by NAME. On a machine where the install directory is not
+// on PATH — `~/.local/bin` very often is not, and on an agent pod the writable dirs reset on restart
+// so "edit your shell profile" does not survive — the install succeeds, routing works for the session
+// that set it up, and the auto-restart hook then never finds the binary again. The failure mode it
+// exists to catch is a hang with no error, so nothing announces that the safety net is gone.
+//
+// `--bin` writes the absolute path into the env block the hook inherits. As with the upstream,
+// uninstall must take back only a path it recorded writing.
+func TestBinPathSurvivesAMachineWhereItIsNotOnPATH(t *testing.T) {
+	const absPath = "/home/agent/.local/bin/context-guru-proxy"
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	writeJSON(t, path, map[string]any{"env": map[string]any{"MINE": "keep"}})
+
+	if facts, code := settings(t, "add", "--file", path, "--url", ourURL, "--bin", absPath); code != 0 {
+		t.Fatalf("add --bin failed: %v", facts)
+	}
+	env := readJSON(t, path)["env"].(map[string]any)
+	if env["CONTEXT_GURU_BIN"] != absPath {
+		t.Errorf("CONTEXT_GURU_BIN = %v, want %q — without it the hook cannot find the proxy on a "+
+			"machine where its directory is not on PATH, and nothing says so", env["CONTEXT_GURU_BIN"], absPath)
+	}
+
+	if _, code := settings(t, "remove", "--file", path); code != 0 {
+		t.Fatal("remove failed")
+	}
+	env = readJSON(t, path)["env"].(map[string]any)
+	if _, still := env["CONTEXT_GURU_BIN"]; still {
+		t.Error("uninstall left our binary path behind")
+	}
+	if env["MINE"] != "keep" {
+		t.Error("removal took the user's own env var with it")
+	}
+
+	// A CONTEXT_GURU_BIN the user set themselves is theirs to keep.
+	writeJSON(t, path, map[string]any{"env": map[string]any{"MINE": "keep"}})
+	if _, code := settings(t, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	data := readJSON(t, path)
+	env = data["env"].(map[string]any)
+	env["CONTEXT_GURU_BIN"] = "/opt/their/own/build"
+	writeJSON(t, path, data)
+	if _, code := settings(t, "remove", "--file", path); code != 0 {
+		t.Fatal("remove failed")
+	}
+	if got := readJSON(t, path)["env"].(map[string]any)["CONTEXT_GURU_BIN"]; got != "/opt/their/own/build" {
+		t.Errorf("uninstall deleted a binary path it never wrote: %v", got)
+	}
+}
