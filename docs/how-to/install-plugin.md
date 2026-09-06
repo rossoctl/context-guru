@@ -17,6 +17,89 @@ tells you to run it, and until you do, this session has no `/context-guru:*` ski
 line answers `Unknown command: /context-guru:install` on a perfectly good install. Starting a fresh
 session works too; reloading is just quicker.
 
+### Step 2 asks you to pick a scope — this is what it means
+
+`/plugin install` offers three, and they decide who gets **the plugin**:
+
+| Option | Written to | Who gets it |
+|---|---|---|
+| **Install for you** (user scope) | `~/.claude/settings.json` | you, in **every project** on this machine |
+| Install for all collaborators (project scope) | `<repo>/.claude/settings.json` | **everyone who clones the repo** — this file is committed |
+| Install for you, in this repo only (local scope) | `<repo>/.claude/settings.local.json` | you, this repo only — gitignored |
+
+**User scope** is what the rest of this page assumes: install once, then decide routing per repo.
+The trade is that both hooks and ~225 always-on tokens apply to every session you start anywhere.
+That is why the hooks self-gate on `ANTHROPIC_BASE_URL` naming their own port — in a project you
+never routed they exit immediately and print nothing.
+
+**Project scope commits a proxy plugin to a shared repository.** Everyone who clones then gets a
+`SessionStart` hook that launches a local proxy and a `UserPromptSubmit` hook that runs before every
+prompt. That is a team decision, not a personal one; do not pick it on someone else's behalf.
+
+**Local scope** is the cleanest way to evaluate: one repo, gitignored, nothing left in your user
+configuration afterwards.
+
+**This is not the same question as the routing scope**, which `/context-guru:install` asks separately
+and which decides *which sessions go through the proxy* ([table below](#which-file-the-routing-goes-in)).
+They are independent: a local-scope plugin still routes only the repo you run the install skill in,
+and a user-scope plugin does not route anything until you ask it to.
+
+### `/plugin configure` — four options, all with working defaults
+
+You can open it, press **Save configuration**, and change nothing. Only one of these usually needs
+setting, and only in one situation.
+
+| Option | Default | Change it when |
+|---|---|---|
+| **Proxy port** | `8787` | something already holds 8787. Deliberately not 4000, which collides with litellm |
+| **Preset** | `cache` | you want more than the prompt-cache split. `cache` drops no content, adds no tools and makes no model calls |
+| **Idle exit** | `24h` | rarely. The floor is `max(2 × store.ttl_seconds, 1h)`; below it the proxy refuses to start rather than silently discarding cache state |
+| **Upstream base URL** | *(empty)* | **something else is already the gateway** — see below |
+
+**Upstream base URL is the one that matters on a hosted agent.** Empty means "forward straight to
+`api.anthropic.com`". On a platform that supplies its own local gateway — a coding-agent pod, a
+managed workspace, a corporate proxy — that is wrong twice over: the gateway holds the credential,
+and it may rewrite model names. One pod maps `claude/haiku…` to the real model id, so a proxy that
+bypasses it sends model names the API has never heard of and **every** request fails.
+
+Set it to whatever `ANTHROPIC_BASE_URL` already contains, and the proxy chains behind that gateway
+instead of replacing it: your `Authorization` / `x-api-key` passes straight through, so the gateway
+keeps authenticating and keeps translating models.
+
+Setting it here is slightly better than letting `/context-guru:install` detect it. `start-proxy.sh`
+reads this option directly, so the `SessionStart` hook chains correctly in every session without
+depending on the settings `env` block having been written. The install skill writes
+`ANTHROPIC_UPSTREAM` there as well, and the two agree.
+
+### If a permission prompt or an auto-mode denial stops the install
+
+Starting the proxy routes this session's API traffic through a locally-installed binary, and Claude
+Code treats that as worth asking about. In interactive use you get a prompt to approve; under auto
+mode the classifier may deny it outright, with something like:
+
+```
+Denied by auto mode classifier ∙ [Traffic Redirection] ... a local proxy intercepting all Claude
+API traffic before forwarding to an unverified upstream
+```
+
+**That is a reasonable objection, not a bug to route around.** Installing a plugin by name is not the
+same as consenting to have your API traffic intercepted, and those are genuinely two decisions.
+
+Three ways through, in the order worth trying:
+
+1. **Approve it when asked.** One approval, and the install finishes.
+2. **Run the two commands yourself** with the `!` prefix in Claude Code, which makes the consent
+   yours rather than the agent's. The skill prints them if it is blocked.
+3. **Add a permission rule** if you would rather not be asked each time. Rules match by command
+   prefix, so name the script:
+
+   ```json
+   {"permissions": {"allow": ["Bash(~/.claude/plugins/cache/context-guru/**)"]}}
+   ```
+
+   Adjust the path to what your install actually reports. The plugin cannot grant this to itself, by
+   design — a plugin that could approve its own traffic interception would be worth distrusting.
+
 ## You do not need an API key
 
 Setting `ANTHROPIC_BASE_URL` **without** a credential variable leaves your claude.ai login
