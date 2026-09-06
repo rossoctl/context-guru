@@ -1043,11 +1043,19 @@ func (m *Memory) remove(el *list.Element) {
 		m.stashN--
 		m.stashBytes -= int64(len(e.payload))
 		m.noteReclaimed(e.key)
-		// A stash only reaches here via sweepExpired (LRU pressure cannot take one), so
-		// this counts TTL reclamation. Counted rather than silent because it is the one
-		// remaining way an outstanding marker can stop resolving, and an operator seeing
-		// expand_unresolved_missing needs to know whether the answer is "raise max_entries"
-		// (refused) or "raise ttl_seconds" (expired).
+		// A stash reaches here only from a TTL-driven caller — sweepExpired, or Get's lazy-expiry
+		// branch on a single entry it finds past its deadline. LRU pressure cannot take one
+		// (evictOldest skips on !e.pinned && !e.stash), which is the case that WOULD make this
+		// counter wrong: an eviction booked as a TTL expiry would send an operator to ttl_seconds
+		// for a capacity problem. Both real callers are TTL-driven, so the increment is right.
+		//
+		// (An earlier version of this comment named sweepExpired as the only path. Get's branch
+		// makes that false while leaving the conclusion intact, and the sentence below leans on the
+		// conclusion — so it is worth being exact about which claim is doing the work.)
+		//
+		// Counted rather than silent because it is the one remaining way an outstanding marker can
+		// stop resolving, and an operator seeing expand_unresolved_missing needs to know whether
+		// the answer is "raise max_entries" (refused) or "raise stash_ttl_seconds" (expired).
 		m.stashExpiredN++
 	}
 	// Any replay decision disappearing must be detectable — keyed on the NAMESPACE, not on

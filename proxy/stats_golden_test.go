@@ -101,11 +101,11 @@ var statsGoldenTopLevel = []string{
 	"stash_bytes",
 	"stash_capacity",
 	"stash_expired",
-	"stash_revived",
 	"stash_live",
 	"stash_max_bytes",
 	"stash_missing",
 	"stash_refused",
+	"stash_revived",
 	// summarize_* are the same three figures for `summarize`, which owns a SEPARATE
 	// budget: its call covers the whole middle of the transcript (~57k prompt tokens
 	// measured) rather than one tool output, so the two components cannot share a
