@@ -109,8 +109,11 @@ type BudgetPolicy struct {
 	// any observation and every budget falls back to Config.MaxPings.
 	Predictor Predictor
 	// Interval is the keep-alive cadence this policy assumes when it reasons about windows.
-	// It MUST match the Config.PingIdle the simulator will actually ping at, or the windows
-	// priced here are not the windows bought. Defaults to DefaultPingIdle.
+	// It matters when PingBudget/Windows/Decide are called directly, outside Simulate.
+	// Simulate itself always overrides this to Config.PingIdle before running — the windows
+	// priced must be the windows actually pinged, and PingIdle is Simulate's own authority on
+	// that, so a caller cannot let the two drift by setting this to something else. Defaults
+	// to DefaultPingIdle.
 	Interval time.Duration
 	// MaxK caps the induction's horizon. Defaults to DefaultBudgetMaxK.
 	MaxK int

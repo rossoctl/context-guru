@@ -1,7 +1,6 @@
 package kvcache
 
 import (
-	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -385,14 +384,19 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 			cfg.MaxPings = n
 		}
 	}
-	// BudgetPolicy.Interval is documented to have to match Config.PingIdle — the windows it
-	// prices must be the windows this replay actually pings at — but nothing checked that
-	// until now. A caller that builds the two separately and lets them drift gets economics
-	// silently priced for a schedule Simulate isn't running, which is worse than an error.
-	if bp, ok := s.(BudgetPolicy); ok && bp.interval() != cfg.PingIdle {
-		panic(fmt.Sprintf("kvcache: BudgetPolicy.Interval (%s) does not match Config.PingIdle "+
-			"(%s) — the windows this arm prices are not the windows Simulate pings at",
-			bp.interval(), cfg.PingIdle))
+	// BudgetPolicy.Interval must be the interval THIS replay actually pings at, and
+	// Config.PingIdle is Simulate's own authority on that — the same authority every
+	// registry arm gets its interval from at construction (NewStrategy wires cfg.PingIdle
+	// into HistoricalProbability and friends). BudgetPolicy is built by the caller rather
+	// than by NewStrategy, so nothing stopped its Interval from drifting from cfg.PingIdle —
+	// a panic here was tried and reverted: this package now recovers from a panicking
+	// Predictor (see PingBudget) specifically because Simulate is reachable from an HTTP
+	// handler with no recover() of its own under package dash, so a second panic seam right
+	// next to the first would undo that. Overriding is strictly safer than either crashing
+	// or silently pricing a different schedule than the one that runs.
+	if bp, ok := s.(BudgetPolicy); ok {
+		bp.Interval = cfg.PingIdle
+		s = bp
 	}
 	sem := cfg.Semantics
 	out := &Result{Strategy: s.Name(), Decisions: map[Action]int64{},

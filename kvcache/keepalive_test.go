@@ -1,9 +1,7 @@
 package kvcache
 
 import (
-	"fmt"
 	"math"
-	"strings"
 	"testing"
 	"time"
 )
@@ -652,23 +650,27 @@ func (panickingPredictor) ReuseProbability(Observation, time.Duration) (float64,
 // BudgetPolicy.Interval is documented to have to match Config.PingIdle, but until now nothing
 // checked it — a caller that let the two drift got economics silently priced for a schedule
 // Simulate was not actually running.
-func TestSimulateRejectsABudgetPolicyIntervalThatDisagreesWithConfig(t *testing.T) {
+// Simulate must not crash on a BudgetPolicy.Interval that disagrees with Config.PingIdle: it
+// is reachable from an HTTP handler (dash/kvcacheapi.go -> dash/kvcachesim.go) with no
+// recover() under package dash, and this package already treats a panicking Predictor as a
+// bug to guard against (see TestPingBudgetDegradesRatherThanPropagatingAPredictorPanic) — a
+// second panic seam right next to that one would contradict it. So Simulate overrides
+// Interval to Config.PingIdle instead: the two are made incapable of disagreeing, rather than
+// merely checked. A wrong Interval on the input must produce the SAME Result as a correct one.
+func TestSimulateAlignsABudgetPolicysIntervalWithConfigRatherThanTrustingIt(t *testing.T) {
 	reqs, cfg := dataset(t)
 	cfg.PingIdle = 280 * time.Second
-	p := cdfPredictor{points: [][2]float64{{300, 0.1}, {580, 0.6}, {86400, 1}}}
+	cfg.MaxPings = 6
+	p := cdfPredictor{points: [][2]float64{{300, 0.1}, {580, 0.6}, {860, 0.75}, {86400, 1}}}
 
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("Simulate did not panic on a BudgetPolicy.Interval that disagrees with " +
-				"Config.PingIdle")
-		}
-		msg := fmt.Sprint(r)
-		if !strings.Contains(msg, "BudgetPolicy.Interval") || !strings.Contains(msg, "PingIdle") {
-			t.Errorf("panic message %q does not name the mismatch it is about", msg)
-		}
-	}()
-	Simulate(reqs, BudgetPolicy{Predictor: p, Interval: 300 * time.Second, MaxK: 4}, cfg)
+	correct := Simulate(reqs, BudgetPolicy{Predictor: p, Interval: cfg.PingIdle, MaxK: 4}, cfg)
+	wrong := Simulate(reqs, BudgetPolicy{Predictor: p, Interval: 300 * time.Second, MaxK: 4}, cfg)
+	if wrong.Pings != correct.Pings || wrong.TotalUSD != correct.TotalUSD {
+		t.Errorf("a BudgetPolicy built with the wrong Interval fired %d pings costing %.6f; "+
+			"a correctly-configured one fired %d costing %.6f — Simulate let the wrong "+
+			"Interval through instead of overriding it to Config.PingIdle",
+			wrong.Pings, wrong.TotalUSD, correct.Pings, correct.TotalUSD)
+	}
 }
 
 func TestPingBudgetDegradesRatherThanPropagatingAPredictorPanic(t *testing.T) {
