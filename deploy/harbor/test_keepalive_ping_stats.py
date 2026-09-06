@@ -12,6 +12,12 @@ import os, sqlite3, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import keepalive_ping_stats as ps
 
+try:
+    import pandas  # noqa: F401
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
+
 REAL = dict(keepalive=0, max_tokens=32000, stream=1, messages=12, tokens_before=48000,
             mode="active", cache_miss_reason="hit", output_tokens=400, cg_latency_ms=3.0,
             ttfb_ms=900.0, cache_read=48000, cache_write=0, cache_write_1h=0, fresh_input=20,
@@ -202,8 +208,27 @@ class TestCollect(unittest.TestCase):
         self.assertNotEqual(p["session"], "s1")
         self.assertEqual(len(p["session"]), 12)
 
+    def test_5xx_ping_has_no_usage_and_is_not_flagged_unpriced(self):
+        # Docstring calls this case out: a 5xx ping is recorded, with status >= 500 and no
+        # usage. It has genuinely nothing to price, so it must NOT land in ping_cost_unpriced
+        # -- that flag is for a $0.00 row that DID move tokens.
+        pings, _ = self.collect([
+            row("real", 0, id=1),
+            row("ping", 281_000, id=2, status=500, cache_read=0, cache_write=0,
+                output_tokens=0, cost_usd=0.0),
+        ])
+        p = pings[2]
+        self.assertEqual(p["status"], 500)
+        self.assertEqual(p["ping_cost_unpriced"], 0)
+
+    def test_session_with_no_pings_contributes_no_output_rows(self):
+        _, audit = self.collect([row("real", 0, id=1), row("real", 300_000, id=2)])
+        self.assertEqual(audit["pings"], 0)
+        self.assertEqual(audit["rows_scanned"], 0)
+
 
 class TestSummarize(unittest.TestCase):
+    @unittest.skipUnless(HAS_PANDAS, "pandas not installed")
     def test_reports_miss_count_and_percentage(self):
         import pandas as pd
         rows = [dict.fromkeys(ps.OUT_COLS, 0) for _ in range(4)]
@@ -223,6 +248,7 @@ class TestSummarize(unittest.TestCase):
         self.assertIn("cache MISS (cache_read = 0) in total", out)
         self.assertIn("total spent on pings", out)
 
+    @unittest.skipUnless(HAS_PANDAS, "pandas not installed")
     def test_late_pings_are_not_printed_as_a_subset_of_misses(self):
         """A ping can read something and still write more, so "wrote instead of read" is not a
         subset of "missed". The production window had 21 late against 20 misses, which the old
@@ -244,6 +270,7 @@ class TestSummarize(unittest.TestCase):
         self.assertRegex(miss, r"\s1\s+33\.33%")
         self.assertNotIn("of which wrote", out)
 
+    @unittest.skipUnless(HAS_PANDAS, "pandas not installed")
     def test_flags_fingerprint_disagreement_loudly(self):
         import pandas as pd
         r = dict.fromkeys(ps.OUT_COLS, 0)

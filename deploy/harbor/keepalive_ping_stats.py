@@ -25,7 +25,7 @@ bound in the other, and the difference matters when reading a count off this scr
 
   False negatives, all of them OUTSIDE the table. A ping that never got a row: refused by the
   tenant rate limiter, failed in transport, or answered 4xx — that last one returns before
-  record1 (proxy/keepalive.go:906) so a REFUSED ping is invisible here. The table therefore
+  record1 (proxy/keepalive.go:908) so a REFUSED ping is invisible here. The table therefore
   holds pings that were sent AND answered non-4xx; the process counters in KeepAliveStats
   (/stats) hold what was attempted. Read "pings" below as recorded pings, not as pings sent.
   Pings answered 5xx ARE recorded, with status >= 500 and no usage — the status line in the
@@ -33,7 +33,7 @@ bound in the other, and the difference matters when reading a count off this scr
 
 One caveat about the service's OWN attribution columns, which this script carries but does not
 compute: keepalive_pings is an in-process counter consumed by keeper.arrive() during the
-PREPARATION of the next request on the session (proxy/proxy.go:1109), before that request is
+PREPARATION of the next request on the session (proxy/proxy.go:1143), before that request is
 sent upstream and therefore before its status is known. So the first row to arrive takes the
 credit whatever becomes of it, and keepalive_saved_usd is only nonzero on a row that read more
 than it wrote. In the production export checked here, the row that arrived first was a 400 every
@@ -47,9 +47,11 @@ fingerprint of the row shape record1 produces, in both directions, so a mislabel
 up as a number rather than as a silently wrong average.
 
 No message content is read — request_content is never touched. Tenant ids are
-pseudonymized and session ids hashed unless --raw-ids is passed.
+pseudonymized and session ids hashed unless --raw-ids is passed. agent is not covered by
+that flag: it is exported verbatim either way, and the Go side falls back to up to 32
+raw characters of the client's User-Agent string for anything it does not recognize.
 """
-import argparse, csv, glob, hashlib, io, os, sqlite3, sys, tempfile, zipfile
+import argparse, csv, glob, hashlib, os, sqlite3, sys, tempfile, zipfile
 
 DB = "/var/lib/context-guru/cg.db"
 
@@ -315,11 +317,16 @@ def build(rows, table_first_ts, raw_ids):
 def cmd_collect(args):
     out, audit = (collect_export(args.export, args.raw_ids) if args.export
                   else collect(args.db, args.since_ms, args.raw_ids))
-    with open(args.out, "w", newline="") as f:
+    # 0600, and created that way rather than chmod'd afterwards: the row carries TENANT ID
+    # plus per-row dollar figures (ping_cost_usd, next_real_cost_usd) even pseudonymized,
+    # and unconditionally under --raw-ids, so a world-readable default (0644 minus umask)
+    # hands per-customer spend to every local user. O_CREAT|O_TRUNC with the mode set at
+    # creation leaves no window where the file exists with wider permissions.
+    fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=OUT_COLS)
         w.writeheader()
         w.writerows(out)
-    os.chmod(args.out, 0o644)
     print(f"wrote {args.out}: {audit['pings']} pings from {audit['rows_scanned']} rows "
           f"of ping-bearing sessions", file=sys.stderr)
     print(f"identification audit: {audit['flagged_not_fingerprinted']} flagged pings whose "
