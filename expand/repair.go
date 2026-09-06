@@ -167,9 +167,9 @@ func repairOne(body []byte, restored []string, ours map[string]string, callID, p
 //
 // Exact string comparison against the values gjson decodes, never a substring scan of the raw body:
 // JSON escaping makes a raw scan both false-negative (an escaped newline will not match) and
-// false-positive (content that merely contains the original). Compared at the three places a
-// message can hold text — a plain string content, an Anthropic text block, and an Anthropic
-// tool_result block's content.
+// false-positive (content that merely contains the original). Compared at every place a message can
+// hold text: a plain string content, an Anthropic text block, and a tool_result block's content in
+// BOTH its spellings — a string, or an array of sub-blocks (see blockHasText).
 //
 // exceptPath IS LOAD-BEARING, and leaving it out was a bug caught by the existing idempotency test.
 // On a FIRST repair the tool_result holds the client's error, so there is nothing to self-match; on
@@ -182,6 +182,10 @@ func contentPresent(body []byte, orig, exceptPath string) bool {
 		return false
 	}
 	found := false
+	// The top-level `system` field is deliberately NOT searched. It is a place content could live in
+	// principle, and missing it fails the same safe way as anything else here — the tool_result keeps
+	// the content — but nothing in this pipeline moves a tool output there, so searching it would add
+	// a path with no fixture behind it.
 	gjson.GetBytes(body, "messages").ForEach(func(mk, m gjson.Result) bool {
 		base := "messages." + mk.String()
 		if c := m.Get("content"); c.Type == gjson.String {
@@ -191,19 +195,54 @@ func contentPresent(body []byte, orig, exceptPath string) bool {
 			return !found
 		}
 		m.Get("content").ForEach(func(bk, blk gjson.Result) bool {
-			blkBase := base + ".content." + bk.String()
-			for _, f := range [...]string{"text", "content"} {
-				if blkBase+"."+f == exceptPath {
-					continue
-				}
-				if v := blk.Get(f); v.Type == gjson.String && v.String() == orig {
-					found = true
-					return false
-				}
-			}
-			return true
+			found = blockHasText(blk, base+".content."+bk.String(), orig, exceptPath)
+			return !found
 		})
 		return !found
 	})
 	return found
+}
+
+// blockHasText reports whether one content block holds orig, at any path other than exceptPath.
+//
+// It recurses ONE level, because a tool_result's `content` is allowed to be an ARRAY of sub-blocks
+// rather than a string — Anthropic's multi-part shape, e.g. a text block beside an image. Comparing
+// only the string spelling made contentPresent report absent for that shape, so repairOne fell back
+// to writing the original and REINTRODUCED this PR's duplication, scoped to those wire shapes. It
+// failed safe (content is never lost and a pointer is never written to nothing), which is the only
+// reason it was minor rather than a regression.
+//
+// Not theoretical: apply/apply_test.go already fixtures the pipeline compacting text inside exactly
+// that shape, at messages.1.content.0.content.0.text. The marker-creating half was covered and the
+// repair half could not see it.
+//
+// One level is enough and the bound is deliberate: it is the depth the provider schema allows, and
+// unbounded recursion over attacker-influenced JSON is a cost this probe should not carry.
+func blockHasText(blk gjson.Result, blkBase, orig, exceptPath string) bool {
+	for _, f := range [...]string{"text", "content"} {
+		v := blk.Get(f)
+		switch {
+		case v.Type == gjson.String:
+			if blkBase+"."+f != exceptPath && v.String() == orig {
+				return true
+			}
+		case v.IsArray():
+			hit := false
+			v.ForEach(func(sk, sub gjson.Result) bool {
+				subBase := blkBase + "." + f + "." + sk.String()
+				for _, sf := range [...]string{"text", "content"} {
+					sv := sub.Get(sf)
+					if sv.Type == gjson.String && subBase+"."+sf != exceptPath && sv.String() == orig {
+						hit = true
+						return false
+					}
+				}
+				return true
+			})
+			if hit {
+				return true
+			}
+		}
+	}
+	return false
 }
