@@ -69,12 +69,33 @@ note() { printf 'context-guru: %s\n' "$*"; }
 # intercepts the session's model traffic is a decision for the user, and auto mode denying it on the
 # agent's behalf is the correct outcome. What this changes is that the user now has a way to GRANT it
 # — which is the difference between friction and a dead end.
-FORCE="${CONTEXT_GURU_FORCE:-}"
-for arg in "$@"; do
-  case "$arg" in
-    --force) FORCE=1 ;;
+# The flag is named for what it DOES, after `--force` was denied for what it sounded like:
+#
+#     Denied ∙ [Safety Bypass Flag] runs a third-party plugin's start-proxy.sh with --force (after
+#     investigating that flag's role in bypassing checks) to redirect the agent's own API traffic
+#
+# Fair reading of the name, and the name was wrong. Nothing is being bypassed: the gate below asks
+# "is this project routed to us?", and during an install the answer is legitimately "not yet, that is
+# the next step". `--unrouted` says that. `--force` is still accepted so nothing that learned it
+# breaks, but it is not what the skill or the docs tell anyone to use.
+#
+# --upstream <url> is an ARGUMENT for the same reason the flag is: CLAUDE_PLUGIN_OPTION_UPSTREAM is
+# NOT present in the environment of a Bash tool call, even when the option is configured — verified on
+# a hosted agent, where the option was set in user settings and the variable was absent. Plugin
+# options reach HOOK environments; they do not reach a script the install skill runs. So the skill has
+# to pass the upstream explicitly, and passing it as an env prefix is exactly what makes a command
+# ungrantable.
+START_UNROUTED="${CONTEXT_GURU_FORCE:-${CONTEXT_GURU_START_UNROUTED:-}}"
+UPSTREAM_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --unrouted|--force) START_UNROUTED=1 ;;
+    --upstream) UPSTREAM_ARG="${2:-}"; shift ;;
+    --upstream=*) UPSTREAM_ARG="${1#--upstream=}" ;;
   esac
+  shift
 done
+FORCE="$START_UNROUTED"
 
 if [ "$FORCE" = 1 ]; then
   :
@@ -153,7 +174,9 @@ PIDFILE="${STATE}/proxy-${PORT}.pid"
 # released v0.1.1 binary: with it set and no flag, requests arrive at the configured upstream). But
 # relying on inheritance alone is fragile — this hook only sees what the session's env block passes
 # it — so pass it EXPLICITLY when it is configured, and let the plugin option name it too.
-UPSTREAM="${CLAUDE_PLUGIN_OPTION_UPSTREAM:-${ANTHROPIC_UPSTREAM:-}}"
+# The argument wins: it is the only one of these three the install skill can actually rely on, since
+# a Bash tool call sees neither the plugin option nor, necessarily, the session's own env.
+UPSTREAM="${UPSTREAM_ARG:-${CLAUDE_PLUGIN_OPTION_UPSTREAM:-${ANTHROPIC_UPSTREAM:-}}}"
 UPSTREAM_ARGS=()
 if [ -n "$UPSTREAM" ]; then
   UPSTREAM_ARGS=(--anthropic-upstream "$UPSTREAM")

@@ -90,23 +90,34 @@ Three ways through, in the order worth trying:
 1. **Approve it when asked.** One approval, and the install finishes.
 2. **Run the two commands yourself** with the `!` prefix in Claude Code, which makes the consent
    yours rather than the agent's. The skill prints them if it is blocked.
-3. **Add a permission rule** if you would rather not be asked each time. Rules match by command
-   prefix, so name the script's directory:
+3. **Add a permission rule** if you would rather not be asked each time.
+
+   With `/permissions`, paste **the rule on its own** — not a JSON object. Pasting the whole snippet
+   stores the literal text as one allow entry, which matches nothing and looks like it worked:
+
+   ```
+   Bash(/home/you/.claude/plugins/cache/context-guru/**)
+   ```
+
+   Use an **absolute** path rather than `~`. Editing a settings file by hand instead, the same rule is:
 
    ```json
-   {"permissions": {"allow": ["Bash(~/.claude/plugins/cache/context-guru/**)"]}}
+   {"permissions": {"allow": ["Bash(/home/you/.claude/plugins/cache/context-guru/**)"]}}
    ```
 
    Adjust the path to what your install actually reports. The plugin cannot grant this to itself, by
    design — a plugin that could approve its own traffic interception would be worth distrusting.
 
+   One rule covers every command the plugin runs, but only because they are all invoked *directly* and
+   with no environment prefixes. A command like `FOO=1 /path/to/script.sh` begins with `FOO=1`, so no
+   rule naming the script can match it.
+
 **Why prefix matching is worth knowing here.** A rule naming this script covers
-`.../start-proxy.sh --force` but **not** `SOMEVAR=1 .../start-proxy.sh`, because the second command
-does not begin with the script path. That is why the proxy is started with `--force` as an argument and
-why the upstream belongs in the **Upstream base URL** option rather than an `ANTHROPIC_UPSTREAM=`
-prefix: an env-prefixed command is one nobody can approve. If a skill ever prints you a command with
-env prefixes in front of the script, a permission rule will not help and you are back to approving each
-time.
+`.../start-proxy.sh --unrouted --upstream <url>` but **not** `SOMEVAR=1 .../start-proxy.sh`, because
+the second command does not begin with the script path. That is why every option the install needs is
+passed as an argument: an env-prefixed command is one nobody can approve. If a skill ever prints you a
+command with env prefixes in front of the script, a permission rule will not help and you are back to
+approving each time.
 
 **On a hosted agent, expect TWO gates, not one.** Both were observed under auto mode, and both are
 correct:
