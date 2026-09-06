@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Claude Code statusLine command: render what the local context-guru proxy's KV cache is doing.
+"""Claude Code statusLine command: by default, render what THIS session saved against what it
+has spent so far. The prompt-cache TTL countdown and the keep-alive ping counter are opt-in
+extras (--cache / --keepalive) — see skills/statusline/SKILL.md.
 
 Why Python, not another shell script like the hooks: this reads JSON off stdin and makes one
 timeout-bounded HTTP call, and that is what Python's stdlib (`json`, `urllib.request`) does
@@ -39,6 +41,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # How long the whole script may run before its own backstop fires. Generous relative to the
@@ -58,6 +61,11 @@ STATS_CACHE_TTL_SECONDS = 2.0
 # The plugin's own default port, matching context-guru-plugin/.claude-plugin/plugin.json's
 # "port" option default — used only as a fallback when CLAUDE_PLUGIN_OPTION_PORT is absent.
 DEFAULT_PORT = "8787"
+
+# A session_id Claude Code did not itself generate. Guards the one place this script puts a
+# stdin-supplied string into a URL and a tempfile path: an id that does not look like the UUID
+# Claude Code actually sends is treated as absent rather than trusted.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 class _Budget(Exception):
@@ -130,15 +138,26 @@ def _human(n: float) -> str:
     return f"{n:.0f}"
 
 
-def _stats_cache_path(port: str) -> str:
-    return os.path.join(tempfile.gettempdir(), f"context-guru-statusline-{port}.json")
+def _stats_cache_path(port: str, session_id: str | None) -> str:
+    # Keyed by session too, not just port: /api/stats is now fetched SCOPED to one session (see
+    # _fetch_stats), so two terminals sharing one proxy on one port must not read each other's
+    # cached response back as their own.
+    suffix = f"-{session_id}" if session_id else ""
+    return os.path.join(tempfile.gettempdir(), f"context-guru-statusline-{port}{suffix}.json")
 
 
-def _fetch_stats(port: str) -> tuple[dict | None, bool]:
+def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, bool]:
     """Returns (stats, proxy_down). stats is None when unavailable for any reason; proxy_down is
     True only when the proxy could not be reached at all (vs. answered but had nothing useful —
-    e.g. the dashboard flag is off, or sent something this script cannot parse)."""
-    cache_path = _stats_cache_path(port)
+    e.g. the dashboard flag is off, or sent something this script cannot parse).
+
+    Scoped to `session_id` (the dashboard's existing `?session=` filter, dash/query.go's
+    Filter.Session — nothing new added to the proxy) so the savings figure returned pairs with
+    THIS session's own cost/tokens rather than the proxy's whole retained window, which is what
+    /api/stats reports unscoped and is process-wide across every project routed through this
+    proxy — see _default_segment for why mixing the two would be dishonest.
+    """
+    cache_path = _stats_cache_path(port, session_id)
     try:
         st = os.stat(cache_path)
         if time.time() - st.st_mtime < STATS_CACHE_TTL_SECONDS:
@@ -148,6 +167,8 @@ def _fetch_stats(port: str) -> tuple[dict | None, bool]:
         pass  # no usable cache; fetch for real
 
     url = f"http://127.0.0.1:{port}/api/stats"
+    if session_id:
+        url += "?session=" + urllib.parse.quote(session_id, safe="")
     try:
         with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as resp:
             body = resp.read(1 << 20)  # bounded: the real payload is a few KB
@@ -173,20 +194,72 @@ def _fetch_stats(port: str) -> tuple[dict | None, bool]:
     return stats, False
 
 
-def _savings_segment(stats: dict) -> str | None:
-    usd = stats.get("total_saved_usd", 0) or 0
-    tokens = stats.get("saved_unique", 0) or 0
-    if usd == 0 and tokens == 0:
-        # Omitted rather than shown as "$0.00/0 saved", matching the dashboard's own convention
-        # (see metrics.Snapshot.KeepAlive's omitempty): a fresh install has nothing to say yet,
-        # and a row of zeroes there reads as a broken feature rather than a quiet truth.
-        #
-        # NOT `<= 0`: total_saved_usd can go genuinely negative (an idle keep-alive spending more
-        # than it recovers nets the whole figure negative — see dash/overview.go's own waterfall,
-        # "a real outcome the dashboard will not hide"), and that is exactly the case this must
-        # keep showing rather than quietly folding into the same omission as a fresh install.
+def _session_totals(payload: dict) -> tuple[float | None, float | None]:
+    """This SESSION's own running cost and tokens, read off Claude Code's own statusLine
+    payload — no network call, and it is the only session-scoped source there is (confirmed by
+    grepping the installed CLI: `strings <claude binary> | grep total_cost_usd` shows the payload
+    literal `cost:{total_cost_usd:...,total_duration_ms:...,...}`, and Claude Code's own SDK
+    schema describes `cost.total_cost_usd` as "Cost and usage accumulated by the current
+    session"; a real capture confirmed it climbing turn over turn against one session_id).
+
+    Tokens come from `context_window.total_input_tokens` + `total_output_tokens`, NOT from a
+    token field inside `cost` — there isn't one. Claude Code's own SDK schema has a
+    `model_usage` map that would give an exact per-turn sum, but the object literal that would
+    add it to THIS payload is dead code in the installed CLI (`cost:{total_cost_usd:ru(),...!1,
+    total_duration_ms:...}` — that `...!1` spreads the literal `false`, a no-op), so it is never
+    actually present to read. `context_window`'s pair is instead the size of the latest turn's
+    own usage (fresh input, plus whatever cache tiers it hit, plus the reply) — the same number
+    behind Claude Code's own `/context` view, and, for a conversation that only grows, in
+    practice the running total a status line means by "what this session has used" even though
+    it is not a strict per-turn sum. Returns (None, None) where the payload cannot support
+    either — a malformed stdin, or a real one before the first response has anything to report.
+    """
+    usd = None
+    cost = payload.get("cost")
+    if isinstance(cost, dict) and isinstance(cost.get("total_cost_usd"), (int, float)):
+        usd = float(cost["total_cost_usd"])
+
+    tokens = None
+    cw = payload.get("context_window")
+    if isinstance(cw, dict):
+        i, o = cw.get("total_input_tokens"), cw.get("total_output_tokens")
+        if isinstance(i, (int, float)) and isinstance(o, (int, float)):
+            tokens = float(i) + float(o)
+
+    if usd is None or tokens is None:
+        return None, None
+    return usd, tokens
+
+
+def _default_segment(payload: dict, stats: dict | None) -> str | None:
+    """What THIS session saved, against what it has spent so far — the default and, unless a
+    toggle below is turned on, the ONLY thing this status line shows.
+
+    Omitted, not shown as zeroes, in the two cases that mean "nothing to report yet" rather than
+    a broken feature: a malformed/absent stdin payload, and a genuinely brand-new session (its
+    own total is 0 and 0 before the first response has usage to track — dividing "saved" by a
+    total of nothing is nonsensical, not merely undramatic, so this returns before that division
+    is ever written). A real, nonzero total with zero saved DOES still print (`$0.00/0 saved of
+    ...`), same reasoning as the old segment's negative-net case: a real $0 saved this session is
+    not the same fact as no session having happened yet.
+    """
+    total_usd, total_tokens = _session_totals(payload)
+    if total_usd is None or (total_usd == 0 and total_tokens == 0):
         return None
-    return f"${usd:.2f}/{_human(tokens)} saved"
+    if stats is None:  # no session-scoped savings figure to pair the total with
+        return None
+    saved_usd = stats.get("total_saved_usd", 0) or 0
+    saved_tokens = stats.get("saved_unique", 0) or 0
+    return (f"${saved_usd:.2f}/{_human(saved_tokens)} saved of "
+            f"${total_usd:.2f}/{_human(total_tokens)}")
+
+
+def _cache_segment_enabled() -> bool:
+    return "--cache" in sys.argv[1:]
+
+
+def _keepalive_segment_enabled() -> bool:
+    return "--keepalive" in sys.argv[1:]
 
 
 def _keepalive_segment(stats: dict) -> str | None:
@@ -202,18 +275,25 @@ def main() -> None:
         return  # not routed through us: say nothing, exactly like the other hooks
 
     payload = _read_stdin_json()
-    cache_seg = _cache_stopper(payload)
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+        session_id = None  # absent, or not the shape Claude Code actually sends: don't trust it
 
-    stats, proxy_down = _fetch_stats(port)
+    stats, proxy_down = _fetch_stats(port, session_id)
     if proxy_down:
         print("cg!")  # three characters: the proxy is unreachable, nothing else is worth saying
         return
 
-    parts = [cache_seg]
-    if stats is not None:
-        savings = _savings_segment(stats)
-        if savings:
-            parts.append(savings)
+    # Priority is savings-vs-session-total first and always on; the cache TTL stopper and the
+    # keep-alive ping counter are opt-in extras, off unless their flag is passed — see
+    # skills/statusline/SKILL.md for the one-line command that turns either on.
+    parts = []
+    default_seg = _default_segment(payload, stats)
+    if default_seg:
+        parts.append(default_seg)
+    if _cache_segment_enabled():
+        parts.append(_cache_stopper(payload))
+    if stats is not None and _keepalive_segment_enabled():
         keepalive = _keepalive_segment(stats)
         if keepalive:
             parts.append(keepalive)

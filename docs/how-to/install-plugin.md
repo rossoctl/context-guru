@@ -307,41 +307,61 @@ repo. That is correct behaviour, but it means "clone and go" is really "clone, a
 
 ## Status line
 
-`/context-guru:statusline` puts the cache TTL and running savings in your terminal's status line,
-so you see them on every turn instead of asking `/context-guru:status`:
+`/context-guru:statusline` puts this session's own running savings in your terminal's status
+line, so you see them on every turn instead of asking `/context-guru:status`:
 
 ```
-cache 4:12 | $0.42/3.1k saved | ka 2p
+$0.03/12k saved of $0.41/187k
 ```
 
-- **`cache 4:12` / `cache cold`** is the stopper — a countdown to the prompt-cache going cold.
-  It comes from Claude Code's own client-side cache tracker (the same one behind its `/context`
-  view), not from the proxy, so it costs no extra network call and it reflects the *actual* wire
-  bytes regardless of what any component rewrote. `cache –` before the first response of a
-  session has anything to track is normal, not a fault.
-- **`$0.42/3.1k saved`** is the running total (`total_saved_usd` / unique tokens saved), read from
-  the proxy's own `/api/stats`. Hidden entirely while both are zero — a fresh install has nothing
-  to report yet, and a segment reading `$0.00/0 saved` would look like a broken feature rather than
-  an honest one. The same caveats as `/context-guru:status` apply: list-price on a subscription,
-  process-wide rather than per-project.
-- **`ka 2p`** is how many idle keep-alive pings have fired. Hidden while zero, which is the
-  default — keep-alive is off unless you turn it on (below).
-- **`cg!`** means the proxy this project routes to is not answering. Everything else about the
-  line is silent — including in every project that is not routed through context-guru at all.
+That is: this session has saved $0.03 and 12k tokens so far, out of $0.41 and 187k tokens this
+session has spent in total. Both halves are scoped to THIS session — the savings figure is the
+proxy's own `/api/stats?session=<id>` (the same totals `/context-guru:status` shows, but filtered
+to one session rather than the proxy's whole retained window), and the total is read straight off
+Claude Code's own statusLine payload (`cost.total_cost_usd`, `context_window`), so it costs no
+extra network call. Hidden entirely before this session has spent anything at all — before that,
+there is nothing to divide by, not a broken feature; a real `$0.00/0 saved` prints once there is a
+real total to compare it to. Same list-price caveat as `/context-guru:status` applies to the money
+side.
+
+**`cg!`** means the proxy this project routes to is not answering. This is the one thing that
+still shows regardless of the toggles below — everything else about the line is silent, including
+in every project that is not routed through context-guru at all.
+
+### Extras, off by default
+
+Two more segments exist and are hidden until you turn them on — the toggle is one line, no
+restart needed beyond a new session:
+
+- **`cache 4:12` / `cache cold`** — a countdown to the prompt-cache going cold, from Claude
+  Code's own client-side cache tracker (the same one behind its `/context` view). `cache –`
+  before the first response of a session has anything to track is normal, not a fault.
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add --file ~/.claude/settings.json \
+    --statusline "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\" --cache"
+  ```
+- **`ka 2p`** — how many idle keep-alive pings have fired this window. Hidden while zero even
+  once turned on.
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add --file ~/.claude/settings.json \
+    --statusline "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\" --keepalive"
+  ```
+  (Both flags can be passed together.) Drop the flag and re-run the same command to turn an
+  extra back off.
 
 **It only reads.** The status line renders on nearly every keystroke; if it could also *arm*
 anything, a display hook would double as an unbounded traffic generator billed to you. Sending a
-keep-alive ping is a separate, explicit action:
+keep-alive ping is a separate, explicit action, whether or not its counter is shown here:
 
 `/context-guru:keepalive` reports whether the mechanism is on, and turns it on or off. Turning it
 on means the proxy will spend your own credential on idle turns, between sessions, to keep the
 cache warm — worth knowing before you enable it, which is why this asks rather than infers.
 
-One nuance worth having straight: once keep-alive is on, `cache cold` in the status line no
-longer means the provider's own cached entry is actually cold. The countdown is Claude Code's
-own view of *its own* last request; it has no way to see a ping the proxy sent while you were not
-typing. Treat `ka Np` and the next turn's latency as the ground truth once keep-alive is running,
-not the countdown by itself.
+One nuance worth having straight: once keep-alive is on, `cache cold` in the status line (once
+you have turned that segment on) no longer means the provider's own cached entry is actually
+cold. The countdown is Claude Code's own view of *its own* last request; it has no way to see a
+ping the proxy sent while you were not typing. Treat `ka Np` and the next turn's latency as the
+ground truth once keep-alive is running, not the countdown by itself.
 
 ## Troubleshooting
 
@@ -369,9 +389,9 @@ To get working again immediately, `/context-guru:uninstall`.
 defaults to it, and the installer's default avoids the collision on purpose.
 
 **The status line is blank in a routed project.** Blank is its normal state before the first
-response of a session (no cache data to show yet) and while there is nothing to report on the
-savings/keep-alive segments — check `/context-guru:status` for the same numbers to confirm it is
-not simply early. If it stays blank across a whole session with real traffic, confirm
+response of a session — this session has nothing to report yet, so there is no total to show
+savings against. Check `/context-guru:status` for the same numbers to confirm it is not simply
+early. If it stays blank across a whole session with real traffic, confirm
 `/context-guru:statusline` actually installed (`settings.py show` reports `statusline=`), and that
 a *new* session was started after installing it — like the routing key, the setting is picked up
 live but only in a session that started after it was written.

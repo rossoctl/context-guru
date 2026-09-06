@@ -1929,14 +1929,15 @@ func TestSettingsAddRequiresUrlOrStatusline(t *testing.T) {
 // --- the statusLine command --------------------------------------------------------------
 
 // runStatusline runs statusline.py with a controlled environment and stdin, and returns its
-// output, exit code and wall-clock time.
+// output, exit code and wall-clock time. Trailing args (e.g. "--cache", "--keepalive") are
+// passed straight through to the script, exactly as settings.py would install them.
 //
 // TMPDIR is pinned to a fresh t.TempDir() so the /api/stats response cache the script keeps
-// there (keyed only by port) cannot leak between tests that happen to reuse a port number.
-func runStatusline(t *testing.T, env map[string]string, stdin string) (out string, code int, elapsed time.Duration) {
+// there (keyed by port AND session_id) cannot leak between tests that happen to reuse either.
+func runStatusline(t *testing.T, env map[string]string, stdin string, args ...string) (out string, code int, elapsed time.Duration) {
 	t.Helper()
 	py := requireTool(t, "python3")
-	cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
+	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "statusline.py")}, args...)...)
 	cmd.Env = append(os.Environ(), "TMPDIR="+t.TempDir())
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -1950,8 +1951,8 @@ func runStatusline(t *testing.T, env map[string]string, stdin string) (out strin
 	} else if err != nil {
 		t.Fatalf("running statusline.py: %v (%s)", err, b)
 	}
-	t.Logf("statusline.py env=%v stdin=%q -> exit %d in %v, output %q",
-		env, stdin, code, elapsed.Round(time.Millisecond), b)
+	t.Logf("statusline.py args=%v env=%v stdin=%q -> exit %d in %v, output %q",
+		args, env, stdin, code, elapsed.Round(time.Millisecond), b)
 	return string(b), code, elapsed
 }
 
@@ -1981,6 +1982,38 @@ func routedEnv(port string) map[string]string {
 		"ANTHROPIC_BASE_URL":        "http://127.0.0.1:" + port + "/anthropic",
 		"CLAUDE_PLUGIN_OPTION_PORT": port,
 	}
+}
+
+// statuslinePayload builds a stdin payload carrying real session totals — the shape confirmed
+// against the installed Claude Code CLI binary and a live capture (see report-pr217.md):
+// session_id, cost.total_cost_usd, and context_window.total_input_tokens/total_output_tokens.
+// This is what makes _default_segment able to compute anything at all; the bare "{}" used by the
+// tests above this one is deliberately what a malformed/pre-first-response payload looks like.
+func statuslinePayload(sessionID string, totalUSD float64, inputTokens, outputTokens int) string {
+	return fmt.Sprintf(`{"session_id":%q,"cost":{"total_cost_usd":%v},`+
+		`"context_window":{"total_input_tokens":%d,"total_output_tokens":%d}}`,
+		sessionID, totalUSD, inputTokens, outputTokens)
+}
+
+// statsStubCapturingQuery is statsStub plus a hook that hands the request's raw query string to
+// the caller — used to prove /api/stats is actually called with ?session=<id> rather than
+// unscoped, which a passing statsStub test alone cannot show (it ignores the query entirely).
+func statsStubCapturingQuery(t *testing.T, body string, gotQuery *string) (port string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		*gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	return fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
 }
 
 // TestStatuslineIsSilentWhereRoutingIsNotConfigured is the same property the two hooks have,
@@ -2044,11 +2077,14 @@ func TestStatuslineNeverFailsOnAConnectionRefusal(t *testing.T) {
 
 // TestStatuslineSurvivesMalformedStdin: Claude Code's own payload shape is trusted, but this
 // script must not crash if it is ever handed something else — a truncated pipe, a future
-// incompatible change, a manual invocation while testing.
+// incompatible change, a manual invocation while testing. Passes --cache so the fallback cache
+// segment this asserts on is actually turned on; without it every one of these malformed
+// payloads also carries no session totals, so the default segment stays silent too and the
+// script would (correctly) print nothing at all — which this test is not the one checking.
 func TestStatuslineSurvivesMalformedStdin(t *testing.T) {
 	port := statsStub(t, `{"total_saved_usd": 0, "saved_unique": 0}`)
 	for _, stdin := range []string{"", "not json{{{", "null", "[1,2,3]", `{"prompt_cache": "not an object"}`} {
-		out, code, _ := runStatusline(t, routedEnv(port), stdin)
+		out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache")
 		if code != 0 {
 			t.Errorf("stdin %q: exit %d; must never fail a render", stdin, code)
 		}
@@ -2060,12 +2096,12 @@ func TestStatuslineSurvivesMalformedStdin(t *testing.T) {
 
 // TestStatuslineSurvivesAMalformedStatsResponse: the proxy answered, but not with anything this
 // script can parse (a future field-shape change, a body truncated by an intermediary). The cache
-// stopper comes from stdin and owes the network nothing, so it must still render.
+// stopper comes from stdin and owes the network nothing, so it must still render once turned on.
 func TestStatuslineSurvivesAMalformedStatsResponse(t *testing.T) {
 	port := statsStub(t, `not valid json at all`)
 	stdin := `{"prompt_cache": {"warm": true, "expires_at": ` +
 		fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
-	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache")
 	if code != 0 {
 		t.Errorf("exit %d; must never fail a render", code)
 	}
@@ -2111,7 +2147,7 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			expiresAt := time.Now().Add(time.Duration(c.remainingSec * float64(time.Second))).Unix()
 			stdin := fmt.Sprintf(`{"prompt_cache": {"warm": true, "expires_at": %d}}`, expiresAt)
-			out, code, _ := runStatusline(t, routedEnv(port), stdin)
+			out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache")
 			if code != 0 {
 				t.Fatalf("exit %d", code)
 			}
@@ -2177,7 +2213,7 @@ print(m._cache_stopper({"prompt_cache": {"expires_at": 1_700_000_000.0 - 0.5}}))
 
 func TestStatuslineOmitsPromptCacheWhenAbsent(t *testing.T) {
 	port := statsStub(t, `{}`)
-	out, code, _ := runStatusline(t, routedEnv(port), `{}`)
+	out, code, _ := runStatusline(t, routedEnv(port), `{}`, "--cache")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -2186,50 +2222,245 @@ func TestStatuslineOmitsPromptCacheWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestStatuslineOmitsZeroSavings matches the dashboard's own convention (metrics.Snapshot's
-// keepalive field is `omitempty`): a fresh install has genuinely nothing to report yet, and a
-// segment reading "$0.00/0 saved" looks like a broken feature rather than an honest zero — the
-// exact failure the /context-guru:status skill's own docs warn against for the sibling numbers.
+// TestStatuslineOmitsZeroSavings covers a payload with NO session totals at all (the same "{}"
+// shape used above) — before the first response of a session, there is nothing to show and
+// nothing to divide by. Distinct from TestStatuslineDefaultSegmentZeroTotal below, which drives
+// a REAL zero total (cost and tokens both explicitly 0, as Claude Code's own payload reads
+// before any usage exists) through the same "nothing to divide by" path.
 func TestStatuslineOmitsZeroSavings(t *testing.T) {
 	port := statsStub(t, `{"total_saved_usd": 0, "saved_unique": 0, "keepalive_pings": 0}`)
-	out, code, _ := runStatusline(t, routedEnv(port), `{}`)
+	out, code, _ := runStatusline(t, routedEnv(port), `{}`, "--cache", "--keepalive")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.Contains(out, "saved") || strings.Contains(out, "ka ") {
-		t.Errorf("a zero-valued segment was shown: %q", out)
+	if strings.TrimSpace(out) != "cache –" {
+		t.Errorf("got %q, want only the neutral cache placeholder (no session totals to show, no "+
+			"keep-alive pings to report)", out)
+	}
+}
+
+// TestStatuslineDefaultSegmentZeroTotal is the "a brand-new session divides by nothing" case
+// called out by name: cost.total_cost_usd and context_window's token pair are all explicitly 0,
+// exactly like Claude Code's own real payload before the first response has anything to track
+// (confirmed by a live capture — see report-pr217.md). Must render nothing, never "$0.00/0 saved
+// of $0.00/0", a crash, or a NaN/Inf from a division this must never even attempt.
+func TestStatuslineDefaultSegmentZeroTotal(t *testing.T) {
+	port := statsStub(t, `{"total_saved_usd": 0, "saved_unique": 0}`)
+	stdin := `{"session_id":"sess-zero","cost":{"total_cost_usd":0},` +
+		`"context_window":{"total_input_tokens":0,"total_output_tokens":0}}`
+	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("got %q, want nothing — a zero session total is a fresh session, not a fault", out)
+	}
+	if strings.Contains(strings.ToLower(out), "nan") || strings.Contains(strings.ToLower(out), "inf") {
+		t.Fatalf("a zero-total render produced %q — this must never divide by the total at all", out)
+	}
+}
+
+// TestStatuslineDefaultShowsOnlySavings is the shape the feature is FOR: real, non-trivial
+// session totals (matching the live capture) paired with a real savings figure, and — with
+// neither --cache nor --keepalive passed — nothing else in the line at all. This is also the
+// positive control for TestStatuslineOmitsZeroSavings above: without a working default segment,
+// that test's "" assertion (once --cache/--keepalive are added there) would pass for the wrong
+// reason — a statusline.py that rendered NO segment ever would look identical.
+func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
+	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4}`)
+	stdin := statuslinePayload("sess-real", 0.41, 180000, 7000)
+	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	got := strings.TrimSpace(out)
+	if got != "$0.03/12.0k saved of $0.41/187.0k" {
+		t.Errorf("got %q, want the savings-vs-session-total segment exactly", got)
+	}
+	if strings.Contains(got, "cache") || strings.Contains(got, "ka ") {
+		t.Errorf("got %q — an extra segment appeared without its flag", got)
+	}
+}
+
+// TestStatuslineExtrasHiddenByDefault is the OTHER half of the toggle: the same conditions that
+// would make each extra segment render (a real prompt_cache in stdin, real keepalive_pings in
+// stats) must produce NEITHER of them without the flag that turns them on — proven alongside
+// TestStatuslineExtrasShownWhenEnabled below so that "hidden by default" cannot pass merely
+// because the segment is broken.
+func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
+	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4}`)
+	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
+		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
+		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
+	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.Contains(out, "cache") {
+		t.Errorf("got %q — the cache segment showed without --cache", out)
+	}
+	if strings.Contains(out, "ka ") {
+		t.Errorf("got %q — the keep-alive segment showed without --keepalive", out)
+	}
+}
+
+// TestStatuslineExtrasShownWhenEnabled is the positive control for the test above: the SAME
+// conditions, with both flags passed, must show both extras — otherwise "hidden by default"
+// would be indistinguishable from "permanently broken".
+func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
+	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4}`)
+	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
+		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
+		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
+	out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache", "--keepalive")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out, "cache 1:") {
+		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
+	}
+	if !strings.Contains(out, "ka 4p") {
+		t.Errorf("got %q, want %q with --keepalive passed", out, "ka 4p")
+	}
+	if !strings.Contains(out, "$0.03/12.0k saved of $0.41/187.0k") {
+		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
 	}
 }
 
 // TestStatuslineShowsANegativeNetHonestly: total_saved_usd can go genuinely negative — an idle
 // keep-alive spending more than it recovers nets the whole figure negative (dash/overview.go's
-// own waterfall calls this "a real outcome the dashboard will not hide"). A savings segment must
-// not fold that into the same omission as a fresh install with nothing to report yet: `<= 0` and
-// `== 0` agree at exactly zero, but only the latter tells a real loss from "nothing happened".
+// own waterfall calls this "a real outcome the dashboard will not hide"). The default segment
+// must not fold that into the same omission as a fresh session with nothing to report yet: a
+// nonzero SESSION TOTAL with a negative saving is a real fact, not "nothing happened".
 func TestStatuslineShowsANegativeNetHonestly(t *testing.T) {
 	port := statsStub(t, `{"total_saved_usd": -0.05, "saved_unique": 0}`)
-	out, code, _ := runStatusline(t, routedEnv(port), `{}`)
+	stdin := statuslinePayload("sess-neg", 1.00, 40000, 1000)
+	out, code, _ := runStatusline(t, routedEnv(port), stdin)
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "$-0.05/0 saved") {
+	if !strings.Contains(out, "$-0.05/0 saved of $1.00/41.0k") {
 		t.Errorf("got %q, want a segment showing the negative net, not an omission", out)
 	}
 }
 
-// TestStatuslineShowsSavingsAndKeepalive is the positive control for the omission tests above:
-// without it, a statusline.py that never rendered ANY savings segment would pass both.
-func TestStatuslineShowsSavingsAndKeepalive(t *testing.T) {
-	port := statsStub(t, `{"total_saved_usd": 1.5, "saved_unique": 2500, "keepalive_pings": 4}`)
-	out, code, _ := runStatusline(t, routedEnv(port), `{}`)
+// TestStatuslineScopesStatsToItsOwnSession proves /api/stats is actually called with
+// ?session=<this session's id> — the fix for mixing a process-wide savings figure into a
+// segment that claims to be THIS session's own. A statsStub alone (used by every test above)
+// cannot show this: it ignores the query string entirely, so a regression to the old unscoped
+// URL would still pass every one of them.
+func TestStatuslineScopesStatsToItsOwnSession(t *testing.T) {
+	var gotQuery string
+	port := statsStubCapturingQuery(t, `{"total_saved_usd": 0.01, "saved_unique": 1}`, &gotQuery)
+	stdin := statuslinePayload("abc-123-session", 0.10, 1000, 100)
+	_, code, _ := runStatusline(t, routedEnv(port), stdin)
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(out, "$1.50/2.5k saved") {
-		t.Errorf("got %q, want a segment containing %q", out, "$1.50/2.5k saved")
+	if gotQuery != "session=abc-123-session" {
+		t.Errorf("got query %q, want %q", gotQuery, "session=abc-123-session")
 	}
-	if !strings.Contains(out, "ka 4p") {
-		t.Errorf("got %q, want a segment containing %q", out, "ka 4p")
+}
+
+// TestStatuslineDefaultSegmentRequiresStats: a real, nonzero session total with NO savings
+// figure to pair it with (the proxy answered, but /api/stats has nothing — e.g. --dashboard is
+// off) must render nothing, not a session total with a fabricated or missing "saved" half.
+func TestStatuslineDefaultSegmentRequiresStats(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "dashboard disabled", http.StatusNotFound)
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+
+	stdin := statuslinePayload("sess-nodash", 0.41, 180000, 7000)
+	out, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("got %q, want nothing — a real session total with no savings figure to pair "+
+			"it with must not render half a claim", out)
+	}
+}
+
+// TestStatuslineRejectsAMalformedSessionId: session_id is a string this script did not generate,
+// carried straight from stdin into a URL query and a tempfile path. One that does not look like
+// the UUID Claude Code actually sends must be treated as absent rather than passed through
+// verbatim — proven here by a session_id containing characters that would otherwise inject a
+// second query parameter.
+func TestStatuslineRejectsAMalformedSessionId(t *testing.T) {
+	var gotQuery string
+	port := statsStubCapturingQuery(t, `{"total_saved_usd": 0.01, "saved_unique": 1}`, &gotQuery)
+	stdin := statuslinePayload("legit-id&session=someone-elses-session", 0.10, 1000, 100)
+	_, code, _ := runStatusline(t, routedEnv(port), stdin)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.Contains(gotQuery, "someone-elses-session") {
+		t.Fatalf("got query %q — an unsanitised session_id reached the request", gotQuery)
+	}
+	if gotQuery != "" {
+		t.Errorf("got query %q, want an unscoped request (empty query) for a session_id this "+
+			"script does not trust", gotQuery)
+	}
+}
+
+// TestStatuslineCachesPerSession is TestStatuslineCachesStatsAcrossQuickRenders' sibling for the
+// defect its own fix could reintroduce: caching /api/stats by PORT ALONE would let one terminal
+// read back another terminal's session's cached savings figure whenever both share a proxy (a
+// single local proxy commonly serves every project on a machine). Two session ids, same port,
+// same TMPDIR, a stub whose body depends on which session was requested — each render must get
+// its OWN session's figure, never the other's.
+func TestStatuslineCachesPerSession(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.RawQuery {
+		case "session=sess-a":
+			w.Write([]byte(`{"total_saved_usd": 0.01, "saved_unique": 100}`))
+		case "session=sess-b":
+			w.Write([]byte(`{"total_saved_usd": 9.99, "saved_unique": 9000}`))
+		default:
+			t.Errorf("unexpected query %q", r.URL.RawQuery)
+		}
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+
+	py := requireTool(t, "python3")
+	tmp := t.TempDir() // shared TMPDIR on purpose: this is what could let the cache files collide
+	run := func(sessionID string) string {
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
+		cmd.Env = append(os.Environ(), "TMPDIR="+tmp,
+			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+			"CLAUDE_PLUGIN_OPTION_PORT="+port)
+		cmd.Stdin = strings.NewReader(statuslinePayload(sessionID, 1.00, 10000, 1000))
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("statusline.py: %v (%s)", err, b)
+		}
+		return string(b)
+	}
+	a := run("sess-a")
+	b := run("sess-b")
+	if !strings.Contains(a, "$0.01/100 saved") {
+		t.Errorf("session a: got %q, want its own $0.01/100 saved", a)
+	}
+	if !strings.Contains(b, "$9.99/9.0k saved") {
+		t.Errorf("session b: got %q, want its own $9.99/9.0k saved — not session a's cached figure", b)
 	}
 }
 
