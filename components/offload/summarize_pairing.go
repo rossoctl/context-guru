@@ -2,6 +2,7 @@ package offload
 
 import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // Tool-pairing repair for a component that REMOVES messages.
@@ -114,4 +115,66 @@ func summarizeSpan(msgs []bschemas.ChatMessage, keepLast int) (headCount, start,
 		end++
 	}
 	return headCount, start, end
+}
+
+// trimSpanForKeptVerbatim lowers end so the span never contains content the agent EXPANDED.
+//
+// summarize is the one offloader that consults neither skipReduce nor isKeptVerbatim, and it does
+// not edit messages in place — it replaces msgs[start:end] with a single summary. So expanded
+// content inside the span was summarized away, which is two separate problems:
+//
+//   - It is the BOUNCE LOOP cg:keep: exists to prevent, which is why the other ten offloaders
+//     consult it: the agent asks for content back, gets it, and the next turn it is gone again.
+//     Pre-existing, and the reason this fix belongs here rather than at the caller.
+//   - It falsifies expand.RestoredInPlace's pointer. The repair says "the content is present in
+//     the transcript above" on the strength of the body as it stands BEFORE the pipeline runs; if
+//     summarize then removes it, the model is left with a pointer to nothing where it used to get
+//     the content.
+//
+// THE RETREAT MIRRORS THE ADVANCE ABOVE, and for the same reason: a tool exchange is atomic. Simply
+// setting end to the kept-verbatim message's index is not enough, because that message is typically
+// a tool output — so the kept tail would begin with a tool_result whose tool_use is still inside the
+// span, which is one of the two provider rejections summarizeSpan was written to stop:
+//
+//	400 messages.N.content.M: unexpected `tool_use_id` found in `tool_result` blocks
+//	400 messages.N: `tool_use` ids were found without `tool_result` blocks immediately after
+//
+// So end retreats past the whole exchange. Advancing instead (as the tail-alignment rule does) is
+// not available here: advancing past a tool message would swallow the very message being protected.
+//
+// A caller that gets end <= start skips, which is an outcome summarize already supports — the safe
+// direction, and better than either summarizing expanded content away or emitting a request the
+// provider rejects.
+// The scan stops at the FIRST kept-verbatim message, since everything after it is protected by the
+// retreat anyway — so the common case (nothing expanded) is one store lookup per span message and no
+// allocation, and the acting case is fewer. The caller runs this below its trigger gate so a turn
+// that was never going to summarize pays none of it.
+func trimSpanForKeptVerbatim(msgs []bschemas.ChatMessage, start, end int, kept func(string) bool) int {
+	first := -1
+	for i := start; i < end; i++ {
+		if kept(schema.MessageText(msgs[i])) {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return end
+	}
+	end = first
+	// Retreat off any boundary that would split an exchange: a tail beginning with a tool message,
+	// or a span ending on an assistant turn whose results now sit in the tail.
+	for end > start {
+		if end < len(msgs) && msgs[end].Role == bschemas.ChatMessageRoleTool {
+			end--
+			continue
+		}
+		prev := msgs[end-1]
+		if prev.Role == bschemas.ChatMessageRoleAssistant &&
+			prev.ChatAssistantMessage != nil && len(prev.ChatAssistantMessage.ToolCalls) > 0 {
+			end--
+			continue
+		}
+		break
+	}
+	return end
 }

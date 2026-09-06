@@ -349,7 +349,7 @@ func (c *Config) applyPreset() error {
 //
 // In the middle it took 39,335 tokens off messages `collapse` would have taken 76,554 off,
 // and its marker then made `mask`, `extract` and `collapse` decline the message entirely
-// (turn-level gates: marker_or_kept_verbatim 3/6, below_max_tokens 6). Last, it caps and
+// (turn-level gates: already_marked 3/6, below_max_tokens 6). Last, it caps and
 // dedups only the lines the bigger offloaders left behind.
 //
 // `toon` is RETIRED from every preset (the component and its tests stay, so anyone with
