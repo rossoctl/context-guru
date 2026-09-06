@@ -100,6 +100,7 @@ nav:
       - Connect to the IBM service: get-started/connect-ibm-service.md
       - "Quickstart: proxy": get-started/quickstart-proxy.md
       - "Quickstart: compaction service": get-started/quickstart-compaction.md
+      - Install the Claude Code plugin: how-to/install-plugin.md
       - Use with Claude Code: how-to/use-with-claude-code.md
       - Build & evaluate locally: setup.md
   - Concepts:

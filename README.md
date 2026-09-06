@@ -108,7 +108,25 @@ docker build -t context-guru:local .
 
 ## Quickstart (60 seconds)
 
-Download a release binary — statically linked, **no Go and no C compiler needed** — or build
+**Claude Code users — install once per machine, route once per repo; no toolchain, and no API key
+needed on a Pro/Max subscription** ([details](docs/how-to/install-plugin.md)):
+
+```
+/plugin marketplace add rossoctl/context-guru
+/plugin install context-guru@context-guru
+/reload-plugins
+/context-guru:install
+```
+
+`/reload-plugins` is what makes the `/context-guru:*` skills exist in this session; without it the
+last line answers `Unknown command`. A new session does the same thing.
+
+That installs a statically-linked binary (no Go, no C compiler), routes **this project only** by
+default, starts the proxy on demand and lets it exit when idle. `/context-guru:uninstall` undoes it,
+restoring any base URL it replaced. The plugin installs with `--preset cache` — the prompt-cache
+split and nothing else. (The proxy's own default is `house`; `--preset` is how you change it.)
+
+Or by hand — a release binary is statically linked, **no Go and no C compiler needed** — or build
 from source:
 
 ```sh
