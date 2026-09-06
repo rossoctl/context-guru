@@ -220,19 +220,30 @@ func contentPresent(body []byte, orig, exceptPath string) bool {
 // unbounded recursion over attacker-influenced JSON is a cost this probe should not carry.
 func blockHasText(blk gjson.Result, blkBase, orig, exceptPath string) bool {
 	for _, f := range [...]string{"text", "content"} {
+		// THE EXCEPTION IS TESTED BEFORE THE VALUE, and that ordering is the whole of it.
+		//
+		// exceptPath names the FIELD being written (messages.N.content.M.content), so once this is
+		// the excepted field nothing inside it counts — including its array form, whose sub-blocks
+		// sit at …content.M.content.0.text and can therefore never equal exceptPath themselves.
+		// Testing the exception inside the string branch instead left the array spelling with no
+		// exception at all: a repaired block whose content is an array holding the original matched
+		// ITSELF, contentPresent said "present", and the repair wrote a pointer to the only copy
+		// there was. That is the round-1 self-match defect, one spelling over, reintroduced by the
+		// refactor that added the array support.
+		if blkBase+"."+f == exceptPath {
+			continue
+		}
 		v := blk.Get(f)
 		switch {
 		case v.Type == gjson.String:
-			if blkBase+"."+f != exceptPath && v.String() == orig {
+			if v.String() == orig {
 				return true
 			}
 		case v.IsArray():
 			hit := false
-			v.ForEach(func(sk, sub gjson.Result) bool {
-				subBase := blkBase + "." + f + "." + sk.String()
+			v.ForEach(func(_, sub gjson.Result) bool {
 				for _, sf := range [...]string{"text", "content"} {
-					sv := sub.Get(sf)
-					if sv.Type == gjson.String && subBase+"."+sf != exceptPath && sv.String() == orig {
+					if sv := sub.Get(sf); sv.Type == gjson.String && sv.String() == orig {
 						hit = true
 						return false
 					}

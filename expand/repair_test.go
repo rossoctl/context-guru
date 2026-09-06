@@ -238,3 +238,59 @@ func TestRepairIsIdempotentForAnArrayShapedToolResult(t *testing.T) {
 		t.Fatalf("repair is not idempotent for the array shape:\n first %s\n then  %s", first, second)
 	}
 }
+
+// THE EXCEPTED BLOCK MUST NOT MATCH ITSELF IN ITS ARRAY SPELLING EITHER.
+//
+// TestRepairIsIdempotentForAnArrayShapedToolResult asserts the contract for the array shape but
+// cannot reach this state: its array holds the client's ERROR, so pass 1 rewrites `content` to a
+// string and pass 2 takes the string branch, where the exception applied all along. The state that
+// breaks it is an excepted block whose array holds the ORIGINAL — constructed directly here, which
+// is what exceptPath exists for.
+//
+// With the exception tested only inside the string branch, this wrote a pointer while the excepted
+// block was the only copy of the content: the model is left pointing at something that is no longer
+// there, which is the round-1 defect one spelling over.
+func TestRepairDoesNotPointAtTheBlockItIsWriting(t *testing.T) {
+	const orig = "the original tool output that came back"
+	// The answer block's content is an ARRAY holding the original, and it is the ONLY copy.
+	body := `{"model":"claude","messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1",` +
+		`"name":"context_guru_expand","input":{"id":"HASH"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[` +
+		`{"type":"text","text":"` + orig + `"}]}]}]}`
+
+	out, _ := expand.RepairToolResults("anthropic", []byte(body),
+		func(string) (string, bool) { return orig, true })
+
+	answer := gjson.GetBytes(out, "messages.1.content.0.content").String()
+	if strings.Contains(answer, "present in the transcript above") {
+		t.Fatalf("the repair wrote a pointer while the block it was writing held the only copy of "+
+			"the content — it matched itself through its array spelling, so the model now points at "+
+			"content that is gone:\n%s", string(out))
+	}
+	if answer != orig {
+		t.Fatalf("the excepted block should keep the content when there is no other copy, got %q", answer)
+	}
+}
+
+// The control for the fix, so hoisting the exception cannot have disabled the array search that this
+// change exists to add: a DIFFERENT block holding the original in array form must still be found.
+func TestRepairStillFindsAnArrayCopyOutsideTheExceptedBlock(t *testing.T) {
+	const orig = "the original tool output that came back"
+	body := `{"model":"claude","messages":[` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t0","content":[` +
+		`{"type":"text","text":"` + orig + `"}]}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1",` +
+		`"name":"context_guru_expand","input":{"id":"HASH"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1",` +
+		`"content":"Error: No such tool available","is_error":true}]}]}`
+
+	out, _ := expand.RepairToolResults("anthropic", []byte(body),
+		func(string) (string, bool) { return orig, true })
+
+	answer := gjson.GetBytes(out, "messages.2.content.0.content").String()
+	if !strings.Contains(answer, "present in the transcript above") {
+		t.Fatalf("the array copy at messages.0 was not found, so the duplication is back for this "+
+			"wire shape: %q", answer)
+	}
+}
