@@ -35,6 +35,16 @@ import (
 // missing Python is an absent guard, not a broken product.
 func pythonBin(t *testing.T) string {
 	t.Helper()
+	return pythonBinFor(t, "kv_ttl_cost_model")
+}
+
+// pythonBinFor is the probe itself, with the module it must be able to import as a parameter.
+// Every drift test in this package needs the same walk over KVCACHE_PYTHON/python3/python and
+// differs only in which module has to load — kv_ttl_cost_model may want a scientific stack,
+// kv_ttl_keepalive_policy is stdlib-only — so the module name is the parameter and the walk is
+// written once.
+func pythonBinFor(t *testing.T, module string) string {
+	t.Helper()
 	for _, cand := range []string{os.Getenv("KVCACHE_PYTHON"), "python3", "python"} {
 		if cand == "" {
 			continue
@@ -45,8 +55,8 @@ func pythonBin(t *testing.T) string {
 		}
 		// It must be able to import the module at all; a 3.8 interpreter cannot.
 		if out, err := exec.Command(p, "-c",
-			"import sys; sys.path.insert(0,'.'); import kv_ttl_cost_model").CombinedOutput(); err != nil {
-			t.Logf("%s cannot import kv_ttl_cost_model, skipping it: %s", p, out)
+			"import sys; sys.path.insert(0,'.'); import "+module).CombinedOutput(); err != nil {
+			t.Logf("%s cannot import %s, skipping it: %s", p, module, out)
 			continue
 		}
 		return p
