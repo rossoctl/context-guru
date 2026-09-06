@@ -12,6 +12,27 @@ No toolchain, reversible, and the routing decision is per repo.
 The first two are once per machine. The last is once per repo, and it is the one that decides which
 sessions get routed.
 
+### Recommended first: grant the plugin's scripts once
+
+Not required, and worth doing anyway — on any deployment where sessions run under auto mode or a
+restrictive permission policy, the install otherwise stops partway with the proxy running and the
+routing key unwritten. Add this rule before you start, via `/permissions` (paste the rule **alone**, not
+a JSON object) or in a settings file:
+
+```
+Bash(/absolute/path/to/.claude/plugins/cache/context-guru/**)
+```
+
+Use the absolute path — `~` is not expanded in permission rules — and take the path from what
+`/context-guru:install` prints if you are unsure. One rule covers every command the plugin runs.
+
+**Why it is needed at all is worth understanding rather than pasting past.** Starting the proxy, and
+writing the routing key, are the two steps that put your model traffic — and the credential that travels
+with it — through a locally installed third-party binary. Claude Code is right to treat "the user
+installed a plugin called context-guru" as different consent from "the user approved intercepting their
+API traffic". The rule is you saying the second thing explicitly, once. Details and the alternatives are
+in [If the install is blocked](#if-the-install-is-blocked).
+
 **`/reload-plugins` is not optional, and skipping it looks like a broken plugin.** `/plugin install`
 tells you to run it, and until you do, this session has no `/context-guru:*` skills — so the next
 line answers `Unknown command: /context-guru:install` on a perfectly good install. Starting a fresh
@@ -71,7 +92,38 @@ reads this option directly, so the `SessionStart` hook chains correctly in every
 depending on the settings `env` block having been written. The install skill writes
 `ANTHROPIC_UPSTREAM` there as well, and the two agree.
 
-### If a permission prompt or an auto-mode denial stops the install
+### Hosted agents and managed workspaces
+
+Anywhere the platform supplies its own local gateway — a coding-agent pod, a managed dev workspace, a
+corporate proxy injected into the environment — the install takes a slightly different shape. It is a
+supported shape, not a workaround, and it is worth recognising because the signal is easy to miss:
+
+```bash
+echo "$ANTHROPIC_BASE_URL"     # already set, and not by you
+```
+
+If that is set to a local port that is not ours, **the platform's gateway is doing real work.** It holds
+the credential, and it may rewrite model names — one platform maps `claude/haiku…` onto the real model
+id, so a proxy that forwards straight to `api.anthropic.com` sends model names the API has never heard
+of and every request fails. So context-guru goes **in front of** that gateway rather than replacing it:
+your `Authorization` / `x-api-key` passes straight through, and the gateway keeps authenticating.
+
+Three things to expect, and none of them are errors:
+
+| What you see | What to do |
+|---|---|
+| `ANTHROPIC_BASE_URL` set in the environment, no settings file mentions it | chain: set **Upstream base URL** to that URL in `/plugin configure` |
+| `on_path=false` from the install | nothing — the skill passes the absolute path itself, and persists it as `CONTEXT_GURU_BIN` so later sessions' hooks find it |
+| the proxy start or settings write denied | the [permission rule](#recommended-first-grant-the-plugins-scripts-once) above, or approve once |
+
+The install writes three keys in that case rather than one — routing, the upstream to chain behind, and
+the binary path — all in one atomic edit that `/context-guru:uninstall` reverses.
+
+**One thing to check before bothering:** if the workspace's working directory is not a git repository,
+the `cache` preset has nothing to act on and the saving is exactly zero. See
+[What it does to your requests](#what-it-does-to-your-requests).
+
+### If the install is blocked
 
 Starting the proxy routes this session's API traffic through a locally-installed binary, and Claude
 Code treats that as worth asking about. In interactive use you get a prompt to approve; under auto
@@ -119,7 +171,12 @@ passed as an argument: an env-prefixed command is one nobody can approve. If a s
 command with env prefixes in front of the script, a permission rule will not help and you are back to
 approving each time.
 
-**On a hosted agent, expect TWO gates, not one.** Both were observed under auto mode, and both are
+**A correctly-formed permission rule does clear these gates — confirmed.** With the rule above in place
+before the install, both steps that had been denied ran without a prompt and the install completed on a
+hosted agent. If you are denied *with* a rule in place, check the rule is a bare `Bash(...)` string with
+an absolute path, not a JSON object pasted into `/permissions`.
+
+**Without a rule, expect TWO gates, not one.** Both were observed under auto mode, and both are
 correct:
 
 1. **starting the proxy** — *"intercepts and forwards the agent's own Anthropic API traffic"*;

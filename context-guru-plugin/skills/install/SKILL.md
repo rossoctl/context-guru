@@ -173,11 +173,19 @@ so ask it to start anyway:
 "${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh" --unrouted
 ```
 
-If step 3 found a gateway to chain behind, pass it here as an argument too:
+Pass the other two facts you already have as arguments as well — the gateway from step 3, and the
+binary path from step 1 if it reported `on_path=false`:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh" --unrouted --upstream "<their base URL>"
+"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh" --unrouted \
+  --upstream "<their base URL>" --bin "<the path= from step 1>"
 ```
+
+**`--bin` is not optional when `on_path=false`.** Without it the script resolves the binary by name,
+finds nothing, and reports "the proxy binary is not on PATH" — and the last agent to hit that
+improvised, symlinking the binary into a directory under the plugin cache that happened to be on
+`PATH`. It worked, and it would have broken silently at the next plugin update or pod restart, for a
+reason nobody would connect to a symlink made days earlier. You already have the path; pass it.
 
 **Everything goes in as arguments, and nothing as an environment prefix.** Two reasons, both learned
 the hard way on a hosted agent:

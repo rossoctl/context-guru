@@ -87,15 +87,31 @@ note() { printf 'context-guru: %s\n' "$*"; }
 # ungrantable.
 START_UNROUTED="${CONTEXT_GURU_FORCE:-${CONTEXT_GURU_START_UNROUTED:-}}"
 UPSTREAM_ARG=""
+# --bin <path>, because the install knows where the binary is and this script should not have to
+# guess. Without it, an install on a machine whose bin directory is not on PATH went like this: the
+# script reported "the proxy binary is not on PATH" and exited, and the agent driving it improvised —
+# symlinking the binary into a directory under the plugin cache that happened to be on PATH. That
+# works until the plugin updates or the pod restarts, at which point the proxy stops starting for a
+# reason nobody will connect to a symlink made days earlier.
+#
+# install.sh already prints `path=` on every successful install. Passing it here is one argument, is
+# covered by the same permission rule as the rest of the command, and needs no symlink.
+BIN_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --unrouted|--force) START_UNROUTED=1 ;;
     --upstream) UPSTREAM_ARG="${2:-}"; shift ;;
     --upstream=*) UPSTREAM_ARG="${1#--upstream=}" ;;
+    --bin) BIN_ARG="${2:-}"; shift ;;
+    --bin=*) BIN_ARG="${1#--bin=}" ;;
   esac
   shift
 done
 FORCE="$START_UNROUTED"
+# BIN was resolved at the top from CONTEXT_GURU_BIN or the bare name; an explicit --bin overrides both.
+if [ -n "$BIN_ARG" ]; then
+  BIN="$BIN_ARG"
+fi
 
 if [ "$FORCE" = 1 ]; then
   :
