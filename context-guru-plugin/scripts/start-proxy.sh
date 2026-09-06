@@ -97,13 +97,36 @@ UPSTREAM_ARG=""
 # install.sh already prints `path=` on every successful install. Passing it here is one argument, is
 # covered by the same permission rule as the rest of the command, and needs no symlink.
 BIN_ARG=""
+# Every discarded or malformed argument is REPORTED, never swallowed.
+#
+# The first version of this loop had no `*)` branch and took `$2` for `--upstream` on faith. All three
+# of these launched a proxy and reported success while doing the wrong thing:
+#
+#   --upsteam http://gw:4000     one transposed letter -> no upstream at all
+#   --upstream                   missing value         -> no upstream at all
+#   --upstream --bin /some/path  swallowed the flag    -> upstream="--bin", and --bin lost entirely
+#
+# Rows 1 and 2 leave a proxy forwarding to api.anthropic.com, which on a platform whose gateway
+# rewrites model names makes every request fail. Row 3 is two defects from one typo. Exiting non-zero
+# is not the answer — property 5 says this never fails a session — but silence is not either, for the
+# same reason the declined gate now writes a breadcrumb: silence is indistinguishable from "never ran".
+takes_value() { # $1 = flag name, $2 = the candidate value
+  case "${2:-}" in
+    ''|--*) note "ignoring $1: it needs a value, and got '${2:-<nothing>}'"; return 1 ;;
+  esac
+  return 0
+}
 while [ $# -gt 0 ]; do
   case "$1" in
     --unrouted|--force) START_UNROUTED=1 ;;
-    --upstream) UPSTREAM_ARG="${2:-}"; shift ;;
+    # The shift lives INSIDE the accepted branch on purpose: shifting after a rejected value would
+    # consume the next FLAG too, so `--upstream --bin /path` lost --bin as well and reported
+    # '/some/path' as an unrecognised argument. Reject the value, keep the flag that followed it.
+    --upstream) if takes_value --upstream "${2:-}"; then UPSTREAM_ARG="$2"; shift; fi ;;
     --upstream=*) UPSTREAM_ARG="${1#--upstream=}" ;;
-    --bin) BIN_ARG="${2:-}"; shift ;;
+    --bin) if takes_value --bin "${2:-}"; then BIN_ARG="$2"; shift; fi ;;
     --bin=*) BIN_ARG="${1#--bin=}" ;;
+    *) note "ignoring unrecognised argument '$1'" ;;
   esac
   shift
 done

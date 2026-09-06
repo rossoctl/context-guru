@@ -132,9 +132,10 @@ is the right amount of ceremony:
 The caller's `Authorization` / `x-api-key` passes straight through to that upstream, which is what
 lets their gateway keep authenticating. Two places have to know about it, for different reasons:
 
-* **now**, so the proxy you start in step 4 chains — pass it as `--upstream` when you write the
-  settings, and prefer the plugin's **Upstream base URL** option if the user will set one, since
-  `start-proxy.sh` reads `CLAUDE_PLUGIN_OPTION_UPSTREAM` by itself;
+* **now**, twice as an explicit `--upstream` argument: once when starting the proxy in step 4 and once
+  when writing the settings in step 5. Not via the plugin option and not via an env prefix —
+  `CLAUDE_PLUGIN_OPTION_*` does not reach a Bash tool call, and an env prefix cannot be covered by a
+  permission rule;
 * **later**, so every future session's hook chains too — which means the variable has to be in the
   settings `env` block beside our key, because that block is what the hook inherits:
 
@@ -233,13 +234,17 @@ proxy intercepting all Claude API traffic before forwarding to an unverified ups
 
 A fair call — the command text really did redirect traffic — and it blocked the install at its last
 step. It also could not be granted, because Bash permission rules match by command *prefix*, so no
-rule naming this script can cover an env-prefixed invocation. `CONTEXT_GURU_FORCE=1` asks for what it
-means and leaves the routing variable alone.
+rule naming this script can cover an env-prefixed invocation.
 
-If step 3 found a gateway to chain behind, add `ANTHROPIC_UPSTREAM=<their gateway>` — or better, tell
-the user to set the plugin's **Upstream base URL** option, which `start-proxy.sh` reads by itself and
-which then applies in every later session too. Confirm the proxy is actually up before continuing —
-`proxy up on 127.0.0.1:<port>` in the output, or:
+The arguments above are the whole interface. **Do not set `ANTHROPIC_UPSTREAM=`, `CONTEXT_GURU_BIN=` or
+`CONTEXT_GURU_FORCE=` in front of this command** — this paragraph used to recommend exactly that, two
+paragraphs after prohibiting it, and the recommendation was the denied shape. And do not rely on the
+plugin's **Upstream base URL** option being visible here: `CLAUDE_PLUGIN_OPTION_*` reaches hook
+environments, and this step is a Bash tool call, so in *this* step the configured option is precisely
+what the script cannot read. Setting it is still worth telling the user about — it is what later
+sessions' hooks use — but it is not a substitute for `--upstream` now.
+
+Confirm the proxy is actually up before continuing — `proxy up on 127.0.0.1:<port>` in the output, or:
 
 ```bash
 curl -fsS "http://127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT:-8787}/healthz"
@@ -277,8 +282,14 @@ want `context-guru-proxy` on the command line too.
   `--force` once the user has said to replace that specific value. When they do, the replaced
   value is recorded and `/context-guru:uninstall` puts it back — say so, because "we will take
   over your gateway" is much easier to agree to when it is reversible.
+- `result=completed` — already routed to this proxy, and one of the other keys was missing or stale;
+  `added_keys=` names what was filled in. This is the outcome of re-running the install as a repair
+  after an earlier attempt stopped partway, which is the common case on a hosted agent. Report it as a
+  success, not as "nothing to do".
+- `result=unchanged` — routed, and every key already correct. Genuinely nothing to do.
 - `result=repointed` — the file already held a context-guru URL on a different port (the user
-  changed the configured port). Moved, with the previous value reported. Not a conflict.
+  changed the configured port). Moved, with the previous value reported, and the chaining keys carried
+  across. Not a conflict.
 - `result=error reason=unparseable_json` — their settings file is already broken. Do not
   rewrite it. Tell them where and let them fix it.
 
@@ -323,7 +334,7 @@ A `--idle-exit` below the store's floor (~5h34m at the default TTL) is **refused
 purpose — exiting clears in-memory cache state. If they want a shorter one, that is a
 `store.ttl_seconds` conversation, not a flag to force.
 
-### 6. Tell them what happens next
+### 7. Tell them what happens next
 
 - **Do not tell them it only takes effect next session.** That was this skill's claim and it is
   wrong: Claude Code picks the `env` change up live, which is exactly why step 4 starts the proxy

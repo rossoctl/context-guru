@@ -42,6 +42,11 @@ UPSTREAM_KEY = "ANTHROPIC_UPSTREAM"
 # resolves the binary by name, so on those machines this is what makes auto-start work at all.
 BIN_KEY = "CONTEXT_GURU_BIN"
 
+# The keys this script owns. `other_env_keys` counts what the USER has in the env block, so it must
+# exclude all three of ours — it excluded only the base URL, so a chained install reported 3 "other"
+# keys where the user owned 1, and /context-guru:status repeated the wrong number back to them.
+OURS = (KEY, UPSTREAM_KEY, BIN_KEY)
+
 # Where this script records what it did, so a later run can tell its own work from the user's.
 META = "$context-guru"
 
@@ -198,7 +203,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         file=args.file,
         exists=str(existed).lower(),
         base_url=current if current else "(unset)",
-        other_env_keys=len([k for k in (data.get("env") or {}) if k != KEY]),
+        other_env_keys=len([k for k in (data.get("env") or {}) if k not in OURS]),
         top_level_keys=len(data),
     )
     return 0
@@ -213,21 +218,66 @@ def cmd_add(args: argparse.Namespace) -> int:
         emit(result="error", reason="env_not_an_object")
         return 3
 
+    # What a COMPLETE install looks like in this file. Every exit below is judged against this whole
+    # set, not against the base URL alone.
+    #
+    # That distinction is the fix for a defect worth spelling out, because it defeated the remedy for
+    # every other failure in this flow. `unchanged` used to mean "the base URL matches", and the two
+    # early returns below wrote nothing else — so:
+    #
+    #   add --url <same> --upstream http://gw:4000 --bin /opt/cg/proxy
+    #     -> result=unchanged, exit 0, and NEITHER new key written
+    #
+    # Re-running the install is the obvious thing to do after an attempt dies partway, which is how
+    # every hosted-agent attempt ended — and it was a no-op that reported success. There was no way to
+    # add the upstream to an already-routed project at all. The repointed path had the same hole, so
+    # changing the configured port silently un-chained the proxy.
+    desired = {KEY: args.url}
+    if getattr(args, "upstream", ""):
+        desired[UPSTREAM_KEY] = args.upstream
+    if getattr(args, "bin", ""):
+        desired[BIN_KEY] = args.bin
+
     current = env.get(KEY)
-    if current == args.url:
+    if current == args.url and all(env.get(k) == v for k, v in desired.items()):
         emit(result="unchanged", file=args.file, base_url=current,
-             note="already routed to this proxy")
+             upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
+             note="already routed to this proxy, with nothing left to add")
+        return 0
+    if current == args.url:
+        # Routed already, but missing one of the other keys — the repair case. Fill in only what is
+        # absent or different, and say which, since "added" would misdescribe it.
+        saved = backup(args.file) if existed else ""
+        changed = [k for k, v in desired.items() if env.get(k) != v]
+        env.update(desired)
+        data["env"] = env
+        meta = data.setdefault(META, {})
+        meta["installed_base_url"] = args.url
+        if getattr(args, "upstream", ""):
+            meta["installed_upstream"] = args.upstream
+        if getattr(args, "bin", ""):
+            meta["installed_bin"] = args.bin
+        save(args.file, data)
+        emit(result="completed", file=args.file, base_url=args.url, added_keys=",".join(changed),
+             upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""), backup=saved,
+             note="already routed; filled in the keys that were missing")
         return 0
     if current and is_ours(data, current) and not args.force:
         # Our own URL on a different port — the user changed the configured port and re-ran.
         # Reporting a conflict here told them somebody else owned their routing, which was
         # wrong and alarming. Move it, and keep the note so the change is visible.
         saved = backup(args.file)
-        env[KEY] = args.url
+        env.update(desired)   # the whole set: a port change must not drop the chaining keys
         data["env"] = env
-        data.setdefault(META, {})["installed_base_url"] = args.url
+        meta = data.setdefault(META, {})
+        meta["installed_base_url"] = args.url
+        if getattr(args, "upstream", ""):
+            meta["installed_upstream"] = args.upstream
+        if getattr(args, "bin", ""):
+            meta["installed_bin"] = args.bin
         save(args.file, data)
         emit(result="repointed", file=args.file, base_url=args.url, previous=current,
+             upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
              backup=saved, note="this was our own URL on another port; moved")
         return 0
     if current and not args.force:
@@ -286,7 +336,7 @@ def cmd_add(args: argparse.Namespace) -> int:
     save(args.file, data)
     emit(result="added", file=args.file, base_url=args.url,
          replaced=current if current else "", backup=saved or "(new file)",
-         other_env_keys=len([k for k in env if k != KEY]))
+         other_env_keys=len([k for k in env if k not in OURS]))
     return 0
 
 

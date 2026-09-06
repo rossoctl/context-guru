@@ -1508,3 +1508,175 @@ func TestBinPathSurvivesAMachineWhereItIsNotOnPATH(t *testing.T) {
 		t.Errorf("uninstall deleted a binary path it never wrote: %v", got)
 	}
 }
+
+// --- fixes from the second review of #160 -----------------------------------------------------
+
+// TestReRunningTheInstallFillsInMissingKeys is the defect that defeated the remedy for every other
+// failure in this flow.
+//
+// `unchanged` used to mean "the base URL matches", and the two early returns in cmd_add wrote nothing
+// else — so `add --url <same> --upstream … --bin …` reported success and wrote NEITHER new key. Since
+// re-running the install is the obvious thing to do after an attempt dies partway (which is how every
+// hosted-agent attempt ended), the repair was a silent no-op. The repointed path had the same hole, so
+// changing the configured port un-chained the proxy without a word.
+func TestReRunningTheInstallFillsInMissingKeys(t *testing.T) {
+	const gw = "http://gw.example:4000"
+	const bin = "/opt/cg/context-guru-proxy"
+
+	ourKeys := func(path string) map[string]any {
+		t.Helper()
+		env, _ := readJSON(t, path)["env"].(map[string]any)
+		out := map[string]any{}
+		for _, k := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_UPSTREAM", "CONTEXT_GURU_BIN"} {
+			if v, ok := env[k]; ok {
+				out[k] = v
+			}
+		}
+		return out
+	}
+
+	t.Run("re-run adds the keys the first run did not have", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.json")
+		writeJSON(t, path, map[string]any{"env": map[string]any{}})
+
+		if _, code := settings(t, "add", "--file", path, "--url", ourURL); code != 0 {
+			t.Fatal("first add failed")
+		}
+		facts, code := settings(t, "add", "--file", path, "--url", ourURL, "--upstream", gw, "--bin", bin)
+		if code != 0 {
+			t.Fatalf("re-run failed: %v", facts)
+		}
+		if facts["result"] == "unchanged" {
+			t.Errorf("result=unchanged on a re-run that had two keys to add — this is the no-op that "+
+				"made re-running the install useless as a repair: %v", facts)
+		}
+		got := ourKeys(path)
+		if got["ANTHROPIC_UPSTREAM"] != gw || got["CONTEXT_GURU_BIN"] != bin {
+			t.Errorf("re-run did not write the missing keys: %v", got)
+		}
+	})
+
+	t.Run("unchanged only when there is genuinely nothing to add", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.json")
+		writeJSON(t, path, map[string]any{"env": map[string]any{}})
+		if _, code := settings(t, "add", "--file", path, "--url", ourURL,
+			"--upstream", gw, "--bin", bin); code != 0 {
+			t.Fatal("add failed")
+		}
+		facts, code := settings(t, "add", "--file", path, "--url", ourURL, "--upstream", gw, "--bin", bin)
+		if code != 0 || facts["result"] != "unchanged" {
+			t.Errorf("a complete install re-run should be unchanged: %v", facts)
+		}
+	})
+
+	t.Run("a port change keeps the chaining keys", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.json")
+		writeJSON(t, path, map[string]any{"env": map[string]any{}})
+		if _, code := settings(t, "add", "--file", path, "--url", ourURL,
+			"--upstream", gw, "--bin", bin); code != 0 {
+			t.Fatal("add failed")
+		}
+		const moved = "http://127.0.0.1:9999/anthropic"
+		facts, code := settings(t, "add", "--file", path, "--url", moved, "--upstream", gw, "--bin", bin)
+		if code != 0 || facts["result"] != "repointed" {
+			t.Fatalf("expected repointed: %v", facts)
+		}
+		got := ourKeys(path)
+		if got["ANTHROPIC_BASE_URL"] != moved {
+			t.Errorf("port change did not move the base URL: %v", got)
+		}
+		if got["ANTHROPIC_UPSTREAM"] != gw || got["CONTEXT_GURU_BIN"] != bin {
+			t.Errorf("a port change silently un-chained the proxy: %v", got)
+		}
+	})
+
+	t.Run("other_env_keys counts the user's keys, not ours", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.json")
+		writeJSON(t, path, map[string]any{"env": map[string]any{"MINE": "one"}})
+		facts, _ := settings(t, "add", "--file", path, "--url", ourURL, "--upstream", gw, "--bin", bin)
+		if facts["other_env_keys"] != "1" {
+			t.Errorf("other_env_keys=%q; the user owns exactly one env var, and reporting our own "+
+				"keys as theirs made /context-guru:status repeat the wrong number back to them",
+				facts["other_env_keys"])
+		}
+	})
+}
+
+// TestStartProxyReportsArgumentsItCannotUse: three malformed invocations launched a proxy and reported
+// success while doing the wrong thing, because the argument loop had no default branch and took the
+// next word as a value on faith.
+//
+//	--upsteam <url>        one transposed letter -> no upstream at all
+//	--upstream             missing value         -> no upstream at all
+//	--upstream --bin <p>   swallowed the flag    -> upstream="--bin", and --bin lost too
+//
+// The first two leave a proxy forwarding to api.anthropic.com, which on a platform whose gateway
+// rewrites model names makes every request fail. Exiting non-zero is not the fix — this script must
+// never fail a session — so it says what it discarded, for the same reason the declined gate leaves a
+// breadcrumb: silence is indistinguishable from "never ran".
+func TestStartProxyReportsArgumentsItCannotUse(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook is POSIX-only")
+	}
+	requireTool(t, "bash")
+
+	for _, c := range []struct {
+		name     string
+		args     []string
+		wantSaid string
+		wantUp   string // expected --anthropic-upstream value in argv, "" for none
+	}{
+		{"good", []string{"--upstream", "http://gw:4000"}, "", "http://gw:4000"},
+		{"typo", []string{"--upsteam", "http://gw:4000"}, "unrecognised argument '--upsteam'", ""},
+		{"no value", []string{"--upstream"}, "needs a value", ""},
+		{"swallowed flag", []string{"--upstream", "--bin", "/nope/x"}, "needs a value", ""},
+		{"nonsense", []string{"--nonsense"}, "unrecognised argument '--nonsense'", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			argv := filepath.Join(dir, "argv.log")
+			fake := filepath.Join(dir, "fake")
+			body := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> " + argv + "\nsleep 30\n"
+			if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			port := freePort(t)
+			cmd := exec.Command("bash", append([]string{
+				filepath.Join(scriptsDir(t), "start-proxy.sh"), "--unrouted", "--bin", fake,
+			}, c.args...)...)
+			cmd.Env = append(os.Environ(),
+				"CLAUDE_PLUGIN_OPTION_PORT="+port,
+				"ANTHROPIC_BASE_URL=",
+				"ANTHROPIC_UPSTREAM=",
+				"CLAUDE_PLUGIN_OPTION_UPSTREAM=",
+				"CONTEXT_GURU_HEALTH_BUDGET=1",
+				"XDG_STATE_HOME="+filepath.Join(dir, "state"),
+				"TMPDIR="+dir)
+			out, err := cmd.CombinedOutput()
+			t.Cleanup(func() { exec.Command("pkill", "-f", fake).Run() }) //nolint:errcheck
+			if err != nil {
+				t.Fatalf("must never fail a session: %v\n%s", err, out)
+			}
+			said := string(out)
+			if c.wantSaid == "" {
+				if strings.Contains(said, "ignoring") {
+					t.Errorf("complained about a valid invocation:\n%s", said)
+				}
+			} else if !strings.Contains(said, c.wantSaid) {
+				t.Errorf("did not report the discarded argument (want %q):\n%s", c.wantSaid, said)
+			}
+			launched, _ := os.ReadFile(argv)
+			if c.wantUp == "" {
+				if strings.Contains(string(launched), "--anthropic-upstream") {
+					t.Errorf("an upstream reached argv from a malformed argument: %s", launched)
+				}
+			} else if !strings.Contains(string(launched), "--anthropic-upstream "+c.wantUp) {
+				t.Errorf("argv missing the upstream: %s", launched)
+			}
+		})
+	}
+}
