@@ -189,9 +189,18 @@ On **money** a constant wins by 0.89 pp of the bill — 7.6 points of the ceilin
 
 | population | share of stake | AUC by row | AUC by dollar |
 |---|---|---|---|
-| all spans | 100% | 0.93 | 0.635 |
+| all spans | 100% | 0.93 | 0.635¹ |
 | top 20% by prefix | 99.5% | 0.76 | 0.615 |
 | **top 5% by prefix** | **86.7%** | **0.58** | **0.566** |
+
+¹ **Unverified — do not quote this cell.** A stake-weighted AUC decomposes as
+`p²·AUC_in + (1−p)²·AUC_out + 2p(1−p)·AUC_cross` for a subgroup holding stake share `p`. The
+top-20% row above (`p = 0.995`, `AUC = 0.615`) puts a ceiling on this cell of
+`0.995²·0.615 + 0.005²·1 + 2·0.995·0.005·1 ≈ 0.619` even granting the complement and every
+cross-pair a perfect 1.0 — below the 0.635 claimed here, so the two rows cannot both be right.
+Which one is mis-transcribed isn't recoverable from the published figures alone — that needs
+the underlying per-span dollar values, which is outside this page's data boundary. Read this
+cell as "high 0.6x, exact value unconfirmed," not as 0.635.
 
 The model ranks *conversations* almost perfectly and *dollars* barely above chance — and it
 degrades toward the tail where the money is. Its mistakes concentrate on the large-prefix
@@ -317,10 +326,12 @@ from the Python makes it fail with `port 0.05` against `Go 0.50`, which is the c
 
 ## Where to look next
 
-The measured blocker is specific: **the model cannot rank dollars.** Row AUC 0.93, dollar AUC
-0.70, and 0.57 on the spans holding 87% of the stake. Everything downstream of that — the
-threshold tuning, the four feature families — was an attempt to work around it and none
-succeeded, which is what makes it the blocker rather than one finding among several.
+The measured blocker is specific: **the model cannot rank dollars.** Row AUC 0.93, falling to
+0.57 on the spans holding 87% of the stake — the whole-population dollar AUC is the table cell
+flagged unverified above, and is NOT 0.70, a figure the same table's own arithmetic rules out
+by a wider margin than the 0.635 it disputes. Everything downstream of that — the threshold
+tuning, the four feature families — was an attempt to work around it and none succeeded, which
+is what makes it the blocker rather than one finding among several.
 
 Two things follow, in order:
 

@@ -96,9 +96,11 @@ type PingBudgeter interface {
 //
 // So this is NOT the cheaper policy where pings are free: a constant beats it by 0.89 pp of the
 // bill, 7.6 points of the ceiling, because the model ranks conversations well (AUC 0.93) and
-// DOLLARS barely better than chance (AUC 0.70, falling to 0.57 on the largest prefixes, which
-// carry 87% of the stake). What it is, is 9x more efficient PER PING, which is what matters
-// where a tenant rate limit rather than money is what caps the budget.
+// DOLLARS much worse, falling to 0.57 on the largest prefixes, which carry 87% of the stake.
+// (Not 0.70 for the whole population: kv-cache-keepalive-budget.md's own AUC-decomposition
+// arithmetic rules that out; its table flags the whole-population dollar-AUC cell unverified
+// rather than assert a number that fails the check.) What it is, is 9x more efficient PER PING,
+// which is what matters where a tenant rate limit rather than money is what caps the budget.
 // docs/how-to/kv-cache-keepalive-budget.md has the derivation and says plainly which to pick.
 type BudgetPolicy struct {
 	// Label is the name the dashboard groups by. Defaults to StrategyKeepAliveBudget.

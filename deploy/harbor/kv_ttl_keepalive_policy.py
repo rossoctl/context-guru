@@ -80,10 +80,12 @@ reaches, with per-ping efficiency indexed to flat MaxPings=6.
     flat MaxPings=2 (dflt) 33,591          5.19%            44.3%           2.1x
 
 Read the last two columns together, because they say opposite things. On MONEY a constant
-beats this policy by 0.89 pp of the bill: it ranks conversations well (AUC 0.93) and DOLLARS barely
-better than chance (AUC 0.70, and 0.57 on the largest prefixes, which carry 87% of the
-stake), so its mistakes land where they cost most, and at a 11.5:1 payoff a wrong skip is
-expensive. Per PING it is 9x better. So:
+beats this policy by 0.89 pp of the bill: it ranks conversations well (AUC 0.93) and DOLLARS much
+worse, falling to 0.57 on the largest prefixes, which carry 87% of the stake (not 0.70 for the
+whole population — kv-cache-keepalive-budget.md's own AUC-decomposition math rules that out;
+its table flags the whole-population dollar-AUC cell unverified instead), so its mistakes land
+where they cost most, and at a 11.5:1 payoff a wrong skip is expensive. Per PING it is 9x
+better. So:
 
     pings effectively free   ->  raise MaxPings and do not deploy a model
     pings rate-limited      ->  this policy, by a wide margin
@@ -376,8 +378,10 @@ def fit(spans, *, interval_s: float = DEFAULT_INTERVAL_S, life_s: float = DEFAUL
 
     The weight is the point. An unweighted fit optimises row accuracy, and rows are not what
     the bill is made of: this corpus's stake is concentrated so hard that the model can reach
-    AUC 0.93 by row while ranking dollars at 0.70. Weighting by stake does not close that gap
-    — nothing measured here does — but fitting without it makes it worse.
+    AUC 0.93 by row while ranking dollars far worse — see kv-cache-keepalive-budget.md's AUC
+    table (its whole-population dollar figure is flagged unverified there; 0.70 is not it,
+    and the same page's arithmetic rules 0.70 out too). Weighting by stake does not close that
+    gap — nothing measured here does — but fitting without it makes it worse.
     """
     from sklearn.compose import ColumnTransformer
     from sklearn.ensemble import HistGradientBoostingClassifier
