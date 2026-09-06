@@ -50,11 +50,21 @@ type PingBudgeter interface {
 //	rescue = prefix × (write_5m_rate − cache_read_rate)
 //
 // Ping if the chance of that exceeds its cost, i.e. if rescue×h > ping. On the documented
-// Anthropic multiples (read 0.1×, write 1.25× of base input) the prefix term cancels and the
-// threshold is 0.1/1.15 = 8.70% — the same number for every prefix size and every model,
-// which is why this reads a probability and not a token count. It is computed from
-// o.Pricing rather than written down because a deployment whose rates differ has a different
-// threshold, and one that has no rates at all has none.
+// Anthropic multiples (read 0.1×, write 1.25× of base input) the PER-TOKEN part of the prefix
+// term cancels and leaves 0.1/1.15 = 8.70%, the same number for every model — which is why
+// this reads a probability and not a token count. It is computed from o.Pricing rather than
+// written down because a deployment whose rates differ has a different threshold, and one
+// that has no rates at all has none.
+//
+// What does NOT cancel is the ping's fixed overhead. KeepAliveCost carries ping_input and
+// ping_output terms that do not scale with the prefix, so the true gate is
+//
+//	0.0870 + (ping_input×input + ping_output×output) / (prefix × (write_5m − cache_read))
+//
+// which is 8.70% only in the limit. At the documented multiples and one token each way it is
+// 8.70% at 125k tokens, 8.72% at 20k, 8.96% at 2k and 9.74% at 500 — a spread of the same
+// order as the margins this arm is decided by. MinPrefix exists for exactly that reason, and
+// nothing below the tens of thousands of tokens should be read as 8.70%.
 //
 // # WHY IT IS NOT THAT SIMPLE
 //
@@ -106,8 +116,12 @@ type BudgetPolicy struct {
 	// overhead (ping_input, ping_output) does not scale with the prefix, so on a small enough
 	// entry the arithmetic above is dominated by it. 0 disables the gate.
 	MinPrefix int64
-	// Semantics must match the Config's, because a ping's cost depends on whether the
-	// provider accepts a zero-generation request.
+	// Semantics must match the Config's: a ping's cost depends on whether the provider
+	// accepts a zero-generation request, and whether a ping refreshes the entry at all
+	// decides whether this arm has an opinion — see pricable. The zero value means
+	// DefaultSemantics(), as it does for Config and for HistoricalProbability, so a caller
+	// who omits the field is priced against the documented behaviour rather than against
+	// three falses that describe no provider.
 	Semantics Semantics
 }
 
@@ -152,6 +166,48 @@ func (b BudgetPolicy) maxK() int {
 	return DefaultBudgetMaxK
 }
 
+// semantics is the provider behaviour this arm prices against, with the package's own
+// zero-value convention: an unset Semantics means DefaultSemantics(), exactly as
+// Config.withDefaults and HistoricalProbability.withDefaults already read it. Reading three
+// falses literally would price a ping against a provider where nothing refreshes anything,
+// which is not a provider this repo models.
+func (b BudgetPolicy) semantics() Semantics {
+	if b.Semantics == (Semantics{}) {
+		return DefaultSemantics()
+	}
+	return b.Semantics
+}
+
+// pricable is whether this arm's cost model is the cost model the simulator will bill.
+//
+// Every window priced below is one KeepAliveCost: a cache READ over the prefix that carries
+// the entry another lifetime. simulatePings only extends the entry when
+// Semantics.PingRefreshesTTL, and a ping that lands on a lapsed entry is billed
+// Pricing.RecreateCost — a 1.25× write, twelve and a half times a read. Three configurations
+// make the read model false, and on none of them is a break-even derived from the read rate
+// an answer to the question asked:
+//
+//   - PingRefreshesTTL false. A ping extends nothing, so every ping after the first lands on
+//     a dead entry.
+//   - HitRefreshesTTL false. The entry this idle span starts from may already be nearer
+//     expiry than one lifetime, and Observation deliberately carries no hit flag (see the
+//     comment in Simulate), so this arm cannot tell whether it does.
+//   - An interval at or past the lifetime it protects. pricing.go names this "the pathology
+//     of a schedule whose interval exceeds the lifetime it is protecting"; the arm that
+//     claims to take its gate from the rates should be the first to notice it.
+//
+// Measured on kvcache's own replay fixture at Config.MaxPings=6, one predictor throughout,
+// against a plain 5-minute write with no pings: −0.9% under the documented semantics, +17.6%
+// with HitRefreshesTTL off, +86.0% with PingRefreshesTTL off, +146.1% at a 400 s interval.
+// All three are reachable — dash/kvcacheapi.go reads hit_refresh, ping_refresh and the ping
+// interval straight off the query string — so this declines instead. ok=false means
+// Config.MaxPings governs, which is the operator's number rather than a model's, and
+// Decide then writes 5m and fires no pings at all.
+func (b BudgetPolicy) pricable() bool {
+	sem := b.semantics()
+	return sem.HitRefreshesTTL && sem.PingRefreshesTTL && b.interval() < TTL5m.Lifetime()
+}
+
 // Decide holds the prefix at five minutes, and pings only when the budget it would choose is
 // at least one.
 //
@@ -171,10 +227,12 @@ func (b BudgetPolicy) Decide(o Observation) Action {
 //
 // It returns ok=false — "no opinion, use Config.MaxPings" — when there is no predictor, when
 // the model declines the observation, when the rates are unknown so no break-even exists, or
-// when the prefix is below MinPrefix. Every one of those is a case where a number invented
-// here would be worse than the configured default.
+// when the schedule is one this arm cannot price (see pricable). Every one of those is a case
+// where a number invented here would be worse than the configured default. MinPrefix is the
+// one gate that is NOT in that list: it reports (0, true), because declining to ping is a
+// decision.
 func (b BudgetPolicy) PingBudget(o Observation) (int, bool) {
-	if b.Predictor == nil || !o.Pricing.Known || o.CachedTokens <= 0 {
+	if b.Predictor == nil || !o.Pricing.Known || o.CachedTokens <= 0 || !b.pricable() {
 		return 0, false
 	}
 	if b.MinPrefix > 0 && o.CachedTokens < b.MinPrefix {
@@ -185,7 +243,7 @@ func (b BudgetPolicy) PingBudget(o Observation) (int, bool) {
 		return 0, false
 	}
 	rescue := float64(o.CachedTokens) * (o.Pricing.Write5m - o.Pricing.CacheRead)
-	ping := o.Pricing.KeepAliveCost(o.CachedTokens, b.Semantics)
+	ping := o.Pricing.KeepAliveCost(o.CachedTokens, b.semantics())
 	n := b.maxK()
 	// V[n] is 0: past the horizon there is nothing left to buy.
 	v := make([]float64, n+1)

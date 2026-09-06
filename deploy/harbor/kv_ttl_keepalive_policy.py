@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """How MANY keep-alive pings a conversation is worth, decided per conversation.
 
-This is the learned counterpart of `kvcache.BudgetPolicy`, and the two must agree: the Go
-side is what the dashboard reports from, this side is where the fit lives, and
-`kv_ttl_keepalive_drift_test.go` drives the `--fixture` entry point below to pin them
-together. When they disagree, Go is right.
+This is the learned counterpart of `kvcache.BudgetPolicy`, and the two must agree: the Go side
+is what a replay is scored by, this side is where the fit lives, and
+`kv_ttl_keepalive_drift_test.go` drives the `--fixture` entry point below to pin them together.
+When they disagree, Go is right. (`BudgetPolicy` is not in `kvcache.Registry()`, so it reaches a
+replay the way `Custom`'s predictor does: from an in-process caller, because "a predictor is
+code, not a query parameter". No dashboard page renders it.)
 
-    kv_ttl_keepalive_policy.py --db /var/lib/context-guru/cg.db --prices /etc/.../prices.yaml
     kv_ttl_keepalive_policy.py --fixture f.json      # the drift test's interface, stdlib only
-    kv_ttl_keepalive_policy.py --self-test           # synthetic traffic, no store needed
+    kv_ttl_keepalive_policy.py --self-test           # asserts this module's claims, stdlib only
+
+There is deliberately no `--db` yet, unlike kv_ttl_cost_model.py and kv_ttl_predictor_arms.py:
+`fit()` and `person_periods()` below are the fit AS IT WAS RUN, kept so the method is
+reviewable, but they are not wired to an entry point — so the figures quoted in this docstring
+cannot be reproduced from this file alone. Wiring `--db`/`--prices` the way the siblings do,
+and reusing kv_ttl_survival_predictor's person-period expansion instead of the copy below, is
+the next thing to do here.
 
 WHAT PROBLEM THIS SOLVES THAT THE SURVIVAL PREDICTOR DOES NOT
 -------------------------------------------------------------
@@ -40,11 +48,20 @@ Per cached token, at the documented Anthropic multiples of base input:
     cache write  1.25x      what the successor pays if the entry lapsed
     rescue       1.15x      = 1.25 - 0.10, what a successful ping avoids
 
-So a ping pays for itself when the chance it rescues exceeds 0.10/1.15 = 8.70%. The prefix
-size cancels: it multiplies cost and benefit alike. So does the model's per-token rate.
-That is why this module reads probabilities and not token counts, and why the threshold is
-computed from the price list rather than written down — a deployment on different rates has
-a different threshold, and one with no rates has none.
+So a ping pays for itself when the chance it rescues exceeds 0.10/1.15 = 8.70%. The model's
+per-token rate cancels, and so does the PER-TOKEN part of the prefix: it multiplies cost and
+benefit alike. That is why this module reads probabilities and not token counts, and why the
+threshold is computed from the price list rather than written down — a deployment on different
+rates has a different threshold, and one with no rates has none.
+
+What does NOT cancel is `Rates.ping_cost`'s fixed ping_input/ping_output term, so 8.70% is the
+gate only in the limit:
+
+    gate(prefix) = 0.0870 + (ping_input*input + ping_output*output)
+                            / (prefix * (write_5m - cache_read))
+
+8.70% at 125k tokens, 8.72% at 20k, 8.96% at 2k, 9.74% at 500 — a spread of the same order as
+the margins below, which is what `min_prefix` is for.
 
 That 8.70% is the MYOPIC bar and it is too high. With the option value counted the
 effective bar at the first sweep falls to ~7.4%, worth ~6% of the policy's net.
@@ -135,6 +152,11 @@ def windows(cdf, interval_s: float = DEFAULT_INTERVAL_S, life_s: float = DEFAULT
     long. Values are clamped to [0, 1] rather than trusted, because a non-monotone fitted
     CDF would otherwise produce a negative hazard and a budget with no meaning.
     """
+    # max_k <= 0 means the default, because kvcache.BudgetPolicy.maxK() reads it that way and
+    # a port that read it as "no windows at all" would disagree with Go on a value the drift
+    # fixture never sends. Same convention as interval/life below.
+    if max_k <= 0:
+        max_k = DEFAULT_MAX_K
     h, s = [0.0] * max_k, [0.0] * max_k
     for j in range(1, max_k + 1):
         t_j = j * interval_s
@@ -255,6 +277,10 @@ FEATURES = SPAN_CAT + SPAN_NUM + STATE_NUM + STATS_NUM
 class FitResult:
     """Two fitted models and the frame they were fitted on."""
 
+    # `cdf_for` below composes the SURVIVAL model only, so `hazard` is currently fitted and
+    # never read: the h_j the policy uses is derived from the survival curve by windows(), not
+    # from this. Kept because y_hazard is what person_periods() labels and a direct-hazard
+    # variant is the obvious next thing to measure — but it is not what runs.
     hazard: object          # P(returns in the window this ping protects | idle at t_k)
     survival: object        # P(still idle at t_(k+1)            | idle at t_k)
     n_rows: int
@@ -264,9 +290,19 @@ class FitResult:
     def cdf_for(self, span_row, *, interval_s: float, life_s: float, max_k: int):
         """A CDF closure for one span, so `budget_for` can be used unchanged.
 
-        Reconstructed from the two hazards rather than fitted directly, because the models
-        answer conditional questions and `windows()` wants a cumulative one. Composing them
-        forwards is exact: F(t_(j+1)) = 1 - prod_(i<=j) s_i.
+        Reconstructed from the SURVIVAL model rather than fitted directly, because it answers
+        a conditional question and `windows()` wants a cumulative one. Composing forwards is
+        exact: F(t_(j+1)) = 1 - prod_(i<=j) s_i.
+
+        Two caveats, because the drift guard covers NEITHER — it drives `--fixture`, which
+        feeds a step CDF and never reaches this function:
+
+        - F(t_1) is 0 by construction, i.e. this CDF is already conditioned on reaching the
+          first sweep, and `windows()` divides by 1 - F(t_1) = 1 accordingly.
+        - the grid is {t_j} u {t_j + life}, so F(deadline) for the FIRST sweep — `life`, which
+          falls between t_1 and t_2 — is a linear interpolation across a whole interval rather
+          than a fitted value. On the shipped 280 s / 300 s that reads F(300) at
+          (300-280)/(560-280) = 7.1% of the way into the first survival step.
         """
         import numpy as np
 

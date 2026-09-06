@@ -2,10 +2,13 @@ package harbor
 
 // The Go keep-alive budget and the Python one must be the same arithmetic.
 //
-// kvcache.BudgetPolicy is what the dashboard reports from; kv_ttl_keepalive_policy.py is
-// where the model is fitted and where the offline evaluation that justifies the arm runs. Two
-// implementations of one money question is exactly the drift this project has been bitten by,
-// so the Python is a port, this is the guard, and when they disagree Go is right.
+// kvcache.BudgetPolicy is what a replay is scored by; kv_ttl_keepalive_policy.py is where the
+// model is fitted. Two implementations of one money question is exactly the drift this project
+// has been bitten by, so the Python is a port, this is the guard, and when they disagree Go is
+// right. (Neither side is on a dashboard page: BudgetPolicy is not in Registry() and, like
+// Custom's Predictor, it is reached only by an in-process caller — "a predictor is code, not a
+// query parameter", as dash/kvcachesim.go puts it. That is a reason for the guard rather than
+// against it: an arm nothing renders is an arm nobody would notice drifting.)
 //
 // It compares the DECISION and both intermediate vectors. A budget that agrees for the wrong
 // reason — a hazard scaled wrong and a survival scaled inversely wrong — is a guard that has
@@ -20,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -27,28 +31,13 @@ import (
 	"github.com/rossoctl/context-guru/kvcache"
 )
 
-// keepAlivePythonBin is pythonBin's sibling for this module. Separate because the skip
-// message has to name the module that could not be imported, and because this one needs no
-// scientific stack at all where kv_ttl_cost_model may.
+// keepAlivePythonBin is pythonBin parameterised by module, which is the only thing the two
+// ever differed in — the skip message has to name the module that could not be imported, and
+// this one needs no scientific stack at all where kv_ttl_cost_model may. Two spellings of one
+// interpreter probe is how they come to disagree the day one of them gains a caveat.
 func keepAlivePythonBin(t *testing.T) string {
 	t.Helper()
-	for _, cand := range []string{os.Getenv("KVCACHE_PYTHON"), "python3", "python"} {
-		if cand == "" {
-			continue
-		}
-		p, err := exec.LookPath(cand)
-		if err != nil {
-			continue
-		}
-		if out, err := exec.Command(p, "-c",
-			"import sys; sys.path.insert(0,'.'); import kv_ttl_keepalive_policy",
-		).CombinedOutput(); err != nil {
-			t.Logf("%s cannot import kv_ttl_keepalive_policy, skipping it: %s", p, out)
-			continue
-		}
-		return p
-	}
-	return ""
+	return pythonBinFor(t, "kv_ttl_keepalive_policy")
 }
 
 // The fixture wire format. Field names are the Python's own.
@@ -83,9 +72,14 @@ type budgetPyResult struct {
 type cdfPredictor struct{ points [][2]float64 }
 
 func (c cdfPredictor) ReuseProbability(_ kvcache.Observation, horizon time.Duration) (float64, bool) {
+	// Sorted, because _run_fixture sorts its points and a step function read in a different
+	// order is a different distribution. The fixture below happens to be written in order; a
+	// guard that depends on that is a guard that breaks on the next row somebody adds.
+	pts := append([][2]float64(nil), c.points...)
+	sort.Slice(pts, func(i, j int) bool { return pts[i][0] < pts[j][0] })
 	sec := horizon.Seconds()
 	p := 0.0
-	for _, pt := range c.points {
+	for _, pt := range pts {
 		if sec >= pt[0] {
 			p = pt[1]
 		}
@@ -224,6 +218,14 @@ func TestKeepAliveBudgetAgreesWithThePort(t *testing.T) {
 		if c.MinPrefix > 0 {
 			continue // short-circuited before the windows are computed on both sides
 		}
+		// Length first: indexing a shorter vector would PANIC the guard rather than fail it,
+		// and a panic in a drift test reads as a broken test rather than as drift.
+		if len(got.Windows) <= i || len(got.Windows[i].H) != len(h) ||
+			len(got.Windows[i].S) != len(s) {
+			t.Errorf("case %d: Go returned %d windows, port returned %v — the two are not even "+
+				"describing the same schedule", i, len(h), got.Windows)
+			continue
+		}
 		for j := range h {
 			if math.Abs(h[j]-got.Windows[i].H[j]) > 1e-9 {
 				t.Errorf("case %d window %d hazard: Go %.10f, port %.10f",
@@ -233,6 +235,41 @@ func TestKeepAliveBudgetAgreesWithThePort(t *testing.T) {
 				t.Errorf("case %d window %d survival: Go %.10f, port %.10f",
 					i, j+1, s[j], got.Windows[i].S[j])
 			}
+		}
+	}
+}
+
+// MaxK <= 0 means the default on BOTH sides.
+//
+// The fixture above always sends 8, so nothing in it would notice the two disagreeing here —
+// and they did: Go's maxK() falls back to DefaultBudgetMaxK where the port read a
+// non-positive max_k as "no windows", answering 0 to every case. A default is exactly the
+// kind of thing a port drifts on, because it is the value nobody passes.
+func TestKeepAliveBudgetDefaultsMaxKTheSameWayOnBothSides(t *testing.T) {
+	py := keepAlivePythonBin(t)
+	if py == "" {
+		t.Skip("no usable Python")
+	}
+	explicit := budgetDriftFixture()
+	explicit.MaxK = kvcache.DefaultBudgetMaxK
+	implicit := budgetDriftFixture()
+	implicit.MaxK = 0
+
+	want := scoreBudgetWithPort(t, py, explicit)
+	got := scoreBudgetWithPort(t, py, implicit)
+	for i := range explicit.Cases {
+		if got.Budgets[i] != want.Budgets[i] {
+			t.Errorf("case %d: port answered %d with max_k=0 and %d with max_k=%d",
+				i, got.Budgets[i], want.Budgets[i], kvcache.DefaultBudgetMaxK)
+		}
+		// And Go, whose MaxK=0 is the same fallback.
+		k, ok, _, _ := goBudget(explicit.Cases[i], implicit)
+		if !ok && explicit.Cases[i].MinPrefix == 0 {
+			t.Errorf("case %d: Go had no opinion with MaxK=0", i)
+			continue
+		}
+		if k != got.Budgets[i] {
+			t.Errorf("case %d with MaxK=0: Go %d, port %d", i, k, got.Budgets[i])
 		}
 	}
 }

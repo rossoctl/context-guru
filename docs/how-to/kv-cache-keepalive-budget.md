@@ -6,15 +6,17 @@ it**, decided per conversation instead of once for the whole fleet.
 
 The short version, and the last bullet is the one to read first:
 
-- **The break-even is 8.70%**, it comes out of the rates rather than a config file, and it is
-  the same number for every prefix size and every model.
+- **The break-even is 8.70%**, and it comes out of the rates rather than a config file. It is
+  the same number for every model, and for every prefix large enough that a ping's fixed
+  overhead rounds away — 8.70% at 125k tokens, 9.74% at 500.
 - **The decision is not "ping or not", it is "how many"**, and the pings are not independent:
   each one keeps the entry alive so the next is a `0.1x` read instead of a `1.25x`
   re-creation. That makes it a backward induction, not a threshold.
 - **`kvcache.BudgetPolicy` is the arm**; `PingBudgeter` is the one-method seam that lets a
   per-conversation budget reach the ping loop. Neither changes any existing arm.
 - **On money, a constant beats it.** A flat `MaxPings=5` takes 6.91% off the bill where this
-  policy takes 6.07%. It wins only on **net per ping**, and there by 9×.
+  policy takes 6.07%. It wins only on **net per ping**, and against that same `MaxPings=5` by
+  **7.6×** — the 9× below is against `MaxPings=6`, which is what the table is indexed to.
   If your pings are effectively free, raise `MaxPings` and do not deploy a model. That is the
   honest recommendation and the rest of this page is why.
 
@@ -30,11 +32,30 @@ Per cached token, as multiples of base input:
 
 A ping pays for itself when the chance it rescues exceeds `0.10 / 1.15 = 8.70%`.
 
-The prefix size **cancels** — it multiplies cost and benefit alike — and so does the model's
-per-token rate. That is why `BudgetPolicy` reads a probability and never a token count, and
-why the threshold is computed from `Observation.Pricing` rather than written down: a
-deployment on different rates has a different threshold, and one with no rates has none
+The model's per-token rate **cancels**, and so does the *per-token part* of the prefix — it
+multiplies cost and benefit alike. That is why `BudgetPolicy` reads a probability and never a
+token count, and why the threshold is computed from `Observation.Pricing` rather than written
+down: a deployment on different rates has a different threshold, and one with no rates has none
 (`PingBudget` returns `ok=false` and the configured `MaxPings` governs).
+
+What does **not** cancel is the ping's fixed overhead. `Pricing.KeepAliveCost` carries
+`ping_input` and `ping_output` terms that do not scale with the prefix, so
+
+```
+gate(prefix) = 0.0870 + (ping_input x input + ping_output x output)
+                        / (prefix x (write_5m - cache_read))
+```
+
+| prefix | gate |
+|---:|---:|
+| 500 | 9.74% |
+| 2,000 | 8.96% |
+| 20,000 | 8.72% |
+| 125,000 | 8.70% |
+
+8.70% is the limit, not the number at every size, and the spread is the same order as the
+margins this arm is chosen by. `MinPrefix` is the gate for exactly that reason, and
+`TestBudgetGateRisesOnASmallPrefixByTheFixedOverhead` pins the four figures above.
 
 Two consequences worth stating because they are easy to get backwards:
 
@@ -233,6 +254,26 @@ result := kvcache.Simulate(reqs, pol, cfg)
 `Interval` must match `Config.PingIdle`. If it does not, the windows this policy prices are
 not the windows the simulator buys, and every number it produces is about a schedule nobody
 ran.
+
+### The schedules it will not price
+
+Every window above is priced as one `KeepAliveCost` — a `0.1x` read that carries the entry
+another lifetime. Three configurations make that false, and the simulator bills all three as
+`Pricing.RecreateCost`, a `1.25x` write:
+
+| configuration | why the read model breaks | reachable via |
+|---|---|---|
+| `Semantics.PingRefreshesTTL` off | a ping extends nothing, so every ping after the first lands on a dead entry | `?ping_refresh=0` |
+| `Semantics.HitRefreshesTTL` off | the entry may already be nearer expiry than one lifetime, and `Observation` carries no hit flag by design, so the arm cannot tell | `?hit_refresh=0` |
+| `Interval >= 300 s` | every ping arrives after the entry it was meant to hold | `?x=300` and up |
+
+Measured on `kvcache`'s replay fixture at `MaxPings=6`, one predictor throughout, against a
+plain 5-minute write with no pings: **−0.9%** under the documented semantics, **+17.6%** with
+`HitRefreshesTTL` off, **+86.0%** with `PingRefreshesTTL` off, **+146.1%** at a 400 s interval.
+
+So `PingBudget` returns `ok=false` on all three rather than quote a break-even taken from a
+rate it is not paying, and `Decide` then writes 5m and fires no pings —
+`TestBudgetDeclinesASchedulePricedOnTheWrongRate`.
 
 `Config.MaxPings` remains a **ceiling**. A budget above it is clamped, so a model can never
 raise an operator's cap — asserted by `TestPingBudgeterBoundsTheSimulatedPings`.

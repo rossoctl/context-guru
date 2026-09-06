@@ -209,6 +209,88 @@ func TestBudgetDeclinesRatherThanInventingANumber(t *testing.T) {
 	}
 }
 
+// A schedule where a ping is NOT a cheap read has to be declined, not priced as one.
+//
+// The whole arm rests on one ping costing Pricing.KeepAliveCost. simulatePings only extends
+// the entry when Semantics.PingRefreshesTTL, and a ping landing on a lapsed entry is billed
+// Pricing.RecreateCost — 12.5x a read. So on semantics or an interval that break the read
+// model, quoting an 8.70% break-even is quoting the wrong rate, and the honest answer is
+// ok=false: Config.MaxPings is the operator's number and Decide fires no pings at all.
+func TestBudgetDeclinesASchedulePricedOnTheWrongRate(t *testing.T) {
+	fine := cdfPredictor{points: [][2]float64{{300, 0}, {580, 0.9}, {86400, 1}}}
+	o := pricedObservation(t, 124_845)
+
+	for _, tc := range []struct {
+		name string
+		pol  BudgetPolicy
+	}{
+		{"a ping does not refresh the entry",
+			BudgetPolicy{Predictor: fine, Semantics: Semantics{HitRefreshesTTL: true}}},
+		{"a hit does not refresh the entry, so this span's deadline is unknowable",
+			BudgetPolicy{Predictor: fine, Semantics: Semantics{PingRefreshesTTL: true}}},
+		{"the interval lands exactly on the lifetime",
+			BudgetPolicy{Predictor: fine, Interval: TTL5m.Lifetime()}},
+		{"the interval is past the lifetime it protects",
+			BudgetPolicy{Predictor: fine, Interval: 400 * time.Second}},
+	} {
+		if k, ok := tc.pol.PingBudget(o); ok {
+			t.Errorf("%s: (%d, true), want ok=false — every ping on this schedule is a 1.25x "+
+				"write, so a break-even taken from the read rate is the wrong number", tc.name, k)
+		}
+		if a := tc.pol.Decide(o); a != ActionWrite5m {
+			t.Errorf("%s: Decide = %v, want %v — an arm that cannot price the schedule must not "+
+				"buy pings on it", tc.name, a, ActionWrite5m)
+		}
+	}
+
+	// And the documented semantics, however they are spelled, must still be priced. The zero
+	// value means DefaultSemantics() here for the same reason it does on Config.
+	for _, sem := range []Semantics{{}, DefaultSemantics()} {
+		pol := BudgetPolicy{Predictor: fine, Semantics: sem}
+		if k, ok := pol.PingBudget(o); !ok || k < 1 {
+			t.Errorf("Semantics %+v: (%d, %v), want a budget — this is the shipped provider "+
+				"behaviour and the zero value has to mean it", sem, k, ok)
+		}
+	}
+}
+
+// The gate is prefix-independent in its PER-TOKEN part only. A ping's ping_input/ping_output
+// overhead does not scale with the prefix, so the true bar rises as the prefix shrinks, and
+// the doc comment now says so by how much. This pins those numbers, because "8.70% for every
+// prefix" was stated four times and is out by a full point at 500 tokens — the same order as
+// the margins the arm is chosen by.
+func TestBudgetGateRisesOnASmallPrefixByTheFixedOverhead(t *testing.T) {
+	const asymptote = DefaultCacheReadMultiple /
+		(DefaultWrite5mMultiple - DefaultCacheReadMultiple)
+	for _, tc := range []struct {
+		prefix int64
+		want   float64
+	}{
+		{500, 0.097391}, {2_000, 0.089565}, {20_000, 0.087217}, {124_845, 0.086998},
+	} {
+		o := pricedObservation(t, tc.prefix)
+		// The smallest single-window hazard that buys one ping, by bisection on the real gate.
+		lo, hi := 0.0, 1.0
+		for i := 0; i < 60; i++ {
+			mid := (lo + hi) / 2
+			pol := BudgetPolicy{MaxK: 1, Predictor: cdfPredictor{
+				points: [][2]float64{{300, 0}, {580, mid}, {3600, 1}}}}
+			if k, _ := pol.PingBudget(o); k >= 1 {
+				hi = mid
+			} else {
+				lo = mid
+			}
+		}
+		if math.Abs(hi-tc.want) > 1e-5 {
+			t.Errorf("prefix %d: measured gate %.6f, want %.6f", tc.prefix, hi, tc.want)
+		}
+		if hi < asymptote {
+			t.Errorf("prefix %d: gate %.6f is BELOW the per-token break-even %.6f, which the "+
+				"fixed overhead makes impossible", tc.prefix, hi, asymptote)
+		}
+	}
+}
+
 // The hazard the induction reads must be CONDITIONAL on the conversation having stayed idle
 // this long, because that is the only population that ever faces the decision.
 //
@@ -236,6 +318,66 @@ func TestBudgetHazardIsConditionalOnStillBeingIdle(t *testing.T) {
 			"unconditional mass, so if these are close the divide by the survivor share is "+
 			"missing and the model is answering a question nobody asks", hGone[1], hStay[1])
 	}
+}
+
+// Three paths the nine tests above never reach, each of which a mutation would survive.
+//
+// They are cheap and they are not decorative: the first is the arm's own label, the second is
+// what stops a schedule being priced past the point the conversation is certainly back, and
+// the third is a predictor that answers one horizon and declines another — which a real fitted
+// model does at the edge of its support.
+func TestBudgetCoversItsRemainingBranches(t *testing.T) {
+	fine := cdfPredictor{points: [][2]float64{{300, 0}, {580, 0.9}, {86400, 1}}}
+	o := pricedObservation(t, 124_845)
+
+	if got := (BudgetPolicy{Label: "budget-v2"}).Name(); got != "budget-v2" {
+		t.Errorf("Name() = %q, want the Label — the dashboard groups by it", got)
+	}
+
+	// CERTAINLY back before the second sweep. Windows must stop, leaving the rest at zero
+	// rather than dividing by a survivor share of nothing.
+	certain := cdfPredictor{points: [][2]float64{{300, 0}, {580, 0.5}, {560, 1.0}}}
+	h, s, ok := BudgetPolicy{Predictor: certain, MaxK: 4}.Windows(o)
+	if !ok {
+		t.Fatal("certain return: no windows")
+	}
+	for j := 1; j < len(h); j++ {
+		if h[j] != 0 || s[j] != 0 {
+			t.Errorf("window %d after a certain return: h=%v s=%v, want zeros — no later ping "+
+				"can be needed once the conversation is back", j+1, h[j], s[j])
+		}
+	}
+
+	// A predictor that answers the survivor question and declines the window question. The
+	// whole vector has to be abandoned, not silently completed from the answers it did give.
+	partial := horizonPredictor{f: func(horizon time.Duration) (float64, bool) {
+		if horizon == DefaultPingIdle {
+			return 0.1, true
+		}
+		return 0, false
+	}}
+	if _, _, ok := (BudgetPolicy{Predictor: partial, MaxK: 4}).Windows(o); ok {
+		t.Error("a predictor that declined a horizon produced windows: a partly-answered vector " +
+			"is not a smaller vector, it is an unusable one")
+	}
+	if _, ok := (BudgetPolicy{Predictor: partial, MaxK: 4}).PingBudget(o); ok {
+		t.Error("PingBudget claimed an opinion on a partly-answered predictor")
+	}
+	// And the same policy with a predictor that answers everything still works, so the test
+	// above is about the decline and not about the fixture.
+	if _, ok := (BudgetPolicy{Predictor: fine, MaxK: 4}).PingBudget(o); !ok {
+		t.Error("the control case declined too; the assertion above proves nothing")
+	}
+}
+
+// horizonPredictor answers per HORIZON rather than per observation, which is how a model at the
+// edge of its support behaves: fitted out to one sweep, nothing to say past it.
+type horizonPredictor struct {
+	f func(time.Duration) (float64, bool)
+}
+
+func (p horizonPredictor) ReuseProbability(_ Observation, h time.Duration) (float64, bool) {
+	return p.f(h)
 }
 
 // ── the simulator seam ──────────────────────────────────────────────────────
@@ -288,11 +430,25 @@ func TestPingBudgeterBoundsTheSimulatedPings(t *testing.T) {
 	}
 }
 
-// Adding the seam must not have moved any arm that does not use it. Every registered arm is
-// replayed and compared against the same arm before PingBudgeter existed — which is what the
-// unbudgeted path still is, so the assertion is that a budget-less strategy is untouched.
+// No registered arm may opt into the seam, and a budgeted replay must not be able to reach one
+// that has not.
+//
+// The first half is the invariant: none of the registry's arms implements PingBudgeter, so all
+// of them are still budgeted by Config.MaxPings. The second is what the new mutable state on
+// convState makes worth asserting — pendingBudget and budgeted are per-conversation fields
+// carried across requests, and the failure they invite is one replay's budget surviving into
+// another's. So each arm is replayed, a budgeted stub is replayed in between, and the arm is
+// replayed again: the two runs of the same arm must be identical to the last cent.
+//
+// What this deliberately does NOT claim is a comparison against the code before PingBudgeter
+// existed. That comparison cannot be written in-package — bypassing Simulate's type assertion
+// also bypasses every OTHER optional interface a strategy may implement, so it stops being the
+// same replay. The no-op property of a declining budgeter is asserted directly, on a stub, by
+// TestPingBudgeterBoundsTheSimulatedPings.
 func TestUnbudgetedArmsAreUnaffectedByTheSeam(t *testing.T) {
 	reqs, cfg := dataset(t)
+	cfg.MaxPings = 6
+	covered := 0
 	for _, spec := range Registry() {
 		s, err := NewStrategy(spec.Name, reqs, cfg)
 		if err != nil {
@@ -306,9 +462,25 @@ func TestUnbudgetedArmsAreUnaffectedByTheSeam(t *testing.T) {
 				"Config.MaxPings path, and one that opted in silently would change behaviour",
 				name)
 		}
-		if r := Simulate(reqs, s, cfg); r == nil {
+		before := Simulate(reqs, s, cfg)
+		Simulate(reqs, budgetedStub{label: "interloper", budget: 1, ok: true}, cfg)
+		after := Simulate(reqs, s, cfg)
+		if before == nil || after == nil {
 			t.Errorf("%s: nil result", name)
+			continue
 		}
+		covered++
+		if math.Abs(before.TotalUSD-after.TotalUSD) > 1e-12 || before.Pings != after.Pings {
+			t.Errorf("%s: %.12f over %d pings, then %.12f over %d after a budgeted replay ran "+
+				"in between — a budget leaked out of one replay into another", name,
+				before.TotalUSD, before.Pings, after.TotalUSD, after.Pings)
+		}
+	}
+	// A registry that stopped resolving would make the loop above vacuous, so say how much of
+	// it was actually replayed. One arm (replay) legitimately has no name-based constructor.
+	if covered < len(Registry())-1 {
+		t.Errorf("only %d of %d registry arms were replayed; the assertion is nearly vacuous",
+			covered, len(Registry()))
 	}
 }
 
@@ -372,6 +544,70 @@ func TestBudgetPolicyRunsThroughSimulateAndVariesPerConversation(t *testing.T) {
 		t.Errorf("budget took %d distinct values over the fixture: %v — a policy that picks one "+
 			"number for every conversation is Config.MaxPings with extra steps", len(seen), seen)
 	}
+}
+
+// And the varying budget has to reach the PING LOOP, not just PingBudget.
+//
+// The test above calls PingBudget directly, which proves the arithmetic is per-observation and
+// nothing about the seam. Simulate could memoize the first Observation it ever saw, or hold one
+// budget for the whole replay, and every assertion above would still pass — verified: freezing
+// the Observation Simulate hands to PingBudget leaves the whole kvcache package green.
+//
+// So: a budgeter that says 0 for half the conversations and the cap for the other half must
+// land STRICTLY BETWEEN the two constant runs. One number for the whole replay lands on an end.
+func TestAPerConversationBudgetReachesThePingLoop(t *testing.T) {
+	reqs, cfg := dataset(t)
+	cfg.MaxPings = 6
+
+	half := splitBudgeter{cap: cfg.MaxPings}
+	none := Simulate(reqs, budgetedStub{label: "all-zero", budget: 0, ok: true}, cfg)
+	all := Simulate(reqs, budgetedStub{label: "all-cap", budget: cfg.MaxPings, ok: true}, cfg)
+	got := Simulate(reqs, half, cfg)
+
+	if none.Pings >= all.Pings {
+		t.Fatalf("the two constant runs fired %d and %d pings; this fixture cannot show a split",
+			none.Pings, all.Pings)
+	}
+	if got.Pings <= none.Pings || got.Pings >= all.Pings {
+		t.Errorf("split budget fired %d pings, want strictly between %d (always 0) and %d "+
+			"(always %d) — a budget that lands on either end is one number for the whole replay, "+
+			"which is what the seam exists to avoid", got.Pings, none.Pings, all.Pings, cfg.MaxPings)
+	}
+	if half.asked() < 2 {
+		t.Errorf("Simulate asked for a budget %d times: it is not asking per conversation",
+			half.asked())
+	}
+}
+
+// splitBudgeter budgets on the CONVERSATION, so a seam that forwards one frozen Observation
+// cannot reproduce its ping count.
+type splitBudgeter struct {
+	cap int
+	n   *int
+}
+
+func (s splitBudgeter) Name() string              { return "split-budget" }
+func (s splitBudgeter) Decide(Observation) Action { return ActionPing5m }
+func (s splitBudgeter) PingBudget(o Observation) (int, bool) {
+	if s.n != nil {
+		*s.n++
+	}
+	// Deterministic on the conversation id, so the split is a property of the observation and
+	// not of the order Simulate happens to walk in.
+	sum := 0
+	for _, c := range o.Conversation {
+		sum += int(c)
+	}
+	if sum%2 == 0 {
+		return 0, true
+	}
+	return s.cap, true
+}
+func (s splitBudgeter) asked() int {
+	if s.n == nil {
+		return 2 // not counting; the ping-count assertion is the one with teeth
+	}
+	return *s.n
 }
 
 // The ceiling must still be a ceiling with the seam in place. NewOptimal reads the same ping
