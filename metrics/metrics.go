@@ -769,14 +769,33 @@ type Snapshot struct {
 	// distinct broken markers — a missing payload cannot be restored, so every later turn
 	// re-reports it for every affected message.
 	//
-	// StashExpired counts payloads the TTL reclaimed, which is the one remaining way an
-	// outstanding marker stops resolving; the fix for that is a larger ttl_seconds. Live
-	// against Capacity, and Bytes against MaxBytes, say how close each budget is to binding
-	// before any of them fires.
+	// StashExpired counts payloads the TTL reclaimed. Payloads have their OWN, shorter TTL
+	// (stash_ttl_seconds) because a payload — unlike a frozen decision — is re-derivable from
+	// the transcript: every turn's replay re-writes it, so a reclaimed one is re-created on the
+	// request path before any expand could ask for it (see store.DefaultStashTTL, #190).
+	//
+	// StashRevived is that absorption, counted: a payload written again under a key the TTL had
+	// taken. It is why StashExpired is not itself an alert — Expired without Revived is a
+	// session that never came back, which is the reclamation working. What breaks the promise is
+	// StashMissing, and the remedy for a rising StashMissing is stash_ttl_seconds (the payload
+	// was reclaimed too eagerly) or a larger reserve (the re-stash was refused) — read Live
+	// against Capacity and Bytes against MaxBytes to tell which.
+	//
+	// BOTH AT ZERO IS NOT EVIDENCE THAT THE HORIZON WORKS. It means the reserve never bound.
+	// sweepExpired runs only from StashRoom, PutStash's pre-refusal path and evictOldest — i.e.
+	// only once the reserve, the shared exempt budget or the entry cap is already binding — and
+	// PutStash's refresh branch does not check expiry, so on an unsaturated run an
+	// expired-but-unswept payload is resurrected in place and NEITHER counter moves. That is the
+	// intended behaviour (a slot is released when a slot is wanted), but it means a run must
+	// actually saturate the reserve before this pair says anything, which is the same precondition
+	// iteration 024 failed to meet for stash_refused — and failing it is how #190 became
+	// undecidable from data. What distinguishes "never bound" from "working" is StashRefused and
+	// StashLive against StashCapacity.
 	// Filled by the host at serve time (offload + store live below metrics).
 	StashRefused  int64 `json:"stash_refused"`
 	StashMissing  int64 `json:"stash_missing"`
 	StashExpired  int64 `json:"stash_expired"`
+	StashRevived  int64 `json:"stash_revived"`
 	StashLive     int   `json:"stash_live"`
 	StashCapacity int   `json:"stash_capacity"`
 	StashBytes    int64 `json:"stash_bytes"`
