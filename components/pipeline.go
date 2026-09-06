@@ -102,6 +102,12 @@ func (p *Pipeline) runOne(comp Component, req *schemas.BifrostChatRequest, c *Ct
 			// Fail open: revert and record. A component panic never breaks the request.
 			revert()
 			rep.Reverted = true
+			// A component's own deferred Skipped-guard (see extract_sweep.go) can already have run
+			// during this same panic unwind, since Go runs defers on the way out. Clear it here so
+			// Reverted and Skipped never both end up true on one Report -- a half-state that did not
+			// exist before per-component defers started setting Skipped, and that a raw `skipped`
+			// column reader would otherwise have to know to exclude Reverted to read correctly.
+			rep.Skipped = false
 			rep.TokensBefore = baseline
 			rep.TokensAfter = baseline
 			rep.Err = fmt.Errorf("panic: %v", r)

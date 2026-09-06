@@ -992,12 +992,13 @@ func TestSweepPrefixWriteTripsTheCounterEvenOnAPartialHit(t *testing.T) {
 }
 
 // block_fallback now declines on a partial hit that WROTE, not only on a zero read, so the two cases
-// must stay distinguishable. The counters are what a reader actually gets: on this path the call row
-// is DROPPED (foldFallback returns early because the fallback deliberately never ran, so
-// rec.Component stays "" and Offload's `call.rec.Component != ""` guard discards it), which means the
-// Rejection string built alongside is unreachable today. That is a pre-existing hole of the same class
-// the comment at foldFallback documents for the no-asker path -- recorded here rather than fixed,
-// because adding a row where none existed is a behaviour change this evidence does not cover.
+// must stay distinguishable. This asserts the counters, which is one of two things a reader sees: see
+// TestBlockFallbackDecliningAWritePublishesTheCorrectRejection for the other, the Rejection string
+// itself. (549714c claimed the call row is dropped here because rec.Component stays "" -- that is only
+// true of THIS test's own `rep := &components.Report{}`. In production, pipeline.go sets
+// rep.Component = comp.Name() before Offload ever runs, and the assignment at extract_sweep.go's
+// `r.rec = components.ModelCall{Component: rep.Component, ...}` happens before this decline branch, so
+// the row survives and the Rejection string is published. See the other test for the fix.)
 func TestBlockFallbackDistinguishesAZeroReadFromAWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -1033,5 +1034,35 @@ func TestBlockFallbackDistinguishesAZeroReadFromAWrite(t *testing.T) {
 				t.Error("a declined ask modified a message")
 			}
 		})
+	}
+}
+
+// The Rejection string 549714c added is published, not dropped: rep.Component is never "" in
+// production, because pipeline.go's runOne sets it (`Report{Component: comp.Name(), ...}`) before
+// calling Offload, and `r.rec = components.ModelCall{Component: rep.Component, ...}` fills rec.Component
+// from it well before this decline branch runs. So the row clears the `call.rec.Component != ""` guard
+// and lands in rep.Calls with the branched reason -- the field an operator actually reads on
+// extraction_calls.rejection, which this PR itself calls out as already mis-analysed twice.
+func TestBlockFallbackDecliningAWritePublishesTheCorrectRejection(t *testing.T) {
+	asker := &labelAsker{verdict: "drop", needed: "none"}
+	asker.cacheRead, asker.cacheWrite = 39805, 260604
+	e := newSweepSmall(t, "block_fallback: true\n")
+	// rep.Component set exactly as pipeline.go's runOne sets it, ahead of calling Offload.
+	rep := &components.Report{Component: "extract_llm_sweep"}
+	if _, err := e.Offload(sweepReq(), rep,
+		preExpiryCtx("s", asker, store.NewMemory(store.Options{}))); err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Calls) != 1 {
+		t.Fatalf("expected the declined call to be published, got %d rows", len(rep.Calls))
+	}
+	call := rep.Calls[0]
+	if call.Component == "" {
+		t.Fatal("published row has no Component, so it never clears the caller's guard")
+	}
+	const want = "the prefix ask re-created the agent's prefix instead of reading it and " +
+		"block_fallback is set; declining rather than paying again for a full-price transcript read"
+	if call.Rejection != want {
+		t.Errorf("Rejection = %q, want %q", call.Rejection, want)
 	}
 }
