@@ -102,13 +102,13 @@ var notExportedWhy = map[string]string{
 	// these AFTER renderMetrics takes its snapshot, so a promLine off `s` would export a permanent
 	// 0 while passing this test — which is precisely the silent-zero failure #200 is about, and it
 	// would be embarrassing to reproduce it in the counter meant to report it.
-	"UsageUnparsed":             "cg_usage_unparsed_total, from proxy.UsageGaps()",
-	"UsageUnreadable":           "cg_usage_unreadable_total, from proxy.UsageGaps()",
-	"StashLive":                 `cg_stash_reserve_entries{state="live"}, from store.Memory.StashStats()`,
-	"StashCapacity":             `cg_stash_reserve_entries{state="capacity"}, from store.Memory.StashStats()`,
-	"StashBytes":                `cg_stash_reserve_bytes{state="live"}, from store.Memory.StashStats()`,
-	"StashMaxBytes":             `cg_stash_reserve_bytes{state="capacity"}, from store.Memory.StashStats()`,
-	"Extract":                   "the cg_extract_* family, from metrics.ExtractSnapshot()",
+	"UsageUnparsed":   "cg_usage_unparsed_total, from proxy.UsageGaps()",
+	"UsageUnreadable": "cg_usage_unreadable_total, from proxy.UsageGaps()",
+	"StashLive":       `cg_stash_reserve_entries{state="live"}, from store.Memory.StashStats()`,
+	"StashCapacity":   `cg_stash_reserve_entries{state="capacity"}, from store.Memory.StashStats()`,
+	"StashBytes":      `cg_stash_reserve_bytes{state="live"}, from store.Memory.StashStats()`,
+	"StashMaxBytes":   `cg_stash_reserve_bytes{state="capacity"}, from store.Memory.StashStats()`,
+	"Extract":         "the cg_extract_* family, from metrics.ExtractSnapshot()",
 
 	// Not numbers. Prometheus has no string sample, and a list of names would have to
 	// become a label — which is what the cg_component_* family already is.
