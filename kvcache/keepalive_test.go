@@ -1,7 +1,9 @@
 package kvcache
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -612,7 +614,13 @@ func (s splitBudgeter) asked() int {
 
 // The ceiling must still be a ceiling with the seam in place. NewOptimal reads the same ping
 // core, so if the signature change had quietly altered its arithmetic this is what catches it.
-func TestOptimalStillBoundsABudgetedArm(t *testing.T) {
+// This cannot fail through BudgetPolicy's own arithmetic: Simulate's MaxPings cap bounds BOTH
+// sides identically (the PingBudgeter clamp described on Config.MaxPings), so no strategy
+// sharing that cap can ever cost less than `optimal` — buggy or correct. What this proves is
+// that the SEAM doesn't break `optimal`'s own bookkeeping when the competing strategy happens
+// to implement PingBudgeter, not that BudgetPolicy's economics are sound; the mutation-tested
+// TestBudget* cases above are what actually pin the arithmetic.
+func TestOptimalStillRunsCorrectlyAlongsideAPingBudgeter(t *testing.T) {
 	reqs, cfg := dataset(t)
 	cfg.MaxPings = 6
 	opt, err := NewStrategy(StrategyOptimal, reqs, cfg)
@@ -624,7 +632,53 @@ func TestOptimalStillBoundsABudgetedArm(t *testing.T) {
 	arm := Simulate(reqs, BudgetPolicy{Predictor: p, Interval: cfg.PingIdle, MaxK: 6,
 		Semantics: cfg.Semantics}, cfg)
 	if ceiling.TotalUSD > arm.TotalUSD+1e-9 {
-		t.Errorf("optimal cost %.6f exceeds BudgetPolicy's %.6f: the ceiling is not a ceiling",
-			ceiling.TotalUSD, arm.TotalUSD)
+		t.Errorf("optimal cost %.6f exceeds BudgetPolicy's %.6f: Simulate's own ceiling "+
+			"bookkeeping broke", ceiling.TotalUSD, arm.TotalUSD)
+	}
+}
+
+// panickingPredictor always panics, standing in for a third-party model implementation that
+// blows up — a nil pointer in a client library, a malformed response it didn't guard against.
+type panickingPredictor struct{}
+
+func (panickingPredictor) ReuseProbability(Observation, time.Duration) (float64, bool) {
+	panic("predictor exploded")
+}
+
+// Predictor is injectable. CLAUDE.md's fail-open rule says a component error reverts that
+// component only, so a panicking Predictor must degrade PingBudget to ok=false — the path the
+// arm already handles correctly — rather than propagate through Decide into Simulate (or the
+// live ping decision), which would take down more than this one component.
+// BudgetPolicy.Interval is documented to have to match Config.PingIdle, but until now nothing
+// checked it — a caller that let the two drift got economics silently priced for a schedule
+// Simulate was not actually running.
+func TestSimulateRejectsABudgetPolicyIntervalThatDisagreesWithConfig(t *testing.T) {
+	reqs, cfg := dataset(t)
+	cfg.PingIdle = 280 * time.Second
+	p := cdfPredictor{points: [][2]float64{{300, 0.1}, {580, 0.6}, {86400, 1}}}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Simulate did not panic on a BudgetPolicy.Interval that disagrees with " +
+				"Config.PingIdle")
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "BudgetPolicy.Interval") || !strings.Contains(msg, "PingIdle") {
+			t.Errorf("panic message %q does not name the mismatch it is about", msg)
+		}
+	}()
+	Simulate(reqs, BudgetPolicy{Predictor: p, Interval: 300 * time.Second, MaxK: 4}, cfg)
+}
+
+func TestPingBudgetDegradesRatherThanPropagatingAPredictorPanic(t *testing.T) {
+	o := pricedObservation(t, 124_845)
+	pol := BudgetPolicy{Predictor: panickingPredictor{}, MaxK: 4}
+	if k, ok := pol.PingBudget(o); ok {
+		t.Fatalf("PingBudget = (%d, true) from a panicking Predictor, want ok=false", k)
+	}
+	if a := pol.Decide(o); a != ActionWrite5m {
+		t.Errorf("Decide = %v with a panicking Predictor, want %v — ok=false falls back to "+
+			"Config.MaxPings rather than propagating the panic", a, ActionWrite5m)
 	}
 }

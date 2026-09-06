@@ -231,7 +231,16 @@ func (b BudgetPolicy) Decide(o Observation) Action {
 // where a number invented here would be worse than the configured default. MinPrefix is the
 // one gate that is NOT in that list: it reports (0, true), because declining to ping is a
 // decision.
-func (b BudgetPolicy) PingBudget(o Observation) (int, bool) {
+func (b BudgetPolicy) PingBudget(o Observation) (budget int, ok bool) {
+	// Predictor is injectable — CLAUDE.md's fail-open rule means a third-party implementation
+	// panicking must revert to Config.MaxPings (ok=false), not take down the caller. This is
+	// the one seam both real callers (Decide and the simulator) go through, so it is the one
+	// place that needs the guard.
+	defer func() {
+		if r := recover(); r != nil {
+			budget, ok = 0, false
+		}
+	}()
 	if b.Predictor == nil || !o.Pricing.Known || o.CachedTokens <= 0 || !b.pricable() {
 		return 0, false
 	}
@@ -254,7 +263,7 @@ func (b BudgetPolicy) PingBudget(o Observation) (int, bool) {
 		}
 	}
 	// The FIRST j that is not worth buying ends the schedule. See the type comment.
-	budget := 0
+	budget = 0
 	for j := 0; j < n; j++ {
 		if v[j] <= 0 {
 			break

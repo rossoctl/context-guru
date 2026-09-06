@@ -1,6 +1,7 @@
 package kvcache
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -383,6 +384,15 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 		if n := pc.PingCap(); n > 0 && n < cfg.MaxPings {
 			cfg.MaxPings = n
 		}
+	}
+	// BudgetPolicy.Interval is documented to have to match Config.PingIdle — the windows it
+	// prices must be the windows this replay actually pings at — but nothing checked that
+	// until now. A caller that builds the two separately and lets them drift gets economics
+	// silently priced for a schedule Simulate isn't running, which is worse than an error.
+	if bp, ok := s.(BudgetPolicy); ok && bp.interval() != cfg.PingIdle {
+		panic(fmt.Sprintf("kvcache: BudgetPolicy.Interval (%s) does not match Config.PingIdle "+
+			"(%s) — the windows this arm prices are not the windows Simulate pings at",
+			bp.interval(), cfg.PingIdle))
 	}
 	sem := cfg.Semantics
 	out := &Result{Strategy: s.Name(), Decisions: map[Action]int64{},
