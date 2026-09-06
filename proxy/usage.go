@@ -92,7 +92,25 @@ func (m usageMiss) String() string {
 // these, or the number an operator watches to confirm accounting is healthy is incremented by it
 // being broken.
 func (m usageMiss) alertable() bool {
-	return m == usageMissUnparsed || m == usageMissUnreadable
+	_, ok := usageCounters[m]
+	return ok
+}
+
+// usageCounters is the SINGLE SOURCE OF TRUTH for which reasons are alertable and which counter each
+// one moves. alertable() derives from it and responseUsageWhy increments through it, so the two
+// cannot drift.
+//
+// They were two independent lists — a predicate and a switch — and that is the same "two labels, one
+// condition" shape this whole change is about. Widening only the predicate, which is exactly the edit
+// someone adding a 6th usageMiss value would make, passed the entire suite: the shape record started
+// firing on the new case while no counter moved and nothing caught it. Found in review.
+//
+// A value ABSENT from this map is benign by definition: no counter, no shape record. That is the
+// decision a new value has to face, and TestEveryUsageMissIsClassifiedAsBenignOrCounted makes it
+// face it rather than defaulting.
+var usageCounters = map[usageMiss]*atomic.Int64{
+	usageMissUnparsed:   &usageUnparsed,
+	usageMissUnreadable: &usageUnreadable,
 }
 
 // nestedUsagePaths are places a usage block is known to live OTHER than the top level. They are
@@ -353,13 +371,10 @@ func responseUsageWhy(contentType string, body []byte) (Usage, usageMiss, bool) 
 		u, why = parseUsageWhy(body)
 	}
 	u.StopReason = responseStopReason(sse, body)
-	if why.alertable() {
-		switch why {
-		case usageMissUnparsed:
-			usageUnparsed.Add(1)
-		case usageMissUnreadable:
-			usageUnreadable.Add(1)
-		}
+	// One lookup drives both the counter and the record, so a reason cannot be alertable for one and
+	// not the other. See usageCounters.
+	if counter, alertable := usageCounters[why]; alertable {
+		counter.Add(1)
 		// len(body) so the record still reports the whole response's size — that is what says a
 		// window was spliced — while describing the document that actually failed to parse.
 		recordUsageShape(sse, len(body), doc)

@@ -351,3 +351,51 @@ func TestTheMissReasonNeverContradictsUsageReported(t *testing.T) {
 		t.Errorf("reported %v, want unparsed_dialect", got)
 	}
 }
+
+// EVERY usageMiss VALUE MUST BE A DELIBERATE CHOICE, benign or counted.
+//
+// alertable() and the counter increment used to be two independent lists — a predicate and a switch.
+// Widening only the predicate, exactly the edit someone adding a 6th value would make, passed the
+// entire suite: the shape record started firing on the new case while no counter moved. They are one
+// map now, so they cannot drift; this test covers the other half, which construction cannot — that
+// a new value is not silently benign because nobody added it anywhere.
+//
+// The failure it produces is a naming one on purpose: an unnamed value means someone added a
+// usageMiss and stopped, and the two questions to answer are "what does the log line call it" and
+// "is it alertable".
+func TestEveryUsageMissIsClassifiedAsBenignOrCounted(t *testing.T) {
+	// Benign by design — no counter, no shape record. Listed rather than derived, so adding a value
+	// here is a decision and not an omission.
+	benign := map[usageMiss]bool{
+		usageMissNone:   true,
+		usageMissNoBody: true,
+		usageMissAbsent: true,
+		usageMissZero:   true,
+	}
+	for m := usageMissNone; m <= usageMissUnreadable; m++ {
+		if got := m.String(); got == "unknown" {
+			t.Errorf("usageMiss(%d) has no name, so the log line would read `usage_miss=unknown`: "+
+				"a value was added without deciding what an operator should see", m)
+		}
+		_, counted := usageCounters[m]
+		switch {
+		case benign[m] && counted:
+			t.Errorf("%v is listed benign but has a counter: one of the two is wrong, and the "+
+				"dangerous direction is a benign outcome moving an alertable number", m)
+		case !benign[m] && !counted:
+			t.Errorf("%v is neither listed benign nor counted, so it is silently benign by "+
+				"omission — decide: add it to `benign` here, or give it a counter in usageCounters", m)
+		}
+		if counted != m.alertable() {
+			t.Errorf("%v: alertable()=%v disagrees with usageCounters membership=%v — the two have "+
+				"drifted apart again", m, m.alertable(), counted)
+		}
+	}
+	// And the map holds nothing outside the declared range, which would be an entry for a value that
+	// no longer exists.
+	for m := range usageCounters {
+		if m > usageMissUnreadable {
+			t.Errorf("usageCounters has an entry for usageMiss(%d), outside the declared values", m)
+		}
+	}
+}
