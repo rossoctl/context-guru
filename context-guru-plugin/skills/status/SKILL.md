@@ -12,8 +12,18 @@ Answer two questions in order, because the second is meaningless if the first is
 
 ## 1. Routing and liveness
 
+First get the configured port, because you cannot read it from the environment here —
+`CLAUDE_PLUGIN_OPTION_*` reaches hook environments only, so a shell default would silently report on
+8787 while the user runs on something else:
+
 ```bash
-PORT="${CLAUDE_PLUGIN_OPTION_PORT:-8787}"
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" config
+```
+
+Use its `option_port=`, or 8787 if it reports `source=(none)`. Then:
+
+```bash
+PORT="<port>"
 echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-(unset)}"
 curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/healthz" || echo "(no proxy on ${PORT})"
 ```

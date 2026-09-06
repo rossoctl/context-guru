@@ -23,7 +23,7 @@ something:
 
 1. a checksum that could not be verified — never install anyway;
 2. `--global`, which puts every session on the machine behind the proxy — confirm once, naming that;
-3. a base URL already set to somebody else's endpoint — see step 3, where the usual answer is to
+3. a base URL already set to somebody else's endpoint — see step 4, where the usual answer is to
    chain behind it rather than to ask.
 
 Everything else: act, then say what you did.
@@ -68,7 +68,7 @@ It prints `key=value` lines. Read them rather than guessing:
 
 - `result=present` — already installed, nothing downloaded. Fine; continue.
 - `result=installed` — downloaded and verified. If `on_path=false`, note the `path=` value: you will
-  pass it as `--bin` in step 5 so the session hook can find the proxy without a `PATH` change (see
+  pass it as `--bin` in step 6 so the session hook can find the proxy without a `PATH` change (see
   there for why telling them to edit their profile is not sufficient on its own).
 - `result=error reason=no_release_found` — no published release yet for this repo. Say so, and
   offer the source build (`make build-static`, needs Go 1.26 but no C toolchain). Do not pretend
@@ -90,7 +90,29 @@ It prints `key=value` lines. Read them rather than guessing:
   `CONTEXT_GURU_VERSION=vX.Y.Z`. If `version=unknown`, the installed binary predates `--version`
   and an upgrade is worth offering.
 
-### 2. Choose the scope
+### 2. Find out which port and preset are actually configured
+
+**You cannot read `$CLAUDE_PLUGIN_OPTION_PORT` here, and a shell default silently gives you the wrong
+answer.** Claude Code puts those variables into HOOK environments only, never into a Bash tool call —
+so `${CLAUDE_PLUGIN_OPTION_PORT:-8787}` in a command always expands to 8787, whatever the user
+configured. That was a real defect, not a nicety: the routing key named 8787 while every later hook read
+the configured port and self-gated on it, so the hooks saw an unrouted project, did nothing, and the one
+running proxy had no auto-restart behind it. Once it idle-exited, nothing brought it back, silently.
+
+The values are on disk, so read them:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" config
+```
+
+- `option_port=…` / `option_preset=…` / `option_idle_exit=…` / `option_upstream=…` — use these
+- `source=(none)` — nothing configured; the `plugin.json` defaults apply (port 8787, preset `cache`)
+
+Carry the port through **every** later step explicitly: `--port` when starting the proxy, and the same
+number in the URL you write. If it turns out to be anything other than 8787, say so in your summary —
+a non-default port is the kind of thing a user forgets they set.
+
+### 3. Choose the scope
 
 Default to **this project only**. Ask before doing anything wider, and give them the real
 trade-off in one line each:
@@ -105,7 +127,7 @@ If the user passed `--global`, use the third and confirm once that they mean it,
 blast radius. `env` blocks merge per key across scopes, so a user-scope install is not clobbered
 by a project that ships its own `env` block.
 
-### 3. Look before you write
+### 4. Look before you write
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" show --file <target>
@@ -132,8 +154,8 @@ is the right amount of ceremony:
 The caller's `Authorization` / `x-api-key` passes straight through to that upstream, which is what
 lets their gateway keep authenticating. Two places have to know about it, for different reasons:
 
-* **now**, twice as an explicit `--upstream` argument: once when starting the proxy in step 4 and once
-  when writing the settings in step 5. Not via the plugin option and not via an env prefix —
+* **now**, twice as an explicit `--upstream` argument: once when starting the proxy in step 5 and once
+  when writing the settings in step 6. Not via the plugin option and not via an env prefix —
   `CLAUDE_PLUGIN_OPTION_*` does not reach a Bash tool call, and an env prefix cannot be covered by a
   permission rule;
 * **later**, so every future session's hook chains too — which means the variable has to be in the
@@ -149,7 +171,7 @@ lets their gateway keep authenticating. Two places have to know about it, for di
 Say what you are doing and why in one line, then continue. Replacing a platform-provided gateway
 outright will usually break that agent's authentication, so do not offer it as the default.
 
-### 4. START THE PROXY FIRST, before writing any settings
+### 5. START THE PROXY FIRST, before writing any settings
 
 **This order is not a preference, and getting it wrong breaks the session doing the install.**
 
@@ -174,7 +196,7 @@ so ask it to start anyway:
 "${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh" --unrouted
 ```
 
-Pass the other two facts you already have as arguments as well — the gateway from step 3, and the
+Pass the other facts you already have as arguments too — the port from step 2, the gateway from step 4, and the
 binary path from step 1 if it reported `on_path=false`:
 
 ```bash
@@ -247,23 +269,23 @@ sessions' hooks use — but it is not a substitute for `--upstream` now.
 Confirm the proxy is actually up before continuing — `proxy up on 127.0.0.1:<port>` in the output, or:
 
 ```bash
-curl -fsS "http://127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT:-8787}/healthz"
+curl -fsS "http://127.0.0.1:<port>/healthz"
 ```
 
 If it did not come up, **stop and do not write the settings key.** An unrouted project with no proxy
 is a working project; a routed one with no proxy is a broken one.
 
-### 5. Write the one key
+### 6. Write the one key
 
-The port comes from the plugin's configuration (`CLAUDE_PLUGIN_OPTION_PORT`, default `8787`).
+The port is the one you discovered in step 2 — not a shell expansion, which would silently be 8787.
 The URL must end in `/anthropic` — that is the path the proxy serves the Anthropic dialect on.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add \
-  --file <target> --url "http://127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT:-8787}/anthropic"
+  --file <target> --url "http://127.0.0.1:<port>/anthropic"
 ```
 
-If step 3 found a gateway to chain behind, add `--upstream <their base URL>` to that same command.
+If step 4 found a gateway to chain behind, add `--upstream <their base URL>` to that same command.
 Do **not** hand-edit the file to add it: one atomic write, one backup, and uninstall removes only an
 upstream it recorded writing. Skipping it leaves chaining working *only* until the running proxy
 idles out — the next session's hook would start one aimed at `api.anthropic.com`.
@@ -278,7 +300,7 @@ which fixes it without touching the user's shell at all. Still mention the `PATH
 want `context-guru-proxy` on the command line too.
 
 - `result=added` — report the `backup=` path to the user. That is their undo.
-- `result=conflict` — you skipped step 3, or the file changed. Go back and ask; only pass
+- `result=conflict` — you skipped step 4, or the file changed. Go back and ask; only pass
   `--force` once the user has said to replace that specific value. When they do, the replaced
   value is recorded and `/context-guru:uninstall` puts it back — say so, because "we will take
   over your gateway" is much easier to agree to when it is reversible.
@@ -293,13 +315,13 @@ want `context-guru-proxy` on the command line too.
 - `result=error reason=unparseable_json` — their settings file is already broken. Do not
   rewrite it. Tell them where and let them fix it.
 
-### 6. Prove it, and only then say it worked
+### 7. Prove it, and only then say it worked
 
-The proxy went up in step 4, so this is a re-check after the routing change rather than a first
+The proxy went up in step 5, so this is a re-check after the routing change rather than a first
 start — confirm rather than assume:
 
 ```bash
-curl -fsS "http://127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT:-8787}/healthz"
+curl -fsS "http://127.0.0.1:<port>/healthz"
 ```
 
 `start-proxy.sh` is idempotent and gated: it starts the proxy only if nothing answers `/healthz`, and
@@ -311,11 +333,11 @@ and read the log rather than declaring victory:
 
 ```bash
 context-guru-proxy \
-  --listen "127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT:-8787}" \
-  --preset "${CLAUDE_PLUGIN_OPTION_PRESET:-cache}" \
-  --idle-exit="${CLAUDE_PLUGIN_OPTION_IDLE_EXIT:-24h}" \
+  --listen "127.0.0.1:<port>" \
+  --preset "<preset>" \
+  --idle-exit="<idle-exit>" \
   --dashboard \
-  --dashboard-db "${XDG_STATE_HOME:-$HOME/.local/state}/context-guru/dashboard-${CLAUDE_PLUGIN_OPTION_PORT:-8787}.db"
+  --dashboard-db "${XDG_STATE_HOME:-$HOME/.local/state}/context-guru/dashboard-<port>.db"
 ```
 
 **Both dashboard flags are required, and leaving them off is not cosmetic.** `--dashboard`
@@ -334,7 +356,7 @@ A `--idle-exit` below the store's floor (~5h34m at the default TTL) is **refused
 purpose — exiting clears in-memory cache state. If they want a shorter one, that is a
 `store.ttl_seconds` conversation, not a flag to force.
 
-### 7. Tell them what happens next
+### 8. Tell them what happens next
 
 - **Do not tell them it only takes effect next session.** That was this skill's claim and it is
   wrong: Claude Code picks the `env` change up live, which is exactly why step 4 starts the proxy
