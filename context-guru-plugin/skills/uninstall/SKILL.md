@@ -20,7 +20,7 @@ plus a per-project one can both exist.
 ```bash
 PORT="${CLAUDE_PLUGIN_OPTION_PORT:-8787}"
 for f in .claude/settings.local.json .claude/settings.json ~/.claude/settings.json; do
-  [ -f "$f" ] && python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" remove \
+  [ -f "$f" ] && "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" remove \
       --file "$f" --url "http://127.0.0.1:${PORT}/anthropic"
 done
 ```

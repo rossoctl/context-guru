@@ -22,7 +22,7 @@ Then check where the routing is configured, in precedence order — later files 
 
 ```bash
 for f in ~/.claude/settings.json .claude/settings.json .claude/settings.local.json; do
-  [ -f "$f" ] && python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" show --file "$f"
+  [ -f "$f" ] && "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" show --file "$f"
 done
 ```
 

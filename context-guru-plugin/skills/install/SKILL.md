@@ -67,8 +67,9 @@ Bounded on purpose, because an unbounded version of this step got denied as
 It prints `key=value` lines. Read them rather than guessing:
 
 - `result=present` — already installed, nothing downloaded. Fine; continue.
-- `result=installed` — downloaded and verified. If `on_path=false`, tell the user to add the
-  directory to their `PATH` and that the session hook cannot find the proxy until they do.
+- `result=installed` — downloaded and verified. If `on_path=false`, note the `path=` value: you will
+  pass it as `--bin` in step 5 so the session hook can find the proxy without a `PATH` change (see
+  there for why telling them to edit their profile is not sufficient on its own).
 - `result=error reason=no_release_found` — no published release yet for this repo. Say so, and
   offer the source build (`make build-static`, needs Go 1.26 but no C toolchain). Do not pretend
   it worked.
@@ -107,7 +108,7 @@ by a project that ships its own `env` block.
 ### 3. Look before you write
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" show --file <target>
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" show --file <target>
 ```
 
 If `base_url` is already set to something that is not our port, **stop and ask.** It may be
@@ -128,14 +129,14 @@ in front of theirs so their gateway still handles auth and upstream routing. On 
 is the normal shape rather than an anomaly to escalate; one line saying what you are chaining behind
 is the right amount of ceremony:
 
-```bash
-ANTHROPIC_UPSTREAM="<their base URL>" "${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"
-```
+The caller's `Authorization` / `x-api-key` passes straight through to that upstream, which is what
+lets their gateway keep authenticating. Two places have to know about it, for different reasons:
 
-`ANTHROPIC_UPSTREAM` is the proxy's own environment fallback for `--anthropic-upstream`, and the
-caller's `Authorization` / `x-api-key` passes straight through to it — so their gateway still
-authenticates. For it to survive into later sessions the variable has to be in the settings `env`
-block beside our key, since that is what the SessionStart hook inherits:
+* **now**, so the proxy you start in step 4 chains — pass it as `--upstream` when you write the
+  settings, and prefer the plugin's **Upstream base URL** option if the user will set one, since
+  `start-proxy.sh` reads `CLAUDE_PLUGIN_OPTION_UPSTREAM` by itself;
+* **later**, so every future session's hook chains too — which means the variable has to be in the
+  settings `env` block beside our key, because that block is what the hook inherits:
 
 ```json
 {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787/anthropic",
@@ -230,7 +231,7 @@ The port comes from the plugin's configuration (`CLAUDE_PLUGIN_OPTION_PORT`, def
 The URL must end in `/anthropic` — that is the path the proxy serves the Anthropic dialect on.
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add \
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add \
   --file <target> --url "http://127.0.0.1:${CLAUDE_PLUGIN_OPTION_PORT:-8787}/anthropic"
 ```
 
