@@ -305,6 +305,44 @@ repo. That is correct behaviour, but it means "clone and go" is really "clone, a
   signals that do move are `components.cachesplit.verdict` and the billed tiers.
 - `/context-guru:uninstall` — removes the one settings key (with a backup) and stops the proxy.
 
+## Status line
+
+`/context-guru:statusline` puts the cache TTL and running savings in your terminal's status line,
+so you see them on every turn instead of asking `/context-guru:status`:
+
+```
+cache 4:12 | $0.42/3.1k saved | ka 2p
+```
+
+- **`cache 4:12` / `cache cold`** is the stopper — a countdown to the prompt-cache going cold.
+  It comes from Claude Code's own client-side cache tracker (the same one behind its `/context`
+  view), not from the proxy, so it costs no extra network call and it reflects the *actual* wire
+  bytes regardless of what any component rewrote. `cache –` before the first response of a
+  session has anything to track is normal, not a fault.
+- **`$0.42/3.1k saved`** is the running total (`total_saved_usd` / unique tokens saved), read from
+  the proxy's own `/api/stats`. Hidden entirely while both are zero — a fresh install has nothing
+  to report yet, and a segment reading `$0.00/0 saved` would look like a broken feature rather than
+  an honest one. The same caveats as `/context-guru:status` apply: list-price on a subscription,
+  process-wide rather than per-project.
+- **`ka 2p`** is how many idle keep-alive pings have fired. Hidden while zero, which is the
+  default — keep-alive is off unless you turn it on (below).
+- **`cg!`** means the proxy this project routes to is not answering. Everything else about the
+  line is silent — including in every project that is not routed through context-guru at all.
+
+**It only reads.** The status line renders on nearly every keystroke; if it could also *arm*
+anything, a display hook would double as an unbounded traffic generator billed to you. Sending a
+keep-alive ping is a separate, explicit action:
+
+`/context-guru:keepalive` reports whether the mechanism is on, and turns it on or off. Turning it
+on means the proxy will spend your own credential on idle turns, between sessions, to keep the
+cache warm — worth knowing before you enable it, which is why this asks rather than infers.
+
+One nuance worth having straight: once keep-alive is on, `cache cold` in the status line no
+longer means the provider's own cached entry is actually cold. The countdown is Claude Code's
+own view of *its own* last request; it has no way to see a ping the proxy sent while you were not
+typing. Treat `ka Np` and the next turn's latency as the ground truth once keep-alive is running,
+not the countdown by itself.
+
 ## Troubleshooting
 
 **"Nothing happened after `/context-guru:install`."** The setting applies to a **new** session;
@@ -329,6 +367,14 @@ To get working again immediately, `/context-guru:uninstall`.
 
 **Port 8787 is taken.** Change it in the plugin's configuration. Do not use 4000; litellm
 defaults to it, and the installer's default avoids the collision on purpose.
+
+**The status line is blank in a routed project.** Blank is its normal state before the first
+response of a session (no cache data to show yet) and while there is nothing to report on the
+savings/keep-alive segments — check `/context-guru:status` for the same numbers to confirm it is
+not simply early. If it stays blank across a whole session with real traffic, confirm
+`/context-guru:statusline` actually installed (`settings.py show` reports `statusline=`), and that
+a *new* session was started after installing it — like the routing key, the setting is picked up
+live but only in a session that started after it was written.
 
 **`--idle-exit` is refused at startup.** A threshold below roughly 5h34m (2× the store's default
 entry lifetime) is rejected, because exiting clears in-memory cache state — including frozen
