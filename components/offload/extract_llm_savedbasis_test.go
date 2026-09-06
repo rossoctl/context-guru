@@ -217,8 +217,12 @@ func TestExtractLLMReplayBooksWhatTheReplayedMessageActuallySaved(t *testing.T) 
 // three followers reach extractInflight.Do, and summarizingModel.Complete is pure string work that
 // returns immediately. Verified 50/50 at -count=50. Deliberately left as is, because a lost race
 // FATALS on the deduped_inflight_extraction and model.calls preconditions rather than passing
-// vacuously — so a red here says whether the guard broke or the race was simply lost, which is the
-// property that matters. Do not read a failure on those two lines as a defect in the guard.
+// vacuously — so a red here says whether the guard broke or the fixture produced no followers, which
+// is the property that matters. A failure on those two lines means the latter, and it has two very
+// different causes: the race was lost, or SINGLE-FLIGHT DEDUP ITSELF REGRESSED — a changed result
+// key, a concurrency semaphore that now serialises the candidates, getResultGlobal starting to
+// answer them. Neither is a defect in out[k].called, but the second is a defect worth chasing, so do
+// not read those two lines going red as nothing having happened.
 func TestExtractLLMDoesNotBookASingleFlightFollowersSaving(t *testing.T) {
 	// Byte-identical bodies, so all four share one extraction key and three become followers.
 	// The text is distinct from every other fixture here because extractInflight's group is
