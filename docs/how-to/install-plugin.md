@@ -108,10 +108,29 @@ prefix: an env-prefixed command is one nobody can approve. If a skill ever print
 env prefixes in front of the script, a permission rule will not help and you are back to approving each
 time.
 
-**On a hosted agent, expect to approve once.** Under auto mode this denial is not a misfire — the pod's
-own gateway is doing the authenticating, and putting a third-party proxy in front of it is exactly the
-kind of thing a classifier should stop an agent from doing unilaterally. One `!`-prefixed command, or
-one rule, and it is done.
+**On a hosted agent, expect TWO gates, not one.** Both were observed under auto mode, and both are
+correct:
+
+1. **starting the proxy** — *"intercepts and forwards the agent's own Anthropic API traffic"*;
+2. **writing the routing key** — *"routes all future API traffic (including the Authorization
+   credential …) through a locally-run proxy sourced from a third-party marketplace plugin the user
+   only generically installed"*.
+
+The second is the sharper objection and it is worth reading twice, because it is the real decision:
+routing means your credential passes through this binary. On a chained install it has to — that is how
+the platform gateway keeps authenticating. Checksum verification proves the download matches what the
+repo published; it does not make the code trustworthy, and there is no signature anywhere in this path.
+
+So on a hosted agent, an unattended install cannot complete, by design. Either approve both steps,
+run both commands yourself with `!`, or add a rule covering the plugin's `scripts/` directory — one rule
+covers both, since both are that directory's scripts.
+
+**And on a hosted agent, check whether the trial can show you anything before doing any of it.** The
+`cache` preset works by moving a cache breakpoint inside the environment snapshot Claude Code appends
+to its system prompt. **Outside a git repository there is no such snapshot**, so `cachesplit` reports
+`verdict: skipped` and the saving is exactly zero — a structural zero, not a warm-up. A pod whose
+working directory is not a repo will measure nothing no matter how long you leave it. `/context-guru:status`
+says so explicitly; believe it rather than waiting for numbers to appear.
 
 ## You do not need an API key
 

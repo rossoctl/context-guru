@@ -82,8 +82,17 @@ else
 case "${ANTHROPIC_BASE_URL:-}" in
   *"127.0.0.1:${PORT}/"* | *"localhost:${PORT}/"* | *"[::1]:${PORT}/"*) ;;
   *)
-    # Silent by design. This is the common case — every unrouted project — and a line of
-    # output here would appear in sessions that have nothing to do with context-guru.
+    # Silent on STDOUT by design: this is the common case — every unrouted project — and a line
+    # here would appear in sessions that have nothing to do with context-guru.
+    #
+    # But leave a breadcrumb in the log, because silence with no trace is indistinguishable from
+    # "the script never ran", and that cost somebody a real debugging session. A human pasted a
+    # long env-prefixed invocation, the paste split across two lines so the assignments became a
+    # no-op statement, the script ran unrouted and exited here without a word — no output, no log,
+    # no pidfile. Three rounds of guessing followed, and the fix was only found by reading this
+    # branch in the source. One line costs nothing and answers it immediately.
+    printf '%s declined: ANTHROPIC_BASE_URL=%s does not name port %s; pass --force to start anyway\n' \
+      "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${ANTHROPIC_BASE_URL:-unset}" "$PORT" >>"$LOG" 2>/dev/null
     exit 0 ;;
 esac
 fi
