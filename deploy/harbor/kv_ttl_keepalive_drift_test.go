@@ -61,7 +61,11 @@ type budgetWindows struct {
 }
 
 type budgetPyResult struct {
-	BreakEven float64         `json:"break_even"`
+	// One entry per case, not one for the fixture: _run_fixture used to assign this inside its
+	// per-case loop and report only the last case's, which happened to go unnoticed here
+	// because every case's rates come from the same multiples. A list makes that assumption
+	// checked rather than assumed.
+	BreakEven []float64       `json:"break_even"`
 	Budgets   []int           `json:"budgets"`
 	Windows   []budgetWindows `json:"windows"`
 }
@@ -198,11 +202,18 @@ func TestKeepAliveBudgetAgreesWithThePort(t *testing.T) {
 		t.Fatalf("port returned %d budgets for %d cases", len(got.Budgets), len(f.Cases))
 	}
 
-	// The break-even is the one number the whole arm rests on, and it must be the rates' own.
+	// The break-even is the one number the whole arm rests on, and it must be the rates' own —
+	// for EVERY case, including the 5×-rate one, since the prefix and the per-token rate both
+	// cancel and the ratio must not move with input_rate.
 	const wantBreakEven = kvcache.DefaultCacheReadMultiple /
 		(kvcache.DefaultWrite5mMultiple - kvcache.DefaultCacheReadMultiple)
-	if math.Abs(got.BreakEven-wantBreakEven) > 1e-9 {
-		t.Errorf("break-even: port %.10f, Go's rates give %.10f", got.BreakEven, wantBreakEven)
+	if len(got.BreakEven) != len(f.Cases) {
+		t.Fatalf("port returned %d break-evens for %d cases", len(got.BreakEven), len(f.Cases))
+	}
+	for i, be := range got.BreakEven {
+		if math.Abs(be-wantBreakEven) > 1e-9 {
+			t.Errorf("case %d break-even: port %.10f, Go's rates give %.10f", i, be, wantBreakEven)
+		}
 	}
 
 	for i, c := range f.Cases {

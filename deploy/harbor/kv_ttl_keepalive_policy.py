@@ -417,20 +417,22 @@ def _run_fixture(path: str) -> int:
         "cached_tokens":…, "input_rate":…, "cdf":[[seconds, p], …],
         "min_prefix":… (optional)}]}
 
-    and the output is {"break_even":…, "budgets":[…], "windows":[{"h":[…],"s":[…]}, …]} so
-    the Go test can compare the decision AND the two intermediate vectors — a budget that
-    agrees for the wrong reason is a guard that will stop catching things.
+    and the output is {"break_even":[…], "budgets":[…], "windows":[{"h":[…],"s":[…]}, …]} —
+    one break_even PER CASE, not one for the fixture, because each case carries its own
+    input_rate and a fixture that mixed rate shapes would otherwise report only the last
+    case's — so the Go test can compare the decision AND the two intermediate vectors, per
+    case, and a budget that agrees for the wrong reason is a guard that will stop catching
+    things.
     """
     with open(path, encoding="utf-8") as fh:
         spec = json.load(fh)
     interval = float(spec.get("interval_s", DEFAULT_INTERVAL_S))
     life = float(spec.get("life_s", DEFAULT_LIFE_S))
     max_k = int(spec.get("max_k", DEFAULT_MAX_K))
-    budgets, wins = [], []
-    be = None
+    break_evens, budgets, wins = [], [], []
     for case in spec["cases"]:
         rates = Rates.from_input_rate(float(case["input_rate"]))
-        be = break_even(rates.cache_read, rates.write_5m)
+        break_evens.append(break_even(rates.cache_read, rates.write_5m))
         points = sorted((float(a), float(b)) for a, b in case["cdf"])
 
         def cdf(seconds: float, _pts=points) -> float:
@@ -445,7 +447,7 @@ def _run_fixture(path: str) -> int:
         budgets.append(budget_for(cdf, int(case["cached_tokens"]), rates, interval_s=interval,
                                   life_s=life, max_k=max_k,
                                   min_prefix=int(case.get("min_prefix", 0))))
-    print(json.dumps({"break_even": be, "budgets": budgets, "windows": wins}))
+    print(json.dumps({"break_even": break_evens, "budgets": budgets, "windows": wins}))
     return 0
 
 
