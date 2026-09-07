@@ -36,9 +36,15 @@ The values are on disk, so read them:
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" config
 ```
 
-Use its `option_port=` and `option_preset=`, or 8787 and `cache` if it reports `source=(none)`. Then
-substitute both into the `<port>` / `<preset>` placeholders in every block below. If the port is
-anything other than 8787, say so in your summary.
+**Read the fallback per option, not from `source=`.** That command prints an `option_<name>=` line only
+for keys the user actually configured, and reports `source=(none)` only when nothing at all is set. So
+somebody who set the port and never touched the preset — the case this whole section exists for — gets a
+real `source=` and *no* `option_preset=` line. Any option the output does not list is unconfigured: use
+the `plugin.json` default for that one (port 8787, preset `cache`), whatever `source=` says.
+
+Substitute both values into the `<port>` / `<preset>` placeholders in every block below. Never leave a
+placeholder unfilled and never substitute an empty string — an empty preset is not a harmless default,
+it turns compaction off (see step 2). If the port is anything other than 8787, say so in your summary.
 
 ## 1. Report current activity
 
@@ -68,6 +74,13 @@ STATE="${XDG_STATE_HOME:-$HOME/.local/state}/context-guru"
 mkdir -p "$STATE"
 CFG="${STATE}/keepalive-${PORT}.yaml"
 MARKER="# context-guru: written by /context-guru:keepalive"
+# An unresolved preset is NOT a harmless default. `preset:` written empty makes the proxy load a
+# config with no pipeline at all and report success, so compaction is off while keep-alive keeps
+# spending the caller's credential on idle pings — worse than the wrong-preset bug this replaced.
+if [ -z "$PRESET" ]; then
+  echo "REFUSING: no preset resolved; substitute option_preset= from \`settings.py config\`, or the plugin.json default \`cache\`"
+  exit 1
+fi
 if [ -f "$CFG" ] && ! head -1 "$CFG" | grep -qF "$MARKER"; then
   echo "REFUSING: ${CFG} already exists and was not written by this skill; edit or remove it by hand first"
 else
@@ -97,7 +110,7 @@ block, or the plugin's own equivalent, then:
 "${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh" --unrouted
 ```
 
-Confirm it actually picked the config up — `curl -fsS http://127.0.0.1:${PORT}/healthz` first,
+Confirm it actually picked the config up — `curl -fsS http://127.0.0.1:<port>/healthz` first,
 then check step 1's `keepalive_pings` again after a session has gone idle for a while.
 
 ## 3. Turn it off

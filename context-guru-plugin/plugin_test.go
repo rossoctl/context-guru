@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -2516,6 +2517,15 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 // fixture port of 8787 that regression passes by coincidence, which is exactly how it shipped.
 const keepalivePort = "4041"
 
+// emptyPreset asks runKeepaliveBlock to substitute an EMPTY preset value, which is not the same as
+// passing "" — that means "this block has no <preset> line at all". Only the first models a model that
+// looked for `option_preset=` and found nothing to use.
+const emptyPreset = "\x00"
+
+// unfilledPlaceholder matches a `<lowercase>` placeholder left in an extracted block. Lower-case only
+// on purpose, so a heredoc delimiter (`<<EOF`) is not mistaken for one.
+var unfilledPlaceholder = regexp.MustCompile(`<[a-z][a-z_]*>`)
+
 // fillSkillPlaceholder substitutes one placeholder in an extracted skill block, failing loudly when
 // it is absent: an unsubstituted `PORT="<port>"` makes every path below look inert for the wrong
 // reason, which is what happened when the placeholder was introduced in the uninstall skill.
@@ -2541,7 +2551,19 @@ func runKeepaliveBlock(t *testing.T, needle, preset string, env map[string]strin
 	block := skillBlock(t, "keepalive", needle)
 	block = fillSkillPlaceholder(t, "keepalive", block, `PORT="<port>"`, `PORT="`+keepalivePort+`"`)
 	if preset != "" {
-		block = fillSkillPlaceholder(t, "keepalive", block, `PRESET="<preset>"`, `PRESET="`+preset+`"`)
+		v := preset
+		if v == emptyPreset {
+			v = ""
+		}
+		block = fillSkillPlaceholder(t, "keepalive", block, `PRESET="<preset>"`, `PRESET="`+v+`"`)
+	}
+	// Nothing below may execute a template. The per-call substitutions above are opt-in, so this is
+	// the check that does not have to be remembered: the day a block gains a placeholder no call site
+	// fills, it fails here instead of running literally and asserting on nothing.
+	if m := unfilledPlaceholder.FindString(block); m != "" {
+		t.Fatalf("the keepalive %q block still carries the placeholder %s after substitution; it would "+
+			"execute as a literal template and every assertion below would pass on nothing:\n%s",
+			needle, m, block)
 	}
 	cmd := exec.Command("bash", "-c", block)
 	cmd.Env = append(os.Environ(), "CLAUDE_PLUGIN_OPTION_PORT=", "CLAUDE_PLUGIN_OPTION_PRESET=")
@@ -2662,6 +2684,35 @@ func TestKeepaliveDisableOnlyRemovesOurOwnFile(t *testing.T) {
 	})
 }
 
+// TestKeepaliveEnableRefusesAnEmptyPreset closes the hole the placeholder flow itself opens.
+//
+// `settings.py config` prints `option_preset=` only when that key is actually configured, so a user who
+// set the port and never touched the preset leaves the model with nothing to substitute. Writing the
+// resulting `preset:` line empty is not an error anywhere downstream: applyPreset returns early on
+// `Preset == ""` (config/config.go), so Load reports success, no pipeline is filled, and compaction is
+// entirely OFF while the keep-alive keeps spending the caller's credential on idle pings.
+//
+// That is strictly worse than the defaulted-`cache` bug this branch fixes, since `cache` at least ran
+// the split. The block already refuses to write over a file that is not its own; an unresolved preset
+// earns the same conservatism, and must leave no file behind.
+func TestKeepaliveEnableRefusesAnEmptyPreset(t *testing.T) {
+	state := t.TempDir()
+	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, emptyPreset, map[string]string{
+		"XDG_STATE_HOME": state,
+	})
+	if code == 0 {
+		t.Errorf("an unresolved preset was accepted; that writes `preset:` empty, which turns "+
+			"compaction off while keep-alive keeps paying for pings:\n%s", out)
+	}
+	if !strings.Contains(out, "REFUSING") {
+		t.Errorf("the refusal was not reported as such:\n%s", out)
+	}
+	cfg := filepath.Join(state, "context-guru", "keepalive-"+keepalivePort+".yaml")
+	if _, err := os.Stat(cfg); err == nil {
+		t.Errorf("a config was written anyway at %s, so the proxy would start with compaction off", cfg)
+	}
+}
+
 // TestStartProxyPicksUpAKeepaliveConfig proves the wiring between the opt-in toggle above and the
 // hook that actually launches the proxy: presence of the file is what decides, and it is the ONLY
 // thing that decides — nothing else about this test's environment names keep-alive at all.
@@ -2740,6 +2791,22 @@ func TestStartProxyPicksUpAKeepaliveConfig(t *testing.T) {
 	}
 }
 
+// fenceOpener matches a markdown fence and captures its info string. Leading whitespace is allowed
+// because an indented fence is still a fence — a block indented as a list continuation is executed
+// exactly like one at column zero.
+var fenceOpener = regexp.MustCompile("^[ \t]*```+[ \t]*([A-Za-z0-9_.+-]*)")
+
+// isShellFence reports whether a fence's info string means "this is shell the model will run". The
+// label is not a semantic boundary: ```sh and a bare ``` are executed the same as ```bash, so keying
+// a guard on the literal "```bash" leaves the same defect reachable one keystroke away.
+func isShellFence(info string) bool {
+	switch strings.ToLower(info) {
+	case "", "bash", "sh", "shell", "zsh", "console", "shell-session":
+		return true
+	}
+	return false
+}
+
 // TestNoSkillBlockReadsAPluginOption is a guard, not a discovery: it is the same defect as
 // TestTheConfiguredPortCanActuallyBeHonoured, which was found once in install/status/uninstall, fixed
 // there, and then reintroduced wholesale by a later skill that was written from the older pattern.
@@ -2749,9 +2816,14 @@ func TestStartProxyPicksUpAKeepaliveConfig(t *testing.T) {
 // it always yields the default, whatever the user configured, and reports success while doing it.
 // Skills must obtain these values from `settings.py config` and substitute them.
 //
-// Scoped to fenced bash blocks in skills/, on purpose: the hook SCRIPTS (start-proxy.sh,
+// Scoped to fenced SHELL blocks in skills/, on purpose: the hook SCRIPTS (start-proxy.sh,
 // check-proxy.sh) do run in a hook environment and read these variables legitimately, and the skills'
 // PROSE has to be able to name the variable in order to warn about it.
+//
+// "Shell block" deliberately includes ```sh, a bare ```, and an indented fence, not just ```bash at
+// column zero. Round-1 review demonstrated both escapes: the same defect re-added under a ```sh fence,
+// and under a two-space-indented ```bash fence, each left this guard silent. A guard for a CLASS has
+// to match how the model reads a block, and the model does not care what the info string says.
 func TestNoSkillBlockReadsAPluginOption(t *testing.T) {
 	entries, err := os.ReadDir("skills")
 	if err != nil {
@@ -2767,20 +2839,25 @@ func TestNoSkillBlockReadsAPluginOption(t *testing.T) {
 			t.Errorf("reading %s: %v", e.Name(), err)
 			continue
 		}
-		in := false
+		// Two pieces of state, not one. Tracking only "am I in a block I care about" gets the
+		// PARITY wrong: a ```json fence would not open anything, so its CLOSING fence reads as an
+		// opener and every prose line after it looks like shell. That is not hypothetical — it
+		// misfired on install/SKILL.md's prose the first time this guard was widened.
+		inFence, isShell := false, false
 		for i, line := range strings.Split(string(b), "\n") {
-			switch {
-			case !in && strings.HasPrefix(line, "```bash"):
-				in = true
-			case in && strings.HasPrefix(line, "```"):
-				in = false
-			case in:
-				if strings.Contains(line, "CLAUDE_PLUGIN_OPTION_") {
-					t.Errorf("skills/%s/SKILL.md:%d reads a plugin option inside an executable block, "+
-						"which always expands to the default in a Bash tool call:\n\t%s\n"+
-						"Obtain it from `settings.py config` and substitute a <placeholder> instead.",
-						e.Name(), i+1, strings.TrimSpace(line))
+			if m := fenceOpener.FindStringSubmatch(line); m != nil {
+				if inFence {
+					inFence, isShell = false, false
+				} else {
+					inFence, isShell = true, isShellFence(m[1])
 				}
+				continue
+			}
+			if inFence && isShell && strings.Contains(line, "CLAUDE_PLUGIN_OPTION_") {
+				t.Errorf("skills/%s/SKILL.md:%d reads a plugin option inside an executable block, "+
+					"which always expands to the default in a Bash tool call:\n\t%s\n"+
+					"Obtain it from `settings.py config` and substitute a <placeholder> instead.",
+					e.Name(), i+1, strings.TrimSpace(line))
 			}
 		}
 		checked++
