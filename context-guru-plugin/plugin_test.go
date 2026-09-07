@@ -2825,13 +2825,21 @@ func TestEverySkillStatesThePerOptionFallback(t *testing.T) {
 		checked++
 		// The positive alone is the reassurance I suspected it of being: review demonstrated that
 		// restoring the old sentence while KEEPING the new rule passes. So assert the absence of the old
-		// instruction shape too. The discriminating string is "or 8787 if it reports" and not
-		// `source=(none)`, because the corrected prose quotes that token legitimately while explaining
-		// the rule — asserting on the token would fail every fixed file.
-		if strings.Contains(body, "or 8787 if it reports") {
-			t.Errorf("skills/%s/SKILL.md still tells the model \"or 8787 if it reports …\", which is the "+
-				"fallback keyed on `source=` that this rule replaces. A skill can state the per-option "+
-				"rule and contradict it two lines later; that is what this assertion catches.", e.Name())
+		// instruction shape too.
+		//
+		// The needle is the CONDITION, "if it reports `source=(none)`", not "or 8787 if it reports". The
+		// narrower form was coupled to one phrasing and this repo had two: keepalive's own sentence said
+		// "or 8787 and `cache` if it reports …", which slipped straight through — the same failure as
+		// keying the fence scan on "```bash". Verified against both real phrasings (origin/main's status
+		// and e0ea8a9's keepalive: 1 each) and all five current skills (0).
+		//
+		// It cannot be `source=(none)` alone: the corrected prose says "reports `source=(none)` only
+		// when …", which is an explanation rather than a condition, so the token appears in every FIXED
+		// file. "if it reports" is what makes it an instruction to act on.
+		if strings.Contains(body, "if it reports `source=(none)`") {
+			t.Errorf("skills/%s/SKILL.md still tells the model to fall back \"if it reports "+
+				"`source=(none)`\", which is the condition this per-option rule replaces. A skill can "+
+				"state the rule and contradict it two lines later; that is what this catches.", e.Name())
 		}
 		if !strings.Contains(body, "is unconfigured") {
 			t.Errorf("skills/%s/SKILL.md reads `settings.py config` but never says that an option the "+
