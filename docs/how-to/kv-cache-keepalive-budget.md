@@ -249,11 +249,156 @@ a 5× volume ramp across the window, so the weekday label is partly a label for 
 date. **Separating a weekly cycle from a date effect needs 8–12 weeks**, and until then no
 feature question on this corpus is answerable.
 
-## How to use it
+## Turning it on
 
-`BudgetPolicy` is deliberately **not** in `Registry()`. Like `Custom`, it cannot be built from
-a name alone — it needs a `Predictor` — and the registry's promise is that every name in it
-resolves. Construct it and hand it to `Simulate`:
+Pick it on the **KV-cache** page. It is the `keepalive-budget` checkbox, it is in the default
+arm set, and it is scored against the same baseline, the same rates and the same savings
+arithmetic as every other arm.
+
+That is new. `BudgetPolicy` used to be unreachable from any page, and the reason was structural
+rather than an oversight: it is built from a `Predictor`, no `Predictor` existed outside a test,
+and the registry's promise is that every name in it resolves. A name resolving to an arm with a
+nil `Predictor` would have been worse than no name at all — `Decide` returns `write_5m` when it
+has no opinion, so that arm never pings, and the page would have shown a flat write policy under
+a label promising a learned one.
+
+[`kvcache.ReuseModelV1`](#the-shipped-model) removed the premise instead of the promise. The
+model is a table of coefficients compiled into the binary, so `NewKeepAliveBudget` builds the arm
+from nothing and the name resolves on every process. Nothing else about the seam changed: a
+caller with its own predictor still constructs `BudgetPolicy` directly and gets its own label.
+
+!!! warning "`Config.MaxPings` still caps it, and the page defaults to 2"
+    A budget can ask for fewer pings than the cap, never more. The arm reasons over 8 sweeps, so
+    at the page's default `k=2` it is bounded to a quarter of its own horizon. It still wins
+    there — see the table below — but if you want to see the schedule it would actually choose,
+    set the keep-alive cap to 8.
+
+### The shipped model
+
+`ReuseModelV1` is a **fixed** discrete-time survival model: one coefficient per shipped feature,
+one per one-hot level, one intercept, compiled in and never re-fitted at runtime. The
+coefficients and their full provenance are in `kvcache/reusemodel_v1_gen.go`, generated; the
+arithmetic that reads them is in `kvcache/reusemodel.go`, hand-written.
+
+| | |
+|---|---|
+| corpus | 18.4 days of the hosted capture, 2026-08-17 → 2026-09-04 UTC |
+| 219,650 idle spans | of which **37,418 reach the first sweep** — the population the decision is faced on |
+| 276,321 person-periods | one row per (span, sweep it actually reached) |
+| holdout AUC | **0.9065** by row, **0.7837** by dollar, fitted on the early 70% and scored on the late 30% |
+| reference GBM, in-sample | 0.9572 by row, 0.8705 by dollar — the ceiling a shippable model gives up |
+
+Three things about it are worth arguing with.
+
+**It is a logistic regression, not the gradient-boosted pair `fit()` uses.** Not because the
+ensemble is worse — it is better, and the generated file prints by how much on every re-fit —
+but because it cannot ship. Thirty-seven trees of thresholds cannot be reviewed in a diff, so
+nobody could tell a re-fit that improved the model from one that broke it; and the live pinger
+consults the same model on the request path, where `proxy/keepalivestrategy.go`'s own rule is "a
+rule, or … a portable logistic-regression dot product — never an embedded model or a call out of
+the hot path."
+
+**It is fixed, and that is a feature.** A model re-fitted at startup would make yesterday's
+dashboard figure unreproducible, and this page's whole claim is that replaying a historical
+window gives the same answer every time.
+
+**The sweep index is a one-hot, not a linear term.** This is the one place the shipped model's
+specification departs from the reference's, and it was not a preference. `sweep_k`,
+`log_elapsed` and `log_secs_to_deadline` are all exact functions of the sweep index — the third
+is `life - interval` at *every* sweep, a constant. A tree ensemble treats that as redundancy; a
+linear model cannot, and the first fit showed what it costs: coefficients of −4.77 and +4.09 on
+two features that move together, summing to a hazard of ~14% at every sweep where the corpus
+measures 4.86% at the first and 0.24% by the seventh. The arm bought its maximum budget on 97%
+of decisions and saved *less than a flat `MaxPings=2`*. A free coefficient per sweep recovers the
+real shape, which rises from −1.25 at the first sweep to +1.83 at the seventh and then falls —
+not monotone, which is exactly why assuming monotone was wrong.
+
+`user_id` and `cache_ttl` are both in the reference's 13 features and neither is shipped.
+`user_id` is a per-tenant dummy: it does not generalise to a tenant the fit never saw and it
+would put tenant identifiers in the binary, while `stat_p`/`log_stat_n` already carry that
+tenant's own history in a non-identifying form. `cache_ttl` is subtler and only becomes wrong
+once the model is actually wired in behind `Predictor`: offline it is the tier the corpus
+*recorded*, but at serve time the seam hands over `Observation.TTL`, which `simulate.go` sets
+from the tier **the arm under test chose on the previous turn**. Training on one and serving the
+other is a train/serve skew, and the second meaning is the model's own prior output fed back as
+an input. Dropping it cost 0.0001 of holdout dollar-AUC.
+
+### What it is worth, measured
+
+Same corpus, replayed through the real arm on the KV-cache page's own scorer, against the
+`fixed-5m` baseline the page uses. `optimal` reads the future and is a ceiling, never a result.
+
+| arm | pings | off the bill | of the ceiling | net per ping |
+|---|---:|---:|---:|---:|
+| `optimal` *(unreachable)* | 1,041 | **8.054%** | 100.0% | 3.069 |
+| **`keepalive-budget`, cap 5** | **8,790** | **2.065%** | 25.6% | **0.0932** |
+| **`keepalive-budget`, cap 8** | **9,003** | **2.059%** | 25.6% | **0.0907** |
+| `keepalive-5m` flat `k=5` | 59,139 | 1.860% | 23.1% | 0.0125 |
+| **`keepalive-budget`, cap 2** | **7,573** | **1.850%** | 23.0% | **0.0969** |
+| `keepalive-5m` flat `k=6` | 69,864 | 1.817% | 22.6% | 0.0103 |
+| `keepalive-5m` flat `k=2` | 25,586 | 1.808% | 22.4% | 0.0280 |
+| `keepalive-5m-once` | 13,538 | 1.516% | 18.8% | 0.0444 |
+| `keepalive-5m` flat `k=8` | 90,779 | 1.381% | 17.1% | 0.0060 |
+| `stop-reason-gated` | 14,969 | 0.710% | 8.8% | 0.0188 |
+| `fixed-5m` *(baseline)* | 0 | 0.000% | — | — |
+| `historical-probability` | 0 | −0.128% | — | — |
+
+**On this window the arm beats every reachable alternative on money, which is not what the
+earlier measurement found.** The version of this page written against the previous corpus
+reported a flat constant beating the arm by 0.89 pp; here `keepalive-budget` takes 2.07% against
+the best flat arm's 1.86%, and does it with **8,790 pings against 59,139** — 7.5× the value per
+ping. Two things changed and only one of them is the corpus: the window is longer (18.4 days
+against 16.9), and the specification defects above were fixed. Read the earlier figure as
+measuring a differently-specified model.
+
+The budget genuinely varies per conversation, which is the entire point of the arm and the one
+thing a flat `MaxPings` cannot do:
+
+| budget chosen | share of decisions |
+|---:|---:|
+| 0 | 41.4% |
+| 1 | 31.9% |
+| 2 | 22.5% |
+| 5 | 1.2% |
+| 6 | 3.0% |
+| 8 | 0.0% |
+
+Note the shape: **41.4% of conversations are worth no ping at all**, and the arm declines them.
+That is where the 6.6× reduction in ping volume comes from, and it is why the per-ping column
+moves so much more than the money column.
+
+### The fit weight: an argument that lost
+
+The fit is weighted by **dollars at risk**, and the reasoning said it should not be. A
+stake-weighted fit is deliberately miscalibrated — it reports the hazard of a dollar, not of a
+conversation, and the two differ fourfold here (21.10% stake-weighted at the first sweep against
+4.86% by row). `BudgetPolicy` compares that probability against a break-even of 8.70%, so the
+whole decision turns on which side of 8.70% the number lands, and `log_prefix` is a covariate
+precisely so the size effect survives without the weighting.
+
+Both were fitted and both were replayed through the arm:
+
+| `--weight` | pings | off the bill | net per ping | budget 0 on |
+|---|---:|---:|---:|---:|
+| `stake` | 9,003 | **2.059%** | 0.0907 | 41.4% |
+| `none` | 7,250 | 1.836% | **0.1004** | 56.4% |
+
+`stake` ships, because money is the question the page is asked. What the calibration argument
+predicted did not happen: being better calibrated against the break-even did not produce better
+decisions, it produced **fewer** of them. `--weight none` is still selectable, and the argument
+is still a good one — worth re-testing on a longer window rather than re-deriving.
+
+## How to use it from Go
+
+The arm is in the registry, so a name is enough:
+
+```go
+s, _ := kvcache.NewStrategy(kvcache.StrategyKeepAliveBudget, nil, cfg)
+result := kvcache.Simulate(reqs, s, cfg)
+```
+
+With your own predictor instead of the shipped one, construct it directly and hand it to
+`Simulate`:
 
 ```go
 pol := kvcache.BudgetPolicy{
@@ -314,13 +459,27 @@ budgeted by `Config.MaxPings` exactly as before.
 ```sh
 cd deploy/harbor
 python3 kv_ttl_keepalive_policy.py --self-test    # asserts the module's claims, stdlib only
-python3 kv_ttl_keepalive_policy.py --fixture f.json
+python3 kv_ttl_keepalive_policy.py --fixture f.json   # the decision arithmetic's guard
+python3 kv_ttl_keepalive_policy.py --score f.json     # the shipped MODEL's guard
+
+# re-fit the shipped model and regenerate both checked-in artifacts
+python3 kv_ttl_keepalive_policy.py \
+    --db /var/lib/context-guru/cg.db --prices /etc/context-guru/prices.yaml \
+    --model-out reusemodel_v1.json --go-out ../../kvcache/reusemodel_v1_gen.go
 ```
+
+`--db` is what this page used to say was missing. The fit reads the corpus read-only, builds the
+person-period frame itself, and writes two artifacts: `reusemodel_v1.json`, which is the fit's own
+output, and `kvcache/reusemodel_v1_gen.go`, generated from it. Both are checked in, and the pair
+being checked against each other is the point — see `--score` below. The fit needs pandas and
+scikit-learn; everything else here does not.
 
 Everything above the `── the fit ──` divider is **stdlib-only and pure**: `break_even`,
 `windows`, `ping_budget`, `Rates`, `budget_for`. The scientific stack is imported inside the
 fitting functions only, so the drift guard runs in a plain CI container. A guard that cannot
 run is an absent guard.
+
+There are **two** guards, because they cover different things.
 
 `kv_ttl_keepalive_drift_test.go` drives that `--fixture` entry point and compares the budget
 **and** both intermediate vectors across 11 cases chosen to sit on branches the two
@@ -330,14 +489,33 @@ where most have already returned, a small prefix where the ping's fixed overhead
 a rate scale 5× different to prove the threshold does not move. Deleting the survivor divide
 from the Python makes it fail with `port 0.05` against `Go 0.50`, which is the check working.
 
+What that guard cannot see is the **model**: `--fixture` supplies the distribution as a
+hand-written step CDF, so the coefficients, the feature derivation and the standardisation are all
+outside it. `kv_ttl_reusemodel_drift_test.go` closes that hole. It drives `--score` over the
+checked-in `reusemodel_v1.json` — the artifact the Go table was generated from, so a hand-edit of
+the generated file or a regeneration that was never committed both fail — and its fixture carries
+**raw `Observation` fields, never derived features**, so a `log1p` applied to milliseconds on one
+side and seconds on the other is caught rather than agreed on. It compares four layers: the
+per-sweep survival vector, the CDF at horizons deliberately placed on and off the knot grid, the
+per-window `h`/`s` that `Windows` derives, and the budget. Tolerance is 1e-9 absolute, because
+both sides do the same arithmetic in the same order and anything above float noise is a real
+divergence rather than a tolerance question.
+
 ## Where to look next
 
-The measured blocker is specific: **the model cannot rank dollars.** Row AUC 0.93, falling to
-0.57 on the spans holding 87% of the stake — the whole-population dollar AUC is the table cell
-flagged unverified above, and is NOT 0.70, a figure the same table's own arithmetic rules out
-by a wider margin than the 0.635 it disputes. Everything downstream of that — the threshold
-tuning, the four feature families — was an attempt to work around it and none succeeded, which
-is what makes it the blocker rather than one finding among several.
+The blocker this page named — **the model cannot rank dollars** — is still the blocker, and it is
+now a number rather than an inference: holdout dollar-AUC **0.7837** against row-AUC 0.9065. The
+gap is the finding. Row AUC says the model knows which conversations come back; dollar AUC says it
+knows much less about which *dollars* do, and the dollars are concentrated hard enough that this is
+the difference that matters. The reference ensemble reaches 0.8705 by dollar, so roughly half the
+remaining gap is the estimator and half is the data.
+
+What has changed is that this no longer blocks *shipping the arm*. The measurement above says the
+arm beats every reachable alternative on money on this window even with a dollar-AUC of 0.78 —
+because the induction only needs the probability to land on the right side of 8.70%, which is a
+weaker requirement than ranking. The blocker is now about how much MORE there is, not about
+whether there is any: the arm reaches 25.6% of the `optimal` ceiling, and the other 74% is what
+better dollar discrimination would buy.
 
 Two things follow, in order:
 
@@ -352,3 +530,14 @@ Two things follow, in order:
 
 What is **not** worth doing is adding more columns and measuring them on 18 days. That
 returns sign-flipping answers indefinitely, and this work produced four of them.
+
+Two more, specific to the shipped model:
+
+3. **Re-test `--weight none` on a longer window.** The calibration argument above is sound and
+   lost by 0.22 pp on 18 days, which is within shouting distance of this corpus's ±0.42 pp seed
+   noise. It is not settled, it is merely decided for now.
+4. **The cap interacts with the budget and nobody has looked at why.** `keepalive-budget` scores
+   *better* at `MaxPings=5` (2.065%) than at 8 (2.059%). The difference is small and may be noise,
+   but the arm asking for more pings than it should on a thin tail is exactly the shape the
+   backward induction is supposed to prevent, so a cap that improves on it is worth a look rather
+   than a shrug.

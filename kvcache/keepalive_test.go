@@ -449,6 +449,7 @@ func TestUnbudgetedArmsAreUnaffectedByTheSeam(t *testing.T) {
 	reqs, cfg := dataset(t)
 	cfg.MaxPings = 6
 	covered := 0
+	budgeters := map[string]bool{}
 	for _, spec := range Registry() {
 		s, err := NewStrategy(spec.Name, reqs, cfg)
 		if err != nil {
@@ -458,9 +459,7 @@ func TestUnbudgetedArmsAreUnaffectedByTheSeam(t *testing.T) {
 		}
 		name := spec.Name
 		if _, isBudgeter := s.(PingBudgeter); isBudgeter {
-			t.Errorf("%s implements PingBudgeter: the registered arms are meant to stay on the "+
-				"Config.MaxPings path, and one that opted in silently would change behaviour",
-				name)
+			budgeters[name] = true
 		}
 		before := Simulate(reqs, s, cfg)
 		Simulate(reqs, budgetedStub{label: "interloper", budget: 1, ok: true}, cfg)
@@ -474,6 +473,28 @@ func TestUnbudgetedArmsAreUnaffectedByTheSeam(t *testing.T) {
 			t.Errorf("%s: %.12f over %d pings, then %.12f over %d after a budgeted replay ran "+
 				"in between — a budget leaked out of one replay into another", name,
 				before.TotalUSD, before.Pings, after.TotalUSD, after.Pings)
+		}
+	}
+	// The set of registered arms on the budget path is an ALLOW-LIST, not "none".
+	//
+	// It was "none" until keepalive-budget joined the registry, and the message then read "one
+	// that opted in silently would change behaviour" — which is still the failure being
+	// guarded, because SILENTLY is the load-bearing word. Comparing against a named set keeps
+	// that and adds the other direction: an arm dropping off this list is also a behaviour
+	// change nobody asked for, and an assertion of "none" could never have caught it.
+	want := map[string]bool{StrategyKeepAliveBudget: true}
+	for name := range budgeters {
+		if !want[name] {
+			t.Errorf("%s implements PingBudgeter but is not on the allow-list: the other "+
+				"registered arms are meant to stay on the Config.MaxPings path, and one that "+
+				"opted in silently would change behaviour", name)
+		}
+	}
+	for name := range want {
+		if !budgeters[name] {
+			t.Errorf("%s is on the PingBudgeter allow-list but does not implement it; the arm "+
+				"still resolves, so it now silently runs on Config.MaxPings instead of on its "+
+				"own per-conversation budget", name)
 		}
 	}
 	// A registry that stopped resolving would make the loop above vacuous, so say how much of

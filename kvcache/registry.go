@@ -100,6 +100,8 @@ var registry = []StrategySpec{
 	{Name: StrategyStopReasonGated, Description: StopReasonGated{}.Describe()},
 	{Name: StrategyStickySession1h, Description: NewStickySession1h().Describe(),
 		PartialReplayUnsafe: true},
+	{Name: StrategyKeepAliveBudget, Description: NewKeepAliveBudget(Config{}).Describe() +
+		" Reads the compiled-in " + ReuseModelV1.Describe() + "."},
 	{Name: StrategyReplay, Description: "Replay an explicit action supplied per request. The " +
 		"seam a policy decided elsewhere — an offline predictor, a hand-written experiment — " +
 		"is scored through.", NeedsDataset: true},
@@ -151,6 +153,8 @@ func NewStrategy(name string, reqs []*Request, cfg Config) (Strategy, error) {
 		return StopReasonGated{}, nil
 	case StrategyStickySession1h:
 		return NewStickySession1h(), nil
+	case StrategyKeepAliveBudget:
+		return NewKeepAliveBudget(cfg), nil
 	case StrategyOptimal:
 		return NewOptimal(reqs, cfg), nil
 	case StrategyReplay:
@@ -279,6 +283,42 @@ func (StopReasonGated) Describe() string {
 		"stop_sequence, tool_calls, length, content_filter) or \"looks done, isn't\" " +
 		"(stop, unset), both measured well under the ping break-even. Extends, rather than " +
 		"revisits, the deliberate decision already in pingable() to keep pinging on end_turn."
+}
+
+// ── the learned budget arm ─────────────────────────────────────────────────
+
+// NewKeepAliveBudget builds the learned keep-alive arm from the model compiled into this
+// binary.
+//
+// This constructor is why `keepalive-budget` is IN the registry, and the reason is worth
+// stating because the arm's own doc comment says the opposite. BudgetPolicy was excluded on
+// the grounds that it "cannot be built from a name alone — it needs a Predictor", and while
+// the only Predictor was an injected one that was exactly right: a name in the registry has
+// to resolve, and one that resolved to an arm with a nil Predictor would resolve to an arm
+// that never pings — a silently different policy wearing the right label.
+//
+// ReuseModelV1 removes the premise rather than the promise. The model is a fixed table of
+// coefficients in this binary, so the name resolves to the same arm on every process, in
+// every replay, without anything being handed in. Nothing else about the exclusion argument
+// changes: a caller with its OWN predictor still constructs BudgetPolicy directly and hands
+// it to Simulate, exactly as before, and gets its own label.
+//
+// MinPrefix is deliberately left at 0 — no small-prefix gate. The arithmetic does not need
+// one: PingBudget's ping cost is Pricing.KeepAliveCost, which already carries the fixed
+// ping_input/ping_output terms that do not scale with the prefix, so the break-even it
+// compares against is the true one at 500 tokens as much as at 125k. MinPrefix is an operator
+// dial for a deployment that wants a floor anyway, not a correction for a bias, and choosing
+// a number here would be inventing one.
+func NewKeepAliveBudget(cfg Config) BudgetPolicy {
+	return BudgetPolicy{
+		Predictor: ReuseModelV1,
+		// Simulate overrides Interval to Config.PingIdle regardless — see its doc comment —
+		// so this matters only for a direct PingBudget/Windows call. Seeded from the config
+		// rather than from the model so the two agree wherever the caller has an opinion.
+		Interval:  cfg.PingIdle,
+		MaxK:      ReuseModelV1.MaxK,
+		Semantics: cfg.Semantics,
+	}
 }
 
 // ── the explicit-action seam ───────────────────────────────────────────────
