@@ -2860,6 +2860,16 @@ func TestNoSkillBlockReadsAPluginOption(t *testing.T) {
 					e.Name(), i+1, strings.TrimSpace(line))
 			}
 		}
+		// An odd number of fence lines ends the loop still inside one, which means the scan lost its
+		// bearings partway through and everything after that point went unexamined. That is a false
+		// negative over the whole remainder rather than a misfire: round-2 review deleted one closing
+		// fence, re-added the defect to all four blocks, and this guard reported 0 of 4. A missing
+		// backtick line is an ordinary editing slip, so detect it — same argument as `checked == 0`
+		// below, and it costs nothing while every skill stays balanced.
+		if inFence {
+			t.Errorf("skills/%s/SKILL.md: fences are unbalanced, so the scan lost its bearings partway "+
+				"through and this guard proved nothing for the rest of the file", e.Name())
+		}
 		checked++
 	}
 	if checked == 0 {
