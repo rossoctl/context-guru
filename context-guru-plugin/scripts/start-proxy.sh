@@ -272,11 +272,22 @@ KEEPALIVE_CFG="${STATE}/keepalive-${PORT}.yaml"
 PRESET_NOTE="$PRESET"
 if [ -f "$KEEPALIVE_CFG" ]; then
   CONFIG_ARGS=(--config "$KEEPALIVE_CFG")
-  # Fails OPEN, and reports nothing rather than something wrong. This runs on the SessionStart path,
-  # so an unreadable, empty, comment-only or preset-less file must still start the proxy: `set -e` is
-  # deliberately not in force, so a failing pipeline here only leaves cfg_preset empty.
-  cfg_preset=$(sed -n 's/^[[:space:]]*preset:[[:space:]]*//p' "$KEEPALIVE_CFG" 2>/dev/null \
-                 | head -1 | tr -d "\"'" | sed 's/[[:space:]]*$//')
+  # Fails OPEN, and reports nothing rather than something wrong. This runs on the SessionStart path, so
+  # an unreadable, empty, comment-only or preset-less file must still start the proxy.
+  #
+  # What keeps that true is the ABSENCE of `set -e` combined with the PRESENCE of `set -uo pipefail`
+  # (line 28) — and it is pipefail that makes the combination load-bearing, not -e alone. With pipefail,
+  # a failing `sed` (a config that exists but cannot be read) becomes this assignment's exit status; add
+  # -e and the script dies with status 2 BEFORE the proxy is launched, which is the failure this file's
+  # own header calls the biggest risk in the feature. Do not add -e here without reading
+  # TestStartProxyReportsThePresetActuallyInEffect's unreadable-config row, which exists to catch it.
+  #
+  # Anchored at column zero: `preset:` is a top-level key, and a nested one (e.g. components.offload.
+  # preset) in a hand-edited file both LOADS and would win a first-match-any-indentation search, so the
+  # note would name the inner value while the proxy ran the outer one. Inline comments are stripped for
+  # the same reason — `preset: cache # why` used to leak the comment into the note.
+  cfg_preset=$(sed -n 's/^preset:[[:space:]]*//p' "$KEEPALIVE_CFG" 2>/dev/null \
+                 | head -1 | sed 's/[[:space:]]*#.*$//' | tr -d "\"'" | sed 's/[[:space:]]*$//')
   if [ -n "$cfg_preset" ]; then
     PRESET_NOTE="${cfg_preset} (from keepalive-${PORT}.yaml)"
   else

@@ -2823,6 +2823,16 @@ func TestEverySkillStatesThePerOptionFallback(t *testing.T) {
 			continue // this skill does not read the options, so it has no fallback to state
 		}
 		checked++
+		// The positive alone is the reassurance I suspected it of being: review demonstrated that
+		// restoring the old sentence while KEEPING the new rule passes. So assert the absence of the old
+		// instruction shape too. The discriminating string is "or 8787 if it reports" and not
+		// `source=(none)`, because the corrected prose quotes that token legitimately while explaining
+		// the rule — asserting on the token would fail every fixed file.
+		if strings.Contains(body, "or 8787 if it reports") {
+			t.Errorf("skills/%s/SKILL.md still tells the model \"or 8787 if it reports …\", which is the "+
+				"fallback keyed on `source=` that this rule replaces. A skill can state the per-option "+
+				"rule and contradict it two lines later; that is what this assertion catches.", e.Name())
+		}
 		if !strings.Contains(body, "is unconfigured") {
 			t.Errorf("skills/%s/SKILL.md reads `settings.py config` but never says that an option the "+
 				"output does not list is UNCONFIGURED. Without that, a partial config (a real `source=` "+
@@ -2937,11 +2947,12 @@ func TestNoSkillBlockReadsAPluginOption(t *testing.T) {
 func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 	const optionPreset = "codesmart" // what the PLUGIN OPTION says, and what the note must not parrot
 	for _, c := range []struct {
-		name      string
-		writeCfg  bool
-		cfg       string
-		wantIn    []string
-		wantNotIn []string
+		name       string
+		writeCfg   bool
+		cfg        string
+		unreadable bool // chmod 000 after writing: the ONLY config that makes sed itself fail
+		wantIn     []string
+		wantNotIn  []string
 	}{
 		{
 			name:     "the config's preset is reported, not the plugin option's",
@@ -2983,6 +2994,32 @@ func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 			wantNotIn: []string{"preset " + optionPreset},
 		},
 		{
+			// The row that defends the fail-open property itself. Every other row has a config sed can
+			// READ — empty, comment-only and junk files all match nothing and exit 0 — so none of them
+			// can see `set -e` being added. This one can: with pipefail in force, an unreadable file
+			// makes the assignment non-zero, and -e would then kill the script before the proxy starts.
+			name:     "an unreadable config still starts the proxy (this is what -e would break)",
+			writeCfg: true, cfg: "preset: house\ncache:\n  keepalive: true\n", unreadable: true,
+			wantIn:    []string{"unstated"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			// Reachable by hand edit, not theoretical: this document LOADS, with a top-level preset of
+			// house and a full house pipeline, so a first-match-at-any-indentation read would name the
+			// inner value while the proxy ran the outer one.
+			name:      "a nested preset: does not shadow the top-level one",
+			writeCfg:  true,
+			cfg:       "components:\n  offload:\n    preset: inner\npreset: house\ncache:\n  keepalive: true\n",
+			wantIn:    []string{"preset house"},
+			wantNotIn: []string{"inner", "preset " + optionPreset},
+		},
+		{
+			name:     "an inline comment does not leak into the note",
+			writeCfg: true, cfg: "preset: house # kept for the split\ncache:\n  keepalive: true\n",
+			wantIn:    []string{"preset house"},
+			wantNotIn: []string{"kept for the split", "preset " + optionPreset},
+		},
+		{
 			// With no config there is no --config, so the plugin option IS what is in effect and the
 			// note should say so. Without this row the test would pass on a note that never reports a
 			// preset at all.
@@ -3021,6 +3058,14 @@ func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 				cfgPath := filepath.Join(stateDir, "keepalive-"+port+".yaml")
 				if err := os.WriteFile(cfgPath, []byte(c.cfg), 0o644); err != nil {
 					t.Fatal(err)
+				}
+				if c.unreadable {
+					if os.Geteuid() == 0 {
+						t.Skip("root ignores mode 000, so this row cannot make the read fail")
+					}
+					if err := os.Chmod(cfgPath, 0o000); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 
