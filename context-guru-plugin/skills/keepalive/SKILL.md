@@ -16,10 +16,34 @@ own money (or usage-limit budget) between turns, while nobody is at the keyboard
 renders on every keystroke; if IT could arm this, a display hook would double as an unbounded
 traffic generator. Turning it on is therefore always something a user asks for, here, once.
 
+## First: get the configured port and preset
+
+**You cannot read `$CLAUDE_PLUGIN_OPTION_PORT` or `$CLAUDE_PLUGIN_OPTION_PRESET` here.** Claude Code
+puts those variables into HOOK environments only, never into a Bash tool call, so
+`${CLAUDE_PLUGIN_OPTION_PORT:-8787}` in a command always expands to 8787 whatever the user configured.
+
+For this skill that is worse than a misreport, because both values decide what gets written:
+
+- the config file is **named after the port**, so on a proxy configured for 4041 the enable step would
+  write `keepalive-8787.yaml` — a file nothing ever reads. The toggle would report success and change
+  nothing, and step 1 would then report on 8787 and confirm it.
+- `--config` **replaces** `--preset` entirely, so a defaulted `cache` would silently turn a configured
+  `house` preset off at the moment keep-alive turned on.
+
+The values are on disk, so read them:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" config
+```
+
+Use its `option_port=` and `option_preset=`, or 8787 and `cache` if it reports `source=(none)`. Then
+substitute both into the `<port>` / `<preset>` placeholders in every block below. If the port is
+anything other than 8787, say so in your summary.
+
 ## 1. Report current activity
 
 ```bash
-PORT="${CLAUDE_PLUGIN_OPTION_PORT:-8787}"
+PORT="<port>"
 curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/api/stats" | \
   python3 -c 'import json,sys; d=json.load(sys.stdin); print({k: d[k] for k in d if k.startswith("keepalive_")})'
 ```
@@ -38,8 +62,8 @@ conservatism as `settings.py`, just for a file that is ours alone rather than th
 `settings.json`):
 
 ```bash
-PORT="${CLAUDE_PLUGIN_OPTION_PORT:-8787}"
-PRESET="${CLAUDE_PLUGIN_OPTION_PRESET:-cache}"
+PORT="<port>"
+PRESET="<preset>"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/context-guru"
 mkdir -p "$STATE"
 CFG="${STATE}/keepalive-${PORT}.yaml"
@@ -79,7 +103,7 @@ then check step 1's `keepalive_pings` again after a session has gone idle for a 
 ## 3. Turn it off
 
 ```bash
-PORT="${CLAUDE_PLUGIN_OPTION_PORT:-8787}"
+PORT="<port>"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/context-guru"
 CFG="${STATE}/keepalive-${PORT}.yaml"
 MARKER="# context-guru: written by /context-guru:keepalive"

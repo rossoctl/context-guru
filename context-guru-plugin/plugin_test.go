@@ -2511,14 +2511,40 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 
 // --- the keep-alive opt-in toggle -----------------------------------------------------------
 
+// keepalivePort is deliberately not 8787. These blocks name the config file after the port, so a
+// regression to `${CLAUDE_PLUGIN_OPTION_PORT:-8787}` writes a filename nothing reads — and at a
+// fixture port of 8787 that regression passes by coincidence, which is exactly how it shipped.
+const keepalivePort = "4041"
+
+// fillSkillPlaceholder substitutes one placeholder in an extracted skill block, failing loudly when
+// it is absent: an unsubstituted `PORT="<port>"` makes every path below look inert for the wrong
+// reason, which is what happened when the placeholder was introduced in the uninstall skill.
+func fillSkillPlaceholder(t *testing.T, skill, block, placeholder, value string) string {
+	t.Helper()
+	if !strings.Contains(block, placeholder) {
+		t.Fatalf("the %s block no longer carries %s; if that value is obtained differently now, this "+
+			"test needs to follow suit rather than execute a stale template:\n%s", skill, placeholder, block)
+	}
+	return strings.Replace(block, placeholder, value, 1)
+}
+
 // runKeepaliveBlock executes one bash block from skills/keepalive/SKILL.md with a controlled
 // environment, the same way runCheck/skillBlock drive the other skills' destructive snippets.
-func runKeepaliveBlock(t *testing.T, needle string, env map[string]string) (out string, code int) {
+//
+// The blocks are TEMPLATES: the skill tells the model to discover the port and preset with
+// `settings.py config` and substitute them, because CLAUDE_PLUGIN_OPTION_* never reaches a Bash tool
+// call. So fill the placeholders the way the model is instructed to, and run with those variables
+// EMPTY — that is the environment the blocks actually execute in.
+func runKeepaliveBlock(t *testing.T, needle, preset string, env map[string]string) (out string, code int) {
 	t.Helper()
 	requireTool(t, "bash")
 	block := skillBlock(t, "keepalive", needle)
+	block = fillSkillPlaceholder(t, "keepalive", block, `PORT="<port>"`, `PORT="`+keepalivePort+`"`)
+	if preset != "" {
+		block = fillSkillPlaceholder(t, "keepalive", block, `PRESET="<preset>"`, `PRESET="`+preset+`"`)
+	}
 	cmd := exec.Command("bash", "-c", block)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), "CLAUDE_PLUGIN_OPTION_PORT=", "CLAUDE_PLUGIN_OPTION_PRESET=")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -2539,15 +2565,13 @@ func runKeepaliveBlock(t *testing.T, needle string, env map[string]string) (out 
 // keep-alive turned on — the opposite of what enabling it is supposed to do.
 func TestKeepaliveEnableWritesAPresetPreservingConfig(t *testing.T) {
 	state := t.TempDir()
-	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, map[string]string{
-		"CLAUDE_PLUGIN_OPTION_PORT":   "8787",
-		"CLAUDE_PLUGIN_OPTION_PRESET": "codesmart",
-		"XDG_STATE_HOME":              state,
+	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, "codesmart", map[string]string{
+		"XDG_STATE_HOME": state,
 	})
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	cfg := filepath.Join(state, "context-guru", "keepalive-8787.yaml")
+	cfg := filepath.Join(state, "context-guru", "keepalive-"+keepalivePort+".yaml")
 	b, err := os.ReadFile(cfg)
 	if err != nil {
 		t.Fatalf("config was not written at %s: %v", cfg, err)
@@ -2569,14 +2593,13 @@ func TestKeepaliveEnableRefusesToClobberAForeignFile(t *testing.T) {
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := filepath.Join(stateDir, "keepalive-8787.yaml")
+	cfg := filepath.Join(stateDir, "keepalive-"+keepalivePort+".yaml")
 	foreign := "# hand-written, not ours\npreset: cache\n"
 	if err := os.WriteFile(cfg, []byte(foreign), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, map[string]string{
-		"CLAUDE_PLUGIN_OPTION_PORT": "8787",
-		"XDG_STATE_HOME":            state,
+	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, "cache", map[string]string{
+		"XDG_STATE_HOME": state,
 	})
 	if code != 0 {
 		t.Fatalf("must not fail outright, just refuse: exit %d: %s", code, out)
@@ -2599,14 +2622,13 @@ func TestKeepaliveDisableOnlyRemovesOurOwnFile(t *testing.T) {
 		if err := os.MkdirAll(stateDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		cfg := filepath.Join(stateDir, "keepalive-8787.yaml")
+		cfg := filepath.Join(stateDir, "keepalive-"+keepalivePort+".yaml")
 		ours := "# context-guru: written by /context-guru:keepalive\npreset: cache\ncache:\n  keepalive: true\n"
 		if err := os.WriteFile(cfg, []byte(ours), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		out, code := runKeepaliveBlock(t, `rm -f "$CFG"`, map[string]string{
-			"CLAUDE_PLUGIN_OPTION_PORT": "8787",
-			"XDG_STATE_HOME":            state,
+		out, code := runKeepaliveBlock(t, `rm -f "$CFG"`, "", map[string]string{
+			"XDG_STATE_HOME": state,
 		})
 		if code != 0 {
 			t.Fatalf("exit %d: %s", code, out)
@@ -2622,14 +2644,13 @@ func TestKeepaliveDisableOnlyRemovesOurOwnFile(t *testing.T) {
 		if err := os.MkdirAll(stateDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		cfg := filepath.Join(stateDir, "keepalive-8787.yaml")
+		cfg := filepath.Join(stateDir, "keepalive-"+keepalivePort+".yaml")
 		foreign := "# hand-written\npreset: cache\n"
 		if err := os.WriteFile(cfg, []byte(foreign), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		out, code := runKeepaliveBlock(t, `rm -f "$CFG"`, map[string]string{
-			"CLAUDE_PLUGIN_OPTION_PORT": "8787",
-			"XDG_STATE_HOME":            state,
+		out, code := runKeepaliveBlock(t, `rm -f "$CFG"`, "", map[string]string{
+			"XDG_STATE_HOME": state,
 		})
 		if code != 0 {
 			t.Fatalf("exit %d: %s", code, out)
@@ -2717,6 +2738,57 @@ func TestStartProxyPicksUpAKeepaliveConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNoSkillBlockReadsAPluginOption is a guard, not a discovery: it is the same defect as
+// TestTheConfiguredPortCanActuallyBeHonoured, which was found once in install/status/uninstall, fixed
+// there, and then reintroduced wholesale by a later skill that was written from the older pattern.
+//
+// CLAUDE_PLUGIN_OPTION_* reaches HOOK environments only, never a Bash tool call, so any
+// `${CLAUDE_PLUGIN_OPTION_X:-default}` inside a skill's fenced bash block is a silent wrong answer —
+// it always yields the default, whatever the user configured, and reports success while doing it.
+// Skills must obtain these values from `settings.py config` and substitute them.
+//
+// Scoped to fenced bash blocks in skills/, on purpose: the hook SCRIPTS (start-proxy.sh,
+// check-proxy.sh) do run in a hook environment and read these variables legitimately, and the skills'
+// PROSE has to be able to name the variable in order to warn about it.
+func TestNoSkillBlockReadsAPluginOption(t *testing.T) {
+	entries, err := os.ReadDir("skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join("skills", e.Name(), "SKILL.md"))
+		if err != nil {
+			t.Errorf("reading %s: %v", e.Name(), err)
+			continue
+		}
+		in := false
+		for i, line := range strings.Split(string(b), "\n") {
+			switch {
+			case !in && strings.HasPrefix(line, "```bash"):
+				in = true
+			case in && strings.HasPrefix(line, "```"):
+				in = false
+			case in:
+				if strings.Contains(line, "CLAUDE_PLUGIN_OPTION_") {
+					t.Errorf("skills/%s/SKILL.md:%d reads a plugin option inside an executable block, "+
+						"which always expands to the default in a Bash tool call:\n\t%s\n"+
+						"Obtain it from `settings.py config` and substitute a <placeholder> instead.",
+						e.Name(), i+1, strings.TrimSpace(line))
+				}
+			}
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no skills were scanned, so this guard proved nothing")
+	}
+	t.Logf("scanned %d skills", checked)
 }
 
 // --- findings from Osher's end-to-end review of #160 ------------------------------------------
