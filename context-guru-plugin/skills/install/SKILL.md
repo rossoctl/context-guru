@@ -107,6 +107,11 @@ The values are on disk, so read them:
 
 - `option_port=…` / `option_preset=…` / `option_idle_exit=…` / `option_upstream=…` — use these
 - `source=(none)` — nothing configured; the `plugin.json` defaults apply (port 8787, preset `cache`)
+- **an option with no line of its own is unconfigured**, whatever `source=` says. Only keys the user
+  actually set are printed, so a partial config — the port set and the preset never touched, say —
+  reports a real `source=` and simply omits `option_preset=`. Take the `plugin.json` default for each
+  missing option individually; do not read one present option as meaning the rest are set, and do not
+  invent a value because `source=` was not `(none)`.
 
 Carry the port through **every** later step explicitly: `--port` when starting the proxy, and the same
 number in the URL you write. If it turns out to be anything other than 8787, say so in your summary —

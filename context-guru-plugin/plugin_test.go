@@ -2791,6 +2791,52 @@ func TestStartProxyPicksUpAKeepaliveConfig(t *testing.T) {
 	}
 }
 
+// TestEverySkillStatesThePerOptionFallback guards the wording, because the wording is the whole fix.
+//
+// `settings.py config` prints an `option_<name>=` line only for keys the user actually set, and reports
+// `source=(none)` only when the options object is missing or empty. All four skills that call it used to
+// document the fallback as keyed on `source=(none)` — so a PARTIAL config (a real `source=`, one option
+// absent) fell through every documented branch and left the model inventing a value at the exact point
+// those sections warn against it. For `uninstall` that builds a URL matching nothing, so the removal
+// silently finds nothing to remove.
+//
+// This asserts prose, which is unusual here and deliberate: the skills ARE the program on this path, and
+// the defect was a sentence rather than a statement. Kept to one required phrase rather than exact text,
+// so rewording stays cheap and deleting the rule does not.
+func TestEverySkillStatesThePerOptionFallback(t *testing.T) {
+	entries, err := os.ReadDir("skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join("skills", e.Name(), "SKILL.md"))
+		if err != nil {
+			t.Errorf("reading %s: %v", e.Name(), err)
+			continue
+		}
+		body := string(b)
+		if !strings.Contains(body, `settings.py" config`) {
+			continue // this skill does not read the options, so it has no fallback to state
+		}
+		checked++
+		if !strings.Contains(body, "is unconfigured") {
+			t.Errorf("skills/%s/SKILL.md reads `settings.py config` but never says that an option the "+
+				"output does not list is UNCONFIGURED. Without that, a partial config (a real `source=` "+
+				"with one option missing) matches no documented branch and the model invents a value.",
+				e.Name())
+		}
+	}
+	if checked < 4 {
+		t.Fatalf("only %d skills were found to read `settings.py config`; expected at least the four "+
+			"(install, status, uninstall, keepalive), so this guard proved less than it claims", checked)
+	}
+	t.Logf("checked %d skills that read the configured options", checked)
+}
+
 // fenceOpener matches a markdown fence and captures its info string. Leading whitespace is allowed
 // because an indented fence is still a fence — a block indented as a list continuation is executed
 // exactly like one at column zero.
@@ -2876,6 +2922,145 @@ func TestNoSkillBlockReadsAPluginOption(t *testing.T) {
 		t.Fatal("no skills were scanned, so this guard proved nothing")
 	}
 	t.Logf("scanned %d skills", checked)
+}
+
+// TestStartProxyReportsThePresetActuallyInEffect: the success note used to print $PRESET, which comes
+// from the plugin option, even though --config REPLACES the preset entirely. So with a keep-alive config
+// in play the proxy ran whatever `preset:` that file recorded while the note named the option — and the
+// two diverge the moment somebody changes the option after enabling keep-alive. Same species as the
+// defect this branch started from: a confident report of a value that is not in effect.
+//
+// The reading of the file happens on the SessionStart path, so every degenerate config must still START
+// the proxy, and must not produce a note that is wrong in the other direction. "Reported nothing" beats
+// "reported wrong", and neither beats "did not start" — hence the exit-0 and launched checks on every
+// row, not just the happy one.
+func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
+	const optionPreset = "codesmart" // what the PLUGIN OPTION says, and what the note must not parrot
+	for _, c := range []struct {
+		name      string
+		writeCfg  bool
+		cfg       string
+		wantIn    []string
+		wantNotIn []string
+	}{
+		{
+			name:     "the config's preset is reported, not the plugin option's",
+			writeCfg: true, cfg: "preset: house\ncache:\n  keepalive: true\n",
+			wantIn:    []string{"preset house"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			name:     "a quoted and padded value is still read",
+			writeCfg: true, cfg: "preset:   \"house\"  \ncache:\n  keepalive: true\n",
+			wantIn:    []string{"preset house"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			// Older files predate the always-state-the-preset rule. Report it as unstated: a config may
+			// set `pipeline:` directly, so claiming compaction is OFF would be wrong in the other
+			// direction — the failure mode this whole test exists to prevent.
+			name:     "no preset line: unstated, and never claimed to be off",
+			writeCfg: true, cfg: "cache:\n  keepalive: true\n",
+			wantIn:    []string{"unstated"},
+			wantNotIn: []string{"preset " + optionPreset, "compaction is OFF"},
+		},
+		{
+			name:     "a comment-only config claims nothing",
+			writeCfg: true, cfg: "# written by hand, nothing else\n",
+			wantIn:    []string{"unstated"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			name:     "an empty config claims nothing",
+			writeCfg: true, cfg: "",
+			wantIn:    []string{"unstated"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			name:     "malformed junk still starts the proxy and claims nothing",
+			writeCfg: true, cfg: "\x00\x01 not: [yaml: at all\n",
+			wantIn:    []string{"unstated"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			// With no config there is no --config, so the plugin option IS what is in effect and the
+			// note should say so. Without this row the test would pass on a note that never reports a
+			// preset at all.
+			name:      "no keepalive config: the plugin option is the truth and is reported",
+			writeCfg:  false,
+			wantIn:    []string{"preset " + optionPreset},
+			wantNotIn: []string{"unstated"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			requireTool(t, "bash")
+			dir := t.TempDir()
+			argvFile := filepath.Join(dir, "argv")
+			fake := filepath.Join(dir, "fake-proxy")
+			port := freePort(t)
+			py := requireTool(t, "python3")
+			script := "#!/usr/bin/env bash\n" +
+				"printf '%s\\n' \"$*\" > " + argvFile + "\n" +
+				"exec " + py + " -c '\n" +
+				"import http.server\n" +
+				"class H(http.server.BaseHTTPRequestHandler):\n" +
+				"    def do_GET(self):\n" +
+				"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+				"    def log_message(self, *a): pass\n" +
+				"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n'\n"
+			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			state := filepath.Join(dir, "state")
+			if c.writeCfg {
+				stateDir := filepath.Join(state, "context-guru")
+				if err := os.MkdirAll(stateDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := filepath.Join(stateDir, "keepalive-"+port+".yaml")
+				if err := os.WriteFile(cfgPath, []byte(c.cfg), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+			cmd.Env = append(os.Environ(),
+				"CLAUDE_PLUGIN_OPTION_PORT="+port,
+				"CLAUDE_PLUGIN_OPTION_PRESET="+optionPreset,
+				"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+				"CONTEXT_GURU_BIN="+fake,
+				"XDG_STATE_HOME="+state,
+				"TMPDIR="+dir)
+			out, err := cmd.CombinedOutput()
+			t.Cleanup(func() {
+				if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+					exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+				}
+			})
+			// Fails open: property 5 of this script is that it never fails a session, whatever the
+			// config on disk looks like.
+			if err != nil {
+				t.Fatalf("must never fail a session: %v\n%s", err, out)
+			}
+			if _, rerr := os.Stat(argvFile); rerr != nil {
+				t.Fatalf("the proxy was never launched, so this config stopped a session starting: %v\n%s",
+					rerr, out)
+			}
+			got := string(out)
+			t.Logf("note ->\n%s", got)
+			for _, w := range c.wantIn {
+				if !strings.Contains(got, w) {
+					t.Errorf("note does not contain %q:\n%s", w, got)
+				}
+			}
+			for _, w := range c.wantNotIn {
+				if strings.Contains(got, w) {
+					t.Errorf("note contains %q, which is not what is in effect:\n%s", w, got)
+				}
+			}
+		})
+	}
 }
 
 // --- findings from Osher's end-to-end review of #160 ------------------------------------------
@@ -2968,6 +3153,47 @@ func TestTheConfiguredPortCanActuallyBeHonoured(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(dir, "context-guru-proxy-"+port+".log")); err != nil {
 			t.Errorf("the log is not named after the configured port: %v", err)
+		}
+	})
+
+	// The state none of the four skills was written for: SOME options set, others not. cmd_config
+	// prints a line only for keys actually present and falls back to `source=(none)` only when the
+	// whole options object is missing, so a partial config reports a real `source=` and simply omits
+	// the rest. Every skill documented its fallback as keyed on `source=(none)`, which does not apply
+	// here — leaving the model to invent a value at the exact point those sections warn is dangerous.
+	t.Run("a partial config reports a real source and omits the options not set", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := filepath.Join(dir, "cfg")
+		if err := os.MkdirAll(cfg, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// port set, preset never touched — the common case, and the one that used to mislead.
+		writeJSON(t, filepath.Join(cfg, "settings.json"), map[string]any{
+			"pluginConfigs": map[string]any{
+				"context-guru@context-guru": map[string]any{
+					"options": map[string]any{"port": 4041},
+				},
+			},
+		})
+		py := requireTool(t, "python3")
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "config")
+		cmd.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+cfg)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("config failed: %v\n%s", err, out)
+		}
+		got := string(out)
+		t.Logf("config ->\n%s", got)
+		if !strings.Contains(got, "option_port=4041") {
+			t.Errorf("the configured port was not reported:\n%s", got)
+		}
+		if strings.Contains(got, "option_preset=") {
+			t.Errorf("an unconfigured option was reported as though it had a value:\n%s", got)
+		}
+		if strings.Contains(got, "source=(none)") {
+			t.Errorf("a partial config reported source=(none); the skills' per-option fallback rule "+
+				"exists precisely because this reports a real source:\n%s", got)
 		}
 	})
 
