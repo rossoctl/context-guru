@@ -213,6 +213,83 @@ decline every future one and destroy the evidence that could revise the estimate
 Read `prefix_rewrite_repaid` against `econ_ask_not_repaid` and `prefix_rewrite_not_repaid`: the two
 declines name **different** costs and are raised exclusively, so they sum rather than overlap.
 
+### When the trigger declines — and why it is usually *not* "no turns left"
+
+The condition is `need > have`:
+
+```
+have = estimated turns before the request fills the window
+need = turns of saving required to repay the one-time costs
+     = ceil( (11.5 × rewritten  +  askUSD / cache_read_rate)
+             ─────────────────────────────────────────────── )
+                        offered × approval
+```
+
+Which gives **three** routes to a decline, not one:
+
+| route | meaning |
+|---|---|
+| `have` falls | near the window ceiling, few turns left to collect on — this is the "no turns left" case |
+| numerator rises | the question got expensive (more uncached prefix to read), or the rewrite reaches deeper |
+| denominator falls | less mass on offer, or a measured approval rate saying the model will not take much of it |
+
+**In the iteration 025 pre-flight only the last two fired.** `have` actually *rose* over the run, 27 → 120,
+and the trigger declined anyway:
+
+| | first ask | at the first decline |
+|---|---|---|
+| `offered` | 11,011 | 6,014 (÷1.8) |
+| `approval` | 1.00 | 0.328 (÷3.1) |
+| `askUSD` | $0.0161 | $0.0498 (×3.1) |
+| **`need`** | **8** | **127** |
+| `have` | 27 | 120 |
+
+The numerator tripled as the ledger learned what an ask really costs; the denominator fell 5.6x as the
+inventory thinned and the approval rate came in. **17x on `need`, while the turns available got better.**
+So the decline meant *"the question now costs what it really costs, and what is left to ask about cannot
+repay it"* — not *"we are running out of runway"*.
+
+That is the shape to expect, because **the sweep eats its own lunch.** The first asks remove the large,
+obviously-spent outputs (13,122 and 1,676 tokens here); what remains is smaller, while the ask's price
+holds or climbs as the uncached prefix grows. The profitable sweeps happen and then the trigger shuts
+itself off, which is why there is no call cap — it is self-limiting.
+
+There is a second-order effect worth noticing in that table: `have` jumped from ~25 to ~120 immediately
+after those first two removals. Taking 15k tokens out shrank the request, so more turns fit before the
+window fills — **the sweep's own success bought it more runway**, which then part-funded the later asks.
+
+### Why there is no context-pressure floor
+
+A natural-looking economy is "do not even evaluate the trigger until the context is, say, 70% full — that
+saves paying for asks early in a conversation". **This component deliberately has no such floor, and on
+the measured workload it would disable it completely.** Every ask in the pre-flight fired between
+**13.9% and 29.3%** of the 64k window:
+
+| ask | pressure | tokens removed |
+|---|---|---|
+| 1 | 29.3% | **13,122** |
+| 2 | 13.9% | 1,676 |
+| 3–9 | 18.3% – 23.5% | 0 – 1,194 each |
+| 10 | 25.4% | **5,978** |
+
+A 70% floor blocks all ten, and the two asks doing most of the work — 19,100 of 26,528 tokens between
+them — are the *first* and the *last*, both under 30%.
+
+Two reasons this is structural rather than a quirk of one run:
+
+- **`T` is the whole benefit.** The saving is collected once per remaining turn, so waiting for pressure
+  waits for the moment `T` is smallest. Firing at 90% of the window means paying a rewrite to collect a
+  saving roughly once. The profitable moment to compact is **earlier** than the moment of maximum
+  pressure, which is the same finding stated at the top of this section.
+- **A pressure gate on a component that relieves pressure cannot fire once the component works.** The
+  request stays at 20% *because* outputs are being removed. Requiring high pressure first is requiring
+  the fever before the medicine that prevents it.
+
+The early-conversation economy people are reaching for already exists, and it is **free**:
+`min_inventory` declines before any model call, and it raised `sweep_inventory_below_min` **38 times**
+against 20 econ decisions in the same run. That is the filter doing the work a pressure floor was meant
+to do, without a rate card, a window fraction, or a paid call.
+
 ## When the cache read does not happen
 
 `PrefixUsage` is returned rather than merely recorded, so the component gates on it. A read of zero is
