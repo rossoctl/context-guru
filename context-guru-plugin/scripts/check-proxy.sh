@@ -89,9 +89,18 @@ PRESET="${CLAUDE_PLUGIN_OPTION_PRESET:-cache}"
 IDLE_EXIT="${CLAUDE_PLUGIN_OPTION_IDLE_EXIT:-24h}"
 UPSTREAM="${CLAUDE_PLUGIN_OPTION_UPSTREAM:-${ANTHROPIC_UPSTREAM:-}}"
 if [ -x "$STARTER" ]; then
-  RECOVER="\"${STARTER}\" --unrouted --port ${PORT} --preset ${PRESET} --idle-exit ${IDLE_EXIT}"
+  # Every interpolated value is SINGLE-quoted in the printed text, because this string is not run here
+  # — it is pasted into a human's shell, where it is re-parsed. An upstream is the realistic case:
+  # `http://gw.example:4000/v1?tenant=acme&mode=chain` unquoted makes the `&` background the command at
+  # that point, so the paste exits 0, starts a proxy, and chains it to a TRUNCATED upstream
+  # (…?tenant=acme) with nothing said. A space truncates the same way, and `;` would run the remainder.
+  #
+  # Single quotes rather than double: double quotes still expand `$` and backticks in the user's shell,
+  # so a value containing either would be silently rewritten at paste time. Single quotes suppress all
+  # of it, and none of these values can legitimately contain an apostrophe.
+  RECOVER="\"${STARTER}\" --unrouted --port '${PORT}' --preset '${PRESET}' --idle-exit '${IDLE_EXIT}'"
   if [ -n "$UPSTREAM" ]; then
-    RECOVER="${RECOVER} --upstream ${UPSTREAM}"
+    RECOVER="${RECOVER} --upstream '${UPSTREAM}'"
   fi
   HOW="To fix it now, in a terminal. This is the same script the hook runs, so it picks up your
 keep-alive config, the dashboard flags and the pidfile uninstall looks for, without you restating any

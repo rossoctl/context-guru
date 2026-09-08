@@ -2952,6 +2952,30 @@ func TestNoSkillBlockReadsAPluginOption(t *testing.T) {
 	t.Logf("scanned %d skills", checked)
 }
 
+// hasArgvFlag reports whether argv contains flag as a WHOLE token, and flagValue returns the token
+// after it. Substring matching is not good enough here and the difference is not academic:
+// `--dashboard` is a PREFIX of `--dashboard-db`, so `strings.Contains(argv, "--dashboard")` is
+// satisfied by the flag that follows it. Review deleted `--dashboard` from start-proxy.sh's launch
+// line and the assertion that exists to catch exactly that stayed green, with the dashboard off and
+// /dashboard/ returning 404.
+func hasArgvFlag(argv []string, flag string) bool {
+	for _, f := range argv {
+		if f == flag {
+			return true
+		}
+	}
+	return false
+}
+
+func argvFlagValue(argv []string, flag string) (string, bool) {
+	for i, f := range argv {
+		if f == flag && i+1 < len(argv) {
+			return argv[i+1], true
+		}
+	}
+	return "", false
+}
+
 // TestCheckProxyRecoveryCommandIsTheRealLaunchPath: the note printed when nothing answers on the port
 // used to carry a hand-rolled `context-guru-proxy --listen … --preset …`, and that duplicate had drifted
 // from what start-proxy.sh actually launches in four ways at once — it named the plugin option's preset
@@ -2965,122 +2989,146 @@ func TestNoSkillBlockReadsAPluginOption(t *testing.T) {
 // then asserts on the argv the proxy was launched with. A flag list can be repaired and drift again; what
 // has to hold is that the printed command produces the same proxy the hook would have started.
 func TestCheckProxyRecoveryCommandIsTheRealLaunchPath(t *testing.T) {
-	requireTool(t, "bash")
-	const preset, idle, upstream = "house", "90m", "http://gw.example:4000"
-
-	dir := t.TempDir()
-	state := filepath.Join(dir, "state")
-	stateDir := filepath.Join(state, "context-guru")
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	port := freePort(t)
-	// A keep-alive config exists, which is the case the old command silently discarded.
-	keepalive := filepath.Join(stateDir, "keepalive-"+port+".yaml")
-	if err := os.WriteFile(keepalive, []byte("preset: "+preset+"\ncache:\n  keepalive: true\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Step 1: get the note. Auto-recovery has to FAIL for it to print, so the binary does not exist.
-	root, err := filepath.Abs(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	env := append(os.Environ(),
-		"CLAUDE_PLUGIN_ROOT="+root,
-		"CLAUDE_PLUGIN_OPTION_PORT="+port,
-		"CLAUDE_PLUGIN_OPTION_PRESET="+preset,
-		"CLAUDE_PLUGIN_OPTION_IDLE_EXIT="+idle,
-		"CLAUDE_PLUGIN_OPTION_UPSTREAM="+upstream,
-		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
-		"CONTEXT_GURU_BIN="+filepath.Join(dir, "does-not-exist"),
-		"CONTEXT_GURU_HEALTH_BUDGET=1",
-		"XDG_STATE_HOME="+state,
-		"TMPDIR="+dir)
-	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "check-proxy.sh"))
-	cmd.Env = env
-	b, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("check-proxy.sh must never fail a prompt: %v\n%s", err, b)
-	}
-	note := string(b)
-	t.Logf("note ->\n%s", note)
-
-	// The duplicated command line must be gone, not merely corrected.
-	if strings.Contains(note, "context-guru-proxy --listen") {
-		t.Errorf("the note still prints a hand-rolled proxy command line; that duplicate is what drifted "+
-			"from the real launch path four times:\n%s", note)
-	}
-
-	// Step 2: pull the command out of the note and run it, this time with a proxy binary that works.
-	var recover string
-	for _, line := range strings.Split(note, "\n") {
-		if strings.Contains(line, "start-proxy.sh") && strings.Contains(line, "--unrouted") {
-			recover = strings.TrimSpace(line)
-			break
-		}
-	}
-	if recover == "" {
-		t.Fatalf("the note offers no runnable recovery command:\n%s", note)
-	}
-
-	argvFile := filepath.Join(dir, "argv")
-	fake := filepath.Join(dir, "fake-proxy")
-	py := requireTool(t, "python3")
-	script := "#!/usr/bin/env bash\n" +
-		"printf '%s\\n' \"$*\" > " + argvFile + "\n" +
-		"exec " + py + " -c '\n" +
-		"import http.server\n" +
-		"class H(http.server.BaseHTTPRequestHandler):\n" +
-		"    def do_GET(self):\n" +
-		"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
-		"    def log_message(self, *a): pass\n" +
-		"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n'\n"
-	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Deliberately NOT carrying the CLAUDE_PLUGIN_OPTION_* values: a terminal does not have them, which
-	// is the whole reason the printed command has to pass them as flags. Only CONTEXT_GURU_BIN and the
-	// state/tmp redirections are kept, because the test cannot install a real binary.
-	run := exec.Command("bash", "-c", recover)
-	run.Env = append(os.Environ(),
-		"CLAUDE_PLUGIN_OPTION_PORT=", "CLAUDE_PLUGIN_OPTION_PRESET=", "CLAUDE_PLUGIN_OPTION_IDLE_EXIT=",
-		"CLAUDE_PLUGIN_OPTION_UPSTREAM=", "ANTHROPIC_BASE_URL=", "ANTHROPIC_UPSTREAM=",
-		"CONTEXT_GURU_BIN="+fake,
-		"XDG_STATE_HOME="+state,
-		"TMPDIR="+dir)
-	out2, err := run.CombinedOutput()
-	t.Cleanup(func() {
-		if pb, e := os.ReadFile(filepath.Join(stateDir, "proxy-"+port+".pid")); e == nil {
-			exec.Command("kill", strings.TrimSpace(string(pb))).Run() //nolint:errcheck
-		}
-	})
-	if err != nil {
-		t.Fatalf("the printed recovery command failed: %v\n%s", err, out2)
-	}
-	argv, rerr := os.ReadFile(argvFile)
-	if rerr != nil {
-		t.Fatalf("the printed recovery command never launched a proxy: %v\nnote:\n%s\nrun:\n%s",
-			rerr, note, out2)
-	}
-	got := string(argv)
-	t.Logf("recovery command launched: %s", got)
-
-	for _, want := range []struct{ what, needle string }{
-		{"the configured port", "--listen 127.0.0.1:" + port},
-		{"the keep-alive config (omitting it turns off keep-alive the user is paying for)", "--config " + keepalive},
-		{"the configured upstream (omitting it bypasses the gateway holding their credential)", "--anthropic-upstream " + upstream},
-		{"the configured idle-exit (omitting it leaves a proxy that never exits)", "--idle-exit=" + idle},
-		{"the dashboard flags", "--dashboard"},
+	// The upstream cases matter because the printed command is re-parsed by the user's shell. An
+	// unquoted `&` backgrounds the command mid-way, so the paste succeeds, starts a proxy, and chains it
+	// to a TRUNCATED upstream with nothing said — a silent partial success, which is the same failure
+	// mode as everything else in this file.
+	for _, c := range []struct{ name, upstream string }{
+		{"a plain upstream", "http://gw.example:4000"},
+		{"an upstream whose query string contains &", "http://gw.example:4000/v1?tenant=acme&mode=chain"},
 	} {
-		if !strings.Contains(got, want.needle) {
-			t.Errorf("the recovered proxy is missing %s: wanted %q in\n\t%s", want.what, want.needle, got)
-		}
-	}
-	// The pidfile is what uninstall uses; a recovery proxy it cannot find is unstoppable.
-	if _, err := os.Stat(filepath.Join(stateDir, "proxy-"+port+".pid")); err != nil {
-		t.Errorf("no pidfile, so uninstall could not stop the recovered proxy: %v", err)
+		t.Run(c.name, func(t *testing.T) {
+			requireTool(t, "bash")
+			const preset, idle = "house", "90m"
+
+			dir := t.TempDir()
+			state := filepath.Join(dir, "state")
+			stateDir := filepath.Join(state, "context-guru")
+			if err := os.MkdirAll(stateDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			port := freePort(t)
+			// A keep-alive config exists, which is the case the old command silently discarded.
+			keepalive := filepath.Join(stateDir, "keepalive-"+port+".yaml")
+			if err := os.WriteFile(keepalive, []byte("preset: "+preset+"\ncache:\n  keepalive: true\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			// Step 1: get the note. Auto-recovery has to FAIL for it to print, so the binary is absent.
+			root, err := filepath.Abs(".")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "check-proxy.sh"))
+			cmd.Env = append(os.Environ(),
+				"CLAUDE_PLUGIN_ROOT="+root,
+				"CLAUDE_PLUGIN_OPTION_PORT="+port,
+				"CLAUDE_PLUGIN_OPTION_PRESET="+preset,
+				"CLAUDE_PLUGIN_OPTION_IDLE_EXIT="+idle,
+				"CLAUDE_PLUGIN_OPTION_UPSTREAM="+c.upstream,
+				"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+				"CONTEXT_GURU_BIN="+filepath.Join(dir, "does-not-exist"),
+				"CONTEXT_GURU_HEALTH_BUDGET=1",
+				"XDG_STATE_HOME="+state,
+				"TMPDIR="+dir)
+			b, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("check-proxy.sh must never fail a prompt: %v\n%s", err, b)
+			}
+			note := string(b)
+			t.Logf("note ->\n%s", note)
+
+			// The duplicated command line must be gone, not merely corrected.
+			if strings.Contains(note, "context-guru-proxy --listen") {
+				t.Errorf("the note still prints a hand-rolled proxy command line; that duplicate is what "+
+					"drifted from the real launch path four times:\n%s", note)
+			}
+
+			// Step 2: pull the command out of the note and run it, with a proxy binary that works.
+			var recover string
+			for _, line := range strings.Split(note, "\n") {
+				if strings.Contains(line, "start-proxy.sh") && strings.Contains(line, "--unrouted") {
+					recover = strings.TrimSpace(line)
+					break
+				}
+			}
+			if recover == "" {
+				t.Fatalf("the note offers no runnable recovery command:\n%s", note)
+			}
+
+			argvFile := filepath.Join(dir, "argv")
+			fake := filepath.Join(dir, "fake-proxy")
+			py := requireTool(t, "python3")
+			script := "#!/usr/bin/env bash\n" +
+				"printf '%s\\n' \"$*\" > " + argvFile + "\n" +
+				"exec " + py + " -c '\n" +
+				"import http.server\n" +
+				"class H(http.server.BaseHTTPRequestHandler):\n" +
+				"    def do_GET(self):\n" +
+				"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+				"    def log_message(self, *a): pass\n" +
+				"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n'\n"
+			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			// Deliberately NOT carrying the CLAUDE_PLUGIN_OPTION_* values: a terminal does not have them,
+			// which is the whole reason the printed command has to pass them as flags. Only CONTEXT_GURU_BIN
+			// and the state/tmp redirections are kept, because the test cannot install a real binary.
+			run := exec.Command("bash", "-c", recover)
+			run.Env = append(os.Environ(),
+				"CLAUDE_PLUGIN_OPTION_PORT=", "CLAUDE_PLUGIN_OPTION_PRESET=", "CLAUDE_PLUGIN_OPTION_IDLE_EXIT=",
+				"CLAUDE_PLUGIN_OPTION_UPSTREAM=", "ANTHROPIC_BASE_URL=", "ANTHROPIC_UPSTREAM=",
+				"CONTEXT_GURU_BIN="+fake,
+				"XDG_STATE_HOME="+state,
+				"TMPDIR="+dir)
+			out2, err := run.CombinedOutput()
+			t.Cleanup(func() {
+				if pb, e := os.ReadFile(filepath.Join(stateDir, "proxy-"+port+".pid")); e == nil {
+					exec.Command("kill", strings.TrimSpace(string(pb))).Run() //nolint:errcheck
+				}
+			})
+			if err != nil {
+				t.Fatalf("the printed recovery command failed: %v\n%s", err, out2)
+			}
+			raw, rerr := os.ReadFile(argvFile)
+			if rerr != nil {
+				t.Fatalf("the printed recovery command never launched a proxy: %v\nnote:\n%s\nrun:\n%s",
+					rerr, note, out2)
+			}
+			argv := strings.Fields(string(raw))
+			t.Logf("recovery command launched: %s", strings.TrimSpace(string(raw)))
+
+			// Flags carrying a value: assert the VALUE, so a truncated one fails.
+			for _, want := range []struct{ what, flag, value string }{
+				{"the configured port", "--listen", "127.0.0.1:" + port},
+				{"the keep-alive config (omitting it turns off keep-alive the user is paying for)",
+					"--config", keepalive},
+				{"the configured upstream (a truncated one bypasses the gateway holding their credential)",
+					"--anthropic-upstream", c.upstream},
+			} {
+				got, ok := argvFlagValue(argv, want.flag)
+				if !ok {
+					t.Errorf("the recovered proxy never got %s (%s missing): %v", want.what, want.flag, argv)
+					continue
+				}
+				if got != want.value {
+					t.Errorf("%s is wrong: %s = %q, want %q", want.what, want.flag, got, want.value)
+				}
+			}
+			// Whole-token flags. --dashboard MUST be matched as a token: it is a prefix of --dashboard-db,
+			// and a substring check here passed with the bare flag deleted and the dashboard off.
+			for _, flag := range []string{"--dashboard", "--idle-exit=" + idle} {
+				if !hasArgvFlag(argv, flag) {
+					t.Errorf("the recovered proxy is missing %s, so it is not the proxy the hook would have "+
+						"started: %v", flag, argv)
+				}
+			}
+			// The pidfile is what uninstall uses; a recovery proxy it cannot find is unstoppable.
+			if _, err := os.Stat(filepath.Join(stateDir, "proxy-"+port+".pid")); err != nil {
+				t.Errorf("no pidfile, so uninstall could not stop the recovered proxy: %v", err)
+			}
+		})
 	}
 }
 
