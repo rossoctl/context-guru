@@ -331,7 +331,13 @@ func (e *ExtractSweep) econPays(req *bschemas.BifrostChatRequest, c *components.
 	// cannot be recovered afterwards from `have` alone, and for a DECLINE there is no cg.sweep.ask row
 	// to read req_tokens off, so the only place it can be recorded is here. See issue on a pressure
 	// floor: the argument turns entirely on this distribution, and one workload's is not evidence.
-	slog.Debug("cg.sweep.econ", "decision", d.ok, "needTurns", d.need, "haveTurns", d.have,
+	// THROUGH THE SESSION-AWARE LOGGER, not bare slog. This row carried no `session`, while
+	// cg.sweep.ask beside it does, so econ decisions could not be grouped into a per-session
+	// trajectory — and a per-session trajectory is the only way to detect the CLIENT's compaction from
+	// our side: a clear shows up as the request SHRINKING between consecutive turns. Iteration 025
+	// could not answer "did LOCA's clearing ever fire" from 1,153 recorded decisions because of this
+	// one missing field.
+	logging.From(c.Ctx).Debug("cg.sweep.econ", "decision", d.ok, "needTurns", d.need, "haveTurns", d.have,
 		"candidates", len(cands), "offeredTokens", saved, "askUSD", d.askUSD,
 		"approval", d.approval, "estFromMeasurement", d.measured, "askDeclined", d.askDeclined,
 		"reqTokens", d.reqTokens, "ctxWindow", ctxWindowOf(c), "pressure", d.pressure)
