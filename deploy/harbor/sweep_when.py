@@ -68,11 +68,19 @@ def main(paths):
             g[1] += 1
         else:
             g[0] += 1
-    for lo, hi in BUCKETS:
-        b = f"{int(lo*100):>3}-{int(hi*100):<3}%"
+    # EVERY bucket that was counted, including the over-window overflow. Iterating BUCKETS alone
+    # silently dropped the ">=100%" row -- 142 of 248 declines in the first arm-seed -- so the printed
+    # column summed to less than half the decisions it claimed to describe, and the visible rows made
+    # high-pressure declines look like a minor tail. A table that does not add up to its own total is
+    # worse than no table.
+    shown = 0
+    for b in [f"{int(lo*100):>3}-{int(hi*100):<3}%" for lo, hi in BUCKETS] + ["  >=100%"]:
         if b in grid:
             f, dec = grid[b]
+            shown += f + dec
             print(f"  {b:<12} {f:>7} {dec:>9}")
+    if shown != len(rows):
+        print(f"  !! table sums to {shown} of {len(rows)} decisions -- a bucket is unaccounted for")
 
     fired = [d["pressure"] for k, d, _ in rows if k != "econ_decline"]
     if fired:
