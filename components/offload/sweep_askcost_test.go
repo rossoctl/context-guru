@@ -226,3 +226,28 @@ func originalPrefixRewritePays(req *bschemas.BifrostChatRequest, saved, shallowe
 	need = int(math.Ceil(cacheWriteX * float64(rewritten) / float64(saved)))
 	return need, turns, need <= turns
 }
+
+// PRESSURE IS RECORDED ON A DECLINE, which is the case that has no other record. A fired ask leaves a
+// cg.sweep.ask row carrying req_tokens; a declined one leaves nothing, so if the econ decision does not
+// carry pressure itself then "did it fire too early" is unanswerable for exactly the decisions that
+// did not fire.
+func TestEconDecisionCarriesWhereInTheWindowItWasTaken(t *testing.T) {
+	e := newSweep(t, "econ_trigger: true\n")
+	req := bigReq(24, 400)
+	total := schema.MessagesTokens(req)
+	c := econCtx(total * 4) // a quarter of the way through the window
+
+	cands := candsFor(req, 3, 5)
+	d := e.econPays(req, c, cands)
+	if d.reqTokens != total {
+		t.Errorf("reqTokens = %d, want %d", d.reqTokens, total)
+	}
+	if d.pressure < 0.2 || d.pressure > 0.3 {
+		t.Errorf("pressure = %v, want ~0.25 (%d tokens of a %d window)",
+			d.pressure, total, c.CtxWindow)
+	}
+	// And an unknown window must not produce a division artefact that reads as "empty context".
+	if _, p := sweepPressure(req, econCtx(0)); p != 0 {
+		t.Errorf("pressure = %v with no window; an unknown window must report 0, not a ratio", p)
+	}
+}

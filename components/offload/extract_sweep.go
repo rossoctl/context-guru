@@ -315,6 +315,7 @@ func (e *ExtractSweep) econPays(req *bschemas.BifrostChatRequest, c *components.
 		d.askUSD, d.approval, d.measured = e.asks.estimate(askCostPrior(req, c))
 	}
 	d.need, d.have, d.ok = prefixRewritePaysCharging(req, saved, shallowest, d.askUSD, d.approval, c)
+	d.reqTokens, d.pressure = sweepPressure(req, c)
 	// WHICH TERM REFUSED, established by re-running the test with the ask free rather than inferred
 	// from the shape of the numbers. "The rewrite does not repay" and "the question does not repay" are
 	// different findings about different costs, and one counter reporting both would be unreadable in
@@ -324,10 +325,41 @@ func (e *ExtractSweep) econPays(req *bschemas.BifrostChatRequest, c *components.
 			d.askDeclined = true
 		}
 	}
+	// PRESSURE ON EVERY DECISION, fire or decline. `have` already carries the horizon this trigger
+	// reasons about, but it is a projection -- and the open question about this component is whether it
+	// fires TOO EARLY, which is a question about where in the window the request actually sat. That
+	// cannot be recovered afterwards from `have` alone, and for a DECLINE there is no cg.sweep.ask row
+	// to read req_tokens off, so the only place it can be recorded is here. See issue on a pressure
+	// floor: the argument turns entirely on this distribution, and one workload's is not evidence.
 	slog.Debug("cg.sweep.econ", "decision", d.ok, "needTurns", d.need, "haveTurns", d.have,
 		"candidates", len(cands), "offeredTokens", saved, "askUSD", d.askUSD,
-		"approval", d.approval, "estFromMeasurement", d.measured, "askDeclined", d.askDeclined)
+		"approval", d.approval, "estFromMeasurement", d.measured, "askDeclined", d.askDeclined,
+		"reqTokens", d.reqTokens, "ctxWindow", ctxWindowOf(c), "pressure", d.pressure)
 	return d
+}
+
+// sweepPressure is where in the model's window this request sits when a trigger is decided: the
+// request's own token mass, and that mass as a fraction of the window.
+//
+// Reported rather than acted on. A floor on it is an open question (see the enhancement issue), and the
+// reason it is only a question is that the measurement exists for exactly one workload: on LOCA at 64k
+// every ask in the iteration 025 pre-flight fired between 0.139 and 0.293, so a 0.70 floor would have
+// declined all ten and removed nothing. A long coding session against a 1M window is the case that
+// argues the other way and nothing here has measured it. Logging first is what makes that comparison
+// possible at all.
+func sweepPressure(req *bschemas.BifrostChatRequest, c *components.Ctx) (reqTokens int, pressure float64) {
+	reqTokens = schema.MessagesTokens(req)
+	if w := ctxWindowOf(c); w > 0 {
+		pressure = float64(reqTokens) / float64(w)
+	}
+	return reqTokens, pressure
+}
+
+func ctxWindowOf(c *components.Ctx) int {
+	if c == nil {
+		return 0
+	}
+	return c.CtxWindow
 }
 
 // econDecision is the econ trigger's verdict with its terms exposed. A bool cannot say which cost
@@ -345,6 +377,10 @@ type econDecision struct {
 	askUSD   float64
 	approval float64
 	measured bool
+	// reqTokens and pressure are where in the window this decision was taken. Recorded, never acted
+	// on. See sweepPressure.
+	reqTokens int
+	pressure  float64
 }
 
 // selectAffordableDrops chooses WHICH of the model's votes to actually apply.
@@ -464,6 +500,15 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 		// removed output verbatim, undoing the removal AND breaking the byte-stability of the prefix
 		// the provider is caching.
 		rep.Gate("not_in_pre_expiry_window")
+	} else {
+		// TRIGGER ONE'S FIRINGS WERE INVISIBLE. Only its refusals were recorded, so a run could show
+		// `not_in_pre_expiry_window` 46 times and say nothing about the turns where the clock DID fire
+		// — and on this path the econ decision is skipped entirely, so cg.sweep.econ carries no row
+		// either. "Did the sweep fire too early" is unanswerable for a whole trigger without this.
+		rt, pressure := sweepPressure(req, c)
+		slog.Debug("cg.sweep.preexpiry", "reqTokens", rt, "ctxWindow", ctxWindowOf(c),
+			"pressure", pressure, "idleMs", c.IdleMs, "cacheTTLMs", c.CacheTTLMs,
+			"session", c.Session)
 	}
 
 	val := savedTokenValue(c)
