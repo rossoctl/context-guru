@@ -263,11 +263,27 @@ Two design changes are indicated and neither should be made on this evidence alo
    largely avoided that state **because** it was sweeping. Any future run at a declared band should
    measure how much of the run actually sat inside it before treating the band as the independent
    variable. The enforcement was never the model's: there is no API parameter that caps INPUT
-   (`max_tokens` bounds output only), so the band can only be held by the client, and
-   `--clear-trigger-tokens 64000` with `--clear-at-least-tokens 16000` did not hold it. LOCA's clear
-   reclaims tool-use blocks only, so mass in text and thinking cannot be recovered by it at all — a
-   lower trigger and a far larger `clear-at-least` are the levers, and why clearing cannot keep up is
-   worth diagnosing before the band is used again.
+   (`max_tokens` bounds output only), so the band can only be held by the client — and it was not.
+
+   **The clearing was configured correctly and still did not bind.** LOCA echoes
+   `Trigger tokens: 64000`, `Clear tool uses: ON`, `Clear at least tokens: 16000`. But the request-size
+   histogram shows no trace of a threshold at 64k: density RISES across it (60–64k holds 2.5% of
+   decisions, 64–68k holds 4.8%), 50% of requests sit above it, 11.2% land in 128–200k and 3.5% beyond
+   200k. A binding trigger produces a pile-up below it and a cliff above; there is neither.
+
+   **A coincidence read as a mechanism, recorded because it changed a recommendation.** The median
+   request is 63,687 against a 64,000 trigger — a 99.5% match — and that was first taken as proof the
+   clearing was holding the median, which implied a 128k band would double transcript sizes and roughly
+   double cost. The histogram refutes it. Transcript size is driven by the tasks, not by the declared
+   window, so **raising the declared band changes the fiction and not the workload**: at 128k the valid
+   region goes from 50% to 85% of decisions at approximately unchanged cost.
+
+   Candidate cause, unverified: **`Clear thinking: False`**. Thinking blocks are never reclaimed, and on
+   long agentic tasks with adaptive thinking they accumulate — once that mass alone exceeds the trigger,
+   clearing tool uses cannot bring a transcript back under it. Testable by flipping the flag.
+
+   And the rig emits **no per-event clear logging**, only the configuration echo, so whether a clear ever
+   fired is not recoverable from this run. That gap should be closed before the band is trusted again.
 3. **Four of five seeds pair against a six-day-old baseline.** The drift check licensed it but is itself
    underpowered on accuracy (it needs ≥6 tasks moving one way to fail), so "no large drift detected" is
    the strongest available claim.
