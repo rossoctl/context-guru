@@ -227,6 +227,7 @@ nav:
       - "LOCA — iter023": experiments/loca/iter023/results.md
       - "LOCA — iter024 (preregistration)": experiments/loca/iter024/PREREGISTRATION.md
       - "LOCA — iter024": experiments/loca/iter024/results.md
+      - "LOCA — iter025 (preregistration)": experiments/loca/iter025/PREREGISTRATION.md
   - Integrations:
       - Host adapters: integrations.md
       - bifrost plugin: how-to/bifrost-plugin.md
