@@ -36,9 +36,10 @@ was present and effectively inert.
 fires only when the decline holds *with a free ask and no discount* — i.e. decisions iteration 024's
 arithmetic would also have refused. There are **751** of those, and iteration 024 recorded 25.
 
-The pressure distribution says where they are. **568 of the 1,119 declines (51%) were taken at or beyond
-100% of the declared window**, where `estimateTurnsRemaining` returns 0 by construction and nothing can
-repay anything.
+The pressure distribution says where they are. **571 of the 1,119 declines were taken at or beyond 100%
+of the declared window**, where `estimateTurnsRemaining` returns 0 by construction and nothing can repay
+anything. (An earlier draft said 568; that was the count beyond 101%, the bucket table's boundary.)
+Counted by the term that actually blocks them, **603 of the 1,119 declines — 54% — had `haveTurns == 0`.**
 
 ```
 ask charge declines 368 asks
@@ -156,14 +157,28 @@ Two design changes are indicated and neither should be made on this evidence alo
 ## Limits
 
 1. **15 clusters.** Every conclusion is at n=15 tasks; the seeds add precision within a task, not clusters.
-2. **Four of five seeds pair against a six-day-old baseline.** The drift check licensed it but is itself
+2. **THE 64k BAND WAS NOT HELD, and this is the largest limitation here.** `ctxWindow` is 64,000 —
+   declared to the proxy through the model-info file — but it is a measurement device, not a limit: the
+   real model is sonnet-5 at 1M, so nothing rejects a larger request, and LOCA's clearing is client-side,
+   triggered on its own accounting *between* turns, clearing *at least* 16k rather than resetting.
+   Requests therefore ran far past the band: median 88,378 tokens at the over-window decisions, p90
+   194,259, **maximum 612,290 — 9.6x the declared window.**
+
+   The consequence is not cosmetic. `estimateTurnsRemaining` returns 0 whenever `reqTokens >= window`, so
+   in 603 of 1,119 declines the econ trigger was being consulted in a regime where it is *structurally
+   incapable of authorising anything*, whatever its terms. Section 2 describes the gate locking itself
+   out; the fuller statement is that the rig presents it with a state it cannot act in, and iteration 024
+   largely avoided that state **because** it was sweeping. Any future run at a declared band should
+   measure how much of the run actually sat inside it before treating the band as the independent
+   variable.
+3. **Four of five seeds pair against a six-day-old baseline.** The drift check licensed it but is itself
    underpowered on accuracy (it needs ≥6 tasks moving one way to fail), so "no large drift detected" is
    the strongest available claim.
-3. **Seed 2's baseline errored on one task** (`NhlB2bAnalysisS2LEnv`); that pair is dropped as unpairable,
+4. **Seed 2's baseline errored on one task** (`NhlB2bAnalysisS2LEnv`); that pair is dropped as unpairable,
    not scored 0. Counting it as 0 credited arm B with a win it did not earn and inflated the pooled
    discordant count by one before it was caught.
-4. **Latency and the ≥100%-pressure finding rest on 34 firings and 1,153 decisions respectively** — the
+5. **Latency and the ≥100%-pressure finding rest on 34 firings and 1,153 decisions respectively** — the
    second is well-powered, the first is not.
-5. **Arm configs are not shippable defaults** (`min_inventory: 3`, sweep `min_tokens: 100`), held identical
+6. **Arm configs are not shippable defaults** (`min_inventory: 3`, sweep `min_tokens: 100`), held identical
    across arms so they cannot bias B−A.
-6. **`/metrics` remains aggregate** (#180); nothing here cross-checks against a Prometheus series.
+7. **`/metrics` remains aggregate** (#180); nothing here cross-checks against a Prometheus series.
