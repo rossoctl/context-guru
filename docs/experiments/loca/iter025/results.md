@@ -1,4 +1,4 @@
-# Iteration 025 — results: the reward result does not replicate through a gate that can decline
+# Iteration 025 — results: the substantive endpoints are uninterpretable, and the rig is why
 
 **Pre-registered** in `PREREGISTRATION.md` before launch, with Amendment 1 recorded before the run and
 the drift check's target frozen before its pass. Every number below was read after that commit.
@@ -12,8 +12,9 @@ the drift check's target frozen before its pass. Every number below was read aft
 | harm gate (>25% blocks any positive claim) | clears | **BLOCKED** |
 | sweep firings, arm B | 151 per arm-seed, **85.7%** of decisions | **34 across five seeds, 2.9%** |
 
-**The registered reading is unambiguous: blocked, no positive claim.** Not "the mechanism does not
-work" — the mechanism barely ran.
+**The registered reading is blocked, no positive claim — but see section 0 before reading any of it as a
+test of the mechanism, because it is not one.** The mechanism barely ran, and it was prevented from
+running in exactly the conditions it was designed for.
 
 ## 0. CORRECTION, recorded after the run: half these decisions were taken in a state no gate could act in
 
@@ -46,12 +47,41 @@ cannot meaningfully exceed it, and the function is sound; in the *simulated* 64k
 an impossible state and 0 is a defensible answer to an impossible input. The defect is that **the rig
 produced impossible states and this iteration then measured the gate inside them** — see limit 2.
 
-**What this does and does not change.** The reward null (section 1's table, p = 0.5078) stands: it measures
-what actually ran. The admissibility checks stand. **The claim "the charge suppresses the mechanism ~30x"
-does not** — roughly half of the suppression is a rig artifact, and the honest statement is that the charge
-suppresses to 6.5% in the region where the arithmetic is meaningful. Section 5's pressure finding needs the
-same qualifier, though it partly survives: within the valid region there are still 486 declines at a median
-pressure of 0.48 against firings reaching only 0.45.
+### The reward comparison is uninterpretable too, and that is the bigger casualty
+
+A first draft of this correction said the reward null "stands, because it measures what actually ran".
+@davidamid pushed further and is right: **a comparison in which the treatment did not operate cannot test
+the treatment.** Arm B fired 34 times in five seeds, never on a request above 28,647 tokens, and was
+structurally barred from acting on the deep, large transcripts the component exists for. "6 better, 3
+worse" therefore measures *arm B as it behaved*, which is close to a tautology — a component that scarcely
+acts produces scarcely any effect — and it says nothing about whether the mechanism helps when it runs.
+
+**WITHDRAWN: "the reward result does not replicate."** That phrasing implies iterations 024 and 025 were
+comparable tests of one mechanism. They were not: iteration 024 swept transcripts up to 348,869 tokens,
+96 of its 589 asks above the band, while this iteration swept none above 28,647. The single condition that
+differs most is the one where removal has the most to remove.
+
+The pattern that hypothesis predicts is present, and is **not** offered as evidence for it:
+
+| | mean delta | worse |
+|---|---|---|
+| 5 largest tasks (641k–1.47M baseline input tokens) | **−0.050** | 2 of 5 |
+| 5 smallest tasks (57k–247k) | **+0.200** | **0 of 5** |
+
+Directionally what "it helped where it could fire" would look like. But each regression is one or two
+task-seed flips (`NhlB2bAnalysis` 2/4 against 1/4; `FilterLowSellingProducts` 1/5 against 0/5) on a
+benchmark this repo has measured at 0.200 and 0.800 on identical config. Consistent with the hypothesis;
+no support for it at this n.
+
+**What this iteration does license.** The gate machinery works as built — it charges, measures, converges
+to within 3% of an independently measured ask cost, declines, and attributes declines to the right term.
+The admissibility instrumentation works: `cost_source: component` throughout, `stash_refused: 0`, zero HTML
+400s. And it found that **the rig does not hold its own band**, which turns `estimateTurnsRemaining` into a
+fiction above it. That last is the most valuable thing here and it was not what the run was bought for.
+
+**What it does not license:** any statement about the merged sweep's effect on reward, any statement about
+the size of the ask charge's suppression beyond "6.5% in the valid region", and any cost conclusion
+generalised past the unrepresentative sample of asks that survived (small transcripts only).
 
 ## 1. The gate declined almost everything (see the correction above before reading these rates)
 
@@ -185,9 +215,9 @@ anyway"**, and that the gate needs re-specifying before it is used as a decision
 
 ## 7. What this licenses, and what it does not
 
-**It does not show the merged sweep is worthless.** It shows that *with the ask charged as currently
-calibrated*, the component almost never acts, and a component that does not act produces neither benefit
-nor harm — 6 tasks better and 3 worse is what a coin looks like.
+**It does not show the merged sweep is worthless, and it does not show the reverse.** It shows that in
+this rig the component was prevented from acting where it matters, so no reward statement is available in
+either direction. Fix the rig before spending anything on the mechanism's behalf.
 
 The preregistration named the next step for exactly this outcome: **run the `econ_ignore_ask_cost` arm**
 (~$260, no rebuild — the knob ships) to separate *"the charge suppressed a real benefit"* from *"there was
