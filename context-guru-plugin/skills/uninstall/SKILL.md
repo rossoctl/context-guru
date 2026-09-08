@@ -24,7 +24,11 @@ default would build the wrong URL and the removal would find nothing to remove:
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" config
 ```
 
-Use its `option_port=`, or 8787 if it reports `source=(none)`. Then:
+Use its `option_port=`. **Read the fallback per option, not from `source=`:** that command prints an
+`option_<name>=` line only for keys the user actually configured, and reports `source=(none)` only when
+nothing at all is set — so somebody with a partial config gets a real `source=` and no `option_port=`
+line. Any option the output does not list is unconfigured; use the `plugin.json` default for that one
+(port 8787), whatever `source=` says. Then:
 
 ```bash
 PORT="<port>"

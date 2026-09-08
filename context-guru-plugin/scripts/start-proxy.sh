@@ -263,8 +263,39 @@ fi
 # keep-alive was turned on, the exact opposite of what enabling it is supposed to do.
 CONFIG_ARGS=()
 KEEPALIVE_CFG="${STATE}/keepalive-${PORT}.yaml"
+
+# PRESET_NOTE is what the success note reports, and it is NOT $PRESET once --config is passed. Because
+# --config replaces the preset entirely (see above), the proxy runs whatever `preset:` the keep-alive
+# file recorded, while $PRESET still holds the plugin option. Reporting the option named a value that
+# was not in effect, and the two diverge the moment somebody changes the option after enabling
+# keep-alive — a confident report of something untrue, which is the failure this plugin exists to avoid.
+PRESET_NOTE="$PRESET"
 if [ -f "$KEEPALIVE_CFG" ]; then
   CONFIG_ARGS=(--config "$KEEPALIVE_CFG")
+  # Fails OPEN, and reports nothing rather than something wrong. This runs on the SessionStart path, so
+  # an unreadable, empty, comment-only or preset-less file must still start the proxy.
+  #
+  # What keeps that true is the ABSENCE of `set -e` combined with the PRESENCE of `set -uo pipefail`
+  # (line 28) — and it is pipefail that makes the combination load-bearing, not -e alone. With pipefail,
+  # a failing `sed` (a config that exists but cannot be read) becomes this assignment's exit status; add
+  # -e and the script dies with status 2 BEFORE the proxy is launched, which is the failure this file's
+  # own header calls the biggest risk in the feature. Do not add -e here without reading
+  # TestStartProxyReportsThePresetActuallyInEffect's unreadable-config row, which exists to catch it.
+  #
+  # Anchored at column zero: `preset:` is a top-level key, and a nested one (e.g. components.offload.
+  # preset) in a hand-edited file both LOADS and would win a first-match-any-indentation search, so the
+  # note would name the inner value while the proxy ran the outer one. Inline comments are stripped for
+  # the same reason — `preset: cache # why` used to leak the comment into the note.
+  cfg_preset=$(sed -n 's/^preset:[[:space:]]*//p' "$KEEPALIVE_CFG" 2>/dev/null \
+                 | head -1 | sed 's/[[:space:]]*#.*$//' | tr -d "\"'" | sed 's/[[:space:]]*$//')
+  if [ -n "$cfg_preset" ]; then
+    PRESET_NOTE="${cfg_preset} (from keepalive-${PORT}.yaml)"
+  else
+    # No preset: line. Do NOT say "compaction is off" — a config may set `pipeline:` directly without
+    # naming a preset, and files written before the always-state-the-preset rule exist in the wild. So
+    # report only what is known: the config decides, and it did not name one.
+    PRESET_NOTE="unstated in keepalive-${PORT}.yaml"
+  fi
 fi
 
 PRESET="$PRESET" \
@@ -307,11 +338,11 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # and overwrites the pidfile with a pid that immediately exits), not on this one.
   if curl -fsS --max-time 1 "$HEALTH" >/dev/null 2>&1; then
       if [ -n "$UPSTREAM" ]; then
-      note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET}, idle-exit ${IDLE_EXIT}), chained behind ${UPSTREAM}."
+      note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET_NOTE}, idle-exit ${IDLE_EXIT}), chained behind ${UPSTREAM}."
       note "dashboard: http://127.0.0.1:${PORT}/dashboard/"
       exit 0
     fi
-    note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET}, idle-exit ${IDLE_EXIT})."
+    note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET_NOTE}, idle-exit ${IDLE_EXIT})."
     note "dashboard: http://127.0.0.1:${PORT}/dashboard/"
     exit 0
   fi

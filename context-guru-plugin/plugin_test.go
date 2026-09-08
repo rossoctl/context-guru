@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -2511,14 +2512,61 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 
 // --- the keep-alive opt-in toggle -----------------------------------------------------------
 
+// keepalivePort is deliberately not 8787. These blocks name the config file after the port, so a
+// regression to `${CLAUDE_PLUGIN_OPTION_PORT:-8787}` writes a filename nothing reads — and at a
+// fixture port of 8787 that regression passes by coincidence, which is exactly how it shipped.
+const keepalivePort = "4041"
+
+// emptyPreset asks runKeepaliveBlock to substitute an EMPTY preset value, which is not the same as
+// passing "" — that means "this block has no <preset> line at all". Only the first models a model that
+// looked for `option_preset=` and found nothing to use.
+const emptyPreset = "\x00"
+
+// unfilledPlaceholder matches a `<lowercase>` placeholder left in an extracted block. Lower-case only
+// on purpose, so a heredoc delimiter (`<<EOF`) is not mistaken for one.
+var unfilledPlaceholder = regexp.MustCompile(`<[a-z][a-z_]*>`)
+
+// fillSkillPlaceholder substitutes one placeholder in an extracted skill block, failing loudly when
+// it is absent: an unsubstituted `PORT="<port>"` makes every path below look inert for the wrong
+// reason, which is what happened when the placeholder was introduced in the uninstall skill.
+func fillSkillPlaceholder(t *testing.T, skill, block, placeholder, value string) string {
+	t.Helper()
+	if !strings.Contains(block, placeholder) {
+		t.Fatalf("the %s block no longer carries %s; if that value is obtained differently now, this "+
+			"test needs to follow suit rather than execute a stale template:\n%s", skill, placeholder, block)
+	}
+	return strings.Replace(block, placeholder, value, 1)
+}
+
 // runKeepaliveBlock executes one bash block from skills/keepalive/SKILL.md with a controlled
 // environment, the same way runCheck/skillBlock drive the other skills' destructive snippets.
-func runKeepaliveBlock(t *testing.T, needle string, env map[string]string) (out string, code int) {
+//
+// The blocks are TEMPLATES: the skill tells the model to discover the port and preset with
+// `settings.py config` and substitute them, because CLAUDE_PLUGIN_OPTION_* never reaches a Bash tool
+// call. So fill the placeholders the way the model is instructed to, and run with those variables
+// EMPTY — that is the environment the blocks actually execute in.
+func runKeepaliveBlock(t *testing.T, needle, preset string, env map[string]string) (out string, code int) {
 	t.Helper()
 	requireTool(t, "bash")
 	block := skillBlock(t, "keepalive", needle)
+	block = fillSkillPlaceholder(t, "keepalive", block, `PORT="<port>"`, `PORT="`+keepalivePort+`"`)
+	if preset != "" {
+		v := preset
+		if v == emptyPreset {
+			v = ""
+		}
+		block = fillSkillPlaceholder(t, "keepalive", block, `PRESET="<preset>"`, `PRESET="`+v+`"`)
+	}
+	// Nothing below may execute a template. The per-call substitutions above are opt-in, so this is
+	// the check that does not have to be remembered: the day a block gains a placeholder no call site
+	// fills, it fails here instead of running literally and asserting on nothing.
+	if m := unfilledPlaceholder.FindString(block); m != "" {
+		t.Fatalf("the keepalive %q block still carries the placeholder %s after substitution; it would "+
+			"execute as a literal template and every assertion below would pass on nothing:\n%s",
+			needle, m, block)
+	}
 	cmd := exec.Command("bash", "-c", block)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), "CLAUDE_PLUGIN_OPTION_PORT=", "CLAUDE_PLUGIN_OPTION_PRESET=")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -2539,15 +2587,13 @@ func runKeepaliveBlock(t *testing.T, needle string, env map[string]string) (out 
 // keep-alive turned on — the opposite of what enabling it is supposed to do.
 func TestKeepaliveEnableWritesAPresetPreservingConfig(t *testing.T) {
 	state := t.TempDir()
-	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, map[string]string{
-		"CLAUDE_PLUGIN_OPTION_PORT":   "8787",
-		"CLAUDE_PLUGIN_OPTION_PRESET": "codesmart",
-		"XDG_STATE_HOME":              state,
+	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, "codesmart", map[string]string{
+		"XDG_STATE_HOME": state,
 	})
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	cfg := filepath.Join(state, "context-guru", "keepalive-8787.yaml")
+	cfg := filepath.Join(state, "context-guru", "keepalive-"+keepalivePort+".yaml")
 	b, err := os.ReadFile(cfg)
 	if err != nil {
 		t.Fatalf("config was not written at %s: %v", cfg, err)
@@ -2569,14 +2615,13 @@ func TestKeepaliveEnableRefusesToClobberAForeignFile(t *testing.T) {
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := filepath.Join(stateDir, "keepalive-8787.yaml")
+	cfg := filepath.Join(stateDir, "keepalive-"+keepalivePort+".yaml")
 	foreign := "# hand-written, not ours\npreset: cache\n"
 	if err := os.WriteFile(cfg, []byte(foreign), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, map[string]string{
-		"CLAUDE_PLUGIN_OPTION_PORT": "8787",
-		"XDG_STATE_HOME":            state,
+	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, "cache", map[string]string{
+		"XDG_STATE_HOME": state,
 	})
 	if code != 0 {
 		t.Fatalf("must not fail outright, just refuse: exit %d: %s", code, out)
@@ -2599,14 +2644,13 @@ func TestKeepaliveDisableOnlyRemovesOurOwnFile(t *testing.T) {
 		if err := os.MkdirAll(stateDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		cfg := filepath.Join(stateDir, "keepalive-8787.yaml")
+		cfg := filepath.Join(stateDir, "keepalive-"+keepalivePort+".yaml")
 		ours := "# context-guru: written by /context-guru:keepalive\npreset: cache\ncache:\n  keepalive: true\n"
 		if err := os.WriteFile(cfg, []byte(ours), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		out, code := runKeepaliveBlock(t, `rm -f "$CFG"`, map[string]string{
-			"CLAUDE_PLUGIN_OPTION_PORT": "8787",
-			"XDG_STATE_HOME":            state,
+		out, code := runKeepaliveBlock(t, `rm -f "$CFG"`, "", map[string]string{
+			"XDG_STATE_HOME": state,
 		})
 		if code != 0 {
 			t.Fatalf("exit %d: %s", code, out)
@@ -2622,14 +2666,13 @@ func TestKeepaliveDisableOnlyRemovesOurOwnFile(t *testing.T) {
 		if err := os.MkdirAll(stateDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		cfg := filepath.Join(stateDir, "keepalive-8787.yaml")
+		cfg := filepath.Join(stateDir, "keepalive-"+keepalivePort+".yaml")
 		foreign := "# hand-written\npreset: cache\n"
 		if err := os.WriteFile(cfg, []byte(foreign), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		out, code := runKeepaliveBlock(t, `rm -f "$CFG"`, map[string]string{
-			"CLAUDE_PLUGIN_OPTION_PORT": "8787",
-			"XDG_STATE_HOME":            state,
+		out, code := runKeepaliveBlock(t, `rm -f "$CFG"`, "", map[string]string{
+			"XDG_STATE_HOME": state,
 		})
 		if code != 0 {
 			t.Fatalf("exit %d: %s", code, out)
@@ -2639,6 +2682,35 @@ func TestKeepaliveDisableOnlyRemovesOurOwnFile(t *testing.T) {
 			t.Errorf("a config this skill never wrote was removed: %v, %q, output: %s", err, got, out)
 		}
 	})
+}
+
+// TestKeepaliveEnableRefusesAnEmptyPreset closes the hole the placeholder flow itself opens.
+//
+// `settings.py config` prints `option_preset=` only when that key is actually configured, so a user who
+// set the port and never touched the preset leaves the model with nothing to substitute. Writing the
+// resulting `preset:` line empty is not an error anywhere downstream: applyPreset returns early on
+// `Preset == ""` (config/config.go), so Load reports success, no pipeline is filled, and compaction is
+// entirely OFF while the keep-alive keeps spending the caller's credential on idle pings.
+//
+// That is strictly worse than the defaulted-`cache` bug this branch fixes, since `cache` at least ran
+// the split. The block already refuses to write over a file that is not its own; an unresolved preset
+// earns the same conservatism, and must leave no file behind.
+func TestKeepaliveEnableRefusesAnEmptyPreset(t *testing.T) {
+	state := t.TempDir()
+	out, code := runKeepaliveBlock(t, `cat > "$CFG" <<EOF`, emptyPreset, map[string]string{
+		"XDG_STATE_HOME": state,
+	})
+	if code == 0 {
+		t.Errorf("an unresolved preset was accepted; that writes `preset:` empty, which turns "+
+			"compaction off while keep-alive keeps paying for pings:\n%s", out)
+	}
+	if !strings.Contains(out, "REFUSING") {
+		t.Errorf("the refusal was not reported as such:\n%s", out)
+	}
+	cfg := filepath.Join(state, "context-guru", "keepalive-"+keepalivePort+".yaml")
+	if _, err := os.Stat(cfg); err == nil {
+		t.Errorf("a config was written anyway at %s, so the proxy would start with compaction off", cfg)
+	}
 }
 
 // TestStartProxyPicksUpAKeepaliveConfig proves the wiring between the opt-in toggle above and the
@@ -2714,6 +2786,331 @@ func TestStartProxyPicksUpAKeepaliveConfig(t *testing.T) {
 			}
 			if !c.wantConfig && hasAnyConfig {
 				t.Errorf("no keepalive config was written, but --config appeared anyway: %q", argv)
+			}
+		})
+	}
+}
+
+// TestEverySkillStatesThePerOptionFallback guards the wording, because the wording is the whole fix.
+//
+// `settings.py config` prints an `option_<name>=` line only for keys the user actually set, and reports
+// `source=(none)` only when the options object is missing or empty. All four skills that call it used to
+// document the fallback as keyed on `source=(none)` — so a PARTIAL config (a real `source=`, one option
+// absent) fell through every documented branch and left the model inventing a value at the exact point
+// those sections warn against it. For `uninstall` that builds a URL matching nothing, so the removal
+// silently finds nothing to remove.
+//
+// This asserts prose, which is unusual here and deliberate: the skills ARE the program on this path, and
+// the defect was a sentence rather than a statement. Kept to one required phrase rather than exact text,
+// so rewording stays cheap and deleting the rule does not.
+func TestEverySkillStatesThePerOptionFallback(t *testing.T) {
+	entries, err := os.ReadDir("skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join("skills", e.Name(), "SKILL.md"))
+		if err != nil {
+			t.Errorf("reading %s: %v", e.Name(), err)
+			continue
+		}
+		body := string(b)
+		if !strings.Contains(body, `settings.py" config`) {
+			continue // this skill does not read the options, so it has no fallback to state
+		}
+		checked++
+		// The positive alone is the reassurance I suspected it of being: review demonstrated that
+		// restoring the old sentence while KEEPING the new rule passes. So assert the absence of the old
+		// instruction shape too.
+		//
+		// The needle is the CONDITION, "if it reports `source=(none)`", not "or 8787 if it reports". The
+		// narrower form was coupled to one phrasing and this repo had two: keepalive's own sentence said
+		// "or 8787 and `cache` if it reports …", which slipped straight through — the same failure as
+		// keying the fence scan on "```bash". Verified against both real phrasings (origin/main's status
+		// and e0ea8a9's keepalive: 1 each) and all five current skills (0).
+		//
+		// It cannot be `source=(none)` alone: the corrected prose says "reports `source=(none)` only
+		// when …", which is an explanation rather than a condition, so the token appears in every FIXED
+		// file. "if it reports" is what makes it an instruction to act on.
+		if strings.Contains(body, "if it reports `source=(none)`") {
+			t.Errorf("skills/%s/SKILL.md still tells the model to fall back \"if it reports "+
+				"`source=(none)`\", which is the condition this per-option rule replaces. A skill can "+
+				"state the rule and contradict it two lines later; that is what this catches.", e.Name())
+		}
+		if !strings.Contains(body, "is unconfigured") {
+			t.Errorf("skills/%s/SKILL.md reads `settings.py config` but never says that an option the "+
+				"output does not list is UNCONFIGURED. Without that, a partial config (a real `source=` "+
+				"with one option missing) matches no documented branch and the model invents a value.",
+				e.Name())
+		}
+	}
+	if checked < 4 {
+		t.Fatalf("only %d skills were found to read `settings.py config`; expected at least the four "+
+			"(install, status, uninstall, keepalive), so this guard proved less than it claims", checked)
+	}
+	t.Logf("checked %d skills that read the configured options", checked)
+}
+
+// fenceOpener matches a markdown fence and captures its info string. Leading whitespace is allowed
+// because an indented fence is still a fence — a block indented as a list continuation is executed
+// exactly like one at column zero.
+var fenceOpener = regexp.MustCompile("^[ \t]*```+[ \t]*([A-Za-z0-9_.+-]*)")
+
+// isShellFence reports whether a fence's info string means "this is shell the model will run". The
+// label is not a semantic boundary: ```sh and a bare ``` are executed the same as ```bash, so keying
+// a guard on the literal "```bash" leaves the same defect reachable one keystroke away.
+func isShellFence(info string) bool {
+	switch strings.ToLower(info) {
+	case "", "bash", "sh", "shell", "zsh", "console", "shell-session":
+		return true
+	}
+	return false
+}
+
+// TestNoSkillBlockReadsAPluginOption is a guard, not a discovery: it is the same defect as
+// TestTheConfiguredPortCanActuallyBeHonoured, which was found once in install/status/uninstall, fixed
+// there, and then reintroduced wholesale by a later skill that was written from the older pattern.
+//
+// CLAUDE_PLUGIN_OPTION_* reaches HOOK environments only, never a Bash tool call, so any
+// `${CLAUDE_PLUGIN_OPTION_X:-default}` inside a skill's fenced bash block is a silent wrong answer —
+// it always yields the default, whatever the user configured, and reports success while doing it.
+// Skills must obtain these values from `settings.py config` and substitute them.
+//
+// Scoped to fenced SHELL blocks in skills/, on purpose: the hook SCRIPTS (start-proxy.sh,
+// check-proxy.sh) do run in a hook environment and read these variables legitimately, and the skills'
+// PROSE has to be able to name the variable in order to warn about it.
+//
+// "Shell block" deliberately includes ```sh, a bare ```, and an indented fence, not just ```bash at
+// column zero. Round-1 review demonstrated both escapes: the same defect re-added under a ```sh fence,
+// and under a two-space-indented ```bash fence, each left this guard silent. A guard for a CLASS has
+// to match how the model reads a block, and the model does not care what the info string says.
+func TestNoSkillBlockReadsAPluginOption(t *testing.T) {
+	entries, err := os.ReadDir("skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join("skills", e.Name(), "SKILL.md"))
+		if err != nil {
+			t.Errorf("reading %s: %v", e.Name(), err)
+			continue
+		}
+		// Two pieces of state, not one. Tracking only "am I in a block I care about" gets the
+		// PARITY wrong: a ```json fence would not open anything, so its CLOSING fence reads as an
+		// opener and every prose line after it looks like shell. That is not hypothetical — it
+		// misfired on install/SKILL.md's prose the first time this guard was widened.
+		inFence, isShell := false, false
+		for i, line := range strings.Split(string(b), "\n") {
+			if m := fenceOpener.FindStringSubmatch(line); m != nil {
+				if inFence {
+					inFence, isShell = false, false
+				} else {
+					inFence, isShell = true, isShellFence(m[1])
+				}
+				continue
+			}
+			if inFence && isShell && strings.Contains(line, "CLAUDE_PLUGIN_OPTION_") {
+				t.Errorf("skills/%s/SKILL.md:%d reads a plugin option inside an executable block, "+
+					"which always expands to the default in a Bash tool call:\n\t%s\n"+
+					"Obtain it from `settings.py config` and substitute a <placeholder> instead.",
+					e.Name(), i+1, strings.TrimSpace(line))
+			}
+		}
+		// An odd number of fence lines ends the loop still inside one, which means the scan lost its
+		// bearings partway through and everything after that point went unexamined. That is a false
+		// negative over the whole remainder rather than a misfire: round-2 review deleted one closing
+		// fence, re-added the defect to all four blocks, and this guard reported 0 of 4. A missing
+		// backtick line is an ordinary editing slip, so detect it — same argument as `checked == 0`
+		// below, and it costs nothing while every skill stays balanced.
+		if inFence {
+			t.Errorf("skills/%s/SKILL.md: fences are unbalanced, so the scan lost its bearings partway "+
+				"through and this guard proved nothing for the rest of the file", e.Name())
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no skills were scanned, so this guard proved nothing")
+	}
+	t.Logf("scanned %d skills", checked)
+}
+
+// TestStartProxyReportsThePresetActuallyInEffect: the success note used to print $PRESET, which comes
+// from the plugin option, even though --config REPLACES the preset entirely. So with a keep-alive config
+// in play the proxy ran whatever `preset:` that file recorded while the note named the option — and the
+// two diverge the moment somebody changes the option after enabling keep-alive. Same species as the
+// defect this branch started from: a confident report of a value that is not in effect.
+//
+// The reading of the file happens on the SessionStart path, so every degenerate config must still START
+// the proxy, and must not produce a note that is wrong in the other direction. "Reported nothing" beats
+// "reported wrong", and neither beats "did not start" — hence the exit-0 and launched checks on every
+// row, not just the happy one.
+func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
+	const optionPreset = "codesmart" // what the PLUGIN OPTION says, and what the note must not parrot
+	for _, c := range []struct {
+		name       string
+		writeCfg   bool
+		cfg        string
+		unreadable bool // chmod 000 after writing: the ONLY config that makes sed itself fail
+		wantIn     []string
+		wantNotIn  []string
+	}{
+		{
+			name:     "the config's preset is reported, not the plugin option's",
+			writeCfg: true, cfg: "preset: house\ncache:\n  keepalive: true\n",
+			wantIn:    []string{"preset house"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			name:     "a quoted and padded value is still read",
+			writeCfg: true, cfg: "preset:   \"house\"  \ncache:\n  keepalive: true\n",
+			wantIn:    []string{"preset house"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			// Older files predate the always-state-the-preset rule. Report it as unstated: a config may
+			// set `pipeline:` directly, so claiming compaction is OFF would be wrong in the other
+			// direction — the failure mode this whole test exists to prevent.
+			name:     "no preset line: unstated, and never claimed to be off",
+			writeCfg: true, cfg: "cache:\n  keepalive: true\n",
+			wantIn:    []string{"unstated"},
+			wantNotIn: []string{"preset " + optionPreset, "compaction is OFF"},
+		},
+		{
+			name:     "a comment-only config claims nothing",
+			writeCfg: true, cfg: "# written by hand, nothing else\n",
+			wantIn:    []string{"unstated"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			name:     "an empty config claims nothing",
+			writeCfg: true, cfg: "",
+			wantIn:    []string{"unstated"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			name:     "malformed junk still starts the proxy and claims nothing",
+			writeCfg: true, cfg: "\x00\x01 not: [yaml: at all\n",
+			wantIn:    []string{"unstated"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			// The row that defends the fail-open property itself. Every other row has a config sed can
+			// READ — empty, comment-only and junk files all match nothing and exit 0 — so none of them
+			// can see `set -e` being added. This one can: with pipefail in force, an unreadable file
+			// makes the assignment non-zero, and -e would then kill the script before the proxy starts.
+			name:     "an unreadable config still starts the proxy (this is what -e would break)",
+			writeCfg: true, cfg: "preset: house\ncache:\n  keepalive: true\n", unreadable: true,
+			wantIn:    []string{"unstated"},
+			wantNotIn: []string{"preset " + optionPreset},
+		},
+		{
+			// Reachable by hand edit, not theoretical: this document LOADS, with a top-level preset of
+			// house and a full house pipeline, so a first-match-at-any-indentation read would name the
+			// inner value while the proxy ran the outer one.
+			name:      "a nested preset: does not shadow the top-level one",
+			writeCfg:  true,
+			cfg:       "components:\n  offload:\n    preset: inner\npreset: house\ncache:\n  keepalive: true\n",
+			wantIn:    []string{"preset house"},
+			wantNotIn: []string{"inner", "preset " + optionPreset},
+		},
+		{
+			name:     "an inline comment does not leak into the note",
+			writeCfg: true, cfg: "preset: house # kept for the split\ncache:\n  keepalive: true\n",
+			wantIn:    []string{"preset house"},
+			wantNotIn: []string{"kept for the split", "preset " + optionPreset},
+		},
+		{
+			// With no config there is no --config, so the plugin option IS what is in effect and the
+			// note should say so. Without this row the test would pass on a note that never reports a
+			// preset at all.
+			name:      "no keepalive config: the plugin option is the truth and is reported",
+			writeCfg:  false,
+			wantIn:    []string{"preset " + optionPreset},
+			wantNotIn: []string{"unstated"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			requireTool(t, "bash")
+			dir := t.TempDir()
+			argvFile := filepath.Join(dir, "argv")
+			fake := filepath.Join(dir, "fake-proxy")
+			port := freePort(t)
+			py := requireTool(t, "python3")
+			script := "#!/usr/bin/env bash\n" +
+				"printf '%s\\n' \"$*\" > " + argvFile + "\n" +
+				"exec " + py + " -c '\n" +
+				"import http.server\n" +
+				"class H(http.server.BaseHTTPRequestHandler):\n" +
+				"    def do_GET(self):\n" +
+				"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+				"    def log_message(self, *a): pass\n" +
+				"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n'\n"
+			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			state := filepath.Join(dir, "state")
+			if c.writeCfg {
+				stateDir := filepath.Join(state, "context-guru")
+				if err := os.MkdirAll(stateDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := filepath.Join(stateDir, "keepalive-"+port+".yaml")
+				if err := os.WriteFile(cfgPath, []byte(c.cfg), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if c.unreadable {
+					if os.Geteuid() == 0 {
+						t.Skip("root ignores mode 000, so this row cannot make the read fail")
+					}
+					if err := os.Chmod(cfgPath, 0o000); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+			cmd.Env = append(os.Environ(),
+				"CLAUDE_PLUGIN_OPTION_PORT="+port,
+				"CLAUDE_PLUGIN_OPTION_PRESET="+optionPreset,
+				"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+				"CONTEXT_GURU_BIN="+fake,
+				"XDG_STATE_HOME="+state,
+				"TMPDIR="+dir)
+			out, err := cmd.CombinedOutput()
+			t.Cleanup(func() {
+				if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+					exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+				}
+			})
+			// Fails open: property 5 of this script is that it never fails a session, whatever the
+			// config on disk looks like.
+			if err != nil {
+				t.Fatalf("must never fail a session: %v\n%s", err, out)
+			}
+			if _, rerr := os.Stat(argvFile); rerr != nil {
+				t.Fatalf("the proxy was never launched, so this config stopped a session starting: %v\n%s",
+					rerr, out)
+			}
+			got := string(out)
+			t.Logf("note ->\n%s", got)
+			for _, w := range c.wantIn {
+				if !strings.Contains(got, w) {
+					t.Errorf("note does not contain %q:\n%s", w, got)
+				}
+			}
+			for _, w := range c.wantNotIn {
+				if strings.Contains(got, w) {
+					t.Errorf("note contains %q, which is not what is in effect:\n%s", w, got)
+				}
 			}
 		})
 	}
@@ -2809,6 +3206,47 @@ func TestTheConfiguredPortCanActuallyBeHonoured(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(dir, "context-guru-proxy-"+port+".log")); err != nil {
 			t.Errorf("the log is not named after the configured port: %v", err)
+		}
+	})
+
+	// The state none of the four skills was written for: SOME options set, others not. cmd_config
+	// prints a line only for keys actually present and falls back to `source=(none)` only when the
+	// whole options object is missing, so a partial config reports a real `source=` and simply omits
+	// the rest. Every skill documented its fallback as keyed on `source=(none)`, which does not apply
+	// here — leaving the model to invent a value at the exact point those sections warn is dangerous.
+	t.Run("a partial config reports a real source and omits the options not set", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := filepath.Join(dir, "cfg")
+		if err := os.MkdirAll(cfg, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// port set, preset never touched — the common case, and the one that used to mislead.
+		writeJSON(t, filepath.Join(cfg, "settings.json"), map[string]any{
+			"pluginConfigs": map[string]any{
+				"context-guru@context-guru": map[string]any{
+					"options": map[string]any{"port": 4041},
+				},
+			},
+		})
+		py := requireTool(t, "python3")
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "config")
+		cmd.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+cfg)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("config failed: %v\n%s", err, out)
+		}
+		got := string(out)
+		t.Logf("config ->\n%s", got)
+		if !strings.Contains(got, "option_port=4041") {
+			t.Errorf("the configured port was not reported:\n%s", got)
+		}
+		if strings.Contains(got, "option_preset=") {
+			t.Errorf("an unconfigured option was reported as though it had a value:\n%s", got)
+		}
+		if strings.Contains(got, "source=(none)") {
+			t.Errorf("a partial config reported source=(none); the skills' per-option fallback rule "+
+				"exists precisely because this reports a real source:\n%s", got)
 		}
 	})
 
