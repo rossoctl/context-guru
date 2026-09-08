@@ -340,7 +340,12 @@ func (e *ExtractSweep) econPays(req *bschemas.BifrostChatRequest, c *components.
 	logging.From(c.Ctx).Debug("cg.sweep.econ", "decision", d.ok, "needTurns", d.need, "haveTurns", d.have,
 		"candidates", len(cands), "offeredTokens", saved, "askUSD", d.askUSD,
 		"approval", d.approval, "estFromMeasurement", d.measured, "askDeclined", d.askDeclined,
-		"reqTokens", d.reqTokens, "ctxWindow", ctxWindowOf(c), "pressure", d.pressure)
+		"reqTokens", d.reqTokens, "ctxWindow", ctxWindowOf(c), "pressure", d.pressure,
+		// EXPLICITLY. logging.From(c.Ctx) injects route/tenant/provider/mode but NOT the session id —
+		// cg.sweep.ask carries `session` because it passes it by hand, and switching this row to the
+		// same logger was therefore not sufficient. Without it the per-session trajectory that reveals
+		// a client-side clear is still unrecoverable, which is the whole point of the field.
+		"session", c.Session)
 	return d
 }
 
