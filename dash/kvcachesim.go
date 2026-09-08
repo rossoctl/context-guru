@@ -77,6 +77,7 @@ const (
 	KVStrategyHistorical      = kvcache.StrategyHistorical
 	KVStrategyStopReasonGated = kvcache.StrategyStopReasonGated
 	KVStrategyStickySession1h = kvcache.StrategyStickySession1h
+	KVStrategyKeepAliveBudget = kvcache.StrategyKeepAliveBudget
 	KVStrategyOptimal         = kvcache.StrategyOptimal
 	// KVStrategyCustom is the one arm that is NOT in kvcache's registry, because it cannot be
 	// built from a name: it carries the page's own thresholds and the in-process Predictor
@@ -139,9 +140,20 @@ func isUnbuildable(name string) bool { return name == kvcache.StrategyReplay }
 // the only figure that says how much headroom exists at all, and an arm nobody sees by default is
 // one nobody compares against — and it is marked Unreachable so no surface can present it as a
 // result.
+//
+// `keepalive-budget` is the eleventh, and it is in the DEFAULT set rather than merely on the
+// picker because the comparison it belongs in is the one this list already draws: it is the only
+// arm here that spends a DIFFERENT number of pings per conversation, and against the flat
+// keep-alive arms beside it that is the whole question. Measured on 18.4 days of the hosted
+// capture it takes 2.07% off the bill where the best flat arm takes 1.86%, and does it with 8,790
+// pings against 59,139 — a figure that only means anything read next to those arms, which is what
+// a default set is for. `Config.MaxPings` still bounds it like every other arm: at the page's
+// default of 2 it is capped well below the 8 sweeps it reasons over, and
+// docs/how-to/kv-cache-keepalive-budget.md says what that costs.
 var KVCacheDefaultStrategies = []string{KVStrategyNoCache, KVStrategyFixed5m, KVStrategyFixed1h,
 	KVStrategyKeepAlive5m, KVStrategyKeepAlive5mOnce, KVStrategyKeepAlive1hOnce,
-	KVStrategyObserved, KVStrategyHistorical, KVStrategyStopReasonGated, KVStrategyOptimal}
+	KVStrategyObserved, KVStrategyHistorical, KVStrategyStopReasonGated,
+	KVStrategyKeepAliveBudget, KVStrategyOptimal}
 
 // kvCacheDefaultBaseline is the arm every saving is measured against when the caller names none,
 // and it comes from the REGISTRY rather than from a constant here.
