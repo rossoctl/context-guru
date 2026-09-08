@@ -1,0 +1,228 @@
+package offload
+
+import (
+	"math"
+	"strconv"
+	"strings"
+	"testing"
+
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/schema"
+)
+
+// THE DEFECT THESE EXIST TO CATCH, in one line: the econ trigger authorised nine adjudications in nine
+// on the iteration 025 pre-flight, six of which removed nothing, because its break-even charged the
+// cache-write and never the model call that decides what to remove.
+//
+// Every test below is written to fail against the arithmetic as it was, and each was checked by
+// reverting the change rather than by reading it.
+
+// econCtx is a request-shaped context with a known window and the deployment's own rates left unset, so
+// agentRates falls back to the sonnet-class constants beside it. MaxCachedIdx -1 with CacheAware means
+// "cache-aware, boundary unknown", which is the case the two window conventions disagree about.
+func econCtx(window int) *components.Ctx {
+	return &components.Ctx{CtxWindow: window, CacheAware: true, MaxCachedIdx: -1}
+}
+
+// bigReq builds a transcript of n messages of roughly `each` tokens, so a fixture can be large enough
+// for a charged ask to genuinely pay for itself. Token counts here are schema.TextTokens' estimate of
+// the string, not a literal, which is what every other econ fixture relies on too.
+func bigReq(n, each int) *bschemas.BifrostChatRequest {
+	req := &bschemas.BifrostChatRequest{}
+	for i := 0; i < n; i++ {
+		body := strings.Repeat("line "+strconv.Itoa(i)+" of the transcript\n", each)
+		if i%2 == 1 {
+			req.Input = append(req.Input, assistantMsg(body))
+			continue
+		}
+		req.Input = append(req.Input, toolResultMsg(body))
+	}
+	return req
+}
+
+// COREF'S PATH IS UNTOUCHED, term for term. prefixRewritePays is shared with a component that decides
+// with a deterministic index and pays for no call, so the refactor must be exactly a no-op there.
+// Asserted against an independent recomputation of the ORIGINAL expression rather than against the new
+// one, because comparing the new code to itself would pass however wrong it is.
+func TestPrefixRewritePaysUnchangedWithoutAnAsk(t *testing.T) {
+	req := bigReq(24, 400)
+	for _, tc := range []struct {
+		name              string
+		window            int
+		saved, shallowest int
+	}{
+		{"deep drop, big window", 200_000, 800, 2},
+		{"late drop", 200_000, 800, 20},
+		{"no turns left", 900, 800, 2},
+		{"whole span removed", 200_000, 1 << 20, 0},
+		{"nothing saved", 200_000, 0, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := econCtx(tc.window)
+			need, have, ok := prefixRewritePays(req, tc.saved, tc.shallowest, c)
+			wNeed, wHave, wOK := originalPrefixRewritePays(req, tc.saved, tc.shallowest, c)
+			if need != wNeed || have != wHave || ok != wOK {
+				t.Fatalf("coref's break-even moved: got (need=%d have=%d ok=%v), "+
+					"original arithmetic says (need=%d have=%d ok=%v)", need, have, ok, wNeed, wHave, wOK)
+			}
+		})
+	}
+}
+
+// THE BRANCH THAT DID THE DAMAGE. When every candidate sits at or past the cached boundary the prefix
+// needs no rewriting, and the old code returned "authorised" unconditionally from there. That is
+// precisely the branch on which the cache-write is free and the ask is therefore the ONLY cost, so it
+// is the branch where an unconditional yes is least defensible. It fired on 5 of the pre-flight's 9.
+func TestFreeRewriteStillHasToRepayTheAsk(t *testing.T) {
+	req := bigReq(24, 400)
+	c := econCtx(200_000)
+	// The LAST message, removed entirely: the rewritten span is that one message, so `rewritten`
+	// lands on zero and this is the free branch. Deliberately a MODEST saving — an inventory of a
+	// million tokens would repay a $5 ask on its own and prove nothing about the branch.
+	last := len(req.Input) - 1
+	saved := schema.TextTokens(schema.MessageText(req.Input[last]))
+
+	if _, _, ok := prefixRewritePays(req, saved, last, c); !ok {
+		t.Fatal("fixture is wrong: this must be the free-rewrite branch, which authorises with no ask")
+	}
+	// The same batch, with an ask that costs real money, must not be waved through.
+	need, have, ok := prefixRewritePaysCharging(req, saved, last, 5.00, 1, c)
+	if ok {
+		t.Errorf("a $5.00 adjudication was authorised because the REWRITE was free "+
+			"(need=%d have=%d) — the ask was never a term in the decision", need, have)
+	}
+	if need == 0 {
+		t.Errorf("need=0 for a priced ask: the free-rewrite early return is still short-circuiting")
+	}
+}
+
+// The second half of the correction: `saved` is what MIGHT be dropped, and the model takes a subset.
+// Discounting it has to scale the requirement, or the estimate is decorative.
+func TestApprovalDiscountScalesTheRequirement(t *testing.T) {
+	req := bigReq(40, 400)
+	c := econCtx(200_000)
+	full, _, _ := prefixRewritePaysCharging(req, 4_000, 2, 0.10, 1, c)
+	third, _, _ := prefixRewritePaysCharging(req, 4_000, 2, 0.10, 1.0/3.0, c)
+	if full == 0 {
+		t.Fatal("fixture is wrong: need is 0 even undiscounted, so the discount cannot show")
+	}
+	if third < full*2 {
+		t.Errorf("approval 1/3 moved need from %d to %d; expecting roughly 3x, so the discount "+
+			"is not reaching the denominator", full, third)
+	}
+}
+
+// A measured approval of zero must not let the component disable itself forever: declining every ask
+// destroys the only source of evidence that could revise the estimate, and there is no path back.
+func TestApprovalFloorPreventsPermanentSelfDisable(t *testing.T) {
+	l := &askLedger{}
+	for i := 0; i < minAskSamples+2; i++ {
+		l.record(0.05, 10_000, 0) // asked, paid, removed nothing
+	}
+	cost, approval, measured := l.estimate(0)
+	if !measured {
+		t.Fatalf("%d asks recorded and the ledger still reports the prior", minAskSamples+2)
+	}
+	if approval <= 0 {
+		t.Fatalf("approval %v: a zero estimate declines every future ask and can never be revised",
+			approval)
+	}
+	if approval != approvalFloor {
+		t.Errorf("approval = %v, want the floor %v", approval, approvalFloor)
+	}
+	if cost <= 0 {
+		t.Errorf("cost = %v after recording $0.05 asks", cost)
+	}
+}
+
+// The ledger has to LEARN, and has to say when it is still guessing — an estimate that silently stays
+// at its prior is the shape that let min_inventory block everything downstream in silence.
+func TestAskLedgerLearnsCostAndApprovalAfterWarmUp(t *testing.T) {
+	l := &askLedger{}
+	const prior = 0.123
+	if cost, approval, measured := l.estimate(prior); measured || cost != prior || approval != 1 {
+		t.Fatalf("a fresh ledger must report the prior and say so: cost=%v approval=%v measured=%v",
+			cost, approval, measured)
+	}
+	l.record(0.04, 1_000, 250)
+	if _, _, measured := l.estimate(prior); measured {
+		t.Errorf("one ask is not a rate: the ledger trusted itself after a single sample")
+	}
+	for i := 0; i < minAskSamples; i++ {
+		l.record(0.04, 1_000, 250)
+	}
+	cost, approval, measured := l.estimate(prior)
+	if !measured {
+		t.Fatalf("still on the prior after %d asks", minAskSamples+1)
+	}
+	if cost < 0.039 || cost > 0.041 {
+		t.Errorf("cost = %v, want ~0.04 (mean of identical asks)", cost)
+	}
+	if approval < 0.24 || approval > 0.26 {
+		t.Errorf("approval = %v, want ~0.25 (250 of 1,000 offered)", approval)
+	}
+}
+
+// An ask with no offered mass is not evidence about a RATE, and folding it in would drag the
+// denominator without adding information.
+func TestAskLedgerIgnoresAnAskThatOfferedNothing(t *testing.T) {
+	l := &askLedger{}
+	for i := 0; i < minAskSamples+1; i++ {
+		l.record(0.04, 0, 0)
+	}
+	if _, _, measured := l.estimate(0.5); measured {
+		t.Error("empty asks were counted as samples, so the ledger now reports a rate over no mass")
+	}
+}
+
+// THE TWO WINDOW CONVENTIONS LEAN OPPOSITE WAYS ON PURPOSE, and this is the one that is easy to get
+// wrong by reaching for the helper that already exists. prefixRewriteWindow treats an unknown boundary
+// as "all cached", which over-states a REWRITE and is therefore safe. The identical assumption
+// under-states an ASK — everything looks like a cheap cache read — which is the direction that
+// authorises. So askCostPrior must resolve the unknown case the other way.
+func TestAskCostPriorTreatsAnUnknownBoundaryAsUncached(t *testing.T) {
+	req := bigReq(24, 400)
+	unknown := askCostPrior(req, econCtx(200_000))
+
+	known := econCtx(200_000)
+	known.MaxCachedIdx = len(req.Input) - 1 // the provider holds all of it
+	cached := askCostPrior(req, known)
+
+	if unknown <= cached {
+		t.Errorf("unknown boundary priced at %v, fully-cached at %v: an unknown cache is being "+
+			"treated as a cheap read, which is the direction that authorises the ask", unknown, cached)
+	}
+	// And the fresh side has to dominate, which is what the measured pre-flight split says: 28,594
+	// fresh against 52,074 cached was $0.057 against $0.010.
+	if unknown < cached*2 {
+		t.Errorf("fresh tokens priced at only %v against %v cached: the split at the boundary is "+
+			"not the term that matters here", unknown, cached)
+	}
+}
+
+// originalPrefixRewritePays is the expression as it stood before the ask became a term, kept as an
+// INDEPENDENT reference for the coref-unchanged test above. Deliberately a transcription rather than a
+// call into the new code.
+func originalPrefixRewritePays(req *bschemas.BifrostChatRequest, saved, shallowest int,
+	c *components.Ctx) (need, have int, ok bool) {
+
+	if c == nil || c.CtxWindow <= 0 {
+		return 0, 0, true
+	}
+	if saved <= 0 {
+		return 0, 0, false
+	}
+	end := prefixRewriteWindow(req, c)
+	rewritten := 0
+	for j := shallowest; j <= end && j < len(req.Input); j++ {
+		rewritten += schema.TextTokens(schema.MessageText(req.Input[j]))
+	}
+	rewritten -= saved
+	turns := estimateTurnsRemaining(schema.MessagesTokens(req), modelTurns(req), c.CtxWindow)
+	if rewritten <= 0 {
+		return 0, turns, true
+	}
+	need = int(math.Ceil(cacheWriteX * float64(rewritten) / float64(saved)))
+	return need, turns, need <= turns
+}

@@ -29,6 +29,15 @@ func TestSweepEconTriggerFiresOutsideTheWindow(t *testing.T) {
 	req := sweepReqStocked()
 	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
 	c.IdleMs = 30 * 1000 // plenty of TTL left: trigger one is OFF
+	// THE PROVIDER HOLDS THE PREFIX, stated rather than left at the shared fixture's -1. The ask is
+	// charged now (see sweep_askcost.go), and its price turns entirely on which side of the cache
+	// boundary the transcript sits: at the read rate this ask costs about $0.03, at the fresh rate
+	// about $0.22. An unknown boundary is priced at the fresh rate on purpose, so leaving it unset
+	// here would test the trigger against a cold-cache bill while the asker beside it reports a
+	// 19,595-token cache READ — the fixture would contradict itself. Every measured sweep in the
+	// iteration 025 pre-flight had a known boundary (max_cached_idx 22 through 76), so this is the
+	// production case. The unknown one is asserted separately, below.
+	c.MaxCachedIdx = len(req.Input) - 2
 
 	rep := &components.Report{}
 	if _, err := e.Offload(req, rep, c); err != nil {
@@ -247,4 +256,68 @@ func firstLines(s string, n int) string {
 		ls = ls[:n]
 	}
 	return strings.Join(ls, "\n")
+}
+
+// THE ASK IS A TERM IN THE DECISION, on the same fixture that authorises when the boundary is known.
+//
+// This is the defect the iteration 025 pre-flight measured: 9 asks authorised in 9, six of which
+// removed nothing, $0.4339 spent for a net of -$0.4322 — because the break-even charged the
+// cache-write and never the model call that reads it. With the boundary UNKNOWN the ask is priced at
+// the fresh rate (askCostPrior resolves the unknown case against authorising, the opposite of
+// prefixRewriteWindow, deliberately), which on this transcript is about $0.22 against roughly $0.03
+// warm, and that is enough to turn the same batch down.
+//
+// The gate name is asserted specifically. `prefix_rewrite_not_repaid` has always meant "the
+// cache-write does not earn itself back" and it must keep meaning only that: a single label reporting
+// both causes would be unreadable in exactly the way marker_or_kept_verbatim was, and the two now sum
+// to the econ declines rather than one containing the other.
+func TestSweepEconTriggerDeclinesWhenTheAskCannotRepayItself(t *testing.T) {
+	asker := &labelAsker{verdict: "drop", needed: "none"}
+	asker.cacheRead = 19595
+	e := newSweep(t, "econ_trigger: true\n")
+	req := sweepReqStocked()
+	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
+	c.IdleMs = 30 * 1000 // trigger one is OFF, so this is the econ decision and nothing else
+
+	rep := &components.Report{}
+	if _, err := e.Offload(req, rep, c); err != nil {
+		t.Fatal(err)
+	}
+	if n := atomic.LoadInt64(&asker.calls); n != 0 {
+		t.Fatalf("paid for %d adjudication(s) whose own price the batch cannot repay", n)
+	}
+	if rep.Gates["econ_ask_not_repaid"] == 0 {
+		t.Errorf("declined, but not for the ask's price — the ask is still not a term in the "+
+			"decision (gates: %v)", rep.Gates)
+	}
+	if rep.Gates["prefix_rewrite_not_repaid"] != 0 {
+		t.Errorf("the REWRITE was blamed for a decline the ASK caused; the two causes are sharing "+
+			"one counter (gates: %v)", rep.Gates)
+	}
+	if rep.Events["prefix_rewrite_repaid"] != 0 {
+		t.Errorf("recorded a repayment it did not get: %v", rep.Events)
+	}
+}
+
+// The switch has to actually restore the old arithmetic, or a run cannot attribute the change to it.
+// Same fixture as the decline above; the only difference is the knob.
+func TestSweepEconIgnoreAskCostRestoresTheUnpricedGate(t *testing.T) {
+	asker := &labelAsker{verdict: "keep", needed: "a", quote: "Find the auth timeout"}
+	asker.cacheRead = 19595
+	e := newSweep(t, "econ_trigger: true\necon_ignore_ask_cost: true\n")
+	req := sweepReqStocked()
+	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
+	c.IdleMs = 30 * 1000
+
+	rep := &components.Report{}
+	if _, err := e.Offload(req, rep, c); err != nil {
+		t.Fatal(err)
+	}
+	if n := atomic.LoadInt64(&asker.calls); n == 0 {
+		t.Fatalf("econ_ignore_ask_cost did not restore the unpriced gate: the ask that the "+
+			"charged gate declines must go through here (gates: %v)", rep.Gates)
+	}
+	if rep.Gates["econ_ask_not_repaid"] != 0 {
+		t.Errorf("the ask was charged despite econ_ignore_ask_cost: %v", rep.Gates)
+	}
 }

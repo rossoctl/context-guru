@@ -182,6 +182,37 @@ guessed TTL would invalidate live prefixes on exactly the deployments whose TTL 
 the codebase's own clock-uncertainty margin for cache expiry. Wider fires more often and invalidates
 more remaining TTL; narrower fires rarely. Nothing measures either side.
 
+### The second trigger, and what it has to pay for
+
+`econ_trigger` fires on **mass** rather than the clock, which is how the sweep reaches a session whose
+cache keeps being refreshed — the long agent run with the most to save, and the one the pre-expiry
+window can never reach. It pays a real cache-write to do it, so it has to clear a break-even first.
+
+That break-even has three terms, and the third one is easy to forget because it is not a property of the
+transcript:
+
+| | |
+|---|---|
+| **benefit** | the mass removed, collected on every remaining turn — and discounted by how much of the inventory the adjudicator actually takes |
+| **cost** | the cache-write the mutation forces, charged once, from the earliest dropped index to the cached boundary |
+| **cost** | **the adjudication itself**, charged whether or not the answer turns out to be "drop something" |
+
+Leaving that last term out is not a rounding error. Measured on iteration 025's pre-flight, it was the
+*whole* cost: 9 asks authorised out of 9, six of which removed nothing, $0.4339 spent for $0.0017 of
+value. The damage concentrated on the case where every candidate already sits past the cached boundary —
+there the cache-write is genuinely free, which used to authorise unconditionally, and which is exactly
+the case where the ask is the only thing being paid for.
+
+Both the ask's price and the approval rate are **measured from this component's own asks** rather than
+configured, for the same reason the rate card is preferred to a constant: a literal approval rate is one
+workload's average wearing a threshold's authority. Two guards keep a self-referential gate from
+strangling itself — a short warm-up, because a single ask can only ever report 0% or 100% of its
+inventory, and a floor under the approval rate, without which one unlucky run of empty asks would
+decline every future one and destroy the evidence that could revise the estimate.
+
+Read `prefix_rewrite_repaid` against `econ_ask_not_repaid` and `prefix_rewrite_not_repaid`: the two
+declines name **different** costs and are raised exclusively, so they sum rather than overlap.
+
 ## When the cache read does not happen
 
 `PrefixUsage` is returned rather than merely recorded, so the component gates on it. A read of zero is
@@ -242,7 +273,11 @@ net; the model does not get to hear about it.
 | key | default | what it does |
 |---|---|---|
 | `min_tokens` | 1000 | Per-output floor for naming a candidate in the inventory. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 this produced **zero** extractions across 3,437 production requests. |
+| `min_inventory` | 10 | Fewest candidates worth asking about; below it the sweep declines without asking. The model's judgement is a function of how many candidates it **compares**: shown one output it scored 6% live-kept, ~15 together reached 58% at the lowest cost per output. Below the floor a removal is a guess, and a wrong removal costs content the agent still needs while a wrong keep costs one turn's tokens. |
 | `pre_expiry_seconds` | 60 | Width of the pre-expiry window. The component's one unmeasured number. |
+| `evidence` | `false` | Add the co-reference index's record to each inventory line. It is **evidence the model weighs, never a filter** over the candidates — a pre-filter left about one candidate per request, collapsing a bulk arm into the per-output shape refuted at 6% live-kept. Also adds a paragraph teaching how to read the counters; counters with no explanation invite an invented reading. |
+| `econ_trigger` | `false` | Add the **economic** trigger alongside the pre-expiry window, so a live cached prefix can be swept when the saving outruns the cache-write it forces. The two are OR'd and neither contains the other: pre-expiry fires on the clock and cannot reach a session whose cache keeps being refreshed — the long run with the most to save — while econ fires on mass and cannot know how much time is left. |
+| `econ_ignore_ask_cost` | `false` | Restore the econ trigger's original break-even, which charged the cache-write and **not** the adjudication that reads it. Left out, that authorised 9 asks in 9 on iteration 025's pre-flight, six of which removed nothing: $0.4339 spent against $0.0017 of value. Set true only to attribute a run's difference to the change. |
 | `block_fallback` | `false` | Decline instead of falling back to a content-carrying completion when the cache read did not happen. |
 | `marker_mode` | `full` | `full` is the only mode that keeps a removal recoverable. |
 
@@ -277,7 +312,13 @@ unparseable: raise the budget, not the prompt), `sweep_verdict_unusable`,
 `sweep_no_prefix`, `sweep_ask_failed`, `sweep_inventory_of_one`, `sweep_kept_everything`,
 `sweep_unparseable`, `sweep_reply_truncated`, `sweep_verdict_unusable`, `sweep_verdict_unknown_label`,
 `sweep_verdict_duplicate_label`, `sweep_verdict_missing`, `sweep_drop_would_not_shrink`,
-`not_in_pre_expiry_window`.
+`not_in_pre_expiry_window`, `sweep_inventory_below_min`, `drop_unaffordable_pruned`,
+`prefix_rewrite_not_repaid`, `econ_ask_not_repaid`.
+
+The last two are raised **exclusively**, and reading them as one number loses the finding:
+`prefix_rewrite_not_repaid` means the cache-write does not earn itself back, `econ_ask_not_repaid` means
+the batch cannot repay the price of *asking* about it. `prefix_rewrite_repaid` is the matching event when
+the trigger does fire — and it says the batch was worth asking about, never that a saving was banked.
 
 ## What is not measured
 

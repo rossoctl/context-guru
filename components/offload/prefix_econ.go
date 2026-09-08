@@ -29,6 +29,14 @@ import (
 // The consequence is counter-intuitive and worth restating wherever this is used: firing
 // at 90% of the window means T is nearly zero — paying a rewrite for a saving collected
 // once. The profitable moment to compact is EARLIER than the moment of maximum pressure.
+//
+// A CALLER THAT PAYS A MODEL TO DECIDE has a second one-time cost and a discount on S, and
+// takes prefixRewritePaysCharging instead:
+//
+//	cost    = 11.5 x W + ask         benefit = (S x approval) x T
+//
+// coref does not — its index is deterministic and free — so it keeps prefixRewritePays,
+// which is that same expression with ask 0 and approval 1. See sweep_askcost.go.
 
 // cacheWriteX is one cache-write in cache-read-equivalents: ($2.50 - $0.20) / $0.20 on
 // Anthropic's published per-MTok prices. Shared with deploy/harbor/coref.py.
@@ -64,10 +72,34 @@ func prefixRewriteWindow(req *bschemas.BifrostChatRequest, c *components.Ctx) in
 // fraction-based threshold in this package: an unresolvable threshold imposes no
 // constraint rather than silently disabling the pass.
 func prefixRewritePays(req *bschemas.BifrostChatRequest, saved, shallowest int, c *components.Ctx) (need, have int, ok bool) {
+	return prefixRewritePaysCharging(req, saved, shallowest, 0, 1, c)
+}
+
+// prefixRewritePaysCharging is prefixRewritePays plus the two terms extract_llm_sweep's econ trigger
+// needs and coref does not:
+//
+//	askUSD    the price of the model call that decides WHAT to remove, in dollars
+//	approval  the fraction of `saved` that call is expected to actually take
+//
+// See sweep_askcost.go for why both are measured rather than assumed, and for the pre-flight numbers
+// that made them necessary.
+//
+// coref reaches this through prefixRewritePays with askUSD 0 and approval 1, which reduces it to the
+// original arithmetic TERM FOR TERM: coref decides with a deterministic index, so there is no call to
+// charge and no vote to discount. That equivalence is asserted, not assumed — see
+// TestPrefixRewritePaysUnchangedWithoutAnAsk.
+func prefixRewritePaysCharging(req *bschemas.BifrostChatRequest, saved, shallowest int,
+	askUSD, approval float64, c *components.Ctx) (need, have int, ok bool) {
+
 	if c == nil || c.CtxWindow <= 0 {
 		return 0, 0, true
 	}
 	if saved <= 0 {
+		return 0, 0, false
+	}
+	// EXPECTED mass, not offered mass. `saved` is the whole inventory; the model takes a subset.
+	eff := float64(saved) * approval
+	if eff <= 0 {
 		return 0, 0, false
 	}
 	end := prefixRewriteWindow(req, c)
@@ -76,11 +108,27 @@ func prefixRewritePays(req *bschemas.BifrostChatRequest, saved, shallowest int, 
 		rewritten += schema.TextTokens(schema.MessageText(req.Input[j]))
 	}
 	rewritten -= saved // the removed mass is not part of what gets written back
-	if rewritten <= 0 {
-		return 0, estimateTurnsRemaining(schema.MessagesTokens(req), modelTurns(req), c.CtxWindow), true
+	if rewritten < 0 {
+		// CLAMPED, not returned on. This was `return 0, T, true` — an unconditional authorisation on
+		// the one branch where the cache-write is free and the ask is therefore the ONLY cost, which
+		// is how the econ trigger came to authorise 9 asks in 9 and lose $0.4322 doing it. With
+		// askUSD 0 the arithmetic below still yields need 0 and ok true, so coref is untouched.
+		rewritten = 0
 	}
-	need = int(math.Ceil(cacheWriteX * float64(rewritten) / float64(saved)))
 	have = estimateTurnsRemaining(schema.MessagesTokens(req), modelTurns(req), c.CtxWindow)
+	// The ask converted into cache-read-equivalents, so it can be added to a cache-write term already
+	// expressed that way: dollars / (dollars per cache-read token) = tokens.
+	askEquiv := 0.0
+	if askUSD > 0 {
+		if _, read, _ := agentRates(c); read > 0 {
+			askEquiv = askUSD / read
+		}
+	}
+	onetime := cacheWriteX*float64(rewritten) + askEquiv
+	if onetime <= 0 {
+		return 0, have, true
+	}
+	need = int(math.Ceil(onetime / eff))
 	return need, have, need <= have
 }
 

@@ -48,7 +48,7 @@ Stage 2 (~$284, `+extract_llm` tail and prefix) runs **only if** stage 1 justifi
   important finding available here.
 
 **Yield** — three numbers, never one, or the result is uninterpretable
-([why](../../../results/measurement-limits.md#3-eligible--acted--yield-measures-the-throttle-not-the-capability)):
+([why](../../../results/measurement-limits.md#3-eligible-acted-yield-measures-the-throttle-not-the-capability)):
 
 | number | source |
 |---|---|

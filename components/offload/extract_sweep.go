@@ -68,6 +68,13 @@ type ExtractSweep struct {
 	// econTrigger enables the SECOND trigger: fire on economics even while the cache is live. See
 	// econPays() for the break-even, and why one trigger is not a superset of the other.
 	econTrigger bool
+	// ignoreAskCost restores the econ trigger's original break-even, which charged the cache-write and
+	// never the adjudication that reads it. See extractSweepConfig.EconIgnoreAskCost.
+	ignoreAskCost bool
+	// asks is what this component's own adjudications have cost and how much of the mass it offered
+	// them came back removed, which is what lets the econ test price the QUESTION from measurement.
+	// See sweep_askcost.go.
+	asks *askLedger
 
 	mode markerMode
 }
@@ -105,6 +112,14 @@ type extractSweepConfig struct {
 	// deliberately invalidates a LIVE cached prefix, which is a cost the pre-expiry trigger exists to
 	// avoid, and it is only worth paying when the saving is collected over enough remaining turns.
 	EconTrigger bool `yaml:"econ_trigger"`
+	// EconIgnoreAskCost restores the econ trigger's original break-even, which weighed a cache-write
+	// against the whole candidate inventory and never charged the adjudication call that reads it.
+	//
+	// OFF by default — i.e. the ask IS charged and the inventory IS discounted — because leaving both
+	// out authorised 9 asks in 9 on the iteration 025 pre-flight, six of which removed nothing, for a
+	// net of -$0.4322. Retained as a switch so a run can ATTRIBUTE that change rather than infer it:
+	// one binary, two gates, everything else held identical. See sweep_askcost.go.
+	EconIgnoreAskCost bool `yaml:"econ_ignore_ask_cost"`
 	// BlockFallback refuses the fallback path: when the prefix ask cannot read the cache, decline
 	// instead of asking again with the output content copied into the prompt.
 	//
@@ -221,7 +236,11 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 		minTokens: cfg.MinTokens, minInventory: cfg.MinInventory,
 		preExpiry: pre, mode: parseMarkerMode(cfg.MarkerMode),
 		blockFallback: cfg.BlockFallback, econTrigger: cfg.EconTrigger,
-		evidence: cfg.Evidence,
+		evidence: cfg.Evidence, ignoreAskCost: cfg.EconIgnoreAskCost,
+		// Per component INSTANCE, which is per configured pipeline. Two pipelines running different
+		// prompts would learn different approval rates, and sharing one ledger between them would
+		// average two workloads into a number describing neither.
+		asks: &askLedger{},
 	}, nil
 }
 
@@ -284,18 +303,48 @@ func (e *ExtractSweep) sweeping(c *components.Ctx) bool {
 // two lean opposite ways and neither is calibrated, so read a fired econ trigger as "this batch was
 // worth asking about", not as a realised saving. `prefix_rewrite_not_repaid` vs
 // `prefix_rewrite_repaid` is what makes the split observable.
-func (e *ExtractSweep) econPays(req *bschemas.BifrostChatRequest, c *components.Ctx, cands []sweepCand) (need, have int, ok bool) {
+func (e *ExtractSweep) econPays(req *bschemas.BifrostChatRequest, c *components.Ctx,
+	cands []sweepCand) econDecision {
+
 	if !e.econTrigger || len(cands) == 0 {
-		return 0, 0, false
+		return econDecision{}
 	}
-	saved, shallowest := 0, cands[0].i
-	for _, cd := range cands {
-		saved += schema.TextTokens(cd.content)
-		if cd.i < shallowest {
-			shallowest = cd.i
+	saved, shallowest := candMass(cands)
+	d := econDecision{offered: saved, approval: 1}
+	if !e.ignoreAskCost {
+		d.askUSD, d.approval, d.measured = e.asks.estimate(askCostPrior(req, c))
+	}
+	d.need, d.have, d.ok = prefixRewritePaysCharging(req, saved, shallowest, d.askUSD, d.approval, c)
+	// WHICH TERM REFUSED, established by re-running the test with the ask free rather than inferred
+	// from the shape of the numbers. "The rewrite does not repay" and "the question does not repay" are
+	// different findings about different costs, and one counter reporting both would be unreadable in
+	// exactly the way `marker_or_kept_verbatim` was.
+	if !d.ok && !e.ignoreAskCost {
+		if _, _, free := prefixRewritePays(req, saved, shallowest, c); free {
+			d.askDeclined = true
 		}
 	}
-	return prefixRewritePays(req, saved, shallowest, c)
+	slog.Debug("cg.sweep.econ", "decision", d.ok, "needTurns", d.need, "haveTurns", d.have,
+		"candidates", len(cands), "offeredTokens", saved, "askUSD", d.askUSD,
+		"approval", d.approval, "estFromMeasurement", d.measured, "askDeclined", d.askDeclined)
+	return d
+}
+
+// econDecision is the econ trigger's verdict with its terms exposed. A bool cannot say which cost
+// refused, and the whole point of charging the ask is to be able to tell the two apart in a run's
+// counters.
+type econDecision struct {
+	need, have int
+	ok         bool
+	// askDeclined reports that the ask's own price is the ONLY reason this did not clear: the same
+	// batch, priced with a free ask, would have been authorised.
+	askDeclined bool
+	// offered is the candidate inventory's token mass — what was priced, and later what the realised
+	// removal is booked against. See askLedger.record.
+	offered  int
+	askUSD   float64
+	approval float64
+	measured bool
 }
 
 // selectAffordableDrops chooses WHICH of the model's votes to actually apply.
@@ -644,17 +693,23 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	// did not already fire: the two are OR'd, and pricing a rewrite the first trigger has already
 	// justified would let an unrepaid verdict veto a nearly-free removal.
 	asking := preExpiry
+	// Declared out here because the realised outcome is booked against the mass this decision PRICED —
+	// see askLedger.record after phase 3.
+	var d econDecision
 	if !asking {
-		need, have, ok := e.econPays(req, c, cands)
-		if ok {
+		d = e.econPays(req, c, cands)
+		if d.ok {
 			asking = true
 			rep.Event("prefix_rewrite_repaid")
 		} else if e.econTrigger {
-			rep.Gate("prefix_rewrite_not_repaid")
-		}
-		if e.econTrigger {
-			slog.Debug("cg.sweep.econ", "decision", ok, "needTurns", need, "haveTurns", have,
-				"candidates", len(cands))
+			// EXACTLY ONE of these, never both. `prefix_rewrite_not_repaid` keeps meaning what it has
+			// always meant — the cache-write does not earn itself back — so the two labels sum to the
+			// econ declines instead of double-counting a subset of them.
+			if d.askDeclined {
+				rep.Gate("econ_ask_not_repaid")
+			} else {
+				rep.Gate("prefix_rewrite_not_repaid")
+			}
 		}
 	}
 	if len(cands) > 0 && asking {
@@ -725,6 +780,19 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			// reason the row read as a plain rejection.
 			call.rec.Rejection = "adjudicated spent, but no drop could be applied"
 		}
+		// BOOK WHAT THE ASK ACTUALLY COST AND ACTUALLY BOUGHT, so the next econ decision is priced by
+		// this component's own history instead of a literal. `applied` rather than the vote count: the
+		// ratio has to map offered mass onto mass that stopped being sent, so pruning, refusals and the
+		// marker's own tokens all belong inside it.
+		//
+		// Booked on the pre-expiry path too. That path does not consult the econ test, but its ask is
+		// the same prompt to the same model, so its price and its yield are evidence about the next
+		// econ decision regardless of which trigger paid for this one.
+		offered := d.offered
+		if offered == 0 {
+			offered, _ = candMass(cands)
+		}
+		e.asks.record(call.rec.CostUSD, offered, applied)
 		if call.rec.Component != "" {
 			rep.Calls = append(rep.Calls, call.rec)
 		}
@@ -1442,7 +1510,9 @@ func init() {
 		{Key: "evidence", Type: components.FieldBool,
 			Hint: "Add the co-reference index's record (novel/refs/ref_age/used_frac/later_turns and the index's own verdict) to each candidate's inventory line. Unset = FALSE. It is EVIDENCE the model weighs, never a filter over the candidates: a co-reference PRE-FILTER left about one candidate per request, which silently turned a bulk arm into the per-output shape refuted at 6% live-kept and meant the model only ever saw what the index had already judged spent — destroying the veto on the index's blind spot that the mechanism exists to provide. Enabling this also adds a paragraph to the adjudication contract teaching how to read the counters; a prompt carrying counters it never explains is worse than one carrying neither."},
 		{Key: "econ_trigger", Type: components.FieldBool,
-			Hint: "Add the ECONOMIC trigger alongside the pre-expiry window: sweep a LIVE cached prefix when the removal's saving, collected over the turns estimated to remain, exceeds the cache-write it forces (S*T > 11.5*W). Unset = FALSE, because it deliberately invalidates a prefix the provider still holds. The two triggers are OR'd and neither contains the other — pre-expiry fires on the clock and cannot reach a session whose cache keeps being refreshed, which is the long run with the most to save; econ fires on mass and cannot know how much time is left. S is the inventory's whole mass and so an upper bound on the batch's real saving; read prefix_rewrite_repaid / prefix_rewrite_not_repaid rather than assuming a fired trigger banked anything."},
+			Hint: "Add the ECONOMIC trigger alongside the pre-expiry window: sweep a LIVE cached prefix when the removal's saving, collected over the turns estimated to remain, exceeds the cache-write it forces (S*T > 11.5*W). Unset = FALSE, because it deliberately invalidates a prefix the provider still holds. The two triggers are OR'd and neither contains the other — pre-expiry fires on the clock and cannot reach a session whose cache keeps being refreshed, which is the long run with the most to save; econ fires on mass and cannot know how much time is left. S is the inventory's whole mass and so an upper bound on the batch's real saving; read prefix_rewrite_repaid / prefix_rewrite_not_repaid rather than assuming a fired trigger banked anything. The adjudication's own price and a measured approval rate are now BOTH terms in that test -- see econ_ignore_ask_cost for what happens without them."},
+		{Key: "econ_ignore_ask_cost", Type: components.FieldBool,
+			Hint: "Restore the econ trigger's original break-even, which weighed the cache-write against the whole candidate inventory and never charged the model call that decides what to remove. Unset = FALSE, i.e. the ask IS charged and the inventory IS discounted by the approval rate this component has measured for itself. Leaving both out authorised 9 adjudications in 9 on the iteration 025 pre-flight, six of which removed nothing, for $0.4339 spent against $0.0017 of value -- and the worst of it landed on the branch where every candidate sits past the cached boundary, so the rewrite is free and the ask is the ONLY cost, which the old test short-circuited past unconditionally. Set true only to attribute a run's difference to this change; read econ_ask_not_repaid against prefix_rewrite_not_repaid to see which cost is declining."},
 		markerModeField(),
 	})
 }
