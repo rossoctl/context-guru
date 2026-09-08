@@ -77,13 +77,13 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 		// the tail boundary: the agent re-sends the original, so we must re-mask it to the
 		// same bytes or it reverts full→masked→full and churns the provider KV cache. This
 		// also skips kept-verbatim content (see reapplyFrozen).
-		if fk, _, ok := reapplyFrozen(c, m.Name(), msg); ok {
+		if fk, _, ok := reapplyFrozen(c, rep, m.Name(), msg); ok {
 			changed++
 			keys = append(keys, fk...)
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim") // already offloaded, or expanded by the agent
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate) // already offloaded, or expanded by the agent — the gate says which
 			continue
 		}
 		if schema.TextTokens(content) < m.minTokens {
@@ -116,7 +116,9 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 			rep.Gate("marker_no_win") // rewrite+marker wouldn't shrink this message
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(msg, newText)
 		freeze(c, m.Name(), content, newText) // freeze so later turns replay it (no churn)
 		changed++

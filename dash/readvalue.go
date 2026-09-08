@@ -82,7 +82,7 @@ func (d *DB) TierCosts(f Filter, p modelinfo.Pricer) (*TierCosts, error) {
 	// Incomplete accounting is excluded, not priced as zero: Event.Price refuses to price
 	// such a request at all, and an estimate that quietly included them would report a
 	// smaller bill than the one that was billed.
-	rows, err := d.sql.Query(`SELECT r.model, COUNT(*),
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.model, COUNT(*),
 		COALESCE(SUM(r.fresh_input),0), COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
 		COALESCE(SUM(r.output_tokens),0), COALESCE(SUM(MIN(r.frozen_tokens, r.cache_read)),0),
 		COALESCE(SUM(r.cost_usd),0)
@@ -173,7 +173,7 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 	const uniq = `min(max(c.saved_unique,0), max(c.saved_gross,0))`
 	// Grouped by whether the row carried a STORED saved_usd, because that is what decides
 	// whether comparing the two is a check or a tautology — see the cross-check note below.
-	rows, err := d.sql.Query(`SELECT c.component, r.model,
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT c.component, r.model,
 		CASE WHEN r.cache_read > 0 THEN 'read'
 		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
 		     ELSE 'fresh' END,
@@ -300,7 +300,7 @@ func (d *DB) EstimateComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Comp
 	// window-wide average that would flatter warm traffic.
 	const gross = `max(c.saved_gross,0)`
 	const uniq = `min(max(c.saved_unique,0), max(c.saved_gross,0))`
-	rows, err := d.sql.Query(`SELECT c.component, r.model,
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT c.component, r.model,
 		CASE WHEN r.cache_read > 0 THEN 'read'
 		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
 		     ELSE 'fresh' END,
@@ -343,7 +343,7 @@ func (d *DB) EstimateComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Comp
 	}
 	// Rows that removed tokens but whose request was never priced at all. Counted, not
 	// valued: "we cannot say" and "it was worth nothing" are different answers.
-	urows, err := d.sql.Query(`SELECT c.component, COUNT(*)
+	urows, err := d.sql.QueryContext(d.readCtx(), `SELECT c.component, COUNT(*)
 		FROM request_components c JOIN requests r ON r.id = c.request_id
 		WHERE `+cond+` AND c.saved_usd = 0 AND c.saved_gross > 0
 		  AND r.token_accounting <> 'complete' GROUP BY 1`, args...)

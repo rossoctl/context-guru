@@ -12,6 +12,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
 )
 
 func init() { components.Register("agentdiet", newAgentDiet) }
@@ -399,7 +400,7 @@ func (d *AgentDiet) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 			if !schema.Rewritable(*msg) {
 				continue
 			}
-			if fk, saved, ok := reapplyFrozen(c, d.Name(), msg); ok {
+			if fk, saved, ok := reapplyFrozen(c, rep, d.Name(), msg); ok {
 				rep.TokensBefore += saved // best-effort; the pipeline recomputes exactly
 				keys = append(keys, fk...)
 				changed++
@@ -438,7 +439,15 @@ func (d *AgentDiet) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 			continue
 		}
 		content := schema.MessageText(msg)
-		if content == "" || skipReduce(c, content) {
+		if content == "" {
+			continue
+		}
+		// Short-circuit restored: skipReduce does a store Get, and the empty string is not
+		// content — asking about it costs a lookup and would raise a spurious gate if "" were
+		// ever marked. The original `content == "" || skipReduce(...)` had this ordering for a
+		// reason and splitting the call lost it.
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate)
 			continue
 		}
 		// A frozen decision was replayed above; a second reduction of the same bytes
@@ -473,6 +482,35 @@ func (d *AgentDiet) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		model = c.Model.For(d.modelSource)
 	}
 	if model == nil { // no model configured: replay-only, never an error
+		if changed == 0 {
+			rep.Skipped = true
+		}
+		return keys, nil
+	}
+
+	// The reserve, before the model call — the same ordering summarize needs and for the same
+	// reason, one step weaker because this component acts per message.
+	//
+	// Every plan this reflection produces will want a payload of its own, so if the reserve
+	// cannot take even the smallest of them the call is paid and every plan is then declined at
+	// commitMark: a model call for a step that is guaranteed to be left verbatim. Probing with
+	// the smallest candidate is deliberately the WEAKEST useful test — it skips only when
+	// nothing at all can be admitted, and never declines a step whose plans might still fit.
+	// A partial fit stays the per-message decision it already is.
+	smallest := 0
+	for _, it := range items {
+		if n := len(it.content); smallest == 0 || n < smallest {
+			smallest = n
+		}
+	}
+	if effectiveMode(c, d.mode) == markerFull && !store.StashRoom(c.Store, smallest) {
+		// Counted, not just gated. stash_refused is documented — in config.md, in routes.md and on
+		// the counter itself — as THE signal to raise a budget, and deliberately upstream of
+		// expand_unresolved_missing. A component whose refusals are invisible to it undercuts that:
+		// a deployment starving agentdiet would decline a whole step's removals every turn while
+		// /stats read 0. One increment per declined step, which is what was declined.
+		stashRefusals.Add(1)
+		rep.Gate("stash_reserve_exhausted")
 		if changed == 0 {
 			rep.Skipped = true
 		}
@@ -558,7 +596,9 @@ func (d *AgentDiet) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		if !ok {
 			continue
 		}
-		commitMark(c, rep, eff, key, p.content)
+		if !commitMark(c, rep, eff, key, p.content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(&req.Input[p.i], newText)
 		freeze(c, d.Name(), p.content, newText)
 		changed++

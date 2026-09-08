@@ -186,7 +186,7 @@ func (cf *Coref) Offload(req *bschemas.BifrostChatRequest, rep *components.Repor
 		if !schema.Rewritable(*m) || schema.MessageText(*m) == "" {
 			continue
 		}
-		if fk, _, ok := reapplyFrozen(c, cf.Name(), m); ok {
+		if fk, _, ok := reapplyFrozen(c, rep, cf.Name(), m); ok {
 			replayed[i] = true
 			changed++
 			keys = append(keys, fk...)
@@ -248,7 +248,19 @@ func (cf *Coref) Offload(req *bschemas.BifrostChatRequest, rep *components.Repor
 
 	// Commit the whole batch, then charge the session exactly one rewrite for it.
 	for _, p := range plan {
-		commitMark(c, rep, p.eff, p.key, p.original)
+		// HONOUR THE REFUSAL. commitMark can decline when the store cannot hold the original
+		// (#188's rewind reserve), and a declined payload must NOT be spliced: the marker would
+		// point at nothing, which is the dangling-marker defect #187 measured. Skipping the entry
+		// leaves that one message verbatim and costs nothing else.
+		//
+		// One consequence, stated rather than hidden: refusals shrink the batch AFTER
+		// min_batch_frac was evaluated on the plan, so a pass can end up removing less than the
+		// fraction that justified taking the rewrite. The rewrite is still charged once. That is a
+		// worse deal than planned but never an incorrect one, and it is visible as
+		// stash_refused > 0 alongside a small realised saving.
+		if !commitMark(c, rep, p.eff, p.key, p.original) {
+			continue
+		}
 		schema.SetMessageText(&req.Input[p.idx], p.newText)
 		// Latch. From here the bytes for this content are fixed for the session: the next
 		// turn replays them rather than re-deciding, because the decision is a function of
@@ -297,8 +309,11 @@ func (cf *Coref) planCuts(req *bschemas.BifrostChatRequest, rep *components.Repo
 			rep.Gate("below_min_tokens")
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim")
+		// #201/#208 split the conflated reason apart: skipReduce now NAMES why it declined, so a
+		// marker already present and an output the agent expanded are no longer one counter. Report
+		// what it says rather than the old merged label.
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate)
 			continue
 		}
 		class, ok := classes[i]

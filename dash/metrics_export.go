@@ -104,7 +104,7 @@ type TenantMetricRow struct {
 // a tenant that has ONLY archived data still needs a row, or its history would vanish
 // from Grafana the moment its last live session was archived.
 func (d *DB) TenantMetrics(since int64) ([]TenantMetricRow, error) {
-	rows, err := d.sql.Query(`
+	rows, err := d.sql.QueryContext(d.readCtx(), `
 		SELECT t.tenant_id,
 		       COALESCE(t.requests,0), COALESCE(t.tokens_before,0), COALESCE(t.tokens_after,0),
 		       COALESCE(t.saved_unique,0), COALESCE(t.cache_read,0), COALESCE(t.cache_write,0),

@@ -1116,3 +1116,27 @@ func TestUINeverShowsABareCost(t *testing.T) {
 		}
 	}
 }
+
+// The 5 s response cache is the reason /api/facets survived at ~1.5s per call: requested on
+// every tab switch, one miss followed by eleven hits reads as a fast endpoint. X-Cache is what
+// lets a measurement tell the two apart, so it is asserted rather than assumed — an A/B that
+// silently compares a miss against a hit reports a 158x "optimisation" nobody made.
+func TestCachedRoutesLabelHitsAndMisses(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	seed(t, rec, mkEvent(time.Now().UnixMilli(), "sess-1", "aws/claude-sonnet-5", 1000, 800))
+	for _, path := range []string{"/api/stats", "/api/facets", "/api/components"} {
+		w, _ := get(t, a, path, "")
+		if got := w.Header().Get("X-Cache"); got != "miss" {
+			t.Errorf("%s first call: X-Cache = %q, want miss", path, got)
+		}
+		w, _ = get(t, a, path, "")
+		if got := w.Header().Get("X-Cache"); got != "hit" {
+			t.Errorf("%s second call: X-Cache = %q, want hit", path, got)
+		}
+	}
+	// An uncached route must not claim either, or the header becomes noise.
+	w, _ := get(t, a, "/api/requests?limit=1", "")
+	if got := w.Header().Get("X-Cache"); got != "" {
+		t.Errorf("/api/requests: X-Cache = %q, want absent", got)
+	}
+}

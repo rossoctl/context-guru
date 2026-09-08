@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -32,9 +33,9 @@ func forwardedBody(t *testing.T, body []byte) []byte {
 // point is that one of those two differs.
 func forwardedOn(t *testing.T, route, yaml string, body []byte) []byte {
 	t.Helper()
-	var got []byte
+	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = io.ReadAll(r.Body)
+		up.record(r)
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(route, "anthropic") {
 			_, _ = w.Write([]byte(`{"id":"m1","type":"message","role":"assistant","model":"claude",` +
@@ -53,7 +54,7 @@ func forwardedOn(t *testing.T, route, yaml string, body []byte) []byte {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	return got
+	return up.last().body
 }
 
 // toolsRequest is the ANTHROPIC dialect, because that is the only dialect the injection targets:
@@ -210,11 +211,9 @@ func TestAdjudicateToolNotAdvertisedOnANonAnthropicRoute(t *testing.T) {
 // must instead be answered IN BAND, before the client is written to, which leaves the request-path
 // repair as a backstop rather than the primary defence.
 func TestAdjudicateStrayCallDoesNotReachTheClientOnTheJSONPath(t *testing.T) {
-	round := 0
-	var second []byte
+	var up upstreamCapture
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		round++
+		round := up.record(r)
 		w.Header().Set("Content-Type", "application/json")
 		if round == 1 {
 			// The model calls OUR tool, which is always a defect by construction.
@@ -224,7 +223,6 @@ func TestAdjudicateStrayCallDoesNotReachTheClientOnTheJSONPath(t *testing.T) {
 				`"usage":{"input_tokens":5,"output_tokens":1}}`))
 			return
 		}
-		second = body
 		_, _ = w.Write([]byte(`{"id":"m2","type":"message","role":"assistant","model":"claude",` +
 			`"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn",` +
 			`"usage":{"input_tokens":6,"output_tokens":2}}`))
@@ -242,10 +240,11 @@ func TestAdjudicateStrayCallDoesNotReachTheClientOnTheJSONPath(t *testing.T) {
 	resp.Body.Close()
 
 	// PRECONDITION: the loop must actually have run a second round, or this asserts nothing.
-	if round < 2 {
+	if round := up.hits(); round < 2 {
 		t.Fatalf("the stray was never intercepted -- only %d upstream round(s), client got: %s",
 			round, got)
 	}
+	second := up.body(2)
 	if strings.Contains(string(got), adjudicate.ToolName) {
 		t.Errorf("the proxy-injected tool_use reached the CLIENT: %s", got)
 	}
@@ -279,10 +278,10 @@ func TestAdjudicateStrayCoCalledWithClientToolLeaks(t *testing.T) {
 	}}
 
 	// --- Turn 1: the leak. -------------------------------------------------------------------
-	rounds := 0
+	var rounds atomic.Int64 // an atomic carries the happens-before edge the round trip does not
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
-		rounds++
+		rounds.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		blocks, _ := json.Marshal(assistantCoCall["content"])
 		_, _ = w.Write([]byte(`{"id":"m1","type":"message","role":"assistant","model":"claude",` +
@@ -303,7 +302,7 @@ func TestAdjudicateStrayCoCalledWithClientToolLeaks(t *testing.T) {
 
 	// PRECONDITION: exactly one upstream round. A continuation would mean the loop answered in band
 	// after all, and then the rest of this test is asserting nothing about the co-call path.
-	if rounds != 1 {
+	if rounds := rounds.Load(); rounds != 1 {
 		t.Fatalf("expected the loop to bail on otherTools after ONE round, got %d — the co-call path "+
 			"no longer defers, so this test's premise is gone: %s", rounds, leaked)
 	}
@@ -362,11 +361,11 @@ func TestAdjudicateStrayCoCalledWithClientToolLeaks(t *testing.T) {
 // THE LEAK, streaming path. The splicer withheld only the expand tool by name, so an adjudication call
 // streamed through event by event and the client saw it live.
 func TestAdjudicateStrayCallDoesNotReachTheClientOnTheSSEPath(t *testing.T) {
-	round := 0
+	var round atomic.Int64 // an atomic carries the happens-before edge the round trip does not
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
-		round++
-		if round == 1 {
+		n := round.Add(1)
+		if n == 1 {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			for _, ev := range []string{
@@ -415,7 +414,7 @@ func TestAdjudicateStrayCallDoesNotReachTheClientOnTheSSEPath(t *testing.T) {
 	}
 	got, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if round < 2 {
+	if round := round.Load(); round < 2 {
 		t.Fatalf("the streamed stray was never intercepted -- only %d round(s), client got: %s",
 			round, got)
 	}

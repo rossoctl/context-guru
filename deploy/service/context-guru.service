@@ -146,5 +146,26 @@ LimitNOFILE=65536
 MemoryMax=8G
 TasksMax=4096
 
+# GOMEMLIMIT must be set whenever MemoryMax is, and this deployment is the proof.
+#
+# Go's garbage collector sizes the heap against its OWN target and knows nothing about a cgroup
+# limit. So a process under MemoryMax grows until the KERNEL starts refusing it memory, and then
+# behaves at its worst: the GC keeps chasing a heap goal the cgroup will not allow, the kernel
+# reclaims continuously to keep it under the cap, and the two fight. Measured on this box, live:
+# 6.8 GB of Go heap against the 8 G cap, 3.66 cores burned continuously with the CPU spread evenly
+# across twelve threads (the GC's own signature, not an application loop), for 28 hours. Every
+# dashboard query ran inside that, which is why they crossed their 10s timeout.
+#
+# 7 GiB leaves the ~1 GB of headroom the cap needs for everything that is not Go heap — thread
+# stacks, the rclone child, page cache the process has dirtied — while giving the GC a ceiling it
+# can actually aim at, so it collects harder instead of being throttled by the kernel.
+#
+# Honest about what this is: a SEATBELT, not the cure. It converts "kernel reclaim thrash, and an
+# OOM kill if the burst is sharp enough" into "known, bounded GC pressure". If the real working set
+# genuinely exceeds the limit, it relocates the thrash rather than removing it. What removes it is
+# not needing the memory — bounding read concurrency and cancelling reads whose caller has gone
+# (dash/store.go, dash/api.go), which is where the 6.8 GB actually came from.
+Environment=GOMEMLIMIT=7GiB
+
 [Install]
 WantedBy=multi-user.target

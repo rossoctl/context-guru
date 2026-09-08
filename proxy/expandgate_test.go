@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/tidwall/gjson"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -59,9 +58,9 @@ func TestExpandToolIsAdvertisedOnlyWhereMarkersCanExist(t *testing.T) {
 		{"a pipeline with an offloader", "pipeline: [linecap, cachesplit]\n", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			var forwarded []byte
+			var up upstreamCapture
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				forwarded, _ = io.ReadAll(r.Body)
+				up.record(r)
 				w.Header().Set("Content-Type", "application/json")
 				fmt.Fprint(w, `{"type":"message","usage":{"input_tokens":1}}`)
 			}))
@@ -89,6 +88,7 @@ func TestExpandToolIsAdvertisedOnlyWhereMarkersCanExist(t *testing.T) {
 				t.Fatal(err)
 			}
 			resp.Body.Close()
+			forwarded := up.last().body
 			if len(forwarded) == 0 {
 				t.Fatal("upstream received nothing")
 			}

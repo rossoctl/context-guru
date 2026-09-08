@@ -139,15 +139,53 @@ Present only when an extraction component has recorded something. See
 ### Provider-billed token tiers, and the honest ratios
 
 Summed from response `usage` blocks, so all four are zero against an upstream that
-reports no usage.
+reports no usage — **or against one whose usage this proxy could not read**, which is a different
+thing and is counted separately. See [when the tiers read zero](#when-the-tiers-read-zero).
 
 | Field | Meaning |
 |---|---|
 | `fresh_input_tokens` · `cache_read_tokens` · `cache_write_tokens` · `output_tokens` | The four billed tiers. |
+| `usage_unparsed` | Responses that carried a usage block in a **spelling this proxy does not recognise**, so the four tiers above were recorded as 0 on an otherwise healthy request. Non-zero means token accounting is offline for some route or provider. Counts **responses**, not requests — one request can drive several upstream rounds through the expand loop — so do not read it as a fraction of `requests`. |
+| `usage_unreadable` | Responses whose examined bytes would not parse at all, so usage could not be sought — a spliced head+tail sniffer window rather than an unrecognised dialect. Different fix; see below. |
 | `attempted_tokens` | What compaction was **allowed** to touch this window — the uncached tail when cache-aware. |
 | `frozen_tokens` | What cache-awareness deliberately left alone. Its benefit is the cache reads that stayed cheap; this is its cost. |
 | `savings_pct_attempted` | `saved ÷ attempted`. The ratio to quote: `savings_pct`'s whole-request denominator recounts the transcript every turn and trends to ~0% on a long session. `0` when nothing was attempted. |
 | `savings_pct_new_input` | `saved ÷ (fresh + cache_write + saved)` — savings as a fraction of what would newly have entered the provider. Reported as `0`, **never 100**, when the provider reported no usage: savings must not be divided by themselves. |
+
+#### When the tiers read zero
+
+Four token fields at 0 on a 200 with correct savings, correct latency and correct everything else
+used to mean **five** different things, with nothing to tell them apart:
+
+| Cause | `usage_miss` in the log | Counted | What to do |
+|---|---|---|---|
+| The provider genuinely reported no usage (an OpenAI response without `stream_options`) | `absent` | — | nothing |
+| A recognised block whose every tier is zero | `all_zero` | — | nothing; legitimate on some responses |
+| Empty response body | `no_body` | — | nothing |
+| A usage block in an **unrecognised dialect** (Bedrock Converse camelCase `usage.inputTokens`, or a nested `response.usage`) | `unparsed_dialect` | `usage_unparsed` | **alert.** Add the dialect — the DEBUG record below names it |
+| The examined bytes were not a whole document, so the block was hidden | `unreadable_body` | `usage_unreadable` | **alert.** Raise `sniffMax` or buffer the body; do *not* go hunting for a missing field name |
+
+Only the last two are failures, and only they are counted — the number an operator watches to
+confirm accounting is healthy must not be incremented by it being broken. The reason for every
+miss, benign ones included, rides on the `cg.request` log line as `usage_miss`.
+
+**Which of the two you can even get depends on the response path**, and this has already misled
+two readers, so: `unreadable_body` can arise **only** on the sniffed path — the one taken when
+neither proxy-injected tool is advertised on the request (`proxy.go`, `if !advertised`), where usage
+is read from a bounded head+tail window instead of the whole body. When either tool *is* advertised
+— which `inject_expand: always` guarantees from the first turn — a non-streamed response is read
+whole and the window never applies, so a miss there is a dialect or a genuine absence and nothing
+else. `valid_json` in the record below settles it either way without needing to know the path.
+
+**The shape record.** On the first unaccounted response per process, `cg.usage_unaccounted` is
+logged at DEBUG with the response's **key names** — top-level keys, where a usage block was found,
+and the key names inside it — and nothing else. No values and no body: a body dump on agent traffic
+writes kilobytes of transcript per response, and this record cannot, by construction. It is what
+turns "usage_reported is false" into "the provider is sending camelCase", from any deployment that
+hits the gap, without a capture rig or an extra request.
+
+This ran undetected for **4,015 of 4,015 requests** in one benchmark iteration and was found two
+iterations later, in a post-mortem chasing a different question.
 
 ### SSE streaming health
 
@@ -194,6 +232,59 @@ at 11.5× the read price — unless it is re-derived.
 A healthy long-horizon run shows `frozen_hits` climbing with turn count and `frozen_dropped` at
 0; a rising `frozen_dropped` means decisions are dying mid-session (TTL too short for the task,
 or the entry cap too small for the session's working set).
+
+### Rewind reserve (reversibility health)
+
+The store holds the **originals** behind `<<cg:HASH>>` markers in a reserve of its own that LRU
+pressure cannot evict, bounded by two budgets: half the entry cap, and `stash_max_bytes`. Before
+#187 those payloads shared the cache's evictable half with per-removal bookkeeping while the
+*decisions* naming them were pinned, so the more a configuration removed the more of its own
+reversibility it destroyed, silently.
+
+| Field | Meaning |
+|---|---|
+| `stash_live` / `stash_capacity` | Payloads held now, and the reserve's entry cap (`max_entries / 2`). `live` approaching `capacity` is the warning. |
+| `stash_bytes` / `stash_max_bytes` | What those payloads cost, and the byte budget (`stash_max_bytes`). Entries are a poor proxy for memory here — a payload is a whole tool output, every other exempt entry is a marker line — so read both pairs to see **which** budget bound. |
+| `stash_refused` | Removals **declined** because the reserve was full. The content was left verbatim and nothing became irreversible — raise `max_entries` or `stash_max_bytes`. |
+| `stash_missing` | Marker replays that found **no payload** behind them: a dangling `<<cg:HASH>>` went upstream. This one *is* a broken promise. A replay re-stashes the payload it re-derived, so this fires only when that write was **also** refused — raise the reserve, and `stash_ttl_seconds` if `stash_expired` is what is taking them. |
+| `stash_expired` | Payloads reclaimed by their own TTL (`stash_ttl_seconds`, shorter than `ttl_seconds`). **Not an alert on its own** — read it against `stash_revived`. |
+| `stash_revived` | Reclaimed payloads written again by a later replay, which re-derives them from the transcript **before** the marker goes upstream: reclamation absorbed at no cost. Tracking `stash_expired` means the shorter payload TTL is working as designed; see [why payloads expire sooner](config.md#why-payloads-expire-sooner-than-decisions). |
+
+`stash_refused` is the **leading** indicator for `expand_unresolved_missing`: that counter cannot
+move until the agent happens to call `expand`, so a proxy that had stopped being able to promise
+reversibility read as perfectly healthy until one did. This one moves when the budget binds.
+
+**Do not read `stash_refused` and `stash_missing` as the same thing.** They are opposite outcomes,
+and they were one counter until the #188 review pointed out that made the safe case
+indistinguishable from the dangerous one. A refusal means a removal did **not** happen — the
+content went upstream verbatim, and the cost is tokens. A missing payload means a marker went out
+with nothing behind it, which is the failure #187 was about. Alert on `stash_missing`; watch
+`stash_refused`. `stash_missing` also grows with **turn count** rather than with distinct dangling
+markers: a payload that has gone cannot be restored (the replayed bytes must stay byte-identical to
+the turn that created them), so every later turn re-reports it for every affected message.
+
+### What an expand costs
+
+| Field | Meaning |
+|---|---|
+| `expand_prefix_flips` | Turns where an **established** compaction was abandoned because the agent had expanded that content, so the original went upstream in full at its cached position — a suffix cache-write attributable to expansion, at ~11.5× a read. |
+
+Deliberate rather than a defect: re-compacting would loop the agent into another expand, and one
+cache-write is cheaper than an unbounded loop. Counting it makes the trade visible, since no other
+counter distinguishes an expand-induced cache-write from any other.
+
+It grows **per turn per message**, not per distinct content: every later turn re-sends the same
+original and the same abandonment is observed again, while only the first is a real cache-write. Read
+it as "expansion is churning cached prefixes here".
+
+It also counts **one event**, not every expand-induced cache-write: a replay declined because the
+content was expanded. At least one sibling is uncounted — protecting expanded content shortens
+`summarize`'s span, which can invalidate a checkpoint and force a re-summary, and different summary
+text at a fixed prefix position is another suffix cache-write. So a zero here does not mean expansion
+cost nothing. The per-component gate
+`kept_verbatim_after_expand` is the per-message view, and `already_marked` is its benign sibling —
+the two were one label (`marker_or_kept_verbatim`) until they were split. Full picture in
+[what an expand costs](../how-to/recover-context.md#what-an-expand-costs-across-turns).
 
 ### cmdfilter attribution
 

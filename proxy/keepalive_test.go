@@ -688,15 +688,19 @@ func TestKillSwitch(t *testing.T) {
 // End to end against a real HTTP server: the ping actually goes out, carries the caller's
 // credential, and reaches the upstream as a max_tokens:1 non-streaming POST of the same body.
 func TestSendPingHitsTheUpstream(t *testing.T) {
-	var got struct {
+	// The handler runs on the test server's goroutine; the HTTP round trip is not a
+	// happens-before edge, so what it saw comes back over a buffered channel rather than
+	// through a captured variable the test goroutine would read unsynchronised.
+	type seen struct {
 		body []byte
 		auth string
 		path string
 	}
+	seenCh := make(chan seen, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b := make([]byte, 1<<20)
 		n, _ := r.Body.Read(b)
-		got.body, got.auth, got.path = b[:n], r.Header.Get("Authorization"), r.URL.Path
+		seenCh <- seen{b[:n], r.Header.Get("Authorization"), r.URL.Path}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"usage":{"input_tokens":0,"output_tokens":1,` +
 			`"cache_read_input_tokens":48576,"cache_creation_input_tokens":0},"stop_reason":"max_tokens"}`))
@@ -716,6 +720,7 @@ func TestSendPingHitsTheUpstream(t *testing.T) {
 	if u.CacheRead != 48576 || u.CacheWrite != 0 {
 		t.Errorf("usage read=%d write=%d; a ping must READ the prefix, not write it", u.CacheRead, u.CacheWrite)
 	}
+	got := <-seenCh
 	if got.auth != "Bearer sk-caller" {
 		t.Errorf("upstream saw Authorization %q", got.auth)
 	}

@@ -17,8 +17,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
-          check-latest: true
+          # go.mod is the single source of truth for the toolchain. Pinning a literal here is
+          # what let CI validate on 1.25 while go.mod declared 1.26.4 and releases built on
+          # 1.26 (#152) — three numbers that have to agree and no mechanism making them.
+          go-version-file: go.mod
       - name: Lint
         run: make lint
       - name: Test & coverage
@@ -54,8 +56,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
-          check-latest: true
+          # go.mod is the single source of truth for the toolchain. Pinning a literal here is
+          # what let CI validate on 1.25 while go.mod declared 1.26.4 and releases built on
+          # 1.26 (#152) — three numbers that have to agree and no mechanism making them.
+          go-version-file: go.mod
       - name: Build with no C compiler available
         run: |
           go build -o /tmp/cg-purego ./cmd/context-guru-proxy

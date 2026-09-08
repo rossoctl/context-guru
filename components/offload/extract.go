@@ -64,8 +64,8 @@ func (e *Extract) Offload(req *bschemas.BifrostChatRequest, rep *components.Repo
 			rep.Gate("below_output_floor")
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim") // don't re-reduce
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate) // don't re-reduce; the gate says which reason
 			continue
 		}
 		projected, ok := collapseObviousNoise(content)
@@ -79,7 +79,9 @@ func (e *Extract) Offload(req *bschemas.BifrostChatRequest, rep *components.Repo
 			rep.Gate("marker_no_win") // projection+marker wouldn't shrink this message
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(msg, newText)
 		changed++
 		if key != "" {

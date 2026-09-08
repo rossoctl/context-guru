@@ -200,10 +200,37 @@ func frozenLost(c *components.Ctx, key string) bool {
 // exists and still shrinks it. It also refreshes the expand originals for any markers
 // in the replacement (the agent re-sent the full original as m's content), so
 // restoration keeps working across turns. Returns the marker keys + whether it acted.
-func reapplyFrozen(c *components.Ctx, comp string, m *bschemas.ChatMessage) ([]string, int, bool) {
+func reapplyFrozen(c *components.Ctx, rep *components.Report, comp string, m *bschemas.ChatMessage) ([]string, int, bool) {
 	content := schema.MessageText(*m)
 	if isKeptVerbatim(c, contentKey(content)) {
-		return nil, 0, false // agent expanded this; replaying the collapse would loop
+		// The agent expanded this; replaying the collapse would loop it into another expand.
+		//
+		// COUNT THE FLIP, which needs one more lookup than declining does. Whether this turn
+		// costs anything depends on something this branch did not previously ask: was there a
+		// frozen decision? If there was, the provider is holding COMPACTED bytes for this
+		// message and we are about to send the original in full at the same position — a change
+		// inside the cached prefix, so the whole suffix is re-written at ~11.5x a read. If there
+		// was not, the message was never compacted and nothing flips.
+		//
+		// Both cases raise the same gate at the caller (kept_verbatim_after_expand), because from
+		// the offloader's point of view they are the same decision. Only this one has a price, and
+		// nothing distinguished them before — so an expand-induced cache-write was indistinguishable
+		// from any other, which is #201's second bullet.
+		//
+		// store.Peek, NOT Get, and this is the load-bearing part of the probe rather than a
+		// micro-optimisation. Memory.Get SLIDES the TTL and reorders the LRU, and FrozenPrefix is
+		// one of the PINNED namespaces — so probing with Get renewed a pinned entry that this
+		// branch has just decided will never be replayed, and pinned entries count against the
+		// shared exempt budget that gates rewind-reserve admission. A diagnostic would have been
+		// applying back-pressure to the reserve. Measured: with a 100s TTL and ten turns 60s apart,
+		// the probe kept a frozen decision alive 600s in.
+		//
+		// One extra lookup on rare content: this branch is reached only for content the agent
+		// actually expanded, not on the hot path.
+		if store.Peek(c.Store, frozenKey(c.Session, comp, contentKey(content))) {
+			expandFlips.Add(1)
+		}
+		return nil, 0, false
 	}
 	repl, ok := c.Store.Get(frozenKey(c.Session, comp, contentKey(content)))
 	if !ok {
@@ -217,8 +244,35 @@ func reapplyFrozen(c *components.Ctx, comp string, m *bschemas.ChatMessage) ([]s
 		return nil, 0, false
 	}
 	keys := expand.ParseMarkers(rs)
+	if len(keys) == 0 {
+		// A REPLAY WITH NO MARKERS IS A DEGRADED-MODE REPLAY, and it has to say so.
+		//
+		// Under marker_mode summary/off nothing was stashed, so the frozen replacement carries no
+		// <<cg:HASH>> to parse and this returns no cache keys — while still shrinking the message.
+		// components/pipeline.go reverts exactly that combination ("dropped content without
+		// stashing a cache_key") unless rep.Irreversible says the loss was chosen.
+		//
+		// The turn that MADE the decision sets it, through commitMark's non-full branch. Every
+		// later turn replays it through here and did not, so from turn 2 onward a summary-mode
+		// offloader had its whole component reverted and the transcript sent verbatim — a
+		// full-suffix cache write at ~11.5x the read price, on every turn, for the rest of the
+		// session. Measured on a two-turn mask fixture: turn 1 Irreversible=true, turn 2
+		// Irreversible=false with the message rewritten and no keys returned.
+		//
+		// The blanket flag cannot mask a FULL-mode bug: every freeze() site is downstream of a
+		// tryMark/commitMark pair, so a full-mode frozen replacement always carries a marker and
+		// len(keys) == 0 implies a degraded mode.
+		rep.Irreversible = true
+	}
 	for _, k := range keys {
-		c.Store.Put(k, []byte(content)) // refresh the stashed original for expand
+		// Refresh the stashed original for expand. A key already present is always retained
+		// (see store.Stasher), so a false answer means this replayed decision's payload had
+		// already left the store: the marker about to go out is DANGLING. The replacement
+		// bytes are replayed anyway — declining would flip an already-cached message and
+		// cannot un-send the marker — and commitRefresh counts it as stash_missing, which is
+		// the counter for a broken promise. It used to increment stashRefusals, the counter
+		// whose whole operator-facing meaning is "nothing became irreversible".
+		commitRefresh(c, rep, markerFull, k, content)
 	}
 	schema.SetMessageText(m, rs)
 	return keys, saved, true
@@ -258,6 +312,38 @@ var (
 // FrozenStats returns the cumulative freeze-replay hits and misses since process start.
 // Exported for the host's /stats, which pairs them with the store's drop/repair counts.
 func FrozenStats() (hits, misses int64) { return frozenHits.Load(), frozenMisses.Load() }
+
+// expandFlips counts turns where an ESTABLISHED compaction was abandoned because the agent had
+// expanded that content: a frozen decision existed, so the provider is holding the compacted bytes,
+// and this turn sends the original in full at the same position.
+//
+// That costs a cache-write of the whole suffix at ~11.5x a read — the exact cost the cache-tail
+// gate exists to avoid everywhere else — and it was undocumented, uncounted and invisible: no
+// counter distinguished "the prefix flipped because the agent expanded" from any other cache-write,
+// so an operator could not see it and a benchmark could not attribute it (#201).
+//
+// It is a deliberate cost, not a bug. Re-compacting would bounce the agent straight into another
+// expand, and one cache-write is cheaper than an unbounded expand loop — which is why cg:keep:
+// exists. Counting it makes the trade visible instead of assumed.
+//
+// ONE PER TURN PER MESSAGE, not one per distinct content: every later turn re-sends the same
+// original and re-observes the same abandonment, so this grows with turn count. Only the FIRST is
+// a real cache-write — after that the provider has cached the full form — so read it as "expansion
+// is costing prefix churn in this deployment", not as a count of cache-writes. Distinct content is
+// what kept_verbatim_after_expand's per-component gate approximates.
+//
+// AND ONE EVENT, not every expand-induced cache-write. This is its only increment site: a replay
+// declined because the content was expanded. summarize has a sibling that is NOT counted here —
+// trimSpanForKeptVerbatim shortens the span to protect expanded content, which can invalidate a
+// checkpoint whose boundary reached past the new end, and re-summarizing emits different summary
+// text at a fixed prefix position. Same class of cost, correct trade, deliberately uncounted:
+// a second increment site changes what this number means and wants its own decision.
+var expandFlips atomic.Int64
+
+// ExpandPrefixFlips returns how many times a replay declined because the agent had expanded content
+// that WAS compacted before. Non-zero means expansion is re-writing cached prefixes; see
+// expandFlips for why it is per turn per message rather than per distinct content.
+func ExpandPrefixFlips() int64 { return expandFlips.Load() }
 
 // contentKey is a marker/whitespace-insensitive content hash (shared with extract's
 // result cache), so the same output re-sent across turns maps to one frozen decision.
@@ -299,9 +385,40 @@ func isKeptVerbatim(c *components.Ctx, ck string) bool {
 // orphan the earlier stash), or the agent expanded it and re-compacting would just
 // trigger another expand — a per-turn bounce loop. Every offloader consults this on
 // each candidate so the kept-verbatim / never-double-reduce guarantees hold uniformly.
-func skipReduce(c *components.Ctx, content string) bool {
-	return expand.HasPlaceholder(content) || isKeptVerbatim(c, contentKey(content))
+// It returns WHICH of the two, because the caller publishes it as a gate and the two reasons want
+// opposite readings (#201). "Already carries a marker" is benign — that content is already
+// compacted, and nothing about this turn changes. "The agent expanded it" is an established
+// compaction being abandoned: from this turn on the original goes upstream in full at its own
+// position, which is a change inside the provider's cached prefix.
+//
+// They shared the label `marker_or_kept_verbatim` at eight of eleven sites while three offloaders
+// (extract_sweep, extract_llm, failed_run) already raised `kept_verbatim_after_expand` for exactly
+// the same condition. Gates reach /stats per component, so that was a published counter reporting
+// both a benign outcome and a real cost — and a published experimental figure was corrected twice
+// off it before anyone noticed the label was the problem. Same rule as #200 and #188.
+func skipReduce(c *components.Ctx, content string) (gate string, skip bool) {
+	// Marker first: content that already carries one was compacted by some component, and asking
+	// the store about kept-verbatim would be a wasted Get on the common path.
+	if expand.HasPlaceholder(content) {
+		return GateAlreadyMarked, true
+	}
+	if isKeptVerbatim(c, contentKey(content)) {
+		return GateKeptVerbatim, true
+	}
+	return "", false
 }
+
+// The two gate labels skipReduce distinguishes, named constants because eleven offloaders raise
+// them and a typo in one would silently split a counter in two.
+const (
+	// GateAlreadyMarked: this content already carries an offload marker, so reducing again would
+	// double-compact and can orphan the earlier stash. Benign — nothing flips.
+	GateAlreadyMarked = "already_marked"
+	// GateKeptVerbatim: the agent expanded this content, so it must not be re-compacted (that
+	// would bounce it straight into another expand). The turn this first appears is the turn the
+	// message reverts to its full form inside the cached prefix — see ExpandPrefixFlips.
+	GateKeptVerbatim = "kept_verbatim_after_expand"
+)
 
 // --- Stash ownership (scoping GET /expand by session) ----------------------
 //

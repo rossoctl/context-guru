@@ -43,7 +43,8 @@ component. It now names one of these on every message it passes over, visible pe
 |---|---|
 | `within_keep_recent` | the request holds no more tool outputs than `keep_recent`, so nothing is "older" |
 | `below_min_tokens` | the output is smaller than `min_tokens` |
-| `marker_or_kept_verbatim` | already offloaded by an earlier component, or expanded by the agent |
+| `already_marked` | already offloaded by an earlier component — benign, that content is compacted already |
+| `kept_verbatim_after_expand` | the agent expanded this content, so it must not be re-compacted. The first turn this appears is the turn the message reverts to its full form inside the cached prefix — counted as `expand_prefix_flips`. |
 | `cached_prefix` | the output is inside the provider's cached prefix, where a new mask would flip already-cached content and force a cache-write of the suffix. This is the gate `cold_cache` lifts on a provably-expired cache |
 | `non_text_blocks` | a text rewrite would drop the message's non-text blocks |
 | `marker_no_win` | marker + head-peek would not be smaller than the output itself |

@@ -3,6 +3,7 @@ package dash
 import (
 	"database/sql"
 	"fmt"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -49,6 +50,16 @@ type WaterfallStep struct {
 // Overview is the payload behind the dashboard's headline. Every percentage here
 // is derived at read time from stored absolutes, so a rate change never rewrites
 // history and a filter change never needs a rebuild.
+// invalidConfigRecentWindow is how recently a request must have run with a failed configuration
+// for the dashboard to still call it a live problem.
+//
+// An hour, because the thing being detected is a stored config that cannot build: while it lasts
+// EVERY request for that account is affected, so on any account with traffic the signal appears
+// within seconds and keeps appearing. An hour is therefore long enough that a quiet account still
+// trips it, and short enough that the banner clears on its own once someone fixes the config —
+// without anyone having to know that clearing it is a thing that needs doing.
+const invalidConfigRecentWindow = time.Hour
+
 type Overview struct {
 	Since    int64 `json:"since"`
 	Until    int64 `json:"until"`
@@ -65,6 +76,21 @@ type Overview struct {
 	// zero before anyone noticed from a log line rather than from here. Nonzero here means the
 	// account's Settings page needs attention now, not "check the logs".
 	InvalidConfigRequests int64 `json:"invalid_config_requests"`
+	// InvalidConfigRecent is the same count over the last invalidConfigRecentWindow, scoped to
+	// the account but NOT to the filter's time range or any of its facets. It exists because
+	// InvalidConfigRequests alone cannot answer the question the banner above the headline asks,
+	// which is "is compaction broken RIGHT NOW".
+	//
+	// The dashboard's default view has no time filter at all, so a window-scoped count keeps
+	// reporting an incident forever after it is over: this deployment carried 1,752 such requests
+	// from a single afternoon (a config key removed with no migration, since fixed), and the page
+	// went on telling every viewer to "open Settings and fix the configuration" for days, about a
+	// configuration that was already correct. An alarm that cannot switch itself off is one people
+	// learn to scroll past, which costs exactly what it was built to buy.
+	//
+	// Facets are deliberately ignored, not just the time range: filtering to one model must not be
+	// able to hide a live breakage that happens to be showing up on another.
+	InvalidConfigRecent int64 `json:"invalid_config_recent"`
 
 	TokensBefore int64 `json:"tokens_before"`
 	TokensAfter  int64 `json:"tokens_after"`
@@ -489,7 +515,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		CacheTTL: map[string]int64{},
 	}
 	var cgAvg, upAvg, ttfbAvg, upBufAvg sql.NullFloat64
-	err := d.sql.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT r.session_id),
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*), COUNT(DISTINCT r.session_id),
 		COALESCE(SUM(r.tokens_before),0), COALESCE(SUM(r.tokens_after),0), COALESCE(SUM(r.saved_unique),0),
 		COALESCE(SUM(r.attempted_tokens),0), COALESCE(SUM(r.frozen_tokens),0),
 		-- The gross saving over ONLY the rows that recorded an attempted_tokens denominator, so
@@ -646,16 +672,29 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// Everything from here to the percentiles below is a separate, independent read against
 	// the same filter — none of these queries consumes another's result (the two exceptions,
 	// the inflation correction and the estimator median, are noted where they are), so nothing
-	// stops them running concurrently instead of one after another. That is not an optimization
-	// for its own sake: measured against a production-sized copy of this table with zero write
-	// contention, this stretch alone summed to ~9s run sequentially — CompactionResets and the
-	// replay estimate each multiple seconds by themselves — which is why /api/stats was timing
-	// out its 10s caller-facing deadline on every single call, not just under load. Run
-	// concurrently against the same pooled *sql.DB (store.go's SetMaxOpenConns already sizes
-	// the pool for this), wall time drops to roughly the slowest single query rather than their
-	// sum. SQLite's WAL mode already gave each of these its own read snapshot when they ran
-	// sequentially — nothing here was ever one atomic view of the table — so concurrency changes
-	// only how long the caller waits, never what any individual query reads.
+	// stops them running concurrently instead of one after another.
+	//
+	// THE GROUP BUYS NO WALL TIME AT TODAY'S SIZES, and the claim that it does — that this
+	// "drops to roughly the slowest single query rather than their sum" — is retracted. Measured
+	// on a 16,444-request corpus: the sixteen queries in this function sum to 587 ms and the
+	// slowest is 186 ms, and Overview() measures 520-556 ms. That is the sum. The reason is the
+	// driver: `modernc.org/sqlite` reads do not run in parallel here. N copies of one ~280 ms
+	// query, 16 cores, SetMaxOpenConns(100) — n=2 is 1.05x, n=4 is 0.68x, n=8 is 0.51x, so
+	// concurrency is SLOWER than sequential once there is any of it.
+	//
+	// What is NOT established: the ~9s this comment used to attribute to sequential execution,
+	// and the /api/stats timeouts attributed to that. Both figures predate the LAG rewrite below
+	// and idx_tooldecl_session, and nobody has re-measured this stretch sequentially either side
+	// of those two changes — so which change earned that improvement is an open question, not
+	// something this comment gets to answer. Note also that 0.51x at n=8 is a measurement of
+	// TODAY's sizes; it does not establish that concurrency never helped at 9s scale, where the
+	// contention profile may genuinely have differed. So the group stays: a deletion needs its
+	// own before/after, which nobody has run.
+	//
+	// Still true, and unaffected by any of the above: SQLite's WAL mode already gave each of
+	// these its own read snapshot when they ran sequentially — nothing here was ever one atomic
+	// view of the table — so concurrency changes only how long the caller waits, never what any
+	// individual query reads.
 	var (
 		replayProjectedRaw, inflation          int64
 		ttl                                    map[string]int64
@@ -667,6 +706,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		accountingM, cacheMissM, uncompressedM map[string]int64
 		p95cg, p95up                           float64
 		invalidConfigRequests                  int64
+		invalidConfigRecent                    int64
 	)
 	var g errgroup.Group
 	// See InvalidConfigRequests' own comment: preset is set to "invalid" by
@@ -675,8 +715,22 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// scopes this to the tenant/window idx_requests_tenant covers, so this is a filter over an
 	// already-narrow row set, not a fresh scan.
 	g.Go(func() error {
-		return d.sql.QueryRow(`SELECT COUNT(*) FROM requests r
+		return d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r
 			WHERE `+cond+` AND r.preset = 'invalid'`, args...).Scan(&invalidConfigRequests)
+	})
+	// The same fact over a fixed recent window, which is what the banner is actually about. Built
+	// here rather than by copying f and overriding Since, so that it demonstrably carries the
+	// TENANT scope and nothing else: a facet leaking in could hide a live breakage, and dropping
+	// the tenant term would show one account another's problem.
+	g.Go(func() error {
+		rcond := "r.keepalive = 0 AND r.ts >= ? AND r.preset = 'invalid'"
+		rargs := []any{time.Now().Add(-invalidConfigRecentWindow).UnixMilli()}
+		if !f.TenantAll {
+			rcond += " AND r.tenant_id = ?"
+			rargs = append(rargs, f.Tenant)
+		}
+		return d.sql.QueryRowContext(d.readCtx(),
+			`SELECT COUNT(*) FROM requests r WHERE `+rcond, rargs...).Scan(&invalidConfigRecent)
 	})
 	// The replay ceiling's raw form, corrected below by the inflation query once both are in —
 	// see the comment above `splitMoved` usage earlier in this function for the ceiling's own
@@ -692,7 +746,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// function must still sort the WHOLE table before the outer filter can narrow anything.
 	// Left as the correlated form on purpose.
 	g.Go(func() error {
-		return d.sql.QueryRow(`SELECT COALESCE(SUM(r.saved_unique * (
+		return d.sql.QueryRowContext(d.readCtx(), `SELECT COALESCE(SUM(r.saved_unique * (
 				SELECT COUNT(*) FROM requests p WHERE p.session_id = r.session_id
 				  AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id)))),0)
 			FROM requests r WHERE `+cond+` AND r.saved_unique > 0`, args...).Scan(&replayProjectedRaw)
@@ -708,7 +762,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// 10,000-row perf fixture, 5 trials: gated 52.7 ms against 53.0 ms ungated at 0 pings, and
 	// 58.0 against 57.3 at 100 — one extra scan for no measurable saving, so it is gone.
 	g.Go(func() error {
-		return d.sql.QueryRow(`SELECT COALESCE(SUM((
+		return d.sql.QueryRowContext(d.readCtx(), `SELECT COALESCE(SUM((
 				SELECT COALESCE(SUM(r.saved_unique),0) FROM requests r
 				  WHERE r.session_id = p.session_id AND r.saved_unique > 0
 				    AND (r.ts < p.ts OR (r.ts = p.ts AND r.id < p.id))
@@ -728,7 +782,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// The MODAL breakpoint placement, not the mean: 1.5 breakpoints in a system block is not
 	// a thing any request did, and an average across locations describes no prompt at all.
 	g.Go(func() error {
-		err := d.sql.QueryRow(`SELECT r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages,
+		err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages,
 				r.cache_bp_blocks, COUNT(*) AS n
 			FROM requests r WHERE `+cond+`
 			GROUP BY 1,2,3,4 ORDER BY n DESC LIMIT 1`, args...).Scan(&bs, &bt, &bm, &bb, &modalRequests)
@@ -753,14 +807,27 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// happens (tokens_before > 0 holds for every row measured), so this is not a behavior
 	// change in practice, but it is not a byte-for-byte port of the old query's guarantee.
 	g.Go(func() error {
-		q := `WITH s AS (
-			SELECT r.*, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
+		// Two columns through the window sort, not `r.*`. The CTE used to select every column
+		// of `requests` and carry all of them through the PARTITION BY sort, when the only thing
+		// the outer query wants from it is one LAG value per row. Emitting (id, prev) and joining
+		// back on the primary key sorts ~2 columns instead of ~56; the 16k primary-key probes
+		// that costs are cheaper than the payload they replace, which is the opposite of the
+		// tradeoff Facets' component list turns on (see query.go) — invocation count wins there,
+		// sort payload wins here, so neither is a rule.
+		//
+		// Measured: 242-316 ms to 59-63 ms on the 16,444-request corpus (5 runs), and 1,324 ms
+		// to 553 ms read-only against the production database. Result identical service-wide
+		// (37,954 rows there, 526 here) and under each tenant scope separately. Keeping the CTE
+		// self-contained but listing only the filterable columns was also tried and is the worse
+		// of the two at 135 ms.
+		q := `WITH prev AS (
+			SELECT r.id AS rid, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
 				OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
 			FROM requests r
-		) SELECT COUNT(*) FROM s r WHERE ` + cond + `
-			AND r.tokens_before > 0 AND r.prev_tokens_before IS NOT NULL
-			AND r.tokens_before < r.prev_tokens_before`
-		return d.sql.QueryRow(q, args...).Scan(&o.CompactionResets)
+		) SELECT COUNT(*) FROM requests r JOIN prev ON prev.rid = r.id WHERE ` + cond + `
+			AND r.tokens_before > 0 AND prev.prev_tokens_before IS NOT NULL
+			AND r.tokens_before < prev.prev_tokens_before`
+		return d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(&o.CompactionResets)
 	})
 	// The estimator check, on the only population where the two counts are comparable: requests
 	// where nothing was removed, so tokens_before and the provider's billed input describe the
@@ -773,13 +840,13 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	g.Go(func() error {
 		const ratioPop = ` AND r.tokens_before = r.tokens_after AND r.tokens_before > 0
 			AND r.token_accounting = 'complete' AND r.fresh_input + r.cache_read + r.cache_write > 0`
-		if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+ratioPop,
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+ratioPop,
 			args...).Scan(&estimatorDivergenceRows); err != nil {
 			return err
 		}
 		if estimatorDivergenceRows > 0 {
 			var med sql.NullFloat64
-			if err := d.sql.QueryRow(`SELECT
+			if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
 				CAST(r.fresh_input + r.cache_read + r.cache_write AS REAL) / r.tokens_before AS ratio
 				FROM requests r WHERE `+cond+ratioPop+`
 				ORDER BY ratio ASC LIMIT 1 OFFSET ?`,
@@ -795,7 +862,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// them: one predicate, one meaning.
 	g.Go(func() error {
 		kaCond, kaArgs := withKeepAlive(f).where()
-		return d.sql.QueryRow(`SELECT
+		return d.sql.QueryRowContext(d.readCtx(), `SELECT
 			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN r.keepalive = 1 THEN r.cost_usd ELSE 0 END),0)
 			FROM requests r WHERE `+kaCond, kaArgs...).Scan(&keepAlivePings, &keepAlivePingUSD)
@@ -880,6 +947,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.Uncompressed = uncompressedM
 	o.CGLatencyMsP95, o.UpstreamMsP95 = p95cg, p95up
 	o.InvalidConfigRequests = invalidConfigRequests
+	o.InvalidConfigRecent = invalidConfigRecent
 
 	o.SafetyCost.FrozenTokens = o.FrozenTokens
 	o.SafetyCost.RestoredTokens = o.ExpandTokens
@@ -1103,7 +1171,7 @@ func (o *Overview) waterfall() []WaterfallStep {
 
 // countBy groups the filtered window by one column.
 func (d *DB) countBy(cond string, args []any, col string) (map[string]int64, error) {
-	rows, err := d.sql.Query(`SELECT r.`+col+`, COUNT(*) FROM requests r WHERE `+cond+` GROUP BY 1`, args...)
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.`+col+`, COUNT(*) FROM requests r WHERE `+cond+` GROUP BY 1`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1126,7 +1194,7 @@ func (d *DB) countBy(cond string, args []any, col string) (map[string]int64, err
 // window of a few hundred thousand floats in milliseconds off the ts index.
 func (d *DB) percentile(cond string, args []any, col string, p float64) (float64, error) {
 	var n int64
-	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests r WHERE `+cond+` AND r.`+col+` > 0`, args...).Scan(&n); err != nil {
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+` AND r.`+col+` > 0`, args...).Scan(&n); err != nil {
 		return 0, err
 	}
 	if n == 0 {
@@ -1134,7 +1202,7 @@ func (d *DB) percentile(cond string, args []any, col string, p float64) (float64
 	}
 	idx := int64(float64(n-1) * p)
 	var v sql.NullFloat64
-	err := d.sql.QueryRow(`SELECT r.`+col+` FROM requests r WHERE `+cond+` AND r.`+col+` > 0
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.`+col+` FROM requests r WHERE `+cond+` AND r.`+col+` > 0
 		ORDER BY r.`+col+` ASC LIMIT 1 OFFSET ?`, append(append([]any(nil), args...), idx)...).Scan(&v)
 	if err == sql.ErrNoRows {
 		return 0, nil

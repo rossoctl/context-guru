@@ -148,13 +148,13 @@ func (s *Skeleton) Offload(req *schemas.BifrostChatRequest, rep *components.Repo
 		// Replay a frozen decision at ANY depth: the agent re-sends the original every
 		// turn, so not re-eliding it would flip the message skeleton→full→skeleton and
 		// churn the provider's KV cache. Same contract as mask/failed_run/readlifecycle.
-		if fk, _, ok := reapplyFrozen(c, s.Name(), m); ok {
+		if fk, _, ok := reapplyFrozen(c, rep, s.Name(), m); ok {
 			emitted++
 			keys = append(keys, fk...)
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim") // already carries a marker, or the agent expanded it
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate) // already carries a marker, or the agent expanded it — the gate says which
 			continue
 		}
 		if schema.TextTokens(content) < s.minTokens {
@@ -178,7 +178,9 @@ func (s *Skeleton) Offload(req *schemas.BifrostChatRequest, rep *components.Repo
 			rep.Gate("marker_no_win") // skeleton+marker wouldn't shrink this message; leave it verbatim
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(m, newText)
 		freeze(c, s.Name(), content, newText)
 		emitted++

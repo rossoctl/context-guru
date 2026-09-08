@@ -113,7 +113,7 @@ func (d *DB) coldSessions(idleBefore int64, kind string, limit int) ([]coldCandi
 	      FROM requests r WHERE r.session_id <> '' ` + notYet + `
 	      GROUP BY r.session_id HAVING MAX(r.ts) < ?
 	      ORDER BY MAX(r.ts) ASC LIMIT ?`
-	rows, err := d.sql.Query(q, idleBefore, limit)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, idleBefore, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +139,7 @@ func (d *DB) oldestLocalSessions(limit int) ([]coldCandidate, error) {
 
 // scanCandidates runs a candidate query and scans its rows.
 func (d *DB) scanCandidates(q string, args ...any) ([]coldCandidate, error) {
-	rows, err := d.sql.Query(q, args...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +403,7 @@ func (d *DB) ArchivedSessions(f Filter, limit int) ([]ArchivedSession, error) {
 	}
 	q += ` ORDER BY last_ts DESC LIMIT ?`
 	args = append(args, limit)
-	rows, err := d.sql.Query(q, args...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +424,7 @@ func (d *DB) ArchivedSessions(f Filter, limit int) ([]ArchivedSession, error) {
 // ArchivedSessionByID reads one index row.
 func (d *DB) ArchivedSessionByID(sessionID string) (ArchivedSession, error) {
 	var a ArchivedSession
-	err := d.sql.QueryRow(`SELECT session_id,tenant_id,first_ts,last_ts,requests,
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT session_id,tenant_id,first_ts,last_ts,requests,
 	  content_path,content_bytes,full_path,full_bytes,archived_at,remote
 	  FROM archived_sessions WHERE session_id = ?`, sessionID).Scan(
 		&a.SessionID, &a.TenantID, &a.FirstTS, &a.LastTS, &a.Requests,

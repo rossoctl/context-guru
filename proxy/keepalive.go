@@ -1158,6 +1158,52 @@ type KeepAliveStats struct {
 	SpentUSD float64 `json:"spend_usd"`
 }
 
+// PendingPings reports how many tracked sessions still have a ping scheduled ahead of them.
+//
+// This exists for the idle-exit watchdog, and it exists because the keep-alive INVERTS the
+// ordinary meaning of "idle": pinging is what the proxy does precisely while no client
+// traffic is arriving. A watchdog counting only requests would therefore kill the process in
+// exactly the window the feature was built for — the quiet gap after `end_turn`, where 83.7%
+// of the recoverable dollars sit. So "no requests recently" is not sufficient to exit; "and
+// nothing is waiting to be pinged" is the other half.
+//
+// The conditions are `due`'s minus the timing term: an entry that is stopped, or has spent its
+// MaxPings, or whose policy is off will never be pinged again and must not hold the process open.
+//
+// One caveat, because "a live entry is by construction one we intend to ping" is very nearly true
+// and not exactly: `sweep` also drops entries whose `pingable()` has since gone false, and it only
+// looks once `now >= startedAt + Idle`. Inside that window this counts an entry that will never
+// actually be pinged, which resets the activity clock and delays the exit by up to one `Idle`.
+// Bounded by the entry's own retire timer at `(MaxPings+1) * Idle`, and immaterial against a 24h
+// threshold — but the honest statement is "outside that window", not "by construction".
+//
+// Erring toward counting is the right direction anyway: over-counting delays an exit by minutes,
+// while under-counting kills the process during the quiet gap the keep-alive exists to work in.
+func (h *Handler) PendingPings() int {
+	if h == nil {
+		return 0
+	}
+	return h.keeper.pendingPings()
+}
+
+// pendingPings counts entries with a ping still ahead of them. Nil-safe: a keeper whose
+// sweep never launched (the CONTEXT_GURU_KEEPALIVE kill switch) has nothing pending, which
+// correctly lets an idle proxy exit.
+func (k *keeper) pendingPings() int {
+	if k == nil {
+		return 0
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	n := 0
+	for _, e := range k.live {
+		if !e.stopped && e.pol.on() && e.pings < e.pol.MaxPings {
+			n++
+		}
+	}
+	return n
+}
+
 // Stats snapshots the keeper's counters.
 func (k *keeper) Stats() KeepAliveStats {
 	if k == nil {

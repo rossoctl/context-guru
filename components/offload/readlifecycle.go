@@ -157,7 +157,7 @@ func (rl *ReadLifecycle) Offload(req *bschemas.BifrostChatRequest, rep *componen
 		// Replay a frozen decision on EVERY turn, at any depth: the agent re-sends the
 		// original each turn, so not re-offloading it would flip the message
 		// offloaded→full→offloaded and churn the provider's KV cache.
-		if fk, _, ok := reapplyFrozen(c, rl.Name(), msg); ok {
+		if fk, _, ok := reapplyFrozen(c, rep, rl.Name(), msg); ok {
 			changed++
 			keys = append(keys, fk...)
 			continue
@@ -167,8 +167,8 @@ func (rl *ReadLifecycle) Offload(req *bschemas.BifrostChatRequest, rep *componen
 			rep.Gate("fresh_read") // no later edit, no later re-read: never touched
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim")
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate)
 			continue
 		}
 		if schema.TextTokens(content) < rl.minTokens {
@@ -194,7 +194,9 @@ func (rl *ReadLifecycle) Offload(req *bschemas.BifrostChatRequest, rep *componen
 			rep.Gate("marker_no_win")
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(msg, newText)
 		freeze(c, rl.Name(), content, newText)
 		changed++

@@ -11,6 +11,7 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 
 | Your workload | Preset |
 |---|---|
+| **Trying context-guru for the first time** | **`cache`** |
 | **Most agents — the recommended pipeline** | **`codesmart`** (pass `--preset codesmart`; the binary defaults to `house`) |
 | Same, but no LLM on the hot path | `codesafe` |
 | A guaranteed-safe, lossless win only | `safe` |
@@ -28,6 +29,7 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 |---|---|
 | `codesmart` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, linecap, cachesplit` |
 | `codesafe` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, extract, collapse, linecap, cachesplit` |
+| `cache` | `cachesplit` |
 | `safe` | `format, textclean, searchfold, cachesplit` |
 | `balanced` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, cachesplit` |
 | `aggressive` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, smartcrush, extract, extract_llm, linecap, cachesplit` |
@@ -55,6 +57,39 @@ reproduces a published baseline for A/B comparison, not a recommendation. They a
 table so it lists every preset that exists; pick from the table above this one.
 
 ## Notes on the ones people pick
+
+### `cache` — start here
+
+`cachesplit` and nothing else. Pick it when what you want is to find out whether this thing
+helps you, with the smallest possible claim to check:
+
+- **Nothing is dropped, summarised, or replaced.** No `<<cg:HASH>>` markers, no
+  `context_guru_expand` tool added to your requests, no model calls. It splits one oversized
+  system block into two adjacent text blocks whose concatenation is byte-identical, so the
+  model sees exactly the prompt your agent sent — and moves the cache breakpoint onto the
+  half that does not churn.
+- **What it is worth is regime-dependent, and the funnel's regime is the weak one.** The
+  headline **−34.1% cost / 0% → 96.7% hit** comes from a benchmark harness running tasks
+  back-to-back inside the provider's 5-minute cache TTL
+  ([cacheinject](../components/cacheinject.md#what-the-split-is-worth)), which is
+  precisely the regime where the split pays — and is *one task measured three times, not a
+  fleet average*. On this project's own interactive traffic the figure is **$0.0298 across
+  1,127 sessions / 11,361 requests**
+  ([dashboard](../dashboard.md#what-it-is-actually-worth-here-and-why-that-is-small)): Claude
+  Code captures the environment snapshot once per session, and 1,105 of 1,127 session starts
+  read zero tokens from cache because the previous prefix had already expired. It is also
+  **exactly zero** outside a git repository, on a system prompt under the 1,024-token
+  `minSplitTokens` floor, and on any implicit prefix-cache backend (vLLM, llm-d). Neither
+  figure is wrong; they differ by three orders of magnitude because the mechanism needs a
+  second session inside five minutes.
+
+- **Anthropic-family only.** `cachesplit` is a no-op against implicit prefix-cache backends
+  (vLLM, llm-d), which match to the divergence on their own — so on those it costs nothing
+  and buys nothing.
+
+Move to `codesmart` once you want the offloaders too. `safe` is the next step up and is still
+lossless in meaning, but it does rewrite JSON, so `cache` is the one whose promise you can
+confirm by reading a single line of `config/config.go`.
 
 **`codesmart`** is the shipped default and the cheapest arm in the
 [benchmarks](../RESULTS.md) at the highest reward. It is the one preset that ships tuned

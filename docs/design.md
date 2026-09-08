@@ -201,9 +201,11 @@ lossy — the known TTL edge, much narrower now the TTL slides on every read (se
 ## State: the Store
 
 One `Store` interface, in-memory TTL+LRU default (both hosts share it). Defaults: **10000s sliding
-TTL, 1000 entries, 100 sticky sessions**. It carries, keyed per session:
+TTL, 5000 entries, a 256 MiB rewind reserve, 100 sticky sessions**. It carries, keyed per session:
 
-- **Rewind** — `cache_key → original bytes` (what the expand loop resolves).
+- **Rewind** — `cache_key → original bytes` (what the expand loop resolves). Held in a reserve
+  that **refuses** rather than evicting a live payload, because the marker naming it has already
+  been sent: see the [config reference](reference/config.md#store).
 - **Sticky** — the set of content ids already reduced on prior turns (for byte-stable output
   across turns; scaffolding for cache stability).
 
@@ -625,7 +627,7 @@ pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
 components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }
   smartcrush: { min_items: 5, keep_first: 3, keep_last: 2 }
-store: { ttl_seconds: 10000, max_entries: 1000 }
+store: { ttl_seconds: 10000, max_entries: 5000 }
 ```
 
 A component registers its constructor + config type via `init()`; adding one makes it

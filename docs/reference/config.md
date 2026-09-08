@@ -24,8 +24,86 @@ The document has six top-level fields (from the `Config` struct in
 |---|---|---|
 | `enabled` | `true` | Toggles the state store. `false` wires a `store.Nop`: nothing is stashed, so offloads become **one-way** and must run `marker_mode: off`. |
 | `ttl_seconds` | `10000` | Entry lifetime, and it **slides** — a `Get` refreshes the deadline, so an entry replayed every turn never ages out. Raised from 1800 because Terminal-Bench tasks average ~1975 s of wall clock and run to 4 h, so the old default expired live frozen decisions mid-task. |
-| `max_entries` | `1000` | LRU cap. Frozen-decision keys (`cg:frz:`, `cg:res:`, `cg:len:`) are **pinned** — exempt from LRU eviction, because losing one is cache-destructive rather than merely a miss. The pin is capped at half `max_entries`, and eviction reclaims **expired** entries first (pinned included). |
+| `max_entries` | `5000` | LRU cap. Two groups of keys are **exempt** from LRU eviction, and they behave differently when full — see below. Eviction reclaims **expired** entries first, exempt ones included. Raised from 1,000: one process-wide store serves every concurrent session, and a single reversible removal writes five entries (the payload, `cg:own:`, `cg:xseen:`, and the two pinned decision records), so 1,000 was an order of magnitude under the observed volume. |
+| `stash_ttl_seconds` | `1800` | The **rewind payloads'** own entry lifetime, shorter than `ttl_seconds` and capped by it (the cap is silent, so `/config` reports the **effective** value, not the configured one). A payload is re-derivable from the transcript, a frozen decision is not — see [the two horizons](#why-payloads-expire-sooner-than-decisions) below. |
+| `stash_max_bytes` | `268435456` (256 MiB) | What the **rewind reserve** may cost in memory. Entries are a poor proxy for it in this one namespace: every other exempt entry is a marker line or an integer, a rewind payload is a whole tool output. Whichever of `max_entries` and this binds first, binds. |
 | `max_sessions` | `100` | Cap on per-session sticky-id sets. |
+
+#### The two exemptions, and the floor under them
+
+**Pinned decisions** (`cg:frz:`, `cg:res:`, `cg:xres:`, `cg:len:`, `cg:ttl:`, `cg:seen:`) are
+exempt because losing one is cache-destructive rather than merely a miss: the replacement bytes
+for an already-cached message stop being reproducible, so the message flips and the provider
+re-writes the whole suffix at ~11.5x the read price. Over its cap a pin simply becomes an
+ordinary evictable entry.
+
+**The rewind reserve** holds the payloads behind `<<cg:HASH>>` markers. It cannot be a pin
+prefix — a payload key *is* the marker id, a bare content hash the model reads out of the
+request — so it is claimed explicitly and, unlike a pin, a payload that cannot be admitted is
+**refused**: the component declines the removal and leaves the content verbatim rather than
+stamping a marker nothing can resolve. Only the TTL releases a slot — which is why payloads get a
+shorter one than everything else.
+
+Each exemption is capped at half `max_entries`, and **a quarter of `max_entries` is held back
+from both** so something is always evictable. Without that floor the two could occupy the whole
+cap, and a cache with nothing evictable does not fail loudly: the next write to an unpinned
+namespace is evicted by its own insert, silently turning `cg:keep:` (the flag that stops the
+expand loop), `cg:sum:` (summarize checkpoints) and `cg:own:` (which gates `GET /expand`) into
+no-ops.
+
+**When `stash_refused` rises**, raise `max_entries` or `stash_max_bytes` — read `stash_live`
+against `stash_capacity` and `stash_bytes` against `stash_max_bytes` at
+[`/stats`](routes.md#get-stats) to see which budget bound. Nothing became irreversible: the
+removals did not happen. `stash_missing` is the different, worse number — a marker replayed with
+no payload behind it. A replay re-stashes the payload it re-derived, so `stash_missing` only fires
+when that write was **also** refused: raise the reserve first, and `stash_ttl_seconds` if
+`stash_expired` is what is taking the payloads.
+
+#### Why payloads expire sooner than decisions
+
+`ttl_seconds` is sized for a **frozen decision** — the replacement bytes the provider already
+cached. Nothing else holds them, so losing one flips an already-cached message and re-writes the
+whole suffix at ~11.5x the read price; it has to survive a long-horizon task, idle gaps included.
+
+A **payload** is a copy of content the agent re-sends every turn, so it needs a much shorter
+horizon. Every offloader replays its frozen decision on **every turn**, regardless of the
+cache-tail gate (it must, or the message reverts full→compacted→full and churns the KV cache), and
+that replay re-stashes the payload from the message text it just read. So a live marker's payload
+has its deadline slid every turn, and one the TTL already took is **re-created on the request
+path** — before the request goes upstream, and therefore before any `expand` call in the response
+could ask for it. `stash_revived` counts exactly that.
+
+Giving both namespaces `ttl_seconds` meant one busy period could hold the reserve saturated for
+~2.8 h after the load that filled it, refusing every removal process-wide the whole time. The
+split shrinks that hangover to `stash_ttl_seconds` without making any removal irreversible.
+
+**Which offloaders re-derive, because it is not all of them:**
+
+| Offloader | Per-turn re-stash | If its payload is reclaimed |
+|---|---|---|
+| `mask`, `cmdfilter`, `collapse`, `failed_run`, `skeleton`, `readlifecycle`, `agentdiet` | `reapplyFrozen` → `commitRefresh`, every turn regardless of the tail gate | re-created on the request path; `stash_revived` |
+| `summarize`, `extract_llm` | only past their own gates — `summarize`'s trigger and model-availability checks, `extract_llm`'s `no_goal_keywords` | a skipped turn refreshes nothing, but it splices nothing either, so no marker of theirs dangles while the skip lasts |
+| `dedup`, `extract`, `linecap`, `smartcrush` | **none** — no replay path at all; they redo the transformation from the re-sent original through the *refusable* `commitMark` | once reclaimed it is a new stash, so a saturated reserve **refuses** and the message goes upstream verbatim after earlier turns sent it compacted: `stash_refused` **plus a representation flip** |
+
+That last row is worth reading twice, because `stash_refused`'s own description promises "nothing
+became irreversible" — true about reversibility, and silent about the cache-write actually paid. It
+is reachable at `ttl_seconds` too, so it is not new; a shorter payload horizon shortens the distance
+to it.
+
+`summarize`'s trigger skip is **recurring**, not a one-off: the agent's own compaction shrinks the
+incoming request and can drop it back under the trigger's `min_request_tokens` for several
+consecutive turns.
+
+The exposure this leaves, stated plainly: a turn that runs **no pipeline** performs no refresh (an
+`x-context-guru-bypass` request, or the agent-compaction bypass), so an unbroken run of bypassed
+turns longer than `stash_ttl_seconds` could outlive a payload whose marker is still live. Both are
+single-request events in practice, and on the first row above the outcome is the reported one —
+`stash_missing` — not a silent loss.
+
+**`stash_expired` and `stash_revived` both at zero means the reserve never bound**, not that the
+horizon is working: the sweep runs only once a budget is already binding, and an expired-but-unswept
+payload is resurrected in place by the next write. What tells the two apart is `stash_refused` and
+`stash_live` against `stash_capacity`.
 
 The pinned prefixes are a code-level property of the key layout, supplied by their owners via
 `store.Options.PinPrefixes` — not a YAML knob.
@@ -64,7 +142,7 @@ components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }
   smartcrush: { min_items: 5, keep_first: 3, keep_last: 2 }
   cmdfilter:  { min_size: 400 }   # the default; measured, see components/cmdfilter.md
-store: { ttl_seconds: 10000, max_entries: 1000 }
+store: { ttl_seconds: 10000, max_entries: 5000 }
 mode: sync                          # sync | observe
 ```
 
@@ -78,7 +156,9 @@ for every component's config block.
 |---|---|---|
 | `--preset` / `PRESET` | `house` | Pipeline preset when no `--config`. `codesmart` is the SWE-bench arm and must be asked for by name. |
 | `--config` / `CONFIG` | — | YAML config file (overrides preset). |
-| `LISTEN_ADDR` | `:4000` | Listen address. |
+| `--listen` / `LISTEN_ADDR` | `:4000` | Listen address. The flag exists so the port is visible in `ps` and to a supervisor; before it, the address reached the process only through the environment. |
+| `--version` | — | Print version and commit, then exit. |
+| `--idle-exit` / `IDLE_EXIT` | `0` (never) | Exit after this long with **no requests and no keep-alive ping pending**, so a proxy started on demand does not outlive its use. Refused at startup below `max(2 × store.ttl_seconds, 1h)` — 5h33m20s at the default TTL — because exiting clears the in-memory store, and losing a frozen decision re-bills its whole prefix as cache creation. Also refused together with `--upstreams`: a gateway serving other people's agents must not self-terminate. Liveness probes (`/healthz`, `/metrics`) deliberately do **not** count as activity; anything else does, including the dashboard's own polling. |
 | `--openai-upstream` / `OPENAI_UPSTREAM` | `https://api.openai.com` | OpenAI upstream base. |
 | `--anthropic-upstream` / `ANTHROPIC_UPSTREAM` | `https://api.anthropic.com` | Anthropic upstream base. |
 | `--bob-upstream` / `BOB_UPSTREAM` | — | Bob (BobShell) backend base. Setting it mounts the [Bob gateway routes](routes.md#bob-bobshell-gateway-routes); unset, an unknown path 404s as before. |

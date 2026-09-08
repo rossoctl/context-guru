@@ -36,7 +36,7 @@ func (a *API) keepAlive(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	led, err := a.rec.DB().KeepAliveLedger(f)
+	led, err := a.db(r).KeepAliveLedger(f)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -55,7 +55,7 @@ func (a *API) keepAliveBehaviour(w http.ResponseWriter, r *http.Request) {
 	// the page knows it. Defaulted in the DB layer, never guessed here.
 	x, _ := strconv.ParseFloat(r.URL.Query().Get("x"), 64)
 	k, _ := strconv.Atoi(r.URL.Query().Get("k"))
-	b, err := a.rec.DB().KeepAliveBehaviour(f, CoverageSeconds(x, k))
+	b, err := a.db(r).KeepAliveBehaviour(f, CoverageSeconds(x, k))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -71,7 +71,7 @@ func (a *API) keepAliveSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	rows, err := a.rec.DB().KeepAliveSessions(f, limit)
+	rows, err := a.db(r).KeepAliveSessions(f, limit)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -96,7 +96,7 @@ func (a *API) keepAliveCalc(w http.ResponseWriter, r *http.Request) {
 	k, _ := strconv.Atoi(q.Get("k"))
 	prefix, _ := strconv.ParseInt(q.Get("prefix"), 10, 64)
 	model, source := q.Get("model"), "given"
-	db := a.rec.DB()
+	db := a.db(r)
 	if session := q.Get("session"); session != "" {
 		p, m, err := db.LastBilledPrefix(f, session)
 		if err != nil {
@@ -158,7 +158,7 @@ func (a *API) keepAliveLive(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	x, _ := strconv.ParseFloat(q.Get("x"), 64)
 	k, _ := strconv.Atoi(q.Get("k"))
-	out, err := a.rec.DB().KeepAliveLive(f, time.Now().UnixMilli(), x, k, a.priceFn(r))
+	out, err := a.db(r).KeepAliveLive(f, time.Now().UnixMilli(), x, k, a.priceFn(r))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -173,7 +173,7 @@ func (a *API) keepAliveRecommend(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	rec, err := a.rec.DB().KeepAliveRecommend(f)
+	rec, err := a.db(r).KeepAliveRecommend(f)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return

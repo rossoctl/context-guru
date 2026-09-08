@@ -489,6 +489,52 @@ func TestOverviewCountsInvalidConfigRequests(t *testing.T) {
 	}
 }
 
+// A resolved config incident must stop raising the alarm, which is what InvalidConfigRecent is for.
+//
+// The dashboard's banner is present-tense — "open Settings and fix the configuration" — but it was
+// driven by a count over the filter's window, and the default view has NO window. So on this
+// deployment 1,752 invalid-config requests from a single afternoon kept the banner up for days
+// after the config was fixed, telling every viewer to go and repair something already correct. An
+// alarm that cannot switch itself off is one people learn to ignore.
+func TestInvalidConfigRecentIgnoresResolvedHistory(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now()
+	// A burst of breakage well in the past, and nothing wrong since.
+	old := mkEvent(now.Add(-48*time.Hour).UnixMilli(), "s-old", "m", 100, 100)
+	old.Preset = "invalid"
+	fine := mkEvent(now.Add(-time.Minute).UnixMilli(), "s-now", "m", 100, 90)
+	fine.Preset = "codesmart"
+	if err := db.insertBatch([]*Event{old, fine}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := db.Overview(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.InvalidConfigRequests != 1 {
+		t.Fatalf("invalid_config_requests = %d, want 1 (the historical fact must still be reported)",
+			o.InvalidConfigRequests)
+	}
+	if o.InvalidConfigRecent != 0 {
+		t.Errorf("invalid_config_recent = %d, want 0: a config fixed two days ago is not a live "+
+			"problem, and the banner keyed on this must clear itself", o.InvalidConfigRecent)
+	}
+
+	// ...and a breakage happening NOW must still raise it, or the fix has removed the alarm.
+	live := mkEvent(now.Add(-2*time.Minute).UnixMilli(), "s-live", "m", 100, 100)
+	live.Preset = "invalid"
+	if err := db.insertBatch([]*Event{live}); err != nil {
+		t.Fatal(err)
+	}
+	if o, err = db.Overview(Filter{}); err != nil {
+		t.Fatal(err)
+	}
+	if o.InvalidConfigRecent != 1 {
+		t.Errorf("invalid_config_recent = %d, want 1: a configuration failing to build right now is "+
+			"exactly what this banner exists to surface", o.InvalidConfigRecent)
+	}
+}
+
 // TestNewInputRatioNeverDividesSavingsByThemselves is the guard the issue calls
 // non-negotiable: with no provider usage data the denominator would be `saved`
 // alone and the ratio would read ~100%. It must read n/a.

@@ -751,6 +751,94 @@ type Snapshot struct {
 	FrozenDropped  int64 `json:"frozen_dropped"`
 	FrozenRepaired int64 `json:"frozen_repaired"`
 	FrozenFlips    int64 `json:"frozen_flips"`
+	// Rewind-reserve health — the REVERSIBILITY cost line, and the leading indicator for
+	// expand_unresolved_missing. That counter can only move when the agent happens to ask
+	// for removed content, so a run whose store could no longer hold payloads read as
+	// perfectly healthy until it did (#187: 209 failed expands in one benchmark arm, 0 in
+	// the arm where the sweep was inert).
+	//
+	// StashRefused counts removals DECLINED because the reserve was full: content left
+	// verbatim, nothing became irreversible, and the fix is a larger max_entries (or
+	// stash_max_bytes — read Bytes against MaxBytes to see which budget bound).
+	//
+	// StashMissing is the OPPOSITE outcome and must not be read as a refusal: a marker was
+	// replayed with no payload behind it, so a dangling marker went out on the wire. It is the
+	// one case here that genuinely breaks reversibility. The two shared a counter until the
+	// #188 review, which meant the number an operator watches to confirm nothing broke was
+	// being incremented by things breaking. It also grows with TURN COUNT rather than with
+	// distinct broken markers — a missing payload cannot be restored, so every later turn
+	// re-reports it for every affected message.
+	//
+	// StashExpired counts payloads the TTL reclaimed. Payloads have their OWN, shorter TTL
+	// (stash_ttl_seconds) because a payload — unlike a frozen decision — is re-derivable from
+	// the transcript: every turn's replay re-writes it, so a reclaimed one is re-created on the
+	// request path before any expand could ask for it (see store.DefaultStashTTL, #190).
+	//
+	// StashRevived is that absorption, counted: a payload written again under a key the TTL had
+	// taken. It is why StashExpired is not itself an alert — Expired without Revived is a
+	// session that never came back, which is the reclamation working. What breaks the promise is
+	// StashMissing, and the remedy for a rising StashMissing is stash_ttl_seconds (the payload
+	// was reclaimed too eagerly) or a larger reserve (the re-stash was refused) — read Live
+	// against Capacity and Bytes against MaxBytes to tell which.
+	//
+	// BOTH AT ZERO IS NOT EVIDENCE THAT THE HORIZON WORKS. It means the reserve never bound.
+	// sweepExpired runs only from StashRoom, PutStash's pre-refusal path and evictOldest — i.e.
+	// only once the reserve, the shared exempt budget or the entry cap is already binding — and
+	// PutStash's refresh branch does not check expiry, so on an unsaturated run an
+	// expired-but-unswept payload is resurrected in place and NEITHER counter moves. That is the
+	// intended behaviour (a slot is released when a slot is wanted), but it means a run must
+	// actually saturate the reserve before this pair says anything, which is the same precondition
+	// iteration 024 failed to meet for stash_refused — and failing it is how #190 became
+	// undecidable from data. What distinguishes "never bound" from "working" is StashRefused and
+	// StashLive against StashCapacity.
+	// Filled by the host at serve time (offload + store live below metrics).
+	// UsageUnparsed and UsageUnreadable are the two ways this proxy failed to ACCOUNT a response
+	// it otherwise served perfectly: the provider sent a usage block in a spelling the parser does
+	// not recognise, or the bytes examined were not a whole document (a spliced sniffer window).
+	// Either way fresh_input_tokens / cache_read_tokens / cache_write_tokens read 0 on a healthy
+	// 200 with correct savings, correct latency and correct everything else — which ran for 4,015
+	// of 4,015 requests in one benchmark iteration and was found two iterations later, in a
+	// post-mortem chasing a different question (#200).
+	//
+	// Counted apart because the REMEDIES are opposite — add the dialect vs. stop truncating the
+	// window — and kept out of the benign cases (a provider that genuinely reported no usage, and
+	// a recognised block whose tiers are all zero), which are reported as `usage_miss` on the
+	// lifecycle log line and are not alertable. Filled by the host at serve time.
+	UsageUnparsed   int64 `json:"usage_unparsed"`
+	UsageUnreadable int64 `json:"usage_unreadable"`
+	StashRefused    int64 `json:"stash_refused"`
+	StashMissing    int64 `json:"stash_missing"`
+	StashExpired    int64 `json:"stash_expired"`
+	StashRevived    int64 `json:"stash_revived"`
+	StashLive       int   `json:"stash_live"`
+	StashCapacity   int   `json:"stash_capacity"`
+	StashBytes      int64 `json:"stash_bytes"`
+	StashMaxBytes   int64 `json:"stash_max_bytes"`
+	// ExpandPrefixFlips counts turns where an ESTABLISHED compaction was abandoned because the
+	// agent had expanded that content: a frozen decision existed, so the provider holds the
+	// compacted bytes, and the turn sends the original in full at the same position. That is a
+	// cache-write of the whole suffix at ~11.5x a read — the cost the cache-tail gate exists to
+	// avoid everywhere else — and until now no counter distinguished it from any other cache-write,
+	// so an operator could not see it and a benchmark could not attribute it (#201).
+	//
+	// It is a DELIBERATE cost, not a defect: re-compacting would bounce the agent into another
+	// expand, and one cache-write is cheaper than an unbounded loop. This makes the trade visible
+	// rather than assumed.
+	//
+	// Per turn per message, not per distinct content — every later turn re-sends the same original
+	// and re-observes the same abandonment, and only the FIRST is a real cache-write. Read it as
+	// "expansion is churning cached prefixes here", not as a count of cache-writes. Filled by the
+	// host at serve time (the counter lives in components/offload).
+	//
+	// IT COUNTS ONE EVENT, not every expand-induced cache-write: a REPLAY DECLINED because the
+	// content was expanded (components/offload.reapplyFrozen, its only increment site). At least one
+	// sibling is not counted — protecting expanded content shortens summarize's span, which can
+	// invalidate a checkpoint whose boundary reached past it, and re-summarizing produces different
+	// summary text at a fixed prefix position, i.e. another suffix cache-write. That is the correct
+	// trade (content loss for one cache-write) and the same class of event, but a second increment
+	// site would change what this number means, so it is deliberately left to its own decision. Do
+	// not read a zero here as "expansion cost nothing".
+	ExpandPrefixFlips int64 `json:"expand_prefix_flips"`
 	// CompactionResets counts turns whose cached-prefix boundary restarted because the
 	// AGENT compacted its own transcript (it shrank under a stable session id). The
 	// session id deliberately survives that compaction so one conversation is one

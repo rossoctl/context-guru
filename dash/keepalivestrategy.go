@@ -42,7 +42,7 @@ type StrategyLedgerView struct {
 // attributed to whichever strategy's ping(s) actually preceded it, once.
 func (d *DB) StrategyLedger(strategyID string) (*StrategyLedgerView, error) {
 	out := &StrategyLedgerView{StrategyID: strategyID, Tenants: []StrategyLedgerRow{}}
-	rows, err := d.sql.Query(`SELECT tenant_id, COUNT(*), COALESCE(SUM(cost_usd),0)
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT tenant_id, COUNT(*), COALESCE(SUM(cost_usd),0)
 		FROM requests WHERE keepalive = 1 AND keepalive_strategy_id = ?
 		GROUP BY tenant_id ORDER BY 3 DESC`, strategyID)
 	if err != nil {
@@ -65,7 +65,7 @@ func (d *DB) StrategyLedger(strategyID string) (*StrategyLedgerView, error) {
 	for i := range out.Tenants {
 		row := &out.Tenants[i]
 		var saved sql.NullFloat64
-		if err := d.sql.QueryRow(`SELECT SUM(`+kaSaved("r.")+`) FROM requests r
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT SUM(`+kaSaved("r.")+`) FROM requests r
 			WHERE r.tenant_id = ? AND r.keepalive_saved_usd > 0 AND r.keepalive_strategy_id = ?`,
 			row.TenantID, strategyID).Scan(&saved); err != nil {
 			return nil, err
@@ -99,7 +99,7 @@ func (a *API) keepAliveStrategyLedger(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "name the strategy")
 		return
 	}
-	led, err := a.rec.DB().StrategyLedger(id)
+	led, err := a.db(r).StrategyLedger(id)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return

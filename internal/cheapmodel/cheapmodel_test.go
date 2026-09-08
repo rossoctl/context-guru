@@ -19,12 +19,17 @@ func TestAnthropicSkipsNonTextLeadingBlock(t *testing.T) {
 	}
 }
 
+// authHeaders is what a fixture upstream saw on the wire. Handlers run on the test server's
+// own goroutine, so the values travel back over a buffered channel rather than through a
+// captured variable: the HTTP round trip is not a happens-before edge, and a plain capture
+// read by the test goroutine is a data race whether or not -race happens to observe it.
+type authHeaders struct{ auth, key, version string }
+
 func TestAnthropicBearerAuth(t *testing.T) {
-	var gotAuth, gotKey, gotVersion string
+	seen := make(chan authHeaders, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		gotKey = r.Header.Get("x-api-key")
-		gotVersion = r.Header.Get("anthropic-version")
+		seen <- authHeaders{r.Header.Get("Authorization"), r.Header.Get("x-api-key"),
+			r.Header.Get("anthropic-version")}
 		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"OK"}]}`)
 	}))
 	defer srv.Close()
@@ -32,6 +37,8 @@ func TestAnthropicBearerAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err %v", err)
 	}
+	got := <-seen
+	gotAuth, gotKey, gotVersion := got.auth, got.key, got.version
 	if gotAuth != "Bearer tok" {
 		t.Fatalf("Authorization = %q, want %q", gotAuth, "Bearer tok")
 	}
@@ -44,10 +51,9 @@ func TestAnthropicBearerAuth(t *testing.T) {
 }
 
 func TestAnthropicDefaultAuthUsesAPIKey(t *testing.T) {
-	var gotAuth, gotKey string
+	seen := make(chan authHeaders, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		gotKey = r.Header.Get("x-api-key")
+		seen <- authHeaders{auth: r.Header.Get("Authorization"), key: r.Header.Get("x-api-key")}
 		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"OK"}]}`)
 	}))
 	defer srv.Close()
@@ -55,6 +61,8 @@ func TestAnthropicDefaultAuthUsesAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err %v", err)
 	}
+	got := <-seen
+	gotAuth, gotKey := got.auth, got.key
 	if gotKey != "tok" {
 		t.Fatalf("x-api-key = %q, want %q", gotKey, "tok")
 	}

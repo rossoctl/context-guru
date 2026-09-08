@@ -39,9 +39,22 @@ import (
 //     they are cached for a scrape interval — Grafana will scrape every 15s and a query
 //     per scrape per tenant would make observability the load.
 
-// promCacheTTL bounds how stale per-tenant series may be. Just under a typical 15s
-// scrape so consecutive scrapes do not serve one cached copy twice.
-const promCacheTTL = 10 * time.Second
+// promCacheTTL is how old a rendered exposition may get before a scrape triggers a refresh.
+//
+// It was 10s, chosen as "just under a typical 15s scrape so consecutive scrapes do not serve one
+// cached copy twice". That reasoning inverts: a TTL SHORTER than the scrape interval guarantees
+// the cached body is always already expired when a scrape arrives, so the cache never serves a
+// single scrape and every scrape pays a full render. Once a render exceeded the 10s scrape_timeout
+// that became a permanent outage — every scrape rendering from scratch, being cut off at 10s by
+// the TimeoutHandler in Mux, and returning 503 — which is exactly how this deployment's Grafana
+// went blank while the exposition itself was perfectly healthy.
+//
+// So the TTL is now comfortably LONGER than a scrape interval, and staleness is handled by serving
+// the last good body while a refresh happens behind it (see metricsHandler). Prometheus timestamps
+// a sample when it scrapes, so a body one refresh old costs a little resolution; a body that never
+// arrives costs the whole dashboard. cg_metrics_age_seconds publishes the difference so it can be
+// seen and alerted on rather than guessed at.
+const promCacheTTL = 60 * time.Second
 
 // Refusals: every way a request can be turned away before it reaches an upstream.
 //
@@ -196,6 +209,11 @@ type promCache struct {
 	mu   sync.Mutex
 	at   time.Time
 	body string
+	// took is how long the last render actually needed. Exported beside the body's age because the
+	// two together are the whole diagnosis when this endpoint misbehaves: a rising age with a small
+	// duration means the refresher is not running, and an age pinned near the duration means
+	// rendering has grown past the interval and the numbers are as fresh as they can be.
+	took time.Duration
 }
 
 // metricsHandler serves the Prometheus endpoint.
@@ -210,39 +228,95 @@ func (h *Handler) metricsHandler(w http.ResponseWriter, r *http.Request) {
 			"/metrics is a service-wide view; scrape it from loopback or set METRICS_TOKEN"})
 		return
 	}
-	h.promCache.mu.Lock()
-	if time.Since(h.promCache.at) < promCacheTTL && h.promCache.body != "" {
-		body := h.promCache.body
-		h.promCache.mu.Unlock()
-		writeMetrics(w, body)
+	body, age, took := h.promSnapshot()
+	if body != "" && age < promCacheTTL {
+		writeMetrics(w, body, age, took)
 		return
 	}
-	h.promCache.mu.Unlock()
-	// SINGLE-FLIGHT, not a bare re-render: rendering used to happen OUTSIDE any lock, on the
-	// stated assumption that a cache-miss race costs "at most one redundant render." That
-	// held only while a render finishes faster than requests arrive. Once real write
-	// contention (this driver blocks a read across the writer's whole open transaction —
-	// see CLAUDE.local.md) pushes a render's own time past that interval, EVERY request
-	// during the slow render sees the same stale cache and starts ANOTHER render — and more
-	// concurrent renders competing for the same bounded connection pool makes each one
-	// slower still, a spiral that measured live as /metrics reliably timing out. Collapsing
-	// every concurrent cache-miss into the one render already in flight stops that spiral at
-	// any render duration: however long it takes, it happens once, and every waiter shares it.
-	v, _, _ := h.metricsInflight.Do("metrics", func() (any, error) {
-		return h.renderMetrics(), nil
-	})
-	body := v.(string)
-	h.promCache.mu.Lock()
-	h.promCache.at, h.promCache.body = time.Now(), body
-	h.promCache.mu.Unlock()
-	writeMetrics(w, body)
+	// STALE-WHILE-REVALIDATE. A scrape is never made to wait for a render it did not cause.
+	//
+	// This is the fix for the outage, and the reasoning is worth keeping because the obvious
+	// alternative is what was here: render on the miss and make the scraper wait. That is fine
+	// while a render is fast and becomes an unrecoverable outage the moment it is not — the render
+	// exceeds scrape_timeout, the TimeoutHandler in Mux discards it and answers 503, and because
+	// nothing was cached the next scrape repeats the whole thing. The target goes down and STAYS
+	// down, and every dashboard built on these series reads "No data", which looks like the
+	// service is dead rather than like one endpoint being slow.
+	//
+	// Serving the previous body immediately breaks that: a scraper always gets a valid exposition,
+	// the refresh happens behind it, and the worst case degrades to resolution rather than to
+	// absence. The singleflight below means an arbitrarily slow render still happens once at a
+	// time no matter how many scrapes arrive during it.
+	if body != "" {
+		go h.refreshMetrics()
+		writeMetrics(w, body, age, took)
+		return
+	}
+	// Nothing cached at all — the first scrape after a restart. There is no stale body to fall back
+	// on, so this one renders inline and does have to wait. It is bounded by the TimeoutHandler
+	// like before, and it is the only scrape that ever pays.
+	h.refreshMetrics()
+	body, age, took = h.promSnapshot()
+	if body == "" {
+		// The render was cut off before it stored anything. Say so as a 503 rather than serve an
+		// empty exposition, which Prometheus would accept as a successful scrape of a service with
+		// no metrics — indistinguishable, on a dashboard, from every counter being zero.
+		http.Error(w, "metrics render did not complete; retry", http.StatusServiceUnavailable)
+		return
+	}
+	writeMetrics(w, body, age, took)
 }
 
-func writeMetrics(w http.ResponseWriter, body string) {
-	// version=0.0.4 is the classic text exposition format; naming it explicitly stops
-	// a scraper guessing.
+// promSnapshot reads the cached exposition, its age and the duration of the render that produced
+// it, under one lock acquisition so the three cannot disagree.
+func (h *Handler) promSnapshot() (body string, age, took time.Duration) {
+	h.promCache.mu.Lock()
+	defer h.promCache.mu.Unlock()
+	if h.promCache.body == "" {
+		return "", 0, 0
+	}
+	return h.promCache.body, time.Since(h.promCache.at), h.promCache.took
+}
+
+// refreshMetrics renders the exposition and stores it, collapsing concurrent callers onto one
+// render.
+//
+// Collapsing matters more than it looks: without it, a render slower than the scrape interval
+// means every scrape starts another one, and concurrent renders compete for the same bounded
+// connection pool, so each is slower than the last — a spiral that measured live as /metrics
+// reliably timing out. With it, however long a render takes, it happens once and every waiter
+// shares the result.
+func (h *Handler) refreshMetrics() {
+	_, _, _ = h.metricsInflight.Do("metrics", func() (any, error) {
+		started := time.Now()
+		body := h.renderMetrics()
+		h.promCache.mu.Lock()
+		h.promCache.at, h.promCache.body, h.promCache.took = time.Now(), body, time.Since(started)
+		h.promCache.mu.Unlock()
+		return nil, nil
+	})
+}
+
+func writeMetrics(w http.ResponseWriter, body string, age, took time.Duration) {
+	// version=0.0.4 is the classic text exposition format; naming it explicitly stops a scraper
+	// guessing.
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(body))
+	// Appended per response rather than built into the body, because they describe THIS response:
+	// the body is shared by every scrape served from one render, and its age differs for each.
+	//
+	// These two exist so that serving a stale body stays honest. Every other series here can be a
+	// minute old now, and without a published age there is no way to tell a dashboard showing
+	// slightly-old numbers from one showing numbers that stopped updating entirely — which is the
+	// failure this endpoint just had, in the form that took hours to notice.
+	var b strings.Builder
+	promHeaderProc(&b, "cg_metrics_age_seconds",
+		"Age of the exposition being served. Rises above the refresh interval only if refreshes have stopped; alert on it.", "gauge")
+	promLine(&b, "cg_metrics_age_seconds", "", age.Seconds())
+	promHeaderProc(&b, "cg_metrics_render_seconds",
+		"How long the render that produced this body took. Approaching the scrape interval means the per-tenant queries need attention.", "gauge")
+	promLine(&b, "cg_metrics_render_seconds", "", took.Seconds())
+	_, _ = w.Write([]byte(b.String()))
 }
 
 // metricsAllowed gates the endpoint. A bearer token is accepted so Prometheus can
@@ -428,7 +502,61 @@ func (h *Handler) renderMetrics() string {
 			dropped, repaired := fl.FrozenLossStats()
 			promLine(&b, "cg_frozen_decisions_total", `outcome="dropped"`, float64(dropped))
 			promLine(&b, "cg_frozen_decisions_total", `outcome="repaired"`, float64(repaired))
+			st := fl.StashStats()
+			promHeaderProc(&b, "cg_stash_reserve_entries",
+				"Rewind payloads (the originals behind <<cg:HASH>> markers) held now, and the reserve's size. live approaching capacity is the warning; reaching it turns into declined removals, not broken markers.", "gauge")
+			promLine(&b, "cg_stash_reserve_entries", `state="live"`, float64(st.Live))
+			promLine(&b, "cg_stash_reserve_entries", `state="capacity"`, float64(st.Capacity))
+			// The reserve's OTHER budget, and the one that binds first for large payloads: a
+			// payload is a whole tool output while every other exempt entry is a marker line, so
+			// an entry count alone names a memory figure anywhere across two orders of
+			// magnitude. Paired with the entry gauge so an operator can see WHICH budget bound
+			// and therefore which knob to turn.
+			promHeaderProc(&b, "cg_stash_reserve_bytes",
+				"What the held rewind payloads cost, and the reserve's byte budget (stash_max_bytes). Read against cg_stash_reserve_entries: entries near capacity means raise max_entries, bytes near the budget means raise stash_max_bytes.", "gauge")
+			promLine(&b, "cg_stash_reserve_bytes", `state="live"`, float64(st.Bytes))
+			promLine(&b, "cg_stash_reserve_bytes", `state="capacity"`, float64(st.MaxBytes))
+			// Payloads carry their OWN, shorter TTL (stash_ttl_seconds), because a payload is
+			// re-derivable from the transcript and a frozen decision is not — so reclaiming one is
+			// ordinarily absorbed by the next turn's replay rather than being a loss. That makes
+			// this counter on its own ambiguous, which is why the revived series ships with it.
+			promHeaderProc(&b, "cg_stash_expired_total",
+				"Rewind payloads reclaimed by their TTL (stash_ttl_seconds). NOT an alert on its own: read against cg_stash_revived_total, and alert on cg_stash_missing_total instead.", "counter")
+			promLine(&b, "cg_stash_expired_total", "", float64(st.Expired))
+			promHeaderProc(&b, "cg_stash_revived_total",
+				"Reclaimed payloads written again by a later replay, which re-derives them from the transcript before the marker goes upstream: reclamation absorbed at no cost. Tracking cg_stash_expired_total means the shorter payload TTL is working; lagging it while cg_stash_missing_total rises means raise stash_ttl_seconds.", "counter")
+			promLine(&b, "cg_stash_revived_total", "", float64(st.Revived))
 		}
+		// Process-wide, so outside the cast for the same reason hit/miss are: a component
+		// declines the removal, whichever store instance refused the payload. This is the
+		// LEADING indicator for cg_expand_unresolved_total{cause="missing"}, which cannot move
+		// until the agent happens to call expand.
+		unparsedUsage, unreadableUsage := UsageGaps()
+		// The two accounting-outage counters (#200). Process-wide, so outside the store cast for
+		// the same reason the stash pair is: the parser is package-level.
+		promHeaderProc(&b, "cg_usage_unparsed_total",
+			"Responses that carried a usage block in a spelling this proxy does not recognise, so fresh/cache_read/cache_write tokens were recorded as 0 on an otherwise healthy request. Non-zero means token accounting is offline for some route or provider; the DEBUG record cg.usage_unaccounted names the dialect (key names only).", "counter")
+		promLine(&b, "cg_usage_unparsed_total", "", float64(unparsedUsage))
+		// Split from the above because the fix is in a different place entirely: these bytes were
+		// not a whole document, so no parser could have read them.
+		promHeaderProc(&b, "cg_usage_unreadable_total",
+			"Responses whose examined bytes would not parse at all, so usage could not be sought — a spliced head+tail sniffer window, not an unrecognised dialect. Raise sniffMax or buffer the body; do NOT go looking for a missing field name.", "counter")
+		promLine(&b, "cg_usage_unreadable_total", "", float64(unreadableUsage))
+		// The one cache-write an operator can attribute to a cause (#201). Process-wide like the
+		// frozen hit/miss pair above and sourced from offload's own counter for the same reason.
+		promHeaderProc(&b, "cg_expand_prefix_flips_total",
+			"Turns where an established compaction was abandoned because the agent had expanded that content, so the original went upstream in full at its cached position: a suffix cache-write attributable to expansion. Deliberate (re-compacting would loop the agent into another expand) but not free. Per turn per message, not per distinct content - only the first is a real cache-write.", "counter")
+		promLine(&b, "cg_expand_prefix_flips_total", "", float64(offload.ExpandPrefixFlips()))
+		promHeaderProc(&b, "cg_stash_refused_total",
+			"Removals declined because the store's rewind reserve was full. The content was left verbatim and nothing became irreversible; raise max_entries or stash_max_bytes.", "counter")
+		promLine(&b, "cg_stash_refused_total", "", float64(offload.StashRefusals()))
+		// The counter that means the promise DID break, kept apart from the one above because
+		// the help text above makes a guarantee this case violates. Alert on this one; watch
+		// that one. It grows with turn count rather than with distinct dangling markers,
+		// because a payload that has gone cannot be restored and every later turn replays it.
+		promHeaderProc(&b, "cg_stash_missing_total",
+			"Marker replays that found NO payload behind them: a dangling <<cg:HASH>> went upstream, so this is a broken reversibility promise rather than a declined removal. A replay re-stashes the payload it re-derived, so this only fires when that write was ALSO refused — raise max_entries/stash_max_bytes, and stash_ttl_seconds if cg_stash_expired_total is what is taking them. Grows per turn per affected message, not per distinct marker.", "counter")
+		promLine(&b, "cg_stash_missing_total", "", float64(offload.StashMissing()))
 
 		// Same rule as the two families above, and this counter would have had the same bug:
 		// Snapshot.AdjudicateStray is filled only by the /stats handler (proxy.go), so a promLine

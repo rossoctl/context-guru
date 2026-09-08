@@ -50,8 +50,8 @@ func (d *Dedup) Offload(req *schemas.BifrostChatRequest, rep *components.Report,
 			rep.Gate("below_min_tokens")
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim") // don't re-reduce
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate) // don't re-reduce; the gate says which reason
 			continue
 		}
 		h := hashKey(content)
@@ -67,7 +67,9 @@ func (d *Dedup) Offload(req *schemas.BifrostChatRequest, rep *components.Report,
 			rep.Gate("marker_no_win") // pointer+marker wouldn't shrink this duplicate
 			continue
 		}
-		commitMark(c, rep, eff, key, content)
+		if !commitMark(c, rep, eff, key, content) {
+			continue // the store cannot back the marker; leave this message verbatim
+		}
 		schema.SetMessageText(m, newText)
 		changed++
 		if key != "" {

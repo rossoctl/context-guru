@@ -553,7 +553,7 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 			return deleted, err
 		}
 		var total int64
-		if err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&total); err != nil {
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests`).Scan(&total); err != nil {
 			return deleted, err
 		}
 		if total == 0 {
@@ -595,10 +595,10 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 // have nothing to look at).
 func (d *DB) sizeBytes() (int64, error) {
 	var pages, pageSize int64
-	if err := d.sql.QueryRow(`PRAGMA page_count`).Scan(&pages); err != nil {
+	if err := d.sql.QueryRowContext(d.readCtx(), `PRAGMA page_count`).Scan(&pages); err != nil {
 		return 0, err
 	}
-	if err := d.sql.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
+	if err := d.sql.QueryRowContext(d.readCtx(), `PRAGMA page_size`).Scan(&pageSize); err != nil {
 		return 0, err
 	}
 	total := pages * pageSize
@@ -625,7 +625,7 @@ func (d *DB) reclaim() error {
 	// then reads its own progress backwards and deletes again.
 	d.checkpoint()
 	var mode int
-	if err := d.sql.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err == nil && mode == 2 {
+	if err := d.sql.QueryRowContext(d.readCtx(), `PRAGMA auto_vacuum`).Scan(&mode); err == nil && mode == 2 {
 		if _, err := d.sql.Exec(`PRAGMA incremental_vacuum(2000)`); err != nil {
 			return err
 		}
@@ -644,6 +644,35 @@ func (d *DB) checkpoint() {
 		return
 	}
 	_, _ = d.sql.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+}
+
+// optimize refreshes the query planner's statistics for tables whose statistics are missing or
+// stale. Called from the janitor's recurring pass; see janitorPass for the measurement and for
+// why it is not done at Open.
+//
+// The 0x10002 MASK IS LOAD-BEARING and a bare `PRAGMA optimize` here is a silent no-op. 0x00002 is
+// "run ANALYZE where it would help"; 0x10000 is what lifts the restriction that a table must have
+// been queried BY THIS CONNECTION to be considered. The janitor takes a fresh connection from the
+// pool and runs no queries of its own, so under the default mask SQLite correctly concludes this
+// connection has used nothing and analyses nothing. Measured on a copy of the production database,
+// on a cold connection: bare `PRAGMA optimize` completes in 0.00s and leaves sqlite_stat1 absent;
+// `PRAGMA optimize(0x10002)` produces all 26 statistic rows, also in 0.00s.
+//
+// It is fast because it SAMPLES rather than doing a full scan — which is the whole reason it can
+// live on a recurring pass, where a bare ANALYZE (72s on this database) could not. The sampled
+// statistics are good enough for the decision that actually matters here, join order: with them the
+// component aggregate plans as SEARCH requests USING idx_requests_ts -> SEARCH request_components
+// USING idx_rc_request and runs in 0.209s, against 2.0s and a full 1.58M-row scan without them.
+//
+// Errors are logged rather than returned: out-of-date statistics make queries slower, never wrong,
+// so a failure here must not stop the rest of a janitor pass.
+func (d *DB) optimize() {
+	if d.path == "" || d.path == ":memory:" {
+		return
+	}
+	if _, err := d.sql.Exec(`PRAGMA optimize(0x10002)`); err != nil {
+		slog.Warn("dash: PRAGMA optimize failed; query plans will use whatever statistics exist", "err", err)
+	}
 }
 
 // DropOldestSessions deletes the n least-recently-active SESSIONS and returns how
@@ -678,7 +707,7 @@ func (d *DB) DropOldestSessions(n int) (int64, error) {
 // traffic evict everyone else's history, which is the shared-service failure where the
 // person causing the problem is the last to notice it.
 func (d *DB) TenantRowCounts() (map[string]int64, error) {
-	rows, err := d.sql.Query(`SELECT tenant_id, COUNT(*) c FROM requests
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT tenant_id, COUNT(*) c FROM requests
 		WHERE tenant_id <> '' GROUP BY tenant_id ORDER BY c DESC`)
 	if err != nil {
 		return nil, err
@@ -699,7 +728,7 @@ func (d *DB) TenantRowCounts() (map[string]int64, error) {
 // tenantRowCount counts one tenant's request rows.
 func (d *DB) tenantRowCount(tenant string) (int64, error) {
 	var n int64
-	err := d.sql.QueryRow(`SELECT COUNT(*) FROM requests WHERE tenant_id = ?`, tenant).Scan(&n)
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests WHERE tenant_id = ?`, tenant).Scan(&n)
 	return n, err
 }
 

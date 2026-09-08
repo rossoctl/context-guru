@@ -117,7 +117,7 @@ func (d *DB) CampaignRealSavings(strategyIDs, tenantIDs []string, since int64) (
 			costArgs = append(costArgs, id)
 		}
 		costArgs = append(costArgs, since)
-		costRows, err := d.sql.Query(`SELECT tenant_id,
+		costRows, err := d.sql.QueryContext(d.readCtx(), `SELECT tenant_id,
 				CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER) h,
 				COUNT(*), COALESCE(SUM(cost_usd),0)
 			FROM requests WHERE keepalive = 1 AND keepalive_strategy_id IN (`+
@@ -175,7 +175,7 @@ func (d *DB) CampaignRealSavings(strategyIDs, tenantIDs []string, since int64) (
 			savingArgs = append(savingArgs, id)
 		}
 		savingArgs = append(savingArgs, since)
-		savingRows, err := d.sql.Query(`SELECT r.tenant_id,
+		savingRows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id,
 				CAST(strftime('%H', r.ts/1000, 'unixepoch') AS INTEGER) h,
 				COUNT(*), COUNT(DISTINCT r.ts/86400000), `+savedExpr+`
 			FROM requests r WHERE r.keepalive = 0 AND r.tenant_id IN (`+

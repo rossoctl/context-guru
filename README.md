@@ -108,6 +108,27 @@ docker build -t context-guru:local .
 
 ## Quickstart (60 seconds)
 
+**Claude Code users — install once per machine, route once per repo; no toolchain, and no API key
+needed on a Pro/Max subscription** ([details](docs/how-to/install-plugin.md)):
+
+```
+/plugin marketplace add rossoctl/context-guru
+/plugin install context-guru@context-guru
+/reload-plugins
+/context-guru:install
+```
+
+`/reload-plugins` is what makes the `/context-guru:*` skills exist in this session; without it the
+last line answers `Unknown command`. A new session does the same thing.
+
+That installs a statically-linked binary (no Go, no C compiler), routes **this project only** by
+default, starts the proxy on demand and lets it exit when idle. `/context-guru:uninstall` undoes it,
+restoring any base URL it replaced. The plugin installs with `--preset cache` — the prompt-cache
+split and nothing else. (The proxy's own default is `house`; `--preset` is how you change it.)
+
+Or by hand — a release binary is statically linked, **no Go and no C compiler needed** — or build
+from source:
+
 ```sh
 # 1 — run the proxy (ships with the SWE-bench-winning cache-aware config by default)
 ./bin/context-guru-proxy                          # --preset house (the default); listens on :4000
@@ -144,8 +165,10 @@ See [docs/components.md](docs/components.md) and [docs/reference/presets.md](doc
 | Flag / env | Default | Purpose |
 |---|---|---|
 | `--preset` / `PRESET` | `house` | pipeline preset when no `--config` |
+| `--idle-exit` / `IDLE_EXIT` | `0` (never) | exit after this long unused; floor `max(2 × store.ttl_seconds, 1h)`, refused with `--upstreams` |
+| `--version` | — | print version and commit, then exit |
 | `--config` / `CONFIG` | — | YAML config (overrides preset) |
-| `LISTEN_ADDR` | `:4000` | listen address |
+| `--listen` / `LISTEN_ADDR` | `:4000` | listen address. The flag exists so the port is visible in `ps` and to a supervisor |
 | `--anthropic-upstream` / `ANTHROPIC_UPSTREAM` | `https://api.anthropic.com` | Anthropic upstream base |
 | `--openai-upstream` / `OPENAI_UPSTREAM` | `https://api.openai.com` | OpenAI upstream base |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | — | real key injected on forward (gateway mode); empty = pass client auth through |

@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,25 +49,19 @@ func newModeHandler(t *testing.T, yaml, upstream string, mode components.Mode, c
 	return h, agg
 }
 
-// captureUpstream records every body the upstream receives.
+// captureUpstream records every body the upstream receives. It is the bodies-only view over
+// upstreamCapture (proxy_test.go), which is where the synchronisation and the reasoning for it
+// live; the narrow signature stays because its call sites only ever want the bodies in order.
 func captureUpstream(t *testing.T) (*httptest.Server, func() [][]byte) {
 	t.Helper()
-	var mu sync.Mutex
-	var got [][]byte
+	var up upstreamCapture
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		got = append(got, b)
-		mu.Unlock()
+		up.record(r)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	}))
 	t.Cleanup(srv.Close)
-	return srv, func() [][]byte {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([][]byte(nil), got...)
-	}
+	return srv, up.bodies
 }
 
 const modePipeline = "pipeline: [dedup, cacheinject]\n"

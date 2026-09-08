@@ -39,6 +39,7 @@ var statsGoldenTopLevel = []string{
 	"cg_added_ms_avg",
 	"compaction_resets",
 	"components",
+	"expand_prefix_flips",
 	"expand_unresolved_malformed",
 	// The alertable half of reversibility: a marker id this proxy could have minted that resolved
 	// to nothing, i.e. a cut advertised as reversible that was not. Added to the reviewed contract
@@ -86,6 +87,26 @@ var statsGoldenTopLevel = []string{
 	"sse_streamed",
 	"sse_ttfb_ms_avg",
 	"sse_ttfb_ms_avg_buffered",
+	// The rewind reserve (#187, #188). stash_refused is the LEADING indicator for
+	// expand_unresolved_missing, which cannot move until the agent happens to call expand — so
+	// a run that had stopped being able to promise reversibility read as healthy. stash_missing
+	// is its OPPOSITE and is listed separately on purpose: a refusal means nothing became
+	// irreversible, while a missing payload means a dangling marker went out. The two shared one
+	// key until the #188 review pointed out that made the safe case indistinguishable from the
+	// dangerous one. stash_bytes/stash_max_bytes are the reserve's other budget — entries are a
+	// poor proxy for memory in this namespace. Added to the reviewed contract rather than
+	// loosening the assertion, per the rule above.
+	//
+	// In alphabetical order like the rest: the first four landed appended in #188 and broke the
+	// ordering, which the test does not catch (it compares sets) and a reader does.
+	"stash_bytes",
+	"stash_capacity",
+	"stash_expired",
+	"stash_live",
+	"stash_max_bytes",
+	"stash_missing",
+	"stash_refused",
+	"stash_revived",
 	// summarize_* are the same three figures for `summarize`, which owns a SEPARATE
 	// budget: its call covers the whole middle of the transcript (~57k prompt tokens
 	// measured) rather than one tool output, so the two components cannot share a
@@ -101,6 +122,11 @@ var statsGoldenTopLevel = []string{
 	"top_passthrough",
 	"upstream_ms_avg",
 	"upstream_ms_avg_bypassed",
+	// The two accounting-outage counters (#200). Added to the reviewed contract rather than
+	// loosening the assertion: fresh/cache_read/cache_write reading 0 on a healthy request is
+	// exactly the kind of silence a golden test exists to make someone notice.
+	"usage_unparsed",
+	"usage_unreadable",
 	"wasted_tokens",
 }
 

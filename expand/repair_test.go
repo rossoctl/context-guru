@@ -177,3 +177,120 @@ func TestRepairNeverMatchesAnIDLessBlock(t *testing.T) {
 		}
 	}
 }
+
+// A tool_result's `content` may be an ARRAY of sub-blocks, not only a string — Anthropic's
+// multi-part shape, e.g. text beside an image. contentPresent compared only the string spelling, so
+// for that shape it reported the original absent and the repair fell back to writing the content,
+// reintroducing the duplication this change exists to remove.
+//
+// It failed SAFE — content is never lost and a pointer is never written to nothing — which is why it
+// was minor. But it is live rather than theoretical: apply/apply_test.go fixtures the pipeline
+// compacting text inside exactly this shape, at messages.1.content.0.content.0.text, so the
+// marker-creating half was covered while the repair half could not see it.
+func TestRepairPointsAtContentInsideAnArrayShapedToolResult(t *testing.T) {
+	const orig = "the original tool output that came back"
+	// messages[1] holds the original in the ARRAY spelling; messages[3] is the expand round-trip
+	// whose tool_result the repair rewrites.
+	body := `{"model":"claude","messages":[` +
+		`{"role":"user","content":"go"},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t0","content":[` +
+		`{"type":"text","text":"` + orig + `"},` +
+		`{"type":"image","source":{"data":"AAAA"}}]}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1",` +
+		`"name":"context_guru_expand","input":{"id":"HASH"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1",` +
+		`"content":"Error: No such tool available","is_error":true}]}]` + `}`
+
+	out, restored := expand.RepairToolResults("anthropic", []byte(body),
+		func(string) (string, bool) { return orig, true })
+	if len(restored) != 1 {
+		t.Fatalf("restored %d originals, want 1: the fixture is not exercising the repair", len(restored))
+	}
+	answer := gjson.GetBytes(out, "messages.3.content.0.content").String()
+	if answer == orig {
+		t.Fatalf("the repair wrote a SECOND copy of the content, because contentPresent could not "+
+			"see the array-shaped tool_result at messages.1 — the duplication is back for this "+
+			"wire shape:\n%s", answer)
+	}
+	if !strings.Contains(answer, "present in the transcript above") {
+		t.Fatalf("the repaired tool_result carries neither the content nor a pointer: %q", answer)
+	}
+	// And the copy it points at must still be there, unchanged.
+	if got := gjson.GetBytes(out, "messages.1.content.0.content.0.text").String(); got != orig {
+		t.Fatalf("the in-place copy was altered: %q", got)
+	}
+}
+
+// The array recursion must not make a block match ITSELF once repaired, or the repair stops being
+// idempotent — the same defect exceptPath was added for, one nesting level down.
+func TestRepairIsIdempotentForAnArrayShapedToolResult(t *testing.T) {
+	const orig = "the original tool output that came back"
+	body := `{"model":"claude","messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1",` +
+		`"name":"context_guru_expand","input":{"id":"HASH"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[` +
+		`{"type":"text","text":"Error: No such tool available"}]}]}]}`
+
+	resolve := func(string) (string, bool) { return orig, true }
+	first, _ := expand.RepairToolResults("anthropic", []byte(body), resolve)
+	second, _ := expand.RepairToolResults("anthropic", first, resolve)
+	if string(first) != string(second) {
+		t.Fatalf("repair is not idempotent for the array shape:\n first %s\n then  %s", first, second)
+	}
+}
+
+// THE EXCEPTED BLOCK MUST NOT MATCH ITSELF IN ITS ARRAY SPELLING EITHER.
+//
+// TestRepairIsIdempotentForAnArrayShapedToolResult asserts the contract for the array shape but
+// cannot reach this state: its array holds the client's ERROR, so pass 1 rewrites `content` to a
+// string and pass 2 takes the string branch, where the exception applied all along. The state that
+// breaks it is an excepted block whose array holds the ORIGINAL — constructed directly here, which
+// is what exceptPath exists for.
+//
+// With the exception tested only inside the string branch, this wrote a pointer while the excepted
+// block was the only copy of the content: the model is left pointing at something that is no longer
+// there, which is the round-1 defect one spelling over.
+func TestRepairDoesNotPointAtTheBlockItIsWriting(t *testing.T) {
+	const orig = "the original tool output that came back"
+	// The answer block's content is an ARRAY holding the original, and it is the ONLY copy.
+	body := `{"model":"claude","messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1",` +
+		`"name":"context_guru_expand","input":{"id":"HASH"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[` +
+		`{"type":"text","text":"` + orig + `"}]}]}]}`
+
+	out, _ := expand.RepairToolResults("anthropic", []byte(body),
+		func(string) (string, bool) { return orig, true })
+
+	answer := gjson.GetBytes(out, "messages.1.content.0.content").String()
+	if strings.Contains(answer, "present in the transcript above") {
+		t.Fatalf("the repair wrote a pointer while the block it was writing held the only copy of "+
+			"the content — it matched itself through its array spelling, so the model now points at "+
+			"content that is gone:\n%s", string(out))
+	}
+	if answer != orig {
+		t.Fatalf("the excepted block should keep the content when there is no other copy, got %q", answer)
+	}
+}
+
+// The control for the fix, so hoisting the exception cannot have disabled the array search that this
+// change exists to add: a DIFFERENT block holding the original in array form must still be found.
+func TestRepairStillFindsAnArrayCopyOutsideTheExceptedBlock(t *testing.T) {
+	const orig = "the original tool output that came back"
+	body := `{"model":"claude","messages":[` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t0","content":[` +
+		`{"type":"text","text":"` + orig + `"}]}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1",` +
+		`"name":"context_guru_expand","input":{"id":"HASH"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1",` +
+		`"content":"Error: No such tool available","is_error":true}]}]}`
+
+	out, _ := expand.RepairToolResults("anthropic", []byte(body),
+		func(string) (string, bool) { return orig, true })
+
+	answer := gjson.GetBytes(out, "messages.2.content.0.content").String()
+	if !strings.Contains(answer, "present in the transcript above") {
+		t.Fatalf("the array copy at messages.0 was not found, so the duplication is back for this "+
+			"wire shape: %q", answer)
+	}
+}

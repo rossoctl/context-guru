@@ -21,6 +21,7 @@ package dash
 
 import (
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -373,7 +374,7 @@ func (d *DB) ToolReportFor(f Filter, price func(string) (modelinfo.Price, bool))
 	where, args := f.where()
 	// Sessions in scope, their re-read multiplier and the tiers they paid. tools>0
 	// because a request that declared nothing has no inventory to be missing.
-	rows, err := d.sql.Query(`SELECT r.session_id, r.model,
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, r.model,
 		SUM(CASE WHEN r.cache_read > 0 THEN 1 ELSE 0 END),
 		SUM(CASE WHEN r.cache_read = 0 AND r.cache_write > 0 THEN 1 ELSE 0 END),
 		SUM(CASE WHEN r.cache_read = 0 AND r.cache_write = 0 THEN 1 ELSE 0 END)
@@ -456,7 +457,7 @@ func (d *DB) scopedDecls(f Filter, where string, args []any) ([]declRow, error) 
 		a = append(a, f.Tenant)
 	}
 	q += ` GROUP BY 1, 2, 3, 4`
-	rows, err := d.sql.Query(q, a...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, a...)
 	if err != nil {
 		return nil, err
 	}
@@ -485,7 +486,7 @@ func (d *DB) scopedUses(f Filter, where string, args []any) ([]useRow, error) {
 		a = append(a, f.Tenant)
 	}
 	q += ` GROUP BY 1, 2, 3`
-	rows, err := d.sql.Query(q, a...)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, a...)
 	if err != nil {
 		return nil, err
 	}
@@ -902,33 +903,34 @@ func (a *API) MountTools(m *http.ServeMux) {
 // to one session (through the standard filter, so an id belonging to someone else
 // simply selects nothing rather than 403-ing and confirming that it exists).
 func (a *API) tools(w http.ResponseWriter, r *http.Request) {
-	f, _, ok := a.scope(r)
+	f, p, ok := a.scope(r)
 	if !ok {
 		unauthorized(w)
 		return
 	}
 	price := a.priceFn(r)
-	rep, err := a.rec.DB().ToolReportFor(f, price)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "could not read the tool inventory")
-		return
-	}
-	// Credit for what the USER removed themselves. Best-effort and non-fatal: it is an
-	// addition to the report, so a deployment where it fails still gets the inventory rather
-	// than an error page. Needs a pricer to put a dollar on, and the token counts stand
-	// without one.
-	if price != nil {
-		// The account's own server-side removal list, so a reduction that the tool filter is
-		// ALREADY credited for can be marked as overlapping instead of counted twice.
-		sr, err := a.rec.DB().SelfRemovals(f, price, a.toolFilterStateForScope(f).Removed)
+	a.serveJSON(w, r, &a.toolsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
+		rep, err := db.ToolReportFor(f, price)
 		if err != nil {
-			// Non-fatal, but never silent: swallowing this returned an empty list that was
-			// indistinguishable from "the account removed nothing", which is a claim.
-			slog.Warn("dash: self-removal credit unavailable", "err", err)
+			return nil, err
 		}
-		rep.SelfRemoved = sr
-	}
-	writeJSON(w, rep)
+		// Credit for what the USER removed themselves. Best-effort and non-fatal: it is an
+		// addition to the report, so a deployment where it fails still gets the inventory rather
+		// than an error page. Needs a pricer to put a dollar on, and the token counts stand
+		// without one.
+		if price != nil {
+			// The account's own server-side removal list, so a reduction that the tool filter is
+			// ALREADY credited for can be marked as overlapping instead of counted twice.
+			sr, err := db.SelfRemovals(f, price, a.toolFilterStateForScope(f).Removed)
+			if err != nil {
+				// Non-fatal, but never silent: swallowing this returned an empty list that was
+				// indistinguishable from "the account removed nothing", which is a claim.
+				slog.Warn("dash: self-removal credit unavailable", "err", err)
+			}
+			rep.SelfRemoved = sr
+		}
+		return json.Marshal(rep)
+	})
 }
 
 // priceFn resolves a model's rates for the duration of one request, or nil when the
@@ -949,7 +951,7 @@ func (a *API) priceFn(r *http.Request) func(string) (modelinfo.Price, bool) {
 
 // countInventoryRows is a test and diagnostic helper: how many inventory rows exist.
 func (d *DB) countInventoryRows() (decls, uses int64, err error) {
-	err = d.sql.QueryRow(`SELECT
+	err = d.sql.QueryRowContext(d.readCtx(), `SELECT
 		(SELECT COUNT(*) FROM tool_declarations),
 		(SELECT COUNT(*) FROM tool_uses)`).Scan(&decls, &uses)
 	if err == sql.ErrNoRows {
@@ -997,7 +999,7 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 		model                string
 		hasMCP, hasSkills    bool
 	}
-	srows, err := d.sql.Query(`SELECT r.tenant_id, r.session_id, MIN(r.ts),
+	srows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, MIN(r.ts),
 			SUM(CASE WHEN r.cache_read > 0 THEN 1 ELSE 0 END),
 			SUM(CASE WHEN r.cache_read = 0 AND r.cache_write > 0 THEN 1 ELSE 0 END),
 			SUM(CASE WHEN r.cache_read = 0 AND r.cache_write = 0 THEN 1 ELSE 0 END),
@@ -1042,13 +1044,32 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 	// join condition, and the candidate + cohort aggregation happen in the same pass. Filtered by
 	// tenant_id in SQL when the caller is scoped to one account — the common case — so a
 	// per-account view still only ever touches that account's own rows, exactly as before.
-	dq := `SELECT tenant_id, session_id, kind, name, server, tokens FROM tool_declarations`
+	// Reduced in SQL, not in Go. The loop below keeps MAX(tokens) per candidate and a SET of
+	// session ids, so feeding it one row per digest and letting it collapse them was 33.5 rows
+	// of work per fact it kept: 1,811,405 declaration rows for 54,030 distinct
+	// (tenant, session, kind, name, server) on the production corpus. GROUP BY in the same
+	// column order as idx_tooldecl_inventory (see schema.go) makes this an ordered scan of a
+	// covering index — no temp b-tree, no table fetch — and hands Go the 54k facts instead of
+	// the 1.8M rows. Measured on a corpus built to production's cardinalities: 4,498 ms to
+	// 1,229 ms, and 10,749 ms if the GROUP BY runs WITHOUT the index, so the two ship together.
+	//
+	// CROSS-FILE INVARIANT: this GROUP BY and idx_tooldecl_inventory in schema.go are only
+	// correct together and either half alone is a regression -- the index without the GROUP BY
+	// leaves the plan on the table scan (3,636 ms, buys nothing), the GROUP BY without the index
+	// sorts into a temp b-tree (10,749 ms, 2.4x SLOWER than the scan it replaced). Removing
+	// either half looks independently safe and is not.
+	//
+	// `started` is deliberately NOT in this SELECT: it comes from the requests-side sessByKey
+	// lookup below, not from this table. Adding MAX(started) here without also adding it to the
+	// GROUP BY would silently change the grouping -- the same trap in the other direction.
+	dq := `SELECT tenant_id, session_id, kind, name, server, MAX(tokens) FROM tool_declarations`
 	var dargs []any
 	if !f.TenantAll {
 		dq += ` WHERE tenant_id = ?`
 		dargs = append(dargs, f.Tenant)
 	}
-	drows, err := d.sql.Query(dq, dargs...)
+	dq += ` GROUP BY tenant_id, session_id, kind, name, server`
+	drows, err := d.sql.QueryContext(d.readCtx(), dq, dargs...)
 	if err != nil {
 		return nil, err
 	}

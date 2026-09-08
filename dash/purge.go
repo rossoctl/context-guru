@@ -162,7 +162,7 @@ func (r *Recorder) PurgeTenant(ctx context.Context, tenantID string) (PurgeResul
 // caller that cannot ask cannot assert it.
 func (d *DB) TenantHasRows(tenantID string) (bool, error) {
 	var n int64
-	err := d.sql.QueryRow(`SELECT
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT
 	  (SELECT COUNT(*) FROM requests WHERE tenant_id = ?) +
 	  (SELECT COUNT(*) FROM archived_sessions WHERE tenant_id = ?) +
 	  (SELECT COUNT(*) FROM tenant_spend WHERE tenant_id = ?)`,
@@ -175,11 +175,11 @@ func (d *DB) TenantHasRows(tenantID string) (bool, error) {
 // it exists to catch: a delete that took the parents and left the children belonging to
 // nobody, which no tenant-scoped query can see.
 func (d *DB) OrphanRows() (components, content int64, err error) {
-	if err = d.sql.QueryRow(`SELECT COUNT(*) FROM request_components c
+	if err = d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM request_components c
 	  WHERE NOT EXISTS (SELECT 1 FROM requests r WHERE r.id = c.request_id)`).Scan(&components); err != nil {
 		return 0, 0, err
 	}
-	err = d.sql.QueryRow(`SELECT COUNT(*) FROM request_content c
+	err = d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM request_content c
 	  WHERE NOT EXISTS (SELECT 1 FROM requests r WHERE r.id = c.request_id)`).Scan(&content)
 	return components, content, err
 }

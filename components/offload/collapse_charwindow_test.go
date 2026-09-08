@@ -191,8 +191,8 @@ func TestCollapseCharWindowSkipsMarkedContent(t *testing.T) {
 	if got := schema.MessageText(req.Input[0]); got != body {
 		t.Fatalf("marker-bearing content must be untouched, got %.200q", got)
 	}
-	if rep.Gates["marker_or_kept_verbatim"] == 0 {
-		t.Fatalf("want marker_or_kept_verbatim, gates %v", rep.Gates)
+	if rep.Gates[GateAlreadyMarked] == 0 {
+		t.Fatalf("want %s, gates %v", GateAlreadyMarked, rep.Gates)
 	}
 }
 
@@ -368,7 +368,7 @@ func TestCollapseCharWindowAtExactlyTheLineWindowSize(t *testing.T) {
 // output with more than head_lines+tail_lines lines took the line path however big those
 // lines were. A multi-megabyte line inside the kept head or tail survived untouched — and
 // worse than being declined, because dropping the small filler lines in the middle counts as
-// acting and stamps a marker, which then makes linecap decline marker_or_kept_verbatim.
+// acting and stamps a marker, which then makes linecap decline already_marked.
 // Measured: 4,195,111 B in, 4,194,922 B out, 189 bytes saved, 1.57 M tokens forwarded.
 func TestCollapseCutsAHugeLineInsideTheLineWindow(t *testing.T) {
 	huge := oneLineJSON(1 << 20) // one line, bigger than any window

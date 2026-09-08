@@ -427,8 +427,12 @@ func TestCorefLeavesExpandedContentAlone(t *testing.T) {
 	if got := schema.MessageText(req.Input[corefCutIdx]); !strings.Contains(got, corefNovelUnused) {
 		t.Fatal("re-cut content the agent had expanded; that is the expand bounce loop")
 	}
-	if rep.Gates["marker_or_kept_verbatim"] == 0 {
-		t.Error("expected the kept-verbatim gate to record the declined candidate")
+	// #201/#208 split this apart: the specific reason is reported now, not the merged label.
+	if rep.Gates[GateKeptVerbatim] == 0 {
+		t.Errorf("expected %s to record the declined candidate (gates: %v)", GateKeptVerbatim, rep.Gates)
+	}
+	if rep.Gates["marker_or_kept_verbatim"] != 0 {
+		t.Error("still raising the conflated gate that #201 replaced")
 	}
 }
 
