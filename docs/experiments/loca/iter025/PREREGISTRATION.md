@@ -160,3 +160,97 @@ Declared now so no result can be rescued after the fact:
 5. **`/metrics` remains aggregate** (#180); nothing here cross-checks against a Prometheus series.
 6. **Reward is scored by LOCA's own task solving**, which is blind to nothing but is also low-resolution:
    ≤75 pairs separates only large effects.
+
+---
+
+## Amendment 1 — reuse iteration 024's arm A for four of five seeds (pre-launch)
+
+**Recorded before launch, and before any iteration-025 number beyond the pre-flight is read.**
+
+### The change
+
+Arm A runs at **seed 1 only**. Seeds 2–5 pair arm B against **iteration 024's already-recorded arm A** on
+the same task configs. 90 runs instead of 150.
+
+Cost, recomputed from iteration 024's actual per-task spend rather than the pre-flight's single task —
+which is the better estimator and the one this file should have used from the start:
+
+| | runs | cost |
+|---|---|---|
+| iteration 024, as run | 150 | **$471.13** (mean $3.141/run, median $1.895, max $37.67) |
+| iteration 025 as originally registered | 150 | ~$471 |
+| **iteration 025 amended** | **90** | **~$301** (arm B 5 seeds ≈ $263 + arm A seed 1 ≈ $38) |
+
+The original ~$460 estimate was right, but by luck: the pre-flight task's $3.070 happened to sit near a
+mean of $3.141 drawn from a distribution whose median is $1.895 and whose maximum is $37.67. An n=1
+extrapolation from a long-tailed distribution is not an estimate, and this replaces it.
+
+### Why reuse is admissible, having checked rather than assumed
+
+1. **The gateway difference is accounting, not routing.** Iteration 024 ran against
+   `…vpc.res.ibm.com` and this run uses `…vpc-int.res.ibm.com`; @davidamid confirms both terminate at the
+   same Anthropic endpoint and exist to separate billing inside the organisation. This was the objection
+   that would have blocked reuse outright, and it does not hold.
+2. **Iteration 024's arm A recorded no extraction activity at all** — `extract_llm` `calls: 0`,
+   `cost_source: none`, `gross_saved_tokens: 0` across 378 and 316 requests. So there are no per-component
+   cost or latency figures in arm A for the five accounting fixes to have invalidated. Its contribution is
+   purely behavioural: reward, turns, wall clock, total cost.
+3. **Every merged change is inert or accounting-only for arm A's active components.** #204, #205 and #208
+   are accounting and labels. #216 is `extract_llm`-specific and `extract_llm` made zero calls in arm A.
+   The ask charge and the pressure logging touch `econ_trigger`, which arm A does not enable. That leaves
+   **#188**, which gave `commitMark` a refusal used by `cmdfilter`, `collapse`, `dedup`, `extract` — a real
+   behaviour change in principle, but `stash_refused` has been **0** on all three pre-flights, so the
+   reserve is never exhausted at this scale. Recorded as a limit rather than dismissed.
+4. **Per-task pairing is possible.** `results.json` → `per_config` carries `avg_accuracy`, `avg_steps` and
+   `avg_cost_usd` keyed by environment name, for all 15 tasks of every arm-seed.
+
+### The drift check, declared in advance
+
+One risk survives all of the above and cannot be tested retroactively: **six days of drift** behind the
+`aws/claude-sonnet-5` alias. Seed 1's arm A is re-run to test it.
+
+**Comparison is A-against-A on identical config, so the expected difference is zero.** Criterion, fixed
+now: a **two-sided exact McNemar test on the discordant tasks** between `i024As1` and `i025As1`, α = 0.05,
+plus mean per-task cost within ±30%.
+
+| drift check | conclusion | next |
+|---|---|---|
+| not significant, cost within ±30% | no detectable drift; iteration 024's arm A is a valid control | pair seeds 2–5 against it as planned |
+| significant, or cost outside ±30% | drift is real and the reused baseline is contaminated | run arm A at seeds 2–5 (+~$170); draw no B−A conclusion until it completes |
+
+**The frozen target** — recorded here so it cannot be selected after the fact:
+
+| task | avg_accuracy | avg_steps | avg_cost_usd |
+|---|---|---|---|
+| `ABTestingS2LEnv` | 0.0 | 49.0 | $4.47 |
+| `AcademicWarningS2LEnv` | 1.0 | 97.0 | $10.44 |
+| `ApplyPhDEmailS2LEnv` | 1.0 | 24.0 | $2.26 |
+| `CanvasArrangeExamS2LEnv` | 0.0 | 14.0 | $2.04 |
+| `CanvasListTestS2LEnv` | 0.0 | 14.0 | $1.31 |
+| `CourseAssistantS2LEnv` | 1.0 | 15.0 | $1.05 |
+| `ExcelMarketResearchS2LEnv` | 1.0 | 23.0 | $0.83 |
+| `FilterLowSellingProductsS2LEnv` | 0.0 | 12.0 | $1.46 |
+| `MachineOperatingS2LEnv` | 1.0 | 45.0 | $2.46 |
+| `NhlB2bAnalysisS2LEnv` | 0.0 | 17.0 | $0.94 |
+| `PayableInvoiceCheckerS2LEnv` | 1.0 | 15.0 | $0.42 |
+| `SetConfCrDdlS2LEnv` | 1.0 | 10.0 | $3.60 |
+| `UpdateMaterialInventoryS2LEnv` | 1.0 | 13.0 | $3.79 |
+| `WoocommerceNewWelcomeS2LEnv` | 0.0 | 15.0 | $1.77 |
+| `WoocommerceStockAlertS2LEnv` | 0.0 | 15.0 | $1.61 |
+
+solved-equivalent (sum of avg_accuracy) = 8.000 of 15 tasks
+summary: {"avg_accuracy": 0.5333, "avg_steps": 25.2, "total_cost_usd": 38.469868, "total_error": 0, "total_input_tokens": 6603311, "total_output_tokens": 499145, "total_success": 15}
+
+### Limits this amendment adds
+
+1. **The pairs are not homogeneous in time.** Seed 1's pair is same-day; seeds 2–5 pair against a
+   six-day-old baseline. The drift check licenses that, it does not remove it, and any B−A result must say
+   so.
+2. **#188's refusal path exists in arm B's binary and not in the reused arm A's.** Inert at
+   `stash_refused: 0`, and that counter must be reported for arm B to show it stayed inert.
+3. **Latency comparisons across the reused seeds carry the gateway hop's difference**, even with the same
+   Anthropic endpoint behind it: the two litellm deployments are different hosts. Seed 1 is the only clean
+   latency pair, so the latency endpoint effectively falls to n=15 unless the full baseline is run.
+4. If the drift check fails, the amended run costs **more** than the original design would have
+   (~$301 + ~$170 = ~$471, plus a re-analysis). That is accepted deliberately: the check buys a falsifiable
+   answer about drift, which the original design assumed away.
