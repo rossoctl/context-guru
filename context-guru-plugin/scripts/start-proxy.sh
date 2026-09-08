@@ -98,6 +98,15 @@ UPSTREAM_ARG=""
 # covered by the same permission rule as the rest of the command, and needs no symlink.
 BIN_ARG=""
 PORT_ARG=""
+# --preset and --idle-exit, the last two options that existed only as CLAUDE_PLUGIN_OPTION_* reads.
+#
+# They are here so a command handed to a HUMAN can carry them as flags. The alternative is an env
+# prefix, and this file already records what that costs: a pasted env-prefixed invocation split
+# across two lines, the assignments became a no-op statement, the script ran unrouted and exited
+# without a word, and three rounds of guessing followed. check-proxy.sh prints exactly such a
+# recovery command, so every value it needs to pass must have an argument form.
+PRESET_ARG=""
+IDLE_EXIT_ARG=""
 # Every discarded or malformed argument is REPORTED, never swallowed.
 #
 # The first version of this loop had no `*)` branch and took `$2` for `--upstream` on faith. All three
@@ -144,6 +153,10 @@ while [ $# -gt 0 ]; do
     # form twice over; this one was missed both times.
     --port) if takes_value --port "${2:-}"; then PORT_ARG="$2"; shift; fi ;;
     --port=*) if takes_value --port "${1#--port=}"; then PORT_ARG="${1#--port=}"; fi ;;
+    --preset) if takes_value --preset "${2:-}"; then PRESET_ARG="$2"; shift; fi ;;
+    --preset=*) if takes_value --preset "${1#--preset=}"; then PRESET_ARG="${1#--preset=}"; fi ;;
+    --idle-exit) if takes_value --idle-exit "${2:-}"; then IDLE_EXIT_ARG="$2"; shift; fi ;;
+    --idle-exit=*) if takes_value --idle-exit "${1#--idle-exit=}"; then IDLE_EXIT_ARG="${1#--idle-exit=}"; fi ;;
     *) note "ignoring unrecognised argument '$1'" ;;
   esac
   shift
@@ -152,6 +165,15 @@ FORCE="$START_UNROUTED"
 # BIN was resolved at the top from CONTEXT_GURU_BIN or the bare name; an explicit --bin overrides both.
 if [ -n "$BIN_ARG" ]; then
   BIN="$BIN_ARG"
+fi
+# An explicit --preset / --idle-exit overrides the option read at the top, same precedence as --bin.
+# Note this does NOT override a keepalive --config: that file states its own preset and --config
+# replaces the preset entirely, which is why the success note reports what the config says.
+if [ -n "$PRESET_ARG" ]; then
+  PRESET="$PRESET_ARG"
+fi
+if [ -n "$IDLE_EXIT_ARG" ]; then
+  IDLE_EXIT="$IDLE_EXIT_ARG"
 fi
 # PORT likewise, and everything derived from it has to be recomputed — the gate below compares against
 # it, and the log, pidfile, health URL and dashboard DB are all named after it. Re-deriving them here

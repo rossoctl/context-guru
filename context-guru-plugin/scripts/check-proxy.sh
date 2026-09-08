@@ -60,19 +60,62 @@ if [ -x "${CLAUDE_PLUGIN_ROOT:-}/scripts/start-proxy.sh" ]; then
 fi
 
 LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log"
-# Same state directory the starter uses, so the command printed below writes its dashboard DB
-# where the hook-started proxy would have, and not into the user's repository.
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/context-guru"
+STARTER="${CLAUDE_PLUGIN_ROOT:-}/scripts/start-proxy.sh"
+
+# The recovery command DELEGATES to start-proxy.sh instead of restating its command line.
+#
+# It used to print a hand-rolled `context-guru-proxy --listen … --preset …`, and that duplicate had
+# drifted from the real launch path in four ways at once. It named CLAUDE_PLUGIN_OPTION_PRESET, which
+# --config replaces anyway; and it omitted --config, --anthropic-upstream and --idle-exit. Pasting it
+# therefore turned keep-alive OFF for somebody who had explicitly enabled it and was paying for the
+# pings, bypassed a configured gateway (which on a platform whose gateway rewrites model names makes
+# every request fail), and left a proxy that never idle-exits holding the port. Every one of those was
+# silent, at the moment the user is already troubleshooting.
+#
+# A repaired flag list would drift again the next time start-proxy.sh gains one — which is exactly how
+# those four were each missed in turn. Delegation cannot.
+#
+# Everything is passed as FLAGS, never as an env prefix. start-proxy.sh's own gate comment records what
+# an env prefix costs a human: a pasted invocation split across two lines, the assignments became a
+# no-op statement, the script ran unrouted and exited without a word. That is why --preset and
+# --idle-exit gained argument forms alongside --port and --upstream.
+#
+# --unrouted is required, not optional: settings `env` values reach hook processes, not interactive
+# shells, so ANTHROPIC_BASE_URL is absent in the user's terminal and start-proxy.sh's gate would
+# otherwise decline and do nothing. The port and preset must be passed for the same reason — the
+# CLAUDE_PLUGIN_OPTION_* values this hook can see are invisible there, so a bare invocation would
+# start on 8787 with the default preset.
+PRESET="${CLAUDE_PLUGIN_OPTION_PRESET:-cache}"
+IDLE_EXIT="${CLAUDE_PLUGIN_OPTION_IDLE_EXIT:-24h}"
+UPSTREAM="${CLAUDE_PLUGIN_OPTION_UPSTREAM:-${ANTHROPIC_UPSTREAM:-}}"
+if [ -x "$STARTER" ]; then
+  RECOVER="\"${STARTER}\" --unrouted --port ${PORT} --preset ${PRESET} --idle-exit ${IDLE_EXIT}"
+  if [ -n "$UPSTREAM" ]; then
+    RECOVER="${RECOVER} --upstream ${UPSTREAM}"
+  fi
+  HOW="To fix it now, in a terminal. This is the same script the hook runs, so it picks up your
+keep-alive config, the dashboard flags and the pidfile uninstall looks for, without you restating any
+of them:
+  ${RECOVER}
+Log from the last attempt: ${LOG}"
+else
+  # No starter to point at means the install is broken in a way the user has to fix anyway. Say that,
+  # rather than falling back to a hand-written command line — reintroducing the duplicate here would
+  # reintroduce the drift, in the one situation where nothing can be verified.
+  HOW="This plugin's start-proxy.sh is not where this hook expects it:
+  ${STARTER}
+so there is no command to hand you that would be safe to run — writing one out would mean restating
+the proxy's flags, and a stale copy of that list is what made this note wrong before. Reinstall with
+/context-guru:install from a session that still works.
+Log from the last attempt: ${LOG}"
+fi
+
 cat <<EOF
 context-guru: this project is routed through http://127.0.0.1:${PORT}/anthropic, and nothing is
 answering there. **Your request will hang with no error message** — that is what a dead proxy looks
 like from inside Claude Code, and it is why this note exists rather than a skill.
 
-To fix it now, in a terminal (the dashboard flags matter: without them /dashboard/ is a 404, and
-this proxy would then hold the port for the whole --idle-exit window with no way to notice why):
-  context-guru-proxy --listen 127.0.0.1:${PORT} --preset ${CLAUDE_PLUGIN_OPTION_PRESET:-cache} \\
-    --dashboard --dashboard-db "${STATE_DIR}/dashboard-${PORT}.db"
-Log from the last attempt: ${LOG}
+${HOW}
 
 To stop routing entirely and get working immediately, remove env.ANTHROPIC_BASE_URL from
 .claude/settings.local.json (or run /context-guru:uninstall from a session that still works).

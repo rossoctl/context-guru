@@ -950,7 +950,17 @@ func TestCheckHookFinishesInsideItsOwnTimeout(t *testing.T) {
 	for _, want := range []string{
 		"nothing is answering there",
 		"Your request will hang with no error message",
-		"--dashboard", // the printed recovery command must not recreate the 404 dashboard
+		// This used to assert the literal "--dashboard", because the note restated the proxy's whole
+		// command line and a copy of it that forgot those flags left the user with a 404 dashboard.
+		// The note no longer restates anything — it points at start-proxy.sh, which always passes them
+		// — so the string is gone by design rather than by regression.
+		//
+		// The property itself did not move to prose: TestCheckProxyRecoveryCommandIsTheRealLaunchPath
+		// RUNS the printed command and asserts --dashboard in the argv the proxy is actually launched
+		// with, which is strictly stronger than finding the word in a paragraph. What is left to check
+		// here is that this path still hands the user something runnable at all.
+		"start-proxy.sh",
+		"--unrouted",
 	} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("the diagnostic is missing %q; output was:\n%s", want, out)
@@ -2940,6 +2950,224 @@ func TestNoSkillBlockReadsAPluginOption(t *testing.T) {
 		t.Fatal("no skills were scanned, so this guard proved nothing")
 	}
 	t.Logf("scanned %d skills", checked)
+}
+
+// TestCheckProxyRecoveryCommandIsTheRealLaunchPath: the note printed when nothing answers on the port
+// used to carry a hand-rolled `context-guru-proxy --listen … --preset …`, and that duplicate had drifted
+// from what start-proxy.sh actually launches in four ways at once — it named the plugin option's preset
+// (which --config replaces anyway) and omitted --config, --anthropic-upstream and --idle-exit.
+//
+// Pasting it therefore turned keep-alive OFF for somebody who had enabled it and was paying for the
+// pings, bypassed a configured gateway, and left a proxy that never idle-exits. All silently, while the
+// user was already troubleshooting.
+//
+// So this does not assert on the note's WORDING. It extracts the command the note prints and RUNS it,
+// then asserts on the argv the proxy was launched with. A flag list can be repaired and drift again; what
+// has to hold is that the printed command produces the same proxy the hook would have started.
+func TestCheckProxyRecoveryCommandIsTheRealLaunchPath(t *testing.T) {
+	requireTool(t, "bash")
+	const preset, idle, upstream = "house", "90m", "http://gw.example:4000"
+
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state")
+	stateDir := filepath.Join(state, "context-guru")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	port := freePort(t)
+	// A keep-alive config exists, which is the case the old command silently discarded.
+	keepalive := filepath.Join(stateDir, "keepalive-"+port+".yaml")
+	if err := os.WriteFile(keepalive, []byte("preset: "+preset+"\ncache:\n  keepalive: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 1: get the note. Auto-recovery has to FAIL for it to print, so the binary does not exist.
+	root, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(),
+		"CLAUDE_PLUGIN_ROOT="+root,
+		"CLAUDE_PLUGIN_OPTION_PORT="+port,
+		"CLAUDE_PLUGIN_OPTION_PRESET="+preset,
+		"CLAUDE_PLUGIN_OPTION_IDLE_EXIT="+idle,
+		"CLAUDE_PLUGIN_OPTION_UPSTREAM="+upstream,
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+		"CONTEXT_GURU_BIN="+filepath.Join(dir, "does-not-exist"),
+		"CONTEXT_GURU_HEALTH_BUDGET=1",
+		"XDG_STATE_HOME="+state,
+		"TMPDIR="+dir)
+	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "check-proxy.sh"))
+	cmd.Env = env
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("check-proxy.sh must never fail a prompt: %v\n%s", err, b)
+	}
+	note := string(b)
+	t.Logf("note ->\n%s", note)
+
+	// The duplicated command line must be gone, not merely corrected.
+	if strings.Contains(note, "context-guru-proxy --listen") {
+		t.Errorf("the note still prints a hand-rolled proxy command line; that duplicate is what drifted "+
+			"from the real launch path four times:\n%s", note)
+	}
+
+	// Step 2: pull the command out of the note and run it, this time with a proxy binary that works.
+	var recover string
+	for _, line := range strings.Split(note, "\n") {
+		if strings.Contains(line, "start-proxy.sh") && strings.Contains(line, "--unrouted") {
+			recover = strings.TrimSpace(line)
+			break
+		}
+	}
+	if recover == "" {
+		t.Fatalf("the note offers no runnable recovery command:\n%s", note)
+	}
+
+	argvFile := filepath.Join(dir, "argv")
+	fake := filepath.Join(dir, "fake-proxy")
+	py := requireTool(t, "python3")
+	script := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n' \"$*\" > " + argvFile + "\n" +
+		"exec " + py + " -c '\n" +
+		"import http.server\n" +
+		"class H(http.server.BaseHTTPRequestHandler):\n" +
+		"    def do_GET(self):\n" +
+		"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+		"    def log_message(self, *a): pass\n" +
+		"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n'\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Deliberately NOT carrying the CLAUDE_PLUGIN_OPTION_* values: a terminal does not have them, which
+	// is the whole reason the printed command has to pass them as flags. Only CONTEXT_GURU_BIN and the
+	// state/tmp redirections are kept, because the test cannot install a real binary.
+	run := exec.Command("bash", "-c", recover)
+	run.Env = append(os.Environ(),
+		"CLAUDE_PLUGIN_OPTION_PORT=", "CLAUDE_PLUGIN_OPTION_PRESET=", "CLAUDE_PLUGIN_OPTION_IDLE_EXIT=",
+		"CLAUDE_PLUGIN_OPTION_UPSTREAM=", "ANTHROPIC_BASE_URL=", "ANTHROPIC_UPSTREAM=",
+		"CONTEXT_GURU_BIN="+fake,
+		"XDG_STATE_HOME="+state,
+		"TMPDIR="+dir)
+	out2, err := run.CombinedOutput()
+	t.Cleanup(func() {
+		if pb, e := os.ReadFile(filepath.Join(stateDir, "proxy-"+port+".pid")); e == nil {
+			exec.Command("kill", strings.TrimSpace(string(pb))).Run() //nolint:errcheck
+		}
+	})
+	if err != nil {
+		t.Fatalf("the printed recovery command failed: %v\n%s", err, out2)
+	}
+	argv, rerr := os.ReadFile(argvFile)
+	if rerr != nil {
+		t.Fatalf("the printed recovery command never launched a proxy: %v\nnote:\n%s\nrun:\n%s",
+			rerr, note, out2)
+	}
+	got := string(argv)
+	t.Logf("recovery command launched: %s", got)
+
+	for _, want := range []struct{ what, needle string }{
+		{"the configured port", "--listen 127.0.0.1:" + port},
+		{"the keep-alive config (omitting it turns off keep-alive the user is paying for)", "--config " + keepalive},
+		{"the configured upstream (omitting it bypasses the gateway holding their credential)", "--anthropic-upstream " + upstream},
+		{"the configured idle-exit (omitting it leaves a proxy that never exits)", "--idle-exit=" + idle},
+		{"the dashboard flags", "--dashboard"},
+	} {
+		if !strings.Contains(got, want.needle) {
+			t.Errorf("the recovered proxy is missing %s: wanted %q in\n\t%s", want.what, want.needle, got)
+		}
+	}
+	// The pidfile is what uninstall uses; a recovery proxy it cannot find is unstoppable.
+	if _, err := os.Stat(filepath.Join(stateDir, "proxy-"+port+".pid")); err != nil {
+		t.Errorf("no pidfile, so uninstall could not stop the recovered proxy: %v", err)
+	}
+}
+
+// TestCheckProxySaysSoWhenThereIsNoStarterToPointAt: with CLAUDE_PLUGIN_ROOT wrong or the plugin
+// half-installed there is no script to delegate to. The note must say that rather than fall back to a
+// hand-written command line — reintroducing the duplicate in the one case where nothing is verifiable is
+// how the original defect would come back.
+func TestCheckProxySaysSoWhenThereIsNoStarterToPointAt(t *testing.T) {
+	requireTool(t, "bash")
+	dir := t.TempDir()
+	port := freePort(t)
+	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "check-proxy.sh"))
+	cmd.Env = append(os.Environ(),
+		"CLAUDE_PLUGIN_ROOT="+filepath.Join(dir, "not-the-plugin"),
+		"CLAUDE_PLUGIN_OPTION_PORT="+port,
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+		"CONTEXT_GURU_HEALTH_BUDGET=1",
+		"XDG_STATE_HOME="+filepath.Join(dir, "state"),
+		"TMPDIR="+dir)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("must never fail a prompt: %v\n%s", err, b)
+	}
+	note := string(b)
+	t.Logf("note ->\n%s", note)
+	if strings.Contains(note, "context-guru-proxy --listen") {
+		t.Errorf("fell back to a hand-rolled command line, which is the defect this replaced:\n%s", note)
+	}
+	if !strings.Contains(note, "not where this hook expects it") {
+		t.Errorf("the missing starter is not reported:\n%s", note)
+	}
+	if !strings.Contains(note, "/context-guru:install") {
+		t.Errorf("no way forward is offered:\n%s", note)
+	}
+}
+
+// TestStartProxyTakesPresetAndIdleExitAsArguments: both existed only as CLAUDE_PLUGIN_OPTION_* reads,
+// which a terminal does not have — so the command check-proxy.sh prints could not carry them without an
+// env prefix, and this file's own gate comment records a human losing three rounds of debugging to a
+// pasted env prefix that split across lines and became a no-op.
+func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
+	requireTool(t, "bash")
+	dir := t.TempDir()
+	argvFile := filepath.Join(dir, "argv")
+	fake := filepath.Join(dir, "fake-proxy")
+	body := "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > " + argvFile + "\nprintenv PRESET >> " +
+		argvFile + "\nsleep 30\n"
+	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	port := freePort(t)
+	state := filepath.Join(dir, "state")
+	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"),
+		"--unrouted", "--bin", fake, "--port", port, "--preset", "house", "--idle-exit", "90m")
+	// The options say something DIFFERENT, so a passing test cannot be reading them instead.
+	cmd.Env = append(os.Environ(),
+		"CLAUDE_PLUGIN_OPTION_PRESET=codesmart",
+		"CLAUDE_PLUGIN_OPTION_IDLE_EXIT=24h",
+		"ANTHROPIC_BASE_URL=",
+		"CONTEXT_GURU_BIN=",
+		"CONTEXT_GURU_HEALTH_BUDGET=1",
+		"XDG_STATE_HOME="+state,
+		"TMPDIR="+dir)
+	out, err := cmd.CombinedOutput()
+	t.Cleanup(func() { exec.Command("pkill", "-f", fake).Run() }) //nolint:errcheck
+	if err != nil {
+		t.Fatalf("must never fail a session: %v\n%s", err, out)
+	}
+	got, rerr := os.ReadFile(argvFile)
+	if rerr != nil {
+		t.Fatalf("the proxy never ran: %v\n%s", rerr, out)
+	}
+	launched := string(got)
+	t.Logf("launched: %s", launched)
+	if !strings.Contains(launched, "--idle-exit=90m") {
+		t.Errorf("--idle-exit was not honoured as an argument: %s", launched)
+	}
+	if strings.Contains(launched, "--idle-exit=24h") {
+		t.Errorf("the option beat the argument for idle-exit: %s", launched)
+	}
+	// PRESET reaches the proxy as an environment variable, so it is printed by the fake rather than argv.
+	if !strings.Contains(launched, "house") {
+		t.Errorf("--preset was not honoured as an argument: %s", launched)
+	}
+	if strings.Contains(launched, "codesmart") {
+		t.Errorf("the option beat the argument for preset: %s", launched)
+	}
 }
 
 // TestStartProxyReportsThePresetActuallyInEffect: the success note used to print $PRESET, which comes
