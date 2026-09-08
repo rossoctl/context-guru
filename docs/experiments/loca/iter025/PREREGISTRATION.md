@@ -254,3 +254,12 @@ summary: {"avg_accuracy": 0.5333, "avg_steps": 25.2, "total_cost_usd": 38.469868
 4. If the drift check fails, the amended run costs **more** than the original design would have
    (~$301 + ~$170 = ~$471, plus a re-analysis). That is accepted deliberately: the check buys a falsifiable
    answer about drift, which the original design assumed away.
+5. **The drift check is underpowered on accuracy, and this is stated before its data exists.** Exact
+   two-sided McNemar over 15 tasks cannot reach p < 0.05 unless **at least 6 tasks move in the same
+   direction** — b=5, c=0 gives p = 0.0625. So it detects a large systematic shift and would pass moderate
+   drift undetected. The criterion is kept as registered rather than widened, because loosening it after
+   seeing the arithmetic and before seeing the data would raise the false-failure rate on a test whose
+   failure costs ~$170. The consequence is recorded instead: **"drift check passed" means "no large drift
+   detected", never "no drift"**, and that qualifier belongs on every reused-baseline pair in the results.
+   The mean per-task cost criterion (±30% over 15 tasks) is continuous and is the more sensitive of the
+   two; read them together, not as one verdict.
