@@ -1394,7 +1394,15 @@ func (e *ExtractSweep) adjudicate(req *bschemas.BifrostChatRequest, c *component
 		logging.From(c.Ctx).Debug("cg.sweep.ask", "offered", len(items),
 			"verdicts", len(verdicts), "dropped", len(drop), "candidate_tokens", before,
 			// judgedTokens, not `removed`: #216 replaced the latter and it no longer exists here.
-			"removed_tokens", judgedTokens, "cache_read", usage.CacheRead, "fresh", usage.Fresh,
+			"removed_tokens", judgedTokens,
+			// ALL FOUR TOKEN TIERS, because recordLeg prices all four and this row reported two.
+			// Pooled over iteration 025's 33 logged asks, cache_read and fresh accounted for $0.653
+			// of $0.978 measured spend -- so a THIRD of the cost sat in the two tiers the row did not
+			// carry, and "the ask paid a cache-write on its own prompt" could not be distinguished
+			// from "the ask returned ~1k output tokens" after the fact. Those imply different fixes.
+			"cache_read", usage.CacheRead, "fresh", usage.Fresh,
+			"cache_write", usage.CacheWrite, "output", usage.Output,
+			"cost_usd", askCost+fbCost,
 			"session", c.Session, "max_cached_idx", c.MaxCachedIdx,
 			"req_tokens", schema.MessagesTokens(req), "messages", len(req.Input))
 	}

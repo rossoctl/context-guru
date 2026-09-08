@@ -15,7 +15,45 @@ the drift check's target frozen before its pass. Every number below was read aft
 **The registered reading is unambiguous: blocked, no positive claim.** Not "the mechanism does not
 work" — the mechanism barely ran.
 
-## 1. The gate declined almost everything
+## 0. CORRECTION, recorded after the run: half these decisions were taken in a state no gate could act in
+
+**Raised by @davidamid: if the 64k window is imaginary, was `estimateTurnsRemaining` not simply wrong?**
+It was, and the consequence reaches the headline of this document.
+
+`estimateTurnsRemaining` returns 0 whenever `reqTokens >= CtxWindow`, and `CtxWindow` here is the
+**declared** 64k, not the model's real capacity. At a request of 88,378 tokens it therefore reported "no
+turns remain" while the agent continued for dozens more and one transcript reached 612,290. Splitting
+every econ decision on that term:
+
+| region | decisions | fired | rate |
+|---|---|---|---|
+| all | 1,153 | 34 | 2.9% |
+| **valid** (`haveTurns > 0`) | 520 | 34 | **6.5%** |
+| **structurally dead** (`haveTurns == 0`) | **633 (55%)** | **0** | **0.0%** |
+
+So the 2.9% quoted below is diluted by 633 decisions where firing was **impossible by construction**. The
+defensible figure is **6.5%**.
+
+**And iteration 024 was exposed to the identical false T** — 97 of its 589 asks were also above 64k. It
+fired anyway, because the `rewritten <= 0` free-pass branch skipped the T comparison entirely. So this
+branch's fix removed the bypass and thereby made T load-bearing exactly where T is least trustworthy. Its
+85.7% authorisation rate is inflated in the opposite direction, by firings that happened only because the
+gate ignored T, which means **6.5% and 85.7% are not comparable either** and no clean valid-region
+comparison is available: iteration 024's binary records no pressure field.
+
+**This is not a code defect.** In production `CtxWindow` is the real window from model-info, a request
+cannot meaningfully exceed it, and the function is sound; in the *simulated* 64k world, sitting at 88k is
+an impossible state and 0 is a defensible answer to an impossible input. The defect is that **the rig
+produced impossible states and this iteration then measured the gate inside them** — see limit 2.
+
+**What this does and does not change.** The reward null (section 1's table, p = 0.5078) stands: it measures
+what actually ran. The admissibility checks stand. **The claim "the charge suppresses the mechanism ~30x"
+does not** — roughly half of the suppression is a rig artifact, and the honest statement is that the charge
+suppresses to 6.5% in the region where the arithmetic is meaningful. Section 5's pressure finding needs the
+same qualifier, though it partly survives: within the valid region there are still 486 declines at a median
+pressure of 0.48 against firings reaching only 0.45.
+
+## 1. The gate declined almost everything (see the correction above before reading these rates)
 
 | seed | requests | econ decisions | fired | % | declined: rewrite | declined: ask |
 |---|---|---|---|---|---|---|
@@ -56,6 +94,30 @@ evidence justifying each decline is produced by the previous one.** The same eff
 other side: `sweep_inventory_below_min` fell from 389 to ~130 per seed, because outputs iteration 024
 turned into markers are still sitting in the inventory here — which is also why *more* decisions reached
 the gate (1,153) on *fewer* requests.
+
+### What the fix actually closed: the over-window firings
+
+`req_tokens` recorded at the asks that FIRED, which is the sharpest available statement of the change:
+
+| | asks | median | p90 | max | at or above 64k |
+|---|---|---|---|---|---|
+| iteration 024 arm B | 589 | 37,236 | 86,972 | **348,869** | **97 (16%)** |
+| iteration 025 arm B | 33 | 8,557 | 21,753 | 28,647 | **0 (0%)** |
+
+Iteration 024 swept transcripts up to 349k tokens; this iteration never swept one above 28.6k.
+
+At `reqTokens >= ctxWindow`, `estimateTurnsRemaining` returns 0, so `need > have` for any positive need
+and the ONLY route by which the old gate could authorise was the `rewritten <= 0` free-pass branch — the
+unconditional `return 0, T, true` that this branch converted to a clamp. **So those 97 over-window asks
+existed solely because of the branch that was closed**, and they were the asks on the largest transcripts,
+i.e. the ones with the most available to remove.
+
+The tension cuts both ways and nothing in this iteration resolves it. Those asks genuinely were unpriced:
+the cache-write was free, because the candidates sat past the cache boundary, but the adjudication was
+not, and the old test charged neither. The fix is right that they were not free. It may equally be true
+that they were the valuable ones. "Correctly stopped paying for asks that lost money" and "stopped making
+the only asks that mattered" predict exactly this data, which is what makes the `econ_ignore_ask_cost` arm
+the next run rather than a nicety.
 
 ## 3. Cost — negative under both value models, which settles the question the pre-flight left open
 
@@ -170,7 +232,12 @@ Two design changes are indicated and neither should be made on this evidence alo
    out; the fuller statement is that the rig presents it with a state it cannot act in, and iteration 024
    largely avoided that state **because** it was sweeping. Any future run at a declared band should
    measure how much of the run actually sat inside it before treating the band as the independent
-   variable.
+   variable. The enforcement was never the model's: there is no API parameter that caps INPUT
+   (`max_tokens` bounds output only), so the band can only be held by the client, and
+   `--clear-trigger-tokens 64000` with `--clear-at-least-tokens 16000` did not hold it. LOCA's clear
+   reclaims tool-use blocks only, so mass in text and thinking cannot be recovered by it at all — a
+   lower trigger and a far larger `clear-at-least` are the levers, and why clearing cannot keep up is
+   worth diagnosing before the band is used again.
 3. **Four of five seeds pair against a six-day-old baseline.** The drift check licensed it but is itself
    underpowered on accuracy (it needs ≥6 tasks moving one way to fail), so "no large drift detected" is
    the strongest available claim.
