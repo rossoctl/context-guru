@@ -4,11 +4,13 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
 )
 
 // THE DEFECT THESE EXIST TO CATCH, in one line: the econ trigger authorised nine adjudications in nine
@@ -249,5 +251,205 @@ func TestEconDecisionCarriesWhereInTheWindowItWasTaken(t *testing.T) {
 	// And an unknown window must not produce a division artefact that reads as "empty context".
 	if _, p := sweepPressure(req, econCtx(0)); p != 0 {
 		t.Errorf("pressure = %v with no window; an unknown window must report 0, not a ratio", p)
+	}
+}
+
+// THE OPPORTUNITY FLOOR, and the specific defect it closes: the econ trigger fires most eagerly exactly
+// where its question is least answerable.
+//
+// Measured on the iteration 026 probe, the first ask of every pass landed on a 2,621-token transcript —
+// 88% of it candidate output, nothing cached to rewrite, 70 projected turns to collect over — clearing
+// the break-even by 3.3x at 4% context pressure, and removing nothing, correctly, because nothing had
+// been superseded. Those are the ask ledger's WARM-UP samples, so the estimator calibrates on the one
+// moment its question cannot be answered, and a floored approval then suppresses the asks that would
+// correct it.
+//
+// Asserted as a PAIR, because either half alone passes against the wrong code: the floor must exclude
+// an output that is too new, and must NOT exclude the same output once turns have accumulated after it.
+// A gate that simply refuses everything would satisfy the first assertion.
+func TestOpportunityFloorRefusesOutputsTooNewToJudge(t *testing.T) {
+	asker := &labelAsker{verdict: "drop", needed: "none"}
+	asker.cacheRead = 19595
+
+	// The fixture's candidates sit near the END of the transcript, so few model turns follow them.
+	fresh := sweepReqStocked()
+	// ...and the same fixture with assistant turns appended, giving those candidates their opportunity.
+	aged := sweepReqStocked()
+	for i := 0; i < 12; i++ {
+		aged.Input = append(aged.Input, assistantMsg("step "+strconv.Itoa(i)+": still working"))
+	}
+
+	for _, tc := range []struct {
+		name    string
+		req     *bschemas.BifrostChatRequest
+		wantAsk bool
+	}{
+		{"too new — the ask must not happen", fresh, false},
+		{"aged — the same candidates must be offered", aged, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asker.calls = 0
+			e := newSweep(t, "econ_trigger: true\nmin_later_turns: 8\n")
+			c := preExpiryCtx("s"+tc.name, asker, store.NewMemory(store.Options{}))
+			c.IdleMs = 30 * 1000
+			c.MaxCachedIdx = len(tc.req.Input) - 2
+
+			rep := &components.Report{}
+			if _, err := e.Offload(tc.req, rep, c); err != nil {
+				t.Fatal(err)
+			}
+			asked := atomic.LoadInt64(&asker.calls) > 0
+			if asked != tc.wantAsk {
+				t.Fatalf("asked=%v want=%v — gates: %v", asked, tc.wantAsk, rep.Gates)
+			}
+			if !tc.wantAsk && rep.Gates["sweep_candidate_too_new"] == 0 {
+				t.Errorf("declined without recording WHY the candidates were unusable: %v", rep.Gates)
+			}
+			if tc.wantAsk && rep.Gates["sweep_candidate_too_new"] != 0 {
+				t.Errorf("aged candidates were still refused as too new: %v", rep.Gates)
+			}
+		})
+	}
+}
+
+// The floor is OFF unless asked for. Without this, "we added an opportunity floor" and "we changed every
+// deployment running the sweep" are the same commit.
+func TestOpportunityFloorIsOffByDefault(t *testing.T) {
+	asker := &labelAsker{verdict: "drop", needed: "none"}
+	asker.cacheRead = 19595
+	e := newSweep(t, "econ_trigger: true\n") // no min_later_turns
+	req := sweepReqStocked()
+	c := preExpiryCtx("s", asker, store.NewMemory(store.Options{}))
+	c.IdleMs = 30 * 1000
+	c.MaxCachedIdx = len(req.Input) - 2
+
+	rep := &components.Report{}
+	if _, err := e.Offload(req, rep, c); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Gates["sweep_candidate_too_new"] != 0 {
+		t.Errorf("the floor fired without being configured: %v", rep.Gates)
+	}
+}
+
+// THE REQUEST-LEVEL FLOOR, and the invariant that makes it safe: it suppresses COLLECTION, never the
+// frozen replays. A floor that returned early would undo savings already earned — a later turn would
+// re-send every removed output verbatim, breaking both the saving and the prefix's byte-stability.
+//
+// Three assertions, because each catches a different wrong implementation: below the floor there is no
+// ask and the reason is recorded; above it the same fixture asks normally; and a floor that fires must
+// not stop the component reporting on the pre-expiry trigger it still evaluated.
+func TestRequestPressureFloorSuppressesCollectionNotReplays(t *testing.T) {
+	asker := &labelAsker{verdict: "drop", needed: "none"}
+	asker.cacheRead = 19595
+	// A FRESH REQUEST PER SUBTEST. Sharing one is not safe here: Offload splices markers into
+	// req.Input, so a later subtest sees every candidate as already-marked and skips it
+	// (`empty_or_marker_present`), which reads as a floor that fired when it did not.
+
+	// ONLY THE FLOOR VARIES. The window stays at preExpiryCtx's 1,000,000, where this fixture sits at
+	// about 7% pressure and the econ trigger is already known to fire (see
+	// TestSweepEconTriggerFiresOutsideTheWindow). Moving the window instead would change `have` as well
+	// — a first attempt set it to 2x the request, which put pressure above the floor and left roughly
+	// one turn of headroom, so the ECON gate declined and the test read as a floor that fired when it
+	// had not.
+	for _, tc := range []struct {
+		name    string
+		floor   string
+		wantAsk bool
+	}{
+		{"below the floor", "min_pressure: 0.10\n", false},
+		{"above the floor", "min_pressure: 0.01\n", true},
+		{"floor unset", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asker.calls = 0
+			req := sweepReqStocked()
+			e := newSweep(t, "econ_trigger: true\n"+tc.floor)
+			c := preExpiryCtx("p"+tc.name, asker, store.NewMemory(store.Options{}))
+			c.IdleMs = 30 * 1000
+			c.MaxCachedIdx = len(req.Input) - 2
+
+			rep := &components.Report{}
+			if _, err := e.Offload(req, rep, c); err != nil {
+				t.Fatal(err)
+			}
+			if asked := atomic.LoadInt64(&asker.calls) > 0; asked != tc.wantAsk {
+				t.Fatalf("asked=%v want=%v (gates: %v)", asked, tc.wantAsk, rep.Gates)
+			}
+			if !tc.wantAsk && rep.Gates["sweep_below_min_pressure"] == 0 {
+				t.Errorf("suppressed without recording why (gates: %v)", rep.Gates)
+			}
+			if tc.wantAsk && rep.Gates["sweep_below_min_pressure"] != 0 {
+				t.Errorf("floor fired when it should not have (gates: %v)", rep.Gates)
+			}
+			// The trigger-one counter is raised BEFORE the floor is consulted, so a fired floor must
+			// not swallow it — otherwise a run cannot tell "the floor stopped us" from "the component
+			// never woke up".
+			if rep.Gates["not_in_pre_expiry_window"] == 0 {
+				t.Errorf("the pre-expiry decision went unrecorded (gates: %v)", rep.Gates)
+			}
+		})
+	}
+}
+
+// THE INVARIANT THE PRESSURE FLOOR MUST NOT BREAK: a frozen removal is still replayed on a turn the
+// floor suppresses.
+//
+// This is why the floor sets a flag instead of returning. Without the replay, a later turn re-sends the
+// removed output verbatim — undoing a saving already paid for AND breaking the byte-stability of the
+// prefix the provider is caching, which costs a full cache-write. The comment at the floor asserts this;
+// this test is what makes the assertion checkable, and a `return` in place of the flag fails it.
+//
+// Two Offload calls share one session and one store: the first removes something with the floor off, the
+// second runs with the floor firing and must still show the marker rather than the original bytes.
+func TestPressureFloorStillReplaysFrozenRemovals(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	asker := &labelAsker{verdict: "drop", needed: "none"}
+	asker.cacheRead = 19595
+
+	// Turn one: floor off, so the sweep acts and freezes its decision.
+	first := sweepReqStocked()
+	e1 := newSweep(t, "econ_trigger: true\n")
+	c1 := preExpiryCtx("replay-sess", asker, st)
+	c1.IdleMs = 30 * 1000
+	c1.MaxCachedIdx = len(first.Input) - 2
+	rep1 := &components.Report{}
+	if _, err := e1.Offload(first, rep1, c1); err != nil {
+		t.Fatal(err)
+	}
+	var markedIdx = -1
+	for i := range first.Input {
+		if strings.Contains(schema.MessageText(first.Input[i]), "cg:") {
+			markedIdx = i
+			break
+		}
+	}
+	if markedIdx < 0 {
+		t.Skip("turn one removed nothing on this fixture, so there is no frozen decision to replay")
+	}
+
+	// Turn two: same session and store, floor firing. The frozen removal must still be applied.
+	second := sweepReqStocked()
+	original := schema.MessageText(second.Input[markedIdx])
+	e2 := newSweep(t, "econ_trigger: true\nmin_pressure: 0.99\n")
+	c2 := preExpiryCtx("replay-sess", asker, st)
+	c2.IdleMs = 30 * 1000
+	c2.MaxCachedIdx = len(second.Input) - 2
+	rep2 := &components.Report{}
+	if _, err := e2.Offload(second, rep2, c2); err != nil {
+		t.Fatal(err)
+	}
+	if rep2.Gates["sweep_below_min_pressure"] == 0 {
+		t.Fatalf("fixture is wrong: the floor did not fire, so this proves nothing (gates: %v)",
+			rep2.Gates)
+	}
+	got := schema.MessageText(second.Input[markedIdx])
+	if got == original {
+		t.Errorf("the frozen removal was NOT replayed on a floor-suppressed turn: message %d came "+
+			"back verbatim, so a saving already paid for was undone and the cached prefix broken",
+			markedIdx)
+	}
+	if !strings.Contains(got, "cg:") {
+		t.Errorf("message %d carries no marker after replay: %q", markedIdx, firstLines(got, 2))
 	}
 }
