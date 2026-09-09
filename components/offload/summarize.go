@@ -439,10 +439,27 @@ func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []b
 	if spanHash(covered) != cp.CoveredHash {
 		// COUNTED SEPARATELY because this is the only decline an UPSTREAM COMPONENT can cause. The
 		// hash is over msgs as the rest of the pipeline left them, and `summarize` runs last, so any
-		// component that mutates a message inside the checkpointed span forces the paid path even
-		// when the tail is small. extract_llm_sweep is the case to watch: it removes deep-history
-		// outputs and runs earlier. Without this gate that cost is invisible and indistinguishable
-		// from a session that simply had no checkpoint.
+		// component mutating a message inside the checkpointed span lands here. extract_llm_sweep is
+		// the obvious one: it removes deep-history outputs and runs earlier.
+		//
+		// READ THIS AS CHURN, NOT AS COST. It was misread as a cost once and the reasoning is easy to
+		// repeat, so here is why it is not:
+		//
+		//  1. The mutated messages are INSIDE msgs[start:end], which the fresh path collapses into a
+		//     single summary. So the upstream component's marker does not reach the wire at all on
+		//     this turn — its removal and this summary are doing the same job to the same bytes, and
+		//     the summary wins. There is no removal being "paid for twice".
+		//  2. It is a ONE-OFF per upstream change, not a per-turn tax. The fresh path writes a NEW
+		//     checkpoint whose hash covers the mutated content, so once the upstream component is
+		//     replaying a frozen decision — which is what freezing is for — the span hashes
+		//     identically from the next turn on and reuse resumes.
+		//
+		// So ONE firing per upstream removal is expected and harmless. What this counter is actually
+		// for is the other case: firing REPEATEDLY on one session means the checkpoint is not
+		// re-stabilising, i.e. some component above is mutating the span DIFFERENTLY turn to turn
+		// rather than replaying a fixed decision. That is when real money appears — a model call plus
+		// a prefix rewrite on every eligible turn — and it is indistinguishable from healthy operation
+		// without this gate. Compare the count against the session's turns, never against zero.
 		rep.Gate("summary_covered_span_changed")
 		return nil, nil, false, false // prefix diverged (different session / edited) → fresh
 	}

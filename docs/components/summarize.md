@@ -62,11 +62,25 @@ Reuse requires the covered span to be **byte-unchanged**, and the hash is taken 
 earlier components in the pipeline left them*. So any component that mutates a message inside the
 checkpointed span invalidates the checkpoint and forces the paid path, even when the tail is small.
 
-`extract_llm_sweep` is the case to watch, since it removes deep-history outputs and runs before
-`summarize`. Note what it cannot do: because the trigger gates everything, a removal can never *cause* a
-summarize run — it can only convert a free reuse into a paid refresh on a turn that was going to run
-anyway. Whether the two spans overlap in practice is unmeasured: the sweep targets deep history while the
-checkpoint boundary sits nearer the tail, so they may rarely collide.
+`extract_llm_sweep` is the obvious candidate, since it removes deep-history outputs and runs before
+`summarize`. **But read `summary_covered_span_changed` as churn, not as cost**, for two reasons that are
+easy to miss:
+
+- The mutated messages sit inside the span the fresh path **collapses into a single summary**, so the
+  upstream marker never reaches the wire on that turn. The removal and the summary are doing the same job
+  to the same bytes; nothing is paid for twice.
+- It is a **one-off per upstream change**. The fresh path writes a new checkpoint whose hash covers the
+  mutated content, so once the upstream component is replaying a frozen decision the span hashes
+  identically from the next turn and reuse resumes.
+
+So one firing per removal is expected and harmless. The counter earns its place on the *other* case:
+firing **repeatedly within one session** means the checkpoint is not re-stabilising — something upstream is
+mutating the span differently turn to turn instead of replaying a fixed decision — and only then is there a
+model call plus a prefix rewrite on every eligible turn. Compare the count against the session's turns,
+never against zero.
+
+Note also what an upstream removal cannot do: because the trigger gates everything, it can never *cause* a
+summarize run.
 
 **And that cannot currently be checked from a run.** The reuse path records no gate and no event, and
 `rep.Replays` is never incremented, so `acted_replay` reads 0 for this component whether reuse fired on
