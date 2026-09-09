@@ -82,7 +82,8 @@ split shrinks that hangover to `stash_ttl_seconds` without making any removal ir
 | Offloader | Per-turn re-stash | If its payload is reclaimed |
 |---|---|---|
 | `mask`, `cmdfilter`, `collapse`, `failed_run`, `skeleton`, `readlifecycle`, `agentdiet` | `reapplyFrozen` → `commitRefresh`, every turn regardless of the tail gate | re-created on the request path; `stash_revived` |
-| `summarize`, `extract_llm` | only past their own gates — `summarize`'s trigger and model-availability checks, `extract_llm`'s `no_goal_keywords` | a skipped turn refreshes nothing, but it splices nothing either, so no marker of theirs dangles while the skip lasts |
+| `summarize` | **every turn once a checkpoint exists**, regardless of its trigger or whether a model is available — `replayStale`/`tryReuse` → `commitRefresh` | re-created on the request path; `stash_missing` if the payload has already gone, and the replay proceeds anyway because the summary text must stay byte-identical |
+| `extract_llm` | only past its own gate — `no_goal_keywords` | a skipped turn refreshes nothing, but it splices nothing either, so no marker of its own dangles while the skip lasts |
 | `dedup`, `extract`, `linecap`, `smartcrush` | **none** — no replay path at all; they redo the transformation from the re-sent original through the *refusable* `commitMark` | once reclaimed it is a new stash, so a saturated reserve **refuses** and the message goes upstream verbatim after earlier turns sent it compacted: `stash_refused` **plus a representation flip** |
 
 That last row is worth reading twice, because `stash_refused`'s own description promises "nothing
@@ -90,9 +91,18 @@ became irreversible" — true about reversibility, and silent about the cache-wr
 is reachable at `ttl_seconds` too, so it is not new; a shorter payload horizon shortens the distance
 to it.
 
-`summarize`'s trigger skip is **recurring**, not a one-off: the agent's own compaction shrinks the
-incoming request and can drop it back under the trigger's `min_request_tokens` for several
-consecutive turns.
+`summarize`'s trigger skip is **recurring**, not a one-off, and by default it is now the common case
+rather than the exception: `trigger.cache_state` defaults to `pre_expiry`, which is true for seconds
+at a time, so most turns of a long session are skipped turns. (The agent's own compaction is a second
+route to the same state — it shrinks the incoming request and can drop it back under
+`min_request_tokens` for several consecutive turns.)
+
+That is only safe because a skipped turn still **splices**. Once a checkpoint exists, every later turn
+re-emits the same summary bytes from it, with no model call, whichever gate declined and whether or
+not a summarizer is configured — see the first row of the table above. A skip that forwarded the full
+transcript instead would diverge from the cached prefix at the first summarized message and force a
+full-suffix cache-write, so under a rarely-firing trigger the component would cost money on nearly
+every turn to save it on a few.
 
 The exposure this leaves, stated plainly: a turn that runs **no pipeline** performs no refresh (an
 `x-context-guru-bypass` request, or the agent-compaction bypass), so an unbroken run of bypassed

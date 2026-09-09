@@ -22,7 +22,7 @@ func newSummarizeTestComponent(t *testing.T, model components.Model) *Summarize 
 	t.Helper()
 	c, err := newSummarize([]byte(
 		"keep_last: 1\nmin_tokens: 10\nresummarize_tokens: 0\n" +
-			"trigger:\n  min_messages: 3\n  min_request_tokens: 10\n"))
+			"trigger:\n  min_messages: 3\n  min_request_tokens: 10\n  min_request_frac: 0\n"))
 	if err != nil {
 		t.Fatalf("newSummarize: %v", err)
 	}

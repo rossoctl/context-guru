@@ -19,7 +19,7 @@ import (
 // bifrost's ChatMessage) was DELETED from the forwarded request — an altered request,
 // which is the wrong direction for fail-open. The rebuild must decline instead.
 func TestRebuildKeepsAMessageNormalizeCouldNotParse(t *testing.T) {
-	cfg := pipe(t, "pipeline: [summarize]\ncomponents:\n  summarize: {keep_last: 1, start_from_message: 0, min_tokens: 1}\n")
+	cfg := pipe(t, "pipeline: [summarize]\ncomponents:\n  summarize: {keep_last: 1, start_from_message: 0, min_tokens: 1, trigger: {min_request_frac: 0}}\n")
 	p, _ := cfg.Build(nil)
 
 	// Five body messages, four of them normalizable: summarize collapses them to three,

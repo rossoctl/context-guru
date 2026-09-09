@@ -36,7 +36,7 @@ func sysMsg(s string) bschemas.ChatMessage {
 // prefix is unchanged and whose new tail is small must REUSE the prior summary —
 // no second model call, and the summary message byte-identical (KV-cache stable).
 func TestSummarizeReusesCheckpoint(t *testing.T) {
-	off := newComp(t, "summarize", "keep_last: 1\nstart_from_message: 0\nmin_tokens: 1\nresummarize_tokens: 100000\n")
+	off := newComp(t, "summarize", "keep_last: 1\nstart_from_message: 0\nmin_tokens: 1\ntrigger: {min_request_frac: 0}\nresummarize_tokens: 100000\n")
 	st := store.NewMemory(store.Options{})
 	cm := &countingModel{resp: "essential facts"}
 	tool := toolMsg(strings.Repeat("verbose tool output line\n", 40))

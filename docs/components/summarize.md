@@ -87,15 +87,110 @@ of the normalized list, so it is asserted on the raw body instead (`apply/toolro
 | `model.base_url` | *the provider's public API* | Pin a dedicated endpoint as a full URL. |
 | `model.api_key` | *the process env key* | **Credential** for the pinned endpoint; empty falls back to the provider env key, which a hosted deployment refuses. Write-only on the settings page. |
 | `model.auth` | `x-api-key` | Anthropic only: `x-api-key` \| `bearer`. |
-| `trigger` | — | Gates the first summary: `min_request_tokens`, `min_messages`, `min_output_tokens`, and the window fractions `min_request_frac`, `min_output_frac`, `huge_output_frac`. |
+| `trigger.min_request_frac` | **0.9** | Summarize only once the transcript is at least this fraction of the model's context window. See below. |
+| `trigger.cache_state` | **`pre_expiry`** | Summarize only when the prompt cache is about to expire. `any` removes the constraint. See below. |
+| `trigger.pre_expiry_seconds` | 60 | How wide "about to expire" is. Unmeasured either way. |
+| `trigger` (rest) | — | `min_request_tokens`, `min_messages`, `min_output_tokens`, `min_output_frac`, `huge_output_frac`. |
 | `marker_mode` | `full` | `full` (stash + resolvable marker) / `summary` / `off`. |
+
+## When it summarizes, and why the default is not "whenever it's big"
+
+By default this component pays for a summary only when **both** are true: the transcript is at least
+**0.9** of the model's context window, and the prompt cache is within **60 seconds** of expiring.
+
+The second condition is the one that saves money. Compacting a transcript rewrites history, and
+rewriting history that the provider is currently holding in its prompt cache invalidates that entry
+— the next turn re-writes the whole suffix at 1.25x the fresh input rate. Doing it in the window
+where the entry is about to lapse anyway costs almost nothing, because what is invalidated was
+nearly worthless.
+
+Measured on production traffic: every session that reached 90% of a 1M window and kept running went
+cold in that band **repeatedly** — minimum 2 full-prefix rewrites, median 7, maximum 46. At 0.9 of
+1M on an Opus-class model one such rewrite is ~$5.88 against ~$0.50 on a compacted prefix.
+
+`0.9` is not an optimum and is not defended as one: swept from 0.6 to 0.95 the trade is almost
+perfectly linear, so every 5-point step down recovers a further $320-500 at $0.22-0.32 per extra
+turn spent on a compacted context. 0.9 is the conservative end of a defensible range.
+
+### The cache condition has to be met once, not every turn
+
+It is easy to read the two conditions as a per-turn coin flip and conclude the component will
+rarely act. It is not one. The cache condition gates **producing** a summary, and a session only
+needs to produce one:
+
+- The **first** summary needs one turn to arrive while the cache is near expiry — anywhere in the
+  session's remaining turns, not on a particular turn.
+- **Every turn after that** re-emits that summary from the checkpoint with no model call and no
+  gate check at all, so the compacted, cache-stable prefix persists whether or not the conditions
+  are ever met again.
+- When the verbatim tail later grows past `resummarize_tokens`, rolling the checkpoint forward
+  needs the conditions again — and **failing to roll it forward is cheap**: the standing summary
+  is replayed instead of reverting to the full transcript, so the cost is a staler summary with a
+  longer tail, never a cache invalidation.
+
+What that leaves worth worrying about is narrow: a session that reaches the fill threshold and
+never once has a turn land near cache expiry gets no benefit. What it does **not** do is lose
+ground relative to not running the component at all.
+
+Note also which size the fill fraction measures. It is the **incoming** request, before this
+component acts. Because the proxy is transparent, the client never learns its transcript was
+compacted and keeps re-sending everything it has, so that number grows monotonically and the fill
+conjunct, once satisfied, stays satisfied. What shrinks is what goes **upstream**.
+
+### ⚠️ What caps the context is the CLIENT, not this component
+
+A session whose turns are seconds apart never enters the pre-expiry window, so **this component will
+decline on every turn while the transcript keeps growing.** That is intended: the ceiling belongs to
+the agent. Claude Code runs its own compaction as it approaches its context budget, and this
+component's job is to get ahead of the expensive rewrites below that ceiling, not to be the ceiling.
+
+**If your client does not compact its own context** — anything driving a raw API, a custom harness,
+a benchmark runner — nothing will stop the transcript growing until the provider rejects it. Those
+deployments must opt out:
+
+```yaml
+components:
+  summarize:
+    trigger:
+      cache_state: any        # summarize whenever the size gates are met
+      min_request_frac: 0     # …and let min_request_tokens be the size gate
+```
+
+Both shipped example configs under `examples/llm-d-service/` do exactly this, because they drive a
+raw endpoint.
+
+An unrecognised `cache_state` is a config **error**, not a silent fall back to `any`: a typo in the
+one key that decides when this component fires would otherwise turn the gate off while reading as
+though it were on.
+
+### The fill fraction refuses to act on a guessed window
+
+`min_request_frac` needs the model's context window as a number. It comes from an operator's own
+price list if configured, else LiteLLM's public map. If neither answers, a small substring table
+compiled into the binary does — and that table answers 200,000 for every Opus, against a real
+1,000,000. A 0.9 fraction resolved against it would fire at 180k, five times too early.
+
+So the gate **declines** when the window is unknown *or* came from that table, and counts
+`window_not_exact`. Setting `min_request_frac: 0` removes the dependency entirely.
 
 ## When it shines
 
-Long agentic sessions where the bulk is stale middle context.
+Long agentic sessions where the bulk is stale middle context, behind a client that caps its own
+context window.
 
 ## When it's inert
 
-Transcript below `trigger`, span below `min_tokens`, or no model available (no-op).
+The cache state does not permit it (`cache_state_declined_warm`, or `…_cold` / `…_unknown` under a
+non-default `cache_state`), transcript below `trigger` (`below_request_trigger`), context window
+unknown or guessed (`window_not_exact`), span below `min_tokens`, or no model available
+(`no_model`).
+
+**Inert is not the same as untouched.** Once this component has summarized a session once, every
+later turn re-emits that same summary from a checkpoint — byte-identically, with no model call, even
+on turns the gates decline and even where no summarizer is configured. It has to: sending the full
+transcript again on a quiet turn would diverge from the bytes the provider cached at the first
+summarized message and force the very cache-write the trigger exists to avoid. Those turns are
+counted as `reused_checkpoint` / `gated_replayed_checkpoint` replays rather than as acts, so `/stats`
+distinguishes a component amortizing old work from one paying for new work.
 
 See also: [Components overview](../components.md) · [Choose a preset](../how-to/choose-a-preset.md)

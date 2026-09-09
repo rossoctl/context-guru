@@ -187,9 +187,9 @@ func TestSummarizeEmittedWireIsShapeValid(t *testing.T) {
 	// message's bytes with no model reply to stub.
 	pipelines := []struct{ name, yaml string }{
 		{"summarize", "pipeline: [summarize]\ncomponents:\n" +
-			"  summarize: {keep_last: %d, start_from_message: 0, min_tokens: 1}\n"},
+			"  summarize: {keep_last: %d, start_from_message: 0, min_tokens: 1, trigger: {min_request_frac: 0}}\n"},
 		{"summarize+extract_llm", "pipeline: [summarize, extract_llm]\ncomponents:\n" +
-			"  summarize: {keep_last: %d, start_from_message: 0, min_tokens: 1}\n" +
+			"  summarize: {keep_last: %d, start_from_message: 0, min_tokens: 1, trigger: {min_request_frac: 0}}\n" +
 			"  extract_llm: {strategy: deterministic, min_tokens: 1, economic_gate: false, " +
 			"allow_on_caching_backend: true}\n"},
 	}

@@ -171,12 +171,24 @@ const (
 	// against LRU pressure from a busy proxy.
 	TTLPrefix  = "cg:ttl:"  // longest cache lifetime this session has ever asked for
 	SeenPrefix = "cg:seen:" // last activity under a content-derived session id
+	// SumPrefix is summarize's per-session checkpoint: the exact summary text, the span it
+	// covers, and that span's hash.
+	//
+	// PINNED ONLY SINCE summarize's TRIGGER GAINED A CACHE-STATE CONDITION, because that changed
+	// what losing it costs. While the trigger was a size threshold, a lost checkpoint meant
+	// summarize re-paid its model call and rolled a new one forward — money, not correctness, and
+	// the reason this namespace sat unpinned. The trigger now declines on most turns by design,
+	// and the checkpoint is the ONLY thing keeping those turns in the summarized shape. Losing it
+	// makes the next gated turn send the transcript FULL, diverging from the bytes the provider
+	// cached at the first summarized message and re-writing the whole suffix at 1.25x fresh.
+	// That is cache-destructive, which is this list's entry criterion.
+	SumPrefix = "cg:sum:"
 )
 
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
-var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix}
+var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {
@@ -613,8 +625,6 @@ func (m *Memory) DisableSlidingTTLForTest() {
 //
 //   - cg:keep: (offload.MarkKeptVerbatim) — isKeptVerbatim goes permanently false, so content
 //     the agent just expanded is re-compacted, which is the expand loop the flag exists to stop.
-//   - cg:sum:  (offload.saveCheckpoint) — summarize can never checkpoint, so it re-pays its
-//     model call every turn and never reuses.
 //   - cg:own:  (offload.recordOwner) — GET /expand refuses a key the session really does own.
 //   - cg:xseen: — the economic gate misprices recurrence.
 //

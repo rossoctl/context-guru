@@ -2,6 +2,7 @@ package components
 
 import (
 	"math"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/schema"
@@ -31,6 +32,95 @@ type Trigger struct {
 	MinRequestFrac float64 `yaml:"min_request_frac"` // fire when request >= frac*window (e.g. 0.6)
 	MinOutputFrac  float64 `yaml:"min_output_frac"`  // per-item: only offload an output >= frac*window
 	HugeOutputFrac float64 `yaml:"huge_output_frac"` // HARD per-item trigger: a single output >= frac*window
+
+	// CacheState restricts firing by where the request sits in its prompt cache's life:
+	// "" / "any" (no constraint), "pre_expiry", "cold", "pre_expiry_or_cold". See
+	// CacheAllows, and CachePhase for what the phases mean.
+	CacheState string `yaml:"cache_state"`
+	// PreExpirySeconds is how wide the pre-expiry window is (0 = DefaultPreExpiry). Wider
+	// fires more often and invalidates more remaining lifetime; narrower fires rarely.
+	// Nothing measures either side — it is the same unmeasured number extract_llm_sweep
+	// carries, and for the same reason.
+	PreExpirySeconds int `yaml:"pre_expiry_seconds"`
+}
+
+// CacheState values. "any" is spelled explicitly rather than left as "" because it has to be
+// SAYABLE: a component whose default is a restrictive state needs an opt-out an operator can
+// write down, and "" is what the settings form posts for "unset" (see config/form.go normalize).
+const (
+	CacheStateAny             = "any"
+	CacheStatePreExpiry       = "pre_expiry"
+	CacheStateCold            = "cold"
+	CacheStatePreExpiryOrCold = "pre_expiry_or_cold"
+)
+
+// CacheStates is the permitted set, in display order — the Options for the settings form and
+// the set a constructor validates against.
+var CacheStates = []string{CacheStateAny, CacheStatePreExpiry, CacheStateCold, CacheStatePreExpiryOrCold}
+
+// DefaultPreExpiry is the pre-expiry window's width when none is configured. One minute,
+// which is this codebase's own clock-uncertainty margin for cache expiry (see apply.cacheIsCold)
+// — chosen because it is the margin already trusted elsewhere, not because it was measured.
+const DefaultPreExpiry = time.Minute
+
+// PreExpiry is the configured window width, or DefaultPreExpiry.
+func (t Trigger) PreExpiry() time.Duration {
+	if t.PreExpirySeconds > 0 {
+		return time.Duration(t.PreExpirySeconds) * time.Second
+	}
+	return DefaultPreExpiry
+}
+
+// CacheAllows reports whether the cache phase permits firing.
+//
+// UNKNOWN IS PERMITTED, AND THAT IS THE OPPOSITE OF WHAT extract_llm_sweep DOES WITH IT. The
+// asymmetry is deliberate and load-bearing both ways.
+//
+// The sweep must not fire on Unknown because its ASK reads a cache entry that has to exist; a
+// window computed from a guessed TTL would invalidate live prefixes on exactly the deployments
+// whose TTL could not be read.
+//
+// A size-gated compactor must fire on Unknown, because Unknown is not rare or exotic: CacheTTLMs
+// and IdleMs are both zero whenever the cache-aware path did not run at all — a
+// non-Anthropic-family provider with no cache_control breakpoint, `cache_mode: off`, a bypassed
+// turn, a session's first turn. Declining there would make the component DEAD on those
+// deployments while protecting nothing: with cacheAware false, MaxCachedIdx stays -1, so
+// Ctx.TailOnly already permits every offloader to rewrite deep history there. There is no live
+// prefix whose invalidation we would be avoiding.
+//
+// An unrecognised value permits, rather than silently disabling the component. Constructors
+// validate the string and refuse a bad one at config time, which is where a typo belongs.
+func (t Trigger) CacheAllows(p CachePhase) bool {
+	switch t.CacheState {
+	case CacheStatePreExpiry:
+		return p == CachePhasePreExpiry || p == CachePhaseUnknown
+	case CacheStateCold:
+		return p == CachePhaseCold || p == CachePhaseUnknown
+	case CacheStatePreExpiryOrCold:
+		return p == CachePhasePreExpiry || p == CachePhaseCold || p == CachePhaseUnknown
+	default: // "" and "any"
+		return true
+	}
+}
+
+// FracResolvable reports whether the configured fractions can be resolved against a window worth
+// trusting. False only when a fraction is actually configured AND the window is a guess or
+// unknown — so a Trigger carrying no fractions is unaffected.
+//
+// WHY THIS IS NOT JUST `CtxWindow > 0`: the resolver's ok=true is not the same as right. Its last
+// resort is a substring table whose Claude entries are `claude-sonnet-5` and a `claude` catch-all
+// at 200,000, so every Opus and every Fable resolves to 200,000 against a real window of
+// 1,000,000. A 0.9 fraction against that fires at 180k — five times too early, on the exact
+// sessions the fraction exists to protect. Frac(0.9, 0) already evaluates to no constraint, so
+// without this check an unknown window silently DROPS the size gate instead of declining.
+//
+// A per-item floor (OutputFloor, IsHuge) does not consult this on purpose: too small a window
+// there merely raises a floor, which is the safe direction.
+func (t Trigger) FracResolvable(c *Ctx) bool {
+	if t.MinRequestFrac <= 0 {
+		return true
+	}
+	return c != nil && c.CtxWindowExact && c.CtxWindow > 0
 }
 
 // frac converts a fraction of the window to an absolute token count (0 if either is unset).
@@ -100,5 +190,9 @@ func TriggerFields(prefix string) []Field {
 		{Key: p + "min_request_frac", Type: FieldFloat, Hint: "The request threshold as a fraction of the model's context window, e.g. 0.6. Raises the absolute floor, never lowers it; ignored when the window is unknown."},
 		{Key: p + "min_output_frac", Type: FieldFloat, Hint: "The per-item floor as a fraction of the window. Also only ever raises the absolute one."},
 		{Key: p + "huge_output_frac", Type: FieldFloat, Hint: "Hard per-item trigger: a single output at least this fraction of the window is acted on regardless of the request-level gate."},
+		{Key: p + "cache_state", Type: FieldEnum, Default: CacheStateAny, Options: CacheStates,
+			Hint: "Restrict firing by the prompt cache's state: any (no constraint), pre_expiry (the entry still exists but is about to expire — acting then invalidates almost nothing), cold (the entry is gone), or either. A component whose default is not `any` documents its own."},
+		{Key: p + "pre_expiry_seconds", Type: FieldInt, Default: int(DefaultPreExpiry / time.Second),
+			Hint: "How wide the pre-expiry window is, in seconds. Wider fires more often and invalidates more remaining cache lifetime; narrower fires rarely. Unmeasured either way."},
 	}
 }

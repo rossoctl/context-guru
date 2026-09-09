@@ -60,7 +60,7 @@ func TestSummarizeNeverSplitsAToolExchange(t *testing.T) {
 
 	for _, keep := range []int{1, 2, 3, 4, 5} {
 		cfg := pipe(t, "pipeline: [summarize]\ncomponents:\n  summarize: {keep_last: "+
-			string(rune('0'+keep))+", start_from_message: 0, min_tokens: 1}\n")
+			string(rune('0'+keep))+", start_from_message: 0, min_tokens: 1, trigger: {min_request_frac: 0}}\n")
 		p, _ := cfg.Build(nil)
 		out, changed := apply.BodyWithModel(context.Background(), p,
 			store.NewMemory(store.Options{}), bschemas.Anthropic, body, "", false,

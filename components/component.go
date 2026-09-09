@@ -280,6 +280,16 @@ type Ctx struct {
 	// fraction-based Trigger thresholds are ignored and only absolutes apply. Stored
 	// as a resolved int so Trigger stays a pure, network-free, unit-testable function.
 	CtxWindow int
+	// CtxWindowExact says CtxWindow is a figure published for THIS model, not a family
+	// guess. It matters because ok=true from the resolver is not the same as right: the
+	// substring table of last resort answers 200,000 for every Opus, and LiteLLM publishes
+	// those at 1,000,000. A fraction resolved against the guess fires five times too early.
+	//
+	// A per-item FLOOR may act on a guess — too small a window merely raises the floor. A
+	// decision about how FULL the context is may not, and Trigger declines rather than
+	// guessing (see Trigger.CacheAllows). Zero value is false, so a Ctx built without it
+	// fails closed for the fraction and unchanged for everything else.
+	CtxWindowExact bool
 	// CacheAware is true when this request goes to a prompt-caching backend and the
 	// pipeline should avoid mutating already-cached content. When true, supersession/
 	// age-based offloaders (failed_run, mask, collapse) must restrict their

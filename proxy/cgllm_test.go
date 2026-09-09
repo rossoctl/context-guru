@@ -58,7 +58,8 @@ func cgLLMHandlerPriced(t *testing.T, upstream string, cheap components.Model,
 	t.Helper()
 	cfg, err := config.LoadBytes([]byte(
 		"pipeline: [summarize]\ncomponents:\n  summarize:\n    keep_last: 1\n" +
-			"    start_from_message: 0\n    min_tokens: 1\n    model:\n      source: config\n"))
+			"    start_from_message: 0\n    min_tokens: 1\n" +
+			"    trigger: {min_request_frac: 0}\n    model:\n      source: config\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

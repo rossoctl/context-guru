@@ -591,19 +591,20 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// be two scans of the body on the request path for one fact.
 	bps := CountBreakpoints(body)
 	c := &components.Ctx{
-		Ctx:          ctx,
-		Session:      sessionID,
-		Store:        st,
-		Model:        models,
-		Bypass:       bypass,
-		CtxWindow:    o.Window,
-		ModelName:    gjson.GetBytes(body, "model").String(),
-		SelfRates:    o.SelfRates,
-		RatesFor:     o.RatesFor,
-		CacheAware:   cacheAware,
-		ColdCache:    coldCache,
-		IdleMs:       idleMs,
-		MaxCachedIdx: maxCachedIdx,
+		Ctx:            ctx,
+		Session:        sessionID,
+		Store:          st,
+		Model:          models,
+		Bypass:         bypass,
+		CtxWindow:      o.Window,
+		CtxWindowExact: o.WindowExact,
+		ModelName:      gjson.GetBytes(body, "model").String(),
+		SelfRates:      o.SelfRates,
+		RatesFor:       o.RatesFor,
+		CacheAware:     cacheAware,
+		ColdCache:      coldCache,
+		IdleMs:         idleMs,
+		MaxCachedIdx:   maxCachedIdx,
 		// Every breakpoint already on the wire — including the ones no component can
 		// see (`system`, `tools`, and the marks our own normalize drops). The
 		// provider's cap of four counts them all (issue #32, defect 2).

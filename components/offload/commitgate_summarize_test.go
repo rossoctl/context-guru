@@ -138,7 +138,7 @@ func TestSummarizeDoesNotPayForACheckpointItCannotStash(t *testing.T) {
 func TestSummarizeReplaysItsCheckpointRatherThanFlippingCachedContent(t *testing.T) {
 	model := &countingModel{out: "SUMMARY: explored the handler, 3 tests fail."}
 	c, err := newSummarize([]byte("keep_last: 1\nmin_tokens: 10\nresummarize_tokens: 200\n" +
-		"trigger:\n  min_messages: 2\n  min_request_tokens: 10\n"))
+		"trigger:\n  min_messages: 2\n  min_request_tokens: 10\n  min_request_frac: 0\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

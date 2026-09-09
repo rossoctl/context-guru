@@ -192,6 +192,13 @@ func (t *Table) Price(_ context.Context, model string) (Price, bool) {
 
 // Window returns an operator-supplied context window, for models the public map
 // does not list. Entries without one return ok=false so the public map still wins.
+// WindowExact: an operator's own table is authoritative by construction — they wrote a window
+// for this deployment's models, which is a stronger claim than the public map's.
+func (t *Table) WindowExact(ctx context.Context, model string) (int, bool, bool) {
+	w, ok := t.Window(ctx, model)
+	return w, ok, ok
+}
+
 func (t *Table) Window(_ context.Context, model string) (int, bool) {
 	e, ok := t.lookup(model)
 	if !ok || e.window == 0 {

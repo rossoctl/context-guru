@@ -33,6 +33,12 @@ type Opts struct {
 	Models components.ModelSpec
 	// Window is the model's resolved context window (max input tokens; 0 = unknown).
 	Window int
+	// WindowExact says Window is a figure published for THIS model rather than a family
+	// guess. False when unknown, and false when it came from the substring table of last
+	// resort — which answers 200,000 for every Opus, five times low. A component deciding
+	// "how full is the context" must not act on a guess; one setting a per-output floor may.
+	// See modelinfo.ExactResolver.
+	WindowExact bool
 	// CacheMode is "auto" (default) | "on" | "off" — see resolveCacheAware.
 	CacheMode string
 	// Now is the clock, injected so idle-time reasoning is testable. Zero means time.Now().
