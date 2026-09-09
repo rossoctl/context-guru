@@ -13,6 +13,48 @@ Read this before designing an arm or believing a number.
 Reward on LOCA is **binary per task**, so a paired comparison uses McNemar's exact test on
 discordant pairs. That test is brutal at small n.
 
+### Clusters give the power; seeds make each cluster trustworthy
+
+**This section's own title overstates the case and this subsection is the correction.** "Reward at small
+n shows nothing" is not what the arithmetic says. Fifteen clusters detected iteration 024's effect at
+**p = 0.0078**, and the bar is reachable: a two-sided exact sign test over 15 paired task means clears
+α = 0.05 at **6 better and 0 worse**.
+
+| better | worse | p | significant |
+|---|---|---|---|
+| 8 | 0 | **0.0078** | yes — iteration 024's actual result |
+| 6 | 0 | **0.0312** | yes |
+| 5 | 0 | 0.0625 | no |
+| 9 | 1 | **0.0215** | yes |
+| 8 | 1 | **0.0391** | yes |
+| 7 | 1 | 0.0703 | no |
+| 10 | 2 | **0.0386** | yes |
+| 6 | 3 | 0.5078 | no — iteration 025's actual result |
+
+**Seeds do not add clusters.** Five seeds of the same fifteen tasks is still fifteen clusters, because the
+seeds are correlated observations of the same task. What they buy is different and it is not power: they
+make each cluster's mean **stable**. Iteration 023 measured arm C scoring 0.200 and then 0.800 on a
+byte-identical config, and the iteration 026 probe ran one task at 75, 32 and 16 steps across three
+passes. At one seed per task a cluster is close to a coin flip; at five it is a mean. That stability is
+what let iteration 024's clusters come out 8-and-0 rather than as noise, which is what made the sign test
+significant.
+
+So the design reads: **clusters set the ceiling on what can be detected, seeds decide whether the clusters
+are worth testing.** Getting that backwards produces two specific errors, both of which have been made
+here:
+
+1. **Reading a null as underpowered.** Iteration 025 returned 6 better, 3 worse, p = 0.5078. That is a
+   coin, not a suppressed signal, and the cause was that the mechanism fired 34 times against iteration
+   024's 151 — a treatment problem, whose remedy is not more seeds. More seeds would have changed nothing.
+2. **Buying seeds for power.** They do not supply it. If more power is needed the answer is more *tasks*,
+   which means a different LOCA set or a different workload, not more repetitions of the same fifteen.
+
+Where fifteen clusters genuinely does bind is the **harm gate**, and that is a property of the decision
+rule rather than of the sample: a Clopper-Pearson 95% upper bound on the worsened proportion is 21.8% at
+0 of 15, **31.9% at 1 of 15**, and 48.1% at 3 of 15. Against a 25% veto that passes only on a perfect
+zero — so a result of 9 better and 1 worse is significant at p = 0.0215 and vetoed anyway. Any run using
+that bound as a blocker should say so in advance, because the rule and not the evidence is doing the work.
+
 ### Headroom: n is not the only thing that limits detection
 
 Before any n calculation, ask how many tasks are *able* to show the effect at all. Direction matters,
