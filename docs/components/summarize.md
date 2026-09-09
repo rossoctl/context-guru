@@ -29,8 +29,17 @@ re-summarizing every turn.
 ### Why reuse is load-bearing rather than an optimisation
 
 The trigger gates the component completely — below it `summarize` returns immediately and does nothing.
-**Above it, the component runs on every turn**, because the trigger is evaluated against the incoming
-request and the client keeps re-sending its full history. So each of those turns takes one of two paths:
+**And the trigger reads the request as the REST OF THE PIPELINE LEFT IT**, because one `req` pointer is
+threaded through the components in order, each mutating it in place, and `summarize` runs last. So
+upstream compaction decides whether this component fires at all: the system is self-limiting, and
+measured it fires on 0–28% of requests (13.5% and 27.9% on iteration 025's two arms, 25.8% and 0% on the
+iteration 026 probes) rather than on every turn.
+
+That is also the deferral mechanism, stated without hand-waving: anything upstream that shrinks the
+post-pipeline request below the threshold stops `summarize` running, and `acted / runs` against a
+baseline arm is how you see it.
+
+On a turn where it does fire, one of two paths is taken:
 
 | path | when | cost |
 |---|---|---|
@@ -43,7 +52,9 @@ cache writes, paid for by a bigger request each turn; smaller means a tighter re
 more often. Zero disables reuse, so every eligible turn re-summarises.
 
 Read that against a cache write costing roughly 11.5x a cache read per token in this codebase's own
-arithmetic, and the conclusion is that **reuse is what makes running every turn affordable at all**.
+arithmetic and reuse is worth real money on the turns it applies — though at a 14–28% firing rate it is an
+optimisation rather than, as an earlier draft of this section claimed, the only thing making per-turn
+operation viable. Operation is not per-turn.
 
 ### The interaction to watch: an upstream component can defeat it
 
