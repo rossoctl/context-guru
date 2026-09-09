@@ -26,6 +26,42 @@ byte-identical so the prefix stays KV-cache stable) until the un-summarized tail
 `resummarize_tokens`, when the checkpoint rolls forward with a fresh summary. This is what stops it
 re-summarizing every turn.
 
+### Why reuse is load-bearing rather than an optimisation
+
+The trigger gates the component completely — below it `summarize` returns immediately and does nothing.
+**Above it, the component runs on every turn**, because the trigger is evaluated against the incoming
+request and the client keeps re-sending its full history. So each of those turns takes one of two paths:
+
+| path | when | cost |
+|---|---|---|
+| **reuse** | tail since the checkpoint < `resummarize_tokens` | **free** — no model call, summary byte-identical, cached prefix survives |
+| **roll forward** | tail ≥ `resummarize_tokens` | a model call **plus a prefix rewrite from the summary onward**, i.e. a cache write |
+
+`resummarize_tokens` is therefore a **refresh interval**, not a size limit: it is how much new content the
+component will carry verbatim before paying to re-summarise. Larger means fewer model calls and fewer
+cache writes, paid for by a bigger request each turn; smaller means a tighter request and a cache write
+more often. Zero disables reuse, so every eligible turn re-summarises.
+
+Read that against a cache write costing roughly 11.5x a cache read per token in this codebase's own
+arithmetic, and the conclusion is that **reuse is what makes running every turn affordable at all**.
+
+### The interaction to watch: an upstream component can defeat it
+
+Reuse requires the covered span to be **byte-unchanged**, and the hash is taken over the messages *as
+earlier components in the pipeline left them*. So any component that mutates a message inside the
+checkpointed span invalidates the checkpoint and forces the paid path, even when the tail is small.
+
+`extract_llm_sweep` is the case to watch, since it removes deep-history outputs and runs before
+`summarize`. Note what it cannot do: because the trigger gates everything, a removal can never *cause* a
+summarize run — it can only convert a free reuse into a paid refresh on a turn that was going to run
+anyway. Whether the two spans overlap in practice is unmeasured: the sweep targets deep history while the
+checkpoint boundary sits nearer the tail, so they may rarely collide.
+
+**And that cannot currently be checked from a run.** The reuse path records no gate and no event, and
+`rep.Replays` is never incremented, so `acted_replay` reads 0 for this component whether reuse fired on
+every turn or none — see the open issue on summarize's uncounted reuse path. A zero there means
+*unmeasured*, not *never*.
+
 Run it **alone** (its own preset) — it restructures the whole transcript.
 
 ## Before → After
