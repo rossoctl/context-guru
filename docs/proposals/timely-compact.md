@@ -66,7 +66,33 @@ specific to this codebase.
 
 ---
 
-## The trigger: reuse pre-expiry, do not reach for the cold gate
+## The policy, stated plainly
+
+Two tiers. The second one is the feature; the first is a backstop.
+
+| tier | condition | why |
+|---|---|---|
+| 1 | `fill ≥ 0.99` | compact unconditionally — the ceiling is one turn away and something is going to compact |
+| 2 | `0.9 ≤ fill < 0.99` **and** the cache is within seconds of expiring | compact now, so the rewrite that is coming lands on ~80k instead of ~940k |
+
+**What the compaction actually buys, on opus at 0.9 of a 1M window** (input $5/MTok → read $0.50/MTok,
+write $6.25/MTok):
+
+| | on the compacting turn | on each later cold miss |
+|---|---|---|
+| do nothing | read 940k = **$0.47** | write 940k = **$5.88** |
+| compact to ~80k | write 80k = **$0.50** | write 80k = **$0.50** |
+
+So the compacting turn is a wash (+$0.03) and every subsequent miss saves ~$5.38. Measured fleet
+average across mixed models and sizes: **$4.48** per cold event above 90%.
+
+**The TTL refresh is not an additional bonus, and should not be quoted as one.** The provider
+refreshes an entry's lifetime on every read as well as every write ("the cache is refreshed for no
+additional cost each time the cached content is used" — quoted in `proxy/keepalive.go:39`), so the
+uncompacted turn would have bought the same five minutes for free. What changes is not *how long* the
+entry lives but *what it costs to lose*. The entire gain is the second column above.
+
+## Why that trigger is pre-expiry rather than the cold gate
 
 Three arguments, strongest first.
 
@@ -95,13 +121,12 @@ first makes every subsequent ping ~12x cheaper *and* makes the eventual miss che
 cannot deliver this: on a keep-alive'd account the session is not supposed to go cold at all, so a
 cold-gated compaction would either never fire (working keep-alive) or fire wrongly (argument 1).
 
-### 3. Firing before the miss, not on it, is worth exactly one full-price rewrite per cold event
+### 3. Firing before the miss, not on it, is worth exactly one full-price rewrite
 
 This is the weakest of the three and should be stated honestly, because the intuition ("compact
 before the cache goes cold") overstates it. Our compaction shrinks **what we forward**, so a
-compaction performed *on* the cold turn already pays the cache-write on the small body — the money is
-not lost by waiting. What waiting costs is only the difference between deciding with a warm entry and
-deciding without one; the modelled saving (below) is reached either way.
+compaction performed *on* the cold turn already pays the cache-write on the small body — most of the
+money is not lost by waiting. What waiting costs is the one rewrite you were standing in front of.
 
 ### The measured case for the fill threshold
 
@@ -152,9 +177,44 @@ against $4.48 — 5.3x cheaper and 3.4x rarer, so **18x less money** ($25.54 tot
 The pitch is not "compaction is mistimed everywhere"; it is "when a session is allowed to fill a 1M
 window, going cold up there costs 5x per event and nothing currently fires in front of it."
 
+### Where the code goes: tier 2 is a TIMER, not a request gate
+
+This is the part the first draft of this document got wrong, and it is the difference between a
+feature that fires and one that mostly does not.
+
+"The cache is at 280s of 300s" is a statement about a moment when **nothing is in flight**. A gate in
+the pipeline can only observe it if the agent happens to send a turn inside that 20-second slice; a
+session that pauses for twenty minutes presents its next turn *after* expiry and never qualifies. Put
+tier 2 in the pipeline and its firing rate becomes the design's largest unknown — an unknown created
+entirely by the placement.
+
+`proxy/keepalive.go` **is already that timer**, and it already has everything tier 2 needs:
+
+- it holds "the exact bytes that went upstream" per session (`keeper.record`, `keepalive.go:559`)
+  plus the caller's credential;
+- it wakes on an idle deadline derived from the same believed TTL;
+- it already makes a real upstream request on its own initiative, with `max_tokens: 1`
+  (`keepalive.go:1036`) — the one place in this codebase where work happens off the agent's critical
+  path.
+
+Today that ping re-sends the same bytes, refreshing the **big** entry. Tier 2 is: when the held body's
+fill is ≥ 0.9, have the ping send the **summarized** body instead. Consequences, all of them wanted:
+
+- it fires at 280s by construction, so there is no firing-rate question;
+- the ~19.6s summarizer call is off the agent's critical path entirely;
+- the small entry is what is warm when the agent comes back, and the next real turn — compacting to
+  the same frozen checkpoint — reads it;
+- `modes.Tracker` must record the ping's length as a turn, or the following turn treats those
+  messages as mutable tail and rewrites them. This is the same argument `apply.go:560-585` already
+  makes for why a *bypassed* turn has to record its length, and the fix is the same call.
+
+Tier 1 (`fill ≥ 0.99`) stays a plain pipeline gate — at the ceiling there is a request in flight by
+definition.
+
 ### What the code needs
 
-The condition is `fill ≥ threshold` **AND** `in the pre-expiry window`. Half of it already exists:
+Tier 1 is `fill ≥ 0.99`. Tier 2 is `fill ≥ 0.9` **AND** the pre-expiry window. Half of that already
+exists:
 
 - **fill** — `components.Trigger.MinRequestFrac` resolved against `Ctx.CtxWindow`
   (`components/trigger.go:47`). `summarize` already consults it (`summarize.go:157`). So
@@ -171,7 +231,10 @@ Smallest change that does not create a second reader of one fact:
 2. Add `Trigger.CacheState` (`any` default | `pre_expiry` | `cold` | `pre_expiry_or_cold`) and
    `Trigger.PreExpirySeconds`, both surfaced through `TriggerFields` so the fields-parity test forces
    the settings form to learn about them.
-3. Configure `summarize` with `trigger: {min_request_frac: 0.9, cache_state: pre_expiry}`.
+3. Configure `summarize` with both tiers — `trigger: {min_request_frac: 0.99}` for the unconditional
+   one, and `{min_request_frac: 0.9, cache_state: pre_expiry}` for the timer-driven one. The shared
+   helper is what lets keep-alive and the pipeline agree on "the cache is nearly gone" instead of each
+   deriving it.
 
 `summarize` is already built for a trigger that fires rarely: its skip is documented as **recurring**
 rather than one-off, a skipped turn "refreshes nothing but splices nothing either, so no marker of
@@ -194,33 +257,54 @@ Two known costs of doing it inside `summarize`:
 
 ## Native compaction: two different questions wearing one name
 
-### (a) Claude Code's own auto-compact — no, and we should not try
+### (a) Claude Code's own auto-compact — a proxy cannot invoke it
 
-It is **client-side**. Measured across 8 unrelated tenants: a tight mode of 147 events between 150K
-and 190K, median **167,425**, p10 157K / p90 177K, per-tenant medians 158K-170K. That is ~84% of a
-hardcoded **200,000**, not a fraction of the served window (these same ids demonstrably accept
-999,8xx tokens; if the client were budgeting against 1M it would fire near 840K, and there is no mode
-anywhere near it). It is not `window − max_tokens` either (200,000 − 64,000 = 136,000, but the
-trigger sits 31K above that). It never drifted across days.
+It is **client-side**: the agent decides from its own token accounting, then issues a summarize
+request that context-guru deliberately **bypasses** (`proxy/agentcompaction.go` — compacting the
+compactor is the one case where the pipeline makes a request strictly worse than no proxy at all).
+Only the client owns its transcript, so no request-path intervention can make it discard one.
 
-The agent decides, from its own token accounting, and then issues a summarize request that
-context-guru deliberately **bypasses** — `proxy/agentcompaction.go`, because compacting the compactor
-is the one case where the pipeline makes a request strictly worse than no proxy at all. A proxy
-cannot make the client discard its transcript; only the client owns it.
+**Where the client's threshold actually sits varies by client, and the fleet data does not describe
+every deployment.** Two populations, both real:
 
-The one lever that would work is inflating `usage.input_tokens` on the response so the client's
-budgeter thinks it is closer to its ceiling. **It would function, and it should be rejected on
-honesty grounds rather than feasibility ones:** it corrupts the number the user sees in `/context`
-and in `cost.total_cost_usd` (which our own statusline skill reads), it is unauditable from the
-client, and it makes the proxy lie about billing. Not a shape to ship.
+- Sessions whose client budgets against a hardcoded **200,000**: a tight mode of 147 events between
+  150K and 190K, median **167,425** (p10 157K / p90 177K), reproducing independently across eight
+  tenants at medians of 158K-170K. Not `window − max_tokens` (200,000 − 64,000 = 136,000, 31K below
+  the observed trigger), and stable across days.
+- Sessions that run to **999,8xx tokens and then drop**, i.e. a client that knows the window is 1M and
+  compacts near the ceiling. These are the ten sessions the money in this proposal comes from.
 
-Worth knowing before anyone presents this feature: **if the client simply knew the window were 1M,
-its existing auto-compact would fire near 840K and prevent roughly $1,073** — more than this feature
-recovers at 0.9, with context-guru doing nothing. That is a client/gateway metadata fix, not a proxy
-feature. It reshapes the claim rather than sinking it: the defensible version is *a fixed percentage
-is the wrong instrument; the right trigger is cache state, which the client cannot see.* Confirm the
-mechanism first — have one user run `/context` on `claude-opus-5` through the gateway and read the
-window it reports. If it says 200K, this is settled.
+An earlier draft of this document generalized the first population's 167K figure into a claim about
+the whole fleet, and drew from it the conclusion that "just fix the advertised window" would recover
+~$1,073 with context-guru doing nothing. **That conclusion holds only for clients in the first
+population and must not be repeated as a general caveat.** For a client that already knows it has 1M
+and compacts at the ceiling, the 0.9-1.0 band is precisely the stretch nothing protects — which is the
+premise of this proposal, not an objection to it. Check which population a given deployment is in
+before quoting either number: `/context` on `claude-opus-5` through the gateway reports the window the
+client believes it has.
+
+**The lever that would let a proxy move the client's threshold, and why it is not this one.**
+Inflating `usage.input_tokens` on the response would make the client's budgeter think it is closer to
+its ceiling, and it would work. It should be rejected on honesty grounds rather than feasibility ones:
+it corrupts the number the user reads in `/context` and in `cost.total_cost_usd` — which this repo's
+own statusline skill consumes — it is unauditable from the client, and it makes the proxy lie about
+billing.
+
+**What we do instead is the honest version of the same effect, and it is a free consequence of tier 1
+rather than a mechanism to build.** Our compaction genuinely forwards fewer tokens, so the
+`input_tokens` the provider reports back are genuinely smaller. If the client derives its context
+gauge from response usage — very likely, since Claude Code's statusline payload carries
+`context_window.total_input_tokens` (`context-guru-plugin/plugin_test.go:2005`) — then compacting
+**delays** the client's own auto-compact rather than racing it. Stated as inference, and cheap to
+confirm: compact once at tier 1 and watch whether `/context` drops.
+
+Two consequences of that, worth deciding deliberately rather than discovering:
+
+- our compaction **substitutes** for the client's rather than duplicating it, which is the outcome we
+  want (ours is reversible; the client's is baked into its transcript permanently);
+- but the client's transcript keeps growing, so we carry and re-compact an ever-longer body. Fine on
+  cost — the frozen checkpoint replays — and it means the client's `/context` reading stops tracking
+  the real conversation length. Nothing measures where that stops being acceptable.
 
 ### (b) The Anthropic API's server-side compaction — yes, with one piece of state we must own
 
@@ -300,17 +384,18 @@ Three properties that make this attractive relative to our summarizer, and three
 
 ## What is not measured
 
-1. **How often the pre-expiry window would actually fire — the load-bearing unknown.** It requires a
-   real request to arrive inside a 60s slice of a 300s TTL. Sessions that idle for twenty minutes
-   present their next turn *after* expiry, not inside the window, and never qualify. The saving
-   grace is that we only need **one** hit per session above the threshold, and sessions in that band
-   run many turns there (median 79, max 685) — at even a 2% per-turn hit rate, 79 turns gives ~80%
-   odds of at least one. That is an estimate, not a measurement. **It is computable today** from the
-   existing inter-request gap distributions in `dash/kvcache.go` (`MedianIdleMs` / `MeanIdleMs` /
-   `P90IdleMs`) against each session's recorded TTL — no code shipped, no traffic touched. Do this
-   first; if the answer is "rarely", the width of the window (`pre_expiry_seconds`, itself the
-   sweep's one unmeasured number) is the dial, and widening it for compaction is a different trade
-   from widening it for the sweep.
+1. **How much of the traffic tier 2 can reach, given that keep-alive is opt-in per account.** Putting
+   tier 2 on the keep-alive timer removes the firing-rate question — it fires at 280s by construction
+   rather than hoping a turn lands in a 20-second slice — and replaces it with a coverage question:
+   keep-alive is opt-in, capped per session and capped in count, because a ping is real spend on the
+   caller's own credential. A deployment that has not enabled it gets tier 1 only. Whether tier 2
+   should be able to run its own timer independently of the keep-alive authorization is a policy
+   question, not a technical one, and the answer is probably no for the same reason keep-alive is
+   opt-in: it spends someone else's money.
+   The measurement worth doing first is still cheap and needs no code shipped — the inter-request gap
+   distributions already in `dash/kvcache.go` (`MedianIdleMs` / `MeanIdleMs` / `P90IdleMs`) against
+   each session's recorded TTL say how many sessions above 0.9 fill ever present a gap long enough for
+   a pre-expiry ping to matter.
 2. **Whether the keep-alive/tracker divergence should be closed** by having a ping record a turn.
    Doing so would make `ColdCache` honest on keep-alive'd accounts and would remove argument 1's
    asymmetry — but it also changes the sweep's behaviour, and the sweep is shipped. Its own issue,
