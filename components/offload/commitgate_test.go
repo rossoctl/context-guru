@@ -178,6 +178,21 @@ func gateCases() []gateCase {
 			body := strings.Repeat("a line of log output that goes on for a while\n", 80)
 			return c.(components.Offload), toolMsgs(body, body+"tail\n"), ctxFor(st)
 		}},
+		{"coref", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
+			// Driven rather than exempted, because coref DID have the defect this table exists to
+			// catch: it ignored commitMark's return and spliced plus froze regardless.
+			//
+			// min_later_turns AND min_batch_frac are both defaulted out of the way, the same as
+			// corefFor does. Leaving the opportunity floor at its default of 8 protects this
+			// fixture's tail candidate, nothing is cut, and the saturated case below would then
+			// pass vacuously -- which this table's own precondition catches.
+			c, err := newCoref([]byte("min_tokens: 20\nmin_batch_frac: 0\nmin_later_turns: 0\n" +
+				"break_even: false\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return c.(components.Offload), corefReq(), corefCtx(st)
+		}},
 		{"dedup", func(t *testing.T, st store.Store) (components.Offload, *bschemas.BifrostChatRequest, *components.Ctx) {
 			c, err := newDedup([]byte("min_tokens: 20\n"))
 			if err != nil {

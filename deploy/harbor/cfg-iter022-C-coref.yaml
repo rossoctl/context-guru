@@ -1,0 +1,61 @@
+# iter022 ARM C -- arm A plus the `coref` COMPONENT: the zero-LLM deterministic cutter.
+#
+# The alternative to arm B, not an addition to it. coref builds the same co-reference index but ACTS on
+# it directly -- cutting outputs no later turn literally reuses anything from -- instead of handing the
+# index to a model as evidence. It costs no model call at all. Offline, scored against a held-out
+# future, `unreferenced` alone removed 11.8% at 95% live-kept and was the best discriminator of ten
+# arms, model arms included. Its ground truth was Tier-1 EXACT matching, though, which is blind to
+# exactly the transformed reuse arm B's model is meant to see -- so B vs C is a genuinely open question
+# rather than a formality.
+#
+# PLACED AFTER extract_llm_sweep, deliberately. coref leaves markers and the sweep skips marked content,
+# so coref upstream would pre-filter the sweep -- the failure documented in arm B's header. Downstream,
+# the sweep adjudicates first on its own (pre-expiry) trigger and coref cuts from what remains. That
+# ordering also means the two are not silently competing for the same candidates on the same turn.
+#
+# The cut set is the SHIPPED default: cut_unreferenced only. cut_closed stays off because its two
+# thresholds (closed_dist, open_reps) are the OUTPUT of a measurement pass that has not run on real
+# traffic, and shipping a guessed closed_dist would ship the one number the design says must be
+# measured. min_batch_frac stays at its 0.05 default: 0.15 admitted ONE of nineteen real long sessions
+# and zero at this cut set -- a gate no traffic can clear is an off switch that looks like a threshold.
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, coref, extract, collapse, cachesplit, toolfilter, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    min_tokens: 3000
+    model: {model: claude-haiku-4-5, source: incoming}
+    strategy: code
+    trigger: {min_request_tokens: 3000}
+  extract_llm_sweep:
+    min_tokens: 1000
+    # AMENDMENT 1 (pre-launch, derived from the pre-flight -- see PREREGISTRATION.md "Amendment 1").
+    # min_inventory 10 is UNREACHABLE on this benchmark and it silently blocks everything downstream.
+    # Measured on 710 tool outputs across two pre-flight passes: median output 59 tokens, p75 1,187,
+    # p90 3,059. At the shipped floor of 1000 that is 4.0 candidates per request, and lowering the
+    # floor to 100 only reaches 5.9 -- so no floor makes 10. The early return at
+    # sweep_inventory_below_min fires BEFORE the econ decision is taken, so the branch's headline
+    # trigger was never even evaluated: prefix_rewrite_repaid and _not_repaid were both 0.
+    # min_tokens stays at the shipped 1000 so the candidate POPULATION is still the shipped one.
+    min_inventory: 3
+  coref:
+    min_tokens: 300
+    cut_unreferenced: true
+    cut_closed: false
+    min_batch_frac: 0.05
+    break_even: true
+    rewrite_budget: 3
+    keep_head_chars: 96
+  summarize:
+    trigger: {min_request_frac: 0.78}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

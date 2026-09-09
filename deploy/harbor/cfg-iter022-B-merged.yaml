@@ -1,0 +1,61 @@
+# iter022 ARM B -- arm A with TWO KNOBS FLIPPED on extract_llm_sweep. Nothing else differs.
+#
+#   evidence: true      the co-reference index's record for each candidate goes into the adjudication
+#                       prompt as `evidence: novel=.. refs=.. ref_age=.. used_frac=.. later_turns=..
+#                       verdict_of_index=..`, and the contract gains a paragraph teaching how to read
+#                       it. THIS IS THE MERGED DESIGN of PR #80: one call, seeing the outputs and the
+#                       reference evidence, with the MODEL holding the veto. It needs no `coref`
+#                       component -- internal/coref is a library the sweep calls directly.
+#
+#   econ_trigger: true  the SECOND trigger. main sweeps only inside the pre-expiry window
+#                       (0 < CacheTTLMs-IdleMs <= pre_expiry), which cannot fire at all on a session
+#                       whose cache keeps being refreshed -- the long run with the most to save. econ
+#                       fires on MASS instead of the clock, when S*T > 11.5*W, paying a real cache-write
+#                       to reach those sessions. Neither trigger contains the other, which is why both
+#                       are kept.
+#
+# WHY coref-THE-COMPONENT IS NOT HERE. It cuts and leaves a marker, and the sweep skips marked content
+# (`empty_or_marker_present`), so placing it upstream would hide its cuts from the model -- structurally
+# the `prefix_still_referenced` thinner that removed 149,681 candidates, left ~one per request, and
+# silently turned a bulk arm into the per-output shape refuted at 6% live-kept. Evidence and cutting are
+# ALTERNATIVES, not a stack. The cutter gets its own arm, C.
+#
+# S IS AN UPPER BOUND on the econ trigger's saving (the inventory's whole mass; the model drops only
+# some of it) and W leans the other way (an unknown cache boundary is assumed to be the whole
+# transcript). Neither is calibrated, so prefix_rewrite_repaid vs prefix_rewrite_not_repaid is the
+# endpoint, not an assumed saving.
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, collapse, cachesplit, toolfilter, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    min_tokens: 3000
+    model: {model: claude-haiku-4-5, source: incoming}
+    strategy: code
+    trigger: {min_request_tokens: 3000}
+  extract_llm_sweep:
+    min_tokens: 1000
+    # AMENDMENT 1 (pre-launch, derived from the pre-flight -- see PREREGISTRATION.md "Amendment 1").
+    # min_inventory 10 is UNREACHABLE on this benchmark and it silently blocks everything downstream.
+    # Measured on 710 tool outputs across two pre-flight passes: median output 59 tokens, p75 1,187,
+    # p90 3,059. At the shipped floor of 1000 that is 4.0 candidates per request, and lowering the
+    # floor to 100 only reaches 5.9 -- so no floor makes 10. The early return at
+    # sweep_inventory_below_min fires BEFORE the econ decision is taken, so the branch's headline
+    # trigger was never even evaluated: prefix_rewrite_repaid and _not_repaid were both 0.
+    # min_tokens stays at the shipped 1000 so the candidate POPULATION is still the shipped one.
+    min_inventory: 3
+    evidence: true
+    econ_trigger: true
+  summarize:
+    trigger: {min_request_frac: 0.78}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

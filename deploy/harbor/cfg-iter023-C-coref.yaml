@@ -1,0 +1,44 @@
+# iter023 ARM C -- arm A plus the coref COMPONENT: the zero-LLM deterministic cutter.
+#
+# Placed AFTER extract_llm_sweep so it cannot pre-filter the adjudicator -- the failure that starved three
+# earlier iterations. The alternative to arm B, not an addition to it: coref acts on the same index
+# directly instead of handing it to a model as evidence, and costs no model call at all.
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, coref, extract, collapse, cachesplit, toolfilter, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    model: {model: claude-haiku-4-5, source: incoming}
+    strategy: code
+  extract_llm_sweep:
+    min_tokens: 100
+    # AMENDMENT 1 (pre-launch, derived from the pre-flight -- see PREREGISTRATION.md "Amendment 1").
+    # min_inventory 10 is UNREACHABLE on this benchmark and it silently blocks everything downstream.
+    # Measured on 710 tool outputs across two pre-flight passes: median output 59 tokens, p75 1,187,
+    # p90 3,059. At the shipped floor of 1000 that is 4.0 candidates per request, and lowering the
+    # floor to 100 only reaches 5.9 -- so no floor makes 10. The early return at
+    # sweep_inventory_below_min fires BEFORE the econ decision is taken, so the branch's headline
+    # trigger was never even evaluated: prefix_rewrite_repaid and _not_repaid were both 0.
+    # min_tokens stays at the shipped 1000 so the candidate POPULATION is still the shipped one.
+    min_inventory: 3
+  coref:
+    min_tokens: 300
+    cut_unreferenced: true
+    cut_closed: false
+    min_batch_frac: 0.05
+    break_even: true
+    rewrite_budget: 3
+    keep_head_chars: 96
+  summarize:
+    trigger: {min_request_frac: 0.78}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

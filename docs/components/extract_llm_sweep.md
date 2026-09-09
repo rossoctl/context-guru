@@ -182,6 +182,163 @@ guessed TTL would invalidate live prefixes on exactly the deployments whose TTL 
 the codebase's own clock-uncertainty margin for cache expiry. Wider fires more often and invalidates
 more remaining TTL; narrower fires rarely. Nothing measures either side.
 
+### The second trigger, and what it has to pay for
+
+`econ_trigger` fires on **mass** rather than the clock, which is how the sweep reaches a session whose
+cache keeps being refreshed — the long agent run with the most to save, and the one the pre-expiry
+window can never reach. It pays a real cache-write to do it, so it has to clear a break-even first.
+
+That break-even has three terms, and the third one is easy to forget because it is not a property of the
+transcript:
+
+| | |
+|---|---|
+| **benefit** | the mass removed, collected on every remaining turn — and discounted by how much of the inventory the adjudicator actually takes |
+| **cost** | the cache-write the mutation forces, charged once, from the earliest dropped index to the cached boundary |
+| **cost** | **the adjudication itself**, charged whether or not the answer turns out to be "drop something" |
+
+Leaving that last term out is not a rounding error. Measured on iteration 025's pre-flight, it was the
+*whole* cost: 9 asks authorised out of 9, six of which removed nothing, $0.4339 spent for $0.0017 of
+value. The damage concentrated on the case where every candidate already sits past the cached boundary —
+there the cache-write is genuinely free, which used to authorise unconditionally, and which is exactly
+the case where the ask is the only thing being paid for.
+
+Both the ask's price and the approval rate are **measured from this component's own asks** rather than
+configured, for the same reason the rate card is preferred to a constant: a literal approval rate is one
+workload's average wearing a threshold's authority. Two guards keep a self-referential gate from
+strangling itself — a short warm-up, because a single ask can only ever report 0% or 100% of its
+inventory, and a floor under the approval rate, without which one unlucky run of empty asks would
+decline every future one and destroy the evidence that could revise the estimate.
+
+Read `prefix_rewrite_repaid` against `econ_ask_not_repaid` and `prefix_rewrite_not_repaid`: the two
+declines name **different** costs and are raised exclusively, so they sum rather than overlap.
+
+### The terms, and what the component knows about itself
+
+Every turn the sweep may ask the model *"which of these tool outputs are spent?"*. That question costs
+money, so a test decides whether to ask at all. Its vocabulary:
+
+| term | meaning |
+|---|---|
+| **candidate** | one tool output being considered for removal |
+| **inventory** / **batch size** | how many candidates go into a single ask (`offered` in the logs) |
+| **approval** | the fraction of offered tokens the model actually agrees to remove. Offer 10,000, get 3,000 removed, approval is 0.30 |
+| **the ledger** | a running record of what this component's own asks have cost and how much they removed — how approval gets *measured* rather than assumed |
+| **warm-up** | the first three asks, before the ledger can average. Assumed values are used instead: approval 1.0, and a cost estimated from the request's shape |
+| **floor** | the lowest approval the ledger will report, 0.05. A guard so a measured zero cannot drive the expected saving to zero and disable the component outright |
+
+The ledger holds four running totals — asks, dollars spent, tokens offered, tokens actually removed — and
+derives two predictions for the next ask: cost as `dollars / asks`, and approval as `removed / offered`.
+
+**So approval answers "is the question worth asking?"** — when this component pays to ask, how much does
+it get back? A poor track record predicts a poor next ask, and the price stops being justified. It is the
+component observing its own history.
+
+Two things that vocabulary hides and that matter:
+
+- **The thing being asked is the ADJUDICATOR, not the agent.** It is a second call to the same model,
+  judging which outputs are spent. The agent doing the task never sees it. A low approval means the
+  *judge* kept the outputs, not that the agent did anything.
+- **A low approval is not automatically a failure.** It means the judge found those outputs still
+  load-bearing, and that may be correct. If they genuinely are not spent, declining to pay for the
+  question is the right answer.
+
+**Which is exactly what makes the estimator dangerous: it is self-referential.** It predicts its own
+future from its own past, and its predictions determine what evidence it receives. Predict low, do not
+ask, learn nothing, keep predicting low — defensible at every individual step and permanently wrong if the
+early samples were unrepresentative.
+
+That is not hypothetical. On the iteration 026 probe the first three asks all carried **three** candidates,
+a batch size this repo had already measured as one where the model does not act (about 94% kept when shown
+a single output, against 58% dropped at ~15). One drop out of nine candidates, approval measured near
+zero, clamped to the 0.05 floor — and because approval sits in the DENOMINATOR of the break-even, 0.05
+multiplies the turns-to-repay by twenty. A real decision at `need=36, have=7` was declined that would have
+read `need≈2` at approval 1.0. After that no ask cleared the bar, so no new sample arrived, and the
+estimate stayed floored.
+
+**The floor prevents approval reaching zero. It does not prevent the estimator getting STUCK**, which is
+the failure that actually occurred, and the deeper defect is one of shape rather than value: approval is a
+CURVE in batch size and the code stores a single point on it. One scalar cannot express "a batch of three
+will not yield but a batch of eight will", and that sentence is both true and necessary. Tracked in the
+issue on the approval estimate.
+
+### When the trigger declines — and why it is usually *not* "no turns left"
+
+The condition is `need > have`:
+
+```
+have = estimated turns before the request fills the window
+need = turns of saving required to repay the one-time costs
+     = ceil( (11.5 × rewritten  +  askUSD / cache_read_rate)
+             ─────────────────────────────────────────────── )
+                        offered × approval
+```
+
+Which gives **three** routes to a decline, not one:
+
+| route | meaning |
+|---|---|
+| `have` falls | near the window ceiling, few turns left to collect on — this is the "no turns left" case |
+| numerator rises | the question got expensive (more uncached prefix to read), or the rewrite reaches deeper |
+| denominator falls | less mass on offer, or a measured approval rate saying the model will not take much of it |
+
+**In the iteration 025 pre-flight only the last two fired.** `have` actually *rose* over the run, 27 → 120,
+and the trigger declined anyway:
+
+| | first ask | at the first decline |
+|---|---|---|
+| `offered` | 11,011 | 6,014 (÷1.8) |
+| `approval` | 1.00 | 0.328 (÷3.1) |
+| `askUSD` | $0.0161 | $0.0498 (×3.1) |
+| **`need`** | **8** | **127** |
+| `have` | 27 | 120 |
+
+The numerator tripled as the ledger learned what an ask really costs; the denominator fell 5.6x as the
+inventory thinned and the approval rate came in. **17x on `need`, while the turns available got better.**
+So the decline meant *"the question now costs what it really costs, and what is left to ask about cannot
+repay it"* — not *"we are running out of runway"*.
+
+That is the shape to expect, because **the sweep eats its own lunch.** The first asks remove the large,
+obviously-spent outputs (13,122 and 1,676 tokens here); what remains is smaller, while the ask's price
+holds or climbs as the uncached prefix grows. The profitable sweeps happen and then the trigger shuts
+itself off, which is why there is no call cap — it is self-limiting.
+
+There is a second-order effect worth noticing in that table: `have` jumped from ~25 to ~120 immediately
+after those first two removals. Taking 15k tokens out shrank the request, so more turns fit before the
+window fills — **the sweep's own success bought it more runway**, which then part-funded the later asks.
+
+### Why there is no context-pressure floor
+
+A natural-looking economy is "do not even evaluate the trigger until the context is, say, 70% full — that
+saves paying for asks early in a conversation". **This component deliberately has no such floor, and on
+the measured workload it would disable it completely.** Every ask in the pre-flight fired between
+**13.9% and 29.3%** of the 64k window:
+
+| ask | pressure | tokens removed |
+|---|---|---|
+| 1 | 29.3% | **13,122** |
+| 2 | 13.9% | 1,676 |
+| 3–9 | 18.3% – 23.5% | 0 – 1,194 each |
+| 10 | 25.4% | **5,978** |
+
+A 70% floor blocks all ten, and the two asks doing most of the work — 19,100 of 26,528 tokens between
+them — are the *first* and the *last*, both under 30%.
+
+Two reasons this is structural rather than a quirk of one run:
+
+- **`T` is the whole benefit.** The saving is collected once per remaining turn, so waiting for pressure
+  waits for the moment `T` is smallest. Firing at 90% of the window means paying a rewrite to collect a
+  saving roughly once. The profitable moment to compact is **earlier** than the moment of maximum
+  pressure, which is the same finding stated at the top of this section.
+- **A pressure gate on a component that relieves pressure cannot fire once the component works.** The
+  request stays at 20% *because* outputs are being removed. Requiring high pressure first is requiring
+  the fever before the medicine that prevents it.
+
+The early-conversation economy people are reaching for already exists, and it is **free**:
+`min_inventory` declines before any model call, and it raised `sweep_inventory_below_min` **38 times**
+against 20 econ decisions in the same run. That is the filter doing the work a pressure floor was meant
+to do, without a rate card, a window fraction, or a paid call.
+
 ## When the cache read does not happen
 
 `PrefixUsage` is returned rather than merely recorded, so the component gates on it. A read of zero is
@@ -242,7 +399,11 @@ net; the model does not get to hear about it.
 | key | default | what it does |
 |---|---|---|
 | `min_tokens` | 1000 | Per-output floor for naming a candidate in the inventory. Every line is paid fresh, and a small output's removal cannot repay the marker it leaves behind. At 3000 this produced **zero** extractions across 3,437 production requests. |
+| `min_inventory` | 10 | Fewest candidates worth asking about; below it the sweep declines without asking. The model's judgement is a function of how many candidates it **compares**: shown one output it scored 6% live-kept, ~15 together reached 58% at the lowest cost per output. Below the floor a removal is a guess, and a wrong removal costs content the agent still needs while a wrong keep costs one turn's tokens. |
 | `pre_expiry_seconds` | 60 | Width of the pre-expiry window. The component's one unmeasured number. |
+| `evidence` | `false` | Add the co-reference index's record to each inventory line. It is **evidence the model weighs, never a filter** over the candidates — a pre-filter left about one candidate per request, collapsing a bulk arm into the per-output shape refuted at 6% live-kept. Also adds a paragraph teaching how to read the counters; counters with no explanation invite an invented reading. |
+| `econ_trigger` | `false` | Add the **economic** trigger alongside the pre-expiry window, so a live cached prefix can be swept when the saving outruns the cache-write it forces. The two are OR'd and neither contains the other: pre-expiry fires on the clock and cannot reach a session whose cache keeps being refreshed — the long run with the most to save — while econ fires on mass and cannot know how much time is left. |
+| `econ_ignore_ask_cost` | `false` | Restore the econ trigger's original break-even, which charged the cache-write and **not** the adjudication that reads it. Left out, that authorised 9 asks in 9 on iteration 025's pre-flight, six of which removed nothing: $0.4339 spent against $0.0017 of value. Set true only to attribute a run's difference to the change. |
 | `block_fallback` | `false` | Decline instead of falling back to a content-carrying completion when the cache read did not happen. |
 | `marker_mode` | `full` | `full` is the only mode that keeps a removal recoverable. |
 
@@ -277,7 +438,13 @@ unparseable: raise the budget, not the prompt), `sweep_verdict_unusable`,
 `sweep_no_prefix`, `sweep_ask_failed`, `sweep_inventory_of_one`, `sweep_kept_everything`,
 `sweep_unparseable`, `sweep_reply_truncated`, `sweep_verdict_unusable`, `sweep_verdict_unknown_label`,
 `sweep_verdict_duplicate_label`, `sweep_verdict_missing`, `sweep_drop_would_not_shrink`,
-`not_in_pre_expiry_window`.
+`not_in_pre_expiry_window`, `sweep_inventory_below_min`, `drop_unaffordable_pruned`,
+`prefix_rewrite_not_repaid`, `econ_ask_not_repaid`.
+
+The last two are raised **exclusively**, and reading them as one number loses the finding:
+`prefix_rewrite_not_repaid` means the cache-write does not earn itself back, `econ_ask_not_repaid` means
+the batch cannot repay the price of *asking* about it. `prefix_rewrite_repaid` is the matching event when
+the trigger does fire — and it says the batch was worth asking about, never that a saving was banked.
 
 ## What is not measured
 

@@ -422,18 +422,45 @@ func (s *Summarize) emitCheckpoint(cp sumCheckpoint, msgs []bschemas.ChatMessage
 func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []bschemas.ChatMessage,
 	headCount, start, end int) (out []bschemas.ChatMessage, keys []string, ok, stale bool) {
 	if s.resummarizeTokens <= 0 {
+		rep.Gate("summary_reuse_disabled")
 		return nil, nil, false, false
 	}
 	cp, ok := loadCheckpoint(c)
 	if !ok || cp.CoveredCount <= 0 {
+		rep.Gate("summary_no_checkpoint")
 		return nil, nil, false, false
 	}
 	boundary := start + cp.CoveredCount
 	if boundary > end { // covered prefix would overlap the kept tail — can't reuse
+		rep.Gate("summary_checkpoint_overlaps_tail")
 		return nil, nil, false, false
 	}
 	covered := msgs[start:boundary]
 	if spanHash(covered) != cp.CoveredHash {
+		// COUNTED SEPARATELY because this is the only decline an UPSTREAM COMPONENT can cause. The
+		// hash is over msgs as the rest of the pipeline left them, and `summarize` runs last, so any
+		// component mutating a message inside the checkpointed span lands here. extract_llm_sweep is
+		// the obvious one: it removes deep-history outputs and runs earlier.
+		//
+		// READ THIS AS CHURN, NOT AS COST. It was misread as a cost once and the reasoning is easy to
+		// repeat, so here is why it is not:
+		//
+		//  1. The mutated messages are INSIDE msgs[start:end], which the fresh path collapses into a
+		//     single summary. So the upstream component's marker does not reach the wire at all on
+		//     this turn — its removal and this summary are doing the same job to the same bytes, and
+		//     the summary wins. There is no removal being "paid for twice".
+		//  2. It is a ONE-OFF per upstream change, not a per-turn tax. The fresh path writes a NEW
+		//     checkpoint whose hash covers the mutated content, so once the upstream component is
+		//     replaying a frozen decision — which is what freezing is for — the span hashes
+		//     identically from the next turn on and reuse resumes.
+		//
+		// So ONE firing per upstream removal is expected and harmless. What this counter is actually
+		// for is the other case: firing REPEATEDLY on one session means the checkpoint is not
+		// re-stabilising, i.e. some component above is mutating the span DIFFERENTLY turn to turn
+		// rather than replaying a fixed decision. That is when real money appears — a model call plus
+		// a prefix rewrite on every eligible turn — and it is indistinguishable from healthy operation
+		// without this gate. Compare the count against the session's turns, never against zero.
+		rep.Gate("summary_covered_span_changed")
 		return nil, nil, false, false // prefix diverged (different session / edited) → fresh
 	}
 	// The un-summarized middle since the checkpoint (excludes the kept last-K).
@@ -442,6 +469,7 @@ func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []b
 		// faithful summary of msgs[start:boundary] and re-emitting it produces the same bytes
 		// earlier turns sent. Rolling it forward is merely BETTER, so a fresh attempt that
 		// cannot complete may fall back to it instead of sending the transcript full.
+		rep.Gate("summary_tail_past_threshold")
 		return nil, nil, false, true
 	}
 	// Refresh the stashed original span so expand keeps resolving it (full-mode
@@ -459,6 +487,13 @@ func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []b
 		}
 	}
 	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	// THROUGH Report.Replay, which files the Event and Report.Replays together. This path recorded
+	// NOTHING before: no event, no gate, and Replays never incremented, so `acted_replay` read 0 for
+	// this component whether reuse fired on every eligible turn or on none. The two cost profiles are
+	// nothing alike — a free byte-identical re-emission against a model call plus a prefix rewrite —
+	// and /stats could not tell them apart on the component doing the most work on this workload.
+	// Exactly the defect ActedFresh/ActedReplay were introduced for (#176), one component over.
+	rep.Replay("summary_checkpoint_reused")
 	return emitted, ks, true, false
 }
 

@@ -1,0 +1,58 @@
+# iter023 ARM A -- the BASELINE: housellm's SHAPE, with two settings corrected rather than inherited.
+#
+# 1. extract_llm IS UNPINNED. Iteration 022 ran housellm verbatim, which pins both a per-output floor and
+#    a trigger threshold. Either one sets `explicit`, and shouldFire() then returns true unconditionally
+#    ("explicit min_tokens/trigger configured"), so the warm path fired on EVERY request -- and its pinned
+#    floor sat below the 6,250-token break-even the preset's own comment derives, so it fired below cost
+#    too. That is #120 stacked on #134. Unpinned, the derived pressure trigger governs (fire above 0.60
+#    context pressure, or above 0.25 with >10% growth) and pressureFloor derives the per-output floor from
+#    pressure instead of from a per-workload constant.
+#
+#    This is also what made iteration 022's arm B uninterpretable: extract_llm acted 15 times in arm A
+#    against 108 in arm B on a byte-identical config, dwarfing the sweep's 11 acts. Per-session it was
+#    concentrated -- 3 of 15 sessions in A, 8 of 15 in B, two sessions holding 67 of B's 108 -- so the
+#    aggregate is a high-variance statistic at this n rather than a systematic effect. Unpinning does not
+#    remove that variance, but it removes the forcing that guaranteed the component ran every turn.
+#
+# 2. THE SWEEP FLOOR DROPS TO 100, which is now safe. That knob was doing two jobs: choosing which outputs
+#    to NAME, and standing in for whether a drop is worth its cache-write. selectAffordableDrops now
+#    prices the second on DEPTH relative to the batch, so the floor is free to serve the first. Measured
+#    on iteration 022's own traffic: a floor of 1000 named 4.5 of the 23.6 outputs a request carried and
+#    held the batch at 4.4 against a cap of 12, while 100 reaches 11.6 for 8% more mass -- the outputs it
+#    admits average 414 tokens against 8,370 for those already in. Candidates are the axis the mechanism
+#    lives on (6% live-kept shown one output, 58% at ~15) and cost one inventory line each.
+#
+# collapse and summarize are unchanged from iteration 022 and identical across arms. collapse bought 0
+# errored runs and 0 HTML 400s there, which is worth more than the summarize endpoint it costs (see that
+# iteration's results.md section 4b).
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, collapse, cachesplit, toolfilter, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    model: {model: claude-haiku-4-5, source: incoming}
+    strategy: code
+  extract_llm_sweep:
+    min_tokens: 100
+    # AMENDMENT 1 (pre-launch, derived from the pre-flight -- see PREREGISTRATION.md "Amendment 1").
+    # min_inventory 10 is UNREACHABLE on this benchmark and it silently blocks everything downstream.
+    # Measured on 710 tool outputs across two pre-flight passes: median output 59 tokens, p75 1,187,
+    # p90 3,059. At the shipped floor of 1000 that is 4.0 candidates per request, and lowering the
+    # floor to 100 only reaches 5.9 -- so no floor makes 10. The early return at
+    # sweep_inventory_below_min fires BEFORE the econ decision is taken, so the branch's headline
+    # trigger was never even evaluated: prefix_rewrite_repaid and _not_repaid were both 0.
+    # min_tokens stays at the shipped 1000 so the candidate POPULATION is still the shipped one.
+    min_inventory: 3
+  summarize:
+    trigger: {min_request_frac: 0.78}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}
