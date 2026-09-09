@@ -338,6 +338,58 @@ See also: the proposal (`docs/proposals/coref-compaction.md`) ·
 [experiment log](../experiments/README.md) ·
 [selection experiment](coref-selection-experiment.md)
 
+### The benchmark's compaction never fired, on any iteration, because the gateway does not forward it
+
+**The most expensive rig trap recorded here, because it silently invalidates the word "band" in every
+LOCA iteration from 008 onward.**
+
+Every LOCA run is launched with `--use-clear-tool-uses --clear-trigger-tokens <band>`, and each
+iteration is indexed by that band ("32k band", "64k band"). The intent is that the agent behaves as if it
+had that window, compacting as it approaches. `clear_tool_uses` is **not** client-side: it is an
+Anthropic API beta (`clear_tool_uses_20250919`) sent as a `context_management` request parameter and
+applied server-side.
+
+It never applied. Measured 2026-09-09 against the benchmark gateway:
+
+| probe | result |
+|---|---|
+| trigger 1 token, 532 actual, `keep: 0` | `applied_edits: []` |
+| trigger 1 token, **72,481** actual, `keep: 0` | `applied_edits: []` |
+| same, with `clear_at_least: 16000` | `applied_edits: []` |
+| `aws/claude-sonnet-5`, `claude-sonnet-5`, `aws/claude-haiku-4-5` | all `applied_edits: []` |
+
+And the drop is localised to the **gateway**, not to our proxy and not to the model:
+
+- **context-guru preserves it.** A request carrying `context_management` plus the beta header, put
+  through the proxy with an echo upstream, arrives upstream with the parameter and the header byte-intact
+  — the "byte-lossless splice" holds for a field no Go code in this repo has ever heard of.
+- **The gateway shape-checks it and then discards it.** A malformed *shape* is rejected with
+  `context_management: Input does not match the expected shape. Received Model Group=…`, which is
+  litellm's error format, not Anthropic's. But a **bogus edit type** (`this_is_not_a_real_edit_type`)
+  returns 200 — and Anthropic would reject an unknown member of a discriminated union. So the edits are
+  never seen by the API, and the `{"applied_edits": []}` echoed in every response is synthesised
+  gateway-side.
+
+**Consequences, which reach past one iteration.** Nothing enforced the band on any run. Iteration 025
+measured requests to 612,290 tokens against a declared 64,000 — 9.6x — with 50% of all sweep decisions
+taken past the window, where `estimateTurnsRemaining` returns 0 and the econ trigger cannot authorise
+anything. The pressure regime in every iteration was whatever the tasks happened to produce, not what the
+design selected, and a declared window is a **scale for computing pressure, never a constraint**.
+
+**What was tried and did not fix it.** `--use-clear-thinking` was the leading hypothesis: thinking blocks
+are never reclaimed by default (`Clear thinking: False`), so once that mass passes the trigger, clearing
+tool uses cannot get back under it. A paired 4-task probe with the flag on ($22.18 control, $30.71
+treatment) moved the share of decisions past the band from **54% to 55%** — nothing — and per-session
+shrink detection found **1 real shrink in 97 consecutive-turn transitions**. The flag was not the problem
+because no clearing was reaching the API at all.
+
+**How to actually hold a band**, in preference order: run the benchmark against an endpoint that forwards
+context management; or implement clearing client-side in the harness; or accept that the band cannot be
+enforced and **choose** it to fit the workload rather than to constrain it — at a 64k declared band the
+median request was 63,687, i.e. the threshold sat exactly on the median, which is the worst available
+choice. Whatever is chosen, report the share of decisions that actually fell inside the band before
+treating the band as the independent variable.
+
 ### Untracked scratch tooling is the least-reviewed code in the measurement path
 
 `repair_shim.py` — an ~80-line HTTP hop between LOCA and the gateway, living only in `/tmp` on the
