@@ -213,6 +213,55 @@ decline every future one and destroy the evidence that could revise the estimate
 Read `prefix_rewrite_repaid` against `econ_ask_not_repaid` and `prefix_rewrite_not_repaid`: the two
 declines name **different** costs and are raised exclusively, so they sum rather than overlap.
 
+### The terms, and what the component knows about itself
+
+Every turn the sweep may ask the model *"which of these tool outputs are spent?"*. That question costs
+money, so a test decides whether to ask at all. Its vocabulary:
+
+| term | meaning |
+|---|---|
+| **candidate** | one tool output being considered for removal |
+| **inventory** / **batch size** | how many candidates go into a single ask (`offered` in the logs) |
+| **approval** | the fraction of offered tokens the model actually agrees to remove. Offer 10,000, get 3,000 removed, approval is 0.30 |
+| **the ledger** | a running record of what this component's own asks have cost and how much they removed — how approval gets *measured* rather than assumed |
+| **warm-up** | the first three asks, before the ledger can average. Assumed values are used instead: approval 1.0, and a cost estimated from the request's shape |
+| **floor** | the lowest approval the ledger will report, 0.05. A guard so a measured zero cannot drive the expected saving to zero and disable the component outright |
+
+The ledger holds four running totals — asks, dollars spent, tokens offered, tokens actually removed — and
+derives two predictions for the next ask: cost as `dollars / asks`, and approval as `removed / offered`.
+
+**So approval answers "is the question worth asking?"** — when this component pays to ask, how much does
+it get back? A poor track record predicts a poor next ask, and the price stops being justified. It is the
+component observing its own history.
+
+Two things that vocabulary hides and that matter:
+
+- **The thing being asked is the ADJUDICATOR, not the agent.** It is a second call to the same model,
+  judging which outputs are spent. The agent doing the task never sees it. A low approval means the
+  *judge* kept the outputs, not that the agent did anything.
+- **A low approval is not automatically a failure.** It means the judge found those outputs still
+  load-bearing, and that may be correct. If they genuinely are not spent, declining to pay for the
+  question is the right answer.
+
+**Which is exactly what makes the estimator dangerous: it is self-referential.** It predicts its own
+future from its own past, and its predictions determine what evidence it receives. Predict low, do not
+ask, learn nothing, keep predicting low — defensible at every individual step and permanently wrong if the
+early samples were unrepresentative.
+
+That is not hypothetical. On the iteration 026 probe the first three asks all carried **three** candidates,
+a batch size this repo had already measured as one where the model does not act (about 94% kept when shown
+a single output, against 58% dropped at ~15). One drop out of nine candidates, approval measured near
+zero, clamped to the 0.05 floor — and because approval sits in the DENOMINATOR of the break-even, 0.05
+multiplies the turns-to-repay by twenty. A real decision at `need=36, have=7` was declined that would have
+read `need≈2` at approval 1.0. After that no ask cleared the bar, so no new sample arrived, and the
+estimate stayed floored.
+
+**The floor prevents approval reaching zero. It does not prevent the estimator getting STUCK**, which is
+the failure that actually occurred, and the deeper defect is one of shape rather than value: approval is a
+CURVE in batch size and the code stores a single point on it. One scalar cannot express "a batch of three
+will not yield but a batch of eight will", and that sentence is both true and necessary. Tracked in the
+issue on the approval estimate.
+
 ### When the trigger declines — and why it is usually *not* "no turns left"
 
 The condition is `need > have`:
