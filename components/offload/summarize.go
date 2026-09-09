@@ -422,18 +422,28 @@ func (s *Summarize) emitCheckpoint(cp sumCheckpoint, msgs []bschemas.ChatMessage
 func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []bschemas.ChatMessage,
 	headCount, start, end int) (out []bschemas.ChatMessage, keys []string, ok, stale bool) {
 	if s.resummarizeTokens <= 0 {
+		rep.Gate("summary_reuse_disabled")
 		return nil, nil, false, false
 	}
 	cp, ok := loadCheckpoint(c)
 	if !ok || cp.CoveredCount <= 0 {
+		rep.Gate("summary_no_checkpoint")
 		return nil, nil, false, false
 	}
 	boundary := start + cp.CoveredCount
 	if boundary > end { // covered prefix would overlap the kept tail — can't reuse
+		rep.Gate("summary_checkpoint_overlaps_tail")
 		return nil, nil, false, false
 	}
 	covered := msgs[start:boundary]
 	if spanHash(covered) != cp.CoveredHash {
+		// COUNTED SEPARATELY because this is the only decline an UPSTREAM COMPONENT can cause. The
+		// hash is over msgs as the rest of the pipeline left them, and `summarize` runs last, so any
+		// component that mutates a message inside the checkpointed span forces the paid path even
+		// when the tail is small. extract_llm_sweep is the case to watch: it removes deep-history
+		// outputs and runs earlier. Without this gate that cost is invisible and indistinguishable
+		// from a session that simply had no checkpoint.
+		rep.Gate("summary_covered_span_changed")
 		return nil, nil, false, false // prefix diverged (different session / edited) → fresh
 	}
 	// The un-summarized middle since the checkpoint (excludes the kept last-K).
@@ -442,6 +452,7 @@ func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []b
 		// faithful summary of msgs[start:boundary] and re-emitting it produces the same bytes
 		// earlier turns sent. Rolling it forward is merely BETTER, so a fresh attempt that
 		// cannot complete may fall back to it instead of sending the transcript full.
+		rep.Gate("summary_tail_past_threshold")
 		return nil, nil, false, true
 	}
 	// Refresh the stashed original span so expand keeps resolving it (full-mode
@@ -459,6 +470,13 @@ func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []b
 		}
 	}
 	emitted, ks := s.emitCheckpoint(cp, msgs, headCount, boundary)
+	// THROUGH Report.Replay, which files the Event and Report.Replays together. This path recorded
+	// NOTHING before: no event, no gate, and Replays never incremented, so `acted_replay` read 0 for
+	// this component whether reuse fired on every eligible turn or on none. The two cost profiles are
+	// nothing alike — a free byte-identical re-emission against a model call plus a prefix rewrite —
+	// and /stats could not tell them apart on the component doing the most work on this workload.
+	// Exactly the defect ActedFresh/ActedReplay were introduced for (#176), one component over.
+	rep.Replay("summary_checkpoint_reused")
 	return emitted, ks, true, false
 }
 
