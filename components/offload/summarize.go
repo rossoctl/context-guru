@@ -178,6 +178,26 @@ const (
 	summarizeDefaultCacheState  = components.CacheStatePreExpiry
 )
 
+// The four names summarize files on Report.Events. Promoted to constants because a SECOND
+// package now keys on them: the dashboard's compaction-episode walk (dash/compactepisode.go)
+// identifies a fresh summary as an act carrying EventFreshSummary and a replay as one carrying
+// any of the other three. A renamed string here would leave that walk matching nothing and
+// reporting zero episodes — a silent zero, which is the failure mode this repo has already paid
+// for twice (see Report.Replays on #176).
+const (
+	// EventFreshSummary marks a turn that PAID for a summary: a model call was made, a
+	// checkpoint was written, and the transcript was restructured around new bytes. It is the
+	// t0 of a compaction episode.
+	EventFreshSummary = "fresh_summary"
+	// The three replay names — a turn that re-emitted an existing checkpoint for free. Each
+	// says WHY the replay happened, which is the operator-facing distinction: the trigger
+	// permitted this turn and the tail had not grown (reused), the trigger declined it
+	// (gated), or the store's rewind reserve refused a new stash (reserve exhausted).
+	EventReusedCheckpoint                   = "reused_checkpoint"
+	EventGatedReplayedCheckpoint            = "gated_replayed_checkpoint"
+	EventReserveExhaustedReplayedCheckpoint = "reserve_exhausted_replayed_checkpoint"
+)
+
 // applySummarizeTriggerDefaults installs summarize's trigger defaults for keys the operator did
 // not write, and validates cache_state.
 //
@@ -242,7 +262,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// avoid, so the feature would have been a net loss rather than a smaller win.
 	//
 	// So: gate, record why, and keep going to the replay.
-	sized := s.trigger.Fires(req, c.CtxWindow)
+	sized := s.trigger.Fires(req, c)
 	if !sized {
 		rep.Gate("below_request_trigger")
 	}
@@ -292,7 +312,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		if len(reusedKeys) == 0 {
 			rep.Irreversible = true // reused a non-full checkpoint (nothing stashed)
 		}
-		rep.Replay("reused_checkpoint")
+		rep.Replay(EventReusedCheckpoint)
 		req.Input = reusedMsgs
 		return reusedKeys, nil
 	}
@@ -311,7 +331,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// recorded WHICH it was.
 	if !fires || model == nil {
 		if stale {
-			return s.replayStale(c, rep, req, msgs, headCount, start, "gated_replayed_checkpoint")
+			return s.replayStale(c, rep, req, msgs, headCount, start, EventGatedReplayedCheckpoint)
 		}
 		// Nothing was ever emitted in a summarized shape for this session, so the full
 		// transcript is not a flip of anything — it is what the provider already has.
@@ -449,6 +469,16 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		CoveredHash: spanHash(span), Key: key,
 	})
 
+	// The fresh path's own event, filed HERE rather than at the top of the path: everything
+	// above this line can still decline (a blank summary, a refused stash, an empty span after
+	// the expand trim), and an event filed before those would name a summary that was never
+	// emitted. This is the first point at which a new summary is committed.
+	//
+	// An Event, not a Replay: this turn spent money. Report.Replay is for the free paths, and
+	// keeping the two apart is what lets the episode walk below tell a paid t0 from the
+	// amortization that follows it.
+	rep.Event(EventFreshSummary)
+
 	// [msg0, summary, last-K] — reassign; apply.Body rebuilds losslessly.
 	out := make([]bschemas.ChatMessage, 0, 2+s.keepLast)
 	out = append(out, msgs[:headCount]...)
@@ -489,7 +519,7 @@ func (s *Summarize) refuse(c *components.Ctx, rep *components.Report, req *bsche
 		rep.Skipped = true
 		return nil, nil
 	}
-	return s.replayStale(c, rep, req, msgs, headCount, start, "reserve_exhausted_replayed_checkpoint")
+	return s.replayStale(c, rep, req, msgs, headCount, start, EventReserveExhaustedReplayedCheckpoint)
 }
 
 // replayStale re-emits the standing checkpoint on a turn that will not produce a new one.

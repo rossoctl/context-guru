@@ -386,9 +386,15 @@ func TestTriggerDefaultsUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, window := range []int{0, 200000, 1000000} {
-		if !zero.Fires(&req, window) {
-			t.Fatalf("zero Trigger did not fire at window %d; that breaks every "+
-				"config without a trigger: block", window)
+		// Both extremes of the billed figure: absent (a session's first turn) and nearly the
+		// whole window. A zero Trigger must fire in either case — it carries no fraction, so
+		// nothing about the fill can reach its decision.
+		for _, billed := range []int{0, window - 1} {
+			c := &components.Ctx{CtxWindow: window, CtxWindowExact: true, PrevBilledInput: billed}
+			if !zero.Fires(&req, c) {
+				t.Fatalf("zero Trigger did not fire at window %d, billed %d; that breaks every "+
+					"config without a trigger: block", window, billed)
+			}
 		}
 	}
 	if got := zero.OutputFloor(200000, 1500); got != 1500 {

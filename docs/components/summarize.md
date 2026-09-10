@@ -87,7 +87,7 @@ of the normalized list, so it is asserted on the raw body instead (`apply/toolro
 | `model.base_url` | *the provider's public API* | Pin a dedicated endpoint as a full URL. |
 | `model.api_key` | *the process env key* | **Credential** for the pinned endpoint; empty falls back to the provider env key, which a hosted deployment refuses. Write-only on the settings page. |
 | `model.auth` | `x-api-key` | Anthropic only: `x-api-key` \| `bearer`. |
-| `trigger.min_request_frac` | **0.9** | Summarize only once the transcript is at least this fraction of the model's context window. See below. |
+| `trigger.min_request_frac` | **0.9** | Summarize only once the session has been billed at least this fraction of the model's context window. Measured from the provider's own input count for the previous turn — see below. |
 | `trigger.cache_state` | **`pre_expiry`** | Summarize only when the prompt cache is about to expire. `any` removes the constraint. See below. |
 | `trigger.pre_expiry_seconds` | 60 | How wide "about to expire" is. Unmeasured either way. |
 | `trigger` (rest) | — | `min_request_tokens`, `min_messages`, `min_output_tokens`, `min_output_frac`, `huge_output_frac`. |
@@ -163,15 +163,32 @@ An unrecognised `cache_state` is a config **error**, not a silent fall back to `
 one key that decides when this component fires would otherwise turn the gate off while reading as
 though it were on.
 
-### The fill fraction refuses to act on a guessed window
+### The fill fraction is measured on the provider's numbers, and refuses to guess
 
-`min_request_frac` needs the model's context window as a number. It comes from an operator's own
-price list if configured, else LiteLLM's public map. If neither answers, a small substring table
-compiled into the binary does — and that table answers 200,000 for every Opus, against a real
-1,000,000. A 0.9 fraction resolved against it would fire at 180k, five times too early.
+Two things have to be true before "is this transcript 90% full" can be answered at all, and this
+component declines — counting `window_not_exact` — whenever either is missing.
 
-So the gate **declines** when the window is unknown *or* came from that table, and counts
-`window_not_exact`. Setting `min_request_frac: 0` removes the dependency entirely.
+**The window has to be the real one.** It comes from an operator's own price list if configured,
+else LiteLLM's public map. If neither answers, a small substring table compiled into the binary
+does — and that table answers 200,000 for every Opus, against a real 1,000,000. A 0.9 fraction
+resolved against it would fire at 180k, five times too early. So a window that came from the table,
+or no window at all, declines rather than acts.
+
+**The fill has to be measured the same way the window is.** A context window is stated in the
+tokens the provider bills: the messages, *plus* the system prompt, *plus* the tool declarations,
+*plus* the JSON envelope. This proxy's own tokenizer sees only the message text, which on measured
+traffic is a median **3.4x smaller** (p25 2.4x, p90 6.8x). Comparing our count against the
+provider's window would demand roughly three times a 1M window's worth of transcript — a threshold
+that can never be reached, because the request is rejected upstream, or the client compacts, first.
+
+So the fill comes from the provider's own reported input count for the session's **previous** turn,
+recorded when that response arrived. That makes it one turn stale, which is deliberate: a
+transcript only grows, so the previous turn is a sound lower bound, and a gate that opens one turn
+late is the harmless direction. A session's **first** turn has no such figure and declines — an
+unknown fill is not an empty one.
+
+Setting `min_request_frac: 0` removes all of this, and then `min_request_tokens` (counted in
+message text) is the size gate.
 
 ## When it shines
 

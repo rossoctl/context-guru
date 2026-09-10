@@ -183,12 +183,35 @@ const (
 	// cached at the first summarized message and re-writing the whole suffix at 1.25x fresh.
 	// That is cache-destructive, which is this list's entry criterion.
 	SumPrefix = "cg:sum:"
+	// BilledPrefix is the provider's own billed input-token count for this session's PREVIOUS
+	// turn: fresh input + cache reads + cache writes, as the provider reported them.
+	//
+	// It exists because a fraction of the context window cannot be evaluated against
+	// schema.MessagesTokens. That counts message TEXT only — no system prompt, no tool
+	// declarations, no JSON envelope — while a context window is stated in the units the
+	// provider bills. Measured on this deployment's uncompacted traffic the two differ by a
+	// median 3.38x (p25 2.43, p90 6.80; see dash/overview.go's EstimatorDivergence), so
+	// `MessagesTokens >= 0.9 * window` demands roughly three times the window's worth of
+	// transcript and never becomes true at all. This is the numerator in the DENOMINATOR's
+	// units, which is the only way that comparison is meaningful.
+	//
+	// PINNED, for the same reason SumPrefix is. summarize's default trigger declines when this
+	// is absent (an unknown fill must not be guessed at), so losing the key does not merely
+	// cost a re-measurement — it turns the component off until the next response writes it
+	// back, and the turns in between send the transcript full.
+	//
+	// Written on the RESPONSE path, read on the request path, so it is always the previous
+	// turn's figure. That is a deliberate one-turn lag rather than an estimate: a transcript
+	// only grows, so the previous turn is a sound lower bound on this one, and a gate that
+	// fires one turn late is the safe direction.
+	BilledPrefix = "cg:bin:"
 )
 
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
-var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix}
+var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
+	BilledPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {

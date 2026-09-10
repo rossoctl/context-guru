@@ -18,10 +18,10 @@ import (
 // a test that constructs the phase directly would agree with CachePhase by fiat. These set the raw
 // Ctx fields a real request carries — the TTL the body asked for and this session's idle time — so
 // the classification under test is the one apply's numbers actually produce.
-func sumCtx(st store.Store, phase string, window int, exact bool) *components.Ctx {
+func sumCtx(st store.Store, phase string, window int, exact bool, billed int) *components.Ctx {
 	c := &components.Ctx{
 		Ctx: context.Background(), Session: "s", Store: st, MaxCachedIdx: -1,
-		CtxWindow: window, CtxWindowExact: exact,
+		CtxWindow: window, CtxWindowExact: exact, PrevBilledInput: billed,
 	}
 	const ttl = 5 * 60 * 1000 // a bare `ephemeral` mark: five minutes
 	switch phase {
@@ -96,7 +96,7 @@ func TestSummarizeReplaysItsCheckpointOnATurnTheTriggerDeclines(t *testing.T) {
 	// --- Turn 1: inside the pre-expiry window, so the gate opens and a checkpoint is made.
 	msgs := sumTranscript(3)
 	turn1 := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), msgs...)}
-	ctx := sumCtx(st, "pre_expiry", 0, false)
+	ctx := sumCtx(st, "pre_expiry", 0, false, 0)
 	var rep components.Report
 	if _, err := s.Offload(turn1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
@@ -121,7 +121,7 @@ func TestSummarizeReplaysItsCheckpointOnATurnTheTriggerDeclines(t *testing.T) {
 	grown := sumTranscript(9)
 	turn2 := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), grown...)}
 	rep = components.Report{}
-	if _, err := s.Offload(turn2, &rep, sumCtx(st, "warm", 0, false)); err != nil {
+	if _, err := s.Offload(turn2, &rep, sumCtx(st, "warm", 0, false, 0)); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
 	if rep.Gates["cache_state_declined_warm"] == 0 {
@@ -170,7 +170,7 @@ func TestSummarizeReplaysItsCheckpointWhenNoModelIsAvailable(t *testing.T) {
 
 	msgs := sumTranscript(3)
 	turn1 := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), msgs...)}
-	ctx := sumCtx(st, "pre_expiry", 0, false)
+	ctx := sumCtx(st, "pre_expiry", 0, false, 0)
 	var rep components.Report
 	if _, err := s.Offload(turn1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
@@ -186,7 +186,7 @@ func TestSummarizeReplaysItsCheckpointWhenNoModelIsAvailable(t *testing.T) {
 	grown := sumTranscript(9)
 	turn2 := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), grown...)}
 	rep = components.Report{}
-	if _, err := s.Offload(turn2, &rep, sumCtx(st, "pre_expiry", 0, false)); err != nil {
+	if _, err := s.Offload(turn2, &rep, sumCtx(st, "pre_expiry", 0, false, 0)); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
 	if rep.Gates["no_model"] == 0 {
@@ -223,7 +223,7 @@ func TestAZeroResummarizeTokensConfigStillReplaysRatherThanFlipping(t *testing.T
 
 	msgs := sumTranscript(3)
 	turn1 := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), msgs...)}
-	ctx := sumCtx(st, "pre_expiry", 0, false)
+	ctx := sumCtx(st, "pre_expiry", 0, false, 0)
 	var rep components.Report
 	if _, err := s.Offload(turn1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
@@ -235,7 +235,7 @@ func TestAZeroResummarizeTokensConfigStillReplaysRatherThanFlipping(t *testing.T
 
 	turn2 := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), msgs...)}
 	rep = components.Report{}
-	if _, err := s.Offload(turn2, &rep, sumCtx(st, "warm", 0, false)); err != nil {
+	if _, err := s.Offload(turn2, &rep, sumCtx(st, "warm", 0, false, 0)); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
 	if len(turn2.Input) == len(msgs) {
@@ -247,32 +247,51 @@ func TestAZeroResummarizeTokensConfigStillReplaysRatherThanFlipping(t *testing.T
 	}
 }
 
-// The fill conjunct, with the window as the subject.
+// The fill conjunct, with the window and the RULER as the subject.
 //
-// The second case is the one worth having: the resolver said ok=true, so CtxWindow is non-zero and
-// every existing code path treats it as usable — but it came from the substring table of last
-// resort, which answers 200,000 for every Opus against a real 1,000,000. A 0.9 fraction resolved
-// against that fires at 180k. Declining is the only honest answer, and `CtxWindow > 0` cannot reach
-// it: only the provenance can.
+// Two cases here are load-bearing for different reasons.
+//
+// The guessed-window case: the resolver said ok=true, so CtxWindow is non-zero and every existing
+// code path treats it as usable -- but it came from the substring table of last resort, which
+// answers 200,000 for every Opus against a real 1,000,000. A 0.9 fraction resolved against that
+// fires at 180k. Declining is the only honest answer, and `CtxWindow > 0` cannot reach it: only
+// the provenance can.
+//
+// The RULER cases: the fill is Ctx.PrevBilledInput -- the provider's own count for this session's
+// previous turn -- and not schema.MessagesTokens. The fixture below is a handful of tokens of
+// message text against a 1M window, so under the old arithmetic (frac*window compared against
+// MessagesTokens) EVERY row would decline, including the two that must fire. The precondition
+// asserts that gap explicitly, so this test cannot quietly stop being about the ruler.
 func TestTheFillConjunctDeclinesRatherThanResolveAgainstAGuessedWindow(t *testing.T) {
 	msgs := sumTranscript(3)
 	req := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), msgs...)}
 	tokens := schema.MessagesTokens(req)
 	if tokens < 20 {
-		t.Fatalf("fixture is only %d tokens, too small to sit either side of a fraction", tokens)
+		t.Fatalf("fixture is only %d tokens, too small to be a transcript at all", tokens)
+	}
+
+	const window = 1_000_000
+	const floor = 0.9 * window
+	// The whole point of the change: our own count of this transcript is nowhere near the
+	// threshold, and the gate must nonetheless fire when the PROVIDER has billed past it.
+	if float64(tokens) >= floor {
+		t.Fatalf("fixture counts %d message-text tokens, which already clears the %.0f floor; "+
+			"this test can no longer distinguish the two rulers", tokens, floor)
 	}
 
 	cases := []struct {
 		name      string
 		window    int
 		exact     bool
+		billed    int
 		wantFires bool
 		wantGate  string
 	}{
-		{"a measured window the transcript fills fires", int(float64(tokens) / 0.9), true, true, ""},
-		{"a measured window the transcript does not fill declines", tokens * 100, true, false, "below_request_trigger"},
-		{"a GUESSED window declines even though it is non-zero", int(float64(tokens) / 0.9), false, false, "window_not_exact"},
-		{"an unknown window declines rather than silently dropping the conjunct", 0, false, false, "window_not_exact"},
+		{"a session the provider has billed past the fraction fires", window, true, 950_000, true, ""},
+		{"a session billed well short of it declines", window, true, 100_000, false, "below_request_trigger"},
+		{"a GUESSED window declines even though it is non-zero", window, false, 950_000, false, "window_not_exact"},
+		{"an unknown window declines rather than silently dropping the conjunct", 0, false, 950_000, false, "window_not_exact"},
+		{"no previous billed figure declines: unknown fill is not an empty one", window, true, 0, false, "window_not_exact"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -283,7 +302,7 @@ func TestTheFillConjunctDeclinesRatherThanResolveAgainstAGuessedWindow(t *testin
 			st := store.NewMemory(store.Options{MaxEntries: 400})
 			in := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), msgs...)}
 			var rep components.Report
-			if _, err := s.Offload(in, &rep, sumCtx(st, "unknown", tc.window, tc.exact)); err != nil {
+			if _, err := s.Offload(in, &rep, sumCtx(st, "unknown", tc.window, tc.exact, tc.billed)); err != nil {
 				t.Fatalf("Offload must fail open: %v", err)
 			}
 			fired := atomic.LoadInt64(&model.calls) == 1

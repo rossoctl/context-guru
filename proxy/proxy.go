@@ -1393,6 +1393,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		if h.agg != nil && usageOK {
 			h.agg.RecordUsage(usage.FreshInput, usage.CacheRead, usage.CacheWrite, usage.Output)
 		}
+		// The provider's own input count, kept for this session's NEXT turn so a
+		// fraction-of-the-window trigger has something in the window's units to compare
+		// against. `session` here is tr.Session — the id apply itself derived — which is what
+		// RecordBilledInput requires; the three parts are summed because the split between
+		// fresh, read and written is an artefact of where the cache breakpoints fell, while the
+		// question being asked is how big the prompt was.
+		//
+		// Guarded on usageOK: a response that reported no usage (a stream that failed, a
+		// non-provider path) must leave the previous turn's figure in place rather than
+		// overwrite it with a zero that would read as "unknown" and shut the gate.
+		if usageOK {
+			apply.RecordBilledInput(tn.Store, session,
+				usage.FreshInput+usage.CacheRead+usage.CacheWrite)
+		}
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 		// THE one line per request. In a defer so every terminal path emits it exactly
 		// once — stream-through, buffered replay, the round-cap exit, an upstream failure

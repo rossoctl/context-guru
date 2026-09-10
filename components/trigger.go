@@ -25,10 +25,16 @@ type Trigger struct {
 	MinMessages      int `yaml:"min_messages"`       // …and carry at least this many messages (≈ steps)
 	MinOutputTokens  int `yaml:"min_output_tokens"`  // per-item floor: only offload an output at least this big
 
-	// Context-window fractions (0 = unset) make triggers general across models:
-	// each is resolved against Ctx.CtxWindow (the model's max input tokens, obtained
-	// dynamically). When the window is unknown (0) fractions are ignored and only the
-	// absolute thresholds apply — fully backward compatible.
+	// Context-window fractions (0 = unset) make triggers general across models: each is
+	// resolved against Ctx.CtxWindow (the model's max input tokens, obtained dynamically).
+	// When the window is unknown (0) fractions are ignored and only the absolute thresholds
+	// apply — fully backward compatible.
+	//
+	// MinRequestFrac is compared against Ctx.PrevBilledInput, NOT against
+	// schema.MessagesTokens: a window is stated in the provider's billed units and
+	// MessagesTokens counts message text only, a median 3.38x smaller. See Fires. The per-item
+	// fractions below are floors on a single tool output, where our own tokenizer is both sides
+	// of the comparison and no conversion arises.
 	MinRequestFrac float64 `yaml:"min_request_frac"` // fire when request >= frac*window (e.g. 0.6)
 	MinOutputFrac  float64 `yaml:"min_output_frac"`  // per-item: only offload an output >= frac*window
 	HugeOutputFrac float64 `yaml:"huge_output_frac"` // HARD per-item trigger: a single output >= frac*window
@@ -120,7 +126,12 @@ func (t Trigger) FracResolvable(c *Ctx) bool {
 	if t.MinRequestFrac <= 0 {
 		return true
 	}
-	return c != nil && c.CtxWindowExact && c.CtxWindow > 0
+	// Three facts, all required, and the third is the one this function was missing when it
+	// shipped. A fraction of the window has to be compared against a figure measured the way
+	// the window is measured — the provider's own billed input — and Ctx.PrevBilledInput is
+	// the only such figure available. 0 means this session has no earlier response to read
+	// from, so the fill is unknown and there is nothing honest to compare.
+	return c != nil && c.CtxWindowExact && c.CtxWindow > 0 && c.PrevBilledInput > 0
 }
 
 // frac converts a fraction of the window to an absolute token count (0 if either is unset).
@@ -131,20 +142,47 @@ func frac(f float64, window int) int {
 	return int(math.Ceil(f * float64(window)))
 }
 
-// Fires reports whether the request-level thresholds are met, given the resolved
-// model context window (0 = unknown). The effective request-token threshold is the
-// MAX of the absolute MinRequestTokens and the fraction MinRequestFrac*window; the
-// message-count threshold is unchanged. Thresholds are ANDed; a zero threshold
-// imposes no constraint. Does not consider the per-item floors (OutputFloor/IsHuge).
-func (t Trigger) Fires(req *schemas.BifrostChatRequest, window int) bool {
+// Fires reports whether the request-level thresholds are met. Thresholds are ANDed; a zero
+// threshold imposes no constraint. Does not consider the per-item floors (OutputFloor/IsHuge).
+//
+// # The two size thresholds are measured on DIFFERENT RULERS, and are therefore separate
+//
+// This function used to take `reqFloor = max(MinRequestTokens, frac(MinRequestFrac, window))`
+// and compare the result against schema.MessagesTokens. That is a units error, and it made the
+// fraction unreachable rather than merely inaccurate:
+//
+//   - MessagesTokens counts message TEXT ONLY — no system prompt, no tool declarations, no JSON
+//     envelope. MinRequestTokens has always been stated in those units and still is.
+//   - A context window is stated in the units the PROVIDER bills, which include all of the
+//     above. Measured on uncompacted production traffic the provider's count runs a median
+//     3.38x higher than MessagesTokens (p25 2.43, p90 6.80 — dash/overview.go's
+//     EstimatorDivergence).
+//
+// So `MessagesTokens >= 0.9 * 1_000_000` really asks for about 3M provider tokens on a 1M model:
+// the request is rejected upstream, or the client compacts, long before it can be true. A gate
+// that never fires looks exactly like a gate that is working, which is why this is worth the
+// paragraph.
+//
+// max() cannot be salvaged either — taking the larger of two numbers on two different rulers is
+// meaningless. They are ANDed as separate conjuncts, each against the figure measured its own
+// way. For a config that sets only one (the common case, and every shipped default) this changes
+// nothing; for one that sets both it is stricter, and honestly so.
+//
+// The fraction is skipped when PrevBilledInput is 0 rather than treated as a zero fill — see
+// FracResolvable, which is the conjunct a caller uses to tell "not full enough" from "cannot
+// tell", and which summarize counts separately.
+func (t Trigger) Fires(req *schemas.BifrostChatRequest, c *Ctx) bool {
 	if t.MinMessages > 0 && len(req.Input) < t.MinMessages {
 		return false
 	}
-	reqFloor := t.MinRequestTokens
-	if f := frac(t.MinRequestFrac, window); f > reqFloor {
-		reqFloor = f
+	if t.MinRequestTokens > 0 && schema.MessagesTokens(req) < t.MinRequestTokens {
+		return false
 	}
-	if reqFloor > 0 && schema.MessagesTokens(req) < reqFloor {
+	window, billed := 0, 0
+	if c != nil {
+		window, billed = c.CtxWindow, c.PrevBilledInput
+	}
+	if f := frac(t.MinRequestFrac, window); f > 0 && billed > 0 && billed < f {
 		return false
 	}
 	return true

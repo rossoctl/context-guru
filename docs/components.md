@@ -75,8 +75,21 @@ Every preset that touches caching carries `cachesplit`, never `cacheinject` — 
 context window** (resolved dynamically via LiteLLM's public model map, no hand-maintained list):
 `min_request_frac`, `min_output_frac`, and a hard `huge_output_frac` ("huge tool call" — act regardless of
 the request-level gate). `collapse.max_frac` scales its size budget likewise.
-Absolutes (`min_request_tokens`, etc.) still win; when the window is unknown, fractions are ignored and
-absolutes apply (backward compatible). This lets one config generalize across models/benchmarks.
+When the window is unknown, fractions are ignored and absolutes apply (backward compatible). This lets
+one config generalize across models/benchmarks.
+
+!!! note "`min_request_frac` and `min_request_tokens` are measured differently, and are ANDed"
+    A context window is stated in the tokens the **provider** bills — messages plus the system
+    prompt, the tool declarations and the JSON envelope. `min_request_frac` is therefore compared
+    against the provider's own reported input count for the session's previous turn.
+    `min_request_tokens` is compared against **message text only**, which is what this proxy's own
+    tokenizer can see, and on measured traffic runs a median **3.4x smaller** than the billed
+    figure. Because the two are on different scales they are separate conditions, both of which
+    must be met — taking the larger of them would be comparing unlike numbers. Set one or the
+    other unless you mean both.
+
+    The per-item fractions (`min_output_frac`, `huge_output_frac`) are unaffected: they size a
+    single tool output, where the same tokenizer is on both sides of the comparison.
 
 **Reversibility in practice.** The `context_guru_expand` tool is advertised on outgoing requests
 (`INJECT_EXPAND=auto|always|never`, default `auto` = whenever the request already declares tools,

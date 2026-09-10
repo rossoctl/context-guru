@@ -652,7 +652,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// Resolved once: the candidate loop below tests it per tool output, and it is a
 	// handler call rather than a field read.
 	dbg := debugExtractLLM(c)
-	fires := e.trigger.Fires(req, c.CtxWindow)
+	fires := e.trigger.Fires(req, c)
 	goal := e.extractionContext(req)
 	query := keywords(goal)
 	if len(query) == 0 {
