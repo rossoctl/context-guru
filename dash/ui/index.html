@@ -555,6 +555,64 @@
     <h2>Unique savings by component</h2>
     <div id="chart-comp" class="chart" data-testid="chart-components"></div>
   </div>
+  <!-- What a summary was WORTH over a fixed span of work after it was made. Separate from the
+       table above because it answers a different question: that one asks whether a component
+       earns its place over a whole window, this one measures one mechanism — summarize's
+       cache-aware trigger — against the specific cost it exists to avoid. -->
+  <div class="panel">
+    <h2>What each summary earned</h2>
+    <p class="note">Every summary, followed for <strong>10% more of the model's context
+      window</strong>. Cold rewrites avoided, warm reads made cheaper, minus what the summary
+      itself cost.</p>
+    <details class="why"><summary>What these columns mean, and what they leave out</summary>
+      <dl>
+        <dt>Episode</dt><dd>one summary plus the span of work after it — from the turn it was
+          made until the session had been billed 10% more of the window. Measured in the
+          <strong>provider's</strong> token counts, because that is what a context window is
+          stated in.</dd>
+        <dt>Cold credit</dt><dd><strong>the headline.</strong> Turns inside the span whose cache
+          entry had lapsed. An uncompacted prefix would have been re-written in full at 1.25x
+          fresh; a compacted one was not. This is the cost the trigger exists to avoid.</dd>
+        <dt>Read credit</dt><dd>turns whose cache hit. The transcript is re-sent every turn, so a
+          shorter one is cheaper on every warm turn too, at the 0.1x cache-read rate. Usually the
+          larger of the two columns, simply because warm turns are far more numerous.</dd>
+        <dt>Other</dt><dd>cold starts and turns with no cache verdict. Kept apart rather than
+          folded into either — a session's first turn had no entry to preserve.</dd>
+        <dt>Our cost</dt><dd>the summary's own model call, plus the cache write our rewrite caused
+          on that turn. The write is an <strong>upper bound</strong>: some of it was transcript
+          growth that would have been paid anyway, and no record says how much. Overstating our
+          own cost is the safe direction for a savings figure.</dd>
+        <dt>Net</dt><dd>credit minus cost. Negative is a real outcome and is shown as one.</dd>
+        <dt>Recorded vs inferred</dt><dd>two different claims, never added together.
+          <strong>Recorded</strong> means the component said so on that turn.
+          <strong>Inferred</strong> means an older row acted and carried no replay marker, so it
+          must have paid — the only way to see anything from before that marker existed, and
+          therefore the only comparison against the old size-only trigger.</dd>
+        <dt>Open / voided</dt><dd>an <strong>open</strong> span has not finished inside this time
+          window; a <strong>voided</strong> one had the client compact its own transcript
+          part-way through, which is the very thing this trigger tries to get ahead of, so the
+          rest is not comparable. Both are counted and neither is totalled.</dd>
+        <dt>Not counted</dt><dd>a summary the agent had to <code>expand</code> again costs input
+          tokens that this figure does not subtract. Conversations on a model whose context
+          window is not published are excluded entirely rather than measured against a guess.</dd>
+      </dl>
+    </details>
+    <div class="tblwrap" tabindex="0">
+      <table class="tbl" data-testid="episodes-table">
+        <thead><tr>
+          <th>Provenance</th><th class="num">Episodes</th><th class="num">Closed</th>
+          <th class="num">Open</th><th class="num">Voided</th><th class="num">Turns</th>
+          <th class="num">Cold credit</th><th class="num">Read credit</th><th class="num">Other</th>
+          <th class="num">Our cost</th><th class="num">Net</th>
+        </tr></thead>
+        <tbody id="episodes-body"></tbody>
+      </table>
+    </div>
+    <!-- The coverage half. Without it this panel is survivorship: it would only ever report on
+         sessions the trigger DID fire on, which is always a positive number. -->
+    <p class="hint" id="episodes-coverage" data-testid="episodes-coverage" hidden></p>
+    <p class="hint" id="episodes-assumptions" data-testid="episodes-assumptions" hidden></p>
+  </div>
 </section>
 
 <!-- ── Sessions ───────────────────────────────────────────────────────────── -->

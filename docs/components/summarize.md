@@ -190,6 +190,43 @@ unknown fill is not an empty one.
 Setting `min_request_frac: 0` removes all of this, and then `min_request_tokens` (counted in
 message text) is the size gate.
 
+## Measuring what it earned
+
+The Components tab carries a **What each summary earned** panel, which follows every summary for
+**10% more of the model's context window** and reports what happened over that span:
+
+| Column | What it is |
+|---|---|
+| Cold credit | turns in the span whose cache entry had lapsed — an uncompacted prefix would have been re-written in full at 1.25x fresh. This is the cost the trigger exists to avoid. |
+| Read credit | turns whose cache hit. A shorter transcript is cheaper on every warm turn too, at the 0.1x read rate. Usually the larger column, because warm turns are far more numerous. |
+| Our cost | the summary's own model call, plus the cache write the rewrite caused. The write half is an **upper bound** — some of it was growth that would have been paid anyway. |
+| Net | credit minus cost. Negative is shown as negative. |
+
+Three things about that panel are worth knowing before reading a number off it.
+
+**It reports coverage, not just savings.** Beside the table is the count of conversations that
+reached the fill threshold and produced **no** summary at all, and what their expired-cache
+rewrites cost. Without that line the panel would only ever describe sessions this component fired
+on, which is survivorship and always looks positive. That count is also the number that says
+whether `pre_expiry_seconds` should be widened.
+
+**`recorded` and `inferred` are separate rows and are never added.** `recorded` means the component
+said so on that turn. `inferred` means an older row acted and carried no replay marker, so it must
+have paid for a summary — sound, but deduced. It exists because the marker is new: `inferred` is
+the only way to see what the **old size-only trigger** achieved, and therefore the only available
+comparison.
+
+**Spans that are `open` or `voided` are counted and not totalled.** Open means the span had not
+finished inside the time range being viewed; voided means the client compacted its own transcript
+part-way through, which is the very thing this trigger tries to get ahead of, so the remainder is
+not comparable.
+
+The measurement introduces no new pricing. Every dollar comes from the same per-request figures the
+rest of the dashboard uses, priced when the request was recorded at the rates then in force — the
+panel scopes them into spans and splits them by the cache state of the turn that earned them.
+A conversation on a model whose context window is not published is excluded rather than measured
+against a guess, for the same reason the trigger declines there.
+
 ## When it shines
 
 Long agentic sessions where the bulk is stale middle context, behind a client that caps its own

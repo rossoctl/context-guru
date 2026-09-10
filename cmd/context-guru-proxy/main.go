@@ -590,6 +590,11 @@ func main() {
 	// history and the same question about it.
 	if rec != nil {
 		h.API().SetPricer(priceResolver(windows))
+		// The SAME resolver chain the request path sizes triggers against, so the dashboard's
+		// "how full did this context get" and the trigger's own answer cannot disagree. Read
+		// through modelinfo.Exact on the dash side, which is what keeps the last-resort
+		// substring table's 200,000-for-every-Opus out of a span measurement.
+		h.API().SetWindows(windows)
 	}
 
 	// One identity resolver for both halves of the dashboard: the read routes (dash)

@@ -42,6 +42,13 @@ type API struct {
 	tenantCapture func(tenantID string) bool
 	// pricer values the pre-instrumentation split figure on read. nil = that figure is omitted.
 	pricer modelinfo.Pricer
+	// windows resolves a model's context window, and is separate from pricer because the two
+	// answer different questions and a deployment can know one without the other. Read through
+	// modelinfo.Exact, so a resolver that will not say whether its answer is PUBLISHED is
+	// treated as inexact — the substring table of last resort answers 200,000 for every Opus
+	// against a real 1,000,000, and a span sized against that measures a fifth of the work it
+	// claims to. nil means every window is unknown, which excludes rather than guesses.
+	windows modelinfo.Resolver
 	// statsCache, facetsCache and componentsCache hold the last rendered body per
 	// (principal, query), briefly. Overview alone measured 25s under real production write
 	// load (many sequential queries, each one a chance to queue behind the writer), and
@@ -370,6 +377,10 @@ func (a *API) SetTenantCapture(fn func(tenantID string) bool) { a.tenantCapture 
 // absent rather than zero — an unpriced number must not read as "nothing was saved".
 func (a *API) SetPricer(p modelinfo.Pricer) { a.pricer = p }
 
+// SetWindows supplies the context-window resolver, for the views that ask how FULL a context got
+// rather than what it cost. Separate from SetPricer for the reason the fields are separate.
+func (a *API) SetWindows(r modelinfo.Resolver) { a.windows = r }
+
 // Who has to act when there is no transcript to show. This is a SEPARATE axis from the
 // transcript state, deliberately: the state answers "why is this panel empty" and the
 // answer is the same either way (nothing was captured), while this names the party who
@@ -526,7 +537,11 @@ func (a *API) routes() []route {
 	rs = append(rs, a.keepAliveStrategyRoutes()...)
 	// The KV-cache TTL analysis and strategy simulator, declared beside its handlers in
 	// kvcacheapi.go and appended here for the same reason.
-	return append(rs, a.kvCacheRoutes()...)
+	rs = append(rs, a.kvCacheRoutes()...)
+	// The Components tab's compaction-episode measurement, declared beside its handler in
+	// compactepisode.go and appended here for the same reason as the rest: this table is what
+	// the scoping tests walk.
+	return append(rs, a.compactEpisodeRoutes()...)
 }
 
 // Mount registers every dashboard route on a mux under the given prefix
