@@ -40,6 +40,16 @@ session works too; reloading is just quicker.
 
 ### Step 2 asks you to pick a scope — this is what it means
 
+**Project scope is the default, and the script now enforces it.** `settings.py add` refuses to write
+the machine-wide `~/.claude/settings.json` unless it is explicitly passed `--user-scope`, which the
+install skill adds only after you have asked for `--global` and confirmed it. The reason is the
+blast radius, not tidiness: a project-scope install that goes wrong costs you that project, while
+the same mistake machine-wide takes out every Claude Code session you have — including the ones you
+would use to fix it, and every project unrelated to context-guru. Routing per repo also means a
+machine-wide base URL of your own keeps working everywhere else, because `env` blocks merge per key
+with the most specific file winning.
+
+
 `/plugin install` offers three, and they decide who gets **the plugin**:
 
 | Option | Written to | Who gets it |
@@ -362,6 +372,69 @@ you have turned that segment on) no longer means the provider's own cached entry
 cold. The countdown is Claude Code's own view of *its own* last request; it has no way to see a
 ping the proxy sent while you were not typing. Treat `ka Np` and the next turn's latency as the
 ground truth once keep-alive is running, not the countdown by itself.
+
+## The escape hatch: when Claude Code cannot fix it for you
+
+`/context-guru:uninstall` is a skill, so it needs a working session. The failure this plugin can
+cause takes that away: every request goes through a local proxy, so a dead port, a stale routing
+key or a credential the upstream rejects makes *every* API call fail — and the agent that would
+undo the routing cannot reach a model to be asked. That is not hypothetical; it is the incident
+this section exists because of.
+
+So the install writes a hatch you can run yourself, and it lives **outside the plugin** — a
+recovery tool inside the thing that broke is gone the moment you `/plugin uninstall`, refresh the
+marketplace, or the plugin cache is wiped:
+
+```bash
+~/.local/state/context-guru/context-guru-reset          # always here
+context-guru-reset                                      # on PATH too, when ~/.local/bin exists
+```
+
+It is POSIX `sh`. No Claude, no network, no proxy, no Python, no Go binary, no plugin code.
+
+```bash
+context-guru-reset --dry-run    # show what it would change, write nothing
+context-guru-reset              # show the plan, ask, then restore
+context-guru-reset --yes        # no prompt, for a script
+```
+
+What it does:
+
+1. reads its record of every settings file the install edited — kept in
+   `~/.local/state/context-guru/reset-manifest.tsv`;
+2. copies each of those aside as `*.context-guru-prereset-*`, so running the hatch is itself
+   reversible;
+3. restores each one from a copy taken **before the first edit**, held in
+   `~/.local/state/context-guru/originals/` — or deletes the file, when the install is the reason
+   it exists;
+4. verifies no routing key is left, and reports anything it could not fix.
+
+Why a separate copy when every edit already writes a `*.context-guru-backup-*` beside the file:
+those are capped at ten and every add *and* remove writes one, so on a machine that has installed
+and uninstalled a few times the backup holding your pre-context-guru state is the first to be
+deleted. The copy under `originals/` is written once, with `O_EXCL`, and never pruned.
+
+It never signals a process, never touches the network, and never edits a file it has no record of
+editing. Any proxy still running exits on its own idle timeout.
+
+### It restores routing, not credentials
+
+Worth being blunt about, because the incident that prompted the hatch was **not** a routing fault.
+Both `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` were set, the gateway rejected whichever one
+won, and the export was a single line in a shell rc. No amount of settings surgery reaches that.
+
+So the hatch ends with an environment report: whether both credential variables are set, whether
+`ANTHROPIC_BASE_URL` is exported in your *shell* (where no settings file can override it), and the
+`file:line` of every `ANTHROPIC_*` assignment in your shell startup files. It prints the locations
+and never the values — a recovery tool that echoes a live key into your terminal buffer is not one.
+Fixing those lines is yours to do; the hatch will not edit them.
+
+### If there is no record
+
+A hand-edited settings file, or a wiped state directory, and the hatch has nothing to restore
+from. It says so, prints the three files worth checking, greps each for the keys, and lists the
+timestamped backups beside them — rather than reporting "nothing to do" to somebody whose sessions
+are down. Exit status is 3: finished, with something left for a human.
 
 ## Troubleshooting
 

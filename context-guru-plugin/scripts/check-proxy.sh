@@ -119,6 +119,25 @@ the proxy's flags, and a stale copy of that list is what made this note wrong be
 Log from the last attempt: ${LOG}"
 fi
 
+# The escape hatch, named here because THIS is the moment it is for: the proxy is down, the next
+# request hangs, and the advice this note used to end on was "edit the JSON by hand, or run a skill
+# from a session that still works" — the second of which is unavailable to a user whose sessions are
+# all routed through the same dead port. Only named when it is actually on disk; pointing at a path
+# that is not there would be worse than saying nothing.
+HATCH="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}/context-guru-reset"
+if [ -x "$HATCH" ]; then
+  ESCAPE="To stop routing entirely and get working immediately, run this in a terminal — it needs no
+working Claude session, restores every settings file this plugin edited from a copy taken before the
+first edit, and prints what it changed:
+
+  ${HATCH}
+
+Add --dry-run first if you would rather see the plan than take it."
+else
+  ESCAPE="To stop routing entirely and get working immediately, remove env.ANTHROPIC_BASE_URL from
+.claude/settings.local.json (or run /context-guru:uninstall from a session that still works)."
+fi
+
 cat <<EOF
 context-guru: this project is routed through http://127.0.0.1:${PORT}/anthropic, and nothing is
 answering there. **Your request will hang with no error message** — that is what a dead proxy looks
@@ -126,7 +145,6 @@ like from inside Claude Code, and it is why this note exists rather than a skill
 
 ${HOW}
 
-To stop routing entirely and get working immediately, remove env.ANTHROPIC_BASE_URL from
-.claude/settings.local.json (or run /context-guru:uninstall from a session that still works).
+${ESCAPE}
 EOF
 exit 0

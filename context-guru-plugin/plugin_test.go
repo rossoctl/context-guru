@@ -61,8 +61,22 @@ func requireTool(t *testing.T, name string) string {
 // settings runs settings.py and returns its key=value output as a map, plus the exit code.
 func settings(t *testing.T, args ...string) (map[string]string, int) {
 	t.Helper()
+	return settingsIn(t, t.TempDir(), t.TempDir(), args...)
+}
+
+// settingsIn is settings() with the two directories settings.py now writes OUTSIDE the target file
+// made explicit: the state directory holding the escape hatch and its record, and HOME (the hatch
+// is also copied to ~/.local/bin when that exists).
+//
+// Every test goes through here, including the ones that predate the hatch, because otherwise
+// `go test` writes into the DEVELOPER'S real ~/.local/state/context-guru — recording temp paths in
+// the manifest their own hatch would later read, and rewriting the copy on their PATH. A test suite
+// for a recovery tool must not be able to disturb the developer's own recovery tool.
+func settingsIn(t *testing.T, state, home string, args ...string) (map[string]string, int) {
+	t.Helper()
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "settings.py")}, args...)...)
+	cmd.Env = append(os.Environ(), "CONTEXT_GURU_STATE="+state, "HOME="+home)
 	out, err := cmd.CombinedOutput()
 	code := 0
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -3577,5 +3591,596 @@ func TestSettingsReportsOSErrorsAsData(t *testing.T) {
 	// And it must not have damaged the file it could not replace.
 	if env := readJSON(t, path)["env"].(map[string]any); env["MINE"] != "keep" {
 		t.Errorf("the original file was altered on a failed write: %v", env)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The escape hatch.
+//
+// These tests exist because of an incident rather than a design review. A colleague installed the
+// plugin, ended up with 401 on every request, and found that `/context-guru:uninstall` — the
+// documented undo — could not run: it is a skill, and a skill needs a session that can reach a
+// model. The undo path was unavailable for precisely the reason he needed it.
+//
+// So the properties below are not "the hatch works". They are "the hatch works when everything
+// this plugin provides is gone": no Claude, no proxy, no plugin directory, no interpreter beyond
+// POSIX sh. Each test removes one of those and asserts recovery anyway.
+// ---------------------------------------------------------------------------
+
+// hatchPath is where settings.py installs the hatch, and asserts the two properties that make it a
+// hatch at all: it is executable, and it is NOT inside the plugin.
+func hatchPath(t *testing.T, state string) string {
+	t.Helper()
+	p := filepath.Join(state, "context-guru-reset")
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("no escape hatch at %s: %v", p, err)
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("the hatch at %s is not executable (mode %v) — a user in trouble should not have "+
+			"to work out that they need to prefix it with `sh`", p, fi.Mode().Perm())
+	}
+	if strings.HasPrefix(p, scriptsDir(t)) {
+		t.Fatalf("the hatch was installed INSIDE the plugin (%s). `/plugin uninstall`, a "+
+			"marketplace refresh or a wiped plugin cache would take the recovery tool with it", p)
+	}
+	return p
+}
+
+// runHatch executes the installed hatch with a controlled environment. cwd matters: the no-record
+// path reports files relative to the project the user is in.
+func runHatch(t *testing.T, state, home, cwd string, args ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command(hatchPath(t, state), args...)
+	cmd.Dir = cwd
+	cmd.Env = []string{
+		"CONTEXT_GURU_STATE=" + state,
+		"HOME=" + home,
+		"PATH=" + os.Getenv("PATH"),
+	}
+	out, err := cmd.CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("running the hatch: %v (%s)", err, out)
+	}
+	t.Logf("hatch %v -> exit %d\n%s", args, code, out)
+	return string(out), code
+}
+
+// TestInstallLeavesAWayBackOutsideThePlugin is the whole feature in one assertion: after an install
+// there is a runnable recovery tool that does not live in the plugin, its path was REPORTED so the
+// skill can tell the user, and it holds a record of the file that was edited.
+func TestInstallLeavesAWayBackOutsideThePlugin(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"theme": "dark"})
+
+	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL)
+	if code != 0 {
+		t.Fatalf("add: exit %d, %v", code, facts)
+	}
+	// Reported, not merely present. The install skill has to hand the path to the user while the
+	// session still works, because afterwards it may not.
+	if facts["reset_hatch"] == "" || facts["reset_hatch"] == "unavailable" {
+		t.Errorf("add did not report a usable reset_hatch: %v", facts)
+	}
+	if got, want := facts["reset_hatch"], hatchPath(t, state); got != want {
+		t.Errorf("reported reset_hatch=%q, but the hatch is at %q", got, want)
+	}
+	record, err := os.ReadFile(filepath.Join(state, "reset-manifest.tsv"))
+	if err != nil {
+		t.Fatalf("no record for the hatch to read: %v", err)
+	}
+	if !strings.Contains(string(record), path) {
+		t.Errorf("the record does not name the file that was edited:\n%s", record)
+	}
+}
+
+// TestTheHatchNeedsNothingButPOSIXSh: the hatch runs in a state where the proxy is down and Claude
+// cannot talk, so anything it depends on is a way for it to be unavailable too. Asserted against
+// the script's text, since "it happened to work on this machine" is not the claim.
+func TestTheHatchNeedsNothingButPOSIXSh(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(scriptsDir(t), "reset.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	if !strings.HasPrefix(body, "#!/bin/sh") {
+		t.Errorf("the hatch must be POSIX sh; its shebang is %q",
+			strings.SplitN(body, "\n", 2)[0])
+	}
+	// Line-by-line, with comments stripped, so a word that appears while EXPLAINING the absence of
+	// a dependency is not read as the dependency. `claude` is deliberately not in this list: the
+	// script names it in the prose it prints ("start a NEW claude session"), which is advice rather
+	// than an invocation — the first version of this test failed on exactly that line.
+	for i, line := range strings.Split(body, "\n") {
+		code := line
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			code = line[:idx]
+		}
+		for _, banned := range []string{"python", "curl ", "context-guru-proxy", "jq ", "$(claude"} {
+			if strings.Contains(code, banned) {
+				t.Errorf("reset.sh:%d depends on %q, which may be exactly what is missing:\n%s",
+					i+1, banned, line)
+			}
+		}
+	}
+}
+
+// TestTheOriginalCopyOutlivesTheRollingBackups is the reason the hatch keeps its own copy rather
+// than trusting the *.context-guru-backup-* files beside the settings file: those are capped at ten
+// and BOTH add and remove write one, so on a machine that has installed and uninstalled a few times
+// the backup holding the user's pre-context-guru state is the first one deleted. The copy recovery
+// depends on cannot be on a rolling window.
+func TestTheOriginalCopyOutlivesTheRollingBackups(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"env": map[string]any{"MY_OWN": "keepme"}})
+	pristine, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 12; i++ { // KEEP_BACKUPS is 10; twelve cycles writes 24 of them
+		if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+			t.Fatalf("cycle %d: add failed", i)
+		}
+		if _, code := settingsIn(t, state, home, "remove", "--file", path, "--url", ourURL); code != 0 {
+			t.Fatalf("cycle %d: remove failed", i)
+		}
+	}
+
+	entries, err := os.ReadDir(filepath.Join(state, "originals"))
+	if err != nil {
+		t.Fatalf("the originals directory is gone: %v", err)
+	}
+	var found string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".original") {
+			found = filepath.Join(state, "originals", e.Name())
+		}
+		// A leading dot would make the copy invisible to `ls` and to every glob — including a
+		// user's own, in a directory that exists to be read by hand. The natural name starts with
+		// one, because the parent directory of a real target is `.claude`.
+		if strings.HasPrefix(e.Name(), ".") {
+			t.Errorf("the pre-edit copy %q is a hidden file", e.Name())
+		}
+	}
+	if found == "" {
+		t.Fatalf("no pre-edit copy survived twelve install/uninstall cycles: %v", entries)
+	}
+	got, err := os.ReadFile(found)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(pristine) {
+		t.Errorf("the pre-edit copy is not the file as the user had it:\ngot:  %s\nwant: %s",
+			got, pristine)
+	}
+}
+
+// TestHatchRestoresWithThePluginDeleted is the scenario the hatch is for. The user's way out must
+// not be inside the thing they are trying to get away from, so: install, delete the plugin's own
+// copy of the script, and recover anyway.
+func TestHatchRestoresWithThePluginDeleted(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{
+		"theme":       "dark",
+		"env":         map[string]any{"MY_OWN": "keepme"},
+		"permissions": map[string]any{"allow": []string{"Bash(ls)"}},
+	})
+	pristine, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL,
+		"--upstream", "https://gateway.corp.example"); code != 0 {
+		t.Fatal("add failed")
+	}
+	// Prove the fixture: routing really is in the file, so the restore below is doing work.
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "127.0.0.1:8787") {
+		t.Fatalf("fixture is wrong — no routing key was written:\n%s", b)
+	}
+
+	// The hatch's own copy is the one that runs. Delete the plugin's, restoring it afterwards, to
+	// prove the installed copy is not quietly delegating to a file that may no longer exist.
+	src := filepath.Join(scriptsDir(t), "reset.sh")
+	body, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.WriteFile(src, body, 0o755) })
+
+	out, code := runHatch(t, state, home, proj, "--yes")
+	if code != 0 {
+		t.Fatalf("hatch: exit %d\n%s", code, out)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(pristine) {
+		t.Errorf("the file was not restored to its pre-install state:\ngot:  %s\nwant: %s",
+			got, pristine)
+	}
+	// Reversible in its own right: whatever was there before the restore is kept, for the user who
+	// runs this and then finds the routing was not their problem.
+	pre, err := filepath.Glob(path + ".context-guru-prereset-*")
+	if err != nil || len(pre) == 0 {
+		t.Errorf("the hatch overwrote the routed file without keeping a copy of it")
+	}
+}
+
+// TestHatchDeletesAFileTheInstallCreated: "put it back" means DELETE when the install is the reason
+// the file exists. Restoring an empty file instead would leave a stub in the user's project that
+// they did not write and would have no reason to suspect.
+func TestHatchDeletesAFileTheInstallCreated(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.local.json")
+
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("fixture: the install did not create the file: %v", err)
+	}
+	out, code := runHatch(t, state, home, proj, "--yes")
+	if code != 0 {
+		t.Fatalf("hatch: exit %d\n%s", code, out)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a file the install created was left behind (err=%v)", err)
+	}
+}
+
+// TestHatchSecondRunChangesNothing: people re-run a recovery tool — the first run tells them to
+// start a new session, and they check. The second run must be a real no-op rather than another
+// copy, another backup file, and another "1 file put back".
+func TestHatchSecondRunChangesNothing(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"theme": "dark"})
+
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	if _, code := runHatch(t, state, home, proj, "--yes"); code != 0 {
+		t.Fatal("first hatch run failed")
+	}
+	before, _ := filepath.Glob(path + ".context-guru-prereset-*")
+
+	out, code := runHatch(t, state, home, proj, "--yes")
+	if code != 0 {
+		t.Fatalf("second run: exit %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "already matches") && !strings.Contains(out, "Nothing to restore") {
+		t.Errorf("the second run did not report itself as a no-op:\n%s", out)
+	}
+	after, _ := filepath.Glob(path + ".context-guru-prereset-*")
+	if len(after) != len(before) {
+		t.Errorf("the second run wrote %d more backup(s) for no reason", len(after)-len(before))
+	}
+}
+
+// TestHatchDryRunWritesNothing. The routed file is what the user may still need; a preview that
+// modifies it is not a preview.
+func TestHatchDryRunWritesNothing(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"theme": "dark"})
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	routed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := runHatch(t, state, home, proj, "--dry-run")
+	if code != 0 {
+		t.Fatalf("dry run: exit %d\n%s", code, out)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(routed) {
+		t.Errorf("--dry-run modified the file")
+	}
+	if !strings.Contains(out, "nothing written") {
+		t.Errorf("--dry-run did not say it wrote nothing:\n%s", out)
+	}
+}
+
+// TestHatchWithNoRecordTellsTheUserWhereToLook: a hand-edited settings file, or a wiped state
+// directory. "Nothing to do" is the least useful thing that could be said to somebody whose
+// sessions are down, so the absent-record path has to do the diagnosis a human would.
+func TestHatchWithNoRecordTellsTheUserWhereToLook(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	// The real target, at the real path, because this branch's whole job is to point a user at the
+	// places routing hides — and the paths it prints are project-relative.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
+	writeJSON(t, path, map[string]any{"theme": "dark"})
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	hatch := hatchPath(t, state)
+	// Keep the hatch, lose the record — the state directory is not sacred, and a user may well
+	// have cleaned it out on advice from the uninstall skill.
+	if err := os.Remove(filepath.Join(state, "reset-manifest.tsv")); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(hatch, "--yes")
+	cmd.Dir = proj
+	cmd.Env = []string{"CONTEXT_GURU_STATE=" + state, "HOME=" + home, "PATH=" + os.Getenv("PATH")}
+	b, err := cmd.CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	out := string(b)
+	if code != 3 {
+		t.Errorf("exit %d; want 3 (finished, with something left for a human)\n%s", code, out)
+	}
+	for _, want := range []string{"settings.local.json", "ANTHROPIC_BASE_URL", "127.0.0.1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the no-record path never mentions %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestHatchReportsCredentialsByLocationAndNeverByValue. The incident that produced this hatch was
+// not a routing fault at all: both ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN were set, the gateway
+// rejected whichever won, and the export was one line in a shell rc. Restoring settings cannot
+// reach that, so the hatch reports it — and must do so without echoing a live key into a terminal
+// buffer, a log, or a pasted transcript.
+func TestHatchReportsCredentialsByLocationAndNeverByValue(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"theme": "dark"})
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+
+	const secret = "sk-THIS-MUST-NEVER-BE-PRINTED"
+	rc := "# a comment\nexport PATH=\"$HOME/bin:$PATH\"\nexport ANTHROPIC_API_KEY=" + secret + "\n"
+	if err := os.WriteFile(filepath.Join(home, ".zshrc"), []byte(rc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(hatchPath(t, state), "--dry-run")
+	cmd.Dir = proj
+	cmd.Env = []string{
+		"CONTEXT_GURU_STATE=" + state,
+		"HOME=" + home,
+		"PATH=" + os.Getenv("PATH"),
+		"ANTHROPIC_API_KEY=" + secret,
+		"ANTHROPIC_AUTH_TOKEN=sk-a-different-one",
+	}
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			t.Fatal(err)
+		}
+	}
+	out := string(b)
+	if strings.Contains(out, secret) {
+		t.Errorf("the hatch printed a credential value:\n%s", out)
+	}
+	if !strings.Contains(out, "BOTH set") {
+		t.Errorf("the hatch did not flag two credential variables being set at once:\n%s", out)
+	}
+	if !strings.Contains(out, ".zshrc:3") {
+		t.Errorf("the hatch did not report the file and line of the export:\n%s", out)
+	}
+}
+
+// TestDeadProxyNoteNamesTheEscapeHatch. This hook fires on the prompt that is ABOUT to hang, which
+// makes it the single best place to hand the user their way out — and the advice it used to end on
+// was "edit the JSON by hand, or run /context-guru:uninstall from a session that still works". The
+// second half is unavailable to the user this note is written for: if their projects route through
+// the same dead port, no session still works. That is how the incident behind the hatch played out.
+func TestDeadProxyNoteNamesTheEscapeHatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook is POSIX-only")
+	}
+	requireTool(t, "bash")
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state", "context-guru")
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hatch := filepath.Join(state, "context-guru-reset")
+	if err := os.WriteFile(hatch, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A binary that cannot start, so the hook reaches its "I could not fix this" note.
+	fake := filepath.Join(dir, "fake-proxy")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := freePort(t) // nothing listening: refused fast, so the hook goes straight to the note
+
+	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "check-proxy.sh"))
+	cmd.Env = append(os.Environ(),
+		"CLAUDE_PLUGIN_ROOT="+root,
+		"CLAUDE_PLUGIN_OPTION_PORT="+port,
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+		"CONTEXT_GURU_BIN="+fake,
+		"XDG_STATE_HOME="+filepath.Join(dir, "state"),
+		"TMPDIR="+dir)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			t.Fatalf("running check-proxy.sh: %v (%s)", err, b)
+		}
+	}
+	out := string(b)
+	if !strings.Contains(out, hatch) {
+		t.Errorf("the dead-proxy note does not name the escape hatch at %s:\n%s", hatch, out)
+	}
+	if !strings.Contains(out, "no\nworking Claude session") &&
+		!strings.Contains(strings.Join(strings.Fields(out), " "), "no working Claude session") {
+		t.Errorf("the note names the hatch without saying it works when Claude cannot:\n%s", out)
+	}
+}
+
+// TestDeadProxyNoteFallsBackWhenThereIsNoHatch is the negative control for the test above: pointing
+// a stuck user at a path that does not exist would be worse than the manual instructions, so the
+// hatch is named only when it is on disk.
+func TestDeadProxyNoteFallsBackWhenThereIsNoHatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook is POSIX-only")
+	}
+	out, _, _ := runCheck(t, freePort(t), "#!/bin/sh\nexit 1\n")
+	flat := strings.Join(strings.Fields(out), " ")
+	if strings.Contains(flat, "context-guru-reset") {
+		t.Errorf("named a hatch that is not installed:\n%s", out)
+	}
+	if !strings.Contains(flat, "remove env.ANTHROPIC_BASE_URL from .claude/settings.local.json") {
+		t.Errorf("the fallback instructions are gone, so a user with no hatch is told nothing:\n%s", out)
+	}
+}
+
+// TestAnAlreadyRoutedProjectStillGetsAHatch covers the machines that need one most: everybody who
+// installed BEFORE the hatch existed. Their re-run of /context-guru:install reports
+// `result=unchanged` and writes nothing, so the code path that installs the hatch never runs — and
+// re-running the install is the first thing anyone does when something looks wrong.
+//
+// There is no pre-edit copy to invent, so the hatch must be honest rather than absent: it names the
+// file, and says the original content is not recoverable from its own record.
+func TestAnAlreadyRoutedProjectStillGetsAHatch(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	// Routed already, by a version of the plugin that kept no record — which is what the state
+	// directory being empty represents.
+	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
+
+	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL)
+	if code != 0 || facts["result"] != "unchanged" {
+		t.Fatalf("fixture: wanted result=unchanged exit 0, got %v exit %d", facts, code)
+	}
+	if facts["reset_hatch"] == "" || facts["reset_hatch"] == "unavailable" {
+		t.Fatalf("a no-op re-run left the machine with no hatch: %v", facts)
+	}
+	if facts["reset_original"] != "unavailable" {
+		t.Errorf("reset_original=%q; the pre-install content genuinely is not recoverable here and "+
+			"claiming otherwise would promise a restore that cannot happen", facts["reset_original"])
+	}
+	out, code := runHatch(t, state, home, proj, "--yes")
+	if code != 3 {
+		t.Errorf("hatch exit %d; want 3 — it has a file to name but cannot restore it\n%s", code, out)
+	}
+	if !strings.Contains(out, path) {
+		t.Errorf("the hatch does not name the routed file:\n%s", out)
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), ourURL) {
+		t.Errorf("the hatch modified a file it had no pre-edit copy of")
+	}
+}
+
+// TestAConflictIsNeverRecordedAsOurEdit is the guard on the branch above. `result=conflict` is
+// somebody else's base URL that this script refused to touch — a corporate gateway, a benchmark
+// endpoint. Recording it would tell the hatch that context-guru edited a file it never wrote to,
+// and the hatch's whole safety property is that it only touches files it has a record of editing.
+func TestAConflictIsNeverRecordedAsOurEdit(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	theirs := "https://gateway.corp.example/anthropic"
+	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": theirs}})
+
+	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL)
+	if code != 2 || facts["result"] != "conflict" {
+		t.Fatalf("fixture: wanted result=conflict exit 2, got %v exit %d", facts, code)
+	}
+	if b, err := os.ReadFile(filepath.Join(state, "reset-manifest.tsv")); err == nil {
+		if strings.Contains(string(b), path) {
+			t.Errorf("a refused conflict was recorded as our own edit:\n%s", b)
+		}
+	}
+}
+
+// TestAddRefusesTheMachineWideFileWithoutBeingTold. The default scope was documented in the install
+// skill and nowhere else — the script wrote whatever --file it was handed. A prompt is not a
+// guardrail against a machine-wide lockout: it can be skipped, or read differently by the next
+// model, and the cost is every Claude Code session on the machine, including the ones the user would
+// use to recover. So the refusal lives in the script.
+func TestAddRefusesTheMachineWideFileWithoutBeingTold(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	userScope := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(userScope), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, userScope, map[string]any{"theme": "dark"})
+	before, err := os.ReadFile(userScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	facts, code := settingsIn(t, state, home, "add", "--file", userScope, "--url", ourURL)
+	if code != 2 || facts["reason"] != "user_scope_needs_flag" {
+		t.Fatalf("wanted exit 2 reason=user_scope_needs_flag, got exit %d %v", code, facts)
+	}
+	after, err := os.ReadFile(userScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("the machine-wide file was modified by a call that reported refusing:\n%s", after)
+	}
+
+	// With the flag — i.e. the user asked for --global and confirmed — it goes through.
+	facts, code = settingsIn(t, state, home, "add", "--file", userScope, "--url", ourURL, "--user-scope")
+	if code != 0 || facts["result"] != "added" {
+		t.Fatalf("--user-scope did not permit the write: exit %d %v", code, facts)
+	}
+	env, _ := readJSON(t, userScope)["env"].(map[string]any)
+	if env["ANTHROPIC_BASE_URL"] != ourURL {
+		t.Errorf("routing not written with --user-scope: %v", env)
+	}
+}
+
+// TestRemoveIsNeverGatedByScope: uninstall loops over all three scopes, and it is the recovery path.
+// Gating removal the way `add` is gated would make a machine-wide install unremovable by the tool
+// that installed it — erring on exactly the wrong side.
+func TestRemoveIsNeverGatedByScope(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	userScope := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(userScope), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, userScope, map[string]any{"theme": "dark"})
+	if _, code := settingsIn(t, state, home, "add", "--file", userScope, "--url", ourURL,
+		"--user-scope"); code != 0 {
+		t.Fatal("fixture: --user-scope add failed")
+	}
+
+	facts, code := settingsIn(t, state, home, "remove", "--file", userScope, "--url", ourURL)
+	if code != 0 {
+		t.Fatalf("remove from user scope: exit %d %v", code, facts)
+	}
+	env, _ := readJSON(t, userScope)["env"].(map[string]any)
+	if _, still := env["ANTHROPIC_BASE_URL"]; still {
+		t.Errorf("routing survived removal from the machine-wide file: %v", env)
+	}
+	if readJSON(t, userScope)["theme"] != "dark" {
+		t.Errorf("removal damaged the machine-wide file")
 	}
 }
