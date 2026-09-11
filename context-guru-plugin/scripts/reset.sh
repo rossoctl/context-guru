@@ -33,6 +33,16 @@ YES=0
 STAMP="$(date +%Y%m%d-%H%M%S)"
 # Set when any step could not finish, so the exit code tells a script what a human would see.
 INCOMPLETE=0
+# Set ONLY by a problem with a FILE, and kept separate from INCOMPLETE on purpose.
+#
+# INCOMPLETE grew to include an environment condition (an ANTHROPIC_BASE_URL exported in the user's
+# shell, which no settings change can override) and that immediately made the empty-plan branch lie
+# in the other direction: with clean files and a routed shell it printed "your settings files are NOT
+# back to their pre-install state" plus instructions to repair a file, two lines under a line saying
+# that same file already matched its pre-install copy. Which sentence to print is a question about
+# FILES; the exit code is a question about whether anything is left for a human. Two questions, two
+# flags.
+FILES_UNFIXED=0
 RESTORED=0
 
 usage() {
@@ -74,6 +84,38 @@ MANIFEST="$STATE/reset-manifest.tsv"
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------------------
+# redact: a filter for anything that prints FILE CONTENT.
+#
+# Found in review, and it contradicted this script's own stated principle 150 lines below: the
+# whole-file warning diffs the settings file, `env` is exactly where people keep
+# ANTHROPIC_API_KEY, and so `--dry-run` — the invocation the docs tell people to run FIRST —
+# printed a live key twice, once per side of the diff.
+#
+# Who reads this output is what makes it worse than the usual secret-in-a-log: somebody debugging
+# a 401, whose next move is very likely to paste the whole thing into an issue, a chat or a
+# screenshot, precisely BECAUSE the output is designed to be read and acted on.
+#
+# Applied at every site that prints file content rather than at the one the reviewer found — the
+# diff, the verify pass and the no-record grep all echo lines from the user's settings — because
+# "remember to filter this one too" is how the first leak happened.
+#
+# Redacts the VALUE and keeps the line, so the diff still shows THAT a credential line changed,
+# which is the whole point of showing a diff. Three shapes:
+#   * any JSON key whose name contains key/token/secret/password/credential, in any case;
+#   * an Anthropic/OpenAI-style `sk-...` value, whatever the field is called;
+#   * credentials embedded in a URL (https://user:pass@host).
+#
+# Case-insensitivity is spelled out with bracket classes on purpose: BSD sed (macOS, where this
+# script runs most) has no `I` flag on `s///`, so `[Kk][Ee][Yy]` is the portable spelling.
+# ---------------------------------------------------------------------------
+REDACT_NAME='[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]'
+redact() {
+  sed -E -e "s/(\"[A-Za-z0-9_-]*(${REDACT_NAME})[A-Za-z0-9_-]*\"[[:space:]]*:[[:space:]]*\")[^\"]*/\1<value not shown>/g" \
+         -e 's/sk-[A-Za-z0-9_-]{6,}/sk-<value not shown>/g' \
+         -e 's#(://)[^/@[:space:]"]*:[^/@[:space:]"]*@#\1<credentials not shown>@#g'
+}
 
 # ---------------------------------------------------------------------------
 # The credential / environment report.
@@ -181,7 +223,7 @@ if [ ! -f "$MANIFEST" ]; then
       say "  $f"
       hits="$(grep -n 'ANTHROPIC_BASE_URL\|ANTHROPIC_UPSTREAM\|CONTEXT_GURU_BIN' "$f" 2>/dev/null || true)"
       if [ -n "$hits" ]; then
-        printf '%s\n' "$hits" | sed 's/^/      /'
+        printf '%s\n' "$hits" | redact | sed 's/^/      /'
         say "      ^ if one of those points at 127.0.0.1 and you did not set it, delete that key."
       else
         say "      (no context-guru keys — this one is fine)"
@@ -270,8 +312,12 @@ while IFS='	' read -r existed original path; do
           say ""
           say "        The two files differ (this includes context-guru's own keys, and the"
           say "        reformatting it applied when it wrote the file):"
-          diff "$original" "$path" 2>/dev/null | grep '^[<>]' | head -14 | sed 's/^/          /'
-          [ "${dl:-0}" -gt 14 ] && say "          ... and $((dl - 14)) more line(s)"
+          # 30, not 14. A hand-written settings file is usually compact and settings.py rewrites
+          # it pretty-printed, so the first dozen diff lines are pure reformatting — at 14 the cut
+          # landed BEFORE the user's own change (an added permission grant) in a test, which is the
+          # one line they actually needed to see. Still bounded, because this prints to a terminal.
+          diff "$original" "$path" 2>/dev/null | grep '^[<>]' | head -30 | redact | sed 's/^/          /'
+          [ "${dl:-0}" -gt 30 ] && say "          ... and $((dl - 30)) more line(s)"
           say "        (\"<\" is the pre-install copy, \">\" is your file now.)"
         fi
       fi
@@ -298,7 +344,7 @@ while IFS='	' read -r existed original path; do
       say "        compare it yourself, then: cp \"$newest\" \"$path\""
     fi
     say "        left untouched."
-    INCOMPLETE=1
+    INCOMPLETE=1; FILES_UNFIXED=1
   fi
 done < "$MANIFEST"
 
@@ -308,16 +354,30 @@ fi
 
 if [ ! -s "$PLAN" ]; then
   say ""
+  # report_environment sets INCOMPLETE, and this branch used to test INCOMPLETE BEFORE running it —
+  # so an ANTHROPIC_BASE_URL exported in the user's shell (the one condition no file restore can fix)
+  # printed its `!` and still exited 0, while the identical condition on a non-empty plan exited 3.
+  #
+  # Its output is captured rather than printed here so the summary sentence still comes first. A
+  # redirect does NOT create a subshell in POSIX sh, so INCOMPLETE set inside the function survives —
+  # which `ENV_OUT=$(report_environment)` would silently NOT do, and the bug would be invisible.
+  ENV_TMP="$(mktemp "${TMPDIR:-/tmp}/cg-reset-env.XXXXXX")"
+  report_environment > "$ENV_TMP"
   # An empty plan is reached from TWO very different states, and saying the reassuring one about
   # both was a review finding: the missing-copy branch above deliberately adds nothing to the plan,
   # so a routed file with no original produced the correct "! ..." block and then "already back to
   # their pre-install state" as the LAST line — the opposite of the truth, to the one user who is
   # locked out. Exit 3 was right; nobody reads an exit code, they read the last line.
-  if [ "$INCOMPLETE" = 0 ]; then
+  if [ "$FILES_UNFIXED" = 0 ]; then
     say "Nothing to restore — your settings files are already back to their pre-install state."
-    report_environment
+    if [ "$INCOMPLETE" != 0 ]; then
+      say ""
+      say "Your FILES are fine. What is left is in the environment report below, and a settings"
+      say "file cannot fix it — read the ! line there."
+    fi
+    cat "$ENV_TMP"; rm -f "$ENV_TMP"
     final_advice
-    exit 0
+    [ "$INCOMPLETE" = 0 ] && exit 0 || exit 3
   fi
   say "Nothing could be restored automatically — see the ! line(s) above. Your settings files are"
   say "NOT back to their pre-install state, and this tool has no copy that would put them there."
@@ -328,7 +388,7 @@ if [ ! -s "$PLAN" ]; then
   say "  2. or open the file and delete the ANTHROPIC_BASE_URL / ANTHROPIC_UPSTREAM /"
   say "     CONTEXT_GURU_BIN keys from its \"env\" block, leaving everything else alone."
   say "     That is all the routing is; nothing else has to change."
-  report_environment
+  cat "$ENV_TMP"; rm -f "$ENV_TMP"
   final_advice
   exit 3
 fi
@@ -374,7 +434,7 @@ while IFS='	' read -r action original path; do
       say "  saved current state: $pre"
     else
       warn "  ! could not copy $path aside; leaving it alone rather than restoring over it"
-      INCOMPLETE=1
+      INCOMPLETE=1; FILES_UNFIXED=1
       continue
     fi
   fi
@@ -384,7 +444,7 @@ while IFS='	' read -r action original path; do
         say "  deleted:  $path"
         RESTORED=$((RESTORED + 1))
       else
-        warn "  ! could not delete $path"; INCOMPLETE=1
+        warn "  ! could not delete $path"; INCOMPLETE=1; FILES_UNFIXED=1
       fi ;;
     restore)
       # cp onto the existing path, never `mv`: the settings file may be a symlink into a dotfiles
@@ -394,7 +454,7 @@ while IFS='	' read -r action original path; do
         say "  restored: $path"
         RESTORED=$((RESTORED + 1))
       else
-        warn "  ! could not restore $path from $original"; INCOMPLETE=1
+        warn "  ! could not restore $path from $original"; INCOMPLETE=1; FILES_UNFIXED=1
       fi ;;
   esac
 done < "$PLAN"
@@ -412,7 +472,7 @@ while IFS='	' read -r action original path; do
     # Not automatically a failure: a user whose own gateway was replaced with --force gets that
     # gateway back here, and it is SUPPOSED to be in the restored file.
     say "  ?   $path still mentions an ANTHROPIC_* key:"
-    grep -n 'ANTHROPIC_BASE_URL\|ANTHROPIC_UPSTREAM\|CONTEXT_GURU_BIN' "$path" | sed 's/^/        /'
+    grep -n 'ANTHROPIC_BASE_URL\|ANTHROPIC_UPSTREAM\|CONTEXT_GURU_BIN' "$path" | redact | sed 's/^/        /'
     if grep -q '127\.0\.0\.1\|localhost' "$path" 2>/dev/null; then
       say "        that points at a local proxy — if you did not set it yourself, delete the key."
       left=1
@@ -423,7 +483,7 @@ while IFS='	' read -r action original path; do
     say "  ok  $path (no context-guru keys)"
   fi
 done < "$PLAN"
-[ "$left" = 0 ] || INCOMPLETE=1
+[ "$left" = 0 ] || { INCOMPLETE=1; FILES_UNFIXED=1; }
 
 report_environment
 final_advice

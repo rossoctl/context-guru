@@ -438,6 +438,19 @@ are down. Exit status is 3: finished, with something left for a human.
 
 ## Troubleshooting
 
+**Every request fails or hangs, and `/context-guru:uninstall` cannot run.** Run this:
+
+```bash
+~/.local/state/context-guru/context-guru-reset
+```
+
+That is the whole fix. It needs no working Claude session — which is the point, because when routing
+is what broke, the skill that would undo it cannot reach a model either. It restores every settings
+file this plugin edited, prints what it changed, and ends by naming anything a file restore cannot
+fix (a credential variable, an `ANTHROPIC_BASE_URL` exported in your shell). Add `--dry-run` first if
+you want the plan without the change. Full detail: [the escape
+hatch](#the-escape-hatch-when-claude-code-cannot-fix-it-for-you).
+
 **"Nothing happened after `/context-guru:install`."** The setting applies to a **new** session;
 the one you ran it in already has its environment. Start a new session.
 

@@ -4371,3 +4371,203 @@ func TestAnUnusableStateDirectoryNeverFailsTheInstall(t *testing.T) {
 		t.Error("the user's settings were damaged")
 	}
 }
+
+// --- fixes from review round 2 of #236 -----------------------------------------------------
+
+// TestThePlanNeverPrintsACredential. The whole-file warning added in round 1 diffs the settings
+// file, and `env` is exactly where people keep ANTHROPIC_API_KEY — so `--dry-run`, the invocation the
+// docs tell people to run FIRST, printed a live key twice, once per side of the diff. It contradicted
+// the principle stated 150 lines above it in the same script.
+//
+// The audience is what makes it worse than a secret in a log: somebody debugging a 401, whose next
+// move is to paste the output into an issue or a screenshot, precisely because it is written to be
+// read and acted on. TestHatchReportsCredentialsByLocationAndNeverByValue covers the rc-file half and
+// did not cover this path, which is how it got through.
+func TestThePlanNeverPrintsACredential(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	const (
+		apiKey    = "sk-ant-SUPERSECRET-do-not-print-me"
+		oddlyName = "hunter2-also-secret" // a key-ish name that is not spelled ANTHROPIC_*
+		urlCreds  = "pw123"
+	)
+	// Written COMPACT, the way a hand-edited settings file actually looks, and not via writeJSON.
+	// That matters for what this test covers: writeJSON indents, settings.py rewrites with the same
+	// indent, so the credential lines came out byte-identical on both sides of the diff and never
+	// appeared in it. The secret-absence assertion then passed for the wrong reason — nothing to
+	// redact — which is exactly what the "no redaction marker" check below caught.
+	fixture := `{"env": {"ANTHROPIC_API_KEY": "` + apiKey + `", "authToken": "` + oddlyName +
+		`", "MY_GATEWAY": "https://alice:` + urlCreds + `@gw.example/v1"},` +
+		` "permissions": {"allow": ["Bash(ls:*)"]}}`
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	// A later change, so the whole-file warning and its diff are reached at all.
+	cur := readJSON(t, path)
+	cur["permissions"] = map[string]any{"allow": []string{"Bash(ls:*)", "Bash(git push:*)"}}
+	writeJSON(t, path, cur)
+
+	for _, args := range [][]string{{"--dry-run"}, {"--yes"}} {
+		out, _ := runHatch(t, state, home, proj, args...)
+		for _, secret := range []string{apiKey, oddlyName, urlCreds} {
+			if strings.Contains(out, secret) {
+				t.Errorf("hatch %v printed a credential (%q):\n%s", args, secret, out)
+			}
+		}
+		if args[0] == "--dry-run" {
+			// The redaction must not gut the diff: showing THAT a line changed is its whole purpose.
+			if !strings.Contains(out, "git push") {
+				t.Errorf("redaction removed the change the diff exists to show:\n%s", out)
+			}
+			if !strings.Contains(out, "value not shown") {
+				t.Errorf("no redaction marker, so the diff may simply not have run:\n%s", out)
+			}
+		}
+	}
+}
+
+// TestNormalUninstallDoesNotClaimTheOriginalIsGone. An ordinary uninstall of an ordinarily-installed
+// project takes the "file already carries our keys" branch — correctly, since a copy of the file at
+// that moment would be meaningless. But it also SET reset_original=unavailable, while the good,
+// verified-clean copy from the install sat on disk. install/SKILL.md turns that fact into "the hatch
+// can unroute but not restore", so the skill would have told users their content was unrecoverable
+// when it was not: the same class of inverted reassurance as round 1's finding 2.
+func TestNormalUninstallDoesNotClaimTheOriginalIsGone(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"permissions": map[string]any{"allow": []string{"Bash(ls:*)"}}})
+
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	facts, code := settingsIn(t, state, home, "remove", "--file", path, "--url", ourURL)
+	if code != 0 {
+		t.Fatalf("remove: exit %d, %v", code, facts)
+	}
+	if facts["reset_original"] == "unavailable" {
+		t.Errorf("remove reported reset_original=unavailable; the record's copy is what matters, "+
+			"not whether THIS call could take one: %v", facts)
+	}
+	// And the copy really is there, really is clean.
+	originals, _ := filepath.Glob(filepath.Join(state, "originals", "*.original"))
+	if len(originals) != 1 {
+		t.Fatalf("want exactly one original, got %v", originals)
+	}
+	b, err := os.ReadFile(originals[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "ANTHROPIC_BASE_URL") {
+		t.Errorf("the original holds routing:\n%s", b)
+	}
+}
+
+// TestAnExportedBaseURLIsNotCalledAFileProblem. INCOMPLETE grew to include an environment condition
+// (a base URL exported in the user's shell, which no settings change can override), and wiring that
+// into the empty-plan branch made it lie in the other direction: with clean files and a routed shell
+// it printed "your settings files are NOT back to their pre-install state" plus instructions to
+// repair a file, two lines under a line saying that file already matched its pre-install copy.
+//
+// Which sentence to print is a question about files; the exit code is a question about whether
+// anything is left for a human. Two questions, two flags.
+func TestAnExportedBaseURLIsNotCalledAFileProblem(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"permissions": map[string]any{"allow": []string{"Bash(ls:*)"}}})
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	if _, code := runHatch(t, state, home, proj, "--yes"); code != 0 {
+		t.Fatal("first run should be a clean restore")
+	}
+
+	// Same clean state, but the shell itself is routed.
+	cmd := exec.Command(hatchPath(t, state), "--yes")
+	cmd.Dir = proj
+	cmd.Env = []string{
+		"CONTEXT_GURU_STATE=" + state, "HOME=" + home, "PATH=" + os.Getenv("PATH"),
+		"ANTHROPIC_BASE_URL=" + ourURL,
+	}
+	b, err := cmd.CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	out := string(b)
+	if code != 3 {
+		t.Errorf("exit %d, want 3: an exported loopback base URL is left for a human", code)
+	}
+	if strings.Contains(out, "NOT back to their pre-install state") {
+		t.Errorf("called a clean file a file problem:\n%s", out)
+	}
+	for _, want := range []string{"already back to their pre-install state", "Your FILES are fine",
+		"exported in THIS SHELL"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestLoopbackDetectionCoversTheShapesThatMatter. The predicate guarding round 1's severe finding
+// used a startswith tuple, and everything it missed was a false NEGATIVE — the direction that
+// re-introduces the defect, by taking a copy of an already-routed file and calling it an original.
+func TestLoopbackDetectionCoversTheShapesThatMatter(t *testing.T) {
+	for _, tc := range []struct {
+		url     string
+		ourFile bool
+	}{
+		{"http://127.0.0.1:8787/anthropic", true},
+		{"http://127.0.0.1/anthropic", true}, // no port
+		{"http://0.0.0.0:8787/anthropic", true},
+		{"http://[::1]/anthropic", true}, // v6, no port
+		{"https://localhost:8787/anthropic", true},
+		{"https://gateway.corp.example/anthropic", false},
+		{"https://not-localhost.example.com/v1", false}, // must not match on substring
+	} {
+		state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		path := filepath.Join(proj, "settings.json")
+		// No metadata and none of our other keys, so the loopback clause is the only thing deciding.
+		writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": tc.url}})
+		if _, code := settingsIn(t, state, home, "remove", "--file", path, "--url", tc.url); code != 0 {
+			t.Fatalf("%s: remove failed", tc.url)
+		}
+		originals, _ := filepath.Glob(filepath.Join(state, "originals", "*.original"))
+		if tc.ourFile && len(originals) != 0 {
+			b, _ := os.ReadFile(originals[0])
+			t.Errorf("%s: took a pre-edit copy of an already-routed file:\n%s", tc.url, b)
+		}
+		if !tc.ourFile && len(originals) != 1 {
+			t.Errorf("%s: declined to copy a file that is not ours (want an original, got %v)",
+				tc.url, originals)
+		}
+	}
+}
+
+// TestTroubleshootingLeadsWithTheCommand. Discoverability is part of the feature, not documentation
+// polish: a user who needs the hatch is searching the docs with a Claude that cannot answer
+// questions. Troubleshooting is the section they open, and it did not name the hatch at all.
+func TestTroubleshootingLeadsWithTheCommand(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "docs", "how-to", "install-plugin.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, after, ok := strings.Cut(string(b), "## Troubleshooting")
+	if !ok {
+		t.Fatal("no Troubleshooting section")
+	}
+	// Within the first entry, not somewhere further down the section.
+	head := after
+	if len(head) > 900 {
+		head = head[:900]
+	}
+	for _, want := range []string{"context-guru-reset", "hangs", "cannot run"} {
+		if !strings.Contains(head, want) {
+			t.Errorf("the first Troubleshooting entry does not cover %q:\n%s", want, head)
+		}
+	}
+}

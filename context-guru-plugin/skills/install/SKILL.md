@@ -335,9 +335,12 @@ want `context-guru-proxy` on the command line too.
   needs no Claude, no network, no proxy and no plugin. `reset_hatch=unavailable` means the state
   directory could not be written — say so plainly, because then their only undo is the `backup=`
   path above.
-- `reset_original=unavailable` — the routing is recorded but the file's original CONTENT is not.
-  Rare (an unreadable settings file). Worth one line, since the hatch can then unroute but not
-  restore.
+- `reset_original=unavailable` — the routing is recorded but the hatch holds no copy of the file's
+  original CONTENT, so it can name the file and point at the timestamped backups but cannot restore
+  it. **Read `reset_original_reason=` and pass it on rather than guessing** — the usual cause is not
+  a fault: the project was already routed when the record was first created (a pre-hatch install,
+  or a state directory that was cleaned), and no copy of an unrouted version was ever takeable.
+  Say that plainly; it is not a reason to stop, and it does not appear on a normal first install.
 - `result=conflict` — you skipped step 4, or the file changed. Go back and ask; only pass
   `--force` once the user has said to replace that specific value. When they do, the replaced
   value is recorded and `/context-guru:uninstall` puts it back — say so, because "we will take

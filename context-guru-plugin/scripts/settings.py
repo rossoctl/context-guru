@@ -357,6 +357,29 @@ def _render_tsv(entries: list[dict]) -> bytes:
     return b"\n".join(out) + b"\n"
 
 
+def _is_loopback(url: str) -> bool:
+    """Does this URL name this machine? Used only as the weakest signal in _looks_routed_by_us.
+
+    Written out rather than a `startswith` tuple because every shape the tuple missed was a false
+    NEGATIVE — no port (`http://127.0.0.1/anthropic`), `0.0.0.0`, `[::1]` without a port, `https://`
+    — and a false negative here is the direction that re-introduces the defect the caller exists to
+    prevent: taking a copy of an already-routed file and calling it an original.
+    """
+    rest = url
+    for scheme in ("http://", "https://"):
+        if rest.startswith(scheme):
+            rest = rest[len(scheme):]
+            break
+    else:
+        return False
+    host = rest.split("/", 1)[0]
+    if host.startswith("["):                      # [::1] or [::1]:8787
+        host = host.split("]", 1)[0] + "]"
+    else:
+        host = host.split(":", 1)[0]
+    return host in ("127.0.0.1", "localhost", "[::1]", "0.0.0.0", "::1")
+
+
 def _looks_routed_by_us(real: str) -> bool:
     """Is this file ALREADY in our post-install state, so a copy of it is not an "original"?
 
@@ -400,8 +423,7 @@ def _looks_routed_by_us(real: str) -> bool:
     if UPSTREAM_KEY in env or BIN_KEY in env:
         return True   # nobody else writes these two
     url = env.get(KEY)
-    if isinstance(url, str) and url.startswith(("http://127.0.0.1:", "http://localhost:",
-                                                "http://[::1]:")):
+    if isinstance(url, str) and _is_loopback(url):
         # A pre-hatch install old enough to have no metadata. Ambiguous with a user's own loopback
         # proxy, and resolved toward the safer failure per the docstring.
         return True
@@ -440,11 +462,19 @@ def _record_touch(real: str, existed: bool) -> None:
         return
 
     original = ""
+    skipped_copy = False
     if existed and _looks_routed_by_us(real):
-        # Recorded, but with no original — which is exactly the state ensure_hatch() already
-        # produces, and the hatch's missing-copy branch already reports honestly.
-        HATCH_FACTS["reset_original"] = "unavailable"
-        HATCH_FACTS["reset_original_reason"] = "file already carried context-guru's keys"
+        # Recorded, but with no original from THIS call — which is exactly the state ensure_hatch()
+        # already produces, and the hatch's missing-copy branch already reports honestly.
+        #
+        # Deliberately not reported here. It was, and that was a review finding: an ordinary
+        # uninstall of an ordinarily-installed project takes this branch (the file IS ours by then),
+        # so `reset_original=unavailable` was printed while a good, verified-clean copy from the
+        # install sat on disk. install/SKILL.md turns that fact into "the hatch can unroute but not
+        # restore", so the skill would have told users their content was unrecoverable when it was
+        # not. The fact is a statement about what the hatch HOLDS, so it is decided below, after the
+        # manifest entry is known.
+        skipped_copy = True
     elif existed:
         dest = os.path.join(state, "originals", _slug(real) + ".original")
         try:
@@ -475,6 +505,7 @@ def _record_touch(real: str, existed: bool) -> None:
     except (OSError, json.JSONDecodeError):
         entries = []
 
+    held_original = ""
     for e in entries:
         if e.get("path") == real:
             # Seen before. The first record is the authoritative one — `existed_before` describes
@@ -482,11 +513,13 @@ def _record_touch(real: str, existed: bool) -> None:
             # later run would say "it existed" about a file we created ourselves.
             if not e.get("original") and original:
                 e["original"] = original
+            held_original = e.get("original") or ""
             break
     else:
         entries.append({"path": real, "existed_before": bool(existed),
                         "original": original,
                         "first_touched": _dt.datetime.now().astimezone().isoformat(timespec="seconds")})
+        held_original = original
 
     hatch = install_hatch(state)
     try:
@@ -500,11 +533,13 @@ def _record_touch(real: str, existed: bool) -> None:
 
     HATCH_FACTS["reset_hatch"] = hatch or "unavailable"
     HATCH_FACTS["reset_record"] = tsvp
-    if existed and not original:
-        # Worth its own line: routing can be removed from the record, but the file's original
-        # CONTENT is not recoverable from anything the hatch holds.
+    if existed and not held_original:
+        # Judged against what the RECORD ends up holding, not against this call: a file whose
+        # original was captured by an earlier install must not be reported as unrecoverable now.
         HATCH_FACTS["reset_original"] = "unavailable"
-        HATCH_FACTS.setdefault("reset_original_reason", "no pre-edit copy could be taken")
+        HATCH_FACTS["reset_original_reason"] = (
+            "the file already carried context-guru's keys when it was first recorded"
+            if skipped_copy else "no pre-edit copy could be taken")
 
 
 def save(path: str, data: dict) -> None:
