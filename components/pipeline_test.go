@@ -37,6 +37,17 @@ func (boom) Name() string                                              { return 
 func (boom) Enabled(*Ctx) bool                                         { return true }
 func (boom) Reformat(*schemas.BifrostChatRequest, *Report, *Ctx) error { panic("kaboom") }
 
+// boomAfterSkipped mimics a component whose own deferred Skipped-guard (the pattern
+// extract_sweep.go uses) runs during panic unwind before runOne's recover sees the Report.
+type boomAfterSkipped struct{}
+
+func (boomAfterSkipped) Name() string      { return "boomafterskipped" }
+func (boomAfterSkipped) Enabled(*Ctx) bool { return true }
+func (boomAfterSkipped) Reformat(_ *schemas.BifrostChatRequest, rep *Report, _ *Ctx) (err error) {
+	defer func() { rep.Skipped = true }()
+	panic("kaboom")
+}
+
 type grow struct{}             // grows the request — never-worse guard must revert
 func (grow) Name() string      { return "grow" }
 func (grow) Enabled(*Ctx) bool { return true }
@@ -110,6 +121,22 @@ func TestFailOpenOnPanic(t *testing.T) {
 	}
 	if !rr.Components[0].Reverted || rr.Components[0].Err == nil {
 		t.Fatalf("expected reverted+err report, got %+v", rr.Components[0])
+	}
+}
+
+// A component's deferred Skipped-guard runs during the same panic unwind that reaches runOne's
+// recover, which sets Reverted. The two must not both end up true on one Report: dash/event.go's
+// Mutated derivation and any future "count skipped rows" query would misread a reverted row as
+// also having skipped.
+func TestPanicClearsSkippedSetByTheComponentsOwnDefer(t *testing.T) {
+	req := reqWith("keep me intact")
+	rr := NewPipeline([]Component{boomAfterSkipped{}}, nil).Run(req, testCtx())
+	rep := rr.Components[0]
+	if !rep.Reverted {
+		t.Fatalf("expected reverted report, got %+v", rep)
+	}
+	if rep.Skipped {
+		t.Errorf("Reverted && Skipped both true: %+v", rep)
 	}
 }
 
