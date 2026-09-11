@@ -4608,11 +4608,18 @@ var redactShapes = []struct {
 }{
 	{"ANTHROPIC_API_KEY", `  "ANTHROPIC_API_KEY": "sk-ant-REALKEY0000",`, "REALKEY0000"},
 	{"ANTHROPIC_AUTH_TOKEN", `  "ANTHROPIC_AUTH_TOKEN": "REALTOKENVALUE",`, "REALTOKENVALUE"},
-	// The one that matters most here, and not a shape invented for the test: this is how a Context
-	// Guru credential is carried on this project's own dev machines, so it is the single most likely
-	// credential to appear in a context-guru user's env block — and its name contains none of
-	// key/token/secret/password/credential, which is why the first two versions of the filter missed
-	// it. HEADER is in the name class because of this row.
+	// The one that matters most here, and not a shape invented for the test.
+	//
+	// PROVENANCE, recorded because it is the strongest argument for this whole table: this leak was
+	// LIVE, not theoretical. `ANTHROPIC_CUSTOM_HEADERS` carrying a `<header>: <token>` string is how a
+	// Context Guru credential is set on this project's own development machines — set for interactive
+	// sessions and explicitly unset for benchmark runs — and it was present in the real
+	// ~/.claude/settings.json of the machine this filter was written on, where the author had read
+	// that file earlier the same day and not connected it to the filter.
+	//
+	// So the single most likely credential to appear in a context-guru user's env block was the one
+	// the first two versions of the filter did not catch, and its name contains none of
+	// key/token/secret/password/credential. HEADER is in the name class because of this row.
 	{"ANTHROPIC_CUSTOM_HEADERS", `  "ANTHROPIC_CUSTOM_HEADERS": "x-context-guru-token: cg_live_REALGURU",`, "REALGURU"},
 	{"authorization bearer JWT", `  "authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.REALJWTBODY",`, "REALJWTBODY"},
 	{"github PAT", `  "GITHUB_PAT": "ghp_REALPAT00000000",`, "REALPAT00000000"},
@@ -4626,6 +4633,13 @@ var redactShapes = []struct {
 	{"model must survive", `  "model": "opus",`, ""},
 	{"theme must survive", `  "theme": "dark",`, ""},
 	{"a plain loopback base URL must survive", `  "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787/anthropic",`, ""},
+	// These three are what the verify pass and the no-record grep exist to SHOW the user — they are
+	// the routing itself, not a credential. AUTH and HEADER in the name class match more broadly than
+	// the original five did, so each is pinned here: over-redacting these would leave a locked-out
+	// user reading "<value not shown>" where they need to see which port they are pointed at.
+	{"a corporate base URL must survive", `  "ANTHROPIC_BASE_URL": "https://gateway.corp.example/anthropic",`, ""},
+	{"ANTHROPIC_UPSTREAM must survive", `  "ANTHROPIC_UPSTREAM": "https://gateway.corp.example",`, ""},
+	{"CONTEXT_GURU_BIN must survive", `  "CONTEXT_GURU_BIN": "/home/user/.local/bin/context-guru-proxy",`, ""},
 }
 
 // TestRedactCoversEveryKnownCredentialShape drives the real filter, lifted out of reset.sh, rather
