@@ -87,7 +87,7 @@ func TestCacheAllowsPermitsUnknownWhileTheExactPhaseTestDoesNot(t *testing.T) {
 		t.Fatalf("fixture does not produce Unknown, it produces %s — the rest of this test is vacuous", unknown)
 	}
 	for _, state := range []string{CacheStatePreExpiry, CacheStateCold, CacheStatePreExpiryOrCold} {
-		if !(Trigger{CacheState: state}).CacheAllows(unknown) {
+		if !(Trigger{CacheState: state}).CacheAllows(nil, unknown) {
 			t.Errorf("cache_state %q refused an UNKNOWN phase: on any deployment where the "+
 				"cache-aware path does not run — a non-caching provider, cache_mode: off, a "+
 				"bypassed turn, a first turn — this makes the component dead while protecting "+
@@ -109,7 +109,7 @@ func TestCacheAllowsPermitsUnknownWhileTheExactPhaseTestDoesNot(t *testing.T) {
 func TestTheZeroTriggerPermitsEveryCachePhase(t *testing.T) {
 	var zero Trigger
 	for _, p := range []CachePhase{CachePhaseUnknown, CachePhaseWarm, CachePhasePreExpiry, CachePhaseCold} {
-		if !zero.CacheAllows(p) {
+		if !zero.CacheAllows(nil, p) {
 			t.Errorf("the zero Trigger refused phase %s; a Trigger that names no cache_state must "+
 				"impose no cache constraint", p)
 		}
@@ -131,5 +131,41 @@ func TestCacheRemainingSeparatesUnknownFromExpired(t *testing.T) {
 	if !ok || d != 0 {
 		t.Errorf("an exactly-expired entry: got (%v, %v), want (0, true) — expiry is KNOWN, and "+
 			"reporting it as unknown would hide it from every caller", d, ok)
+	}
+}
+
+// PERMITTING COLD IS ONLY SOUND IF IT READS THE CLOCK RATHER THAN THE FLAG, and this is the test
+// that says so.
+//
+// Ctx.ColdCache is a known false positive on a keep-alive'd session: proxy/keepalive.go never
+// updates the turn tracker, so a session whose entry the keeper has been refreshing reads cold
+// while the entry is alive (proxy/promexport.go:807, the −$708 mechanism). A default of
+// pre_expiry_or_cold that trusted the flag would compact LIVE prefixes on exactly the sessions
+// someone is paying pings to protect — turning the cheapest moment to compact into the most
+// expensive one.
+func TestColdIsAcceptedFromTheClockAndNotFromTheFlagAlone(t *testing.T) {
+	const ttl = 5 * 60 * 1000
+	for _, state := range []string{CacheStateCold, CacheStatePreExpiryOrCold} {
+		// The keep-alive shape: the flag says cold, the clock says there is life left. This is
+		// the case that must NOT fire.
+		flagOnly := &Ctx{ColdCache: true, CacheTTLMs: ttl, IdleMs: 30 * 1000}
+		if (Trigger{CacheState: state}).CacheAllows(flagOnly, flagOnly.CachePhase(time.Minute)) {
+			t.Errorf("%s: permitted a session whose entry has %dms of life left because the flag "+
+				"said cold; that compacts a live prefix on a keep-alive'd session",
+				state, ttl-30*1000)
+		}
+		// Genuinely expired by the clock: this is the cheapest moment to compact, because the
+		// turn is paying to create an entry either way.
+		expired := &Ctx{ColdCache: true, CacheTTLMs: ttl, IdleMs: ttl + 60*1000}
+		if !(Trigger{CacheState: state}).CacheAllows(expired, expired.CachePhase(time.Minute)) {
+			t.Errorf("%s: refused a genuinely expired entry; that turn pays a write regardless, "+
+				"so declining leaves the full-prefix rewrite on the table", state)
+		}
+		// Nothing known either way stays Unknown, which every state permits for its own
+		// documented reasons — it must not be silently treated as cold.
+		unknown := &Ctx{}
+		if !(Trigger{CacheState: state}).CacheAllows(unknown, unknown.CachePhase(time.Minute)) {
+			t.Errorf("%s: refused an Unknown phase; see CacheAllows on why Unknown permits", state)
+		}
 	}
 }

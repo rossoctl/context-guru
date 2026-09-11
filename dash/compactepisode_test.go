@@ -567,10 +567,144 @@ func TestTheQueryFeedsTheWalkAClosedEpisode(t *testing.T) {
 		t.Errorf("provenance = %q, want %q — the stored event must survive the round trip",
 			e.Provenance, EpisodeRecorded)
 	}
-	if offUSD(e.ColdCreditUSD, 4.0) {
-		t.Errorf("cold credit = %v, want 4.0 (2.5 + 1.5, both turns ttl_expiry)", e.ColdCreditUSD)
+	// 1.5, NOT 4.0: t0's own $2.50 is deliberately not credited. At the moment of compaction
+	// nothing has been saved — we have only spent a model call and a cache write. The saving is
+	// what the LATER turns realize, which here is the single replay turn's $1.50.
+	if offUSD(e.ColdCreditUSD, 1.5) {
+		t.Errorf("cold credit = %v, want 1.5 — the replay turn only; crediting t0 would "+
+			"front-load a saving that has not happened yet", e.ColdCreditUSD)
 	}
 	if offUSD(e.SummarizerCostUSD, 0.05) {
 		t.Errorf("summarizer cost = %v, want 0.05", e.SummarizerCostUSD)
+	}
+}
+
+// THE COMPACTION TURN IS DEBIT-ONLY, and this is the rule that keeps the panel from paying itself
+// in advance.
+//
+// At t0 nothing has been saved. We have SPENT: a model call, and a cache write to put the new
+// smaller prefix in place. The saving is realized on later turns — cheaper reads against a shorter
+// transcript, and cold rewrites that cost 1.25xC instead of 1.25xF. An earlier version credited
+// t0's own saved_usd, which booked a saving at the cache-CREATION rate for work that had not yet
+// paid off: the one direction a savings figure must never lean.
+func TestTheCompactionTurnIsChargedAndNotCredited(t *testing.T) {
+	base := int64(900_000)
+	out := walk([]compactRow{
+		// t0 carries a large saved_usd AND a large write. Only the write may survive.
+		row(1, base, fresh, saved(9), miss(CacheTTLExpiry), wrote(40_000), cgCost(0.05)),
+		row(2, base+testSpan, saved(2), miss(CacheHit)),
+	}, exactWindow, testPrice)
+
+	e := only(t, out)
+	if e.State != EpisodeClosed {
+		t.Fatalf("precondition: the episode must close, got %q", e.State)
+	}
+	if offUSD(e.ColdCreditUSD, 0) {
+		t.Errorf("cold credit = %v, want 0 — t0's own saved_usd must not be credited", e.ColdCreditUSD)
+	}
+	if offUSD(e.ReadCreditUSD, 2) {
+		t.Errorf("read credit = %v, want 2 (the later turn only)", e.ReadCreditUSD)
+	}
+	wantDebit := 40_000 * 1.25e-6
+	if offUSD(e.InvalidationDebitUSD, wantDebit) {
+		t.Errorf("invalidation debit = %v, want %v — t0's write IS charged", e.InvalidationDebitUSD, wantDebit)
+	}
+	if offUSD(e.NetUSD, 2-wantDebit-0.05) {
+		t.Errorf("net = %v, want %v", e.NetUSD, 2-wantDebit-0.05)
+	}
+}
+
+// A cache write on a prefix_change turn INSIDE a span we opened is charged to us.
+//
+// prefix_change means the prompt no longer matched what was cached, and inside a summarized span
+// the thing that changes the prompt is us. It is already excluded from the credit for that reason;
+// excluding it from the debit too would be having it both ways — counting neither our damage nor
+// its cost.
+//
+// This is not hypothetical. Observed on a live run: a turn whose summarizer call hung held the
+// request past its own cache lifetime, the entry expired in our hands, the full 197k prefix was
+// re-written, and the row was recorded as prefix_change because idle is measured at ARRIVAL while
+// the expiry happened inside the pipeline.
+func TestASelfCausedPrefixChangeWriteInsideTheSpanIsCharged(t *testing.T) {
+	base := int64(900_000)
+	out := walk([]compactRow{
+		row(1, base, fresh, wrote(5_000)),
+		row(2, base+50_000, saved(3), miss(CachePrefixChange), wrote(197_000)),
+		row(3, base+testSpan, saved(1), miss(CacheHit)),
+	}, exactWindow, testPrice)
+
+	e := only(t, out)
+	want := (5_000 + 197_000) * 1.25e-6
+	if offUSD(e.InvalidationDebitUSD, want) {
+		t.Errorf("invalidation debit = %v, want %v (t0's write plus the self-caused rewrite)",
+			e.InvalidationDebitUSD, want)
+	}
+	// And that turn's saved_usd is still credited nowhere.
+	if offUSD(e.ColdCreditUSD+e.OtherCreditUSD, 0) || offUSD(e.ReadCreditUSD, 1) {
+		t.Errorf("a prefix_change turn must be credited nowhere: cold=%v read=%v other=%v",
+			e.ColdCreditUSD, e.ReadCreditUSD, e.OtherCreditUSD)
+	}
+}
+
+// An unfinished span reports its net rather than vanishing.
+//
+// Excluding it was survivorship one level below the coverage line: an unfinished span is exactly
+// the case where we paid for a summary and have not yet recouped it, so dropping those made the
+// panel systematically optimistic. It stays OUT of the settled total — a partial figure grows as
+// the time range widens — but it is reported, and it is allowed to be negative.
+func TestAnUnfinishedSpanReportsItsNetApartFromTheSettledTotal(t *testing.T) {
+	base := int64(900_000)
+	out := walk([]compactRow{
+		// Paid for a summary and a write; only one small read back so far.
+		row(1, base, fresh, wrote(40_000), cgCost(0.05)),
+		row(2, base+10_000, saved(0.01), miss(CacheHit)),
+	}, exactWindow, testPrice)
+
+	e := only(t, out)
+	if e.State != EpisodeOpen {
+		t.Fatalf("precondition: the span must still be open, got %q", e.State)
+	}
+	want := 0.01 - 40_000*1.25e-6 - 0.05
+	if offUSD(e.NetUSD, want) {
+		t.Errorf("open episode net = %v, want %v — an unfinished span must carry a net, and it "+
+			"is allowed to be negative", e.NetUSD, want)
+	}
+	g := out.ByProvenance[0]
+	if offUSD(g.NetUSD, 0) {
+		t.Errorf("settled net = %v, want 0 — an open span must not enter the settled total", g.NetUSD)
+	}
+	if offUSD(g.OpenNetUSD, want) {
+		t.Errorf("open net = %v, want %v — the exposure must be visible", g.OpenNetUSD, want)
+	}
+	if g.OpenTurns != 2 {
+		t.Errorf("open turns = %d, want 2", g.OpenTurns)
+	}
+	if out.Assumptions.OpenRule == "" {
+		t.Error("the server must state what the open figure means; an unexplained second total " +
+			"is worse than no second total")
+	}
+}
+
+// A voided span also reports what it spent. The client compacted mid-span so the payoff is not
+// comparable, but the money we spent was still spent.
+func TestAVoidedSpanStillReportsWhatItSpent(t *testing.T) {
+	base := int64(900_000)
+	out := walk([]compactRow{
+		row(1, base, fresh, wrote(40_000), cgCost(0.05), tokensBefore(300_000)),
+		row(2, base+10_000, saved(0.02), miss(CacheHit), tokensBefore(310_000)),
+		row(3, base+20_000, saved(0.02), miss(CacheHit), tokensBefore(40_000)),
+	}, exactWindow, testPrice)
+
+	e := only(t, out)
+	if e.State != EpisodeVoided {
+		t.Fatalf("precondition: the span must be voided, got %q", e.State)
+	}
+	g := out.ByProvenance[0]
+	if offUSD(g.NetUSD, 0) {
+		t.Errorf("settled net = %v, want 0 — a voided span is not comparable", g.NetUSD)
+	}
+	if g.VoidedNetUSD >= 0 {
+		t.Errorf("voided net = %v, want negative — we paid for a summary the client then "+
+			"superseded, and that spend is reported rather than dropped", g.VoidedNetUSD)
 	}
 }

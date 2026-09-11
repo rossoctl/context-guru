@@ -82,19 +82,47 @@ func TestSummarizeTimeoutIsCountedAndLeavesInputIntact(t *testing.T) {
 		Model:   components.ModelSpec{Static: model, Incoming: model},
 	}
 
+	beforeTimeouts := atomic.LoadInt64(&summarizeTimeouts)
 	rep := &components.Report{}
 	_, err := s.Offload(req, rep, c)
 
-	// The model must actually have been called, or the test proves nothing: a component
-	// that skipped on a trigger/floor also leaves the messages alone.
+	// A BLOWN DEADLINE NO LONGER REACHES THE CALLER, and that is the contract this test now
+	// pins. The summary is produced off the hot path, so the request has already been answered
+	// by the time the call gives up: Offload returns nil, the transcript is untouched, and the
+	// only trace is the counter.
+	//
+	// This is the whole point of the async execution model rather than a weakening of the old
+	// one. Measured on a live run against the SYNCHRONOUS path: a call sat for its full 300s
+	// budget while upstream itself took 2.8s, the prompt cache entry expired inside the
+	// pipeline, and the turn then paid a 197,879-token full-prefix rewrite — the exact cost the
+	// trigger exists to avoid, caused by our own latency. A timeout that costs nothing but a
+	// counter increment is the outcome worth having.
+	if err != nil {
+		t.Fatalf("Offload returned %v on a blown deadline; with the call off the hot path the "+
+			"request is already answered and there is nobody to hand an error to", err)
+	}
+
+	// The model must actually have been called, or the test proves nothing: a component that
+	// skipped on a trigger/floor also leaves the messages alone. Drained on the production
+	// channel rather than slept, so this stays deterministic.
+	if !WaitForSummaryForTest(c.Session, 5*time.Second) {
+		t.Fatal("the background summary never finished, so the timeout path was never exercised")
+	}
 	if atomic.LoadInt64(&model.calls) == 0 {
 		t.Fatal("model was never called, so the timeout path was never exercised. " +
 			"Check the fixture clears trigger.min_messages / min_request_tokens and " +
 			"that the span is above min_tokens.")
 	}
-	if err == nil {
-		t.Fatal("Offload returned nil on a blown deadline; the pipeline needs the error " +
-			"to revert this component")
+	// The counter is the ONLY place a degraded summarizer now shows up, so it has to move.
+	if got := atomic.LoadInt64(&summarizeTimeouts); got <= beforeTimeouts {
+		t.Errorf("summarize_timeouts did not move (%d -> %d): with nothing on the hot path "+
+			"waiting for the call, this counter is the only evidence a summary was paid for "+
+			"and lost", beforeTimeouts, got)
+	}
+	// And no checkpoint was written, because there is no summary to checkpoint.
+	if _, ok := loadCheckpoint(c); ok {
+		t.Error("a timed-out call left a checkpoint; a later turn would splice a summary that " +
+			"was never produced")
 	}
 	// The message list must be untouched: summarize is the one component that changes
 	// the message COUNT, so a partial rebuild on the error path would leave the caller

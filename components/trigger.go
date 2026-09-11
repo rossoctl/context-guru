@@ -96,17 +96,37 @@ func (t Trigger) PreExpiry() time.Duration {
 //
 // An unrecognised value permits, rather than silently disabling the component. Constructors
 // validate the string and refuse a bad one at config time, which is where a typo belongs.
-func (t Trigger) CacheAllows(p CachePhase) bool {
+func (t Trigger) CacheAllows(c *Ctx, p CachePhase) bool {
 	switch t.CacheState {
 	case CacheStatePreExpiry:
 		return p == CachePhasePreExpiry || p == CachePhaseUnknown
 	case CacheStateCold:
-		return p == CachePhaseCold || p == CachePhaseUnknown
+		return coldByArithmetic(c) || p == CachePhaseUnknown
 	case CacheStatePreExpiryOrCold:
-		return p == CachePhasePreExpiry || p == CachePhaseCold || p == CachePhaseUnknown
+		return p == CachePhasePreExpiry || coldByArithmetic(c) || p == CachePhaseUnknown
 	default: // "" and "any"
 		return true
 	}
+}
+
+// coldByArithmetic reports that this request's cache entry is expired ACCORDING TO THE CLOCK, as
+// opposed to according to Ctx.ColdCache.
+//
+// THE DISTINCTION IS THE WHOLE FUNCTION, and without it permitting Cold would be a regression.
+// ColdCache is a KNOWN FALSE POSITIVE on a keep-alive'd session: proxy/keepalive.go never updates
+// the turn tracker, so a session whose entry the keeper has been refreshing reads cold while the
+// entry is very much alive — the −$708 mechanism proxy/promexport.go:807 documents. A trigger that
+// accepted the flag would therefore compact LIVE prefixes on exactly the sessions someone is
+// paying pings to protect, which is the single most expensive thing this component can do.
+//
+// CacheRemaining separates "cannot tell" from "expired": it reports ok=false when the TTL or the
+// idle time is unknown, and a non-positive duration only when both are known and the entry's
+// lifetime has run out. Unknown is NOT cold here — a component that cannot tell must fall through
+// to the Unknown branch, which the caller permits for its own documented reasons, rather than
+// borrow a verdict it has not earned.
+func coldByArithmetic(c *Ctx) bool {
+	remaining, ok := c.CacheRemaining()
+	return ok && remaining <= 0
 }
 
 // FracResolvable reports whether the configured fractions can be resolved against a window worth

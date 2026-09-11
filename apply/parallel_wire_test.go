@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -62,9 +64,15 @@ func TestSummarizeNeverSplitsAToolExchange(t *testing.T) {
 		cfg := pipe(t, "pipeline: [summarize]\ncomponents:\n  summarize: {keep_last: "+
 			string(rune('0'+keep))+", start_from_message: 0, min_tokens: 1, trigger: {min_request_frac: 0}}\n")
 		p, _ := cfg.Build(nil)
-		out, changed := apply.BodyWithModel(context.Background(), p,
-			store.NewMemory(store.Options{}), bschemas.Anthropic, body, "", false,
-			components.ModelSpec{Incoming: stubModel{resp: "essential facts"}})
+		// Two passes over one Store: the first commissions the summary, the second splices it. A
+		// fresh Store per pass would lose the checkpoint, no pass would change the message count,
+		// and every wire assertion below would be vacuous.
+		st := store.NewMemory(store.Options{})
+		models := components.ModelSpec{Incoming: stubModel{resp: "essential facts"}}
+		apply.BodyWithModel(context.Background(), p, st, bschemas.Anthropic, body, "", false, models)
+		offload.WaitForAllSummariesForTest(5 * time.Second)
+		out, changed := apply.BodyWithModel(context.Background(), p, st,
+			bschemas.Anthropic, body, "", false, models)
 		if !changed {
 			continue
 		}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
@@ -99,6 +100,10 @@ func TestSummarizeDoesNotPayForACheckpointItCannotStash(t *testing.T) {
 	if _, err := s.Offload(healthy, &rep, ctxFor(store.NewMemory(store.Options{MaxEntries: 400}))); err != nil {
 		t.Fatal(err)
 	}
+	// The summary is commissioned off the hot path, so drain before counting calls: the call
+	// happens, just not on this turn's clock. Waiting on the production channel rather than
+	// sleeping keeps this deterministic.
+	WaitForSummaryForTest("s", 5*time.Second)
 	if atomic.LoadInt64(&model.calls) != 1 {
 		t.Fatalf("the fixture made %d model calls against a healthy store, want 1: it does not "+
 			"reach the summarize path, so the assertion below would pass vacuously",
@@ -154,14 +159,14 @@ func TestSummarizeReplaysItsCheckpointRatherThanFlippingCachedContent(t *testing
 		id := "t" + strconv.Itoa(i)
 		msgs = append(msgs, callMsg(id), bulkResult(id))
 	}
-	turn1 := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), msgs...)}
-	var rep components.Report
-	if _, err := s.Offload(turn1, &rep, ctx); err != nil {
-		t.Fatal(err)
-	}
+	// The summary is commissioned off the hot path, so it takes two turns to have a summarized
+	// body: turn 0 commissions, turn 1 splices. The refusal under test happens on a LATER turn
+	// still, and what it must not do is flip that spliced shape back to the full transcript.
+	turn1, rep1 := commissionThenSplice(t, s, msgs, ctx)
+	rep := *rep1
 	if len(turn1.Input) >= len(msgs) {
-		t.Fatalf("turn 1 did not summarize (%d messages, was %d), so there is no checkpoint and "+
-			"no cached shape for a refusal to flip", len(turn1.Input), len(msgs))
+		t.Fatalf("the splicing turn did not summarize (%d messages, was %d), so there is no "+
+			"cached shape for a refusal to flip", len(turn1.Input), len(msgs))
 	}
 	summaryShape := len(turn1.Input)
 	if _, ok := loadCheckpoint(ctx); !ok {

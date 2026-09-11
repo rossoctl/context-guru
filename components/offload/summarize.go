@@ -3,7 +3,6 @@ package offload
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -110,6 +109,9 @@ type Summarize struct {
 	modelClient       components.Model // config-pinned client (model: block), or nil
 	trigger           components.Trigger
 	mode              markerMode
+	// summaryWaitSeconds caps how long a turn will wait for a summary another turn started.
+	// 0 = defaultSummaryWait. See summarize_async.go.
+	summaryWaitSeconds int
 }
 
 type summarizeConfig struct {
@@ -126,6 +128,11 @@ type summarizeConfig struct {
 	Model             modelConfig        `yaml:"model"`
 	Trigger           components.Trigger `yaml:"trigger"`
 	MarkerMode        string             `yaml:"marker_mode"` // full (default) | summary | off
+	// SummaryWaitSeconds: how long a turn waits for a summary that an EARLIER turn started
+	// (0 = 120s). The summary itself is produced off the hot path, so this is a latency
+	// ceiling and never a correctness parameter — when it expires the turn proceeds with
+	// whatever it already had. See summarize_async.go.
+	SummaryWaitSeconds int `yaml:"summary_wait_seconds"`
 }
 
 func newSummarize(raw []byte) (components.Component, error) {
@@ -145,7 +152,7 @@ func newSummarize(raw []byte) (components.Component, error) {
 		level: cfg.SummaryLevel, keepLast: cfg.KeepLast,
 		minTokens: cfg.MinTokens, resummarizeTokens: cfg.ResummarizeTokens,
 		includeToolCalls: cfg.IncludeToolCalls, modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(), trigger: cfg.Trigger,
-		mode: parseMarkerMode(cfg.MarkerMode),
+		mode: parseMarkerMode(cfg.MarkerMode), summaryWaitSeconds: cfg.SummaryWaitSeconds,
 	}, nil
 }
 
@@ -175,7 +182,7 @@ func newSummarize(raw []byte) (components.Component, error) {
 // design avoids.
 const (
 	summarizeDefaultRequestFrac = 0.9
-	summarizeDefaultCacheState  = components.CacheStatePreExpiry
+	summarizeDefaultCacheState  = components.CacheStatePreExpiryOrCold
 )
 
 // The four names summarize files on Report.Events. Promoted to constants because a SECOND
@@ -196,6 +203,16 @@ const (
 	EventReusedCheckpoint                   = "reused_checkpoint"
 	EventGatedReplayedCheckpoint            = "gated_replayed_checkpoint"
 	EventReserveExhaustedReplayedCheckpoint = "reserve_exhausted_replayed_checkpoint"
+	// EventSummaryStarted marks a turn that COMMISSIONED a summary without waiting for it. The
+	// spend is committed here; the summary lands (or does not) on its own, and EventFreshSummary
+	// is filed by the goroutine that commits it. Two names because a started-and-lost call is a
+	// real outcome that must not read as a delivered summary.
+	EventSummaryStarted = "summary_started"
+	// EventAwaitedCheckpoint marks a turn that WAITED for a summary an earlier turn started and
+	// then spliced it. Distinct from EventReusedCheckpoint because this one cost latency: it is
+	// the turn that paid for the async design, and the pair (awaited, summary_wait_timeout) is
+	// what says whether the wait cap is set anywhere near right.
+	EventAwaitedCheckpoint = "awaited_checkpoint"
 )
 
 // applySummarizeTriggerDefaults installs summarize's trigger defaults for keys the operator did
@@ -274,7 +291,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		rep.Gate("window_not_exact")
 	}
 	phase := c.CachePhase(s.trigger.PreExpiry())
-	phased := s.trigger.CacheAllows(phase)
+	phased := s.trigger.CacheAllows(c, phase)
 	if !phased {
 		// NOT extract_llm_sweep's `not_in_pre_expiry_window`, deliberately. That component has
 		// exactly one permitted state, so a name asserting which one is always true of it. This
@@ -325,6 +342,40 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		rep.Gate("no_model") // NeedsModel but none available → degrade gracefully
 	}
 
+	// A SUMMARY THIS SESSION ALREADY STARTED may be seconds from landing. Wait for it before
+	// deciding there is nothing to splice — that is the whole point of producing summaries off
+	// the hot path, and it is the common case rather than the rare one: the trigger fires only
+	// after a long idle gap, so the user is active immediately afterwards and the next turn
+	// typically arrives while the call is still running.
+	//
+	// Above the gates' effect, because a turn that lands mid-flight is usually a turn the gates
+	// DECLINE (the cache is warm again by then) and it is exactly the turn that most needs the
+	// result: without it, it forwards the full transcript at 1.25xF.
+	if _, running := inFlight.peek(c.Session); running {
+		waited, landed := inFlight.waitFor(c.Ctx, c.Session, s.summaryWait())
+		atomic.AddInt64(&summarizeWaitedMs, waited.Milliseconds())
+		if landed {
+			// Re-read: the checkpoint the background call just wrote is the thing we waited for.
+			if outMsgs, outKeys, ok, nowStale := s.tryReuse(c, rep, msgs, headCount, start, end); ok {
+				if len(outKeys) == 0 {
+					rep.Irreversible = true
+				}
+				rep.Replay(EventAwaitedCheckpoint)
+				req.Input = outMsgs
+				return outKeys, nil
+			} else if nowStale {
+				stale = true
+			}
+		} else {
+			// The cap expired (or the client gave up). Counted, because a climbing timeout count
+			// is the signal that the cap is set wrong or the summarizer is degraded — and with
+			// nothing on the hot path waiting for it any more, this counter is the only place
+			// that shows up.
+			atomic.AddInt64(&summarizeWaitTimeouts, 1)
+			rep.Gate("summary_wait_timeout")
+		}
+	}
+
 	// No new summary this turn — gated, or nothing to summarize with. Fall back to the most
 	// cache-stable shape available, which is the standing checkpoint when there is one. Both
 	// reasons take the same path because they have the same remedy; the gates above already
@@ -373,126 +424,73 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 		return nil, nil
 	}
 
-	// THE RESERVE IS CONSULTED BEFORE THE MODEL CALL, not after it.
+	// THE RESERVE IS PROBED BEFORE THE CALL IS COMMISSIONED, not after it comes back.
 	//
-	// The span is all the marker key depends on (key = hashKey(spanJSON)), and the payload is
-	// the span itself — so nothing about the stash needs the summary to exist. The check used
-	// to sit after s.summarize, which meant a saturated reserve paid the call (measured at ~57k
-	// prompt tokens) and threw the result away, then did it again on the NEXT turn, and every
-	// turn after, because a refusal saves no checkpoint and so changes nothing about the next
-	// turn's inputs. Asking first turns an unbounded stream of wasted calls into a skip.
+	// The span is all the marker key depends on, and the payload is the span itself, so nothing
+	// about the stash needs the summary to exist. Asking first is what turns an unbounded stream
+	// of wasted calls into a skip: a saturated reserve used to pay the call (~57k prompt tokens),
+	// throw the result away, and do it again on the next turn and every turn after, because a
+	// refusal saves no checkpoint and so changes nothing about the next turn's inputs.
 	//
-	// A probe, not a claim: StashRoom reserves nothing, so the real PutStash below can still
-	// refuse if another session took the slot in between. That is a rare race rather than the
-	// steady state, and it lands on the same refusal path. Claiming the slot up here instead
-	// would leak one payload's worth of reserve every time the model call then failed — the
-	// resource this whole change exists to protect.
-	mode := effectiveMode(c, s.mode)
-	var spanJSON []byte
-	var key string
-	if mode == markerFull {
-		var err error
-		if spanJSON, err = json.Marshal(span); err != nil {
+	// That argument gets STRONGER with the call off the hot path, not weaker: a wasted call now
+	// costs money without even the excuse of having been on the critical path, and nothing in the
+	// response tells anyone it happened. The actual PutStash still runs in the goroutine (see
+	// commitAsyncSummary) and can still refuse if another session took the slot meanwhile — this
+	// probe removes the steady-state waste, not the race.
+	if effectiveMode(c, s.mode) == markerFull {
+		spanJSON, err := json.Marshal(span)
+		if err != nil {
 			return nil, err
 		}
-		key = hashKey(string(spanJSON))
 		if !store.StashRoom(c.Store, len(spanJSON)) {
 			return s.refuse(c, rep, req, msgs, headCount, start, stale)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(c.Ctx, summarizeCallTimeout)
-	defer cancel()
-	summary, err := s.summarize(ctx, model, span, conversationGoal(req))
-	if err != nil {
-		// Classify before returning. Our own ctx is the reliable signal: the parent
-		// request may still be healthy while THIS component's budget expired, and the
-		// http client wraps the cause, so errors.Is walks to it.
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			atomic.AddInt64(&summarizeTimeouts, 1)
-		} else {
-			atomic.AddInt64(&summarizeErrors, 1)
-		}
-		return nil, err // fail-open: the pipeline reverts this component
+	// START THE SUMMARY AND FORWARD. This is where the component used to call the model inline
+	// with a 300-second budget, on a turn chosen precisely because the prompt cache had at most 60
+	// seconds left to live — so a slow call guaranteed the entry died while we held the request,
+	// and the full transcript then went upstream at 1.25x. Measured once for real: 300s held,
+	// 2.8s of it upstream, 197,879 tokens re-written, and the model call wasted. See
+	// summarize_async.go for the whole argument.
+	//
+	// Nothing about THIS turn's response depends on the summary now. A later turn splices it —
+	// waiting for it if it is still in flight — which costs this turn's compaction and buys back
+	// the worst case.
+	// A SESSIONLESS REQUEST IS SUMMARIZED INLINE, and that is not a concession — it is the only
+	// thing that can work. The whole async design rests on handing the result to a LATER TURN OF
+	// THE SAME SESSION: the checkpoint is keyed by session id (store.SumPrefix+session) and the
+	// single-flight registry is keyed the same way. With no session id there is no key to save
+	// under, nothing to single-flight on, and no later turn that could ever find it — so going
+	// async would spend a model call and discard the result, every turn, forever.
+	//
+	// Such a request is also not the case the async path protects: no session means no prompt
+	// cache entry we could be invalidating, and no next turn whose latency we are protecting.
+	// This keeps the pre-existing behaviour exactly for callers who have it (the library API and
+	// /compact both reach here without a session), and confines the new execution model to the
+	// proxy traffic it was designed for.
+	if c.Session == "" {
+		return s.summarizeInline(c, rep, req, msgs, model, span, headCount, start, end, stale)
 	}
-	if strings.TrimSpace(summary) == "" {
-		rep.Skipped = true
-		return nil, nil
-	}
-
-	// Stash the replaced span so expand can restore it — full mode only. In
-	// summary/off there is no restoration; flag the deliberate lossy drop so the
-	// pipeline's dropped-without-stash guard permits it.
-	// full is reversible only if the store persists the stash; otherwise degrade
-	// to an irreversible off-style drop (no unresolvable marker).
-	if mode == markerFull {
-		// A summary REPLACES the span it covers, so the marker in the summary text is the
-		// only route back to it. If the store's rewind reserve cannot hold the span, this
-		// component must not summarize at all: unlike the per-message offloaders it cannot
-		// leave "this message" verbatim, so refusing means skipping the whole checkpoint.
-		//
-		// Reachable despite the StashRoom probe above (the probe claims nothing and another
-		// session can take the slot in between), which is why the refusal path still exists
-		// here — the probe removes the steady-state waste, not the race.
-		if !store.PutStash(c.Store, key, spanJSON) {
-			return s.refuse(c, rep, req, msgs, headCount, start, stale)
-		}
+	if !s.startAsyncSummary(c, model, span, conversationGoal(req), end-start) {
+		// Another summary is already in flight for this session. This turn must not start a
+		// second: a session that keeps firing would otherwise queue one full-transcript model
+		// call per turn, each paying for a ~48k-token prompt, with the last writer's checkpoint
+		// winning arbitrarily.
+		rep.Gate("summary_already_in_flight")
 	} else {
-		rep.Irreversible = true
+		// An Event, not a Replay: money is being spent, just not on this turn's clock. The
+		// FRESH-summary event is filed by the goroutine's commit, so /stats never reports a
+		// summary that was started and never landed as though it had landed.
+		rep.Event(EventSummaryStarted)
 	}
-
-	summaryText := summaryWrapper(summary, key, mode)
-	// USER, not system. The summary is injected context, and Anthropic will not accept a
-	// system-role message in the middle of `messages`: system content belongs in the
-	// top-level `system` field, and a system role inside the array must precede an
-	// assistant message or end it. This component emits [msgs[0], summary, tail...], so
-	// when msgs[0] is itself the system prompt — the normal case — a system-role summary
-	// lands at index 1 and the provider rejects the whole request:
-	//
-	//	400 messages.1: role 'system' must precede an 'assistant' message or end the array
-	//
-	// Measured on live LOCA-bench traffic: every task that triggered a summarization failed
-	// this way, including in an arm with NO other component enabled, so it is this
-	// component's own output and not a pipeline interaction. It went unnoticed because
-	// every prior measurement replayed through /compact, which never forwards upstream and
-	// therefore never has the body validated by a provider.
-	//
-	// A user-role message carrying the summary is both valid and conventional — it is what
-	// Claude Code's own compaction does.
-	summaryMsg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
-	schema.SetMessageText(&summaryMsg, summaryText)
-
-	// Checkpoint: this summary subsumes the leading span (len(span) messages from
-	// index 1). A later turn appends messages, so this same prefix stays stable.
-	saveCheckpoint(c, sumCheckpoint{
-		SummaryMsg: summaryText, CoveredCount: end - start,
-		CoveredHash: spanHash(span), Key: key,
-	})
-
-	// The fresh path's own event, filed HERE rather than at the top of the path: everything
-	// above this line can still decline (a blank summary, a refused stash, an empty span after
-	// the expand trim), and an event filed before those would name a summary that was never
-	// emitted. This is the first point at which a new summary is committed.
-	//
-	// An Event, not a Replay: this turn spent money. Report.Replay is for the free paths, and
-	// keeping the two apart is what lets the episode walk below tell a paid t0 from the
-	// amortization that follows it.
-	rep.Event(EventFreshSummary)
-
-	// [msg0, summary, last-K] — reassign; apply.Body rebuilds losslessly.
-	out := make([]bschemas.ChatMessage, 0, 2+s.keepLast)
-	out = append(out, msgs[:headCount]...)
-	out = append(out, summaryMsg)
-	out = append(out, msgs[end:]...)
-	// Removing a span can orphan the tail's leading tool_result blocks; a provider rejects
-	// the whole request if it does. See dropOrphanedToolResults.
-	if repaired, n := dropOrphanedToolResults(out); n > 0 {
-		out = repaired
+	// The turn proceeds with whatever it already had: a stale checkpoint if one exists (the most
+	// cache-stable shape available), otherwise untouched. Untouched is the fail-open outcome and
+	// it is the same one every earlier version produced when the model was unavailable.
+	if stale {
+		return s.replayStale(c, rep, req, msgs, headCount, start, EventGatedReplayedCheckpoint)
 	}
-	req.Input = out
-	if key != "" {
-		return []string{key}, nil
-	}
+	rep.Skipped = true
 	return nil, nil
 }
 
@@ -826,6 +824,10 @@ func init() {
 			Hint: "Once a summary exists, reuse it with no model call until the tail since that checkpoint grows past this many tokens. 0 = re-summarize every eligible turn."},
 		{Key: "include_tool_calls", Type: components.FieldBool,
 			Hint: "Include tool calls and their results in the trajectory handed to the summarizer."},
+		{Key: "summary_wait_seconds", Type: components.FieldInt, Default: 120, Min: 0,
+			Hint: "The summary is produced off the hot path, so a turn that arrives while one is " +
+				"still running waits this long for it (0 = 120s). Waiting beats sending the full " +
+				"transcript; when the wait expires the turn proceeds regardless."},
 		markerModeField(),
 	}
 	f = append(f, modelFields("model")...)

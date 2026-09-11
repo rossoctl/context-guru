@@ -7,11 +7,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -239,8 +241,15 @@ func TestSummarizeCountChangeLossless(t *testing.T) {
 		},
 	})
 
-	out, changed := apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false,
-		components.ModelSpec{Incoming: stubModel{resp: "essential facts"}})
+	// TWO PASSES, because summarize commissions its summary off the hot path: the first pass
+	// starts the model call and forwards the body untouched, and the second splices the result.
+	// apply derives the session id from the transcript, so the drain cannot name it.
+	models := components.ModelSpec{Incoming: stubModel{resp: "essential facts"}}
+	apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false, models)
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("the background summary never landed, so there is nothing for the second pass to splice")
+	}
+	out, changed := apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false, models)
 	if !changed {
 		t.Fatal("summarize should have restructured the transcript")
 	}

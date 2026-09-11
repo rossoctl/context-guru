@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
@@ -101,12 +102,23 @@ func TestSummarizeReplaysItsCheckpointOnATurnTheTriggerDeclines(t *testing.T) {
 	if _, err := s.Offload(turn1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// Turn 1 COMMISSIONS the summary; it does not carry it — the model call happens off the hot
+	// path so a slow summarizer can never hold a request past its own cache lifetime. Draining
+	// here is what makes turn 2 the turn that splices. It waits on the same channel a real later
+	// turn waits on, so this cannot pass merely by being slow enough on one machine.
+	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
+		t.Fatal("turn 1's summary never landed")
+	}
 	// Preconditions. Without these a fixture that stopped reaching the fresh path would make
 	// every assertion below pass vacuously — the summarized and never-summarized shapes are
 	// indistinguishable once you stop checking that turn 1 did anything.
-	if len(turn1.Input) >= len(msgs) {
-		t.Fatalf("turn 1 did not summarize (%d messages, was %d), so there is no checkpoint and "+
-			"nothing for turn 2 to replay (gates: %v)", len(turn1.Input), len(msgs), rep.Gates)
+	// The precondition is now about the CHECKPOINT, not about turn 1's own body: turn 1 forwards
+	// untouched by design and hands the result to the next turn. Asserting on turn1.Input would
+	// fail on correct behaviour, and dropping the precondition entirely would let a fixture that
+	// stopped summarizing at all pass vacuously — the whole point of having one.
+	if _, ok := loadCheckpoint(ctx); !ok {
+		t.Fatalf("turn 1 commissioned no checkpoint, so there is nothing for turn 2 to replay "+
+			"(gates: %v, events: %v)", rep.Gates, rep.Events)
 	}
 	if n := atomic.LoadInt64(&model.calls); n != 1 {
 		t.Fatalf("turn 1 made %d model calls, want 1 — the fresh path did not run (gates: %v)", n, rep.Gates)
@@ -114,7 +126,9 @@ func TestSummarizeReplaysItsCheckpointOnATurnTheTriggerDeclines(t *testing.T) {
 	if _, ok := loadCheckpoint(ctx); !ok {
 		t.Fatal("turn 1 saved no checkpoint, so the replay under test has nothing to replay")
 	}
-	summaryShape, summaryText := len(turn1.Input), schema.MessageText(turn1.Input[1])
+	// head + summary + keepLast(1), computed rather than read off turn 1: turn 1 forwards untouched
+	// now and hands the summary to the next turn via the checkpoint.
+	summaryShape, summaryText := 3, cpRef(t, ctx)
 
 	// --- Turn 2: warm cache, so the gate SHUTS, and a tail grown past resummarize_tokens so the
 	// standing checkpoint is stale rather than reusable as-is.
@@ -139,7 +153,7 @@ func TestSummarizeReplaysItsCheckpointOnATurnTheTriggerDeclines(t *testing.T) {
 	}
 	// Byte-identical, or the replay is itself a flip.
 	if got := schema.MessageText(turn2.Input[1]); got != summaryText {
-		t.Errorf("the replayed summary differs from the one turn 1 sent, so the replay is itself a "+
+		t.Errorf("the replayed summary differs from the checkpoint it came from, so the replay is itself a "+
 			"cache flip:\n got %q\nwant %q", got, summaryText)
 	}
 	// A replay is free. Paying for one here would mean the gate is not gating the model call,
@@ -175,10 +189,17 @@ func TestSummarizeReplaysItsCheckpointWhenNoModelIsAvailable(t *testing.T) {
 	if _, err := s.Offload(turn1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
-	if len(turn1.Input) >= len(msgs) {
-		t.Fatalf("turn 1 did not summarize, so there is no checkpoint to replay (gates: %v)", rep.Gates)
+	// Turn 1 COMMISSIONS the summary; it does not carry it — the model call happens off the hot
+	// path so a slow summarizer can never hold a request past its own cache lifetime. Draining
+	// here is what makes turn 2 the turn that splices. It waits on the same channel a real later
+	// turn waits on, so this cannot pass merely by being slow enough on one machine.
+	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
+		t.Fatal("turn 1's summary never landed")
 	}
-	summaryText := schema.MessageText(turn1.Input[1])
+	if _, ok := loadCheckpoint(ctx); !ok {
+		t.Fatalf("turn 1 commissioned no checkpoint, so there is nothing to replay (gates: %v)", rep.Gates)
+	}
+	summaryText := cpRef(t, ctx)
 
 	// The model goes away. Still in the pre-expiry window, so the trigger itself would allow a
 	// fresh summary — the model's absence is the only reason there will not be one.
@@ -228,10 +249,17 @@ func TestAZeroResummarizeTokensConfigStillReplaysRatherThanFlipping(t *testing.T
 	if _, err := s.Offload(turn1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
-	if len(turn1.Input) >= len(msgs) {
-		t.Fatalf("turn 1 did not summarize (gates: %v)", rep.Gates)
+	// Turn 1 COMMISSIONS the summary; it does not carry it — the model call happens off the hot
+	// path so a slow summarizer can never hold a request past its own cache lifetime. Draining
+	// here is what makes turn 2 the turn that splices. It waits on the same channel a real later
+	// turn waits on, so this cannot pass merely by being slow enough on one machine.
+	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
+		t.Fatal("turn 1's summary never landed")
 	}
-	summaryText := schema.MessageText(turn1.Input[1])
+	if _, ok := loadCheckpoint(ctx); !ok {
+		t.Fatalf("turn 1 commissioned no checkpoint (gates: %v)", rep.Gates)
+	}
+	summaryText := cpRef(t, ctx)
 
 	turn2 := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), msgs...)}
 	rep = components.Report{}
@@ -302,9 +330,14 @@ func TestTheFillConjunctDeclinesRatherThanResolveAgainstAGuessedWindow(t *testin
 			st := store.NewMemory(store.Options{MaxEntries: 400})
 			in := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), msgs...)}
 			var rep components.Report
-			if _, err := s.Offload(in, &rep, sumCtx(st, "unknown", tc.window, tc.exact, tc.billed)); err != nil {
+			ctx := sumCtx(st, "unknown", tc.window, tc.exact, tc.billed)
+			if _, err := s.Offload(in, &rep, ctx); err != nil {
 				t.Fatalf("Offload must fail open: %v", err)
 			}
+			// The call is COMMISSIONED, not made inline, so drain before counting. A turn that
+			// declined started nothing and this returns immediately; a turn that fired started
+			// exactly one call and this waits for it.
+			WaitForSummaryForTest(ctx.Session, 5*time.Second)
 			fired := atomic.LoadInt64(&model.calls) == 1
 			if fired != tc.wantFires {
 				t.Errorf("fired=%v want %v (gates: %v)", fired, tc.wantFires, rep.Gates)
@@ -338,8 +371,9 @@ func newCacheGatedSummarizeWithFrac(t *testing.T, trigger string) *Summarize {
 func TestSummarizeTriggerDefaultsAndTheirOptOut(t *testing.T) {
 	t.Run("an absent key takes the shipped default", func(t *testing.T) {
 		s := newCacheGatedSummarizeWithFrac(t, "")
-		if s.trigger.CacheState != components.CacheStatePreExpiry {
-			t.Errorf("cache_state defaulted to %q, want %q", s.trigger.CacheState, components.CacheStatePreExpiry)
+		if s.trigger.CacheState != components.CacheStatePreExpiryOrCold {
+			t.Errorf("cache_state defaulted to %q, want %q", s.trigger.CacheState,
+				components.CacheStatePreExpiryOrCold)
 		}
 		if s.trigger.MinRequestFrac != summarizeDefaultRequestFrac {
 			t.Errorf("min_request_frac defaulted to %v, want %v", s.trigger.MinRequestFrac, summarizeDefaultRequestFrac)
@@ -355,7 +389,7 @@ func TestSummarizeTriggerDefaultsAndTheirOptOut(t *testing.T) {
 	})
 	t.Run("cache_state any restores the size-only behaviour", func(t *testing.T) {
 		s := newCacheGatedSummarizeWithFrac(t, "trigger:\n  cache_state: any\n")
-		if !s.trigger.CacheAllows(components.CachePhaseWarm) {
+		if !s.trigger.CacheAllows(nil, components.CachePhaseWarm) {
 			t.Error("cache_state: any refused a warm turn, so the documented opt-out for a client " +
 				"that does not cap its own context does not actually opt out")
 		}
@@ -373,7 +407,7 @@ func TestSummarizeTriggerDefaultsAndTheirOptOut(t *testing.T) {
 		// unset value — so a wrong one here does not merely mislabel the settings page, it
 		// persists a cache_state summarize never chose.
 		want := map[string]any{
-			"trigger.cache_state":      components.CacheStatePreExpiry,
+			"trigger.cache_state":      components.CacheStatePreExpiryOrCold,
 			"trigger.min_request_frac": summarizeDefaultRequestFrac,
 		}
 		seen := map[string]bool{}
@@ -392,4 +426,52 @@ func TestSummarizeTriggerDefaultsAndTheirOptOut(t *testing.T) {
 			}
 		}
 	})
+}
+
+// cpRef is the summary bytes a session's checkpoint holds — the reference every replay must match.
+//
+// It replaced `schema.MessageText(turn1.Input[1])` across this file when summaries moved off the
+// hot path: turn 1 commissions the work and forwards untouched, so its own body no longer contains
+// the summary. The PROPERTY under test is unchanged, and is the one this file exists for — every
+// turn that splices must splice identical bytes, or the replay is itself the cache flip it was
+// meant to prevent — but the authority for those bytes is now the checkpoint rather than turn 1.
+func cpRef(t *testing.T, ctx *components.Ctx) string {
+	t.Helper()
+	cp, ok := loadCheckpoint(ctx)
+	if !ok {
+		t.Fatal("no checkpoint: turn 1 commissioned no summary, so there is no reference to " +
+			"compare replays against")
+	}
+	return cp.SummaryMsg
+}
+
+// commissionThenSplice runs the two turns the async execution model always takes: one that
+// COMMISSIONS a summary and forwards untouched, and one that SPLICES the result. It returns the
+// second turn's request — the one carrying the summarized transcript — and that turn's report.
+//
+// It exists because "summarize this and show me the output" stopped being a single call. Every test
+// that wants a summarized body needs both turns, and writing them out by hand invites the one
+// mistake that does not fail loudly: forget the drain and the test becomes flaky rather than
+// broken, which is the worst of the available failure modes.
+func commissionThenSplice(t *testing.T, s *Summarize, msgs []bschemas.ChatMessage,
+	ctx *components.Ctx) (*bschemas.BifrostChatRequest, *components.Report) {
+	t.Helper()
+	first := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), msgs...)}
+	var rep1 components.Report
+	if _, err := s.Offload(first, &rep1, ctx); err != nil {
+		t.Fatalf("the commissioning turn must fail open: %v", err)
+	}
+	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
+		t.Fatalf("no summary landed within 5s (gates: %v, events: %v)", rep1.Gates, rep1.Events)
+	}
+	if _, ok := loadCheckpoint(ctx); !ok {
+		t.Fatalf("the commissioning turn produced no checkpoint, so the second turn has nothing "+
+			"to splice (gates: %v, events: %v)", rep1.Gates, rep1.Events)
+	}
+	second := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), msgs...)}
+	var rep2 components.Report
+	if _, err := s.Offload(second, &rep2, ctx); err != nil {
+		t.Fatalf("the splicing turn must fail open: %v", err)
+	}
+	return second, &rep2
 }

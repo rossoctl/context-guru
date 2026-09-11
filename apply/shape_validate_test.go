@@ -7,12 +7,14 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
@@ -202,10 +204,18 @@ func TestSummarizeEmittedWireIsShapeValid(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// TWO PASSES OVER ONE STORE. summarize commissions its summary off the hot path, so
+			// the first pass starts the model call and forwards the body untouched; the second
+			// splices the checkpoint the first one left. The Store must be SHARED between them —
+			// a fresh one per pass would discard the checkpoint and neither pass would ever
+			// change the message count, which is the condition every assertion here rests on.
 			p, _ := cfg.Build(nil)
-			out, changed := BodyWithModel(context.Background(), p, store.NewMemory(store.Options{}),
-				bschemas.Anthropic, body, "", false,
-				components.ModelSpec{Incoming: shapeModel{}})
+			st := store.NewMemory(store.Options{})
+			models := components.ModelSpec{Incoming: shapeModel{}}
+			BodyWithModel(context.Background(), p, st, bschemas.Anthropic, body, "", false, models)
+			offload.WaitForAllSummariesForTest(5 * time.Second)
+			out, changed := BodyWithModel(context.Background(), p, st,
+				bschemas.Anthropic, body, "", false, models)
 			if !changed {
 				continue
 			}

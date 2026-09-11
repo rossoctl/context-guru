@@ -88,9 +88,10 @@ of the normalized list, so it is asserted on the raw body instead (`apply/toolro
 | `model.api_key` | *the process env key* | **Credential** for the pinned endpoint; empty falls back to the provider env key, which a hosted deployment refuses. Write-only on the settings page. |
 | `model.auth` | `x-api-key` | Anthropic only: `x-api-key` \| `bearer`. |
 | `trigger.min_request_frac` | **0.9** | Summarize only once the session has been billed at least this fraction of the model's context window. Measured from the provider's own input count for the previous turn — see below. |
-| `trigger.cache_state` | **`pre_expiry`** | Summarize only when the prompt cache is about to expire. `any` removes the constraint. See below. |
+| `trigger.cache_state` | **`pre_expiry_or_cold`** | Summarize only when the prompt cache is about to expire **or has already expired** — the two moments when the cache write it costs was going to be paid anyway. `any` removes the constraint. See below. |
 | `trigger.pre_expiry_seconds` | 60 | How wide "about to expire" is. Unmeasured either way. |
 | `trigger` (rest) | — | `min_request_tokens`, `min_messages`, `min_output_tokens`, `min_output_frac`, `huge_output_frac`. |
+| `summary_wait_seconds` | 120 | The summary is produced **off the hot path**; a turn that arrives while one is still running waits this long for it. When the wait expires the turn proceeds regardless. See below. |
 | `marker_mode` | `full` | `full` (stash + resolvable marker) / `summary` / `off`. |
 
 ## When it summarizes, and why the default is not "whenever it's big"
@@ -98,11 +99,29 @@ of the normalized list, so it is asserted on the raw body instead (`apply/toolro
 By default this component pays for a summary only when **both** are true: the transcript is at least
 **0.9** of the model's context window, and the prompt cache is within **60 seconds** of expiring.
 
-The second condition is the one that saves money. Compacting a transcript rewrites history, and
-rewriting history that the provider is currently holding in its prompt cache invalidates that entry
-— the next turn re-writes the whole suffix at 1.25x the fresh input rate. Doing it in the window
-where the entry is about to lapse anyway costs almost nothing, because what is invalidated was
-nearly worthless.
+The second condition is the one that saves money, and the rule behind it is **only ever spend a
+cache write that was going to be spent anyway**. Compacting rewrites history, and rewriting history
+the provider is currently holding in its cache invalidates that entry — the next turn re-writes the
+whole suffix at 1.25x the fresh input rate.
+
+There are two moments when that costs nothing, and the default permits both:
+
+| Cache state | Without compaction | With compaction | |
+|---|---|---|---|
+| **warm** | a cheap read | a write, **and a live entry destroyed** | the only harmful case |
+| **near expiry** | a cheap read now, a full rewrite later if the next turn is late | a small write now, cheap reads after | better, *given* an assumption about the next turn |
+| **already expired** | a **full** rewrite — the entry is gone, this turn pays a write regardless | a **small** write | strictly better, unconditionally |
+
+The expired case is the reliable one: on such a turn there is nothing left to invalidate, and the
+only question is whether the write is the whole transcript or the summary. It is also the one you
+can count on seeing — a near-expiry turn needs a request to land inside a 60-second slice of a
+5-minute lifetime, while any gap longer than the TTL produces an expired turn on the next request.
+A session that only ever went fully cold would, under `pre_expiry` alone, never compact at all and
+grow until the provider rejected it.
+
+"Expired" is decided by the **clock** (a known TTL and idle time), never by the cold-cache flag
+alone: that flag reads cold on a keep-alive'd session whose entry is very much alive, and acting on
+it would compact live prefixes on exactly the sessions someone is paying pings to protect.
 
 Measured on production traffic: every session that reached 90% of a 1M window and kept running went
 cold in that band **repeatedly** — minimum 2 full-prefix rewrites, median 7, maximum 46. At 0.9 of
@@ -136,6 +155,33 @@ Note also which size the fill fraction measures. It is the **incoming** request,
 component acts. Because the proxy is transparent, the client never learns its transcript was
 compacted and keeps re-sending everything it has, so that number grows monotonically and the fill
 conjunct, once satisfied, stays satisfied. What shrinks is what goes **upstream**.
+
+### The summary is produced off the hot path
+
+A turn that decides to summarize **does not wait for the summary**. It starts the work and forwards
+immediately with whatever it already had; a later turn splices the result.
+
+That is not an optimisation, it is a correctness fix. The trigger fires when the prompt cache has at
+most `pre_expiry_seconds` (60) left to live, and the model call's budget is 300 seconds — so a slow
+call *guaranteed* the entry died while the request was held, and the full transcript then went
+upstream at the cache-creation rate. Measured once on live traffic: 300s held, 2.8s of it upstream,
+197,879 tokens re-written, and the model call wasted. The best moment to compact became the most
+expensive one, from latency alone.
+
+**Expect one turn per episode to stall for a few seconds.** The trigger fires only after a long idle
+gap, so the user is active immediately afterwards, and in an agent loop the next request usually
+arrives while the summary is still running. That turn waits — up to `summary_wait_seconds` — because
+the alternative is sending the full transcript. When the wait expires the turn proceeds with what it
+has.
+
+Only one summary runs per session at a time. A request with **no session id** (the library API,
+`/compact`) is summarized inline instead, because the checkpoint is keyed by session: with no key
+there is no later turn that could ever find the result.
+
+Two counters say whether this is healthy, and they are the only place a degraded summarizer now
+shows up: `summarize_timeouts` / `summarize_errors` for calls that never landed, and the
+`awaited_checkpoint` / `summary_wait_timeout` pair for whether the wait cap is set anywhere near
+right.
 
 ### ⚠️ What caps the context is the CLIENT, not this component
 
@@ -238,6 +284,10 @@ The cache state does not permit it (`cache_state_declined_warm`, or `…_cold` /
 non-default `cache_state`), transcript below `trigger` (`below_request_trigger`), context window
 unknown or guessed (`window_not_exact`), span below `min_tokens`, or no model available
 (`no_model`).
+
+The full design — the run that motivated it, why an expired cache is the reliable case rather than
+the merely-safe one, why there is no keep-alive ping, and how the saving is accounted — is in
+`docs/proposals/pre-expiry-summary-gate.md` in the repository.
 
 **Inert is not the same as untouched.** Once this component has summarized a session once, every
 later turn re-emits that same summary from a checkpoint — byte-identically, with no model call, even

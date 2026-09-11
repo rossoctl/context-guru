@@ -5,9 +5,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -51,8 +53,16 @@ func TestSummarizeReusesCheckpoint(t *testing.T) {
 		if _, err := off.Offload(req, &rep, c); err != nil {
 			t.Fatal(err)
 		}
+		// Drain: summarize commissions its model call off the hot path, so a turn that fires has
+		// not finished when Offload returns. Every assertion below is about what the NEXT turn
+		// sees, which is exactly what draining here makes true.
+		offload.WaitForSummaryForTest("sess1", 5*time.Second)
 		return req
 	}
+
+	// The first pass COMMISSIONS the summary and forwards untouched. So the sequence is warm-up,
+	// then the turn that first splices, then the turn that must reuse it.
+	run(base())
 
 	req1 := run(base())
 	if cm.calls != 1 {

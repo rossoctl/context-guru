@@ -168,6 +168,22 @@ type CompactionEpisodeGroup struct {
 	NetUSD               float64 `json:"net_usd"`
 	// UnpricedEpisodes are closed episodes on a model with no rates: counted, never valued.
 	UnpricedEpisodes int64 `json:"unpriced_episodes"`
+	// OpenNetUSD is the net of spans that have NOT finished — money committed whose payoff is
+	// still accruing. Reported apart from NetUSD rather than excluded.
+	//
+	// Excluding it was survivorship one level below the coverage line: an unfinished span is
+	// exactly the case where we paid for a summary and have not yet recouped it, so dropping
+	// those made the panel systematically optimistic. It is kept OUT of NetUSD because a partial
+	// figure grows as the time range widens, which would make the settled total depend on when
+	// you looked.
+	//
+	// It is not automatically a loss, and that is why it is computed rather than assumed: we are
+	// behind only when 1.25xC > 0.1xF, i.e. when the compacted prefix exceeds ~8% of the full
+	// one. At better than roughly 12.5:1 compression the compaction turn is already cheaper on
+	// its own turn, before any later read saves anything.
+	OpenNetUSD   float64 `json:"open_net_usd"`
+	OpenTurns    int64   `json:"open_turns"`
+	VoidedNetUSD float64 `json:"voided_net_usd"`
 }
 
 // CompactionCoverage is the other half of the question, and the panel is dishonest without it.
@@ -209,6 +225,7 @@ type CompactionAssumptions struct {
 	VoidRule      string  `json:"void_rule"`
 	WindowRule    string  `json:"window_rule"`
 	KnownOmission string  `json:"known_omission"`
+	OpenRule      string  `json:"open_rule"`
 }
 
 // CompactionEpisodes is the whole view.
@@ -323,18 +340,29 @@ func walkCompactEpisodes(rows []compactRow, window windowFn, price priceFn,
 			// ONLY a closed episode contributes money. An open one is a partial span whose
 			// total would grow if the query window moved; a voided one is not comparable at
 			// all. Both are counted above so the reader can see how many were dropped.
-			if e.State == EpisodeClosed {
-				if !e.Priced {
+			switch {
+			case !e.Priced:
+				// Unpriced: counted, never valued. An unpriced model is not a free one.
+				if e.State == EpisodeClosed {
 					g.UnpricedEpisodes++
-				} else {
-					g.Turns += e.Turns
-					g.ColdCreditUSD += e.ColdCreditUSD
-					g.ReadCreditUSD += e.ReadCreditUSD
-					g.OtherCreditUSD += e.OtherCreditUSD
-					g.InvalidationDebitUSD += e.InvalidationDebitUSD
-					g.SummarizerCostUSD += e.SummarizerCostUSD
-					g.NetUSD += e.NetUSD
 				}
+			case e.State == EpisodeClosed:
+				g.Turns += e.Turns
+				g.ColdCreditUSD += e.ColdCreditUSD
+				g.ReadCreditUSD += e.ReadCreditUSD
+				g.OtherCreditUSD += e.OtherCreditUSD
+				g.InvalidationDebitUSD += e.InvalidationDebitUSD
+				g.SummarizerCostUSD += e.SummarizerCostUSD
+				g.NetUSD += e.NetUSD
+			case e.State == EpisodeOpen:
+				// Still accruing: its own total, so the settled figure stays comparable while the
+				// outstanding exposure stays visible.
+				g.OpenNetUSD += e.NetUSD
+				g.OpenTurns += e.Turns
+			case e.State == EpisodeVoided:
+				// The client compacted mid-span, so the payoff is not comparable — but we did
+				// spend, and that is reported rather than dropped.
+				g.VoidedNetUSD += e.NetUSD
 			}
 			if len(out.Episodes) < episodeListCap {
 				out.Episodes = append(out.Episodes, e)
@@ -376,6 +404,7 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 			if prevTokensBefore > 0 && r.TokensBefore > 0 && r.TokensBefore < prevTokensBefore {
 				cur.State = EpisodeVoided
 				cur.EndTS, cur.EndBilled = r.TS, r.Billed
+				finishEpisode(cur, p)
 				out = append(out, *cur)
 				cur = nil
 			}
@@ -389,6 +418,18 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 			// being maintained, and its cost belongs to the span it happened in.
 			if isFreshSummary(r) != "" {
 				cur.SummarizerCostUSD += r.CGLLMCostUSD
+				cur.InvalidationDebitUSD += writeUSD(r.CacheWrite, r.CacheWrite1h, p)
+			} else if r.MissReason == CachePrefixChange {
+				// A prefix_change turn inside a span we opened is a cache write charged because
+				// the prompt no longer matched what was cached — and inside a summarized span the
+				// thing that changes the prompt is US. It is already excluded from the credit for
+				// that reason (see creditTurn); excluding it from the DEBIT as well would be
+				// having it both ways, counting neither our damage nor its cost.
+				//
+				// Observed for real: a turn whose summarizer call hung held the request past its
+				// own cache lifetime, so the entry expired in our hands and the full prefix was
+				// re-written — and it was recorded as prefix_change, because idle is measured at
+				// arrival while the expiry happened inside the pipeline.
 				cur.InvalidationDebitUSD += writeUSD(r.CacheWrite, r.CacheWrite1h, p)
 			}
 			if r.Billed >= cur.StartBilled+span {
@@ -412,9 +453,15 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 					InvalidationDebitUSD: writeUSD(r.CacheWrite, r.CacheWrite1h, p),
 					SummarizerCostUSD:    r.CGLLMCostUSD,
 				}
-				if !credited {
-					creditTurn(cur, r)
-				}
+				// NO CREDIT ON THE COMPACTION TURN, and `credited` is now irrelevant to that.
+				//
+				// At t0 nothing has been saved — we have only SPENT: a model call, and a cache
+				// write for the new smaller prefix. The saving arrives on later turns, as reads
+				// against a shorter transcript and as cold rewrites that cost 1.25xC instead of
+				// 1.25xF. Crediting t0 front-loaded a saving at the cache-CREATION rate for work
+				// that had not yet paid off, which is the one direction a savings figure must
+				// never lean.
+				_ = credited
 			}
 		}
 		prevTokensBefore = r.TokensBefore
@@ -563,11 +610,15 @@ func compactAssumptions(spanFrac, fillFrac float64) CompactionAssumptions {
 		CreditSource: "request_components.saved_usd for the summarize component, priced at write time " +
 			"(Event.baselineDeltaUSD: unique removals at the cache-creation rate, re-sent " +
 			"removals at the rate that turn's cache actually paid)",
-		ColdLabel:     "turns whose cache_miss_reason is ttl_expiry — the entry had lapsed, so an uncompacted prefix would have been re-written in full",
-		ReadLabel:     "turns whose cache_miss_reason is hit — the re-sent remainder, billed at the cache-read rate",
-		DebitBound:    "t0's own cache-creation tokens at this model's write rates: an UPPER bound, since some of that write was transcript growth that would have been paid anyway",
-		VoidRule:      "an episode whose span contains a drop in our own message-token count is voided — the client compacted, so the remainder is not comparable",
-		WindowRule:    "a conversation whose model window is not exactly published contributes nothing and is counted as window_unknown",
+		ColdLabel:  "turns whose cache_miss_reason is ttl_expiry — the entry had lapsed, so an uncompacted prefix would have been re-written in full",
+		ReadLabel:  "turns whose cache_miss_reason is hit — the re-sent remainder, billed at the cache-read rate",
+		DebitBound: "t0's own cache-creation tokens at this model's write rates: an UPPER bound, since some of that write was transcript growth that would have been paid anyway",
+		VoidRule:   "an episode whose span contains a drop in our own message-token count is voided — the client compacted, so the remainder is not comparable",
+		WindowRule: "a conversation whose model window is not exactly published contributes nothing and is counted as window_unknown",
+		OpenRule: "a span that has not finished is reported with its own net, apart from the settled " +
+			"total: it is money committed whose payoff is still accruing, and dropping it would " +
+			"make the panel optimistic. It is not automatically a loss — the compaction turn is " +
+			"already cheaper on its own turn at better than ~12.5:1 compression",
 		KnownOmission: "context_guru_expand calls inside a span are not charged against it; a summary the agent had to undo costs input tokens this figure does not subtract",
 	}
 }
