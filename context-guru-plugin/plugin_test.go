@@ -4184,3 +4184,190 @@ func TestRemoveIsNeverGatedByScope(t *testing.T) {
 		t.Errorf("removal damaged the machine-wide file")
 	}
 }
+
+// --- fixes from review round 1 of #236 -----------------------------------------------------
+
+// TestRemoveFirstNeverProducesAnOriginalHoldingRouting is the assertion the reviewer asked to have
+// pinned, and it names the defect exactly: record_touch() runs from save(), and save() is ALSO
+// cmd_remove's write path — so when the first recorded touch of a file was a REMOVAL, the O_EXCL
+// "copy taken before the first edit" was a copy of the ROUTED file, permanently. The hatch then
+// faithfully restored routing into an unrouted project.
+//
+// Who reaches it: every pre-hatch install that upgrades and then uninstalls, and anyone whose state
+// directory was wiped between install and remove. That is the population this whole feature is for.
+func TestRemoveFirstNeverProducesAnOriginalHoldingRouting(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.local.json")
+	// A file as a PRE-HATCH install left it: routed, with the metadata that version recorded, and no
+	// pre-edit copy anywhere because that version did not take one.
+	writeJSON(t, path, map[string]any{
+		"env":           map[string]any{"ANTHROPIC_BASE_URL": ourURL},
+		"permissions":   map[string]any{"allow": []string{"Bash(ls:*)"}},
+		"$context-guru": map[string]any{"installed_base_url": ourURL},
+	})
+
+	if _, code := settingsIn(t, state, home, "remove", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("remove failed")
+	}
+	// Whatever the record holds, nothing calling itself a pre-edit copy may contain routing.
+	originals, _ := filepath.Glob(filepath.Join(state, "originals", "*.original"))
+	for _, o := range originals {
+		b, err := os.ReadFile(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "ANTHROPIC_BASE_URL") {
+			t.Fatalf("%s is called a pre-edit copy and contains routing:\n%s", o, b)
+		}
+	}
+
+	// End to end: the hatch must not put back what the remove took out.
+	out, code := runHatch(t, state, home, proj, "--yes")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "ANTHROPIC_BASE_URL") {
+		t.Errorf("the recovery tool re-introduced routing (exit %d):\n%s\nfile:\n%s", code, out, b)
+	}
+	if !strings.Contains(string(b), "Bash(ls:*)") {
+		t.Errorf("the user's own permission grant was lost:\n%s", b)
+	}
+}
+
+// TestEmptyPlanNeverClaimsSuccessWhenNothingCouldBeRestored. An empty plan is reached from two very
+// different states — genuinely clean, and "this file is routed and I have no copy to fix it with" —
+// and both used to end on "already back to their pre-install state". Exit 3 was correct, but nobody
+// reads an exit code; they read the last line, and it said the opposite of the truth to the one user
+// who is locked out.
+func TestEmptyPlanNeverClaimsSuccessWhenNothingCouldBeRestored(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
+	// Routed already, no record: the pre-hatch install picking up a hatch on a no-op re-run.
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("fixture: add failed")
+	}
+
+	out, code := runHatch(t, state, home, proj, "--yes")
+	if code != 3 {
+		t.Errorf("exit %d, want 3", code)
+	}
+	if strings.Contains(out, "already back to their pre-install state") {
+		t.Errorf("told the user they are unrouted while the file is still routed:\n%s", out)
+	}
+	for _, want := range []string{"NOT back to their pre-install state", "ANTHROPIC_BASE_URL"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the honest branch is missing %q:\n%s", want, out)
+		}
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), ourURL) {
+		t.Error("it modified a file it has no pre-edit copy of")
+	}
+}
+
+// TestARestoreWarnsThatItRevertsTheWholeFile. The primary path is `cp`, so it reverts everything in
+// the file — and Claude Code appends permission grants to settings.local.json as the user approves
+// tools, so a months-old install means months of grants. The confirmation prompt asked "restore
+// these files?" and said nothing about that, which makes it consent to something unstated.
+func TestARestoreWarnsThatItRevertsTheWholeFile(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"permissions": map[string]any{"allow": []string{"Bash(ls:*)"}}})
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	// The user then approves another tool and sets a model, the way a real month of use looks.
+	cur := readJSON(t, path)
+	cur["model"] = "opus"
+	cur["permissions"] = map[string]any{"allow": []string{"Bash(ls:*)", "Bash(git push:*)"}}
+	writeJSON(t, path, cur)
+
+	out, code := runHatch(t, state, home, proj, "--dry-run")
+	if code != 0 {
+		t.Fatalf("dry run: exit %d\n%s", code, out)
+	}
+	flat := strings.Join(strings.Fields(out), " ")
+	for _, want := range []string{
+		"reverts the WHOLE file",
+		"prereset",             // and that it is undoable
+		"The two files differ", // shown as evidence, before the prompt
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("the plan does not warn about %q before asking:\n%s", want, out)
+		}
+	}
+	// It must not claim a filtered count of "your" changes: settings.py rewrites the file with
+	// indent=2, so a compact original differs on every line, and our own metadata spans lines that
+	// carry none of the words such a filter greps out. The first version of this reported 16 lines
+	// of user changes for a file whose only real change was one permission grant.
+	if strings.Contains(flat, "that are NOT context-guru's") {
+		t.Errorf("re-introduced a filtered line count that cannot be computed without a JSON parser:\n%s", out)
+	}
+}
+
+// TestMissingCopyIsNotRenderedAsAPath: the record carries "-" when no copy was ever taken, and
+// printing it verbatim gave "the pre-edit copy is missing (-)" — which reads as a bug in the tool
+// rather than a known limit of what it holds, on the pre-hatch path that is now the common case.
+func TestMissingCopyIsNotRenderedAsAPath(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	out, _ := runHatch(t, state, home, proj, "--dry-run")
+	if strings.Contains(out, "missing (-)") {
+		t.Errorf("rendered the empty-copy marker as a path:\n%s", out)
+	}
+	if !strings.Contains(out, "no pre-edit copy was taken") {
+		t.Errorf("did not explain why there is no copy:\n%s", out)
+	}
+}
+
+// TestDryRunAgreesWithARealRunAboutWhatIsLeft: --dry-run exited 0 unconditionally, so it and a real
+// run disagreed about whether anything was left for a human.
+func TestDryRunAgreesWithARealRunAboutWhatIsLeft(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+	_, dry := runHatch(t, state, home, proj, "--dry-run")
+	_, real := runHatch(t, state, home, proj, "--yes")
+	if dry != real {
+		t.Errorf("--dry-run exited %d but the real run exited %d; they must agree about whether "+
+			"anything is left for a human", dry, real)
+	}
+}
+
+// TestAnUnusableStateDirectoryNeverFailsTheInstall. "Fail open, always" is a hard boundary in this
+// repo, and the hatch machinery is the newest thing in the write path. An install that would
+// otherwise have worked must not be broken by the recovery bookkeeping — it must report that the
+// hatch is unavailable and carry on.
+func TestAnUnusableStateDirectoryNeverFailsTheInstall(t *testing.T) {
+	home, proj := t.TempDir(), t.TempDir()
+	// A FILE where the state directory should be, so every path inside it is unusable.
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"theme": "dark"})
+
+	facts, code := settingsIn(t, blocked, home, "add", "--file", path, "--url", ourURL)
+	if code != 0 || facts["result"] != "added" {
+		t.Fatalf("an unusable state dir broke the install: exit %d, %v", code, facts)
+	}
+	if facts["reset_hatch"] != "unavailable" {
+		t.Errorf("reset_hatch=%q; it must say so rather than imply a hatch exists", facts["reset_hatch"])
+	}
+	env, _ := readJSON(t, path)["env"].(map[string]any)
+	if env["ANTHROPIC_BASE_URL"] != ourURL {
+		t.Errorf("the routing itself did not get written: %v", env)
+	}
+	if readJSON(t, path)["theme"] != "dark" {
+		t.Error("the user's settings were damaged")
+	}
+}

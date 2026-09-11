@@ -357,7 +357,74 @@ def _render_tsv(entries: list[dict]) -> bytes:
     return b"\n".join(out) + b"\n"
 
 
+def _looks_routed_by_us(real: str) -> bool:
+    """Is this file ALREADY in our post-install state, so a copy of it is not an "original"?
+
+    This is the guard on a severe defect found in review. `record_touch` runs from `save()`, and
+    `save()` is also `cmd_remove`'s write path — so when the FIRST recorded touch of a file was a
+    REMOVAL, the O_EXCL "copy taken before the first edit" was a copy of the ROUTED file, and being
+    O_EXCL it was permanent. The hatch then faithfully restored routing into an unrouted project:
+    the one behaviour a recovery tool cannot have, reproduced, and worst on exactly the population
+    this hatch is for — every pre-hatch install that upgrades and then uninstalls.
+
+    Content, not intent: `remove` is the obvious way in, but threading "this is an install" through
+    `save()` would still take a routed copy when an ADD runs against a file we had already routed
+    (a wiped state directory, a re-run with --force). What makes a copy meaningless is that the file
+    already carries our work, whoever is writing and why.
+
+    Erring is asymmetric, so this errs one way on purpose. A false positive costs the user a
+    whole-file restore they could have had, and the hatch says so honestly and points at the
+    timestamped backups. A false negative re-applies the routing they ran the hatch to escape.
+
+    A base URL that is NOT ours is deliberately not a signal — a user's own loopback gateway
+    (litellm's default is 127.0.0.1:4000) is precisely the value most worth having a copy of. Hence
+    the record and our own keys below, plus the narrow loopback test, rather than "any base URL".
+    """
+    try:
+        with open(real, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        # Unparseable never reaches a write (load() refuses first), so this is a file we are not
+        # going to touch anyway. Say "not ours" and let the O_EXCL copy happen: an unreadable file
+        # is the case where a byte-for-byte copy is worth most.
+        return False
+    if not isinstance(data, dict):
+        return False
+    if META in data:
+        # We have written this file before, and recorded it. The strongest signal there is, and the
+        # one the pre-hatch population carries: this metadata predates the hatch.
+        return True
+    env = data.get("env")
+    if not isinstance(env, dict):
+        return False
+    if UPSTREAM_KEY in env or BIN_KEY in env:
+        return True   # nobody else writes these two
+    url = env.get(KEY)
+    if isinstance(url, str) and url.startswith(("http://127.0.0.1:", "http://localhost:",
+                                                "http://[::1]:")):
+        # A pre-hatch install old enough to have no metadata. Ambiguous with a user's own loopback
+        # proxy, and resolved toward the safer failure per the docstring.
+        return True
+    return False
+
+
 def record_touch(real: str, existed: bool) -> None:
+    """Fail-open wrapper. See _record_touch.
+
+    `except OSError` at three inner sites was nearly total and reviewed as not good enough: the body
+    also encodes paths to UTF-8, which raises UnicodeEncodeError (not an OSError) for a filename
+    carrying surrogates from surrogateescape. "Fail open, always" is a hard boundary in this repo, so
+    the hatch machinery must not be able to fail a settings write for ANY reason — the install it
+    would break is one that would otherwise have worked.
+    """
+    try:
+        _record_touch(real, existed)
+    except Exception as exc:                      # noqa: BLE001 - deliberate, see docstring
+        HATCH_FACTS["reset_hatch"] = "unavailable"
+        HATCH_FACTS["reset_hatch_detail"] = f"{type(exc).__name__}: {exc}"
+
+
+def _record_touch(real: str, existed: bool) -> None:
     """Note that we are about to edit `real`, and make sure a way back exists.
 
     Called from save() before the write, so `existed` is the truth about the file as the user had
@@ -373,7 +440,12 @@ def record_touch(real: str, existed: bool) -> None:
         return
 
     original = ""
-    if existed:
+    if existed and _looks_routed_by_us(real):
+        # Recorded, but with no original — which is exactly the state ensure_hatch() already
+        # produces, and the hatch's missing-copy branch already reports honestly.
+        HATCH_FACTS["reset_original"] = "unavailable"
+        HATCH_FACTS["reset_original_reason"] = "file already carried context-guru's keys"
+    elif existed:
         dest = os.path.join(state, "originals", _slug(real) + ".original")
         try:
             fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -432,6 +504,7 @@ def record_touch(real: str, existed: bool) -> None:
         # Worth its own line: routing can be removed from the record, but the file's original
         # CONTENT is not recoverable from anything the hatch holds.
         HATCH_FACTS["reset_original"] = "unavailable"
+        HATCH_FACTS.setdefault("reset_original_reason", "no pre-edit copy could be taken")
 
 
 def save(path: str, data: dict) -> None:
@@ -506,6 +579,15 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def ensure_hatch(file: str) -> None:
+    """Fail-open wrapper. See _ensure_hatch, and record_touch for why this is not `except OSError`."""
+    try:
+        _ensure_hatch(file)
+    except Exception as exc:                      # noqa: BLE001 - deliberate, see record_touch
+        HATCH_FACTS["reset_hatch"] = "unavailable"
+        HATCH_FACTS["reset_hatch_detail"] = f"{type(exc).__name__}: {exc}"
+
+
+def _ensure_hatch(file: str) -> None:
     """Put a hatch in place for a project that is already routed, without editing anything.
 
     There is no pre-edit copy to take — that moment passed, possibly in a version of this plugin

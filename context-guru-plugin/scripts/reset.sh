@@ -240,11 +240,56 @@ while IFS='	' read -r existed original path; do
     else
       say "      RESTORE from the copy taken before the first edit:"
       say "      $original"
+      # A whole-file restore reverts EVERYTHING in the file, not just the routing — and for
+      # .claude/settings.local.json that is not hypothetical, because Claude Code appends permission
+      # grants to it as the user approves tools. A months-old install means months of grants. The
+      # copy of the current file taken below makes it recoverable, but silently reverting a user's
+      # settings while a confirmation prompt says only "restore these files?" is not a choice they
+      # were given. So: show them, in the plan, before they answer.
+      #
+      # `diff` rather than a JSON-aware comparison on purpose: parsing JSON in sh is exactly the
+      # cleverness a recovery tool must not contain, and a plain diff of two small files answers the
+      # question the user actually has, which is "what am I about to lose".
+      say ""
+      say "      ! this reverts the WHOLE file, not just the routing. Anything you changed in it"
+      say "        since installing goes back too — permission grants Claude Code appended as you"
+      say "        approved tools, a model or theme you set. Your current version is copied to"
+      say "        *.context-guru-prereset-* first, so this is undoable."
+      # The diff is shown as EVIDENCE, with no claim about which side of it is the user's.
+      #
+      # The first version of this counted "lines that are not context-guru's" by grepping our key
+      # names out, and the number was false precision twice over: settings.py rewrites the file with
+      # indent=2, so a compact original diffs on every line, and our own metadata spans lines that
+      # carry none of the words being filtered. It reported 16 lines of "your" changes for a file
+      # whose only real change was two permission grants. Since sh cannot compare JSON semantically
+      # — and parsing it here is exactly the cleverness this script must not contain — the honest
+      # move is to show the difference and say plainly what it includes.
+      if command -v diff >/dev/null 2>&1; then
+        dl="$(diff "$original" "$path" 2>/dev/null | grep -c '^[<>]' || true)"
+        if [ "${dl:-0}" -gt 0 ]; then
+          say ""
+          say "        The two files differ (this includes context-guru's own keys, and the"
+          say "        reformatting it applied when it wrote the file):"
+          diff "$original" "$path" 2>/dev/null | grep '^[<>]' | head -14 | sed 's/^/          /'
+          [ "${dl:-0}" -gt 14 ] && say "          ... and $((dl - 14)) more line(s)"
+          say "        (\"<\" is the pre-install copy, \">\" is your file now.)"
+        fi
+      fi
+      say ""
       printf 'restore\t%s\t%s\n' "$original" "$path" >> "$PLAN"
     fi
   else
     say "  $path"
-    say "      ! the pre-edit copy is missing ($original)"
+    # `-` is what the record carries when no copy was ever taken (a project that was already
+    # routed when the record was created, or a file whose first recorded touch was a REMOVAL).
+    # Rendering it as a path — "the pre-edit copy is missing (-)" — reads like a bug in the tool
+    # rather than a known limit of what it holds, and it is the normal case for pre-hatch installs.
+    if [ "$original" = "-" ] || [ -z "$original" ]; then
+      say "      ! no pre-edit copy was taken for this file — it already carried context-guru's"
+      say "        keys when the record was created, so nothing here holds its original content."
+    else
+      say "      ! the pre-edit copy is missing ($original)"
+    fi
     newest="$(ls -1t "$path".context-guru-backup-* 2>/dev/null | head -1 || true)"
     if [ -n "$newest" ]; then
       say "        a timestamped backup exists and is NOT restored automatically, because it"
@@ -263,17 +308,42 @@ fi
 
 if [ ! -s "$PLAN" ]; then
   say ""
-  say "Nothing to restore — your settings files are already back to their pre-install state."
+  # An empty plan is reached from TWO very different states, and saying the reassuring one about
+  # both was a review finding: the missing-copy branch above deliberately adds nothing to the plan,
+  # so a routed file with no original produced the correct "! ..." block and then "already back to
+  # their pre-install state" as the LAST line — the opposite of the truth, to the one user who is
+  # locked out. Exit 3 was right; nobody reads an exit code, they read the last line.
+  if [ "$INCOMPLETE" = 0 ]; then
+    say "Nothing to restore — your settings files are already back to their pre-install state."
+    report_environment
+    final_advice
+    exit 0
+  fi
+  say "Nothing could be restored automatically — see the ! line(s) above. Your settings files are"
+  say "NOT back to their pre-install state, and this tool has no copy that would put them there."
+  say ""
+  say "What works, in order of least effort:"
+  say "  1. compare a timestamped backup beside the file and copy it back yourself:"
+  say "       cp <file>.context-guru-backup-<newest> <file>"
+  say "  2. or open the file and delete the ANTHROPIC_BASE_URL / ANTHROPIC_UPSTREAM /"
+  say "     CONTEXT_GURU_BIN keys from its \"env\" block, leaving everything else alone."
+  say "     That is all the routing is; nothing else has to change."
   report_environment
   final_advice
-  [ "$INCOMPLETE" = 0 ] && exit 0 || exit 3
+  exit 3
 fi
 
 if [ "$DRY" = 1 ]; then
   say ""
   say "--dry-run: nothing written."
   report_environment
-  exit 0
+  # Honour INCOMPLETE here too. It used to exit 0 unconditionally, so --dry-run and a real run
+  # disagreed about whether anything was left for a human — including when report_environment had
+  # just found an exported ANTHROPIC_BASE_URL that no settings change can override.
+  [ "$INCOMPLETE" = 0 ] && exit 0
+  say ""
+  say "(--dry-run found something a restore will not fix — see the ! lines above.)"
+  exit 3
 fi
 
 if [ "$YES" = 0 ]; then
