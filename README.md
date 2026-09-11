@@ -118,6 +118,11 @@ needed on a Pro/Max subscription** ([details](docs/how-to/install-plugin.md)):
 /context-guru:install
 ```
 
+**If it ever breaks and Claude cannot fix it:** `~/.local/state/context-guru/context-guru-reset`
+undoes the routing from a plain terminal — no working Claude session, no proxy, no network. Routing
+every request through a local proxy means a failure there fails every request, including the ones the
+uninstall skill would need, so the way out cannot itself be a skill.
+
 `/reload-plugins` is what makes the `/context-guru:*` skills exist in this session; without it the
 last line answers `Unknown command`. A new session does the same thing.
 

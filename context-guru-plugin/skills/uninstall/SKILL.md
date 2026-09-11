@@ -12,6 +12,15 @@ fails.
 
 If the user is here because something is broken, do step 1 first and explain afterwards.
 
+**If they are here because Claude could not talk at all, they got here by luck** — the routing this
+skill removes is what breaks the session that would run it. There is a plain-sh escape hatch for
+that, installed outside the plugin at
+`${XDG_STATE_HOME:-$HOME/.local/state}/context-guru/context-guru-reset` (also on `PATH` as
+`context-guru-reset` when `~/.local/bin` is there). It restores every settings file the install
+edited from a copy taken before the first edit, and needs no Claude, no network and no proxy. Point
+at it when a user reports being stuck, and prefer it to this skill for anyone who is currently
+locked out — it is `cp`, where this skill is a conversation.
+
 ## 1. Remove the routing key
 
 Check all three scopes: the install may have written any of them, and a `--global` install

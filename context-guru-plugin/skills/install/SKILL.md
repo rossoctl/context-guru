@@ -37,7 +37,9 @@ Three lines, not an essay. The user asked for an install; deliver one, and let t
 - **The real risk: if the proxy is down, requests HANG** rather than failing — no output, no error.
   A `UserPromptSubmit` hook detects that and restarts it. This is why the default scope is one
   project, not the machine.
-- `/context-guru:uninstall` reverses it, restoring any base URL it replaced.
+- `/context-guru:uninstall` reverses it, restoring any base URL it replaced. If the routing
+  itself is what breaks, a skill cannot run — so the install also drops a plain-sh escape hatch
+  outside the plugin, and step 6 tells them where it is.
 
 Fuller detail — preset behaviour, subscription vs metered billing, scope trade-offs — is in
 `docs/how-to/install-plugin.md`. Point at it; do not recite it.
@@ -128,9 +130,22 @@ trade-off in one line each:
 | This project, whole team | `.claude/settings.json` | breaks for everyone who clones the repo |
 | Every project (`--global`) | `~/.claude/settings.json` | **every Claude Code session on the machine breaks** |
 
-If the user passed `--global`, use the third and confirm once that they mean it, naming the
-blast radius. `env` blocks merge per key across scopes, so a user-scope install is not clobbered
-by a project that ships its own `env` block.
+Project scope is the default because of that third row, and the asymmetry is worth being concrete
+about: a project-scope mistake costs the user one project, while the same mistake machine-wide takes
+out every session they could use to fix it — including every project that has nothing to do with
+context-guru. Writing the project's own `.claude/settings.local.json` is also why overriding a
+machine-wide base URL is safe here: `env` blocks merge per key, most specific first, so the project
+file wins for this project and changes nothing anywhere else.
+
+**The script enforces this; it is not left to you.** `settings.py add` refuses the machine-wide file
+outright and exits 2 with `reason=user_scope_needs_flag` unless it is passed `--user-scope`. That
+refusal used to live only in this paragraph, and a default that exists only in a prompt is not a
+guardrail — it can be skipped or read differently, and what it guards against is a machine-wide
+lockout. So if the user passed `--global`: confirm once, naming the blast radius, and only then add
+`--user-scope` to the step 6 command. Never add it to satisfy an error you did not expect — an
+unexpected `user_scope_needs_flag` means you are about to write the wrong file.
+
+Removal is not gated, on purpose: `/context-guru:uninstall` has to be able to clean every scope.
 
 ### 4. Look before you write
 
@@ -305,6 +320,27 @@ which fixes it without touching the user's shell at all. Still mention the `PATH
 want `context-guru-proxy` on the command line too.
 
 - `result=added` — report the `backup=` path to the user. That is their undo.
+- `reset_hatch=<path>` — **print this path verbatim, on its own line, in your summary.** It is the
+  escape hatch, and this is the only moment the user is certain to be able to read it: the failure
+  it exists for is "every request through the proxy fails", and in that state no skill can run,
+  including `/context-guru:uninstall`. It happened — a colleague's install left him at 401 on every
+  call with the documented undo path unavailable for exactly the reason he needed it. Tell him the
+  command, not the concept:
+
+  ```
+  If Claude ever stops being able to talk after this, run: <the reset_hatch path>
+  ```
+
+  It restores every settings file this plugin edited, from a copy taken before the first edit, and
+  needs no Claude, no network, no proxy and no plugin. `reset_hatch=unavailable` means the state
+  directory could not be written — say so plainly, because then their only undo is the `backup=`
+  path above.
+- `reset_original=unavailable` — the routing is recorded but the hatch holds no copy of the file's
+  original CONTENT, so it can name the file and point at the timestamped backups but cannot restore
+  it. **Read `reset_original_reason=` and pass it on rather than guessing** — the usual cause is not
+  a fault: the project was already routed when the record was first created (a pre-hatch install,
+  or a state directory that was cleaned), and no copy of an unrouted version was ever takeable.
+  Say that plainly; it is not a reason to stop, and it does not appear on a normal first install.
 - `result=conflict` — you skipped step 4, or the file changed. Go back and ask; only pass
   `--force` once the user has said to replace that specific value. When they do, the replaced
   value is recorded and `/context-guru:uninstall` puts it back — say so, because "we will take
@@ -373,6 +409,8 @@ purpose — exiting clears in-memory cache state. If they want a shorter one, th
 - Dashboard: `http://127.0.0.1:<port>/dashboard/` — the four billed token tiers are where the
   cache effect is visible.
 - `/context-guru:status` for the numbers, `/context-guru:uninstall` to undo.
+- The escape hatch from step 6, once more, as the last line of your summary. A user who has to
+  find it will be looking at this transcript with a session that cannot answer questions.
 
 ## Do not
 
