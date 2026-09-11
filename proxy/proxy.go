@@ -625,12 +625,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// threshold AND extract_llm's context-pressure triggering on this endpoint — so
 	// /compact did not reflect production, and offline replay/eval measured a different
 	// component than the one that ships.
-	window := 0
-	if h.opts.Windows != nil {
-		if w, ok := h.opts.Windows.Window(r.Context(), gjson.GetBytes(body, "model").String()); ok {
-			window = w
-		}
-	}
+	window, windowExact := h.resolveWindow(r.Context(), body)
 	// Use the SAME boundary tracker as the chat path. /compact used to fall through to
 	// apply's legacy store-backed prevLen, which the chat path had already moved off, so this
 	// endpoint kept two properties the chat path had shed: concurrent turns of one session
@@ -649,15 +644,16 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// cp.llmCtx: our own compaction-model spend under this context is charged to THIS
 	// request's row, not to whichever tenant is in flight when the call returns.
 	res := apply.BodyOpts(cp.llmCtx(r.Context()), pipe, tn.Store, apply.Opts{
-		Provider:  provider,
-		Body:      body,
-		Session:   r.Header.Get("x-context-guru-session"),
-		Tenant:    tn.ID,
-		Bypass:    strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true"),
-		Models:    models,
-		Window:    window,
-		CacheMode: cacheMode,
-		Tracker:   h.tracker,
+		Provider:    provider,
+		Body:        body,
+		Session:     r.Header.Get("x-context-guru-session"),
+		Tenant:      tn.ID,
+		Bypass:      strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true"),
+		Models:      models,
+		Window:      window,
+		WindowExact: windowExact,
+		CacheMode:   cacheMode,
+		Tracker:     h.tracker,
 	})
 	cp.noteCG(float64(time.Since(start).Microseconds()) / 1000.0)
 	cp.noteTrace(res.Trace)
@@ -1036,12 +1032,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		}
 		// Resolve the model's context window (dynamic, cached) so fraction-based
 		// triggers scale with the model; 0 when unknown (absolutes apply).
-		window := 0
-		if h.opts.Windows != nil {
-			if w, ok := h.opts.Windows.Window(r.Context(), gjson.GetBytes(body, "model").String()); ok {
-				window = w
-			}
-		}
+		window, windowExact := h.resolveWindow(r.Context(), body)
 		bypassed := strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
 		// The agent's OWN compaction request rides the same route. Bypass it exactly as the
 		// header does — compacting it destroys content the summary is supposed to carry
@@ -1121,15 +1112,16 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			body, added, tr = h.applyMode(&reqInfo{
 				// cp.llmCtx: context-guru's OWN compaction-model spend under this context
 				// is charged to this request's row, and to no other tenant's.
-				ctx:      cp.llmCtx(r.Context()),
-				provider: provider,
-				body:     body,
-				session:  r.Header.Get("x-context-guru-session"),
-				bypassed: bypassed,
-				models:   models,
-				window:   window,
-				rates:    h.selfRates(r.Context(), gjson.GetBytes(body, "model").String()),
-				tn:       tn,
+				ctx:         cp.llmCtx(r.Context()),
+				provider:    provider,
+				body:        body,
+				session:     r.Header.Get("x-context-guru-session"),
+				bypassed:    bypassed,
+				models:      models,
+				window:      window,
+				windowExact: windowExact,
+				rates:       h.selfRates(r.Context(), gjson.GetBytes(body, "model").String()),
+				tn:          tn,
 			})
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
@@ -1400,6 +1392,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		if h.agg != nil && usageOK {
 			h.agg.RecordUsage(usage.FreshInput, usage.CacheRead, usage.CacheWrite, usage.Output)
+		}
+		// The provider's own input count, kept for this session's NEXT turn so a
+		// fraction-of-the-window trigger has something in the window's units to compare
+		// against. `session` here is tr.Session — the id apply itself derived — which is what
+		// RecordBilledInput requires; the three parts are summed because the split between
+		// fresh, read and written is an artefact of where the cache breakpoints fell, while the
+		// question being asked is how big the prompt was.
+		//
+		// Guarded on usageOK: a response that reported no usage (a stream that failed, a
+		// non-provider path) must leave the previous turn's figure in place rather than
+		// overwrite it with a zero that would read as "unknown" and shut the gate.
+		if usageOK {
+			apply.RecordBilledInput(tn.Store, session,
+				usage.FreshInput+usage.CacheRead+usage.CacheWrite)
 		}
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 		// THE one line per request. In a defer so every terminal path emits it exactly
@@ -1729,6 +1735,40 @@ func writeRaw(w http.ResponseWriter, resp *http.Response, body []byte) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// resolveWindow resolves this request's model context window and whether that figure is
+// published for the model rather than guessed at from its family.
+//
+// ONE reader for both facts, and both paths (`/v1/messages` and `/compact`) go through it —
+// because they diverged once already: /compact hard-coded the window as 0, which silently
+// disabled every fraction-based trigger on the endpoint the offline eval runs against, so eval
+// measured a different component than the one that ships. A second fact resolved beside it is a
+// second chance to make that mistake.
+//
+// exact=false covers BOTH "unknown" and "a guess", because a caller that must not act on a guess
+// must not act on an unknown either, and no caller needs to tell those apart. See
+// modelinfo.ExactResolver for why ok=true from the resolver is not the same as right.
+func (h *Handler) resolveWindow(ctx context.Context, body []byte) (window int, exact bool) {
+	if h.opts.Windows == nil {
+		return 0, false
+	}
+	model := gjson.GetBytes(body, "model").String()
+	// The capability is optional: an Options.Windows supplied by a caller that predates it,
+	// or a test double, still resolves windows and simply never claims exactness.
+	if er, hasCap := h.opts.Windows.(interface {
+		WindowExact(context.Context, string) (int, bool, bool)
+	}); hasCap {
+		w, ex, ok := er.WindowExact(ctx, model)
+		if !ok {
+			return 0, false
+		}
+		return w, ex
+	}
+	if w, ok := h.opts.Windows.Window(ctx, model); ok {
+		return w, false
+	}
+	return 0, false
 }
 
 func (h *Handler) doUpstream(r *http.Request, up upstream, body []byte) (*http.Response, error) {

@@ -133,7 +133,11 @@ const maxAskItems = 12
 // What is NOT known is the yield/cost trade-off of widening it. A wider window fires on more turns
 // and invalidates prefixes with more remaining TTL; a narrower one fires rarely. Nothing measures
 // either side, so this is deliberately narrow and configurable rather than tuned.
-const defaultPreExpiry = time.Minute
+//
+// Aliased to components.DefaultPreExpiry rather than restated: summarize's trigger carries the same
+// window with the same justification, and two spellings of one unmeasured number is how they drift
+// apart the first time somebody tunes one of them.
+const defaultPreExpiry = components.DefaultPreExpiry
 
 // sweepBannedKeys are the compaction knobs that have no meaning for an adjudicator, and the reason
 // each one does not apply. They are refused rather than ignored: a silently accepted `rewrite: false`
@@ -228,21 +232,18 @@ func (*ExtractSweep) Enabled(*components.Ctx) bool { return true }
 // `0 < remaining <= preExpiry`, where remaining is the cache's believed lifetime minus this session's
 // idle time.
 //
-// THE TTL IS DERIVED, NOT ASSUMED. Ctx.CacheTTLMs is the same figure apply's cold decision uses, read
-// out of the request itself: a bare `ephemeral` mark is 5 minutes, an explicit `ttl: "1h"` is an hour,
-// widened to the longest lifetime this prefix has ever asked for. 0 means the cache-aware path did not
-// run, i.e. unknown, and unknown must not fire — a window computed from a guessed TTL would invalidate
-// live prefixes on exactly the deployments whose TTL we could not read.
+// THE TTL IS DERIVED, NOT ASSUMED, and UNKNOWN MUST NOT FIRE — a window computed from a guessed TTL
+// would invalidate live prefixes on exactly the deployments whose TTL we could not read. That is why
+// this asks for CachePhasePreExpiry EXACTLY rather than "anything but warm": components.CachePhase
+// deliberately leaves the policy on Unknown to its caller, because a size-gated compactor answers it
+// the other way (see components.CachePhase and Trigger.CacheAllows). This component's ask needs a
+// cache that provably exists, so nothing but PreExpiry will do.
 //
-// !ColdCache is redundant against `remaining > 0` and kept anyway: it is apply's own verdict, computed
-// with its clock-skew margin, and one cheap agreement check costs nothing next to a wrongly
-// invalidated prefix.
+// The arithmetic, the derivation of the TTL and the agreement check against apply's own ColdCache
+// verdict all live in components.CachePhase now, because summarize needs the same fact and two
+// derivations of one fact is how the cold decision and the dashboard came to disagree once already.
 func (e *ExtractSweep) sweeping(c *components.Ctx) bool {
-	if c == nil || c.ColdCache || c.CacheTTLMs <= 0 || c.IdleMs <= 0 {
-		return false
-	}
-	remaining := time.Duration(c.CacheTTLMs-c.IdleMs) * time.Millisecond
-	return remaining > 0 && remaining <= e.preExpiry
+	return c.CachePhase(e.preExpiry) == components.CachePhasePreExpiry
 }
 
 // sweepUnusableSamples bounds how many unparseable replies get logged in full. Process-wide, because

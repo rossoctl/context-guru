@@ -251,3 +251,46 @@ func AvgCallCost(p Pricing) (float64, bool) {
 		llmCacheWrite.Load(), llmCacheRead.Load())
 	return total / float64(calls), true
 }
+
+// ReplayUsage attributes usage that was INCURRED EARLIER, ELSEWHERE, to the sink scoping ctx.
+//
+// It exists for exactly one caller and the reason is worth stating, because a general "add
+// arbitrary usage" function is otherwise an invitation to double-count. summarize produces its
+// summary on a DETACHED goroutine so that a slow model call cannot hold a request past its own
+// prompt-cache lifetime. That goroutine outlives the request that started it, so by the time it
+// knows what the call cost, that request's row has already been written and its
+// `cg_llm_cost_usd` is 0 — measured, and caught by proxy's own
+// TestCGLLMCostIsChargedToTheRequestThatSpentIt.
+//
+// Leaving it there was not an option: the compaction-episode measurement charges the summarizer's
+// spend as a DEBIT, so a missing cost makes the panel overstate its own saving, which is the one
+// direction a savings figure must never lean.
+//
+// So the goroutine records what it used, and the NEXT turn of the same session replays it here.
+// The attribution is one turn late by construction — the same deliberate lag Ctx.PrevBilledInput
+// carries, and for the same reason: a figure that arrives slightly late is worth far more than one
+// that never arrives. The whole-process totals were never wrong; only the per-request row was.
+//
+// Replaying twice would double-count, so the caller must delete its record before replaying — see
+// summarize's takeDeferredUsage.
+func ReplayUsage(ctx context.Context, model string, inTok, outTok, cacheWrite, cacheRead int) {
+	SinkFrom(ctx).add(model, inTok, outTok, cacheWrite, cacheRead)
+}
+
+// WithDetachedSink installs a sink that does NOT chain to whatever sink already scopes ctx,
+// returning it so the caller can read its usage and attribute it deliberately later.
+//
+// It exists because WithCallSink's chaining — normally the right behaviour, since a narrower
+// window should still credit its request — is a DOUBLE-COUNT hazard for work that outlives the
+// request that started it. summarize's detached summarizer inherits the commissioning request's
+// context, so a chained sink reaches that request's row: if the call happens to finish before that
+// row is written, the cost lands there AND is replayed onto the next turn, charging one call
+// twice. Measured, at exactly 2x, by proxy's TestOurOwnSpendCountsTheCacheTiersToo.
+//
+// Detaching makes the attribution single-valued: the commissioning row can never see this usage,
+// and exactly one later turn replays it. Process-wide totals are unaffected — those are counted by
+// the model wrapper itself, not by walking the sink chain.
+func WithDetachedSink(ctx context.Context) (context.Context, *Sink) {
+	s := &Sink{} // no parent, deliberately
+	return context.WithValue(ctx, sinkKey{}, s), s
+}

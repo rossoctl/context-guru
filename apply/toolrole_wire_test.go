@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -65,7 +67,7 @@ func TestNoToolRoleOnAnthropicWireAfterCountChange(t *testing.T) {
 	// strategy: deterministic keeps this hermetic -- the reduction is a real rewrite of the kept
 	// message's bytes with no model reply to stub.
 	const comps = "components:\n" +
-		"  summarize: {keep_last: 3, start_from_message: 0, min_tokens: 1}\n" +
+		"  summarize: {keep_last: 3, start_from_message: 0, min_tokens: 1, trigger: {min_request_frac: 0}}\n" +
 		"  extract_llm: {strategy: deterministic, min_tokens: 1, economic_gate: false, " +
 		"allow_on_caching_backend: true}\n"
 
@@ -88,9 +90,15 @@ func checkNoToolRole(t *testing.T, yaml string, body []byte, inCount int) {
 	t.Helper()
 	cfg := pipe(t, yaml)
 	p, _ := cfg.Build(nil)
-	out, changed := apply.BodyWithModel(context.Background(), p,
-		store.NewMemory(store.Options{}), bschemas.Anthropic, body, "", false,
-		components.ModelSpec{Incoming: stubModel{resp: "essential facts"}})
+	// Two passes over one Store: the first commissions the summary, the second splices it. See
+	// the note in apply_test.go — a fresh Store per pass loses the checkpoint and the message
+	// count never changes, so the rebuild under test never runs.
+	st := store.NewMemory(store.Options{})
+	models := components.ModelSpec{Incoming: stubModel{resp: "essential facts"}}
+	apply.BodyWithModel(context.Background(), p, st, bschemas.Anthropic, body, "", false, models)
+	offload.WaitForAllSummariesForTest(5 * time.Second)
+	out, changed := apply.BodyWithModel(context.Background(), p, st,
+		bschemas.Anthropic, body, "", false, models)
 	if !changed {
 		t.Fatal("no component acted, so the rebuild never ran -- assertion is vacuous")
 	}

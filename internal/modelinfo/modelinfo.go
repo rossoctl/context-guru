@@ -27,6 +27,37 @@ type Resolver interface {
 	Window(ctx context.Context, model string) (tokens int, ok bool)
 }
 
+// ExactResolver is the optional capability a Resolver implements to say whether the window it
+// returned is a MEASURED figure for that model or a GUESS — and it exists because the two are
+// not interchangeable for every caller.
+//
+// DefaultStatic answers by substring with a `{"claude", 200000}` catch-all, so a 1M-window model
+// it has no entry for comes back as 200,000 with ok=true. That is a fine floor for a caller that
+// only wants "don't act on a tiny output" — a too-small window there merely raises a floor. It is
+// NOT fine for a caller deciding "is this transcript 90% full", where a 5x-low window fires the
+// decision five times too early. Such a caller must be able to tell the two apart, and ok=true
+// cannot tell it.
+//
+// A Resolver that does NOT implement this is treated as inexact by Chain, deliberately: a new
+// source has to say it is authoritative, because the failure of forgetting is silent and the
+// failure of declaring wrongly is not.
+type ExactResolver interface {
+	WindowExact(ctx context.Context, model string) (tokens int, exact, ok bool)
+}
+
+// Exact reports a window plus whether it is measured rather than guessed, for any Resolver.
+// A resolver without the capability answers exact=false.
+func Exact(r Resolver, ctx context.Context, model string) (tokens int, exact, ok bool) {
+	if r == nil {
+		return 0, false, false
+	}
+	if er, hasCap := r.(ExactResolver); hasCap {
+		return er.WindowExact(ctx, model)
+	}
+	w, found := r.Window(ctx, model)
+	return w, false, found
+}
+
 // Price is a model's per-token USD rates, in the four tiers a prompt-caching
 // provider bills. Zero rates mean "unknown" — a caller must treat a Price it did
 // not get an ok=true for as "no pricing", never as free.
@@ -260,6 +291,13 @@ func (l *LiteLLM) Price(ctx context.Context, model string) (Price, bool) {
 const sampleSpecKey = "sample_spec"
 
 // Window returns the model's context window from the cached LiteLLM map.
+// WindowExact: a hit in the fetched map is a per-model `max_input_tokens` published for that
+// model, so it is measured. A miss is a miss — exactness says nothing when ok is false.
+func (l *LiteLLM) WindowExact(ctx context.Context, model string) (int, bool, bool) {
+	w, ok := l.Window(ctx, model)
+	return w, ok, ok
+}
+
 func (l *LiteLLM) Window(ctx context.Context, model string) (int, bool) {
 	l.refreshIfStale(ctx)
 	l.mu.Lock()
@@ -303,6 +341,16 @@ func DefaultStatic() Static {
 	}}
 }
 
+// WindowExact: NEVER exact. Every answer here is a substring match against a deliberately tiny
+// table ending in a `{"claude", 200000}` catch-all, so a model with no entry of its own gets its
+// family's floor rather than its own window — measured 5x low for the whole Opus family, which
+// LiteLLM publishes at 1,000,000. A floor is what this table is for; a fill percentage is not
+// something it can answer.
+func (s Static) WindowExact(ctx context.Context, model string) (int, bool, bool) {
+	w, ok := s.Window(ctx, model)
+	return w, false, ok
+}
+
 func (s Static) Window(_ context.Context, model string) (int, bool) {
 	m := strings.ToLower(model)
 	for _, e := range s.table { // first match wins; order most-specific first
@@ -323,6 +371,18 @@ func (c Chain) Window(ctx context.Context, model string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// WindowExact resolves as Window does and reports whether the link that ANSWERED considers its
+// figure measured. First ok still wins — the exactness of a later link is irrelevant, because a
+// later link was never consulted.
+func (c Chain) WindowExact(ctx context.Context, model string) (int, bool, bool) {
+	for _, r := range c {
+		if w, exact, ok := Exact(r, ctx, model); ok {
+			return w, exact, true
+		}
+	}
+	return 0, false, false
 }
 
 // Price tries each element that can price a model; the first ok wins. Elements

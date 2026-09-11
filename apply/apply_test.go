@@ -7,11 +7,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -224,7 +226,7 @@ func (m stubModel) Complete(context.Context, string) (string, error) { return m.
 // into [system, <summary>, final]; apply must keep the retained messages and all
 // non-message fields byte-identical while the count drops.
 func TestSummarizeCountChangeLossless(t *testing.T) {
-	cfg := pipe(t, "pipeline: [summarize]\ncomponents:\n  summarize: {keep_last: 1, start_from_message: 0, min_tokens: 1}\n")
+	cfg := pipe(t, "pipeline: [summarize]\ncomponents:\n  summarize: {keep_last: 1, start_from_message: 0, min_tokens: 1, trigger: {min_request_frac: 0}}\n")
 	p, _ := cfg.Build(nil)
 	st := store.NewMemory(store.Options{})
 
@@ -239,8 +241,15 @@ func TestSummarizeCountChangeLossless(t *testing.T) {
 		},
 	})
 
-	out, changed := apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false,
-		components.ModelSpec{Incoming: stubModel{resp: "essential facts"}})
+	// TWO PASSES, because summarize commissions its summary off the hot path: the first pass
+	// starts the model call and forwards the body untouched, and the second splices the result.
+	// apply derives the session id from the transcript, so the drain cannot name it.
+	models := components.ModelSpec{Incoming: stubModel{resp: "essential facts"}}
+	apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false, models)
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("the background summary never landed, so there is nothing for the second pass to splice")
+	}
+	out, changed := apply.BodyWithModel(context.Background(), p, st, bschemas.OpenAI, body, "", false, models)
 	if !changed {
 		t.Fatal("summarize should have restructured the transcript")
 	}

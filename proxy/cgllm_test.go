@@ -15,6 +15,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
@@ -58,7 +59,8 @@ func cgLLMHandlerPriced(t *testing.T, upstream string, cheap components.Model,
 	t.Helper()
 	cfg, err := config.LoadBytes([]byte(
 		"pipeline: [summarize]\ncomponents:\n  summarize:\n    keep_last: 1\n" +
-			"    start_from_message: 0\n    min_tokens: 1\n    model:\n      source: config\n"))
+			"    start_from_message: 0\n    min_tokens: 1\n" +
+			"    trigger: {min_request_frac: 0}\n    model:\n      source: config\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,19 +189,42 @@ func TestCGLLMCostIsChargedToTheRequestThatSpentIt(t *testing.T) {
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
+	// TWO REQUESTS, and the cost lands on the SECOND. summarize produces its summary off the hot
+	// path, so the goroutine that makes the model call finishes after the commissioning request
+	// has been answered and its row written — there is no longer any moment at which that row
+	// could be charged.
+	//
+	// The property this test pairs with is unchanged and both halves still hold: the cost must not
+	// land on another tenant's row (the test above), and it must not silently become 0 (this one).
+	// It is attributed one turn late, to the SAME session, which is the same deliberate lag
+	// Ctx.PrevBilledInput carries. See cheapmodel.ReplayUsage for why late beats never: the
+	// compaction-episode panel charges this spend as a debit, so a missing cost makes that panel
+	// overstate its own saving.
 	postChat(t, srv, "sess-own")
 	waitForRows(t, rec, 1)
 	if cheapCalls.Load() == 0 {
 		t.Fatal("the summarizer never called the cheap model; the assertion below would be vacuous")
 	}
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("turn 1's summary never finished, so there is no cost to attribute")
+	}
+	// The second turn of the same session is what attributes it.
+	postChat(t, srv, "sess-own")
+	waitForRows(t, rec, 2)
 
 	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := page.Requests[0].CGLLMCostUSD; got <= 0 {
-		t.Errorf("cg_llm_cost_usd = %v after this request's own summarizer spent "+
-			"10000-in/2000-out; our own model cost stopped being reported", got)
+	total := 0.0
+	for _, r := range page.Requests {
+		total += r.CGLLMCostUSD
+	}
+	if total <= 0 {
+		t.Errorf("no row carries any cg_llm_cost_usd after the summarizer spent "+
+			"10000-in/2000-out across %d rows; our own model cost stopped being reported "+
+			"anywhere, which makes every savings figure that subtracts it too generous",
+			len(page.Requests))
 	}
 }
 
@@ -230,17 +255,37 @@ func TestOurOwnSpendIsPricedAtTheCompactionModelsRate(t *testing.T) {
 		prices)
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
+	// A SECOND TURN OF THE SAME SESSION is what attributes the cost. summarize produces its
+	// summary off the hot path, so the goroutine making the model call finishes after the
+	// commissioning request's row is written: there is no moment at which that row could be
+	// charged. The spend is replayed onto the next turn of the same session — one turn late by
+	// construction, the same lag Ctx.PrevBilledInput carries. See cheapmodel.ReplayUsage.
+	//
+	// The PRICING property under test is unaffected: the rate applied is still the compaction
+	// model's, whichever row carries the figure. Summing across rows keeps the assertion about the
+	// rate rather than about which row it landed on.
 	postChat(t, srv, "sess-priced")
 	waitForRows(t, rec, 1)
-
 	if calls.Load() == 0 {
 		t.Fatal("the compaction model was never called, so this proves nothing")
 	}
+	// Drain, THEN a second turn: that makes turn 2 attribute exactly the one call turn 1
+	// commissioned. Turn 2 commissions another, but nothing attributes it (there is no turn 3),
+	// so the rows carry exactly one call's cost and the expectation below stays unscaled.
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("turn 1's summary never finished, so there is no cost to attribute")
+	}
+	postChat(t, srv, "sess-priced")
+	waitForRows(t, rec, 2)
+
 	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := page.Requests[0].CGLLMCostUSD
+	got := 0.0
+	for _, r := range page.Requests {
+		got += r.CGLLMCostUSD
+	}
 	if diff := got - wantCheap; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("cg_llm_cost_usd = %.6f, want %.6f (the compaction model's rate). At the "+
 			"agent's rate it would be %.6f, %.1fx too high", got, wantCheap, wantAgent,
@@ -281,16 +326,36 @@ func TestOurOwnSpendCountsTheCacheTiersToo(t *testing.T) {
 		twoModelPricer{agent: price, compact: price})
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
+	// A SECOND TURN OF THE SAME SESSION is what attributes the cost. summarize produces its
+	// summary off the hot path, so the goroutine making the model call finishes after the
+	// commissioning request's row is written: there is no moment at which that row could be
+	// charged. The spend is replayed onto the next turn of the same session — one turn late by
+	// construction, the same lag Ctx.PrevBilledInput carries. See cheapmodel.ReplayUsage.
+	//
+	// The PRICING property under test is unaffected: the rate applied is still the compaction
+	// model's, whichever row carries the figure. Summing across rows keeps the assertion about the
+	// rate rather than about which row it landed on.
 	postChat(t, srv, "sess-tiers")
 	waitForRows(t, rec, 1)
 	if calls.Load() == 0 {
 		t.Fatal("the compaction model was never called, so this proves nothing")
 	}
+	// Drained first, for the reason given in the test above: exactly one call's cost is
+	// attributed, so the expectation stays unscaled.
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("turn 1's summary never finished, so there is no cost to attribute")
+	}
+	postChat(t, srv, "sess-tiers")
+	waitForRows(t, rec, 2)
+
 	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := page.Requests[0].CGLLMCostUSD
+	got := 0.0
+	for _, r := range page.Requests {
+		got += r.CGLLMCostUSD
+	}
 	if diff := got - want; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("cg_llm_cost_usd = %.6f, want %.6f. Counting only fresh input and output "+
 			"gives %.6f, which is %.1fx too LOW on a call whose prompt was cached",

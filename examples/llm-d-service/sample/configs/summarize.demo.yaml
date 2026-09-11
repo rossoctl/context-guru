@@ -1,6 +1,12 @@
 # = configs/summarize.yaml with triggers lowered for the small sample.
+#
+# cache_state/min_request_frac carry the same opt-out as configs/summarize.yaml, and the sample
+# needs it even more than the real config does: the shipped default fires only near 0.9 of the
+# model's context window with the prompt cache about to expire, and a four-message sample reaches
+# neither condition. Without the opt-out this demo would show summarize doing nothing at all.
 pipeline: [summarize]
 components:
   summarize: { summary_level: concise, keep_last: 2, min_tokens: 50, marker_mode: "off",
-               trigger: { min_messages: 4 }, model: { source: config } }
+               trigger: { min_messages: 4, cache_state: any, min_request_frac: 0 },
+               model: { source: config } }
 store: { enabled: false }

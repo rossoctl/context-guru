@@ -462,7 +462,7 @@ type sumCheckpoint struct {
 	Key          string `json:"k"`
 }
 
-func sumKey(session string) string { return "cg:sum:" + session }
+func sumKey(session string) string { return store.SumPrefix + session }
 
 func loadCheckpoint(c *components.Ctx) (sumCheckpoint, bool) {
 	b, ok := c.Store.Get(sumKey(c.Session))

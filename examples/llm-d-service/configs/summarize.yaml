@@ -17,6 +17,19 @@ components:
     trigger:
       min_messages: 12            # don't summarize short conversations
       min_request_tokens: 40000   # …or small ones
+      # OPTING OUT OF THE SHIPPED DEFAULT, and this is the configuration that has to.
+      #
+      # By default summarize fires only when the transcript is >= 0.9 of the model's context
+      # window AND the prompt cache is about to expire — because compacting a warm prefix
+      # invalidates it and costs a full-suffix cache-write. That default assumes something
+      # else caps the context: Claude Code runs its own compaction as it nears its budget.
+      #
+      # This config drives a raw endpoint, so nothing else will. Without `cache_state: any`
+      # a busy session stays warm indefinitely, this component declines on every turn, and
+      # the transcript grows until the provider rejects it. `min_request_frac: 0` restores
+      # the size gates above as the only ones (0.9 of the window would dwarf 40000).
+      cache_state: any
+      min_request_frac: 0
     model:
       source: config
       provider: openai

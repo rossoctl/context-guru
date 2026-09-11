@@ -2,9 +2,11 @@ package offload
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
@@ -47,7 +49,7 @@ func newSummarizeKeepLast(t *testing.T, keepLast int) *Summarize {
 	t.Helper()
 	c, err := newSummarize([]byte(
 		"keep_last: " + strconv.Itoa(keepLast) + "\nmin_tokens: 10\nresummarize_tokens: 0\n" +
-			"trigger:\n  min_messages: 2\n  min_request_tokens: 10\n"))
+			"trigger:\n  min_messages: 2\n  min_request_tokens: 10\n  min_request_frac: 0\n"))
 	if err != nil {
 		t.Fatalf("newSummarize: %v", err)
 	}
@@ -96,12 +98,29 @@ func TestSummarizeEmitsAShapeValidTranscript(t *testing.T) {
 			// The fixture is deliberately re-cloned: Offload reassigns req.Input but the
 			// messages themselves are shared, and a leaked mutation would make the next
 			// keep_last mean something else.
+			// TWO TURNS, because the summary is produced off the hot path: the first turn
+			// commissions it and forwards untouched, the second splices it. The shape under
+			// test is the SPLICED one — the bytes that actually reach a provider — so
+			// validating the first turn's body would be validating the input.
+			//
+			// A fresh Store per combination, and a session id per combination too: the
+			// checkpoint is keyed by session, so a shared id would let keep_last=1's summary
+			// be spliced into keep_last=2's transcript and the shape assertion would be about
+			// the wrong span.
+			c := &components.Ctx{Ctx: context.Background(),
+				Session: fmt.Sprintf("shape-%s-%d", name, keepLast),
+				Store:   store.NewMemory(store.Options{}), CtxWindow: 1_000_000}
+			sc := newSummarizeKeepLast(t, keepLast)
+			first := &bschemas.BifrostChatRequest{Input: schema.CloneMessages(base)}
+			var rep1 components.Report
+			if _, err := sc.Offload(first, &rep1, c); err != nil {
+				t.Fatalf("%s keep_last=%d: commissioning turn: %v", name, keepLast, err)
+			}
+			WaitForSummaryForTest(c.Session, 5*time.Second)
 			req := &bschemas.BifrostChatRequest{Input: schema.CloneMessages(base)}
 			var rep components.Report
-			c := &components.Ctx{Ctx: context.Background(), Session: "s",
-				Store: store.NewMemory(store.Options{}), CtxWindow: 1_000_000}
-			if _, err := newSummarizeKeepLast(t, keepLast).Offload(req, &rep, c); err != nil {
-				t.Fatalf("%s keep_last=%d: Offload: %v", name, keepLast, err)
+			if _, err := sc.Offload(req, &rep, c); err != nil {
+				t.Fatalf("%s keep_last=%d: splicing turn: %v", name, keepLast, err)
 			}
 			if rep.Skipped {
 				continue

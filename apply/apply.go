@@ -591,19 +591,24 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// be two scans of the body on the request path for one fact.
 	bps := CountBreakpoints(body)
 	c := &components.Ctx{
-		Ctx:          ctx,
-		Session:      sessionID,
-		Store:        st,
-		Model:        models,
-		Bypass:       bypass,
-		CtxWindow:    o.Window,
-		ModelName:    gjson.GetBytes(body, "model").String(),
-		SelfRates:    o.SelfRates,
-		RatesFor:     o.RatesFor,
-		CacheAware:   cacheAware,
-		ColdCache:    coldCache,
-		IdleMs:       idleMs,
-		MaxCachedIdx: maxCachedIdx,
+		Ctx:            ctx,
+		Session:        sessionID,
+		Store:          st,
+		Model:          models,
+		Bypass:         bypass,
+		CtxWindow:      o.Window,
+		CtxWindowExact: o.WindowExact,
+		// Read under the SAME sessionID the host will write back under (Trace.Session), which
+		// is what keeps the fraction gate from reading a permanent zero. See
+		// RecordBilledInput.
+		PrevBilledInput: prevBilledInput(st, sessionID),
+		ModelName:       gjson.GetBytes(body, "model").String(),
+		SelfRates:       o.SelfRates,
+		RatesFor:        o.RatesFor,
+		CacheAware:      cacheAware,
+		ColdCache:       coldCache,
+		IdleMs:          idleMs,
+		MaxCachedIdx:    maxCachedIdx,
 		// Every breakpoint already on the wire — including the ones no component can
 		// see (`system`, `tools`, and the marks our own normalize drops). The
 		// provider's cap of four counts them all (issue #32, defect 2).
@@ -1093,6 +1098,46 @@ func prevLen(st store.Store, session string) int {
 
 func putLen(st store.Store, session string, n int) {
 	st.Put("cg:len:"+session, []byte(strconv.Itoa(n)))
+}
+
+// RecordBilledInput stores the provider's own input-token count for a finished turn, so the NEXT
+// turn of the same session can be compared against the model's context window in the units that
+// window is stated in. Call it once per response, with fresh + cache-read + cache-write.
+//
+// EXPORTED, and the only writer, because the read and the write must agree on the key or the
+// figure is silently always zero — which reads as "not full" and disables every fraction gate
+// that depends on it. The host has to hand back the session id the pipeline itself derived
+// (Trace.Session): re-deriving it from the outgoing body would hash a transcript this pipeline
+// had just rewritten, producing a different key on exactly the sessions where compaction is
+// happening.
+//
+// A ping must never come through here. Its usage describes a keep-alive touch of the cached
+// prefix, not the agent's transcript, and it would understate the fill for a session that is
+// merely idle. Only the real request path calls this.
+func RecordBilledInput(st store.Store, session string, tokens int64) {
+	if st == nil || session == "" || tokens <= 0 {
+		return
+	}
+	st.Put(store.BilledPrefix+session, []byte(strconv.FormatInt(tokens, 10)))
+}
+
+// prevBilledInput reads back what RecordBilledInput stored, or 0 when this session has no earlier
+// response — its first turn, an evicted key, or a host that never calls the writer. 0 means
+// UNKNOWN, and a component deciding how full the context is must decline rather than read it as
+// an empty transcript (see Trigger.FracResolvable).
+func prevBilledInput(st store.Store, session string) int {
+	if st == nil {
+		return 0
+	}
+	b, ok := st.Get(store.BilledPrefix + session)
+	if !ok || len(b) == 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(string(b))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // attemptedTokens sums the tokens of the messages an age/supersession offloader

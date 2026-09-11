@@ -171,12 +171,58 @@ const (
 	// against LRU pressure from a busy proxy.
 	TTLPrefix  = "cg:ttl:"  // longest cache lifetime this session has ever asked for
 	SeenPrefix = "cg:seen:" // last activity under a content-derived session id
+	// SumPrefix is summarize's per-session checkpoint: the exact summary text, the span it
+	// covers, and that span's hash.
+	//
+	// PINNED ONLY SINCE summarize's TRIGGER GAINED A CACHE-STATE CONDITION, because that changed
+	// what losing it costs. While the trigger was a size threshold, a lost checkpoint meant
+	// summarize re-paid its model call and rolled a new one forward — money, not correctness, and
+	// the reason this namespace sat unpinned. The trigger now declines on most turns by design,
+	// and the checkpoint is the ONLY thing keeping those turns in the summarized shape. Losing it
+	// makes the next gated turn send the transcript FULL, diverging from the bytes the provider
+	// cached at the first summarized message and re-writing the whole suffix at 1.25x fresh.
+	// That is cache-destructive, which is this list's entry criterion.
+	SumPrefix = "cg:sum:"
+	// BilledPrefix is the provider's own billed input-token count for this session's PREVIOUS
+	// turn: fresh input + cache reads + cache writes, as the provider reported them.
+	//
+	// It exists because a fraction of the context window cannot be evaluated against
+	// schema.MessagesTokens. That counts message TEXT only — no system prompt, no tool
+	// declarations, no JSON envelope — while a context window is stated in the units the
+	// provider bills. Measured on this deployment's uncompacted traffic the two differ by a
+	// median 3.38x (p25 2.43, p90 6.80; see dash/overview.go's EstimatorDivergence), so
+	// `MessagesTokens >= 0.9 * window` demands roughly three times the window's worth of
+	// transcript and never becomes true at all. This is the numerator in the DENOMINATOR's
+	// units, which is the only way that comparison is meaningful.
+	//
+	// PINNED, for the same reason SumPrefix is. summarize's default trigger declines when this
+	// is absent (an unknown fill must not be guessed at), so losing the key does not merely
+	// cost a re-measurement — it turns the component off until the next response writes it
+	// back, and the turns in between send the transcript full.
+	//
+	// Written on the RESPONSE path, read on the request path, so it is always the previous
+	// turn's figure. That is a deliberate one-turn lag rather than an estimate: a transcript
+	// only grows, so the previous turn is a sound lower bound on this one, and a gate that
+	// fires one turn late is the safe direction.
+	BilledPrefix = "cg:bin:"
+	// UsagePrefix is model usage a DETACHED summarizer call incurred, waiting to be attributed to
+	// this session's next turn.
+	//
+	// summarize produces its summary off the hot path, so the goroutine finishes after the
+	// request that started it has been answered and its row written — leaving that row's
+	// cg_llm_cost_usd at 0 while the money was genuinely spent. The compaction-episode panel
+	// charges that spend as a debit, so losing it makes the panel overstate its own saving.
+	//
+	// PINNED, like SumPrefix and BilledPrefix: losing it loses a cost figure permanently, and a
+	// savings measurement missing its costs is worse than one that is simply absent.
+	UsagePrefix = "cg:use:"
 )
 
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
-var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix}
+var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
+	BilledPrefix, UsagePrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {
@@ -613,8 +659,6 @@ func (m *Memory) DisableSlidingTTLForTest() {
 //
 //   - cg:keep: (offload.MarkKeptVerbatim) — isKeptVerbatim goes permanently false, so content
 //     the agent just expanded is re-compacted, which is the expand loop the flag exists to stop.
-//   - cg:sum:  (offload.saveCheckpoint) — summarize can never checkpoint, so it re-pays its
-//     model call every turn and never reuses.
 //   - cg:own:  (offload.recordOwner) — GET /expand refuses a key the session really does own.
 //   - cg:xseen: — the economic gate misprices recurrence.
 //

@@ -280,6 +280,37 @@ type Ctx struct {
 	// fraction-based Trigger thresholds are ignored and only absolutes apply. Stored
 	// as a resolved int so Trigger stays a pure, network-free, unit-testable function.
 	CtxWindow int
+	// CtxWindowExact says CtxWindow is a figure published for THIS model, not a family
+	// guess. It matters because ok=true from the resolver is not the same as right: the
+	// substring table of last resort answers 200,000 for every Opus, and LiteLLM publishes
+	// those at 1,000,000. A fraction resolved against the guess fires five times too early.
+	//
+	// A per-item FLOOR may act on a guess — too small a window merely raises the floor. A
+	// decision about how FULL the context is may not, and Trigger declines rather than
+	// guessing (see Trigger.CacheAllows). Zero value is false, so a Ctx built without it
+	// fails closed for the fraction and unchanged for everything else.
+	CtxWindowExact bool
+	// PrevBilledInput is the provider's own input-token count for this session's PREVIOUS turn
+	// — fresh input + cache reads + cache writes — or 0 when this session has no earlier
+	// response to read (its first turn, a lost store key, or a host that does not record it).
+	//
+	// It is the ONLY figure on this Ctx that can be compared against CtxWindow, and that is
+	// why it exists. schema.MessagesTokens counts message TEXT only: no system prompt, no tool
+	// declarations, no JSON envelope. A context window is stated in the units the provider
+	// bills, which include all of those. Measured on this deployment's uncompacted traffic the
+	// two differ by a median 3.38x (p25 2.43, p90 6.80 — dash/overview.go's
+	// EstimatorDivergence, computed over requests where nothing was compacted, so the two are
+	// describing the same prompt). Testing `MessagesTokens >= 0.9 * window` therefore waits for
+	// roughly three times a 1M window's worth of transcript and never becomes true: the
+	// provider rejects the request, or the client compacts, long before the gate opens. That is
+	// not a rounding error, it is a gate that silently never fires.
+	//
+	// One turn stale by construction — it is written from a response and read on the next
+	// request. Not an approximation to apologize for: a transcript only grows, so the previous
+	// turn is a sound lower bound on this one, and a size gate that opens one turn late is the
+	// harmless direction. A component must treat 0 as UNKNOWN and decline a fill decision, the
+	// same rule CtxWindowExact carries, for the same reason.
+	PrevBilledInput int
 	// CacheAware is true when this request goes to a prompt-caching backend and the
 	// pipeline should avoid mutating already-cached content. When true, supersession/
 	// age-based offloaders (failed_run, mask, collapse) must restrict their
