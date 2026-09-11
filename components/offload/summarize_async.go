@@ -11,6 +11,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -193,7 +194,11 @@ func (s *Summarize) startAsyncSummary(c *components.Ctx, model components.Model,
 	spanCopy := make([]bschemas.ChatMessage, len(span))
 	copy(spanCopy, span)
 	// Everything the goroutine needs, read HERE while we are still on the request's goroutine.
-	session, store := c.Session, c.Store
+	//
+	// `st`, not `store`: the obvious name shadows the store PACKAGE, which this goroutine also
+	// calls into (store.PutStash, store.SumPrefix). It compiled, which is what makes it worth
+	// renaming rather than leaving.
+	session, st := c.Session, c.Store
 	go func() {
 		defer inFlight.finish(session, j)
 		// Fail open, always: a panic in a detached goroutine takes the process down, which is a
@@ -201,7 +206,16 @@ func (s *Summarize) startAsyncSummary(c *components.Ctx, model components.Model,
 		defer func() { _ = recover() }()
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Ctx), asyncSummaryBudget())
 		defer cancel()
+		// A DETACHED sink, not a nested one. This goroutine inherits the commissioning request's
+		// context, so a chained sink would also reach THAT request's row — and when the call
+		// finishes before the row is written, the cost lands there as well as being replayed onto
+		// the next turn, charging one call twice. Measured at exactly 2x. Detaching makes the
+		// attribution single-valued; process totals are counted by the model wrapper regardless.
+		ctx, callSink := cheapmodel.WithDetachedSink(ctx)
 		summary, err := s.summarize(ctx, model, spanCopy, goal)
+		// Deferred BEFORE the error check: a call that timed out or failed may still have been
+		// billed for its input, and a cost we incurred is a cost we report.
+		deferUsage(st, session, callSink)
 		if err != nil {
 			// Classified here rather than swallowed: with nothing on the hot path waiting for
 			// this call, these two counters are the ONLY place a degraded summarizer shows up.
@@ -216,7 +230,7 @@ func (s *Summarize) startAsyncSummary(c *components.Ctx, model components.Model,
 		if strings.TrimSpace(summary) == "" {
 			return
 		}
-		s.commitAsyncSummary(c, session, store, spanCopy, summary, coveredCount)
+		s.commitAsyncSummary(c, session, st, spanCopy, summary, coveredCount)
 	}()
 	return true
 }
@@ -280,4 +294,76 @@ func AsyncSummaryStats() (started, committed, waitedMs, waitTimeouts int64) {
 		atomic.LoadInt64(&summarizeAsyncCommitted),
 		atomic.LoadInt64(&summarizeWaitedMs),
 		atomic.LoadInt64(&summarizeWaitTimeouts)
+}
+
+// deferredUsage is what a detached summarizer call used, waiting for a turn to attribute it to.
+type deferredUsage struct {
+	Model      string `json:"model"`
+	In         int    `json:"in"`
+	Out        int    `json:"out"`
+	CacheWrite int    `json:"cache_write"`
+	CacheRead  int    `json:"cache_read"`
+}
+
+// deferUsage records what a detached call used, for this session's next turn to attribute.
+//
+// Additive rather than replacing: two calls can complete between one turn and the next (a
+// commission and a roll-forward), and the second must not erase the first's cost. The whole point
+// of this record is that a cost we incurred is a cost we report.
+func deferUsage(st store.Store, session string, sink *cheapmodel.Sink) {
+	if st == nil || session == "" || sink == nil {
+		return
+	}
+	calls, in, out := sink.Totals()
+	cw, cr := sink.CacheTotals()
+	if calls == 0 || (in == 0 && out == 0 && cw == 0 && cr == 0) {
+		return
+	}
+	u := deferredUsage{Model: sink.Model(), In: int(in), Out: int(out),
+		CacheWrite: int(cw), CacheRead: int(cr)}
+	if b, ok := st.Get(store.UsagePrefix + session); ok && len(b) > 0 {
+		var prev deferredUsage
+		if json.Unmarshal(b, &prev) == nil {
+			u.In += prev.In
+			u.Out += prev.Out
+			u.CacheWrite += prev.CacheWrite
+			u.CacheRead += prev.CacheRead
+			if u.Model == "" {
+				u.Model = prev.Model
+			}
+		}
+	}
+	if b, err := json.Marshal(u); err == nil {
+		st.Put(store.UsagePrefix+session, b)
+	}
+}
+
+// takeDeferredUsage attributes any pending detached-call usage to THIS request, and clears it.
+//
+// Read-then-delete-then-replay, in that order: replaying without deleting would charge the same
+// call to every later turn, which is a worse error than the missing cost it fixes.
+func takeDeferredUsage(c *components.Ctx) {
+	if c == nil || c.Store == nil || c.Session == "" {
+		return
+	}
+	key := store.UsagePrefix + c.Session
+	b, ok := c.Store.Get(key)
+	if !ok || len(b) == 0 {
+		return
+	}
+	// CLEARED BEFORE REPLAYING, not after: replaying without clearing charges the same call to
+	// every later turn of the session, which is a worse error than the missing cost it fixes.
+	// Overwritten rather than deleted because store.Store has no Delete — an empty record reads
+	// back as all-zero and is refused by the guard below.
+	c.Store.Put(key, []byte("{}"))
+	var u deferredUsage
+	if json.Unmarshal(b, &u) != nil {
+		return
+	}
+	if u.In == 0 && u.Out == 0 && u.CacheWrite == 0 && u.CacheRead == 0 {
+		// An already-cleared record. Returning here matters: ReplayUsage would otherwise
+		// increment the sink's CALL count for a call that is being counted a second time.
+		return
+	}
+	cheapmodel.ReplayUsage(c.Ctx, u.Model, u.In, u.Out, u.CacheWrite, u.CacheRead)
 }

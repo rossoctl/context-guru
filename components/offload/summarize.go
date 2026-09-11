@@ -279,6 +279,11 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// avoid, so the feature would have been a net loss rather than a smaller win.
 	//
 	// So: gate, record why, and keep going to the replay.
+	// Attribute any model spend a DETACHED summarizer call incurred since this session's last
+	// turn. First thing, and unconditionally: the money was spent whatever this turn decides, and
+	// the compaction-episode panel charges it as a debit. See takeDeferredUsage.
+	takeDeferredUsage(c)
+
 	sized := s.trigger.Fires(req, c)
 	if !sized {
 		rep.Gate("below_request_trigger")

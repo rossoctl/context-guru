@@ -205,13 +205,24 @@ const (
 	// only grows, so the previous turn is a sound lower bound on this one, and a gate that
 	// fires one turn late is the safe direction.
 	BilledPrefix = "cg:bin:"
+	// UsagePrefix is model usage a DETACHED summarizer call incurred, waiting to be attributed to
+	// this session's next turn.
+	//
+	// summarize produces its summary off the hot path, so the goroutine finishes after the
+	// request that started it has been answered and its row written — leaving that row's
+	// cg_llm_cost_usd at 0 while the money was genuinely spent. The compaction-episode panel
+	// charges that spend as a debit, so losing it makes the panel overstate its own saving.
+	//
+	// PINNED, like SumPrefix and BilledPrefix: losing it loses a cost figure permanently, and a
+	// savings measurement missing its costs is worse than one that is simply absent.
+	UsagePrefix = "cg:use:"
 )
 
 // DefaultPinPrefixes is the shipped set of key namespaces whose loss is cache-destructive.
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
 var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
-	BilledPrefix}
+	BilledPrefix, UsagePrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.
 func (m *Memory) isPinPrefix(key string) bool {

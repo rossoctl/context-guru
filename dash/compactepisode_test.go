@@ -708,3 +708,59 @@ func TestAVoidedSpanStillReportsWhatItSpent(t *testing.T) {
 			"superseded, and that spend is reported rather than dropped", g.VoidedNetUSD)
 	}
 }
+
+// A COMMISSIONED summary is a t0, and this test exists because a live run proved it was not.
+//
+// Summaries are produced off the hot path, so the goroutine that finishes one has no request row
+// and no Report to file `fresh_summary` against. With the walk keying on that event alone, a real
+// Claude Code session that fired the trigger, paid for a summary and spliced it on the next turn
+// produced ZERO episodes — while the coverage half correctly reported one qualifying conversation
+// with no episode. The measurement was blind to exactly the thing it was built to measure.
+//
+// Keying on the commission is also the better definition of t0: it carries the debits and no
+// credit, which is true of the turn that spent the money whether or not the summary ever landed.
+func TestACommissionedSummaryOpensAnEpisode(t *testing.T) {
+	base := int64(900_000)
+	commissioned := func(r *compactRow) {
+		r.Acted = false // the commissioning turn splices nothing, so it did not "act"
+		r.Events = `{"` + offload.EventSummaryStarted + `":1}`
+	}
+	awaited := func(r *compactRow) {
+		r.Acted = true
+		r.Events = `{"` + offload.EventAwaitedCheckpoint + `":1}`
+	}
+
+	out := walk([]compactRow{
+		row(1, base, commissioned, wrote(40_000), cgCost(0.05), miss(CacheTTLExpiry)),
+		row(2, base+50_000, awaited, saved(3), miss(CacheHit)),
+		row(3, base+testSpan, saved(2), miss(CacheTTLExpiry)),
+	}, exactWindow, testPrice)
+
+	e := only(t, out)
+	if e.Provenance != EpisodeRecorded {
+		t.Errorf("provenance = %q, want %q — summary_started is a recorded fact about that turn",
+			e.Provenance, EpisodeRecorded)
+	}
+	if e.State != EpisodeClosed {
+		t.Fatalf("state = %q, want closed", e.State)
+	}
+	if e.StartTS != 1 {
+		t.Errorf("t0 = %d, want the commissioning turn (1)", e.StartTS)
+	}
+	// t0's costs are charged; t0 earns no credit.
+	if offUSD(e.SummarizerCostUSD, 0.05) {
+		t.Errorf("summarizer cost = %v, want 0.05 — the commissioning turn paid for the call",
+			e.SummarizerCostUSD)
+	}
+	if offUSD(e.InvalidationDebitUSD, 40_000*1.25e-6) {
+		t.Errorf("invalidation debit = %v, want %v", e.InvalidationDebitUSD, 40_000*1.25e-6)
+	}
+	// The awaited turn is a SPLICE, so it must not have opened a second episode — and its saving
+	// belongs to this one.
+	if offUSD(e.ReadCreditUSD, 3) {
+		t.Errorf("read credit = %v, want 3 (the awaited turn's saving)", e.ReadCreditUSD)
+	}
+	if offUSD(e.ColdCreditUSD, 2) {
+		t.Errorf("cold credit = %v, want 2 (the closing turn)", e.ColdCreditUSD)
+	}
+}

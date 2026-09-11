@@ -103,8 +103,8 @@ const (
 // Episode provenance. Kept apart and NEVER summed, the same discipline declcredit.go keeps
 // between a measured saving and a modelled one.
 const (
-	// EpisodeRecorded: t0 carried offload.EventFreshSummary, which summarize files on the turn
-	// it commits a new summary. A fact about that turn.
+	// EpisodeRecorded: t0 carried offload.EventSummaryStarted (it commissioned a summary) or
+	// offload.EventFreshSummary (the inline path committed one). A fact about that turn.
 	EpisodeRecorded = "recorded"
 	// EpisodeInferred: t0 acted and carried none of summarize's replay event names, so it must
 	// have been a fresh summary. Sound, but it is an inference from an absence, and it is the
@@ -518,13 +518,35 @@ func isFreshSummary(r compactRow) string {
 		}
 		return ""
 	}
-	if strings.Contains(r.Events, `"`+offload.EventFreshSummary+`"`) {
+	// EITHER event marks a paid t0, and the async one is the common case.
+	//
+	// EventSummaryStarted is the turn that COMMISSIONED a summary: it spent the model call and it
+	// invalidated the prefix, and it is the only one of the two that appears on a proxied request
+	// at all — the background goroutine that finishes the work has no request row and no Report to
+	// file against. EventFreshSummary now reaches a row only on the INLINE path, which is the
+	// sessionless caller (the library API, /compact).
+	//
+	// Keying on the commission rather than on the completion is also the more correct choice for
+	// what t0 means here: t0 carries the DEBITS and no credit, because at that moment nothing has
+	// been saved and money has been spent. That is true of the commissioning turn whether or not
+	// the summary it paid for ever landed — and a summary that was paid for and lost is exactly
+	// the case this measurement must not quietly drop.
+	//
+	// A LIVE RUN CAUGHT THIS. With the walk keying on EventFreshSummary alone, a real Claude Code
+	// session that fired the trigger, commissioned a summary and spliced it on the next turn
+	// produced `episodes: 0` — the coverage half correctly reported one qualifying conversation
+	// with no episode, and the episode half saw nothing at all.
+	if strings.Contains(r.Events, `"`+offload.EventSummaryStarted+`"`) ||
+		strings.Contains(r.Events, `"`+offload.EventFreshSummary+`"`) {
 		return EpisodeRecorded
 	}
 	for _, replay := range []string{
 		offload.EventReusedCheckpoint,
 		offload.EventGatedReplayedCheckpoint,
 		offload.EventReserveExhaustedReplayedCheckpoint,
+		// A turn that WAITED for a summary and spliced it is a splice, not a purchase: the call
+		// it waited for was paid for by the turn that commissioned it.
+		offload.EventAwaitedCheckpoint,
 	} {
 		if strings.Contains(r.Events, `"`+replay+`"`) {
 			return ""
