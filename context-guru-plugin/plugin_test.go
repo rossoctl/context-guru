@@ -4210,7 +4210,23 @@ func TestRemoveFirstNeverProducesAnOriginalHoldingRouting(t *testing.T) {
 		t.Fatal("remove failed")
 	}
 	// Whatever the record holds, nothing calling itself a pre-edit copy may contain routing.
+	//
+	// The loop below is VACUOUS on its own for this fixture — no copy is the expected outcome, and an
+	// empty glob asserts nothing — so the expected count is asserted explicitly and the record is
+	// checked to say so. Flagged in review as the pattern worth propagating: an absence assertion
+	// needs a companion that proves the path ran.
 	originals, _ := filepath.Glob(filepath.Join(state, "originals", "*.original"))
+	if len(originals) != 0 {
+		t.Errorf("took %d pre-edit copy/copies of a file that was already routed: %v",
+			len(originals), originals)
+	}
+	rec, err := os.ReadFile(filepath.Join(state, "reset-manifest.tsv"))
+	if err != nil {
+		t.Fatalf("no record was written at all, so the rest of this test proves little: %v", err)
+	}
+	if !strings.Contains(string(rec), path) {
+		t.Errorf("the record does not mention the file, so the hatch would not know about it:\n%s", rec)
+	}
 	for _, o := range originals {
 		b, err := os.ReadFile(o)
 		if err != nil {
@@ -4569,5 +4585,223 @@ func TestTroubleshootingLeadsWithTheCommand(t *testing.T) {
 		if !strings.Contains(head, want) {
 			t.Errorf("the first Troubleshooting entry does not cover %q:\n%s", want, head)
 		}
+	}
+}
+
+// --- fixes from review round 3 of #236 -----------------------------------------------------
+
+// redactShapes is the ledger behind reset.sh's `redact` filter, one row per credential shape.
+//
+// It exists because that filter is a DENYLIST on a recovery tool, and a denylist is a list that will
+// be wrong again — it has now been wrong three times in this PR alone, in three different shapes.
+// Inverting it to an allowlist is worse on a diff of arbitrary JSON (it would redact the
+// `permissions` entries the diff exists to show), so the discipline is this table instead: ADD A ROW
+// WHEN YOU ADD A RULE, and the next miss is a row somebody forgot rather than an invisible leak.
+//
+// The must-survive rows matter as much as the leak rows. A filter that redacts everything passes
+// every absence assertion and makes the diff useless, which is the failure this table also pins.
+var redactShapes = []struct {
+	name string
+	line string
+	// secret must not appear in the output. Empty means the line must pass through UNCHANGED.
+	secret string
+}{
+	{"ANTHROPIC_API_KEY", `  "ANTHROPIC_API_KEY": "sk-ant-REALKEY0000",`, "REALKEY0000"},
+	{"ANTHROPIC_AUTH_TOKEN", `  "ANTHROPIC_AUTH_TOKEN": "REALTOKENVALUE",`, "REALTOKENVALUE"},
+	// The one that matters most here, and not a shape invented for the test: this is how a Context
+	// Guru credential is carried on this project's own dev machines, so it is the single most likely
+	// credential to appear in a context-guru user's env block — and its name contains none of
+	// key/token/secret/password/credential, which is why the first two versions of the filter missed
+	// it. HEADER is in the name class because of this row.
+	{"ANTHROPIC_CUSTOM_HEADERS", `  "ANTHROPIC_CUSTOM_HEADERS": "x-context-guru-token: cg_live_REALGURU",`, "REALGURU"},
+	{"authorization bearer JWT", `  "authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.REALJWTBODY",`, "REALJWTBODY"},
+	{"github PAT", `  "GITHUB_PAT": "ghp_REALPAT00000000",`, "REALPAT00000000"},
+	{"credential in a query param", `  "ANTHROPIC_UPSTREAM": "https://gw/anthropic?api_key=REALQUERYKEY",`, "REALQUERYKEY"},
+	{"credential in URL userinfo", `  "MY_GW": "https://svc:REALURLPASS@gw.corp/anthropic",`, "REALURLPASS"},
+	{"slack token", `  "SLACK": "xoxb-REALSLACKTOKEN",`, "REALSLACKTOKEN"},
+	{"aws access key id", `  "AWS_ACCESS_KEY_ID": "AKIAREALAWSKEY0000",`, "REALAWSKEY"},
+	{"bare exported base URL with userinfo", `https://svc:REALURLPASS@gw.corp/anthropic`, "REALURLPASS"},
+
+	{"permission grant must survive", `      "Bash(git push:*)",`, ""},
+	{"model must survive", `  "model": "opus",`, ""},
+	{"theme must survive", `  "theme": "dark",`, ""},
+	{"a plain loopback base URL must survive", `  "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787/anthropic",`, ""},
+}
+
+// TestRedactCoversEveryKnownCredentialShape drives the real filter, lifted out of reset.sh, rather
+// than a copy of it — a copy would drift from the thing that ships.
+func TestRedactCoversEveryKnownCredentialShape(t *testing.T) {
+	requireTool(t, "bash")
+	body, err := os.ReadFile(filepath.Join(scriptsDir(t), "reset.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Slice out REDACT_NAME through the end of the redact() function.
+	_, rest, ok := strings.Cut(string(body), "REDACT_NAME=")
+	if !ok {
+		t.Fatal("reset.sh no longer defines REDACT_NAME; this test is extracting the wrong thing")
+	}
+	fnEnd := strings.Index(rest, "\n}\n")
+	if fnEnd < 0 {
+		t.Fatal("could not find the end of redact(); extraction would be silently partial")
+	}
+	fn := "REDACT_NAME=" + rest[:fnEnd+3]
+	if !strings.Contains(fn, "redact()") || !strings.Contains(fn, "sed") {
+		t.Fatalf("extracted fragment does not look like the filter:\n%s", fn)
+	}
+	fnPath := filepath.Join(t.TempDir(), "redact.sh")
+	if err := os.WriteFile(fnPath, []byte(fn), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range redactShapes {
+		cmd := exec.Command("sh", "-c",
+			`. "$1"; printf '%s\n' "$2" | redact`, "_", fnPath, tc.line)
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: running redact: %v (%s)", tc.name, err, b)
+		}
+		got := strings.TrimRight(string(b), "\n")
+		if tc.secret == "" {
+			if got != tc.line {
+				t.Errorf("%s: over-redacted, so the diff loses what it exists to show\n got:  %q\n want: %q",
+					tc.name, got, tc.line)
+			}
+			continue
+		}
+		if strings.Contains(got, tc.secret) {
+			t.Errorf("%s: LEAKED %q\n got: %q", tc.name, tc.secret, got)
+		}
+		if got == tc.line {
+			t.Errorf("%s: line passed through untouched, so no rule matched it at all\n got: %q",
+				tc.name, got)
+		}
+	}
+}
+
+// TestNoPrinterOfContentEscapesTheFilter walks every site in reset.sh that prints real content and
+// plants a credential in each. The round-2 fix covered the plan diff; the review then found a FOURTH
+// site inside report_environment itself — the function whose own header promises values are never
+// printed — because that test only exercised the diff. So this one is organised by SITE.
+func TestNoPrinterOfContentEscapesTheFilter(t *testing.T) {
+	const secret = "REALSECRET-do-not-print-me"
+
+	t.Run("the verify pass", func(t *testing.T) {
+		// A user's own gateway carrying credentials in the URL, taken over with --force and then
+		// handed back. Verify greps the restored file and prints the matching lines.
+		state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		path := filepath.Join(proj, "settings.json")
+		theirs := "https://svc:" + secret + "@gw.corp.example/anthropic"
+		writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": theirs}})
+		if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL,
+			"--force"); code != 0 {
+			t.Fatal("add --force failed")
+		}
+		out, _ := runHatch(t, state, home, proj, "--yes")
+		if strings.Contains(out, secret) {
+			t.Errorf("the verify pass printed a credential:\n%s", out)
+		}
+		if !strings.Contains(out, "still mentions") {
+			t.Fatalf("the verify branch never ran, so this asserted nothing:\n%s", out)
+		}
+	})
+
+	t.Run("the environment report", func(t *testing.T) {
+		state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		path := filepath.Join(proj, "settings.json")
+		writeJSON(t, path, map[string]any{"theme": "dark"})
+		if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+			t.Fatal("add failed")
+		}
+		cmd := exec.Command(hatchPath(t, state), "--dry-run")
+		cmd.Dir = proj
+		cmd.Env = []string{
+			"CONTEXT_GURU_STATE=" + state, "HOME=" + home, "PATH=" + os.Getenv("PATH"),
+			"ANTHROPIC_BASE_URL=https://svc:" + secret + "@gw.corp.example/anthropic",
+		}
+		b, _ := cmd.CombinedOutput()
+		out := string(b)
+		if strings.Contains(out, secret) {
+			t.Errorf("report_environment printed a credential:\n%s", out)
+		}
+		if !strings.Contains(out, "exported in this shell") {
+			t.Fatalf("the branch that prints $base never ran:\n%s", out)
+		}
+	})
+
+	t.Run("the no-record grep", func(t *testing.T) {
+		state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(proj, ".claude", "settings.local.json")
+		writeJSON(t, path, map[string]any{"theme": "dark"})
+		if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL,
+			"--upstream", "https://gw.corp/anthropic?api_key="+secret); code != 0 {
+			t.Fatal("add failed")
+		}
+		hatch := hatchPath(t, state)
+		if err := os.Remove(filepath.Join(state, "reset-manifest.tsv")); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(hatch, "--yes")
+		cmd.Dir = proj
+		cmd.Env = []string{"CONTEXT_GURU_STATE=" + state, "HOME=" + home, "PATH=" + os.Getenv("PATH")}
+		b, _ := cmd.CombinedOutput()
+		out := string(b)
+		if strings.Contains(out, secret) {
+			t.Errorf("the no-record grep printed a credential:\n%s", out)
+		}
+		if !strings.Contains(out, "ANTHROPIC_UPSTREAM") {
+			t.Fatalf("the grep never printed the key line, so this asserted nothing:\n%s", out)
+		}
+	})
+}
+
+// TestASuccessfulRestoreSaysSoEvenWhenTheShellIsRouted. The final summary tested INCOMPLETE for a
+// question about files — the same bug fixed in the empty-plan branch, one branch further down. So a
+// COMPLETELY successful restore, verified unrouted, run from a shell with an exported base URL (a
+// hosted agent, or simply the shell they installed from) printed "Finished with something left for
+// you" and never printed the count: $RESTORED was thrown away on the one run where it is the good
+// news, and the user who had just recovered was told the run did not finish.
+//
+// It survived three rounds because NO test grepped for "Done." at all.
+func TestASuccessfulRestoreSaysSoEvenWhenTheShellIsRouted(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	path := filepath.Join(proj, "settings.json")
+	writeJSON(t, path, map[string]any{"permissions": map[string]any{"allow": []string{"Bash(ls:*)"}}})
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+
+	// Non-empty plan (a real restore) AND a routed shell: the two conditions together.
+	cmd := exec.Command(hatchPath(t, state), "--yes")
+	cmd.Dir = proj
+	cmd.Env = []string{
+		"CONTEXT_GURU_STATE=" + state, "HOME=" + home, "PATH=" + os.Getenv("PATH"),
+		"ANTHROPIC_BASE_URL=" + ourURL,
+	}
+	b, err := cmd.CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	out := string(b)
+	if !strings.Contains(out, "restored:") {
+		t.Fatalf("no restore happened, so this test asserted nothing:\n%s", out)
+	}
+	if !strings.Contains(out, "Done. 1 file(s) put back.") {
+		t.Errorf("a fully successful restore never reported its count:\n%s", out)
+	}
+	if strings.Contains(out, "Finished with something left for you") {
+		t.Errorf("told the user the run did not finish after a verified-clean restore:\n%s", out)
+	}
+	if code != 3 {
+		t.Errorf("exit %d, want 3: the exported base URL is still left for a human", code)
+	}
+	if !strings.Contains(out, "environment report above") {
+		t.Errorf("did not point at what is actually left:\n%s", out)
 	}
 }

@@ -110,10 +110,25 @@ warn() { printf '%s\n' "$*" >&2; }
 # Case-insensitivity is spelled out with bracket classes on purpose: BSD sed (macOS, where this
 # script runs most) has no `I` flag on `s///`, so `[Kk][Ee][Yy]` is the portable spelling.
 # ---------------------------------------------------------------------------
-REDACT_NAME='[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]'
+# This is a DENYLIST, and a denylist on a recovery tool is a list that will be wrong again — it has
+# now been wrong three times, each in a different shape. It is not inverted to an allowlist because
+# on a diff of arbitrary JSON that would redact the `permissions` entries the diff exists to show,
+# which is a worse failure. What keeps it honest instead is a table-driven test with one row per
+# shape (TestRedactCoversEveryKnownCredentialShape): the next miss should be a row somebody forgot
+# to add, not an invisible leak. ADD A ROW WHEN YOU ADD A RULE.
+#
+# Name half. HEADER is not decoration: ANTHROPIC_CUSTOM_HEADERS is how a Context Guru credential is
+# carried on this project's own dev machines, so the single most likely credential in a context-guru
+# user's env block had a name containing none of key/token/secret/password/credential. AUTH catches
+# `authorization: Bearer …`, the other natural way to put a credential in an env block, and
+# `authToken` for free.
+REDACT_NAME='[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]|[Aa][Uu][Tt][Hh]|[Hh][Ee][Aa][Dd][Ee][Rr]|[Ss][Ee][Ss][Ss][Ii][Oo][Nn]|[Cc][Oo][Oo][Kk][Ii][Ee]|[Ss][Ii][Gg][Nn][Aa][Tt][Uu][Rr][Ee]'
 redact() {
   sed -E -e "s/(\"[A-Za-z0-9_-]*(${REDACT_NAME})[A-Za-z0-9_-]*\"[[:space:]]*:[[:space:]]*\")[^\"]*/\1<value not shown>/g" \
          -e 's/sk-[A-Za-z0-9_-]{6,}/sk-<value not shown>/g' \
+         -e 's#(ghp_|github_pat_|xox[baprs]-|AKIA|eyJ)[A-Za-z0-9_./+-]{6,}#\1<value not shown>#g' \
+         -e "s/([Bb]earer[[:space:]]+)[A-Za-z0-9_.~+/=-]{8,}/\1<value not shown>/g" \
+         -e "s/([?\&][A-Za-z0-9_-]*([Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt])=)[^\&\"[:space:]]*/\1<value not shown>/g" \
          -e 's#(://)[^/@[:space:]"]*:[^/@[:space:]"]*@#\1<credentials not shown>@#g'
 }
 
@@ -155,12 +170,16 @@ report_environment() {
     case "$base" in
       http://127.0.0.1:*|http://localhost:*|http://[::1]:*)
         say "  ! ANTHROPIC_BASE_URL is exported in THIS SHELL and points at a local proxy:"
-        say "      $base"
+        # Through redact, like every other printer of real content. This was the fourth site and the
+        # worst one: it sits in the function whose own header promises values are never printed, and
+        # it honoured that for the credential variables and the rc grep while echoing a base URL
+        # verbatim — so an exported https://svc:SECRET@gw/anthropic went straight to the terminal.
+        say "      $(printf '%s' "$base" | redact)"
         say "    A settings file cannot override an exported variable, so this shell stays"
         say "    routed until you unset it. Fix the line reported below, then open a new shell."
         INCOMPLETE=1 ;;
       *)
-        say "  - ANTHROPIC_BASE_URL is exported in this shell: $base" ;;
+        say "  - ANTHROPIC_BASE_URL is exported in this shell: $(printf '%s' "$base" | redact)" ;;
     esac
   fi
 
@@ -255,7 +274,9 @@ say ""
 say "Files context-guru edited:"
 
 PLAN="$(mktemp "${TMPDIR:-/tmp}/cg-reset-plan.XXXXXX")"
-trap 'rm -f "$PLAN"' EXIT INT TERM
+# ENV_TMP is in here too (set later, in the empty-plan branch): an interrupt between its mktemp and
+# its rm would otherwise leak a temp file into TMPDIR.
+trap 'rm -f "$PLAN" ${ENV_TMP:+"$ENV_TMP"}' EXIT INT TERM
 
 n=0
 while IFS='	' read -r existed original path; do
@@ -488,10 +509,22 @@ done < "$PLAN"
 report_environment
 final_advice
 
-if [ "$INCOMPLETE" = 0 ]; then
+# FILES_UNFIXED chooses the sentence, INCOMPLETE chooses the exit code — the same split as the
+# empty-plan branch, which is where this bug was fixed first and where it should have been fixed
+# both times. Testing INCOMPLETE here meant a COMPLETELY successful restore, verified unrouted, run
+# from a shell with an exported base URL (a hosted agent, or the shell they installed from) printed
+# "Finished with something left for you" and never printed the count at all: $RESTORED was computed
+# and thrown away on precisely the run where it is the good news, and the user who had just
+# recovered was told the run did not finish.
+if [ "$FILES_UNFIXED" = 0 ]; then
   say ""
   say "Done. $RESTORED file(s) put back."
-  exit 0
+  if [ "$INCOMPLETE" != 0 ]; then
+    say ""
+    say "The files are done. What is left is in the environment report above — a settings file"
+    say "cannot fix it, so read the ! line there before starting a new session."
+  fi
+  [ "$INCOMPLETE" = 0 ] && exit 0 || exit 3
 fi
 say ""
 say "Finished with something left for you — see the ! lines above."
