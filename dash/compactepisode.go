@@ -127,6 +127,11 @@ type CompactionEpisode struct {
 	Window      int   `json:"window"`
 	StartBilled int64 `json:"start_billed"`
 	EndBilled   int64 `json:"end_billed"`
+	// SpentBilled is the provider-billed input CONSUMED since t0, summed over the span's turns.
+	// It is the axis the span closes on, because it is the only one that grows monotonically: a
+	// per-turn size falls as soon as a summary lands (measured: 154,584 -> 31,682), so a span
+	// defined against it never closes.
+	SpentBilled int64 `json:"spent_billed"`
 	Turns       int64 `json:"turns"`
 	// The credit, split by the cache state of the turn that earned it. ColdCreditUSD is the
 	// headline: turns whose entry had lapsed, where an uncompacted prefix would have been
@@ -215,17 +220,18 @@ type CompactionCoverage struct {
 // CompactionAssumptions is the server stating its own arithmetic, so the page prints it rather
 // than restating it in a template nothing tests — the rule the KV-cache page already keeps.
 type CompactionAssumptions struct {
-	SpanFrac      float64 `json:"span_frac"`
-	FillFrac      float64 `json:"fill_frac"`
-	SpanMeasure   string  `json:"span_measure"`
-	CreditSource  string  `json:"credit_source"`
-	ColdLabel     string  `json:"cold_label"`
-	ReadLabel     string  `json:"read_label"`
-	DebitBound    string  `json:"debit_bound"`
-	VoidRule      string  `json:"void_rule"`
-	WindowRule    string  `json:"window_rule"`
-	KnownOmission string  `json:"known_omission"`
-	OpenRule      string  `json:"open_rule"`
+	SpanFrac        float64 `json:"span_frac"`
+	FillFrac        float64 `json:"fill_frac"`
+	SpanMeasure     string  `json:"span_measure"`
+	CreditSource    string  `json:"credit_source"`
+	ColdLabel       string  `json:"cold_label"`
+	ReadLabel       string  `json:"read_label"`
+	DebitBound      string  `json:"debit_bound"`
+	VoidRule        string  `json:"void_rule"`
+	WindowRule      string  `json:"window_rule"`
+	KnownOmission   string  `json:"known_omission"`
+	OpenRule        string  `json:"open_rule"`
+	SpanMeasureNote string  `json:"span_measure_note"`
 }
 
 // CompactionEpisodes is the whole view.
@@ -418,7 +424,7 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 			// being maintained, and its cost belongs to the span it happened in.
 			if isFreshSummary(r) != "" {
 				cur.SummarizerCostUSD += r.CGLLMCostUSD
-				cur.InvalidationDebitUSD += writeUSD(r.CacheWrite, r.CacheWrite1h, p)
+				cur.InvalidationDebitUSD += causedWriteUSD(r, p)
 			} else if r.MissReason == CachePrefixChange {
 				// A prefix_change turn inside a span we opened is a cache write charged because
 				// the prompt no longer matched what was cached — and inside a summarized span the
@@ -432,7 +438,19 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 				// arrival while the expiry happened inside the pipeline.
 				cur.InvalidationDebitUSD += writeUSD(r.CacheWrite, r.CacheWrite1h, p)
 			}
-			if r.Billed >= cur.StartBilled+span {
+			// CUMULATIVE billed input, not the difference between two request sizes. Compaction
+			// REDUCES what a turn sends, so `r.Billed` falls the moment a summary lands — on the
+			// live validation run it went 154,584 -> 31,682 — and a span defined as
+			// `Billed >= StartBilled + span` could then never close: it would be waiting for the
+			// transcript to regrow past a size the compaction had just removed. The episode stayed
+			// `open` forever and contributed to no total, which is the same blindness as having no
+			// episode at all.
+			//
+			// Cumulative spend is monotone by construction, is in the provider's units (so it is
+			// comparable to the window), and is what "10% more of the context has been SPENT"
+			// actually means.
+			cur.SpentBilled += r.Billed
+			if cur.SpentBilled >= span {
 				cur.State = EpisodeClosed
 				finishEpisode(cur, p)
 				out = append(out, *cur)
@@ -448,9 +466,10 @@ func conversationEpisodes(conv []compactRow, w int, p kvcache.Pricing, spanFrac 
 					StartBilled: r.Billed, EndBilled: r.Billed,
 					Turns:  1,
 					Priced: p.Known,
-					// t0's own cache creation, at this model's write rates. See the field
-					// comment: an upper bound, on purpose.
-					InvalidationDebitUSD: writeUSD(r.CacheWrite, r.CacheWrite1h, p),
+					// t0's own cache creation, but ONLY when we actually caused it — see
+					// causedTheWrite. On a cold t0 the entry was already gone and that write was
+					// due whatever we did, so charging it invents a cost.
+					InvalidationDebitUSD: causedWriteUSD(r, p),
 					SummarizerCostUSD:    r.CGLLMCostUSD,
 				}
 				// NO CREDIT ON THE COMPACTION TURN, and `credited` is now irrelevant to that.
@@ -558,6 +577,34 @@ func isFreshSummary(r compactRow) string {
 	return ""
 }
 
+// causedWriteUSD prices only the cache creation WE are responsible for on a summarizing turn.
+//
+// THE DISTINCTION DECIDES WHETHER THIS PANEL REPORTS A GAIN OR A LOSS, and getting it wrong was
+// measured. On the live validation run t0 was a genuine ttl_expiry: the entry had already lapsed,
+// so that turn was going to write its whole prefix whatever we did. Charging its 154,581-token
+// write to us produced a $0.193 debit against $0.136 of credit — a reported net LOSS on a turn
+// that was, in fact, the cheapest possible moment to compact.
+//
+// The rule is the same one the trigger itself follows: only a write that would NOT have happened
+// otherwise is our cost.
+//
+//   - ttl_expiry / cold_start: the entry was gone. The write was due regardless, so we caused
+//     none of it and the debit is zero. This is exactly why firing on a cold turn is the
+//     unconditionally-better case.
+//   - hit: the entry was LIVE and we rewrote the prefix anyway, so the creation on that turn is
+//     ours. A partial hit also reads as `hit`, which is the conservative direction here — it
+//     charges us for a write we may only partly have caused.
+//   - prefix_change / unknown: inside a span we opened, the thing that changed the prompt is
+//     usually us, so it is charged. Conservative for a savings figure.
+func causedWriteUSD(r compactRow, p kvcache.Pricing) float64 {
+	switch r.MissReason {
+	case CacheTTLExpiry, CacheColdStart:
+		return 0
+	default:
+		return writeUSD(r.CacheWrite, r.CacheWrite1h, p)
+	}
+}
+
 // writeUSD prices cache-creation tokens, splitting out the 1h-tier subset. A 1h write is 2.0x
 // base input where a 5m write is 1.25x, so pricing one as the other understates by 0.75x of the
 // written prefix — the same correction cost_usd already makes.
@@ -632,11 +679,12 @@ func compactAssumptions(spanFrac, fillFrac float64) CompactionAssumptions {
 		CreditSource: "request_components.saved_usd for the summarize component, priced at write time " +
 			"(Event.baselineDeltaUSD: unique removals at the cache-creation rate, re-sent " +
 			"removals at the rate that turn's cache actually paid)",
-		ColdLabel:  "turns whose cache_miss_reason is ttl_expiry — the entry had lapsed, so an uncompacted prefix would have been re-written in full",
-		ReadLabel:  "turns whose cache_miss_reason is hit — the re-sent remainder, billed at the cache-read rate",
-		DebitBound: "t0's own cache-creation tokens at this model's write rates: an UPPER bound, since some of that write was transcript growth that would have been paid anyway",
-		VoidRule:   "an episode whose span contains a drop in our own message-token count is voided — the client compacted, so the remainder is not comparable",
-		WindowRule: "a conversation whose model window is not exactly published contributes nothing and is counted as window_unknown",
+		ColdLabel:       "turns whose cache_miss_reason is ttl_expiry — the entry had lapsed, so an uncompacted prefix would have been re-written in full",
+		ReadLabel:       "turns whose cache_miss_reason is hit — the re-sent remainder, billed at the cache-read rate",
+		SpanMeasureNote: "the span closes on CUMULATIVE billed input since t0, which is the only monotone axis: a per-turn size falls as soon as a summary lands",
+		DebitBound:      "cache-creation tokens on a summarizing turn, charged ONLY where the entry was still live: on a turn whose cache had already expired the write was due whatever we did, so none of it is our cost. Where it is charged it is an upper bound, since some of that write was transcript growth that would have been paid anyway",
+		VoidRule:        "an episode whose span contains a drop in our own message-token count is voided — the client compacted, so the remainder is not comparable",
+		WindowRule:      "a conversation whose model window is not exactly published contributes nothing and is counted as window_unknown",
 		OpenRule: "a span that has not finished is reported with its own net, apart from the settled " +
 			"total: it is money committed whose payoff is still accruing, and dropping it would " +
 			"make the panel optimistic. It is not automatically a loss — the compaction turn is " +

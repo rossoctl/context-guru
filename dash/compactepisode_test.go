@@ -38,7 +38,13 @@ func unpricedModel(string) kvcache.Pricing {
 func row(ts, billed int64, opts ...func(*compactRow)) compactRow {
 	r := compactRow{
 		Tenant: "t", Session: "s", Model: "m", TS: ts,
-		Billed: billed, TokensBefore: billed / 3, MissReason: CacheHit,
+		// TokensBefore is derived from ts and therefore MONOTONE, deliberately. Deriving it from
+		// `billed` (the original choice) made it fall whenever a turn sent less — which is what
+		// every turn after a summary does — and a falling tokens_before is exactly how the walk
+		// detects a CLIENT-side compaction, so every fixture silently voided its own episode. The
+		// real relationship is the opposite: our outgoing shrinks while the client's transcript
+		// keeps growing.
+		Billed: billed, TokensBefore: 100_000 + ts*100, MissReason: CacheHit,
 	}
 	for _, o := range opts {
 		o(&r)
@@ -109,20 +115,22 @@ func only(t *testing.T, out *CompactionEpisodes) CompactionEpisode {
 // The span is 10% MORE billed input, and the boundary is inclusive. A turn one token short of it
 // leaves the episode open; the turn that reaches it closes.
 func TestAnEpisodeClosesWhenTheSessionHasBeenBilledTenPercentMoreOfTheWindow(t *testing.T) {
-	base := int64(900_000)
 
+	// Cumulative spend: one turn of (testSpan-1) is one short of the span.
+	// t0 is deliberately SMALL: cumulative spend closes the span, so a large t0 would close it on
+	// its own turn and leave no span to measure.
 	short := walk([]compactRow{
-		row(1, base, fresh),
-		row(2, base+testSpan-1, saved(1)),
+		row(1, 1_000, fresh),
+		row(2, testSpan-1, saved(1)),
 	}, exactWindow, testPrice)
 	if e := only(t, short); e.State != EpisodeOpen {
 		t.Errorf("one token short of the span must leave the episode open, got %q", e.State)
 	}
 
 	closed := walk([]compactRow{
-		row(1, base, fresh),
-		row(2, base+testSpan-1, saved(1)),
-		row(3, base+testSpan, saved(2)),
+		row(1, 1_000, fresh),
+		row(2, testSpan-1, saved(1)),
+		row(3, 1, saved(2)), // one more token of spend reaches the span exactly
 	}, exactWindow, testPrice)
 	e := only(t, closed)
 	if e.State != EpisodeClosed {
@@ -131,8 +139,11 @@ func TestAnEpisodeClosesWhenTheSessionHasBeenBilledTenPercentMoreOfTheWindow(t *
 	if e.Turns != 3 {
 		t.Errorf("closed episode covered %d turns, want 3", e.Turns)
 	}
-	if e.StartBilled != base || e.EndBilled != base+testSpan {
-		t.Errorf("span recorded as %d..%d, want %d..%d", e.StartBilled, e.EndBilled, base, base+testSpan)
+	if e.SpentBilled != testSpan {
+		t.Errorf("spent_billed = %d, want exactly the span %d", e.SpentBilled, testSpan)
+	}
+	if e.StartBilled != 1_000 {
+		t.Errorf("start_billed = %d, want t0's own size 1000", e.StartBilled)
 	}
 }
 
@@ -142,8 +153,8 @@ func TestAnEpisodeClosesWhenTheSessionHasBeenBilledTenPercentMoreOfTheWindow(t *
 // per-episode figure five times too small.
 func TestAGuessedWindowProducesNoEpisodeAndIsCounted(t *testing.T) {
 	rows := []compactRow{
-		row(1, 900_000, fresh),
-		row(2, 900_000+testSpan, saved(5)),
+		row(1, 1_000, fresh),
+		row(2, testSpan, saved(5)),
 	}
 	out := walk(rows, guessedWindow, testPrice)
 	if len(out.Episodes) != 0 {
@@ -166,11 +177,11 @@ func TestAGuessedWindowProducesNoEpisodeAndIsCounted(t *testing.T) {
 // compacted — and a voided episode must not contribute money.
 func TestAClientCompactionInsideTheSpanVoidsTheEpisode(t *testing.T) {
 	out := walk([]compactRow{
-		row(1, 900_000, fresh, tokensBefore(300_000)),
-		row(2, 940_000, saved(3), tokensBefore(310_000)),
+		row(1, 1_000, fresh, tokensBefore(300_000)),
+		row(2, 10_000, saved(3), tokensBefore(310_000)),
 		// The drop: our own message-token count falls, which only a client-side compaction does.
-		row(3, 950_000, saved(3), tokensBefore(40_000)),
-		row(4, 900_000+testSpan, saved(3), tokensBefore(50_000)),
+		row(3, 10_000, saved(3), tokensBefore(40_000)),
+		row(4, testSpan, saved(3), tokensBefore(50_000)),
 	}, exactWindow, testPrice)
 
 	e := only(t, out)
@@ -192,8 +203,8 @@ func TestAClientCompactionInsideTheSpanVoidsTheEpisode(t *testing.T) {
 // would grow purely because the query window moved, which is not a property of the traffic.
 func TestAnOpenEpisodeIsReportedButNotTotalled(t *testing.T) {
 	out := walk([]compactRow{
-		row(1, 900_000, fresh),
-		row(2, 910_000, saved(7), miss(CacheTTLExpiry)),
+		row(1, 1_000, fresh),
+		row(2, 10_000, saved(7), miss(CacheTTLExpiry)),
 	}, exactWindow, testPrice)
 
 	e := only(t, out)
@@ -218,14 +229,15 @@ func TestAnOpenEpisodeIsReportedButNotTotalled(t *testing.T) {
 // prompt had changed, which on a summarized session is frequently our own doing, so crediting it
 // would pay this component for the misses it caused.
 func TestCreditIsSplitByTheCacheVerdictOfTheTurnThatEarnedIt(t *testing.T) {
-	base := int64(900_000)
 	out := walk([]compactRow{
-		row(1, base, fresh),
-		row(2, base+10_000, saved(4), miss(CacheTTLExpiry)),
-		row(3, base+20_000, saved(1), miss(CacheHit)),
-		row(4, base+30_000, saved(2), miss(CacheColdStart)),
-		row(5, base+40_000, saved(8), miss(CachePrefixChange)),
-		row(6, base+testSpan, saved(3), miss(CacheHit)),
+		row(1, 1_000, fresh),
+		// Equal, small turns: the span must close on the LAST turn so every verdict above is
+		// inside it. Uneven sizes closed it at turn 5 and silently dropped turn 6's credit.
+		row(2, 10_000, saved(4), miss(CacheTTLExpiry)),
+		row(3, 10_000, saved(1), miss(CacheHit)),
+		row(4, 10_000, saved(2), miss(CacheColdStart)),
+		row(5, 10_000, saved(8), miss(CachePrefixChange)),
+		row(6, testSpan, saved(3), miss(CacheHit)),
 	}, exactWindow, testPrice)
 
 	e := only(t, out)
@@ -253,11 +265,10 @@ func TestCreditIsSplitByTheCacheVerdictOfTheTurnThatEarnedIt(t *testing.T) {
 // content sat on is not knowable from the usage block), so a debit derived from the label alone
 // would silently be zero on exactly the turns where we rewrote a live prefix.
 func TestTheInvalidationDebitComesFromTheWriteNotTheLabel(t *testing.T) {
-	base := int64(900_000)
 	out := walk([]compactRow{
 		// A partial hit: labelled hit, and 40k tokens of cache creation all the same.
-		row(1, base, fresh, miss(CacheHit), wrote(40_000), cgCost(0.05)),
-		row(2, base+testSpan, saved(6), miss(CacheHit)),
+		row(1, 1_000, fresh, miss(CacheHit), wrote(40_000), cgCost(0.05)),
+		row(2, testSpan, saved(6), miss(CacheHit)),
 	}, exactWindow, testPrice)
 
 	e := only(t, out)
@@ -277,10 +288,9 @@ func TestTheInvalidationDebitComesFromTheWriteNotTheLabel(t *testing.T) {
 // An unpriced model is not a free one. Every dollar is left absent and the episode is counted
 // apart, so no total picks these up as real figures — the lie kvcache.Pricing.Known exists to stop.
 func TestAnUnpricedModelLeavesTheMoneyAbsentRatherThanZero(t *testing.T) {
-	base := int64(900_000)
 	out := walk([]compactRow{
-		row(1, base, fresh, wrote(40_000)),
-		row(2, base+testSpan, saved(6), miss(CacheTTLExpiry)),
+		row(1, 1_000, fresh, wrote(40_000)),
+		row(2, testSpan, saved(6), miss(CacheTTLExpiry)),
 	}, exactWindow, unpricedModel)
 
 	e := only(t, out)
@@ -304,9 +314,8 @@ func TestAnUnpricedModelLeavesTheMoneyAbsentRatherThanZero(t *testing.T) {
 // entry does not transfer between models. Two models in one session are two conversations, and one
 // cannot close the other's span.
 func TestTwoModelsInOneSessionAreTwoConversations(t *testing.T) {
-	base := int64(900_000)
-	a := row(1, base, fresh)
-	b := row(2, base+testSpan, saved(9))
+	a := row(1, 1_000, fresh)
+	b := row(2, testSpan, saved(9))
 	b.Model = "other"
 	out := walk([]compactRow{a, b}, exactWindow, testPrice)
 
@@ -327,9 +336,8 @@ func TestTwoModelsInOneSessionAreTwoConversations(t *testing.T) {
 // which is the only way to see anything at all from before the event existed — and therefore the
 // only available comparison against the old size-only trigger.
 func TestRecordedAndInferredEpisodesAreReportedApart(t *testing.T) {
-	base := int64(900_000)
-	rec := []compactRow{row(1, base, fresh), row(2, base+testSpan, saved(4), miss(CacheTTLExpiry))}
-	inf := []compactRow{row(3, base, actedWithNoEvents), row(4, base+testSpan, saved(6), miss(CacheTTLExpiry))}
+	rec := []compactRow{row(1, 1_000, fresh), row(2, testSpan, saved(4), miss(CacheTTLExpiry))}
+	inf := []compactRow{row(3, 1_000, actedWithNoEvents), row(4, testSpan, saved(6), miss(CacheTTLExpiry))}
 	inf[0].Session, inf[1].Session = "s2", "s2"
 
 	out := walk(append(rec, inf...), exactWindow, testPrice)
@@ -354,8 +362,8 @@ func TestRecordedAndInferredEpisodesAreReportedApart(t *testing.T) {
 // as a new episode would restart the span on almost every turn of a healthy session.
 func TestAReplayTurnDoesNotStartAnEpisode(t *testing.T) {
 	out := walk([]compactRow{
-		row(1, 900_000, replay, saved(3)),
-		row(2, 900_000+testSpan, replay, saved(3)),
+		row(1, 1_000, replay, saved(3)),
+		row(2, testSpan, replay, saved(3)),
 	}, exactWindow, testPrice)
 	if len(out.Episodes) != 0 {
 		t.Errorf("replays must not open an episode, got %+v", out.Episodes)
@@ -369,6 +377,8 @@ func TestAQualifyingConversationWithNoSummaryLandsInCoverageNotInEpisodes(t *tes
 	// Billed past 0.9 of the window, several cold rewrites, and no summary anywhere.
 	out := walk([]compactRow{
 		row(1, 500_000),
+		// Coverage asks whether the conversation ever GOT big, so these carry real sizes: it is a
+		// question about reaching the fill threshold, not about cumulative spend.
 		row(2, 910_000, miss(CacheTTLExpiry), wrote(200_000)),
 		row(3, 950_000, miss(CacheTTLExpiry), wrote(300_000)),
 	}, exactWindow, testPrice)
@@ -412,11 +422,10 @@ func TestAConversationBelowTheFillThresholdIsNotCounted(t *testing.T) {
 // maintained, so its call cost and the cache write it caused are charged there rather than opening
 // a second episode whose credit would double-count the first one's turns.
 func TestARollForwardInsideTheSpanChargesTheSameEpisode(t *testing.T) {
-	base := int64(900_000)
 	out := walk([]compactRow{
-		row(1, base, fresh, cgCost(0.05), wrote(10_000)),
-		row(2, base+50_000, fresh, cgCost(0.07), wrote(20_000), saved(2)),
-		row(3, base+testSpan, saved(4), miss(CacheTTLExpiry)),
+		row(1, 1_000, fresh, miss(CacheHit), cgCost(0.05), wrote(10_000)),
+		row(2, 50_000, fresh, miss(CacheHit), cgCost(0.07), wrote(20_000), saved(2)),
+		row(3, testSpan, saved(4), miss(CacheTTLExpiry)),
 	}, exactWindow, testPrice)
 
 	e := only(t, out)
@@ -434,10 +443,9 @@ func TestARollForwardInsideTheSpanChargesTheSameEpisode(t *testing.T) {
 // episodes, and its SAVING must be counted once. The costs of the new summary belong to the new
 // span; the saving was earned in the old one.
 func TestTheTurnThatClosesOneSpanAndOpensAnotherIsCreditedOnce(t *testing.T) {
-	base := int64(900_000)
 	out := walkCompactEpisodes([]compactRow{
-		row(1, base, fresh),
-		row(2, base+testSpan, fresh, saved(5), miss(CacheTTLExpiry), wrote(8_000), cgCost(0.03)),
+		row(1, 1_000, fresh),
+		row(2, testSpan, fresh, saved(5), miss(CacheTTLExpiry), wrote(8_000), cgCost(0.03)),
 	}, exactWindow, testPrice, 0.10, 0.90)
 
 	if len(out.Episodes) != 2 {
@@ -588,11 +596,10 @@ func TestTheQueryFeedsTheWalkAClosedEpisode(t *testing.T) {
 // t0's own saved_usd, which booked a saving at the cache-CREATION rate for work that had not yet
 // paid off: the one direction a savings figure must never lean.
 func TestTheCompactionTurnIsChargedAndNotCredited(t *testing.T) {
-	base := int64(900_000)
 	out := walk([]compactRow{
 		// t0 carries a large saved_usd AND a large write. Only the write may survive.
-		row(1, base, fresh, saved(9), miss(CacheTTLExpiry), wrote(40_000), cgCost(0.05)),
-		row(2, base+testSpan, saved(2), miss(CacheHit)),
+		row(1, 1_000, fresh, saved(9), miss(CacheHit), wrote(40_000), cgCost(0.05)),
+		row(2, testSpan, saved(2), miss(CacheHit)),
 	}, exactWindow, testPrice)
 
 	e := only(t, out)
@@ -626,11 +633,10 @@ func TestTheCompactionTurnIsChargedAndNotCredited(t *testing.T) {
 // re-written, and the row was recorded as prefix_change because idle is measured at ARRIVAL while
 // the expiry happened inside the pipeline.
 func TestASelfCausedPrefixChangeWriteInsideTheSpanIsCharged(t *testing.T) {
-	base := int64(900_000)
 	out := walk([]compactRow{
-		row(1, base, fresh, wrote(5_000)),
-		row(2, base+50_000, saved(3), miss(CachePrefixChange), wrote(197_000)),
-		row(3, base+testSpan, saved(1), miss(CacheHit)),
+		row(1, 1_000, fresh, miss(CacheHit), wrote(5_000)),
+		row(2, 50_000, saved(3), miss(CachePrefixChange), wrote(197_000)),
+		row(3, testSpan, saved(1), miss(CacheHit)),
 	}, exactWindow, testPrice)
 
 	e := only(t, out)
@@ -653,11 +659,10 @@ func TestASelfCausedPrefixChangeWriteInsideTheSpanIsCharged(t *testing.T) {
 // panel systematically optimistic. It stays OUT of the settled total — a partial figure grows as
 // the time range widens — but it is reported, and it is allowed to be negative.
 func TestAnUnfinishedSpanReportsItsNetApartFromTheSettledTotal(t *testing.T) {
-	base := int64(900_000)
 	out := walk([]compactRow{
 		// Paid for a summary and a write; only one small read back so far.
-		row(1, base, fresh, wrote(40_000), cgCost(0.05)),
-		row(2, base+10_000, saved(0.01), miss(CacheHit)),
+		row(1, 1_000, fresh, miss(CacheHit), wrote(40_000), cgCost(0.05)),
+		row(2, 10_000, saved(0.01), miss(CacheHit)),
 	}, exactWindow, testPrice)
 
 	e := only(t, out)
@@ -688,11 +693,10 @@ func TestAnUnfinishedSpanReportsItsNetApartFromTheSettledTotal(t *testing.T) {
 // A voided span also reports what it spent. The client compacted mid-span so the payoff is not
 // comparable, but the money we spent was still spent.
 func TestAVoidedSpanStillReportsWhatItSpent(t *testing.T) {
-	base := int64(900_000)
 	out := walk([]compactRow{
-		row(1, base, fresh, wrote(40_000), cgCost(0.05), tokensBefore(300_000)),
-		row(2, base+10_000, saved(0.02), miss(CacheHit), tokensBefore(310_000)),
-		row(3, base+20_000, saved(0.02), miss(CacheHit), tokensBefore(40_000)),
+		row(1, 1_000, fresh, miss(CacheHit), wrote(40_000), cgCost(0.05), tokensBefore(300_000)),
+		row(2, 10_000, saved(0.02), miss(CacheHit), tokensBefore(310_000)),
+		row(3, 20_000, saved(0.02), miss(CacheHit), tokensBefore(40_000)),
 	}, exactWindow, testPrice)
 
 	e := only(t, out)
@@ -720,7 +724,6 @@ func TestAVoidedSpanStillReportsWhatItSpent(t *testing.T) {
 // Keying on the commission is also the better definition of t0: it carries the debits and no
 // credit, which is true of the turn that spent the money whether or not the summary ever landed.
 func TestACommissionedSummaryOpensAnEpisode(t *testing.T) {
-	base := int64(900_000)
 	commissioned := func(r *compactRow) {
 		r.Acted = false // the commissioning turn splices nothing, so it did not "act"
 		r.Events = `{"` + offload.EventSummaryStarted + `":1}`
@@ -731,9 +734,9 @@ func TestACommissionedSummaryOpensAnEpisode(t *testing.T) {
 	}
 
 	out := walk([]compactRow{
-		row(1, base, commissioned, wrote(40_000), cgCost(0.05), miss(CacheTTLExpiry)),
-		row(2, base+50_000, awaited, saved(3), miss(CacheHit)),
-		row(3, base+testSpan, saved(2), miss(CacheTTLExpiry)),
+		row(1, 1_000, commissioned, wrote(40_000), cgCost(0.05), miss(CacheHit)),
+		row(2, 50_000, awaited, saved(3), miss(CacheHit)),
+		row(3, testSpan, saved(2), miss(CacheTTLExpiry)),
 	}, exactWindow, testPrice)
 
 	e := only(t, out)
@@ -762,5 +765,78 @@ func TestACommissionedSummaryOpensAnEpisode(t *testing.T) {
 	}
 	if offUSD(e.ColdCreditUSD, 2) {
 		t.Errorf("cold credit = %v, want 2 (the closing turn)", e.ColdCreditUSD)
+	}
+}
+
+// THE SPAN AXIS MUST BE MONOTONE, and this is the case that proves the obvious axis is not.
+//
+// Compaction REDUCES what a turn sends. On the live validation run the billed input fell from
+// 154,584 to 31,682 the moment the summary landed. A span defined as "this turn's size exceeds
+// t0's size plus 10% of the window" therefore waits for the transcript to regrow past a size the
+// compaction had just removed — so it never closes, the episode stays `open` forever, and it
+// contributes to no total. That is the same blindness as having no episode at all, arrived at from
+// the opposite direction.
+//
+// Cumulative spend is monotone by construction and is what "10% more of the context has been
+// spent" means.
+func TestTheSpanClosesOnCumulativeSpendEvenWhenEachTurnGetsSmaller(t *testing.T) {
+	out := walk([]compactRow{
+		row(1, 1_000, fresh, miss(CacheTTLExpiry), tokensBefore(122_043)),
+		// Every later turn SENDS far less than t0 — exactly as it does once a summary lands — while
+		// the client's own transcript keeps GROWING. Both halves are from the live run.
+		row(2, 31_682, saved(1), miss(CacheHit), tokensBefore(122_190)),
+		row(3, 31_700, saved(1), miss(CacheHit), tokensBefore(122_324)),
+		row(4, 31_700, saved(1), miss(CacheHit), tokensBefore(122_562)),
+		row(5, 31_700, saved(1), miss(CacheHit), tokensBefore(122_800)),
+	}, exactWindow, testPrice)
+
+	e := only(t, out)
+	if e.State != EpisodeClosed {
+		t.Fatalf("state = %q, want closed: 31,682 x 4 is past 10%% of a 1M window, and a "+
+			"span that waits for a per-turn SIZE to exceed t0's would never close here",
+			e.State)
+	}
+	if e.SpentBilled < testSpan {
+		t.Errorf("spent_billed = %d, want at least the span %d", e.SpentBilled, testSpan)
+	}
+}
+
+// A COLD t0 COSTS US NOTHING IN CACHE WRITES, and getting this wrong turned a gain into a reported
+// loss on the live run.
+//
+// t0 there was a genuine ttl_expiry: the entry had already lapsed, so that turn was going to write
+// its whole prefix whatever we did. Charging its 154,581-token write to us produced a $0.193 debit
+// against $0.136 of credit — a reported net LOSS on what is in fact the cheapest possible moment to
+// compact, and the exact moment the trigger's default was widened to catch.
+func TestAColdT0IsNotChargedForAWriteThatWasDueAnyway(t *testing.T) {
+	cold := walk([]compactRow{
+		row(1, 1_000, fresh, miss(CacheTTLExpiry), wrote(154_581), tokensBefore(122_043)),
+		row(2, 31_682, saved(0.14), miss(CacheHit), tokensBefore(122_190)),
+		row(3, 31_700, saved(0.01), miss(CacheHit), tokensBefore(122_324)),
+		row(4, 31_700, saved(0.01), miss(CacheHit), tokensBefore(122_562)),
+		row(5, 31_700, saved(0.01), miss(CacheHit), tokensBefore(122_800)),
+	}, exactWindow, testPrice)
+	e := only(t, cold)
+	if offUSD(e.InvalidationDebitUSD, 0) {
+		t.Errorf("invalidation debit = %v, want 0 — the entry had already expired, so that write "+
+			"was due whatever we did and none of it is our cost", e.InvalidationDebitUSD)
+	}
+	if e.NetUSD <= 0 {
+		t.Errorf("net = %v, want positive: crediting the reads while charging a write we did not "+
+			"cause reports a loss on the cheapest moment to compact", e.NetUSD)
+	}
+
+	// The mirror: a t0 whose cache was LIVE did cause its write, and is charged.
+	warm := walk([]compactRow{
+		row(1, 1_000, fresh, miss(CacheHit), wrote(100_000), tokensBefore(122_043)),
+		row(2, 31_682, saved(0.14), miss(CacheHit), tokensBefore(122_190)),
+		row(3, 31_700, saved(0.01), miss(CacheHit), tokensBefore(122_324)),
+		row(4, 31_700, saved(0.01), miss(CacheHit), tokensBefore(122_562)),
+		row(5, 31_700, saved(0.01), miss(CacheHit), tokensBefore(122_800)),
+	}, exactWindow, testPrice)
+	e2 := only(t, warm)
+	if offUSD(e2.InvalidationDebitUSD, 100_000*1.25e-6) {
+		t.Errorf("invalidation debit = %v, want %v — a live entry that we rewrote IS our cost",
+			e2.InvalidationDebitUSD, 100_000*1.25e-6)
 	}
 }
