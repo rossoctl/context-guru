@@ -1,6 +1,9 @@
 package proxy
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // THE LIST MUST MATCH THE MOUNTED TABLE. That is the whole value of exporting it: a host asks
 // core which routes are password routes instead of hardcoding a list that rots the moment one is
@@ -18,25 +21,40 @@ func TestPasswordRoutePatternsMatchTheMountedRoutes(t *testing.T) {
 				"has drifted from the table", p)
 		}
 	}
-	// And the converse: every mounted route that looks like a password route must be named.
+	// THE CONVERSE, AND IT MUST NOT RESTATE THE LIST. An earlier version of this test compared
+	// each mounted route against a hardcoded re-listing of the same seven paths, which reduced the
+	// whole check to "the list matches the list": adding a genuinely new password route to
+	// ctlRoutes left the suite green. That is the one direction the export exists to protect
+	// against ("silently rots the moment a route is added"), so the signal here has to be
+	// INDEPENDENT of PasswordRoutePatterns.
+	//
+	// The independent signal is the PATH ITSELF: a route whose path mentions "password" is a
+	// password route, whatever it is called. That catches an addition without knowing about it in
+	// advance, which a fixed predicate cannot.
+	named := map[string]bool{}
+	for _, p := range PasswordRoutePatterns() {
+		named[p] = true
+	}
 	for pattern := range mounted {
-		method, path := splitPattern(pattern)
-		looksLikeOne := path == "/api/register" || path == "/api/login" || path == "/api/verify" ||
-			path == "/api/me/password" || path == "/api/password-reset" ||
-			path == "/api/password-reset/verify" || path == "/api/tenants/{id}/password-reset"
-		if !looksLikeOne {
+		_, path := splitPattern(pattern)
+		if !strings.Contains(strings.ToLower(path), "password") {
 			continue
 		}
-		named := false
-		for _, p := range PasswordRoutePatterns() {
-			if p == pattern {
-				named = true
-				break
-			}
+		if !named[pattern] {
+			t.Errorf("%q is mounted and its path names a password, but PasswordRoutePatterns does "+
+				"not include it. Either add it to the list, or — if it genuinely is not a "+
+				"password route — say so here with a comment explaining why", pattern)
 		}
-		if !named {
-			t.Errorf("%s %s is mounted and is a password route, but PasswordRoutePatterns does "+
-				"not name it", method, path)
+	}
+
+	// The three routes whose paths do NOT contain "password" cannot be caught by the rule above,
+	// so they are pinned individually: account creation and verification are half of the password
+	// flow (ctlRegister takes a Password and returns ErrBadPassword; ctlVerify mints the session
+	// it leads to) and login is where a password is presented.
+	for _, p := range []string{"POST /api/register", "POST /api/login", "POST /api/verify"} {
+		if !named[p] {
+			t.Errorf("%q must be named: it is part of the password flow even though its path does "+
+				"not say so", p)
 		}
 	}
 }
@@ -70,6 +88,12 @@ func TestIsPasswordRoute(t *testing.T) {
 
 		// The wildcard is ONE segment: a nested path must not match.
 		{"POST", "/api/tenants/a/b/password-reset", false},
+		// AN ENCODED SLASH IS NOT A SEGMENT BOUNDARY, because ServeMux does not treat it as
+		// one: it routes on the escaped path, so "a%2Fb" is a single segment and the handler
+		// RUNS. Answering false here is the bypass this case pins — a host filtering on this
+		// function would pass the request straight through to ctlManagerReset.
+		{"POST", "/api/tenants/a%2Fb/password-reset", true},
+		{"POST", "/api/tenants/a%2fb/password-reset", true},
 		// ...and an empty id is not an id.
 		{"POST", "/api/tenants//password-reset", false},
 		// A path that merely ends the same way is not the route.
