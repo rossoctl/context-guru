@@ -137,6 +137,11 @@ type Options struct {
 	// Cache is the single-tenant host's prompt-cache policy (the idle keep-alive and the
 	// mixed-TTL head). In hosted mode each tenant's own `cache:` block is used instead.
 	Cache CachePolicy
+	// AuthMode selects how a human authenticates to the control plane. The zero value is
+	// AuthPassword, which is today's behaviour, so an existing deployment is unaffected by this
+	// field existing. AuthExternal withdraws the password routes entirely — see authmode.go for
+	// why present-but-unused is not equivalent to absent.
+	AuthMode AuthMode
 	// Upstreams is the operator's allow-list, by name, consulted only in hosted
 	// mode. A tenant selects a NAME; it can never supply a URL.
 	Upstreams map[string]Upstream

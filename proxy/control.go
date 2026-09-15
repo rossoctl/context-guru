@@ -72,6 +72,32 @@ type ctlRoute struct {
 
 // ctlRoutes is the single mounted route table, read by MountControl and by the scope test.
 func (h *Handler) ctlRoutes() []ctlRoute {
+	rs := h.allCtlRoutes()
+	if !h.opts.AuthMode.DisablesPasswordRoutes() {
+		return rs
+	}
+	// EXTERNAL IDENTITY: the password routes are withdrawn from the TABLE, not merely left
+	// unused. This table is what Mount walks and what the scope test walks, so removing them here
+	// removes them from both — a route present in the table but absent from the mux would be
+	// checked by the test and unreachable in practice, and the reverse would be worse.
+	//
+	// PasswordRoutePatterns is the single list, so this cannot drift from what a host is told to
+	// expect: adding a password route without adding it there fails that file's own test.
+	withdrawn := make(map[string]bool, len(PasswordRoutePatterns()))
+	for _, p := range PasswordRoutePatterns() {
+		withdrawn[p] = true
+	}
+	kept := rs[:0]
+	for _, rt := range rs {
+		if !withdrawn[rt.pattern] {
+			kept = append(kept, rt)
+		}
+	}
+	return kept
+}
+
+// allCtlRoutes is every control-plane route this build knows, before any withdrawal.
+func (h *Handler) allCtlRoutes() []ctlRoute {
 	rs := []ctlRoute{
 		{"POST /api/register", ctlPublic, h.ctlRegister},
 		{"POST /api/login", ctlPublic, h.ctlLogin},
