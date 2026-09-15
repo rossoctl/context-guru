@@ -271,14 +271,17 @@ func (l *LiteLLM) fetch(ctx context.Context) (map[string]int, map[string]Price, 
 		if p.Zero() {
 			continue
 		}
-		// LiteLLM omits cache rates for models that do not cache; fall back to the
-		// provider-standard Anthropic multiples ONLY when a cache tier is missing but
-		// input pricing is known, so a cached request is never priced as free.
+		// LiteLLM omits cache rates for models that do not cache; fall back to a
+		// multiple ONLY when a cache tier is missing but input pricing is known, so a
+		// cached request is never priced as free. The WRITE multiple is per-family:
+		// 1.25x is Anthropic's published premium and no other family charges one. See
+		// CacheWriteFracFor — a flat 1.25x here put a fabricated 25% premium on every
+		// OpenAI and Gemini row's SAVINGS.
 		if p.CacheRead == 0 {
-			p.CacheRead = p.Input * 0.1
+			p.CacheRead = p.Input * anthropicCacheReadFrac
 		}
 		if p.CacheWrite == 0 {
-			p.CacheWrite = p.Input * 1.25
+			p.CacheWrite = p.Input * CacheWriteFracFor(k)
 		}
 		pm[full] = p
 		if _, ok := pm[tail]; !ok {

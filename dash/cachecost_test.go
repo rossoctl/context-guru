@@ -39,8 +39,10 @@ func TestRepeatSavingsAreValuedByTheCacheOutcome(t *testing.T) {
 	}
 	hit, miss := mk(80_000, 0), mk(0, 80_000)
 
-	wantHit := float64(removed) * ibmSonnet.CacheRead
-	wantMiss := float64(removed) * ibmSonnet.CacheWrite
+	// Both scaled by the tokenizer correction (#240), taken from the event itself so the
+	// assertions stay about WHICH TIER is used — the thing this test exists to pin.
+	wantHit := float64(removed) * ibmSonnet.CacheRead * hit.BilledTokenFactor
+	wantMiss := float64(removed) * ibmSonnet.CacheWrite * miss.BilledTokenFactor
 	if got := hit.BaselineCostUSD - hit.CostUSD; math.Abs(got-wantHit) > 1e-12 {
 		t.Errorf("cache HIT: removal valued at %.10f, want the read rate %.10f", got, wantHit)
 	}
@@ -55,7 +57,7 @@ func TestRepeatSavingsAreValuedByTheCacheOutcome(t *testing.T) {
 	// A turn that neither read nor wrote cache (a provider with no cache at all) values
 	// the removal at the fresh rate, never at zero.
 	none := mk(0, 0)
-	if got := none.BaselineCostUSD - none.CostUSD; math.Abs(got-float64(removed)*ibmSonnet.Input) > 1e-12 {
+	if got := none.BaselineCostUSD - none.CostUSD; math.Abs(got-float64(removed)*ibmSonnet.Input*none.BilledTokenFactor) > 1e-12 {
 		t.Errorf("no cache at all: removal valued at %.10f, want the fresh rate", got)
 	}
 }

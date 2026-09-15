@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
 // Read-time valuation of figures the store recorded without pricing.
@@ -217,7 +218,14 @@ func (d *DB) DecomposeComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Com
 		// the later turn actually paid, which on warm traffic is the cache-read rate — a tenth
 		// of the write rate. That asymmetry is why a large replay multiple still adds up to
 		// very little money, and the UI has to be able to say so.
-		first, rep := float64(unique)*price.CacheWrite, float64(replay)*rate
+		//
+		// Both terms carry the tokenizer correction (#240), from the same helper the write
+		// path uses. It has to be applied HERE as well as in Event.Price: this is a second,
+		// independent implementation of the same arithmetic, and a fix applied to one while
+		// the other stayed put is what TestPreColumnComponentRowsAreValuedNotZeroed exists
+		// to catch — it compares the two paths against each other.
+		bf, _ := tokens.BilledDeltaFactor(model)
+		first, rep := float64(unique)*price.CacheWrite*bf, float64(replay)*rate*bf
 		c.SavedUSDFirstRemoval += first
 		c.SavedUSDReplay += rep
 		// The subset that a stored figure exists for. Only this part of the decomposition is a
@@ -335,7 +343,10 @@ func (d *DB) EstimateComponentSavedUSD(f Filter, p modelinfo.Pricer, out []*Comp
 		case "write":
 			rate = price.CacheWrite
 		}
-		c.SavedUSDEstimated += float64(unique)*price.CacheWrite + float64(replay)*rate
+		// Same tokenizer correction as Event.Price and SavedUSDFirstRemoval above — this
+		// estimator's whole defence is that it runs the IDENTICAL formula to the write path.
+		bf, _ := tokens.BilledDeltaFactor(model)
+		c.SavedUSDEstimated += (float64(unique)*price.CacheWrite + float64(replay)*rate) * bf
 		c.SavedUSDEstimatedRows += n
 	}
 	if err := rows.Err(); err != nil {

@@ -10,6 +10,7 @@ import (
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/kvcache"
 )
 
@@ -725,11 +726,19 @@ func chargeRowCosts(e *CompactionEpisode, r compactRow, p kvcache.Pricing, opens
 // because the prompt had CHANGED — which on a summarized session is frequently our own doing — so
 // counting it as a saving would credit this component for the misses it caused.
 //
-// # The quantity, and its known error
+// # The quantity, and its correction
 //
-// saved_gross is summarize's own tokenizer over message text, which under-states the provider's
-// count of the same removed content by ~12.4% at the sizes compaction happens at (issue #240). That
-// under-reports this component, which is the safe direction, and the panel says so.
+// saved_gross is summarize's own tokenizer over message text and the RATES here are the provider's,
+// so the two had to be reconciled — issue #240. This comment used to state the gap as "~12.4%,
+// which under-reports, which is the safe direction". Both halves were wrong to leave: 12.4% came
+// from a single cross-turn substitution, and MEASURED against real bills the gap is larger —
+// f = 1.3686 on haiku-4-5 and 1.6857 on the sonnet-5/opus-5 tokenizer (see
+// tokens.BilledDeltaFactor). "Conservative" is not a reason to leave a savings figure wrong, and
+// the direction was never the whole story: the same root cause OVER-reports wherever a cache-write
+// premium was fabricated (modelinfo.CacheWriteFracFor).
+//
+// So the quantity is corrected by the same per-family factor the write path and the read-time
+// estimator use. The token counts on the row are untouched — only the counterfactual dollars.
 func creditTurn(e *CompactionEpisode, r compactRow, p kvcache.Pricing) {
 	// saved_usd is read for exactly one thing: it is non-zero iff summarize removed something on
 	// this turn that the savings pipeline was willing to price. Cheaper than re-deriving that
@@ -738,14 +747,15 @@ func creditTurn(e *CompactionEpisode, r compactRow, p kvcache.Pricing) {
 	if r.SavedUSD == 0 || r.SavedGross <= 0 || !p.Known {
 		return
 	}
+	bf, _ := tokens.BilledDeltaFactor(r.Model)
 	switch r.MissReason {
 	case CacheTTLExpiry:
 		// The counterfactual write is the whole removed span, at the tier this turn wrote at.
-		e.ColdCreditUSD += writeUSD(r.SavedGross, scaledWrite1h(r), p)
+		e.ColdCreditUSD += writeUSD(r.SavedGross, scaledWrite1h(r), p) * bf
 	case CacheHit:
-		e.ReadCreditUSD += float64(r.SavedGross) * p.CacheRead
+		e.ReadCreditUSD += float64(r.SavedGross) * p.CacheRead * bf
 	case CacheColdStart, CacheUnknown, "":
-		e.OtherCreditUSD += float64(r.SavedGross) * p.CacheRead
+		e.OtherCreditUSD += float64(r.SavedGross) * p.CacheRead * bf
 	}
 }
 
