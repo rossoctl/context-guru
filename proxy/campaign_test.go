@@ -314,9 +314,12 @@ func TestTileHoursCoversExactlyItsHoursNoGapNoOverlap(t *testing.T) {
 	if w, ok := byStart["14:00"]; !ok || w.end != "15:00" {
 		t.Errorf("hour 14 = %+v, want [14:00,15:00)", byStart["14:00"])
 	}
+	// Hour 23 ends at the END-OF-DAY sentinel, so the hour it tiles is covered in full. It used
+	// to end at "23:59", which as an exclusive end left 23:59:00-23:59:59 covered by nothing —
+	// this test asserted that gap as though it were a requirement, and it was only a limitation.
 	w23, ok := byStart["23:00"]
-	if !ok || w23.end != "23:59" {
-		t.Fatalf("hour 23 = %+v, want [23:00,23:59) (never \"24:00\")", w23)
+	if !ok || w23.end != "24:00" {
+		t.Fatalf("hour 23 = %+v, want [23:00,24:00) so the hour is covered in full", w23)
 	}
 
 	// Every window must itself be valid, and coverage must match exactly: every
@@ -355,14 +358,21 @@ func TestTileHoursCoversExactlyItsHoursNoGapNoOverlap(t *testing.T) {
 	check(14, 59, true)
 	check(15, 0, false)
 	check(23, 0, true)
-	check(23, 59, false) // the one minute no window can ever cover
-	check(0, 0, false)   // hour 23 must not wrap into hour 0
+	check(23, 59, true) // hour 23 means all of hour 23, 23:59 included
+	check(0, 0, false)  // hour 23 must not wrap into hour 0
 }
 
 func TestTileHoursSingleHourEndingTheDay(t *testing.T) {
 	windows := tileHours([]int{23}, nil)
-	if len(windows) != 1 || windows[0].Start != "23:00" || windows[0].End != "23:59" {
-		t.Errorf("got %+v, want a single [23:00,23:59) window", windows)
+	if len(windows) != 1 || windows[0].Start != "23:00" || windows[0].End != "24:00" {
+		t.Errorf("got %+v, want a single [23:00,24:00) window — the whole of hour 23", windows)
+	}
+	// And it must actually cover the final minute, which is the point of the sentinel.
+	s := tenant.Strategy{Active: true, Windows: []tenant.Window{{
+		Start: windows[0].Start, End: windows[0].End, TZ: "UTC"}},
+		Target: tenant.Target{Mode: tenant.TargetAll}}
+	if !s.InWindow(time.Date(2026, 6, 7, 23, 59, 30, 0, time.UTC)) {
+		t.Error("a [23:00,24:00) window does not cover 23:59; the end-of-day sentinel is broken")
 	}
 }
 

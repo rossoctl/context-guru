@@ -29,7 +29,12 @@ func TestApplyStrategyNoMatchLeavesPolicyUnchanged(t *testing.T) {
 func TestApplyStrategyListBeatsAll(t *testing.T) {
 	k, _, clock := testKeeper(t, Limits{})
 	now := clock.now()
-	window := []tenant.Window{{Start: "00:00", End: "23:59", Days: nil}}
+	// "00:00".."23:59" is all day, and it now genuinely is: Window.contains treats both ends as
+	// inclusive, so this covers 23:59 too. It did not before, which made this test fail for one
+	// minute in 1440 — whenever CI ran at 23:59 in DefaultStrategyTZ. The boundary itself is
+	// pinned at a fixed instant in tenant/keepalivewindow_test.go; this test still uses the real
+	// clock because what it is about is the live control plane, not the calendar.
+	window := []tenant.Window{{Start: "00:00", End: "24:00", Days: nil}}
 	allTarget := tenant.Strategy{
 		ID: "all", Active: true, Windows: window, Target: tenant.Target{Mode: tenant.TargetAll},
 		IdleSeconds: 100, MaxPings: 1, UpdatedAt: now, // newer
@@ -59,7 +64,7 @@ func TestApplyStrategyListBeatsAll(t *testing.T) {
 func TestApplyStrategyRecencyBreaksTiesAmongEquallySpecificMatches(t *testing.T) {
 	k, _, clock := testKeeper(t, Limits{})
 	now := clock.now()
-	window := []tenant.Window{{Start: "00:00", End: "23:59"}}
+	window := []tenant.Window{{Start: "00:00", End: "24:00"}}
 	older := tenant.Strategy{
 		ID: "older", Active: true, Windows: window, Target: tenant.Target{Mode: tenant.TargetAll},
 		IdleSeconds: 100, MaxPings: 1, UpdatedAt: now.Add(-time.Hour),
@@ -90,7 +95,7 @@ func TestApplyStrategyRequiresActiveTargetAndWindow(t *testing.T) {
 	now := clock.now()
 	base := tenant.Strategy{
 		ID: "s", Active: true, IdleSeconds: 100, MaxPings: 1,
-		Windows: []tenant.Window{{Start: "00:00", End: "23:59"}},
+		Windows: []tenant.Window{{Start: "00:00", End: "24:00"}},
 		Target:  tenant.Target{Mode: tenant.TargetAll}, UpdatedAt: now,
 	}
 
@@ -125,7 +130,7 @@ func TestSessionOverrideStillWinsOverAMatchingStrategy(t *testing.T) {
 	strategy := tenant.Strategy{
 		ID: "biz-hours", Active: true, IdleSeconds: 150, MaxPings: 3, MinPrefixTokens: 5000,
 		MaxUSDPerPing: 0.5,
-		Windows:       []tenant.Window{{Start: "00:00", End: "23:59"}},
+		Windows:       []tenant.Window{{Start: "00:00", End: "24:00"}},
 		Target:        tenant.Target{Mode: tenant.TargetAll}, UpdatedAt: now,
 	}
 	k.setStrategies([]tenant.Strategy{strategy})
@@ -237,7 +242,7 @@ func TestApplyStrategyCopiesPredictorFields(t *testing.T) {
 	now := clock.now()
 	s := tenant.Strategy{
 		ID: "s1", Active: true, Target: tenant.Target{Mode: tenant.TargetAll},
-		Windows:     []tenant.Window{{Start: "00:00", End: "23:59"}},
+		Windows:     []tenant.Window{{Start: "00:00", End: "24:00"}},
 		IdleSeconds: 280, MaxPings: 1,
 		PredictorID:        "stop-reason-gated",
 		PredictorThreshold: 0.5,
@@ -274,7 +279,7 @@ func TestResolveHeadTTLMatchingStrategyOverridesTheAccount(t *testing.T) {
 	now := clock.now()
 	s := tenant.Strategy{
 		ID: "s1", Active: true, Target: tenant.Target{Mode: tenant.TargetAll},
-		Windows:     []tenant.Window{{Start: "00:00", End: "23:59"}},
+		Windows:     []tenant.Window{{Start: "00:00", End: "24:00"}},
 		IdleSeconds: 280, MaxPings: 1,
 		HeadTTL1h:        true,
 		HeadTTLMinTokens: 50000,
@@ -294,7 +299,7 @@ func TestResolveHeadTTLCannotTurnTheAccountsOwnSettingOff(t *testing.T) {
 	now := clock.now()
 	s := tenant.Strategy{
 		ID: "s1", Active: true, Target: tenant.Target{Mode: tenant.TargetAll},
-		Windows:     []tenant.Window{{Start: "00:00", End: "23:59"}},
+		Windows:     []tenant.Window{{Start: "00:00", End: "24:00"}},
 		IdleSeconds: 280, MaxPings: 1, HeadTTL1h: false,
 	}
 	k.setStrategies([]tenant.Strategy{s})

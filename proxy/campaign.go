@@ -319,11 +319,9 @@ func weekdaysFromNames(names []string) []time.Weekday {
 // exactly those hours and no others, merging consecutive hours into one window.
 //
 // Hour 23 never merges past midnight into hour 0: tenant.Window has no overnight span
-// (Window.Validate rejects end <= start), so a run ending at 23 always closes its own
-// window at "23:59" — the latest End the model can express — rather than "24:00", which
-// Window.Validate rejects outright as an invalid HH:MM. The minute 23:59:00-23:59:59 is
-// therefore never coverable by any window this function builds; a known, documented
-// gap in tenant.Window itself, not something introduced here.
+// (Window.Validate rejects end <= start), so a run ending at 23 closes its own window at
+// "24:00" — the end-of-day sentinel tenant.parseHHMM accepts for exactly this reason. It used
+// to close at "23:59", which as an exclusive end left 23:59:00-23:59:59 covered by nothing.
 func tileHours(hours []int, days []time.Weekday) []tenant.Window {
 	sorted := append([]int(nil), hours...)
 	sort.Ints(sorted)
@@ -336,10 +334,11 @@ func tileHours(hours []int, days []time.Weekday) []tenant.Window {
 			end = sorted[i]
 		}
 		i++
+		// end+1 == 24 spells itself "24:00", the end-of-day sentinel tenant.parseHHMM accepts.
+		// It used to be written "23:59", which as an EXCLUSIVE end stopped at 23:58:59.999 and
+		// left 23:59:00-23:59:59 covered by nothing — the gap the comment above used to describe
+		// as unavoidable. It is not unavoidable any more.
 		endStr := fmt.Sprintf("%02d:00", end+1)
-		if end == 23 {
-			endStr = "23:59"
-		}
 		out = append(out, tenant.Window{
 			Days: days, Start: fmt.Sprintf("%02d:00", start), End: endStr,
 		})

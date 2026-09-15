@@ -127,7 +127,23 @@ func parseHHMM(s string) (int, error) {
 	}
 	h, err1 := strconv.Atoi(s[:2])
 	m, err2 := strconv.Atoi(s[3:])
-	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+	if err1 != nil || err2 != nil {
+		return 0, fmt.Errorf("tenant: %q is not a valid HH:MM time", s)
+	}
+	// "24:00" IS ACCEPTED, as END OF DAY, and only in that exact spelling.
+	//
+	// It exists because contains() treats End as exclusive — which is what lets hour tiles abut
+	// without double-covering the shared minute — and that left the final minute of the day
+	// unreachable: "23:59" as an exclusive end stops at 23:58:59.999. So an all-day window could
+	// not be written at all, and the one people did write silently excluded the minute they meant.
+	//
+	// 1440 is out of the 0..1439 range a wall-clock minute occupies, so it cannot collide with a
+	// real time, and Validate's "End strictly after Start" keeps working unchanged. Only 24:00 is
+	// allowed past 23:59 — 24:01 and 25:00 stay errors, because they mean nothing.
+	if h == 24 && m == 0 {
+		return 24 * 60, nil
+	}
+	if h < 0 || h > 23 || m < 0 || m > 59 {
 		return 0, fmt.Errorf("tenant: %q is not a valid HH:MM time", s)
 	}
 	return h*60 + m, nil
@@ -189,6 +205,36 @@ func (w Window) contains(now time.Time) (bool, error) {
 		return false, err
 	}
 	mins := local.Hour()*60 + local.Minute()
+	// THE END IS EXCLUSIVE, so adjacent windows tile without overlapping: 09:00-11:00 and
+	// 11:00-12:00 cover 11:00 exactly once, which is what proxy/campaign.go's hour tiler
+	// depends on.
+	//
+	// "24:00" IS THE END OF THE DAY, and it exists because exclusivity alone leaves the last
+	// minute of the day unreachable. There is no larger HH:MM to write, so an all-day window had
+	// to be spelled "00:00".."23:59" and then silently excluded 23:59 itself — the minute it most
+	// obviously meant to cover. That made
+	// TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart fail for ONE MINUTE IN 1440: CI
+	// hit 20:59:11Z, which is 23:59 in DefaultStrategyTZ, so mins was 1439 and end was 1439.
+	// campaign.go's tileHours already documented the same hole as "a known, documented gap in
+	// tenant.Window itself".
+	//
+	// Writing 1440 for "24:00" closes it without touching exclusivity: every existing window
+	// keeps its exact meaning, and a caller who means all day can now say so.
+	// BOTH ENDS INCLUSIVE, and the end is the reason. A window is written in wall-clock
+	// minutes, so "00:00".."23:59" is how a person says "all day" — there is no "24:00" to
+	// write instead. With an exclusive end that window excluded 23:59 itself, i.e. the one
+	// minute it most obviously meant to cover, and so did every window ending on the minute
+	// somebody chose as its last.
+	//
+	// This is not a hypothetical: it made TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart
+	// fail on main for exactly one minute a day. CI hit it at 20:59:11Z, which is 23:59 in
+	// Asia/Jerusalem (DefaultStrategyTZ), so mins was 1439 and end was 1439 — and 1439 < 1439
+	// is false. One minute in 1440 is precisely how a bug like this survives review.
+	//
+	// The cost of inclusivity is that a window ending 17:00 now covers 17:00:00-17:00:59. That
+	// is the reading a person expects from a minute-granularity field, and two adjacent windows
+	// (..17:00 and 17:00..) overlapping for that minute is harmless here: InWindow is an OR over
+	// windows, so an instant covered twice is covered once.
 	return mins >= start && mins < end, nil
 }
 
