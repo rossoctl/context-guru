@@ -31,6 +31,8 @@ type API struct {
 	// whoami describes the caller's session for the UI's mode probe. Supplied by the
 	// host in hosted mode; nil means single-tenant.
 	whoami func(*http.Request) any
+	// uiPath is the UI mount prefix, or "" for DefaultUIPath. Set by SetUIPath before Mount.
+	uiPath string
 	// toolFilterFn resolves a tenant's declaration-removal configuration for the inventory
 	// page's control. A hook rather than a field of our own: the list is the account's
 	// compaction configuration, owned, validated and audited by the control plane, and a
@@ -470,8 +472,12 @@ func (a *API) scope(r *http.Request) (Filter, Principal, bool) {
 }
 
 // unauthorized is the one place a data route refuses a caller.
-func unauthorized(w http.ResponseWriter) {
-	httpErr(w, http.StatusUnauthorized, "sign in at /dashboard/ to view your traffic")
+//
+// A method rather than a package function so the message can name the CONFIGURED UI path: telling
+// someone to sign in at a prefix this deployment does not serve is worse than not telling them
+// where at all.
+func (a *API) unauthorized(w http.ResponseWriter) {
+	httpErr(w, http.StatusUnauthorized, "sign in at "+a.uiPrefix()+" to view your traffic")
 }
 
 // scopeClass is the tenant-boundary decision a route has made.
@@ -502,11 +508,14 @@ type route struct {
 // routes is the single mounted route table, read by Mount and by the scoping test.
 func (a *API) routes() []route {
 	rs := []route{
-		{"GET /dashboard", scopePublic, func(w http.ResponseWriter, r *http.Request) {
-			// One canonical URL: /dashboard and /dashboard/ must not be two pages.
-			http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
+		{"GET " + a.uiBare(), scopePublic, func(w http.ResponseWriter, r *http.Request) {
+			// One canonical URL: the bare and slashed forms must not be two pages. They would not
+			// even be the same page — the UI's relative asset references resolve against the
+			// parent directory on the bare form, which is a blank dashboard.
+			http.Redirect(w, r, a.uiPrefix(), http.StatusMovedPermanently)
 		}},
-		{"GET /dashboard/", scopePublic, http.StripPrefix("/dashboard/", uiHandler()).ServeHTTP},
+		{"GET " + a.uiPrefix(), scopePublic,
+			http.StripPrefix(a.uiPrefix(), uiHandler()).ServeHTTP},
 		{"GET /api/stats", scopeTenant, a.stats},
 		{"GET /api/series", scopeTenant, a.series},
 		{"GET /api/requests", scopeTenant, a.requests},
@@ -617,7 +626,7 @@ func (a *API) requireManager(w http.ResponseWriter, r *http.Request, what string
 	}
 	p, ok := a.auth(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return false
 	}
 	if !p.Manager {
@@ -671,7 +680,7 @@ const (
 func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 	f, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	session := r.PathValue("session")
@@ -830,7 +839,7 @@ func mergeArchivedContent(local, fetched []*Event) []*Event {
 func (a *API) archive(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	rows, err := a.db(r).ArchivedSessions(f, atoiDefault(r.URL.Query().Get("limit"), 100))
@@ -860,7 +869,7 @@ func (a *API) archive(w http.ResponseWriter, r *http.Request) {
 func (a *API) archivedSession(w http.ResponseWriter, r *http.Request) {
 	_, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	session := r.PathValue("session")
@@ -909,7 +918,7 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 	// computed without the role check ships every tenant's session ids to everyone.
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	a.rec.Hub().ServeScoped(w, r, f.Tenant, f.TenantAll)
@@ -1024,7 +1033,7 @@ func atoiDefault(s string, def int) int {
 func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 	f, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	a.serveJSON(w, r, &a.statsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
@@ -1118,7 +1127,7 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 func (a *API) series(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	bucket := atoi64(r.URL.Query().Get("bucket"))
@@ -1133,7 +1142,7 @@ func (a *API) series(w http.ResponseWriter, r *http.Request) {
 func (a *API) requests(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	q := r.URL.Query()
@@ -1153,7 +1162,7 @@ func (a *API) request(w http.ResponseWriter, r *http.Request) {
 	}
 	_, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	// Content visibility: single-tenant keeps the CIDR gate (loopback or a trusted
@@ -1219,7 +1228,7 @@ func (a *API) request(w http.ResponseWriter, r *http.Request) {
 func (a *API) sessions(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	q := r.URL.Query()
@@ -1235,7 +1244,7 @@ func (a *API) sessions(w http.ResponseWriter, r *http.Request) {
 func (a *API) components(w http.ResponseWriter, r *http.Request) {
 	f, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	a.serveJSON(w, r, &a.componentsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
@@ -1275,7 +1284,7 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 func (a *API) breakdown(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	dim := r.URL.Query().Get("dim")
@@ -1304,7 +1313,7 @@ func (a *API) breakdown(w http.ResponseWriter, r *http.Request) {
 func (a *API) facets(w http.ResponseWriter, r *http.Request) {
 	flt, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	a.serveJSON(w, r, &a.facetsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
@@ -1436,7 +1445,7 @@ func (a *API) capture(w http.ResponseWriter, r *http.Request) {
 	if a.auth != nil {
 		p, ok := a.auth(r)
 		if !ok {
-			unauthorized(w)
+			a.unauthorized(w)
 			return
 		}
 		if !p.Manager {

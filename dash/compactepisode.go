@@ -1117,7 +1117,7 @@ func (a *API) compactEpisodeRoutes() []route {
 func (a *API) compactionEpisodes(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	// A whole-dataset read, like the KV-cache page's two: take a slot so a refresh storm cannot
