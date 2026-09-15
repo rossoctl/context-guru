@@ -9,19 +9,24 @@ import "strings"
 // what it saw before this existed.
 const DefaultUIPath = "/dashboard/"
 
-// SetUIPath moves the dashboard UI to a different prefix.
+// SetUIPath serves the dashboard UI at a different prefix.
 //
-// WHY A HOST NEEDS THIS. A deployment that renames the dashboard — for a routing convention, to sit
-// beside another tool, or simply because "/dashboard-stats/" reads better on its own service — has
-// to fork dash/api.go today, because the prefix is written into the route table, the bare-path
-// redirect and the sign-in refusal. Forking a file to change a string is how a deployment ends up
-// maintaining a copy of the whole package.
+// WHY A HOST NEEDS THIS. The prefix used to be written into the route table, the bare-path redirect
+// and the sign-in refusal, so a deployment serving the dashboard anywhere else had to fork
+// dash/api.go — and forking a file to change a string is how a deployment ends up maintaining a
+// copy of the whole package.
 //
-// It must be called BEFORE Mount, and it is not safe to call once serving: the route table is read
-// at mount time, and a prefix that changed underneath a running mux would leave the redirect and
-// the mount disagreeing. Panics on a path that is not rooted and slash-terminated, because a
-// half-formed prefix produces a dashboard whose relative asset references resolve one directory up
-// — a blank page with no error, which is materially harder to diagnose than a panic at startup.
+// IT MOVES THE MOUNT, IT DOES NOT ADD ONE. The default prefix stops existing: a host that chooses
+// its own path gets exactly one, and the old one 404s. That is deliberate — two live prefixes for
+// one page means a bookmark, a runbook and a link each naming a different URL, and no way to tell
+// which is canonical. A host that wants the old path to redirect can register that itself in three
+// lines; a host that wants it gone gets that by default.
+//
+// It must be called BEFORE Mount, and it is not safe once serving: the route table is read at mount
+// time, and a prefix that changed underneath a running mux would leave the redirect and the mount
+// disagreeing. Panics on a path that is not rooted and slash-terminated, because a half-formed
+// prefix produces a dashboard whose relative asset references resolve one directory up — a blank
+// page with no error, materially harder to diagnose than a panic at startup.
 //
 // The UI itself is prefix-agnostic by construction: index.html and the scripts reference siblings
 // relatively, /api/* is a sibling of the mount rather than a child, and the asset-version rewriter

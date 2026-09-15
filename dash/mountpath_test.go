@@ -98,21 +98,23 @@ func TestAssetsAreServedUnderTheNewPrefix(t *testing.T) {
 	}
 }
 
-// THE REFUSAL MESSAGE MUST NAME THE CONFIGURED PATH. Telling somebody to sign in at a prefix this
-// deployment does not serve is worse than not telling them where at all.
-func TestTheSignInRefusalNamesTheConfiguredPath(t *testing.T) {
-	rec := httptest.NewRecorder()
-	a := &API{uiPath: "/dashboard-stats/"}
-	a.unauthorized(rec)
-	if body := rec.Body.String(); !strings.Contains(body, "/dashboard-stats/") {
-		t.Errorf("refusal = %q, want it to name /dashboard-stats/", body)
-	}
-
-	// And the default still names the default.
-	rec = httptest.NewRecorder()
-	(&API{}).unauthorized(rec)
-	if body := rec.Body.String(); !strings.Contains(body, DefaultUIPath) {
-		t.Errorf("refusal = %q, want it to name %s", body, DefaultUIPath)
+// THE REFUSAL MUST NOT DISCLOSE THE PATH. It used to say "sign in at /dashboard/", which was fine
+// while that was the only prefix and became wrong once a host could choose its own: a hardcoded
+// path is a LIE on a deployment that moved the dashboard, and an ADVERTISEMENT on one that would
+// rather its dashboard were not discoverable by whoever pokes an /api/ route unauthenticated.
+func TestTheSignInRefusalDisclosesNoPath(t *testing.T) {
+	for _, a := range []*API{{}, {uiPath: "/dashboard-stats/"}} {
+		rec := httptest.NewRecorder()
+		a.unauthorized(rec)
+		body := rec.Body.String()
+		if !strings.Contains(body, "sign in") {
+			t.Errorf("refusal = %q, want it to still tell the caller to sign in", body)
+		}
+		for _, leak := range []string{"/dashboard", "dashboard-stats"} {
+			if strings.Contains(body, leak) {
+				t.Errorf("refusal = %q leaks %q; it must name no path", body, leak)
+			}
+		}
 	}
 }
 

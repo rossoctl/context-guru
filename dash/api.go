@@ -473,11 +473,13 @@ func (a *API) scope(r *http.Request) (Filter, Principal, bool) {
 
 // unauthorized is the one place a data route refuses a caller.
 //
-// A method rather than a package function so the message can name the CONFIGURED UI path: telling
-// someone to sign in at a prefix this deployment does not serve is worse than not telling them
-// where at all.
+// IT NAMES NO PATH. It used to say "sign in at /dashboard/", which was fine while that was the only
+// prefix and became wrong once a host could choose its own: a hardcoded path is a LIE on a
+// deployment that moved the dashboard, and an ADVERTISEMENT on one that would rather its dashboard
+// were not discoverable by whoever pokes an /api/ route unauthenticated. A caller who is meant to
+// have the dashboard already has its URL; one who is not gains nothing from learning it.
 func (a *API) unauthorized(w http.ResponseWriter) {
-	httpErr(w, http.StatusUnauthorized, "sign in at "+a.uiPrefix()+" to view your traffic")
+	httpErr(w, http.StatusUnauthorized, "sign in to view your traffic")
 }
 
 // scopeClass is the tenant-boundary decision a route has made.
