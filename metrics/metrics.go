@@ -757,6 +757,9 @@ type Snapshot struct {
 	CacheAwareSummarizerRefusedStash int64 `json:"cache_aware_summarizer_refused_stash"`
 	// declined because the outbound request would exceed max_request_tokens; the session outgrew the method rather than anything failing
 	CacheAwareSummarizerTooLarge int64 `json:"cache_aware_summarizer_too_large"`
+	// the profiles_path override could not be read, so the EMBEDDED registry was used instead; the
+	// instruction roles this arm resolved are not the ones the deployment pinned
+	CacheAwareSummarizerProfileFallbacks int64 `json:"cache_aware_summarizer_profile_fallbacks"`
 	// detached summaries commissioned
 	CacheAwareSummarizerAsyncStarted int64 `json:"cache_aware_summarizer_async_started"`
 	// detached summaries that reached a checkpoint. The PAIR is the signal: started without committed is a summary paid for and lost

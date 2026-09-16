@@ -2005,6 +2005,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.CacheAwareSummarizerUnverifiedSystem = offload.CacheAwareSummarizerUnverifiedSystem()
 	snap.CacheAwareSummarizerRefusedStash = offload.CacheAwareSummarizerRefusedStash()
 	snap.CacheAwareSummarizerTooLarge = offload.CacheAwareSummarizerTooLarge()
+	snap.CacheAwareSummarizerProfileFallbacks = offload.CacheAwareSummarizerProfileFallbacks()
 	caStarted, caCommitted, _, _ := offload.CacheAwareAsyncStats()
 	snap.CacheAwareSummarizerAsyncStarted, snap.CacheAwareSummarizerAsyncCommitted = caStarted, caCommitted
 

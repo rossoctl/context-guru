@@ -163,6 +163,7 @@ var notExportedWhy = map[string]string{
 	"CacheAwareSummarizerUnverifiedSystem": "NOT EXPORTED YET — declined because instruction_role was pinned to `system` for a model no registry profile verifies",
 	"CacheAwareSummarizerRefusedStash":     "NOT EXPORTED YET — a summary was abandoned because the store would not accept the span",
 	"CacheAwareSummarizerTooLarge":         "NOT EXPORTED YET — declined because the outbound request would exceed max_request_tokens",
+	"CacheAwareSummarizerProfileFallbacks": "NOT EXPORTED YET — the profiles_path override could not be read and the embedded registry was used instead, so the roles this arm resolved are not the ones the deployment pinned",
 	"CacheAwareSummarizerAsyncStarted":     "NOT EXPORTED YET — detached summaries commissioned",
 	"CacheAwareSummarizerAsyncCommitted":   "NOT EXPORTED YET — detached summaries that reached a checkpoint. The PAIR is the signal: started without committed is a summary paid for and lost",
 	"SummarizeTimeouts":                    "NOT EXPORTED YET — summarize's fail-open path is invisible in Prometheus",

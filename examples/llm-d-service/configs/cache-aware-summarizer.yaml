@@ -20,9 +20,10 @@ pipeline: [cache_aware_summarizer]
 
 components:
   cache_aware_summarizer:
-    # Verbatim ends. Both cuts are aligned to turn boundaries automatically, so neither can
-    # orphan a tool result from its call; alignment keeps MORE than asked, never less.
-    keep_first_turns: 1
+    # Verbatim ends. The head is not configurable — msgs[0] is always kept, since it carries the
+    # conversation's identity — so only the tail size is set here. Both cuts are aligned to turn
+    # boundaries automatically, so neither can orphan a tool result from its call; alignment keeps
+    # MORE than asked, never less.
     keep_last_turns: 10   # the one tail size measured to win on agentic traffic
 
     # Where the appended instruction goes.
