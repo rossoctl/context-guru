@@ -172,7 +172,7 @@ func TestSummarizeSpanNeverCutsInsideAToolExchange(t *testing.T) {
 		asst("t1"), res("t1"), asst("t2"), res("t2"),
 	}
 	for keep := 1; keep <= 4; keep++ {
-		headCount, start, end := summarizeSpan(msgs, keep)
+		headCount, start, end := summarizeSpan(msgs, 1, keep)
 		if end < len(msgs) && msgs[end].Role == bschemas.ChatMessageRoleTool {
 			t.Errorf("keepLast=%d: tail begins on a tool message at %d — orphans its result", keep, end)
 		}
@@ -184,7 +184,7 @@ func TestSummarizeSpanNeverCutsInsideAToolExchange(t *testing.T) {
 	// A head that is an assistant tool-call message must NOT be preserved: its results are
 	// inside the span, so keeping it would leave the call unanswered.
 	headIsCall := []bschemas.ChatMessage{asst("t9"), res("t9"), userMsg("next"), userMsg("more")}
-	headCount, start, _ := summarizeSpan(headIsCall, 1)
+	headCount, start, _ := summarizeSpan(headIsCall, 1, 1)
 	if headCount != 0 {
 		t.Errorf("an assistant tool-call head must not be preserved, got headCount=%d", headCount)
 	}
@@ -193,7 +193,7 @@ func TestSummarizeSpanNeverCutsInsideAToolExchange(t *testing.T) {
 	}
 
 	// A normal head (system prompt) IS preserved — the identity the head exists for.
-	headCount, _, _ = summarizeSpan(msgs, 2)
+	headCount, _, _ = summarizeSpan(msgs, 1, 2)
 	if headCount != 1 {
 		t.Errorf("a system-prompt head must be preserved, got headCount=%d", headCount)
 	}

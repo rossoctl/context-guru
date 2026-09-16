@@ -20,6 +20,7 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 | Coding agent reading big source files | `coding` |
 | MCP / list-endpoint JSON arrays | `mcp` |
 | One long transcript to compress, standalone | `summarize` |
+| A cache-unaware summarizer baseline, or a backend with no derivable cache TTL | `summarizer1509` |
 | Squeeze harder, tolerate LLM/structural offload | `aggressive` |
 | Nothing — A/B baseline, passthrough control | `off` |
 
@@ -38,6 +39,7 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 | `agent` | `format, textclean, searchfold, dedup, failed_run, mask, extract, extract_llm, cachesplit` |
 | `general` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, linecap, cachesplit` |
 | `summarize` | `summarize` |
+| `summarizer1509` | `summarize` |
 | `off` | *(empty)* |
 | `agentdiet` | `format, agentdiet, cachesplit` |
 | `house` | `format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter` |

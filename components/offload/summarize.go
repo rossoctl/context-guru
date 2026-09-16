@@ -3,6 +3,7 @@ package offload
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -100,6 +101,8 @@ const maxTrajectoryChars = 280_000
 // the body preserving the retained messages' original bytes.
 type Summarize struct {
 	level             string
+	keepFirst         int
+	customPrompt      string
 	keepLast          int
 	minTokens         int
 	resummarizeTokens int
@@ -114,19 +117,30 @@ type Summarize struct {
 }
 
 type summarizeConfig struct {
-	SummaryLevel string `yaml:"summary_level"`      // concise | regular | highly_detailed
-	KeepLast     int    `yaml:"keep_last"`          // messages kept verbatim at the tail
-	StartFrom    int    `yaml:"start_from_message"` // legacy: folds into trigger.min_messages
-	MinTokens    int    `yaml:"min_tokens"`         // min content tokens in the span to bother
+	SummaryLevel string `yaml:"summary_level"` // concise | regular | highly_detailed
+	// KeepFirst is how many leading messages stay verbatim (default 1). It is 2 that an
+	// OpenAI-shaped deployment wants: there msgs[0] is the system prompt and the task statement
+	// is msgs[1], so the default folds the task into the summary. On Anthropic traffic the
+	// system prompt is a top-level field the pipeline never sees, so 1 already pins the task.
+	KeepFirst int `yaml:"keep_first"`
+	KeepLast  int `yaml:"keep_last"`          // messages kept verbatim at the tail
+	StartFrom int `yaml:"start_from_message"` // legacy: folds into trigger.min_messages
+	MinTokens int `yaml:"min_tokens"`         // min content tokens in the span to bother
 	// ResummarizeTokens: once a summary exists, reuse it (no LLM call) until the
 	// un-summarized tail since the last checkpoint grows past this many tokens,
 	// then roll the checkpoint forward with a fresh summary. 0 = re-summarize
 	// every eligible turn (old behavior).
-	ResummarizeTokens int                `yaml:"resummarize_tokens"`
-	IncludeToolCalls  bool               `yaml:"include_tool_calls"`
-	Model             modelConfig        `yaml:"model"`
-	Trigger           components.Trigger `yaml:"trigger"`
-	MarkerMode        string             `yaml:"marker_mode"` // full (default) | summary | off
+	ResummarizeTokens int  `yaml:"resummarize_tokens"`
+	IncludeToolCalls  bool `yaml:"include_tool_calls"`
+	// CustomPrompt is a deployment-specific instruction appended LAST to the summarizer prompt,
+	// inside a frame that says whose instruction it is and what precedence it has. The frame
+	// matters: a bare instruction pasted after a long trajectory reads to the model as more
+	// trajectory and gets summarized rather than followed. Two limits survive it — the ban on
+	// inventing anything the conversation does not contain, and the <summary> output format.
+	CustomPrompt string             `yaml:"custom_prompt"`
+	Model        modelConfig        `yaml:"model"`
+	Trigger      components.Trigger `yaml:"trigger"`
+	MarkerMode   string             `yaml:"marker_mode"` // full (default) | summary | off
 	// SummaryWaitSeconds: how long a turn waits for a summary that an EARLIER turn started
 	// (0 = 120s). The summary itself is produced off the hot path, so this is a latency
 	// ceiling and never a correctness parameter — when it expires the turn proceeds with
@@ -135,9 +149,15 @@ type summarizeConfig struct {
 }
 
 func newSummarize(raw []byte) (components.Component, error) {
-	cfg := summarizeConfig{SummaryLevel: "regular", KeepLast: 3, StartFrom: 6, MinTokens: 500, ResummarizeTokens: 6000}
+	cfg := summarizeConfig{SummaryLevel: "regular", KeepFirst: 1, KeepLast: 3, StartFrom: 6, MinTokens: 500, ResummarizeTokens: 6000}
 	if err := components.Decode(raw, &cfg); err != nil {
 		return nil, err
+	}
+	// Refused rather than clamped: a negative keep_first is a typo, and silently reading it as 0
+	// would summarize the whole transcript including the task statement — the one thing the head
+	// exists to pin.
+	if cfg.KeepFirst < 0 {
+		return nil, fmt.Errorf("summarize: keep_first is %d, which cannot be negative", cfg.KeepFirst)
 	}
 	// Legacy start_from_message is a message-count gate; the canonical knob is
 	// trigger.min_messages. Fold one into the other so both work.
@@ -148,7 +168,7 @@ func newSummarize(raw []byte) (components.Component, error) {
 		return nil, err
 	}
 	return &Summarize{
-		level: cfg.SummaryLevel, keepLast: cfg.KeepLast,
+		level: cfg.SummaryLevel, keepFirst: cfg.KeepFirst, customPrompt: cfg.CustomPrompt, keepLast: cfg.KeepLast,
 		minTokens: cfg.MinTokens, resummarizeTokens: cfg.ResummarizeTokens,
 		includeToolCalls: cfg.IncludeToolCalls, modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(), trigger: cfg.Trigger,
 		mode: parseMarkerMode(cfg.MarkerMode), summaryWaitSeconds: cfg.SummaryWaitSeconds,
@@ -258,7 +278,7 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	msgs := req.Input
 	// Keep msg0 (system/first) + the last keepLast; summarize the span between — with both
 	// boundaries aligned so neither cuts inside a tool exchange. See summarizeSpan.
-	headCount, start, end := summarizeSpan(msgs, s.keepLast)
+	headCount, start, end := summarizeSpan(msgs, s.keepFirst, s.keepLast)
 
 	// THE GATES DECIDE WHETHER TO PAY FOR A *NEW* SUMMARY. THEY DO NOT DECIDE WHETHER THE SUMMARY
 	// THIS SESSION ALREADY MADE STAYS IN THE BODY WE FORWARD. Those were one decision until the
@@ -701,6 +721,11 @@ func (s *Summarize) summarize(ctx context.Context, model components.Model, span 
 	if suffix := summaryLevelSuffix[s.level]; suffix != "" {
 		user += "\n" + suffix
 	}
+	// LAST, deliberately: trailing instructions carry the most weight, and this one has to
+	// outrank the trajectory it follows rather than be read as part of it.
+	if cp := strings.TrimSpace(s.customPrompt); cp != "" {
+		user += "\n\n" + summarizerCustomPromptFrame + cp + "\n"
+	}
 	prompt := sys + "\n\n" + user
 	var lastErr error
 	for i := 0; i < 3; i++ {
@@ -856,6 +881,26 @@ Strictly avoid fabricating, inferring, or exaggerating any information not prese
 
 Trajectory: {trajectory}`
 
+// summarizerCustomPromptFrame is the frame `custom_prompt` is wrapped in.
+//
+// A bare instruction pasted after a long trajectory reads to the model as more trajectory, so it
+// gets summarized instead of followed. This says whose instruction it is, what precedence it has,
+// and where that precedence stops. The anti-fabrication rule is the base prompt's entire purpose,
+// so it stays absolute: without that carve-out a custom prompt asking for a field the conversation
+// lacks ("always state the failing test") invites the model to invent one, and an invented fact in
+// a summary is indistinguishable from a real one for every later turn of the session.
+const summarizerCustomPromptFrame = `ADDITIONAL OPERATOR INSTRUCTIONS (apply these on top of the guidelines above)
+The operator of this service has supplied deployment-specific instructions for this summary. Treat
+them as authoritative guidance about WHAT to keep and HOW to present it — not as part of the
+conversation you are summarizing, and not as something to mention in your output. Where they narrow
+or re-prioritize the guidelines above, follow them. Two limits always survive: the prohibition on
+fabricating, inferring or exaggerating anything not explicitly present in the conversation is
+absolute, and the required <summary></summary> output format does not change. If an instruction asks
+for information the conversation does not contain, omit it rather than inventing it.
+
+OPERATOR INSTRUCTIONS:
+`
+
 var summaryLevelSuffix = map[string]string{
 	"concise":         "Please generate a concise summary",
 	"regular":         "Please generate a comprehensive and useful summary",
@@ -867,6 +912,11 @@ func init() {
 		{Key: "summary_level", Type: components.FieldEnum, Default: "regular",
 			Options: []string{"concise", "regular", "highly_detailed"},
 			Hint:    "How much detail the summary is asked for. The keys of summaryLevelSuffix — an unrecognised value silently produces no level instruction at all."},
+		{Key: "keep_first", Type: components.FieldInt, Default: 1, Min: 0,
+			Hint: "Messages kept verbatim at the HEAD, before the summarized span. 1 pins msgs[0]. " +
+				"On OpenAI-shaped traffic msgs[0] is the system prompt and the task statement is " +
+				"msgs[1], so set 2 there or the task is folded into the summary; on Anthropic " +
+				"traffic the system prompt is a top-level field and 1 already pins the task."},
 		{Key: "keep_last", Type: components.FieldInt, Default: 3,
 			Hint: "Messages kept verbatim at the tail; only what precedes them is summarized."},
 		{Key: "start_from_message", Type: components.FieldInt, Default: 6,
@@ -877,6 +927,10 @@ func init() {
 			Hint: "Once a summary exists, reuse it with no model call until the tail since that checkpoint grows past this many tokens. 0 = re-summarize every eligible turn."},
 		{Key: "include_tool_calls", Type: components.FieldBool,
 			Hint: "Include tool calls and their results in the trajectory handed to the summarizer."},
+		{Key: "custom_prompt", Type: components.FieldString,
+			Hint: "A deployment-specific instruction appended last to the summarizer prompt, inside a " +
+				"frame that gives it precedence over the trajectory. The ban on fabricating anything " +
+				"absent from the conversation, and the <summary> output format, are not overridable."},
 		{Key: "summary_wait_seconds", Type: components.FieldInt, Default: 120, Min: 0,
 			Hint: "The summary is produced off the hot path, so a turn that arrives while one is " +
 				"still running waits this long for it (0 = 120s). Waiting beats sending the full " +
