@@ -297,3 +297,70 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return b
 }
+
+// ⛔ A PREFIX THE CALLER ALREADY MARKED IS LEFT ALONE.
+//
+// bschemas.ChatContentBlock carries CacheControl and the content passthrough preserves it, so an
+// agent that caches its own prompt arrives here already marked. Its breakpoint is the one its
+// cache entry was created under, so ours would buy nothing — and the provider allows only FOUR
+// per request, where a fifth is a 400 on the whole call.
+func TestCompleteMessagesLeavesACallerMarkedPrefixAlone(t *testing.T) {
+	big := strings.Repeat("the dispatch path in src/mod/file.py raises on a missing trailing newline "+
+		"and pytest tests/test_handler.py reports three failures\n", 90)
+	instr := "Summarize the conversation above."
+	body := captureBody(t, func(o OpenAI) error {
+		o.Model = "aws/claude-opus-4-7"
+		_, err := o.CompleteMessages(context.Background(), "", []bschemas.ChatMessage{{
+			Role: bschemas.ChatMessageRoleUser,
+			Content: &bschemas.ChatMessageContent{ContentBlocks: []bschemas.ChatContentBlock{{
+				Type: bschemas.ChatContentBlockTypeText, Text: &big,
+				CacheControl: &bschemas.CacheControl{Type: "ephemeral"},
+			}}},
+		}, {Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &instr}}})
+		return err
+	})
+	raw := string(mustJSON(t, body))
+	if n := strings.Count(raw, "cache_control"); n != 1 {
+		t.Errorf("cache_control appears %d times, want exactly 1 (the caller's own, not ours too): %s", n, raw)
+	}
+}
+
+// A breakpoint needs a content block to attach to. An assistant turn that is purely tool calls has
+// no content, so the mark must walk BACK to the last message that can carry one rather than
+// silently going out unmarked.
+func TestCompleteMessagesWalksBackToAMarkableMessage(t *testing.T) {
+	big := strings.Repeat("src/mod/file.py:41 assertion failed, expected 200 got 500 on a short payload\n", 140)
+	name, id := "bash", "call_1"
+	instr := "Summarize the conversation above."
+	body := captureBody(t, func(o OpenAI) error {
+		o.Model = "aws/claude-opus-4-7"
+		_, err := o.CompleteMessages(context.Background(), "", []bschemas.ChatMessage{
+			{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &big}},
+			// purely tool calls: no content, cannot carry a breakpoint
+			{Role: bschemas.ChatMessageRoleAssistant, ChatAssistantMessage: &bschemas.ChatAssistantMessage{
+				ToolCalls: []bschemas.ChatAssistantMessageToolCall{{ID: &id,
+					Function: bschemas.ChatAssistantMessageToolCallFunction{Name: &name, Arguments: "{}"}}},
+			}},
+			{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &instr}},
+		})
+		return err
+	})
+	msgs := body["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("sent %d messages, want 3", len(msgs))
+	}
+	blocks, ok := msgs[0].(map[string]any)["content"].([]any)
+	if !ok {
+		t.Fatalf("message 0 content = %T, want a marked block array (the mark should have walked back to it)",
+			msgs[0].(map[string]any)["content"])
+	}
+	if _, marked := blocks[len(blocks)-1].(map[string]any)["cache_control"]; !marked {
+		t.Errorf("the walked-back message carries no breakpoint: %#v", blocks[len(blocks)-1])
+	}
+	if s := string(mustJSON(t, msgs[1])); strings.Contains(s, "cache_control") {
+		t.Error("marked the tool-call message, which has no content block to attach to")
+	}
+	if s := string(mustJSON(t, msgs[2])); strings.Contains(s, "cache_control") {
+		t.Error("marked the appended instruction — that writes every turn and reads nothing")
+	}
+}
