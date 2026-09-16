@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
 // OpenAI calls a small OpenAI chat-completions model with a single user prompt and
@@ -63,6 +64,88 @@ func (o OpenAI) CompleteSystem(ctx context.Context, system, prompt string) (stri
 	return o.post(ctx, msgs)
 }
 
+// cacheControlPrefixEnd returns the index of the last PREFIX message — the one whose final
+// content block should carry a cache_control breakpoint — or -1 to send no mark at all.
+//
+// WHY A MARK IS NEEDED, AND ONLY HERE. An Anthropic-family model has no automatic prefix
+// caching: without an explicit breakpoint the summarization call re-prefills the entire
+// conversation, which is precisely the cost CompleteMessages exists to remove. Measured on
+// aws/claude-opus-4-7 through a LiteLLM gateway, same ~9.4k-token conversation both ways:
+//
+//	appended instruction, no breakpoint   fresh=9616 write=0    read=0     (8.2x)
+//	appended instruction, breakpoint      fresh=237  write=0    read=9378  (1.0x)
+//
+// A real OpenAI-shaped endpoint is the opposite case twice over: it caches automatically, so
+// the mark buys nothing, and it rejects an unrecognised field inside a content part, so
+// sending one would break the call. Hence the substring test on the served id — the same test
+// minCacheablePrefix already makes, and conservative in the same direction: an alias that
+// hides the real model gets no mark and behaves exactly as it does today.
+//
+// THE BREAKPOINT ENDS THE PREFIX, it does not end the REQUEST. components.MessagesModel's
+// contract is that the caller appends exactly one fresh message, so the cacheable prefix is
+// everything before it. Marking the final message instead would write a fresh entry on every
+// turn and read nothing — the failure this is meant to remove, with the premium added.
+func cacheControlPrefixEnd(model string, msgs []bschemas.ChatMessage) int {
+	if len(msgs) < 2 || !strings.Contains(strings.ToLower(model), "claude") {
+		return -1
+	}
+	n := 0
+	for _, m := range msgs[:len(msgs)-1] {
+		n += tokens.Count(messageText(m))
+	}
+	// Below the model's floor the provider ignores the mark silently, so the write premium
+	// would be paid for an entry nothing can read. CacheablePrefix owns that table.
+	if !CacheablePrefix(model, n) {
+		return -1
+	}
+	return len(msgs) - 2
+}
+
+// messageText extracts a message's text for token counting only. Deliberately local rather
+// than reaching for schema.MessageText: this package sits below the public ones and counting
+// is the only thing it needs.
+func messageText(m bschemas.ChatMessage) string {
+	if m.Content == nil {
+		return ""
+	}
+	if m.Content.ContentStr != nil {
+		return *m.Content.ContentStr
+	}
+	var b strings.Builder
+	for _, blk := range m.Content.ContentBlocks {
+		if blk.Text != nil {
+			b.WriteString(*blk.Text)
+		}
+	}
+	return b.String()
+}
+
+// markedContent re-renders content as a block array carrying a cache_control breakpoint on its
+// LAST block, via a JSON round-trip of the original so every field survives — including block
+// kinds this file does not model. Rebuilding blocks field-by-field would silently drop an image
+// source or a provider extension, and a dropped field changes the prefix, which loses the cache
+// read the mark was added to get.
+//
+// A bare string becomes a single text block. That is the same content to the provider — string
+// and one text block render identically — and it is the only shape a breakpoint can attach to.
+func markedContent(c *bschemas.ChatMessageContent) (any, bool) {
+	raw, err := json.Marshal(c)
+	if err != nil {
+		return nil, false
+	}
+	cc := map[string]any{"type": "ephemeral"}
+	var blocks []map[string]any
+	if err := json.Unmarshal(raw, &blocks); err == nil && len(blocks) > 0 {
+		blocks[len(blocks)-1]["cache_control"] = cc
+		return blocks, true
+	}
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil && str != "" {
+		return []any{map[string]any{"type": "text", "text": str, "cache_control": cc}}, true
+	}
+	return nil, false
+}
+
 // THE MAPPING IS AN EXPLICIT ALLOWLIST, and both halves of that are load-bearing.
 //
 // CONTENT IS PASSED THROUGH AS-IS, not flattened to text. m.Content is a *ChatMessageContent
@@ -91,6 +174,7 @@ func (o OpenAI) CompleteMessages(ctx context.Context, system string, msgs []bsch
 	if system != "" {
 		wire = append(wire, map[string]any{"role": "system", "content": system})
 	}
+	markAt := cacheControlPrefixEnd(o.Model, msgs)
 	for i := range msgs {
 		m := msgs[i]
 		e := map[string]any{"role": string(m.Role)}
@@ -98,6 +182,14 @@ func (o OpenAI) CompleteMessages(ctx context.Context, system string, msgs []bsch
 		// message that is purely tool calls legitimately has none.
 		if m.Content != nil {
 			e["content"] = m.Content
+			// The one deliberate exception to "verbatim": the prefix's last block carries the
+			// breakpoint. Metadata only — the rendered content is unchanged, so the bytes the
+			// provider hashes are the same ones the agent's own turn cached.
+			if i == markAt {
+				if marked, ok := markedContent(m.Content); ok {
+					e["content"] = marked
+				}
+			}
 		}
 		// `name` is request-legal on OpenAI (bifrost tags it "for chat completions"). Passed through
 		// rather than dropped: if inbound traffic sets it, omitting it makes this request diverge

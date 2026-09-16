@@ -202,3 +202,98 @@ func TestCompleteMessagesToolMessageWithBlockContent(t *testing.T) {
 			"from the parent's", m["content"])
 	}
 }
+
+// ⭐ THE BREAKPOINT IS WHAT MAKES THIS WORK ON ANTHROPIC AT ALL.
+//
+// Anthropic-family models have no automatic prefix caching, so the appended-instruction shape
+// saves nothing without an explicit cache_control mark: measured 8.2x the warm cost on
+// aws/claude-opus-4-7. The mark must land on the last block of the PREFIX — everything except
+// the appended instruction — because a mark on the instruction writes a new entry every turn
+// and reads none.
+func TestCompleteMessagesMarksThePrefixForAnthropicModels(t *testing.T) {
+	convo := strings.Repeat("the handler in src/mod/file.py returns 500 on a missing newline; "+
+		"pytest tests/test_handler.py reports three failures in the dispatch path\n", 90)
+	instr := "[OPERATOR INSTRUCTION] Summarize the conversation above."
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		json.Unmarshal(b, &got)
+		io.WriteString(w, `{"choices":[{"message":{"content":"<summary>ok</summary>"}}]}`)
+	}))
+	defer srv.Close()
+	o := OpenAI{BaseURL: srv.URL, Model: "aws/claude-opus-4-7", Client: srv.Client()}
+	if _, err := o.CompleteMessages(context.Background(), "", []bschemas.ChatMessage{
+		{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &convo}},
+		{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &instr}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	msgs := got["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("sent %d messages, want 2", len(msgs))
+	}
+	blocks, isArr := msgs[0].(map[string]any)["content"].([]any)
+	if !isArr {
+		t.Fatalf("prefix content = %T, want a block array so a breakpoint can attach", msgs[0].(map[string]any)["content"])
+	}
+	last := blocks[len(blocks)-1].(map[string]any)
+	cc, ok := last["cache_control"].(map[string]any)
+	if !ok || cc["type"] != "ephemeral" {
+		t.Errorf("prefix's last block carries no ephemeral cache_control: %#v", last)
+	}
+	if last["text"] != convo {
+		t.Error("the marked block's text was altered — that changes the prefix and loses the read")
+	}
+	// The appended instruction must NOT be marked: it is the fresh suffix, and marking it
+	// writes a new entry per turn instead of reading the agent's.
+	if s := string(mustJSON(t, msgs[1])); strings.Contains(s, "cache_control") {
+		t.Errorf("the appended instruction was marked — that writes every turn and reads nothing: %s", s)
+	}
+}
+
+// A real OpenAI endpoint caches automatically AND rejects unknown fields inside a content part,
+// so the mark must never be sent there.
+func TestCompleteMessagesSendsNoCacheControlToOpenAIModels(t *testing.T) {
+	convo := strings.Repeat("stack frame in src/mod/file.py line 42 raised on a missing newline\n", 120)
+	instr := "Summarize the conversation above."
+	for _, model := range []string{"gpt-4o-mini", "azure/gpt-5-mini", "Qwen/Qwen3-32B"} {
+		body := captureBody(t, func(o OpenAI) error {
+			o.Model = model
+			_, err := o.CompleteMessages(context.Background(), "", []bschemas.ChatMessage{
+				{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &convo}},
+				{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &instr}},
+			})
+			return err
+		})
+		if s := string(mustJSON(t, body)); strings.Contains(s, "cache_control") {
+			t.Errorf("model %q: cache_control reached a non-Anthropic endpoint", model)
+		}
+	}
+}
+
+// Below the model's floor the provider ignores the mark, so sending one buys a write premium for
+// an entry nothing can read. CacheablePrefix owns the table; this pins that we consult it.
+func TestCompleteMessagesSkipsTheMarkBelowTheModelMinimum(t *testing.T) {
+	short := "one short turn"
+	instr := "Summarize the conversation above."
+	body := captureBody(t, func(o OpenAI) error {
+		o.Model = "aws/claude-opus-4-7"
+		_, err := o.CompleteMessages(context.Background(), "", []bschemas.ChatMessage{
+			{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &short}},
+			{Role: bschemas.ChatMessageRoleUser, Content: &bschemas.ChatMessageContent{ContentStr: &instr}},
+		})
+		return err
+	})
+	if s := string(mustJSON(t, body)); strings.Contains(s, "cache_control") {
+		t.Errorf("marked a prefix below the model minimum — the premium buys an unreadable entry: %s", s)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
