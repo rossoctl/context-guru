@@ -53,11 +53,27 @@ The two failure modes are not equally visible:
 | **silent** | a template **drops** or **hoists** the message. The model continues the task, and its next turn is recorded as the summary. |
 
 `instruction_role: auto` resolves per model from
-[`summarizer_model_profiles.yaml`](https://github.com/rossoctl/context-guru/blob/main/components/offload/summarizer_model_profiles.yaml),
-which carries a `verified:` provenance string on every entry and `default_role: user` — the only
-direction that cannot fail silently. A pinned `instruction_role: system` for a model no profile
-verifies **declines** at request time and increments
-`cache_aware_summarizer_unverified_system`, rather than risking the silent case.
+[`summarizer_model_profiles.yaml`](https://github.com/rossoctl/context-guru/blob/main/components/offload/summarizer_model_profiles.yaml).
+That file has two parts: `system_models`, an allow-list of match strings that take the instruction as
+`role: system`, and `profiles`, a provenance record that grants nothing and only says what was
+established about each model. A pinned `instruction_role: system` for a model the allow-list does not
+name **declines** at request time and increments `cache_aware_summarizer_unverified_system`, rather
+than risking the silent case.
+
+**`system_models` is empty, so every model resolves to `user` today.** The reason is that a profile
+described a *model*, while what has to accept a trailing system message is the whole *path* to it.
+The component requires a `components.MessagesModel` and only the OpenAI-shaped client implements one,
+so every reachable deployment sends OpenAI-shaped requests — and a gateway translating those to a
+native provider API may lift a mid-array system message into that API's top-level `system` field.
+Measured against a LiteLLM gateway fronting Bedrock: `aws/claude-opus-5` with a trailing `role: system`
+returned `400 … the conversation must end with a user message` on every call (the instruction had been
+removed from `messages[]`), while the same request with `role: user` returned 200. End to end, the
+`claude-opus-5` arm compacted nothing and reported only `cache_aware_summarizer_errors`; the
+`claude-sonnet-5` arm, which resolved to `user`, cut 2228 tokens to 876.
+
+To promote a model, verify the **path** — probe through the same endpoint and credential production
+uses and confirm the instruction arrives last — then add its match string to `system_models`, or ship
+a `profiles_path` override so the promotion needs no rebuild.
 
 ## The call is detached, so compaction takes two turns
 

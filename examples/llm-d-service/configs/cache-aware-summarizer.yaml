@@ -28,14 +28,19 @@ components:
 
     # Where the appended instruction goes.
     #   auto   — resolved per model from components/offload/summarizer_model_profiles.yaml
-    #   system — the authoritative operator channel, where the model/provider accepts one
+    #   system — the authoritative operator channel, where the PATH to the model accepts one
     #            at the END of the messages array
     #   user   — the safe fallback; every template and provider accepts a user turn
     # ⚠️ auto needs model_id to resolve against; without it auto falls to `user`.
-    # ⛔ Do not hand-set `system` for a model you have not verified. Anthropic returns a
-    # clean 400, but a chat template that DROPS or HOISTS the message fails silently: the
-    # model continues the task and its next turn is recorded as the "summary". DeepSeek's
-    # template hoists every system message to the front — accepted, wrong place, no error.
+    # ⚠️ auto resolves to `user` for EVERY model on this build: the registry's system_models
+    # allow-list is empty, because a measured run found a gateway lifting the trailing system
+    # message into the provider's top-level field — a 400 on aws/claude-opus-5, and on a
+    # transcript ending in a user turn a silent relocation instead. Read that file's header
+    # before promoting anything, and verify the PATH, not just the model.
+    # ⛔ Do not hand-set `system` for a path you have not probed. It DECLINES unless the
+    # allow-list names the model (cache_aware_summarizer_unverified_system), and where it does
+    # go through, a template that DROPS or HOISTS the message fails silently: the model
+    # continues the task and its next turn is recorded as the "summary".
     instruction_role: auto
     # ⚠️ LITERAL VALUES. Nothing in this codebase expands ${VAR} in a config file — the proxy reads
     # the YAML as-is — so edit these in place (or template the file with envsubst before mounting).

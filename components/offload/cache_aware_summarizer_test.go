@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -213,10 +215,14 @@ func TestCacheAwareInstructionRoleAndPromptVariant(t *testing.T) {
 		{"system", bschemas.ChatMessageRoleSystem, "Summarize the conversation above."},
 		{"user", bschemas.ChatMessageRoleUser, "OPERATOR INSTRUCTION"},
 	} {
-		// A pinned `system` needs a model the registry VERIFIES, or Offload declines by design.
+		// A pinned `system` needs a model the registry ALLOWS, or Offload declines by design.
+		// system_models is empty on the embedded registry, so the only way to reach the system
+		// channel at all is an override that promotes a model — which is also the documented
+		// route for a deployment that has verified its own path.
 		cfg := caBaseCfg + "instruction_role: " + tc.role + "\n"
 		if tc.role == "system" {
-			cfg += "model_id: Qwen/Qwen3.6-27B\n"
+			cfg += "model_id: Qwen/Qwen3.6-27B\nprofiles_path: " +
+				caWriteProfiles(t, "qwen3") + "\n"
 		}
 		s := newCacheAware(t, cfg)
 		model := &capturingModel{out: "<summary>ok</summary>"}
@@ -264,29 +270,83 @@ func TestCacheAwareDeclinesRatherThanFlatteningThePrompt(t *testing.T) {
 	}
 }
 
-// The registry resolves auto per model. Qwen is the verified system-capable case on this stack; an
-// unknown id must fall to user, because that is the direction that cannot fail silently.
-func TestCacheAwareAutoRoleResolvesFromTheRegistry(t *testing.T) {
-	for _, tc := range []struct{ id, want string }{
-		{"Qwen/Qwen3.6-27B", "system"},
-		{"meta-llama/Llama-3.3-70B-Instruct", "system"},
-		{"claude-opus-5", "system"},
-		{"claude-sonnet-5", "user"},
-		{"deepseek-ai/DeepSeek-V3", "user"},
-		{"mistralai/Mistral-7B-Instruct-v0.3", "user"},
-		// Narrowed away deliberately: an inherited profile is unknown in the sense that matters,
-		// and substring matching reached templates that were never checked.
-		{"meta-llama/Llama-2-7b-chat-hf", "user"},
-		{"codellama/CodeLlama-34b", "user"},
-		{"Qwen/Qwen2-7B-Instruct", "user"},
-		{"some-model-nobody-has-checked", "user"},
-		{"", "user"},
+// The SHIPPED registry grants the system channel to nothing: system_models is empty, so every
+// model — including the ones whose own templates were verified to accept a trailing system
+// message — resolves to `user`.
+//
+// ⛔ The claude ids are the reason the allow-list exists, and they are asserted here rather than
+// left to the generic case. `claude-opus-5` resolved to `system` off a profile that described the
+// NATIVE Anthropic API, was reached over an OpenAI-shaped gateway that lifts a mid-array system
+// message into the top-level field, and 400'd on every call while the component reported only a
+// counter. A future entry re-granting it must fail this test loudly.
+func TestCacheAwareAutoRoleIsUserForEveryShippedModel(t *testing.T) {
+	for _, id := range []string{
+		"aws/claude-opus-5", "aws/claude-sonnet-5", "claude-opus-5", "claude-sonnet-5",
+		"claude-opus-4-8", "claude-fable-5-1", "claude-mythos-5", "claude-haiku-4-5",
+		"Qwen/Qwen3.6-27B", "meta-llama/Llama-3.3-70B-Instruct", "meta-llama/Llama-3.1-8B-Instruct",
+		"deepseek-ai/DeepSeek-V3", "mistralai/Mistral-7B-Instruct-v0.3", "openai/gpt-oss-120b",
+		"google/gemma-2-27b-it", "meta-llama/Llama-2-7b-chat-hf", "codellama/CodeLlama-34b",
+		"Qwen/Qwen2-7B-Instruct", "some-model-nobody-has-checked", "",
 	} {
-		s := newCacheAware(t, caBaseCfg+"instruction_role: auto\nmodel_id: \""+tc.id+"\"\n")
-		if got := s.InstructionRole(); got != tc.want {
-			t.Errorf("model_id %q: resolved role %q, want %q", tc.id, got, tc.want)
+		s := newCacheAware(t, caBaseCfg+"instruction_role: auto\nmodel_id: \""+id+"\"\n")
+		if got := s.InstructionRole(); got != "user" {
+			t.Errorf("model_id %q: resolved role %q, want user — system_models is empty, so "+
+				"nothing may resolve to the system channel", id, got)
 		}
 	}
+}
+
+// A promotion works, and only for the id it names. This is the escape hatch a deployment uses
+// after verifying its OWN path, and the test that keeps the allow-list from being decorative.
+func TestCacheAwareSystemModelsAllowListPromotesOnlyWhatItNames(t *testing.T) {
+	path := caWriteProfiles(t, "qwen3")
+	for _, tc := range []struct{ id, want string }{
+		{"Qwen/Qwen3.6-27B", "system"},
+		{"aws/claude-opus-5", "user"},
+		{"Qwen/Qwen2-7B-Instruct", "user"},
+	} {
+		s := newCacheAware(t, caBaseCfg+"instruction_role: auto\nmodel_id: \""+tc.id+
+			"\"\nprofiles_path: "+path+"\n")
+		// auto re-resolves per request when profiles_path is set, so drive a turn rather than
+		// reading the construction-time answer.
+		s.modelClient = &capturingModel{out: "<summary>ok</summary>"}
+		model := s.modelClient.(*capturingModel)
+		caRun(t, s, "ca-allow-"+tc.id, caFixture())
+		if model.calls == 0 {
+			t.Fatalf("%s: no call was made, so the assertion below is vacuous", tc.id)
+		}
+		last := model.gotMsgs[len(model.gotMsgs)-1]
+		if string(last.Role) != tc.want {
+			t.Errorf("model_id %q with qwen3 promoted: instruction role %q, want %q",
+				tc.id, last.Role, tc.want)
+		}
+	}
+}
+
+// caWriteProfiles writes a registry identical to the embedded one except that system_models names
+// the given match strings, so a test can exercise the system channel the shipped file grants to
+// nothing.
+func caWriteProfiles(t *testing.T, allow ...string) string {
+	t.Helper()
+	body := string(summarizerProfilesYAML)
+	list := "system_models: ["
+	for i, a := range allow {
+		if i > 0 {
+			list += ", "
+		}
+		list += "\"" + a + "\""
+	}
+	list += "]"
+	replaced := strings.Replace(body, "system_models: []", list, 1)
+	if replaced == body {
+		t.Fatal("the embedded registry no longer contains `system_models: []`; this helper " +
+			"silently stopped promoting anything and every system-role assertion became vacuous")
+	}
+	path := filepath.Join(t.TempDir(), "profiles.yaml")
+	if err := os.WriteFile(path, []byte(replaced), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // The output shape must be [head, summary, tail], and the spliced summary must never be

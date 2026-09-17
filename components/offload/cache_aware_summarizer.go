@@ -88,8 +88,8 @@ type cacheAwareSummarizerConfig struct {
 	// `user` default, and hence the construction-time refusal of an explicit `system` for a model
 	// the registry has not verified.
 	InstructionRole string `yaml:"instruction_role"`
-	// ModelID is the served model id that `auto` resolves against. Without it `auto` falls to the
-	// registry's default_role.
+	// ModelID is the served model id that `auto` resolves against. Without it nothing can match
+	// the system_models allow-list, so `auto` resolves to `user`.
 	ModelID string `yaml:"model_id"`
 	// ProfilesPath overrides the embedded registry with a file on disk, so a deployment can
 	// promote a model it verified itself without rebuilding.
@@ -127,37 +127,45 @@ type cacheAwareSummarizerConfig struct {
 
 // summarizerProfiles is summarizer_model_profiles.yaml; see that file for the provenance of
 // every entry and for how to verify a model before promoting it.
+//
+// SystemModels is the ALLOW-LIST, and it is the only thing that grants a trailing role: system
+// instruction. Profiles is a provenance record and grants nothing: an entry there says what we
+// know about a model's template or provider, and promoting one means adding its match string to
+// SystemModels as well. The two were one list until a measured failure separated them — a
+// profile marked `role: system` was reached over a gateway whose translation layer does not
+// preserve a mid-array system message, so knowing what a model accepts turned out to be a
+// different question from knowing what the path to it accepts.
 type summarizerProfiles struct {
 	Prompts struct {
 		System string `yaml:"system"`
 		User   string `yaml:"user"`
 	} `yaml:"prompts"`
-	DefaultRole string `yaml:"default_role"`
-	Profiles    []struct {
+	// SystemModels are match strings whose models take the instruction as role: system. EMPTY
+	// on this build: no model+path combination is currently verified. See the file header.
+	SystemModels []string `yaml:"system_models"`
+	Profiles     []struct {
 		Match    string `yaml:"match"`
-		Role     string `yaml:"role"`
 		Verified string `yaml:"verified"`
 	} `yaml:"profiles"`
 }
 
 // roleFor resolves the appended instruction's role for a model id, and reports whether the
-// answer came from a PROFILE or from the default. The first substring match wins, so specific
-// ids precede family prefixes in the file. matched=false means nothing in the registry covers
-// this model, which is the state an explicit `system` is refused for.
+// answer came from the system_models ALLOW-LIST. The first substring match wins, so specific
+// ids precede family prefixes in the file. matched=false means the registry does not permit a
+// system-role instruction for this model, which is the state an explicit `system` is refused
+// for — and with an empty system_models that is every model, deliberately.
+//
+// There is no configurable fallback role any more. `default_role` was one, and a global switch
+// that can re-grant `system` to every unmatched model at once is the opposite of an allow-list,
+// so an unmatched model is now unconditionally `user`.
 func (p *summarizerProfiles) roleFor(modelID string) (role bschemas.ChatMessageRole, matched bool) {
 	id := strings.ToLower(strings.TrimSpace(modelID))
 	if id != "" {
-		for _, e := range p.Profiles {
-			if e.Match != "" && strings.Contains(id, strings.ToLower(e.Match)) {
-				if strings.EqualFold(e.Role, "system") {
-					return bschemas.ChatMessageRoleSystem, true
-				}
-				return bschemas.ChatMessageRoleUser, true
+		for _, m := range p.SystemModels {
+			if m != "" && strings.Contains(id, strings.ToLower(strings.TrimSpace(m))) {
+				return bschemas.ChatMessageRoleSystem, true
 			}
 		}
-	}
-	if strings.EqualFold(p.DefaultRole, "system") {
-		return bschemas.ChatMessageRoleSystem, false
 	}
 	return bschemas.ChatMessageRoleUser, false
 }

@@ -96,20 +96,64 @@ prompts:
     nothing after it. Do not continue the task. Do not call any tool.
 
 # ─────────────────────────────────────────────────────────────────────────────────────
-# Profiles. `match` is a case-insensitive substring against the resolved model id; the
-# FIRST match wins, so put specific ids above family prefixes. `role` is what gets
-# appended. `verified` records how the entry was established, because an unsourced
-# profile is worse than no profile — it looks like knowledge.
+# system_models — THE ALLOW-LIST. Match strings whose models take the instruction as
+# role: system. This is the ONLY thing that grants the system channel; `profiles` below
+# grants nothing. Entries are case-insensitive substrings of the resolved model id.
+#
+# ⛔ IT IS EMPTY, AND THAT IS A MEASURED RESULT, NOT AN OVERSIGHT.
+#
+# A profile recorded what a MODEL's template or provider accepts. What actually has to
+# accept a trailing system message is the whole PATH to that model, and those are not the
+# same question. The component requires a components.MessagesModel and only the
+# OpenAI-shaped client implements one, so every reachable deployment sends OpenAI-shaped
+# requests — and a gateway translating those to a native provider API is free to lift a
+# mid-array system message into that API's top-level system field. It is not a hop the
+# profile could see.
+#
+# MEASURED against a LiteLLM gateway fronting Bedrock, 2026-09-17, on the exact shape this
+# component builds — [conversation..., instruction]:
+#
+#   aws/claude-opus-5    trailing role:system  -> HTTP 400
+#   aws/claude-sonnet-5  trailing role:system  -> HTTP 400
+#   aws/claude-opus-5    trailing role:user    -> HTTP 200
+#   aws/claude-sonnet-5  trailing role:user    -> HTTP 200, summary returned
+#
+# The 400 names the mechanism: "This model does not support assistant message prefill. The
+# conversation must end with a user message." The instruction was REMOVED from messages[]
+# and folded into the top-level system field, so the array ended on the assistant turn.
+# The same conversation ending in a USER message returned 200 with the instruction
+# relocated to the front — accepted, wrong place, no error. That is the silent failure the
+# `user` default exists for, and it is reachable on the ordinary path.
+#
+# End to end through the proxy on that gateway: the opus-5 arm logged
+# cache_aware_summarizer_errors=1 with async_committed=0 and compacted NOTHING, while the
+# sonnet-5 arm (resolved to `user`) committed a summary and cut 2228 tokens to 876.
+#
+# TO PROMOTE A MODEL, verify the PATH and not just the model — send the two-call probe
+# through the same endpoint and credential production uses, and confirm the instruction
+# arrives last. Then add its match string here, or ship a `profiles_path` override so the
+# promotion does not need a rebuild.
 # ─────────────────────────────────────────────────────────────────────────────────────
-default_role: user # ⛔ never change this to system — see "THE SAFE DIRECTION" above
+system_models: []
 
+# ─────────────────────────────────────────────────────────────────────────────────────
+# Profiles — A PROVENANCE RECORD, NOT A GRANT. Each entry says what was established about
+# a model's own template or provider rules, and how. Nothing here changes the resolved
+# role: with system_models empty, every model resolves to `user`. These are kept because
+# they are the expensive part — reading a chat template or a provider's availability
+# matrix — and because promoting a model later starts from what is already known here.
+#
+# There is no `default_role`. It was a single switch that could re-grant `system` to every
+# unmatched model at once, which is the opposite of an allow-list; an unmatched model is
+# now unconditionally `user`.
+# ─────────────────────────────────────────────────────────────────────────────────────
 profiles:
-  # ⚠️ THE ANTHROPIC ROWS BELOW ARE NOT REACHABLE TODAY. cache_aware_summarizer needs a
-  # components.MessagesModel, and only the OpenAI-shaped client implements it — the Anthropic
-  # client keeps `system` top-level and has no role=tool, so the same mapping would be wrong
-  # there and the component declines on it. These rows encode the provider's documented rules so
-  # they are correct when that client gains the capability; until then `claude-opus-5` +
-  # instruction_role: auto does NOT get you a system-role instruction, it gets a decline.
+  # ⚠️ THE ANTHROPIC ROWS BELOW WERE ONCE MARKED NOT REACHABLE, ON THE GROUNDS THAT ONLY THE
+  # OpenAI-shaped client implements components.MessagesModel and the Anthropic client declines.
+  # That was wrong in a specific way, and it is the bug the allow-list above records: matching is
+  # a substring test on the model id, so `aws/claude-opus-5` served over an OpenAI-shaped gateway
+  # DID reach `match: claude-opus-5` and DID get a system-role instruction — which then 400'd on
+  # every call. A row is reachable whenever some path resolves an id that matches it.
   #
   # ── Anthropic ───────────────────────────────────────────────────────────────────────
   # Mid-conversation system messages are a documented, GA feature (no beta header): append
@@ -125,16 +169,12 @@ profiles:
   # (InvokeModel passthrough, not ARN-versioned models) and Vertex — but NOT Foundry.
   # Source: Anthropic prompt-caching + platform-availability docs, read 2026-09-15.
   - match: claude-opus-5
-    role: system
     verified: "docs 2026-09-15 — mid-conversation system messages, GA, no beta header"
   - match: claude-opus-4-8
-    role: system
     verified: "docs 2026-09-15 — supported"
   - match: claude-fable-5
-    role: system
     verified: "docs 2026-09-15 — supported (covers fable-5 and fable-5-1)"
   - match: claude-mythos-5
-    role: system
     verified: "docs 2026-09-15 — supported (covers mythos-5 and mythos-5-1)"
 
   # ⛔ Sonnet 5 is explicitly NOT supported, and the docs say sources conflict: the model
@@ -143,24 +183,22 @@ profiles:
   # successful call — an intermittently-accepted operator channel is worse than a
   # consistently-absent one.
   - match: claude-sonnet-5
-    role: user
     verified: "docs 2026-09-15 — NOT supported; sources conflict, treat as unsupported"
   # Everything older in the family: 4.7, 4.6, Haiku. Not supported.
   - match: claude-opus-4-7
-    role: user
     verified: "docs 2026-09-15 — predates the feature"
   - match: claude-opus-4-6
-    role: user
     verified: "docs 2026-09-15 — predates the feature"
   - match: claude-sonnet-4-6
-    role: user
     verified: "docs 2026-09-15 — predates the feature"
   - match: claude-haiku
-    role: user
     verified: "docs 2026-09-15 — not supported"
 
   # ── Qwen 3 family (what this cluster serves) ────────────────────────────────────────
-  # ⭐ SUPPORTED, and deliberately so. The Qwen3 chat template dispatches on role with an
+  # ⭐ THE TEMPLATE ACCEPTS IT — but system_models does not grant it, so this resolves to `user`
+  # like everything else. Recorded because it is the strongest promotion candidate on a vLLM path,
+  # where no gateway translation stands between the request and the template. The Qwen3 chat
+  # template dispatches on role with an
   # explicit carve-out for a non-first system message:
   #
   #   {%- if (message.role == "user") or (message.role == "system" and not loop.first) %}
@@ -179,13 +217,12 @@ profiles:
   # long run — the command is in the header above. If the carve-out is absent, this entry
   # is wrong and the arm will silently measure the model continuing the conversation.
   - match: qwen3
-    role: system
     verified: "Qwen3-32B tokenizer_config.json chat_template, 2026-09-15 — `system and not loop.first` renders in place. NOT re-verified on Qwen3.6-27B."
   # ⛔ NO BROAD `qwen/qwen` FALLBACK. It would catch Qwen1.5/Qwen2 builds whose templates were
   # never checked, and an entry whose own provenance says "inherited" is unknown in the sense
-  # that matters — so it must fall through to default_role, exactly as gemma does.
+  # that matters — so it must not be promoted on inheritance, exactly as gemma is not.
 
-  # ── Llama 3.x ⭐ VERIFIED SUPPORTED ──────────────────────────────────────────────────
+  # ── Llama 3.x ⭐ TEMPLATE VERIFIED (not granted; see system_models) ──────────────────
   # The system extraction checks ONLY messages[0]:
   #   {%- if messages[0]['role'] == 'system' %}{%- set system_message = ... %}{%- set messages = messages[1:] %}
   # and the per-message loop then renders ANY role string verbatim with no allow-list:
@@ -199,17 +236,15 @@ profiles:
   #   https://huggingface.co/unsloth/Llama-3.3-70B-Instruct/raw/main/tokenizer_config.json
   #   https://huggingface.co/NousResearch/Meta-Llama-3.1-8B-Instruct/raw/main/tokenizer_config.json
   # ⛔ MATCHED ON THE FULL VERSION, not `llama-3` — matching is a plain SUBSTRING test, and
-  # "codeLlama-34b" contains "llama-3". A test caught exactly that. Only the two builds whose
-  # templates were read get `system`; anything else falls through to default_role.
+  # "codeLlama-34b" contains "llama-3". A test caught exactly that. Kept narrow so that a future
+  # promotion cannot widen accidentally: an entry added to system_models inherits this precision.
   - match: llama-3.1
-    role: system
     verified: "Llama-3.1 tokenizer_config chat_template, 2026-09-15 — generic role branch renders a non-first system message in place"
   - match: llama-3.3
-    role: system
     verified: "Llama-3.3 tokenizer_config chat_template, 2026-09-15 — same generic role branch"
   # ⛔ NO BROAD `llama` FALLBACK. Substring matching would catch llama-2-7b-chat (whose template
   # enforces alternation and RAISES), codellama and llama-guard — none of them the 3.x templates
-  # verified above. Only the verified prefix gets `system`.
+  # verified above. Only the verified prefix is recorded, and recording is not granting.
 
   # ── Families where a trailing system message is WRONG: default to `user` ─────────────
   #
@@ -224,7 +259,7 @@ profiles:
   #   and renders it ONCE at the top, right after bos_token. So a trailing instruction is
   #   accepted, rendered, and placed at the FRONT — before the conversation it was supposed to
   #   comment on. Nothing errors. This is the exact silent failure the `user` default exists
-  #   for, and it is why this entry is `user` even though the template "supports" system.
+  #   for, and it is why this entry is marked VERIFIED WRONG even though the template "supports" system.
   #   Source: DeepSeek-V3 / R1 tokenizer_config chat_template, 2026-09-15.
   #
   # ⛔ gpt-oss — the harmony template inspects only messages[0] for role developer|system and
@@ -239,17 +274,12 @@ profiles:
   #   (system content must be merged into the first user turn), so `user` is very likely also
   #   the correct answer, but it is recorded as unverified rather than asserted.
   - match: mistral
-    role: user
     verified: "VERIFIED WRONG — Mistral-7B-Instruct-v0.3 template raises on a non-first system message (strict alternation)"
   - match: mixtral
-    role: user
     verified: "VERIFIED WRONG — see mistral"
   - match: deepseek
-    role: user
     verified: "VERIFIED WRONG — DeepSeek V3/R1 template HOISTS every system message to the front, silently"
   - match: gpt-oss
-    role: user
     verified: "VERIFIED WRONG — harmony template reads only messages[0]; operator text belongs in the `developer` channel this component does not model"
   - match: gemma
-    role: user
     verified: "UNVERIFIED — tokenizer_config 401 (gated repo); Gemma is widely documented to have no system role at all"
