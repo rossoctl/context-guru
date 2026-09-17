@@ -3094,10 +3094,16 @@ func TestEverySkillStatesThePerOptionFallback(t *testing.T) {
 				e.Name())
 		}
 	}
-	if checked < 4 {
-		t.Fatalf("only %d skills were found to read `settings.py config`; expected at least the four "+
-			"(install, status, uninstall, cache-strategy-picker), so this guard proved less than it "+
-			"claims", checked)
+	// Three, not four, since install/SKILL.md stopped reading the options directly: the orchestrator
+	// (`install.sh --route`) resolves them, with the same per-option fallback enforced in shell and
+	// covered by TestRoutePlanResolvesTheConfiguredPortPerOption. A skill that delegates cannot state
+	// a fallback it no longer performs, so requiring it to would force prose back into a file whose
+	// whole point is that it no longer carries the mechanism. The remaining three (status, uninstall,
+	// cache-strategy-picker) still substitute the values themselves and still need the rule.
+	if checked < 3 {
+		t.Fatalf("only %d skills were found to read `settings.py config`; expected at least the three "+
+			"(status, uninstall, cache-strategy-picker), so this guard proved less than it claims",
+			checked)
 	}
 	t.Logf("checked %d skills that read the configured options", checked)
 }
@@ -3559,6 +3565,18 @@ func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 				"preset: house\ncache:\n  head_ttl_1h: true\n",
 			wantIn:    []string{"cache strategy 1-hour-head", "preset house"},
 			wantNotIn: []string{"cache strategy split", "preset " + optionPreset},
+		},
+		{
+			// A file we do NOT own whose first line happens to carry `strategy=`. The name read ran the
+			// `sed` on line 1 of whatever was at that path, with no ownership test — so a foreign config
+			// was announced as `cache strategy <theirs>` in the startup note while `strategy show` called
+			// the same file `(foreign)`. The stated point of recording the name in the file is that the
+			// two readers cannot disagree, so this is the row that holds them to it.
+			name:      "a foreign config's strategy= is not adopted as ours",
+			writeCfg:  true,
+			cfg:       "# rolled by hand strategy=evil\npreset: house\ncache:\n  keepalive: true\n",
+			wantIn:    []string{"cache strategy unnamed"},
+			wantNotIn: []string{"cache strategy evil", "strategy evil"},
 		},
 		{
 			// A config we own but that predates named strategies, or one we do not own at all: report
@@ -5142,4 +5160,1825 @@ func TestASuccessfulRestoreSaysSoEvenWhenTheShellIsRouted(t *testing.T) {
 	if !strings.Contains(out, "environment report above") {
 		t.Errorf("did not point at what is actually left:\n%s", out)
 	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// install.sh --route: the orchestrator
+// ---------------------------------------------------------------------------------------------
+//
+// These tests exist because the seven steps they cover used to be seven paragraphs of prose in
+// skills/install/SKILL.md, and every defect in that file's history had one shape: the prose was
+// right and the command a model emitted differed from it. Asserting on a script means asserting on
+// what will actually run.
+//
+// Two properties get the most attention here, because both have already shipped as defects:
+//   - `--plan` must write NOTHING. It is the only command in this design that is safe to run
+//     before the user has agreed to anything, and a plan with a side effect is not a plan.
+//   - the ORDER of "start the proxy" and "write the routing key" is load-bearing. Claude Code picks
+//     an env change up while the session is running, so writing first once killed the installing
+//     session with Connection refused before it reached the step that starts the proxy.
+
+// routeEnv builds the environment a --route run sees: a sandbox HOME and state directory, a
+// controlled PATH, and — critically — ANTHROPIC_BASE_URL REMOVED.
+//
+// That last one is not tidiness. The developer's own shell has a base URL set (that is what this
+// plugin does), and inheriting it made every "clean project" fixture look already-routed, so the
+// orchestrator refused with base_url_already_set. The leak was caught by a smoke run; without this
+// helper it would have made the conflict tests below pass for the wrong reason.
+func routeEnv(t *testing.T, home, state, extraPath string) []string {
+	t.Helper()
+	env := []string{}
+	for _, kv := range sandboxEnv(t) {
+		if strings.HasPrefix(kv, "ANTHROPIC_BASE_URL=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	path := os.Getenv("PATH")
+	if extraPath != "" {
+		path = extraPath + string(os.PathListSeparator) + path
+	}
+	return append(env,
+		"HOME="+home,
+		"XDG_STATE_HOME="+state,
+		"CLAUDE_CONFIG_DIR="+filepath.Join(home, ".claude"),
+		"PATH="+path,
+	)
+}
+
+// runRoute runs install.sh --route in `dir` and returns the parsed key=value facts.
+func runRoute(t *testing.T, dir string, env []string, args ...string) (map[string]string, int) {
+	t.Helper()
+	requireTool(t, "bash")
+	argv := append([]string{filepath.Join(scriptsDir(t), "install.sh"), "--route"}, args...)
+	cmd := exec.Command("bash", argv...)
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("running install.sh --route %v: %v (%s)", args, err, out)
+	}
+	facts := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			facts[k] = v
+		}
+	}
+	t.Logf("install.sh --route %v -> exit %d\n%s", args, code, out)
+	return facts, code
+}
+
+// writePluginOptions writes the CONFIGURED plugin options where `settings.py config` reads them.
+// The shape matters and is easy to get wrong: pluginConfigs[<plugin>@<marketplace>].options.
+func writePluginOptions(t *testing.T, home string, opts map[string]any) {
+	t.Helper()
+	dir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, filepath.Join(dir, "settings.json"), map[string]any{
+		"pluginConfigs": map[string]any{
+			"context-guru@context-guru": map[string]any{"options": opts},
+		},
+	})
+}
+
+// consentOK returns the arguments a WRITING-path test needs: the scope plus the explicit consent
+// flag. Spelled out in a helper so it is obvious that these tests stand in for a user who answered
+// yes, rather than quietly routing around the gate - and so that the gate's own test,
+// TestRouteRefusesWithoutExplicitConsent, is the only place the flag is absent on purpose.
+func consentOK(extra ...string) []string {
+	return append([]string{"--scope", "project", "--i-consent-to-traffic-interception"}, extra...)
+}
+
+// TestRoutePlanWritesNothing. --plan is the command that runs before the user has agreed to
+// anything — it is what a `!` block in the skill executes at render time, unprompted. If it can
+// create a settings file, a state directory or a strategy config, then rendering the skill is
+// itself an install, which is exactly the consent this design is careful about.
+func TestRoutePlanWritesNothing(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	facts, code := runRoute(t, proj, routeEnv(t, home, state, ""), "--plan", "--scope", "project")
+	if code != 0 || facts["result"] != "planned" {
+		t.Fatalf("exit %d result=%q, want 0/planned: %v", code, facts["result"], facts)
+	}
+	for _, p := range []string{
+		filepath.Join(proj, ".claude", "settings.local.json"),
+		filepath.Join(state, "context-guru"),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("--plan created %s; a plan with a side effect is not a plan, and this one runs "+
+				"before the user has been asked anything", p)
+		}
+	}
+	// It also has to be USEFUL, or the skill is back to placeholders: the plan is what lets the model
+	// ask its one question with the user's real file and real endpoint in it.
+	for _, k := range []string{"file", "port", "preset", "cache_strategy", "base_url", "permission_rule"} {
+		if facts[k] == "" {
+			t.Errorf("the plan omits %q, so the model has nothing concrete to report or ask about", k)
+		}
+	}
+}
+
+// TestRoutePlanResolvesTheConfiguredPortPerOption is the defect that shipped once, in the shape
+// `${CLAUDE_PLUGIN_OPTION_PORT:-8787}`: plugin options never reach a Bash tool call, so a shell
+// default silently won. The routing key then named 8787 while every later hook read the CONFIGURED
+// port, self-gated on it, saw an unrouted project and did nothing — leaving the one running proxy
+// with no auto-restart behind it, silently, until it idled out.
+//
+// It also pins the PER-OPTION fallback: `settings.py config` prints a line only for keys the user
+// actually set, so a partial config (port set, preset never touched) must not be read as "the rest
+// are configured too" or as "nothing is configured".
+func TestRoutePlanResolvesTheConfiguredPortPerOption(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	// Deliberately partial: port and strategy set, preset and idle_exit never touched.
+	writePluginOptions(t, home, map[string]any{"port": 4041, "cache_strategy": "split"})
+	facts, code := runRoute(t, proj, routeEnv(t, home, state, ""), "--plan", "--scope", "project")
+	if code != 0 {
+		t.Fatalf("exit %d: %v", code, facts)
+	}
+	if facts["port"] != "4041" {
+		t.Errorf("port=%q, want 4041: a defaulted 8787 is the shipped defect this test exists for",
+			facts["port"])
+	}
+	if facts["base_url"] != "http://127.0.0.1:4041/anthropic" {
+		t.Errorf("base_url=%q does not carry the configured port; the routing key and the hooks would "+
+			"then disagree about which proxy this project uses", facts["base_url"])
+	}
+	if facts["health_url"] != "http://127.0.0.1:4041/healthz" {
+		t.Errorf("health_url=%q does not carry the configured port, so the check would prove nothing "+
+			"about the proxy this install actually starts", facts["health_url"])
+	}
+	if facts["cache_strategy"] != "split" {
+		t.Errorf("cache_strategy=%q, want the configured split", facts["cache_strategy"])
+	}
+	// The two the user never set must fall back individually, not be blanked because the file existed.
+	if facts["preset"] != "cache" {
+		t.Errorf("preset=%q; an unconfigured option must fall back to the plugin.json default on its "+
+			"own, and an EMPTY preset silently disables compaction", facts["preset"])
+	}
+	if facts["idle_exit"] != "24h" {
+		t.Errorf("idle_exit=%q, want the 24h default", facts["idle_exit"])
+	}
+}
+
+// TestRouteRefusesAnExistingBaseURLUntilTold. Replacing somebody's gateway silently breaks their
+// setup while looking like success, and which of chain/replace/abort is right depends on whose
+// endpoint it is — not something a script can know. So it must stop, and it must NAME the value.
+func TestRouteRefusesAnExistingBaseURLUntilTold(t *testing.T) {
+	const theirs = "https://gateway.corp.example/v1"
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	env := append(routeEnv(t, home, state, ""), "ANTHROPIC_BASE_URL="+theirs)
+
+	// Exit 0, NOT 2. The plan runs from a `!` block in the skill, and a non-zero exit there produced
+	// an invocation with NO OUTPUT AT ALL in a real sandboxed session — the model never saw the plan
+	// and never asked the question, while the run looked fine because nothing had been written. A
+	// plan reports; `needs_decision` is data, not a failure.
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "project")
+	if code != 0 || facts["result"] != "needs_decision" || facts["reason"] != "base_url_already_set" {
+		t.Fatalf("exit %d result=%q reason=%q, want 0/needs_decision/base_url_already_set: %v",
+			code, facts["result"], facts["reason"], facts)
+	}
+	if facts["existing_base_url"] != theirs {
+		t.Errorf("the refusal does not name what is already set (%q); the user cannot answer the "+
+			"question without it", facts["existing_base_url"])
+	}
+
+	// Told to chain: their endpoint becomes the upstream, so their gateway keeps holding the
+	// credential and doing model-name rewriting. Forgetting to carry it is how chaining works until
+	// the running proxy idles out and the next one is aimed at api.anthropic.com.
+	facts, code = runRoute(t, proj, env, "--plan", "--scope", "project", "--on-conflict", "chain")
+	if code != 0 || facts["result"] != "planned" {
+		t.Fatalf("chain: exit %d result=%q: %v", code, facts["result"], facts)
+	}
+	if facts["chained"] != "true" || facts["upstream"] != theirs {
+		t.Errorf("chained=%q upstream=%q; chaining has to record THEIR endpoint as the upstream",
+			facts["chained"], facts["upstream"])
+	}
+
+	// Told to abort: exit 0 and change nothing. A refusal the user asked for is not a failure.
+	facts, code = runRoute(t, proj, env, "--scope", "project", "--on-conflict", "abort")
+	if code != 0 || facts["result"] != "aborted" {
+		t.Errorf("abort: exit %d result=%q, want 0/aborted", code, facts["result"])
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "settings.local.json")); err == nil {
+		t.Error("abort wrote a settings file anyway")
+	}
+}
+
+// TestRouteRefusesMachineWideWithoutTheFlag. A project-scope mistake costs one project; the same
+// mistake machine-wide takes out every session the user could use to fix it. The refusal lives in
+// the script rather than only in the skill's prose, because a default that exists only in a prompt
+// can be read differently, and what it guards against is a machine-wide lockout.
+func TestRouteRefusesMachineWideWithoutTheFlag(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	env := routeEnv(t, home, state, "")
+	// Under --plan this is a reported decision at exit 0 (see TestRoutePlanAlwaysExitsZero).
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user")
+	if code != 0 || facts["reason"] != "user_scope_needs_flag" {
+		t.Fatalf("exit %d reason=%q, want 0/user_scope_needs_flag: %v", code, facts["reason"], facts)
+	}
+	// But the WRITING path must still refuse it, with a code a caller can act on.
+	if f, c := runRoute(t, proj, env, "--scope", "user"); c != 2 || f["result"] != "refused" {
+		t.Errorf("confirm with --scope user: exit %d result=%q, want 2/refused — a machine-wide "+
+			"install must not be reachable without the flag", c, f["result"])
+	}
+	facts, code = runRoute(t, proj, env, "--plan", "--scope", "user", "--i-understand-machine-wide")
+	if code != 0 || facts["result"] != "planned" {
+		t.Fatalf("with the flag: exit %d result=%q: %v", code, facts["result"], facts)
+	}
+	if want := filepath.Join(home, ".claude", "settings.json"); facts["file"] != want {
+		t.Errorf("file=%q, want the machine-wide file %q", facts["file"], want)
+	}
+}
+
+// TestRouteRefusesUnknownFlagsRatherThanIgnoringThem. A silently dropped --scope writes the wrong
+// file and reports success, which is the worst available outcome: the user is told the thing they
+// asked for happened somewhere it did not.
+func TestRouteRefusesUnknownFlagsRatherThanIgnoringThem(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	env := routeEnv(t, home, state, "")
+	for _, tc := range []struct {
+		args   []string
+		reason string
+	}{
+		{[]string{"--plan", "--frobnicate"}, "unknown_flag"},
+		{[]string{"--plan", "--mode", "sideways"}, "unknown_mode"},
+		{[]string{"--plan", "--on-conflict", "maybe"}, "unknown_on_conflict"},
+	} {
+		facts, code := runRoute(t, proj, env, tc.args...)
+		if code == 0 || facts["reason"] != tc.reason {
+			t.Errorf("%v: exit %d reason=%q, want nonzero/%s", tc.args, code, facts["reason"], tc.reason)
+		}
+	}
+}
+
+// TestRouteAttachModeSkipsInstallAndStart. `attach` is not a smaller `local`: on a gateway
+// deployment the proxy is landed in the gateway, so there is nothing to install and starting a
+// second proxy alongside it is the double-interception case. The URL is also the one thing that
+// cannot be derived there, so it is the one thing validated first — before a health check is spent,
+// and reported as an invalid URL rather than as a failed write, which names the wrong step.
+func TestRouteAttachModeSkipsInstallAndStart(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	env := routeEnv(t, home, state, "")
+
+	t.Run("needs a base url", func(t *testing.T) {
+		facts, code := runRoute(t, proj, env, "--plan", "--mode", "attach")
+		if code != 0 || facts["reason"] != "attach_needs_base_url" {
+			t.Errorf("plan: exit %d reason=%q, want 0/attach_needs_base_url", code, facts["reason"])
+		}
+		if f, c := runRoute(t, proj, env, "--mode", "attach"); c != 2 {
+			t.Errorf("confirm without --base-url: exit %d, want 2 (%v)", c, f)
+		}
+	})
+	t.Run("rejects a malformed one before doing anything", func(t *testing.T) {
+		// The exact shape observed in the wild: no scheme, no port.
+		facts, code := runRoute(t, proj, env, "--mode", "attach",
+			"--base-url", "127.0.0.1/anthropic", "--no-health-check", "--scope", "project")
+		if code != 2 || facts["reason"] != "invalid_base_url" {
+			t.Errorf("exit %d reason=%q, want 2/invalid_base_url: %v", code, facts["reason"], facts)
+		}
+		if facts["detail"] != "no_scheme" {
+			t.Errorf("detail=%q, want no_scheme so the caller can say WHY", facts["detail"])
+		}
+		if _, err := os.Stat(filepath.Join(proj, ".claude", "settings.local.json")); err == nil {
+			t.Error("a malformed base URL was written into a routing key")
+		}
+	})
+	t.Run("a base url in local mode is refused", func(t *testing.T) {
+		facts, code := runRoute(t, proj, env, "--plan", "--scope", "project",
+			"--base-url", "https://gw/anthropic")
+		if code != 0 || facts["reason"] != "base_url_is_local_mode_nonsense" {
+			t.Errorf("plan: exit %d reason=%q: in local mode the URL is derived, so accepting one "+
+				"would reopen the class this design closes", code, facts["reason"])
+		}
+	})
+	t.Run("plans no binary and no start", func(t *testing.T) {
+		facts, code := runRoute(t, proj, env, "--plan", "--mode", "attach",
+			"--base-url", "https://gw.internal/anthropic")
+		if code != 0 {
+			t.Fatalf("exit %d: %v", code, facts)
+		}
+		if !strings.Contains(facts["binary"], "not needed") {
+			t.Errorf("binary=%q; attach must not plan a binary install", facts["binary"])
+		}
+		if facts["health_url"] != "https://gw.internal/healthz" {
+			t.Errorf("health_url=%q; it should sit beside the base URL, not on a local port",
+				facts["health_url"])
+		}
+	})
+}
+
+// fakeProxyDir writes a fake context-guru-proxy that answers /healthz on `port`, and returns the
+// directory to put on PATH.
+//
+// It MUST answer --version and exit: install.sh probes the installed version by running the binary,
+// and the first version of this fixture served forever on that probe, hanging the run before a
+// single assertion could fail. A fake that does not exit where the real one does is not a fake.
+func fakeProxyDir(t *testing.T, port string, listen bool) string {
+	t.Helper()
+	py := requireTool(t, "python3")
+	dir := t.TempDir()
+	body := "sleep 300\n"
+	if listen {
+		body = "exec " + py + " -c '\n" +
+			"import http.server\n" +
+			"class H(http.server.BaseHTTPRequestHandler):\n" +
+			"    def do_GET(self):\n" +
+			"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+			"    def log_message(self, *a): pass\n" +
+			"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n'\n"
+	}
+	script := "#!/usr/bin/env bash\n" +
+		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy vfake (commit none)'; exit 0; fi\n" +
+		body
+	if err := os.WriteFile(filepath.Join(dir, "context-guru-proxy"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestRouteWritesRoutingOnlyAfterSomethingAnswers is the ordering property, from both sides.
+//
+// The failure it prevents was observed in a real session driving the old prose: the routing key was
+// written, the proxy had not been started yet, and the session's next API call went to 127.0.0.1 and
+// died with Connection refused before reaching the step that starts the proxy. The installer
+// produced the hang state the whole design exists to avoid.
+func TestRouteWritesRoutingOnlyAfterSomethingAnswers(t *testing.T) {
+	t.Run("a healthy proxy: routing is written", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		port := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": port})
+		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+		facts, code := runRoute(t, proj, env, consentOK()...)
+		t.Cleanup(func() {
+			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+			}
+		})
+		if code != 0 || facts["result"] != "routed" {
+			t.Fatalf("exit %d result=%q: %v", code, facts["result"], facts)
+		}
+		b, err := os.ReadFile(filepath.Join(proj, ".claude", "settings.local.json"))
+		if err != nil {
+			t.Fatalf("no settings written: %v", err)
+		}
+		if !strings.Contains(string(b), "http://127.0.0.1:"+port+"/anthropic") {
+			t.Errorf("the routing key does not name the resolved port:\n%s", b)
+		}
+		// The strategy has to be written BEFORE the proxy starts, or it does nothing until something
+		// restarts it — start-proxy.sh reads that file only when it starts one.
+		if _, err := os.Stat(filepath.Join(state, "context-guru", "keepalive-"+port+".yaml")); err != nil {
+			t.Errorf("no cache strategy config was written before the proxy started: %v", err)
+		}
+		// And the undo has to be reported, because it is the only thing that works when routing breaks.
+		if facts["reset_hatch"] == "" || facts["reset_hatch"] == "unavailable" {
+			t.Errorf("reset_hatch=%q; the skill is required to print this verbatim and cannot if it "+
+				"is not reported", facts["reset_hatch"])
+		}
+	})
+
+	t.Run("a proxy that never answers: settings are NOT touched", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		port := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": port})
+		env := routeEnv(t, home, state, fakeProxyDir(t, port, false))
+		facts, code := runRoute(t, proj, env, consentOK()...)
+		if code == 0 || facts["reason"] != "health_check_failed" {
+			t.Fatalf("exit %d reason=%q, want nonzero/health_check_failed: %v",
+				code, facts["reason"], facts)
+		}
+		if _, err := os.Stat(filepath.Join(proj, ".claude", "settings.local.json")); err == nil {
+			b, _ := os.ReadFile(filepath.Join(proj, ".claude", "settings.local.json"))
+			t.Errorf("routing was written with nothing answering — a routed project with no proxy is "+
+				"the hang state this ordering exists to prevent:\n%s", b)
+		}
+	})
+}
+
+// TestRouteIsIdempotent. The install skill may be re-run, and on a hosted agent a re-run IS the
+// repair path after an earlier attempt stopped partway. A second run must be a success that changes
+// nothing, not a conflict against itself.
+func TestRouteIsIdempotent(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+	t.Cleanup(func() {
+		if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+			exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+		}
+	})
+	if facts, code := runRoute(t, proj, env, consentOK()...); code != 0 {
+		t.Fatalf("first run: exit %d %v", code, facts)
+	}
+	facts, code := runRoute(t, proj, env, consentOK()...)
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("second run: exit %d result=%q, want 0/routed: %v", code, facts["result"], facts)
+	}
+	if facts["settings_result"] != "unchanged" && facts["settings_result"] != "completed" {
+		t.Errorf("settings_result=%q on a re-run; want unchanged or completed rather than a conflict "+
+			"against our own key", facts["settings_result"])
+	}
+	// A re-run must also be distinguishable from a first install, or it gets narrated as one.
+	if plan, _ := runRoute(t, proj, env, "--plan", "--scope", "project"); plan["already_routed"] != "true" {
+		t.Errorf("already_routed=%q after installing; the model cannot tell a repair from a fresh "+
+			"install and will describe the wrong thing", plan["already_routed"])
+	}
+}
+
+// TestInstallSkillDelegatesRatherThanReimplementing. The point of the orchestrator is that the
+// ordering and the option resolution stop being prose. If the skill still spells out the individual
+// commands, both copies exist and the one a model follows is whichever it read last.
+func TestInstallSkillDelegatesRatherThanReimplementing(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("skills", "install", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	if !strings.Contains(body, "--route --plan") {
+		t.Error("the install skill never renders the plan, so the model is back to asking its " +
+			"question with placeholders instead of the user's real file and endpoint")
+	}
+	// The `!` block is what makes the plan un-mistypable: it runs at render, so no model chose it.
+	if !strings.Contains(body, "!`") {
+		t.Error("the plan is not rendered through a `!` block, so the model must decide to run it " +
+			"and can reword it — the failure mode the orchestrator exists to remove")
+	}
+	for _, banned := range []string{`settings.py" add`, `start-proxy.sh" --unrouted`} {
+		if strings.Contains(body, banned) {
+			t.Errorf("the install skill still spells out %q. The ordering between the individual "+
+				"scripts is load-bearing and getting it wrong once killed the installing session; "+
+				"two copies of it means a model can follow the wrong one.", banned)
+		}
+	}
+	// Cut from 423 lines to roughly a third. Not a style preference: 39 of those lines were some
+	// form of "do not improvise this", which is what prose has to do when it carries a mechanism.
+	if n := strings.Count(body, "\n"); n > 200 {
+		t.Errorf("the install skill is %d lines; it delegates the mechanism now, so it should be "+
+			"well under 200", n)
+	}
+}
+
+// TestRoutePlanAlwaysExitsZero is the regression test for the defect that a real sandboxed session
+// found and no unit test could have.
+//
+// The install skill runs `--route --plan` from a `!` block, which pre-executes at render. The first
+// version of this script exited 2 when a base URL was already set — the commonest state of a hosted
+// machine, and precisely the case the plan exists to describe. Invoked for real, the whole skill then
+// produced NO OUTPUT AT ALL: the model never saw the plan, never asked its question, and the run
+// looked successful because nothing had been written.
+//
+// So the rule is flat, and it is cheaper to assert than to reason about: a plan REPORTS. Every
+// condition it can discover is a fact on stdout with exit 0. Only a command that actually declines
+// to act — the writing path — exits non-zero.
+func TestRoutePlanAlwaysExitsZero(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	base := routeEnv(t, home, state, "")
+	withTheirs := append(routeEnv(t, home, state, ""),
+		"ANTHROPIC_BASE_URL=https://gateway.corp.example/v1")
+
+	for _, tc := range []struct {
+		name string
+		env  []string
+		args []string
+	}{
+		{"clean project", base, []string{"--plan", "--scope", "project"}},
+		{"a base URL already set", withTheirs, []string{"--plan", "--scope", "project"}},
+		{"machine-wide without the flag", base, []string{"--plan", "--scope", "user"}},
+		{"attach with no base url", base, []string{"--plan", "--mode", "attach"}},
+		{"attach with a malformed base url", base,
+			[]string{"--plan", "--mode", "attach", "--base-url", "127.0.0.1/anthropic"}},
+		{"a base url in local mode", base,
+			[]string{"--plan", "--scope", "project", "--base-url", "https://gw/anthropic"}},
+		{"team scope", base, []string{"--plan", "--scope", "team"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, code := runRoute(t, proj, tc.env, tc.args...)
+			if code != 0 {
+				t.Errorf("exit %d, want 0. A `!` block that exits non-zero can take the whole skill "+
+					"invocation with it, and then the model sees nothing at all: %v", code, facts)
+			}
+			// Exit 0 is not enough on its own — it must also SAY something the caller can branch on,
+			// or a silent success is just a different way of proving nothing.
+			switch facts["result"] {
+			case "planned", "needs_decision":
+			default:
+				t.Errorf("result=%q; a plan must report either `planned` or `needs_decision`",
+					facts["result"])
+			}
+		})
+	}
+}
+
+// TestInstallSkillDoesNotGrantItselfTheGatedCommand.
+//
+// Measured in a real sandboxed session: with `allowed-tools: Bash(.../install.sh)` in the skill's
+// frontmatter, the command that starts a traffic-intercepting proxy and repoints
+// ANTHROPIC_BASE_URL ran with NO prompt at all. The `!` block needs no such grant — it pre-executes
+// at render — so the only thing that line can grant is the one step whose gate this design calls a
+// feature.
+//
+// A plugin declaring the permission the classifier exists to ask about is the plugin answering a
+// question that belongs to its user. That is worth a test rather than a comment, because adding an
+// allowed-tools line is an obvious "fix" for anyone who finds the prompt annoying.
+func TestInstallSkillDoesNotGrantItselfTheGatedCommand(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("skills", "install", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	front, _, ok := strings.Cut(strings.TrimPrefix(body, "---\n"), "\n---")
+	if !ok {
+		t.Fatal("no frontmatter in skills/install/SKILL.md")
+	}
+	for _, line := range strings.Split(front, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "allowed-tools:") {
+			t.Errorf("the install skill declares %q. That pre-approves the one command that redirects "+
+				"the user's model traffic, which was measured to run with no prompt at all. The `!` "+
+				"block does not need it.", strings.TrimSpace(line))
+		}
+	}
+	// And the reason has to stay written down, or the line comes back.
+	if !strings.Contains(body, "allowed-tools") {
+		t.Error("no note explaining why there is no allowed-tools; without it the next person to " +
+			"find the prompt annoying will simply add one")
+	}
+}
+
+// TestRouteRefusesWithoutExplicitConsent is the gate the owner chose over relying on the approval
+// prompt, and the three measurements behind that choice are worth keeping next to the test:
+//
+//   - the auto-mode classifier is itself a model, so it is probabilistic. The same command string was
+//     denied in one trial and allowed in two others (see #248's retracted finding 3).
+//   - a skill can declare the prompt away. With `allowed-tools: Bash(.../install.sh)` in its
+//     frontmatter, this exact command ran with NO prompt at all.
+//   - in a non-interactive session there is no prompt, because there is no human to ask — and the
+//     measured result was a complete, unattended install of a traffic interceptor.
+//
+// The third is what this gate is really for: an unattended run now FAILS CLOSED. What the gate cannot
+// do is prove a human said yes, since a caller can pass the flag unprompted. It converts "we hope a
+// prompt fires" into a deterministic precondition, which is a different and better kind of guarantee
+// than none.
+func TestRouteRefusesWithoutExplicitConsent(t *testing.T) {
+	for _, mode := range []string{"local", "attach"} {
+		t.Run(mode, func(t *testing.T) {
+			home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+			port := freePort(t)
+			writePluginOptions(t, home, map[string]any{"port": port})
+			env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+			args := []string{"--scope", "project"}
+			if mode == "attach" {
+				// attach starts nothing, but it still repoints the session's traffic, so it needs the
+				// same consent. A gate that only covered the mode that runs a binary would be guarding
+				// the wrong thing.
+				args = append(args, "--mode", "attach",
+					"--base-url", "http://127.0.0.1:"+port+"/anthropic")
+			}
+			facts, code := runRoute(t, proj, env, args...)
+			if code != 2 || facts["reason"] != "consent_required" {
+				t.Fatalf("exit %d reason=%q, want 2/consent_required: %v", code, facts["reason"], facts)
+			}
+			// Nothing at all may have happened. Not a settings file, not a proxy, not a strategy.
+			for _, p := range []string{
+				filepath.Join(proj, ".claude", "settings.local.json"),
+				filepath.Join(state, "context-guru", "proxy-"+port+".pid"),
+				filepath.Join(state, "context-guru", "keepalive-"+port+".yaml"),
+			} {
+				if _, err := os.Stat(p); err == nil {
+					t.Errorf("refused for want of consent but created %s anyway", p)
+				}
+			}
+			// The refusal has to hand back a runnable command, or a model reassembles one by hand —
+			// which is exactly how a scheme-less URL got composed on 2026-09-14.
+			if !strings.Contains(facts["confirm_command"], "--i-consent-to-traffic-interception") {
+				t.Errorf("confirm_command=%q does not carry the consent flag", facts["confirm_command"])
+			}
+		})
+	}
+}
+
+// TestRouteProceedsWithConsentAndThePrintedCommandWorksVerbatim. A refusal that hands back a command
+// which does not actually work is worse than no suggestion at all: it invites the caller to improvise
+// a fix. So run the printed command exactly as printed, through a shell, and require it to install.
+func TestRouteProceedsWithConsentAndThePrintedCommandWorksVerbatim(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+	t.Cleanup(func() {
+		if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+			exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+		}
+	})
+
+	plan, code := runRoute(t, proj, env, "--plan", "--scope", "project")
+	if code != 0 {
+		t.Fatalf("plan: exit %d %v", code, plan)
+	}
+	if plan["consent_required"] != "true" {
+		t.Errorf("the plan does not advertise consent_required, so the model has no reason to ask "+
+			"before running the command: %v", plan)
+	}
+	cmdline := plan["confirm_command"]
+	if cmdline == "" {
+		t.Fatal("the plan printed no confirm_command")
+	}
+
+	cmd := exec.Command("bash", "-c", cmdline)
+	cmd.Dir = proj
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	t.Logf("verbatim confirm_command -> %v\n%s", err, out)
+	if !strings.Contains(string(out), "result=routed") {
+		t.Errorf("the command the plan printed did not complete the install when run verbatim:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "settings.local.json")); err != nil {
+		t.Errorf("no routing written by the printed command: %v", err)
+	}
+}
+
+// TestRouteConfirmCommandCarriesEveryDecision. The point of printing it is that the caller appends
+// nothing. If the decisions the plan resolved are missing from it, a model has to reassemble the
+// command — the failure that produced a scheme-less URL on a colleague's machine.
+func TestRouteConfirmCommandCarriesEveryDecision(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	env := append(routeEnv(t, home, state, ""),
+		"ANTHROPIC_BASE_URL=https://gateway.corp.example/v1")
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
+		"--i-understand-machine-wide", "--on-conflict", "chain", "--cache-strategy", "split",
+		"--upstream", "https://gw.example/v1", "--health-url", "http://127.0.0.1:9/healthz",
+		"--no-health-check")
+	if code != 0 {
+		t.Fatalf("exit %d: %v", code, facts)
+	}
+	for _, want := range []string{
+		"--scope user",
+		"--on-conflict chain",
+		"--i-understand-machine-wide",
+		// Three more that travelled in argv and were missing from the printed line. --upstream is the
+		// consequential one: it decides what gets WRITTEN, so dropping it made the install record an
+		// upstream the caller never asked for. The other two decide how the install VERIFIES itself,
+		// and a dropped verification decision is the quieter half of the same defect.
+		"--upstream https://gw.example/v1",
+		"--health-url http://127.0.0.1:9/healthz",
+		"--no-health-check",
+		// The decision that spends the user's money was missing from both the command and this list,
+		// which is how the drop shipped past a suite that otherwise covers this area well. `split` is
+		// the value worth pinning: the regression is a user asking NOT to spend and being charged.
+		"--cache-strategy split",
+		"--i-consent-to-traffic-interception",
+	} {
+		if !strings.Contains(facts["confirm_command"], want) {
+			t.Errorf("confirm_command is missing %q, so the caller must add it by hand:\n%s",
+				want, facts["confirm_command"])
+		}
+	}
+}
+
+// TestInstallSkillAsksForConsentAsAChoice. The gate is only half the mechanism; the other half is
+// that a human is actually asked. A skill that mentions the flag without saying how to obtain a yes
+// invites a model to append it to make a refusal go away — which is the one thing it must not be.
+func TestInstallSkillAsksForConsentAsAChoice(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("skills", "install", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	if !strings.Contains(body, "--i-consent-to-traffic-interception") {
+		t.Fatal("the install skill never mentions the consent flag, so the install cannot complete")
+	}
+	// A pickable choice, not prose to skim.
+	if !strings.Contains(body, "AskUserQuestion") {
+		t.Error("the skill does not tell the model to ask with AskUserQuestion; a two-option choice " +
+			"is much harder to answer sideways than a sentence ending in a question mark")
+	}
+	// And the absence of an answer must be a refusal, or an unattended run proceeds by default —
+	// the exact behaviour this gate was added to stop.
+	lowered := strings.ToLower(body)
+	if !strings.Contains(lowered, "a silent or absent answer is a no") {
+		t.Error("the skill does not say that a silent or absent answer means NO. Without that, a " +
+			"non-interactive session has no instruction against passing the flag unasked")
+	}
+	if !strings.Contains(lowered, "do not pass") {
+		t.Error("the skill never prohibits passing the consent flag on the model's own judgement")
+	}
+}
+
+// TestValidBaseURLRefusesAHostThatIsNotAHost. The host was checked for emptiness and nothing else,
+// which would be a modest gap if the approved string stayed data. It does not: install.sh interpolates
+// it into `confirm_command=`, SKILL.md tells the model to run that verbatim, and this suite runs it
+// through `bash -c`. So "is this a URL we will write" was also, in effect, "is this safe to put in a
+// command line", and it answered yes to `http://x;whoami/anthropic`.
+func TestValidBaseURLRefusesAHostThatIsNotAHost(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	for _, bad := range []string{
+		"http://x;whoami/anthropic", // command separator
+		"http://$(id)/anthropic",    // command substitution
+		"http://`id`/anthropic",     // the older spelling of the same
+		"http://a b/anthropic",      // argument splitting
+		"http://x@y/anthropic",      // userinfo, i.e. a host that is not the host
+		"http://-/anthropic",        // reads as a flag once it reaches a command line
+		"http://x|y/anthropic",      // pipe
+		"http://x&y/anthropic",      // background/AND
+	} {
+		facts, code := settingsIn(t, state, home, "check-url", "--url", bad)
+		if code == 0 || facts["detail"] != "bad_host" {
+			t.Errorf("check-url %q -> exit %d detail=%q; want a bad_host refusal. This string reaches a "+
+				"shell command line the skill tells a model to run verbatim", bad, code, facts["detail"])
+		}
+	}
+
+	// The control half. A guard that refuses real gateways is a different defect, not a fix — and the
+	// underscore case is deliberate: it is not strictly legal in a hostname, internal gateways use it
+	// anyway, and it is shell-inert, so refusing it would block installs to buy nothing.
+	for _, good := range []string{
+		"http://127.0.0.1:8787/anthropic",
+		"https://gw.internal/anthropic",
+		"https://gw-1.corp_int.example:4000/anthropic",
+		"http://[::1]:8787/anthropic",
+	} {
+		facts, code := settingsIn(t, state, home, "check-url", "--url", good)
+		if code != 0 || facts["result"] != "ok" {
+			t.Errorf("check-url %q -> exit %d %v; refusing a legitimate endpoint is its own defect",
+				good, code, facts)
+		}
+	}
+}
+
+// TestRouteConfirmCommandCannotCarryShellSyntax is the second half of the same defect, and it is the
+// half that keeps working when the first is bypassed.
+//
+// The host character class cannot save this case: the URL below is a LEGITIMATE loopback URL by every
+// rule valid_base_url() enforces — real host, real port, path ending in `anthropic` — and it still
+// carries `;` in its PATH, which valid_base_url() does not police and should not have to. The only
+// thing standing between that and execution is that route_confirm_command quotes what it interpolates.
+//
+// Asserted on the marker file rather than the exit code on purpose: the install is expected to fail
+// (there is nothing at that URL). What must not happen is the payload running, and it ran BEFORE any
+// consent answer in the original, because it rides the string `--plan` prints.
+func TestRouteConfirmCommandCannotCarryShellSyntax(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	marker := filepath.Join(t.TempDir(), "PWNED")
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	env := routeEnv(t, home, state, "")
+
+	hostile := "http://127.0.0.1:" + port + "/;touch " + marker + ";/anthropic"
+
+	// It really is accepted by the validator — otherwise this test would be proving nothing about the
+	// quoting, which is the thing it exists to pin.
+	if facts, code := settingsIn(t, state, home, "check-url", "--url", hostile); code != 0 {
+		t.Skipf("check-url now refuses %q (%v); this case no longer isolates the quoting layer",
+			hostile, facts)
+	}
+
+	plan, code := runRoute(t, proj, env, "--plan", "--mode", "attach", "--base-url", hostile)
+	if code != 0 {
+		t.Fatalf("plan: exit %d %v", code, plan)
+	}
+	cmdline := plan["confirm_command"]
+	if cmdline == "" {
+		t.Fatal("no confirm_command to test")
+	}
+	cmd := exec.Command("bash", "-c", cmdline)
+	cmd.Dir = proj
+	cmd.Env = env
+	out, _ := cmd.CombinedOutput()
+	t.Logf("confirm_command run verbatim:\n%s\n%s", cmdline, out)
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("the command printed by --plan executed an injected payload (%s exists). It fires "+
+			"whenever that string reaches a shell, which is upstream of the consent gate entirely",
+			marker)
+	}
+}
+
+// TestRouteDecidesProvenanceFromTheRecordNotTheURLShape. `route_inspect` answered "is this already
+// ours?" by matching `127.0.0.1:<port>` against the current value — the one inference
+// valid_base_url()'s own docstring forbids, because two local proxies are indistinguishable by URL.
+// The consequence was not cosmetic: somebody else's proxy on our port was reported as ours with
+// `existing_base_url=` emptied, so the single question this design says can never be defaulted was
+// never asked, and the skill narrated it as "a re-run or a repair".
+func TestRouteDecidesProvenanceFromTheRecordNotTheURLShape(t *testing.T) {
+	port := freePort(t)
+
+	t.Run("a foreign URL on our own port is a conflict", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		writePluginOptions(t, home, map[string]any{"port": port})
+		// No `$context-guru` record: this file was written by something else. Same URL we would use.
+		foreign := "http://127.0.0.1:" + port + "/anthropic"
+		if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeJSON(t, filepath.Join(proj, ".claude", "settings.local.json"),
+			map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": foreign}})
+
+		facts, code := runRoute(t, proj, routeEnv(t, home, state, ""), "--plan", "--scope", "project")
+		if code != 0 {
+			t.Fatalf("plan: exit %d %v", code, facts)
+		}
+		if facts["already_routed"] == "true" {
+			t.Errorf("claimed somebody else's endpoint as ours. With port 4000 this is litellm's own "+
+				"default, so this is how an install would silently take over a working gateway: %v", facts)
+		}
+		if facts["existing_base_url"] == "" {
+			t.Errorf("existing_base_url was emptied, so the conflict is never reported and the one "+
+				"question that cannot be defaulted is never asked: %v", facts)
+		}
+	})
+
+	t.Run("a different port is not our port", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		writePluginOptions(t, home, map[string]any{"port": port})
+		// The old match was an unanchored substring, so 8787 matched an endpoint on 87870.
+		if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeJSON(t, filepath.Join(proj, ".claude", "settings.local.json"), map[string]any{
+			"env": map[string]any{"ANTHROPIC_BASE_URL": "http://127.0.0.1:" + port + "0/anthropic"},
+		})
+		facts, code := runRoute(t, proj, routeEnv(t, home, state, ""), "--plan", "--scope", "project")
+		if code != 0 {
+			t.Fatalf("plan: exit %d %v", code, facts)
+		}
+		if facts["already_routed"] == "true" {
+			t.Errorf("port %s0 was matched as port %s: %v", port, port, facts)
+		}
+	})
+
+	// The other direction, which is what makes the fix a fix rather than a refusal to answer: OUR OWN
+	// install must still be recognised, from the record this time, so a re-run is not narrated as fresh.
+	t.Run("our own install is still recognised", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		p := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": p})
+		env := routeEnv(t, home, state, fakeProxyDir(t, p, true))
+		t.Cleanup(func() { stopFakeProxy(t, state, p) })
+
+		if facts, code := runRoute(t, proj, env, consentOK()...); code != 0 {
+			t.Fatalf("first install: exit %d %v", code, facts)
+		}
+		facts, code := runRoute(t, proj, env, "--plan", "--scope", "project")
+		if code != 0 {
+			t.Fatalf("plan: exit %d %v", code, facts)
+		}
+		if facts["already_routed"] != "true" {
+			t.Errorf("our own routing was not recognised, so a re-run gets narrated as a fresh "+
+				"install: %v", facts)
+		}
+	})
+}
+
+// TestRouteRefusesAnUnknownStrategyBeforeTouchingAnything. `settings.py strategy set` refuses a typo
+// with exit 2, and install.sh turned that refusal into `strategy_warning=` with `|| true`. No config
+// file written means `split`, so `--cache-strategy 5-minute-ping` installed a DIFFERENT mechanism from
+// the one named and reported `result=routed`. That is the same shape as the unknown flag this script
+// already refuses: a dropped decision reporting success.
+func TestRouteRefusesAnUnknownStrategyBeforeTouchingAnything(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+
+	facts, code := runRoute(t, proj, env, consentOK("--cache-strategy", "5-minute-ping")...)
+	if code != 2 || facts["reason"] != "unknown_strategy" {
+		t.Fatalf("exit %d reason=%q, want 2/unknown_strategy: %v", code, facts["reason"], facts)
+	}
+	// Before the binary, before the proxy, before the settings file.
+	for _, p := range []string{
+		filepath.Join(proj, ".claude", "settings.local.json"),
+		filepath.Join(state, "context-guru", "proxy-"+port+".pid"),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("refused the strategy name but created %s anyway", p)
+		}
+	}
+	// The names have to be in the refusal, or the model guesses — and the names differ in whether they
+	// spend the user's money, which is not a thing to guess at.
+	if !strings.Contains(facts["note"], "5-min-ping") {
+		t.Errorf("the refusal does not list the real strategy names: note=%q", facts["note"])
+	}
+}
+
+// TestRouteReportsAProxyItLeftRunning. "SETTINGS WERE NOT TOUCHED" is true, and "nothing happened" is
+// what a caller infers from it — the skill was instructing the model to say "nothing was written; the
+// project is unrouted, which is a working project", and the first clause was false. This matters most
+// when the health check fails TRANSIENTLY: the user is told nothing happened, and their retry meets a
+// stale pidfile on an occupied port.
+func TestRouteReportsAProxyItLeftRunning(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	// listen=false: it starts, it stays up, it never answers /healthz.
+	env := routeEnv(t, home, state, fakeProxyDir(t, port, false))
+	t.Cleanup(func() { stopFakeProxy(t, state, port) })
+
+	facts, code := runRoute(t, proj, env, consentOK()...)
+	if facts["reason"] != "health_check_failed" {
+		t.Fatalf("exit %d, want a failed health check: %v", code, facts)
+	}
+	pidfile := filepath.Join(state, "context-guru", "proxy-"+port+".pid")
+	b, err := os.ReadFile(pidfile)
+	if err != nil {
+		t.Skipf("no proxy was started, so there is no side effect to report: %v", err)
+	}
+	// Ground truth first: this test is only meaningful if something really is still running.
+	if err := exec.Command("kill", "-0", strings.TrimSpace(string(b))).Run(); err != nil {
+		t.Skipf("the fake proxy is not running, so there is nothing to report: %v", err)
+	}
+	if facts["proxy_started"] != "true" {
+		t.Errorf("a proxy IS running on port %s and the report does not say so. The caller is told "+
+			"only that settings were untouched, and will report that nothing happened: %v", port, facts)
+	}
+	if facts["pidfile"] == "" || facts["stop_command"] == "" {
+		t.Errorf("no pidfile= or stop_command=, so the user is left with a listener and no handle "+
+			"on it: %v", facts)
+	}
+}
+
+// TestRoutePlanCarriesTheConsentQuestionIncludingTheSpend.
+//
+// The gate guards the ACT and has to name the TERMS. `--i-consent-to-traffic-interception` is spelled
+// to gate "traffic gets intercepted", while what the user is asked also covers scope and which cache
+// strategy — and the default one spends their own quota while nobody is at the keyboard. A question
+// narrower than the command it authorises is not consent to that command, so the question is generated
+// from the same resolved facts as the command rather than from the skill's example paragraph.
+func TestRoutePlanCarriesTheConsentQuestionIncludingTheSpend(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	writePluginOptions(t, home, map[string]any{"port": freePort(t)})
+	env := routeEnv(t, home, state, "")
+
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "project")
+	if code != 0 {
+		t.Fatalf("plan: exit %d %v", code, facts)
+	}
+	q := facts["consent_question"]
+	if q == "" {
+		t.Fatal("the plan prints no consent_question=, so the question a model asks is composed from " +
+			"prose and can drift from the command it authorises")
+	}
+	if !strings.Contains(q, "SPENDS") {
+		t.Errorf("the default strategy spends the user's own quota and the question does not say so. "+
+			"That is the half of the proposition a user would most want to have been asked: %q", q)
+	}
+
+	// And with a strategy that does not spend, it must not claim otherwise.
+	facts, code = runRoute(t, proj, env, "--plan", "--scope", "project", "--cache-strategy", "split")
+	if code != 0 {
+		t.Fatalf("plan: exit %d %v", code, facts)
+	}
+	if strings.Contains(facts["consent_question"], "SPENDS") {
+		t.Errorf("`split` spends nothing, so warning about spending is a false statement in the one "+
+			"sentence the user is asked to agree to: %q", facts["consent_question"])
+	}
+}
+
+// TestRouteHonoursTheStrategyThroughThePrintedCommand is the end-to-end of the money finding: not just
+// that the flag appears in `confirm_command=`, but that running that line actually leaves `split`
+// armed. The regression it guards is a user asking not to spend and being charged anyway.
+func TestRouteHonoursTheStrategyThroughThePrintedCommand(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+	t.Cleanup(func() { stopFakeProxy(t, state, port) })
+
+	plan, code := runRoute(t, proj, env, "--plan", "--scope", "project", "--cache-strategy", "split")
+	if code != 0 {
+		t.Fatalf("plan: exit %d %v", code, plan)
+	}
+	cmd := exec.Command("bash", "-c", plan["confirm_command"])
+	cmd.Dir = proj
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	t.Logf("verbatim -> %v\n%s", err, out)
+	if !strings.Contains(string(out), "result=routed") {
+		t.Fatalf("the printed command did not complete the install:\n%s", out)
+	}
+	// `split` IS the absence of a keepalive config. Its presence means the spending strategy was armed.
+	if _, err := os.Stat(filepath.Join(state, "context-guru", "keepalive-"+port+".yaml")); err == nil {
+		t.Error("the user asked for `split` and a keepalive config was written anyway, so the install " +
+			"spends their quota while reporting success")
+	}
+}
+
+// stopFakeProxy kills whatever the run under test left listening. Pidfile-first and best-effort: a
+// `pkill` pattern is out of the question here, because these eval boxes are shared with another
+// engineer and with other sessions running as the same unix user.
+func stopFakeProxy(t *testing.T, state, port string) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid"))
+	if err != nil {
+		return
+	}
+	if pid := strings.TrimSpace(string(b)); pid != "" {
+		exec.Command("kill", pid).Run() //nolint:errcheck
+	}
+}
+
+// TestInstallSkillRunsThePrintedCommandRatherThanAnExample. The step-2 block used to be a hand-written
+// command, and it contradicted the bullet directly under it telling the model to run `confirm_command=`
+// as printed. Two concrete defects in one block: it baked in `--on-conflict chain`, wrong whenever the
+// plan came back with nothing already set, and it spelled the path with `${CLAUDE_PLUGIN_ROOT}` — a
+// variable install.sh's own comment records as substituted into a `!`-block's command STRING but NOT
+// exported to a child process, so on the one gated command it can expand to `/scripts/install.sh`.
+func TestInstallSkillRunsThePrintedCommandRatherThanAnExample(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("skills", "install", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	step, _, found := strings.Cut(body, "## 3. Read the result")
+	if !found {
+		t.Fatal("SKILL.md no longer has a `## 3. Read the result` section; this test reads the step " +
+			"above it and needs re-anchoring")
+	}
+	_, step, found = strings.Cut(step, "### Then run one command")
+	if !found {
+		t.Fatal("SKILL.md no longer has a `### Then run one command` section")
+	}
+	// The defect is a COPYABLE command, so that is what this looks for: a fenced block in this step
+	// spelling out an install.sh invocation. Prose may name `--on-conflict chain` and
+	// `${CLAUDE_PLUGIN_ROOT}` freely — the section explains why neither belongs in a command here, and
+	// an earlier version of this assertion failed on that explanation, which is a test measuring the
+	// wrong thing rather than a defect in the file.
+	for _, fence := range strings.Split(step, "```")[1:] {
+		if !strings.Contains(fence, "install.sh") {
+			continue
+		}
+		t.Errorf("this step shows a copyable install.sh command:\n%s\nA model copies the block, not "+
+			"the bullet beside it. Every hand-written spelling of this command has been wrong in the "+
+			"same two ways: a baked-in --on-conflict that is wrong whenever the plan found nothing "+
+			"already set, and ${CLAUDE_PLUGIN_ROOT}, which is not exported to a Bash tool call. "+
+			"confirm_command= carries the absolute path resolved from $0", fence)
+		break
+	}
+	if !strings.Contains(step, "verbatim") {
+		t.Error("the step no longer tells the model to run the printed line verbatim")
+	}
+	// And the ask has to be driven by the script's own resolved question, not a paragraph that can
+	// drift from what the command does.
+	if !strings.Contains(body, "consent_question") {
+		t.Error("the skill does not use consent_question=, so the question asked and the command " +
+			"authorised are composed independently and can disagree about the money")
+	}
+}
+
+// TestStrategySetSplitAnswersTheOperationTheCallerAsked. `split` is implemented as a REMOVAL, because
+// --config replaces --preset rather than layering, so the absence of a file is the only way to express
+// "the preset and nothing else". That is the right mechanism and it leaked into the report: a caller
+// that asked to `set` was answered `cleared`, so success had three words and every future caller
+// inherited the obligation to know that. install.sh's `set|cleared|unchanged` case was the tell.
+func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	const port = "9391"
+
+	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+		"--port", port, "--preset", "cache"); code != 0 || facts["result"] != "set" {
+		t.Fatalf("arming a real strategy: exit %d %v", code, facts)
+	}
+
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "split",
+		"--port", port, "--preset", "cache")
+	if code != 0 || facts["result"] != "set" {
+		t.Errorf("`strategy set --name split` -> exit %d result=%q; a caller that asked to set is "+
+			"answered with the word for what it asked: %v", code, facts["result"], facts)
+	}
+	if facts["strategy"] != "split" {
+		t.Errorf("strategy=%q, want split: %v", facts["strategy"], facts)
+	}
+	// The path deliberately does not exist now, so naming it would be a confidently wrong detail.
+	if facts["file"] != "(none)" {
+		t.Errorf("file=%q; `split` IS the absence of a config, so the report should not name a path "+
+			"that does not exist: %v", facts["file"], facts)
+	}
+	// Idempotent, and still a `set`.
+	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "split",
+		"--port", port, "--preset", "cache"); code != 0 || facts["result"] != "set" {
+		t.Errorf("re-setting split: exit %d %v", code, facts)
+	}
+
+	// And `clear`, invoked as itself, keeps its own vocabulary — the fix must not have flattened the
+	// distinction, only stopped one op borrowing the other's word.
+	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+		"--port", port, "--preset", "cache"); code != 0 {
+		t.Fatalf("re-arming: exit %d %v", code, facts)
+	}
+	if facts, code := settingsIn(t, state, home, "strategy", "clear", "--port", port); code != 0 ||
+		facts["result"] != "cleared" {
+		t.Errorf("`strategy clear` -> exit %d result=%q, want cleared: %v", code, facts["result"], facts)
+	}
+	if facts, code := settingsIn(t, state, home, "strategy", "clear", "--port", port); code != 0 ||
+		facts["result"] != "unchanged" {
+		t.Errorf("`strategy clear` with nothing there -> exit %d result=%q, want unchanged: %v",
+			code, facts["result"], facts)
+	}
+}
+
+// TestOneHourHeadDisclosesItsSizeGateEverywhereItIsDescribed.
+//
+// `1-hour-head` ships `head_ttl_min_tokens: 50000`, and that number is the difference between the
+// strategy doing something and doing nothing. It was disclosed in none of the three places a user
+// reads before choosing it.
+//
+// What makes it more than an omission: the evidence all three places cite is config/config.go's live
+// measurement — GRANTED on Haiku 4.5 at 36,251 of 36,574 tokens written, downgraded on Sonnet 5 at
+// 48,212. BOTH of those prefixes are BELOW the 50,000 gate the strategy ships with. So a user who arms
+// this on the one model where the tier was granted, and checks a request the size of the one that was
+// measured, sees no 1h label — and the advice to "verify with Usage.CacheWrite1h" reads zero for a
+// second, undisclosed reason. The threshold is defensible (it is what makes the strategy pay at all);
+// advertising a measurement while hiding the gate that measurement would not have passed is not.
+func TestOneHourHeadDisclosesItsSizeGateEverywhereItIsDescribed(t *testing.T) {
+	// The gate as actually shipped. If this changes, every description below has to change with it,
+	// which is the coupling this test exists to enforce.
+	gate, err := os.ReadFile(filepath.Join("scripts", "settings.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gate), `head_ttl_min_tokens": 50000`) {
+		t.Skip("the 1-hour-head size gate is no longer 50000; re-anchor this test on the new value")
+	}
+
+	for _, f := range []struct{ what, path string }{
+		{"the strategy's own description, printed by `strategy list`",
+			filepath.Join("scripts", "settings.py")},
+		{"plugin.json, where the option is actually chosen",
+			filepath.Join(".claude-plugin", "plugin.json")},
+		{"the picker skill, which is what a user reads to decide",
+			filepath.Join("skills", "cache-strategy-picker", "SKILL.md")},
+	} {
+		b, err := os.ReadFile(f.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := string(b)
+		// Only the text that talks about this strategy matters, but every one of these files mentions it
+		// exactly once in prose, so a whole-file check is honest and stays readable.
+		if !strings.Contains(body, "1-hour-head") && !strings.Contains(body, "1-hour tier") {
+			t.Errorf("%s (%s) does not describe 1-hour-head at all", f.what, f.path)
+			continue
+		}
+		if !strings.Contains(body, "50k") && !strings.Contains(body, "50,000") &&
+			!strings.Contains(body, "50000") {
+			t.Errorf("%s (%s) describes 1-hour-head without stating the >=50k-token gate. Below that "+
+				"the strategy does nothing at all, and both measurements this file cites as evidence "+
+				"(36,574 and 48,212 tokens) are on the inactive side of it", f.what, f.path)
+		}
+	}
+}
+
+// withEnv replaces a variable in a prepared environment rather than appending a second copy of it:
+// duplicate keys in an exec environment are resolved by the child's libc, not by us, so appending is
+// not a reliable way to override one.
+func withEnv(env []string, key, val string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, key+"=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, key+"="+val)
+}
+
+// TestRouteReportsAProxyLeftInTheTMPDIRFallback.
+//
+// start-proxy.sh derives its state dir and then, if it cannot create it, falls back:
+//
+//	STATE="${CONTEXT_GURU_STATE:-...}"
+//	mkdir -p "$STATE" 2>/dev/null || STATE="${TMPDIR:-/tmp}"
+//
+// install.sh re-derived the first line and not the second, so on a machine whose state dir cannot be
+// created it looked for the pidfile in the state dir while the proxy's pidfile was in $TMPDIR — and the
+// honest "a proxy is still running" report printed NOTHING. The defect that report exists to fix,
+// intact in the fallback path.
+//
+// Not a corner: the fallback fires only when the machine is already broken, which is when a health
+// check is likeliest to fail and an accurate side-effect report matters most.
+//
+// The fix is that the script which WRITES the pidfile prints the path it used (`--emit-facts`) and this
+// one reads it, so there is no second derivation left to drift.
+func TestRouteReportsAProxyLeftInTheTMPDIRFallback(t *testing.T) {
+	home, proj := t.TempDir(), t.TempDir()
+	tmp := t.TempDir()
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+
+	// A state dir that cannot be created: a path underneath a regular file.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unmakeable := filepath.Join(blocker, "state")
+
+	// listen=false: it starts and stays up, but never answers /healthz.
+	env := routeEnv(t, home, unmakeable, fakeProxyDir(t, port, false))
+	env = withEnv(env, "TMPDIR", tmp)
+	t.Cleanup(func() { stopFakeProxy2(t, filepath.Join(tmp, "proxy-"+port+".pid")) })
+
+	facts, code := runRoute(t, proj, env, consentOK()...)
+	if facts["reason"] != "health_check_failed" {
+		t.Fatalf("exit %d, want a failed health check: %v", code, facts)
+	}
+
+	// Ground truth: is a proxy really running, and is its pidfile really in TMPDIR? Without this the
+	// assertions below could pass vacuously on a run where nothing started at all.
+	pidfile := filepath.Join(tmp, "proxy-"+port+".pid")
+	b, err := os.ReadFile(pidfile)
+	if err != nil {
+		t.Skipf("no pidfile in the TMPDIR fallback, so there is no drift to test here: %v", err)
+	}
+	if err := exec.Command("kill", "-0", strings.TrimSpace(string(b))).Run(); err != nil {
+		t.Skipf("the fake proxy is not running: %v", err)
+	}
+
+	if facts["proxy_started"] != "true" {
+		t.Errorf("a proxy IS running with its pidfile at %s and the report does not mention it. This "+
+			"is the same defect the side-effect report fixed, reachable through the fallback: %v",
+			pidfile, facts)
+	}
+	if facts["pidfile"] != pidfile {
+		t.Errorf("pidfile=%q, want %q — the path has to come from the script that wrote it, not from "+
+			"a second copy of its derivation", facts["pidfile"], pidfile)
+	}
+}
+
+// stopFakeProxy2 kills a proxy by an explicit pidfile path. Pidfile-first and best-effort; never a
+// pkill pattern, because these boxes are shared with another engineer as the same unix user.
+func stopFakeProxy2(t *testing.T, pidfile string) {
+	t.Helper()
+	b, err := os.ReadFile(pidfile)
+	if err != nil {
+		return
+	}
+	if pid := strings.TrimSpace(string(b)); pid != "" {
+		exec.Command("kill", pid).Run() //nolint:errcheck
+	}
+}
+
+// TestRouteDistinguishesAnUnreadableStrategyListFromABadName. An empty strategy list is not an unknown
+// name, and conflating them made the script state a false thing about the caller's input: with
+// settings.py unavailable, `--cache-strategy 5-min-ping` — the default, and obviously a strategy — came
+// back as "is not a strategy. Known: unavailable", burying the one fault the user could act on inside a
+// sentence about a typo. The skill's next move is to ask which name they meant, about a correct name.
+func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
+	requireTool(t, "bash")
+	home, proj := t.TempDir(), t.TempDir()
+	writePluginOptions(t, home, map[string]any{"port": freePort(t)})
+
+	// A scripts directory where settings.py cannot run. install.sh self-locates from $0, so copying it
+	// beside a broken sibling is enough — no need to break the real one.
+	broken := t.TempDir()
+	for _, name := range []string{"install.sh", "start-proxy.sh"} {
+		b, err := os.ReadFile(filepath.Join(scriptsDir(t), name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(broken, name), b, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(broken, "settings.py"),
+		[]byte("#!/bin/sh\nexit 127\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", filepath.Join(broken, "install.sh"), "--route", "--plan",
+		"--cache-strategy", "5-min-ping")
+	cmd.Dir = proj
+	cmd.Env = routeEnv(t, home, t.TempDir(), "")
+	out, _ := cmd.CombinedOutput()
+	t.Logf("install.sh with an unusable settings.py:\n%s", out)
+	body := string(out)
+
+	if strings.Contains(body, "is not a strategy") {
+		t.Errorf("`5-min-ping` is the default strategy and was reported as not being one, because the "+
+			"LIST could not be read. A false statement about the caller's input:\n%s", body)
+	}
+	if !strings.Contains(body, "strategy_list_unavailable") {
+		t.Errorf("the real fault is not named as the reason, so the user cannot act on it:\n%s", body)
+	}
+}
+
+// TestConsentQuestionReadsWhetherAStrategySpendsFromTheStrategyList.
+//
+// `route_consent_question` hardcoded which name spends. That was correct for all three strategies that
+// exist, and its catch-all asserted "(no spend)" about every name it had not been told about — so a
+// fourth strategy that spends, or `1-hour-head` gaining a ping, would make it state something false in
+// the one sentence a human is asked to agree to.
+//
+// The expectation here is derived from `settings.py strategy list` rather than written out, so this test
+// cannot go stale the way the function did: add a spending strategy and it checks the new one too.
+func TestConsentQuestionReadsWhetherAStrategySpendsFromTheStrategyList(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	writePluginOptions(t, home, map[string]any{"port": freePort(t)})
+	env := routeEnv(t, home, state, "")
+
+	list, code := settingsIn(t, state, home, "strategy", "list")
+	if code != 0 || list["names"] == "" {
+		t.Fatalf("could not read the strategy list this test derives its expectations from: %v", list)
+	}
+
+	for _, name := range strings.Split(list["names"], ",") {
+		t.Run(name, func(t *testing.T) {
+			spends := list["spends_"+strings.ReplaceAll(name, "-", "_")]
+			if spends == "" {
+				t.Fatalf("strategy list reports no spends_ fact for %q, so the consent question has "+
+					"nothing to read: %v", name, list)
+			}
+			facts, code := runRoute(t, proj, env, "--plan", "--scope", "project",
+				"--cache-strategy", name)
+			if code != 0 {
+				t.Fatalf("plan: exit %d %v", code, facts)
+			}
+			q := facts["consent_question"]
+			warns := strings.Contains(q, "SPENDS")
+			if warns != (spends == "true") {
+				t.Errorf("strategy list says spends=%s for %q, and the consent question %s warn about "+
+					"spending. The sentence a user agrees to has to agree with STRATEGIES:\n  %s",
+					spends, name, map[bool]string{true: "does", false: "does not"}[warns], q)
+			}
+		})
+	}
+}
+
+// TestRouteChainOverwritesAConflictFoundInTheFile is the shape no test covered, and the reason the
+// defect it guards shipped through three review rounds.
+//
+// `--force` was added for `replace` only. But BOTH decisions overwrite the routing key — that is what
+// routing through a proxy means; `chain` differs only in additionally recording the old value as the
+// upstream. So `chain` — the answer the design calls usually right, and the reason the plan asks its one
+// question at all — died at step 7 whenever the existing endpoint was in a settings FILE:
+// `result=error reason=settings_write_failed` with an empty `detail=`, for a user who had just answered
+// the only question they were asked.
+//
+// Every other chain test supplies the conflict through `ANTHROPIC_BASE_URL`, where there is nothing in
+// the file to overwrite, and that path genuinely worked. A file-sourced conflict is what a PREVIOUS
+// context-guru install or a checked-in team settings file leaves behind, which is not an exotic state.
+func TestRouteChainOverwritesAConflictFoundInTheFile(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	env := routeEnv(t, home, state, fakeProxyDir(t, port, true)) // routeEnv strips ANTHROPIC_BASE_URL
+	t.Cleanup(func() { stopFakeProxy(t, state, port) })
+
+	const gateway = "https://gw.corp.example/v1"
+	settings := filepath.Join(proj, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, settings, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": gateway}})
+
+	facts, code := runRoute(t, proj, env, consentOK("--on-conflict", "chain")...)
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("chain with a file-sourced conflict: exit %d result=%q detail=%q — the user answered "+
+			"the one question the plan asks and the install refused: %v",
+			code, facts["result"], facts["detail"], facts)
+	}
+	if facts["upstream"] != gateway {
+		t.Errorf("upstream=%q, want the gateway we chained behind: %v", facts["upstream"], facts)
+	}
+
+	// The record is what makes overwriting their key safe rather than a bypass, so it is asserted
+	// directly rather than trusted: uninstall reads `previous_base_url` to put the gateway back.
+	got := readJSON(t, settings)
+	envBlock, _ := got["env"].(map[string]any)
+	meta, _ := got["$context-guru"].(map[string]any)
+	if envBlock["ANTHROPIC_UPSTREAM"] != gateway {
+		t.Errorf("ANTHROPIC_UPSTREAM=%v, want %q — without it the proxy has nothing to forward to and "+
+			"the user's auth breaks", envBlock["ANTHROPIC_UPSTREAM"], gateway)
+	}
+	if meta["previous_base_url"] != gateway {
+		t.Fatalf("previous_base_url=%v, want %q. This is the record uninstall restores from; without "+
+			"it, --force here WOULD be a one-way door", meta["previous_base_url"], gateway)
+	}
+
+	// And the round trip, because the record only matters if it is actually honoured.
+	if facts, code := settingsIn(t, state, home, "remove", "--file", settings); code != 0 {
+		t.Fatalf("remove: exit %d %v", code, facts)
+	}
+	after := readJSON(t, settings)
+	afterEnv, _ := after["env"].(map[string]any)
+	if afterEnv["ANTHROPIC_BASE_URL"] != gateway {
+		t.Errorf("after uninstall ANTHROPIC_BASE_URL=%v, want their gateway %q restored",
+			afterEnv["ANTHROPIC_BASE_URL"], gateway)
+	}
+}
+
+// TestAConflictRefusalNamesItsReason. install.sh reports `detail=$(kv "$aout" reason)` on a failed
+// write, and this script's conflict paths emitted `existing=`/`proposed=` but no `reason=` — so the one
+// line that would explain a refusal came back EMPTY, and a refusal was indistinguishable from a crash.
+//
+// Fixed in the emit rather than in the reader: every caller keys on `reason=`, so a refusal that does
+// not carry one is the defect, and naming it once fixes it for all of them.
+func TestAConflictRefusalNamesItsReason(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+
+	t.Run("add, base URL already set", func(t *testing.T) {
+		f := filepath.Join(t.TempDir(), "settings.json")
+		writeJSON(t, f, map[string]any{
+			"env": map[string]any{"ANTHROPIC_BASE_URL": "https://gw.corp.example/v1"}})
+		facts, code := settingsIn(t, state, home, "add", "--file", f,
+			"--url", "http://127.0.0.1:8787/anthropic")
+		if code != 2 || facts["result"] != "conflict" {
+			t.Fatalf("exit %d result=%q, want a conflict: %v", code, facts["result"], facts)
+		}
+		if facts["reason"] != "base_url_already_set" {
+			t.Errorf("reason=%q; install.sh reports this as `detail=`, so an empty one leaves the "+
+				"failure unexplained on the line meant to explain it: %v", facts["reason"], facts)
+		}
+	})
+
+	t.Run("remove, a URL we did not install", func(t *testing.T) {
+		f := filepath.Join(t.TempDir(), "settings.json")
+		writeJSON(t, f, map[string]any{
+			"env": map[string]any{"ANTHROPIC_BASE_URL": "https://someone.else/v1"}})
+		facts, code := settingsIn(t, state, home, "remove", "--file", f,
+			"--url", "http://127.0.0.1:8787/anthropic")
+		if code != 2 || facts["result"] != "conflict" {
+			t.Fatalf("exit %d result=%q, want a conflict: %v", code, facts["result"], facts)
+		}
+		if facts["reason"] == "" {
+			t.Errorf("no reason= on the remove mismatch either: %v", facts)
+		}
+	})
+}
+
+// TestRouteRefusesAnUnknownScopeOutLoud. `route_scope_file` called `route_refuse` — which emits and
+// exits — from inside `R_FILE=$(route_scope_file)`. Command substitution captured every line it
+// printed, assigned them to R_FILE and threw them away, so `--scope bogus` produced NO OUTPUT AT ALL
+// and exit 2.
+//
+// That is the same defect class as this design's first recorded one: a non-zero exit with nothing on
+// stdout leaves the model with nothing to act on, and it happens inside the `!` block that renders the
+// skill. `--mode` and `--on-conflict` were validated at parse time and did print; `--scope` was not,
+// and it is the likelier mistake of the three — the flag this skill documents to users is `--global`
+// while the value this script accepts is `user`.
+func TestRouteRefusesAnUnknownScopeOutLoud(t *testing.T) {
+	home, proj := t.TempDir(), t.TempDir()
+	facts, code := runRoute(t, proj, routeEnv(t, home, t.TempDir(), ""), "--plan", "--scope", "global")
+	if code == 0 {
+		t.Fatalf("an unknown scope was accepted: %v", facts)
+	}
+	if len(facts) == 0 {
+		t.Fatal("exited non-zero with NO facts at all. A model gets an empty result and no reason, " +
+			"which is the failure this script's plan contract exists to prevent")
+	}
+	if facts["reason"] != "unknown_scope" {
+		t.Errorf("reason=%q, want unknown_scope: %v", facts["reason"], facts)
+	}
+	// The mistake this catches is `--global` -> `--scope global`, so the refusal should say what the
+	// real value is rather than only that this one is wrong.
+	if !strings.Contains(facts["note"], "user") {
+		t.Errorf("the refusal does not point at the accepted value, so a model has to guess "+
+			"again: note=%q", facts["note"])
+	}
+}
+
+// TestConflictPlanPrintsARunnableCommandPerAnswer.
+//
+// The conflict branch is the ONE place this design asks a question, and it printed a
+// `confirm_command=` that could not perform any of the answers: `R_ONCONFLICT` is empty precisely
+// because that is what is being asked, and `route_confirm_command` only appends `--on-conflict` when it
+// is set. So SKILL.md's "it carries every decision, the only thing you add is nothing" was false on
+// exactly the path where a decision was outstanding, and running the printed line verbatim re-hit the
+// same refusal. The way out for a model would have been to compose the flag itself — the
+// model-composed-syntax risk this whole design exists to remove.
+//
+// So the script prints one runnable line per answer and the model picks.
+func TestConflictPlanPrintsARunnableCommandPerAnswer(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	const gateway = "https://gateway.corp.example/v1"
+	env := withEnv(routeEnv(t, home, state, fakeProxyDir(t, port, true)),
+		"ANTHROPIC_BASE_URL", gateway)
+	t.Cleanup(func() { stopFakeProxy(t, state, port) })
+
+	plan, code := runRoute(t, proj, env, "--plan", "--scope", "project")
+	if code != 0 || plan["reason"] != "base_url_already_set" {
+		t.Fatalf("expected the conflict question: exit %d %v", code, plan)
+	}
+	for _, k := range []string{"confirm_command_chain", "confirm_command_replace"} {
+		if plan[k] == "" {
+			t.Fatalf("%s= is missing, so the only way to act on the answer is to compose the flag: %v",
+				k, plan)
+		}
+	}
+	if !strings.Contains(plan["confirm_command_chain"], "--on-conflict chain") {
+		t.Errorf("confirm_command_chain does not carry the decision: %s", plan["confirm_command_chain"])
+	}
+
+	// The property that matters: the printed line, run exactly as printed, performs the answer.
+	cmd := exec.Command("bash", "-c", plan["confirm_command_chain"])
+	cmd.Dir = proj
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	t.Logf("confirm_command_chain run verbatim -> %v\n%s", err, out)
+	if !strings.Contains(string(out), "result=routed") {
+		t.Fatalf("the chain line did not complete the install when run verbatim:\n%s", out)
+	}
+	if !strings.Contains(string(out), "upstream="+gateway) {
+		t.Errorf("chain ran but did not keep their gateway as upstream:\n%s", out)
+	}
+}
+
+// TestStrategyClearRefusesToDeleteAFileItCannotRead. `clear` swallowed the OSError from reading the
+// config, which left `text` empty — and `text and not _strategy_is_ours(text)` is then false, so the
+// ownership check was skipped and execution fell through to os.unlink(), reporting `result=cleared` for
+// a file it never verified it wrote. A permission-restricted foreign config is exactly what produces
+// that, and exactly the case the ownership check exists for, so the invariant this module advertises
+// (and TestStrategyNeverTouchesAFileItDidNotWrite asserts) was false in the one case that matters most.
+func TestStrategyClearRefusesToDeleteAFileItCannotRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 000 is still readable, so this test cannot create the condition " +
+			"it asserts on and would pass without testing anything")
+	}
+	state, home := t.TempDir(), t.TempDir()
+	cfg := strategyCfg(state)
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, []byte("# not ours at all\npreset: whatever\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(cfg, 0o644) }) //nolint:errcheck
+
+	facts, code := settingsIn(t, state, home, "strategy", "clear", "--port", keepalivePort)
+	if _, err := os.Stat(cfg); err != nil {
+		t.Fatalf("a config that could not be read, and therefore could not be shown to be ours, was "+
+			"DELETED: %v (facts %v)", err, facts)
+	}
+	if code == 0 {
+		t.Errorf("reported success for a file it did not touch and could not verify: %v", facts)
+	}
+	if facts["reason"] != "unreadable" {
+		t.Errorf("reason=%q, want unreadable — `set` already names this situation that way, and the "+
+			"two ops disagreeing about it is what let this through: %v", facts["reason"], facts)
+	}
+}
+
+// TestStrategySetSplitNeedsNoPreset. The empty-preset guard ran before the `split` short-circuit, so
+// `strategy set --name split` — with no `--preset`, which the parser does not require — was refused as
+// `empty_preset`, whose note warns about silently disabling compaction in a file that would never be
+// written. `split` IS the absence of a config: it recurses into `clear` and never reads the preset. It
+// also regressed the old keep-alive-off path, which was `rm -f "$CFG"` and needed no preset at all.
+func TestStrategySetSplitNeedsNoPreset(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "split",
+		"--port", keepalivePort)
+	if code != 0 {
+		t.Fatalf("`strategy set --name split` needs no preset and was refused: exit %d %v", code, facts)
+	}
+	if facts["reason"] == "empty_preset" {
+		t.Errorf("still refused for an empty preset on the one strategy that writes no file: %v", facts)
+	}
+	if facts["result"] != "set" || facts["strategy"] != "split" {
+		t.Errorf("result=%q strategy=%q, want set/split: %v", facts["result"], facts["strategy"], facts)
+	}
+
+	// The control, because the guard is right where it applies: a strategy that DOES write a file must
+	// still refuse an empty preset, or compaction is silently off while pings keep being paid for.
+	facts, code = settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+		"--port", keepalivePort, "--preset", "")
+	if code == 0 || facts["reason"] != "empty_preset" {
+		t.Errorf("the empty-preset guard was lost where it matters: exit %d %v", code, facts)
+	}
+}
+
+// TestConflictPlanAsksAboutTheEndpointItWouldDisplace.
+//
+// `consent_question=` named an existing endpoint only through R_UPSTREAM, which the `chain` branch
+// populates — and that branch has by definition not run on the path that ASKS about the conflict. So on
+// the one path where what happens to the user's gateway *is* the question, the generated question
+// described a local proxy and never mentioned the gateway, while SKILL.md says of that line "say all of
+// it, do not compose your own shorter version".
+//
+// This is the round-2 finding (the gate protects the act, not the terms) surviving on the single path
+// where the terms are the whole question — and untested for the same reason the --force bug was:
+// TestRoutePlanCarriesTheConsentQuestionIncludingTheSpend runs with no ANTHROPIC_BASE_URL, so it never
+// reaches this branch.
+//
+// Questions are now paired one-to-one with the commands that perform them, so the thing a user answers
+// and the thing that answer runs are generated together and cannot describe different states.
+func TestConflictPlanAsksAboutTheEndpointItWouldDisplace(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	const gateway = "https://gw.corp.example/v1"
+	env := withEnv(routeEnv(t, home, state, ""), "ANTHROPIC_BASE_URL", gateway)
+
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "project")
+	if code != 0 || facts["reason"] != "base_url_already_set" {
+		t.Fatalf("expected the conflict question: exit %d %v", code, facts)
+	}
+
+	chain, replace := facts["consent_question_chain"], facts["consent_question_replace"]
+	for name, q := range map[string]string{"chain": chain, "replace": replace} {
+		if q == "" {
+			t.Fatalf("consent_question_%s= is missing, so a model asking per SKILL.md has no generated "+
+				"question for the answer it is asking about: %v", name, facts)
+		}
+		if !strings.Contains(q, gateway) {
+			t.Errorf("consent_question_%s does not name the endpoint being displaced, which is the "+
+				"whole of what the user is deciding: %q", name, q)
+		}
+		// The money clause from round 2 has to survive into both, or the paired questions reintroduce
+		// the very gap they were split to close.
+		if !strings.Contains(q, "SPENDS") {
+			t.Errorf("consent_question_%s lost the spend warning: %q", name, q)
+		}
+	}
+	// The two answers are different propositions, and the difference is the decision.
+	if !strings.Contains(chain, "upstream") {
+		t.Errorf("the chain question does not say the gateway is KEPT: %q", chain)
+	}
+	if !strings.Contains(replace, "REPLACING") {
+		t.Errorf("the replace question does not say the gateway is replaced: %q", replace)
+	}
+
+	// One state, one shape: neither bare key appears here, because neither could be complete and both
+	// mean something exact everywhere else in this script.
+	for _, k := range []string{"consent_question", "confirm_command"} {
+		if v, ok := facts[k]; ok {
+			t.Errorf("%s=%q is printed on the path where the answer is what is being asked for. A key "+
+				"whose contract is 'the whole proposition' / 'a line that runs' should be absent rather "+
+				"than hold a placeholder, which is the value most likely to be re-read as the real thing",
+				k, v)
+		}
+	}
+
+	// And the control, because the risk in this fix is losing the single keys where they are correct.
+	clean := t.TempDir()
+	facts, code = runRoute(t, clean, routeEnv(t, home, t.TempDir(), ""), "--plan", "--scope", "project")
+	if code != 0 {
+		t.Fatalf("plan with no conflict: exit %d %v", code, facts)
+	}
+	if facts["consent_question"] == "" || facts["confirm_command"] == "" {
+		t.Errorf("with nothing to ask about, the single keys must still be present and complete: %v",
+			facts)
+	}
+}
+
+// TestMissingFlagValueRefusesOnStdout. Every value-taking flag used `${2:?...}`, which writes BASH's
+// diagnostic to stderr and exits 1 — no `result=`, nothing on stdout. That is the third recorded
+// instance of one shape in this design: `--plan` exiting 2 with no output, `--scope bogus` swallowed by
+// a command substitution, and this. Closed as a class rather than one flag at a time, which is why this
+// test is a table over every flag rather than an assertion about one.
+//
+// Reachability is honest rather than dramatic: the skill's `!` block passes fixed arguments and a
+// printed `confirm_command_*` always carries its values. What makes it matter is that a re-typed or
+// truncated command is usually cut at the END — so a dropped VALUE is at least as likely as a dropped
+// flag, and a dropped flag already reports `unknown_flag` on stdout.
+func TestMissingFlagValueRefusesOnStdout(t *testing.T) {
+	home, proj := t.TempDir(), t.TempDir()
+	env := routeEnv(t, home, t.TempDir(), "")
+
+	for _, flag := range []string{
+		"--scope", "--mode", "--on-conflict", "--base-url",
+		"--cache-strategy", "--upstream", "--health-url",
+	} {
+		t.Run(flag, func(t *testing.T) {
+			facts, code := runRoute(t, proj, env, "--plan", flag)
+			if code == 0 {
+				t.Fatalf("%s with no value was accepted: %v", flag, facts)
+			}
+			// The point of the finding: something has to arrive on STDOUT as key=value.
+			if len(facts) == 0 {
+				t.Fatalf("%s exited %d with nothing on stdout. A caller keying on `result=` sees an "+
+					"empty response and no reason, which is this design's oldest defect shape", flag, code)
+			}
+			if facts["reason"] != "missing_value" {
+				t.Errorf("reason=%q, want missing_value: %v", facts["reason"], facts)
+			}
+			if facts["flag"] != flag {
+				t.Errorf("flag=%q, want %q — the refusal has to name which one: %v",
+					facts["flag"], flag, facts)
+			}
+		})
+	}
+
+	// Control: the flags still take values.
+	facts, code := runRoute(t, proj, env, "--plan", "--scope", "project", "--cache-strategy", "split")
+	if code != 0 || facts["result"] != "planned" {
+		t.Errorf("a flag WITH a value must still be accepted: exit %d %v", code, facts)
+	}
+}
+
+// TestConsentQuestionAgreesWithTheUpstreamThatGetsWritten covers two defects that were only visible
+// together, and only by comparing the question against the file the install writes.
+//
+//  1. One rule, two encodings. `route_main` DEFAULTED R_UPSTREAM to the displaced endpoint only when it
+//     was empty; the question generator OVERRODE it unconditionally. With a configured upstream those
+//     disagreed: the chain question named the endpoint being displaced as the one being kept, never
+//     named the gateway that actually ends up behind the proxy, and the replace question lost its
+//     REPLACING clause entirely because a non-empty R_UPSTREAM made that branch unreachable.
+//
+//  2. `confirm_command` dropped `--upstream`. Same shape as the `--cache-strategy` drop: a decision
+//     travelling in argv, absent from the printed line, silently re-resolved by the run that performs
+//     it — so the file named an upstream the caller never asked for. Found by running the check
+//     prescribed for (1); the question was right by then and the FILE was wrong, which is the opposite
+//     of the defect being looked for.
+//
+// The assertion is therefore against the settings file rather than against a string: the question has
+// to describe what actually happens, and only the file knows that.
+func TestConsentQuestionAgreesWithTheUpstreamThatGetsWritten(t *testing.T) {
+	const gateway = "https://gw.corp.example/v1"    // what the user already has
+	const configured = "https://real.up.example/v1" // an explicitly configured upstream
+
+	t.Run("a configured upstream alongside a conflicting endpoint", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		port := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": port})
+		env := withEnv(routeEnv(t, home, state, fakeProxyDir(t, port, true)),
+			"ANTHROPIC_BASE_URL", gateway)
+		t.Cleanup(func() { stopFakeProxy(t, state, port) })
+
+		plan, code := runRoute(t, proj, env, "--plan", "--scope", "project", "--upstream", configured)
+		if code != 0 || plan["reason"] != "base_url_already_set" {
+			t.Fatalf("expected the conflict question: exit %d %v", code, plan)
+		}
+
+		chain, replace := plan["consent_question_chain"], plan["consent_question_replace"]
+		if strings.Contains(chain, "keeping "+gateway) {
+			t.Errorf("the chain question calls the DISPLACED endpoint the one being kept. With an "+
+				"explicit --upstream the proxy forwards there instead, so their endpoint is replaced "+
+				"however the conflict decision was spelled:\n  %s", chain)
+		}
+		if !strings.Contains(chain, configured) {
+			t.Errorf("the chain question never names the gateway that ends up behind the proxy:\n  %s",
+				chain)
+		}
+		if !strings.Contains(replace, "REPLACING "+gateway) {
+			t.Errorf("the replace question lost its REPLACING clause — a non-empty upstream made that "+
+				"branch unreachable, so it stopped saying the endpoint is displaced:\n  %s", replace)
+		}
+		// Splitting one question into two is an easy way to lose what round 2 added.
+		for name, q := range map[string]string{"chain": chain, "replace": replace} {
+			if !strings.Contains(q, "SPENDS") {
+				t.Errorf("consent_question_%s lost the spend warning: %q", name, q)
+			}
+		}
+
+		// The check that matters, and the one that found the second defect: run the printed line and
+		// compare the question against what was actually written.
+		cmd := exec.Command("bash", "-c", plan["confirm_command_chain"])
+		cmd.Dir = proj
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		t.Logf("confirm_command_chain -> %v\n%s", err, out)
+
+		got := readJSON(t, filepath.Join(proj, ".claude", "settings.local.json"))
+		envBlock, _ := got["env"].(map[string]any)
+		written, _ := envBlock["ANTHROPIC_UPSTREAM"].(string)
+		if written != configured {
+			t.Fatalf("ANTHROPIC_UPSTREAM=%q, want the %q that was asked for. The printed command "+
+				"dropped --upstream, so the run that performed the install re-resolved it to the "+
+				"endpoint being displaced", written, configured)
+		}
+		if !strings.Contains(chain, written) {
+			t.Errorf("the question and the file disagree: file says %q, question says:\n  %s",
+				written, chain)
+		}
+	})
+
+	// Control: the common case must be unchanged — chain with nothing configured really does keep
+	// their gateway, and the question should say so rather than claim a replacement.
+	t.Run("chain with no configured upstream still keeps their gateway", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		port := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": port})
+		env := withEnv(routeEnv(t, home, state, fakeProxyDir(t, port, true)),
+			"ANTHROPIC_BASE_URL", gateway)
+		t.Cleanup(func() { stopFakeProxy(t, state, port) })
+
+		plan, code := runRoute(t, proj, env, "--plan", "--scope", "project")
+		if code != 0 {
+			t.Fatalf("plan: exit %d %v", code, plan)
+		}
+		chain := plan["consent_question_chain"]
+		if !strings.Contains(chain, "keeping "+gateway) {
+			t.Errorf("the ordinary chain case should say their gateway is kept:\n  %s", chain)
+		}
+		if strings.Contains(chain, "REPLACING") {
+			t.Errorf("chain with nothing configured keeps their endpoint; saying REPLACING would be "+
+				"the same defect in the other direction:\n  %s", chain)
+		}
+		cmd := exec.Command("bash", "-c", plan["confirm_command_chain"])
+		cmd.Dir, cmd.Env = proj, env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("confirm: %v\n%s", err, out)
+		}
+		got := readJSON(t, filepath.Join(proj, ".claude", "settings.local.json"))
+		envBlock, _ := got["env"].(map[string]any)
+		if envBlock["ANTHROPIC_UPSTREAM"] != gateway {
+			t.Errorf("ANTHROPIC_UPSTREAM=%v, want %q: the question and the file must agree here too",
+				envBlock["ANTHROPIC_UPSTREAM"], gateway)
+		}
+	})
 }

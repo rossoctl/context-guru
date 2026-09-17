@@ -115,21 +115,31 @@ needed on a Pro/Max subscription** ([details](docs/how-to/install-plugin.md)):
 /plugin marketplace add rossoctl/context-guru
 /plugin install context-guru@context-guru
 /reload-plugins
+/permissions        # allow  Bash(<your home>/.claude/plugins/cache/context-guru/**)
 /context-guru:install
 ```
 
-**If it ever breaks and Claude cannot fix it:** `~/.local/state/context-guru/context-guru-reset`
-undoes the routing from a plain terminal — no working Claude session, no proxy, no network. Routing
-every request through a local proxy means a failure there fails every request, including the ones the
-uninstall skill would need, so the way out cannot itself be a skill.
-
 `/reload-plugins` is what makes the `/context-guru:*` skills exist in this session; without it the
-last line answers `Unknown command`. A new session does the same thing.
+last line answers `Unknown command`. A new session does the same thing. The `/permissions` rule needs
+the **absolute** path — `~` is not expanded in permission rules — and is not optional in practice:
+without it the install's first command can be denied, and the skill's instructions then never reach
+the model at all
+([why](docs/how-to/install-plugin.md#recommended-first-grant-the-plugins-scripts-once)).
 
 That installs a statically-linked binary (no Go, no C compiler), routes **this project only** by
 default, starts the proxy on demand and lets it exit when idle. `/context-guru:uninstall` undoes it,
-restoring any base URL it replaced. The plugin installs with `--preset cache` — the prompt-cache
-split and nothing else. (The proxy's own default is `house`; `--preset` is how you change it.)
+restoring any base URL it replaced.
+
+**Keep-alive is on by default**, as `cache_strategy=5-min-ping`: a ping just under the provider's
+5-minute cache TTL, so the prompt cache is still warm when you come back to an idle session. It
+**spends a little of your own quota** while nobody is at the keyboard — that is the mechanism, not a
+side effect. `/context-guru:cache-strategy-picker` names the alternatives and what each costs.
+Separately, `--preset cache` is the compaction pipeline: prompt-cache handling only, nothing dropped
+from your requests.
+
+**If it ever breaks and Claude cannot fix it:** `~/.local/state/context-guru/context-guru-reset` undoes
+the routing from a plain terminal — no working session, no proxy, no network. A dead proxy fails every
+request, including the ones an uninstall skill would need, so the way out cannot itself be a skill.
 
 Or by hand — a release binary is statically linked, **no Go and no C compiler needed** — or build
 from source:

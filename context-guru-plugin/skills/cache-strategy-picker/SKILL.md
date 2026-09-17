@@ -68,7 +68,7 @@ curl -fsS --max-time 3 "http://127.0.0.1:<port>/api/stats" | \
 |---|---|---|
 | `split` | the preset's `cachesplit` alone. Written as the ABSENCE of a config | free — no model calls |
 | `5-min-ping` | split **+** an idle ping at 280 s (just under the provider's 5-minute TTL), ≤2 per idle span, ≥20k-token prefix, ≤$0.25/ping | **spends the caller's own credential between turns** |
-| `1-hour-head` | split **+** the 1-hour tier on the `tools`/`system` breakpoints | free, and often $0 of benefit — see below |
+| `1-hour-head` | split **+** the 1-hour tier on the `tools`/`system` breakpoints, **only on >=50k-token prefixes** | free, and often $0 of benefit — see below |
 
 **Say the cost before switching TO `5-min-ping`, once, in one line.** It spends the caller's money
 (or usage-limit budget) while nobody is at the keyboard, and it applies to every session routed
@@ -81,6 +81,15 @@ downgraded on `claude-sonnet-5`** (0 of 48,212, with an otherwise normal 200). Z
 in 19,805 production requests. So on the Opus/Sonnet models most users run, the honest projection is
 **$0**, and `Usage.CacheWrite1h` is the only thing that says otherwise. Offer it as a measurement,
 not an upgrade.
+
+**And say the gate out loud when you offer it.** This strategy ships `head_ttl_min_tokens: 50000`, so
+it does nothing whatever on a prefix under 50k tokens. That threshold is what makes it pay at all
+(+$48.81, against −$18.34 applied blanket), so it is not a flaw — but **both measurements above are
+below it**: 36,574 tokens on Haiku, 48,212 on Sonnet. A user who arms this on Haiku 4.5, the one model
+where the tier was granted, and then checks a request the size of the one that was measured, sees no 1h
+label — and would reasonably conclude the tier was refused when in fact the request was too small to
+ask. If they are watching `Usage.CacheWrite1h` for zero, tell them which of the two reasons they are
+looking at.
 
 **Never turn a strategy on from a display path.** The status line renders on every keystroke; if it
 could arm this, a display hook would double as an unbounded traffic generator. Arming is always

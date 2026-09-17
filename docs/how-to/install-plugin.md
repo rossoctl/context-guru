@@ -14,10 +14,26 @@ sessions get routed.
 
 ### Recommended first: grant the plugin's scripts once
 
-Not required, and worth doing anyway — on any deployment where sessions run under auto mode or a
-restrictive permission policy, the install otherwise stops partway with the proxy running and the
-routing key unwritten. Add this rule before you start, via `/permissions` (paste the rule **alone**, not
-a JSON object) or in a settings file:
+**Do this first on any deployment where sessions run under auto mode or a restrictive permission
+policy.** It used to be a convenience — the install would stop partway, with the proxy running and the
+routing key unwritten. Since the install moved into `install.sh --route`, the consequence is different
+and larger, and it was measured in a real non-interactive session rather than reasoned about:
+
+`/context-guru:install` opens by running `install.sh --route --plan` in a `` !`` `` block, whose output
+*is* the skill's input. If that command is denied, **the skill's instructions never reach the model at
+all** — there is no install to stop partway, because nothing was ever read. In the measured run the
+model correctly reported that it was blocked and asked for approval, and then improvised a suggestion
+from the plugin's description alone: it proposed `--attach <the corporate gateway>`, which is not what
+`--attach` does (that flag points at a proxy that already exists, not at a gateway to sit in front of).
+That is precisely the interpretation this design exists to remove, and without the rule the design is
+not in effect.
+
+With the rule in place, the same session read the plan and presented the chain/replace/abort choice
+generated from it, naming the existing gateway and what happens to it, and wrote nothing while waiting
+for an answer.
+
+Add the rule before you start, via `/permissions` (paste the rule **alone**, not a JSON object) or in a
+settings file:
 
 ```
 Bash(/absolute/path/to/.claude/plugins/cache/context-guru/**)
@@ -37,6 +53,33 @@ in [If the install is blocked](#if-the-install-is-blocked).
 tells you to run it, and until you do, this session has no `/context-guru:*` skills — so the next
 line answers `Unknown command: /context-guru:install` on a perfectly good install. Starting a fresh
 session works too; reloading is just quicker.
+
+### Reproducing this flow in a sandbox (for people changing it)
+
+Two traps, both of which cost a run:
+
+**1. The project's `env` block applies to the session you are testing with.** To exercise the
+conflict path you put an existing `ANTHROPIC_BASE_URL` in the test project's
+`.claude/settings.local.json` — and Claude Code then uses that value for the test session's own API
+calls. A placeholder like `https://gw.example/v1` makes the session unable to reach any API at all
+(`ENOTFOUND`), and the run tells you nothing about the install. Use a **real, reachable** endpoint as
+the pre-existing one; a corporate gateway is both realistic and functional.
+
+**2. The plugin has to be registered, not just present.** Copying it under `~/.claude/plugins/` is not
+enough. A sandbox `HOME` needs three files:
+
+- `.claude/plugins/known_marketplaces.json` — the marketplace, `installLocation` pointing at the repo
+  root (the `.claude-plugin/marketplace.json` there names `./context-guru-plugin` as the source);
+- `.claude/plugins/installed_plugins.json` — `{"version": 2, "plugins": {"context-guru@context-guru":
+  [{"scope": "user", "installPath": "<repo>/context-guru-plugin", ...}]}}`. Point `installPath` at a
+  worktree to test that branch's code directly;
+- `.claude/settings.json` — `enabledPlugins: {"context-guru@context-guru": true}`, plus
+  `pluginConfigs` for the port, and the permission rule above if you want the `` !`` `` block to run.
+
+Also pin `CONTEXT_GURU_STATE` and put a fake `context-guru-proxy` earlier on `PATH` — one that serves
+real HTTP on the port, or the health check cannot pass and you will only ever test the failure path.
+Run against a gateway that is **not** context-guru, so the measurement is not routed through the thing
+being measured.
 
 ### Step 2 asks you to pick a scope — this is what it means
 
@@ -75,7 +118,7 @@ and which decides *which sessions go through the proxy* ([table below](#which-fi
 They are independent: a local-scope plugin still routes only the repo you run the install skill in,
 and a user-scope plugin does not route anything until you ask it to.
 
-### `/plugin configure` — four options, all with working defaults
+### `/plugin configure` — five options, all with working defaults
 
 You can open it, press **Save configuration**, and change nothing. Only one of these usually needs
 setting, and only in one situation.
@@ -83,7 +126,8 @@ setting, and only in one situation.
 | Option | Default | Change it when |
 |---|---|---|
 | **Proxy port** | `8787` | something already holds 8787. Deliberately not 4000, which collides with litellm |
-| **Preset** | `cache` | you want more than the prompt-cache split. `cache` drops no content, adds no tools and makes no model calls |
+| **Preset** | `cache` | you want more than prompt-cache handling. `cache` drops no content and adds no tools. It makes no model calls *itself* — whether anything is spent is decided by the cache strategy below, not here |
+| **Cache strategy** | `5-min-ping` | you do not want keep-alive: this default holds the cache warm across idle gaps by pinging just under the provider's 5-minute TTL, and that **spends a little of your own quota** while nobody is at the keyboard. `/context-guru:cache-strategy-picker` names each strategy and what it costs |
 | **Idle exit** | `24h` | rarely. The floor is `max(2 × store.ttl_seconds, 1h)`; below it the proxy refuses to start rather than silently discarding cache state |
 | **Upstream base URL** | *(empty)* | **something else is already the gateway** — see below |
 

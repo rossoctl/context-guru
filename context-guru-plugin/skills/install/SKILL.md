@@ -1,473 +1,199 @@
 ---
 name: install
-description: Install a local context-guru proxy and route this project's Claude Code sessions through it, so long sessions stop paying to re-create the prompt cache. Use when the user asks to install, set up, enable, try or start context-guru, or to route Claude Code through it. Accepts --global to route every project on the machine instead of just this one, and --cache-strategy <split|5-min-ping|1-hour-head> to override the default cache strategy (5-min-ping, which sends idle keep-alive pings).
+description: Install a local context-guru proxy and route this project's Claude Code sessions through it, so long sessions stop paying to re-create the prompt cache. Use when the user asks to install, set up, enable, try or start context-guru, or to route Claude Code through it. Accepts --global to route every project on the machine instead of just this one, --cache-strategy <split|5-min-ping|1-hour-head> to override the default cache strategy, and --attach <url> to point at a proxy that already exists (a gateway or shared pod) instead of starting one.
 ---
 
 # Install context-guru for Claude Code
 
-Install the proxy binary, then add **one** key — `env.ANTHROPIC_BASE_URL` — to a settings file
-so this project's sessions go through it.
-
-Your job here is the part a shell script does badly: choosing the right file, merging into
-settings the user already depends on, noticing a base URL that is already set, and verifying
-the result. The deterministic steps are scripts in `${CLAUDE_PLUGIN_ROOT}/scripts/`. Run them;
-do not reimplement them inline.
-
-**Be decisive. This should feel like one command, not an interview.** The user asked for an install —
-run the steps, then report what happened in a handful of lines. Do not narrate each step before
-taking it, do not explain what a proxy is, and do not ask permission for the default path:
-project-local routing is already the safe choice, which is why it is the default.
-
-There are exactly three things worth stopping for, and in all three continuing would damage
-something:
-
-1. a checksum that could not be verified — never install anyway;
-2. `--global`, which puts every session on the machine behind the proxy — confirm once, naming that;
-3. a base URL already set to somebody else's endpoint — see step 4, where the usual answer is to
-   chain behind it rather than to ask.
-
-Everything else: act, then say what you did.
-
-**Ask ONCE, in one sentence, and let the permission prompt be the second half of the consent.**
-Three things need the user's agreement — the scope, what to do about a base URL that is already set,
-and that `5-min-ping` spends a little of their own quota on idle turns — and they are one decision
-about one install, not three interviews. State all of it in a single line, get one answer, then run
-the commands that carry those decisions as ARGUMENTS. The approval prompt on the command that
-redirects traffic then shows the user the actual thing they agreed to, which is why it is not a
-second question: a command that names its own scope and upstream is the consent, rather than a copy
-of it. Never split this into a question per parameter, and never ask again for something the same
-answer already covered.
-
-## What to say before you start
-
-Three lines, not an essay. The user asked for an install; deliver one, and let them ask for detail.
-
-- Routes this project's Claude Code requests through a **local** proxy (`127.0.0.1`), which forwards
-  to Anthropic. **No API key added** — a Pro/Max login keeps working unchanged.
-- **The real risk: if the proxy is down, requests HANG** rather than failing — no output, no error.
-  A `UserPromptSubmit` hook detects that and restarts it. This is why the default scope is one
-  project, not the machine.
-- `/context-guru:uninstall` reverses it, restoring any base URL it replaced. If the routing
-  itself is what breaks, a skill cannot run — so the install also drops a plain-sh escape hatch
-  outside the plugin, and step 6 tells them where it is.
-
-Fuller detail — preset behaviour, subscription vs metered billing, scope trade-offs — is in
-`docs/how-to/install-plugin.md`. Point at it; do not recite it.
-
-## Do not investigate the user's machine
-
-Bounded on purpose, because an unbounded version of this step got denied as
-`[Credential Exploration]` by Claude Code's own auto-mode classifier on the first real install:
-
-- **Never enumerate, print or test credential variables** — not `ANTHROPIC_API_KEY`,
-  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `AWS_*`, nor any `env | grep` over them. This
-  plugin does not read credentials and must not appear to. A proxy plugin sweeping for API keys is
-  indistinguishable from the thing everyone is right to fear.
-- **Do not profile other processes** — no `ps aux`, `ss`, `lsof` or port scanning to identify what
-  else is running. If something else holds the port, the scripts report it; that is enough.
-- The only environment fact you need is whether `$ANTHROPIC_BASE_URL` already names our port, and
-  `echo "${ANTHROPIC_BASE_URL:-unset}"` answers it.
-
-## Steps
-
-### 1. Install the binary
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/install.sh"
-```
-
-It prints `key=value` lines. Read them rather than guessing:
-
-- `result=present` — already installed, nothing downloaded. Fine; continue.
-- `result=installed` — downloaded and verified. If `on_path=false`, note the `path=` value: you will
-  pass it as `--bin` in step 6 so the session hook can find the proxy without a `PATH` change (see
-  there for why telling them to edit their profile is not sufficient on its own).
-- `result=error reason=no_release_found` — no published release yet for this repo. Say so, and
-  offer the source build (`make build-static`, needs Go 1.26 but no C toolchain). Do not pretend
-  it worked.
-- `result=error reason=download_failed` — the release tag exists but carries no asset for this
-  platform, which is what a repo looks like before its first build is attached. The script tries a
-  `go install` fallback first and reports `fallback=go_install_attempted` (printed before the
-  attempt, so read it with `result=`, not as proof the build worked); if that is in the output and the
-  result is still an error, there was no toolchain either.
-- `reason=checksum_mismatch`, `checksum_unavailable`, `checksum_absent` — **stop, and do not
-  install.** All three mean the download could not be verified against the release's
-  `checksums.txt`. There is no signature anywhere yet, so this is the only integrity check in the
-  path, and the binary in question is about to handle all of the user's LLM traffic and hold their
-  API key. `CONTEXT_GURU_INSECURE=1` overrides it and you must not set it on the user's behalf.
-- `checksum=SKIPPED_BY_CONTEXT_GURU_INSECURE` in the output — the user set that themselves. Say
-  plainly that an unverified binary was installed.
-- **Already installed?** The script reports `result=present` with the `version=`, and does not
-  replace it. To upgrade, re-run with `CONTEXT_GURU_UPGRADE=1`; to pin a version, set
-  `CONTEXT_GURU_VERSION=vX.Y.Z`. If `version=unknown`, the installed binary predates `--version`
-  and an upgrade is worth offering.
-
-### 2. Find out which port and preset are actually configured
-
-**You cannot read `$CLAUDE_PLUGIN_OPTION_PORT` here, and a shell default silently gives you the wrong
-answer.** Claude Code puts those variables into HOOK environments only, never into a Bash tool call —
-so `${CLAUDE_PLUGIN_OPTION_PORT:-8787}` in a command always expands to 8787, whatever the user
-configured. That was a real defect, not a nicety: the routing key named 8787 while every later hook read
-the configured port and self-gated on it, so the hooks saw an unrouted project, did nothing, and the one
-running proxy had no auto-restart behind it. Once it idle-exited, nothing brought it back, silently.
-
-The values are on disk, so read them:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" config
-```
-
-- `option_port=…` / `option_preset=…` / `option_idle_exit=…` / `option_upstream=…` /
-  `option_cache_strategy=…` — use these
-- `source=(none)` — nothing configured; the `plugin.json` defaults apply (port 8787, preset `cache`,
-  cache strategy `5-min-ping`)
-- **an option with no line of its own is unconfigured**, whatever `source=` says. Only keys the user
-  actually set are printed, so a partial config — the port set and the preset never touched, say —
-  reports a real `source=` and simply omits `option_preset=`. Take the `plugin.json` default for each
-  missing option individually; do not read one present option as meaning the rest are set, and do not
-  invent a value because `source=` was not `(none)`.
-
-Carry the port through **every** later step explicitly: `--port` when starting the proxy, and the same
-number in the URL you write. If it turns out to be anything other than 8787, say so in your summary —
-a non-default port is the kind of thing a user forgets they set.
-
-### 3. Choose the scope
-
-Default to **this project only**. Ask before doing anything wider, and give them the real
-trade-off in one line each:
-
-| Scope | File | If the proxy is down |
-|---|---|---|
-| **This project (default)** | `.claude/settings.local.json` | only this project breaks; the file is gitignored |
-| This project, whole team | `.claude/settings.json` | breaks for everyone who clones the repo |
-| Every project (`--global`) | `~/.claude/settings.json` | **every Claude Code session on the machine breaks** |
-
-Project scope is the default because of that third row, and the asymmetry is worth being concrete
-about: a project-scope mistake costs the user one project, while the same mistake machine-wide takes
-out every session they could use to fix it — including every project that has nothing to do with
-context-guru. Writing the project's own `.claude/settings.local.json` is also why overriding a
-machine-wide base URL is safe here: `env` blocks merge per key, most specific first, so the project
-file wins for this project and changes nothing anywhere else.
-
-**The script enforces this; it is not left to you.** `settings.py add` refuses the machine-wide file
-outright and exits 2 with `reason=user_scope_needs_flag` unless it is passed `--user-scope`. That
-refusal used to live only in this paragraph, and a default that exists only in a prompt is not a
-guardrail — it can be skipped or read differently, and what it guards against is a machine-wide
-lockout. So if the user passed `--global`: confirm once, naming the blast radius, and only then add
-`--user-scope` to the step 6 command. Never add it to satisfy an error you did not expect — an
-unexpected `user_scope_needs_flag` means you are about to write the wrong file.
-
-Removal is not gated, on purpose: `/context-guru:uninstall` has to be able to clean every scope.
-
-### 4. Look before you write
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" show --file <target>
-```
-
-If `base_url` is already set to something that is not our port, **stop and ask.** It may be
-their company gateway, a benchmark endpoint, or another proxy — replacing it silently would
-break their setup while looking like success. Offer: keep theirs (abandon the install), or
-replace it (and tell them the old value, so they can put it back).
-
-**Also check the environment, not only the file.** On a hosted or containerised agent the base URL
-is often set in the process environment rather than in any settings file, so `show` reports
-`exists=false` while the session is already routed elsewhere:
-
-```bash
-echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}"
-```
-
-If that names a port other than ours, **chain rather than replace, and just do it** — run our proxy
-in front of theirs so their gateway still handles auth and upstream routing. On a hosted agent this
-is the normal shape rather than an anomaly to escalate; one line saying what you are chaining behind
-is the right amount of ceremony:
-
-The caller's `Authorization` / `x-api-key` passes straight through to that upstream, which is what
-lets their gateway keep authenticating. Two places have to know about it, for different reasons:
-
-* **now**, twice as an explicit `--upstream` argument: once when starting the proxy in step 5 and once
-  when writing the settings in step 6. Not via the plugin option and not via an env prefix —
-  `CLAUDE_PLUGIN_OPTION_*` does not reach a Bash tool call, and an env prefix cannot be covered by a
-  permission rule;
-* **later**, so every future session's hook chains too — which means the variable has to be in the
-  settings `env` block beside our key, because that block is what the hook inherits:
-
-```json
-{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787/anthropic",
-         "ANTHROPIC_UPSTREAM": "http://127.0.0.1:<their port>"}}
-```
-
-`settings.py` writes only our one key, so add that second key by hand and say that you did.
-
-Say what you are doing and why in one line, then continue. Replacing a platform-provided gateway
-outright will usually break that agent's authentication, so do not offer it as the default.
-
-### 4b. Write the cache strategy, BEFORE the proxy starts
-
-The order matters and it is the opposite of intuition: `start-proxy.sh` reads this file only when it
-STARTS a proxy, so a strategy written afterwards does nothing until something restarts it. Write it
-now and the very first proxy has it.
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" strategy set \
-  --name <cache strategy> --port <port> --preset <preset>
-```
-
-The default is **`5-min-ping`**, and it is the one thing in this install that spends money: an idle
-ping just under the provider's 5-minute TTL, at most 2 per idle span, only on prefixes over 20k
-tokens, capped at $0.25 a ping. Bounded, not free. **Say so in one line** — it belongs in the same
-sentence as everything else you are about to do, not in a separate interrogation:
-
-> Keep-alive will be on as `5-min-ping`, which spends a little of your own quota on idle turns to
-> hold the cache warm. `/context-guru:cache-strategy-picker` switches it to `split` if you would
-> rather it did not.
-
-- `result=set` with `spends=true` — report the strategy NAME in your summary. The name is what lets
-  them switch back later without remembering four tuning numbers.
-- `result=cleared` — they asked for `split`, which is the ABSENCE of a config rather than a config
-  saying "off". Correct, and nothing further is needed.
-- `result=conflict reason=not_ours` — something we did not write is at that path. Leave it, say so,
-  and continue the install: a missing strategy is not a reason to abandon a working proxy.
-- `result=error reason=unknown_strategy` — you invented a name. `settings.py strategy list` is the
-  authoritative set.
-- `reason=empty_preset` — you did not substitute the preset from step 2. Do not retry with a guess;
-  an empty preset silently turns compaction off.
-
-If the user asked for a specific strategy (`/context-guru:install --cache-strategy split`), pass that
-instead of the configured default, and say which one you used.
-
-### 5. START THE PROXY FIRST, before writing any settings
-
-**This order is not a preference, and getting it wrong breaks the session doing the install.**
-
-Claude Code picks up a settings `env` change **while the session is running** — it does not wait for
-a restart. Observed, in a fresh session driving this very skill: the key was written, the proxy had
-not been started yet, and the session's next API call went to `127.0.0.1:8787` and died with
-`API Error: Connection refused`. It never reached the step that starts the proxy. That left the
-project routed with nothing listening — the hang state this whole design exists to avoid, produced
-by the installer itself.
-
-So: proxy up and answering `/healthz` first, settings second. Then the instant routing takes effect,
-something is already there.
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh"
-```
-
-The script self-gates on `$ANTHROPIC_BASE_URL` naming our port, which is not yet true at this point,
-so ask it to start anyway:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh" --unrouted
-```
-
-Pass the other facts you already have as arguments too — the port from step 2, the gateway from step 4, and the
-binary path from step 1 if it reported `on_path=false`:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh" --unrouted \
-  --upstream "<their base URL>" --bin "<the path= from step 1>"
-```
-
-**`--bin` is not optional when `on_path=false`.** Without it the script resolves the binary by name,
-finds nothing, and reports "the proxy binary is not on PATH" — and the last agent to hit that
-improvised, symlinking the binary into a directory under the plugin cache that happened to be on
-`PATH`. It worked, and it would have broken silently at the next plugin update or pod restart, for a
-reason nobody would connect to a symlink made days earlier. You already have the path; pass it.
-
-**Everything goes in as arguments, and nothing as an environment prefix.** Two reasons, both learned
-the hard way on a hosted agent:
-
-* Bash permission rules match by command PREFIX, so `FOO=1 /path/to/start-proxy.sh` cannot be covered
-  by any rule naming this script. An env-prefixed command is one the user cannot approve.
-* **`CLAUDE_PLUGIN_OPTION_*` is NOT in the environment of a Bash tool call**, even when the option is
-  configured. Verified: the option was set to the pod's gateway in user settings and the variable was
-  absent from the shell. Plugin options reach HOOK environments; they do not reach a script this skill
-  runs. So never assume the script can read the configured upstream — pass it.
-
-The flag is `--unrouted`, not `--force`. It was `--force` for one round and got denied for its name —
-`[Safety Bypass Flag]`, which is a fair reading. Nothing is being bypassed: the script's gate asks "is
-this project routed to us?" and during an install the honest answer is "not yet, that is the next
-step". Do not reintroduce `--force`, even though it still works.
-
-**Expect this to be denied under auto mode, and do not try to get around it.** Observed twice on a
-hosted agent:
-
-```
-Denied by auto mode classifier ∙ [Traffic Redirection] Starting a third-party plugin's local proxy
-that intercepts and forwards the agent's own Anthropic API traffic ... reroutes model traffic through
-unvetted code without the user having named or reviewed that specific interception.
-```
-
-That is the correct outcome, not a bug: installing a plugin by name is not the same as consenting to
-have your model traffic intercepted, and an agent should not make that call for its user. When it
-happens, stop, report exactly what is and is not done, and hand the user their three options:
-
-1. approve the prompt (interactive sessions get one);
-2. run this one command themselves with the `!` prefix — print it ready to paste, with no env
-   prefixes so it matches what a rule would allow;
-3. add a permission rule, e.g. `Bash(<the scripts dir>/**)`, if they would rather not be asked again.
-
-Do not offer a fourth way, do not reword the command to look less like what it is, and never write the
-routing key while the proxy is not up.
-
-**Do not satisfy the gate by prefixing `ANTHROPIC_BASE_URL=…` instead.** That is what this step used
-to say, and it was denied outright on a hosted agent:
-
-```
-Denied by auto mode classifier ∙ [Traffic Redirection] ... repoints ANTHROPIC_BASE_URL to a local
-proxy intercepting all Claude API traffic before forwarding to an unverified upstream
-```
-
-A fair call — the command text really did redirect traffic — and it blocked the install at its last
-step. It also could not be granted, because Bash permission rules match by command *prefix*, so no
-rule naming this script can cover an env-prefixed invocation.
-
-The arguments above are the whole interface. **Do not set `ANTHROPIC_UPSTREAM=`, `CONTEXT_GURU_BIN=` or
-`CONTEXT_GURU_FORCE=` in front of this command** — this paragraph used to recommend exactly that, two
-paragraphs after prohibiting it, and the recommendation was the denied shape. And do not rely on the
-plugin's **Upstream base URL** option being visible here: `CLAUDE_PLUGIN_OPTION_*` reaches hook
-environments, and this step is a Bash tool call, so in *this* step the configured option is precisely
-what the script cannot read. Setting it is still worth telling the user about — it is what later
-sessions' hooks use — but it is not a substitute for `--upstream` now.
-
-Confirm the proxy is actually up before continuing — `proxy up on 127.0.0.1:<port>` in the output, or:
-
-```bash
-curl -fsS "http://127.0.0.1:<port>/healthz"
-```
-
-If it did not come up, **stop and do not write the settings key.** An unrouted project with no proxy
-is a working project; a routed one with no proxy is a broken one.
-
-### 6. Write the one key
-
-The port is the one you discovered in step 2 — not a shell expansion, which would silently be 8787.
-The URL must end in `/anthropic` — that is the path the proxy serves the Anthropic dialect on.
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add \
-  --file <target> --url "http://127.0.0.1:<port>/anthropic"
-```
-
-If step 4 found a gateway to chain behind, add `--upstream <their base URL>` to that same command.
-Do **not** hand-edit the file to add it: one atomic write, one backup, and uninstall removes only an
-upstream it recorded writing. Skipping it leaves chaining working *only* until the running proxy
-idles out — the next session's hook would start one aimed at `api.anthropic.com`.
-
-**If step 1 reported `on_path=false`, add `--bin <the absolute path it reported>` as well.** Telling
-the user to fix their `PATH` is not enough on its own: the `SessionStart` hook resolves the proxy BY
-NAME, so until the shell profile is edited the install looks successful, works for this session, and
-the auto-restart safety net silently never fires — with a hang as the failure mode it was there to
-catch. On a hosted agent it is worse, because the writable directories reset on restart, so a profile
-edit does not survive. `--bin` writes the absolute path into the same `env` block the hook inherits,
-which fixes it without touching the user's shell at all. Still mention the `PATH` gap, since they will
-want `context-guru-proxy` on the command line too.
-
-- `result=added` — report the `backup=` path to the user. That is their undo.
-- `reset_hatch=<path>` — **print this path verbatim, on its own line, in your summary.** It is the
-  escape hatch, and this is the only moment the user is certain to be able to read it: the failure
-  it exists for is "every request through the proxy fails", and in that state no skill can run,
-  including `/context-guru:uninstall`. It happened — a colleague's install left him at 401 on every
-  call with the documented undo path unavailable for exactly the reason he needed it. Tell him the
-  command, not the concept:
+<!-- Deliberately NO `allowed-tools:` here. The `!` block below pre-executes at render and needs no
+     tool permission, so the only thing an allowed-tools line would grant is the ONE command that
+     starts a traffic-intercepting proxy and repoints ANTHROPIC_BASE_URL. Measured in a real
+     sandboxed session: with `Bash(.../install.sh)` declared, that command ran with no prompt at all.
+     A plugin granting itself the permission the classifier exists to ask about is the plugin
+     answering a question that belongs to its user. -->
+
+!`"${CLAUDE_PLUGIN_ROOT}/scripts/install.sh" --route --plan`
+
+**The block above is this project's real state, gathered before you were asked anything.** It ran
+during rendering, so you did not choose to run it and cannot have mistyped it — read it rather than
+re-deriving any of it. It wrote nothing and started nothing.
+
+Your job is the part a script does badly: putting one question to a human, and reporting honestly.
+Everything else — resolving the port, ordering the proxy before the routing key, deriving the URL,
+health-checking, recording the undo — is in `install.sh --route`, where it is line order rather than
+a numbered paragraph somebody can read differently.
+
+## 1. Say what you are about to do, in three lines
+
+- Routes this project's requests through a **local** proxy (`127.0.0.1`) that forwards to Anthropic.
+  **No API key is added** — a Pro/Max login keeps working.
+- **The real risk: if the proxy is down, requests HANG** rather than failing. A `UserPromptSubmit`
+  hook restarts it. This is why one project, not the machine, is the default scope.
+- `/context-guru:uninstall` reverses it. If routing itself breaks, no skill can run — so the install
+  drops a plain-sh escape hatch outside the plugin, and step 4 tells them where.
+
+If `cache_strategy=5-min-ping` (the default), one more clause: keep-alive is on, so it spends a little
+of their own quota on idle turns to hold the cache warm, and `/context-guru:cache-strategy-picker`
+names the alternatives and what each costs. Do not recommend one — they differ in what they spend, and
+that is the user's call.
+
+Fuller detail is in `docs/how-to/install-plugin.md`. Point at it; do not recite it.
+
+## 2. Ask ONCE, then run one command
+
+**Read `result=` in the plan first.** A plan always exits 0 — `needs_decision` is something for you
+to act on, not a failure to report as one.
+
+- `result=planned` — the plan is clean. If `already_routed=true`, say so: this is a re-run or a
+  repair, not a fresh install.
+- `result=needs_decision reason=base_url_already_set` — `existing_base_url=` names somebody's endpoint. It
+  may be their company gateway, a benchmark endpoint or another proxy. **This is the one question**,
+  and on a hosted agent the answer is nearly always chain: our proxy sits in front and theirs keeps
+  handling auth and model routing. Replacing it outright usually breaks that agent's authentication.
+- `result=needs_decision reason=user_scope_needs_flag` — they passed `--global`. Confirm once, naming the
+  blast radius: **every** Claude Code session on the machine, including projects that have nothing
+  to do with context-guru, which is also every session they could use to fix it.
+- `result=error reason=binary_install_failed` — read `detail=`. `no_release_found` wants the source
+  build offer (`make build-static`, Go 1.26, no C toolchain). Anything naming a checksum
+  (`checksum_mismatch`, `checksum_unavailable`, `checksum_absent`) is a **hard stop**: it is the only
+  integrity check in the path and the binary is about to carry all of their LLM traffic. Never set
+  `CONTEXT_GURU_INSECURE=1` on their behalf.
+
+**One question, covering everything that needs their agreement — and you do not write it.** The
+script generates it from the resolved facts and prints it (`consent_question*=`, below). A worked
+example used to sit here, and it was the hazard this design removes: a hand-written sentence beside a
+generated one is two sources for one question, and the hand-written one drifts.
+
+### Get an explicit yes, as a choice they pick
+
+**`--route` refuses to do anything without `--i-consent-to-traffic-interception`.** That is
+deliberate and it is not a formality: everything the command does either intercepts their model
+traffic or points it somewhere new, and the approval prompt cannot be relied on to ask about that —
+it is probabilistic, a skill can declare it away, and in an unattended session there is no prompt
+because there is no human. So the script fails closed and the consent has to come from a person.
+
+**Ask it as a two-option choice, not as prose they can skim.** Use `AskUserQuestion` if you have it,
+so it renders as something they pick rather than something they might answer sideways:
+
+- **question**: what the `consent_question*=` line says, generated from the same resolved facts as the
+  command it authorises. Say all of it — phrase it naturally, but every fact has to survive, and do not
+  drop the money: a question narrower than the command it authorises is not consent to that command.
+- **option 1 — "Yes, route this project"**: what they get, and that `/context-guru:uninstall` reverses it.
+- **option 2 — "No, don't change anything"**: nothing is installed, started or written.
+
+Without `AskUserQuestion`, ask in plain text with exactly two numbered options and stop for an answer.
+
+**A silent or absent answer is a NO.** If nothing comes back — a non-interactive run, a session with
+no human — report what the plan found and stop. Do not infer consent from the fact that they typed
+`/context-guru:install`, and do not pass it because a refusal is inconvenient. **Never pass it on your
+own judgement.** Passing it is you asserting that a person said yes.
+
+### Then run one command
+
+**When the plan came back `needs_decision reason=base_url_already_set`**, there is no single
+`confirm_command=` — the answer is the thing being asked for. The plan prints one runnable line per
+answer instead, **paired**: `consent_question_chain=` with `confirm_command_chain=`, and
+`consent_question_replace=` with `confirm_command_replace=`. Ask using the two `consent_question_*`
+lines as the two options — they name the endpoint the user already has and say what becomes of it,
+which is the whole of what they are deciding — then run the `confirm_command_*` line matching their
+answer, verbatim. For *abort*, run nothing.
+
+There is deliberately **no** `consent_question=` or `confirm_command=` on that path: the answer is the
+thing being asked for, so neither could be complete, and both those keys mean something exact
+everywhere else. Do not add `--on-conflict` to any other line yourself; if the paired lines are
+missing, re-run `--plan` rather than composing a command.
+
+**Otherwise, run the `confirm_command=` line from the plan, verbatim.** Copy it; do not retype it, do not
+reorder it, and do not add or drop a flag. It is printed with every decision already resolved — scope,
+mode, base URL, conflict, cache strategy, machine-wide acknowledgement — and it ends with
+`--i-consent-to-traffic-interception`, so **the only thing you add is nothing.**
+
+There is deliberately no example command here. There used to be, and it was the defect this section
+exists to prevent: it hardcoded `--on-conflict chain`, which is wrong whenever the plan came back with
+nothing already set, and it spelled the path `"${CLAUDE_PLUGIN_ROOT}/scripts/install.sh"` — a variable
+that is substituted into a `` !`` ``-block's command string but is **not** exported to a Bash tool call,
+so on the one gated command it could expand to `/scripts/install.sh`, and a model that hit "no such
+file" would improvise a path. `confirm_command=` carries the absolute path the script resolved from
+`$0`, which is why it is the only spelling to use.
+
+If a decision in it looks wrong, go back to `## 2` and change the input to the plan, then re-read the
+line it prints. Editing the line by hand is how a decision the user made gets silently dropped.
+
+**Expect this one command to be gated, and do not try to get around it.** It starts a
+traffic-intercepting proxy and repoints `ANTHROPIC_BASE_URL`; auto mode is right to ask, because
+installing a plugin by name is not the same as consenting to have your model traffic intercepted.
+The command names its own scope and upstream, so approving it **is** the consent rather than a second
+copy of the question. If it is denied, hand them three options and no fourth: approve the prompt, run
+that exact command themselves with `!`, or add the rule the plan printed as `permission_rule=`. Do
+not reword the command to look like less than it is, and never write routing while no proxy answers.
+
+## 3. Read the result
+
+- `result=routed` — done. `settings_result=` says which: `added`, `unchanged` (already correct),
+  `completed` (a repair of an earlier partial attempt — report it as success, not "nothing to do"),
+  or `repointed` (moved to a new port).
+- `result=error reason=health_check_failed` — **no routing was written**, so the project is unrouted,
+  which is a working project. Say what the log shows rather than guessing. Do **not** say "nothing
+  happened": check `proxy_started=`. If it is `true`, a proxy IS still listening on that port and was
+  not stopped — say so, and pass on `stop_command=` or point at `/context-guru:uninstall`. A health
+  check often fails transiently (a slow start, a busy laptop), and a user told "nothing happened" will
+  retry into their own stale pidfile and an occupied port.
+- `result=error reason=health_check_failed_after_write` with `rolled_back=true` — the **routing key**
+  was removed again automatically, so they are unrouted rather than broken. The rollback undoes the
+  routing key and nothing else: `proxy_started=`, `pidfile=` and `strategy_file=` say what is still
+  there. Report those too rather than implying a full undo.
+- `result=error reason=settings_write_failed detail=unparseable_json` — their settings file was
+  already broken. Do not rewrite it; tell them where it is.
+- `result=error reason=settings_write_failed detail=base_url_already_set` — a **refusal**, not a broken
+  file: something was already at that key and the run did not carry a decision authorising a replace.
+  It should not be reachable once `--on-conflict` is passed, so treat it as a bug worth reporting
+  rather than something to retry with a flag you chose yourself. Check `proxy_started=` — the proxy
+  starts before this step, so one may be running.
+- `result=refused reason=consent_required` — you ran it without the flag, or without asking. Nothing
+  was installed, started or written. Go back and ask; do not simply re-run it with the flag appended.
+- `result=refused reason=unknown_strategy` — the `--cache-strategy` name does not exist (a typo, e.g.
+  `5-minute-ping` for `5-min-ping`). Nothing was installed, started or written; the `note=` lists the
+  real names. Ask which they meant — do not pick one for them, because the names differ in whether
+  they spend the user's quota.
+- `strategy_warning=` — the strategy could not be written even though the name was valid (usually a
+  config at that path we did not write). The proxy is fine; mention it and move on.
+
+## 4. Then tell them
+
+- **Do not say it only takes effect next session.** Claude Code picks the `env` change up live —
+  that is why the proxy is started first. What is true: this session began before the proxy existed,
+  so `/context-guru:status` may have nothing to show yet, and a new session is the clean way to look.
+- Name the **cache strategy** from the result, and what it costs.
+- Dashboard: `http://127.0.0.1:<port>/dashboard/` — the four billed token tiers are where the cache
+  effect shows.
+- If `port` is not 8787, say so; a non-default port is the kind of thing people forget they set.
+- `/context-guru:status` for numbers, `/context-guru:cache-strategy-picker` to change the strategy,
+  `/context-guru:uninstall` to undo.
+- **`reset_hatch=` verbatim, on its own line, as your last line.** This is the only moment the user
+  is certain to be able to read it: the failure it exists for is "every request through the proxy
+  fails", and in that state no skill can run — including uninstall. It happened to a colleague.
 
   ```
   If Claude ever stops being able to talk after this, run: <the reset_hatch path>
   ```
 
-  It restores every settings file this plugin edited, from a copy taken before the first edit, and
-  needs no Claude, no network, no proxy and no plugin. `reset_hatch=unavailable` means the state
-  directory could not be written — say so plainly, because then their only undo is the `backup=`
-  path above.
-- `reset_original=unavailable` — the routing is recorded but the hatch holds no copy of the file's
-  original CONTENT, so it can name the file and point at the timestamped backups but cannot restore
-  it. **Read `reset_original_reason=` and pass it on rather than guessing** — the usual cause is not
-  a fault: the project was already routed when the record was first created (a pre-hatch install,
-  or a state directory that was cleaned), and no copy of an unrouted version was ever takeable.
-  Say that plainly; it is not a reason to stop, and it does not appear on a normal first install.
-- `result=conflict` — you skipped step 4, or the file changed. Go back and ask; only pass
-  `--force` once the user has said to replace that specific value. When they do, the replaced
-  value is recorded and `/context-guru:uninstall` puts it back — say so, because "we will take
-  over your gateway" is much easier to agree to when it is reversible.
-- `result=completed` — already routed to this proxy, and one of the other keys was missing or stale;
-  `added_keys=` names what was filled in. This is the outcome of re-running the install as a repair
-  after an earlier attempt stopped partway, which is the common case on a hosted agent. Report it as a
-  success, not as "nothing to do".
-- `result=unchanged` — routed, and every key already correct. Genuinely nothing to do.
-- `result=repointed` — the file already held a context-guru URL on a different port (the user
-  changed the configured port). Moved, with the previous value reported, and the chaining keys carried
-  across. Not a conflict.
-- `result=error reason=unparseable_json` — their settings file is already broken. Do not
-  rewrite it. Tell them where and let them fix it.
-
-### 7. Prove it, and only then say it worked
-
-The proxy went up in step 5, so this is a re-check after the routing change rather than a first
-start — confirm rather than assume:
-
-```bash
-curl -fsS "http://127.0.0.1:<port>/healthz"
-```
-
-`start-proxy.sh` is idempotent and gated: it starts the proxy only if nothing answers `/healthz`, and
-does nothing at all unless `ANTHROPIC_BASE_URL` names our port — so re-running it is free.
-
-If nothing answers, **say so and offer to remove the routing key**, because a routed project with no
-proxy is worse than an unrouted one. To diagnose, start it in the foreground of a background shell
-and read the log rather than declaring victory:
-
-```bash
-context-guru-proxy \
-  --listen "127.0.0.1:<port>" \
-  --preset "<preset>" \
-  --idle-exit="<idle-exit>" \
-  --dashboard \
-  --dashboard-db "${XDG_STATE_HOME:-$HOME/.local/state}/context-guru/dashboard-<port>.db"
-```
-
-**Both dashboard flags are required, and leaving them off is not cosmetic.** `--dashboard`
-defaults to false, so a proxy started without it serves a 404 at `/dashboard/` — the URL step 6
-below tells the user to open. And because `start-proxy.sh` is idempotent on `/healthz`, the
-session hook will never replace this hand-started proxy: with `--idle-exit 24h` the user's
-dashboard stays broken for a day with nothing to connect it to. `--dashboard-db` must be set
-because its default is `./context-guru-dashboard.db`, i.e. a database dropped in the user's
-repository.
-
-Pass the port as `--listen`, not through `LISTEN_ADDR`: the port has to be visible in the process
-command line, or nothing — including `/context-guru:uninstall` — can identify this proxy among
-others.
-
-A `--idle-exit` below the store's floor (~5h34m at the default TTL) is **refused at startup** on
-purpose — exiting clears in-memory cache state. If they want a shorter one, that is a
-`store.ttl_seconds` conversation, not a flag to force.
-
-### 8. Tell them what happens next
-
-- **Do not tell them it only takes effect next session.** That was this skill's claim and it is
-  wrong: Claude Code picks the `env` change up live, which is exactly why step 4 starts the proxy
-  first. What IS true is that this session began before the proxy existed, so `/context-guru:status`
-  may have nothing to show yet — say that instead, and that a new session is the clean way to see it.
-- From then on the plugin's `SessionStart` hook starts the proxy automatically if it is not
-  running, in the projects that are routed and nowhere else.
-- The proxy exits by itself after `--idle-exit` of no use, so nothing is left running.
-- Dashboard: `http://127.0.0.1:<port>/dashboard/` — the four billed token tiers are where the
-  cache effect is visible.
-- **Name the cache strategy in effect**, because a name is the only thing they can say back to you.
-  `start-proxy.sh` prints it too (`cache strategy 5-min-ping`), so the two cannot disagree. If it is
-  `5-min-ping`, one clause on what it spends; if it is `split`, one clause saying nothing is spent
-  between turns.
-- `/context-guru:status` for the numbers, `/context-guru:cache-strategy-picker` to change or turn off the cache strategy, `/context-guru:uninstall` to undo.
-- The escape hatch from step 6, once more, as the last line of your summary. A user who has to
-  find it will be looking at this transcript with a session that cannot answer questions.
+  `reset_hatch=unavailable` means the state directory was unwritable — say so, because then their
+  only undo is the `backup=` path.
 
 ## Do not
 
+- **Do not investigate their machine.** No `env | grep` over credentials, not `ANTHROPIC_API_KEY`,
+  not `AWS_*`; no `ps aux`, `lsof` or port scanning. An unbounded version of this was denied as
+  `[Credential Exploration]` on a real install. This plugin does not read credentials and must not
+  appear to — a proxy plugin sweeping for API keys is indistinguishable from the thing people are
+  right to fear. The plan already tells you every environment fact you need.
+- **Do not re-run the individual scripts** (`settings.py add`, `start-proxy.sh`) to do this by hand.
+  The ordering between them is load-bearing and getting it wrong once killed the installing session.
 - Do not add any other key. Not `ANTHROPIC_API_KEY`, not `ANTHROPIC_AUTH_TOKEN` — a credential
-  variable is what would take them OFF their subscription billing.
-- Do not edit a settings file without the backup step, and do not hand-edit JSON: use the
-  script, which replaces the file atomically.
-- Do not put the base URL in `.mcp.json`, an env file, or a shell rc. One key, one file.
-- Do not claim it is working because the install steps returned 0. `/healthz` answering is the
-  claim; anything else is a guess.
+  variable is what would take them off subscription billing.
+- Do not prefix the command with environment variables. Permission rules match by command PREFIX, so
+  `FOO=1 .../install.sh` is a command nobody can approve. Every option is a flag for that reason.
+- **Do not pass `--i-consent-to-traffic-interception` unless a person answered yes to a question you
+  asked.** It is not a flag that makes a refusal go away; it is you telling the script, on their
+  behalf, that they agreed to have their model traffic intercepted.
+- Do not claim it works because a command exited 0. `result=routed` is the claim.

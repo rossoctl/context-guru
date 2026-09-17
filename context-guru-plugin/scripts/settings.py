@@ -711,6 +711,12 @@ def cmd_show(args: argparse.Namespace) -> int:
         other_env_keys=len([k for k in (data.get("env") or {}) if k not in OURS]),
         top_level_keys=len(data),
         statusline=json.dumps(sl, sort_keys=True) if sl else "(unset)",
+        # Provenance, from the record rather than the URL's shape. install.sh decided "already
+        # routed" by matching `127.0.0.1:<port>` against the current value, which is the inference
+        # valid_base_url()'s own docstring forbids: two local proxies are indistinguishable by URL,
+        # so somebody else's proxy on our port read as ours and the conflict was never reported.
+        # `show` emitted nothing carrying this, so the caller had nothing better to use. Now it does.
+        ours=str(bool(current) and is_ours(data, current)).lower(),
     )
     return 0
 
@@ -769,6 +775,15 @@ def _ensure_hatch(file: str) -> None:
 
 
 def cmd_add(args: argparse.Namespace) -> int:
+    # SHAPE GATE, before anything is read or written. See valid_base_url() for why this is not
+    # is_ours() and why it does not touch --upstream. Exit 2 rather than 1: this is a refusal a
+    # caller can distinguish from a failure, the same code the scope and conflict gates use.
+    if args.url:
+        if why := valid_base_url(args.url):
+            emit(result="error", reason="invalid_base_url", detail=why, url=args.url,
+                 note="refused before writing: a routing key pointing at this would break every "
+                      "request, and `add` reporting success is what made that hard to notice")
+            return 2
     # SCOPE GATE — on the ROUTING, which is the only thing whose scope matters.
     #
     # B2 in review: this was the first statement in the function, above the statusline-only early
@@ -836,7 +851,8 @@ def cmd_add(args: argparse.Namespace) -> int:
     if sl_command:
         existing_sl = data.get(STATUSLINE_KEY)
         if existing_sl is not None and not is_ours_statusline(data, existing_sl) and not args.force:
-            emit(result="conflict", file=args.file, existing=json.dumps(existing_sl, sort_keys=True),
+            emit(result="conflict", reason="statusline_already_set", file=args.file,
+                 existing=json.dumps(existing_sl, sort_keys=True),
                  proposed=sl_command, conflict_on="statusline",
                  note="a statusLine is already configured in this file; ask before replacing it, "
                       "then re-run with --force")
@@ -911,7 +927,13 @@ def cmd_add(args: argparse.Namespace) -> int:
         # env block — what is left is a base URL the USER set, which may be their company
         # gateway or a benchmark endpoint, and taking it over would break their setup while
         # looking like it worked.
-        emit(result="conflict", file=args.file, existing=current, proposed=args.url,
+        # `reason=` is emitted because callers read it. install.sh's step 7 reports
+        # `detail=$(kv "$aout" reason)`, and this path emitted `existing=`/`proposed=` but no reason -
+        # so the one line that would have explained a refusal came back EMPTY. Fixed here rather than
+        # in the reader: every caller of this script keys on `reason=`, so a refusal that does not
+        # carry one is the defect, and naming it once fixes it for all of them.
+        emit(result="conflict", reason="base_url_already_set", file=args.file, existing=current,
+             proposed=args.url,
              note="ANTHROPIC_BASE_URL is already set here; ask before replacing it, "
                   "then re-run with --force")
         return 2
@@ -1018,7 +1040,8 @@ def cmd_remove(args: argparse.Namespace) -> int:
     if current != args.url and not is_ours(data, current):
         # Refuse to remove a base URL that is not ours: the user may have pointed this at
         # something else since, and uninstall must not take that with it.
-        emit(result="conflict", file=args.file, existing=current, expected=args.url,
+        emit(result="conflict", reason="not_the_url_we_installed", file=args.file, existing=current,
+             expected=args.url,
              note="this base URL is not the one context-guru installed; left untouched")
         return 2
     saved = backup(args.file)
@@ -1181,10 +1204,19 @@ STRATEGIES: dict[str, dict] = {
     "1-hour-head": {
         "cache": {"head_ttl_1h": True, "head_ttl_min_tokens": 50000},
         "spends": False,
-        "desc": "split + asks for the 1-hour tier on the tools/system breakpoints. No pings. "
-                "Measured GRANTED on Haiku 4.5 and SILENTLY DOWNGRADED on Sonnet 5 (zero 1h "
-                "writes in 19,805 production requests), so on Opus/Sonnet the honest projection "
-                "is $0 - verify with Usage.CacheWrite1h before believing otherwise.",
+        # The >=50k gate is disclosed HERE, in plugin.json and in the picker's table, because it is
+        # the difference between this strategy doing something and doing nothing - and because both
+        # measurements quoted as its evidence are BELOW it (36,574 on Haiku, 48,212 on Sonnet). A
+        # strategy that advertises a measurement has to state the threshold that measurement would
+        # not have passed, or "verify with Usage.CacheWrite1h" reads zero for an undisclosed second
+        # reason and the user concludes the tier was refused.
+        "desc": "split + asks for the 1-hour tier on the tools/system breakpoints, and ONLY on "
+                "requests with a >=50k-token prefix (below that it does nothing at all; the "
+                "size gate is what makes it pay, +$48.81 against -$18.34 applied blanket). No "
+                "pings. Measured GRANTED on Haiku 4.5 and SILENTLY DOWNGRADED on Sonnet 5 (zero "
+                "1h writes in 19,805 production requests), so on Opus/Sonnet the honest projection "
+                "is $0 - verify with Usage.CacheWrite1h before believing otherwise, and note both "
+                "of those measurements were on prefixes UNDER the 50k gate this ships with.",
     },
 }
 
@@ -1231,9 +1263,101 @@ def _render_strategy(name: str, preset: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def valid_base_url(url: str) -> str:
+    """Is this a base URL we are willing to WRITE into somebody's routing key? Returns "" if so,
+    else a short reason.
+
+    This is the guard that did not exist, and its absence had a straightforward consequence: `add`
+    accepted any string at all — verified, `127.0.0.1/anthropic` with no scheme and no port — wrote
+    it into `env.ANTHROPIC_BASE_URL`, and reported `result=added` with exit 0. The project is then
+    routed to something unroutable, which is the hang state this whole design exists to avoid, and
+    the report says it worked.
+
+    Three things it deliberately is NOT:
+
+    * NOT `is_ours()`. That answers "did we write this?" from the recorded
+      `$context-guru.installed_base_url`, never from the URL's shape — because litellm's default is
+      `http://127.0.0.1:4000/anthropic` and two local proxies are indistinguishable by URL.
+      Provenance and validity are different questions.
+    * NOT `_is_loopback()`, which is deliberately generous: every shape it missed was a false
+      NEGATIVE, and a false negative there re-introduces a different defect.
+    * NOT applied to `--upstream`. That is somebody else's gateway and its shape is theirs — the
+      tests alone carry `http://gw.example:4000/v1?tenant=acme&mode=chain`. We validate the URL
+      whose shape WE control.
+
+    And it is applied on `add` only, never on `remove`: removal is the recovery path, so it has to
+    be able to clean up a malformed value that is already in the file. Strict on write, permissive
+    on removal.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return "empty"
+    if "://" not in url:
+        return "no_scheme"
+    scheme, _, rest = url.partition("://")
+    if scheme.lower() not in ("http", "https"):
+        return "bad_scheme"
+    if not rest or rest.startswith("/"):
+        return "no_host"
+    hostport, _, path = rest.partition("/")
+    # A bracketed v6 literal keeps its brackets; the port is whatever follows the closing one.
+    if hostport.startswith("["):
+        host, _, after = hostport.partition("]")
+        host += "]"
+        port = after[1:] if after.startswith(":") else ""
+    else:
+        host, _, port = hostport.partition(":")
+    if not host:
+        return "no_host"
+    # A host must look like a host. This was only checked for emptiness, and the consequence was not
+    # cosmetic: `http://x;touch /tmp/PWNED;cd /anthropic` was approved as `result=ok`, install.sh
+    # interpolated that approved string unquoted into the `confirm_command=` line that SKILL.md tells
+    # a model to run verbatim and that the suite runs through `bash -c`, and the injected command
+    # executed. Worse, it executed regardless of the consent answer, because it rides the string the
+    # *plan* prints — upstream of the gate in route_main.
+    #
+    # install.sh now also shell-quotes every value it interpolates, which closes the same hole from
+    # the other side. Both are deliberate: this one refuses a URL we would never want to write, and
+    # the quoting stops the next field added to that line from reopening the vector.
+    #
+    # Underscore is permitted though it is not strictly legal in a hostname, because internal
+    # gateways use it and a false refusal here blocks an install; it is shell-inert either way.
+    if host.startswith("["):
+        if not re.fullmatch(r"\[[0-9A-Fa-f:.]+\]", host):
+            return "bad_host"
+    elif not re.fullmatch(r"[A-Za-z0-9_]([A-Za-z0-9._-]*[A-Za-z0-9_])?", host):
+        return "bad_host"
+    if port and not port.isdigit():
+        return "bad_port"
+    if port and not (0 < int(port) < 65536):
+        return "port_out_of_range"
+    # The path the proxy serves the Anthropic dialect on. Writing a base URL without it routes the
+    # session to a 404 on every call, which looks exactly like a broken proxy.
+    if path.rstrip("/").rsplit("/", 1)[-1] != "anthropic":
+        return "path_not_anthropic"
+    # An explicit port is required for loopback and NOT otherwise: our own proxy is always on a
+    # chosen port, while a gateway on `https://gw.internal/anthropic` is legitimately at 443.
+    # `http://127.0.0.1/anthropic` is the malformed shape actually observed in the wild.
+    if _is_loopback(url) and not port:
+        return "loopback_without_port"
+    return ""
+
+
+def cmd_check_url(args: argparse.Namespace) -> int:
+    """Validate a base URL and write nothing. Exit 0 if usable, 2 with a reason if not."""
+    why = valid_base_url(args.url)
+    if why:
+        emit(result="error", reason="invalid_base_url", detail=why, url=args.url)
+        return 2
+    emit(result="ok", url=args.url)
+    return 0
+
+
 def cmd_strategy(args) -> int:
     if args.op == "list":
-        emit(result="ok", default=DEFAULT_STRATEGY)
+        # `names=` is the machine-readable list. The per-strategy keys below mangle `-` to `_` to be
+        # valid fact keys, so they cannot be parsed back into names — install.sh needs to validate a
+        # `--cache-strategy` value BEFORE it downloads a binary, and this is what it reads.
+        emit(result="ok", default=DEFAULT_STRATEGY, names=",".join(STRATEGIES))
         for name, spec in STRATEGIES.items():
             emit(**{f"strategy_{name.replace('-', '_')}": spec["desc"],
                     f"spends_{name.replace('-', '_')}": "true" if spec["spends"] else "false"})
@@ -1263,21 +1387,40 @@ def cmd_strategy(args) -> int:
         return 0
 
     if args.op == "clear":
+        # `set --name split` reaches here by recursion, because split IS the absence of a config. The
+        # caller still asked to SET something, and answering a `set` with `cleared` made success have
+        # three words - install.sh's `set|cleared|unchanged` case was the tell, and every future caller
+        # would have inherited the obligation to know that. So the OP the caller invoked decides the
+        # word, and the mechanism stays a removal.
+        as_set = getattr(args, "as_set", False)
+        done, nothing_to_do = ("set", "set") if as_set else ("cleared", "unchanged")
+        # `file=` would name a path that deliberately does not exist, which is the sort of confidently
+        # wrong detail this script is careful about elsewhere.
+        where = "(none)" if as_set else path
         if not os.path.exists(path):
-            emit(result="unchanged", strategy="split", file=path, port=port,
+            emit(result=nothing_to_do, strategy="split", file=where, port=port,
                  note="nothing to remove")
             return 0
-        text = ""
+        # An unreadable file is NOT a file we may delete. This swallowed the OSError, left `text`
+        # empty, and `text and not _strategy_is_ours(text)` is then false - so the ownership check was
+        # skipped entirely and execution fell through to os.unlink(), reporting `result=cleared` for a
+        # file we never verified we wrote. A permission-restricted foreign config is exactly what that
+        # produces, and exactly the case the check exists for. `set` already handles the same
+        # situation as `unreadable`; this now matches it rather than contradicting the invariant this
+        # module advertises and tests for.
         try:
             text = open(path, encoding="utf-8").read()
-        except OSError:
-            pass
+        except OSError as exc:
+            emit(result="error", reason="unreadable", file=path, detail=f"{exc}",
+                 note="a config exists at this path and cannot be read, so ownership cannot be "
+                      "checked; refusing to delete it. Remove it by hand if it is yours.")
+            return 3
         if text and not _strategy_is_ours(text):
             emit(result="conflict", reason="not_ours", file=path,
                  note="this config was not written by context-guru; remove it by hand")
             return 2
         os.unlink(path)
-        emit(result="cleared", strategy="split", file=path, port=port,
+        emit(result=done, strategy="split", file=where, port=port,
              note="takes effect the next time the proxy starts, not now")
         return 0
 
@@ -1287,6 +1430,16 @@ def cmd_strategy(args) -> int:
         emit(result="error", reason="unknown_strategy", requested=name,
              known=",".join(STRATEGIES))
         return 2
+    # `split` writes NO FILE, so it reaches `clear` and never touches the preset - checking the preset
+    # first refused `strategy set --name split` (with no --preset, which the parser does not require)
+    # as `empty_preset`, whose note about silently disabling compaction describes a file that would
+    # never be written. It also regressed the old keep-alive-off path, which was `rm -f "$CFG"` and
+    # required no preset at all. Ordered before the guard for that reason.
+    if name == "split":
+        # Expressed as a removal, per the STRATEGIES comment - but reported as a `set`, because that is
+        # the operation the caller asked for. See the clear branch.
+        return cmd_strategy(argparse.Namespace(op="clear", port=port, as_set=True))
+
     # An unresolved preset is NOT a harmless default: written empty, the proxy loads a config with
     # no pipeline and reports success, so compaction is off while a strategy keeps running. The old
     # keepalive skill guarded this in shell; it is enforced here so every caller inherits it.
@@ -1295,10 +1448,6 @@ def cmd_strategy(args) -> int:
              note="pass --preset (option_preset= from `settings.py config`, else the plugin.json "
                   "default `cache`); an empty preset silently disables compaction")
         return 2
-
-    if name == "split":
-        # Expressed as a removal, per the STRATEGIES comment.
-        return cmd_strategy(argparse.Namespace(op="clear", port=port))
 
     if os.path.exists(path):
         try:
@@ -1348,6 +1497,13 @@ def main() -> int:
 
     # `strategy` is the named-cache-strategy surface: the one place that decides what a name means,
     # so the skills that use it carry a NAME rather than four tuning numbers in a heredoc.
+    # check-url exists so a caller can validate a supplied base URL BEFORE acting on it. Without
+    # it the only enforcement point was `add`, i.e. after a proxy had been started and a health
+    # check spent — a typo cost real work and surfaced as `settings_write_failed`, which names the
+    # wrong step.
+    cu = sub.add_parser("check-url")
+    cu.add_argument("--url", required=True)
+
     st = sub.add_parser("strategy")
     st.add_argument("op", choices=("list", "show", "set", "clear"))
     st.add_argument("--name", default="",
@@ -1369,7 +1525,8 @@ def main() -> int:
         if args.op == "set" and not args.name:
             ap.error("strategy set needs --name; one of " + ", ".join(STRATEGIES))
     rc = {"add": cmd_add, "remove": cmd_remove, "show": cmd_show,
-          "config": cmd_config, "strategy": cmd_strategy}[args.cmd](args)
+          "config": cmd_config, "strategy": cmd_strategy,
+          "check-url": cmd_check_url}[args.cmd](args)
 
     # The hatch facts are printed HERE rather than from inside save(), so the `result=` line the
     # caller keys on stays first, and so every writing path reports them without six call sites

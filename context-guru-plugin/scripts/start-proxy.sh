@@ -32,6 +32,8 @@ PRESET="${CLAUDE_PLUGIN_OPTION_PRESET:-cache}"
 IDLE_EXIT="${CLAUDE_PLUGIN_OPTION_IDLE_EXIT:-24h}"
 BIN="${CONTEXT_GURU_BIN:-context-guru-proxy}"
 LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log"
+# See --emit-facts below. Off by default: the hook path's output is read by a person.
+EMIT_FACTS=0
 HEALTH="http://127.0.0.1:${PORT}/healthz"
 
 note() { printf 'context-guru: %s\n' "$*"; }
@@ -157,6 +159,7 @@ while [ $# -gt 0 ]; do
     --preset=*) if takes_value --preset "${1#--preset=}"; then PRESET_ARG="${1#--preset=}"; fi ;;
     --idle-exit) if takes_value --idle-exit "${2:-}"; then IDLE_EXIT_ARG="$2"; shift; fi ;;
     --idle-exit=*) if takes_value --idle-exit "${1#--idle-exit=}"; then IDLE_EXIT_ARG="${1#--idle-exit=}"; fi ;;
+    --emit-facts) EMIT_FACTS=1 ;;
     *) note "ignoring unrecognised argument '$1'" ;;
   esac
   shift
@@ -259,6 +262,20 @@ STATE="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}
 mkdir -p "$STATE" 2>/dev/null || STATE="${TMPDIR:-/tmp}"
 PIDFILE="${STATE}/proxy-${PORT}.pid"
 
+# --emit-facts: print the paths this script ACTUALLY used, as key=value, for a caller that has to
+# report them. install.sh used to re-derive the pidfile path from the same expression as line 258 -
+# and missed the fallback on line 259, so on a machine whose state dir cannot be created it looked
+# for the pidfile in the state dir while this script had already written it to $TMPDIR. The caller's
+# honest "a proxy is still running" report then printed nothing at all, in exactly the situation the
+# fallback exists for: a machine that is already broken, which is when a health check is likeliest to
+# fail. One place decides the path and the reader is told, so the two cannot drift again.
+#
+# Behind a flag so the SessionStart hook path, whose output a user reads, is unchanged.
+if [ "$EMIT_FACTS" = 1 ]; then
+  printf 'pidfile=%s\n' "$PIDFILE"
+  printf 'log=%s\n' "$LOG"
+fi
+
 # --anthropic-upstream, when something else is already the gateway.
 #
 # On a hosted agent (a coding-agent pod, a managed workspace) $ANTHROPIC_BASE_URL is set by the
@@ -307,7 +324,18 @@ if [ -f "$KEEPALIVE_CFG" ]; then
   CONFIG_ARGS=(--config "$KEEPALIVE_CFG")
   # Same fail-open discipline as the preset read below: an unreadable or marker-less file must
   # still start the proxy, and must report what is KNOWN rather than something confident and wrong.
-  cfg_strategy=$(sed -n '1s/.*strategy=\([A-Za-z0-9._-]*\).*/\1/p' "$KEEPALIVE_CFG" 2>/dev/null)
+  # The name is trusted only on a file whose first line carries OUR marker. Read without that check,
+  # any foreign config with `strategy=` on line 1 was reported as `cache strategy <theirs>` in the
+  # startup note while `strategy show` called the same file `(foreign)` - and the stated point of
+  # recording the name in the file is that the two readers cannot disagree. Same marker test as
+  # settings.py's _strategy_is_ours(): the prefix, and `written by` on that line.
+  cfg_first=$(sed -n '1p' "$KEEPALIVE_CFG" 2>/dev/null)
+  case "$cfg_first" in
+    "# context-guru:"*"written by"*)
+      cfg_strategy=$(printf '%s\n' "$cfg_first" \
+        | sed -n 's/.*strategy=\([A-Za-z0-9._-]*\).*/\1/p') ;;
+    *) cfg_strategy= ;;
+  esac
   if [ -n "$cfg_strategy" ]; then
     STRATEGY_NOTE="$cfg_strategy"
   else
