@@ -588,10 +588,11 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "read body", http.StatusBadRequest)
+	// Unconditional: every caller of this endpoint wants exactly this — a body already
+	// larger than maxRequestBytes is the normal, intended input here (its whole job is to
+	// shrink whatever it's given), never a reason to reject up front.
+	body, ok := readGatedBody(w, r, true)
+	if !ok {
 		return
 	}
 	provider := bschemas.OpenAI
@@ -1024,10 +1025,11 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			h.refuseRoute(w, r, tn, err)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "read body", http.StatusBadRequest)
+		// Not unconditional: only the agent's OWN compaction request (isAgentCompaction,
+		// checked inside readGatedBody) may read past maxRequestBytes here — everything
+		// else still gets refused at the default ceiling exactly as before.
+		body, ok := readGatedBody(w, r, false)
+		if !ok {
 			return
 		}
 		// Pin the model if configured (eval-containers EVAL_MODEL).
@@ -1289,8 +1291,56 @@ const maxExpandRounds = 3
 
 // maxRequestBytes caps an inbound request body so a single huge POST can't exhaust
 // proxy memory (the body is buffered and token-counted several times). Generous
-// enough for very long agent transcripts; requests above it get 413.
+// enough for very long agent transcripts; requests above it get 413 — unless
+// readGatedBody finds a reason to read further. See maxCompactionRequestBytes.
 const maxRequestBytes = 32 << 20 // 32 MiB
+
+// maxCompactionRequestBytes is the ceiling readGatedBody extends to for the two cases whose
+// entire point is a body already larger than maxRequestBytes: the agent's own compaction
+// request (isAgentCompaction — see agentcompaction.go for why that must be forwarded
+// untouched, never pipelined) and the standalone /compact endpoint, whose whole job is to
+// receive and shrink a body that is, by definition, already large. Matches the existing
+// generous-but-bounded precedent already used in this package for a comparable purpose
+// (maxKeepAliveBytes, keepalive.go).
+const maxCompactionRequestBytes = 128 << 20 // 128 MiB
+
+// readGatedBody reads a request body up to maxRequestBytes as the cheap default —
+// identical cost and behavior to plain http.MaxBytesReader for the overwhelming majority of
+// requests. Only a body already over that reads further, capped at
+// maxCompactionRequestBytes, so the caller can find out whether this is exactly the one case
+// worth the extra buffering: the agent's own compaction request, or (via
+// unconditionalOverride) a route whose whole job is handling a body this large for every
+// caller. Both LimitReader calls bound worst-case memory even against a client that tries to
+// send far more than either ceiling — the same safety property http.MaxBytesReader had, just
+// with an explicit second tier instead of one hard stop.
+//
+// Returns ok=false once a response has already been written; the caller must return
+// immediately without writing anything further.
+func readGatedBody(w http.ResponseWriter, r *http.Request, unconditionalOverride bool) (body []byte, ok bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes+1))
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return nil, false
+	}
+	if int64(len(body)) <= maxRequestBytes {
+		return body, true // fast path — byte-for-byte today's behavior
+	}
+	rest, err := io.ReadAll(io.LimitReader(r.Body, maxCompactionRequestBytes-int64(len(body))+1))
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return nil, false
+	}
+	body = append(body, rest...)
+	if int64(len(body)) > maxCompactionRequestBytes {
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	if !unconditionalOverride && !isAgentCompaction(body) {
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	return body, true
+}
 
 // The expand tool is advertised on the outgoing request by expand.Inject (called
 // in chat, gated by Options.InjectExpand + store.Persists), appended last and

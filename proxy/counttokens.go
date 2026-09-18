@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -60,7 +61,16 @@ func (h *Handler) countTokens(static upstream) http.HandlerFunc {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, "count_tokens: unreadable request body", http.StatusBadRequest)
+			// A body over maxRequestBytes is not malformed — say so distinctly. No
+			// two-tier override here: unlike chat/compact, this route has no pipeline
+			// stage to benefit from reading further (it forwards verbatim), so there is
+			// nothing a higher ceiling would buy.
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				http.Error(w, "count_tokens: request too large", http.StatusRequestEntityTooLarge)
+			} else {
+				http.Error(w, "count_tokens: unreadable request body", http.StatusBadRequest)
+			}
 			return
 		}
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
