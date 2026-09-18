@@ -12,6 +12,7 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/tokens"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // OpenAI calls a small OpenAI chat-completions model with a single user prompt and
@@ -89,35 +90,50 @@ func cacheControlPrefixEnd(model string, msgs []bschemas.ChatMessage) int {
 	if len(msgs) < 2 || !strings.Contains(strings.ToLower(model), "claude") {
 		return -1
 	}
+	prefix := msgs[:len(msgs)-1]
 	n := 0
-	for _, m := range msgs[:len(msgs)-1] {
-		n += tokens.Count(messageText(m))
+	for _, m := range prefix {
+		// A MARK ALREADY IN THE PREFIX IS THE CALLER'S, and it is better placed than ours: it is
+		// the breakpoint the parent request's cache entry was actually created under, so it is the
+		// one a read has to match. bschemas.ChatContentBlock carries CacheControl and the content
+		// passthrough preserves it, so an agent that caches its own prompt (Claude Code does)
+		// arrives here already marked. Adding a second mark buys nothing and spends one of the
+		// provider's FOUR per-request breakpoint slots — a fifth is a 400 on the whole call, which
+		// on this path means a wasted summarization and a reverted component.
+		if hasCacheControl(m) {
+			return -1
+		}
+		n += tokens.Count(schema.MessageText(m))
 	}
-	// Below the model's floor the provider ignores the mark silently, so the write premium
-	// would be paid for an entry nothing can read. CacheablePrefix owns that table.
+	// Below the model's floor the provider ignores the mark silently, so the write premium would
+	// be paid for an entry nothing can read. CacheablePrefix owns that table.
 	if !CacheablePrefix(model, n) {
 		return -1
 	}
-	return len(msgs) - 2
-}
-
-// messageText extracts a message's text for token counting only. Deliberately local rather
-// than reaching for schema.MessageText: this package sits below the public ones and counting
-// is the only thing it needs.
-func messageText(m bschemas.ChatMessage) string {
-	if m.Content == nil {
-		return ""
-	}
-	if m.Content.ContentStr != nil {
-		return *m.Content.ContentStr
-	}
-	var b strings.Builder
-	for _, blk := range m.Content.ContentBlocks {
-		if blk.Text != nil {
-			b.WriteString(*blk.Text)
+	// Walk back to the last message that can actually CARRY a mark. An assistant turn that is
+	// purely tool calls has no content at all, and a breakpoint needs a content block to attach
+	// to. Without this the index could name such a message and the request would go out with no
+	// mark — silently, which is the exact failure this change exists to remove. Marking one turn
+	// earlier keeps a shorter prefix, which is the safe direction: less is cached, nothing breaks.
+	for i := len(prefix) - 1; i >= 0; i-- {
+		if _, ok := markedContent(prefix[i].Content); ok {
+			return i
 		}
 	}
-	return b.String()
+	return -1
+}
+
+// hasCacheControl reports whether this message already carries a breakpoint the caller placed.
+func hasCacheControl(m bschemas.ChatMessage) bool {
+	if m.Content == nil {
+		return false
+	}
+	for _, blk := range m.Content.ContentBlocks {
+		if blk.CacheControl != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // markedContent re-renders content as a block array carrying a cache_control breakpoint on its
