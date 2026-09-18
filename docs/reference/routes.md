@@ -16,6 +16,25 @@ The proxy serves both provider dialects on one port (default `:4000`).
 | `GET /expand?id=` | Recover an offloaded original by its `<<cg:HASH>>` id. Scoped to the caller's session. |
 | `GET /favicon.ico` | `204`. Present so a browser's unprompted request does not fall through to the Bob catch-all below and answer `401`. |
 
+### Request-size ceiling — 32 MiB by default, 128 MiB for compaction
+
+`/openai/v1/chat/completions` and `/anthropic/v1/messages` refuse a request body over 32 MiB
+with `413 Request Entity Too Large` — buffering more than that would risk exhausting proxy
+memory on a single request. Two exceptions, both because the whole point of the request is
+carrying a transcript that is, by definition, already this large:
+
+- **The agent's own compaction request** (see [agent-compaction.md](../how-to/agent-compaction.md))
+  — detected the same way it already is for the pipeline bypass — may read up to 128 MiB. It
+  must be forwarded byte-identical regardless of size, so relaxing the *read* ceiling for it
+  costs nothing extra: no pipeline component runs on it either way.
+- **`/compact`** always reads up to 128 MiB, unconditionally — every caller of this endpoint
+  wants exactly this: a body already larger than 32 MiB is the normal, intended input, never a
+  reason to refuse up front.
+
+128 MiB is still a hard ceiling, not "no limit" — a request larger than that is refused
+regardless of content. `/anthropic/v1/messages/count_tokens` is NOT exempt (no pipeline stage
+would benefit from a higher ceiling — it forwards verbatim either way); it still refuses
+anything over 32 MiB, now with an honest `413` rather than a generic `400`.
 
 ### `count_tokens` answers about the ORIGINAL body, and that is deliberate
 
