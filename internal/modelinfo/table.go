@@ -116,7 +116,15 @@ func ParseTable(b []byte) (*Table, error) {
 			p.CacheRead = p.Input * f.CacheReadFrac
 		}
 		if p.CacheWrite == 0 {
-			p.CacheWrite = p.Input * f.CacheWriteFrac
+			// The file-level cache_write_frac is documented in prices.example.yaml as "the
+			// Anthropic-family multiples", so it is applied to the Anthropic family and not
+			// to models whose provider charges no creation premium at all. An entry that
+			// states its own cache_write is honoured above and never reaches this line.
+			frac := f.CacheWriteFrac
+			if !chargesCacheWritePremium(match) {
+				frac = 1.0
+			}
+			p.CacheWrite = p.Input * frac
 		}
 		t.entries = append(t.entries, tableEntry{match: match, prefix: prefix,
 			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window})

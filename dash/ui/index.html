@@ -357,6 +357,14 @@
         served it from. Pricing gross savings as writes is how a dashboard overstates itself
         by its own overcount ratio — which is why dollar savings and token savings diverge so
         sharply on this workload.</p>
+      <p>Those token counts are our own estimate (an o200k BPE over message text), and the
+        rates are the provider's, so the counts are scaled to the provider's own count of the
+        same removed content before being priced — a measured per-model-family factor, roughly
+        1.37&times; on haiku-4-5 and 1.69&times; on the sonnet-5/opus-5 tokenizer. Without it
+        every figure on this page understated itself; see issue #240. The scaling applies to
+        these counterfactual <em>dollars</em> only. The token figures shown elsewhere are
+        unchanged, because component gates are evaluated against them and moving those would
+        change what gets compacted rather than what gets reported.</p>
     </details>
     <div id="chart-cost" class="chart" data-testid="chart-cost"></div>
   </div>

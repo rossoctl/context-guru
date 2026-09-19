@@ -197,13 +197,27 @@ product was worthless. They were reading a real number with no counterpart.
 Per component, per request, valued at the tier the request actually paid:
 
 ```
-saved_usd(c,r) = u·CacheWrite + (g − u)·tier(r)
+saved_usd(c,r) = f(model) · [ u·CacheWrite + (g − u)·tier(r) ]
   g = saved_gross, u = min(saved_unique, g)
   tier(r) = CacheRead   if cache_read > 0                            (warm: replay from cache)
           = CacheWrite  if cache_write > 0 && cache_write >= fresh    (cold/TTL: prompt re-billed)
           = Input       otherwise                                     (non-caching backend)
+  f(model) = the provider's token count over ours, on removed content   (issue #240)
+           = 1.3686  claude-haiku-4-5
+           = 1.6857  claude-sonnet-5 / claude-opus-5 (one tokenizer; measured identical)
+           = 1.0     unmeasured family — no correction rather than another family's constant
 net_usd(c) = Σ_r saved_usd(c,r) − Σ_r llm_cost_usd(c,r)
 ```
+
+`f` was absent until #240. `g` and `u` are `schema.MessagesTokens` — an o200k BPE over message
+text — while `CacheWrite`/`tier(r)` are the provider's rates, so the formula priced one side's
+counts at the other side's rates. It is a factor on a **difference**, which is why the 3.4x
+`EstimatorDivergence` is not a substitute: that ratio is of **levels**, and a level carries the
+system prompt, tool declarations and JSON envelope that no component removes and that cancel in
+a difference. Measured by `apply.TestBilledPairColdReplay` (real turns billed twice, uncached)
+and corroborated to within 4-7% by `tokens.TestBilledFactorByContentClass` weighted by this
+corpus's own component mix. Rows written before the fix keep their old figures and the
+dashboard labels them — see `requests.billed_token_factor`, where 0 marks a pre-fix row.
 
 The `Σ` over turns **is** the amortization — realized turn by turn as the frozen reduction
 replays, not projected. It reconciles against the stored request-level total to 0.9% on

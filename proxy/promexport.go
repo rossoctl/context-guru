@@ -810,10 +810,10 @@ func (h *Handler) renderMetrics() string {
 				"err", err)
 		} else {
 			promHeader(&b, "cg_baseline_cost_usd", monthToDateCaveat(
-				"What this month's traffic would have cost with nothing removed: the billed cost plus the removed tokens priced at the tier each request actually paid. Subtract cg_saved_usd to get the bill."), "gauge")
+				"What this month's traffic would have cost with nothing removed: the billed cost plus the removed tokens priced at the tier each request actually paid. Subtract cg_saved_usd to get the bill. The removed-token counts behind this are our own estimate scaled to the provider's own count of the same content (issue #240): a measured per-model-family factor, ~1.37x on haiku-4-5 and ~1.69x on the sonnet-5/opus-5 tokenizer. Rows written before that correction are NOT re-priced, so a window spanning the fix mixes two definitions and the older half is the understated one."), "gauge")
 			promLine(&b, "cg_baseline_cost_usd", "", v.BaselineUSD)
 			promHeader(&b, "cg_saved_usd", monthToDateCaveat(
-				"Provider spend compaction avoided this month: baseline minus billed. BEFORE context-guru's own model spend — use cg_net_saved_usd for the verdict."), "gauge")
+				"Provider spend compaction avoided this month: baseline minus billed. BEFORE context-guru's own model spend — use cg_net_saved_usd for the verdict. The removed-token counts behind this are our own estimate scaled to the provider's own count of the same content (issue #240): a measured per-model-family factor, ~1.37x on haiku-4-5 and ~1.69x on the sonnet-5/opus-5 tokenizer. Rows written before that correction are NOT re-priced, so a window spanning the fix mixes two definitions and the older half is the understated one."), "gauge")
 			promLine(&b, "cg_saved_usd", "", v.SavedUSD)
 			promHeader(&b, "cg_net_saved_usd", monthToDateCaveat(
 				"cg_saved_usd minus what context-guru's own compaction models cost. GOES NEGATIVE when a configuration spends more than it saves; that is a real outcome and this series reports it rather than clamping at zero. This is the number to alert on."), "gauge")

@@ -141,7 +141,8 @@ const priceSample = `{
                           "output_cost_per_token": 1e-05,
                           "cache_read_input_token_cost": 2e-07,
                           "cache_creation_input_token_cost": 2.5e-06},
-  "no-cache-model": {"max_input_tokens": 8192, "input_cost_per_token": 4e-06, "output_cost_per_token": 8e-06}
+  "no-cache-model": {"max_input_tokens": 8192, "input_cost_per_token": 4e-06, "output_cost_per_token": 8e-06},
+  "claude-no-cache-rates": {"max_input_tokens": 8192, "input_cost_per_token": 4e-06, "output_cost_per_token": 8e-06}
 }`
 
 func TestLiteLLMPrices(t *testing.T) {
@@ -176,8 +177,28 @@ func TestLiteLLMPrices(t *testing.T) {
 	if np.CacheRead == 0 || np.CacheWrite == 0 {
 		t.Errorf("missing cache tiers left at zero (%+v): a cached request would price as free", np)
 	}
-	if np.CacheRead >= np.Input || np.CacheWrite <= np.Input {
-		t.Errorf("filled cache tiers are not read<input<write: %+v", np)
+	// read < input always: every family that caches discounts a hit.
+	//
+	// The WRITE tier is per-family and this assertion used to read `CacheWrite <= Input` =>
+	// fail, i.e. it required a creation premium on EVERY model. That encoded the Anthropic
+	// premium as a universal invariant, which is the #240 defect: `no-cache-model` is not an
+	// Anthropic id, no other family charges to create an entry, and inventing 1.25x there put
+	// a fabricated premium into that row's SAVINGS. So: never free, and never a premium the
+	// provider does not charge.
+	if np.CacheRead >= np.Input || np.CacheWrite < np.Input {
+		t.Errorf("filled cache tiers are not read<input<=write: %+v", np)
+	}
+	if np.CacheWrite != np.Input {
+		t.Errorf("a non-Anthropic model must get no creation premium, got write=%v input=%v",
+			np.CacheWrite, np.Input)
+	}
+	// And the Anthropic family must still get its published 1.25x.
+	cp, ok := l.Price(ctx, "claude-no-cache-rates")
+	if !ok {
+		t.Fatal("Price(claude-no-cache-rates) not resolved")
+	}
+	if got, want := cp.CacheWrite/cp.Input, 1.25; got < want-1e-9 || got > want+1e-9 {
+		t.Errorf("Anthropic write premium = %v, want %v", got, want)
 	}
 	// An entry with no pricing at all must report unknown, not a zero Price.
 	if _, ok := l.Price(ctx, "totally-absent-xyz"); ok {

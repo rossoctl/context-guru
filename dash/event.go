@@ -5,6 +5,7 @@ import (
 
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
 // Token-accounting honesty levels. A request is only `complete` when the provider
@@ -83,12 +84,25 @@ type Event struct {
 	TenantID  string `json:"tenant_id"`
 	SessionID string `json:"session_id"`
 	Model     string `json:"model"`
-	Provider  string `json:"provider"`
-	Agent     string `json:"agent"`
-	Preset    string `json:"preset"`
-	Mode      string `json:"mode"`
-	Route     string `json:"route"`
-	Status    int    `json:"status"`
+	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
+	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
+	// tokens.BilledDeltaFactor(Model), resolved once in Price.
+	//
+	// It is published rather than folded in silently: this factor is the whole difference
+	// between what the dashboard reported before #240 and after it, and a reader who sees a
+	// savings figure move needs to be able to see, and divide out, the thing that moved it.
+	// 1.0 with BilledTokenFactorMeasured=false means this model's family was never measured
+	// and the figure is exactly what it always was.
+	BilledTokenFactor float64 `json:"billed_token_factor"`
+	// BilledTokenFactorMeasured distinguishes "corrected by a measured factor" from
+	// "uncorrected because nobody has measured this family" — 1.0 means both otherwise.
+	BilledTokenFactorMeasured bool   `json:"billed_token_factor_measured"`
+	Provider                  string `json:"provider"`
+	Agent                     string `json:"agent"`
+	Preset                    string `json:"preset"`
+	Mode                      string `json:"mode"`
+	Route                     string `json:"route"`
+	Status                    int    `json:"status"`
 
 	Bypassed   bool `json:"bypassed"`
 	CacheAware bool `json:"cache_aware"`
@@ -633,6 +647,10 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 		return
 	}
 	e.TokenAccounting = AccountingComplete
+	// Resolve the tokenizer correction ONCE per request, before anything prices a saving.
+	// It multiplies counterfactual token counts only — never a provider-reported count, so
+	// CostUSD below is untouched.
+	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.BilledDeltaFactor(e.Model)
 	e.CostUSD = p.Cost(e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens)
 	// The one-hour write premium. Price.Cost knows a single write rate — the 5-minute one, at
 	// 1.25x base input — so the tokens the provider billed at the 1-hour tier (2.0x) are short
@@ -682,7 +700,8 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 		if unique < 0 {
 			unique = 0
 		}
-		c.SavedUSD = float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)
+		c.SavedUSD = (float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)) *
+			e.BilledTokenFactor
 	}
 }
 
@@ -869,7 +888,12 @@ const providerCacheTTLMs int64 = 5 * 60 * 1000
 
 // baselineDeltaUSD is what the removed content would have cost had it been sent:
 // the unique part as new input (cache-write rate), the re-sent remainder as a
-// cache read.
+// cache read — with the token counts corrected to the provider's own count.
+//
+// The correction (BilledTokenFactor) is issue #240: the counts here are
+// schema.MessagesTokens, an o200k_base estimate, while the RATE is the provider's. Pricing
+// one at the other under-reported this delta on every Claude row. See
+// tokens.BilledDeltaFactor for how the factor was measured and what it does not claim.
 func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
 	unique := e.SavedUnique
 	gross := e.Saved()
@@ -882,7 +906,8 @@ func (e *Event) baselineDeltaUSD(p modelinfo.Price) float64 {
 	if unique < 0 {
 		unique = 0
 	}
-	return float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)
+	raw := float64(unique)*p.CacheWrite + float64(gross-unique)*e.repeatRate(p)
+	return raw * e.BilledTokenFactor
 }
 
 // repeatRate is what the RE-SENT part of the removed content would have been billed
