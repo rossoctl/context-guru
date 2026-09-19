@@ -256,3 +256,72 @@ func TestCachePresetIsCachesplitAlone(t *testing.T) {
 		t.Fatalf(`PresetPipeline("cache") = %v, want [cachesplit]`, built)
 	}
 }
+
+// The housellm per-output floor is a MEASUREMENT, so this guard carries the measurement rather than
+// the number, and any future edit has to argue with the data instead of with a literal.
+//
+// Own cost per million tokens saved, by candidate size, over 873 production extraction calls:
+//
+//	<1k $79.75 · 1-2k $32.41 · 2-3k $14.27 · 3-5k $15.76 · 5-8k $10.70 · 8-15k $4.05 · >=15k $11.56
+//
+// A removed token is worth one cache_write NOW plus one cache_read on each of the k-1 LATER turns
+// that replay it, and k is not a constant: per session it ran p10 3.80 / median 27.11 / p90 70.46
+// over the 70 sessions that saved anything. At write $4.755 and read $0.3814 per MTok that is
+// $5.82 (p10) / $14.71 (median) / $31.25 (p90).
+//
+// USE THE P90 AS THE CEILING, and this is the correction the first version of this guard needed: it
+// named a constant `intervalTop` and gave it $14.71, which is the MEDIAN. With the median standing in
+// for the top the rule below selects 5000; with the real p90 it selects 2000. The number moved three
+// times on the same 873 calls -- an imported k=12 from another corpus, then k=12 again through a
+// mislabelled band, then the median through this constant's NAME -- so treat the endpoint as the part
+// most likely to be wrong.
+//
+// A LOWER BOUND, not an equality. A higher floor only ever DECLINES, so it cannot hurt the agent, and
+// the bands are non-monotonic in cost (2-3k at $14.27 is cheaper than 3-5k at $15.76) which means the
+// ordering is inside the noise of 25-359 calls per band. Asserting equality would pin the literal to
+// a rule fitting that noise; asserting the bound pins only what the measurement actually supports.
+func TestHousellmFloorClearsTheBandsThatLoseAtEveryK(t *testing.T) {
+	const p90TokenValue = 31.25 // $/MTok on a TOP-DECILE session: the ceiling, not the median
+	bands := []struct {
+		from, to int // to == 0 marks the open-ended top band
+		perMTok  float64
+	}{
+		{0, 1000, 79.75}, {1000, 2000, 32.41}, {2000, 3000, 14.27}, {3000, 5000, 15.76},
+		{5000, 8000, 10.70}, {8000, 15000, 4.05}, {15000, 0, 11.56},
+	}
+	floor := 0
+	for _, b := range bands {
+		// The open-ended band has no upper edge to raise a floor to, so it can never set one --
+		// and treating its sentinel as a token count would demand a floor of that size and
+		// silently disable the component.
+		if b.to == 0 || b.perMTok <= p90TokenValue {
+			continue
+		}
+		if b.to > floor {
+			floor = b.to // loses even on a top-decile session
+		}
+	}
+	if floor <= 0 || floor >= 15000 {
+		t.Fatalf("derived floor %d is not a real band edge; the table or the ceiling is wrong", floor)
+	}
+	cfg, err := LoadBytes([]byte("preset: housellm\n"))
+	if err != nil {
+		t.Fatalf("load housellm preset: %v", err)
+	}
+	node, ok := cfg.Components["extract_llm"]
+	if !ok {
+		t.Fatal("housellm no longer configures extract_llm; this guard is testing nothing")
+	}
+	var got struct {
+		MinTokens int `yaml:"min_tokens"`
+	}
+	if err := node.Decode(&got); err != nil {
+		t.Fatalf("decode extract_llm block: %v", err)
+	}
+	if got.MinTokens < floor {
+		t.Errorf("housellm ships min_tokens: %d, below the measured floor of %d. Bands under %d cost "+
+			"$32.41-$79.75 per MTok saved against $%.2f on even a top-decile session, so a call there "+
+			"loses money whatever k turns out to be. Move the table with a new measurement, not the "+
+			"literal alone.", got.MinTokens, floor, floor, p90TokenValue)
+	}
+}
