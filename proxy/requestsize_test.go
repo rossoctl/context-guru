@@ -227,7 +227,7 @@ func TestOversizedToolResultQuotingCompactionPhraseStillGetsThroughAtTheHigherCe
 			"through) — got %s", resp.StatusCode, mustReadAll(t, resp.Body))
 	}
 	if got := up.last().body; !bytes.Equal(got, body) {
-		t.Fatalf("expected the false positive to forward byte-identical, same as a real "+
+		t.Fatalf("expected the false positive to forward byte-identical, same as a real " +
 			"compaction request would")
 	}
 }

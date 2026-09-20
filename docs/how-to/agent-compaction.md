@@ -20,7 +20,7 @@ Shell (`proxy/agentcompaction.go`). Nothing else the agent sends to the same end
 treated specially.
 
 **It also lets that request through when it's the one thing that's already too large.** A
-session whose transcript grew past the [request-size ceiling](../reference/routes.md#request-size-ceiling--32-mib-by-default-128-mib-for-compaction)
+session whose transcript grew past the [request-size ceiling](../reference/routes.md#request-size-ceiling-32-mib-by-default-128-mib-for-compaction)
 (most often bytes diverging from tokens on highly repetitive tool/shell output — a
 compact-and-cheap-in-tokens transcript can still be large in raw bytes) can no longer send an
 ordinary turn, but its own compaction request is exempt up to a higher ceiling, so `/compact`
