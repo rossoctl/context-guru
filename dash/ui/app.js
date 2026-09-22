@@ -6607,8 +6607,19 @@ function showGate(show) {
   syncNav();
 }
 
-/** Reflect who is signed in, and which tabs that entitles them to. */
-function applyAccount() {
+/**
+ * Reflect who is signed in, and which tabs that entitles them to.
+ *
+ * async, and a caller that is about to navigate — probeAccount, on the very first load —
+ * awaits it. Without that, the old <script defer> tag guaranteed campaigns.js ran (and had
+ * mounted its own #tab-campaigns) before applyURL() ever could; this function now fetches
+ * that script itself, on demand, so it has to await that fetch BEFORE the [data-manager]
+ * hidden-toggle loop below — otherwise a manager who deep-links or refreshes on
+ * #/savings/campaigns would hit go('campaigns') while #tab-campaigns either does not exist
+ * yet or exists but was never unhidden (mountTab mounts it hidden on purpose; see its own
+ * comment), and get silently bounced to Overview.
+ */
+async function applyAccount() {
   const t = account.tenant;
   $('#whoami').hidden = !t;
   $('#signout').hidden = !t;
@@ -6622,7 +6633,10 @@ function applyAccount() {
   // maybeLoadManagerScript. A plain hosted account must never have this markup exist at
   // all, not just be CSS-hidden.
   revealManagerTemplates();
-  maybeLoadManagerScript();
+  // Awaited before the loop below runs: campaigns.js's own mountTab call (which creates
+  // #tab-campaigns, initially hidden) has to have already happened, or this loop would
+  // run over a tab that does not exist yet and never get a second pass to unhide it.
+  await maybeLoadManagerScript();
   // data-manager is "hosted managers only". data-local-ok marks the ones that are also
   // fine on a single-tenant proxy, where there is no principal and nothing to scope:
   // /api/benchmarks is manager-gated in hosted mode but open locally, and hiding the tab
@@ -6673,12 +6687,18 @@ function wireManagerView(view) {
 // campaigns.js is manager-only (see its own header) with no local-ok exemption, so it is
 // not even <script>-tagged in index.html — fetching it at all would let a plain account's
 // network tab see a manager-only feature's code. Load it the one time a hosted manager
-// signs in.
-let campaignsScriptLoaded = false;
+// signs in, and resolve only once it has actually run — see applyAccount's own comment on
+// why a caller that is about to navigate needs to await this.
+let campaignsScriptPromise = null;
 function maybeLoadManagerScript() {
-  if (campaignsScriptLoaded || !(account.hosted && isManager())) return;
-  campaignsScriptLoaded = true;
-  document.body.appendChild(el('script', { src: 'campaigns.js' }));
+  if (!(account.hosted && isManager())) return Promise.resolve();
+  if (!campaignsScriptPromise) {
+    campaignsScriptPromise = new Promise((resolve) => {
+      const s = el('script', { src: 'campaigns.js', onload: resolve, onerror: resolve });
+      document.body.appendChild(s);
+    });
+  }
+  return campaignsScriptPromise;
 }
 
 /**
@@ -6730,7 +6750,10 @@ async function probeAccount() {
     account.tenant = null;
     showGate(false);
   }
-  applyAccount();
+  // Awaited: init()'s caller navigates (applyURL -> go) right after this resolves, and a
+  // manager deep-linked or refreshed on a campaigns.js view needs loaders.campaigns to
+  // already be registered before that happens — see applyAccount's own comment.
+  await applyAccount();
   return account.hosted && !!account.tenant;
 }
 

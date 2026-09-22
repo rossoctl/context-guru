@@ -98,7 +98,13 @@
   /* ── Overview-redesign palette. A separate dataviz-validated 8-step categorical set
      (validate_palette.js), used only by the Overview tab's new insight/caching-insights
      markup — --s1..--s4 above is the existing, separately-validated set every other tab's
-     charts already use, and stays untouched. */
+     charts already use, and stays untouched.
+     Only --pal-blue/-good/-serious/-critical are wired to a rule below today (the insight
+     brief's three tones and the caching panel's good/bad figures). The rest of the
+     categorical set — orange/aqua/yellow/magenta/green/violet/red — is declared anyway,
+     already validated, and reserved for the day this section (or a new chart) needs a
+     fourth-plus categorical series or a fifth-plus insight tone, rather than re-deriving and
+     re-validating hex values from scratch then. */
   --pal-blue:    #2a78d6; --pal-orange: #eb6834; --pal-aqua:    #1baf7a; --pal-yellow: #eda100;
   --pal-magenta: #e87ba4; --pal-green:  #008300; --pal-violet:  #4a3aa7; --pal-red:    #e34948;
   --pal-good: #0ca30c; --pal-warning: #fab219; --pal-serious: #ec835a; --pal-critical: #d03b3b;
@@ -600,6 +606,7 @@ details.why dd { margin: 0; }
 .caching-statrow .stat .k { color: var(--fg-muted); font-size: var(--t-small); margin-bottom: var(--sp-1); }
 .caching-statrow .stat .v { font-size: var(--t-num); font-weight: 650; font-variant-numeric: tabular-nums; }
 .caching-statrow .stat .v.good { color: var(--pal-good); }
+.caching-statrow .stat .v.bad { color: var(--pal-critical); }
 .caching-statrow .stat .s { color: var(--fg-faint); font-size: var(--t-micro); margin-top: var(--sp-1); }
 
 /* ── bars (denominators, distributions, waterfall, component savings) ─── */
