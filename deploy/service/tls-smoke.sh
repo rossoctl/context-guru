@@ -14,10 +14,11 @@
 
 set -uo pipefail
 
-CG_HOST="${CG_HOST:-contextguru.vpc.cloud9.ibm.com}"
-# The IBM Internal Root CA. Passing it explicitly rather than relying on the system
-# trust store is the point: it proves a client that trusts ONLY this root can verify
-# the server, which is exactly the situation every IBM laptop is in.
+CG_HOST="${CG_HOST:-contextguru.example.com}"
+# A deployment's internal root CA (IBM's in the case this was written for). Passing
+# it explicitly rather than relying on the system trust store is the point: it proves
+# a client that trusts ONLY this root can verify the server, which is exactly the
+# situation every laptop on that internal network is in.
 #
 # This copy lives beside the config rather than in $ETC/tls/, which is mode 0700 and
 # root-only — correct for the PRIVATE KEY, wrong for a public root certificate that
@@ -151,7 +152,7 @@ head_ "Grafana is behind the manager gate, and its sign-in header cannot be forg
 # request whatever headers it carries, and must never pass a client's own copy through.
 # Both checks below, and the body check is not decoration: a 401 rendered by GRAFANA would
 # mean the request reached it and only the login step said no.
-for hdr in "" "X-Cg-Grafana-User: attacker@ibm.com"; do
+for hdr in "" "X-Cg-Grafana-User: attacker@example.com"; do
   what=$([ -z "$hdr" ] && echo "no credential" || echo "a forged sign-in header")
   body=$(mktemp)
   code=$("${curlca[@]}" ${hdr:+-H "$hdr"} -o "$body" -w '%{http_code}' "$BASE/grafana/api/user")

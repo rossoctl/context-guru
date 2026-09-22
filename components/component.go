@@ -200,7 +200,7 @@ type MessagesModel interface {
 
 // ModelSpec carries the LLM clients a NeedsModel component may use, resolved per
 // request by the host adapter. Incoming is the proxied request's own model +
-// credentials (nil when unavailable, e.g. the AuthBridge host); Static is a
+// credentials (nil when unavailable, e.g. a sidecar-plugin host); Static is a
 // configured cheap model (nil when none is configured). A component selects one
 // by its own `model.source` config via For.
 type ModelSpec struct {

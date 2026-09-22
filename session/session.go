@@ -3,7 +3,7 @@
 // Per the design (D4): each host supplies an explicit id when it has one
 // (bifrost proxy: x-context-guru-session header, else the agent's own id off the
 // request body — Anthropic metadata.user_id or Bob Shell's metadata.taskId;
-// AuthBridge: pctx.Session A2A id; eval-containers: gateway-stamped). When none
+// sidecar plugin: pctx.Session A2A id; eval-containers: gateway-stamped). When none
 // is available we fall back to a deterministic content hash of the system
 // prompt + first user message, which needs no host cooperation.
 package session

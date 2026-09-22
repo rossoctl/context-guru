@@ -23,7 +23,7 @@ var (
 
 // Register makes a component available by name. Called from each component's
 // init(); double-registration or an empty name panics at boot (the
-// database/sql pattern AuthBridge also uses).
+// database/sql pattern used elsewhere too).
 func Register(name string, c Constructor) {
 	if name == "" {
 		panic("components: Register with empty name")

@@ -320,8 +320,9 @@ func readJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 //
 // Every write here is authenticated by the COOKIE, and the cookie's SameSite=Lax is not
 // the boundary it looks like: SameSite's unit is the REGISTRABLE DOMAIN, so on a
-// deployment under ibm.com any colleague's host under ibm.com is "same site" and the
-// browser attaches the cookie. A form post needs no preflight either, and a
+// deployment under a shared organizational domain any other host under that same
+// registrable domain is "same site" and the browser attaches the cookie. A form post
+// needs no preflight either, and a
 // `text/plain` body reaches a JSON decoder unimpeded (DisallowUnknownFields is happy as
 // long as the form's `=` lands inside a string value). Nothing else stood in the way: a
 // cross-origin post could mint a token on the victim's account or sign them out.

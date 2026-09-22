@@ -6,7 +6,7 @@
 // vocabulary), and Aggregator (in-process rollups behind /stats). An OTel-SDK
 // emitter and honest-metrics extras (bounce-adjusted savings, waste signals)
 // land in P5. Each host surfaces these natively (proxy -> bifrost Prometheus/
-// OTel + /metrics; AuthBridge -> StatsSource).
+// OTel + /metrics; sidecar plugin -> StatsSource).
 package metrics
 
 import (

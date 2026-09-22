@@ -62,7 +62,7 @@ type Options struct {
 	// and forwarded here, and every other path Bob calls (control-plane:
 	// /admin/v1/profile, /inference/v1/model/info, …) is proxied through verbatim
 	// so the CLI boots and authenticates. Point Bob's CUSTOM_BASE_URL at this proxy.
-	BobUpstream  string // e.g. https://api.us-east.bob.ibm.com
+	BobUpstream  string // e.g. https://api.example.com
 	OpenAIKey    string // when set, REPLACES the caller's Authorization: Bearer
 	AnthropicKey string // when set, REPLACES the caller's x-api-key
 	// ForceModel, when set, overwrites the request's "model" field. eval-containers
@@ -507,7 +507,7 @@ func isBobProfile(r *http.Request) bool {
 // profile, `Pc.resolveBaseUrl` (bobshell 1.0.6) replaces the HOSTNAME of that URL with
 // `api.<region_domain>` from the profile — keeping the scheme and, fatally, the PORT.
 // Pointed at a context-guru instance on 127.0.0.1:4111, its very next call goes to
-// http://api.us-east.bob.ibm.com:4111, where nothing listens: observed live as
+// http://api.example.com:4111, where nothing listens: observed live as
 // "Request failed after 6 attempts: fetch failed", with not one model request ever
 // reaching the proxy while the profile call itself succeeded — the confusing shape,
 // because the proxy looks half-working and its log is empty.

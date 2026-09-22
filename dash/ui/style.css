@@ -518,6 +518,17 @@ details.why dd { margin: 0; }
 .tile.bad .v  { color: var(--bad); }
 .tile.accent .v { color: var(--accent); }
 
+/* Subtle entrance on every tile, everywhere the .tile pattern is used — one rule polishes
+   Overview, Keep-alive, Inventory and every other tab that renders through tile(). Skipped
+   for anyone who asked the OS not to animate things. */
+@media (prefers-reduced-motion: no-preference) {
+  .tile { animation: tile-in 0.32s ease-out both; }
+  @keyframes tile-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+}
+
 /* The headline row: the three numbers that answer "is this thing working". Bigger,
    and on their own row above the rest. */
 .tiles.headline { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: var(--sp-3); margin-bottom: var(--sp-3); }
@@ -640,6 +651,20 @@ details.why dd { margin: 0; }
 .pill.cold_start { background: var(--info-soft); color: var(--info); }
 .pill.ttl_expiry, .pill.prefix_change, .pill.unknown { background: var(--warn-soft); color: var(--warn); }
 .pill.neutral { background: var(--bg-sunken); color: var(--fg-muted); border-color: var(--border-soft); }
+.pill.good { background: var(--good-soft); color: var(--good); }
+.pill.bad  { background: var(--bad-soft); color: var(--bad); }
+
+/* Overview's own recommendation rows — one line per capability, its verdict pill and its
+   dollar/usage evidence. The full removal command lives on the Inventory tab; this is the
+   glance version. */
+.reco-list { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-2); }
+.reco-row {
+  display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap;
+  padding: var(--sp-1) 0; border-bottom: 1px solid var(--border-soft);
+}
+.reco-row:last-child { border-bottom: none; }
+.reco-row .reco-name { font-weight: 600; }
+.reco-row .reco-note { color: var(--fg-muted); font-size: var(--t-small); }
 
 /* ── charts ───────────────────────────────────────────────────────────── */
 /* No min-height: the SVG's viewBox is now sized to this element's real width by geom(),

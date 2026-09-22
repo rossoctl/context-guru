@@ -125,8 +125,9 @@ recorded and takes effect at the next session's start.
   they avoided; `keepalive_net_usd` is the difference. **A negative net means the strategy is
   costing more than it saves on this traffic** — say that plainly and offer `none`, rather than
   reporting a ping count as if it were a win.
-- The status line (`/context-guru:statusline`) shows `ka Np` once pings have actually happened —
-  never before, and it never triggers one itself.
+- The status line (`/context-guru:statusline --keepalive`) shows `ka ≤Nmiss $X.XX` — the misses
+  prevented and the NET money that saved — once that net is actually positive, never before, and
+  it never triggers a ping itself.
 
 ## Do not
 

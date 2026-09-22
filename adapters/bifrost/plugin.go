@@ -3,7 +3,7 @@
 // this plugin via BifrostConfig.LLMPlugins is all it takes for an embedded
 // bifrost proxy — or any bifrost deployment — to run context engineering.
 //
-// The same components package backs the AuthBridge in-process plugin (P3); only
+// The same components package backs another in-process sidecar plugin (P3); only
 // this thin adapter is bifrost-specific.
 package bifrost
 

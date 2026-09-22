@@ -56,4 +56,4 @@ upstreams:
   # anthropic).
   - name: bob-us-east
     dialect: bob
-    base_url: https://api.us-east.bob.ibm.com
+    base_url: https://REPLACE-WITH-BOB-GATEWAY-HOST
