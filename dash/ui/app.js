@@ -5443,10 +5443,10 @@ function go(view, push = true) {
   if (!Object.prototype.hasOwnProperty.call(loaders, view)) view = 'overview';
   // A view whose tab this account is not entitled to is not reachable by typing its
   // hash either: its loader would 401/403 and paint an error nobody can act on. That
-  // covers a LOCKED tab as well as a hidden one — the lock says "not with this sign-in",
-  // and a 403 is not a better way to say it.
+  // covers a LOCKED tab as well as a hidden one, and — for a manager-only view never
+  // revealed from its <template> (see revealManagerTemplates) — a MISSING one too.
   const tab = navTab(view);
-  if (tab && !reachable(tab)) view = 'overview';
+  if (!tab || !reachable(tab)) view = 'overview';
   state.view = view;
   state.group = GROUP_OF.get(view) || 'overview';
   syncNav();
@@ -6015,7 +6015,8 @@ function init() {
   // Only the components table. Sessions and Requests are LIMIT 25 / LIMIT 50 server-side, so
   // a client-side sort there would sort ONE PAGE under a header that looks global — see
   // sortRows and docs/dashboard.md. They stay unsorted until ?sort=/?dir= reach the SQL.
-  sortable('[data-testid=components-table]', COMPONENT_SORT);
+  // Components is manager-only and its markup is now a <template> until revealed, so this
+  // is wired from wireManagerView instead of here — see revealManagerTemplates.
   $('#f-dim').addEventListener('change', (ev) => { state.dim = ev.currentTarget.value; loadUsage(); });
   // Debounced, and Enter commits immediately rather than waiting out the delay. The
   // pending timer is dropped on submit so the same query is not sent twice.
@@ -6037,7 +6038,8 @@ function init() {
   });
   $('#sess-prev').addEventListener('click', () => { state.sessOffset = Math.max(0, state.sessOffset - 25); loadSessions(); });
   $('#sess-next').addEventListener('click', () => { state.sessOffset += 25; loadSessions(); });
-  $('#bench-refresh').addEventListener('click', rescanBenchmarks);
+  // Benchmarks is manager-only and its markup is now a <template> until revealed, so
+  // #bench-refresh is wired from wireManagerView instead of here — see revealManagerTemplates.
   $('#drawer-close').addEventListener('click', closeDrawer);
   // Forward wrap: reaching the sentinel means the last real stop is behind us.
   $('#drawer-end').addEventListener('focus', () => { $('#drawer-close').focus(); });
@@ -6501,6 +6503,12 @@ function applyAccount() {
     $('#whoami').title = t.role === 'manager' ? 'Manager' : 'User';
   }
   for (const el of $$('[data-account]')) el.hidden = !account.hosted || !t;
+  // Build the manager-only tab/panel DOM (and fetch campaigns.js) only once the role that
+  // entitles a viewer to them is actually known — see revealManagerTemplates and
+  // maybeLoadManagerScript. A plain hosted account must never have this markup exist at
+  // all, not just be CSS-hidden.
+  revealManagerTemplates();
+  maybeLoadManagerScript();
   // data-manager is "hosted managers only". data-local-ok marks the ones that are also
   // fine on a single-tenant proxy, where there is no principal and nothing to scope:
   // /api/benchmarks is manager-gated in hosted mode but open locally, and hiding the tab
@@ -6520,6 +6528,44 @@ function applyAccount() {
   loadTenantOptions();
 }
 function isManager() { return !!(account.tenant && account.tenant.role === 'manager'); }
+
+// Manager-only tab + panel pairs that ship in index.html as inert <template>s (never part
+// of the live DOM, so a plain hosted account's browser never builds them) rather than as
+// hidden elements. `localOk` mirrors data-local-ok: true for the views a single-tenant
+// proxy — which has no principal to protect — may use even signed out.
+const MANAGER_ONLY_VIEWS = [
+  ['config', true], ['benchmarks', true], ['components', true],
+  ['strategies', false], ['tenants', false],
+];
+/** Clone each manager-only template into the live DOM once its viewer is entitled to it. */
+function revealManagerTemplates() {
+  for (const [view, localOk] of MANAGER_ONLY_VIEWS) {
+    if (!(account.hosted ? isManager() : localOk)) continue;
+    const tabTpl = document.getElementById('tpl-tab-' + view);
+    const panelTpl = document.getElementById('tpl-view-' + view);
+    if (!tabTpl && !panelTpl) continue; // already revealed by an earlier call
+    if (tabTpl) tabTpl.replaceWith(tabTpl.content);
+    if (panelTpl) panelTpl.replaceWith(panelTpl.content);
+    wireManagerView(view);
+  }
+}
+// Each view's init()-time-only bindings (sort headers, one-off click/change listeners),
+// deferred here because their targets did not exist in the DOM until just now.
+function wireManagerView(view) {
+  if (view === 'components') sortable('[data-testid=components-table]', COMPONENT_SORT);
+  else if (view === 'benchmarks') $('#bench-refresh').addEventListener('click', rescanBenchmarks);
+  else if (view === 'tenants') $('#ab-range').addEventListener('change', loadVariants);
+}
+// campaigns.js is manager-only (see its own header) with no local-ok exemption, so it is
+// not even <script>-tagged in index.html — fetching it at all would let a plain account's
+// network tab see a manager-only feature's code. Load it the one time a hosted manager
+// signs in.
+let campaignsScriptLoaded = false;
+function maybeLoadManagerScript() {
+  if (campaignsScriptLoaded || !(account.hosted && isManager())) return;
+  campaignsScriptLoaded = true;
+  document.body.appendChild(el('script', { src: 'campaigns.js' }));
+}
 
 /**
  * loadTenantOptions fills the manager's scope select from the roster. Once per session: the
@@ -8805,8 +8851,9 @@ function initAccounts() {
 
   initReset();
   // The A/B window is local to that card: the Tenants view hides the global filter bar
-  // (it is not a traffic view), so the comparison carries its own range.
-  $('#ab-range').addEventListener('change', loadVariants);
+  // (it is not a traffic view), so the comparison carries its own range. Tenants is
+  // manager-only and its markup is now a <template> until revealed, so #ab-range is wired
+  // from wireManagerView instead of here — see revealManagerTemplates.
 
   $('#mint-token').addEventListener('click', async () => {
     const label = prompt('Name this token (e.g. laptop, ci):', 'new-token');

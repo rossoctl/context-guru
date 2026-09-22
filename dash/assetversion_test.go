@@ -81,6 +81,9 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 	runtimeRefs := []struct{ asset, ref string }{
 		{"tools.js", "tools.css"},
 		{"kvcache.js", "kvcache.css"},
+		// campaigns.js is manager-only and not <script>-tagged in index.html at all — see
+		// maybeLoadManagerScript — so app.js fetches it itself once a hosted manager signs in.
+		{"app.js", "campaigns.js"},
 	}
 	for _, rr := range runtimeRefs {
 		js := get("/dashboard/" + rr.asset).Body.String()
