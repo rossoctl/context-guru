@@ -301,6 +301,11 @@
     </label>
   </div>
 
+  <!-- renderOverviewBrief: up to four synthesized sentences with a real number inline, ahead
+       of the evidence below — see its own comment in app.js for how each is gated. Hidden
+       whenever none of them has enough support to say anything. -->
+  <div class="insight-brief" id="overview-brief" hidden></div>
+
   <!-- renderTiles() builds the grouped tile grids in here: a headline row of the three
        numbers that answer "is this working", then one labelled group per subject. Twenty
        tiles in one flat grid is twenty things of equal importance, i.e. no hierarchy. -->
@@ -324,6 +329,17 @@
       see the Inventory tab for the full picture, including those.</p>
     <div id="inventory-tiles"></div>
     <div id="recommendations" data-testid="recommendations"></div>
+  </div>
+
+  <!-- Caching insights: keep-alive's own $ kept apart from cache-reuse behaviour in general.
+       Reuses GET /api/kvcache (the KV-cache tab's own read) plus the keepalive_* fields
+       already on /api/stats; no new backend field. -->
+  <div class="panel" id="caching-insights-panel" hidden>
+    <h2>Caching insights</h2>
+    <p class="note">Cache reuse (any request hitting a warm prefix) and keep-alive (the
+      mechanism that stops one from lapsing) are different levers — kept apart below rather
+      than blended into one savings figure.</p>
+    <div id="caching-insights-tiles" class="caching-statrow"></div>
   </div>
 
   <!-- How many of your sessions actually did something, not just how many exist. Reuses

@@ -1555,7 +1555,7 @@ function renderTiles(o) {
       costNote(o, num(o.prefix_change_requests_all) + ' turns re-billed · not netted'),
       o.prefix_change_cost_all_usd > 0 ? 'bad' : ''),
     tile('requests', 'Requests', num(o.requests), num(o.sessions) + ' sessions'),
-  ], 'headline'));
+  ], 'headline dense'));
 
   // Count up to the headline dollar/token figures instead of painting them already
   // settled — pure polish, skipped entirely for anyone who asked the OS not to animate.
@@ -2110,6 +2110,9 @@ async function loadOverview(opts = {}) {
       complete: 'exact (all four tiers)', partial: 'estimated', missing: 'unmeasured',
     }, 'Fills in from the first captured request: every row is counted as exact, estimated or unmeasured.');
     renderSeries(s.buckets || []);
+    // Kept for renderOverviewBrief's latency-trend sentence, computed once loadUserInsights
+    // (below) resolves — no separate fetch, this is the same series /api/series just returned.
+    state.overviewBuckets = s.buckets || [];
     paintFreshness();
     // Not awaited: its own request, on its own failure path, so a slow or failed
     // keep-alive ledger never delays or blanks the rest of Overview.
@@ -2232,19 +2235,130 @@ async function loadValueBreakdown() {
  */
 async function loadUserInsights() {
   try {
-    const [sessions, report] = await Promise.all([
+    const [sessions, report, kv] = await Promise.all([
       api('sessions', { limit: 500 }),
       api('tools'),
+      api('kvcache'),
     ]);
     renderLatencyPanel(sessions);
     renderSessionUsagePanel(sessions);
     renderInventoryPanel(report);
+    renderCachingInsights(kv);
+    renderOverviewBrief(sessions, report);
   } catch (e) {
     if (aborted(e)) return;
-    for (const id of ['#latency-panel', '#inventory-panel', '#session-usage-panel']) {
+    for (const id of ['#latency-panel', '#inventory-panel', '#session-usage-panel', '#caching-insights-panel', '#overview-brief']) {
       const p = $(id);
       if (p) p.hidden = true;
     }
+  }
+}
+
+/**
+ * renderOverviewBrief is the "here's what happened" lead: up to four sentences, each with a
+ * real number inline, synthesized from data this page has already fetched. No arithmetic
+ * happens on anything NOT already computed by the backend, and each sentence is independently
+ * gated — a claim with insufficient support (too little history, nothing recorded yet) is
+ * omitted rather than hedged, per the same rule the rest of Overview already follows
+ * (Denominator.available, KeepAliveCoverage.recorded_from).
+ */
+function renderOverviewBrief(sessions, report) {
+  const host = $('#overview-brief');
+  if (!host) return;
+  const o = state.overview;
+  const rows = (sessions && sessions.sessions) || [];
+  const items = report ? [...(report.tools || []), ...(report.skills && report.skills.skills || [])] : [];
+  const out = [];
+
+  // Keep-alive's share of total savings — only once the ledger has actually run
+  // (keepalive_pings mirrors KeepAliveCoverage.recorded_from on Overview itself) and there is
+  // a positive total to take a share of.
+  if (o && o.keepalive_pings > 0 && o.total_saved_usd > 0) {
+    const share = pct((100 * o.keepalive_net_usd) / o.total_saved_usd, 0);
+    out.push([o.keepalive_net_usd < 0 ? 'warn' : 'good', usd(o.keepalive_net_usd), 'from keep-alive',
+      o.keepalive_net_usd < 0
+        ? `Keep-alive cost you ${usd(-o.keepalive_net_usd)} net this window — its pings outspent what they avoided.`
+        : `Keep-alive drove ${usd(o.keepalive_net_usd)} of this window's ${usd(o.total_saved_usd)} in savings — ${share} of the total.`]);
+  }
+
+  // Unused MCP servers/skills — only once the inventory read is actually captured.
+  if (report && report.coverage && report.coverage.captured && items.length) {
+    const unused = items.filter((t) => t.sessions_used === 0);
+    if (unused.length) {
+      out.push(['warn', `${unused.length} of ${items.length}`, 'unused',
+        `${unused.length} of your ${items.length} tools & skills haven't been called in this window` +
+        (unused.length <= 3 ? ` — ${unused.map((t) => t.name).join(', ')}.` : '.')]);
+    }
+  }
+
+  // Latency trend — only with enough daily history to say anything about a trend at all
+  // (5, the same minimum this codebase already uses for kvSuggestMinRequests-style gates).
+  const buckets = (state.overviewBuckets || []).filter((b) => b.cg_latency_ms_avg > 0);
+  if (buckets.length >= 5) {
+    const half = Math.floor(buckets.length / 2);
+    const first = buckets.slice(0, half).reduce((a, b) => a + b.cg_latency_ms_avg, 0) / half;
+    const second = buckets.slice(half).reduce((a, b) => a + b.cg_latency_ms_avg, 0) / (buckets.length - half);
+    if (first > 0) {
+      const delta = pct((100 * (second - first)) / first, 0);
+      const dropped = second < first;
+      out.push([dropped ? 'good' : 'warn', (dropped ? '−' : '+') + Math.abs(parseFloat(delta)) + '%', 'latency',
+        `Average latency ${dropped ? 'dropped' : 'rose'} ${Math.abs(parseFloat(delta))}% ` +
+        `(${ms(first)} → ${ms(second)}) over this window.`]);
+    }
+  }
+
+  // Multi- vs single-turn share — only once there is at least one sampled session.
+  if (rows.length) {
+    const used = rows.filter((s) => s.turns > 1).length;
+    const share = pct((100 * used) / rows.length, 0);
+    out.push(['neutral', share, 'multi-turn',
+      `${share} of your sessions are multi-turn (a follow-up, not just one message) — ` +
+      `keep-alive and summarization earn their keep on exactly these.`]);
+  }
+
+  clear(host);
+  if (!out.length) { host.hidden = true; return; }
+  host.hidden = false;
+  for (const [tone, num_, , sentence] of out.slice(0, 4)) {
+    host.appendChild(el('div', { class: 'insight-row ' + tone },
+      el('div', { class: 'num' }, num_),
+      el('p', { text: sentence })));
+  }
+}
+
+/**
+ * renderCachingInsights keeps keep-alive's own $ apart from cache-reuse behaviour in general —
+ * a dollar saved by not letting the cache lapse is a different lever than the cache simply
+ * being hit — reusing GET /api/kvcache (KVCacheAnalysis, the same read the KV-cache tab itself
+ * analyses) and the keepalive_* fields already on /api/stats. No arithmetic beyond what those
+ * two reads already computed.
+ */
+function renderCachingInsights(kv) {
+  const panel = $('#caching-insights-panel');
+  if (!panel) return;
+  const o = state.overview;
+  const cards = kv && kv.cards;
+  const coverage = kv && kv.coverage;
+  if (!cards || !cards.requests) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const host = clear($('#caching-insights-tiles'));
+  const stat = (k, v, s, cls) => el('div', { class: 'stat' },
+    el('div', { class: 'k' }, k), el('div', { class: 'v ' + (cls || '') }, v),
+    s ? el('div', { class: 's' }, s) : null);
+  host.appendChild(stat('Cache-reuse rate', pct(cards.hit_rate_pct, 0), num(cards.hits) + ' of ' + num(cards.requests) + ' requests', 'good'));
+  host.appendChild(stat('Reused within 1h', pct(cards.within_1h_pct, 0), num(cards.within_1h) + ' of ' + num(cards.with_next) + ' with a follow-up'));
+  if (coverage) {
+    host.appendChild(stat('TTL known from config', num(coverage.ttl_configured),
+      'vs. ' + num(coverage.ttl_observed) + ' observed, ' + num(coverage.ttl_unknown) + ' unknown'));
+    host.appendChild(stat('Single-shot conversations', num(coverage.single_request_conversations),
+      'of ' + num(cards.conversations) + ' — no reuse was possible'));
+  }
+  // Keep-alive's own $, deliberately separate from the cache-reuse figures above: this is
+  // the mechanism that PREVENTS a lapse, not the reuse that happens anyway inside a TTL.
+  if (o && o.keepalive_pings > 0) {
+    host.appendChild(stat('Keep-alive $ saved', usd(o.keepalive_net_usd),
+      num(o.keepalive_pings) + ' pings · ' + usd(o.keepalive_ping_usd) + ' spent — kept apart from the savings above',
+      o.keepalive_net_usd < 0 ? 'bad' : 'good'));
   }
 }
 
@@ -2264,7 +2378,7 @@ function renderLatencyPanel(sessions) {
   clear($('#latency-tiles')).appendChild(tileGroup(null, null, [
     tile('latency-latest', 'Latest session', ms(latest.cg_latency_ms_avg), 'most recent session’s own average'),
     tile('latency-window-avg', 'Average, this window', ms(o.cg_latency_ms_avg), num(o.requests) + ' requests'),
-  ], 'headline'));
+  ], 'headline dense'));
 }
 
 /**
@@ -2292,7 +2406,7 @@ function renderSessionUsagePanel(sessions) {
     tile('sessions-total', 'Sessions', num(total)),
     tile('sessions-used', 'Multi-turn (engaged)', num(used), pct(rows.length ? (100 * used) / rows.length : 0, 0) + ' of sampled', 'good'),
     tile('sessions-single', 'Single-turn only', num(rows.length - used), 'one message, no follow-up'),
-  ]));
+  ], 'dense'));
   const note = $('#session-usage-note');
   note.textContent = 'A session that never sent a message never reaches context-guru at all, so '
     + '“opened but never used” cannot be measured here — this compares single-turn '
@@ -2318,7 +2432,7 @@ function renderInventoryPanel(rep) {
     tile('inv-skills', 'Skills', num(rep.skills ? rep.skills.declared : 0)),
     tile('inv-unused-usd', 'Spent carrying unused ones', rep.totals && rep.totals.priced ? usd(rep.totals.unused_usd) : 'unknown',
       'this window', rep.totals && rep.totals.unused_usd > 0 ? 'bad' : ''),
-  ]));
+  ], 'dense'));
   const host = clear($('#recommendations'));
   if (!items.length) return;
   // Strongest removal case: never invoked, ranked by what it costs to keep carrying.
