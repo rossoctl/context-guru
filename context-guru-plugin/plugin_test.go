@@ -2359,7 +2359,8 @@ func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
 // TestStatuslineExtrasShownWhenEnabled below so that "hidden by default" cannot pass merely
 // because the segment is broken.
 func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
-	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4}`)
+	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4,
+		"keepalive_net_usd": 0.07, "keepalive_misses_avoided": 4}`)
 	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
 		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
@@ -2379,7 +2380,8 @@ func TestStatuslineExtrasHiddenByDefault(t *testing.T) {
 // conditions, with both flags passed, must show both extras — otherwise "hidden by default"
 // would be indistinguishable from "permanently broken".
 func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
-	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4}`)
+	port := statsStub(t, `{"total_saved_usd": 0.03, "saved_unique": 12000, "keepalive_pings": 4,
+		"keepalive_net_usd": 0.07, "keepalive_misses_avoided": 4}`)
 	stdin := `{"session_id":"sess-real","cost":{"total_cost_usd":0.41},` +
 		`"context_window":{"total_input_tokens":180000,"total_output_tokens":7000},` +
 		`"prompt_cache":{"expires_at":` + fmt.Sprint(time.Now().Add(90*time.Second).Unix()) + `}}`
@@ -2390,8 +2392,10 @@ func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 	if !strings.Contains(out, "cache 1:") {
 		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
 	}
-	if !strings.Contains(out, "ka 4p") {
-		t.Errorf("got %q, want %q with --keepalive passed", out, "ka 4p")
+	// The keep-alive segment now shows the NET dollar figure and the misses it prevented, not the
+	// raw ping count — see statusline.py's _keepalive_segment.
+	if !strings.Contains(out, "ka ≤4miss $0.07") {
+		t.Errorf("got %q, want %q with --keepalive passed", out, "ka ≤4miss $0.07")
 	}
 	if !strings.Contains(out, "$0.03/12.0k saved of $0.41/187.0k") {
 		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
