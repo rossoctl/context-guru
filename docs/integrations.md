@@ -112,12 +112,10 @@ BOB_API_KEY=<your bob key> \
   bob --yolo "your task"
 ```
 
-The base-URL and key variables both moved between Bob releases, and a stale name fails
-**silently** — Bob simply uses its own default gateway. The 2.x bundle reads
-`BOB_GATEWAY_URL` and `BOB_API_KEY` (it aliases `BOBSHELL_API_KEY` onto the latter, and
-errors if both are set to different values); it contains no `CUSTOM_BASE_URL` or
-`BOBSHELL_DEFAULT_AUTH_TYPE` at all. Older builds read the `CUSTOM_*` / `BOBSHELL_*` set.
-Setting both costs nothing; check yours with `bob --version`.
+!!! note "Variable names moved between Bob releases"
+    A stale name fails **silently** — Bob just uses its own default gateway instead of
+    the proxy. Setting both the old and new variable names costs nothing; check which
+    your build reads with `bob --version`.
 
 How the gateway routes Bob's traffic:
 

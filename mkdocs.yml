@@ -89,19 +89,23 @@ exclude_docs: |
   superpowers/
   proposals/
 
-# Nav mirrors how people arrive: evaluate it (Get started) → understand it
-# (Concepts) → look a component up (Components) → run it a particular way
-# (Modes, Dashboard, Hosted) → check the claims (Results) → wire it in
-# (Integrations). Every page under docs/ appears exactly once.
+# Nav mirrors how people arrive: install it the easy way and see what it saves
+# (Get started) → run it yourself instead of the plugin (Advanced /
+# Self-hosting) → understand it (Concepts) → look a component up (Components)
+# → run it a particular way (Modes, Dashboard, Hosted) → check the claims
+# (Results) → wire it in (Integrations). Every page under docs/ appears exactly
+# once.
 nav:
   - Home: index.md
   - Everything else (README overflow): more.md
   - Get started:
-      - Technical overview: get-started/overview.md
-      - "Quickstart: proxy": get-started/quickstart-proxy.md
-      - "Quickstart: compaction service": get-started/quickstart-compaction.md
       - Install the Claude Code plugin: how-to/install-plugin.md
       - Use with Claude Code: how-to/use-with-claude-code.md
+      - How it saves money: get-started/how-it-saves.md
+      - Technical overview: get-started/overview.md
+  - Advanced / Self-hosting:
+      - "Quickstart: proxy": get-started/quickstart-proxy.md
+      - "Quickstart: compaction service": get-started/quickstart-compaction.md
       - Build & evaluate locally: setup.md
   - Concepts:
       - Architecture: design.md

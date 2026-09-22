@@ -242,7 +242,8 @@ context-guru-proxy --preset codesmart --dashboard
 # open http://localhost:4000/dashboard/
 ```
 
-[![The context-guru dashboard](img/dashboard/01-overview.jpg)](dashboard.md)
+See it yourself at [dashboard.md](dashboard.md) — the UI was recently redesigned, so
+screenshots are omitted here for now rather than shown stale.
 
 - **Four labelled savings denominators**, because a single "savings %" is a lie of
   omission: of what we tried to compact · of new provider-billed input · of the whole

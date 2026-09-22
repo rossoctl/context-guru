@@ -22,8 +22,6 @@ Turn the dashboard on, run your agent, and read the numbers with their denominat
 4. Read the Overview: tokens before/after, the four savings ratios, baseline vs actual
    dollars, and the cumulative-cost chart.
 
-![The dashboard's Overview](../img/dashboard/01-overview.jpg)
-
 For a scriptable snapshot instead, `curl -s localhost:4000/stats | jq`.
 
 ## Which number to quote
@@ -53,14 +51,8 @@ skipped for cache safety, offloads the model asked back for, reverted component 
 our own latency.
 
 Per-component economics (runs, act rate, unique vs gross saved, latency, verdict) show
-which components earn their place on *your* traffic:
-
-![Per-component economics](../img/dashboard/03-component-metrics.jpg)
-
-Click a component to filter the request list, then open a request to see exactly what
-changed as a Git-style diff:
-
-![Git-style content diff](../img/dashboard/09-content-git-diff.jpg)
+which components earn their place on *your* traffic. Click a component to filter the
+request list, then open a request to see exactly what changed as a Git-style diff.
 
 Content capture is **off by default** — enable it with `--dashboard-content`. It is the one
 path that writes agent output to disk, so the operator opts in for their own transcripts.
@@ -169,8 +161,6 @@ scripts/cc-demo.sh
 To view a full harness run, point `--dashboard-bench-dirs` at its jobs root: each run's
 `summary.json` + `rows-<arm>.json` is ingested, with cost-vs-reward per arm and per-task
 drill-down.
-
-![Benchmark comparison](../img/dashboard/11-benchmark-comparison.jpg)
 
 See also: [Dashboard](../dashboard.md) · [Benchmarks](../RESULTS.md) ·
 [Sync & observe](operating-modes.md)

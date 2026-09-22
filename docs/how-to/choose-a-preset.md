@@ -75,7 +75,7 @@ helps you, with the smallest possible claim to check:
   precisely the regime where the split pays — and is *one task measured three times, not a
   fleet average*. On this project's own interactive traffic the figure is **$0.0298 across
   1,127 sessions / 11,361 requests**
-  ([dashboard](../dashboard.md#what-it-is-actually-worth-here-and-why-that-is-small)): Claude
+  ([dashboard](../dashboard.md)): Claude
   Code captures the environment snapshot once per session, and 1,105 of 1,127 session starts
   read zero tokens from cache because the previous prefix had already expired. It is also
   **exactly zero** outside a git repository, on a system prompt under the 1,024-token
