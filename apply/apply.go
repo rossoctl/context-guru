@@ -1,5 +1,5 @@
 // Package apply is the one place the pipeline meets a raw wire request, shared
-// by every host adapter (the bifrost proxy and the AuthBridge plugin). It
+// by every host adapter (the bifrost proxy and an in-process sidecar plugin). It
 // extracts the messages array, runs the pipeline on it, and splices the result
 // back into the original body — byte-lossless for every other field (headroom
 // invariant I1). This is what makes "one implementation behind both

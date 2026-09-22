@@ -14,8 +14,8 @@ reference — port its *logic*, re-implement its transport in Go.
 
 ## Hard boundaries
 
-- **No AuthBridge / cortex code lives here.** That plugin is built in
-  `cortex` and depends on this repo. Keep the public API (`components`,
+- **No sidecar-plugin code lives here.** That plugin is built in its own
+  downstream repo and depends on this repo. Keep the public API (`components`,
   `apply`, `schema`, `config`) clean and importable; never reach into another repo.
 - **Fail open, always.** Any component error/panic reverts that component only; the
   original request is always forwarded as a valid fallback. Every lossy Offload must be

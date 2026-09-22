@@ -1,5 +1,5 @@
 // Package all blank-imports every built-in component so their init()
-// registrations run. Binaries (context-guru-proxy, the AuthBridge plugin)
+// registrations run. Binaries (context-guru-proxy, a sidecar plugin)
 // import this package for its side effects, then build a pipeline by name from
 // config. Import it for effect:
 //

@@ -1,4 +1,4 @@
-// both hosts (bifrost proxy, AuthBridge plugin) share it. v1 ships an in-memory
+// both hosts (bifrost proxy, sidecar plugin) share it. v1 ships an in-memory
 // TTL+LRU backend; SQLite/Redis slot in behind the same interface when a
 // durable or multi-replica deployment is real (see the design doc, D5).
 //

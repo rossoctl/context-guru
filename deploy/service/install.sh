@@ -275,7 +275,7 @@ write_local_dropin() {
 Environment=MANAGER_EMAIL=
 
 # Who may self-register, by email domain. Empty means anyone who can reach the port.
-Environment=REGISTER_DOMAINS=ibm.com
+Environment=REGISTER_DOMAINS=example.com
 
 # Listen address. Keep this on loopback until nginx terminates TLS in front of it: every
 # user's token crosses the network on every request.

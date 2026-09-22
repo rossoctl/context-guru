@@ -1,7 +1,7 @@
 //go:build cg_skeleton
 
 // skeleton is the only cgo component (tree-sitter). It is gated behind the
-// cg_skeleton build tag so the default build — and the AuthBridge plugin that
+// cg_skeleton build tag so the default build — and the sidecar plugin that
 // embeds this module — stays pure-Go (CGO_ENABLED=0), static, and small. Build a
 // coding-agent variant that includes it with: go build -tags cg_skeleton (and
 // CGO_ENABLED=1). Without the tag, "skeleton" is simply not registered, so a
