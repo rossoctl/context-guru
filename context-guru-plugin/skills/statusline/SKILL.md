@@ -1,6 +1,6 @@
 ---
 name: statusline
-description: Enable or disable the context-guru status line — a terminal status line showing this session's running savings against its own running cost/tokens, for whichever project is routed through the local proxy. Use when the user asks to show savings in the status line, add a status line for context-guru, see cache/keep-alive status in the terminal, or turn any of it off.
+description: Enable or disable the context-guru status line — a terminal status line showing the context-window bar, this session's running savings against its own running cost/tokens, the proxy/upstream latency split, and a least-used-tool hint, for whichever project is routed through the local proxy. Use when the user asks to show savings in the status line, add a status line for context-guru, see cache/keep-alive status in the terminal, or turn any of it off.
 ---
 
 # context-guru status line
@@ -9,19 +9,42 @@ Wires `context-guru-plugin/scripts/statusline.py` into Claude Code's `statusLine
 `settings.py` — the same deterministic, conservative script that installs routing, extended to
 manage this one additional top-level key (never a second settings editor, never a hand-edit).
 
-**What it shows by default, once enabled and this project is routed:** what THIS session saved,
-against what it has spent so far — `$0.03/12k saved of $0.41/187k`. The first pair is this
-session's own savings (`total_saved_usd` / `saved_unique`, scoped to this one session_id — see
-the script's own `_fetch_stats`); the second is this session's own running cost and tokens, read
-straight off Claude Code's own statusLine payload (`cost.total_cost_usd`, `context_window`).
-Omitted, not shown as zeroes, before this session has spent anything at all — a real $0 saved
-once there IS a total to compare it to still prints. **In every project that is NOT routed
-through context-guru, it renders nothing at all** — the script self-gates exactly like the
-plugin's two hooks, so installing it is safe even at user scope.
+**What it shows by default, once enabled and this project is routed:**
 
-**Everything else is off by default.** The prompt-cache TTL countdown (`cache 4:12` / `cache
-cold`) and the keep-alive ping counter (`ka 2p`) are extras, each behind its own flag on the
-installed command — see "Turn an extra on" below. Neither is shown until you ask for it.
+```
+████····  100/200.0k 50% | $0.03/12k saved of $0.41/187k | proxy: 3ms · upstream: 340ms | ◇ github 1% remove
+```
+
+Four segments, each independently optional — a segment whose numbers are not available just does
+not print:
+
+- **The context bar** — tokens used against the model's real context window, coloured green
+  under 50%, yellow under 70%, red above. Read straight off Claude Code's own statusLine payload
+  (`context_window.total_input_tokens` / `.context_window_size` / `.used_percentage`); no extra
+  network call.
+- **What THIS session saved, against what it has spent so far** — `$0.03/12k saved of
+  $0.41/187k`. The first pair is this session's own savings (`total_saved_usd` / `saved_unique`,
+  scoped to this one session_id — see the script's own `_fetch_stats`); the second is this
+  session's own running cost and tokens, read straight off Claude Code's own statusLine payload
+  (`cost.total_cost_usd`, `context_window`). Omitted, not shown as zeroes, before this session has
+  spent anything at all — a real $0 saved once there IS a total to compare it to still prints.
+- **The proxy/upstream latency split** — `proxy: 3ms · upstream: 340ms`, ContextGuru's own added
+  latency next to what the upstream provider took, each labelled. Both are `/api/stats`' own
+  `cg_latency_ms_avg` / `upstream_ms_avg`; nothing here is derived.
+- **The least-used MCP server or skill this session** — `◇ github 1% remove` (at 1% or under of
+  this session's tool/skill uses) or `◇ some-skill 8% move` (at 20% or under, i.e. move it to
+  project scope rather than global). Checked against every MCP server named in
+  `~/.claude/settings.json` and every skill this plugin ships — not a system-prompt enumeration
+  (nothing exposes that), so this is what the session's own transcript tail shows was actually
+  called, not a claim about what any one session's prompt loaded.
+
+**In every project that is NOT routed through context-guru, it renders nothing at all** — the
+script self-gates exactly like the plugin's two hooks, so installing it is safe even at user
+scope.
+
+**Two more extras are off by default.** The prompt-cache TTL countdown (`cache 4:12` / `cache
+cold`) and the keep-alive savings counter (`ka ≤2miss $0.07`) are extras, each behind its own flag
+on the installed command — see "Turn an extra on" below. Neither is shown until you ask for it.
 
 **It never sends a keep-alive ping, and never will.** It only reads. Turning the keep-alive
 mechanism on is a separate, explicit action — see `/context-guru:cache-strategy-picker`.
@@ -81,7 +104,7 @@ updates it in place, no `--force` needed:
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add --file ~/.claude/settings.json \
   --statusline "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\" --cache"
 
-# keep-alive ping counter
+# keep-alive net saving + misses prevented
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add --file ~/.claude/settings.json \
   --statusline "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\" --keepalive"
 

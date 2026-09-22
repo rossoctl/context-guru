@@ -369,18 +369,35 @@ repo. That is correct behaviour, but it means "clone and go" is really "clone, a
 line, so you see them on every turn instead of asking `/context-guru:status`:
 
 ```
-$0.03/12k saved of $0.41/187k
+████····  100/200.0k 50% | $0.03/12k saved of $0.41/187k | proxy: 3ms · upstream: 340ms | ◇ github 1% remove
 ```
 
-That is: this session has saved $0.03 and 12k tokens so far, out of $0.41 and 187k tokens this
-session has spent in total. Both halves are scoped to THIS session — the savings figure is the
-proxy's own `/api/stats?session=<id>` (the same totals `/context-guru:status` shows, but filtered
-to one session rather than the proxy's whole retained window), and the total is read straight off
-Claude Code's own statusLine payload (`cost.total_cost_usd`, `context_window`), so it costs no
-extra network call. Hidden entirely before this session has spent anything at all — before that,
-there is nothing to divide by, not a broken feature; a real `$0.00/0 saved` prints once there is a
-real total to compare it to. Same list-price caveat as `/context-guru:status` applies to the money
-side.
+Four segments render by default, each independently — a segment whose numbers are not available
+just does not print, rather than showing a zero:
+
+- **The context bar** (`████···· 100/200.0k 50%`) — tokens used against the model's real context
+  window, coloured green under 50%, yellow under 70%, red above. Read straight off Claude Code's
+  own statusLine payload (`context_window.total_input_tokens` / `.context_window_size` /
+  `.used_percentage`), so it costs no extra network call.
+- **The savings-vs-cost figure** (`$0.03/12k saved of $0.41/187k`) — this session has saved $0.03
+  and 12k tokens so far, out of $0.41 and 187k tokens this session has spent in total. Both halves
+  are scoped to THIS session — the savings figure is the proxy's own `/api/stats?session=<id>`
+  (the same totals `/context-guru:status` shows, but filtered to one session rather than the
+  proxy's whole retained window), and the total is read straight off Claude Code's own statusLine
+  payload (`cost.total_cost_usd`, `context_window`). Hidden entirely before this session has spent
+  anything at all — before that, there is nothing to divide by, not a broken feature; a real
+  `$0.00/0 saved` prints once there is a real total to compare it to. Same list-price caveat as
+  `/context-guru:status` applies to the money side.
+- **The latency split** (`proxy: 3ms · upstream: 340ms`) — ContextGuru's own added latency next to
+  what the upstream provider took, each labelled so the two cannot be misread for one another.
+  Both are `/api/stats`' own averages (`cg_latency_ms_avg` / `upstream_ms_avg`); nothing here is
+  derived.
+- **The unused-tool hint** (`◇ github 1% remove`) — the MCP server or skill THIS session used the
+  least, checked against every MCP server configured in `~/.claude/settings.json` and every skill
+  this plugin ships: `remove` at 1% or under of this session's tool/skill uses, `move` (to project
+  scope, rather than global) at 20% or under, nothing at all above that. Session-scoped, not a
+  system-prompt enumeration — nothing exposes what a given session's prompt actually loaded, so
+  this checks what the transcript's own tail shows was actually called.
 
 **`cg!`** means the proxy this project routes to is not answering. This is the one thing that
 still shows regardless of the toggles below — everything else about the line is silent, including
@@ -398,8 +415,10 @@ restart needed beyond a new session:
   "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add --file ~/.claude/settings.json \
     --statusline "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\" --cache"
   ```
-- **`ka 2p`** — how many idle keep-alive pings have fired this window. Hidden while zero even
-  once turned on.
+- **`ka ≤2miss $0.07`** — the cache misses the idle keep-alive pings prevented this window, and
+  the NET money that saved (credit minus what the pings themselves cost). Shown only when that net
+  is positive — a net loss, or an account with no keep-alive figures recorded at all, prints
+  nothing rather than a zero.
   ```bash
   "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" add --file ~/.claude/settings.json \
     --statusline "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\" --keepalive"
@@ -421,8 +440,8 @@ strategy that sends no pings at all, and switching to it is one word.
 One nuance worth having straight: once keep-alive is on, `cache cold` in the status line (once
 you have turned that segment on) no longer means the provider's own cached entry is actually
 cold. The countdown is Claude Code's own view of *its own* last request; it has no way to see a
-ping the proxy sent while you were not typing. Treat `ka Np` and the next turn's latency as the
-ground truth once keep-alive is running, not the countdown by itself.
+ping the proxy sent while you were not typing. Treat `ka ≤Nmiss $X.XX` and the next turn's latency
+as the ground truth once keep-alive is running, not the countdown by itself.
 
 ## The escape hatch: when Claude Code cannot fix it for you
 

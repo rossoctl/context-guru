@@ -160,9 +160,12 @@ def _configured_tool_names() -> list[str]:
 
 
 def _tool_use_counts(transcript_path: object) -> dict[str, int]:
-    """Tool/skill use counts from the tail of THIS session's own transcript. Same shapes as the
-    IBM renderer's _tool_name: a Skill block reports its own skill name, an `mcp__server__tool`
-    reports `tool`, everything else (a Claude Code built-in) is excluded.
+    """Skill and MCP-SERVER use counts from the tail of THIS session's own transcript, keyed to
+    match what _configured_tool_names reports as "available": a Skill block counts under its own
+    skill name, and an `mcp__server__tool` block counts under `server` — NOT `tool` — because
+    _recommend_segment compares this against configured SERVER names, and a server with three
+    tools used between them is used, not "barely used" three separate, undercounted ways. Everything
+    else (a Claude Code built-in) is excluded.
     """
     counts: dict[str, int] = {}
     if not isinstance(transcript_path, str) or not transcript_path:
@@ -200,7 +203,9 @@ def _tool_use_counts(transcript_path: object) -> dict[str, int]:
                 key = skill.split(":")[-1] if isinstance(skill, str) and skill else "Skill"
             elif name.startswith("mcp__"):
                 parts = name.split("__")
-                key = parts[-1] if parts[-1] else name
+                # parts[1] is the SERVER — "mcp", "<server>", "<tool>", ... — which is the name
+                # _configured_tool_names reports and _recommend_segment compares this against.
+                key = parts[1] if len(parts) > 1 and parts[1] else name
             else:
                 continue  # a Claude Code built-in: not one of the two categories this tracks
             counts[key] = counts.get(key, 0) + 1
@@ -212,8 +217,11 @@ def _recommend_segment(payload: dict) -> str | None:
     this session's tool/skill uses), `move` (<=20%, i.e. to project scope rather than global).
 
     SESSION-SCOPED, not a system-prompt enumeration — see _configured_tool_names for what
-    "configured" means here. A name absent from `counts` is unused in what this session's
-    transcript tail shows, which is what the segment can actually claim.
+    "configured" means here. `counts` is keyed to match: a skill by its own name, an MCP SERVER
+    by its name with every one of its tools' uses summed into it (see _tool_use_counts) — so a
+    server is scored by its combined usage, not by whichever single tool happened to be called
+    most. A name absent from `counts` is unused in what this session's transcript tail shows,
+    which is what the segment can actually claim.
     """
     available = _configured_tool_names()
     if not available:
