@@ -7,7 +7,7 @@ provider, and session id, and how they run the expand loop.
 | Option | Host code | Body source | Expand loop | Status |
 |---|---|---|---|---|
 | Proxy / gateway | `proxy/` + `cmd/context-guru-proxy/` | HTTP request body | server-side, wraps the chat route | shipped; the eval-containers gateway |
-| AuthBridge plugin | `cortex` (imports this module) | `pctx.Body` | response path (`OnResponse`) | plugin lives externally |
+| External sidecar plugin | a separate repo (imports this module) | `pctx.Body` | response path (`OnResponse`) | plugin lives externally |
 | bifrost `LLMPlugin` | `adapters/bifrost/` | `req.ChatRequest` | transport wrapper | adapter shipped |
 
 ## Option A — proxy / gateway
@@ -47,15 +47,15 @@ Key behaviors (`proxy/proxy.go`):
 
 Run it: see the [flag table in docs/more.md](more.md#proxy-gateway-run-it-yourself) and [setup.md](setup.md).
 
-## Option B — AuthBridge in-process plugin
+## Option B — external in-process plugin
 
-The plugin lives in **cortex** (`authlib/plugins/contextguru/`) and imports only this
+The plugin lives in a separate external repository and imports only this
 module — not bifrost internals. It is an outbound `WritesBody` plugin gated to inference paths.
 
 ```mermaid
 sequenceDiagram
   participant Agent
-  participant AB as AuthBridge plugin
+  participant AB as external plugin
   participant Apply as apply.Body
   participant Up as Upstream
   Agent->>AB: outbound request (pctx.Body)
@@ -71,7 +71,7 @@ sequenceDiagram
 The plugin reuses `apply.Body` (bytes in → pipeline → bytes out), `session.Resolve` (from
 `pctx.Session`), the shared `Store`, and `expand/` for the response-path continuation. Config
 arrives as `json.RawMessage` into the same `config` struct the proxy uses; metrics surface via
-AuthBridge's `StatsSource`.
+the external plugin's `StatsSource`.
 
 ## Option C — bifrost LLMPlugin (embed in a bifrost deployment)
 

@@ -113,5 +113,4 @@ family of defect: **cost machinery written for per-output calls, applied to a on
 ## Where the numbers come from
 
 Gate counters read from the proxy's `/stats` during a 128k-band LOCA arm; the floor sweep was run
-offline on a 3-task configuration. Full detail in `docs/experiments/loca/iter019/results.md` and
-`docs/experiments/loca/iter020/`.
+offline on a 3-task configuration. Full detail in internal iteration 019 and iteration 020 run notes (not published).

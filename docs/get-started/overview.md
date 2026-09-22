@@ -31,7 +31,7 @@ of the exact same shape** before it reaches the model.
 flowchart LR
   A[Agent] -->|chat request| H{Host adapter}
   H -->|proxy: proxy.Handler| P[apply.Body]
-  H -->|in-process: AuthBridge plugin| P
+  H -->|in-process: external sidecar plugin| P
   P -->|messages array| PIPE[Pipeline<br/>ordered components]
   PIPE --> P
   P -->|byte-lossless splice| UP[Upstream provider]

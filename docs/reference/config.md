@@ -1,6 +1,6 @@
 # Config & environment
 
-One strict YAML struct serves both hosts (the proxy loads a file; the AuthBridge
+One strict YAML struct serves both hosts (the proxy loads a file; the external plugin
 plugin hands its `config:` subtree to the same loader). A `preset` expands to a
 default pipeline; explicit fields override it.
 

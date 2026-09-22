@@ -122,7 +122,7 @@ It has an **11% false-drop rate** under Tier-1 exact ground truth: outputs dorma
 agent used later. "Unreferenced" is a claim about the past, and the future contradicts it one time in
 nine.
 
-**Revised upward to 21–24%** by [iteration 009](../experiments/loca/iter009/results.md), which widened
+**Revised upward to 21–24%** by iteration 009, which widened
 ground truth with deterministic normalization (numeric reformatting, case, substring; the 24% figure
 additionally allows path-basename matching and is an upper bound). So the "free safe cut" is roughly
 **twice as lossy as first published**, and since Tier-3 semantic reuse is still invisible, even 21% is
@@ -263,7 +263,7 @@ operational damage rate.
   acceptance criteria put reward first, and nothing here touches it.
 - **Ground truth is Tier-1 exact matching**, so it cannot see transformed or semantic reuse. Every
   false-drop figure is a **lower bound**, for every arm. **Partly quantified**
-  ([iteration 009](../experiments/loca/iter009/results.md)): widening it with deterministic
+  (iteration 009): widening it with deterministic
   normalization (numeric reformatting, case, substring) moves referenced candidates 408 → **473**
   (+16%) and raises every arm's false-drop — `cut_unreferenced`'s goes **11% → 21%**, see finding 4.
   The gap between the index and the best model arm does not narrow; it slightly widens. The
@@ -284,7 +284,7 @@ operational damage rate.
   page: any arm's false-drop is measured only on the scoreable subset, and any arm that cuts `opaque`
   more than another is flattered by exactly that much. The deterministic arms never cut it — `Opaque`
   is never-cut by design — so the comparison here is not distorted by it; a model arm's is. See
-  [iteration 027 §7](../experiments/loca/iter027/results.md).
+  iteration 027 §7.
 - **The proxy is blind to positional and non-identifier reuse even on the scoreable subset.** Both
   sides of `novel ∩ ref_tokens[j]` pass through `distinctive()`, which by design rejects short
   lowercase words and numbers under five digits. So "the address in row 1" shares no token with the
@@ -297,7 +297,7 @@ operational damage rate.
   varying depth with varying future remaining.
 - **An asymmetry that flatters the deterministic arms:** `min_later_turns` is a hard structural guard
   present only in them. Model arms received `later_turns` as information with no enforced floor.
-  **Now done** ([iteration 009](../experiments/loca/iter009/results.md), $0, no new model calls): it
+  **Now done** (iteration 009, $0, no new model calls): it
   changes almost nothing. The floor overrides only 6–23 of 885 decisions per arm and moves live-kept
   by 0–2 points; removing it from the deterministic arms costs them one point. The asymmetry was a
   reasonable suspicion and is not the explanation for the gap.
@@ -325,7 +325,7 @@ whether recovery via `expand` actually fires often enough to make a 30% recovera
 preferable to a 20% permanent one; how often the agent's own compaction is reachable at all
 (`modes.Tracker` reset detection, free, still not run); ~~and whether a floor-symmetric comparison
 narrows the gap between the index and the bulk arm~~ — **answered: it does not**
-([iteration 009](../experiments/loca/iter009/results.md)).
+(iteration 009).
 
 See also: [co-reference density](coref-density.md) · the proposal (`docs/proposals/coref-compaction.md`)
 · implementation status (`docs/proposals/coref-implementation.md`)

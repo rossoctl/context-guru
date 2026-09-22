@@ -417,7 +417,7 @@ no longer expires mid-session — but inverting `TailOnly` to fail *closed* is a
 
 `session.Resolve(explicit, system, firstUser)`: an explicit host id wins; otherwise a stable
 `sha256(system + firstUser)[:16]` so two turns of one conversation land on the same key.
-Explicit id sources: proxy header `x-context-guru-session`; AuthBridge `pctx.Session`;
+Explicit id sources: proxy header `x-context-guru-session`; the external plugin's `pctx.Session`;
 eval-containers stamps it in the gateway.
 
 ## Metrics
@@ -653,7 +653,7 @@ flowchart LR
 
 - **`incoming`** (default) reuses the proxied request's model + the gateway's key — zero extra config,
   works through the eval-containers gateway. **`config`** uses a dedicated cheap model (`internal/cheapmodel`
-  Anthropic/OpenAI). The AuthBridge host offers only `config` (its incoming key is a placeholder).
+  Anthropic/OpenAI). The external plugin host offers only `config` (its incoming key is a placeholder).
 - The call is synchronous in the request path (in `sync` mode; in `observe` it happens off-path), so
   it's bounded (short timeout, retry) and **fail-open**: any error reverts the component (pipeline
   guarantee), and a missing model degrades gracefully.

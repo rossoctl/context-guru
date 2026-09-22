@@ -66,7 +66,7 @@ and the two pools are disjoint:
   pass more.
 
 Measured pools, from the matched 15-task comparison in
-[iteration 008](../experiments/loca/iter008/results.md):
+iteration 008:
 
 | band | pass → **can show harm** | fail → **can show gain** |
 |---|---|---|
@@ -74,7 +74,7 @@ Measured pools, from the matched 15-task comparison in
 | 32k | **8** (of 15) | 7 |
 
 At 64k the whole harm signal had to come from **three tasks**. At a 10% harm rate that is 0.3
-expected visible events, which is why [iteration 007](../experiments/loca/iter007/results.md) could
+expected visible events, which is why iteration 007 could
 bound harm only at ≤26% — there was almost nothing for harm to act on. Nor were the 9 failing tasks
 useful: they failed under `format` alone, which is **lossless**, so they fail for reasons no
 compaction component can influence. They cost full price and return a tie.
@@ -120,7 +120,7 @@ a matched run says otherwise.** A matched run is cheap — this one cost $85 and
 (Caveat kept visible: the 64k figure is 3/12 because three tasks errored on the broken shim, so its
 true rate carries some uncertainty. The 25%-vs-53% gap is far too wide for that to account for.)
 
-[iteration 004b](../experiments/loca/iter004b/results.md), 12 tasks:
+iteration 004b, 12 tasks:
 
 | comparison | gained | lost | discordant | p |
 |---|--:|--:|--:|--:|
@@ -193,7 +193,7 @@ Two consequences for design:
 
 Superiority on a binary reward is the expensive claim; **bounding harm is the cheap one, and is
 usually what is actually being asked.** Priced below at $7.59 per task per arm, which was **wrong by
-5×** — the true figure is **$1.52 per run** ([iteration 010](../experiments/loca/iter010/PREREGISTRATION.md)
+5×** — the true figure is **$1.52 per run** (iteration 010
 amendment 1). Divide every dollar figure in this table by ~5; the *ratios* between rows, which are the
 point, are unaffected:
 
@@ -223,11 +223,11 @@ upstream**. No provider ever validates it. So replay can tell you *what a compon
 **structurally incapable** of telling you *whether the result is a sendable request*.
 
 This blind spot hid three provider-rejecting defects in `summarize`
-([iteration 005](../experiments/loca/iter005/results.md)), each masked by the previous one, found
+(iteration 005), each masked by the previous one, found
 only by sending live traffic one at a time. It silently covered every `/compact`-based result here:
 [density](coref-density.md), [the eval-box pass](coref-evalbox.md),
 [component gating](component-gating.md), and
-[iteration 002](../experiments/loca/iter002/results.md) — whose deferral figure came from a pipeline
+iteration 002 — whose deferral figure came from a pipeline
 that 400s in production.
 
 **Mitigated, not solved.** `schema.ValidateShape` + the all-presets test now catch this class
@@ -337,7 +337,7 @@ It defaults to `True` and is genuinely not exposed as a CLI flag, but it groups 
 **all 75 configs execute either way.** The actual trap is on the reading side — `state0`…`state4` are
 the 5 seeds, so globbing `tasks/*/state0/eval.json` silently reads 15 of 75 completed runs and
 **overstates per-run cost by 5×**. That is what iterations 007 and 008 did
-([iteration 010](../experiments/loca/iter010/PREREGISTRATION.md) amendment 1).
+(iteration 010 amendment 1).
 
 **What actually limits reward power here is 15 independent tasks, not n.** 75 runs are 5 seeds of 15
 tasks, so they are clustered: extra seeds buy precision *within* a task and do not add independent
@@ -352,7 +352,7 @@ register improvement *or* degradation, so they consume budget while contributing
 Trajectories were 9–53 tool calls, well short of the ~106 ceiling, and the agent terminated on its own:
 these are genuine task failures, not truncation.
 
-Together these are why [iteration 007](../experiments/loca/iter007/results.md) was stopped rather than
+Together these are why iteration 007 was stopped rather than
 completed.
 
 ## 7. Rig traps that produced valid-looking wrong numbers
@@ -377,7 +377,7 @@ Before believing a benchmark number, confirm the tools worked — per-task `eval
 and a transparency assertion on the `off` arm (0 saved, no component acted).
 
 See also: the proposal (`docs/proposals/coref-compaction.md`) ·
-[experiment log](../experiments/README.md) ·
+experiment log ·
 [selection experiment](coref-selection-experiment.md)
 
 ### The benchmark's compaction never fired, on any iteration, because the gateway does not forward it

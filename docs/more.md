@@ -51,7 +51,7 @@ breakdowns, real before→after examples, and how to reproduce: **[docs/RESULTS.
 flowchart LR
   A[Agent] -->|chat request| H{Host adapter}
   H -->|proxy: proxy.Handler| P[apply.Body]
-  H -->|in-process: AuthBridge plugin| P
+  H -->|in-process: external sidecar plugin| P
   P -->|messages array| PIPE[Pipeline<br/>ordered components]
   PIPE --> P
   P -->|byte-lossless splice| UP[Upstream provider]
@@ -320,7 +320,7 @@ Details in [docs/how-to/operating-modes.md](how-to/operating-modes.md).
 | Option | What | Where |
 |---|---|---|
 | **Proxy / gateway** | `context-guru-proxy` in front of the provider; the eval-containers gateway image | `proxy/`, `cmd/context-guru-proxy/` |
-| **In-process plugin** | AuthBridge (Rossoctl sidecar) plugin importing this module, running the same pipeline on `pctx.Body` | plugin lives in `cortex`; reuses `apply.Body` + `expand/` |
+| **In-process plugin** | an external sidecar plugin importing this module, running the same pipeline on `pctx.Body` | plugin lives in a separate repo; reuses `apply.Body` + `expand/` |
 | _(also)_ **bifrost LLMPlugin** | run the pipeline as a `PreRequestHook` inside any bifrost deployment | `adapters/bifrost/` |
 
 Details in [docs/integrations.md](integrations.md).
@@ -331,6 +331,6 @@ Details in [docs/integrations.md](integrations.md).
 - [docs/how-to/operating-modes.md](how-to/operating-modes.md) — sync vs observe: when to use each, and how to read observe's projections.
 - [docs/dashboard.md](dashboard.md) — the persistent observability dashboard: metrics semantics, the diff view, storage, access gating, API.
 - [docs/components.md](components.md) — every registered component: how it works, live before→after, lossiness, config, best use.
-- [docs/integrations.md](integrations.md) — proxy gateway vs AuthBridge plugin, with request paths.
+- [docs/integrations.md](integrations.md) — proxy gateway vs in-process plugin, with request paths.
 - [docs/setup.md](setup.md) — setup + a concrete SWE-bench run through the eval-containers gateway.
 - [docs/RESULTS.md](RESULTS.md) — the live four-way SWE-bench Verified benchmark (Claude Code, `aws/claude-sonnet-5`): context-guru is the cheapest arm (−13.2% billed cost vs baseline) and solves the most tasks (88%); headroom −5.3%/80%; rtk (shell-level Bash-output hook) −9.0%/86% at $0 tool cost.

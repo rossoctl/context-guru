@@ -536,10 +536,10 @@ loopback-only is about cross-tenant spend data, not about IBM.
 
 ## User setup
 
-!!! tip "Are you a user of the IBM deployment, not its operator?"
-    [Connect to the IBM service](get-started/connect-ibm-service.md) is the five-minute
-    version of this section: register, trust the CA, point one agent at it, and turn it on and
-    off per session.
+!!! tip "Are you a user of an internal hosted deployment, not its operator?"
+    Ask your operator for their connect guide — it is the five-minute version of this
+    section: register, trust the CA, point one agent at it, and turn it on and off per
+    session.
 
 **Keep your own provider key where it already is.** The proxy forwards it, so your
 traffic is billed to you. What you add is a base URL and the context-guru token, and the

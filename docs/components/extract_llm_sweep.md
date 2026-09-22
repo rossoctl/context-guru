@@ -514,7 +514,7 @@ the trigger does fire — and it says the batch was worth asking about, never th
 
 This component has never been measured on a workload independent of the one its thresholds were tuned
 on. Every corpus behind `min_inventory`, `min_tokens`, `min_later_turns` and the 6%-vs-58% live-kept
-curve is LOCA-derived (see [LOCA iteration 028](../experiments/loca/iter028/results.md#5-why-the-iteration-was-stopped-the-workload-cannot-price-this-feature)),
+curve is LOCA-derived (see LOCA iteration 028),
 and on LOCA the cache arithmetic came out at 11.0 against a break-even of 11.5 — with `S` and `T` both
 structurally thin there. So the first real deployment is a **measurement**, not a rollout, and it should
 be configured to be readable rather than aggressive.
