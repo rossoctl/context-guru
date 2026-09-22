@@ -14,9 +14,9 @@ the conversation itself), records the token weight of each declaration, and trac
 ones actually got called. Reading it: [`GET /api/tools`](reference/routes.md) for the
 rollup, [`GET /api/prompt`](reference/routes.md) for one session's actual prefix text.
 
-**Measured on real Claude Code traffic:** of the tokens a session declares in its
-toolbox, **82.7%** are never invoked in that session. 27 declarations were carried by
-every one of 51 sampled sessions and called by none of them.
+**Measured on real Claude Code traffic** (1,844 real request bodies): of the tokens a
+session declares in its toolbox, **82.7%** are never invoked in that session. 27
+declarations were carried by every session and called by none of them.
 
 ## What to do about it
 

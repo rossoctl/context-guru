@@ -40,9 +40,9 @@ them need the others, and none of them touch what the model sees or does.
     ```
 
     **Example:** measured across real Claude Code sessions, **82.7%** of a declared
-    tool catalogue is never invoked in that session — 27 tools carried by every one
-    of 51 sessions and called by none. Naming those in `remove:` drops them from
-    every request of that session, not just one.
+    tool catalogue is never invoked in that session — 27 tools carried by every
+    session and called by none. Naming those in `remove:` drops them from every
+    request of that session, not just one.
 
     **Measured:** 2–4% fewer system-prompt tokens, depending on how tool-heavy your
     setup is. `toolfilter` never removes a name you didn't list, and keeps anything
