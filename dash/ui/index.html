@@ -306,6 +306,40 @@
        tiles in one flat grid is twenty things of equal importance, i.e. no hierarchy. -->
   <div id="tiles"></div>
 
+  <!-- Your latest session's latency beside your average across this window — "is it fast
+       right now" and "is it fast overall" are different questions and a single averaged
+       tile answers neither. Fed from the same /api/sessions read the usage panel below
+       already needs, so this costs no extra request. -->
+  <div class="panel" id="latency-panel" hidden>
+    <h2>Latency</h2>
+    <div id="latency-tiles"></div>
+  </div>
+
+  <!-- What you actually added yourself — MCP servers and skills, never Claude Code's own
+       built-ins — and what to do about the ones not earning their place. Reuses the
+       Inventory tab's own GET /api/tools report; no new backend read. -->
+  <div class="panel" id="inventory-panel" hidden>
+    <h2>Your tools &amp; skills</h2>
+    <p class="note">What you added yourself. Claude Code's own built-in tools are left out —
+      see the Inventory tab for the full picture, including those.</p>
+    <div id="inventory-tiles"></div>
+    <div id="recommendations" data-testid="recommendations"></div>
+  </div>
+
+  <!-- How many of your sessions actually did something, not just how many exist. Reuses
+       GET /api/sessions; no new backend read. -->
+  <div class="panel" id="session-usage-panel" hidden>
+    <h2>Your sessions</h2>
+    <div id="session-usage-tiles"></div>
+    <p class="note" id="session-usage-note"></p>
+  </div>
+
+  <!-- Everything below is real and correct, and most viewers never need it: the operator-
+       level detail behind the numbers above, folded the same way Keep-alive's own gap-timing
+       diagnostics are. -->
+  <details class="setup-others" id="overview-diagnostics">
+    <summary>Detailed diagnostics</summary>
+
   <!-- A small callout, for every user — not just managers — reusing GET /api/keepalive's
        already-computed ledger. Hidden until the keep-alive has actually run on this
        account (keepalive_recorded_from), so a zero here never reads as a measurement. -->
@@ -438,6 +472,7 @@
       </table>
     </div>
   </div>
+  </details>
 </section>
 
 <!-- ── Usage ─────────────────────────────────────────────────────────────────

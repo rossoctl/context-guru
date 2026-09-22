@@ -1384,6 +1384,28 @@ const TILE_INFO = {
 };
 
 /**
+ * countUp animates a tile's value from 0 up to its real figure, formatted with the same
+ * function the tile itself used. Pure polish: it runs once after the tile is already on
+ * screen with its real, correct value, and simply repaints the same node a few times on
+ * the way there — a failed or skipped animation leaves the correct number showing, never a
+ * wrong one.
+ */
+function countUp(key, target, formatter, durationMs = 700) {
+  if (typeof target !== 'number' || !isFinite(target)) return;
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const node = document.querySelector(`[data-testid="tile-${key}-value"]`);
+  if (!node) return;
+  const start = performance.now();
+  function frame(now) {
+    const t = Math.min(1, (now - start) / durationMs);
+    const eased = 1 - (1 - t) ** 3;
+    node.textContent = formatter(target * eased);
+    if (t < 1) requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+/**
  * tile renders one figure, and — when TILE_INFO has an entry for its key — an "i" that
  * discloses what the figure means.
  *
@@ -1534,6 +1556,14 @@ function renderTiles(o) {
       o.prefix_change_cost_all_usd > 0 ? 'bad' : ''),
     tile('requests', 'Requests', num(o.requests), num(o.sessions) + ' sessions'),
   ], 'headline'));
+
+  // Count up to the headline dollar/token figures instead of painting them already
+  // settled — pure polish, skipped entirely for anyone who asked the OS not to animate.
+  if (costKnown) {
+    countUp('total-saved-usd', o.total_saved_usd, usd);
+    countUp('saved-usd', o.net_saved_usd, usd);
+  }
+  countUp('saved-unique', o.saved_unique, (v) => compact(Math.round(v)));
 
   // Groups collapsed into one "Diagnostics" section below rather than shown at the same
   // weight as the headline and Cost/Addressable-spend groups above: real, correct, and
@@ -2086,6 +2116,9 @@ async function loadOverview(opts = {}) {
     loadOverviewKeepAlive();
     // Same reasoning: a slow or failed components read must not blank the totals above it.
     loadValueBreakdown();
+    // Same reasoning again: the plain-account summary (latency, inventory, session usage,
+    // recommendations) reuses two other endpoints and must not delay or blank the totals.
+    loadUserInsights();
     // Restore the offset after the repaint. Even swapping in place, a group that gained or
     // lost a tile changes the document height by a row, and the reader should not have to
     // find their place again because a number rolled over.
@@ -2185,6 +2218,132 @@ async function loadValueBreakdown() {
   } catch (e) {
     if (!aborted(e)) panel.hidden = true; // best-effort: Overview must not depend on this
   }
+}
+
+/**
+ * loadUserInsights fills the three plain-account panels below the headline tiles: latency
+ * (latest session vs. this window's average), your own tools/skills with removal advice,
+ * and how many of your sessions actually did something. All three reuse endpoints the
+ * Sessions and Inventory tabs already call — GET /api/sessions and GET /api/tools — so
+ * this adds no new backend read.
+ *
+ * One fetch pair feeds all three panels; a failure hides them rather than blanking the
+ * totals above, the same best-effort rule as loadOverviewKeepAlive and loadValueBreakdown.
+ */
+async function loadUserInsights() {
+  try {
+    const [sessions, report] = await Promise.all([
+      api('sessions', { limit: 500 }),
+      api('tools'),
+    ]);
+    renderLatencyPanel(sessions);
+    renderSessionUsagePanel(sessions);
+    renderInventoryPanel(report);
+  } catch (e) {
+    if (aborted(e)) return;
+    for (const id of ['#latency-panel', '#inventory-panel', '#session-usage-panel']) {
+      const p = $(id);
+      if (p) p.hidden = true;
+    }
+  }
+}
+
+/**
+ * renderLatencyPanel answers two different questions with two different tiles: "is it fast
+ * right now" (the most recent session's own average — /api/sessions is already sorted
+ * most-recently-active first) and "is it fast overall" (this window's average, already on
+ * /api/stats). Blending them into one number would answer neither.
+ */
+function renderLatencyPanel(sessions) {
+  const panel = $('#latency-panel');
+  const rows = (sessions && sessions.sessions) || [];
+  const o = state.overview;
+  if (!panel || !o || !rows.length) { if (panel) panel.hidden = true; return; }
+  panel.hidden = false;
+  const latest = rows[0];
+  clear($('#latency-tiles')).appendChild(tileGroup(null, null, [
+    tile('latency-latest', 'Latest session', ms(latest.cg_latency_ms_avg), 'most recent session’s own average'),
+    tile('latency-window-avg', 'Average, this window', ms(o.cg_latency_ms_avg), num(o.requests) + ' requests'),
+  ], 'headline'));
+}
+
+/**
+ * renderSessionUsagePanel counts multi-turn sessions apart from single-turn ones — the
+ * closest this data can come to "opened vs. actually used".
+ *
+ * It CANNOT be exactly that: a session that never sent a message never reaches the proxy
+ * at all, so "opened and abandoned" leaves no row anywhere in this database — every session
+ * here already sent at least one message and got a response. A single-turn session is the
+ * best available proxy for "opened it, tried one thing, moved on" and a multi-turn one for
+ * "actually worked in it", and the note below says so rather than overclaiming.
+ *
+ * Sampled over the most recent 500 sessions (the read's own cap) — noted in the caption
+ * when the account has more than that, so the split is never presented as exact past that
+ * size.
+ */
+function renderSessionUsagePanel(sessions) {
+  const panel = $('#session-usage-panel');
+  const rows = (sessions && sessions.sessions) || [];
+  if (!panel || !rows.length) { if (panel) panel.hidden = true; return; }
+  panel.hidden = false;
+  const used = rows.filter((s) => s.turns > 1).length;
+  const total = sessions.total || rows.length;
+  clear($('#session-usage-tiles')).appendChild(tileGroup(null, null, [
+    tile('sessions-total', 'Sessions', num(total)),
+    tile('sessions-used', 'Multi-turn (engaged)', num(used), pct(rows.length ? (100 * used) / rows.length : 0, 0) + ' of sampled', 'good'),
+    tile('sessions-single', 'Single-turn only', num(rows.length - used), 'one message, no follow-up'),
+  ]));
+  const note = $('#session-usage-note');
+  note.textContent = 'A session that never sent a message never reaches context-guru at all, so '
+    + '“opened but never used” cannot be measured here — this compares single-turn '
+    + 'sessions against ones with a follow-up, over your'
+    + (total > rows.length ? ' most recent ' + num(rows.length) + ' sessions' : ' ' + num(rows.length) + ' sessions') + '.';
+}
+
+/**
+ * renderInventoryPanel is the plain-account glance version of the Inventory tab: counts of
+ * what you actually added (never Claude Code's own built-ins — ToolReport.Tools/Servers/
+ * Skills already exclude those, see dash/toolapi.go), plus the strongest removal candidate
+ * and the strongest "keep this" case, both straight from the same Removal/UnusedUSD figures
+ * the Inventory tab renders in full.
+ */
+function renderInventoryPanel(rep) {
+  const panel = $('#inventory-panel');
+  if (!panel || !rep) { if (panel) panel.hidden = true; return; }
+  const items = [...(rep.tools || []), ...(rep.skills && rep.skills.skills || [])];
+  if (!rep.coverage || !rep.coverage.captured) { panel.hidden = true; return; }
+  panel.hidden = false;
+  clear($('#inventory-tiles')).appendChild(tileGroup(null, null, [
+    tile('inv-servers', 'MCP servers', num((rep.servers || []).length)),
+    tile('inv-skills', 'Skills', num(rep.skills ? rep.skills.declared : 0)),
+    tile('inv-unused-usd', 'Spent carrying unused ones', rep.totals && rep.totals.priced ? usd(rep.totals.unused_usd) : 'unknown',
+      'this window', rep.totals && rep.totals.unused_usd > 0 ? 'bad' : ''),
+  ]));
+  const host = clear($('#recommendations'));
+  if (!items.length) return;
+  // Strongest removal case: never invoked, ranked by what it costs to keep carrying.
+  const removable = items.filter((t) => t.sessions_used === 0 && t.unused_usd > 0)
+    .sort((a, b) => b.unused_usd - a.unused_usd).slice(0, 2);
+  // Strongest keep case: the one earning the most, by the same dollar measure everything
+  // else on this panel uses.
+  const keepers = items.filter((t) => t.sessions_used > 0)
+    .sort((a, b) => b.sessions_used - a.sessions_used).slice(0, 1);
+  const rows = [];
+  for (const t of removable) {
+    rows.push(['bad', 'Consider removing', t, 'never used · costs ' + usd(t.unused_usd) + ' this window']);
+  }
+  for (const t of keepers) {
+    rows.push(['good', 'Keep', t, 'used in ' + num(t.sessions_used) + ' of ' + num(t.sessions_declared) + ' sessions']);
+  }
+  if (!rows.length) return;
+  const list = el('div', { class: 'reco-list' });
+  for (const [tone, verdict, t, note] of rows) {
+    list.appendChild(el('div', { class: 'reco-row' },
+      el('span', { class: 'pill ' + tone, text: verdict }),
+      el('span', { class: 'reco-name', text: t.name }),
+      el('span', { class: 'reco-note', text: note })));
+  }
+  host.appendChild(list);
 }
 
 function bucketFor() {
