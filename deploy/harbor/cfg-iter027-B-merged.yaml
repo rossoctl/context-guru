@@ -1,0 +1,155 @@
+# iteration 027 ARM B -- the sweep with the break-even priced for what it actually delivers.
+#
+# ONE SENTENCE: iteration 024 produced this line of work's only reward result while its economic gate was
+# accidentally permissive (its window resolved to 1,000,000 instead of the configured 64,000, inflating
+# the turn horizon ~16x); every gate tightening since has been measured against that broken baseline, and
+# iteration 026 -- gate priced correctly, floor at 0.70 -- fired ZERO asks. This arm asks whether the
+# reward result survives a gate that is both correctly denominated and priced for the benefit the run
+# actually delivered.
+#
+# FOUR CHANGES FROM ITERATION 026 ARM B, each with its reasoning at the key below:
+#
+#   reward_premium: 20     a removed token is worth 20x the cache read it saves (was: unpriced, i.e. 1)
+#   min_pressure:  0.20    was 0.70, which blocked 127 of iteration 024's 203 firings on its own
+#   min_inventory:   10    the measured inflection; iteration 024 already ran at 9.6 offered per ask
+#   + in the BINARY        the turn horizon now credits the removal it is pricing (issue #232)
+#
+# THE LAST ONE IS NOT OPTIONAL AND NOT SEPARABLE. The horizon was measured on the request as it ARRIVED,
+# so a request already past the window had no turns remaining and refused every removal -- including the
+# removal that would bring it back under. On iteration 024's decisions that was exactly zero on 51 of 203
+# firings (25%), and a zero horizon refuses at ANY premium. The premium handles the value side, the credit
+# handles the no-runway side, and neither alone reproduces the behaviour under test.
+#
+# WHAT THIS ARM DOES NOT DO: attribute. Four terms move at once, so a B-A difference cannot be assigned to
+# any one of them. That is deliberate -- the question is whether the result reproduces at all with the
+# arithmetic honest, and a four-way factorial is 40 passes this budget does not have. If it reproduces,
+# taking the terms apart is the next iteration's job.
+#
+# READ THESE FIRST on the results, in this order:
+#   1. model_info_unresolved in st-i022-*.json -- 0, or nothing below means anything
+#   2. the resolved ctx_window in the pass output -- 64000, or the same
+#   3. sweep_offered / cg.sweep.ask count -- did it fire AT ALL. Iteration 026's answer was zero.
+#   4. premium and haveTurns on cg.sweep.econ -- which term is refusing now
+#   5. accuracy, cost per task, steps per task against arm A -- the endpoints, in that order of priority
+#   6. summarize acted, B against A -- and this is the FIRST run in which that number means deferral.
+#      While `collapse` sat in the pipeline it removed 15x what the sweep did and pulled requests under
+#      summarize's trigger before that trigger was evaluated, so "summarize acted" largely answered "did
+#      collapse act". With collapse gone, summarize is the only lossy compactor left and the sweep is the
+#      only thing that can hold a request below its threshold. Still REPORTED, not vetoing: deferral is a
+#      by-product, and the thesis is only worth anything if reward, cost or latency moved.
+# EXACTLY `housellm` PLUS `summarize`, and `collapse` is gone. housellm is the shipped baseline this
+# work is measured against -- format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm,
+# extract_llm_sweep, extract, cachesplit, toolfilter -- and every iteration from 023 to 026 quietly added
+# `collapse` to it. Nothing documented why.
+#
+# WHY IT IS REMOVED, and it is not a judgement about the component:
+#
+#  - it is not in housellm, nor in ANY shipped preset that also contains summarize (none do)
+#  - its documented job is preventing upstream 400s on bodies of 2.6-14.8 MB. On this workload that
+#    condition is an order of magnitude away: the largest request reaching it in the iteration 027 probe
+#    was 93,791 tokens against sonnet-5's 1,000,000, and capfail was 0 in the probe and in BOTH arms of
+#    iteration 026. It was protecting against nothing here.
+#  - its default threshold is `max_tokens: 2000`, so it capped EVERY tool output above 2,000 tokens to 20
+#    head + 20 tail lines, with no judgement about whether the output was spent -- which is precisely the
+#    question extract_llm_sweep is paid to answer, two positions earlier. Whatever the sweep declined to
+#    remove, collapse truncated anyway. Measured on the probe: collapse removed 544,336 tokens against
+#    the sweep's 35,318, a factor of 15.
+#  - and it ran BEFORE summarize, so it took requests from 93,791 to 39,202 -- under summarize's 0.90
+#    trigger -- before that trigger was ever evaluated. Six probe turns where collapse acted: summarize
+#    could not fire. Six where it did not: summarize's trigger fired and summarize declined anyway.
+#
+# Present in both arms it did not break internal validity, but it measured the sweep's value in the
+# presence of a component doing the same job lossily and without judgement, which is not a pipeline
+# anyone ships. THE RISK OF REMOVING IT is an uncapped oversized output causing an upstream 400; that is
+# measured as absent on this band and these tasks, and is NOT a claim about a 128k band or another task
+# set. If step 2 ever moves off this configuration, re-check capfail before assuming this still holds.
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    model: {model: claude-haiku-4-5, source: incoming}
+    strategy: code
+  extract_llm_sweep:
+    min_tokens: 100
+    evidence: true
+    econ_trigger: true
+    # THE ONE TERM IN THE BREAK-EVEN THAT IS A BELIEF. `S x T > 11.5 x W` values a removal at the cache
+    # reads it saves; iteration 024 paid $20.26 to bank $0.72 of them -- 28:1 against -- while accuracy
+    # went 0.486 -> 0.608 with 8 tasks better and 0 worse. Two independent routes land on the same size:
+    # sizing a premium to reproduce that run's firings needs ~28, and dividing its spend by its banked
+    # savings gives 28. 20 is the rounder, weaker claim and behaves the same (53% of that run's removal
+    # value either way, against 19% at face value).
+    #
+    # What it CANNOT do: rescue a request with no turns left. ceil(need/premium) >= 1 > 0 refuses at any
+    # premium, which is why it is paired with the horizon fix in this binary rather than shipped alone.
+    # Read `premium` on cg.sweep.econ to re-price this run's declines without re-running it.
+    reward_premium: 20
+    # LOWERED FROM 0.70. Measured against iteration 024's own firings -- counting only the 74 of 203 that
+    # still repay once priced at a correct window -- a floor of 0.20 keeps 51 and costs 12% of the
+    # removal value, while 0.70 keeps FOUR and costs 67%. The floor's job is narrow: keep the ask
+    # ledger's warm-up samples off transcripts where nothing has been superseded yet. It is not a
+    # deferral mechanism, and iteration 026 showed what happens when it is used as one -- 127 of
+    # iteration 024's 203 firings blocked on this term alone, and zero asks in a $65 run.
+    #
+    # And the floor is also a HORIZON CAP, which is why high values cannot work: the horizon is
+    # turns x (1/p - 1), so 0.70 caps it at 0.43 x turns. Iteration 026's admitted requests carried 3-7
+    # assistant turns, giving haveTurns 0-3 against needs in the tens.
+    min_pressure: 0.20
+    # RAISED TO 10, and the 3 that stood here rested on a claim its own source refutes.
+    #
+    # WHAT I WROTE BEFORE: "iteration 024's actual firings commonly carried THREE candidates", so a floor
+    # of 7 would block 50 of its 203 firings and a floor is "how to decline, not how to get large
+    # batches". The second half is still true. The first half is wrong, and iteration 024's own pooled
+    # counters say so: sweep_offered 6,034 and sweep_over_ask_cap 3,682 across ~626 asks is 15.5 ELIGIBLE
+    # candidates per ask, capped by maxAskItems to a mean of 9.6 OFFERED. Iteration 024 -- the only run in
+    # this line that produced reward -- was already operating at the inflection, not at three.
+    #
+    # WHY THE INFLECTION IS THE RIGHT PLACE TO STAND, from extract_sweep.go's own measurements: shown one
+    # output, 6% live-kept on haiku and 14% on sonnet, both inside the drop-everything null model's error
+    # bar; shown ~15, 58% live-kept at the LOWEST cost per output; batch 3-6 dropped a genuinely-spent
+    # output 2 times in 4; batch 10 dropped it 4 in 4 and cleared 100% of genuinely-spent candidates. A
+    # drop from a three-candidate ask is a guess, and the probe measured what that buys: three asks of
+    # three candidates each dropped only 135, 170 and 162 tokens while keeping every 16k candidate, so
+    # 326 tokens net against 37,060 examined -- 1.2%. An ask that removes 1% of what it is shown does not
+    # repay itself at any premium.
+    #
+    # WHAT THIS COSTS, deliberately: roughly half the opportunities. Measured on the decision-point
+    # corpus, 44% of points carry >=10 candidates overall and 50% in the 32-64k band. That is the
+    # intended trade -- declining an ask whose judgement the measurements call a guess is strictly better
+    # than paying for it, because a wrong keep costs one turn's tokens and a wrong drop costs content the
+    # agent still needs. Read sweep_inventory_below_min against sweep_offered to see the half declined.
+    min_inventory: 10
+    # THE PER-CANDIDATE OPPORTUNITY FLOOR, which iteration 027's first three probes left OFF. It is the
+    # one this failure needed and I set the request-level floor instead: measured on the probe, 3 of 46
+    # offered candidates had later_turns == 0 -- the model had taken no turn since receiving them -- and
+    # they carried 22% of all offered token mass, including the 56,399-token output kept under a quote
+    # that is not in the transcript. "Still needed" is the only honest answer about an output the model
+    # has not yet had the chance to act on, so the verdict carries no information and we pay for it.
+    #
+    # 3 rather than coref's 8: at 8 the probe would have lost 12 of 46 candidates, and the drop it did
+    # get came from the 1-4 bucket. Read sweep_candidate_too_new against sweep_offered.
+    min_later_turns: 3
+    # STOP RE-BUYING AN ANSWER WE ALREADY HAVE. Seven of the probe's ten adjudications were the same five
+    # candidates at the same 41,453 tokens, kept every time -- 70% of the pass's adjudication spend on a
+    # verdict already given, because drops are frozen and replayed while keeps were forgotten.
+    #
+    # 4 turns, not "forever": "still needed" is a judgement about the conversation's current obligations,
+    # not a property of the bytes, so a permanent keep would make a candidate judged needed once
+    # unreachable for the rest of the session. On the probe's trace (the same output re-asked at
+    # later_turns 5,6,7,8,9,10,11) a recheck of 4 gives two asks instead of seven and keeps every chance
+    # to change the verdict. Read sweep_keep_still_held against sweep_offered.
+    keep_recheck_turns: 4
+  summarize:
+    trigger: {min_request_frac: 0.90}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

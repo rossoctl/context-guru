@@ -24,7 +24,7 @@ The four original arms:
 cache-write $2.50/M) + output $10/M, recomputed from each trial's own token tiers; **total**
 adds the tool's own compaction-LLM cost (context-guru's haiku calls). All 89 tasks carry a
 scored outcome; timeouts (agent exceeded its wall-clock budget) count as reward-0 failures.
-See [REPRODUCE.md](REPRODUCE.md) and the [baseline page](terminal-bench-baseline.md).
+See [REPRODUCE.md](REPRODUCE.md) and the [baseline page](terminal-bench-arms.md#full-results-baseline-terminal-bench-20-89-tasks).
 
 **Six baseline trials are degenerate, so the 89-task cost figures need a correction.**
 On these tasks the baseline aborted almost
@@ -81,7 +81,7 @@ per-component evidence, not on maximal token reduction. Three components exclude
 |---|---|
 | `extract_llm` | saved 197,548 unique tokens — worth **$0.0395** at the cache-read rate they actually bill at — for **$3.26** and 1,592,467 ms of blocking time. **82× underwater.** (The plan's earlier "8×" priced those tokens as *fresh*; they sit in the cached prefix.) |
 | `failed_run` | `acted=0`, 28,757 ms spent scanning. Pure latency. |
-| `cacheinject` | removed from all nine presets — see [cacheinject](../components/cacheinject.md). Now that its breakpoints reach the wire, enabling it pushes **cache-write**, the deciding term here, the wrong way. |
+| `cacheinject` | removed from all nine presets — see [cacheinject](../components/caching.md). Now that its breakpoints reach the wire, enabling it pushes **cache-write**, the deciding term here, the wrong way. |
 
 `mask` was deliberately **not** added despite being the largest known token lever (~29.5%):
 that figure is a single-task replay, it drops whole messages, and it is the one offloader that

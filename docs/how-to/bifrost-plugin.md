@@ -49,5 +49,5 @@ changes whenever the head of the conversation changes.
 
 </details>
 
-For the standalone proxy and the AuthBridge plugin, see
+For the standalone proxy and the external sidecar plugin, see
 [Host adapters](../integrations.md).

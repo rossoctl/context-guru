@@ -37,6 +37,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/proxy"
+	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -589,6 +590,11 @@ func main() {
 	// history and the same question about it.
 	if rec != nil {
 		h.API().SetPricer(priceResolver(windows))
+		// The SAME resolver chain the request path sizes triggers against, so the dashboard's
+		// "how full did this context get" and the trigger's own answer cannot disagree. Read
+		// through modelinfo.Exact on the dash side, which is what keeps the last-resort
+		// substring table's 200,000-for-every-Opus out of a span measurement.
+		h.API().SetWindows(windows)
 	}
 
 	// One identity resolver for both halves of the dashboard: the read routes (dash)
@@ -619,7 +625,41 @@ func main() {
 	}
 	// The sink last, so it is the line just above the traffic: "where are the logs and
 	// what level am I getting" is the first question when something looks quiet.
-	ln, err := listenAndAnnounce(addr, "pipeline", cfg.Pipeline, "mode", mode, "logs", sink)
+	// `keepalive` joins this line because the pipeline alone stopped describing what the proxy does.
+	// Raised in review: with the plugin's new default preset of `off` the line read `pipeline=[]` and
+	// nothing else, so the ONE thing running - the idle keep-alive, which spends the caller's own
+	// credential - was invisible at startup, and /stats cannot fill the gap because its keepalive
+	// block is gated on counters that are zero until after the first ping. A mechanism that spends
+	// money while nobody is at the keyboard has to be visible before it has spent any.
+	//
+	// Only the enablement and the two figures that bound the spend, not the whole block: this is a
+	// startup line, and `cache:` is a document the config endpoint already serves in full.
+	kaAttrs := []any{"keepalive", cfg.Cache.KeepAlive}
+	if cfg.Cache.KeepAlive {
+		// Resolved() so the line reports the figures IN EFFECT rather than the zeros a config gets to
+		// leave unset - reporting 0 for an interval that is actually 280 is the class of confidently
+		// wrong detail this repo keeps removing.
+		ka := cfg.Cache.Resolved()
+		kaAttrs = append(kaAttrs,
+			"keepalive_idle_seconds", ka.KeepAliveIdleSeconds,
+			"keepalive_max_pings", ka.KeepAliveMaxPings)
+		// `keepalive=true` says what the CONFIG asks for and nothing about whether anything can be
+		// held, and the difference is not academic: arrive() retires every entry when there is no
+		// recorder ("NO AUDIT SINK, NO RETENTION", keepalive.go:585), so without --dashboard nothing
+		// is held, nothing pings, no counters move and no message is printed - indistinguishable from
+		// keep-alive being off.
+		//
+		// That cost three review rounds on #274 to resolve, in exactly that way: two sessions ran
+		// proxies without --dashboard, saw no pings, and could not tell "not wired" from "never
+		// fired". So the startup line now reports the precondition rather than only the intent. The
+		// plugin always passes --dashboard, so this is for everyone running the binary directly.
+		if !*dashOn {
+			kaAttrs = append(kaAttrs, "keepalive_retention", "IMPOSSIBLE: no recorder (pass --dashboard); "+
+				"entries are retired on arrival, so nothing will be held and no ping will be sent")
+		}
+	}
+	ln, err := listenAndAnnounce(addr, append([]any{"pipeline", cfg.Pipeline, "mode", mode,
+		"logs", sink}, kaAttrs...)...)
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
@@ -1000,8 +1040,14 @@ func effectiveConfig(cfg *config.Config, addr, openai, anthropic, bob, dbPath st
 		"inject_expand":        envOr("INJECT_EXPAND", "auto"),
 		"cheap_model":          os.Getenv("CHEAP_MODEL"),
 		"cheap_model_provider": envOr("CHEAP_MODEL_PROVIDER", "anthropic"),
+		// stash_ttl_seconds is the EFFECTIVE value, not the configured one: it is capped at
+		// ttl_seconds, silently, so publishing the raw field showed 20000 on the dashboard while
+		// the store used 10000. A config surface that disagrees with the running store is the same
+		// silent divergence #200 is about. The other three need no such treatment — their defaults
+		// are filled in but nothing overrides an explicit value.
 		"store": map[string]any{"ttl_seconds": cfg.Store.TTLSeconds,
-			"max_entries": cfg.Store.MaxEntries, "stash_max_bytes": cfg.Store.StashMaxBytes},
+			"max_entries": cfg.Store.MaxEntries, "stash_max_bytes": cfg.Store.StashMaxBytes,
+			"stash_ttl_seconds": store.EffectiveStashTTLSeconds(cfg.Store)},
 		"dashboard":     map[string]any{"db_path": dbPath, "capture_content": content, "trusted_cidrs": cidrs},
 		"build_version": buildinfo.Version,
 		"build_commit":  buildinfo.Commit,
@@ -1142,10 +1188,32 @@ func modelWindows() modelinfo.Resolver {
 		}
 		return chain
 	}
-	return append(chain,
-		modelinfo.NewLiteLLM(os.Getenv("MODEL_INFO_URL"), nil, 0),
-		modelinfo.DefaultStatic(),
-	)
+	url := strings.TrimSpace(os.Getenv("MODEL_INFO_URL"))
+	live := modelinfo.NewLiteLLM(url, nil, 0)
+	if url == "" {
+		// The public map. A fetch failure here is a network inconvenience, not a misconfiguration, so
+		// the embedded table remains the right answer and the chain keeps its fallback.
+		return append(chain, live, modelinfo.DefaultStatic())
+	}
+	// AN EXPLICIT MODEL_INFO_URL IS AN AUTHORITY THE OPERATOR NAMED, and guessing past it is wrong for
+	// the same reason MODEL_PRICES is fatal rather than skipped a few lines up: a silently-absent
+	// document is indistinguishable from one that says something different, and every fraction-based
+	// threshold in the pipeline would then be evaluated against a window nobody chose. Probed
+	// SYNCHRONOUSLY here because the resolver's own fetch is a background refresh — by the time it
+	// fails, requests are already being served against DefaultStatic's 1,000,000 for a claude model.
+	//
+	// This is the check that would have stopped iteration 024. Its rig passed a correct 64k document on
+	// a URL the proxy could not reach; the proxy resolved 1,000,000 on all 2,207 requests, summarize's
+	// 0.78 trigger became 780,000 and never fired once in either arm, the econ trigger's horizon came
+	// out 16x too long and authorised 626 asks, and the run completed with every counter healthy. Six
+	// hours of benchmark time and $207 per arm bought numbers that described no configuration.
+	if err := live.Load(context.Background()); err != nil {
+		log.Fatalf("MODEL_INFO_URL %s: no context window could be resolved from it (%v). Refusing to "+
+			"start: every fraction-based trigger would be evaluated against a built-in default instead "+
+			"of the document you configured, and nothing downstream can tell the difference.", url, err)
+	}
+	// The fallback stays BEHIND the probed document, for models the document does not list.
+	return append(chain, live, modelinfo.DefaultStatic())
 }
 
 // cheapModelFromEnv builds the static "config"-source LLM client for NeedsModel

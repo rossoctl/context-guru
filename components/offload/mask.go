@@ -82,8 +82,8 @@ func (m *Mask) Offload(req *bschemas.BifrostChatRequest, rep *components.Report,
 			keys = append(keys, fk...)
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim") // already offloaded, or expanded by the agent
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate) // already offloaded, or expanded by the agent — the gate says which
 			continue
 		}
 		if schema.TextTokens(content) < m.minTokens {

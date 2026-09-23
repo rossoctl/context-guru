@@ -13,8 +13,10 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
@@ -58,7 +60,8 @@ func cgLLMHandlerPriced(t *testing.T, upstream string, cheap components.Model,
 	t.Helper()
 	cfg, err := config.LoadBytes([]byte(
 		"pipeline: [summarize]\ncomponents:\n  summarize:\n    keep_last: 1\n" +
-			"    start_from_message: 0\n    min_tokens: 1\n    model:\n      source: config\n"))
+			"    start_from_message: 0\n    min_tokens: 1\n" +
+			"    trigger: {min_request_frac: 0}\n    model:\n      source: config\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,19 +190,42 @@ func TestCGLLMCostIsChargedToTheRequestThatSpentIt(t *testing.T) {
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
+	// TWO REQUESTS, and the cost lands on the SECOND. summarize produces its summary off the hot
+	// path, so the goroutine that makes the model call finishes after the commissioning request
+	// has been answered and its row written — there is no longer any moment at which that row
+	// could be charged.
+	//
+	// The property this test pairs with is unchanged and both halves still hold: the cost must not
+	// land on another tenant's row (the test above), and it must not silently become 0 (this one).
+	// It is attributed one turn late, to the SAME session, which is the same deliberate lag
+	// Ctx.PrevBilledInput carries. See cheapmodel.ReplayUsage for why late beats never: the
+	// compaction-episode panel charges this spend as a debit, so a missing cost makes that panel
+	// overstate its own saving.
 	postChat(t, srv, "sess-own")
 	waitForRows(t, rec, 1)
 	if cheapCalls.Load() == 0 {
 		t.Fatal("the summarizer never called the cheap model; the assertion below would be vacuous")
 	}
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("turn 1's summary never finished, so there is no cost to attribute")
+	}
+	// The second turn of the same session is what attributes it.
+	postChat(t, srv, "sess-own")
+	waitForRows(t, rec, 2)
 
 	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := page.Requests[0].CGLLMCostUSD; got <= 0 {
-		t.Errorf("cg_llm_cost_usd = %v after this request's own summarizer spent "+
-			"10000-in/2000-out; our own model cost stopped being reported", got)
+	total := 0.0
+	for _, r := range page.Requests {
+		total += r.CGLLMCostUSD
+	}
+	if total <= 0 {
+		t.Errorf("no row carries any cg_llm_cost_usd after the summarizer spent "+
+			"10000-in/2000-out across %d rows; our own model cost stopped being reported "+
+			"anywhere, which makes every savings figure that subtracts it too generous",
+			len(page.Requests))
 	}
 }
 
@@ -230,17 +256,37 @@ func TestOurOwnSpendIsPricedAtTheCompactionModelsRate(t *testing.T) {
 		prices)
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
+	// A SECOND TURN OF THE SAME SESSION is what attributes the cost. summarize produces its
+	// summary off the hot path, so the goroutine making the model call finishes after the
+	// commissioning request's row is written: there is no moment at which that row could be
+	// charged. The spend is replayed onto the next turn of the same session — one turn late by
+	// construction, the same lag Ctx.PrevBilledInput carries. See cheapmodel.ReplayUsage.
+	//
+	// The PRICING property under test is unaffected: the rate applied is still the compaction
+	// model's, whichever row carries the figure. Summing across rows keeps the assertion about the
+	// rate rather than about which row it landed on.
 	postChat(t, srv, "sess-priced")
 	waitForRows(t, rec, 1)
-
 	if calls.Load() == 0 {
 		t.Fatal("the compaction model was never called, so this proves nothing")
 	}
+	// Drain, THEN a second turn: that makes turn 2 attribute exactly the one call turn 1
+	// commissioned. Turn 2 commissions another, but nothing attributes it (there is no turn 3),
+	// so the rows carry exactly one call's cost and the expectation below stays unscaled.
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("turn 1's summary never finished, so there is no cost to attribute")
+	}
+	postChat(t, srv, "sess-priced")
+	waitForRows(t, rec, 2)
+
 	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := page.Requests[0].CGLLMCostUSD
+	got := 0.0
+	for _, r := range page.Requests {
+		got += r.CGLLMCostUSD
+	}
 	if diff := got - wantCheap; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("cg_llm_cost_usd = %.6f, want %.6f (the compaction model's rate). At the "+
 			"agent's rate it would be %.6f, %.1fx too high", got, wantCheap, wantAgent,
@@ -281,16 +327,36 @@ func TestOurOwnSpendCountsTheCacheTiersToo(t *testing.T) {
 		twoModelPricer{agent: price, compact: price})
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
+	// A SECOND TURN OF THE SAME SESSION is what attributes the cost. summarize produces its
+	// summary off the hot path, so the goroutine making the model call finishes after the
+	// commissioning request's row is written: there is no moment at which that row could be
+	// charged. The spend is replayed onto the next turn of the same session — one turn late by
+	// construction, the same lag Ctx.PrevBilledInput carries. See cheapmodel.ReplayUsage.
+	//
+	// The PRICING property under test is unaffected: the rate applied is still the compaction
+	// model's, whichever row carries the figure. Summing across rows keeps the assertion about the
+	// rate rather than about which row it landed on.
 	postChat(t, srv, "sess-tiers")
 	waitForRows(t, rec, 1)
 	if calls.Load() == 0 {
 		t.Fatal("the compaction model was never called, so this proves nothing")
 	}
+	// Drained first, for the reason given in the test above: exactly one call's cost is
+	// attributed, so the expectation stays unscaled.
+	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("turn 1's summary never finished, so there is no cost to attribute")
+	}
+	postChat(t, srv, "sess-tiers")
+	waitForRows(t, rec, 2)
+
 	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := page.Requests[0].CGLLMCostUSD
+	got := 0.0
+	for _, r := range page.Requests {
+		got += r.CGLLMCostUSD
+	}
 	if diff := got - want; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("cg_llm_cost_usd = %.6f, want %.6f. Counting only fresh input and output "+
 			"gives %.6f, which is %.1fx too LOW on a call whose prompt was cached",
@@ -338,5 +404,151 @@ func TestTheCallersAuthSchemeSurvivesIntoOurOwnCalls(t *testing.T) {
 	}
 	if a.AuthScheme != "bearer" {
 		t.Fatalf("the built client would send the caller's bearer token as %q", a.AuthScheme)
+	}
+}
+
+// THE ASYNC COUNTERS HAVE TO REACH /stats, and for a whole review round they did not.
+//
+// AsyncSummaryStats was maintained by the async path and called by nobody, while three separate
+// comments claimed the numbers reached /stats. The proof was that changing its signature from four
+// returns to six compiled without touching another file. Producing the summary off the hot path
+// removed every other way to see that path's health — inline, a slow or failing summarizer showed up
+// as request latency and as a reverted component; detached, the request is already answered and no
+// row carries the work until the session's next turn — so these counters are not decoration, they
+// are the only signal that exists.
+//
+// IT CALLS THE REAL HANDLER AND READS THE WIRE. An earlier version of this test re-executed the
+// handler's own assignment expression against a local Snapshot, which pinned a COPY of the route:
+// swapping two fields in proxy.go alone would have passed it, because the test performed the same
+// swap. That is the same shape as the defect it was written to prevent — a check that cannot fail
+// for the thing it names — so it decodes /stats instead.
+//
+// The concurrency bound is what makes the field-to-source pairing assertable: it is a distinctive
+// constant, so reading it back off the wire proves the field carries ITS source rather than merely
+// existing. The counts themselves are zero in a fresh process, so key existence (which
+// stats_golden_test pins over the real handler) is all they can be held to here.
+func TestAsyncSummaryCountersReachStats(t *testing.T) {
+	if offload.MaxConcurrentSummaries() <= 0 {
+		t.Fatal("MaxConcurrentSummaries is not positive; a refusal count is meaningless without " +
+			"the ceiling it was measured against")
+	}
+
+	h := New(nil, nil, metrics.NewAggregator(), Options{})
+	w := httptest.NewRecorder()
+	h.stats(w, httptest.NewRequest("GET", "/stats", nil))
+	if w.Code != 200 {
+		t.Fatalf("/stats -> %d", w.Code)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("/stats is not a JSON object: %v", err)
+	}
+
+	// Every async field must be present ON THE WIRE, not merely in the struct.
+	for _, k := range []string{
+		"summarize_async_started", "summarize_async_committed", "summarize_async_refused",
+		"summarize_async_unresolved", "summarize_awaited_ms", "summarize_await_timeouts",
+		"summarize_async_concurrency",
+	} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("%s is absent from /stats: the counter is maintained and served to nobody, "+
+				"which off the hot path means its path has no signal at all", k)
+		}
+	}
+
+	// The pairing, via the one field with a distinctive value: this proves the wire field is fed
+	// from its source rather than from some other counter that happens to be zero too.
+	var concurrency int64
+	if raw, ok := got["summarize_async_concurrency"]; ok {
+		if err := json.Unmarshal(raw, &concurrency); err != nil {
+			t.Fatalf("summarize_async_concurrency is not a number: %v", err)
+		}
+	}
+	if concurrency != offload.MaxConcurrentSummaries() {
+		t.Errorf("summarize_async_concurrency on the wire = %d, want %d from "+
+			"offload.MaxConcurrentSummaries(): the field is not wired to its source",
+			concurrency, offload.MaxConcurrentSummaries())
+	}
+}
+
+// OBSERVE MODE MUST RECORD ITS OWN BILLED INPUT, or the projection it exists to produce is a
+// permanent zero.
+//
+// In observe mode the enforced path never runs a pipeline — that is what makes the byte-identity
+// guarantee structural — so there is no Trace, the session id handed to the recorder is "", and the
+// write feeding Ctx.PrevBilledInput no-opped. The off-path run also reads a DIFFERENT store
+// (Tenancy.Shadow), which nothing wrote cg:bin: into. So FracResolvable read false forever and
+// summarize's shipped 0.9 default reported window_not_exact on every turn: an operator evaluating
+// whether to enable this saw it save nothing, in the one mode whose whole purpose is that
+// projection.
+//
+// The fix shipped with nothing pinning it, which is how a permanent zero comes back.
+func TestObserveModeRecordsBilledInputIntoTheShadowStore(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+
+	cfg, err := config.LoadBytes([]byte(
+		"pipeline: [summarize]\nmode: observe\ncomponents:\n  summarize:\n    keep_last: 1\n" +
+			"    start_from_message: 0\n    min_tokens: 1\n    trigger: {min_request_frac: 0}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := metrics.NewAggregator()
+	pipe, err := cfg.Build(agg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{
+		AnthropicUpstream: up.URL,
+		Mode:              components.ModeObserve,
+	})
+	t.Cleanup(h.Close)
+	// New creates the shadow store itself when the mode is observe (proxy.go:302), and this test
+	// lives in package proxy so it can read the same one the request path writes to. Asserting on
+	// an injected store would prove nothing about the store observe actually uses.
+	shadow := h.shadow
+	if shadow == nil {
+		t.Fatal("observe mode built no shadow store, so there is nothing for the off-path run to read")
+	}
+
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages",
+		strings.NewReader(summarizableRequest()))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-context-guru-session", "sess-observe")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("proxy returned %d", resp.StatusCode)
+	}
+
+	// The id the OBSERVE run derives — the only id the record may be keyed under, and the reason
+	// SessionIDFor exists rather than a second copy of the derivation.
+	sid := apply.SessionIDFor("", "sess-observe", bschemas.Anthropic,
+		[]byte(summarizableRequest()))
+	if sid == "" {
+		t.Fatal("no session id derived for the observe body, so the record cannot be keyed at all")
+	}
+
+	// The write happens in a defer on the response path, so give it a moment to land rather than
+	// asserting on a race.
+	var found bool
+	for i := 0; i < 200; i++ {
+		if _, ok := shadow.Get(store.BilledPrefix + sid); ok {
+			found = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !found {
+		t.Errorf("no cg:bin: record in the shadow store under %q after an observe-mode request: "+
+			"PrevBilledInput stays 0, FracResolvable reads false, and summarize's 0.9 default "+
+			"reports window_not_exact forever — a permanent zero in the mode built for measuring",
+			sid)
 	}
 }

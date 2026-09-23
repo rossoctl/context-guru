@@ -54,7 +54,11 @@ func (s *SmartCrush) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			continue // non-text blocks would be dropped by a text rewrite
 		}
 		content := schema.MessageText(*msg)
-		if skipReduce(c, content) {
+		if gate, skip := skipReduce(c, content); skip {
+			// smartcrush raised NO gate here, so its share of both reasons was invisible even in
+			// the conflated form. It has no reapplyFrozen path, so kept-verbatim content is
+			// precisely where its per-turn work is abandoned.
+			rep.Gate(gate)
 			continue // already offloaded by an earlier component/turn, or expanded by the agent
 		}
 		trimmed := strings.TrimSpace(content)

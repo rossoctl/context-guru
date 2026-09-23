@@ -334,3 +334,47 @@ func TestHeadLineIsBoundedAndSingleLine(t *testing.T) {
 		}
 	}
 }
+
+// THE TWO PROPERTIES ITERATION 027 BOUGHT, asserted as properties rather than as a golden string so the
+// text can still be improved without a test rewrite — but not silently reverted.
+//
+// What they were answering: the adjudication dump recorded 46 verdicts across 10 asks — 45 keeps, 1
+// drop. 28 keeps cited criterion (b), "an instruction that is NOT YET COMPLETE", which is true for the
+// whole duration of any unfinished task; 12 of 45 rested on a quote that is not in the transcript.
+func TestTheContractAsksAboutContentsAndDeclaresTheQuoteChecked(t *testing.T) {
+	ask := BuildPrefixAsk([]AdjudicationItem{{Label: 0, SizeTokens: 10, Head: "x"}})
+	low := strings.ToLower(ask)
+
+	// 1. THE CRITERION MUST BE ABOUT RE-READING THE OUTPUT, not about topical relevance. Without this
+	// the model answers "the task isn't finished, so I still need it" — which is always true and
+	// therefore says nothing.
+	for _, required := range []string{"re-read", "already concluded"} {
+		if !strings.Contains(low, required) {
+			t.Errorf("the criterion no longer asks whether the CONTENTS are needed again (missing %q): "+
+				"a criterion satisfied by any unfinished task licenses keeping everything", required)
+		}
+	}
+	// And it must say so explicitly, because the inference is the thing the model got wrong.
+	if !strings.Contains(low, "unfinished task does not") {
+		t.Error("the contract no longer states that an unfinished task does not by itself make every " +
+			"output it touched still needed — the exact inference 28 of 45 keeps relied on")
+	}
+
+	// 2. THE QUOTE MUST BE DECLARED CHECKED. It always WAS checked (Judge sets QuoteFabricated), but the
+	// model was not told, and 27% of keeps carried a quote that could not be found. Stating the
+	// verification is what removes the incentive to reconstruct one from memory.
+	if !strings.Contains(low, "checked against the conversation") {
+		t.Error("the contract no longer tells the model its quote is verified: the check still runs, " +
+			"but nothing discourages inventing a quote that will fail it")
+	}
+
+	// 3. AND IT MUST NOT THREATEN A REMOVAL FOR A BAD QUOTE. Every failure path here resolves toward
+	// keep; making fabrication cause a DROP would invert the one asymmetry that keeps a wrong answer
+	// cheap. If a future edit wants that, it is a measurement, not a wording change.
+	for _, banned := range []string{"will be removed", "will be dropped", "we will drop"} {
+		if strings.Contains(low, banned) {
+			t.Errorf("the contract threatens a removal for a failed quote check (%q): that makes "+
+				"fabricated evidence cause silent content loss, inverting the safe direction", banned)
+		}
+	}
+}

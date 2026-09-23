@@ -53,7 +53,7 @@ Grammars: go, python, js/ts/tsx, rust, java, c/cpp, ruby, php, c#, kotlin, swift
 ### Build
 
 It is the only cgo component (tree-sitter), so it is gated behind `cg_skeleton` to keep the
-default build — and the AuthBridge plugin that embeds this module — pure-Go and static:
+default build — and the external plugin that embeds this module — pure-Go and static:
 
 ```bash
 CGO_ENABLED=1 go build -tags cg_skeleton ./cmd/context-guru-proxy   # make build does NOT pass the tag
@@ -286,7 +286,7 @@ are only expressible against a real parse tree, and rtk's regex signature extrac
 cannot make either claim. Nothing here should be traded for a pure-Go fallback.
 
 But the tag is not what is keeping this out of production — the measured $0.00 is. So the
-cost of cgo (a C toolchain, ~15 linked grammars, a non-static binary, no AuthBridge
+cost of cgo (a C toolchain, ~15 linked grammars, a non-static binary, no external plugin
 plugin) is being paid by nobody, which is exactly the right outcome for a component that
 is off. A pure-Go fallback (regex-recognised signature lines, brace/indent matching for
 bodies) would cost the parse-clean guards entirely — no ERROR/MISSING notion exists
@@ -310,4 +310,4 @@ read, grep output), an elision that would not re-parse, a body below `min_tokens
 message inside the provider's cached prefix, a store that cannot persist, and whenever
 the skeleton plus its marker would not be smaller than the original.
 
-See also: [Components overview](../components.md) · [mask](mask.md) · [summarize](summarize.md)
+See also: [Components overview](../components.md) · [mask](offload-reducers.md#mask) · [summarize](summarize.md)

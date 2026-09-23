@@ -599,6 +599,23 @@ CREATE INDEX IF NOT EXISTS idx_requests_session_tb
 -- query actually runs; ts lets it stop once it is past the campaign's own activated_at.
 CREATE INDEX IF NOT EXISTS idx_requests_keepalive_strategy
   ON requests(keepalive_strategy_id, ts);
+
+-- The compaction-episode query (dash/compactepisode.go) LEFT JOINs request_components on
+-- (request_id, component) for ONE component name across the whole dataset. Neither
+-- idx_rc_request nor idx_rc_comp covers the pair, so SQLite picks one and filters the rest —
+-- fine while the sqlite_stat1 table exists to tell it which one.
+--
+-- WITHOUT STATISTICS THE PLAN COLLAPSES. Measured on a 50,000-request database: the same query
+-- took 0.078s with statistics and was ABORTED AT 11m14s without them, roughly 50,000^2 index
+-- probes. janitor.go runs PRAGMA optimize every five minutes so a live deployment usually has
+-- them, which makes the exposure the cold window after a restart plus the staleness case that
+-- comment itself warns about. This index takes the no-statistics plan to 0.081s — it makes the
+-- query statistics-INDEPENDENT rather than merely fast on a warm database.
+--
+-- A CROSS JOIN barrier does NOT help and was tried: SQLite cannot reorder a LEFT JOIN's
+-- operands, so the problem was never join order, it was index choice. Found and measured both
+-- ways by a review.
+CREATE INDEX IF NOT EXISTS idx_rc_request_comp ON request_components(request_id, component);
 `
 
 // additiveColumns are columns added to an EXISTING table without a version bump.

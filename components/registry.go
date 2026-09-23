@@ -23,7 +23,7 @@ var (
 
 // Register makes a component available by name. Called from each component's
 // init(); double-registration or an empty name panics at boot (the
-// database/sql pattern AuthBridge also uses).
+// database/sql pattern used elsewhere too).
 func Register(name string, c Constructor) {
 	if name == "" {
 		panic("components: Register with empty name")
@@ -94,6 +94,20 @@ type Field struct {
 	// "unlimited" and is a legitimate choice, while a size threshold with Min 1 rejects 0
 	// because 0 there is not a setting, it is a removed brake.
 	Min int `json:"min,omitempty"`
+	// Withdrawn maps a value this field ONCE accepted to the guidance an operator who wrote it
+	// should be given. Not part of Options, so the form never offers one; consulted before the
+	// generic enum error so the refusal names a replacement.
+	//
+	// IT EXISTS BECAUSE THE GENERIC MESSAGE IS WRONG FOR THIS CASE. "not one of [any pre_expiry]"
+	// is what you tell someone who made a typo. Someone whose config worked yesterday made no
+	// typo — they wrote a value that was documented and defaulted to, and then retired on
+	// evidence — so they need to know which surviving value matches what they were buying. The
+	// alternative, aliasing the old value onto a new one, changes when a component fires without
+	// saying so, which is the failure mode this mechanism was added to stop repeating.
+	//
+	// Not serialized: the form has no control to draw for a value it must never offer, and
+	// shipping the list to the browser would invite a client to "helpfully" migrate it.
+	Withdrawn map[string]string `json:"-"`
 }
 
 // Field types.

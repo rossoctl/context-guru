@@ -42,7 +42,7 @@ Environment=UPSTREAMS=/etc/context-guru/upstreams.yaml
 Environment=CONTROL_DB=/var/lib/context-guru/cg-control.db
 Environment=DASHBOARD=true
 Environment=DASHBOARD_DB=/var/lib/context-guru/cg.db
-Environment=REGISTER_DOMAINS=ibm.com
+Environment=REGISTER_DOMAINS=example.com
 # Set this to the manager's address before first start: the account registered with
 # it becomes the manager, and until one exists nobody can administer other tenants.
 Environment=MANAGER_EMAIL=

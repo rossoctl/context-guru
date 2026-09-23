@@ -3,29 +3,17 @@
 Route [Claude Code](https://docs.claude.com/en/docs/claude-code) through context-guru with
 one environment variable — no changes to Claude Code itself.
 
+**The plugin does all of this for you**, including installing the binary and choosing a scope:
+[Install the Claude Code plugin](install-plugin.md). What follows is the same thing by hand.
+
 ## You do not need an API key
 
-Setting `ANTHROPIC_BASE_URL` **without** a credential variable leaves your claude.ai login in
-place: a Pro or Max subscription keeps working, with your usage limits and billing unchanged. You
-can run context-guru in front of your own sessions with **no API key at all** — which is the
-cheapest way to evaluate it.
-
-Two honest caveats:
-
-- On subscription billing the saving lands in **usage limits**, not dollars, so `/stats` cost
-  figures are list-price estimates and will not match a bill you do not receive.
-- Setting `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` in your Claude Code environment is what
-  moves you onto metered API billing. Only do it deliberately — see
-  [Keep the API key out of Claude Code](#keep-the-api-key-out-of-claude-code), which is about
-  the *proxy* holding the key, not Claude Code.
-- **"No API key" does not mean the proxy sees less.** Routing subscription-authenticated Claude Code
-  through it means the proxy receives your claude.ai OAuth credential on every request and forwards
-  it upstream — that is what keeps your subscription working. If the prompt-cache keep-alive is
-  enabled, the proxy also RETAINS that credential in memory for the life of a tracked session, so it
-  can replay a request on your behalf; those pings are billed to you, spending the same usage limits
-  as your own turns. The credential is zeroised when the entry is dropped
-  ([keep-alive](cache-keepalive.md)) and never written to disk, but a local proxy holding a live
-  credential is the trade being made, and the section below is about a different one.
+See [Install the plugin: You do not need an API key](install-plugin.md#you-do-not-need-an-api-key)
+— the same applies here, whether you route through the plugin or by hand below. One addition
+specific to routing by hand: setting `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` in your Claude
+Code environment is what moves you onto metered API billing, and that's a separate concern from
+[keeping the API key out of Claude Code](#keep-the-api-key-out-of-claude-code) below, which is about
+the *proxy* holding the key, not Claude Code.
 
 ## Steps
 
@@ -64,6 +52,9 @@ Add to `.claude/settings.json` so you don't export anything by hand:
 
 Use `.claude/settings.local.json` instead if you do not want to commit it: a base URL pointing at
 `localhost` breaks Claude Code for everyone who clones the repo whenever the proxy is not running.
+
+That is what the plugin writes by default, on port **8787** rather than 4000 — litellm's default is
+4000, and a collision there is silent and confusing.
 
 ## Keep the API key out of Claude Code
 
@@ -111,7 +102,7 @@ ANTHROPIC_BASE_URL=https://127.0.0.1:1/nope ANTHROPIC_AUTH_TOKEN=bogus \
 **Which preset?** `codesmart` is the recommended pipeline and the cheapest arm in the
 [benchmarks](../RESULTS.md) at the highest reward. Use `coding` if you want `skeleton` to
 strip function bodies out of large source reads — it needs a `cg_skeleton` build. See
-[Choose a preset](choose-a-preset.md).
+[Choose a preset](../reference/presets.md).
 
 **`context-guru-proxy` exits with `unknown component "skeleton"`.** The `coding` preset
 needs a build with the `cg_skeleton` tag; `make build` does not pass it.

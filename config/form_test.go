@@ -538,6 +538,14 @@ func perturbations(fd components.Field, cur any) []any {
 		if x == 0 {
 			x, _ = asFloat(fd.Default)
 		}
+		// RESPECT Min, as the FieldInt case above already does. ApplyForm enforces Min for floats too
+		// (form.go), so a perturbation below it is not a probe of the form — it is the harness feeding
+		// an invalid value and then reporting the correct rejection as a failure. Latent until the
+		// first float field with a non-zero Min: min_pressure and the rest declare Min 0, where x+0.1
+		// is always valid, and extract_llm_sweep.reward_premium (Min 1) is the first that is not.
+		if x+0.1 < float64(fd.Min) {
+			return []any{float64(fd.Min) + 0.1}
+		}
 		return []any{x + 0.1}
 	case components.FieldString:
 		return []any{"cg-form-sentinel"}

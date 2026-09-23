@@ -1,6 +1,6 @@
 // Package config loads context-guru's configuration and builds a pipeline from
 // it. One strict YAML struct serves both hosts (design D9): the proxy loads a
-// file; the AuthBridge plugin hands its config: subtree to LoadBytes; a k8s
+// file; a sidecar plugin hands its config: subtree to LoadBytes; a k8s
 // ConfigMap/CRD just renders the same YAML.
 //
 // The pipeline: name-list controls order + enablement. Each component's own
@@ -226,7 +226,7 @@ func Load(path string) (*Config, error) {
 	return LoadBytes(b)
 }
 
-// LoadBytes parses a YAML config document (strict). Used by the AuthBridge
+// LoadBytes parses a YAML config document (strict). Used by a sidecar
 // plugin's Configure, which receives its subtree as bytes.
 func LoadBytes(b []byte) (*Config, error) {
 	var c Config
@@ -349,7 +349,7 @@ func (c *Config) applyPreset() error {
 //
 // In the middle it took 39,335 tokens off messages `collapse` would have taken 76,554 off,
 // and its marker then made `mask`, `extract` and `collapse` decline the message entirely
-// (turn-level gates: marker_or_kept_verbatim 3/6, below_max_tokens 6). Last, it caps and
+// (turn-level gates: already_marked 3/6, below_max_tokens 6). Last, it caps and
 // dedups only the lines the bigger offloaders left behind.
 //
 // `toon` is RETIRED from every preset (the component and its tests stay, so anyone with

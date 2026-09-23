@@ -94,6 +94,20 @@
 
   --shadow-pop: 0 1px 2px rgb(16 20 27 / 8%), 0 8px 24px rgb(16 20 27 / 10%);
   --ring: 0 0 0 2px var(--bg-raised), 0 0 0 4px var(--accent);
+
+  /* ── Overview-redesign palette. A separate dataviz-validated 8-step categorical set
+     (validate_palette.js), used only by the Overview tab's new insight/caching-insights
+     markup — --s1..--s4 above is the existing, separately-validated set every other tab's
+     charts already use, and stays untouched.
+     Only --pal-blue/-good/-serious/-critical are wired to a rule below today (the insight
+     brief's three tones and the caching panel's good/bad figures). The rest of the
+     categorical set — orange/aqua/yellow/magenta/green/violet/red — is declared anyway,
+     already validated, and reserved for the day this section (or a new chart) needs a
+     fourth-plus categorical series or a fifth-plus insight tone, rather than re-deriving and
+     re-validating hex values from scratch then. */
+  --pal-blue:    #2a78d6; --pal-orange: #eb6834; --pal-aqua:    #1baf7a; --pal-yellow: #eda100;
+  --pal-magenta: #e87ba4; --pal-green:  #008300; --pal-violet:  #4a3aa7; --pal-red:    #e34948;
+  --pal-good: #0ca30c; --pal-warning: #fab219; --pal-serious: #ec835a; --pal-critical: #d03b3b;
 }
 
 /* Dark mode. Tokens only. Applies to an explicit choice and to the system
@@ -123,6 +137,8 @@
     --s1: #4a90e2; --s2: #d9703c; --s3: #1ba676; --s4: #9a68d6;
     /* Stepped for the dark surface rather than flipped: 4.59:1 against --bg-raised. */
     --s-mute: #7a8496;
+    --pal-blue:    #3987e5; --pal-orange: #d95926; --pal-aqua:    #199e70; --pal-yellow: #c98500;
+    --pal-magenta: #d55181; --pal-green:  #008300; --pal-violet:  #9085e9; --pal-red:    #e66767;
     --shadow-pop: 0 1px 2px rgb(0 0 0 / 50%), 0 10px 28px rgb(0 0 0 / 40%);
   }
 }
@@ -138,6 +154,8 @@
   --info: #6ba3ec; --info-soft: #13223a;
   --s1: #4a90e2; --s2: #d9703c; --s3: #1ba676; --s4: #9a68d6;
   --s-mute: #7a8496;
+  --pal-blue:    #3987e5; --pal-orange: #d95926; --pal-aqua:    #199e70; --pal-yellow: #c98500;
+  --pal-magenta: #d55181; --pal-green:  #008300; --pal-violet:  #9085e9; --pal-red:    #e66767;
   --shadow-pop: 0 1px 2px rgb(0 0 0 / 50%), 0 10px 28px rgb(0 0 0 / 40%);
 }
 
@@ -518,12 +536,78 @@ details.why dd { margin: 0; }
 .tile.bad .v  { color: var(--bad); }
 .tile.accent .v { color: var(--accent); }
 
+/* Subtle entrance on every tile, everywhere the .tile pattern is used — one rule polishes
+   Overview, Keep-alive, Inventory and every other tab that renders through tile(). Skipped
+   for anyone who asked the OS not to animate things. */
+@media (prefers-reduced-motion: no-preference) {
+  .tile { animation: tile-in 0.32s ease-out both; }
+  @keyframes tile-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+}
+
 /* The headline row: the three numbers that answer "is this thing working". Bigger,
    and on their own row above the rest. */
 .tiles.headline { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: var(--sp-3); margin-bottom: var(--sp-3); }
 .tiles.headline .tile { padding: var(--sp-4); }
 .tiles.headline .v { font-size: var(--t-hero); }
 .tiles.headline .k { font-size: var(--t-body); }
+
+/* .tiles.dense reuses tile()/tileGroup() untouched — same markup, same data-testids — and
+   restyles it as a flush, bordered row of hairline-divided cells instead of gapped cards:
+   the "dense stat-row, not a busy card grid" treatment, for Overview's headline groups only. */
+.tiles.dense {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0; border: 1px solid var(--border); border-radius: var(--r-lg);
+  background: var(--bg-raised); overflow: hidden; margin-bottom: var(--sp-3);
+}
+.tiles.dense .tile {
+  border: none; border-right: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft);
+  border-radius: 0; padding: var(--sp-3) var(--sp-4);
+  animation: dense-fade .4s ease both;
+}
+.tiles.dense .tile:nth-child(4n) { border-right: none; }
+@keyframes dense-fade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .tiles.dense .tile { animation: none; } }
+
+/* ── Overview insight brief: 3-4 synthesized sentences with the real number inline,
+   Concept B's "hero number IS the chart" rule — no chart here, just the sentence. ─── */
+.insight-brief { margin-bottom: var(--sp-4); }
+.insight-row {
+  display: flex; align-items: baseline; gap: var(--sp-4); padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border-soft);
+  opacity: 0; animation: insight-rise .4s ease-out forwards;
+}
+.insight-row:first-child { border-top: none; }
+.insight-row:nth-of-type(1) { animation-delay: .02s; }
+.insight-row:nth-of-type(2) { animation-delay: .08s; }
+.insight-row:nth-of-type(3) { animation-delay: .14s; }
+.insight-row:nth-of-type(4) { animation-delay: .2s; }
+@keyframes insight-rise { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .insight-row { animation: none; opacity: 1; } }
+.insight-row .num {
+  flex: none; min-width: 92px; text-align: right; font-size: var(--t-num); font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.insight-row.good .num { color: var(--pal-good); }
+.insight-row.warn .num { color: var(--pal-serious); }
+.insight-row.neutral .num { color: var(--pal-blue); }
+.insight-row p { margin: 0; font-size: var(--t-lead); color: var(--fg); }
+
+/* ── caching insights (keep-alive TTL/reuse, kept apart from other savings levers) ── */
+.caching-statrow {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0;
+  border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--bg-raised);
+  overflow: hidden;
+}
+.caching-statrow .stat { padding: var(--sp-3) var(--sp-4); border-right: 1px solid var(--border-soft); }
+.caching-statrow .stat:last-child { border-right: none; }
+.caching-statrow .stat .k { color: var(--fg-muted); font-size: var(--t-small); margin-bottom: var(--sp-1); }
+.caching-statrow .stat .v { font-size: var(--t-num); font-weight: 650; font-variant-numeric: tabular-nums; }
+.caching-statrow .stat .v.good { color: var(--pal-good); }
+.caching-statrow .stat .v.bad { color: var(--pal-critical); }
+.caching-statrow .stat .s { color: var(--fg-faint); font-size: var(--t-micro); margin-top: var(--sp-1); }
 
 /* ── bars (denominators, distributions, waterfall, component savings) ─── */
 .bars { display: grid; gap: var(--sp-2); }
@@ -640,6 +724,20 @@ details.why dd { margin: 0; }
 .pill.cold_start { background: var(--info-soft); color: var(--info); }
 .pill.ttl_expiry, .pill.prefix_change, .pill.unknown { background: var(--warn-soft); color: var(--warn); }
 .pill.neutral { background: var(--bg-sunken); color: var(--fg-muted); border-color: var(--border-soft); }
+.pill.good { background: var(--good-soft); color: var(--good); }
+.pill.bad  { background: var(--bad-soft); color: var(--bad); }
+
+/* Overview's own recommendation rows — one line per capability, its verdict pill and its
+   dollar/usage evidence. The full removal command lives on the Inventory tab; this is the
+   glance version. */
+.reco-list { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-2); }
+.reco-row {
+  display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap;
+  padding: var(--sp-1) 0; border-bottom: 1px solid var(--border-soft);
+}
+.reco-row:last-child { border-bottom: none; }
+.reco-row .reco-name { font-weight: 600; }
+.reco-row .reco-note { color: var(--fg-muted); font-size: var(--t-small); }
 
 /* ── charts ───────────────────────────────────────────────────────────── */
 /* No min-height: the SVG's viewBox is now sized to this element's real width by geom(),

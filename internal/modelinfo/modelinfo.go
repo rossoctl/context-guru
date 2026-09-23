@@ -8,12 +8,23 @@
 //
 // Every lookup fails OPEN: an unknown model returns ok=false and callers fall back
 // to absolute thresholds. Nothing here ever blocks a request — fetches are cached,
-// single-flighted, and time-bounded, and any error just leaves the window unknown.
+// single-flighted, and time-bounded.
+//
+// READ THE LAST SENTENCE OF THAT PARAGRAPH CAREFULLY, because an earlier version of it
+// claimed more than the package delivers. "Any error just leaves the window unknown" is
+// true of THIS resolver in isolation and false of the chain it is normally used in: a
+// Chain{LiteLLM, DefaultStatic()} answers an unreachable document from the embedded
+// table, so a failed fetch does not produce "unknown", it produces a confident and
+// possibly very wrong number. Callers that have been GIVEN an authoritative document —
+// an explicit MODEL_INFO_URL — must not be silently answered from the fallback table;
+// see modelWindows in cmd/context-guru-proxy, which probes such a URL at startup and
+// refuses to run rather than guess past it.
 package modelinfo
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -25,6 +36,37 @@ import (
 // Resolver returns a model's context window in tokens. ok=false means "unknown".
 type Resolver interface {
 	Window(ctx context.Context, model string) (tokens int, ok bool)
+}
+
+// ExactResolver is the optional capability a Resolver implements to say whether the window it
+// returned is a MEASURED figure for that model or a GUESS — and it exists because the two are
+// not interchangeable for every caller.
+//
+// DefaultStatic answers by substring with a `{"claude", 200000}` catch-all, so a 1M-window model
+// it has no entry for comes back as 200,000 with ok=true. That is a fine floor for a caller that
+// only wants "don't act on a tiny output" — a too-small window there merely raises a floor. It is
+// NOT fine for a caller deciding "is this transcript 90% full", where a 5x-low window fires the
+// decision five times too early. Such a caller must be able to tell the two apart, and ok=true
+// cannot tell it.
+//
+// A Resolver that does NOT implement this is treated as inexact by Chain, deliberately: a new
+// source has to say it is authoritative, because the failure of forgetting is silent and the
+// failure of declaring wrongly is not.
+type ExactResolver interface {
+	WindowExact(ctx context.Context, model string) (tokens int, exact, ok bool)
+}
+
+// Exact reports a window plus whether it is measured rather than guessed, for any Resolver.
+// A resolver without the capability answers exact=false.
+func Exact(r Resolver, ctx context.Context, model string) (tokens int, exact, ok bool) {
+	if r == nil {
+		return 0, false, false
+	}
+	if er, hasCap := r.(ExactResolver); hasCap {
+		return er.WindowExact(ctx, model)
+	}
+	w, found := r.Window(ctx, model)
+	return w, false, found
 }
 
 // Price is a model's per-token USD rates, in the four tiers a prompt-caching
@@ -58,16 +100,65 @@ type Pricer interface {
 // Overridable (air-gapped mirrors) via NewLiteLLM.
 const LiteLLMPricesURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
-// normalize lowercases a model id and strips a provider prefix so gateway route
-// names (aws/claude-sonnet-5, anthropic/…, bedrock/…, us.anthropic.…) match the
-// keys LiteLLM uses. Returns the full normalized id and its last path segment.
+// normalize lowercases a model id, strips a provider prefix, and strips a trailing bracketed
+// variant suffix, so gateway route names (aws/claude-sonnet-5, anthropic/…, bedrock/…,
+// us.anthropic.…, aws/claude-opus-5[1m]) match the keys LiteLLM uses. Returns the full normalized
+// id and its last path segment.
+//
+// THE BRACKETED SUFFIX IS THE CONTEXT-LENGTH VARIANT, and not stripping it made every lookup for
+// such an id miss the map entirely. The consequences ran in two directions, both bad:
+//
+//   - The chain fell through to DefaultStatic, whose answer is never exact. Trigger.FracResolvable
+//     requires CtxWindowExact, and summarize ships min_request_frac: 0.9 — so on any id carrying a
+//     suffix the fraction gate could never fire, silently, which looks exactly like a gate that is
+//     working.
+//   - DefaultStatic's substring table answered 200,000 for `claude-opus-5[1m]` against a real
+//     1,000,000. exact=false keeps the trigger from acting on that, but OutputFloor, IsHuge and
+//     extract_llm's fraction all read the non-exact Window(), where five times too low is only safe
+//     in one direction.
+//
+// Found by a review, which then corrected itself twice about the reach: the gateway on the box it
+// tested refuses these ids with a model-authorization error, and the client demonstrably works on
+// that key with the un-suffixed name, so what the request body actually carries in `model` — the
+// only field this reads — was never observed. So this is DEFENSIVE: the defect is real and the fix
+// is right, with no demonstrated production impact. An operator can also work around it with a
+// trailing `*` in a MODEL_PRICES entry.
+//
+// Stripped from BOTH return values, and only when the suffix closes at the very end: `[` inside a
+// key would be part of the name rather than a variant marker, and a half-open bracket is a
+// malformed id this must not silently rewrite.
+// NormalizeID is normalize's exported half: the full normalized id, for a caller outside this
+// package that needs to match a model against a table of its own and must not re-implement the
+// prefix and variant-suffix rules. dash's per-model client-ceiling table is the caller.
+//
+// One implementation, because two would drift: this package already learned that the hard way when
+// the bracketed `[1m]` suffix went unstripped and every lookup for such an id silently missed.
+func NormalizeID(model string) string {
+	full, _ := normalize(model)
+	return full
+}
+
 func normalize(model string) (full, tail string) {
-	full = strings.ToLower(strings.TrimSpace(model))
+	full = stripVariant(strings.ToLower(strings.TrimSpace(model)))
 	tail = full
 	if i := strings.LastIndexAny(tail, "/"); i >= 0 {
 		tail = tail[i+1:]
 	}
 	return full, tail
+}
+
+// stripVariant removes a single trailing "[...]" suffix, e.g. claude-opus-5[1m] -> claude-opus-5.
+// Leaves anything else untouched, including an id with no suffix, an unterminated bracket, and an
+// id that is nothing but a bracketed group.
+func stripVariant(id string) string {
+	if !strings.HasSuffix(id, "]") {
+		return id
+	}
+	i := strings.LastIndexByte(id, '[')
+	if i <= 0 { // no opener, or the whole id is the group — not a variant suffix
+		return id
+	}
+	return id[:i]
 }
 
 // LiteLLM fetches and caches the LiteLLM prices map, serving per-model windows.
@@ -81,6 +172,48 @@ type LiteLLM struct {
 	priceBy  map[string]Price // normalized key -> per-token USD rates
 	fetched  time.Time        // last fetch ATTEMPT (success or failure)
 	fetching bool             // a background fetch is in flight (single-flight guard)
+	lastErr  error            // why the most recent attempt failed; nil once a map has loaded
+	failures int              // cumulative failed attempts, for the run's own stats artifact
+}
+
+// Load fetches the document SYNCHRONOUSLY and reports whether it produced usable entries.
+//
+// Window() cannot be used for this. It calls refreshIfStale, which starts a BACKGROUND fetch and
+// returns "unknown" immediately, so a caller that wants to verify a configured document at startup
+// would always see failure on the first call and success only some milliseconds later — a race whose
+// two outcomes are "refuse to start" and "start fine". Exposed as its own method so that check is
+// deterministic.
+//
+// It also removes a smaller wart: with a background-only warm-up the FIRST request of a process is
+// always served from the fallback window. On a benchmark that is one request per pass priced against
+// the wrong denominator, which is exactly the kind of small, permanent, invisible error that makes a
+// number untrustworthy without making it look wrong.
+func (l *LiteLLM) Load(ctx context.Context) error {
+	m, pm, err := l.fetch(ctx)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.fetched = time.Now()
+	if err != nil {
+		l.lastErr, l.failures = err, l.failures+1
+		return err
+	}
+	if len(m) == 0 {
+		l.lastErr = fmt.Errorf("modelinfo: %s decoded to no usable model entries", l.URL)
+		l.failures++
+		return l.lastErr
+	}
+	l.byKey, l.priceBy, l.lastErr = m, pm, nil
+	return nil
+}
+
+// Unresolved reports why no model-window document has loaded, and how many attempts have failed.
+// Exposed so a RUN can record it in its stats rather than requiring someone to notice a warning in a
+// debug log: a benchmark that silently priced every threshold against the wrong window is a run whose
+// numbers mean nothing, and the cheapest place to catch that is the artifact already collected per pass.
+func (l *LiteLLM) Unresolved() (err error, failures int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lastErr, l.failures
 }
 
 // negTTL is how long to wait before retrying after a failed/empty fetch when no map
@@ -130,6 +263,21 @@ func (l *LiteLLM) refreshIfStale(context.Context) {
 		l.fetched = time.Now()
 		if err == nil && len(m) > 0 {
 			l.byKey, l.priceBy = m, pm // on failure keep any prior map (fail open)
+			l.lastErr = nil
+		} else {
+			// REPORTED. This error used to be discarded here, and discarding it is how a proxy ran for
+			// six hours over ten benchmark passes with every context window resolved from the built-in
+			// fallback and not one line of output saying so. Every fraction-based threshold in the
+			// pipeline — summarize's trigger, the sweep's pressure floor, the econ trigger's horizon —
+			// then reads against the wrong denominator, and each of them looks like it is working.
+			if err == nil {
+				err = fmt.Errorf("modelinfo: %s decoded to no usable model entries", l.URL)
+			}
+			l.lastErr = err
+			l.failures++
+			slog.Warn("modelinfo: the model-window document could not be loaded; context windows will "+
+				"fall back to built-in defaults and every fraction-based trigger will be evaluated "+
+				"against the wrong window", "url", l.URL, "err", err, "failures", l.failures)
 		}
 		l.mu.Unlock()
 	}()
@@ -145,6 +293,14 @@ func (l *LiteLLM) fetch(ctx context.Context) (map[string]int, map[string]Price, 
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
+	// CHECKED, because without it a 404 is indistinguishable from a malformed document. The body of an
+	// error response ("404 File not found") flows into the decode below and comes back as a generic
+	// json error, so "the operator's URL is wrong" and "the upstream document changed shape" produced
+	// the same silence. That is not hypothetical: iteration 024 ran ten passes against an unreachable
+	// model-window file, resolved every context window from the built-in fallback, and reported nothing.
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("modelinfo: %s returned %s", l.URL, resp.Status)
+	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, nil, err
@@ -260,6 +416,13 @@ func (l *LiteLLM) Price(ctx context.Context, model string) (Price, bool) {
 const sampleSpecKey = "sample_spec"
 
 // Window returns the model's context window from the cached LiteLLM map.
+// WindowExact: a hit in the fetched map is a per-model `max_input_tokens` published for that
+// model, so it is measured. A miss is a miss — exactness says nothing when ok is false.
+func (l *LiteLLM) WindowExact(ctx context.Context, model string) (int, bool, bool) {
+	w, ok := l.Window(ctx, model)
+	return w, ok, ok
+}
+
 func (l *LiteLLM) Window(ctx context.Context, model string) (int, bool) {
 	l.refreshIfStale(ctx)
 	l.mu.Lock()
@@ -295,26 +458,97 @@ type staticEntry struct {
 }
 
 // DefaultStatic covers the common families with conservative windows.
+//
+// THE 1M CLAUDE FAMILIES ARE LISTED EXPLICITLY, and they had to be. The table used to carry
+// `{"claude-sonnet-5", 1000000}, {"claude-opus-4", 200000}, {"claude", 200000}` — so every Opus 4.6
+// and newer, Fable 5.1, Sonnet 4.6 and Opus 5 fell through to the 200,000 catch-all against a
+// published 1,000,000. Five times low, with ok=true, so no caller ever saw "unknown"; they saw a
+// confident wrong number. That is issue #233, and its live consumer was ExtractLLM.inputLimit, which
+// reads this table directly when `model.model` is pinned in config: a 5x-low budget means large tool
+// outputs are judged not to fit and are silently skipped, on exactly the long-context models the
+// component exists for.
+//
+// The windows here follow what LiteLLM publishes, which is also the resolver that answers ahead of
+// this table whenever the map is reachable. This is the floor for when it is not.
+//
+// IT IS STILL NEVER EXACT — see WindowExact. A caller deciding "is this transcript 90% full" must
+// refuse a figure from this table however right it looks, because being right about today's model
+// list is not the same as being authoritative about tomorrow's.
 func DefaultStatic() Static {
 	return Static{table: []staticEntry{
-		{"claude-sonnet-5", 1000000}, {"claude-opus-4", 200000}, {"claude", 200000},
+		// The 1M Claude families, most specific first for readability — though the lookup no longer
+		// depends on order, see Window.
+		{"claude-opus-5", 1000000},
+		{"claude-sonnet-5", 1000000},
+		{"claude-fable-5", 1000000},
+		{"claude-opus-4-8", 1000000},
+		{"claude-opus-4-7", 1000000},
+		{"claude-opus-4-6", 1000000},
+		{"claude-sonnet-4-6", 1000000},
+		// 200K Claude families. haiku-4-5 is stated rather than left to the catch-all so that the
+		// test which pins every shipped id has something to point at, and so a future haiku with a
+		// different window fails that test instead of inheriting this one.
+		{"claude-haiku-4-5", 200000},
+		{"claude-opus-4", 200000},
+		{"claude-sonnet-4", 200000},
+		{"claude", 200000},
 		{"gpt-5", 400000}, {"gpt-4o", 128000}, {"gpt-4", 128000}, {"o1", 200000}, {"o3", 200000},
 		{"gemini-2", 1000000}, {"gemini", 1000000}, {"llama", 128000}, {"mistral", 32000},
 	}}
 }
 
+// WindowExact: NEVER exact, and adding correct entries for today's models does not change that.
+// Every answer here is a substring match against a deliberately tiny table ending in a
+// `{"claude", 200000}` catch-all, so a model with no entry of its own still gets its family's floor
+// rather than its own window. A floor is what this table is for; a fill percentage is not something
+// it can answer, and the difference between "right about the models I listed" and "authoritative"
+// is exactly what exact=false encodes.
+func (s Static) WindowExact(ctx context.Context, model string) (int, bool, bool) {
+	w, ok := s.Window(ctx, model)
+	return w, false, ok
+}
+
+// Window resolves by LONGEST matching substring, not by first match.
+//
+// It used to be first-match-wins with a comment asking the reader to keep the table "most-specific
+// first". That made correctness depend on nobody ever appending in the wrong place — and a table
+// whose invariant is a comment is a table that gets appended to in the wrong place. Adding
+// `{"claude-opus-5", 1000000}` after the `{"claude", 200000}` catch-all would have been a one-line
+// change that silently did nothing.
+//
+// Longest-match makes the order cosmetic: `claude-opus-4-8` beats `claude-opus-4` beats `claude`
+// because it is longer, wherever each sits in the slice.
 func (s Static) Window(_ context.Context, model string) (int, bool) {
 	m := strings.ToLower(model)
-	for _, e := range s.table { // first match wins; order most-specific first
-		if strings.Contains(m, e.substr) {
-			return e.window, true
+	best, longest := 0, 0
+	for _, e := range s.table {
+		if len(e.substr) > longest && strings.Contains(m, e.substr) {
+			best, longest = e.window, len(e.substr)
 		}
 	}
-	return 0, false
+	if longest == 0 {
+		return 0, false
+	}
+	return best, true
 }
 
 // Chain tries each resolver in order; the first ok wins.
 type Chain []Resolver
+
+// Unresolved forwards the question to whichever element can answer it, so a caller holding a Chain —
+// which is what the proxy is given — can still find out that the operator's document never loaded. A
+// Chain whose live resolver is failing still ANSWERS every window lookup, from the fallback table
+// behind it, which is exactly why this has to be askable through the Chain and not only on the element.
+func (c Chain) Unresolved() (error, int) {
+	for _, r := range c {
+		if u, ok := r.(interface{ Unresolved() (error, int) }); ok {
+			if err, n := u.Unresolved(); n > 0 {
+				return err, n
+			}
+		}
+	}
+	return nil, 0
+}
 
 func (c Chain) Window(ctx context.Context, model string) (int, bool) {
 	for _, r := range c {
@@ -323,6 +557,18 @@ func (c Chain) Window(ctx context.Context, model string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// WindowExact resolves as Window does and reports whether the link that ANSWERED considers its
+// figure measured. First ok still wins — the exactness of a later link is irrelevant, because a
+// later link was never consulted.
+func (c Chain) WindowExact(ctx context.Context, model string) (int, bool, bool) {
+	for _, r := range c {
+		if w, exact, ok := Exact(r, ctx, model); ok {
+			return w, exact, true
+		}
+	}
+	return 0, false, false
 }
 
 // Price tries each element that can price a model; the first ok wins. Elements

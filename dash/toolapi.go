@@ -905,7 +905,7 @@ func (a *API) MountTools(m *http.ServeMux) {
 func (a *API) tools(w http.ResponseWriter, r *http.Request) {
 	f, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	price := a.priceFn(r)

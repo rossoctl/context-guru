@@ -126,7 +126,7 @@ func (fr *FailedRun) Offload(req *schemas.BifrostChatRequest, rep *components.Re
 			continue
 		}
 		if isKeptVerbatim(c, contentKey(content)) {
-			rep.Gate("kept_verbatim_after_expand")
+			rep.Gate(GateKeptVerbatim)
 			continue
 		}
 		if !failMarkers.MatchString(content) {

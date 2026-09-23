@@ -3,7 +3,7 @@ package offload
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -13,6 +13,7 @@ import (
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
+	"gopkg.in/yaml.v3"
 )
 
 func init() { components.Register("summarize", newSummarize) }
@@ -107,6 +108,9 @@ type Summarize struct {
 	modelClient       components.Model // config-pinned client (model: block), or nil
 	trigger           components.Trigger
 	mode              markerMode
+	// summaryWaitSeconds caps how long a turn will wait for a summary another turn started.
+	// 0 = defaultSummaryWait. See summarize_async.go.
+	summaryWaitSeconds int
 }
 
 type summarizeConfig struct {
@@ -123,6 +127,11 @@ type summarizeConfig struct {
 	Model             modelConfig        `yaml:"model"`
 	Trigger           components.Trigger `yaml:"trigger"`
 	MarkerMode        string             `yaml:"marker_mode"` // full (default) | summary | off
+	// SummaryWaitSeconds: how long a turn waits for a summary that an EARLIER turn started
+	// (0 = 120s). The summary itself is produced off the hot path, so this is a latency
+	// ceiling and never a correctness parameter — when it expires the turn proceeds with
+	// whatever it already had. See summarize_async.go.
+	SummaryWaitSeconds int `yaml:"summary_wait_seconds"`
 }
 
 func newSummarize(raw []byte) (components.Component, error) {
@@ -135,12 +144,148 @@ func newSummarize(raw []byte) (components.Component, error) {
 	if cfg.Trigger.MinMessages == 0 {
 		cfg.Trigger.MinMessages = cfg.StartFrom
 	}
+	if err := applySummarizeTriggerDefaults(raw, &cfg.Trigger); err != nil {
+		return nil, err
+	}
 	return &Summarize{
 		level: cfg.SummaryLevel, keepLast: cfg.KeepLast,
 		minTokens: cfg.MinTokens, resummarizeTokens: cfg.ResummarizeTokens,
 		includeToolCalls: cfg.IncludeToolCalls, modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(), trigger: cfg.Trigger,
-		mode: parseMarkerMode(cfg.MarkerMode),
+		mode: parseMarkerMode(cfg.MarkerMode), summaryWaitSeconds: cfg.SummaryWaitSeconds,
 	}, nil
+}
+
+// summarizeDefaultRequestFrac and summarizeDefaultCacheState are summarize's OWN trigger defaults,
+// and they are the answer to "when is compacting worth an LLM call plus the accuracy it costs".
+//
+// Measured on production traffic (snapshot 2026-09-04): every session that reached 90% of a 1M
+// window and kept running went cold in that band repeatedly — minimum 2 full-prefix rewrites,
+// median 7, maximum 46 — paying $571 that would have been $40 on a compacted prefix. On opus at
+// 0.9 of 1M one cold rewrite is ~$5.88 against ~$0.50 compacted, and 110 of 126 rewrites landed
+// on the way UP through the 90-99% band rather than at the ceiling, so a gate at 0.9 catches most
+// of them before they are paid. Sessions that crossed 90% and then simply ended cost −$0.84 in
+// total across the whole corpus, which is why the fill threshold can be this low.
+//
+// 0.9 IS NOT AN OPTIMUM, and should not be defended as one. Swept from 0.6 to 0.95 the trade is
+// almost perfectly linear — every 5-point step down recovers a further $320-500 at $0.22-0.32 per
+// extra turn spent on a compacted context — so there is no knee to sit in. 0.9 is the
+// conservative end of a defensible range.
+//
+// # THE CACHE STATE IS `any`, AND THAT IS A RETRACTION
+//
+// This default was `pre_expiry_or_cold` for one release: fire only when the prompt cache is about
+// to expire or already has, so the cache write compaction costs was going to be paid anyway. The
+// argument was wrong, and three things in the paragraphs above and below say so.
+//
+//  1. THE DOWNSIDE IT AVOIDED IS −$0.84. That is the figure four paragraphs up, for every session
+//     in the corpus that crossed 90% and then simply ended — which is the entire population that a
+//     warm-cache fire can waste money on. It was cited as the reason the FILL threshold could be
+//     low, and it is equally the reason the cache gate buys nothing: it was insuring a rounding
+//     error against a $531 upside.
+//
+//  2. FIRING WARM PAYS BACK IN 2-3 TURNS. At 0.9 of 200k a 180k prefix compacts to roughly 40k.
+//     The turn that compacts pays 40k at the 1.25x write rate instead of reading 180k at 0.1x,
+//     so it costs about 32k base-equivalents more; every later turn then reads 40k instead of
+//     180k and saves about 14k. That is 2.3 turns to break even, and it is rate-independent
+//     because read, write and base all scale together — the same arithmetic on haiku and opus.
+//     Any session sitting at 0.9 has far more than three turns left in it.
+//
+//  3. A COLD GATE CANNOT PREVENT THE FIRST COLD REWRITE, which is the structural half and the
+//     part that is not a judgement call. Compaction here is two-turn: the turn that fires
+//     COMMISSIONS a summary and forwards the transcript untouched (EventSummaryStarted), and a
+//     later turn splices the checkpoint. So the turn that first observes a cold cache is carrying
+//     the full 180k prefix and pays that rewrite in full. Waiting for cold therefore pays the
+//     first of the median 7 rewrites and prevents the rest; compacting while warm prevents all 7,
+//     for the one-time ~32k above.
+//
+// WHAT THE CACHE-AWARE WORK WAS ACTUALLY WORTH is the other half of the same release, and it
+// stands: Fires resolves the fraction against Ctx.PrevBilledInput (the provider's ruler) rather
+// than schema.MessagesTokens, and against C (the client's own compaction point) rather than the
+// raw window. Those are what made "0.9" denote anything. The gate on top of them did not.
+//
+// `pre_expiry` IS STILL THE RIGHT ANSWER FOR A DIFFERENT QUESTION, which is why the value survives —
+// but NOTHING ASKS THAT QUESTION YET, and the docstring should not imply otherwise. A summarizer
+// whose model call reuses the conversation's own prefix needs that prefix LIVE, the opposite concern
+// to this one and genuinely phase-dependent. THIS component is not one: it flattens its prompt into a
+// single string and shares no prefix with anything, so `pre_expiry` here is honoured and buys nothing
+// but a lower firing rate. cache_aware_summarizer IS the prefix-reusing one and consults neither
+// CacheAllows nor CachePhase, so the key is silently inert there — the same defect as #247. Kept
+// because no surviving value can express "is there a live prefix to hit", not because it pays today.
+//
+// WHAT STOPS A SESSION THAT NEVER ENTERS THE WINDOW: nothing here, deliberately. The ceiling is
+// the CLIENT's — Claude Code runs its own compaction as it approaches C, and Fires now measures
+// against C for that reason. A deployment whose client does not cap its context must set
+// `min_request_frac` low enough, or an absolute `min_request_tokens`, to compact before the
+// provider rejects the request.
+const (
+	summarizeDefaultRequestFrac = 0.9
+	summarizeDefaultCacheState  = components.CacheStateAny
+)
+
+// The four names summarize files on Report.Events. Promoted to constants because a SECOND
+// package now keys on them: the dashboard's compaction-episode walk (dash/compactepisode.go)
+// identifies a fresh summary as an act carrying EventFreshSummary and a replay as one carrying
+// any of the other three. A renamed string here would leave that walk matching nothing and
+// reporting zero episodes — a silent zero, which is the failure mode this repo has already paid
+// for twice (see Report.Replays on #176).
+const (
+	// EventFreshSummary marks a turn that PAID for a summary: a model call was made, a
+	// checkpoint was written, and the transcript was restructured around new bytes. It is the
+	// t0 of a compaction episode.
+	EventFreshSummary = "fresh_summary"
+	// The three replay names — a turn that re-emitted an existing checkpoint for free. Each
+	// says WHY the replay happened, which is the operator-facing distinction: the trigger
+	// permitted this turn and the tail had not grown (reused), the trigger declined it
+	// (gated), or the store's rewind reserve refused a new stash (reserve exhausted).
+	EventReusedCheckpoint                   = "reused_checkpoint"
+	EventGatedReplayedCheckpoint            = "gated_replayed_checkpoint"
+	EventReserveExhaustedReplayedCheckpoint = "reserve_exhausted_replayed_checkpoint"
+	// EventSummaryStarted marks a turn that COMMISSIONED a summary without waiting for it. The
+	// spend is committed here; the summary lands (or does not) on its own, and EventFreshSummary
+	// is filed by the goroutine that commits it. Two names because a started-and-lost call is a
+	// real outcome that must not read as a delivered summary.
+	EventSummaryStarted = "summary_started"
+	// EventAwaitedCheckpoint marks a turn that WAITED for a summary an earlier turn started and
+	// then spliced it. Distinct from EventReusedCheckpoint because this one cost latency: it is
+	// the turn that paid for the async design, and the pair (awaited, summary_wait_timeout) is
+	// what says whether the wait cap is set anywhere near right.
+	EventAwaitedCheckpoint = "awaited_checkpoint"
+)
+
+// applySummarizeTriggerDefaults installs summarize's trigger defaults for keys the operator did
+// not write, and validates cache_state.
+//
+// IT PROBES THE RAW YAML RATHER THAN TESTING FOR THE ZERO VALUE, and it has to. MinRequestFrac is
+// a float64 whose zero means "no constraint", so `min_request_frac: 0` — the way an operator says
+// "compact in the pre-expiry window at ANY size" — is indistinguishable from an absent key once
+// decoded. Defaulting off the zero value would make that configuration unwritable. The probe is
+// the same shape newExtractSweep uses to catch its banned keys before Decode's KnownFields check.
+//
+// The probe is deliberately loose: an unparseable document has already been rejected by
+// components.Decode in the caller, so a failure here means only that the presence question cannot
+// be answered, and the default is then the safer answer.
+func applySummarizeTriggerDefaults(raw []byte, t *components.Trigger) error {
+	present := map[string]bool{}
+	if len(raw) > 0 {
+		var probe struct {
+			Trigger map[string]yaml.Node `yaml:"trigger"`
+		}
+		if err := yaml.Unmarshal(raw, &probe); err == nil {
+			for k := range probe.Trigger {
+				present[k] = true
+			}
+		}
+	}
+	if !present["min_request_frac"] {
+		t.MinRequestFrac = summarizeDefaultRequestFrac
+	}
+	if t.CacheState == "" {
+		t.CacheState = summarizeDefaultCacheState
+	}
+	// Shared with every other component that embeds a Trigger, because this check drifted: it used
+	// to live here and only here, while CacheAllows' docstring promised that all constructors made
+	// it. See Trigger.Validate.
+	return t.Validate("summarize")
 }
 
 func (Summarize) Name() string                 { return "summarize" }
@@ -152,18 +297,67 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// Keep msg0 (system/first) + the last keepLast; summarize the span between — with both
 	// boundaries aligned so neither cuts inside a tool exchange. See summarizeSpan.
 	headCount, start, end := summarizeSpan(msgs, s.keepLast)
-	// Request-level trigger: don't summarize (an LLM call) until the transcript
-	// is genuinely large / deep. Zero thresholds fire always (back-compat).
-	if !s.trigger.Fires(req, c.CtxWindow) || end <= start {
+
+	// THE GATES DECIDE WHETHER TO PAY FOR A *NEW* SUMMARY. THEY DO NOT DECIDE WHETHER THE SUMMARY
+	// THIS SESSION ALREADY MADE STAYS IN THE BODY WE FORWARD. Those were one decision until the
+	// trigger gained a cache-state condition, and conflating them is a cache-DESTRUCTIVE bug
+	// rather than a lost saving — the same shape extract_llm_sweep's "NOT a return" comment
+	// guards against.
+	//
+	// Why it only became a bug now: every earlier trigger was a size threshold, which is roughly
+	// monotone — once a transcript is big enough to fire it stays big enough, so the gate kept
+	// firing and the replay below kept happening. `cache_state: pre_expiry` is true on a small
+	// fraction of turns by construction. With the old `return nil, nil` here, turn N emitted
+	// [head, summary, tail] and turn N+1 emitted the FULL transcript, which diverges from the
+	// bytes the provider just cached at the first summarized message and re-writes the whole
+	// suffix at 1.25x fresh. Every quiet turn would pay the rewrite this component exists to
+	// avoid, so the feature would have been a net loss rather than a smaller win.
+	//
+	// So: gate, record why, and keep going to the replay.
+	// Attribute any model spend a DETACHED summarizer call incurred since this session's last
+	// turn. First thing, and unconditionally: the money was spent whatever this turn decides, and
+	// the compaction-episode panel charges it as a debit. See takeDeferredUsage.
+	takeDeferredUsage(c)
+
+	sized := s.trigger.Fires(req, c)
+	if !sized {
+		rep.Gate("below_request_trigger")
+	}
+	// A fraction resolved against a GUESSED window fires at the wrong size — 0.9 of the
+	// substring table's 200,000 is 180k on a model whose real window is 1M. Declining is the
+	// only honest answer; see components.Trigger.FracResolvable.
+	resolvable := s.trigger.FracResolvable(c)
+	if !resolvable {
+		rep.Gate("window_not_exact")
+	}
+	phase := c.CachePhase(s.trigger.PreExpiry())
+	phased := s.trigger.CacheAllows(c, phase)
+	if !phased {
+		// NOT extract_llm_sweep's `not_in_pre_expiry_window`, deliberately. That component has
+		// exactly one permitted state, so a name asserting which one is always true of it. This
+		// trigger's state is CONFIGURED, and a deployment running `cache_state: cold` reading
+		// "not in the pre-expiry window" off /stats would be told something false about its own
+		// configuration. The phase it actually saw is appended, because "the cache state declined"
+		// without saying which state is the sort of counter that can tell you THAT something
+		// happened and never why.
+		rep.Gate("cache_state_declined_" + phase.String())
+	}
+	fires := sized && resolvable && phased
+
+	// STRUCTURAL, and safe to return on even though the replay below must otherwise always run:
+	// end <= start means the transcript is at most keepLast+1 messages long, and both replay
+	// paths require cp.CoveredCount >= 1, which puts their boundary past `end`. So no checkpoint
+	// could ever have been reused here — this return is equivalent to falling through, not a
+	// loss. A checkpointed session can only reach it by SHRINKING, in which case the covered
+	// hash cannot match either and the provider's prefix is new anyway.
+	if end <= start {
+		// NAMED, because it is a transcript SHAPE the component can never act on however large the
+		// request grows, and it left rep.Skipped with no gate — indistinguishable from "not big enough
+		// yet", which is the healthy steady state. Measured on the iteration 027 probe: requests of
+		// 81,580 tokens sat above the trigger for six consecutive turns and summarize acted on none of
+		// them, with nothing recorded to say which path in this function refused.
+		rep.Gate("summary_span_empty")
 		rep.Skipped = true
-		return nil, nil
-	}
-	model := s.modelClient // config-pinned client wins
-	if model == nil {
-		model = c.Model.For(s.modelSource)
-	}
-	if model == nil {
-		rep.Skipped = true // NeedsModel but none available → degrade gracefully
 		return nil, nil
 	}
 
@@ -171,131 +365,192 @@ func (s *Summarize) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 	// that checkpoint is still small — no LLM call, and the summary message stays
 	// byte-identical (KV-cache stable). Roll the checkpoint forward only once the
 	// tail grows past resummarize_tokens.
+	//
+	// ABOVE the gates' effect and ABOVE model resolution, both deliberately. A replay makes no
+	// model call, so a deployment with no summarizer configured must still get one — leaving the
+	// model check above this sent the full transcript on every turn after the first, which is the
+	// same byte-flip described above arriving by a different route.
 	reusedMsgs, reusedKeys, reused, stale := s.tryReuse(c, rep, msgs, headCount, start, end)
 	if reused {
 		if len(reusedKeys) == 0 {
 			rep.Irreversible = true // reused a non-full checkpoint (nothing stashed)
 		}
+		rep.Replay(EventReusedCheckpoint)
 		req.Input = reusedMsgs
 		return reusedKeys, nil
 	}
 
-	span := msgs[start:end]
-	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: span}) < s.minTokens {
+	model := s.modelClient // config-pinned client wins
+	if model == nil {
+		model = c.Model.For(s.modelSource)
+	}
+	if model == nil {
+		rep.Gate("no_model") // NeedsModel but none available → degrade gracefully
+	}
+
+	// A SUMMARY THIS SESSION ALREADY STARTED may be seconds from landing. Wait for it before
+	// deciding there is nothing to splice — that is the whole point of producing summaries off
+	// the hot path, and it is the common case rather than the rare one: the trigger fires only
+	// after a long idle gap, so the user is active immediately afterwards and the next turn
+	// typically arrives while the call is still running.
+	//
+	// Above the gates' effect, because a turn that lands mid-flight is usually a turn the gates
+	// DECLINE (the cache is warm again by then) and it is exactly the turn that most needs the
+	// result: without it, it forwards the full transcript at 1.25xF.
+	if _, running := inFlight.peek(c.Session); running {
+		waited, landed := inFlight.waitFor(c.Ctx, c.Session, s.summaryWait())
+		atomic.AddInt64(&summarizeWaitedMs, waited.Milliseconds())
+		if landed {
+			// Re-read: the checkpoint the background call just wrote is the thing we waited for.
+			if outMsgs, outKeys, ok, nowStale := s.tryReuse(c, rep, msgs, headCount, start, end); ok {
+				if len(outKeys) == 0 {
+					rep.Irreversible = true
+				}
+				rep.Replay(EventAwaitedCheckpoint)
+				req.Input = outMsgs
+				return outKeys, nil
+			} else if nowStale {
+				stale = true
+			}
+		} else {
+			// The cap expired (or the client gave up). Counted, because a climbing timeout count
+			// is the signal that the cap is set wrong or the summarizer is degraded — and with
+			// nothing on the hot path waiting for it any more, this counter is the only place
+			// that shows up.
+			atomic.AddInt64(&summarizeWaitTimeouts, 1)
+			rep.Gate("summary_wait_timeout")
+		}
+	}
+
+	// No new summary this turn — gated, or nothing to summarize with. Fall back to the most
+	// cache-stable shape available, which is the standing checkpoint when there is one. Both
+	// reasons take the same path because they have the same remedy; the gates above already
+	// recorded WHICH it was.
+	if !fires || model == nil {
+		if stale {
+			return s.replayStale(c, rep, req, msgs, headCount, start, EventGatedReplayedCheckpoint)
+		}
+		// Nothing was ever emitted in a summarized shape for this session, so the full
+		// transcript is not a flip of anything — it is what the provider already has.
 		rep.Skipped = true
 		return nil, nil
 	}
 
-	// THE RESERVE IS CONSULTED BEFORE THE MODEL CALL, not after it.
+	// Never summarize away content the agent EXPANDED. summarize replaces the span wholesale
+	// rather than editing in place, so it is the one offloader skipReduce cannot protect — see
+	// trimSpanForKeptVerbatim for why that is both a bounce loop and a broken pointer.
 	//
-	// The span is all the marker key depends on (key = hashKey(spanJSON)), and the payload is
-	// the span itself — so nothing about the stash needs the summary to exist. The check used
-	// to sit after s.summarize, which meant a saturated reserve paid the call (measured at ~57k
-	// prompt tokens) and threw the result away, then did it again on the NEXT turn, and every
-	// turn after, because a refusal saves no checkpoint and so changes nothing about the next
-	// turn's inputs. Asking first turns an unbounded stream of wasted calls into a skip.
+	// ON THE FRESH PATH ONLY, and below tryReuse rather than above it. The cost argument for
+	// keeping it below the gate is unchanged (a turn that pays no model call must not pay a
+	// contentKey hash plus a store Get per span message, nor file kept_verbatim_after_expand for
+	// a decision nothing made). What is new is that the trim LOWERS `end`, and tryReuse reads
+	// `end` twice — the `boundary > end` bail and the tail-token measure — so running it first
+	// could turn a reusable checkpoint into no reuse, and on a gated turn that means the full
+	// transcript. The guard against expanded content must not be the thing that flips the cache.
 	//
-	// A probe, not a claim: StashRoom reserves nothing, so the real PutStash below can still
-	// refuse if another session took the slot in between. That is a rare race rather than the
-	// steady state, and it lands on the same refusal path. Claiming the slot up here instead
-	// would leak one payload's worth of reserve every time the model call then failed — the
-	// resource this whole change exists to protect.
-	mode := effectiveMode(c, s.mode)
-	var spanJSON []byte
-	var key string
-	if mode == markerFull {
-		var err error
-		if spanJSON, err = json.Marshal(span); err != nil {
+	// Accepted consequence: a turn where the trim would previously have forced a fresh summary
+	// excluding expanded content now replays the standing checkpoint instead, which already
+	// covers that content. That is a small weakening of the anti-bounce guard bought with byte
+	// stability, and it was already true of the pre-existing reuse path.
+	if trimmed := trimSpanForKeptVerbatim(msgs, start, end,
+		func(text string) bool { return isKeptVerbatim(c, contentKey(text)) }); trimmed != end {
+		rep.Gate(GateKeptVerbatim)
+		end = trimmed
+		if end <= start {
+			// Nothing summarizable is left once expanded content is protected. Declining is the
+			// outcome summarize already has for an empty span, and the safe direction.
+			//
+			// SEPARATE from summary_span_empty above: that one is the transcript's own shape, this one
+			// is the agent having expanded content we then must not re-summarize. Same outcome,
+			// opposite remedies — one is a keep_last question, the other is about expand traffic.
+			rep.Gate("summary_span_empty_after_expand_trim")
+			rep.Skipped = true
+			return nil, nil
+		}
+	}
+
+	span := msgs[start:end]
+	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: span}) < s.minTokens {
+		// The span cleared the request-level trigger and is still too small to be worth a model call.
+		// Labelled because it is the decline that says "the request is large but its COMPACTABLE part
+		// is not" — the signature of mass concentrated in the protected tail, and unrecoverable from
+		// the request size alone.
+		rep.Gate("summary_span_below_min_tokens")
+		rep.Skipped = true
+		return nil, nil
+	}
+
+	// THE RESERVE IS PROBED BEFORE THE CALL IS COMMISSIONED, not after it comes back.
+	//
+	// The span is all the marker key depends on, and the payload is the span itself, so nothing
+	// about the stash needs the summary to exist. Asking first is what turns an unbounded stream
+	// of wasted calls into a skip: a saturated reserve used to pay the call (~57k prompt tokens),
+	// throw the result away, and do it again on the next turn and every turn after, because a
+	// refusal saves no checkpoint and so changes nothing about the next turn's inputs.
+	//
+	// That argument gets STRONGER with the call off the hot path, not weaker: a wasted call now
+	// costs money without even the excuse of having been on the critical path, and nothing in the
+	// response tells anyone it happened. The actual PutStash still runs in the goroutine (see
+	// commitAsyncSummary) and can still refuse if another session took the slot meanwhile — this
+	// probe removes the steady-state waste, not the race.
+	if effectiveMode(c, s.mode) == markerFull {
+		spanJSON, err := json.Marshal(span)
+		if err != nil {
 			return nil, err
 		}
-		key = hashKey(string(spanJSON))
 		if !store.StashRoom(c.Store, len(spanJSON)) {
 			return s.refuse(c, rep, req, msgs, headCount, start, stale)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(c.Ctx, summarizeCallTimeout)
-	defer cancel()
-	summary, err := s.summarize(ctx, model, span, conversationGoal(req))
-	if err != nil {
-		// Classify before returning. Our own ctx is the reliable signal: the parent
-		// request may still be healthy while THIS component's budget expired, and the
-		// http client wraps the cause, so errors.Is walks to it.
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			atomic.AddInt64(&summarizeTimeouts, 1)
-		} else {
-			atomic.AddInt64(&summarizeErrors, 1)
-		}
-		return nil, err // fail-open: the pipeline reverts this component
+	// START THE SUMMARY AND FORWARD. This is where the component used to call the model inline
+	// with a 300-second budget, on a turn chosen precisely because the prompt cache had at most 60
+	// seconds left to live — so a slow call guaranteed the entry died while we held the request,
+	// and the full transcript then went upstream at 1.25x. Measured once for real: 300s held,
+	// 2.8s of it upstream, 197,879 tokens re-written, and the model call wasted. See
+	// summarize_async.go for the whole argument.
+	//
+	// Nothing about THIS turn's response depends on the summary now. A later turn splices it —
+	// waiting for it if it is still in flight — which costs this turn's compaction and buys back
+	// the worst case.
+	// A SESSIONLESS REQUEST IS SUMMARIZED INLINE, and that is not a concession — it is the only
+	// thing that can work. The whole async design rests on handing the result to a LATER TURN OF
+	// THE SAME SESSION: the checkpoint is keyed by session id (store.SumPrefix+session) and the
+	// single-flight registry is keyed the same way. With no session id there is no key to save
+	// under, nothing to single-flight on, and no later turn that could ever find it — so going
+	// async would spend a model call and discard the result, every turn, forever.
+	//
+	// Such a request is also not the case the async path protects: no session means no prompt
+	// cache entry we could be invalidating, and no next turn whose latency we are protecting.
+	// This keeps the pre-existing behaviour exactly for callers who have it (the library API and
+	// /compact both reach here without a session), and confines the new execution model to the
+	// proxy traffic it was designed for.
+	if c.Session == "" {
+		return s.summarizeInline(c, rep, req, msgs, model, span, headCount, start, end, stale)
 	}
-	if strings.TrimSpace(summary) == "" {
-		rep.Skipped = true
-		return nil, nil
-	}
-
-	// Stash the replaced span so expand can restore it — full mode only. In
-	// summary/off there is no restoration; flag the deliberate lossy drop so the
-	// pipeline's dropped-without-stash guard permits it.
-	// full is reversible only if the store persists the stash; otherwise degrade
-	// to an irreversible off-style drop (no unresolvable marker).
-	if mode == markerFull {
-		// A summary REPLACES the span it covers, so the marker in the summary text is the
-		// only route back to it. If the store's rewind reserve cannot hold the span, this
-		// component must not summarize at all: unlike the per-message offloaders it cannot
-		// leave "this message" verbatim, so refusing means skipping the whole checkpoint.
-		//
-		// Reachable despite the StashRoom probe above (the probe claims nothing and another
-		// session can take the slot in between), which is why the refusal path still exists
-		// here — the probe removes the steady-state waste, not the race.
-		if !store.PutStash(c.Store, key, spanJSON) {
-			return s.refuse(c, rep, req, msgs, headCount, start, stale)
-		}
+	if why := s.startAsyncSummary(c, model, span, conversationGoal(req), end-start); why != "" {
+		// Another summary is already in flight for this session. This turn must not start a
+		// second: a session that keeps firing would otherwise queue one full-transcript model
+		// call per turn, each paying for a ~48k-token prompt, with the last writer's checkpoint
+		// winning arbitrarily.
+		// The reason is named rather than assumed: this session is already summarizing (ordinary —
+		// a session that keeps firing must not queue one full-transcript call per turn), or the
+		// global bound is full, which means the proxy is shedding compaction under load. Those have
+		// different remedies, so they get different gate names.
+		rep.Gate(why)
 	} else {
-		rep.Irreversible = true
+		// An Event, not a Replay: money is being spent, just not on this turn's clock. The
+		// FRESH-summary event is filed by the goroutine's commit, so /stats never reports a
+		// summary that was started and never landed as though it had landed.
+		rep.Event(EventSummaryStarted)
 	}
-
-	summaryText := summaryWrapper(summary, key, mode)
-	// USER, not system. The summary is injected context, and Anthropic will not accept a
-	// system-role message in the middle of `messages`: system content belongs in the
-	// top-level `system` field, and a system role inside the array must precede an
-	// assistant message or end it. This component emits [msgs[0], summary, tail...], so
-	// when msgs[0] is itself the system prompt — the normal case — a system-role summary
-	// lands at index 1 and the provider rejects the whole request:
-	//
-	//	400 messages.1: role 'system' must precede an 'assistant' message or end the array
-	//
-	// Measured on live LOCA-bench traffic: every task that triggered a summarization failed
-	// this way, including in an arm with NO other component enabled, so it is this
-	// component's own output and not a pipeline interaction. It went unnoticed because
-	// every prior measurement replayed through /compact, which never forwards upstream and
-	// therefore never has the body validated by a provider.
-	//
-	// A user-role message carrying the summary is both valid and conventional — it is what
-	// Claude Code's own compaction does.
-	summaryMsg := bschemas.ChatMessage{Role: bschemas.ChatMessageRoleUser}
-	schema.SetMessageText(&summaryMsg, summaryText)
-
-	// Checkpoint: this summary subsumes the leading span (len(span) messages from
-	// index 1). A later turn appends messages, so this same prefix stays stable.
-	saveCheckpoint(c, sumCheckpoint{
-		SummaryMsg: summaryText, CoveredCount: end - start,
-		CoveredHash: spanHash(span), Key: key,
-	})
-
-	// [msg0, summary, last-K] — reassign; apply.Body rebuilds losslessly.
-	out := make([]bschemas.ChatMessage, 0, 2+s.keepLast)
-	out = append(out, msgs[:headCount]...)
-	out = append(out, summaryMsg)
-	out = append(out, msgs[end:]...)
-	// Removing a span can orphan the tail's leading tool_result blocks; a provider rejects
-	// the whole request if it does. See dropOrphanedToolResults.
-	if repaired, n := dropOrphanedToolResults(out); n > 0 {
-		out = repaired
+	// The turn proceeds with whatever it already had: a stale checkpoint if one exists (the most
+	// cache-stable shape available), otherwise untouched. Untouched is the fail-open outcome and
+	// it is the same one every earlier version produced when the model was unavailable.
+	if stale {
+		return s.replayStale(c, rep, req, msgs, headCount, start, EventGatedReplayedCheckpoint)
 	}
-	req.Input = out
-	if key != "" {
-		return []string{key}, nil
-	}
+	rep.Skipped = true
 	return nil, nil
 }
 
@@ -322,6 +577,24 @@ func (s *Summarize) refuse(c *components.Ctx, rep *components.Report, req *bsche
 		rep.Skipped = true
 		return nil, nil
 	}
+	return s.replayStale(c, rep, req, msgs, headCount, start, EventReserveExhaustedReplayedCheckpoint)
+}
+
+// replayStale re-emits the standing checkpoint on a turn that will not produce a new one.
+//
+// Extracted from refuse because there are now TWO reasons to be in this position and exactly one
+// correct response to both: the rewind reserve would not hold a fresh span (refuse), or the
+// trigger declined this turn / no summarizer is available (Offload's gated path). Sharing the
+// body is not tidiness — it is the same argument emitCheckpoint's own comment makes about the
+// fresh and replayed paths. Two callers emitting the summary through two code paths is two
+// chances for them to emit different bytes for the same decision, and different bytes here is
+// precisely the cache-write the checkpoint exists to prevent.
+//
+// The caller must have been told `stale` by tryReuse, which means the covered prefix's hash was
+// verified there: this function's job is to re-emit, not to re-decide. It still re-checks what it
+// must, because it re-loads the checkpoint rather than being handed one.
+func (s *Summarize) replayStale(c *components.Ctx, rep *components.Report, req *bschemas.BifrostChatRequest,
+	msgs []bschemas.ChatMessage, headCount, start int, event string) ([]string, error) {
 	cp, ok := loadCheckpoint(c)
 	if !ok || cp.CoveredCount <= 0 {
 		rep.Skipped = true
@@ -347,7 +620,6 @@ func (s *Summarize) refuse(c *components.Ctx, rep *components.Report, req *bsche
 	if len(keys) == 0 {
 		rep.Irreversible = true
 	}
-	rep.Event("reserve_exhausted_replayed_checkpoint")
 	// The component DID act — it rewrote the transcript — so it is not Skipped. Saying
 	// otherwise would report a turn that emitted a summary as a turn that did nothing.
 	replaced := len(msgs) - len(out)
@@ -355,6 +627,25 @@ func (s *Summarize) refuse(c *components.Ctx, rep *components.Report, req *bsche
 		rep.Skipped = true
 		return nil, nil
 	}
+	// A MESSAGE-count guard is not a TOKEN guard, and only the second one is what the pipeline
+	// judges. emitCheckpoint can return fewer messages but MORE tokens — a short covered span
+	// replaced by a verbose summary — and the pipeline's never-worse rule then reverts this
+	// component and forwards the full transcript, which is the byte-flip the replay existed to
+	// avoid, arriving silently. Declining here reaches the same wire bytes with a name attached,
+	// which is the difference between a diagnosable decline and an invisible one.
+	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: out}) >=
+		schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: msgs}) {
+		rep.Gate("replay_would_not_shrink")
+		rep.Skipped = true
+		return nil, nil
+	}
+	// Counted as a REPLAY, not as an act: no model call, no new spend, the same bytes an earlier
+	// turn already emitted. `acted` is Saved() > 0 and a replay saves tokens, so without this a
+	// component amortizing old work would be indistinguishable from one paying for new work —
+	// two readings with opposite consequences (see Report.Replays, #176). Under a cache-state
+	// trigger the replay is the DOMINANT activation, so this is the difference between /stats
+	// describing this component correctly and describing it backwards.
+	rep.Replay(event)
 	req.Input = out
 	return keys, nil
 }
@@ -402,27 +693,69 @@ func (s *Summarize) emitCheckpoint(cp sumCheckpoint, msgs []bschemas.ChatMessage
 // checkpoint its only cache-safe fallback is the old one — see the refusal path in Offload.
 func (s *Summarize) tryReuse(c *components.Ctx, rep *components.Report, msgs []bschemas.ChatMessage,
 	headCount, start, end int) (out []bschemas.ChatMessage, keys []string, ok, stale bool) {
-	if s.resummarizeTokens <= 0 {
-		return nil, nil, false, false
-	}
 	cp, ok := loadCheckpoint(c)
 	if !ok || cp.CoveredCount <= 0 {
+		// No standing checkpoint. The expected state on a session's first eligible turn, and it must be
+		// distinguishable from the ones below, which mean a checkpoint exists and could not be used.
+		rep.Gate("summary_no_checkpoint")
 		return nil, nil, false, false
 	}
 	boundary := start + cp.CoveredCount
 	if boundary > end { // covered prefix would overlap the kept tail — can't reuse
+		rep.Gate("summary_checkpoint_overlaps_tail")
 		return nil, nil, false, false
 	}
 	covered := msgs[start:boundary]
 	if spanHash(covered) != cp.CoveredHash {
+		// COUNTED SEPARATELY because this is the only decline an UPSTREAM COMPONENT can cause. The hash
+		// is over msgs as the rest of the pipeline left them, and `summarize` runs last, so any
+		// component mutating a message inside the checkpointed span lands here. extract_llm_sweep is the
+		// obvious one: it removes deep-history outputs and runs earlier.
+		//
+		// READ THIS AS CHURN, NOT AS COST. It was misread as a cost once and the reasoning is easy to
+		// repeat, so here is why it is not:
+		//
+		//  1. The mutated messages are INSIDE msgs[start:end], which the fresh path collapses into a
+		//     single summary. So the upstream component's marker does not reach the wire at all on this
+		//     turn — its removal and this summary are doing the same job to the same bytes, and the
+		//     summary wins. There is no removal being "paid for twice".
+		//  2. It is a ONE-OFF per upstream change, not a per-turn tax. The fresh path writes a NEW
+		//     checkpoint whose hash covers the mutated content, so once the upstream component is
+		//     replaying a frozen decision — which is what freezing is for — the span hashes identically
+		//     from the next turn on and reuse resumes.
+		//
+		// So ONE firing per upstream removal is expected and harmless. What this counter is actually for
+		// is the other case: firing REPEATEDLY on one session means the checkpoint is not
+		// re-stabilising, i.e. some component above is mutating the span DIFFERENTLY turn to turn rather
+		// than replaying a fixed decision. That is when real money appears — a model call plus a prefix
+		// rewrite on every eligible turn — and it is indistinguishable from healthy operation without
+		// this gate. Compare the count against the session's turns, never against zero.
+		rep.Gate("summary_covered_span_changed")
 		return nil, nil, false, false // prefix diverged (different session / edited) → fresh
 	}
 	// The un-summarized middle since the checkpoint (excludes the kept last-K).
-	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: msgs[boundary:end]}) >= s.resummarizeTokens {
+	//
+	// `resummarizeTokens <= 0` means "roll forward on every eligible turn", and it is checked HERE
+	// rather than at the top of this function so that it produces STALE rather than nothing. The
+	// distinction did not matter while the caller always had a model call available: it fell
+	// through to the fresh path either way. It matters now, because a caller that will not pay
+	// for a roll-forward has to be told a valid checkpoint exists — otherwise a config carrying
+	// `resummarize_tokens: 0` replays nothing and oscillates between the full and summarized
+	// shapes on alternating turns, which is the worst of both.
+	if s.resummarizeTokens <= 0 ||
+		schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: msgs[boundary:end]}) >= s.resummarizeTokens {
 		// STALE, not invalid: the prefix hash matched just above, so this checkpoint is still a
 		// faithful summary of msgs[start:boundary] and re-emitting it produces the same bytes
 		// earlier turns sent. Rolling it forward is merely BETTER, so a fresh attempt that
 		// cannot complete may fall back to it instead of sending the transcript full.
+		//
+		// NAMED FOR THE OUTCOME, not for one of its two reasons. This branch now carries both "the tail
+		// grew past resummarize_tokens" and "resummarize_tokens is 0, so roll forward on every eligible
+		// turn", which `0c21ead` deliberately merged here so that a config carrying 0 still reports a
+		// valid checkpoint rather than replaying nothing. An earlier version of this branch gated those
+		// two separately; one of those gates named a path that no longer exists and was dropped rather
+		// than carried forward as a counter that can never fire.
+		rep.Gate("summary_checkpoint_stale")
 		return nil, nil, false, true
 	}
 	// Refresh the stashed original span so expand keeps resolving it (full-mode
@@ -522,7 +855,54 @@ func ensureSummaryTags(s string) string {
 // mode it carries the <<cg:HASH>> marker so the expand tool can recover the full
 // original trajectory; in summary mode a non-resolvable ⟪cg⟫ sentinel; in off
 // mode nothing (the summary text itself is the only trace).
+// sanitizeSummary is the one place the cheap model's raw reply is treated as UNTRUSTED before being
+// wrapped in authoritative instructions and spliced into the transcript.
+//
+// # What is and is not at risk here
+//
+// STRUCTURAL injection is already impossible and this does not attempt to re-close it: whatever comes
+// back becomes exactly one user-role text message, so the leaked-tool_use class from #103 cannot be
+// reproduced through this path. What remains is CONTENT-level steering — the reply is framed by "Use
+// this summary as the older context ... Continue the task accordingly", so text inside it inherits
+// that authority. And the span being summarized is agent-read material: a web page, a file, a
+// command's output. A prompt planted there reaches the summarizer, and whatever the summarizer echoes
+// reaches every later turn of the session, because the checkpoint is replayed verbatim.
+//
+// # What this does, and what it deliberately does not
+//
+// It strips OUR OWN CONTROL STRINGS. The wrapper appends its own expand marker, so a marker inside
+// the reply is never legitimate — and a forged one names a stash key the reply's author chose.
+// OwnsKey (proxy.go) already refuses a cross-tenant restore, so this is not a data-exfiltration path;
+// it is a way to make context_guru_expand resolve to something the model was not given, or to make a
+// summary look like it carries a restorable span when it does not. Same for a closing </summary>,
+// which the summarizer's own prompt uses as a delimiter.
+//
+// It does NOT try to detect instructions inside the reply. That is not decidable, and a filter that
+// half-works invites reliance on it. It also does not cap the length: summarize's own never-worse
+// guard already reverts a turn whose output grew, and a cap here would silently truncate a legitimate
+// long summary into a misleading one — a worse failure than the one it would prevent.
+//
+// Found by a review.
+func sanitizeSummary(summary string) string {
+	// Both marker spellings expand itself accepts, not just the plain one: expand.rawMarkerRe exists
+	// because a marker can arrive JSON-escaped, and a stripper handling only the unescaped form would
+	// be bypassed by exactly the encoding expand deliberately tolerates.
+	summary = summaryMarkerRe.ReplaceAllString(summary, "")
+	for _, bad := range []string{expand.SummaryMarker, "</summary>"} {
+		summary = strings.ReplaceAll(summary, bad, "")
+	}
+	return summary
+}
+
+// summaryMarkerRe matches both spellings of an expand marker — plain and JSON-escaped — mirroring
+// expand.rawMarkerRe. Kept here rather than exported from expand because this is a REMOVAL pattern
+// for untrusted text while expand's own regexes exist to RESOLVE markers we wrote; one identifier
+// for both jobs would let a future tightening of one silently change the other.
+var summaryMarkerRe = regexp.MustCompile(
+	`(?:<|(?i:\\u003c)){2}cg:([A-Za-z0-9_-]{1,64})(?:>|(?i:\\u003e)){2}`)
+
 func summaryWrapper(summary, key string, mode markerMode) string {
+	summary = sanitizeSummary(summary)
 	body := "=== History Summary ===\n" +
 		"The earlier trajectory is summarized below.\n\n" +
 		summary + "\n\n" +
@@ -587,8 +967,28 @@ func init() {
 			Hint: "Once a summary exists, reuse it with no model call until the tail since that checkpoint grows past this many tokens. 0 = re-summarize every eligible turn."},
 		{Key: "include_tool_calls", Type: components.FieldBool,
 			Hint: "Include tool calls and their results in the trajectory handed to the summarizer."},
+		{Key: "summary_wait_seconds", Type: components.FieldInt, Default: 120, Min: 0,
+			Hint: "The summary is produced off the hot path, so a turn that arrives while one is " +
+				"still running waits this long for it (0 = 120s). Waiting beats sending the full " +
+				"transcript; when the wait expires the turn proceeds regardless."},
 		markerModeField(),
 	}
 	f = append(f, modelFields("model")...)
-	components.RegisterFields("summarize", summarizeConfig{}, append(f, components.TriggerFields("trigger")...))
+	// The shared trigger descriptors, with the two defaults THIS component overrides in its
+	// constructor. Field.Default is documented as "what an ABSENT key means to the component", and
+	// what an absent key means here is not what it means to extract_llm — so a descriptor copying
+	// the shared default would be advertising a figure summarize does not use. The settings page
+	// draws straight from these, and form.go's normalize() writes an enum's Default back into the
+	// saved document for an unset value, so a wrong one here does not merely mislabel the page: it
+	// persists a cache_state summarize never chose.
+	tf := components.TriggerFields("trigger")
+	for i := range tf {
+		switch tf[i].Key {
+		case "trigger.cache_state":
+			tf[i].Default = summarizeDefaultCacheState
+		case "trigger.min_request_frac":
+			tf[i].Default = summarizeDefaultRequestFrac
+		}
+	}
+	components.RegisterFields("summarize", summarizeConfig{}, append(f, tf...))
 }

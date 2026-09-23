@@ -41,7 +41,7 @@ func newComp(t *testing.T, name, yaml string) components.Offload {
 // [system, <summary>, u2]; the summary carries a marker and the replaced span is
 // stashed for expand.
 func TestSummarizeRestructures(t *testing.T) {
-	off := newComp(t, "summarize", "keep_last: 1\nstart_from_message: 0\nmin_tokens: 1\n")
+	off := newComp(t, "summarize", "keep_last: 1\nstart_from_message: 0\nmin_tokens: 1\ntrigger: {min_request_frac: 0}\n")
 	st := store.NewMemory(store.Options{})
 	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
 		{Role: bschemas.ChatMessageRoleSystem, Content: &bschemas.ChatMessageContent{ContentStr: strp("you are helpful")}},
@@ -78,7 +78,7 @@ func TestSummarizeRestructures(t *testing.T) {
 
 // TestSummarizeNoModelSkips: NeedsModel with no model available must no-op.
 func TestSummarizeNoModelSkips(t *testing.T) {
-	off := newComp(t, "summarize", "keep_last: 1\nstart_from_message: 0\nmin_tokens: 1\n")
+	off := newComp(t, "summarize", "keep_last: 1\nstart_from_message: 0\nmin_tokens: 1\ntrigger: {min_request_frac: 0}\n")
 	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
 		{Role: bschemas.ChatMessageRoleSystem, Content: &bschemas.ChatMessageContent{ContentStr: strp("s")}},
 		toolMsg(strings.Repeat("x ", 200)),
@@ -95,7 +95,7 @@ func TestSummarizeNoModelSkips(t *testing.T) {
 // TestSummarizeModelErrorFailsOpen: a model error must surface as an error (the
 // pipeline reverts the component) and leave the transcript untouched.
 func TestSummarizeModelErrorFailsOpen(t *testing.T) {
-	off := newComp(t, "summarize", "keep_last: 1\nstart_from_message: 0\nmin_tokens: 1\n")
+	off := newComp(t, "summarize", "keep_last: 1\nstart_from_message: 0\nmin_tokens: 1\ntrigger: {min_request_frac: 0}\n")
 	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
 		{Role: bschemas.ChatMessageRoleSystem, Content: &bschemas.ChatMessageContent{ContentStr: strp("s")}},
 		toolMsg(strings.Repeat("output ", 100)),
@@ -117,7 +117,7 @@ func TestSummarizeModelErrorFailsOpen(t *testing.T) {
 // TestSummarizeEmptyResponseSkips: an empty model response is a no-op, not a
 // broken summary.
 func TestSummarizeEmptyResponseSkips(t *testing.T) {
-	off := newComp(t, "summarize", "keep_last: 1\nstart_from_message: 0\nmin_tokens: 1\n")
+	off := newComp(t, "summarize", "keep_last: 1\nstart_from_message: 0\nmin_tokens: 1\ntrigger: {min_request_frac: 0}\n")
 	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
 		{Role: bschemas.ChatMessageRoleSystem, Content: &bschemas.ChatMessageContent{ContentStr: strp("s")}},
 		toolMsg(strings.Repeat("output ", 100)),

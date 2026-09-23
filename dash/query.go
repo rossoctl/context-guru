@@ -28,6 +28,11 @@ type Filter struct {
 	// default — which is the wrong default for a filter that guards other people's data.
 	TenantAll bool
 	Session   string
+	// SessionIn selects rows whose session id is any of these, for a grouped multi-session
+	// query (e.g. every currently-live keep-alive session) in one round trip rather than one
+	// query per session. Mutually exclusive with Session in practice; if both are set, both
+	// apply (AND), which is never useful, so callers should pick one.
+	SessionIn []string
 	Model     string
 	Provider  string
 	Agent     string
@@ -103,6 +108,15 @@ func (f Filter) where() (string, []any) {
 		add("r.uncompressed_reason = ''")
 	default:
 		add("r.uncompressed_reason = ?", f.Reason)
+	}
+	if len(f.SessionIn) > 0 {
+		placeholders := make([]string, len(f.SessionIn))
+		vals := make([]any, len(f.SessionIn))
+		for i, s := range f.SessionIn {
+			placeholders[i] = "?"
+			vals[i] = s
+		}
+		add("r.session_id IN ("+strings.Join(placeholders, ",")+")", vals...)
 	}
 	if f.Component != "" {
 		add("EXISTS (SELECT 1 FROM request_components c WHERE c.request_id = r.id AND c.component = ?)", f.Component)

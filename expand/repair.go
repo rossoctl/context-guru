@@ -14,6 +14,24 @@ func Unavailable(hashID string) string {
 	return "[expand: original for id " + hashID + " is no longer available]"
 }
 
+// RestoredInPlace is what a repaired tool_result carries INSTEAD of a second copy of the content.
+//
+// The repair used to write the original into the tool_result, and the same call marks that content
+// kept-verbatim — so the offloaders also leave the ORIGINAL message uncompacted at its own position.
+// Both mechanisms are individually right and together they sent the tool output UPSTREAM TWICE, on
+// every turn, for the rest of the session. Measured on a 200-line output through the codesafe
+// preset: 252 bytes when the content is compacted and no expand round-trip exists, against 21,511
+// bytes with one — two full copies, permanently. That is far larger than the one-off prefix flip
+// #201 describes, and it is why this is a defect and not a preference.
+//
+// The note names the id, so it is accurate either way: the content is in the transcript above,
+// verbatim if kept-verbatim held, and behind a resolvable marker if it did not. It cannot go stale,
+// because MarkKeptVerbatim is re-applied for every restored original on every repair turn BEFORE
+// the pipeline reads the transcript — the same call that writes this note re-establishes the mark.
+func RestoredInPlace(hashID string) string {
+	return "[expand: the content for id " + hashID + " is present in the transcript above]"
+}
+
 // RepairToolResults answers, on the way UPSTREAM, an expand call the CLIENT had to answer
 // itself.
 //
@@ -115,7 +133,18 @@ func repairOne(body []byte, restored []string, ours map[string]string, callID, p
 		noteUnresolved(hashID)
 		orig = Unavailable(hashID)
 	}
-	nb, err := sjson.SetBytes(body, path+".content", orig)
+	// WHAT THE MODEL READS is a pointer, not a second copy — but only when there IS something to
+	// point at. The original message is normally still in the transcript at its own position and
+	// left uncompacted (the same repair marks it kept-verbatim), so writing the content here sent it
+	// upstream twice on every later turn. When it is NOT there — the agent's own compaction can drop
+	// that message while keeping the expand round-trip — the tool_result is the model's only copy
+	// and it gets the content, exactly as before. Checked rather than assumed, because a note
+	// pointing at nothing would lose content that used to be delivered.
+	answer := orig
+	if found && contentPresent(body, orig, path+".content") {
+		answer = RestoredInPlace(hashID)
+	}
+	nb, err := sjson.SetBytes(body, path+".content", answer)
 	if err != nil {
 		return body, restored
 	}
@@ -131,4 +160,100 @@ func repairOne(body []byte, restored []string, ours map[string]string, callID, p
 		restored = append(restored, orig)
 	}
 	return body, restored
+}
+
+// contentPresent reports whether orig is already somewhere in this request's messages OTHER than
+// at exceptPath, so a repaired tool_result can point at it instead of repeating it.
+//
+// Exact string comparison against the values gjson decodes, never a substring scan of the raw body:
+// JSON escaping makes a raw scan both false-negative (an escaped newline will not match) and
+// false-positive (content that merely contains the original). Compared at every place a message can
+// hold text: a plain string content, an Anthropic text block, and a tool_result block's content in
+// BOTH its spellings — a string, or an array of sub-blocks (see blockHasText).
+//
+// exceptPath IS LOAD-BEARING, and leaving it out was a bug caught by the existing idempotency test.
+// On a FIRST repair the tool_result holds the client's error, so there is nothing to self-match; on
+// a SECOND pass over an already-repaired body it holds the original, matched itself, and the repair
+// replaced the content with a note pointing at the content it had just removed. The repair must be
+// idempotent — the same body can pass through twice — so the block being written is excluded from
+// the search that decides what to write into it.
+func contentPresent(body []byte, orig, exceptPath string) bool {
+	if orig == "" {
+		return false
+	}
+	found := false
+	// The top-level `system` field is deliberately NOT searched. It is a place content could live in
+	// principle, and missing it fails the same safe way as anything else here — the tool_result keeps
+	// the content — but nothing in this pipeline moves a tool output there, so searching it would add
+	// a path with no fixture behind it.
+	gjson.GetBytes(body, "messages").ForEach(func(mk, m gjson.Result) bool {
+		base := "messages." + mk.String()
+		if c := m.Get("content"); c.Type == gjson.String {
+			if base+".content" != exceptPath && c.String() == orig {
+				found = true
+			}
+			return !found
+		}
+		m.Get("content").ForEach(func(bk, blk gjson.Result) bool {
+			found = blockHasText(blk, base+".content."+bk.String(), orig, exceptPath)
+			return !found
+		})
+		return !found
+	})
+	return found
+}
+
+// blockHasText reports whether one content block holds orig, at any path other than exceptPath.
+//
+// It recurses ONE level, because a tool_result's `content` is allowed to be an ARRAY of sub-blocks
+// rather than a string — Anthropic's multi-part shape, e.g. a text block beside an image. Comparing
+// only the string spelling made contentPresent report absent for that shape, so repairOne fell back
+// to writing the original and REINTRODUCED this PR's duplication, scoped to those wire shapes. It
+// failed safe (content is never lost and a pointer is never written to nothing), which is the only
+// reason it was minor rather than a regression.
+//
+// Not theoretical: apply/apply_test.go already fixtures the pipeline compacting text inside exactly
+// that shape, at messages.1.content.0.content.0.text. The marker-creating half was covered and the
+// repair half could not see it.
+//
+// One level is enough and the bound is deliberate: it is the depth the provider schema allows, and
+// unbounded recursion over attacker-influenced JSON is a cost this probe should not carry.
+func blockHasText(blk gjson.Result, blkBase, orig, exceptPath string) bool {
+	for _, f := range [...]string{"text", "content"} {
+		// THE EXCEPTION IS TESTED BEFORE THE VALUE, and that ordering is the whole of it.
+		//
+		// exceptPath names the FIELD being written (messages.N.content.M.content), so once this is
+		// the excepted field nothing inside it counts — including its array form, whose sub-blocks
+		// sit at …content.M.content.0.text and can therefore never equal exceptPath themselves.
+		// Testing the exception inside the string branch instead left the array spelling with no
+		// exception at all: a repaired block whose content is an array holding the original matched
+		// ITSELF, contentPresent said "present", and the repair wrote a pointer to the only copy
+		// there was. That is the round-1 self-match defect, one spelling over, reintroduced by the
+		// refactor that added the array support.
+		if blkBase+"."+f == exceptPath {
+			continue
+		}
+		v := blk.Get(f)
+		switch {
+		case v.Type == gjson.String:
+			if v.String() == orig {
+				return true
+			}
+		case v.IsArray():
+			hit := false
+			v.ForEach(func(_, sub gjson.Result) bool {
+				for _, sf := range [...]string{"text", "content"} {
+					if sv := sub.Get(sf); sv.Type == gjson.String && sv.String() == orig {
+						hit = true
+						return false
+					}
+				}
+				return true
+			})
+			if hit {
+				return true
+			}
+		}
+	}
+	return false
 }

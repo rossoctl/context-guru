@@ -16,8 +16,21 @@ repos:
     rev: v0.5.1
     hooks:
       - id: go-fmt
-      - id: go-vet
       - id: go-mod-tidy
+
+  # go-vet: local override, not the upstream dnephin/pre-commit-golang hook. That
+  # hook's script runs `go list` (no pattern) at the repo root to build the package
+  # path, which fails with "no Go files" here because this repo has no .go files
+  # directly in its root — everything lives in subpackages. `go vet ./...` does the
+  # same check without that assumption.
+  - repo: local
+    hooks:
+      - id: go-vet
+        name: go vet
+        entry: go vet ./...
+        language: system
+        types: [go]
+        pass_filenames: false
 
   - repo: https://github.com/jorisroovers/gitlint
     rev: v0.19.1

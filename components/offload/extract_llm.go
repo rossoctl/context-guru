@@ -466,6 +466,12 @@ func newExtractLLM(raw []byte) (components.Component, error) {
 	if cfg.AllowOnCachingBackend != nil {
 		allowCached = *cfg.AllowOnCachingBackend
 	}
+	// CacheAllows' docstring promises every constructor validates the trigger; before this, exactly
+	// one of the three did. This component ignores the cache keys — see Trigger.Validate for why that
+	// is a config-shape issue rather than a validation one.
+	if err := cfg.Trigger.Validate("extract_llm"); err != nil {
+		return nil, err
+	}
 	return &ExtractLLM{
 		minTokens: cfg.MinTokens, strategy: cfg.Strategy,
 		modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(),
@@ -652,7 +658,19 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	// Resolved once: the candidate loop below tests it per tool output, and it is a
 	// handler call rather than a field read.
 	dbg := debugExtractLLM(c)
-	fires := e.trigger.Fires(req, c.CtxWindow)
+	// THE FRACTION IS BEST-EFFORT HERE, and deliberately not held to summarize's standard.
+	//
+	// Trigger.Fires compares min_request_frac against Ctx.PrevBilledInput (the provider's own count
+	// for the session's previous turn) and SKIPS the conjunct when that is 0 — a session's first
+	// turn, or a host that does not record it. summarize refuses such a turn outright via
+	// FracResolvable, because it is deciding "is this context nearly full" and a wrong answer there
+	// compacts at the wrong size.
+	//
+	// This component is deciding whether a turn is big enough to be worth looking at, and its real
+	// gate is the per-candidate economics below. Adopting FracResolvable would make it fire LESS on
+	// exactly the deployments that cannot report a billed figure, for no gain in correctness — so
+	// the asymmetry is a choice, not an oversight. docs/components/extract_llm.md says so.
+	fires := e.trigger.Fires(req, c)
 	goal := e.extractionContext(req)
 	query := keywords(goal)
 	if len(query) == 0 {
@@ -876,7 +894,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// If the agent recently EXPANDED this content, leave it verbatim (re-compacting it
 		// would just trigger another expand — a loop). The expand handler marks it.
 		if isKeptVerbatim(c, id) {
-			rep.Gate("kept_verbatim_after_expand")
+			rep.Gate(GateKeptVerbatim)
 			continue
 		}
 		// SAME-SESSION replay first. This session already sent these compacted bytes on an
@@ -900,7 +918,14 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// that never happened — over-reporting the exact figure the iteration-024 re-run
 			// will be judged on.
 			if apply(i, content, cached.Projected, cached.Summary, true) {
-				if saved := schema.TextTokens(content) - schema.TextTokens(cached.Projected); saved > 0 {
+				// Measured against the message AS REPLAYED, for the same reason the fresh path is
+				// (#195): the text written is the projection PLUS the summary, the marker and the
+				// recovery hint, and the summary dominates that overhead. Correcting only the fresh
+				// path would leave this component contradicting itself — the same compaction valued
+				// higher on every replay turn than on the turn it was made, and replays are the
+				// steady state, so most of the reported value would come from the overstated side.
+				// That is the shape extract_llm_sweep was in for one commit; see its two sites.
+				if saved := schema.TextTokens(content) - schema.TextTokens(schema.MessageText(req.Input[i])); saved > 0 {
 					metrics.RecordExtractionValue(rep.Component, float64(saved)*val.repeatPerToken)
 				}
 				dbgReapply++
@@ -1184,17 +1209,21 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 		// overwhelming: a turn whose entire transcript re-bills at 1.25x fresh. On this warm
 		// per-output path the extra second buys a fraction of a cent, so it stays fully concurrent
 		// and the flag above is best-effort.
-		// saved/before carry the CALL's arithmetic to phase 3 rather than letting the goroutine
-		// that computed it book the outcome — see the accept branch in runCall.
+		// The outcome is carried to phase 3 rather than booked by the goroutine that produced it
+		// — see the accept branch in runCall.
 		type outT struct {
 			projected, summary string
-			saved, before      int
+			// saved is the WIRE saving, filled by phase 3 once the splice is a fact — not by the
+			// goroutine that made the call. There is no `before` beside it: phase 3 derives the
+			// denominator from cands[k].content, which is the same number. See the assignment.
+			saved int
 			// called marks a slot that actually issued a model call. A single-flight FOLLOWER
 			// returns before filling its slot, so the accounting in phase 3 must skip it.
 			//
-			// An explicit flag rather than a proxy. `before > 0` was indirect — `before` is in
-			// scope in the follower branch, so filling it there would silently re-enable the
-			// booking — and `calls[k].Component != ""` traded that for a worse coupling: it is
+			// An explicit flag rather than a proxy. `out[k].before > 0` was indirect — `before` was
+			// then a field of this struct and is in scope in the follower branch, so filling it
+			// there would silently re-enable the booking; the field itself is gone as of #195 —
+			// and `calls[k].Component != ""` traded that for a worse coupling: it is
 			// just rep.Component, which components/pipeline.go always sets in production but which
 			// most of this package's tests leave empty on a bare &components.Report{}. That made
 			// the whole booking block unreachable from those fixtures, so a future regression
@@ -1352,8 +1381,17 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 				//
 				// Recorded in phase 3 instead, per candidate, once the splice is a fact. This
 				// runs in a goroutine, so the value simply rides in the slot phase 3 already reads.
-				out[k].saved = before - schema.TextTokens(res)
-				out[k].before = before
+				//
+				// `saved` is NOT computed here, and that is the second half of the same rule: the
+				// projection is not what the message becomes. apply splices
+				// `projected + "\n[" + summary + "] " + marker + hint`, so `before - TextTokens(res)`
+				// omits the summary, the marker and the recovery hint — and the summary is the
+				// dominant term by an order of magnitude, not the marker's ~23 tokens (a 900-token
+				// output compacted to 100 with a 60-token summary booked 800 where the message
+				// shrank by ~715). It is also a model output, so the overstatement varies per
+				// candidate and does not average out across a run. Phase 3 measures the spliced
+				// message instead, and derives the ratio's denominator there too — see #195, and
+				// the assignment in phase 3 for why neither term rides in the slot.
 			} else if !timedOut {
 				e.ratios.observe(0, before) // a miss is real evidence: ratio 0
 			}
@@ -1466,6 +1504,23 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if !apply(cands[k].i, cands[k].content, out[k].projected, out[k].summary, false) {
 				continue
 			}
+			// MEASURED AGAINST THE MESSAGE AS SPLICED, which is what this request's message actually
+			// shrank by, and the basis extract_llm_sweep already books on. Carrying
+			// `before - TextTokens(projection)` out of runCall instead omitted the summary, the
+			// marker and the recovery hint, so the two extraction components' per-arm savings were
+			// not comparable (#195). Not merely a reporting artefact: this feeds e.ratios.observe,
+			// which is what the economic gate consults to decide whether the NEXT call is worth
+			// making, so an optimistic saving biased that decision towards spending.
+			//
+			// Both terms are derived HERE rather than carried in the slot. `before` is
+			// TextTokens(cands[k].content) — the same number runCall computes for
+			// calls[k].CandidateTokens — so once `saved` stopped riding along there was nothing
+			// left for the slot to hold but a denominator, and a field is a worse place for it: a
+			// single-flight FOLLOWER's slot has before == 0 while its message is spliced like any
+			// other, so the field's value did not mean what its name says on every slot that
+			// reaches this line.
+			before := schema.TextTokens(cands[k].content)
+			out[k].saved = before - schema.TextTokens(schema.MessageText(req.Input[cands[k].i]))
 			// The splice is a fact, so the outcome may now be booked. `accepted` in the ledger row
 			// is documented as "the never-worse outcome — the same condition that spliced the
 			// result above, so the log cannot say accepted while the request kept the original",
@@ -1508,13 +1563,25 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			// Only for a slot that actually MADE A CALL — see outT.called for why the condition is
 			// an explicit flag rather than a proxy.
 			//
-			// A DEFENCE, NOT A FIX: nothing was escaping before it. ratioTracker.observe returns
-			// early on totalTok <= 0, both recorders are no-ops at 0, out[k].saved is already 0 in
-			// a follower slot, and a follower's row is dropped by the Component filter on the
-			// append below. So this prevents no live defect, and saying otherwise would leave a
-			// future reader reasoning from a false premise. What it buys is that the booking no
-			// longer depends on three unrelated zero-guards staying zero-guards, and that the
-			// condition is stated where the booking happens.
+			// LOAD-BEARING AS OF #195, and it was a defence before that — the change is worth
+			// stating because the paragraph a reader consults before relaxing this guard used to
+			// say the opposite.
+			//
+			// It was written when `saved` was computed in runCall's accept branch, which a
+			// single-flight FOLLOWER returns before reaching, so a follower's slot carried
+			// saved == 0 and the guard prevented no live defect: three unrelated zero-guards
+			// already did (ratioTracker.observe returns early on totalTok <= 0, both recorders are
+			// no-ops at 0, and a follower's ledger row is dropped by the Component filter on the
+			// append below).
+			//
+			// The wire measurement moved to phase 3, and a follower DOES reach phase 3: its slot is
+			// filled with a non-empty `projected`, so it does not take the `projected == ""` skip,
+			// it splices, and the line above stores a POSITIVE saving for it (tryMark guarantees
+			// the spliced text is strictly smaller). Two of the three zero-guards therefore no
+			// longer apply, and this condition is the only thing between a follower's saving and
+			// RecordExtractionSaving, e.ratios.observe and calls[k].SavedTokens. Removing it books
+			// a saving for a request that made no call — and through the ratio, prices future calls
+			// on it.
 			//
 			// The follower's saving stays UNBOOKED — its leader books the shared result once, and
 			// attributing it twice would over-count. Booking per spliced message rather than per
@@ -1522,7 +1589,7 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 			if out[k].called {
 				calls[k].Accepted = true
 				calls[k].SavedTokens = out[k].saved
-				e.ratios.observe(out[k].saved, out[k].before)
+				e.ratios.observe(out[k].saved, before)
 				metrics.RecordExtractionSaving(rep.Component, out[k].saved)
 				// What the removal was WORTH, at this turn's regime. On a cold sweep that is the
 				// cache-write rate; the replays above are credited at the read rate.
@@ -1589,5 +1656,9 @@ func init() {
 		markerModeField(),
 	}
 	f = append(f, modelFields("model")...)
+	// The cache keys are declared here because the config struct accepts them, and this repo's field
+	// contract requires a declared key for anything the struct reads. This component consults neither
+	// CacheAllows nor CachePhase, so those two keys are INERT on it — see Trigger.Validate for why
+	// that is a config-shape defect with its own issue rather than something validation can fix.
 	components.RegisterFields("extract_llm", extractLLMConfig{}, append(f, components.TriggerFields("trigger")...))
 }

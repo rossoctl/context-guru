@@ -439,7 +439,15 @@ func (d *AgentDiet) Offload(req *bschemas.BifrostChatRequest, rep *components.Re
 			continue
 		}
 		content := schema.MessageText(msg)
-		if content == "" || skipReduce(c, content) {
+		if content == "" {
+			continue
+		}
+		// Short-circuit restored: skipReduce does a store Get, and the empty string is not
+		// content — asking about it costs a lookup and would raise a spurious gate if "" were
+		// ever marked. The original `content == "" || skipReduce(...)` had this ordering for a
+		// reason and splitting the call lost it.
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate)
 			continue
 		}
 		// A frozen decision was replayed above; a second reduction of the same bytes

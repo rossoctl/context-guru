@@ -1,0 +1,81 @@
+# iteration 028 ARM A -- the fixed configuration, against doing nothing.
+#
+# ONE SENTENCE: iteration 024 produced this line's only reward result while its window silently resolved
+# to 1,000,000 instead of 64,000; iteration 027 fixed the two terms that made a correctly-denominated
+# gate refuse (a pooled approval estimator that shut the component down after three asks, and an
+# inventory floor set below the regime the measurements call sound) and simulated the result at 36% of
+# decision points against iteration 024's 28%. This arm asks whether the reward result appears at all
+# when the band is real.
+#
+# IDENTICAL TO cfg-iter028-baseline.yaml EXCEPT TWO KEYS: `evidence` and `econ_trigger`. Everything else
+# -- pipeline, extract_llm, summarize, and every other sweep key -- is byte-identical between the arms, so
+# a B-A difference has one place to come from. Diff the two files before the run; that diff IS the
+# independent variable.
+#
+# WHY THE OTHER SWEEP KEYS SIT IN BOTH ARMS rather than only here: reward_premium, min_pressure,
+# min_inventory, min_later_turns and keep_recheck_turns are inert when the component cannot act, and
+# `econ_trigger` is what lets it act. Putting them in both arms keeps the files diffable down to the two
+# keys that matter instead of making the reader decide which of seven differences did the work.
+#
+# READ THESE FIRST on each pass, in this order, and stop at the first that fails:
+#   1. model_info_unresolved in st-i022-*.json -- 0, or nothing below means anything (this is what
+#      voided iterations 008-024)
+#   2. the resolved ctx_window in the pass output -- 128000, or the same
+#   3. sweep_offered and the ask count -- at least five asks, or the pass is invalid rather than
+#      informative. Iteration 026's answer here was ZERO and it cost a full run to find out.
+#   4. the BASELINE pass's `acted` -- must be 0. If the baseline acted, the arms are not what this file
+#      claims and nothing is comparable.
+#   5. accuracy, then expand_unresolved_missing, then cost and steps. In that order: an arm that wins
+#      accuracy while raising expand_unresolved_missing has not shown anything shippable.
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    model: {model: claude-haiku-4-5, source: incoming}
+    strategy: code
+  extract_llm_sweep:
+    min_tokens: 100
+    # THE INDEPENDENT VARIABLE, both keys. `evidence` puts the co-reference index into the adjudication
+    # prompt; `econ_trigger` adds the second trigger, and it is the only one that can fire under
+    # benchmark load at all -- iteration 022 measured not_in_pre_expiry_window on 18 of 18 requests and
+    # iteration 024's arm A on 378 of 378, because eight parallel workers never leave an idle gap for a
+    # cache entry to approach expiry. That measured zero is what makes the baseline a baseline.
+    evidence: true
+    econ_trigger: true
+    # A removed token is worth 20x the cache read it saves. Load-bearing: simulated over 384 decision
+    # points, a premium of 1 with a floored approval passes 0% of the gate at EVERY band including 256k.
+    reward_premium: 20
+    # 0.70 blocked 127 of iteration 024's 203 firings on its own, and the floor is also a horizon cap:
+    # the horizon is turns x (1/p - 1), so 0.70 caps it at 0.43 x turns.
+    min_pressure: 0.20
+    # THE MEASURED INFLECTION, and the reason this is 10 rather than the 3 iteration 027 ran. Shown one
+    # output, 6% live-kept on haiku and 14% on sonnet, both inside the drop-everything null's error bar;
+    # shown ~15, 58% at the lowest cost per output; batch 3-6 dropped a genuinely-spent output 2 times in
+    # 4; batch 10 dropped it 4 in 4. Iteration 024 was already here -- sweep_offered 6,034 plus
+    # sweep_over_ask_cap 3,682 over ~626 asks is 15.5 eligible candidates per ask, capped to a mean of
+    # 9.6 offered -- and iteration 027's three-candidate asks removed 326 tokens against 37,060 examined.
+    #
+    # It also feeds the approval estimator the evidence that keeps the gate open: rich asks approved ~85%
+    # of offered mass where the three thin asks that shut the component down approved 1.24%.
+    min_inventory: 10
+    # An output the model has taken no turn since receiving cannot be judged spent; offering it
+    # preferentially cuts the most recent context.
+    min_later_turns: 3
+    # A keep is remembered for four model turns rather than re-asked every turn. Measured waste it stops:
+    # seven of ten adjudications on one probe pass were the same five candidates at the same 41,453
+    # tokens, kept every time.
+    keep_recheck_turns: 4
+  summarize:
+    trigger: {min_request_frac: 0.90}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

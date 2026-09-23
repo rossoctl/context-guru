@@ -14,6 +14,9 @@ tar xzf context-guru_*_darwin_arm64.tar.gz
 install -m 755 context-guru_*/context-guru-proxy ~/.local/bin/
 ```
 
+Claude Code users can skip even that — the plugin installs the binary and configures the routing:
+[Install as a Claude Code plugin](../how-to/install-plugin.md).
+
 To build from source instead you need **Go 1.26** — and still no C toolchain: `make build` builds
 with cgo disabled and produces the same statically linked binary. CI asserts that natively for
 linux/amd64 (the `purego` job), and the release workflow asserts it again before publishing.
@@ -130,6 +133,6 @@ operation the model recovers it automatically — see
 
 </details>
 
-See also: [Config & environment](../reference/config.md) ·
-[Choose a preset](../how-to/choose-a-preset.md) · [Routes & headers](../reference/routes.md) ·
+See also: [Config & environment](../reference/reference.md) ·
+[Choose a preset](../reference/presets.md) · [Routes & headers](../reference/reference.md) ·
 [Measure savings](../how-to/measure-savings.md)

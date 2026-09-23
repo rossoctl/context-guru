@@ -1,5 +1,5 @@
 // Package apply is the one place the pipeline meets a raw wire request, shared
-// by every host adapter (the bifrost proxy and the AuthBridge plugin). It
+// by every host adapter (the bifrost proxy and an in-process sidecar plugin). It
 // extracts the messages array, runs the pipeline on it, and splices the result
 // back into the original body — byte-lossless for every other field (headroom
 // invariant I1). This is what makes "one implementation behind both
@@ -412,8 +412,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	}
 	tr.HeadTTL1h, tr.HeadTTLTokens = headTTL1h, headTTLTokens
 
-	msgsRaw := gjson.GetBytes(body, "messages")
-	if !msgsRaw.Exists() || !msgsRaw.IsArray() {
+	msgsRaw := messagesArray(body)
+	if !msgsRaw.Exists() {
 		// Assign rather than return a fresh Result: res already carries the trace fields
 		// set above, and a bypassed request that also lacks a messages array must still
 		// report itself as bypassed rather than as "no messages".
@@ -463,12 +463,15 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	}
 
 	chat := &bschemas.BifrostChatRequest{Provider: provider, Input: norm}
-	sys, firstUser := schema.SessionHead(norm)
-	sessionID := session.Scoped(o.Tenant, explicitSession(o.Session, body), sys, firstUser)
+	// Via the same function the response path reaches through SessionIDFor, so observe mode's
+	// billed-input record and this pipeline's checkpoints cannot key on different ids.
+	sessionID := sessionIDFrom(o.Tenant, o.Session, body, norm)
 	cacheAware := resolveCacheAware(o.CacheMode, provider, body)
 	nowMs := o.nowMs()
 	coldCache := false
-	idleMs := int64(0)
+	// -1, not 0: unknown and "zero idle" are different facts, and the compaction gate PERMITS the
+	// first while it must refuse the second. See components.Ctx.IdleMs.
+	idleMs := int64(-1)
 	// ttlMs is the cache lifetime the cold decision below derives, carried onto the Ctx so a
 	// component can act BEFORE expiry rather than only after it. 0 when the cache-aware path did not
 	// run, which reads as "unknown" to every consumer.
@@ -521,6 +524,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			//
 			// Reading a key we also write is safe: aliasSeen reads BEFORE it writes and runs
 			// once per request, so the value is the previous turn's, never this one's.
+			sys, firstUser := schema.SessionHead(norm)
 			alias := session.Scoped(o.Tenant, "", sys, firstUser)
 			if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
 				prevAt = aliasAt
@@ -547,7 +551,14 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// re-deriving it there would be a second read of one fact — which is how the cold
 			// decision and the dashboard came to disagree once already (see ttlTier).
 			ttlMs = ttl.Milliseconds()
-			if prevAt > 0 && nowMs > prevAt {
+			// nowMs == prevAt is a REAL zero, not a missing measurement: two turns of one session
+			// arriving in the same millisecond, which concurrent sub-requests produce routinely.
+			// It used to fall through to the unknown value and classify the warmest possible
+			// request as "cannot tell" — see components.Ctx.IdleMs.
+			//
+			// nowMs < prevAt stays unknown. A backwards clock cannot be turned into an idle time,
+			// and inventing 0 there would claim warmth we have not measured.
+			if prevAt > 0 && nowMs >= prevAt {
 				idleMs = nowMs - prevAt
 			}
 		} else {
@@ -591,19 +602,28 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// be two scans of the body on the request path for one fact.
 	bps := CountBreakpoints(body)
 	c := &components.Ctx{
-		Ctx:          ctx,
-		Session:      sessionID,
-		Store:        st,
-		Model:        models,
-		Bypass:       bypass,
-		CtxWindow:    o.Window,
-		ModelName:    gjson.GetBytes(body, "model").String(),
-		SelfRates:    o.SelfRates,
-		RatesFor:     o.RatesFor,
-		CacheAware:   cacheAware,
-		ColdCache:    coldCache,
-		IdleMs:       idleMs,
-		MaxCachedIdx: maxCachedIdx,
+		Ctx:            ctx,
+		Session:        sessionID,
+		Store:          st,
+		Model:          models,
+		Bypass:         bypass,
+		CtxWindow:      o.Window,
+		CtxWindowExact: o.WindowExact,
+		// C, the denominator the fill fraction actually belongs over — see
+		// components.Ctx.CompactionPoint.
+		CompactionPoint:       o.CompactionPoint,
+		CompactionPointSource: o.CompactionPointSource,
+		// Read under the SAME sessionID the host will write back under (Trace.Session), which
+		// is what keeps the fraction gate from reading a permanent zero. See
+		// RecordBilledInput.
+		PrevBilledInput: prevBilledInput(st, sessionID),
+		ModelName:       gjson.GetBytes(body, "model").String(),
+		SelfRates:       o.SelfRates,
+		RatesFor:        o.RatesFor,
+		CacheAware:      cacheAware,
+		ColdCache:       coldCache,
+		IdleMs:          idleMs,
+		MaxCachedIdx:    maxCachedIdx,
 		// Every breakpoint already on the wire — including the ones no component can
 		// see (`system`, `tools`, and the marks our own normalize drops). The
 		// provider's cap of four counts them all (issue #32, defect 2).
@@ -999,6 +1019,82 @@ func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
 	return prev
 }
 
+// RecordCacheTouch records that something refreshed this prefix's provider cache entry at nowMs,
+// against the SAME content-derived alias the request path reads. It is the seam a keep-alive ping
+// uses.
+//
+// # Why a ping has to count
+//
+// A ping's whole job is to READ the cached prefix, and a read refreshes the entry's TTL. So after a
+// successful ping the entry is warm again — and until this existed, nothing told the cache-liveness
+// clock. `prevAt` came only from real requests, so on a kept-alive session the idle time grew without
+// bound while the provider held the entry alive, and every reader of Ctx.IdleMs concluded the cache
+// was long dead.
+//
+// For summarize's gate that conclusion was expensive in the one direction that matters: a strict
+// clock test returned "certainly cold", the then-shipped `cache_state: pre_expiry_or_cold` permitted
+// a rewrite, and the component compacted a LIVE prefix — on exactly the sessions someone is paying
+// pings to protect. The gate's own docstring existed to avoid that outcome via Ctx.ColdCache, and
+// then reproduced it through the timestamp underneath. Issue #243.
+//
+// THAT PARTICULAR CONSUMER IS GONE: the cold-gated cache states were withdrawn, and summarize's
+// default no longer consults the cache at all. This clock is not therefore decorative — a component
+// asking "is this prefix LIVE?" reads it, which is `cache_state: pre_expiry` today and
+// cache_aware_summarizer's whole premise tomorrow, and it would be wrong in the same direction
+// without the touch below.
+//
+// # And why this is NOT the dashboard's session-recency map
+//
+// keepalive.go deliberately does not touch that map, and its reason is right: re-dating the session
+// would make the next real request's gap read as four minutes instead of the twenty it actually was,
+// hiding the very thing the mechanism exists to demonstrate.
+//
+// Those are two different questions and they want two different clocks:
+//
+//	"is the provider still holding this prefix?"   -> counts pings   -> THIS clock
+//	"how long was the USER away?"                  -> ignores pings  -> the recency map, untouched
+//
+// Sharing one clock forces a wrong answer to one of them. This writes only the first, so the
+// dashboard's idle-gap statistics and any firing-rate measurement over them are unaffected.
+//
+// # Why the alias and not the session id
+//
+// Because the provider's entry is keyed on CONTENT, and this must land on the key apply's own
+// aliasSeen will read. Computing it here, from the same schema.SessionHead + session.Scoped pair,
+// is what makes the two impossible to drift apart — a second derivation of a cache key is how the
+// cold decision and the dashboard came to disagree once already.
+//
+// nowMs must be the time the ping's request STARTED, not its completion: the provider's lifetime runs
+// from request start, which is the same reasoning kaEntry.startedAt is anchored on.
+func RecordCacheTouch(st store.Store, tenant string, body []byte, provider bschemas.ModelProvider, nowMs int64) {
+	if st == nil || nowMs <= 0 || len(body) == 0 {
+		return
+	}
+	msgsRaw := messagesArray(body)
+	if !msgsRaw.Exists() {
+		return
+	}
+	norm, _ := normalize(provider, msgsRaw.Array())
+	if len(norm) == 0 {
+		return
+	}
+	sys, firstUser := schema.SessionHead(norm)
+	alias := session.Scoped(tenant, "", sys, firstUser)
+	if alias == "" {
+		return
+	}
+	// Monotone: never move the clock BACKWARDS. A ping racing a real request must not make the
+	// entry look older than the request already proved it to be, and the whole point of this
+	// record is that later is warmer.
+	k := store.SeenPrefix + alias
+	if b, got := st.Get(k); got {
+		if prev, err := strconv.ParseInt(string(b), 10, 64); err == nil && prev >= nowMs {
+			return
+		}
+	}
+	st.Put(k, []byte(strconv.FormatInt(nowMs, 10)))
+}
+
 // sessionTTL is cacheTTL widened to the LONGEST lifetime this PREFIX has ever asked for.
 //
 // cacheTTL reads the TTL out of THIS request, so a client that marks `ttl: "1h"` on one turn
@@ -1093,6 +1189,99 @@ func prevLen(st store.Store, session string) int {
 
 func putLen(st store.Store, session string, n int) {
 	st.Put("cg:len:"+session, []byte(strconv.Itoa(n)))
+}
+
+// messagesArray is the ONE gate on a body's message array: it must exist and be an array. An
+// invalid Result means "no messages", which every caller must treat as a request with nothing to
+// derive from.
+//
+// Shared because two copies of this condition diverged immediately. SessionIDFor originally fell
+// back to `input` where BodyOpts required array `messages`, so a body carrying `input` produced a
+// session id from one and nothing from the other — and the billed-input record then landed under an
+// id no pipeline would ever read. The bug was invisible: both functions were individually
+// reasonable.
+func messagesArray(body []byte) gjson.Result {
+	msgsRaw := gjson.GetBytes(body, "messages")
+	if !msgsRaw.Exists() || !msgsRaw.IsArray() {
+		return gjson.Result{}
+	}
+	return msgsRaw
+}
+
+// sessionIDFrom is the ONE derivation of a request's session id, given its normalized messages.
+//
+// Every checkpoint, cold-cache decision and billed-input figure is keyed by this string, so two
+// implementations of it are two different sessions the moment either changes.
+func sessionIDFrom(tenant, explicitSess string, body []byte, norm []bschemas.ChatMessage) string {
+	sys, firstUser := schema.SessionHead(norm)
+	return session.Scoped(tenant, explicitSession(explicitSess, body), sys, firstUser)
+}
+
+// SessionIDFor derives the session id apply WOULD use for a request, without running a pipeline.
+//
+// It exists for the response path in OBSERVE mode. There the enforced path never calls BodyOpts at
+// all — that is what makes observe's byte-identity guarantee structural — so it has no Trace and no
+// session id, and RecordBilledInput had nothing to key on. The consequence was that
+// Ctx.PrevBilledInput stayed 0 forever on an observe tenant, FracResolvable read false, and
+// summarize's shipped 0.9 default reported window_not_exact on every turn: a permanent zero in the
+// one mode whose entire purpose is showing an operator what enforcing WOULD have saved.
+//
+// It shares BOTH halves with BodyOpts — messagesArray for the gate and sessionIDFrom for the
+// derivation — rather than reproducing them. An earlier version claimed that agreement in a comment
+// while actually holding a second copy, and the two had already drifted apart on which body shape
+// they accepted.
+//
+// It re-parses the body, so it is for callers with no Trace. A caller holding one uses Trace.Session.
+func SessionIDFor(tenant, explicitSess string, provider bschemas.ModelProvider, body []byte) string {
+	msgsRaw := messagesArray(body)
+	if !msgsRaw.Exists() {
+		return ""
+	}
+	norm, _ := normalize(provider, msgsRaw.Array())
+	if len(norm) == 0 {
+		return ""
+	}
+	return sessionIDFrom(tenant, explicitSess, body, norm)
+}
+
+// RecordBilledInput stores the provider's own input-token count for a finished turn, so the NEXT
+// turn of the same session can be compared against the model's context window in the units that
+// window is stated in. Call it once per response, with fresh + cache-read + cache-write.
+//
+// EXPORTED, and the only writer, because the read and the write must agree on the key or the
+// figure is silently always zero — which reads as "not full" and disables every fraction gate
+// that depends on it. The host has to hand back the session id the pipeline itself derived
+// (Trace.Session): re-deriving it from the outgoing body would hash a transcript this pipeline
+// had just rewritten, producing a different key on exactly the sessions where compaction is
+// happening.
+//
+// A ping must never come through here. Its usage describes a keep-alive touch of the cached
+// prefix, not the agent's transcript, and it would understate the fill for a session that is
+// merely idle. Only the real request path calls this.
+func RecordBilledInput(st store.Store, session string, tokens int64) {
+	if st == nil || session == "" || tokens <= 0 {
+		return
+	}
+	st.Put(store.BilledPrefix+session, []byte(strconv.FormatInt(tokens, 10)))
+}
+
+// prevBilledInput reads back what RecordBilledInput stored, or 0 when this session has no earlier
+// response — its first turn, an evicted key, or a host that never calls the writer. 0 means
+// UNKNOWN, and a component deciding how full the context is must decline rather than read it as
+// an empty transcript (see Trigger.FracResolvable).
+func prevBilledInput(st store.Store, session string) int {
+	if st == nil {
+		return 0
+	}
+	b, ok := st.Get(store.BilledPrefix + session)
+	if !ok || len(b) == 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(string(b))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // attemptedTokens sums the tokens of the messages an age/supersession offloader

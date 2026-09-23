@@ -6,7 +6,7 @@
 // vocabulary), and Aggregator (in-process rollups behind /stats). An OTel-SDK
 // emitter and honest-metrics extras (bounce-adjusted savings, waste signals)
 // land in P5. Each host surfaces these natively (proxy -> bifrost Prometheus/
-// OTel + /metrics; AuthBridge -> StatsSource).
+// OTel + /metrics; sidecar plugin -> StatsSource).
 package metrics
 
 import (
@@ -650,8 +650,36 @@ type Snapshot struct {
 	// adjudication tool. The proxy advertises that tool on every request and tells the model not to
 	// call it; this is the number that says whether the telling works (measured 0 across ~4,900
 	// requests). Non-zero is a lost agent turn per count, not a correctness failure.
-	AdjudicateStray int64               `json:"adjudicate_stray"`
-	Components      map[string]compStat `json:"components"`
+	AdjudicateStray int64 `json:"adjudicate_stray"`
+	// ModelInfoUnresolved counts failed attempts to load the operator's model-window document, and
+	// ModelInfoLastError says why the most recent one failed. Empty/zero is the healthy case.
+	//
+	// PUBLISHED HERE BECAUSE THIS IS THE ARTIFACT A RUN KEEPS. When the window cannot be resolved,
+	// every fraction-based threshold in the pipeline is silently evaluated against a built-in default
+	// instead: iteration 024 ran ten benchmark passes that way, resolved 1,000,000 on all 2,207
+	// requests against a configured 64,000, and produced a complete set of healthy counters describing
+	// a configuration that was never in effect — summarize's 0.78 trigger became 780,000 and never
+	// fired once, and the econ trigger's turn horizon came out 16x too long. Nothing else in this
+	// snapshot can go non-zero for that. A warning in a debug log was not enough, because nobody reads
+	// a debug log for a run that looks fine.
+	ModelInfoUnresolved int64  `json:"model_info_unresolved"`
+	ModelInfoLastError  string `json:"model_info_last_error,omitempty"`
+
+	Components map[string]compStat `json:"components"`
+	// Pipeline is the CONFIGURED component order, and PipelineLen its length, so a reader can tell
+	// "no components are configured" from "components ran and did nothing". Components alone cannot:
+	// both are an empty map. That distinction stopped being academic when `off` became the plugin's
+	// default preset - the common case is now an empty pipeline, and a dashboard that renders it as
+	// a blank panel says "broken" about something working exactly as configured.
+	//
+	// NEITHER carries omitempty, and Pipeline's absence of it is the load-bearing part. With
+	// `omitempty` an EMPTY slice is omitted exactly like a nil one - so single-tenant `off`, which is
+	// now the plugin's default and the whole case these fields exist to describe, emitted no
+	// `pipeline` key at all and was indistinguishable from the multi-tenant case that both comments
+	// said absence meant. Without it the two are distinct on the wire: `[]` is "configured with no
+	// components", `null` is "no single pipeline describes this endpoint". Caught in review.
+	Pipeline    []string `json:"pipeline"`
+	PipelineLen int      `json:"pipeline_len"`
 	// TopPassthrough names components that ran but never saved a token — dead
 	// weight in the pipeline, candidates to drop from the config.
 	TopPassthrough []string `json:"top_passthrough"`
@@ -699,6 +727,32 @@ type Snapshot struct {
 	SummarizeTimeouts      int64 `json:"summarize_timeouts"`
 	SummarizeErrors        int64 `json:"summarize_errors"`
 	SummarizeCallTimeoutMs int64 `json:"summarize_call_timeout_ms"`
+	// SummarizeAsync* are the health of the DETACHED summarizer path, and they exist because that
+	// path removed every other way to see it. When the call was inline, a slow or failing summarizer
+	// showed up as request latency, as a `reverted` component, and in that request's own row. Off
+	// the hot path it shows up nowhere: the request has already been answered, and no row carries
+	// the work until the session's next turn.
+	//
+	// The pair that matters is Started vs Committed. A growing gap means calls are being paid for
+	// and lost — the only signal that exists for it. Refused counts what the GLOBAL bound turned
+	// away (the deployment shedding compaction under load, distinct from the ordinary per-session
+	// single-flight refusal, which is a gate). Unresolved is how many are outstanding right now.
+	//
+	// WaitedMs and WaitTimeouts are the other half: whether the wait cap is set anywhere near
+	// right. A climbing timeout count means turns are paying the full cap and getting nothing,
+	// which is the case for lowering it or for looking at the summarizer.
+	SummarizeAsyncStarted    int64 `json:"summarize_async_started"`
+	SummarizeAsyncCommitted  int64 `json:"summarize_async_committed"`
+	SummarizeAsyncRefused    int64 `json:"summarize_async_refused"`
+	SummarizeAsyncUnresolved int64 `json:"summarize_async_unresolved"`
+	// SummarizeAsyncPanics counts recovered panics in the detached goroutine. Fail-open is right
+	// there — a panic in a detached goroutine would otherwise take the process down — but the
+	// recover() was silent, so a panicking summarizer showed up only as a growing started/committed
+	// gap and nothing named the cause.
+	SummarizeAsyncPanics      int64 `json:"summarize_async_panics"`
+	SummarizeAwaitedMs        int64 `json:"summarize_awaited_ms"`
+	SummarizeAwaitTimeouts    int64 `json:"summarize_await_timeouts"`
+	SummarizeAsyncConcurrency int64 `json:"summarize_async_concurrency"`
 	// AgentDiet* are the same three figures for the `agentdiet` baseline, which owns a
 	// third budget: its prompt is a window of b+1+a serialized steps, so it sits
 	// between extract_llm's single tool output and summarize's whole span. Reported
@@ -707,6 +761,38 @@ type Snapshot struct {
 	AgentDietTimeouts      int64 `json:"agentdiet_timeouts"`
 	AgentDietErrors        int64 `json:"agentdiet_errors"`
 	AgentDietCallTimeoutMs int64 `json:"agentdiet_call_timeout_ms"`
+	// CacheAwareSummarizer* are cache_aware_summarizer's. That method's whole claim is WHERE the
+	// summarization request is built — the conversation plus an appended instruction, so the
+	// backend recognises a prefix it already has — which makes its cost profile different in
+	// kind from the summarizers it is compared against. Folding it into theirs would report the
+	// baseline's numbers for the treatment.
+	//
+	// ⭐ CacheAwareSummarizerDeclined IS THE LOAD-BEARING ONE. The component refuses to run when
+	// no components.MessagesModel is available, because the alternative — flattening the
+	// conversation into one prompt string — is precisely the prefix-destroying shape it exists to
+	// avoid. A declining arm therefore compacts NOTHING and is byte-identical to `off` on every
+	// other field in this struct. Non-zero means that arm measured nothing.
+	CacheAwareSummarizerCalls         int64 `json:"cache_aware_summarizer_calls"`
+	CacheAwareSummarizerTimeouts      int64 `json:"cache_aware_summarizer_timeouts"`
+	CacheAwareSummarizerErrors        int64 `json:"cache_aware_summarizer_errors"`
+	CacheAwareSummarizerDeclined      int64 `json:"cache_aware_summarizer_declined"`
+	CacheAwareSummarizerCallTimeoutMs int64 `json:"cache_aware_summarizer_call_timeout_ms"`
+	// a call was PAID FOR and returned nothing usable — the signature of an instruction the chat template dropped or hoisted, which is the silent failure the model registry exists to prevent
+	CacheAwareSummarizerEmpty int64 `json:"cache_aware_summarizer_empty"`
+	// declined because instruction_role was pinned to `system` for a model no registry profile verifies; the arm is configured for a silent failure and is refusing to take it
+	CacheAwareSummarizerUnverifiedSystem int64 `json:"cache_aware_summarizer_unverified_system"`
+	// a summary was abandoned because the store would not accept the span; a marker with no stash behind it would be a lossy Offload advertising reversibility it does not have
+	CacheAwareSummarizerRefusedStash int64 `json:"cache_aware_summarizer_refused_stash"`
+	// declined because the outbound request would exceed max_request_tokens; the session outgrew the method rather than anything failing
+	CacheAwareSummarizerTooLarge int64 `json:"cache_aware_summarizer_too_large"`
+	// the profiles_path override could not be read, so the EMBEDDED registry was used instead; the
+	// instruction roles this arm resolved are not the ones the deployment pinned
+	CacheAwareSummarizerProfileFallbacks int64 `json:"cache_aware_summarizer_profile_fallbacks"`
+	// detached summaries commissioned
+	CacheAwareSummarizerAsyncStarted int64 `json:"cache_aware_summarizer_async_started"`
+	// detached summaries that reached a checkpoint. The PAIR is the signal: started without committed is a summary paid for and lost
+	CacheAwareSummarizerAsyncCommitted int64 `json:"cache_aware_summarizer_async_committed"`
+
 	// Extract is extract_llm's own economics (#28 part F), including NET savings after
 	// its LLM cost — the honest headline for the one component that spends to save.
 	// Purely ADDITIVE: no field above was renamed or removed, so deploy/harbor/*.py
@@ -769,18 +855,76 @@ type Snapshot struct {
 	// distinct broken markers — a missing payload cannot be restored, so every later turn
 	// re-reports it for every affected message.
 	//
-	// StashExpired counts payloads the TTL reclaimed, which is the one remaining way an
-	// outstanding marker stops resolving; the fix for that is a larger ttl_seconds. Live
-	// against Capacity, and Bytes against MaxBytes, say how close each budget is to binding
-	// before any of them fires.
+	// StashExpired counts payloads the TTL reclaimed. Payloads have their OWN, shorter TTL
+	// (stash_ttl_seconds) because a payload — unlike a frozen decision — is re-derivable from
+	// the transcript: every turn's replay re-writes it, so a reclaimed one is re-created on the
+	// request path before any expand could ask for it (see store.DefaultStashTTL, #190).
+	//
+	// StashRevived is that absorption, counted: a payload written again under a key the TTL had
+	// taken. It is why StashExpired is not itself an alert — Expired without Revived is a
+	// session that never came back, which is the reclamation working. What breaks the promise is
+	// StashMissing, and the remedy for a rising StashMissing is stash_ttl_seconds (the payload
+	// was reclaimed too eagerly) or a larger reserve (the re-stash was refused) — read Live
+	// against Capacity and Bytes against MaxBytes to tell which.
+	//
+	// BOTH AT ZERO IS NOT EVIDENCE THAT THE HORIZON WORKS. It means the reserve never bound.
+	// sweepExpired runs only from StashRoom, PutStash's pre-refusal path and evictOldest — i.e.
+	// only once the reserve, the shared exempt budget or the entry cap is already binding — and
+	// PutStash's refresh branch does not check expiry, so on an unsaturated run an
+	// expired-but-unswept payload is resurrected in place and NEITHER counter moves. That is the
+	// intended behaviour (a slot is released when a slot is wanted), but it means a run must
+	// actually saturate the reserve before this pair says anything, which is the same precondition
+	// iteration 024 failed to meet for stash_refused — and failing it is how #190 became
+	// undecidable from data. What distinguishes "never bound" from "working" is StashRefused and
+	// StashLive against StashCapacity.
 	// Filled by the host at serve time (offload + store live below metrics).
-	StashRefused  int64 `json:"stash_refused"`
-	StashMissing  int64 `json:"stash_missing"`
-	StashExpired  int64 `json:"stash_expired"`
-	StashLive     int   `json:"stash_live"`
-	StashCapacity int   `json:"stash_capacity"`
-	StashBytes    int64 `json:"stash_bytes"`
-	StashMaxBytes int64 `json:"stash_max_bytes"`
+	// UsageUnparsed and UsageUnreadable are the two ways this proxy failed to ACCOUNT a response
+	// it otherwise served perfectly: the provider sent a usage block in a spelling the parser does
+	// not recognise, or the bytes examined were not a whole document (a spliced sniffer window).
+	// Either way fresh_input_tokens / cache_read_tokens / cache_write_tokens read 0 on a healthy
+	// 200 with correct savings, correct latency and correct everything else — which ran for 4,015
+	// of 4,015 requests in one benchmark iteration and was found two iterations later, in a
+	// post-mortem chasing a different question (#200).
+	//
+	// Counted apart because the REMEDIES are opposite — add the dialect vs. stop truncating the
+	// window — and kept out of the benign cases (a provider that genuinely reported no usage, and
+	// a recognised block whose tiers are all zero), which are reported as `usage_miss` on the
+	// lifecycle log line and are not alertable. Filled by the host at serve time.
+	UsageUnparsed   int64 `json:"usage_unparsed"`
+	UsageUnreadable int64 `json:"usage_unreadable"`
+	StashRefused    int64 `json:"stash_refused"`
+	StashMissing    int64 `json:"stash_missing"`
+	StashExpired    int64 `json:"stash_expired"`
+	StashRevived    int64 `json:"stash_revived"`
+	StashLive       int   `json:"stash_live"`
+	StashCapacity   int   `json:"stash_capacity"`
+	StashBytes      int64 `json:"stash_bytes"`
+	StashMaxBytes   int64 `json:"stash_max_bytes"`
+	// ExpandPrefixFlips counts turns where an ESTABLISHED compaction was abandoned because the
+	// agent had expanded that content: a frozen decision existed, so the provider holds the
+	// compacted bytes, and the turn sends the original in full at the same position. That is a
+	// cache-write of the whole suffix at ~11.5x a read — the cost the cache-tail gate exists to
+	// avoid everywhere else — and until now no counter distinguished it from any other cache-write,
+	// so an operator could not see it and a benchmark could not attribute it (#201).
+	//
+	// It is a DELIBERATE cost, not a defect: re-compacting would bounce the agent into another
+	// expand, and one cache-write is cheaper than an unbounded loop. This makes the trade visible
+	// rather than assumed.
+	//
+	// Per turn per message, not per distinct content — every later turn re-sends the same original
+	// and re-observes the same abandonment, and only the FIRST is a real cache-write. Read it as
+	// "expansion is churning cached prefixes here", not as a count of cache-writes. Filled by the
+	// host at serve time (the counter lives in components/offload).
+	//
+	// IT COUNTS ONE EVENT, not every expand-induced cache-write: a REPLAY DECLINED because the
+	// content was expanded (components/offload.reapplyFrozen, its only increment site). At least one
+	// sibling is not counted — protecting expanded content shortens summarize's span, which can
+	// invalidate a checkpoint whose boundary reached past it, and re-summarizing produces different
+	// summary text at a fixed prefix position, i.e. another suffix cache-write. That is the correct
+	// trade (content loss for one cache-write) and the same class of event, but a second increment
+	// site would change what this number means, so it is deliberately left to its own decision. Do
+	// not read a zero here as "expansion cost nothing".
+	ExpandPrefixFlips int64 `json:"expand_prefix_flips"`
 	// CompactionResets counts turns whose cached-prefix boundary restarted because the
 	// AGENT compacted its own transcript (it shrank under a stable session id). The
 	// session id deliberately survives that compaction so one conversation is one
@@ -848,6 +992,12 @@ type Snapshot struct {
 	// layer). Omitted entirely when nothing has opted in, so a deployment that does not use
 	// it shows no field rather than a row of zeroes.
 	KeepAlive any `json:"keepalive,omitempty"`
+
+	// Savings is /stats' reconciled, DB-backed savings figure — dash.SavingsTotals summed
+	// three ways (current session / live sessions / all-time), filled by the host (the
+	// query lives in `dash`, which sits above this package). Omitted entirely on a hosted
+	// deployment or a proxy with no dashboard, same reasoning as KeepAlive above.
+	Savings any `json:"savings,omitempty"`
 
 	// Provider-billed token tiers (W8), summed from response usage. ADDITIVE: the
 	// benchmark harnesses parse this payload, so fields are only ever added here,

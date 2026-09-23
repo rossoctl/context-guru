@@ -1,0 +1,62 @@
+# iteration 027 ARM A -- BASELINE. `extract_llm_sweep` is in the pipeline and inert: no `evidence`, no
+# `econ_trigger`, so it never adjudicates. Identical to iteration 026's arm A except for this header.
+#
+# THIS IS THE FIRST ITERATION WHOSE WINDOW IS KNOWN TO BE THE CONFIGURED ONE. Iterations 008-024 resolved
+# the model's real 1,000,000 rather than the band, because an unreachable model-window document was
+# answered from a built-in table with no error, no log line and no counter. From this run the proxy
+# refuses to start when an explicit MODEL_INFO_URL does not load, the rig asserts the RESOLVED window off
+# the proxy's own log after traffic, and `/stats` carries `model_info_unresolved`. Check that field is 0
+# in every st-i022-*.json before comparing anything.
+#
+# Consequence worth stating on the baseline arm specifically: `summarize` will actually FIRE here. In
+# iteration 024 its 0.78 trigger became 780,000 against a largest-ever request of 345,996, so it declined
+# 4,015 times out of 4,015 and that run had no compaction of any kind. No prior iteration's summarize
+# behaviour is comparable with this one's.
+# EXACTLY `housellm` PLUS `summarize`, and `collapse` is gone. housellm is the shipped baseline this
+# work is measured against -- format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm,
+# extract_llm_sweep, extract, cachesplit, toolfilter -- and every iteration from 023 to 026 quietly added
+# `collapse` to it. Nothing documented why.
+#
+# WHY IT IS REMOVED, and it is not a judgement about the component:
+#
+#  - it is not in housellm, nor in ANY shipped preset that also contains summarize (none do)
+#  - its documented job is preventing upstream 400s on bodies of 2.6-14.8 MB. On this workload that
+#    condition is an order of magnitude away: the largest request reaching it in the iteration 027 probe
+#    was 93,791 tokens against sonnet-5's 1,000,000, and capfail was 0 in the probe and in BOTH arms of
+#    iteration 026. It was protecting against nothing here.
+#  - its default threshold is `max_tokens: 2000`, so it capped EVERY tool output above 2,000 tokens to 20
+#    head + 20 tail lines, with no judgement about whether the output was spent -- which is precisely the
+#    question extract_llm_sweep is paid to answer, two positions earlier. Whatever the sweep declined to
+#    remove, collapse truncated anyway. Measured on the probe: collapse removed 544,336 tokens against
+#    the sweep's 35,318, a factor of 15.
+#  - and it ran BEFORE summarize, so it took requests from 93,791 to 39,202 -- under summarize's 0.90
+#    trigger -- before that trigger was ever evaluated. Six probe turns where collapse acted: summarize
+#    could not fire. Six where it did not: summarize's trigger fired and summarize declined anyway.
+#
+# Present in both arms it did not break internal validity, but it measured the sweep's value in the
+# presence of a component doing the same job lossily and without judgement, which is not a pipeline
+# anyone ships. THE RISK OF REMOVING IT is an uncapped oversized output causing an upstream 400; that is
+# measured as absent on this band and these tasks, and is NOT a claim about a 128k band or another task
+# set. If step 2 ever moves off this configuration, re-check capfail before assuming this still holds.
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    model: {model: claude-haiku-4-5, source: incoming}
+    strategy: code
+  extract_llm_sweep:
+    min_tokens: 100
+  summarize:
+    trigger: {min_request_frac: 0.90}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

@@ -7,7 +7,7 @@ provider, and session id, and how they run the expand loop.
 | Option | Host code | Body source | Expand loop | Status |
 |---|---|---|---|---|
 | Proxy / gateway | `proxy/` + `cmd/context-guru-proxy/` | HTTP request body | server-side, wraps the chat route | shipped; the eval-containers gateway |
-| AuthBridge plugin | `cortex` (imports this module) | `pctx.Body` | response path (`OnResponse`) | plugin lives externally |
+| External sidecar plugin | a separate repo (imports this module) | `pctx.Body` | response path (`OnResponse`) | plugin lives externally |
 | bifrost `LLMPlugin` | `adapters/bifrost/` | `req.ChatRequest` | transport wrapper | adapter shipped |
 
 ## Option A — proxy / gateway
@@ -45,17 +45,18 @@ Key behaviors (`proxy/proxy.go`):
   (`event-stream`) responses skip the loop and pass through with flushing.
 - `x-context-guru-*` headers are stripped before forwarding upstream.
 
-Run it: see the [README](https://github.com/rossoctl/context-guru/blob/main/README.md) flag table and [setup.md](setup.md).
+Run it: see [Quickstart: proxy](get-started/quickstart-proxy.md) to get it running, and the
+[flag table](reference/reference.md) for every `--flag` / env var.
 
-## Option B — AuthBridge in-process plugin
+## Option B — external in-process plugin
 
-The plugin lives in **cortex** (`authlib/plugins/contextguru/`) and imports only this
+The plugin lives in a separate external repository and imports only this
 module — not bifrost internals. It is an outbound `WritesBody` plugin gated to inference paths.
 
 ```mermaid
 sequenceDiagram
   participant Agent
-  participant AB as AuthBridge plugin
+  participant AB as external plugin
   participant Apply as apply.Body
   participant Up as Upstream
   Agent->>AB: outbound request (pctx.Body)
@@ -71,7 +72,7 @@ sequenceDiagram
 The plugin reuses `apply.Body` (bytes in → pipeline → bytes out), `session.Resolve` (from
 `pctx.Session`), the shared `Store`, and `expand/` for the response-path continuation. Config
 arrives as `json.RawMessage` into the same `config` struct the proxy uses; metrics surface via
-AuthBridge's `StatsSource`.
+the external plugin's `StatsSource`.
 
 ## Option C — bifrost LLMPlugin (embed in a bifrost deployment)
 
@@ -112,12 +113,10 @@ BOB_API_KEY=<your bob key> \
   bob --yolo "your task"
 ```
 
-The base-URL and key variables both moved between Bob releases, and a stale name fails
-**silently** — Bob simply uses its own default gateway. The 2.x bundle reads
-`BOB_GATEWAY_URL` and `BOB_API_KEY` (it aliases `BOBSHELL_API_KEY` onto the latter, and
-errors if both are set to different values); it contains no `CUSTOM_BASE_URL` or
-`BOBSHELL_DEFAULT_AUTH_TYPE` at all. Older builds read the `CUSTOM_*` / `BOBSHELL_*` set.
-Setting both costs nothing; check yours with `bob --version`.
+!!! note "Variable names moved between Bob releases"
+    A stale name fails **silently** — Bob just uses its own default gateway instead of
+    the proxy. Setting both the old and new variable names costs nothing; check which
+    your build reads with `bob --version`.
 
 How the gateway routes Bob's traffic:
 

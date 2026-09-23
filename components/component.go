@@ -172,9 +172,35 @@ type errNoPrefix struct{}
 
 func (errNoPrefix) Error() string { return "no stashed prefix for this session" }
 
+// MessagesModel is an OPTIONAL capability on a Model: a client that can send a full
+// message ARRAY rather than one flattened prompt string. Components detect it by type
+// assertion and must degrade gracefully when a client does not implement it.
+//
+// IT EXISTS FOR CACHE-REUSE COMPACTION, and the reason is arithmetic. A summarizer that
+// builds a fresh prompt ("summarize this trajectory: {text}") shares no prefix with the
+// conversation it is summarizing, so the call pays full prefill on every token — measured
+// at ~57k prompt tokens per call on a 50-task SWE-bench arm. A summarizer that sends the
+// conversation ITSELF plus a short trailing instruction reuses the prefix the agent's own
+// turn just cached, and pays prefill only on the appended suffix.
+//
+// That is the shape Anthropic's own caching guidance prescribes for exactly this case:
+// "Fork operations must reuse the parent's exact prefix. Side computations (summarization,
+// compaction, sub-agents) often spin up a separate API call. If the fork rebuilds system /
+// tools / model with any difference, it misses the parent's cache entirely."
+//
+// system is the parent request's system prompt, passed verbatim so the fork's prefix can
+// match the parent's. "" means send no system block — which is what a component on
+// Anthropic-shaped traffic must do, because the top-level `system` field is not part of
+// the messages array and the pipeline never sees it (see Ctx: there is no System field to
+// read). On that path the shared prefix therefore starts after the system block, and the
+// saving is correspondingly smaller. Measure it; do not assume it.
+type MessagesModel interface {
+	CompleteMessages(ctx context.Context, system string, msgs []schemas.ChatMessage) (string, error)
+}
+
 // ModelSpec carries the LLM clients a NeedsModel component may use, resolved per
 // request by the host adapter. Incoming is the proxied request's own model +
-// credentials (nil when unavailable, e.g. the AuthBridge host); Static is a
+// credentials (nil when unavailable, e.g. a sidecar-plugin host); Static is a
 // configured cheap model (nil when none is configured). A component selects one
 // by its own `model.source` config via For.
 type ModelSpec struct {
@@ -280,6 +306,37 @@ type Ctx struct {
 	// fraction-based Trigger thresholds are ignored and only absolutes apply. Stored
 	// as a resolved int so Trigger stays a pure, network-free, unit-testable function.
 	CtxWindow int
+	// CtxWindowExact says CtxWindow is a figure published for THIS model, not a family
+	// guess. It matters because ok=true from the resolver is not the same as right: the
+	// substring table of last resort answers 200,000 for every Opus, and LiteLLM publishes
+	// those at 1,000,000. A fraction resolved against the guess fires five times too early.
+	//
+	// A per-item FLOOR may act on a guess — too small a window merely raises the floor. A
+	// decision about how FULL the context is may not, and Trigger declines rather than
+	// guessing (see Trigger.CacheAllows). Zero value is false, so a Ctx built without it
+	// fails closed for the fraction and unchanged for everything else.
+	CtxWindowExact bool
+	// PrevBilledInput is the provider's own input-token count for this session's PREVIOUS turn
+	// — fresh input + cache reads + cache writes — or 0 when this session has no earlier
+	// response to read (its first turn, a lost store key, or a host that does not record it).
+	//
+	// It is the ONLY figure on this Ctx that can be compared against CtxWindow, and that is
+	// why it exists. schema.MessagesTokens counts message TEXT only: no system prompt, no tool
+	// declarations, no JSON envelope. A context window is stated in the units the provider
+	// bills, which include all of those. Measured on this deployment's uncompacted traffic the
+	// two differ by a median 3.38x (p25 2.43, p90 6.80 — dash/overview.go's
+	// EstimatorDivergence, computed over requests where nothing was compacted, so the two are
+	// describing the same prompt). Testing `MessagesTokens >= 0.9 * window` therefore waits for
+	// roughly three times a 1M window's worth of transcript and never becomes true: the
+	// provider rejects the request, or the client compacts, long before the gate opens. That is
+	// not a rounding error, it is a gate that silently never fires.
+	//
+	// One turn stale by construction — it is written from a response and read on the next
+	// request. Not an approximation to apologize for: a transcript only grows, so the previous
+	// turn is a sound lower bound on this one, and a size gate that opens one turn late is the
+	// harmless direction. A component must treat 0 as UNKNOWN and decline a fill decision, the
+	// same rule CtxWindowExact carries, for the same reason.
+	PrevBilledInput int
 	// CacheAware is true when this request goes to a prompt-caching backend and the
 	// pipeline should avoid mutating already-cached content. When true, supersession/
 	// age-based offloaders (failed_run, mask, collapse) must restrict their
@@ -324,11 +381,41 @@ type Ctx struct {
 	// one invoice is not a rounding difference; it is a component and a dashboard disagreeing
 	// about whether a configuration pays.
 	RatesFor func(model string) TokenRates
-	// IdleMs is how long this session was idle before this request, in milliseconds; 0 when
-	// there is no previous turn on record. Carried alongside ColdCache so a component can
-	// demand MORE idle time than the provider TTL implies, and so the figure can be
-	// reported rather than re-derived.
+	// IdleMs is how long this session was idle before this request, in milliseconds. Carried
+	// alongside ColdCache so a component can demand MORE idle time than the provider TTL implies,
+	// and so the figure can be reported rather than re-derived.
+	//
+	// NEGATIVE MEANS UNKNOWN — there is no previous turn on record, or the clock went backwards.
+	// ZERO MEANS ZERO IDLE, which is a positive fact about the warmest possible cache.
+	//
+	// The distinction is load-bearing and it was missing. IdleMs used to be 0 for both, so
+	// CacheRemaining reported "cannot tell" for a request that arrived in the same millisecond as
+	// the previous one — and CachePhase turned that into Unknown, which the compaction gate
+	// PERMITS. A live run reached it with nothing exotic: four concurrent requests on one session,
+	// which any agent issuing parallel sub-requests does routinely, produced 13 of 26 turns
+	// classified Unknown over an 8-message live cached prefix. A turn with genuinely zero idle is
+	// the warmest cache there can be and must classify as Warm, not as "no information".
+	//
+	// Writers must therefore initialise this to -1, not 0, when they have no previous timestamp.
 	IdleMs int64
+	// CompactionPoint is C: the provider-billed input at which the CONVERSATION'S OWN compaction
+	// mechanism acts — the largest prompt that mechanism allows before it rewrites the transcript.
+	// 0 = unknown, and a caller must then fall back to CtxWindow.
+	//
+	// IT IS THE DENOMINATOR THE FILL FRACTION BELONGS OVER, not the model window, and that is the
+	// argument for this whole component: compacting just before the conversation's own mechanism
+	// would have acted captures the saving of a large prefix going cold and costs no accuracy that
+	// was not already going to be lost — because a compaction was going to happen there anyway.
+	// Comparing against the window is only correct when C equals the window.
+	//
+	// Measured in the same units as PrevBilledInput and CtxWindow: provider-billed input. Never the
+	// client's own token count, which for one real request read ~168,000 where the provider billed
+	// 199,184 — the same event in a different ruler. See internal/compactionpoint.
+	CompactionPoint int
+	// CompactionPointSource says where CompactionPoint came from: observed on real traffic, assumed
+	// from reported behaviour, or fallen back to the window. Carried so a decision made on a guess
+	// is distinguishable from one made on a measurement — the discipline CtxWindowExact keeps.
+	CompactionPointSource string
 	// MaxCachedIdx is the highest req.Input index considered already committed to the
 	// provider cache (the messages present on the previous turn of this session).
 	// -1 = unknown/first turn/cache off ⇒ no tail restriction. Only meaningful when

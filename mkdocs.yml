@@ -89,68 +89,47 @@ exclude_docs: |
   superpowers/
   proposals/
 
-# Nav mirrors how people arrive: evaluate it (Get started) → understand it
-# (Concepts) → look a component up (Components) → run it a particular way
-# (Modes, Dashboard, Hosted) → check the claims (Results) → wire it in
-# (Integrations). Every page under docs/ appears exactly once.
+# Nav mirrors how people arrive: install it the easy way and see what it saves
+# (Get started) → run it yourself instead of the plugin (Advanced /
+# Self-hosting) → understand it (Concepts) → look a component up (Components)
+# → run it a particular way (Modes, Dashboard, Hosted) → check the claims
+# (Results) → wire it in (Integrations). Every page under docs/ appears exactly
+# once.
 nav:
   - Home: index.md
   - Get started:
-      - Technical overview: get-started/overview.md
-      - Connect to the IBM service: get-started/connect-ibm-service.md
-      - "Quickstart: proxy": get-started/quickstart-proxy.md
-      - "Quickstart: compaction service": get-started/quickstart-compaction.md
+      - Install the Claude Code plugin: how-to/install-plugin.md
       - Use with Claude Code: how-to/use-with-claude-code.md
-      - Build & evaluate locally: setup.md
+      - How it saves money: get-started/how-it-saves.md
+      - Technical overview: get-started/overview.md
+      - "Quickstart: proxy": get-started/quickstart-proxy.md
   - Concepts:
       - Architecture: design.md
       - Reversibility & recovery: how-to/recover-context.md
       - When your agent compacts: how-to/agent-compaction.md
       - Measuring savings: how-to/measure-savings.md
-      - Stop carrying unused tools: how-to/declaration-removal.md
       - Keep an idle prompt cache warm: how-to/cache-keepalive.md
       - Choose a cache TTL: how-to/kv-cache-ttl.md
+      - Budget keep-alive pings: how-to/kv-cache-keepalive-budget.md
   - Components:
       - Overview: components.md
-      - Choose a preset: how-to/choose-a-preset.md
-      - Preset reference: reference/presets.md
-      - Reformat:
-          - format: components/format.md
-          - toon: components/toon.md
-          - textclean: components/textclean.md
-          - cachesplit: components/cachesplit.md
-          - cacheinject: components/cacheinject.md
-          - toolschema: components/toolschema.md
-          - toolfilter: components/toolfilter.md
-      - "Offload (reversible)":
-          - skeleton: components/skeleton.md
-          - dedup: components/dedup.md
-          - readlifecycle: components/readlifecycle.md
-          - collapse: components/collapse.md
-          - failed_run: components/failed_run.md
-          - cmdfilter: components/cmdfilter.md
-          - extract: components/extract.md
-          - extract_llm: components/extract_llm.md
-          - extract_llm_sweep: components/extract_llm_sweep.md
-          - smartcrush: components/smartcrush.md
-          - mask: components/mask.md
-          - summarize: components/summarize.md
-          - agentdiet: components/agentdiet.md
-      - The DSL filter engine:
-          - Filter language: components/dsl.md
-          - Write a custom filter: how-to/custom-dsl-filter.md
-      - Seen in practice:
-          - Live component captures: examples/live-captures.md
-          - Before → after transcripts: examples/before-after.md
+      - Choose a preset: reference/presets.md
+      - Reformat components: components/reformat.md
+      - Prompt caching: components/caching.md
+      - "Offload: deterministic reducers": components/offload-reducers.md
+      - cmdfilter: components/cmdfilter.md
+      - extract_llm: components/extract_llm.md
+      - skeleton: components/skeleton.md
+      - summarize: components/summarize.md
+      - coref: components/coref.md
+      - Advanced & experimental Offload components: components/advanced-offload.md
+      - The DSL filter engine: components/dsl.md
+      - Examples: examples/live-captures.md
   - Modes:
       - Sync & observe: how-to/operating-modes.md
-      - Routes & headers: reference/routes.md
-      - Config & environment: reference/config.md
+      - Config & routes reference: reference/reference.md
       - Settings form & field descriptors: how-to/settings-form.md
   - Dashboard: dashboard.md
-  - Tool inventory: tool-inventory.md
-  - Inventory page (UI): dashboard-inventory-page.md
-  - KV-cache page (UI): dashboard-kvcache-page.md
   - Hosted service: hosted.md
   - Results:
       - Overview: RESULTS.md
@@ -160,28 +139,26 @@ nav:
       - Component internals & examples: results/components.md
       - Reproduce the results: results/REPRODUCE.md
       - Improvement plan: results/improvement-plan.md
-      - "Measured, Aug 2026: this branch": results/branch-2026-08-19.md
-      - "Why below_trigger is not the trigger": results/below-trigger-2026-08.md
-      - "The flattened one-message class": results/flattened-compaction-2026-08.md
       - KV-cache TTL predictors, the whole story: results/kv-ttl-predictor-summary.md
       - TTL predictor feature catalog: results/kv-ttl-predictor-features.md
       - Rule-based and learned TTL arms, scored: results/kv-ttl-predictor-arms.md
       - TTL predictors compared, pooled and per tenant: results/kv-ttl-predictor-comparison.md
       - "Strategies vs Overview: reconciling keep-alive savings": results/kv-ttl-savings-reconciliation.md
-      - "SWE-bench Verified: per-arm detail":
-          - baseline: results/baseline.md
-          - context-guru: results/context-guru.md
-          - headroom: results/headroom.md
-          - rtk: results/rtk.md
-          - observe mode: results/observe-mode.md
+      - "SWE-bench Verified: per-arm detail": results/swebench-arms.md
       - "Terminal-Bench 2.0":
           - Four-way comparison: results/terminal-bench-comparison.md
-          - baseline: results/terminal-bench-baseline.md
-          - context-guru: results/terminal-bench-context-guru.md
-          - headroom: results/terminal-bench-headroom.md
-          - rtk: results/terminal-bench-rtk.md
+          - Per-arm detail: results/terminal-bench-arms.md
+      - "Co-reference density (measurement)": results/coref-density.md
+      - "Co-reference selection (experiment)": results/coref-selection-experiment.md
+      - "Co-reference reachability (measurement)": results/coref-reachability.md
+      - "Co-reference on the eval box": results/coref-evalbox.md
+      - "coref on LOCA-bench": results/coref-loca.md
+      - "What can and cannot be measured": results/measurement-limits.md
+      - "What actually fires (component gating)": results/component-gating.md
+      - "The floor and the economic gate": results/min-tokens-vs-economic-gate.md
   - Integrations:
       - Host adapters: integrations.md
       - bifrost plugin: how-to/bifrost-plugin.md
       - llm-d compaction service: examples/llm-d-service.md
       - Contributing & community: community.md
+      - Run the eval harness locally: setup.md

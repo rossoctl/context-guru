@@ -167,8 +167,8 @@ func (rl *ReadLifecycle) Offload(req *bschemas.BifrostChatRequest, rep *componen
 			rep.Gate("fresh_read") // no later edit, no later re-read: never touched
 			continue
 		}
-		if skipReduce(c, content) {
-			rep.Gate("marker_or_kept_verbatim")
+		if gate, skip := skipReduce(c, content); skip {
+			rep.Gate(gate)
 			continue
 		}
 		if schema.TextTokens(content) < rl.minTokens {

@@ -924,20 +924,14 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	if o.Requests > 0 {
 		o.ExpandRate = float64(o.Expands) / float64(o.Requests)
 	}
-	o.NetSavedUSD = o.BaselineCostUSD - o.CostUSD - o.CGLLMCostUSD
 	o.KeepAlivePings, o.KeepAlivePingUSD = keepAlivePings, keepAlivePingUSD
-	// The keep-alive's net, and the one number a decision rests on. Not folded into
-	// TotalSavedUSD: presenting a saving without the spend that bought it is exactly the
-	// dishonesty this ledger exists to prevent, and CostUSD above no longer carries the pings
-	// (they are excluded from the agent-traffic aggregate), so the two halves are only
-	// comparable here.
-	o.KeepAliveNetUSD = o.KeepAliveSavedUSD - o.KeepAlivePingUSD
-	// THE NET, never the gross. o.CostUSD excludes ping rows, so the pings' own spend appears
-	// nowhere else in this walk — adding KeepAliveSavedUSD here would present a saving without
-	// the spend that bought it, which is the exact dishonesty the ledger exists to prevent. The
-	// three addends are disjoint token sets: compaction's removals, the prefix split's stable
-	// half, and the entries the pings refreshed.
-	o.TotalSavedUSD = o.NetSavedUSD + o.CachesplitSavedUSD + o.KeepAliveNetUSD
+	// NetSavedUSD, KeepAliveNetUSD (never the gross — o.CostUSD excludes ping rows, so the
+	// pings' own spend appears nowhere else in this walk) and TotalSavedUSD (the three
+	// addends are disjoint token sets: compaction's removals, the prefix split's stable
+	// half, and the entries the pings refreshed) all come from the ONE formula SavingsTotals
+	// also uses, so the dashboard and /stats can never disagree about what they mean.
+	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
+		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD)
 	// Both totals exist before the priced additions land, so a deployment with no rates — or a
 	// caller that does not attach the credit — reads a total that is short rather than one that
 	// is absent. SetDeclCredit moves both.

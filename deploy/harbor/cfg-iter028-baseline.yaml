@@ -1,0 +1,68 @@
+# iteration 028 BASELINE -- arm A with the two keys under test REMOVED, and nothing else changed.
+#
+# WHY THIS FILE EXISTS AT ALL, since iteration 024 already has a baseline arm: iteration 024 ran at a
+# window that silently resolved to 1,000,000 and this runs at 128,000. That is established from its own
+# transcripts rather than inferred -- 19% of its decision points carried prefixes ALREADY over 64,000
+# tokens, to a maximum of 507,263, which cannot happen against a 64k window (and this iteration now declares 128k, for the reason in run028.sh). Reading a 128k arm against
+# iteration 024's stored numbers would confound the band with the change under test, which is precisely
+# the defect that voided iterations 008-024. Reusing its seeds controls instance variance; it does not
+# rescue a different independent variable.
+#
+# WHY IT CANNOT ACT, and this is measured rather than assumed. With `econ_trigger` absent only the
+# pre-expiry trigger remains, and it never fires under benchmark load: iteration 022 recorded
+# not_in_pre_expiry_window on 18 of 18 requests and iteration 024's arm A on 378 of 378, because eight
+# parallel workers never leave an idle gap for a cache entry to approach expiry. So `acted` must read 0
+# on every baseline pass -- and if it does not, the arms are not what these files claim and nothing is
+# comparable. That check is condition 4 of the pre-flight.
+#
+# THE ONLY DIFFERENCE FROM cfg-iter028-A.yaml IS `evidence` AND `econ_trigger`. Diff the two files
+# before the run; that diff is the independent variable. Every other sweep key is present here too and
+# is inert while the component cannot act -- kept so the diff is two lines rather than seven.
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    model: {model: claude-haiku-4-5, source: incoming}
+    strategy: code
+  extract_llm_sweep:
+    min_tokens: 100
+    # `evidence` and `econ_trigger` are DELIBERATELY ABSENT. They are the independent variable; see the
+    # header. Do not add them to this file to "make the arms consistent" -- that would delete the
+    # experiment.
+    # A removed token is worth 20x the cache read it saves. Load-bearing: simulated over 384 decision
+    # points, a premium of 1 with a floored approval passes 0% of the gate at EVERY band including 256k.
+    reward_premium: 20
+    # 0.70 blocked 127 of iteration 024's 203 firings on its own, and the floor is also a horizon cap:
+    # the horizon is turns x (1/p - 1), so 0.70 caps it at 0.43 x turns.
+    min_pressure: 0.20
+    # THE MEASURED INFLECTION, and the reason this is 10 rather than the 3 iteration 027 ran. Shown one
+    # output, 6% live-kept on haiku and 14% on sonnet, both inside the drop-everything null's error bar;
+    # shown ~15, 58% at the lowest cost per output; batch 3-6 dropped a genuinely-spent output 2 times in
+    # 4; batch 10 dropped it 4 in 4. Iteration 024 was already here -- sweep_offered 6,034 plus
+    # sweep_over_ask_cap 3,682 over ~626 asks is 15.5 eligible candidates per ask, capped to a mean of
+    # 9.6 offered -- and iteration 027's three-candidate asks removed 326 tokens against 37,060 examined.
+    #
+    # It also feeds the approval estimator the evidence that keeps the gate open: rich asks approved ~85%
+    # of offered mass where the three thin asks that shut the component down approved 1.24%.
+    min_inventory: 10
+    # An output the model has taken no turn since receiving cannot be judged spent; offering it
+    # preferentially cuts the most recent context.
+    min_later_turns: 3
+    # A keep is remembered for four model turns rather than re-asked every turn. Measured waste it stops:
+    # seven of ten adjudications on one probe pass were the same five candidates at the same 41,453
+    # tokens, kept every time.
+    keep_recheck_turns: 4
+  summarize:
+    trigger: {min_request_frac: 0.90}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

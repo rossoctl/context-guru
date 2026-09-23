@@ -3,8 +3,8 @@
 **SWE-bench Verified · 50 tasks · `claude-code` agent on `aws/claude-sonnet-5`**, run live.
 All **50 tasks** scored (no infrastructure exception) under all **four** arms, so every
 number below is apples-to-apples on the same tasks. Reproduce: [REPRODUCE.md](REPRODUCE.md).
-Per-config detail: [baseline.md](baseline.md) · [context-guru.md](context-guru.md) ·
-[headroom.md](headroom.md) · [rtk.md](rtk.md). Component internals & real examples:
+Per-config detail: [baseline](swebench-arms.md#full-results-baseline-off-swe-bench-verified-50-tasks) · [context-guru](swebench-arms.md#full-results-context-guru-codesmart-final-swe-bench-verified-50-tasks) ·
+[headroom](swebench-arms.md#full-results-headroom-hd-cache-swe-bench-verified-50-tasks) · [rtk](swebench-arms.md#full-results-rtk-rust-token-killer-swe-bench-verified-50-tasks). Component internals & real examples:
 [components.md](components.md).
 
 Three of the four arms are compaction layers of two different kinds:

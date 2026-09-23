@@ -687,6 +687,11 @@ details.done > summary { color: var(--success-ink); }
 .tabbed-set > input:nth-child(7):checked ~ .tabbed-content > .tabbed-block:nth-child(7),
 .tabbed-set > input:nth-child(8):checked ~ .tabbed-content > .tabbed-block:nth-child(8) {
   display: block;
+  animation: tab-fade-in 0.18s ease;
+}
+@keyframes tab-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
 }
 .tabbed-set > input:focus-visible + .tabbed-labels > label,
 .tabbed-labels > label:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }

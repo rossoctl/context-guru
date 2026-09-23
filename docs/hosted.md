@@ -53,19 +53,17 @@ provider credential of its own: the key is read off the request and dropped.
 in flight — so for opted-in accounts it must retain your key, and the last request's body,
 for the length of the idle gap. Held in memory only, masked at rest, overwritten on
 release, never logged or persisted, and bounded by a hard deadline of about 14 minutes.
-Every use is a dashboard row you can audit. If you have not enabled it, nothing is
-retained and the paragraph above holds unchanged. See
+Every use is a dashboard row you can audit. See
 [Keep an idle prompt cache warm](how-to/cache-keepalive.md).
 
-That is why identity moved to a header of its own. `x-context-guru-token` carries the
-`cg_live_…` token, and `copyHeaders` strips every `x-context-guru-*` header before
-forwarding, so a token cannot leave the box by construction. A token presented in an
-auth slot instead is still accepted (some tools have nowhere else to put it) and is
-scrubbed out on the way — recognisable because only *our* tokens are shaped
-`cg_live_` + 26 characters, which no provider key is.
+Identity moves in a header of its own, `x-context-guru-token`, carrying the `cg_live_…`
+token; `copyHeaders` strips every `x-context-guru-*` header before forwarding, so a token
+cannot leave the box. A token presented in an auth slot instead is still accepted (some
+tools have nowhere else to put it) and is scrubbed out on the way — recognisable because
+only *our* tokens are shaped `cg_live_` + 26 characters.
 
-A caller with no credential of their own gets a **401**. It never falls back to
-whatever key the box happens to hold: that fallback is the defect this design removes.
+A caller with no credential of their own gets a **401** and never falls back to whatever
+key the box happens to hold.
 
 **Dashboard credentials are separate, and also only ever stored derived**: an argon2id
 hash of the password, `sha256` of the session cookie, `sha256` of the 5-minute email
@@ -254,10 +252,10 @@ CG_TOKEN=cg_live_… deploy/service/tls-smoke.sh      # authenticated checks inc
 deploy/service/tls-smoke.sh                          # without a token: skips those, runs the rest
 ```
 
-`CG_HOST` defaults to `contextguru.vpc.cloud9.ibm.com` and `CG_CA` to
-`/etc/context-guru/ibm-internal-root-ca.pem`; override either from the environment. Passing
+`CG_HOST` defaults to `dashboard.internal.example.com` and `CG_CA` to
+`/etc/context-guru/internal-root-ca.pem`; override either from the environment. Passing
 the root explicitly is the point rather than a detail — it proves a client trusting **only**
-that root can verify the server, which is the situation every IBM laptop is in. The CA copy
+that root can verify the server, which is the situation every managed laptop on an internal CA is in. The CA copy
 lives beside the config and not in `$ETC/tls/`, which is `0700 root`: correct for a private
 key, wrong for a public root certificate that ops scripts and unprivileged clients need to
 read. (Putting it there silently downgraded the script to the system trust store and turned
@@ -283,7 +281,7 @@ originated server-side and reached the client unbuffered.
 
 !!! note "The installer does not place the root CA file"
     `install.sh` creates `$ETC/tls/` and installs the nginx config, but nothing in it writes
-    `/etc/context-guru/ibm-internal-root-ca.pem`. Put it there by hand (readable, not `0700`)
+    `/etc/context-guru/internal-root-ca.pem`. Put it there by hand (readable, not `0700`)
     if you want `tls-smoke.sh` to test against the root rather than falling back to the
     system trust store — it says which one it used.
 
@@ -312,12 +310,12 @@ STARTTLS is used whenever the relay advertises it, and a failure to negotiate **
 send** rather than continuing in the clear: a code that travels plaintext because a
 certificate expired is exactly the silent downgrade that makes "we use TLS" untrue.
 
-On the IBM internal network `na.relay.ibm.com:25` accepts mail from this host, advertises
+On the IBM internal network `mail-relay.internal.example.com:25` accepts mail from this host, advertises
 STARTTLS, verifies against the public trust store, and needs no AUTH:
 
 ```
-Environment=CG_SMTP_HOST=na.relay.ibm.com
-Environment=CG_SMTP_FROM=context-guru@<this-host>.fyre.ibm.com
+Environment=CG_SMTP_HOST=mail-relay.internal.example.com
+Environment=CG_SMTP_FROM=context-guru@<this-host>.internal.example.com
 ```
 
 Egress on **465 and 587 is blocked** from this network; only 25 to the internal relay is
@@ -421,9 +419,9 @@ Residual: a process on this host can forge the header and get unlimited buckets.
 with local access can already read the control database, so that is not the boundary this
 defends.
 
-`--register-domains ibm.com` narrows *which* addresses may register, in any mode. It is an
-**exact-domain-or-subdomain** match on the part after the `@` (`ibm.com` and
-`x.ibm.com` pass; `notibm.com` does not).
+`--register-domains example.com` narrows *which* addresses may register, in any mode. It is an
+**exact-domain-or-subdomain** match on the part after the `@` (`example.com` and
+`x.example.com` pass; `notexample.com` does not).
 
 **What these modes do not do.** The address is now proven — a code has to arrive in that
 mailbox — but reachability is not entitlement. Anyone with a real mailbox in an allowed
@@ -497,7 +495,7 @@ inbound exception for **TCP/443 and nothing else**. Port 80 is not requested and
 "for the redirect" leaks a token per mistyped URL. Keep `LISTEN_ADDR` on loopback so the only
 way in is through the TLS front end.
 
-**Registration policy.** `REGISTER_DOMAINS=ibm.com` in the shipped drop-in is what makes
+**Registration policy.** `REGISTER_DOMAINS=example.com` in the shipped drop-in is what makes
 `open` mode tolerable there: an attacker needs a real, reachable mailbox in a domain you
 control, since [registration mails a code](#3-configure-the-email-path) to it. With no
 domain restriction, `open` means anyone with any working mailbox can mint an account on
@@ -510,11 +508,10 @@ that tenant's agent sends, so there is no shared budget to guard. Month-to-date 
 still computed and shown, per tenant, on Settings and in the manager's roster — it needs
 `MODEL_INFO` on to be non-zero, because an unpriced row costs $0.00.
 
-**Set `MODEL_PRICES` on this box.** ete-litellm bills about half of anthropic.com's published
-rates (`aws/claude-sonnet-5`: $1.52/MTok in against $3.00), and it serves ids the public price
-map has never heard of — the preview Gemini deployments, and Bob's server-resolved tier names,
-which are why a Bob session used to show tokens and latency but no cost at all. Both are fixed
-by pointing at the shipped list:
+**Set `MODEL_PRICES` if you're behind an internal LLM gateway.** A gateway can bill a fraction
+of a provider's published rates, or serve model ids the public price map has never heard of —
+either way, cost shows as $0.00 until you point at a price list that matches what your gateway
+actually charges. Fix it by pointing at the shipped list:
 
 ```sh
 sudo install -m0644 deploy/service/prices.example.yaml /etc/context-guru/prices.yaml
@@ -528,18 +525,18 @@ journalctl -u context-guru -n 20 | grep "price list"   # "entries=42"
 A malformed file refuses to start rather than falling back, because a price list that
 silently failed to load is indistinguishable from "every model is free". The file holds list
 prices and no credential. Details and the matching rules:
-[Per-model prices](reference/config.md#per-model-prices-and-why-the-public-map-is-not-enough).
+[Per-model prices](reference/reference.md#per-model-prices-and-why-the-public-map-is-not-enough).
 
-Two things that are *not* IBM-specific and should not be relaxed: cold storage on Box is one
-rclone remote name away from being any other remote, and `/metrics` plus Grafana binding
-loopback-only is about cross-tenant spend data, not about IBM.
+Two things that are environment-agnostic and should not be relaxed regardless of where you
+deploy: cold storage on Box is one rclone remote name away from being any other remote, and
+`/metrics` plus Grafana binding loopback-only is about cross-tenant spend data.
 
 ## User setup
 
-!!! tip "Are you a user of the IBM deployment, not its operator?"
-    [Connect to the IBM service](get-started/connect-ibm-service.md) is the five-minute
-    version of this section: register, trust the CA, point one agent at it, and turn it on and
-    off per session.
+!!! tip "Are you a user of an internal hosted deployment, not its operator?"
+    Ask your operator for their connect guide — it is the five-minute version of this
+    section: register, trust the CA, point one agent at it, and turn it on and off per
+    session.
 
 **Keep your own provider key where it already is.** The proxy forwards it, so your
 traffic is billed to you. What you add is a base URL and the context-guru token, and the
@@ -572,7 +569,7 @@ New accounts start on the first entry of their dialect, which is an accident of 
 once there is more than one. Name the default explicitly instead:
 
 ```ini
-Environment=CG_DEFAULT_ANTHROPIC_UPSTREAM=ibm-litellm
+Environment=CG_DEFAULT_ANTHROPIC_UPSTREAM=internal-gateway
 ```
 
 `CG_DEFAULT_OPENAI_UPSTREAM` and `CG_DEFAULT_BOB_UPSTREAM` do the same for the other dialects.
@@ -744,32 +741,19 @@ Full configuration (YAML)**, which still takes a document and still validates it
 The settings page shows that whole document read-only under **Full configuration**, so
 "what am I actually running" is a fact on the page rather than an inference from the fields.
 
-#### A long streamed turn is not a timeout
+#### Response-header timeout, not a body timeout
 
-Symptom: a big session, `continue`, four or five minutes of apparently healthy work, then the
-agent reports an API error. It looks like compaction is hanging. It is not — on the eleven
-requests measured this way, context-guru's own time was 25-84 ms and it made zero model calls.
-
-The proxy's upstream client carried `http.Client{Timeout: 5 * time.Minute}`, and that timeout
-covers reading the response **body**. On a streaming dialect that is not a liveness check, it
-is a ceiling on how long a generation may take: a long turn with thinking enabled hit
-~297,900 ms of upstream time and came back **502**, while 160 shorter streamed turns from the
-same account through the same upstream succeeded.
-
-It is `ResponseHeaderTimeout` now — time to the FIRST byte, so a dead upstream is still
-caught and a stream that is producing tokens is never interrupted for having produced them
-for a while. `--upstream-header-timeout` / `UPSTREAM_HEADER_TIMEOUT` tunes it (default 10m).
-That default is generous because a NON-streaming request sends its headers only once it is
+`ResponseHeaderTimeout` bounds time to the FIRST byte, so a dead upstream is still caught
+while a stream that is producing tokens is never interrupted for having produced them for a
+while. `--upstream-header-timeout` / `UPSTREAM_HEADER_TIMEOUT` tunes it (default 10m). That
+default is generous because a NON-streaming request sends its headers only once it is
 generated, so for that shape it is still the whole budget.
 
-If you see this symptom, check `upstream_ms` on the request row before suspecting a
-component: ours is the `cg_latency_ms` column, and the two are not close.
+If you suspect this on a long streamed turn, check `upstream_ms` on the request row against
+`cg_latency_ms`: the former is time spent waiting on the upstream, the latter is
+context-guru's own processing time, and they are not close on a healthy request.
 
 #### Two fields decide whether `extract_llm` can act at all
-
-Both were in stored documents and on neither the form nor the page, and the result was an
-account whose `extract_llm` was fully configured, ran on 251 requests, and made zero model
-calls with nothing on screen to explain it:
 
 - **`model.source`** — `config` selects an operator-configured compaction model, and this
   service deliberately has none: it will not spend the operator's credential on a tenant's
@@ -777,9 +761,9 @@ calls with nothing on screen to explain it:
   anything. `incoming` uses the caller's own model and key. The settings page now says this
   in the field's own hint, driven by `compaction_model` from `GET /api/options`.
 - **`model.model`** — the model that does the compacting, on the same endpoint and credential.
-  Leave it empty and the work runs on your agent's own frontier model, which does not pay:
-  measured here, a cold-cache sweep cut the provider bill by $0.63 and spent **$1.25 of opus**
-  doing it. `claude-haiku-4-5` is the recommended value and is what the form pre-fills.
+  Leave it empty and the work runs on your agent's own frontier model, which does not pay off:
+  a cheap model such as `claude-haiku-4-5` is the recommended value and is what the form
+  pre-fills.
 - **`allow_on_caching_backend`** — absent means **false**, and the economic gate then
   hard-declines every candidate whose tokens are already prompt-cached. On Claude Code
   against Anthropic that is the whole workload. The cold-cache sweep is not subject to it,
@@ -850,7 +834,7 @@ Tracking is not a flag. It is the **absence of a stored document**, which makes 
 transitions one write and keeps the settings page and the proxy from ever disagreeing about
 who is following what. The account view (`/api/me`, `/api/whoami`, `/api/tenants`, …) carries
 three fields — see
-[the tenant view's configuration fields](reference/routes.md#the-tenant-views-configuration-fields)
+[the tenant view's configuration fields](reference/reference.md#the-tenant-views-configuration-fields)
 for the exact shapes:
 
 | Field | Tracking the default | Own configuration |
@@ -1181,7 +1165,7 @@ dozen series we already compute.
     in-process series now carries this caveat in its own HELP text, because HELP travels into
     every scraper, explorer and panel tooltip, and a note only in the docs is a note the
     person reading the panel never sees. See
-    [Routes](reference/routes.md#get-metrics-the-two-families-do-not-agree).
+    [Routes](reference/reference.md#get-metrics-the-two-families-do-not-agree).
 
 !!! warning "Four `cg_tenant_*` names end in `_total` and are gauges"
     `cg_tenant_requests_total`, `cg_tenant_tokens_total`,
@@ -1261,36 +1245,26 @@ Worth knowing before you read either dashboard as a verdict:
   of rendering it neutral is that a genuine collapse to exactly 0 would also read `n/a`; the
   metric cannot tell the two apart, and only the upstream can fix that.
 
-    !!! note "Corrected: the IBM gateway DOES report cache tiers"
-        This page previously said IBM LiteLLM does not. Measured directly against
-        `ete-litellm.ai-models.vpc-int` with a `cache_control` breakpoint, it returns
-        `cache_creation_input_tokens`, `cache_read_input_tokens`, and even the
-        `cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens` split:
-
-        | prefix | model | call 1 | call 2 |
-        |---|---|---|---|
-        | ~4.4k tok | `aws/claude-sonnet-5` | `cache_creation=4424` | `cache_read=4424` |
-        | ~3.7k tok | `claude-haiku-4-5` | `write=0 read=0` (below its 4096 minimum) | same |
-
-        So the tiers are usable on this deployment. If a panel still reads `n/a`, suspect the
-        *streaming* path or a model the pricer cannot name, not the gateway.
+    !!! note "Your internal gateway may still report cache tiers"
+        Many internal LLM gateways do report `cache_creation_input_tokens`,
+        `cache_read_input_tokens`, and the ephemeral cache-creation split, so this
+        deployment's tiers may well be usable even behind an internal gateway. If a panel
+        reads `n/a`, suspect the *streaming* path or a model the pricer cannot name before
+        suspecting the gateway.
 - **`Availability, 30 days` is meaningless until Prometheus has retained 30 days.**
   `avg_over_time(up[30d])` averages the samples that exist, so a Prometheus started an hour
   ago reports a flattering 100%.
 
-Two panels that *did* lie and no longer do, worth knowing because a screenshot taken
-before this may still be in circulation:
+Two panels that this dashboard corrects for, worth knowing because an older screenshot may
+still be in circulation:
 
-- **`Total avoided this month` used to paint a negative figure green.** Its only threshold
-  step was green at `null`, so −$10.19 — compaction saving $6.96 against $17.22 of its own
-  model spend — read as a win. It now steps red below 0. An honest negative has to *look*
-  negative; that tile is the one number an operator reads to decide whether to keep the
-  thing switched on.
-- **`Hit rate by component` divided `acted` by `ran`**, which paints `cachesplit` as a dead
-  red component. It is mutated-never-acted by design (the split removes no content tokens,
-  it moves them out of the hashed prefix), so the component with the measured −34.1% cost
-  effect ranked last. The panel is now **`Activity rate by component`** over
-  `outcome="mutated"`, and "why did it decline?" has its own panel over
+- **`Total avoided this month` steps red below 0.** A negative figure — compaction spending
+  more on its own model calls than it saved — has to *look* negative; that tile is the one
+  number an operator reads to decide whether to keep the thing switched on.
+- **`Activity rate by component`** replaces a panel that divided `acted` by `ran`, which
+  painted `cachesplit` as a dead red component. It is mutated-never-acted by design (the
+  split removes no content tokens, it moves them out of the hashed prefix), so the current
+  panel reads over `outcome="mutated"`, and "why did it decline?" has its own panel over
   `cg_component_gate_declines_total`.
 
 **Alert rules are provisioned** — two, in

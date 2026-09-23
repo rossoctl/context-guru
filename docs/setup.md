@@ -1,7 +1,9 @@
 # Setup & example run
 
 Build the binary/image, then run context-guru as the eval-containers gateway for a real
-SWE-bench task driven by Claude Code.
+SWE-bench task driven by Claude Code. This is the eval harness contributors use to check a
+change against real benchmark traffic — see [Community](community.md) for the rest of the
+contributor workflow.
 
 ## Prerequisites
 

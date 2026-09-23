@@ -211,8 +211,8 @@ func TestLinecapSkipsMarkerBearingContent(t *testing.T) {
 	if got != body {
 		t.Fatal("rewrote content that already carries an offload marker")
 	}
-	if gates["marker_or_kept_verbatim"] == 0 {
-		t.Fatalf("want marker_or_kept_verbatim, got %v", gates)
+	if gates[GateAlreadyMarked] == 0 {
+		t.Fatalf("want %s, got %v", GateAlreadyMarked, gates)
 	}
 }
 
@@ -264,8 +264,8 @@ func TestLinecapYieldsToAnEarlierOffloader(t *testing.T) {
 	if got != marked+"\n"+body {
 		t.Fatalf("linecap rewrote a message another offloader had already marked:\n%.200q", got)
 	}
-	if gates["marker_or_kept_verbatim"] == 0 {
-		t.Fatalf("want marker_or_kept_verbatim, got %v", gates)
+	if gates[GateAlreadyMarked] == 0 {
+		t.Fatalf("want %s, got %v", GateAlreadyMarked, gates)
 	}
 }
 

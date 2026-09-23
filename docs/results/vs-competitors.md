@@ -160,6 +160,6 @@ content saving here. Both are on our roadmap.
 - [Full four-way comparison](comparison.md) — cost decomposition, per-task plots, caveats.
 - [Component internals & real examples](components.md) — every context-guru component, headroom
   compressor, and rtk filter, with before→after captures side by side.
-- Per-arm detail: [baseline](baseline.md) · [context-guru](context-guru.md) ·
-  [headroom](headroom.md) · [rtk](rtk.md).
+- Per-arm detail: [baseline](swebench-arms.md#full-results-baseline-off-swe-bench-verified-50-tasks) · [context-guru](swebench-arms.md#full-results-context-guru-codesmart-final-swe-bench-verified-50-tasks) ·
+  [headroom](swebench-arms.md#full-results-headroom-hd-cache-swe-bench-verified-50-tasks) · [rtk](swebench-arms.md#full-results-rtk-rust-token-killer-swe-bench-verified-50-tasks).
 - [Reproduce](REPRODUCE.md) — install and run all four arms yourself.
