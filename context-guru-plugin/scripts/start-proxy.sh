@@ -271,11 +271,16 @@ UPSTREAM="${UPSTREAM_ARG:-${CLAUDE_PLUGIN_OPTION_UPSTREAM:-${ANTHROPIC_UPSTREAM:
 UPDATE_RECORD="${STATE}/update-check.yaml"
 # The installed binary's own version, read unconditionally (not only when UPDATE_CHECK=1) because
 # fingerprint_want() below also uses it: a binary staged on disk by "always" must be picked up by
-# THIS session's restart decision, not only by the notice. Same shape as install.sh:746-748.
+# THIS session's restart decision, not only by the notice.
+#
+# Read from a plain FILE install.sh writes on every confirmed install — never by running $BIN. A
+# hook that executed the configured binary just to learn its version would run it on every single
+# session start, and $BIN is not necessarily safe or even fast to invoke with an argument it does
+# not expect: a proxy from before the release channel existed, a symlink to something else
+# entirely, or (proven by this repo's own test doubles) something that does not distinguish
+# `--version` from "start serving" at all and treats any invocation as a launch.
 HAVE=""
-if command -v "$BIN" >/dev/null 2>&1; then
-  HAVE=$("$BIN" --version 2>/dev/null | awk '{print $2; exit}') || HAVE=""
-fi
+[ -f "${STATE}/proxy-version" ] && HAVE=$(head -1 "${STATE}/proxy-version" 2>/dev/null) || HAVE=""
 if [ "$UPDATE_CHECK" = 1 ] && [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; then
   # The 5-minute gate. This `find` is the ONLY cost paid on every session start; nothing past it
   # runs unless the record is missing or older than 5 minutes. This is the record settings.py
