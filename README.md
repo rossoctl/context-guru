@@ -76,6 +76,17 @@ Everything else — architecture, the full benchmark, every component, the proxy
 config reference — is in **[docs/design.md](docs/design.md)** and
 **[docs/get-started/how-it-saves.md](docs/get-started/how-it-saves.md)**.
 
+**If something breaks and Claude can't fix it**, run the recovery script — no session, no proxy,
+no network needed:
+
+```
+~/.local/state/context-guru/context-guru-reset
+```
+
+Prefer it over `/context-guru:uninstall` or `/plugin uninstall context-guru@context-guru` when a
+session is actually stuck: a dead proxy fails every request, including the ones an uninstall
+command would need. More: [docs/how-to/install-plugin.md#troubleshooting](docs/how-to/install-plugin.md#troubleshooting).
+
 ## Updating
 
 Claude Code checks the marketplace for updates in the background and prompts you to
