@@ -31,6 +31,8 @@ type API struct {
 	// whoami describes the caller's session for the UI's mode probe. Supplied by the
 	// host in hosted mode; nil means single-tenant.
 	whoami func(*http.Request) any
+	// uiPath is the UI mount prefix, or "" for DefaultUIPath. Set by SetUIPath before Mount.
+	uiPath string
 	// toolFilterFn resolves a tenant's declaration-removal configuration for the inventory
 	// page's control. A hook rather than a field of our own: the list is the account's
 	// compaction configuration, owned, validated and audited by the control plane, and a
@@ -42,6 +44,13 @@ type API struct {
 	tenantCapture func(tenantID string) bool
 	// pricer values the pre-instrumentation split figure on read. nil = that figure is omitted.
 	pricer modelinfo.Pricer
+	// windows resolves a model's context window, and is separate from pricer because the two
+	// answer different questions and a deployment can know one without the other. Read through
+	// modelinfo.Exact, so a resolver that will not say whether its answer is PUBLISHED is
+	// treated as inexact — the substring table of last resort answers 200,000 for every Opus
+	// against a real 1,000,000, and a span sized against that measures a fifth of the work it
+	// claims to. nil means every window is unknown, which excludes rather than guesses.
+	windows modelinfo.Resolver
 	// statsCache, facetsCache and componentsCache hold the last rendered body per
 	// (principal, query), briefly. Overview alone measured 25s under real production write
 	// load (many sequential queries, each one a chance to queue behind the writer), and
@@ -370,6 +379,10 @@ func (a *API) SetTenantCapture(fn func(tenantID string) bool) { a.tenantCapture 
 // absent rather than zero — an unpriced number must not read as "nothing was saved".
 func (a *API) SetPricer(p modelinfo.Pricer) { a.pricer = p }
 
+// SetWindows supplies the context-window resolver, for the views that ask how FULL a context got
+// rather than what it cost. Separate from SetPricer for the reason the fields are separate.
+func (a *API) SetWindows(r modelinfo.Resolver) { a.windows = r }
+
 // Who has to act when there is no transcript to show. This is a SEPARATE axis from the
 // transcript state, deliberately: the state answers "why is this panel empty" and the
 // answer is the same either way (nothing was captured), while this names the party who
@@ -459,8 +472,14 @@ func (a *API) scope(r *http.Request) (Filter, Principal, bool) {
 }
 
 // unauthorized is the one place a data route refuses a caller.
-func unauthorized(w http.ResponseWriter) {
-	httpErr(w, http.StatusUnauthorized, "sign in at /dashboard/ to view your traffic")
+//
+// IT NAMES NO PATH. It used to say "sign in at /dashboard/", which was fine while that was the only
+// prefix and became wrong once a host could choose its own: a hardcoded path is a LIE on a
+// deployment that moved the dashboard, and an ADVERTISEMENT on one that would rather its dashboard
+// were not discoverable by whoever pokes an /api/ route unauthenticated. A caller who is meant to
+// have the dashboard already has its URL; one who is not gains nothing from learning it.
+func (a *API) unauthorized(w http.ResponseWriter) {
+	httpErr(w, http.StatusUnauthorized, "sign in to view your traffic")
 }
 
 // scopeClass is the tenant-boundary decision a route has made.
@@ -491,11 +510,14 @@ type route struct {
 // routes is the single mounted route table, read by Mount and by the scoping test.
 func (a *API) routes() []route {
 	rs := []route{
-		{"GET /dashboard", scopePublic, func(w http.ResponseWriter, r *http.Request) {
-			// One canonical URL: /dashboard and /dashboard/ must not be two pages.
-			http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
+		{"GET " + a.uiBare(), scopePublic, func(w http.ResponseWriter, r *http.Request) {
+			// One canonical URL: the bare and slashed forms must not be two pages. They would not
+			// even be the same page — the UI's relative asset references resolve against the
+			// parent directory on the bare form, which is a blank dashboard.
+			http.Redirect(w, r, a.uiPrefix(), http.StatusMovedPermanently)
 		}},
-		{"GET /dashboard/", scopePublic, http.StripPrefix("/dashboard/", uiHandler()).ServeHTTP},
+		{"GET " + a.uiPrefix(), scopePublic,
+			http.StripPrefix(a.uiPrefix(), uiHandler()).ServeHTTP},
 		{"GET /api/stats", scopeTenant, a.stats},
 		{"GET /api/series", scopeTenant, a.series},
 		{"GET /api/requests", scopeTenant, a.requests},
@@ -526,7 +548,11 @@ func (a *API) routes() []route {
 	rs = append(rs, a.keepAliveStrategyRoutes()...)
 	// The KV-cache TTL analysis and strategy simulator, declared beside its handlers in
 	// kvcacheapi.go and appended here for the same reason.
-	return append(rs, a.kvCacheRoutes()...)
+	rs = append(rs, a.kvCacheRoutes()...)
+	// The Components tab's compaction-episode measurement, declared beside its handler in
+	// compactepisode.go and appended here for the same reason as the rest: this table is what
+	// the scoping tests walk.
+	return append(rs, a.compactEpisodeRoutes()...)
 }
 
 // Mount registers every dashboard route on a mux under the given prefix
@@ -602,7 +628,7 @@ func (a *API) requireManager(w http.ResponseWriter, r *http.Request, what string
 	}
 	p, ok := a.auth(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return false
 	}
 	if !p.Manager {
@@ -656,7 +682,7 @@ const (
 func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 	f, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	session := r.PathValue("session")
@@ -815,7 +841,7 @@ func mergeArchivedContent(local, fetched []*Event) []*Event {
 func (a *API) archive(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	rows, err := a.db(r).ArchivedSessions(f, atoiDefault(r.URL.Query().Get("limit"), 100))
@@ -845,7 +871,7 @@ func (a *API) archive(w http.ResponseWriter, r *http.Request) {
 func (a *API) archivedSession(w http.ResponseWriter, r *http.Request) {
 	_, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	session := r.PathValue("session")
@@ -894,7 +920,7 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 	// computed without the role check ships every tenant's session ids to everyone.
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	a.rec.Hub().ServeScoped(w, r, f.Tenant, f.TenantAll)
@@ -1009,7 +1035,7 @@ func atoiDefault(s string, def int) int {
 func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 	f, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	a.serveJSON(w, r, &a.statsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
@@ -1103,7 +1129,7 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 func (a *API) series(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	bucket := atoi64(r.URL.Query().Get("bucket"))
@@ -1118,7 +1144,7 @@ func (a *API) series(w http.ResponseWriter, r *http.Request) {
 func (a *API) requests(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	q := r.URL.Query()
@@ -1138,7 +1164,7 @@ func (a *API) request(w http.ResponseWriter, r *http.Request) {
 	}
 	_, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	// Content visibility: single-tenant keeps the CIDR gate (loopback or a trusted
@@ -1204,7 +1230,7 @@ func (a *API) request(w http.ResponseWriter, r *http.Request) {
 func (a *API) sessions(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	q := r.URL.Query()
@@ -1220,7 +1246,7 @@ func (a *API) sessions(w http.ResponseWriter, r *http.Request) {
 func (a *API) components(w http.ResponseWriter, r *http.Request) {
 	f, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	a.serveJSON(w, r, &a.componentsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
@@ -1260,7 +1286,7 @@ func (a *API) components(w http.ResponseWriter, r *http.Request) {
 func (a *API) breakdown(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	dim := r.URL.Query().Get("dim")
@@ -1289,7 +1315,7 @@ func (a *API) breakdown(w http.ResponseWriter, r *http.Request) {
 func (a *API) facets(w http.ResponseWriter, r *http.Request) {
 	flt, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	a.serveJSON(w, r, &a.facetsCache, cacheKey(p, r), func(db *DB) ([]byte, error) {
@@ -1421,7 +1447,7 @@ func (a *API) capture(w http.ResponseWriter, r *http.Request) {
 	if a.auth != nil {
 		p, ok := a.auth(r)
 		if !ok {
-			unauthorized(w)
+			a.unauthorized(w)
 			return
 		}
 		if !p.Manager {

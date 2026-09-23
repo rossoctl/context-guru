@@ -639,6 +639,16 @@ func validateValue(comp string, fd components.Field, v any) error {
 		}
 	case components.FieldEnum:
 		s, ok := v.(string)
+		// A WITHDRAWN VALUE IS ANSWERED BEFORE THE GENERIC MESSAGE, so the settings API keeps the
+		// same promise the component constructor does. Without this the two paths disagree: a
+		// withdrawn cache_state written in YAML is refused with the replacement named, while the
+		// same value POSTed here comes back as "is not one of any, pre_expiry" — the message this
+		// mechanism exists to avoid, on the one path where a human is watching a form.
+		if ok {
+			if why, withdrawn := fd.Withdrawn[s]; withdrawn {
+				return fmt.Errorf("config: %s: %s", where, why)
+			}
+		}
 		if !ok || !contains(fd.Options, s) {
 			return fmt.Errorf("config: %s %q is not one of %s", where, v, strings.Join(fd.Options, ", "))
 		}

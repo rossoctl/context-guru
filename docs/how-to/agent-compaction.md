@@ -19,6 +19,15 @@ summarization prompt in the last message of the request, and it covers Claude Co
 Shell (`proxy/agentcompaction.go`). Nothing else the agent sends to the same endpoint is
 treated specially.
 
+**It also lets that request through when it's the one thing that's already too large.** A
+session whose transcript grew past the [request-size ceiling](../reference/reference.md#request-size-ceiling-32-mib-by-default-128-mib-for-compaction)
+(most often bytes diverging from tokens on highly repetitive tool/shell output — a
+compact-and-cheap-in-tokens transcript can still be large in raw bytes) can no longer send an
+ordinary turn, but its own compaction request is exempt up to a higher ceiling, so `/compact`
+still has a way to shrink the session back down instead of leaving it permanently stuck. See
+[rossoctl/context-guru#278](https://github.com/rossoctl/context-guru/issues/278) for the full
+story.
+
 **A compaction does not split your session.** The session id comes from a stable value the
 agent already sends (`x-context-guru-session`, then Claude Code's `metadata.user_id`, then
 Bob's `metadata.taskId`), so one conversation stays one session in the dashboard and keeps

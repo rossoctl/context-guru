@@ -62,9 +62,9 @@ from the next turn onward the original goes upstream **in full, at its original 
 
 **That costs one cache-write of the suffix.** Turn N sent compacted bytes at that position and turn
 N+1 sends the full original, which is a change inside the provider's cached prefix — at ~11.5× a
-cache read, the cost the [cache-tail gate](../reference/config.md) exists to avoid everywhere else.
+cache read, the cost the [cache-tail gate](../reference/reference.md) exists to avoid everywhere else.
 It happens once per expanded content, on the turn after the expand, and it is counted:
-`expand_prefix_flips` at [`/stats`](../reference/routes.md#get-stats) and
+`expand_prefix_flips` at [`/stats`](../reference/reference.md#get-stats) and
 `cg_expand_prefix_flips_total` at `/metrics`.
 
 That figure is **per turn per message**, not per distinct content — every later turn re-sends the
@@ -108,7 +108,7 @@ sessions — and holds, per session:
   (counted as `stash_refused`) instead of quietly breaking an older one. Payloads carry a
   **shorter TTL** than everything else (`stash_ttl_seconds`, 1800 s) because each turn's replay
   re-derives them from the transcript — see
-  [why payloads expire sooner](../reference/config.md#why-payloads-expire-sooner-than-decisions).
+  [why payloads expire sooner](../reference/reference.md#why-payloads-expire-sooner-than-decisions).
 - **Sticky** — content ids already reduced on earlier turns, so output stays byte-stable
   across turns.
 - **Frozen decisions** — the exact replacement bytes an offloader replays so an
@@ -128,7 +128,7 @@ deliberately (with `marker_mode: off`) so `/compact` returns a clean, marker-fre
 **The model called expand and got a placeholder back.** The original expired or was evicted
 from the store. The provider requires one `tool_result` per `tool_call_id`, so an explicit
 placeholder is sent rather than nothing — which turns that offload lossy. Check `stash_missing`
-at [`/stats`](../reference/routes.md#get-stats): that is the one that means a marker went out with
+at [`/stats`](../reference/reference.md#get-stats): that is the one that means a marker went out with
 nothing behind it. `stash_expired` on its own does **not** — a reclaimed payload is normally
 re-derived by the next turn's replay, counted as `stash_revived` — so the remedy is the reserve
 (`store.max_entries` / `store.stash_max_bytes`), which is what refused the re-stash, and
@@ -177,7 +177,7 @@ costs content.
 
 **Frozen-decision health.** `frozen_hits` / `frozen_misses` / `frozen_dropped` /
 `frozen_repaired` / `frozen_flips` — see
-[Routes](../reference/routes.md#freeze-replay-health). A dropped decision is re-derived when
+[Routes](../reference/reference.md#freeze-replay-health). A dropped decision is re-derived when
 re-derivation is reproducible (`mask`, `failed_run`, whose replacement is a pure function of
 content and config). `extract_llm` is excluded on purpose: its replacement is sampled model
 output, so re-deriving could splice *different* bytes into a cached prefix.
@@ -185,4 +185,4 @@ output, so re-deriving could splice *different* bytes into a cached prefix.
 </details>
 
 See also: [Components](../components.md) · [When your agent compacts](agent-compaction.md) ·
-[Routes & headers](../reference/routes.md)
+[Routes & headers](../reference/reference.md)

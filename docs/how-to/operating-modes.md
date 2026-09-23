@@ -118,5 +118,5 @@ benefit came almost entirely from deferring the LLM trimmer, which no longer run
 prompt-caching backends, and it has to decline on agents that set their own cache
 breakpoints — which Claude Code does.
 
-See also: [Measure savings](measure-savings.md) · [Config & environment](../reference/config.md) ·
-[Observe-mode results](../results/observe-mode.md)
+See also: [Measure savings](measure-savings.md) · [Config & environment](../reference/reference.md) ·
+[Observe-mode results](../results/swebench-arms.md#results-observe-mode)

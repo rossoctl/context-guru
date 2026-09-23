@@ -33,7 +33,7 @@ func (a *API) keepAliveRoutes() []route {
 func (a *API) keepAlive(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	led, err := a.db(r).KeepAliveLedger(f)
@@ -48,7 +48,7 @@ func (a *API) keepAlive(w http.ResponseWriter, r *http.Request) {
 func (a *API) keepAliveBehaviour(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	// The coverage the gap bands are marked against, from the caller's own current policy where
@@ -67,7 +67,7 @@ func (a *API) keepAliveBehaviour(w http.ResponseWriter, r *http.Request) {
 func (a *API) keepAliveSessions(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -88,7 +88,7 @@ func (a *API) keepAliveSessions(w http.ResponseWriter, r *http.Request) {
 func (a *API) keepAliveCalc(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	q := r.URL.Query()
@@ -152,7 +152,7 @@ func (a *API) keepAliveCalc(w http.ResponseWriter, r *http.Request) {
 func (a *API) keepAliveLive(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	q := r.URL.Query()
@@ -170,7 +170,7 @@ func (a *API) keepAliveLive(w http.ResponseWriter, r *http.Request) {
 func (a *API) keepAliveRecommend(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	rec, err := a.db(r).KeepAliveRecommend(f)

@@ -3,6 +3,7 @@ package offload
 import (
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
@@ -149,8 +150,17 @@ func TestSummarizeOffloadKeepsExpandedContent(t *testing.T) {
 	if !present(plain.Input) {
 		t.Fatal("the fixture does not contain the content to begin with")
 	}
+	// Two turns: the summary is commissioned off the hot path, so the removal shows up on the
+	// SPLICING turn rather than on the one that decided to summarize.
+	plainCtx := ctxFor(store.NewMemory(store.Options{}))
+	plainCtx.Session = "keptverbatim-plain"
+	var rep0 components.Report
+	if _, err := s.Offload(&bschemas.BifrostChatRequest{Input: build()}, &rep0, plainCtx); err != nil {
+		t.Fatal(err)
+	}
+	WaitForSummaryForTest(plainCtx.Session, 5*time.Second)
 	var rep components.Report
-	if _, err := s.Offload(plain, &rep, ctxFor(store.NewMemory(store.Options{}))); err != nil {
+	if _, err := s.Offload(plain, &rep, plainCtx); err != nil {
 		t.Fatal(err)
 	}
 	if present(plain.Input) {

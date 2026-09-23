@@ -55,7 +55,8 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 		r.tn.Cache.HeadTTL1h, r.tn.Cache.HeadTTLMinTokens)
 	res := apply.BodyOpts(r.ctx, r.tn.Pipe, r.tn.Store, apply.Opts{
 		Provider: r.provider, Body: r.body, Session: r.session, Tenant: r.tn.ID, Bypass: r.bypassed,
-		Models: r.models, Window: r.window, CacheMode: h.opts.CacheMode,
+		Models: r.models, Window: r.window, WindowExact: r.windowExact, CacheMode: h.opts.CacheMode,
+		CompactionPoint: r.compactionPoint, CompactionPointSource: r.compactionPointSource,
 		SelfRates: r.rates, RatesFor: h.ratesFor(r.ctx),
 		HeadTTL1h:        headTTL1h,
 		HeadTTLMinTokens: headTTLMinTokens,
@@ -83,6 +84,17 @@ type reqInfo struct {
 	bypassed bool
 	models   components.ModelSpec
 	window   int
+	// windowExact says window is published for THIS model rather than a family guess —
+	// carried alongside it so a component deciding "how full is the context" can decline
+	// rather than act on a figure the substring table of last resort got 5x wrong.
+	windowExact bool
+	// compactionPoint is C in provider-billed tokens: where the CONVERSATION'S OWN compaction
+	// mechanism acts, which is the denominator a fill fraction belongs over rather than the window.
+	// 0 = unknown. compactionPointSource is "measured" | "assumed" | "window_fallback", carried so a
+	// decision made on a guess is distinguishable from one made on a measurement.
+	// See internal/compactionpoint.
+	compactionPoint       int
+	compactionPointSource string
 	// rates are the request model's per-token rates, so a component that calls that same
 	// model (model.source: incoming) can price its own calls at the right rates instead of
 	// a built-in constant. Zero when the pricer cannot name the model.
@@ -139,7 +151,8 @@ func (h *Handler) observe(r *reqInfo) {
 	h.pool.Enqueue(key, func(ctx context.Context) {
 		apply.BodyOpts(logging.With(ctx, lg), info.tn.Pipe, info.tn.Shadow, apply.Opts{
 			Provider: info.provider, Body: info.body, Session: info.session, Tenant: info.tn.ID,
-			Models: info.models, Window: info.window, CacheMode: h.opts.CacheMode,
+			Models: info.models, Window: info.window, WindowExact: info.windowExact, CacheMode: h.opts.CacheMode,
+			CompactionPoint: info.compactionPoint, CompactionPointSource: info.compactionPointSource,
 			Mode: components.ModeObserve,
 			// The Tracker, so the projection is measured under the SAME cached-prefix
 			// boundary an enforcing mode would use. Without it the boundary is unknown,

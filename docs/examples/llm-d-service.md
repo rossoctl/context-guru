@@ -9,6 +9,49 @@ A ready-to-run example that turns context-guru into a stateless HTTP **compactio
     Source, configs, build script, and Go client:
     [`examples/llm-d-service`](https://github.com/rossoctl/context-guru/tree/main/examples/llm-d-service).
 
+## Quickstart
+
+1. Build:
+
+    ```sh
+    ./examples/llm-d-service/build.sh        # → bin/context-guru-proxy
+    ```
+
+2. Run it. The deterministic `toon` config needs no credentials:
+
+    ```sh
+    bin/context-guru-proxy --config examples/llm-d-service/configs/toon.yaml
+    # listens on :4000 (set LISTEN_ADDR to change)
+    ```
+
+3. Post a request body to `/compact`:
+
+    ```sh
+    curl -s -XPOST localhost:4000/compact -H 'content-type: application/json' -d '{
+      "model": "gpt-4o-mini",
+      "messages": [
+        {"role": "user", "content": "list users"},
+        {"role": "tool", "tool_call_id": "c1",
+         "content": "[{\"id\":1,\"name\":\"Alice\",\"role\":\"admin\"},{\"id\":2,\"name\":\"Bob\",\"role\":\"user\"},{\"id\":3,\"name\":\"Carol\",\"role\":\"admin\"},{\"id\":4,\"name\":\"Dave\",\"role\":\"user\"},{\"id\":5,\"name\":\"Eve\",\"role\":\"admin\"}]"}
+      ]
+    }'
+    ```
+
+    You get the same request back with the tool output re-encoded as TOON — field names once,
+    then one row per element:
+
+    ```
+    [5]{id,name,role}:
+    1,Alice,admin
+    2,Bob,user
+    ...
+    ```
+
+    If the body comes back unchanged, that's expected in three cases (all return `200` with the
+    original body): the output is below a component's `min_tokens` gate, the body has no
+    `messages` array, or a component failed. The service never calls upstream and never errors
+    your caller. Send a larger tool output to see compaction act.
+
 ## The contract
 
 The router's `request-inline-compaction` step calls an external service with a simple contract:
@@ -72,4 +115,4 @@ model is reachable they degrade gracefully — `extract` falls back to a determi
 projection and `summarize` no-ops — and the request still returns `200`.
 
 See all three run on one input, with the full `messages` before and after, in the
-[Before → After showcase](before-after.md).
+[Before → After showcase](live-captures.md#before-after-showcase).

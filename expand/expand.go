@@ -4,7 +4,7 @@
 // original from the Store.
 //
 // The continuation LOOP that actually answers an expand tool call is host glue
-// (the bifrost proxy wraps its chat route; the AuthBridge plugin does it in
+// (the bifrost proxy wraps its chat route; a sidecar plugin does it in
 // OnResponse) — but every host reuses ParseMarkers, ToolDef, and Resolve from
 // here so the wire contract stays identical across integrations.
 package expand

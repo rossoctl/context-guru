@@ -22,8 +22,6 @@ Turn the dashboard on, run your agent, and read the numbers with their denominat
 4. Read the Overview: tokens before/after, the four savings ratios, baseline vs actual
    dollars, and the cumulative-cost chart.
 
-![The dashboard's Overview](../img/dashboard/01-overview.jpg)
-
 For a scriptable snapshot instead, `curl -s localhost:4000/stats | jq`.
 
 ## Which number to quote
@@ -53,14 +51,8 @@ skipped for cache safety, offloads the model asked back for, reverted component 
 our own latency.
 
 Per-component economics (runs, act rate, unique vs gross saved, latency, verdict) show
-which components earn their place on *your* traffic:
-
-![Per-component economics](../img/dashboard/03-component-metrics.jpg)
-
-Click a component to filter the request list, then open a request to see exactly what
-changed as a Git-style diff:
-
-![Git-style content diff](../img/dashboard/09-content-git-diff.jpg)
+which components earn their place on *your* traffic. Click a component to filter the
+request list, then open a request to see exactly what changed as a Git-style diff.
 
 Content capture is **off by default** — enable it with `--dashboard-content`. It is the one
 path that writes agent output to disk, so the operator opts in for their own transcripts.
@@ -110,7 +102,7 @@ guard that turned each candidate away, which separates three different situation
   LLM call would lose money here).
 - **A gap worth closing** — `cmdfilter: {no_filter_match: N}` means nothing matched.
   Cross-check `cmdfilter_selector_misses`, which ranks the output shapes no filter claimed
-  and tells you which filter to [write next](custom-dsl-filter.md).
+  and tells you which filter to [write next](../components/dsl.md).
 
 `top_passthrough` lists components that ran and changed nothing. `cachesplit` always lands
 there because its win is a provider-side cache hit, invisible to content-token counts; a
@@ -169,8 +161,6 @@ scripts/cc-demo.sh
 To view a full harness run, point `--dashboard-bench-dirs` at its jobs root: each run's
 `summary.json` + `rows-<arm>.json` is ingested, with cost-vs-reward per arm and per-task
 drill-down.
-
-![Benchmark comparison](../img/dashboard/11-benchmark-comparison.jpg)
 
 See also: [Dashboard](../dashboard.md) · [Benchmarks](../RESULTS.md) ·
 [Sync & observe](operating-modes.md)

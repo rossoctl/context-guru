@@ -3,7 +3,7 @@
 !!! warning "Offload — lossy, reversible (LLM-written filter). **Spends money to save money.**"
     A cheap model writes a small program that projects a large tool output down to what the agent
     actually needs, deletes the rest, and stashes the original. The powerful, relevance-aware
-    counterpart to the deterministic [`extract`](extract.md) — and the only component whose
+    counterpart to the deterministic [`extract`](offload-reducers.md#extract) — and the only component whose
     savings can be **net negative**. Read [Economics](#economics) before enabling it.
 
 ## The honest verdict
@@ -680,7 +680,7 @@ questions at a flat rate.
 
 !!! danger "These are NOT this component's figures. Read `extract.by_component`."
     The block's top-level keys are the **sum across every extraction component** — this one and
-    [`extract_llm_sweep`](extract_llm_sweep.md), which both write the same counters. The two have
+    [`extract_llm_sweep`](advanced-offload.md#extract_llm_sweep), which both write the same counters. The two have
     opposite economics: per-output calls on a cheap model here, one call on the request's own
     frontier model there.
 
@@ -711,13 +711,30 @@ questions at a flat rate.
 | `gross_value_usd` | What its saved tokens are worth at the rate they'd have been billed |
 | **`net_value_usd`** | **The honest headline. Negative = underwater.** `null` when the spend is not known |
 | `avg_latency_ms` | Mean wall time per call (latency cost on the hot path) |
-| `gross_saved_tokens` | Tokens removed |
+| `gross_saved_tokens` | Tokens removed, measured on the message **as spliced** — the candidate minus what actually went upstream, marker and summary segment included |
 | `reasons` / `top_reason` | Why extraction ran or was suppressed |
 
 Per-component, in `components.extract_llm`: **`acted` counts free replays.** A frozen decision
 re-spliced on a later turn saves tokens and costs nothing, and it landed in the same counter as the
 call that derived it — `acted: 239` beside `reapplied_same_session: 2,291` was read as 239 paid
 extractions. Use `acted_fresh` (paid work) and `acted_replay` (free) instead.
+
+**Both extraction components measure a saving the same way**, and they did not always. `extract_llm`
+booked the candidate minus the model's PROJECTION, while the text written is the projection plus the
+summary segment, the marker and the recovery hint — so its figure overstated by all three, with the
+summary the dominant term. Since the summary is a model output, the overstatement varied per
+candidate rather than averaging out, and two arms of a comparison read side by side were not
+measuring the same thing (#195). Both components now subtract the message that was actually sent, so
+the row is the number of tokens the requests it counts genuinely shrank by. **It is not the bill
+delta**, for two reasons that predate that fix and are unchanged by it: `RecordExtractionSaving`
+counts each *distinct* compaction once, so when single-flight hands two concurrent requests the same
+result two messages shrink and one saving is booked; and replays feed `gross_value_usd` but never
+this row, so the tokens are fresh removals only while the dollars beside them are fresh plus replay
+— the same `acted_fresh` / `acted_replay` split, one column over. Take the money question to
+`gross_value_usd` and `net_value_usd`.
+
+The basis matters beyond reporting: the same figure feeds the ratio tracker the economic gate spends
+against, so an optimistic saving argued for making more calls.
 
 Plus, at the top level of `/stats`: **`llm_truncated`** — replies that stopped at the model's
 output cap. That is the worst outcome available, full price for zero result, and it used to be
@@ -775,7 +792,7 @@ over-long one used to abandon the whole reduction rather than truncate.
 | `model.api_key` | *the process env key* | **Credential** for the pinned endpoint. Empty falls back to `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `OPENAI_API_KEY`, and a **hosted** deployment refuses that fallback rather than bill a tenant's compaction to the operator (`offload.AllowEnvModelKey`). The settings page can set it and never displays it back. |
 | `model.auth` | `x-api-key` | Anthropic only: how the key is sent. `bearer` is what a LiteLLM/gateway front end expects. |
 | `model_max_input_tokens` | *derived* | The extraction model's input budget (see [Context guard](#context-guard)). Pin it for a model whose id nothing can resolve. |
-| `trigger` | *derived* | Explicit gate: `min_output_tokens`, `min_request_tokens`, `min_messages`, plus the window fractions `min_request_frac`, `min_output_frac`, `huge_output_frac`. Setting any of the absolute thresholds pins the trigger; a fraction only ever *raises* the absolute floor it resolves against. |
+| `trigger` | *derived* | Explicit gate: `min_output_tokens`, `min_request_tokens`, `min_messages`, plus the window fractions `min_request_frac`, `min_output_frac`, `huge_output_frac`. Setting any of the absolute thresholds pins the trigger. `min_request_frac` is a separate condition from `min_request_tokens` rather than a floor on it — the two are measured on different scales (see [Components](../components.md#summary)) and both must be met. **The fraction is best-effort here:** it is compared against the provider's own count for the session's previous turn, and when that is unavailable (a first turn, or a host that does not record it) the fraction is skipped rather than refused — so it *permits* where `summarize` declines. That is deliberate: this component's real gate is the per-candidate economics, and refusing would only make it fire less on deployments that cannot report a billed figure. The per-item fractions do raise the per-item floor they resolve against. |
 | `llm_every_n_requests` | — | Fire the LLM path at most once per N requests per session. |
 | `llm_max_per_request` | 0 | Cap LLM calls per firing request (0 = unlimited). |
 | `rewrite` | `true` | `false` forces the verified deletion-only (subsequence) guarantee. |
@@ -856,4 +873,4 @@ Output below the derived floor, low context pressure, **suppressed by the econom
 common case on a caching backend), throttled out this turn, result served from the global cache,
 projection not smaller, or no model available.
 
-See also: [`extract`](extract.md) · [Components overview](../components.md) · [Choose a preset](../how-to/choose-a-preset.md)
+See also: [`extract`](offload-reducers.md#extract) · [Components overview](../components.md) · [Choose a preset](../reference/presets.md)

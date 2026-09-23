@@ -28,11 +28,18 @@
 set -uo pipefail
 
 PORT="${CLAUDE_PLUGIN_OPTION_PORT:-8787}"
-PRESET="${CLAUDE_PLUGIN_OPTION_PRESET:-cache}"
+# `off` is the default preset: the passthrough pipeline, no components. See DEFAULT_PRESET in
+# settings.py for why, and TestThePresetDefaultIsEncodedOnce for the test that keeps these agreeing.
+PRESET="${CLAUDE_PLUGIN_OPTION_PRESET:-off}"
 IDLE_EXIT="${CLAUDE_PLUGIN_OPTION_IDLE_EXIT:-24h}"
 BIN="${CONTEXT_GURU_BIN:-context-guru-proxy}"
 LOG="${TMPDIR:-/tmp}/context-guru-proxy-${PORT}.log"
+# See --emit-facts below. Off by default: the hook path's output is read by a person.
+EMIT_FACTS=0
 HEALTH="http://127.0.0.1:${PORT}/healthz"
+# Our own directory, so this hook can call settings.py. ${CLAUDE_PLUGIN_ROOT} is substituted into a
+# `!`-block command string but is NOT exported to a child process, so it cannot be relied on here.
+HERE="$(unset CDPATH; \cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || HERE=""
 
 note() { printf 'context-guru: %s\n' "$*"; }
 
@@ -98,6 +105,15 @@ UPSTREAM_ARG=""
 # covered by the same permission rule as the rest of the command, and needs no symlink.
 BIN_ARG=""
 PORT_ARG=""
+# --preset and --idle-exit, the last two options that existed only as CLAUDE_PLUGIN_OPTION_* reads.
+#
+# They are here so a command handed to a HUMAN can carry them as flags. The alternative is an env
+# prefix, and this file already records what that costs: a pasted env-prefixed invocation split
+# across two lines, the assignments became a no-op statement, the script ran unrouted and exited
+# without a word, and three rounds of guessing followed. check-proxy.sh prints exactly such a
+# recovery command, so every value it needs to pass must have an argument form.
+PRESET_ARG=""
+IDLE_EXIT_ARG=""
 # Every discarded or malformed argument is REPORTED, never swallowed.
 #
 # The first version of this loop had no `*)` branch and took `$2` for `--upstream` on faith. All three
@@ -144,6 +160,11 @@ while [ $# -gt 0 ]; do
     # form twice over; this one was missed both times.
     --port) if takes_value --port "${2:-}"; then PORT_ARG="$2"; shift; fi ;;
     --port=*) if takes_value --port "${1#--port=}"; then PORT_ARG="${1#--port=}"; fi ;;
+    --preset) if takes_value --preset "${2:-}"; then PRESET_ARG="$2"; shift; fi ;;
+    --preset=*) if takes_value --preset "${1#--preset=}"; then PRESET_ARG="${1#--preset=}"; fi ;;
+    --idle-exit) if takes_value --idle-exit "${2:-}"; then IDLE_EXIT_ARG="$2"; shift; fi ;;
+    --idle-exit=*) if takes_value --idle-exit "${1#--idle-exit=}"; then IDLE_EXIT_ARG="${1#--idle-exit=}"; fi ;;
+    --emit-facts) EMIT_FACTS=1 ;;
     *) note "ignoring unrecognised argument '$1'" ;;
   esac
   shift
@@ -152,6 +173,15 @@ FORCE="$START_UNROUTED"
 # BIN was resolved at the top from CONTEXT_GURU_BIN or the bare name; an explicit --bin overrides both.
 if [ -n "$BIN_ARG" ]; then
   BIN="$BIN_ARG"
+fi
+# An explicit --preset / --idle-exit overrides the option read at the top, same precedence as --bin.
+# Note this does NOT override a keepalive --config: that file states its own preset and --config
+# replaces the preset entirely, which is why the success note reports what the config says.
+if [ -n "$PRESET_ARG" ]; then
+  PRESET="$PRESET_ARG"
+fi
+if [ -n "$IDLE_EXIT_ARG" ]; then
+  IDLE_EXIT="$IDLE_EXIT_ARG"
 fi
 # PORT likewise, and everything derived from it has to be recomputed — the gate below compares against
 # it, and the log, pidfile, health URL and dashboard DB are all named after it. Re-deriving them here
@@ -187,9 +217,168 @@ case "${ANTHROPIC_BASE_URL:-}" in
 esac
 fi
 
-# --- (2) already up? ---------------------------------------------------------------------
+# --- (1b) what configuration do we WANT, and what is running? ----------------------------
+# CONTEXT_GURU_STATE first, like settings.py, reset.sh and check-proxy.sh. S10 in review: this was the
+# ONE script that ignored it, which had two consequences. A user who relocates their state directory
+# got the pidfile written somewhere else, and uninstall looks for it here - one way it loses track of a
+# running proxy. And it defeated the test isolation this PR added: pinning CONTEXT_GURU_STATE does not
+# isolate the hook tests if the hook they spawn does not read it, which is how a `go test` run wrote
+# four pidfiles into a reviewer's real ~/.local/state/context-guru.
+#
+# Resolved HERE, before the idempotence probe, because the probe now has to compare the running
+# proxy's configuration against the one the options ask for - and both the pidfile and the
+# fingerprint live in this directory.
+STATE="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}"
+mkdir -p "$STATE" 2>/dev/null || STATE="${TMPDIR:-/tmp}"
+PIDFILE="${STATE}/proxy-${PORT}.pid"
+# What the proxy holding this port was STARTED with. There is no way to ask it: /healthz answers the
+# literal string "ok" (proxy/proxy.go), and nothing else is unauthenticated. So the starter records it.
+FINGERPRINT="${STATE}/proxy-${PORT}.fingerprint"
+
+# The argument wins: it is the only one of these three the install skill can actually rely on, since
+# a Bash tool call sees neither the plugin option nor, necessarily, the session's own env. Moved up
+# with STATE so it can go into the fingerprint below; UPSTREAM_ARGS is still built at launch.
+UPSTREAM="${UPSTREAM_ARG:-${CLAUDE_PLUGIN_OPTION_UPSTREAM:-${ANTHROPIC_UPSTREAM:-}}}"
+
+# Make the strategy config agree with the plugin option BEFORE anything reads it.
+#
+# This is what makes `/plugin configure` work. --config REPLACES --preset rather than layering, so
+# the preset recorded in an armed strategy file used to be in force forever: a user set `housellm`,
+# saw it stick in the config UI, and kept running whatever was recorded when they first armed
+# keep-alive, with nothing anywhere reporting the divergence.
+#
+# Fails open in every direction - an unreadable file, a foreign file, a missing settings.py, no
+# python at all - because this runs on SessionStart and a config we cannot rewrite is never a reason
+# to leave the user without a proxy. `strategy sync` itself refuses to touch anything without our
+# ownership marker.
+SYNC_OUT=""
+if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; then
+  SYNC_OUT=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" strategy sync \
+               --port "$PORT" --preset "$PRESET" 2>/dev/null) || SYNC_OUT=""
+fi
+# The strategy NAME as sync saw it, so the fingerprint does not re-derive it from the file and become
+# a second encoding of the ownership rule. Empty when sync could not run or declined to act, and an
+# empty name deliberately makes the fingerprint incomparable - see below.
+SYNC_STRATEGY=$(printf '%s\n' "$SYNC_OUT" | sed -n 's/^strategy=//p' | head -1)
+
+# The configuration we want, as one line. Compared as an opaque string: any field changing means the
+# running proxy was started for a different configuration than this session asks for.
+fingerprint_want() {
+  printf 'preset=%s strategy=%s idle=%s upstream=%s port=%s\n' \
+    "$PRESET" "$SYNC_STRATEGY" "$IDLE_EXIT" "$UPSTREAM" "$PORT"
+}
+
+# Stop the proxy we started, so a new one can come up with the new configuration.
+#
+# PIDFILE FIRST, and never a `pkill` pattern: a pattern matching the word proxy on a shared box has
+# killed the wrong process before (see the --listen comment below), and these boxes are shared with
+# other people and other sessions running as the same unix user.
+#
+# NO PIDFILE means we did not start whatever is holding this port. It may be a colleague's proxy, a
+# hand-started one, or an unrelated service. We do not signal it - we leave it alone and say so.
+# Killing something we cannot prove is ours is the one failure this whole file is written to avoid.
+# Waits for the PORT to be free, not for the process to exit, and that distinction is the whole
+# correctness of this function.
+#
+# main.go handles SIGTERM through http.Server.Shutdown, which closes the LISTENERS FIRST and only
+# then drains in-flight requests, for up to 25 s. So there is a window - and a routine one, since a
+# streaming completion easily runs past ten seconds, and on a shared port it is somebody else's turn
+# holding the drain open - where the old proxy has released the port but has not exited.
+#
+# Waiting on the pid treated that window as failure. The caller then reported "it is still running
+# with <old fingerprint>" and exited 0, which is wrong in the direction that stops anyone looking:
+# nothing was listening, so the session was routed at a dead port and the message said the opposite.
+# Reported by review-pr-249-250 and reproduced with a fake proxy that drains the way main.go does.
+#
+# The port being free is also exactly the precondition the caller needs, because that is what lets a
+# new proxy bind - so this now waits for the condition that matters rather than a proxy for it.
+# Which pid is LISTENING on our port, or "" if that cannot be established here.
+#
+# This exists because "is my child alive?" and "did my child get the port?" are different questions,
+# and the second is the one that decides whether a fingerprint may be written. Reported by
+# review-pr-249-250 with a timeline: the post-launch poll was satisfied 22 ms BEFORE the new proxy
+# even exec'd, and its bind attempt was 150 ms further out - so `kill -0` on the recorded pid was
+# necessarily true, and the false fingerprint was written anyway. The predicate was right and
+# evaluated too early.
+#
+# No timing assumption: it asks who holds the socket. `ss` on Linux, `lsof` on macOS, and "" when
+# neither is available - the caller treats that as "cannot tell" rather than as either answer.
+port_owner_pid() {
+  local out
+  if command -v ss >/dev/null 2>&1; then
+    out=$(ss -ltnHp "sport = :${PORT}" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)
+    [ -n "$out" ] && { printf '%s\n' "$out"; return 0; }
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    out=$(lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN -t 2>/dev/null | head -1)
+    [ -n "$out" ] && { printf '%s\n' "$out"; return 0; }
+  fi
+  return 1
+}
+
+stop_running_proxy() {
+  local pid deadline
+  pid=$(cat "$PIDFILE" 2>/dev/null)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  # Plain kill, i.e. SIGTERM, which the proxy handles gracefully: a request already being served is
+  # not dropped by this.
+  kill "$pid" 2>/dev/null || return 1
+  # 30s covers main.go's 25s Shutdown ceiling. In practice the listeners close in milliseconds
+  # (measured 15 ms with no dashboard viewer), so this loop almost always ends on its first probe.
+  deadline=$(( $(date +%s) + 30 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    # EITHER condition is success: the process is gone, or it has released the port and is merely
+    # draining. Both mean a new proxy can bind.
+    kill -0 "$pid" 2>/dev/null || return 0
+    curl -fsS --max-time 1 "$HEALTH" >/dev/null 2>&1 || return 0
+    sleep 0.25
+  done
+  return 1
+}
+
+# --- (2) already up, and is it the proxy we want? ----------------------------------------
 if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
-  exit 0
+  fp_have=$(cat "$FINGERPRINT" 2>/dev/null)
+  fp_want=$(fingerprint_want)
+  # Leave it alone unless we can prove a change is needed. Three of these four cases are deliberate
+  # no-ops, because the cost of a wrong restart (interrupting somebody else's session) is higher than
+  # the cost of a stale preset (reported, and fixed by the next cold start).
+  if [ -z "$fp_have" ]; then
+    # A proxy from before fingerprints existed, or one somebody else started. Not ours to replace.
+    :
+  elif [ -z "$SYNC_STRATEGY" ]; then
+    # We could not establish what strategy is in effect, so we cannot say the running one is wrong.
+    :
+  elif [ "$fp_have" = "$fp_want" ]; then
+    :
+  elif ! stop_running_proxy; then
+    # The wait expired. Re-probe before choosing words: "could not stop it" and "it is still
+    # serving" are different claims, and only the second one justifies leaving the port alone.
+    # Asserting the second from the first is how this branch reported a healthy port about a dead
+    # one. The probe is the authority, not the kill.
+    if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
+      note "the proxy on port ${PORT} was started with a different configuration and could not be"
+      note "stopped automatically; it is STILL ANSWERING with: ${fp_have}"
+      note "stop it and start a new session, or run /context-guru:status."
+      exit 0
+    fi
+    # Not answering: the port is free even though the old process has not exited. Fall through and
+    # start the new one, or the session is left routed at a port nothing is listening on.
+    note "the old proxy on port ${PORT} stopped answering but has not exited yet; starting the new one."
+    rm -f "$FINGERPRINT" 2>/dev/null || true
+  else
+    note "configuration changed, restarting the proxy on port ${PORT}."
+    note "  was: ${fp_have}"
+    note "  now: ${fp_want}"
+    rm -f "$FINGERPRINT" 2>/dev/null || true
+  fi
+  # Still up? Then one of the no-op branches above applied and there is nothing to do.
+  if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
+    exit 0
+  fi
 fi
 
 if ! command -v "$BIN" >/dev/null 2>&1 && [ ! -x "$BIN" ]; then
@@ -227,9 +416,22 @@ command -v setsid >/dev/null 2>&1 || STARTER=(nohup)   # macOS has no setsid
 # was a 404. Its default DB path is `./context-guru-dashboard.db` — the current directory, i.e.
 # the user's repository — so the path must be set explicitly or the plugin litters the project it
 # was invited into.
-STATE="${XDG_STATE_HOME:-$HOME/.local/state}/context-guru"
-mkdir -p "$STATE" 2>/dev/null || STATE="${TMPDIR:-/tmp}"
-PIDFILE="${STATE}/proxy-${PORT}.pid"
+# STATE, PIDFILE and FINGERPRINT are resolved in section (1b), above the idempotence probe that
+# needs them. Kept there rather than duplicated here.
+
+# --emit-facts: print the paths this script ACTUALLY used, as key=value, for a caller that has to
+# report them. install.sh used to re-derive the pidfile path from the same expression as line 258 -
+# and missed the fallback on line 259, so on a machine whose state dir cannot be created it looked
+# for the pidfile in the state dir while this script had already written it to $TMPDIR. The caller's
+# honest "a proxy is still running" report then printed nothing at all, in exactly the situation the
+# fallback exists for: a machine that is already broken, which is when a health check is likeliest to
+# fail. One place decides the path and the reader is told, so the two cannot drift again.
+#
+# Behind a flag so the SessionStart hook path, whose output a user reads, is unchanged.
+if [ "$EMIT_FACTS" = 1 ]; then
+  printf 'pidfile=%s\n' "$PIDFILE"
+  printf 'log=%s\n' "$LOG"
+fi
 
 # --anthropic-upstream, when something else is already the gateway.
 #
@@ -243,9 +445,7 @@ PIDFILE="${STATE}/proxy-${PORT}.pid"
 # released v0.1.1 binary: with it set and no flag, requests arrive at the configured upstream). But
 # relying on inheritance alone is fragile — this hook only sees what the session's env block passes
 # it — so pass it EXPLICITLY when it is configured, and let the plugin option name it too.
-# The argument wins: it is the only one of these three the install skill can actually rely on, since
-# a Bash tool call sees neither the plugin option nor, necessarily, the session's own env.
-UPSTREAM="${UPSTREAM_ARG:-${CLAUDE_PLUGIN_OPTION_UPSTREAM:-${ANTHROPIC_UPSTREAM:-}}}"
+# UPSTREAM itself is resolved in section (1b) so it can enter the fingerprint.
 UPSTREAM_ARGS=()
 if [ -n "$UPSTREAM" ]; then
   UPSTREAM_ARGS=(--anthropic-upstream "$UPSTREAM")
@@ -263,8 +463,90 @@ fi
 # keep-alive was turned on, the exact opposite of what enabling it is supposed to do.
 CONFIG_ARGS=()
 KEEPALIVE_CFG="${STATE}/keepalive-${PORT}.yaml"
+
+# PRESET_NOTE is what the success note reports, and it is NOT $PRESET once --config is passed. Because
+# --config replaces the preset entirely (see above), the proxy runs whatever `preset:` the keep-alive
+# file recorded, while $PRESET still holds the plugin option. Reporting the option named a value that
+# was not in effect, and the two diverge the moment somebody changes the option after enabling
+# keep-alive — a confident report of something untrue, which is the failure this plugin exists to avoid.
+PRESET_NOTE="$PRESET"
+# STRATEGY_NOTE is the NAME of the cache strategy in effect. Reported because a name is the only
+# thing a user can say back to us: "put it back on 5-min-ping" has to be a sentence, not an
+# archaeology exercise over four tuning numbers. `none` is the absence of a config, so it is the
+# correct thing to report when there is no file - not "unknown", and not silence.
+#
+# It said `split` until the default preset became `off`. That name came from `cachesplit`, which is
+# no longer in the default pipeline, so the startup note was announcing a component that was not
+# running - and it was a SECOND encoding of a name settings.py already owns, which is the defect
+# shape this branch exists to remove. Caught by reading the note in a test run, not by the drift
+# test, which only covered the preset. TestTheStartupNoteUsesAStrategyNameSettingsKnows covers it now
+# (the earlier spelling of that name in this comment was of a test that never existed).
+STRATEGY_NOTE="none"
 if [ -f "$KEEPALIVE_CFG" ]; then
   CONFIG_ARGS=(--config "$KEEPALIVE_CFG")
+  # Same fail-open discipline as the preset read below: an unreadable or marker-less file must
+  # still start the proxy, and must report what is KNOWN rather than something confident and wrong.
+  # The name is trusted only on a file whose first line carries OUR marker. Read without that check,
+  # any foreign config with `strategy=` on line 1 was reported as `cache strategy <theirs>` in the
+  # startup note while `strategy show` called the same file `(foreign)` - and the stated point of
+  # recording the name in the file is that the two readers cannot disagree. Same marker test as
+  # settings.py's _strategy_is_ours(): the prefix, and `written by` on that line.
+  cfg_first=$(sed -n '1p' "$KEEPALIVE_CFG" 2>/dev/null)
+  case "$cfg_first" in
+    "# context-guru:"*"written by"*)
+      cfg_strategy=$(printf '%s\n' "$cfg_first" \
+        | sed -n 's/.*strategy=\([A-Za-z0-9._-]*\).*/\1/p') ;;
+    *) cfg_strategy= ;;
+  esac
+  if [ -n "$cfg_strategy" ]; then
+    STRATEGY_NOTE="$cfg_strategy"
+  else
+    STRATEGY_NOTE="unnamed (config predates named strategies, or is not ours)"
+  fi
+  # Fails OPEN, and reports nothing rather than something wrong. This runs on the SessionStart path, so
+  # an unreadable, empty, comment-only or preset-less file must still start the proxy.
+  #
+  # What keeps that true is the ABSENCE of `set -e` combined with the PRESENCE of `set -uo pipefail`
+  # (line 28) — and it is pipefail that makes the combination load-bearing, not -e alone. With pipefail,
+  # a failing `sed` (a config that exists but cannot be read) becomes this assignment's exit status; add
+  # -e and the script dies with status 2 BEFORE the proxy is launched, which is the failure this file's
+  # own header calls the biggest risk in the feature. Do not add -e here without reading
+  # TestStartProxyReportsThePresetActuallyInEffect's unreadable-config row, which exists to catch it.
+  #
+  # Anchored at column zero: `preset:` is a top-level key, and a nested one (e.g. components.offload.
+  # preset) in a hand-edited file both LOADS and would win a first-match-any-indentation search, so the
+  # note would name the inner value while the proxy ran the outer one. Inline comments are stripped for
+  # the same reason — `preset: cache # why` used to leak the comment into the note.
+  cfg_preset=$(sed -n 's/^preset:[[:space:]]*//p' "$KEEPALIVE_CFG" 2>/dev/null \
+                 | head -1 | sed 's/[[:space:]]*#.*$//' | tr -d "\"'" | sed 's/[[:space:]]*$//')
+  if [ -n "$cfg_preset" ]; then
+    PRESET_NOTE="${cfg_preset} (from keepalive-${PORT}.yaml)"
+  else
+    # No preset: line. Do NOT say "compaction is off" — a config may set `pipeline:` directly without
+    # naming a preset, and files written before the always-state-the-preset rule exist in the wild. So
+    # report only what is known: the config decides, and it did not name one.
+    PRESET_NOTE="unstated in keepalive-${PORT}.yaml"
+  fi
+fi
+
+# LAST-MOMENT re-probe, because the idempotence probe at section (2) ran a while ago and a single
+# transient failure of it is what set up the whole reported defect: the port was occupied the entire
+# time, one probe blipped, and this script launched into a port it could never bind. Re-asking here
+# removes the CAUSE rather than only detecting the consequence, and it is free.
+#
+# Anything answering now is not ours - we have not started yet - so this is the already-up case
+# arriving late. Take the same no-op decision section (2) takes when it cannot prove a change is
+# needed: say nothing, touch nothing.
+if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
+  printf '%s something is already answering on port %s; not starting a second proxy\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$PORT" >>"$LOG" 2>/dev/null
+  # On STDOUT, not only in the log, unlike the gate in section (1). Reaching this line means section
+  # (2) already decided a proxy was needed - it was either absent or due for replacement - so a port
+  # that answers NOW is unexpected, and staying quiet would leave a user whose configuration change
+  # did not apply with nothing to go on.
+  note "something else is answering on port ${PORT}, so no proxy was started and nothing was recorded."
+  note "if you changed a setting, it is NOT in effect; check with /context-guru:status."
+  exit 0
 fi
 
 PRESET="$PRESET" \
@@ -306,12 +588,73 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # timeout belongs on the idempotence probe above (where a false negative starts a SECOND proxy
   # and overwrites the pidfile with a pid that immediately exits), not on this one.
   if curl -fsS --max-time 1 "$HEALTH" >/dev/null 2>&1; then
-      if [ -n "$UPSTREAM" ]; then
-      note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET}, idle-exit ${IDLE_EXIT}), chained behind ${UPSTREAM}."
+    # WHOSE PROXY ANSWERED? The health poll cannot tell "the process I just launched" from "something
+    # else already on this port", and writing the fingerprint on the strength of it recreated the
+    # exact defect this branch exists to remove - via the mechanism meant to remove it.
+    #
+    # The sequence, reported by review-pr-249-250 and reproduced: one transient failure of the
+    # idempotence probe above skips the whole already-up block; this launch then fails to BIND
+    # because the port is occupied; the OLD proxy answers this poll; and the fingerprint is written
+    # describing a configuration that never ran. The next two sessions then no-op, because
+    # fp_have == fp_want. Ground truth in the reproduction: only the original preset ever bound.
+    #
+    # That is strictly worse than before this branch, and the reason is the shape of the change: each
+    # session used to re-derive the answer, so a stale reading corrected itself next time, and a
+    # PERSISTED false claim suppresses the correction instead. A cache of a decision has to be at
+    # least as trustworthy as re-deciding, or it is not a cache but a way to make one bad reading
+    # permanent.
+    #
+    # The trigger is not exotic, and this branch's own drain fix makes it more ordinary rather than
+    # less: a proxy whose listener has closed while it drains is exactly a failed probe.
+    #
+    # So: the pid we recorded is the authority on whether OUR proxy is up. If it is gone, something
+    # else is serving this port and we say so instead of persisting a claim about it.
+    # WHO HOLDS THE SOCKET, not "is my child alive". `kill -0` alone was true 22 ms before the new
+    # proxy had even exec'd (review timeline), so it could not distinguish "mine bound the port" from
+    # "mine is still starting while somebody else answers". Ask the kernel instead.
+    #
+    # Three outcomes, and the middle one is the finding:
+    #   owner == started        ours. Record it.
+    #   owner is another pid    not ours. Say so, record nothing.
+    #   owner unknown           no ss and no lsof. Fall back to the liveness check, which is weaker
+    #                           but still catches the common case of a proxy that exited outright.
+    owner=$(port_owner_pid) || owner=""
+    if [ -n "$owner" ] && [ "$owner" != "$started" ]; then
+      ours=0
+    elif [ -n "$owner" ]; then
+      ours=1
+    elif kill -0 "$started" 2>/dev/null; then
+      # The FALLBACK fired: neither ss nor lsof was on PATH, so this is the weaker liveness check and
+      # not the ownership one. Logged because it is invisible otherwise, and it is reachable in
+      # practice - a hook does not always run with a login shell's PATH, and macOS keeps lsof in
+      # /usr/sbin. Review lost a run to exactly that and could not see which check had answered.
+      printf '%s ownership of port %s could not be determined (no ss, no lsof); fell back to a \
+liveness check on pid %s, which cannot tell a proxy that bound from one that is merely alive\n' \
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$PORT" "$started" >>"$LOG" 2>/dev/null
+      ours=1
+    else
+      ours=0
+    fi
+    if [ "$ours" = 1 ]; then
+      # Best-effort write: a state directory we cannot write is survivable everywhere else in this
+      # script, and the only cost is that the next session cannot tell a configuration change happened.
+      fingerprint_want >"$FINGERPRINT" 2>/dev/null || true
+    else
+      # Deliberately REMOVED rather than left stale: a fingerprint describing the configuration we
+      # failed to start would make the next session believe it is already running.
+      rm -f "$FINGERPRINT" 2>/dev/null || true
+      note "port ${PORT} is answering, but the proxy this hook started is not running - so something"
+      note "else holds the port and this session's requests go there, not through the configuration"
+      note "you asked for. Nothing was recorded. Log: ${LOG}"
+      note "check with /context-guru:status before assuming the new settings are in effect."
+      exit 0
+    fi
+    if [ -n "$UPSTREAM" ]; then
+      note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET_NOTE}, cache strategy ${STRATEGY_NOTE}, idle-exit ${IDLE_EXIT}), chained behind ${UPSTREAM}."
       note "dashboard: http://127.0.0.1:${PORT}/dashboard/"
       exit 0
     fi
-    note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET}, idle-exit ${IDLE_EXIT})."
+    note "proxy up on 127.0.0.1:${PORT} (preset ${PRESET_NOTE}, cache strategy ${STRATEGY_NOTE}, idle-exit ${IDLE_EXIT})."
     note "dashboard: http://127.0.0.1:${PORT}/dashboard/"
     exit 0
   fi

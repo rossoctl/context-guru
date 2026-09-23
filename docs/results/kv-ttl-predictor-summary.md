@@ -208,7 +208,7 @@ carried essentially all of the positive net.
 request, whether to commit that whole session to the 1-hour or 5-minute tier — modeling the
 real constraint that a created cache entry can't be renegotiated in place. Built, registered,
 and tested against the same "never beats `optimal`," "never sees the future" invariants every
-other arm here is held to. Full detail: [kv-cache-ttl.md](../how-to/kv-cache-ttl.md#the-sticky-whole-session-arm-and-a-real-haiku-4-5-measurement).
+other arm here is held to.
 
 **Its simulated performance on this deployment's actual (sonnet-5-heavy) traffic is not
 reported** — that would need the same aggregate-only DB access pattern the rest of this page

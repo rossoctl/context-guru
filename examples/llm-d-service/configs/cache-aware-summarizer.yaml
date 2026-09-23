@@ -1,0 +1,81 @@
+# Config 5 — cache-reuse compaction (the cache_aware_summarizer component).
+#
+# Summarizes by APPENDING the instruction to the conversation instead of rebuilding the
+# prompt, so the summarization call reuses the prefix the agent's own turn just cached and
+# pays prefill only on the appended suffix. This is the shape Anthropic's caching guidance
+# prescribes for a fork: "copy the parent's system, tools and model verbatim, then append
+# fork-specific content at the end."
+#
+# ⛔ IT NEEDS A MESSAGE-ARRAY CLIENT. The component requires components.MessagesModel and
+# DECLINES when the configured client cannot send one, because flattening the conversation
+# into a single prompt string is exactly the prefix-destroying shape it exists to avoid. Only
+# the OpenAI-shaped client implements it today (internal/cheapmodel/openai.go) — so
+# model.provider MUST be openai here. Check `cache_aware_summarizer_declined` in /stats: any
+# non-zero value means this config compacted NOTHING and behaved like `off`.
+#
+# ⛔ Run it ALONE. It changes the message count, and apply's count-change rebuild re-emits
+# each retained message's ORIGINAL raw bytes by matching them exactly — a message another
+# component edited in place fails to match and is re-marshalled instead.
+pipeline: [cache_aware_summarizer]
+
+components:
+  cache_aware_summarizer:
+    # Verbatim ends. The head is not configurable — msgs[0] is always kept, since it carries the
+    # conversation's identity — so only the tail size is set here. Both cuts are aligned to turn
+    # boundaries automatically, so neither can orphan a tool result from its call; alignment keeps
+    # MORE than asked, never less.
+    keep_last_turns: 10   # the one tail size measured to win on agentic traffic
+
+    # Where the appended instruction goes.
+    #   auto   — resolved per model from components/offload/summarizer_model_profiles.yaml
+    #   system — the authoritative operator channel, where the PATH to the model accepts one
+    #            at the END of the messages array
+    #   user   — the safe fallback; every template and provider accepts a user turn
+    # ⚠️ auto needs model_id to resolve against; without it auto falls to `user`.
+    # ⚠️ auto resolves to `user` for EVERY model on this build: the registry's system_models
+    # allow-list is empty, because a measured run found a gateway lifting the trailing system
+    # message into the provider's top-level field — a 400 on aws/claude-opus-5, and on a
+    # transcript ending in a user turn a silent relocation instead. Read that file's header
+    # before promoting anything, and verify the PATH, not just the model.
+    # ⛔ Do not hand-set `system` for a path you have not probed. It DECLINES unless the
+    # allow-list names the model (cache_aware_summarizer_unverified_system), and where it does
+    # go through, a template that DROPS or HOISTS the message fails silently: the model
+    # continues the task and its next turn is recorded as the "summary".
+    instruction_role: auto
+    # ⚠️ LITERAL VALUES. Nothing in this codebase expands ${VAR} in a config file — the proxy reads
+    # the YAML as-is — so edit these in place (or template the file with envsubst before mounting).
+    # An unexpanded ${...} left here would be read as a literal model id, match no profile, and
+    # silently resolve instruction_role: auto to `user`.
+    model_id: Qwen/Qwen3.6-27B
+
+    min_tokens: 500       # smallest span worth one model call (gates the SPAN)
+    # ⛔ Gates the OUTBOUND request, which carries the whole conversation — a different quantity
+    # from min_tokens. A refusal, never a truncation: truncating would change the prefix and
+    # defeat the mechanism. 0 disables. Watch cache_aware_summarizer_too_large.
+    max_request_tokens: 120000
+    # Reuse the summary byte-identically until the untouched tail grows past this, so the
+    # forwarded prefix stays stable. 0 would re-derive every turn and invalidate the very cache
+    # this component exists to protect.
+    resummarize_tokens: 6000
+    marker_mode: full     # keeps the replaced span reversible via the expand tool
+
+    # Optional: replace the embedded model registry with one on disk, to promote a model you
+    # have verified yourself without rebuilding.
+    # profiles_path: /etc/cg/summarizer_model_profiles.yaml
+
+    # ⭐ Point this at the SAME endpoint serving the agent. The saving comes from hitting a
+    # prefix that server already has; a different endpoint has a cold cache and there is
+    # nothing to reuse.
+    model:
+      source: config
+      provider: openai
+      base_url: http://vllm-smoke:8001
+      model: Qwen/Qwen3.6-27B
+      api_key: ""
+
+    trigger:
+      min_messages: 20
+      min_request_tokens: 1500
+
+store:
+  enabled: true   # marker_mode: full needs the store to stash the replaced span

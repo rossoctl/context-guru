@@ -28,6 +28,24 @@ func NewPipeline(comps []Component, e Emitter) *Pipeline {
 	return &Pipeline{comps: comps, emitter: e}
 }
 
+// Names returns the component names in pipeline order, which is what makes an EMPTY pipeline
+// reportable. Without it a caller can only see the per-component stats, and a pipeline configured
+// with no components is indistinguishable there from one whose components all ran and did nothing:
+// both are an empty map. That ambiguity is the same class as the one that made `cachesplit` look
+// dead for a release — it is Mutated-never-Acted by design, so acted/ran read 0% and a panel painted
+// it red (docs/results/measured-2026-08.md). `off` is now the default preset, so the empty case is
+// the COMMON case and has to be legible rather than merely correct.
+func (p *Pipeline) Names() []string {
+	if p == nil {
+		return nil
+	}
+	out := make([]string, 0, len(p.comps))
+	for _, c := range p.comps {
+		out = append(out, c.Name())
+	}
+	return out
+}
+
 // Run applies every enabled component to req in place and returns the aggregate
 // report. req is mutated; on any per-component failure that component's changes
 // are rolled back, so the returned request is never worse than the input.

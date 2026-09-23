@@ -566,6 +566,21 @@ func (h *Handler) renderMetrics() string {
 			"Times the AGENT called the proxy-injected context_guru_adjudicate tool, which it is told not to. Each one is a lost agent turn, not a correctness failure; rising means the tool's description has stopped working.", "counter")
 		promLine(&b, "cg_adjudicate_stray_total", "", float64(adjudicate.StrayAnswered()))
 
+		// THE ONE THAT SAYS THE THRESHOLDS ARE MEANINGLESS. A non-zero value here means the operator's
+		// model-window document did not load, so every fraction-based trigger is being evaluated
+		// against a built-in default window instead of the configured one — and nothing else in this
+		// exposition can go non-zero for that. It is a counter rather than a gauge because a document
+		// that failed once and then loaded is a different operational fact from one that is still
+		// failing, and rate() separates them. Read live from the resolver for the same reason as the
+		// three families above: renderMetrics holds the bare aggregator snapshot, where the /stats
+		// handler's fields are still zero.
+		if u, ok := h.opts.Windows.(interface{ Unresolved() (error, int) }); ok {
+			_, n := u.Unresolved()
+			promHeaderProc(&b, "cg_model_info_unresolved_total",
+				"Failed attempts to load the configured model-window document. Non-zero means context windows are resolving from a built-in fallback, so every fraction-based trigger (summarize's request fraction, the sweep's pressure floor, the economic trigger's turn horizon) is evaluated against a window nobody configured. Alert on any increase: the pipeline keeps working and every other counter stays healthy.", "counter")
+			promLine(&b, "cg_model_info_unresolved_total", "", float64(n))
+		}
+
 		promHeaderProc(&b, "cg_sse_streams_total", "Responses by streaming path.", "counter")
 		promLine(&b, "cg_sse_streams_total", `path="streamed"`, float64(s.SSEStreamed))
 		promLine(&b, "cg_sse_streams_total", `path="buffered"`, float64(s.SSEBuffered))

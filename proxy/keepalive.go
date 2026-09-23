@@ -15,8 +15,10 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -221,6 +223,11 @@ type kaEntry struct {
 	// over the production window, that one change takes X=280 from **+$164.46 to −$241.99**,
 	// with ping cost tripling to $408.85.
 	startedAt time.Time
+	// st is the tenant's state store, held so a successful ping can record that it refreshed the
+	// provider's entry — see apply.RecordCacheTouch and issue #243. Held for the same interval as
+	// the masked body below, and for the same reason: the entry exists exactly between one request
+	// and the next, which is when the ping fires.
+	st store.Store
 	// body is the bytes last sent upstream, held MASKED under the same per-process key as the
 	// credential (see credMask). A keeper-owned copy, so it can be overwritten on release
 	// without corrupting a slice something else still reads.
@@ -654,7 +661,7 @@ func (k *keeper) record(tn *Tenancy, session string, startedAt time.Time, body [
 	prefix := u.CacheRead + u.CacheWrite
 	hdr, auth := pingHeaders(r, up)
 	e := &kaEntry{
-		tenant: tn.ID, session: session, startedAt: startedAt, body: owned, up: up,
+		tenant: tn.ID, session: session, startedAt: startedAt, body: owned, up: up, st: tn.Store,
 		provider: provider, model: model, route: route, preset: tn.Preset,
 		agent: r.UserAgent(), pol: pol, prefix: prefix, stopReason: u.StopReason,
 		pingUSD: k.projectedPingUSD(model, prefix),
@@ -836,7 +843,7 @@ func (k *keeper) sweep(now time.Time) int {
 		raw := append([]byte(nil), e.body...)
 		xorMask(raw)
 		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), auth: auth, up: e.up,
-			tenant: e.tenant, session: e.session, ping: e.pings})
+			tenant: e.tenant, session: e.session, st: e.st, ping: e.pings})
 	}
 	k.mu.Unlock()
 
@@ -861,7 +868,10 @@ type pingJob struct {
 	auth            []maskedHeader
 	up              upstream
 	tenant, session string
-	ping            int
+	// st is the tenant's store, copied here for the same reason everything else is: the job runs
+	// on its own goroutine and must hold a copy rather than a pointer into keeper state.
+	st   store.Store
+	ping int
 }
 
 // fire sends one ping and accounts for it. Always fails open and quietly: the agent is not
@@ -923,7 +933,7 @@ func (k *keeper) fire(j pingJob) {
 			"tenant", tenantLabel(j.tenant), "session", j.session,
 			"cache_write", u.CacheWrite, "cache_read", u.CacheRead)
 	}
-	cost := k.record1(j, u, status, ms)
+	cost := k.record1(j, u, status, ms, start)
 	slog.Debug("context-guru: cache keep-alive ping",
 		"tenant", tenantLabel(j.tenant), "session", j.session, "ping", j.ping,
 		"cache_read", u.CacheRead, "cache_write", u.CacheWrite, "output", u.Output,
@@ -944,7 +954,9 @@ func (k *keeper) markStopped(e *kaEntry) {
 // marked keepalive, attributed to the tenant and the session — so the money this mechanism
 // spends is visible in the same ledger as the money it saves, and an account can see it
 // without being told.
-func (k *keeper) record1(j pingJob, u Usage, status int, ms float64) float64 {
+// startedAt is when THIS ping's request began, not when it completed. The provider's cache lifetime
+// runs from request start, which is the same anchor kaEntry.startedAt uses and for the same reason.
+func (k *keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt time.Time) float64 {
 	e := j.e
 	// The identifying fields are read under the lock with everything else: they are set once
 	// at record time and never mutated, but a retired entry is concurrent with this goroutine
@@ -982,6 +994,35 @@ func (k *keeper) record1(j pingJob, u Usage, status int, ms float64) float64 {
 	// the session-recency map: doing so would re-date the session and make the NEXT real
 	// request's gap read as four minutes instead of the twenty it actually was, hiding the
 	// very thing this mechanism is here to demonstrate.
+	//
+	// BUT IT DOES REFRESH THE PROVIDER'S ENTRY, and until #243 nothing told the cache-liveness
+	// clock. A ping's whole job is to READ the cached prefix, and a read resets that entry's TTL —
+	// so after this the entry is warm again. With only real requests writing the clock, a
+	// kept-alive session's idle time grew without bound while the provider held the entry alive,
+	// and summarize's gate concluded the cache was long dead: a strict clock test said "certainly
+	// cold", the then-shipped `pre_expiry_or_cold` permitted a rewrite, and the component compacted
+	// a LIVE prefix — on exactly the sessions someone is paying pings to protect. Those cold-gated
+	// states have since been withdrawn, so the reader that made this expensive is gone; what still
+	// reads the clock is `cache_state: pre_expiry`, whose question is whether the prefix is LIVE.
+	//
+	// TWO CLOCKS, TWO QUESTIONS, and that is why this is not a contradiction of the paragraph
+	// above. "Is the provider still holding this prefix?" counts pings; "how long was the USER
+	// away?" must not. The recency map answers the second and stays untouched; this writes only
+	// the first, so the dashboard's idle-gap statistics are unaffected.
+	//
+	// GATED ON CacheRead > 0, because only a ping that actually read the entry refreshed it. A ping
+	// that WROTE (the entry was already gone) refreshed nothing that was there before, and claiming
+	// otherwise would make the clock lie in the expensive direction.
+	//
+	// Anchored on the ping's START, not its completion, for the same reason kaEntry.startedAt is:
+	// the provider's lifetime runs from request start.
+	//
+	// j.raw is the UNMASKED body copy, and reading it here is safe: fire zeroizes it in a defer that
+	// runs after record1 returns. It is read rather than the masked kaEntry.body because the alias is
+	// derived from the transcript head, which a masked copy does not contain.
+	if status >= 200 && status < 300 && u.CacheRead > 0 {
+		apply.RecordCacheTouch(j.st, j.tenant, j.raw, provider, startedAt.UnixMilli())
+	}
 	ev.Price(price, priced && (u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0))
 	cost := ev.CostUSD
 	k.mu.Lock()
@@ -1215,4 +1256,21 @@ func (k *keeper) Stats() KeepAliveStats {
 	return KeepAliveStats{Live: live, Pings: k.pings.Load(), Skipped: k.skipped.Load(),
 		Failed: k.failed.Load(), Wrote: k.wrote.Load(),
 		SpentUSD: math.Float64frombits(k.spentUSD.Load())}
+}
+
+// LiveSessionKeys returns the session ids the keeper currently considers live — a copy,
+// so mutating the result never touches k.live. k.live is keyed by tenant:session, but
+// each entry carries its own raw session id (kaEntry.session), which is what
+// dash.Filter.Session expects.
+func (k *keeper) LiveSessionKeys() []string {
+	if k == nil {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	keys := make([]string, 0, len(k.live))
+	for _, e := range k.live {
+		keys = append(keys, e.session)
+	}
+	return keys
 }

@@ -25,8 +25,8 @@
     </p>
 
     <div class="btn-row">
-      <a class="btn btn-primary" href="{{ 'get-started/quickstart-proxy/' | url }}">Quickstart</a>
-      <a class="btn btn-ghost" href="{{ 'get-started/overview/' | url }}">Technical overview</a>
+      <a class="btn btn-primary" href="{{ 'how-to/install-plugin/' | url }}">Install the plugin</a>
+      <a class="btn btn-ghost" href="{{ 'get-started/how-it-saves/' | url }}">How it saves money</a>
       <a class="btn btn-ghost" href="{{ config.repo_url }}">Source</a>
     </div>
 
@@ -42,20 +42,16 @@
 
   <div class="cta reveal">
     <h3>Run it in 60 seconds <span class="badge badge-success">no code changes</span></h3>
-<pre><code><span class="c">## build it — needs Go 1.26 and a C toolchain (the tokenizer uses cgo)</span>
-make build
+<pre><code><span class="c">## once per machine</span>
+/plugin marketplace add rossoctl/context-guru
+/plugin install context-guru@context-guru
+/reload-plugins
 
-<span class="c">## start it — one port serves both dialects</span>
-./bin/context-guru-proxy --preset general
-<span class="c">## listening on :4000</span>
-
-<span class="c">## point the agent at it; nothing else about the agent changes</span>
-export ANTHROPIC_BASE_URL=http://localhost:4000/anthropic
-export OPENAI_BASE_URL=http://localhost:4000/openai/v1</code></pre>
+<span class="c">## once per repo — decides which sessions get routed</span>
+/context-guru:install</code></pre>
     <p class="cta-note">
-      Then <code>curl -s localhost:4000/stats | jq</code> for the token-weighted savings
-      rollup, or open <code>/dashboard/</code>.
-      <a href="{{ 'how-to/use-with-claude-code/' | url }}">Claude Code setup →</a>
+      Then <code>/context-guru:status</code> for what it's saving so far.
+      Running your own org-wide proxy instead? <a href="{{ 'get-started/quickstart-proxy/' | url }}">Self-hosting quickstart →</a>
     </p>
   </div>
 
@@ -171,11 +167,6 @@ export OPENAI_BASE_URL=http://localhost:4000/openai/v1</code></pre>
       what was rewritten, and the cost of the safety mechanisms themselves.
     </p>
 
-    <figure class="hero-screenshot">
-      <img src="{{ 'img/dashboard/01-overview.jpg' | url }}" alt="The context-guru dashboard overview: savings headline, cost-over-time curve and the per-component economics table." loading="lazy">
-      <figcaption class="caption">The dashboard Overview, served by the proxy itself at <code>/dashboard/</code>.</figcaption>
-    </figure>
-
     <div class="card-grid">
       <a class="card" href="{{ 'dashboard/' | url }}">
         <div class="card-title">Dashboard</div>
@@ -195,13 +186,13 @@ export OPENAI_BASE_URL=http://localhost:4000/openai/v1</code></pre>
   <section class="section reveal" id="next">
     <h2>Where to go next</h2>
     <div class="card-grid">
-      <a class="card" href="{{ 'get-started/quickstart-proxy/' | url }}">
-        <div class="card-title">Quickstart: proxy <span class="tile-badge on-site">start here</span></div>
-        <p class="card-desc">Build, run, point an agent at it, read the savings.</p>
+      <a class="card" href="{{ 'get-started/how-it-saves/' | url }}">
+        <div class="card-title">How it saves money <span class="tile-badge on-site">start here</span></div>
+        <p class="card-desc">The four mechanisms, each with a before/after example.</p>
       </a>
-      <a class="card" href="{{ 'get-started/quickstart-compaction/' | url }}">
-        <div class="card-title">Quickstart: compaction service</div>
-        <p class="card-desc">Run it as a compaction endpoint instead of a request-path proxy.</p>
+      <a class="card" href="{{ 'get-started/quickstart-proxy/' | url }}">
+        <div class="card-title">Quickstart: proxy (self-hosted)</div>
+        <p class="card-desc">Running it as an org-wide proxy instead of the Claude Code plugin.</p>
       </a>
       <a class="card" href="{{ 'results/vs-competitors/' | url }}">
         <div class="card-title">Where the money went</div>

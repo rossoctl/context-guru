@@ -133,6 +133,6 @@ operation the model recovers it automatically — see
 
 </details>
 
-See also: [Config & environment](../reference/config.md) ·
-[Choose a preset](../how-to/choose-a-preset.md) · [Routes & headers](../reference/routes.md) ·
+See also: [Config & environment](../reference/reference.md) ·
+[Choose a preset](../reference/presets.md) · [Routes & headers](../reference/reference.md) ·
 [Measure savings](../how-to/measure-savings.md)

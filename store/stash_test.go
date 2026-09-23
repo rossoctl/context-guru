@@ -206,8 +206,8 @@ func TestBrokenPromisesDoNotGrowWithLoad(t *testing.T) {
 // back as the only non-exempt entry in the cache. The write "succeeds" and the key is gone.
 //
 // Each of the unpinned namespaces that happens to is load-bearing: cg:keep: is what stops the
-// expand loop (content the agent just expanded gets re-compacted without it), cg:sum: is
-// summarize's checkpoint, cg:own: gates GET /expand, cg:xseen: prices recurrence. And the
+// expand loop (content the agent just expanded gets re-compacted without it), cg:own: gates
+// GET /expand, cg:xseen: prices recurrence. And the
 // state is reached by exactly the workload the reserve was built for — a reversible removal
 // writes two pinned decisions and one stash, so both exemptions saturate together.
 func TestTheExemptionsLeaveAGuaranteedEvictableFloor(t *testing.T) {
@@ -242,10 +242,14 @@ func TestTheExemptionsLeaveAGuaranteedEvictableFloor(t *testing.T) {
 			"whole entry cap, so isKeptVerbatim is permanently false and content the agent just " +
 			"expanded will be re-compacted — the expand loop that flag exists to stop")
 	}
-	m.Put("cg:sum:sess", []byte(`{"c":1}`))
-	if _, ok := m.Get("cg:sum:sess"); !ok {
-		t.Error("a cg:sum: checkpoint did not survive its own Put: summarize can never " +
-			"checkpoint, so it re-pays its model call on every turn")
+	// A second unpinned namespace, because one surviving write could be luck of the eviction
+	// order. cg:own: rather than cg:sum: — the checkpoint namespace was pinned when summarize's
+	// trigger gained a cache-state condition, so it is no longer an example of an unpinned
+	// namespace and asserting on it here would be testing the pin, not the floor.
+	m.Put("cg:own:sess:abc", []byte{1})
+	if _, ok := m.Get("cg:own:sess:abc"); !ok {
+		t.Error("a cg:own: write did not survive its own Put: the exemptions have consumed the " +
+			"whole entry cap, so GET /expand refuses keys the session really does own")
 	}
 	// And the floor is a real quantity, not just "one write got through".
 	if got := m.evictableEntriesForTest(); got < max/4 {

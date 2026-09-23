@@ -54,22 +54,12 @@ cache:
 ```
 
 These are the measured optimum, not defaults picked by feel. Replayed through the shipped
-decision function over the production window:
-
-| policy | pings | ping cost | converted | saving | **net** |
-|---|---:|---:|---:|---:|---:|
-| **X=280 K=2, gated (shipped)** | **912** | **$90.76** | **148** | **$215.84** | **+$125.08** |
-| X=280 K=2, blanket (no gate) | 8,915 | $93.79 | 153 | $221.05 | +$127.26 |
-| X=280 K=1, gated | 536 | $53.51 | 96 | $138.80 | +$85.28 |
-| X=280 K=3, gated | 1,226 | $121.33 | 174 | $252.13 | +$130.80 |
-| X=240 K=2, gated | 1,012 | $102.19 | 134 | $197.03 | +$94.85 |
-| X=280 K=12, gated | 3,307 | $311.78 | 253 | $370.12 | +$58.35 |
-
-**The gate is the whole reason this is deployable: 9.8× fewer pings for 1.7% less money.**
-What it drops is the near-free pings on tiny prefixes — ping cost is bimodal, p50 $0.0004
-against a p99 of $0.2275 — so 8,000 requests of real gateway load disappear and almost none
-of the value does. On a path that already returned 180 HTTP 429s in the same window, that
-matters as much as the dollars.
+decision function over the production window, the gated policy (X=280, K=2) nets **+$125.08**
+against $90.76 of ping cost — within 1.7% of an ungated blanket policy while sending **9.8x
+fewer pings** (912 vs 8,915). What the gate drops is the near-free pings on tiny prefixes —
+ping cost is bimodal, p50 $0.0004 against a p99 of $0.2275 — so most of the real gateway load
+disappears and almost none of the value does, which matters on a path that already returned
+HTTP 429s in the same window.
 
 `X = 280` beats 240 because it wastes fewer pings on gaps that would have hit anyway. `K`
 peaks at 2–3 and falls away after: a session that has *ended* looks exactly like one that
@@ -167,62 +157,37 @@ within about 14 minutes. It cannot be reduced further — the prefix hash covers
 `tools` → `system` → `messages` sequence, so a ping that trimmed the body would miss the
 cache and cost 12.5x instead of saving 11.5x, which is the mechanism inverted.
 
-Seven controls, because this is the one place the service holds a caller's credential beyond
-the life of a request:
+Controls, because this is the one place the service holds a caller's credential beyond the life
+of a request:
 
 | control | what it does |
 |---|---|
-| **Hard deadline** | `time.AfterFunc` at `(K+1) × X` ≈ 14 min. A *scheduled* deadline, not a check inside a loop: a process with no traffic still releases on time. |
-| **Eager release** | dropped the moment the next request arrives, the gate refuses, the span is exhausted, or the process shuts down — whichever comes first. |
-| **Zeroized** | the bytes are overwritten, not just dereferenced. A dropped `[]byte` sits in the heap until a collection that may never come. |
-| **Masked at rest** | the credential **and the body** are XORed under a random per-process key, so the idle hold contains neither a working credential nor a readable transcript. A leaked key is rotatable; a transcript is not. |
-| **Consent per request** | re-read from the tenancy on every request. Turning the setting off retires what is already held on the account's next request; a session that goes quiet is dropped by the deadline. |
-| **Audit row per ping** | every use is a durable `requests` row: tenant, session, timestamp, cost, and whether it read or wrote. **Unconditional**: with no dashboard recorder to write it, nothing is retained at all — an audit control a flag can switch off is not a control. |
-| **Purged on revocation** | account deletion, token revocation and disablement each release that tenant's held material immediately, rather than waiting for the deadline. |
-| **Kill switch** | `CONTEXT_GURU_KEEPALIVE=off` stops *retention*, not merely pinging — nothing is held at all. |
+| **Hard deadline** | released at `(K+1) × X` ≈ 14 min regardless of traffic. |
+| **Eager release** | dropped the moment the next request arrives, the gate refuses, or the process shuts down — whichever comes first. |
+| **Zeroized** | the bytes are overwritten, not just dereferenced. |
+| **Masked at rest** | the credential and the body are XORed under a random per-process key, so a leaked snapshot doesn't leak a working credential or a readable transcript. |
+| **Consent per request** | re-read from the tenancy on every request; turning the setting off retires what's already held. |
+| **Audit row per ping** | every use is a durable `requests` row: tenant, session, timestamp, cost, read-or-wrote. |
+| **Purged on revocation** | account deletion, token revocation and disablement release held material immediately. |
+| **Kill switch** | `CONTEXT_GURU_KEEPALIVE=off` stops *retention*, not merely pinging. |
 
-Bounded on volume too: 128 MiB across at most 512 sessions, and a single body over 8 MiB is
-not held.
-
-**What the masking does and does not buy.** A heap or core dump, a crash report, a
-`/proc/<pid>/mem` read or a `strings` pass over a snapshot yields masked bytes rather than a
-working key — the accidental-capture class, which is the realistic one. It does **not** stop
-an attacker with code execution in this process: the mask is in the same address space. It is
-obfuscation at rest, not encryption. And the credential is necessarily plaintext for the
-duration of the ping itself, because `net/http`'s header map holds strings and a Go string
-cannot be overwritten — so the window is one request instead of the whole idle hold, which is
-the part that was worth closing.
+Bounded on volume too: 128 MiB across at most 512 sessions, and a single body over 8 MiB is not
+held. The masking is obfuscation at rest against an accidental-capture read (a crash dump, a
+`/proc` read) — it does not stop an attacker with code execution in this process.
 
 ## Gating pings on stop_reason (opt-in, per strategy)
 
-Every ping above fires unconditionally — `pingable()` never asks *why* the previous turn
-ended, deliberately, because excluding `end_turn` (the naive reading of "the turn looks
-over") would exclude 83.7% of the recoverable dollars. What that decision never added is
-the other half: `docs/results/kv-ttl-predictor-features.md` and
-`docs/results/kv-ttl-predictor-arms.md` measured that `tool_use`/`stop_sequence`-preceded
-gaps land in the addressable 5m–1h band only 0.0–0.6% of the time (20x under the ~8%
-one-ping break-even), while `end_turn`/`max_tokens`/`refusal`-preceded gaps land there
-11.7–43.3% of the time — and the unconditional schedule pings on all of them equally.
+Pings above fire unconditionally regardless of why the previous turn ended. A manager-controlled
+strategy can instead name a predictor — `predictor_id: "stop-reason-gated"` plus a
+`predictor_threshold` — so a ping only fires when the request it would refresh ended on
+`end_turn`, `max_tokens`, or `refusal`. Measured at +1.54% vs `fixed-5m` pooled, because
+`tool_use`/`stop_sequence`-preceded gaps almost never land in the addressable band while
+`end_turn`/`max_tokens`/`refusal`-preceded ones do far more often — see
+[KV-cache TTL predictor: features](../results/kv-ttl-predictor-features.md) for the measurement.
 
-A manager-controlled strategy (the Strategies tab; see
-`docs/superpowers/specs/2026-08-25-keepalive-strategies-design.md` for the underlying
-model) can now name a predictor: `predictor_id: "stop-reason-gated"` plus a
-`predictor_threshold` adds
-one more condition on top of the strategy's own windows — a ping only fires when the
-request that would be refreshed itself ended on `end_turn`, `max_tokens`, or `refusal`.
-Measured pooled at +1.54% vs `fixed-5m` (CI95 [0.60%, 2.79%]) — real, and statistically
-indistinguishable from a trained logistic regression on the same window, which is why it
-ships as a rule (`kvcache.ClusterOf`, a plain string-set lookup) rather than a model: the
-whole production-safe predictor class this repo supports is a switch of small functions
-like this one, never an embedded model in the ping's hot path.
-
-**Opt-in, not a fleet-wide default.** A strategy with no `predictor_id` — which is every
-strategy that predates this field — behaves exactly as before. Setting one is a per-
-strategy decision a manager makes deliberately, the same audited, DCO'd path every other
-strategy field goes through. Per-tenant heterogeneity is real (0.76%–41.4% band rate even
-conditioned on `end_turn` alone) — the pooled gain in the arms study is carried almost
-entirely by a few tenants, so scope a gated strategy to the tenants it actually helps
-rather than applying it blind, until a per-tenant-tuned version exists.
+This is opt-in per strategy; a strategy with no `predictor_id` behaves exactly as before. Gains
+are concentrated in a few tenants, so scope it to the tenants it actually helps rather than
+applying it fleet-wide.
 
 ## Related
 

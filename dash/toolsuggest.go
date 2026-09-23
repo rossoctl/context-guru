@@ -556,7 +556,7 @@ var errNotPermitted = errors.New("not permitted")
 func (a *API) toolFilterDoc(w http.ResponseWriter, r *http.Request) {
 	f, p, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	price := a.priceFn(r)

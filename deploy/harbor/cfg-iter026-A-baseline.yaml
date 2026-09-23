@@ -1,0 +1,72 @@
+# iteration 026 ARM A -- the DEFERRAL CORRIDOR. Derived from cfg-iter023-A-baseline, with two thresholds
+# changed in BOTH arms and one knob added to arm B, and nothing else.
+#
+# THE POINT, which no prior iteration's config could express: the sweep should act in the window just
+# BELOW the one where summarize fires, so it removes spent tool outputs before the lossy compaction takes
+# them -- and if it removes enough, summarize never fires at all. That is deferral stated as a threshold
+# ordering rather than as a hope.
+#
+#   sweep may act from        0.70 of the window   (arm B: extract_llm_sweep.min_pressure)
+#   summarize fires at        0.90 of the window   (both arms: summarize.trigger.min_request_frac)
+#
+# WHY THE SWEEP NEEDED A FLOOR AT ALL. Without one it fired at 4% context pressure: measured on the
+# iteration 026 probe, the FIRST ask of every pass landed on a 2,621-token transcript, cleared the
+# break-even by 3.3x, and removed nothing -- correctly, because nothing had been superseded yet. The
+# economics are most favourable exactly where the question is least answerable (maximum projected turns,
+# no cached prefix to rewrite, candidate mass a large share of a small transcript), and those asks are
+# the ask ledger's calibration samples, so approval measured near zero and floored, which multiplied
+# turns-to-repay by twenty and shut the component down. Same config, same tasks, same seed: one pass
+# removed 62,525 tokens and another 90, decided by which way its first asks fell.
+#
+# WHY 0.70 RATHER THAN THE 0.10 AN EARLIER ANALYSIS SUGGESTED. That analysis summed the removals a floor
+# would have blocked and called them lost. They are not lost: a blocked candidate stays in the transcript
+# and reaches a LATER, LARGER ask. The counterfactual was static and the system is not. What the data
+# does show is that batch size grows with request size and that bigger batches work better -- 3 candidates
+# at 2.6k, 12 at 32k, and the best ask in the whole set is that batch of 12, which removed 97.6%. The
+# 12-item cap is hit routinely (1,919 candidates capped in one arm-seed), so mass is not scarce; the gate
+# was simply spending itself where mass was.
+#
+# AND WHY SUMMARIZE MOVES TO 0.90 RATHER THAN STAYING AT 0.78. It widens the corridor from 8 points to 20,
+# which is the room the sweep needs to demonstrate that it can hold a request below the summarize
+# threshold. Left window-relative deliberately: deferring summarize IS the thesis, so pinning its trigger
+# to an absolute token count would destroy the thing being measured.
+#
+# READ THESE FIRST on the results: sweep_below_min_pressure against sweep_offered says what the floor
+# cost, summarize acted/runs against arm A says whether anything was actually deferred, and approval in
+# cg.sweep.econ says whether the estimator stayed usable this time.
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, collapse, cachesplit, toolfilter, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    model: {model: claude-haiku-4-5, source: incoming}
+    strategy: code
+  extract_llm_sweep:
+    min_tokens: 100
+    # RAISED FROM 3 TO 7 for iteration 026, and the floor above is why it is now reachable. At
+    # min_pressure 0.70 the sweep only sees large requests, and candidate count scales with request
+    # size: measured across the probes, 3 candidates at a 2.6k transcript against 12 at 32k, with the
+    # 12-item ask cap hit routinely (1,919 candidates capped in one arm-seed of iteration 025, ~10
+    # candidates per request on average). Iteration 022's Amendment 1 called 10 unreachable, but it
+    # measured that at low pressure where inventories are genuinely thin -- the constraint was where
+    # the gate chose to fire, not the workload.
+    #
+    # 7 rather than the shipped 10: the adjudicator's measured willingness rises with batch size (about
+    # 94% kept when shown one output, 58% dropped at ~15; 2-in-4 correct drops at batch 3-6 against
+    # 4-in-4 at 10), so higher is better for judgement quality -- but every point of floor is a request
+    # that asks nothing, and 10 has never been shown reachable on this benchmark. 7 is the compromise,
+    # and sweep_inventory_below_min against sweep_offered says whether it was the right one.
+    min_inventory: 7
+  summarize:
+    trigger: {min_request_frac: 0.90}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

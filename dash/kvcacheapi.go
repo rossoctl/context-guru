@@ -45,7 +45,7 @@ func (a *API) kvCacheRoutes() []route {
 func (a *API) kvCache(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	// The two routes that read the whole dataset take a slot, so a refresh storm cannot commit
@@ -67,7 +67,7 @@ func (a *API) kvCache(w http.ResponseWriter, r *http.Request) {
 func (a *API) kvCacheRows(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	out, err := a.db(r).KVCacheRows(f, kvCacheOptionsFrom(r))
@@ -82,7 +82,7 @@ func (a *API) kvCacheRows(w http.ResponseWriter, r *http.Request) {
 func (a *API) kvCacheSimulate(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	if err := acquireKVCache(r.Context()); err != nil {
@@ -109,7 +109,7 @@ func (a *API) kvCacheSimulate(w http.ResponseWriter, r *http.Request) {
 func (a *API) kvCacheSuggest(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	// Reads the whole dataset, same as kvCache and kvCacheSimulate — same slot, same reason.
@@ -142,7 +142,7 @@ func (a *API) kvCacheSuggest(w http.ResponseWriter, r *http.Request) {
 func (a *API) kvCacheSuggestHoldout(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	// Two full dataset reads, so it takes the same slot the single-window routes do — and
@@ -179,7 +179,7 @@ func (a *API) kvCacheSuggestHoldout(w http.ResponseWriter, r *http.Request) {
 func (a *API) kvCachePricing(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	// The page's own narrowings reach the prefix too. Without them this route priced on a

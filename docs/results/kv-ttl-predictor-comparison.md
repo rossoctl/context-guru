@@ -114,7 +114,6 @@ tenant identity, ahead of time-of-day, ahead of every rolling-gap feature.
 
 ## The sticky whole-session 1h-vs-5m arm
 
-Full detail in [kv-cache-ttl.md](../how-to/kv-cache-ttl.md#the-sticky-whole-session-arm-and-a-real-haiku-4-5-measurement).
 `kvcache.StickySession1h` decides once, at a conversation's first request, whether to
 commit that whole session to the 1-hour or 5-minute tier, and never revisits the choice —
 modeling the real constraint that a created cache entry cannot be renegotiated in place.

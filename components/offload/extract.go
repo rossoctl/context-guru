@@ -39,6 +39,12 @@ func newExtract(raw []byte) (components.Component, error) {
 	if err := components.Decode(raw, &cfg); err != nil {
 		return nil, err
 	}
+	// CacheAllows' docstring promises every constructor validates the trigger; before this, exactly
+	// one of the three did. This component ignores the cache keys — see Trigger.Validate for why that
+	// is a config-shape issue rather than a validation one.
+	if err := cfg.Trigger.Validate("extract"); err != nil {
+		return nil, err
+	}
 	return &Extract{minTokens: cfg.MinTokens, trigger: cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode)}, nil
 }
 
@@ -100,5 +106,9 @@ func init() {
 			Hint: "Per-output floor: only extract from a tool output above this many tokens."},
 		markerModeField(),
 	}
+	// The cache keys are declared here because the config struct accepts them, and this repo's field
+	// contract requires a declared key for anything the struct reads. This component never reads the
+	// cache phase, so those two keys are INERT on it — see Trigger.Validate for why that is a
+	// config-shape defect with its own issue rather than something validation can fix.
 	components.RegisterFields("extract", extractConfig{}, append(f, components.TriggerFields("trigger")...))
 }

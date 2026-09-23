@@ -25,6 +25,13 @@ component, licensed under **Apache-2.0**.
 - **Every reduction must be reversible and fail-open** — add tests for both the
   happy path and the fault-injection (fail-open) path.
 
+## Running the eval harness locally
+
+Want to check a change against real benchmark traffic before opening a PR? [Setup & example
+run](setup.md) walks through building the binary/image and driving a SWE-bench task through
+context-guru as the eval-containers gateway, including the `sweep.py` matrix runner for
+comparing configs across many tasks.
+
 ## Governance & policies
 
 | Document | |

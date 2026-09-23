@@ -40,8 +40,10 @@ import (
 //
 // Same reasoning as deploy/harbor/pipeline_drift_test.go, applied to the docs instead of the
 // benchmark harnesses.
+// docs/how-to/choose-a-preset.md was folded into docs/reference/presets.md (its "Which preset?"
+// table, header and intro line all landed there verbatim) — there is only one preset table to
+// drift-check against now, not two documents that could contradict each other.
 var presetTableDocs = []string{
-	"../docs/how-to/choose-a-preset.md",
 	"../docs/reference/presets.md",
 }
 

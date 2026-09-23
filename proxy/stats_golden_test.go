@@ -19,6 +19,14 @@ import (
 // Adding a field here alongside the new key is the intended way to change it.
 var statsGoldenTopLevel = []string{
 	"actual_baseline_tokens",
+	// pipeline and pipeline_len are how a reader tells "no components are configured" from
+	// "components ran and did nothing" - Components is an empty map in both cases. Always emitted,
+	// never omitempty, because the EMPTY value is the meaningful one: `off` is the plugin's default
+	// preset, so an empty pipeline is the common state, and a dashboard that renders it as blank says
+	// "broken" about something working exactly as configured. On the wire `[]` means "configured with
+	// no components" and `null` means "no single pipeline describes this endpoint" (multi-tenant).
+	"pipeline",
+	"pipeline_len",
 	// Stray calls the agent made to the proxy-injected adjudication tool. Added to the reviewed
 	// contract rather than loosening the assertion, per the rule above: it is the only figure that
 	// can show a "do not call this yourself" description having stopped working.
@@ -30,6 +38,21 @@ var statsGoldenTopLevel = []string{
 	// its own arm: folded into llm_*, an agentdiet arm whose every reflection call
 	// expired would report llm_timeouts 0 and read as having nothing to reduce.
 	"agentdiet_call_timeout_ms",
+	// cache_aware_summarizer. `declined` matters most to a reader of this contract: a declining
+	// arm is byte-identical to `off` on every other field here.
+	"cache_aware_summarizer_calls",
+	"cache_aware_summarizer_timeouts",
+	"cache_aware_summarizer_errors",
+	"cache_aware_summarizer_declined",
+	"cache_aware_summarizer_call_timeout_ms",
+	"cache_aware_summarizer_empty",
+	"cache_aware_summarizer_unverified_system",
+	"cache_aware_summarizer_refused_stash",
+	"cache_aware_summarizer_too_large",
+	"cache_aware_summarizer_profile_fallbacks",
+	"cache_aware_summarizer_async_started",
+	"cache_aware_summarizer_async_committed",
+
 	"agentdiet_errors",
 	"agentdiet_timeouts",
 	"attempted_tokens",
@@ -70,6 +93,13 @@ var statsGoldenTopLevel = []string{
 	"llm_truncated",
 
 	"mode",
+	// WHETHER THE THRESHOLDS IN THIS RUN MEANT ANYTHING. Non-zero says the configured model-window
+	// document never loaded, so every fraction-based trigger was evaluated against a built-in default
+	// window instead. Added to the reviewed contract because the harness in deploy/harbor reads this
+	// payload for every published result and had no way to detect the condition: iteration 024 ran ten
+	// passes at a resolved 1,000,000 against a configured 64,000, summarize never fired once in either
+	// arm, and every other field in this document looked healthy.
+	"model_info_unresolved",
 	"observe_hypothetical_requests",
 	"output_tokens",
 	"potential_overhead_ms_avg",
@@ -115,6 +145,18 @@ var statsGoldenTopLevel = []string{
 	"summarize_call_timeout_ms",
 	"summarize_errors",
 	"summarize_timeouts",
+	// The detached summarizer path's health. Seven fields, because the path they describe removed
+	// every other way to see it: inline, a slow or failing summarizer was visible as request
+	// latency and as a reverted component; detached, the request is already answered and no row
+	// carries the work until the session's next turn.
+	"summarize_async_started",
+	"summarize_async_committed",
+	"summarize_async_refused",
+	"summarize_async_unresolved",
+	"summarize_async_panics",
+	"summarize_awaited_ms",
+	"summarize_await_timeouts",
+	"summarize_async_concurrency",
 	"sync_enforced",
 	"tokens_after",
 	"tokens_before",

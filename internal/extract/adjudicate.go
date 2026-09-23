@@ -110,16 +110,50 @@ type Verdict struct {
 // cost and NEVER mentions recoverability — even though, on this path, the drop genuinely is
 // recoverable through the marker and the stash. That asymmetry is intentional: the operator gets the
 // safety net, the model is not told about it. Every softening of this text measured WORSE.
+//
+// TWO EDITS FROM ITERATION 027, and what they were answering. The adjudication dump showed 46 verdicts
+// across 10 asks: 45 keeps, 1 drop. 28 of those keeps cited criterion (b), 17 cited (a), and 12 of 45
+// rested on a quote that is not in the transcript.
+//
+//  1. THE RAW-FORM TEST MOVED INTO THE CRITERION. (b) reads "an instruction that is NOT YET COMPLETE",
+//     which is true for the whole duration of any unfinished task -- so as written it licenses keeping
+//     anything topically related to the task. The narrowing idea was already in this text ("no
+//     outstanding obligation needs it in raw form") but sat in a later sentence qualifying only the
+//     "captured elsewhere" case. It is now the question itself.
+//
+//     APPLIED TO (a) AS WELL, and that is not incidental: the dump shows the SAME output cited under
+//     (b) on one turn and (a) on the next as later_turns grew. Narrow one clause and the answers
+//     migrate to the other, which would produce no measurable change and read as "the prompt is not the
+//     problem". The clauses have to move together.
+//
+//  2. THE QUOTE IS DECLARED CHECKED. It always was checked -- Judge verifies it against the flattened
+//     transcript and sets QuoteFabricated -- but the model was never told, and 27% of keeps carried a
+//     quote that could not be found. Stating the verification removes the incentive to reconstruct one
+//     from memory. Note what this deliberately does NOT do: a fabricated quote still leaves the verdict
+//     alone, because every failure path here resolves toward keep and making fabrication cause a
+//     REMOVAL would invert that asymmetry in the one direction that loses task quality silently.
+//
+// A THIRD EDIT WAS DRAFTED AND NOT APPLIED. "keep everything is a valid and often correct answer"
+// below reads as encouragement and is the line most directly implicated in a 98% keep rate -- but it is
+// also the text whose cost-honest framing is worth ~26 points of live-kept, and this file's own history
+// says every softening measured worse. Changing it is a measurement, not an edit — the instrument is the
+// offline selection scorer (8,105 decisions, $0 to re-score), because live-kept is what the clause
+// trades against and no reward run at this budget can resolve it. Tracked in #242; do not quietly
+// reword it here.
 const adjudicationContract = `Some of the tool outputs in the conversation above may no longer be needed. Decide,
 for EACH output listed below, whether you still need it.
 
-CRITERION. An output is SPENT only if it is needed for NONE of the following:
+CRITERION. An output is SPENT only if NONE of the following would require you to RE-READ ITS
+CONTENTS. Being about the task is not enough -- the question is whether you need these bytes again:
   (a) the step you are on right now;
-  (b) any instruction the user has given that is NOT YET COMPLETE;
-  (c) any step you have EXPLICITLY STATED you will take and have not yet taken.
-Only obligations WRITTEN IN THE CONVERSATION count -- do not invent hypothetical future needs. An
-output whose information has already been captured elsewhere (a filed total, a recorded conclusion)
-AND which no outstanding obligation needs in raw form is spent.
+  (b) an instruction the user has given that is NOT YET COMPLETE;
+  (c) a step you have EXPLICITLY STATED you will take and have not yet taken.
+Only obligations WRITTEN IN THE CONVERSATION count -- do not invent hypothetical future needs.
+
+THE TEST, per output: could you carry out that obligation from what you have ALREADY concluded or
+written down, without looking at this output again? If yes, it is spent -- even though the task is
+unfinished, and even though the output is about the task. An unfinished task does not by itself make
+every output it touched still needed.
 
 WHAT A WRONG REMOVAL ACTUALLY COSTS. If something you still need is removed, you will usually NOT
 notice the gap and will not ask for the content back. You will answer from worse information and get
@@ -133,7 +167,10 @@ look load-bearing, keep them all -- "keep everything" is a valid and often corre
 FOR EACH OUTPUT, ANSWER THE CRITERION FIRST, THEN DECIDE:
   "needed_by" -- which of (a)/(b)/(c) still needs this output, or "none" if it is spent.
   "quote"     -- when needed_by is a/b/c, the text from the conversation that creates that
-                 obligation, copied VERBATIM. Leave empty only when needed_by is "none".
+                 obligation, copied VERBATIM. Your quote is checked against the conversation
+                 character for character. Do not paraphrase or reconstruct it: if you cannot find
+                 the exact text, you have not identified a written obligation.
+                 Leave empty only when needed_by is "none".
   "verdict"   -- keep (still needed, or you are unsure -- this is the default) or drop (its
                  information is spent; a short descriptor of its shape will remain in its place).
                  A verdict of "drop" REQUIRES needed_by "none": if any obligation still needs the
@@ -145,6 +182,41 @@ above; do not put it in your reply.
 
 Reply with ONLY a JSON array, one object per output, no prose:
 [{"i": <label>, "needed_by": "a|b|c|none", "quote": "<verbatim text or empty>", "verdict": "keep|drop"}]`
+
+// adjudicationEvidence teaches the model to read the `evidence:` field, and is appended to the contract
+// ONLY when at least one item carries one.
+//
+// CONDITIONAL FOR A REASON. `main` shipped Evidence as an empty seam with the note that a prompt
+// teaching the model to interpret counters the prompt never carries would be teaching it to read a
+// field that does not exist. The converse is equally true and is why this text exists: counters carried
+// without an explanation invite the model to invent a reading of them. Both failures are avoided by
+// tying the paragraph to the data.
+//
+// IT FRAMES THE INDEX AS FALLIBLE, in its own words, on purpose. The index is an EXACT-MATCH
+// backward-looking counter: it sees an identifier reappear verbatim and nothing else. Reuse in
+// transformed form -- a number reformatted, a value paraphrased, a fact carried forward in the model's
+// own prose -- is invisible to it, and that blind spot is precisely what the model is here to cover.
+// Presenting the index's verdict as authoritative would collapse the mechanism into the pre-filter that
+// starved three iterations; presenting it as a fallible witness is the only framing under which the
+// model's disagreement is worth anything.
+const adjudicationEvidence = `
+HOW TO READ THE "evidence" FIELD. Each output may carry counters from a mechanical index that scanned
+the conversation for LITERAL reappearances of the identifiers inside that output:
+  novel            -- distinct identifiers this output introduced that nothing before it had.
+  refs             -- how many later messages repeated any of them, character for character.
+  ref_age          -- how long ago the most recent such repeat was, in messages.
+  used_frac        -- the fraction of this output's identifiers that reappeared at all.
+  later_turns      -- how many of your turns came after this output. A SMALL number means the output
+                      has barely had the CHANCE to be referenced, so "refs=0" says nothing about it.
+  verdict_of_index -- what the index concluded on its own.
+
+THE INDEX IS A WITNESS, NOT A JUDGE, AND IT IS BLIND IN A SPECIFIC WAY: it matches text exactly. When
+you used an output's information but wrote it differently -- reformatted a number, summarised a finding,
+carried a fact forward in your own words -- the index recorded NOTHING, and "refs=0" is then evidence of
+its blindness rather than of the output being spent. You can see that reuse and it cannot. Where you and
+the index disagree, YOUR reading of the conversation decides. Treat high refs as corroboration that an
+output is still live, and treat refs=0 as a question to answer from the conversation, never as an answer.
+"anything the index missed" is not a hypothetical -- it is the normal case, and it is why you are asked.`
 
 // BuildPrefixAsk renders the adjudication question for a PREFIX ASK — a call whose prefix is the
 // transcript the agent already sent, read from the provider's prompt cache.
@@ -161,6 +233,9 @@ Reply with ONLY a JSON array, one object per output, no prose:
 func BuildPrefixAsk(items []AdjudicationItem) string {
 	var b strings.Builder
 	b.WriteString(adjudicationContract)
+	if anyEvidence(items) {
+		b.WriteString(adjudicationEvidence)
+	}
 	b.WriteString("\n\nThe conversation above is your own. Read the tool outputs from it directly.\n")
 	b.WriteString("\nTOOL OUTPUTS UNDER CONSIDERATION. Refer to them by these labels only:\n")
 	for _, it := range items {
@@ -205,6 +280,9 @@ const FallbackSampleChars = 2000
 func BuildFallbackAsk(goal string, items []AdjudicationItem) string {
 	var b strings.Builder
 	b.WriteString(adjudicationContract)
+	if anyEvidence(items) {
+		b.WriteString(adjudicationEvidence)
+	}
 	b.WriteString("\n\nWHAT YOU ARE DOING NOW (judge relevance toward this):\n")
 	g := strings.TrimSpace(goal)
 	if g == "" {
@@ -306,7 +384,58 @@ func ParseVerdicts(reply string) ([]Verdict, bool) {
 			return out, true
 		}
 	}
-	return nil, false
+	// NEWLINE-DELIMITED FALLBACK, and it is a parser fix rather than a prompt one because the reply it
+	// recovers is CORRECT. The contract says "Reply with ONLY a JSON array"; sonnet-5 sometimes answers
+	// with one verdict object per line and no brackets at all — measured on a prefix ask whose four
+	// verdicts were individually well-formed, correctly reasoned, and complete for the batch. The array
+	// scan above finds no `[`, so the whole ask was discarded and its cost wasted.
+	//
+	// ACCEPTING MORE VALID ANSWERS IS NOT LOOSENING THE GUARDS. Every check the array path applies is
+	// applied here: each line must decode into a Verdict and must satisfy looksLikeVerdict, so `{}` and
+	// `{"note":"x"}` are still rejected rather than becoming phantom verdicts for label 0.
+	//
+	// EVERY LINE MUST PARSE, which is what keeps truncation distinguishable from malformation. A reply
+	// cut off mid-line leaves a final fragment that does not decode; returning false there sends the
+	// caller to ReplyWasTruncated, which handles the bracket-less case below. Accepting the good lines
+	// and ignoring the fragment would report a partial batch as a complete judgement — the quiet
+	// failure this package already guards against on the array path.
+	return parseVerdictLines(s)
+}
+
+// parseVerdictLines reads a reply of one verdict object per line. Reports false unless EVERY non-empty
+// line is a plausible verdict — see the fallback note in ParseVerdicts for why partial acceptance is
+// worse than rejection here.
+func parseVerdictLines(s string) ([]Verdict, bool) {
+	var out []Verdict
+	for _, ln := range strings.Split(s, "\n") {
+		ln = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(ln), ","))
+		if ln == "" {
+			continue
+		}
+		if !strings.HasPrefix(ln, "{") {
+			return nil, false
+		}
+		var v Verdict
+		if json.Unmarshal([]byte(ln), &v) != nil {
+			return nil, false
+		}
+		if !looksLikeVerdict(v) {
+			return nil, false
+		}
+		out = append(out, v)
+	}
+	// AT LEAST TWO LINES, and this is a deliberate conservatism rather than an arithmetic need.
+	// `TestAnUnparseableReplyYieldsNoVerdicts` refuses a BARE OBJECT as "not an array", and that guard is
+	// older than this fallback: a lone object is indistinguishable from the first line of an answer that
+	// stopped, whereas two or more lines are evidence of a chosen format. Every single-verdict reply that
+	// follows the contract is `[{...}]` and already parses on the array path, so the only thing refused
+	// here is a lone bare object — and inventories of one are gated out by min_inventory long before the
+	// ask. Revisit only if one-candidate asks ever become worth recovering, and change that test
+	// deliberately if so rather than as a side effect.
+	if len(out) < 2 {
+		return nil, false
+	}
+	return out, true
 }
 
 // looksLikeVerdict reports whether a decoded element is plausibly a verdict object rather than an
@@ -330,7 +459,30 @@ func looksLikeVerdict(v Verdict) bool {
 // -- so folding them under one name hid a 70%-of-calls failure behind a label that reads as "the
 // prompt is wrong" (`659e7a6`). Only meaningful when ParseVerdicts returned false.
 func ReplyWasTruncated(reply string) bool {
-	return strings.Contains(reply, "[") && !strings.Contains(reply, "]")
+	if strings.Contains(reply, "[") {
+		return !strings.Contains(reply, "]")
+	}
+	// THE BRACKET-LESS CASE, which exists because ParseVerdicts now also reads one verdict per line. A
+	// newline-delimited reply cut off mid-object has no bracket to be missing, so the test above calls
+	// it a format failure and points the operator at the prompt when the remedy is the token budget.
+	// Read as truncation only when EARLIER lines did parse: a reply whose every line is malformed is a
+	// format failure, and one that got several verdicts out before stopping ran out of room.
+	lines := strings.Split(strings.TrimSpace(reply), "\n")
+	if len(lines) < 2 {
+		return false
+	}
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if last == "" || !strings.HasPrefix(last, "{") {
+		return false
+	}
+	var v Verdict
+	if json.Unmarshal([]byte(last), &v) == nil {
+		return false // the final line is whole; nothing was cut off
+	}
+	if _, ok := parseVerdictLines(strings.Join(lines[:len(lines)-1], "\n")); ok {
+		return true
+	}
+	return false
 }
 
 // Adjudication is what OUR code concluded, which is not the same thing as what the model said. Every
@@ -412,4 +564,17 @@ func transcriptHasQuote(transcript, q string) bool {
 		return true
 	}
 	return strings.Contains(wsRe.ReplaceAllString(transcript, " "), wsRe.ReplaceAllString(q, " "))
+}
+
+// anyEvidence reports whether the paragraph explaining the evidence counters has anything to explain.
+// Per-ASK rather than per-item: the contract is one block of text at the top, so a mixed inventory
+// (some candidates below the index's floor, some above) still gets one explanation, which is also what
+// makes "no index record" a readable line rather than an unexplained one.
+func anyEvidence(items []AdjudicationItem) bool {
+	for _, it := range items {
+		if it.Evidence != "" {
+			return true
+		}
+	}
+	return false
 }

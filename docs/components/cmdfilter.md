@@ -303,7 +303,7 @@ the never-drop list. Shrinking a file dump needs signature extraction
 filters: `cmdfilter` is the wrong mechanism for 81% of the mass.
 
 Nothing here duplicates the lossless reformatters. `grep`/`find`/`ls` path-prefix output is folded by
-`components/reformat/searchfold.go` and ANSI/`\r` terminal noise by [`textclean`](textclean.md), both with
+`components/reformat/searchfold.go` and ANSI/`\r` terminal noise by [`textclean`](reformat.md#textclean), both with
 no marker and no stash — which strictly dominates a filter in this component.
 
 ### The filters
@@ -396,5 +396,5 @@ Output whose first line matches no filter (logged as a selector miss), output un
 filtering that doesn't shrink the message once the marker is counted.
 
 See also: [Components overview](../components.md) · [The DSL filter engine](dsl.md) ·
-[Write a custom DSL filter](../how-to/custom-dsl-filter.md) ·
-[Choose a preset](../how-to/choose-a-preset.md)
+[Write a custom DSL filter](../components/dsl.md#write-a-custom-filter) ·
+[Choose a preset](../reference/presets.md)

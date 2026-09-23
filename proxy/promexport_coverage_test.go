@@ -71,6 +71,22 @@ func TestEverySnapshotFieldIsExportedOrExempt(t *testing.T) {
 // the honest reason: an entry here is a claim that /metrics loses nothing by it, so "not
 // exported yet" is spelled out as such rather than dressed up as a decision.
 var notExportedWhy = map[string]string{
+	// Not a number. The COUNT is exported as cg_model_info_unresolved_total and is what an alert
+	// fires on; the message is for the human who then goes and reads /stats or the log. A label
+	// carrying an arbitrary error string would be unbounded cardinality, which is the one thing a
+	// Prometheus label must never be.
+	"ModelInfoLastError": "not a metric — free-text; the count is cg_model_info_unresolved_total",
+
+	// The CONFIGURED pipeline, not a measurement. Pipeline is a list of names, which is label data
+	// rather than a series; PipelineLen never changes for the life of the process, so a gauge would
+	// be a constant that only ever restates the command line. Both exist for one reason: to let a
+	// reader of /stats tell "no components are configured" from "components ran and did nothing",
+	// which Components alone cannot express because both are an empty map. That question is asked
+	// when reading one proxy's stats, not when alerting across a fleet - and `off` became the
+	// plugin's default preset, so the empty case is now the common one and has to be legible.
+	"Pipeline":    "configured component order, not a measurement; label data, not a series",
+	"PipelineLen": "static for the process lifetime; a gauge would restate the command line",
+
 	// Derived: PromQL computes these from series that ARE exported, and a second series
 	// would be a number that can disagree with its own inputs.
 	"AdjustedSaved":  "cg_saved_tokens_total - cg_wasted_tokens_total",
@@ -84,6 +100,7 @@ var notExportedWhy = map[string]string{
 	"ExpandUnresolvedMalformed": `cg_expand_unresolved_total{reason="malformed"}, from expand.Unresolved()`,
 	"ExpandUnresolvedMissing":   `cg_expand_unresolved_total{reason="missing"}, from expand.Unresolved()`,
 	"AdjudicateStray":           "cg_adjudicate_stray_total, from adjudicate.StrayAnswered()",
+	"ModelInfoUnresolved":       "cg_model_info_unresolved_total, from the resolver's Unresolved()",
 	"LLMCalls":                  "cg_llm_calls_total, from cheapmodel.Usage()",
 	"LLMInputTokens":            `cg_llm_tokens_total{direction="input"}, from cheapmodel.Usage()`,
 	"LLMOutputTokens":           `cg_llm_tokens_total{direction="output"}, from cheapmodel.Usage()`,
@@ -118,12 +135,17 @@ var notExportedWhy = map[string]string{
 	"TopPassthrough":   `component NAMES; the counts are cg_component_runs_total{outcome="mutated"}`,
 	"TopDiscarded":     `component NAMES; the count is cg_component_runs_total{outcome="discarded"}`,
 	"KeepAlive":        "typed `any`; the host fills it with a ledger this package cannot name",
+	"Savings":          "typed `any`; already cg_tenant_net_saved_usd et al. via promexport's own dash-backed rows",
 
 	// Configured budgets, not measurements: constant for the process's life, so a series
 	// would only ever restate a flag. Read them off /stats when a *_timeouts is non-zero.
 	"LLMCallTimeoutMs":       "configured budget, not a measurement",
 	"SummarizeCallTimeoutMs": "configured budget, not a measurement",
-	"AgentDietCallTimeoutMs": "configured budget, not a measurement",
+	// The global bound on detached summarizer calls: a ceiling, like the budget above, and it
+	// travels beside the counts on /stats for the same reason llm_call_timeout_ms does — a refusal
+	// total means nothing without the ceiling it was measured against.
+	"SummarizeAsyncConcurrency": "configured bound, not a measurement",
+	"AgentDietCallTimeoutMs":    "configured budget, not a measurement",
 
 	// cmdfilter attribution is keyed by filter and by output SELECTOR, and the selector set
 	// is open by design (it is the backlog of filters worth writing) — not a bounded label
@@ -149,13 +171,39 @@ var notExportedWhy = map[string]string{
 	// silent: this change deliberately adds ONE family (cg_expand_unresolved_total, the
 	// alertable one) instead of growing the exposition by fourteen series inside a
 	// dashboard PR. Moving any entry out of this map is a small, self-contained change.
-	"LLMTruncated":      "NOT EXPORTED YET — full price, zero result; a real alert candidate",
-	"SummarizeTimeouts": "NOT EXPORTED YET — summarize's fail-open path is invisible in Prometheus",
-	"SummarizeErrors":   "NOT EXPORTED YET — as above",
-	"AgentDietTimeouts": "NOT EXPORTED YET — agentdiet's fail-open path, same gap",
-	"AgentDietErrors":   "NOT EXPORTED YET — as above",
-	"SyncEnforced":      "NOT EXPORTED YET — the machine-readable 'we did modify requests'",
-	"CompactionResets":  "NOT EXPORTED YET — agent self-compaction restarting the cached prefix",
+	"LLMTruncated":                         "NOT EXPORTED YET — full price, zero result; a real alert candidate",
+	"CacheAwareSummarizerCallTimeoutMs":    "configured budget, not a measurement",
+	"CacheAwareSummarizerCalls":            "NOT EXPORTED YET — this method's cost is per compacted turn, so a delta read without it is unattributable",
+	"CacheAwareSummarizerTimeouts":         "NOT EXPORTED YET — its fail-open path is invisible in Prometheus, as summarize's is",
+	"CacheAwareSummarizerErrors":           "NOT EXPORTED YET — as above",
+	"CacheAwareSummarizerDeclined":         "NOT EXPORTED YET — and it is the one that most deserves a series: a declining arm compacts nothing and is byte-identical to `off` on every other field here, so this is the only signal that separates 'ran' from 'no-op'",
+	"CacheAwareSummarizerEmpty":            "NOT EXPORTED YET — a call was PAID FOR and returned nothing usable",
+	"CacheAwareSummarizerUnverifiedSystem": "NOT EXPORTED YET — declined because instruction_role was pinned to `system` for a model no registry profile verifies",
+	"CacheAwareSummarizerRefusedStash":     "NOT EXPORTED YET — a summary was abandoned because the store would not accept the span",
+	"CacheAwareSummarizerTooLarge":         "NOT EXPORTED YET — declined because the outbound request would exceed max_request_tokens",
+	"CacheAwareSummarizerProfileFallbacks": "NOT EXPORTED YET — the profiles_path override could not be read and the embedded registry was used instead, so the roles this arm resolved are not the ones the deployment pinned",
+	"CacheAwareSummarizerAsyncStarted":     "NOT EXPORTED YET — detached summaries commissioned",
+	"CacheAwareSummarizerAsyncCommitted":   "NOT EXPORTED YET — detached summaries that reached a checkpoint. The PAIR is the signal: started without committed is a summary paid for and lost",
+	"SummarizeTimeouts":                    "NOT EXPORTED YET — summarize's fail-open path is invisible in Prometheus",
+	"SummarizeErrors":                      "NOT EXPORTED YET — as above",
+	// The detached summarizer path's health. Listed here rather than exported, following this
+	// block's own rule: adding seven cg_* series inside a PR about the trigger is exactly the
+	// exposition growth it exists to prevent. They ARE on /stats, which is what the review round
+	// that found them asked for — they were previously maintained and read by nobody at all.
+	//
+	// Started-vs-Committed is the pair worth exporting first when someone does: a growing gap is
+	// summarizer work paid for and lost, and off the hot path there is no other signal for it.
+	"SummarizeAsyncStarted":    "NOT EXPORTED YET — with Committed, the only signal that a detached summary was paid for and lost",
+	"SummarizeAsyncCommitted":  "NOT EXPORTED YET — as above; the pair is the signal, not either half",
+	"SummarizeAsyncRefused":    "NOT EXPORTED YET — the global bound shedding compaction under load",
+	"SummarizeAsyncUnresolved": "NOT EXPORTED YET — calls outstanding right now; process-local by nature, so the log is the durable record",
+	"SummarizeAsyncPanics":     "NOT EXPORTED YET — recovered panics in the detached goroutine; the ERROR log line beside it carries the panic value, which is the part a diagnosis needs",
+	"SummarizeAwaitedMs":       "NOT EXPORTED YET — latency a turn paid waiting for a summary another turn started",
+	"SummarizeAwaitTimeouts":   "NOT EXPORTED YET — with AwaitedMs, whether the wait cap is set anywhere near right",
+	"AgentDietTimeouts":        "NOT EXPORTED YET — agentdiet's fail-open path, same gap",
+	"AgentDietErrors":          "NOT EXPORTED YET — as above",
+	"SyncEnforced":             "NOT EXPORTED YET — the machine-readable 'we did modify requests'",
+	"CompactionResets":         "NOT EXPORTED YET — agent self-compaction restarting the cached prefix",
 	// Exported as cg_expand_prefix_flips_total, read from offload.ExpandPrefixFlips() rather than
 	// off `s` for the reason this map's preamble gives: the /stats handler fills the field AFTER
 	// renderMetrics takes its snapshot, so a promLine off `s` would export a permanent 0 while

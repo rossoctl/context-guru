@@ -1,0 +1,43 @@
+# iter023 ARM B -- arm A plus the sweep's two knobs, and nothing else.
+#
+# PR #80's merged design: the co-reference index goes into the adjudication prompt as EVIDENCE and the
+# model keeps the veto. econ_trigger adds the second trigger, which is the only one that can fire under
+# benchmark load at all -- iteration 022 measured not_in_pre_expiry_window on 18 of 18 requests, because
+# eight workers never leave an idle gap for a cache entry to approach expiry.
+#
+# coref-the-component is deliberately absent: it cuts and leaves a marker, the sweep skips marked content,
+# so upstream it would hide its own cuts from the model. Evidence and cutting are alternatives, and the
+# cutter gets arm C.
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, collapse, cachesplit, toolfilter, summarize]
+components:
+  extract: {min_tokens: 400}
+  extract_llm:
+    aggressiveness: medium
+    context: recent
+    context_messages: 2
+    economic_gate: true
+    fire_on: pressure
+    llm_every_n_requests: 1
+    llm_max_per_request: 8
+    llm_max_per_session: 0
+    model: {model: claude-haiku-4-5, source: incoming}
+    strategy: code
+  extract_llm_sweep:
+    min_tokens: 100
+    evidence: true
+    econ_trigger: true
+    # AMENDMENT 1 (pre-launch, derived from the pre-flight -- see PREREGISTRATION.md "Amendment 1").
+    # min_inventory 10 is UNREACHABLE on this benchmark and it silently blocks everything downstream.
+    # Measured on 710 tool outputs across two pre-flight passes: median output 59 tokens, p75 1,187,
+    # p90 3,059. At the shipped floor of 1000 that is 4.0 candidates per request, and lowering the
+    # floor to 100 only reaches 5.9 -- so no floor makes 10. The early return at
+    # sweep_inventory_below_min fires BEFORE the econ decision is taken, so the branch's headline
+    # trigger was never even evaluated: prefix_rewrite_repaid and _not_repaid were both 0.
+    # min_tokens stays at the shipped 1000 so the candidate POPULATION is still the shipped one.
+    min_inventory: 3
+  summarize:
+    trigger: {min_request_frac: 0.78}
+    resummarize_tokens: 20000
+    min_tokens: 500
+    keep_last: 3
+    model: {source: config}

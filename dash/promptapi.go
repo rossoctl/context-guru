@@ -94,7 +94,7 @@ type PromptView struct {
 func (a *API) prompt(w http.ResponseWriter, r *http.Request) {
 	f, _, ok := a.scope(r)
 	if !ok {
-		unauthorized(w)
+		a.unauthorized(w)
 		return
 	}
 	// Content visibility, the SAME rule a.request applies to a transcript. Single-tenant

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Claude Code statusLine command: by default, render what THIS session saved against what it
-has spent so far. The prompt-cache TTL countdown and the keep-alive ping counter are opt-in
-extras (--cache / --keepalive) — see skills/statusline/SKILL.md.
+has spent so far, plus the context-window bar and the proxy/upstream latency split. The
+prompt-cache TTL countdown and the keep-alive ping counter are opt-in extras (--cache /
+--keepalive) — see skills/statusline/SKILL.md.
 
 Why Python, not another shell script like the hooks: this reads JSON off stdin and makes one
 timeout-bounded HTTP call, and that is what Python's stdlib (`json`, `urllib.request`) does
@@ -33,6 +34,7 @@ loopback ".../anthropic" URL regardless of port would treat another local proxy 
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -66,6 +68,181 @@ DEFAULT_PORT = "8787"
 # stdin-supplied string into a URL and a tempfile path: an id that does not look like the UUID
 # Claude Code actually sends is treated as absent rather than trusted.
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+# Context-window bar thresholds, as fractions of the window — same bands as the IBM deployment's
+# renderer, so a developer moving between the two reads the same colour the same way.
+GREEN_MAX = 0.50
+YELLOW_MAX = 0.70
+BAR_CELLS = 8
+RESET, GREEN, YELLOW, RED, DIM = "\033[0m", "\033[32m", "\033[33m", "\033[31m", "\033[2m"
+
+# How many tool_use blocks of transcript tail this reads per render, looking for unused-tool
+# usage. Bounded for the same reason _fetch_stats bounds its own read: this runs on (almost)
+# every render.
+#
+# ponytail: no cross-session persistence here (unlike the IBM deployment's statusline-state.json)
+# — this plugin has no established per-plugin data directory to write one into, and a session-only
+# share is still the number the "remove / move / keep" bands were defined against. Add
+# CLAUDE_PLUGIN_DATA-backed cross-session totals if a genuine need for the longer window shows up.
+TRANSCRIPT_TAIL_BYTES = 512 * 1024
+
+RECOMMEND_REMOVE_MAX = 0.01
+RECOMMEND_PROJECT_MAX = 0.20
+
+_SKILL_NAME_RE = re.compile(r"^name:\s*(\S+)\s*$", re.MULTILINE)
+
+
+def _context_segment(payload: dict) -> str | None:
+    """The context-window bar: tokens used against the model's real window, coloured by pressure.
+
+    Same fields and thresholds as the IBM deployment's renderer (context_window.total_input_tokens
+    / .context_window_size / .used_percentage) — Claude Code's own statusLine payload, no fetch.
+    """
+    cw = payload.get("context_window")
+    if not isinstance(cw, dict):
+        return None
+    used = cw.get("total_input_tokens")
+    window = cw.get("context_window_size")
+    if not isinstance(used, (int, float)) or not isinstance(window, (int, float)) or window <= 0:
+        return None
+    percent = cw.get("used_percentage")
+    fraction = (percent / 100.0) if isinstance(percent, (int, float)) else (used / window)
+    fraction = max(0.0, min(1.0, fraction))
+    colour = GREEN if fraction <= GREEN_MAX else (YELLOW if fraction <= YELLOW_MAX else RED)
+    filled = int(round(fraction * BAR_CELLS))
+    bar = f"{colour}{'█' * filled}{DIM}{'·' * (BAR_CELLS - filled)}{RESET}"
+    return f"{bar} {colour}{_human(used)}/{_human(window)} {fraction * 100:.0f}%{RESET}"
+
+
+def _latency_segment(stats: dict | None) -> str | None:
+    """`proxy: Xms · upstream: Yms` — labelled so ContextGuru's own added latency cannot be
+    misread as the provider's, or vice versa. Both are /api/stats' own averages
+    (dash.Overview.CGLatencyMsAvg / UpstreamMsAvg) — measured, not derived here.
+    """
+    if not isinstance(stats, dict):
+        return None
+    proxy_ms = stats.get("cg_latency_ms_avg")
+    upstream_ms = stats.get("upstream_ms_avg")
+    if not isinstance(proxy_ms, (int, float)) or not isinstance(upstream_ms, (int, float)):
+        return None
+    return f"{DIM}proxy:{RESET} {proxy_ms:.0f}ms {DIM}·{RESET} {DIM}upstream:{RESET} {upstream_ms:.0f}ms"
+
+
+def _configured_tool_names() -> list[str]:
+    """This plugin's own skills, plus any MCP server named in the user's settings.json —
+    best-effort, for the unused-tool recommendation. Not a system-prompt enumeration (nothing
+    exposes that); see _recommend_segment for what that means for the claim this segment can make.
+    """
+    names: set[str] = set()
+    try:
+        skills_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills")
+        for path in glob.glob(os.path.join(skills_dir, "*", "SKILL.md")):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read(4096)
+            except OSError:
+                continue
+            match = _SKILL_NAME_RE.search(text)
+            if match:
+                names.add(match.group(1))
+    except OSError:
+        pass
+    try:
+        settings_path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+        with open(settings_path, encoding="utf-8") as fh:
+            settings = json.load(fh)
+        servers = settings.get("mcpServers") if isinstance(settings, dict) else None
+        if isinstance(servers, dict):
+            names.update(n for n in servers if isinstance(n, str) and n)
+    except (OSError, ValueError):
+        pass
+    return sorted(names)
+
+
+def _tool_use_counts(transcript_path: object) -> dict[str, int]:
+    """Skill and MCP-SERVER use counts from the tail of THIS session's own transcript, keyed to
+    match what _configured_tool_names reports as "available": a Skill block counts under its own
+    skill name, and an `mcp__server__tool` block counts under `server` — NOT `tool` — because
+    _recommend_segment compares this against configured SERVER names, and a server with three
+    tools used between them is used, not "barely used" three separate, undercounted ways. Everything
+    else (a Claude Code built-in) is excluded.
+    """
+    counts: dict[str, int] = {}
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return counts
+    try:
+        size = os.path.getsize(transcript_path)
+        start = max(0, size - TRANSCRIPT_TAIL_BYTES)
+        with open(transcript_path, "rb") as fh:
+            fh.seek(start)
+            text = fh.read(size - start).decode("utf-8", "replace")
+    except OSError:
+        return counts
+    for line in text.split("\n"):
+        if '"tool_use"' not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("type") != "assistant":
+            continue
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not (isinstance(block, dict) and block.get("type") == "tool_use"):
+                continue
+            name = block.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            if name == "Skill":
+                skill = block.get("input", {})
+                skill = skill.get("skill") if isinstance(skill, dict) else None
+                key = skill.split(":")[-1] if isinstance(skill, str) and skill else "Skill"
+            elif name.startswith("mcp__"):
+                parts = name.split("__")
+                # parts[1] is the SERVER — "mcp", "<server>", "<tool>", ... — which is the name
+                # _configured_tool_names reports and _recommend_segment compares this against.
+                key = parts[1] if len(parts) > 1 and parts[1] else name
+            else:
+                continue  # a Claude Code built-in: not one of the two categories this tracks
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _recommend_segment(payload: dict) -> str | None:
+    """One flagged configured tool/skill, unused or barely used THIS SESSION: `remove` (<=1% of
+    this session's tool/skill uses), `move` (<=20%, i.e. to project scope rather than global).
+
+    SESSION-SCOPED, not a system-prompt enumeration — see _configured_tool_names for what
+    "configured" means here. `counts` is keyed to match: a skill by its own name, an MCP SERVER
+    by its name with every one of its tools' uses summed into it (see _tool_use_counts) — so a
+    server is scored by its combined usage, not by whichever single tool happened to be called
+    most. A name absent from `counts` is unused in what this session's transcript tail shows,
+    which is what the segment can actually claim.
+    """
+    available = _configured_tool_names()
+    if not available:
+        return None
+    counts = _tool_use_counts(payload.get("transcript_path"))
+    total = sum(counts.values())
+    if total <= 0:
+        return None  # nothing used yet this session; too early to call anything "unused"
+    flagged: list[tuple[float, str, str]] = []
+    for name in available:
+        share = counts.get(name, 0) / total
+        if share <= RECOMMEND_REMOVE_MAX:
+            flagged.append((share, name, "remove"))
+        elif share <= RECOMMEND_PROJECT_MAX:
+            flagged.append((share, name, "move"))
+    if not flagged:
+        return None
+    flagged.sort(key=lambda t: t[0])
+    share, name, verdict = flagged[0]
+    label = name if len(name) <= 12 else name[:11] + "…"
+    return f"{DIM}◇{RESET} {label} {share * 100:.0f}% {YELLOW}{verdict}{RESET}"
 
 
 class _Budget(Exception):
@@ -263,10 +440,19 @@ def _keepalive_segment_enabled() -> bool:
 
 
 def _keepalive_segment(stats: dict) -> str | None:
-    pings = stats.get("keepalive_pings", 0) or 0
-    if pings <= 0:
+    """The ONE saving with a cause the developer did nothing to earn: cache misses the keep-alive
+    pings PREVENTED, and the NET money that saved (credit minus what the pings themselves cost).
+    Shown only when that net is positive — a net loss or a never-recorded account says nothing,
+    same rule as the IBM deployment's renderer.
+    """
+    net = stats.get("keepalive_net_usd")
+    if not isinstance(net, (int, float)) or net <= 0:
         return None
-    return f"ka {int(pings)}p"
+    prevented = stats.get("keepalive_misses_avoided", 0) or 0
+    parts = "ka"
+    if prevented >= 1:
+        parts += f" ≤{int(prevented)}miss"
+    return f"{parts} ${net:.2f}"
 
 
 def main() -> None:
@@ -284,10 +470,14 @@ def main() -> None:
         print("cg!")  # three characters: the proxy is unreachable, nothing else is worth saying
         return
 
-    # Priority is savings-vs-session-total first and always on; the cache TTL stopper and the
-    # keep-alive ping counter are opt-in extras, off unless their flag is passed — see
-    # skills/statusline/SKILL.md for the one-line command that turns either on.
+    # The context bar is payload-only (no fetch) so it renders even when stats do not; the rest
+    # need `stats`. Priority is savings-vs-session-total first and always on; the cache TTL
+    # stopper and the keep-alive ping counter stay OPT-IN extras, off unless their flag is passed
+    # — see skills/statusline/SKILL.md for the one-line command that turns either on.
     parts = []
+    context_seg = _context_segment(payload)
+    if context_seg:
+        parts.append(context_seg)
     default_seg = _default_segment(payload, stats)
     if default_seg:
         parts.append(default_seg)
@@ -297,6 +487,12 @@ def main() -> None:
         keepalive = _keepalive_segment(stats)
         if keepalive:
             parts.append(keepalive)
+    latency_seg = _latency_segment(stats)
+    if latency_seg:
+        parts.append(latency_seg)
+    recommend_seg = _recommend_segment(payload)
+    if recommend_seg:
+        parts.append(recommend_seg)
     print(" | ".join(parts))
 
 

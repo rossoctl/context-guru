@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
@@ -60,7 +62,7 @@ type Options struct {
 	// and forwarded here, and every other path Bob calls (control-plane:
 	// /admin/v1/profile, /inference/v1/model/info, …) is proxied through verbatim
 	// so the CLI boots and authenticates. Point Bob's CUSTOM_BASE_URL at this proxy.
-	BobUpstream  string // e.g. https://api.us-east.bob.ibm.com
+	BobUpstream  string // e.g. https://api.example.com
 	OpenAIKey    string // when set, REPLACES the caller's Authorization: Bearer
 	AnthropicKey string // when set, REPLACES the caller's x-api-key
 	// ForceModel, when set, overwrites the request's "model" field. eval-containers
@@ -136,6 +138,11 @@ type Options struct {
 	// Cache is the single-tenant host's prompt-cache policy (the idle keep-alive and the
 	// mixed-TTL head). In hosted mode each tenant's own `cache:` block is used instead.
 	Cache CachePolicy
+	// AuthMode selects how a human authenticates to the control plane. The zero value is
+	// AuthPassword, which is today's behaviour, so an existing deployment is unaffected by this
+	// field existing. AuthExternal withdraws the password routes entirely — see authmode.go for
+	// why present-but-unused is not equivalent to absent.
+	AuthMode AuthMode
 	// Upstreams is the operator's allow-list, by name, consulted only in hosted
 	// mode. A tenant selects a NAME; it can never supply a URL.
 	Upstreams map[string]Upstream
@@ -254,6 +261,14 @@ type Handler struct {
 	// metricsInflight collapses every concurrent cache-miss into the one render already
 	// running — see metricsHandler.
 	metricsInflight singleflight.Group
+
+	// lastSessionMu guards lastSession.
+	lastSessionMu sync.Mutex
+	// lastSession is the session id of the most recent REAL (non-ping) request this
+	// handler served — /stats' "current" scope. Set only on the request path (chat),
+	// never on the keep-alive ping path, so a ping can never make itself "current".
+	// Empty until the first real request arrives.
+	lastSession string
 }
 
 // upstreamTransport is the default upstream client's transport, and the reason there is no
@@ -492,7 +507,7 @@ func isBobProfile(r *http.Request) bool {
 // profile, `Pc.resolveBaseUrl` (bobshell 1.0.6) replaces the HOSTNAME of that URL with
 // `api.<region_domain>` from the profile — keeping the scheme and, fatally, the PORT.
 // Pointed at a context-guru instance on 127.0.0.1:4111, its very next call goes to
-// http://api.us-east.bob.ibm.com:4111, where nothing listens: observed live as
+// http://api.example.com:4111, where nothing listens: observed live as
 // "Request failed after 6 attempts: fetch failed", with not one model request ever
 // reaching the proxy while the profile call itself succeeded — the confusing shape,
 // because the proxy looks half-working and its log is empty.
@@ -573,10 +588,11 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "read body", http.StatusBadRequest)
+	// Unconditional: every caller of this endpoint wants exactly this — a body already
+	// larger than maxRequestBytes is the normal, intended input here (its whole job is to
+	// shrink whatever it's given), never a reason to reject up front.
+	body, ok := readGatedBody(w, r, true)
+	if !ok {
 		return
 	}
 	provider := bschemas.OpenAI
@@ -625,12 +641,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// threshold AND extract_llm's context-pressure triggering on this endpoint — so
 	// /compact did not reflect production, and offline replay/eval measured a different
 	// component than the one that ships.
-	window := 0
-	if h.opts.Windows != nil {
-		if w, ok := h.opts.Windows.Window(r.Context(), gjson.GetBytes(body, "model").String()); ok {
-			window = w
-		}
-	}
+	window, windowExact := h.resolveWindow(r.Context(), body)
 	// Use the SAME boundary tracker as the chat path. /compact used to fall through to
 	// apply's legacy store-backed prevLen, which the chat path had already moved off, so this
 	// endpoint kept two properties the chat path had shed: concurrent turns of one session
@@ -649,15 +660,20 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// cp.llmCtx: our own compaction-model spend under this context is charged to THIS
 	// request's row, not to whichever tenant is in flight when the call returns.
 	res := apply.BodyOpts(cp.llmCtx(r.Context()), pipe, tn.Store, apply.Opts{
-		Provider:  provider,
-		Body:      body,
-		Session:   r.Header.Get("x-context-guru-session"),
-		Tenant:    tn.ID,
-		Bypass:    strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true"),
-		Models:    models,
-		Window:    window,
-		CacheMode: cacheMode,
-		Tracker:   h.tracker,
+		Provider:    provider,
+		Body:        body,
+		Session:     r.Header.Get("x-context-guru-session"),
+		Tenant:      tn.ID,
+		Bypass:      strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true"),
+		Models:      models,
+		Window:      window,
+		WindowExact: windowExact,
+		// C, resolved beside the window because the fill fraction belongs over it rather than over
+		// the window — see internal/compactionpoint.
+		CompactionPoint:       compactionpoint.For(gjson.GetBytes(body, "model").String()).Tokens(window),
+		CompactionPointSource: string(compactionpoint.For(gjson.GetBytes(body, "model").String()).Source),
+		CacheMode:             cacheMode,
+		Tracker:               h.tracker,
 	})
 	cp.noteCG(float64(time.Since(start).Microseconds()) / 1000.0)
 	cp.noteTrace(res.Trace)
@@ -1009,10 +1025,11 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			h.refuseRoute(w, r, tn, err)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "read body", http.StatusBadRequest)
+		// Not unconditional: only the agent's OWN compaction request (isAgentCompaction,
+		// checked inside readGatedBody) may read past maxRequestBytes here — everything
+		// else still gets refused at the default ceiling exactly as before.
+		body, ok := readGatedBody(w, r, false)
+		if !ok {
 			return
 		}
 		// Pin the model if configured (eval-containers EVAL_MODEL).
@@ -1036,12 +1053,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		}
 		// Resolve the model's context window (dynamic, cached) so fraction-based
 		// triggers scale with the model; 0 when unknown (absolutes apply).
-		window := 0
-		if h.opts.Windows != nil {
-			if w, ok := h.opts.Windows.Window(r.Context(), gjson.GetBytes(body, "model").String()); ok {
-				window = w
-			}
-		}
+		window, windowExact := h.resolveWindow(r.Context(), body)
+		// C beside the window, resolved once for both the enforced and the observed path.
+		cpoint := compactionpoint.For(gjson.GetBytes(body, "model").String())
 		bypassed := strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
 		// The agent's OWN compaction request rides the same route. Bypass it exactly as the
 		// header does — compacting it destroys content the summary is supposed to carry
@@ -1121,15 +1135,20 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			body, added, tr = h.applyMode(&reqInfo{
 				// cp.llmCtx: context-guru's OWN compaction-model spend under this context
 				// is charged to this request's row, and to no other tenant's.
-				ctx:      cp.llmCtx(r.Context()),
-				provider: provider,
-				body:     body,
-				session:  r.Header.Get("x-context-guru-session"),
-				bypassed: bypassed,
-				models:   models,
-				window:   window,
-				rates:    h.selfRates(r.Context(), gjson.GetBytes(body, "model").String()),
-				tn:       tn,
+				ctx:         cp.llmCtx(r.Context()),
+				provider:    provider,
+				body:        body,
+				session:     r.Header.Get("x-context-guru-session"),
+				bypassed:    bypassed,
+				models:      models,
+				window:      window,
+				windowExact: windowExact,
+				// C, resolved once here so both the enforced and the observed path see the same
+				// figure — a second resolution is a second thing to keep in agreement.
+				compactionPoint:       cpoint.Tokens(window),
+				compactionPointSource: string(cpoint.Source),
+				rates:                 h.selfRates(r.Context(), gjson.GetBytes(body, "model").String()),
+				tn:                    tn,
 			})
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
@@ -1142,6 +1161,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// refreshed are inputs to a dollar figure, not just a label.
 			kaPings, kaRefreshed, kaStrategy := h.keeper.arrive(tn.ID, tr.Session)
 			cp.noteKeepAlive(kaPings, kaRefreshed, kaStrategy)
+			h.setLastSession(tr.Session)
 			if h.agg != nil && !bypassed {
 				h.agg.RecordAddedLatency(addedMs)
 				h.agg.RecordEligibility(tr.AttemptedTokens, tr.FrozenTokens)
@@ -1271,8 +1291,56 @@ const maxExpandRounds = 3
 
 // maxRequestBytes caps an inbound request body so a single huge POST can't exhaust
 // proxy memory (the body is buffered and token-counted several times). Generous
-// enough for very long agent transcripts; requests above it get 413.
+// enough for very long agent transcripts; requests above it get 413 — unless
+// readGatedBody finds a reason to read further. See maxCompactionRequestBytes.
 const maxRequestBytes = 32 << 20 // 32 MiB
+
+// maxCompactionRequestBytes is the ceiling readGatedBody extends to for the two cases whose
+// entire point is a body already larger than maxRequestBytes: the agent's own compaction
+// request (isAgentCompaction — see agentcompaction.go for why that must be forwarded
+// untouched, never pipelined) and the standalone /compact endpoint, whose whole job is to
+// receive and shrink a body that is, by definition, already large. Matches the existing
+// generous-but-bounded precedent already used in this package for a comparable purpose
+// (maxKeepAliveBytes, keepalive.go).
+const maxCompactionRequestBytes = 128 << 20 // 128 MiB
+
+// readGatedBody reads a request body up to maxRequestBytes as the cheap default —
+// identical cost and behavior to plain http.MaxBytesReader for the overwhelming majority of
+// requests. Only a body already over that reads further, capped at
+// maxCompactionRequestBytes, so the caller can find out whether this is exactly the one case
+// worth the extra buffering: the agent's own compaction request, or (via
+// unconditionalOverride) a route whose whole job is handling a body this large for every
+// caller. Both LimitReader calls bound worst-case memory even against a client that tries to
+// send far more than either ceiling — the same safety property http.MaxBytesReader had, just
+// with an explicit second tier instead of one hard stop.
+//
+// Returns ok=false once a response has already been written; the caller must return
+// immediately without writing anything further.
+func readGatedBody(w http.ResponseWriter, r *http.Request, unconditionalOverride bool) (body []byte, ok bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes+1))
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return nil, false
+	}
+	if int64(len(body)) <= maxRequestBytes {
+		return body, true // fast path — byte-for-byte today's behavior
+	}
+	rest, err := io.ReadAll(io.LimitReader(r.Body, maxCompactionRequestBytes-int64(len(body))+1))
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return nil, false
+	}
+	body = append(body, rest...)
+	if int64(len(body)) > maxCompactionRequestBytes {
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	if !unconditionalOverride && !isAgentCompaction(body) {
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	return body, true
+}
 
 // The expand tool is advertised on the outgoing request by expand.Inject (called
 // in chat, gated by Options.InjectExpand + store.Persists), appended last and
@@ -1400,6 +1468,40 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		if h.agg != nil && usageOK {
 			h.agg.RecordUsage(usage.FreshInput, usage.CacheRead, usage.CacheWrite, usage.Output)
+		}
+		// The provider's own input count, kept for this session's NEXT turn so a
+		// fraction-of-the-window trigger has something in the window's units to compare
+		// against. `session` here is tr.Session — the id apply itself derived — which is what
+		// RecordBilledInput requires; the three parts are summed because the split between
+		// fresh, read and written is an artefact of where the cache breakpoints fell, while the
+		// question being asked is how big the prompt was.
+		//
+		// Guarded on usageOK: a response that reported no usage (a stream that failed, a
+		// non-provider path) must leave the previous turn's figure in place rather than
+		// overwrite it with a zero that would read as "unknown" and shut the gate.
+		if usageOK {
+			billed := usage.FreshInput + usage.CacheRead + usage.CacheWrite
+			apply.RecordBilledInput(tn.Store, session, billed)
+			// OBSERVE MODE NEEDS ITS OWN RECORD, or the projection it exists to produce is a
+			// permanent zero.
+			//
+			// In observe mode the enforced path never runs a pipeline — that is what makes the
+			// byte-identity guarantee structural — so there is no Trace, `session` above is "",
+			// and the write no-ops. The off-path run also reads a DIFFERENT store, tn.Shadow,
+			// which nothing would ever write cg:bin: into. So Ctx.PrevBilledInput stayed 0,
+			// FracResolvable read false, and summarize's shipped 0.9 default reported
+			// window_not_exact on every turn: an operator deciding whether to enable this would
+			// see it save nothing, forever. That is the same defect resolveWindow fixes for
+			// /compact, arriving through the other door.
+			//
+			// The session id is derived HERE rather than on the request path, so observe keeps
+			// paying only the enqueue for its measurement — the property modes.go documents.
+			if tn.Mode == components.ModeObserve && tn.Shadow != nil {
+				if sid := apply.SessionIDFor(tn.ID, r.Header.Get("x-context-guru-session"),
+					provider, body); sid != "" {
+					apply.RecordBilledInput(tn.Shadow, sid, billed)
+				}
+			}
 		}
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 		// THE one line per request. In a defer so every terminal path emits it exactly
@@ -1731,6 +1833,40 @@ func writeRaw(w http.ResponseWriter, resp *http.Response, body []byte) {
 	}
 }
 
+// resolveWindow resolves this request's model context window and whether that figure is
+// published for the model rather than guessed at from its family.
+//
+// ONE reader for both facts, and both paths (`/v1/messages` and `/compact`) go through it —
+// because they diverged once already: /compact hard-coded the window as 0, which silently
+// disabled every fraction-based trigger on the endpoint the offline eval runs against, so eval
+// measured a different component than the one that ships. A second fact resolved beside it is a
+// second chance to make that mistake.
+//
+// exact=false covers BOTH "unknown" and "a guess", because a caller that must not act on a guess
+// must not act on an unknown either, and no caller needs to tell those apart. See
+// modelinfo.ExactResolver for why ok=true from the resolver is not the same as right.
+func (h *Handler) resolveWindow(ctx context.Context, body []byte) (window int, exact bool) {
+	if h.opts.Windows == nil {
+		return 0, false
+	}
+	model := gjson.GetBytes(body, "model").String()
+	// The capability is optional: an Options.Windows supplied by a caller that predates it,
+	// or a test double, still resolves windows and simply never claims exactness.
+	if er, hasCap := h.opts.Windows.(interface {
+		WindowExact(context.Context, string) (int, bool, bool)
+	}); hasCap {
+		w, ex, ok := er.WindowExact(ctx, model)
+		if !ok {
+			return 0, false
+		}
+		return w, ex
+	}
+	if w, ok := h.opts.Windows.Window(ctx, model); ok {
+		return w, false
+	}
+	return 0, false
+}
+
 func (h *Handler) doUpstream(r *http.Request, up upstream, body []byte) (*http.Response, error) {
 	if up.base == "" {
 		return nil, errNoUpstream
@@ -1899,11 +2035,40 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.SummarizeTimeouts = offload.SummarizeTimeouts()
 	snap.SummarizeErrors = offload.SummarizeErrors()
 	snap.SummarizeCallTimeoutMs = offload.SummarizeCallTimeout().Milliseconds()
+	// The DETACHED path's own health. Not optional decoration: producing the summary off the hot
+	// path removed every other way to see that it is working. Inline, a slow or failing summarizer
+	// was visible as request latency and as a reverted component; detached, the request is already
+	// answered and no row carries the work until the session's next turn.
+	//
+	// These were maintained and read by nobody for a whole review round — AsyncSummaryStats had no
+	// caller anywhere, while three comments claimed the numbers reached /stats. Changing its
+	// signature from four returns to six compiled untouched, which is the proof.
+	// TestAsyncSummaryCountersReachStats pins the route so that cannot recur.
+	snap.SummarizeAsyncStarted, snap.SummarizeAsyncCommitted,
+		snap.SummarizeAwaitedMs, snap.SummarizeAwaitTimeouts,
+		snap.SummarizeAsyncRefused, snap.SummarizeAsyncUnresolved,
+		snap.SummarizeAsyncPanics = offload.AsyncSummaryStats()
+	snap.SummarizeAsyncConcurrency = offload.MaxConcurrentSummaries()
 	// agentdiet owns a third budget (a window of steps, between one tool output and a
 	// whole span), and runs in its own arm — so it reports its own counters too.
 	snap.AgentDietTimeouts = offload.AgentDietTimeouts()
 	snap.AgentDietErrors = offload.AgentDietErrors()
 	snap.AgentDietCallTimeoutMs = offload.AgentDietCallTimeout().Milliseconds()
+	// cache_aware_summarizer's budget, plus the decline counter that distinguishes "this arm ran"
+	// from "this arm was a no-op indistinguishable from off".
+	snap.CacheAwareSummarizerCalls = offload.CacheAwareSummarizerCalls()
+	snap.CacheAwareSummarizerTimeouts = offload.CacheAwareSummarizerTimeouts()
+	snap.CacheAwareSummarizerErrors = offload.CacheAwareSummarizerErrors()
+	snap.CacheAwareSummarizerDeclined = offload.CacheAwareSummarizerDeclined()
+	snap.CacheAwareSummarizerCallTimeoutMs = offload.CacheAwareSummarizerCallTimeout().Milliseconds()
+	snap.CacheAwareSummarizerEmpty = offload.CacheAwareSummarizerEmpty()
+	snap.CacheAwareSummarizerUnverifiedSystem = offload.CacheAwareSummarizerUnverifiedSystem()
+	snap.CacheAwareSummarizerRefusedStash = offload.CacheAwareSummarizerRefusedStash()
+	snap.CacheAwareSummarizerTooLarge = offload.CacheAwareSummarizerTooLarge()
+	snap.CacheAwareSummarizerProfileFallbacks = offload.CacheAwareSummarizerProfileFallbacks()
+	caStarted, caCommitted, _, _ := offload.CacheAwareAsyncStats()
+	snap.CacheAwareSummarizerAsyncStarted, snap.CacheAwareSummarizerAsyncCommitted = caStarted, caCommitted
+
 	// Freeze-replay health, same layering: the counters live with the code that owns
 	// them (offload for the replay path, the store for dropped/repaired decisions).
 	// Reversibility's two failure causes, split because they need opposite responses and one of
@@ -1917,7 +2082,28 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// is that it does not call it: measured 0 across ~4,900 requests, and a non-zero figure here says
 	// the description stopped working — which nothing else in this snapshot can reveal.
 	snap.AdjudicateStray = adjudicate.StrayAnswered()
+	// WHETHER THE CONTEXT WINDOW IS THE ONE THE OPERATOR CONFIGURED. Asked through an optional
+	// interface rather than by importing internal/modelinfo, so a host that supplies its own resolver
+	// is not obliged to answer and the proxy keeps one dependency fewer. Silence means "this resolver
+	// cannot say", which is not the same as "all is well" — see metrics.Snapshot.ModelInfoUnresolved
+	// for the run this exists because of.
+	if u, ok := h.opts.Windows.(interface{ Unresolved() (error, int) }); ok {
+		if err, n := u.Unresolved(); n > 0 {
+			snap.ModelInfoUnresolved = int64(n)
+			if err != nil {
+				snap.ModelInfoLastError = err.Error()
+			}
+		}
+	}
 	snap.FrozenHits, snap.FrozenMisses = offload.FrozenStats()
+	// The configured pipeline, so an empty one is reportable rather than merely empty. Only for the
+	// single-tenant proxy: hosted, /stats aggregates every tenant and h.pipe describes none of them,
+	// so the field stays nil and `pipeline_len` reads 0 for a different reason - which is why the
+	// per-tenant view is the dashboard, not this endpoint.
+	if h.opts.Tenants == nil && h.pipe != nil {
+		snap.Pipeline = h.pipe.Names()
+		snap.PipelineLen = len(snap.Pipeline)
+	}
 	// The expand-induced prefix flip, published beside the freeze-replay counters because it is the
 	// same mechanism seen from the other side: a replay that DIDN'T happen because the agent
 	// expanded content that was compacted before. See metrics.Snapshot.
@@ -1988,6 +2174,9 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	}
 	xs := metrics.ExtractSnapshot(cost, perSavedTok, cacheWrite, cacheRead)
 	snap.Extract = &xs
+	if s := h.savingsStats(); s != nil && (s.Current != nil || s.Live != nil || s.All != nil) {
+		snap.Savings = s
+	}
 	json.NewEncoder(w).Encode(snap)
 }
 

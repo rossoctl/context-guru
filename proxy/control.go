@@ -72,6 +72,32 @@ type ctlRoute struct {
 
 // ctlRoutes is the single mounted route table, read by MountControl and by the scope test.
 func (h *Handler) ctlRoutes() []ctlRoute {
+	rs := h.allCtlRoutes()
+	if !h.opts.AuthMode.DisablesPasswordRoutes() {
+		return rs
+	}
+	// EXTERNAL IDENTITY: the password routes are withdrawn from the TABLE, not merely left
+	// unused. This table is what Mount walks and what the scope test walks, so removing them here
+	// removes them from both — a route present in the table but absent from the mux would be
+	// checked by the test and unreachable in practice, and the reverse would be worse.
+	//
+	// PasswordRoutePatterns is the single list, so this cannot drift from what a host is told to
+	// expect: adding a password route without adding it there fails that file's own test.
+	withdrawn := make(map[string]bool, len(PasswordRoutePatterns()))
+	for _, p := range PasswordRoutePatterns() {
+		withdrawn[p] = true
+	}
+	kept := rs[:0]
+	for _, rt := range rs {
+		if !withdrawn[rt.pattern] {
+			kept = append(kept, rt)
+		}
+	}
+	return kept
+}
+
+// allCtlRoutes is every control-plane route this build knows, before any withdrawal.
+func (h *Handler) allCtlRoutes() []ctlRoute {
 	rs := []ctlRoute{
 		{"POST /api/register", ctlPublic, h.ctlRegister},
 		{"POST /api/login", ctlPublic, h.ctlLogin},
@@ -294,8 +320,9 @@ func readJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 //
 // Every write here is authenticated by the COOKIE, and the cookie's SameSite=Lax is not
 // the boundary it looks like: SameSite's unit is the REGISTRABLE DOMAIN, so on a
-// deployment under ibm.com any colleague's host under ibm.com is "same site" and the
-// browser attaches the cookie. A form post needs no preflight either, and a
+// deployment under a shared organizational domain any other host under that same
+// registrable domain is "same site" and the browser attaches the cookie. A form post
+// needs no preflight either, and a
 // `text/plain` body reaches a JSON decoder unimpeded (DisallowUnknownFields is happy as
 // long as the form's `=` lands inside a string value). Nothing else stood in the way: a
 // cross-origin post could mint a token on the victim's account or sign them out.

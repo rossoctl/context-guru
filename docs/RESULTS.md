@@ -110,8 +110,10 @@ cost and reward**. Its ceiling is that it only compresses **Bash-tool** output (
   context-guru component, headroom compressor, and rtk command filter works, when it
   triggers, and real before→after compactions from the run logs, side by side.
 - Per-config detail (per-task tables + totals):
-  [baseline](results/baseline.md) · [context-guru](results/context-guru.md) ·
-  [headroom](results/headroom.md) · [rtk](results/rtk.md).
+  [baseline](results/swebench-arms.md#full-results-baseline-off-swe-bench-verified-50-tasks) ·
+  [context-guru](results/swebench-arms.md#full-results-context-guru-codesmart-final-swe-bench-verified-50-tasks) ·
+  [headroom](results/swebench-arms.md#full-results-headroom-hd-cache-swe-bench-verified-50-tasks) ·
+  [rtk](results/swebench-arms.md#full-results-rtk-rust-token-killer-swe-bench-verified-50-tasks).
 - **[Reproduce](results/REPRODUCE.md)** — install and run all four arms yourself.
 
 Method note: cache-aware billed **input** cost = fresh $2/M · cache-read $0.20/M ·

@@ -58,6 +58,28 @@ func TestLiteLLMResolvesAndNormalizes(t *testing.T) {
 	if _, ok := l.Window(ctx, "totally-unknown-xyz"); ok {
 		t.Fatal("unknown model must return ok=false")
 	}
+	// A BRACKETED CONTEXT-LENGTH VARIANT must resolve to its base model, and EXACTLY, because
+	// Trigger.FracResolvable refuses to act on a guess. Before this, `aws/claude-opus-5[1m]` missed
+	// the map entirely: the chain fell through to DefaultStatic, which answers 200,000 for every
+	// Opus with exact=false, so summarize's shipped min_request_frac: 0.9 could never fire on such an
+	// id — silently, which looks exactly like a gate that is working — and every non-exact reader
+	// (OutputFloor, IsHuge, extract_llm's fraction) saw a window five times too low.
+	for _, id := range []string{"claude-sonnet-5[1m]", "aws/claude-sonnet-5[1m]"} {
+		w, exact, ok := Exact(l, ctx, id)
+		if !ok || w != 1000000 {
+			t.Errorf("%s => %d,%v want 1000000: the bracketed suffix is a context-length variant, "+
+				"not part of the model key", id, w, ok)
+		}
+		if !exact {
+			t.Errorf("%s resolved inexactly; FracResolvable refuses a guess, so summarize's "+
+				"fraction gate would never fire on this id", id)
+		}
+	}
+	// And an id that merely CONTAINS a bracket, or ends with an unterminated one, is not rewritten:
+	// this must strip a variant marker, never repair a malformed name.
+	if _, ok := l.Window(ctx, "totally-unknown-xyz[1m"); ok {
+		t.Error("an unterminated bracket must not be stripped into a different lookup")
+	}
 	// cache: many lookups, one fetch.
 	for i := 0; i < 5; i++ {
 		l.Window(ctx, "gpt-4o")

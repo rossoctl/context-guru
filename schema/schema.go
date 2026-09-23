@@ -6,7 +6,7 @@
 // Components operate directly on *schemas.BifrostChatRequest (see package
 // components); this package is the small toolbox around that type, not a
 // competing model. Wire<->schema conversion lives in the host adapters — the
-// bifrost proxy gets it for free from bifrost's transport, the AuthBridge
+// bifrost proxy gets it for free from bifrost's transport, a sidecar
 // plugin uses FromOpenAIBytes/FromAnthropicBytes (added in P3).
 package schema
 
