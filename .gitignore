@@ -191,3 +191,10 @@ site/
 # Personal/local operator notes — deployment-host facts, not repo documentation.
 # Never pushed.
 CLAUDE.local.md
+
+# SQLite databases. The proxy writes its dashboard and control DBs with default
+# names in whatever directory it is started from, so a proxy run inside a checkout
+# leaves production-shaped tenant data in the working tree, untracked but committable.
+*.db
+*.db-wal
+*.db-shm
