@@ -59,16 +59,10 @@ If you want to also carry less, not just pay less, opt into content trimming:
 
 ### Status line
 
-A terminal status line is installed **on by default** alongside the plugin — no separate step. It
-shows the context-window bar, this session's running savings against its own running cost, the
-proxy/upstream latency split, and a least-used-tool hint, and it renders nothing at all in a
-project that isn't routed through context-guru, so it's safe even before you run
-`/context-guru:install` anywhere. Turn it off any time with:
-
+A terminal status line is installed **on by default** alongside the plugin. Run this command to turn it off/on:
 ```
-"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" off --file ~/.claude/settings.json
+/context-guru:statusline off/on
 ```
-
 More: [docs/how-to/install-plugin.md](docs/how-to/install-plugin.md), or ask
 `/context-guru:statusline` to enable an extra segment or turn it back on.
 
