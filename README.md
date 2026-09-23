@@ -80,8 +80,13 @@ Claude Code checks the marketplace for updates in the background and prompts you
 /reload-plugins
 ```
 
-The plugin's version tracks each proxy release, so an update to the proxy is always an update
-you get prompted for. More: [docs/how-to/install-plugin.md](docs/how-to/install-plugin.md#upgrading).
+That updates the **plugin** (skills, hooks, scripts) — it does not update the proxy **binary**,
+which is released separately. A routed session checks for a newer binary release at most once
+every 5 minutes and tells you once, with three answers: update now, always update automatically
+(staged in the background, live at your next session), or do nothing (that release is muted, but a
+later one still asks). Check or act on it any time with `/context-guru:update`.
+
+More: [docs/how-to/install-plugin.md](docs/how-to/install-plugin.md#upgrading).
 
 ## Troubleshooting
 

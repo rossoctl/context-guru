@@ -52,8 +52,11 @@ fi
 # ordering safe; measured end to end at ~6s for the dead-proxy path, and there is a test that
 # reads the timeout out of hooks.json so the two cannot drift apart again.
 if [ -x "${CLAUDE_PLUGIN_ROOT:-}/scripts/start-proxy.sh" ]; then
+  # --no-update-check: this call's stdout is discarded below, so a release notice printed here
+  # would be destroyed while still marking itself delivered — the user would never see it, on
+  # ANY session, ever. The real SessionStart hook has no such flag and gets the notice instead.
   CONTEXT_GURU_HEALTH_BUDGET="${CONTEXT_GURU_HEALTH_BUDGET:-5}" \
-    "${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh" >/dev/null 2>&1 || true
+    "${CLAUDE_PLUGIN_ROOT}/scripts/start-proxy.sh" --no-update-check >/dev/null 2>&1 || true
   if curl -fsS --max-time 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
     exit 0
   fi
