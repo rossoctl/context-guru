@@ -145,6 +145,7 @@ nav:
       - Rule-based and learned TTL arms, scored: results/kv-ttl-predictor-arms.md
       - TTL predictors compared, pooled and per tenant: results/kv-ttl-predictor-comparison.md
       - "Strategies vs Overview: reconciling keep-alive savings": results/kv-ttl-savings-reconciliation.md
+      - "The keep-alive reuse model: features, fit, and what it is worth": results/kv-cache-keepalive-reusemodel.md
       - "SWE-bench Verified: per-arm detail": results/swebench-arms.md
       - "Terminal-Bench 2.0":
           - Four-way comparison: results/terminal-bench-comparison.md
