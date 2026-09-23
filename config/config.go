@@ -415,6 +415,16 @@ var presets = map[string][]string{
 	// summarize restructures the whole transcript (changes the message count) — run
 	// it alone so no other component's in-place edits race apply's rebuild.
 	"summarize": {"summarize"},
+	// summarizer1509 is `summarize` configured as a CACHE-UNAWARE, NO-REUSE summarizer: the
+	// reference shape the llm-d compaction work calls [P0] "compaction as a capability", and the
+	// control arm the cache-aware trigger's payoff is measured against. Same component, three
+	// settings (see presetConfigs): cache_state any, resummarize_tokens 0, keep_first 2.
+	//
+	// It is a preset rather than a second component on purpose. Everything that once distinguished
+	// a separate llm-d summarizer — turn-aligned cuts at both ends, orphaned tool_result repair,
+	// a configurable head — now lives in `summarize` itself, so a fork would duplicate ~500 lines
+	// of summarizer to deliver three YAML values.
+	"summarizer1509": {"summarize"},
 	// agentdiet reproduces the published AgentDiet baseline (arXiv:2509.23586, FSE
 	// 2026) so it can be A/B'd against our own reducers on the same traffic. Its
 	// tuned thresholds live in presetConfigs; it runs with `format` only, because
@@ -475,6 +485,42 @@ var presets = map[string][]string{
 //
 // Component defaults are left untouched, so general/agent/aggressive are unaffected.
 var presetConfigs = map[string]string{
+	// summarizer1509 — `summarize` as the cache-unaware, no-reuse reference summarizer. Three
+	// settings carry the whole difference from the default, and each one is deliberate:
+	//
+	//   cache_state: any        turn the cache-aware gate OFF. This arm exists to be the thing the
+	//     gate is measured against, so it must summarize on size alone, as the component did before
+	//     the trigger gained a cache condition. It is also what a deployment on a backend whose
+	//     prompt-cache lifetime this repo does not derive should set — a fraction of a cache TTL
+	//     that was assumed rather than read is not a measurement.
+	//   resummarize_tokens: 0   no checkpoint reuse: re-summarize on every eligible turn. That is
+	//     the cost the prefix-preserving alternative is supposed to beat, so smuggling reuse in
+	//     here would make the two arms differ by two variables instead of one.
+	//   keep_first: 2           pin [system, task] verbatim. This preset is aimed at OpenAI-shaped
+	//     traffic, where the default 1 pins only the system prompt and folds the task statement
+	//     into the summary.
+	//
+	// keep_last: 10 is the one tail size measured to win on agentic traffic: 3 loses on the TURN
+	// term (the summary is too aggressive to continue from, so the agent re-derives what it lost)
+	// and 20 loses on the PER-TURN term (it re-summarizes on most requests). This arm already
+	// carries the worst case of the per-turn term by construction, so it must not also pay the
+	// turn term. Raise it if the agent starts re-deriving; do not lower it to force savings.
+	"summarizer1509": `pipeline: [summarize]
+components:
+  summarize:
+    keep_first: 2
+    keep_last: 10
+    summary_level: regular
+    include_tool_calls: true
+    min_tokens: 500
+    resummarize_tokens: 0
+    trigger:
+      min_messages: 12
+      min_request_tokens: 20000
+      min_request_frac: 0
+      cache_state: any
+    model:
+      source: config`,
 	"codesmart": `pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, linecap, cachesplit]
 components:
   extract:

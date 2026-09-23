@@ -19,6 +19,7 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 | Coding agent reading big source files | `coding` |
 | MCP / list-endpoint JSON arrays | `mcp` |
 | One long transcript to compress, standalone | `summarize` |
+| A cache-unaware summarizer baseline, or a backend with no derivable cache TTL | `summarizer1509` |
 | Squeeze harder, tolerate LLM/structural offload | `aggressive` |
 | Nothing — A/B baseline, passthrough control | `off` |
 
@@ -37,6 +38,7 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 | `agent` | `format, textclean, searchfold, dedup, failed_run, mask, extract, extract_llm, cachesplit` |
 | `general` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, linecap, cachesplit` |
 | `summarize` | `summarize` |
+| `summarizer1509` | `summarize` |
 | `off` | *(empty)* |
 | `agentdiet` | `format, agentdiet, cachesplit` |
 | `house` | `format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter` |
@@ -185,6 +187,7 @@ Pipelines below are taken exactly from the `presets` map in `config/config.go`.
 | `agent` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `mask` → `extract` → `extract_llm` → `cachesplit` | Long agentic sessions (e.g. Claude Code on SWE-bench) where re-sent tool outputs dominate cost. `mask` is the biggest lever — ~27% content-token savings with no task-reward loss (see [Benchmarks](../RESULTS.md)). |
 | `general` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `mask` → `extract` → `extract_llm` → `collapse` → `linecap` → `cachesplit` | The recommended all-round pipeline: the reward-neutral levers of `agent` plus the situational shrinkers (`cmdfilter` / `linecap` / `collapse`) that cost nothing when they don't fire. |
 | `summarize` | `summarize` | Long trajectories where the transcript itself is the cost. **Runs alone** — it restructures the whole transcript (changes the message count), so no other component's in-place edits race the rebuild. |
+| `summarizer1509` | `summarize` | The same component configured as a **cache-unaware, no-reuse** summarizer — `cache_state: any`, `resummarize_tokens: 0`, `keep_first: 2` — i.e. the reference shape the llm-d compaction work calls [P0], and the control arm the cache-aware trigger is measured against. Also the right starting point on a backend whose prompt-cache lifetime this repo cannot derive. **Runs alone**, for the same reason as `summarize`. |
 | `agentdiet` | `format` → `agentdiet` → `cachesplit` | A **comparable baseline**, not a recommendation: the published [AgentDiet](../components/advanced-offload.md#agentdiet) method ([arXiv:2509.23586](https://arxiv.org/abs/2509.23586)) at its tuned hyperparameters, for A/B'ing against our own reducers. One cheap-model reflection per turn on the step that just aged past `delay_steps`. Carries no other offloader on purpose — they would reduce the same tool outputs first and leave nothing to attribute. |
 
 !!! info "The lossless trio, `toon`'s retirement, and `linecap` (August 2026)"

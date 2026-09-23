@@ -172,9 +172,11 @@ of the normalized list, so it is asserted on the raw body instead (`apply/toolro
 | Key | Default | Meaning |
 |---|---|---|
 | `summary_level` | `regular` | `concise` \| `regular` \| `highly_detailed`. |
+| `keep_first` | 1 | Leading messages kept verbatim before the span. On Anthropic traffic the system prompt is a top-level field the pipeline never sees, so `msgs[0]` is already the opening user turn and 1 pins the task. On OpenAI-shaped traffic `msgs[0]` is the system prompt and the task statement is `msgs[1]`, so set 2 there to keep `[system, task]`. Refused if negative. |
 | `keep_last` | 3 | Trailing messages kept verbatim. |
 | `min_tokens` | 500 | Span floor — minimum middle size before summarizing. |
 | `include_tool_calls` | `false` | `false` → tool outputs masked in the summarized trajectory. |
+| `custom_prompt` | *(none)* | A deployment-specific instruction appended last to the summarizer prompt, framed as operator guidance that takes precedence over the trajectory but not over the anti-fabrication rule or the `<summary>` output format. |
 | `resummarize_tokens` | 6000 | Tail growth that triggers rolling the checkpoint forward. |
 | `start_from_message` | 6 | Legacy message-count gate, folded into `trigger.min_messages` when that is unset. Prefer `trigger.min_messages`; this key is still read so old documents keep working. |
 | `model.source` | `incoming` | LLM source: `incoming` (proxied model+key) or `config` (cheap model). |

@@ -131,7 +131,9 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 	// cost the claim — a stranger deciding whether to route their agent through us can check
 	// "nothing but a cache breakpoint moves" in a second, and cannot check four rewriters as
 	// fast. See TestCachePresetIsCachesplitAlone, which holds the other side of that trade.
-	exempt := map[string]bool{"off": true, "summarize": true, "agentdiet": true, "cache": true}
+	// summarizer1509 is exempt for exactly summarize's reason — it IS summarize, configured as the
+	// cache-unaware no-reuse reference arm, and it restructures the transcript alone.
+	exempt := map[string]bool{"off": true, "summarize": true, "summarizer1509": true, "agentdiet": true, "cache": true}
 	for name, pipeline := range presets {
 		if exempt[name] {
 			continue

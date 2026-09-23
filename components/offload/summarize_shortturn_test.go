@@ -24,7 +24,7 @@ func TestSummarizeSpanDoesNotPanicOnShortTranscripts(t *testing.T) {
 	// The reduced case from the review: two messages, default keep_last.
 	msgs := []bschemas.ChatMessage{userMsg("hi"), assistantMsg("hello")}
 	for _, keepLast := range []int{1, 2, 3, 5, 20} {
-		headCount, start, end := summarizeSpan(msgs, keepLast)
+		headCount, start, end := summarizeSpan(msgs, 1, keepLast)
 		if end < start {
 			t.Errorf("keepLast=%d: end=%d below start=%d; Offload's `end <= start` guard "+
 				"expects a clamped boundary", keepLast, end, start)
@@ -41,7 +41,7 @@ func TestSummarizeSpanDoesNotPanicOnShortTranscripts(t *testing.T) {
 		}
 	}
 	// An empty transcript must be handled too — the head probe indexes msgs[0].
-	if _, start, end := summarizeSpan(nil, 3); end != start {
+	if _, start, end := summarizeSpan(nil, 1, 3); end != start {
 		t.Errorf("nil transcript: span must be empty, got start=%d end=%d", start, end)
 	}
 }

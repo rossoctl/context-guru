@@ -82,12 +82,33 @@ func dropOrphanedToolResults(msgs []bschemas.ChatMessage) ([]bschemas.ChatMessag
 //     conversation's identity — its system prompt or opening user turn — and an assistant
 //     tool-call message is neither, so nothing is lost by folding it into the summary.
 //
-// Returns headCount (0 or 1), start, end. A caller that gets end <= start should skip.
-func summarizeSpan(msgs []bschemas.ChatMessage, keepLast int) (headCount, start, end int) {
-	headCount = 1
-	if len(msgs) > 0 && msgs[0].Role == bschemas.ChatMessageRoleAssistant &&
-		msgs[0].ChatAssistantMessage != nil && len(msgs[0].ChatAssistantMessage.ToolCalls) > 0 {
-		headCount = 0 // preserving it would leave its calls unanswered
+// keepFirst is how many leading messages stay verbatim before the span. It exists because
+// "preserve msgs[0]" means different things in the two dialects, and only one of them keeps
+// the task: on Anthropic traffic the system prompt is a top-level field the pipeline never
+// sees, so msgs[0] IS the opening user turn — but on OpenAI-shaped traffic msgs[0] is the
+// system prompt and the task statement sits at msgs[1], inside the span. A deployment on
+// OpenAI-shaped traffic therefore needs keep_first: 2 to retain what it is working on.
+//
+// Returns headCount (0..keepFirst), start, end. A caller that gets end <= start should skip.
+func summarizeSpan(msgs []bschemas.ChatMessage, keepFirst, keepLast int) (headCount, start, end int) {
+	headCount = keepFirst
+	if headCount < 0 {
+		headCount = 0
+	}
+	if headCount > len(msgs) {
+		headCount = len(msgs)
+	}
+	// THE HEAD MUST BE SELF-CONSISTENT. An assistant message that requested tool calls has its
+	// results in the message(s) after it, so a head ENDING on one keeps a call whose results were
+	// summarized away — the second of the two provider rejections above. Retreat until it does
+	// not. A loop rather than one decrement: consecutive tool-calling assistant messages are
+	// malformed input, and malformed input is exactly where a 400 comes from.
+	//
+	// At keepFirst: 1 this reduces to the original rule (msgs[0] is a tool-calling assistant ⇒
+	// headCount 0), and at keepFirst: 2 a call/result pair at msgs[0:2] is kept WHOLE, because
+	// msgs[1] is the result and carries no calls of its own.
+	for headCount > 0 && requestedToolCalls(msgs[headCount-1]) {
+		headCount--
 	}
 	start = headCount
 	end = len(msgs) - keepLast
@@ -115,6 +136,19 @@ func summarizeSpan(msgs []bschemas.ChatMessage, keepLast int) (headCount, start,
 		end++
 	}
 	return headCount, start, end
+}
+
+// requestedToolCalls reports whether m is an assistant message that asked for tool calls, as
+// bifrost models them.
+//
+// ⚠️ OpenAI-shaped traffic only: bifrost does not map Anthropic `tool_use` content blocks onto
+// ToolCalls, so on the Anthropic path this is always false. The head-retreat above is still
+// correct there, because apply's normalize turns each Anthropic tool_result block into a
+// synthetic role=tool message and the ORIGINAL msgs[0] on that path is the opening user turn,
+// never a tool-calling assistant message.
+func requestedToolCalls(m bschemas.ChatMessage) bool {
+	return m.Role == bschemas.ChatMessageRoleAssistant &&
+		m.ChatAssistantMessage != nil && len(m.ChatAssistantMessage.ToolCalls) > 0
 }
 
 // trimSpanForKeptVerbatim lowers end so the span never contains content the agent EXPANDED.

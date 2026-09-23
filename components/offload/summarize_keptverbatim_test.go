@@ -52,7 +52,7 @@ func TestSummarizeLeavesExpandedContentInTheTranscript(t *testing.T) {
 		userMsg("what next?"),
 	}
 
-	_, start, end := summarizeSpan(msgs, 1)
+	_, start, end := summarizeSpan(msgs, 1, 1)
 	trimmed := trimSpanForKeptVerbatim(msgs, start, end,
 		func(text string) bool { return text == expanded })
 
@@ -85,7 +85,7 @@ func TestSummarizeDeclinesRatherThanTouchingExpandedContent(t *testing.T) {
 		tool(expanded), // immediately after the head, so nothing is summarizable without it
 		userMsg("what next?"),
 	}
-	_, start, end := summarizeSpan(msgs, 1)
+	_, start, end := summarizeSpan(msgs, 1, 1)
 	trimmed := trimSpanForKeptVerbatim(msgs, start, end,
 		func(text string) bool { return text == expanded })
 	if trimmed > start {
@@ -100,7 +100,7 @@ func TestTheTrimIsANoOpWithoutExpandedContent(t *testing.T) {
 	msgs := []bschemas.ChatMessage{
 		userMsg("opener"), userMsg(filler), userMsg(filler), userMsg("what next?"),
 	}
-	_, start, end := summarizeSpan(msgs, 1)
+	_, start, end := summarizeSpan(msgs, 1, 1)
 	if got := trimSpanForKeptVerbatim(msgs, start, end, func(string) bool { return false }); got != end {
 		t.Fatalf("trimmed a span with nothing expanded in it: %d -> %d", end, got)
 	}
