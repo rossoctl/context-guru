@@ -1710,6 +1710,141 @@ def cmd_preset(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# The proxy BINARY's own release channel (v0.1.1 … v0.3.0 on GitHub) is separate from this
+# PLUGIN's version in plugin.json, and updating the plugin through the marketplace does not touch
+# the binary. This is the small state file that lets start-proxy.sh tell the user, at most once
+# per released tag, that a newer binary exists — and remember what they said so it never nags
+# again about a tag it already asked about.
+#
+# Modelled on the strategy file above: a marker on the first line, an ownership guard that
+# refuses to touch a file it did not write, and one render function that is the only composer.
+UPDATE_MARKER_PREFIX = "# context-guru:"
+UPDATE_MARKER_TAIL = "written by"
+
+# `ask` (default): show the notice once per released tag not yet in `skipped`. `auto`: the
+# SessionStart hook upgrades in the background without asking again ("always"). `never`: the
+# check is off. `skipped` is independent of `answer` — it mutes ONE tag, not every future one, so
+# declining v0.3.0 does not hide a v0.4.0 that ships a real fix.
+UPDATE_ANSWERS = ("always", "skip", "never")
+
+
+def update_check_path() -> str:
+    """One file, machine-wide: there is one proxy binary on PATH, not one per port."""
+    return os.path.join(state_dir(), "update-check.yaml")
+
+
+def _update_is_ours(text: str) -> bool:
+    first = text.splitlines()[0] if text.splitlines() else ""
+    return first.startswith(UPDATE_MARKER_PREFIX) and UPDATE_MARKER_TAIL in first
+
+
+def _update_fields_in(text: str) -> dict[str, str]:
+    fields = {"answer": "ask", "skipped": "", "latest": ""}
+    for line in text.splitlines():
+        m = re.match(r"^(answer|skipped|latest):\s*(.*)$", line)
+        if m:
+            fields[m.group(1)] = m.group(2).strip()
+    return fields
+
+
+def _render_update_check(answer: str, skipped: str, latest: str) -> str:
+    return "\n".join([
+        f"{UPDATE_MARKER_PREFIX} update_check=1 {UPDATE_MARKER_TAIL} /context-guru:update",
+        "# Do not hand-edit: this file's ownership is decided by its first line, so an edit that",
+        "# removes the marker also turns the update notice off for good.",
+        f"answer: {answer or 'ask'}",
+        f"skipped: {skipped}",
+        f"latest: {latest}",
+    ]) + "\n"
+
+
+def _read_update_check() -> tuple[dict[str, str] | None, str]:
+    """(fields, "") normally — absent is a real, synthetic "ask" state, not an error. (None,
+    reason) when the file exists but must not be touched: unreadable, or written by something
+    else. Every caller must fail OPEN on the second case, since this runs on the SessionStart path.
+    """
+    path = update_check_path()
+    if not os.path.exists(path):
+        return {"answer": "ask", "skipped": "", "latest": ""}, ""
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return None, "unreadable"
+    if not _update_is_ours(text):
+        return None, "not_ours"
+    return _update_fields_in(text), ""
+
+
+def _write_update_check(fields: dict[str, str]) -> str:
+    """Returns "" on success, else a reason. Never raises — a state write must never fail a
+    session that only needs a proxy, not a notice."""
+    try:
+        ensure_state_dir(state_dir())
+        _write_atomic(update_check_path(), _render_update_check(**fields).encode("utf-8"),
+                       mode=0o600)
+    except OSError as exc:
+        return f"unwritable:{exc}"
+    return ""
+
+
+def cmd_update_check(args) -> int:
+    if args.op == "show":
+        fields, reason = _read_update_check()
+        if fields is None:
+            emit(result="skipped", reason=reason)
+            return 0
+        emit(result="ok", answer=fields["answer"], skipped=fields["skipped"],
+             latest=fields["latest"])
+        return 0
+
+    if args.op == "stamp":
+        # Called by the detached release check after it resolves the latest tag (or fails to).
+        # The file's mtime IS the 5-minute throttle: start-proxy.sh gates the next check on this
+        # file's age with `find … -mmin -5` before it forks python at all, so no date arithmetic
+        # exists in shell and a clock moving backwards only ever makes it check MORE, never less.
+        fields, reason = _read_update_check()
+        if fields is None:
+            emit(result="skipped", reason=reason)
+            return 0
+        fields["latest"] = args.latest
+        write_reason = _write_update_check(fields)
+        path = update_check_path()
+        try:
+            os.utime(path, None)
+        except OSError:
+            pass
+        if write_reason:
+            emit(result="skipped", reason=write_reason)
+            return 0
+        emit(result="ok", latest=args.latest)
+        return 0
+
+    # op == "answer"
+    if args.answer not in UPDATE_ANSWERS:
+        emit(result="error", reason="unknown_answer", known=",".join(UPDATE_ANSWERS))
+        return 2
+    if args.answer == "skip" and not args.version:
+        emit(result="error", reason="missing_value", note="skip needs --version: the tag it mutes")
+        return 2
+    fields, reason = _read_update_check()
+    if fields is None:
+        emit(result="skipped", reason=reason)
+        return 0
+    if args.answer == "always":
+        fields["answer"] = "auto"
+    elif args.answer == "never":
+        fields["answer"] = "never"
+    else:
+        fields["skipped"] = args.version
+    write_reason = _write_update_check(fields)
+    if write_reason:
+        emit(result="skipped", reason=write_reason)
+        return 0
+    emit(result="recorded", answer=fields["answer"], skipped=fields["skipped"])
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1773,6 +1908,15 @@ def main() -> int:
                          "one. Ignored if the plugin's options already live somewhere — that "
                          "file is updated in place regardless of this flag.")
 
+    # The proxy-binary release-notice surface: separate from `strategy`/`preset` because it is
+    # machine-wide (one binary on PATH) rather than per-port or per-project.
+    uc = sub.add_parser("update-check")
+    uc.add_argument("op", choices=("show", "stamp", "answer"))
+    uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp`")
+    uc.add_argument("--answer", default="",
+                    help="for `answer`: one of " + ", ".join(UPDATE_ANSWERS))
+    uc.add_argument("--version", default="", help="the tag `answer --answer skip` mutes")
+
     args = ap.parse_args()
     if args.cmd == "add" and not args.url and not args.statusline:
         ap.error("add needs --url, or --statusline on its own for a statusline-only call")
@@ -1786,7 +1930,7 @@ def main() -> int:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
     rc = {"add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
           "config": cmd_config, "strategy": cmd_strategy, "preset": cmd_preset,
-          "check-url": cmd_check_url}[args.cmd](args)
+          "check-url": cmd_check_url, "update-check": cmd_update_check}[args.cmd](args)
 
     # The hatch facts are printed HERE rather than from inside save(), so the `result=` line the
     # caller keys on stays first, and so every writing path reports them without six call sites

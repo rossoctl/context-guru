@@ -193,5 +193,16 @@ Claude Code prompts you to `/reload-plugins`, or check on demand:
 /reload-plugins
 ```
 
-**The proxy binary** upgrades separately: run the installer with `CONTEXT_GURU_UPGRADE=1`, or pin a
-version with `CONTEXT_GURU_VERSION=vX.Y.Z`.
+**The proxy binary is released separately, and updating the plugin does not update it.** A routed
+session checks for a newer release at most once every 5 minutes and, the first time it finds one,
+tells you once — it does not keep asking on every later session. You get three choices:
+
+| Answer | What happens |
+|---|---|
+| Update now | run `/context-guru:update`, or the command the notice prints |
+| Always update automatically | the SessionStart hook downloads and installs new releases itself, from then on. It stages the binary in the background and never restarts the proxy mid-session — the new binary takes effect at your *next* session, not the one that downloaded it |
+| Do nothing | that release is muted for good, but a *later* release still asks — declining v0.3.0 never hides a v0.4.0 that ships a real fix |
+
+Check or act on it any time with `/context-guru:update`, without waiting for the next notice. Under
+the hood this is still `install.sh` with `CONTEXT_GURU_UPGRADE=1` (or `CONTEXT_GURU_VERSION=vX.Y.Z`
+to pin a version) — the notice and the skill just save you from remembering that flag exists.

@@ -107,13 +107,14 @@ These caveats are not hedging; each one is a way a confident reading would be wr
 `$CONTEXT_GURU_STATE/proxy-<port>.fingerprint`. Compare it against what the options ask for now:
 
 ```
-preset=<x> strategy=<y> idle=<z> upstream=<u> port=<p>
+preset=<x> strategy=<y> idle=<z> upstream=<u> port=<p> bin=<version>
 ```
 
-If they differ, the user changed something — most often `/plugin configure` — and **the running proxy
-predates it**. Say which field differs and that a new session applies it; the SessionStart hook stops
-and restarts the proxy when it sees the difference. Do not restart it from here: this skill runs inside
-a session that is routed through that proxy.
+If they differ, the user changed something — most often `/plugin configure`, or a background proxy
+upgrade landed a new `bin=` — and **the running proxy predates it**. Say which field differs and
+that a new session applies it; the SessionStart hook stops and restarts the proxy when it sees the
+difference. Do not restart it from here: this skill runs inside a session that is routed through
+that proxy.
 
 If the fingerprint is **absent** while a proxy is running, it was started before this was recorded (or
 by something else). That is not an error and not a pending change — say so rather than guessing, and
@@ -122,6 +123,14 @@ note that the next cold start records it.
 This is where a pending switch is reported, deliberately, and not from the `UserPromptSubmit` hook: a
 python invocation on the critical path of every prompt is a poor price for news that the next session
 delivers by itself.
+
+### Is a newer proxy release pending?
+
+`"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" update-check show` — **read-only, never fetches.** It
+reports what the last SessionStart check (at most one every 5 minutes) already found:
+`answer=`/`skipped=`/`latest=`. An empty `latest=` means no check has succeeded yet, not that the
+proxy is current. If `latest=` names something newer than the running `bin=` above and it is not
+the `skipped=` tag, point at `/context-guru:update` rather than re-explaining it here.
 
 - **Check the preset before explaining a zero pipeline saving at all.** The default preset is
   `off`, which runs no components, so `acted: 0` and `saved_tokens: 0` are the expected state, not

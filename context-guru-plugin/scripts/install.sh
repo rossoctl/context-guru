@@ -774,6 +774,19 @@ installed_version() { # prints e.g. v0.1.2, or "" if the binary cannot say
   "$1" --version 2>/dev/null | awk '{print $2; exit}'
 }
 
+# A plain text file, not a binary invocation, so start-proxy.sh can learn the installed version
+# WITHOUT ever executing $BIN on every session start. That distinction is load-bearing: a hook
+# that ran an arbitrary configured binary just to read its version would run it on a machine
+# where that binary is actually something else entirely, or (as a test double proved) something
+# that does not distinguish --version from "start serving" at all. Best effort: a state directory
+# this cannot write to must never fail an install that would otherwise succeed.
+record_installed_version() { # $1 = the version now confirmed on disk
+  st=$(route_state_dir) || return 0
+  mkdir -p "$st" 2>/dev/null || return 0
+  printf '%s\n' "$1" >"${st}/proxy-version.tmp-$$" 2>/dev/null || return 0
+  mv -f "${st}/proxy-version.tmp-$$" "${st}/proxy-version" 2>/dev/null || true
+}
+
 if command -v "$BIN" >/dev/null 2>&1; then
   have_path=$(command -v "$BIN")
   have=$(installed_version "$have_path")
@@ -783,12 +796,14 @@ if command -v "$BIN" >/dev/null 2>&1; then
   # already installed. `latest` resolves below and is compared there.
   if [ "$VERSION" != latest ] && [ "$VERSION" = "$have" ]; then
     emit "result=present"
+    [ -n "$have" ] && record_installed_version "$have"
     exit 0
   fi
   if [ "$VERSION" = latest ] && [ -n "$have" ] && [ "${CONTEXT_GURU_UPGRADE:-}" != 1 ]; then
     # Do not silently re-download on every install run; say what is there and how to move.
     emit "result=present"
     emit "note=set CONTEXT_GURU_UPGRADE=1 to check for and install a newer release"
+    record_installed_version "$have"
     exit 0
   fi
   if [ -z "$have" ]; then
@@ -866,6 +881,7 @@ emit "version=${VERSION}"
 report_path() {
   emit "result=installed"
   emit "path=${DEST}/${BIN}"
+  record_installed_version "$VERSION"
   # Report — do not fix — a PATH that will not find it. Editing the user's shell rc is a bigger
   # intrusion than this script is entitled to, and the skill can tell them in context.
   case ":${PATH}:" in

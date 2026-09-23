@@ -40,6 +40,15 @@ HEALTH="http://127.0.0.1:${PORT}/healthz"
 # Our own directory, so this hook can call settings.py. ${CLAUDE_PLUGIN_ROOT} is substituted into a
 # `!`-block command string but is NOT exported to a child process, so it cannot be relied on here.
 HERE="$(unset CDPATH; \cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || HERE=""
+# The proxy BINARY's own release repo — must agree with install.sh's REPO. Duplicated rather than
+# read from there because install.sh does no work merely by being sourced, and this file forks
+# nothing extra to learn a constant. TestTheReleaseRepoIsEncodedOnce keeps the two agreeing.
+UPDATE_REPO="rossoctl/context-guru"
+# Off for the UserPromptSubmit recovery path (see check-proxy.sh's --no-update-check), on otherwise.
+# A user-wide kill switch, since inheriting this one IS the point: CONTEXT_GURU_UPDATE_CHECK=0 turns
+# the whole feature off without editing the state file.
+UPDATE_CHECK=1
+[ "${CONTEXT_GURU_UPDATE_CHECK:-1}" = 0 ] && UPDATE_CHECK=0
 
 note() { printf 'context-guru: %s\n' "$*"; }
 
@@ -165,6 +174,11 @@ while [ $# -gt 0 ]; do
     --idle-exit) if takes_value --idle-exit "${2:-}"; then IDLE_EXIT_ARG="$2"; shift; fi ;;
     --idle-exit=*) if takes_value --idle-exit "${1#--idle-exit=}"; then IDLE_EXIT_ARG="${1#--idle-exit=}"; fi ;;
     --emit-facts) EMIT_FACTS=1 ;;
+    # A FLAG, not an env prefix: check-proxy.sh passes this on its own internal call, and this
+    # file's own gate comment records what an env prefix costs when a human is the one typing it.
+    # An env var would also be INHERITED — set once, it silences the notice on every future
+    # session invisibly. This cannot leak past the one call that needs it.
+    --no-update-check) UPDATE_CHECK=0 ;;
     *) note "ignoring unrecognised argument '$1'" ;;
   esac
   shift
@@ -240,6 +254,104 @@ FINGERPRINT="${STATE}/proxy-${PORT}.fingerprint"
 # with STATE so it can go into the fingerprint below; UPSTREAM_ARGS is still built at launch.
 UPSTREAM="${UPSTREAM_ARG:-${CLAUDE_PLUGIN_OPTION_UPSTREAM:-${ANTHROPIC_UPSTREAM:-}}}"
 
+# --- (1c) tell the user, at most once per released tag, that a newer PROXY BINARY exists --------
+#
+# The plugin (plugin.json) and the proxy BINARY are two separate release tracks. Updating the
+# plugin through the marketplace never touches the binary, and install.sh will not touch an
+# installed binary unless CONTEXT_GURU_UPGRADE=1 — so without this section, nothing anywhere ever
+# tells the user a newer release shipped.
+#
+# Placed HERE, not later: this is the only window that is both past the routing gate above (never
+# fires in an unrouted project) and before the idempotence probe below, whose fast path exits
+# before this file's binary is even looked at — invisible on every warm session, which under the
+# default --idle-exit 24h is the steady state.
+#
+# check-proxy.sh's own call passes --no-update-check: it discards this script's stdout entirely
+# (>/dev/null), so a notice printed there would be destroyed while still marking itself delivered.
+UPDATE_RECORD="${STATE}/update-check.yaml"
+# The installed binary's own version, read unconditionally (not only when UPDATE_CHECK=1) because
+# fingerprint_want() below also uses it: a binary staged on disk by "always" must be picked up by
+# THIS session's restart decision, not only by the notice.
+#
+# Read from a plain FILE install.sh writes on every confirmed install — never by running $BIN. A
+# hook that executed the configured binary just to learn its version would run it on every single
+# session start, and $BIN is not necessarily safe or even fast to invoke with an argument it does
+# not expect: a proxy from before the release channel existed, a symlink to something else
+# entirely, or (proven by this repo's own test doubles) something that does not distinguish
+# `--version` from "start serving" at all and treats any invocation as a launch.
+HAVE=""
+[ -f "${STATE}/proxy-version" ] && HAVE=$(head -1 "${STATE}/proxy-version" 2>/dev/null) || HAVE=""
+if [ "$UPDATE_CHECK" = 1 ] && [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; then
+  # The 5-minute gate. This `find` is the ONLY cost paid on every session start; nothing past it
+  # runs unless the record is missing or older than 5 minutes. This is the record settings.py
+  # itself touches on `stamp` and `answer`, so there is one file and one clock, not two. A future
+  # mtime (clock skew) reads as "not yet due" and only ever delays the next check, never blocks it
+  # forever — the record can still be re-answered at any time.
+  DUE=1
+  if [ -f "$UPDATE_RECORD" ] && [ -n "$(find "$UPDATE_RECORD" -mmin -5 2>/dev/null)" ]; then
+    DUE=0
+  fi
+
+  UC_OUT=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" update-check show 2>/dev/null) || UC_OUT=""
+  UC_ANSWER=$(printf '%s\n' "$UC_OUT" | sed -n 's/^answer=//p' | head -1)
+  UC_SKIPPED=$(printf '%s\n' "$UC_OUT" | sed -n 's/^skipped=//p' | head -1)
+  UC_LATEST=$(printf '%s\n' "$UC_OUT" | sed -n 's/^latest=//p' | head -1)
+
+  if [ "$UC_ANSWER" != never ]; then
+    if [ "$DUE" = 1 ] && [ -n "$HAVE" ]; then
+      # Detached, and bounded only on ITS OWN clock (--max-time 3), never on the hook's: this must
+      # add ZERO latency to the synchronous /healthz wait below. </dev/null plus both redirects
+      # matter as much as the trailing & — a child inheriting this hook's stdout could interleave
+      # into the session's context, or hold the pipe open, after the hook has already exited.
+      (
+        LATEST=$(curl -fsSLI --max-time 3 -o /dev/null -w '%{url_effective}' \
+                   "https://github.com/${UPDATE_REPO}/releases/latest" 2>/dev/null) || LATEST=""
+        LATEST="${LATEST##*/}"
+        case "$LATEST" in ''|releases|latest) LATEST="" ;; esac
+        CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" update-check stamp --latest "$LATEST" \
+          >/dev/null 2>&1
+      ) </dev/null >/dev/null 2>&1 &
+      disown 2>/dev/null || true
+    fi
+
+    # `skipped=` only gates the ASK branch below — it must never block "auto", or a version the
+    # user skipped BEFORE later saying "always" would silently suppress every future auto-upgrade
+    # too, since skipped is never cleared once set.
+    if [ -n "$UC_LATEST" ] && [ "$UC_LATEST" != "$HAVE" ]; then
+      if [ "$UC_ANSWER" = auto ]; then
+        # "always": stage the new binary in the background; it takes effect through the fingerprint
+        # below at the NEXT session start, never mid-session. install.sh's swap is safe on disk (an
+        # atomic rename), but restarting the proxy NOW would mean SIGTERM to whatever holds this
+        # port — on a shared box possibly a colleague's live session, and on this one the session
+        # reading this very note.
+        (
+          CONTEXT_GURU_UPGRADE=1 "${HERE}/install.sh" >>"$LOG" 2>&1
+        ) </dev/null >/dev/null 2>&1 &
+        disown 2>/dev/null || true
+        note "updating the proxy in the background (${HAVE} -> ${UC_LATEST}); takes effect next session"
+      elif [ "$UC_LATEST" != "$UC_SKIPPED" ]; then
+        # Record this as a default `skip` of THIS tag BEFORE printing — the same "a silent or
+        # absent answer is a no" rule install/SKILL.md states for its own question. A hook can
+        # only print text; it cannot guarantee a model ever turns it into a real question, let
+        # alone that the user answers one. Without this write the notice would repeat every
+        # single session forever, which is exactly the nagging the user asked NOT to get. An
+        # explicit "yes" or "always" from the user overwrites this in the same or a later turn.
+        CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" update-check answer \
+          --answer skip --version "$UC_LATEST" >/dev/null 2>&1 || true
+        note "a newer proxy is released: ${UC_LATEST} (you have ${HAVE}). The plugin updates itself"
+        note "through the marketplace; the proxy BINARY does not, so this is a separate step."
+        note "Ask the user: update now, always update automatically, or not for this version? A"
+        note "silent or absent answer is a no, so this is already recorded as skipped for"
+        note "${UC_LATEST} unless the user says otherwise."
+        note "  now:    run /context-guru:update"
+        note "  always: \"${HERE}/settings.py\" update-check answer --answer always"
+        note "  no:     already recorded; nothing more to do"
+        note "or run /context-guru:update at any time."
+      fi
+    fi
+  fi
+fi
+
 # Make the strategy config agree with the plugin option BEFORE anything reads it.
 #
 # This is what makes `/plugin configure` work. --config REPLACES --preset rather than layering, so
@@ -263,9 +375,13 @@ SYNC_STRATEGY=$(printf '%s\n' "$SYNC_OUT" | sed -n 's/^strategy=//p' | head -1)
 
 # The configuration we want, as one line. Compared as an opaque string: any field changing means the
 # running proxy was started for a different configuration than this session asks for.
+#
+# `bin=` is what makes a binary staged on disk by an "always" upgrade actually take effect: the
+# running proxy is still the OLD code until something restarts it, and this is the only thing that
+# notices the file changed and asks for that restart, at the next session start.
 fingerprint_want() {
-  printf 'preset=%s strategy=%s idle=%s upstream=%s port=%s\n' \
-    "$PRESET" "$SYNC_STRATEGY" "$IDLE_EXIT" "$UPSTREAM" "$PORT"
+  printf 'preset=%s strategy=%s idle=%s upstream=%s port=%s bin=%s\n' \
+    "$PRESET" "$SYNC_STRATEGY" "$IDLE_EXIT" "$UPSTREAM" "$PORT" "$HAVE"
 }
 
 # Stop the proxy we started, so a new one can come up with the new configuration.
