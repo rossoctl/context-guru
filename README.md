@@ -72,19 +72,21 @@ config reference — is in **[docs/design.md](docs/design.md)** and
 
 ## Updating
 
-Claude Code checks the marketplace for updates in the background and prompts you to
-`/reload-plugins` when one lands — or update on demand:
+The proxy **binary** is what matters and what changes often. A routed session checks for a newer
+release every 5 minutes and tells you once, with three answers: update now, always update
+automatically, or do nothing for that release. Update it any time with:
+
+```
+/context-guru:update
+```
+
+**The plugin itself** (skills, hooks, scripts) rarely needs updating — most releases only touch the
+proxy binary, which `/context-guru:update` already covers. If you do want the latest plugin code:
 
 ```
 /plugin marketplace update rossoctl/context-guru
 /reload-plugins
 ```
-
-That updates the **plugin** (skills, hooks, scripts) — it does not update the proxy **binary**,
-which is released separately. A routed session checks for a newer binary release at most once
-every 5 minutes and tells you once, with three answers: update now, always update automatically
-(staged in the background, live at your next session), or do nothing (that release is muted, but a
-later one still asks). Check or act on it any time with `/context-guru:update`.
 
 More: [docs/how-to/install-plugin.md](docs/how-to/install-plugin.md#upgrading).
 
