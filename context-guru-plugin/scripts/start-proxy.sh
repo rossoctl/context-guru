@@ -468,10 +468,6 @@ if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
   elif [ -z "$SYNC_STRATEGY" ]; then
     # We could not establish what strategy is in effect, so we cannot say the running one is wrong.
     :
-  elif [ -z "$HAVE" ]; then
-    # A binary that cannot say --version (predates the release channel, or is momentarily off
-    # PATH) makes the comparison meaningless — never force a restart on that basis alone.
-    :
   elif [ "$fp_have" = "$fp_want" ]; then
     :
   elif ! stop_running_proxy; then
