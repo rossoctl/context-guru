@@ -361,13 +361,42 @@ type Overview struct {
 	//
 	// The gap is mostly SCOPE rather than tokenizer error: tokens_before is
 	// schema.MessagesTokens, which counts message TEXT only — no system prompt, no tool
-	// declarations, no JSON envelope — while the provider bills all of it. Dollars are
-	// unaffected: they come from the provider's own reported usage.
+	// declarations, no JSON envelope — while the provider bills all of it.
+	//
+	// DOLLARS ARE NOT UNAFFECTED. This comment used to end "Dollars are unaffected: they come
+	// from the provider's own reported usage", which is true of cost_usd and false of every
+	// savings figure beside it: baseline_cost_usd is cost_usd + baselineDeltaUSD, and that
+	// delta prices OUR token counts (Saved(), SavedUnique) at the provider's rate. A reader
+	// auditing exactly this was told not to look, which is how #240 survived. The correction
+	// factor is NOT this ratio — see tokens.BilledDeltaFactor, which is a factor on a
+	// DIFFERENCE, measured against real bills, where the fixed overhead above cancels.
+	//
+	// This ratio is also measured on the strict COMPLEMENT of the population it would
+	// invalidate: ratioPop requires tokens_before = tokens_after, i.e. rows where nothing was
+	// compacted, while saved_usd is nonzero exactly where they differ. Read it as "how far off
+	// is a LEVEL on this page", never as a correction for a saving.
 	//
 	// EstimatorDivergenceRows is the population, so a ratio over four requests is not read as a
 	// fact about the deployment. Zero rows leaves the ratio at 0 and the UI shows nothing.
 	EstimatorDivergence     float64 `json:"estimator_divergence"`
 	EstimatorDivergenceRows int64   `json:"estimator_divergence_rows"`
+	// EstimatorDivergenceCompacted is the same median ratio over the rows where compaction
+	// DID remove something — the population every saved_usd figure is computed on, and the
+	// one EstimatorDivergence above deliberately excludes. Published beside it so nobody
+	// reads one as a correction for the other; see the note on EstimatorDivergence.
+	EstimatorDivergenceCompacted     float64 `json:"estimator_divergence_compacted"`
+	EstimatorDivergenceCompactedRows int64   `json:"estimator_divergence_compacted_rows"`
+	// PreCorrectionSavingRows / PreCorrectionSavedUSD / CorrectedSavingRows are the #240
+	// boundary: how much of the savings on this page was computed by the arithmetic BEFORE the
+	// tokenizer correction (requests.billed_token_factor = 0), and how much after.
+	//
+	// They exist because the fix is not backfilled. Re-pricing 281k historical rows would
+	// rewrite measurements nobody re-measured, so old rows keep their old figures and the UI
+	// says which is which. A single "total saved" spanning the boundary is a sum of two
+	// different definitions, and this is what lets the page admit that instead of hiding it.
+	PreCorrectionSavingRows int64   `json:"pre_correction_saving_rows"`
+	PreCorrectionSavedUSD   float64 `json:"pre_correction_saved_usd"`
+	CorrectedSavingRows     int64   `json:"corrected_saving_rows"`
 	// BilledInputTokens is fresh + cache reads + cache writes: the input the PROVIDER counted.
 	// It is here to be compared with TokensBefore, which is what our own tokenizer counted
 	// over message text only — a different unit, roughly a third the size, and the reason no
@@ -601,7 +630,19 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		-- has its own query below.
 		COALESCE(SUM(`+kaSaved("r.")+`),0),
 		COALESCE(SUM(CASE WHEN `+kaSaved("r.")+` > 0 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(r.cache_write_1h),0)
+		COALESCE(SUM(r.cache_write_1h),0),
+		-- The #240 boundary. billed_token_factor = 0 means the row was written before the
+		-- tokenizer correction existed, so its savings figures came out of the old arithmetic.
+		-- Counted separately, and with the dollars behind them, because a total that silently
+		-- mixes two definitions of "saved" is the thing this whole change is about. Rows that
+		-- saved nothing are excluded from both: they are not a correction boundary, they are
+		-- just rows.
+		COALESCE(SUM(CASE WHEN r.billed_token_factor = 0
+			AND r.baseline_cost_usd > r.cost_usd THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.billed_token_factor = 0
+			THEN r.baseline_cost_usd - r.cost_usd ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN r.billed_token_factor > 0
+			AND r.baseline_cost_usd > r.cost_usd THEN 1 ELSE 0 END),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.SavedGrossAttempted, &o.AttemptedRequests,
@@ -617,7 +658,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.Breakpoints.Blocks, &o.Breakpoints.Requests, &o.BilledInputTokens,
 		&o.TokensBeforeBilled, &o.BilledInputRows,
 		&o.SSERecorded, &o.SSEStreamRows, &o.CacheTTLRecorded,
-		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h)
+		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h,
+		&o.PreCorrectionSavingRows, &o.PreCorrectionSavedUSD, &o.CorrectedSavingRows)
 	if err != nil {
 		return nil, err
 	}
@@ -701,6 +743,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		bs, bt, bm, bb, modalRequests          int64
 		estimatorDivergenceRows                int64
 		estimatorDivergence                    float64
+		estimatorDivergenceCompactedRows       int64
+		estimatorDivergenceCompacted           float64
 		keepAlivePings                         int64
 		keepAlivePingUSD                       float64
 		accountingM, cacheMissM, uncompressedM map[string]int64
@@ -857,6 +901,34 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		}
 		return nil
 	})
+	// The SAME ratio over the population that actually produces the savings figures — rows
+	// where we DID remove something. #240's reviewers reached for the divergence above as the
+	// correction factor for saved_usd, and it cannot be: ratioPop requires
+	// tokens_before = tokens_after, the strict COMPLEMENT of the rows saved_usd is nonzero on.
+	// Publishing both makes that visible instead of leaving the reader to assume one stands
+	// for the other. Measured 2026-09-15 on 281,421 production rows: the compacted population
+	// does NOT converge on the uncompacted one as transcripts grow — pooled 3.71x at
+	// 100-200k against 1.91x untouched — so the two are different facts, not one estimate.
+	g.Go(func() error {
+		const compactedPop = ` AND r.tokens_before > r.tokens_after AND r.tokens_before > 0
+			AND r.token_accounting = 'complete' AND r.fresh_input + r.cache_read + r.cache_write > 0`
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests r WHERE `+cond+compactedPop,
+			args...).Scan(&estimatorDivergenceCompactedRows); err != nil {
+			return err
+		}
+		if estimatorDivergenceCompactedRows > 0 {
+			var med sql.NullFloat64
+			if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
+				CAST(r.fresh_input + r.cache_read + r.cache_write AS REAL) / r.tokens_before AS ratio
+				FROM requests r WHERE `+cond+compactedPop+`
+				ORDER BY ratio ASC LIMIT 1 OFFSET ?`,
+				append(append([]any(nil), args...), estimatorDivergenceCompactedRows/2)...).Scan(&med); err != nil {
+				return err
+			}
+			estimatorDivergenceCompacted = med.Float64
+		}
+		return nil
+	})
 	// The COST half, over the same window and the same filters but with ping rows included.
 	// A second query rather than a CASE in the first, because the first deliberately cannot see
 	// them: one predicate, one meaning.
@@ -920,6 +992,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		o.Breakpoints.Modal = fmt.Sprintf("system=%d, tools=%d, messages=%d, blocks=%d", bs, bt, bm, bb)
 	}
 	o.EstimatorDivergenceRows = estimatorDivergenceRows
+	o.EstimatorDivergenceCompacted = estimatorDivergenceCompacted
+	o.EstimatorDivergenceCompactedRows = estimatorDivergenceCompactedRows
 	o.EstimatorDivergence = estimatorDivergence
 	if o.Requests > 0 {
 		o.ExpandRate = float64(o.Expands) / float64(o.Requests)

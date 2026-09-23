@@ -129,6 +129,14 @@ CREATE TABLE IF NOT EXISTS requests (
   -- reason cachesplit_saved_usd is: those tokens carry cache_control, so a miss bills them
   -- as creation at 1.25x rather than at 1.0x.
   keepalive_saved_usd REAL   NOT NULL DEFAULT 0,
+  -- billed_token_factor is the tokenizer correction (issue #240) applied to this row's
+  -- COUNTERFACTUAL dollars: baseline_cost_usd's delta and every request_components.saved_usd.
+  --
+  -- 0 is the BOUNDARY MARKER and is why the default is 0 rather than 1: a row written before
+  -- the correction existed has no factor, and that is a different fact from "measured, and the
+  -- correction is 1.0". The dashboard reads 0 as "this row's savings were computed by the
+  -- pre-#240 arithmetic" and labels it, instead of silently mixing two definitions in one total.
+  billed_token_factor REAL NOT NULL DEFAULT 0,
   -- Which manager-controlled keep-alive STRATEGY, if any, resolved the policy behind this
   -- row — see proxy/keepalivestrategy.go's resolution chain and kaEntry.appliedStrategy.
   -- Carries TWO meanings, disambiguated by the keepalive column: on a ping row (keepalive=1),
@@ -645,6 +653,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "keepalive_pings", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "keepalive_saved_usd", "REAL NOT NULL DEFAULT 0"},
 	{"requests", "keepalive_strategy_id", "TEXT"},
+	// #240's correction factor. Additive with a default of 0, which doubles as the marker for
+	// "written before the correction existed" — see the column comment in ddl above.
+	{"requests", "billed_token_factor", "REAL NOT NULL DEFAULT 0"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	{"request_components", "gates", "TEXT NOT NULL DEFAULT ''"},

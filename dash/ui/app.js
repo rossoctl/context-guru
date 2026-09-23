@@ -955,6 +955,28 @@ const TILE_INFO = {
       + 'tie on our traffic, so two is chosen for the lower request volume and not for a dollar '
       + 'reason. Nothing is applied for you.',
   },
+  'estimator-divergence-compacted': {
+    what: 'The same over-the-provider ratio as the tile beside it, but measured on the '
+      + 'requests where compaction actually removed something.',
+    how: 'Median of (provider-billed input ÷ our own token count) over compacted requests.',
+    catch: 'This is a LEVEL, not a correction factor for the savings. A level carries the '
+      + 'system prompt, the tool declarations and the JSON envelope, none of which any '
+      + 'component removes — so it is 3-4x while the correction the savings actually need is '
+      + 'about 1.4-1.7x. Issue #240 was filed partly on that confusion. The two tiles are '
+      + 'shown together because the older one is measured on the requests where nothing was '
+      + 'removed, which is the exact complement of the rows the savings come from.',
+  },
+  'pre-correction': {
+    what: 'How much of the savings in this window was computed before the tokenizer '
+      + 'correction (issue #240) existed.',
+    how: 'Requests whose billed_token_factor is 0 — written by the older code — with the '
+      + 'baseline-minus-actual dollars they contributed.',
+    catch: 'These rows were deliberately NOT re-priced. Re-pricing history would rewrite '
+      + 'measurements nobody re-measured, so the old figures stand and this tile says how '
+      + 'much of the total they are. While it is non-zero, the headline spans two different '
+      + 'definitions of "saved" and the difference between them is understatement, not '
+      + 'overstatement.',
+  },
   'saved-usd': {
     what: 'What compaction alone avoided, after paying for the model calls context-guru '
       + 'made to do the compacting.',
@@ -1601,6 +1623,25 @@ function renderTiles(o) {
         ? 'median over ' + num(o.estimator_divergence_rows) + ' uncompacted requests'
         : 'no comparable requests in this window',
       o.estimator_divergence > 1.5 ? 'bad' : ''),
+    // The SAME ratio over the rows that actually produced the savings above. The tile to the
+    // left is measured on requests where nothing was removed — the strict complement — and
+    // reading one as a correction for the other is the mistake #240 was filed on. Both, or
+    // neither.
+    tile('estimator-divergence-compacted', 'Same, on compacted requests',
+      o.estimator_divergence_compacted ? o.estimator_divergence_compacted.toFixed(2) + '×' : '—',
+      o.estimator_divergence_compacted_rows
+        ? 'median over ' + num(o.estimator_divergence_compacted_rows) + ' COMPACTED requests · a level, not a correction'
+        : 'nothing compacted in this window'),
+    // The #240 boundary. Shown only when this window actually straddles it, because on a
+    // deployment with no pre-correction history it is noise.
+    o.pre_correction_saving_rows
+      ? tile('pre-correction', 'Savings on the OLD arithmetic',
+          usd(o.pre_correction_saved_usd),
+          num(o.pre_correction_saving_rows) + ' of '
+            + num(o.pre_correction_saving_rows + o.corrected_saving_rows)
+            + ' saving requests predate the #240 tokenizer correction and were NOT re-priced',
+          'warn-text')
+      : null,
     tile('saved-gross', 'Saved (gross)', compact(o.saved_gross), 'recounts re-sent history'),
     // The label has to name the UNIQUE calculation, which dominates this figure, and not
     // only the restore subtraction, which is usually zero: sitting between "Saved (gross)

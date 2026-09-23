@@ -352,7 +352,10 @@ func TestComponentSavingUsesTheTierTheRequestPaid(t *testing.T) {
 				{"cacheinject", 0, 0},
 			} {
 				got := compByName(t, e, want.comp).SavedUSD
-				exp := want.unique*ibmOpus.CacheWrite + want.replay*tier
+				// Scaled by the row's own tokenizer correction (#240) rather than a literal,
+				// so this test keeps pinning the TIER RULE and does not have to be edited
+				// every time the measured factor is refreshed.
+				exp := (want.unique*ibmOpus.CacheWrite + want.replay*tier) * e.BilledTokenFactor
 				if math.Abs(got-exp) > 1e-12 {
 					t.Errorf("%s saved_usd = %.10f, want %.10f (unique at the write rate, "+
 						"replay at this request's %s tier)", want.comp, got, exp, tc.name)
@@ -361,7 +364,7 @@ func TestComponentSavingUsesTheTierTheRequestPaid(t *testing.T) {
 			// And on a warm turn the replay term must NOT be the creation rate, which is the
 			// specific inflation the tier rule exists to prevent.
 			if tc.name == "warm" {
-				if got, ceiling := compByName(t, e, "collapse").SavedUSD, 2_000*ibmOpus.CacheWrite; got >= ceiling {
+				if got, ceiling := compByName(t, e, "collapse").SavedUSD, 2_000*ibmOpus.CacheWrite*e.BilledTokenFactor; got >= ceiling {
 					t.Errorf("a pure-replay component on a warm turn is valued at %.10f, at or above "+
 						"the creation rate %.10f — replay sits in the cached prefix", got, ceiling)
 				}
