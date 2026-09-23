@@ -74,9 +74,20 @@ func settings(t *testing.T, args ...string) (map[string]string, int) {
 // for a recovery tool must not be able to disturb the developer's own recovery tool.
 func settingsIn(t *testing.T, state, home string, args ...string) (map[string]string, int) {
 	t.Helper()
+	return settingsInDir(t, state, home, "", args...)
+}
+
+// settingsInDir is settingsIn with the working directory also made explicit — needed by anything
+// that depends on `os.getcwd()` inside settings.py (record_install_scope/resolve_install_scope
+// key their state by the caller's cwd, the same way install.sh's `route_scope_file()` builds
+// `$PWD/.claude/settings.local.json`). `dir` empty keeps the test binary's own cwd, matching
+// settingsIn's prior behavior for every test that does not care.
+func settingsInDir(t *testing.T, state, home, dir string, args ...string) (map[string]string, int) {
+	t.Helper()
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "settings.py")}, args...)...)
 	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	code := 0
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -90,7 +101,7 @@ func settingsIn(t *testing.T, state, home string, args ...string) (map[string]st
 			facts[k] = v
 		}
 	}
-	t.Logf("settings.py %v -> exit %d, %v", args, code, facts)
+	t.Logf("settings.py %v (dir=%s) -> exit %d, %v", args, dir, code, facts)
 	return facts, code
 }
 
@@ -4577,6 +4588,227 @@ func TestRemoveIsNeverGatedByScope(t *testing.T) {
 	}
 }
 
+// --- persisted install-time scope: the statusline (and preset) must follow it, not guess -----
+//
+// Reported incident: installing context-guru on a single local project also modified and backed
+// up the user's machine-wide ~/.claude/settings.json. Root cause was `install.sh` writing the
+// status line at user scope UNCONDITIONALLY, regardless of what routing itself just chose. The
+// fix: routing's own `add` records which scope it used (`record_install_scope`), and everything
+// else that writes a settings file — the statusline, `preset`'s fallback — reads that record back
+// (`resolve_install_scope` / `settings.py resolve-scope`) instead of deciding on its own.
+
+// TestStatuslineRefusesMachineWideWithoutTheFlag is the direct regression test: a statusline-only
+// add to the machine-wide file, with no --user-scope, must be refused AND must leave no trace
+// beside the file — no write, no backup. A refusal that still left a backup would be the bug with
+// extra steps.
+func TestStatuslineRefusesMachineWideWithoutTheFlag(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	userScope := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(userScope), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, userScope, map[string]any{"theme": "dark"})
+	before, err := os.ReadFile(userScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	facts, code := settingsIn(t, state, home, "add", "--file", userScope,
+		"--statusline", "/opt/cg/statusline.py")
+	if code != 2 || facts["reason"] != "user_scope_needs_flag" {
+		t.Fatalf("wanted exit 2 reason=user_scope_needs_flag, got exit %d %v", code, facts)
+	}
+	if facts["writes"] != "statusline" {
+		t.Errorf("writes= should name the statusline half specifically, got %v", facts)
+	}
+	after, err := os.ReadFile(userScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("the machine-wide file was modified by a call that reported refusing:\n%s", after)
+	}
+	matches, err := filepath.Glob(userScope + ".context-guru-backup-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("a refused statusline write left a backup behind, which is the reported bug: %v", matches)
+	}
+
+	// --user-scope still permits it, once a person has actually agreed to that blast radius.
+	facts, code = settingsIn(t, state, home, "add", "--file", userScope,
+		"--statusline", "/opt/cg/statusline.py", "--user-scope")
+	if code != 0 || facts["result"] != "added" {
+		t.Fatalf("--user-scope did not permit the statusline write: exit %d %v", code, facts)
+	}
+}
+
+// TestResolveInstallScopeRoundTrips: a routing `add` records the scope it used; `resolve-scope`
+// in a later, separate invocation reads it back — this is the mechanism the statusline skill and
+// `preset`'s fallback are supposed to consume instead of hardcoding or re-deriving scope.
+func TestResolveInstallScopeRoundTrips(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	projLocal := filepath.Join(proj, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	py := requireTool(t, "python3")
+	runResolve := func() map[string]string {
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "resolve-scope")
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+		cmd.Dir = proj
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("resolve-scope failed: %v\n%s", err, out)
+		}
+		facts := map[string]string{}
+		for _, line := range strings.Split(string(out), "\n") {
+			if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+				facts[k] = v
+			}
+		}
+		return facts
+	}
+
+	if facts := runResolve(); facts["scope"] != "(ask)" {
+		t.Fatalf("before any routing, want scope=(ask), got %v", facts)
+	}
+
+	if _, code := settingsInDir(t, state, home, proj, "add", "--file", projLocal, "--url", ourURL); code != 0 {
+		t.Fatal("fixture: routing add failed")
+	}
+	facts := runResolve()
+	if facts["scope"] != "project-local" || facts["source"] != "recorded" {
+		t.Fatalf("after routing, want scope=project-local source=recorded, got %v", facts)
+	}
+	if facts["file"] != projLocal {
+		t.Errorf("file = %v, want %v", facts["file"], projLocal)
+	}
+
+	// A second, unrelated project directory that was never routed at all still says "ask" — the
+	// record is per-project, not global.
+	otherProj := t.TempDir()
+	cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "resolve-scope")
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+	cmd.Dir = otherProj
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve-scope failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "scope=(ask)") {
+		t.Errorf("an unrelated project should not inherit another project's recorded scope:\n%s", out)
+	}
+}
+
+// TestResolveInstallScopeSelfHealsALegacyProject: a project routed by hand, or by a version of
+// this plugin that predates the persisted record, has routing but no entry in install-scope.json.
+// resolve-scope must find it by checking which candidate file actually owns routing, answer
+// correctly, and persist that answer so the next call is a plain lookup rather than a repeat scan.
+func TestResolveInstallScopeSelfHealsALegacyProject(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	projLocal := filepath.Join(proj, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Written directly, bypassing `add`, so no install-scope.json entry exists — exactly what a
+	// pre-existing install (or a hand-edited file) looks like.
+	writeJSON(t, projLocal, map[string]any{
+		"env":          map[string]any{"ANTHROPIC_BASE_URL": ourURL},
+		"$context-guru": map[string]any{"installed_base_url": ourURL},
+	})
+
+	py := requireTool(t, "python3")
+	run := func() map[string]string {
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "resolve-scope")
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+		cmd.Dir = proj
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("resolve-scope failed: %v\n%s", err, out)
+		}
+		facts := map[string]string{}
+		for _, line := range strings.Split(string(out), "\n") {
+			if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+				facts[k] = v
+			}
+		}
+		return facts
+	}
+
+	facts := run()
+	if facts["scope"] != "project-local" || facts["source"] != "inferred" {
+		t.Fatalf("want scope=project-local source=inferred on first call, got %v", facts)
+	}
+	if facts := run(); facts["source"] != "recorded" {
+		t.Errorf("the self-heal should have persisted; want source=recorded on the second call, got %v",
+			facts)
+	}
+}
+
+// TestPresetFallbackInheritsRoutingScope: with nothing configured yet anywhere, `preset set`'s
+// fallback used to guess project-local independently of what routing actually chose. It must
+// instead land wherever THIS project's routing already lives.
+func TestPresetFallbackInheritsRoutingScope(t *testing.T) {
+	t.Run("routing at project-local: preset lands there too, no flag needed", func(t *testing.T) {
+		state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		projLocal := filepath.Join(proj, ".claude", "settings.local.json")
+		if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := settingsInDir(t, state, home, proj, "add", "--file", projLocal, "--url", ourURL); code != 0 {
+			t.Fatal("fixture: routing add failed")
+		}
+
+		py := requireTool(t, "python3")
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", "house")
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+		cmd.Dir = proj
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("preset set failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "result=set") {
+			t.Fatalf("preset set did not report success:\n%s", out)
+		}
+		got := readJSON(t, projLocal)
+		opts, _ := ((got["pluginConfigs"].(map[string]any))["context-guru@context-guru"].(map[string]any))["options"].(map[string]any)
+		if opts["preset"] != "house" {
+			t.Errorf("preset not written to the project's own routing file: %v", got)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); !os.IsNotExist(err) {
+			t.Errorf("preset fell back to the machine-wide file instead of inheriting project scope")
+		}
+	})
+
+	t.Run("routing at user scope: preset follows it there automatically", func(t *testing.T) {
+		state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		userScope := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(userScope), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := settingsInDir(t, state, home, proj, "add", "--file", userScope, "--url", ourURL,
+			"--user-scope"); code != 0 {
+			t.Fatal("fixture: user-scope routing add failed")
+		}
+
+		py := requireTool(t, "python3")
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", "house")
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+		cmd.Dir = proj
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("preset set failed: %v\n%s", err, out)
+		}
+		got := readJSON(t, userScope)
+		opts, _ := ((got["pluginConfigs"].(map[string]any))["context-guru@context-guru"].(map[string]any))["options"].(map[string]any)
+		if opts["preset"] != "house" {
+			t.Errorf("preset did not inherit the recorded user scope: %v\n%s", got, out)
+		}
+	})
+}
+
 // --- fixes from review round 1 of #236 -----------------------------------------------------
 
 // TestRemoveFirstNeverProducesAnOriginalHoldingRouting is the assertion the reviewer asked to have
@@ -5629,11 +5861,15 @@ func TestRouteWritesRoutingOnlyAfterSomethingAnswers(t *testing.T) {
 }
 
 // TestRouteInstallsStatuslineByDefault: the status line install now rides along with a successful
-// route, at user scope, and --no-statusline is the opt-out. Also covers that a statusline write
-// failure never turns a successful route into a reported failure — `statusline=skipped` alongside
-// `result=routed`, not `result=error`.
+// route, IN WHATEVER FILE ROUTING ITSELF JUST USED — not unconditionally at user scope. That
+// scope-following is the fix for the reported incident: a default (project-scope) install used to
+// write and back up the user's machine-wide ~/.claude/settings.json as a side effect, every time.
+// --no-statusline is still the opt-out, and a statusline write failure never turns a successful
+// route into a reported failure — `statusline=skipped` alongside `result=routed`, not
+// `result=error`.
 func TestRouteInstallsStatuslineByDefault(t *testing.T) {
-	t.Run("a healthy proxy: the status line is installed at user scope", func(t *testing.T) {
+	t.Run("default scope (project): the status line follows routing into the project, "+
+		"the machine-wide file is never created", func(t *testing.T) {
 		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
 		port := freePort(t)
 		writePluginOptions(t, home, map[string]any{"port": port})
@@ -5650,7 +5886,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		if facts["statusline"] != "on" {
 			t.Fatalf("statusline=%q, want on: %v", facts["statusline"], facts)
 		}
-		got := readJSON(t, filepath.Join(home, ".claude", "settings.json"))
+		got := readJSON(t, filepath.Join(proj, ".claude", "settings.local.json"))
 		sl, _ := got["statusLine"].(map[string]any)
 		want := `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py"`
 		if sl["command"] != want {
@@ -5662,12 +5898,51 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 			// install command does.
 			t.Errorf("statusLine.command = %v, want %q", got["statusLine"], want)
 		}
-		// It went to user scope (home), not the project's routing file.
-		if _, err := os.Stat(filepath.Join(proj, ".claude", "settings.local.json")); err == nil {
-			b, _ := os.ReadFile(filepath.Join(proj, ".claude", "settings.local.json"))
-			if strings.Contains(string(b), "statusLine") {
-				t.Errorf("statusLine leaked into the project-scope routing file:\n%s", b)
+		// The literal reported bug: a project-scope install must never touch the machine-wide
+		// file at all. `writePluginOptions` above already created it (as a fixture, to carry the
+		// configured port) — the assertion is that the install added nothing to it and never
+		// backed it up, not that the file is absent.
+		homeSettings := filepath.Join(home, ".claude", "settings.json")
+		if gotHome := readJSON(t, homeSettings); gotHome["statusLine"] != nil {
+			t.Errorf("statusLine leaked into the machine-wide file from a project-scope install: %v",
+				gotHome["statusLine"])
+		}
+		matches, err := filepath.Glob(homeSettings + ".context-guru-backup-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) != 0 {
+			t.Errorf("a project-scope install backed up the machine-wide file, which is the "+
+				"reported bug: %v", matches)
+		}
+	})
+
+	t.Run("--scope user, consented: routing and statusline both land at user scope, "+
+		"no second confirmation needed", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		port := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": port})
+		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+		facts, code := runRoute(t, proj, env, "--scope", "user", "--i-understand-machine-wide",
+			"--i-consent-to-traffic-interception")
+		t.Cleanup(func() {
+			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
 			}
+		})
+		if code != 0 || facts["result"] != "routed" {
+			t.Fatalf("exit %d result=%q: %v", code, facts["result"], facts)
+		}
+		if facts["statusline"] != "on" {
+			t.Fatalf("statusline=%q, want on: %v", facts["statusline"], facts)
+		}
+		got := readJSON(t, filepath.Join(home, ".claude", "settings.json"))
+		sl, _ := got["statusLine"].(map[string]any)
+		if sl["command"] == nil {
+			t.Errorf("statusLine not written to the user-scope file: %v", got["statusLine"])
+		}
+		if _, err := os.Stat(filepath.Join(proj, ".claude", "settings.local.json")); !os.IsNotExist(err) {
+			t.Errorf("a project-local file was created even though --scope user was chosen: %v", err)
 		}
 	})
 
@@ -5688,22 +5963,24 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		if facts["statusline"] != "skipped" {
 			t.Fatalf("statusline=%q, want skipped: %v", facts["statusline"], facts)
 		}
-		if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); err == nil {
-			got := readJSON(t, filepath.Join(home, ".claude", "settings.json"))
-			if _, has := got["statusLine"]; has {
-				t.Error("--no-statusline was passed but statusLine was written anyway")
-			}
+		got := readJSON(t, filepath.Join(proj, ".claude", "settings.local.json"))
+		if _, has := got["statusLine"]; has {
+			t.Error("--no-statusline was passed but statusLine was written anyway")
 		}
 	})
 
-	t.Run("a pre-existing foreign statusLine: routing still succeeds, statusline is reported skipped", func(t *testing.T) {
+	t.Run("a pre-existing foreign statusLine in the project's OWN routing file: routing still "+
+		"succeeds, statusline is reported skipped", func(t *testing.T) {
 		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
 		port := freePort(t)
 		writePluginOptions(t, home, map[string]any{"port": port})
-		settingsPath := filepath.Join(home, ".claude", "settings.json")
-		existing := readJSON(t, settingsPath)
-		existing["statusLine"] = map[string]any{"type": "command", "command": "my-own-thing"}
-		writeJSON(t, settingsPath, existing)
+		projFile := filepath.Join(proj, ".claude", "settings.local.json")
+		if err := os.MkdirAll(filepath.Dir(projFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeJSON(t, projFile, map[string]any{
+			"statusLine": map[string]any{"type": "command", "command": "my-own-thing"},
+		})
 		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
 		facts, code := runRoute(t, proj, env, consentOK()...)
 		t.Cleanup(func() {
@@ -5718,7 +5995,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		if facts["statusline"] != "skipped" {
 			t.Fatalf("statusline=%q, want skipped: %v", facts["statusline"], facts)
 		}
-		got := readJSON(t, filepath.Join(home, ".claude", "settings.json"))
+		got := readJSON(t, projFile)
 		sl, _ := got["statusLine"].(map[string]any)
 		if sl["command"] != "my-own-thing" {
 			t.Errorf("the user's own statusLine was overwritten: %v", got["statusLine"])

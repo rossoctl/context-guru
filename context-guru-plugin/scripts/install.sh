@@ -700,17 +700,29 @@ a routed one with no proxy is a broken one."
 # ---- statusline, on by default -------------------------------------------------------------
 # A savings-focused install with nothing showing the savings is a worse first impression than a
 # status line that turns out to be unwanted, and unwanted is one command away (--no-statusline
-# here, or `settings.py off` any time after). User scope, always: a status line is a property of
-# the terminal, not of one repository, and it renders nothing in a project that is not routed
-# (see skills/statusline/SKILL.md), so writing it at user scope is safe regardless of which
-# projects get routed later. Never fatal — a statusline write failing is not a routing failure,
-# it is reported as its own fact and nothing about `result=routed` above changes.
+# here, or `settings.py off` any time after).
+#
+# SAME FILE ROUTING JUST USED — not hardcoded to user scope. This used to write unconditionally
+# to $HOME/.claude/settings.json on the theory that it "renders nothing in a project that is not
+# routed, so it's safe regardless of scope" (skills/statusline/SKILL.md). That argument covers
+# whether the RENDER is safe; it says nothing about whether the WRITE is wanted, and the answer
+# was no: a project-scope install (the default) silently wrote and backed up the user's
+# machine-wide settings file every time. $R_FILE is already the file THIS run just wrote routing
+# to, decided by --scope exactly like the routing write two lines above route_main's call to this
+# function — reuse it rather than deciding scope a second time. `--user-scope` is passed through
+# for the same reason `add`'s own routing call gets it at line ~650: `--scope user` for this
+# install already went through --i-understand-machine-wide, so this is not a second confirmation,
+# it is the same one applying to a second key in the same file.
+#
+# Never fatal — a statusline write failing is not a routing failure, it is reported as its own
+# fact and nothing about `result=routed` above changes.
 route_install_statusline() {
   [ "$R_NOSTATUSLINE" = 1 ] && { emit "statusline=skipped"; return 0; }
-  local sl_file="$HOME/.claude/settings.json"
   local sout scode=0
-  sout=$("$(route_here)/settings.py" add --file "$sl_file" \
-    --statusline "python3 \"\${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\"" 2>&1) || scode=$?
+  local sl=("$(route_here)/settings.py" add --file "$R_FILE" \
+    --statusline "python3 \"\${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\"")
+  [ "$R_SCOPE" = user ] && sl+=(--user-scope)
+  sout=$("${sl[@]}" 2>&1) || scode=$?
   local sres; sres=$(kv "$sout" result)
   case "$sres" in
     added|unchanged) emit "statusline=on" ;;
