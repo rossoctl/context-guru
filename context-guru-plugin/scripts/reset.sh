@@ -485,6 +485,28 @@ while IFS='	' read -r existed original path; do
     say "      gone already — nothing to restore"
     continue
   fi
+  # Does this file show ANY sign of being ours RIGHT NOW? The manifest is append-only forever —
+  # nothing ever removes an entry, including a completely clean `/context-guru:uninstall` — so a
+  # file touched once (a --scope user test months ago, a project that was cleanly uninstalled
+  # since) stays on this list permanently. Without this check, every future run of this hatch —
+  # even one aimed at fixing a DIFFERENT, currently-broken project — sweeps that unrelated file
+  # back in and offers to revert it to a copy taken long before whatever the user has since edited
+  # into it. That is not a hypothetical: it is exactly how a user-scope settings.json that was
+  # never part of the CURRENT install got silently reverted, with no `.context-guru-backup-*`
+  # beside it to explain why — the "backup" here is the ORIGINAL copy under the state directory,
+  # nowhere near the file itself.
+  #
+  # `"$context-guru"` is the meta key EVERY context-guru write sets (routing or statusline-only),
+  # so it alone would be enough — the ANTHROPIC_*/CONTEXT_GURU_BIN check is belt-and-suspenders for
+  # a hand-edited file that dropped the meta block but kept a key we wrote.
+  if ! grep -qE 'ANTHROPIC_BASE_URL|ANTHROPIC_UPSTREAM|CONTEXT_GURU_BIN' "$path" 2>/dev/null \
+     && ! grep -qF '$context-guru' "$path" 2>/dev/null; then
+    say "  $path"
+    say "      no context-guru keys here now (uninstalled through the normal path since this was"
+    say "      recorded, or never actually left in this state) — skipping rather than reverting a"
+    say "      file that is not currently context-guru's to fix"
+    continue
+  fi
   if [ "$existed" = 0 ]; then
     say "  $path"
     say "      DELETE (context-guru created this file; it did not exist before)"
