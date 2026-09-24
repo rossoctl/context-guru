@@ -408,10 +408,19 @@ def _git_already_ignores(directory: str, name: str) -> bool:
     """Is `name` (relative to `directory`) already covered by some `.gitignore` git can see? Only
     meaningful once `_in_git_worktree` has said yes. `check-ignore` exits 1 for "not ignored" —
     that is not an error, just the common case this function exists to detect.
+
+    The trailing slash on `name` matters: this runs BEFORE the recovery folder necessarily exists
+    on disk (a first-ever install's `add` may not have created it yet when this is called, and it
+    is always true of a standalone `gitignore-ensure` call), and `git check-ignore` only matches a
+    directory-only pattern (one ending in `/`, which is exactly what this writes) against a bare
+    name when that name is confirmed to be a directory — either because it exists, or because the
+    query itself is spelled with a trailing slash. Querying without one made an existing,
+    correctly-written `.gitignore` entry read back as "not ignored" whenever the folder had not
+    been created yet, which is the common case, not the rare one.
     """
     try:
         result = subprocess.run(
-            ["git", "-C", directory, "check-ignore", "-q", name],
+            ["git", "-C", directory, "check-ignore", "-q", name + "/"],
             capture_output=True, timeout=10, check=False)
     except (OSError, subprocess.SubprocessError):
         return False

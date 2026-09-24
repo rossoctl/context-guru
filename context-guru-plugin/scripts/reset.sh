@@ -465,6 +465,10 @@ for path in "./.claude/settings.local.json" "./.claude/settings.json" "$CLAUDE_D
     if [ -n "$hits" ]; then
       printf '%s\n' "$hits" | redact | sed 's/^/      /'
       say "      ^ if one of those points at 127.0.0.1 and you did not set it, delete that key."
+      # A routing key IS present, with no recovery folder to act on — a real problem left for a
+      # human, not a clean file. Without this, a plan whose only candidate lands here would fall
+      # through to the empty-plan branch's "Nothing to restore", which is the opposite of true.
+      INCOMPLETE=1; FILES_UNFIXED=1
     else
       say "      (no context-guru keys — this one is fine)"
     fi
@@ -556,16 +560,13 @@ for path in "./.claude/settings.local.json" "./.claude/settings.json" "$CLAUDE_D
     fi
   else
     say "  $path"
-    # `-` is what the record carries when no copy was ever taken (a project that was already
-    # routed when the record was created, or a file whose first recorded touch was a REMOVAL).
-    # Rendering it as a path — "the pre-edit copy is missing (-)" — reads like a bug in the tool
-    # rather than a known limit of what it holds, and it is the normal case for pre-hatch installs.
-    if [ "$original" = "-" ] || [ -z "$original" ]; then
-      say "      ! no pre-edit copy was taken for this file — it already carried context-guru's"
-      say "        keys when the record was created, so nothing here holds its original content."
-    else
-      say "      ! the pre-edit copy is missing ($original)"
-    fi
+    # No `.pre-install` at all — a marker file's absence carries no separate "missing" vs. "never
+    # taken" distinction the way a manifest's `-` sentinel used to. Either this file already
+    # carried context-guru's keys when it was first recorded (the common, honest case — see
+    # `_looks_routed_by_us` in settings.py), or something outside this script removed the copy
+    # since. Both read the same to a user: nothing here holds the original content.
+    say "      ! no pre-edit copy was taken for this file — it already carried context-guru's"
+    say "        keys when the record was created, so nothing here holds its original content."
     newest="$(ls -1t "$path".context-guru-backup-* 2>/dev/null | head -1 || true)"
     if [ -n "$newest" ]; then
       say "        a timestamped backup exists and is NOT restored automatically, because it"
