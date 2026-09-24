@@ -139,14 +139,21 @@ Ask before either of these; neither is implied by "stop routing my sessions":
   self-gates on `ANTHROPIC_BASE_URL` and exits immediately in a project that is not routed — which,
   after step 1, is every project. Worth saying, so a leftover hook is not mistaken for a leftover
   proxy.
-- **Delete the state directory** — `~/.local/state/context-guru` holds the pidfile and the
-  dashboard database (session metadata and token counts, no prompt content unless they enabled
-  content capture). **Say what else is in there before they agree:** `originals/` holds the copy of
-  each settings file taken before this plugin first edited it, `prereset/` holds copies taken by the
-  escape hatch, and `context-guru-reset` is the hatch itself. Deleting the directory is what makes
-  the routing removal irreversible and leaves them with no hatch — fine once they are working again
-  and have confirmed it, but it is not the tidy-up-the-leftovers item it looks like. The settings
-  copies are also the reason it is `0700`: they can contain a credential.
+- **Delete the state directory** — `~/.local/state/context-guru` holds the pidfile, the dashboard
+  database (session metadata and token counts, no prompt content unless they enabled content
+  capture), and `context-guru-reset` itself. Deleting it removes the hatch and its `~/.local/bin`
+  copy — fine once they are working again and have confirmed it, but say so before they agree.
+- **Delete the recovery folder(s)** — `<dir>/context-guru-settings-json/`, beside each settings
+  file the install touched (so `.claude/context-guru-settings-json/` for a project install, or
+  `~/.claude/context-guru-settings-json/` for `--global`). This is where the pre-install copy and
+  the escape hatch's own pre-reset copies live now — beside the file, not buried under
+  `~/.local/state`, so a user can actually find it. **Say what's in there before they agree:** a
+  `README.md` explaining the folder, `<file>.pre-install` (the copy taken before this plugin's
+  first edit — what step 1 restores from if needed), and `<file>.pre-reset-*` (only if the escape
+  hatch has run here). Deleting it is what makes the routing removal irreversible; it also can
+  contain a credential, same as the settings file it copies, which is why `/context-guru:install`
+  adds a `.gitignore` entry for it automatically. Full explanation:
+  [docs/how-to/plugin-recovery-files.md](../../../docs/how-to/plugin-recovery-files.md).
 
 ## 4. Confirm the end state
 

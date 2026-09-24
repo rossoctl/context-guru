@@ -157,7 +157,7 @@ not reword the command to look like less than it is, and never write routing whi
   they spend the user's quota.
 - `strategy_warning=` — the strategy could not be written even though the name was valid (usually a
   config at that path we did not write). The proxy is fine; mention it and move on.
-- `statusline=on` — also installed; mention it once. `skipped` is not an install failure.
+- `statusline=on` — also installed; mention it once, same as `recovery_dir=` (a `.gitignore`'d folder beside the routed file). `skipped` is not an install failure.
 
 ## 4. Then tell them
 

@@ -3991,7 +3991,8 @@ func runHatch(t *testing.T, state, home, cwd string, args ...string) (string, in
 
 // TestInstallLeavesAWayBackOutsideThePlugin is the whole feature in one assertion: after an install
 // there is a runnable recovery tool that does not live in the plugin, its path was REPORTED so the
-// skill can tell the user, and it holds a record of the file that was edited.
+// skill can tell the user, and a recovery copy of the file that was edited exists BESIDE it — not
+// in a shared, hashed ledger under the state directory. See recovery_dir_for() in settings.py.
 func TestInstallLeavesAWayBackOutsideThePlugin(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
 	path := filepath.Join(proj, "settings.json")
@@ -4009,12 +4010,65 @@ func TestInstallLeavesAWayBackOutsideThePlugin(t *testing.T) {
 	if got, want := facts["reset_hatch"], hatchPath(t, state); got != want {
 		t.Errorf("reported reset_hatch=%q, but the hatch is at %q", got, want)
 	}
-	record, err := os.ReadFile(filepath.Join(state, "reset-manifest.tsv"))
-	if err != nil {
-		t.Fatalf("no record for the hatch to read: %v", err)
+	wantRecovery := filepath.Join(proj, "context-guru-settings-json")
+	if facts["recovery_dir"] != wantRecovery {
+		t.Errorf("recovery_dir=%q, want %q", facts["recovery_dir"], wantRecovery)
 	}
-	if !strings.Contains(string(record), path) {
-		t.Errorf("the record does not name the file that was edited:\n%s", record)
+	original := filepath.Join(wantRecovery, "settings.json.pre-install")
+	if facts["recovery_original"] != original {
+		t.Errorf("recovery_original=%q, want %q", facts["recovery_original"], original)
+	}
+	got := readJSON(t, original)
+	if got["theme"] != "dark" {
+		t.Errorf("the pre-install copy does not hold what the file looked like before: %v", got)
+	}
+}
+
+// TestRecoveryDirCreationDoesNotTightenTheUsersOwnDirectory is the regression test for a real
+// review finding: ensure_dir_0700 (called via recovery_dir_for()) used to chmod BOTH the recovery
+// folder AND its parent to 0700. For every other caller that parent is plugin-owned state, but for
+// a recovery folder it is the settings file's own directory — `.claude/`, or a project root for a
+// user-scope install — which the user or their team may have deliberately made group- or
+// world-readable (a shared box, a team repo). Verified independently: a 775 directory silently
+// became 700 on the very first settings write, and stayed that way on every one after, with
+// nothing disclosing it anywhere. The recovery folder itself still gets 0700 either way — it can
+// hold a credential-bearing copy of the settings file, the same threat model B3 describes — only
+// the PARENT's mode has to survive untouched, because only the parent is not ours to manage.
+func TestRecoveryDirCreationDoesNotTightenTheUsersOwnDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits only")
+	}
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	claudeDir := filepath.Join(proj, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	// MkdirAll's mode is masked by this process's umask too, so set exactly what the test needs
+	// regardless of it, the same reason ensure_dir_0700 itself chmods explicitly rather than
+	// trusting mkdir's mode argument.
+	if err := os.Chmod(claudeDir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(claudeDir, "settings.local.json")
+
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+
+	fi, err := os.Stat(claudeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o775 {
+		t.Errorf(".claude/ mode changed from 0775 to %o — a settings write silently tightened a "+
+			"directory it does not own", got)
+	}
+	rfi, err := os.Stat(filepath.Join(claudeDir, "context-guru-settings-json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rfi.Mode().Perm(); got != 0o700 {
+		t.Errorf("recovery folder mode = %o, want 0700 — it can hold a credential-bearing copy", got)
 	}
 }
 
@@ -4042,7 +4096,13 @@ func TestTheHatchRunsUnderEveryShellItClaims(t *testing.T) {
 		name := filepath.Base(sh)
 		t.Run(name, func(t *testing.T) {
 			state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-			path := filepath.Join(proj, "settings.json")
+			// One of the three canonical scope paths the hatch itself now checks — it no longer
+			// reads an arbitrary manifest entry, so a settings file anywhere else is invisible to
+			// it. See reset.sh's fixed candidate list.
+			if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(proj, ".claude", "settings.local.json")
 			writeJSON(t, path, map[string]any{"model": "opus",
 				"permissions": map[string]any{"allow": []string{"Bash(ls:*)"}}})
 			pristine, err := os.ReadFile(path)
@@ -4129,28 +4189,20 @@ func TestTheOriginalCopyOutlivesTheRollingBackups(t *testing.T) {
 		}
 	}
 
-	entries, err := os.ReadDir(filepath.Join(state, "originals"))
-	if err != nil {
-		t.Fatalf("the originals directory is gone: %v", err)
-	}
-	var found string
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".original") {
-			found = filepath.Join(state, "originals", e.Name())
-		}
-		// A leading dot would make the copy invisible to `ls` and to every glob — including a
-		// user's own, in a directory that exists to be read by hand. The natural name starts with
-		// one, because the parent directory of a real target is `.claude`.
-		if strings.HasPrefix(e.Name(), ".") {
-			t.Errorf("the pre-edit copy %q is a hidden file", e.Name())
-		}
-	}
-	if found == "" {
-		t.Fatalf("no pre-edit copy survived twelve install/uninstall cycles: %v", entries)
+	// Beside the file now, not in a shared, hashed `originals/` directory under the state dir — see
+	// recovery_dir_for() in settings.py. copy_once's own O_EXCL/hardlink-once semantics are what
+	// keep it surviving every one of the twelve cycles above, unlike the rolling backups.
+	found := filepath.Join(proj, "context-guru-settings-json", "settings.json.pre-install")
+	// A leading dot would make the copy invisible to `ls` and to every glob — including a user's
+	// own, in a directory that exists to be read by hand. Deterministic naming off the settings
+	// file's own basename makes this true by construction now, but the property is worth asserting
+	// rather than assuming.
+	if strings.HasPrefix(filepath.Base(found), ".") {
+		t.Errorf("the pre-edit copy %q is a hidden file", found)
 	}
 	got, err := os.ReadFile(found)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("no pre-edit copy survived twelve install/uninstall cycles: %v", err)
 	}
 	if string(got) != string(pristine) {
 		t.Errorf("the pre-edit copy is not the file as the user had it:\ngot:  %s\nwant: %s",
@@ -4163,7 +4215,12 @@ func TestTheOriginalCopyOutlivesTheRollingBackups(t *testing.T) {
 // copy of the script, and recover anyway.
 func TestHatchRestoresWithThePluginDeleted(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
+	// A canonical scope path: the hatch checks exactly three fixed candidates now (see reset.sh),
+	// not an arbitrary manifest entry, so a settings file anywhere else would be invisible to it.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	writeJSON(t, path, map[string]any{
 		"theme":       "dark",
 		"env":         map[string]any{"MY_OWN": "keepme"},
@@ -4209,9 +4266,11 @@ func TestHatchRestoresWithThePluginDeleted(t *testing.T) {
 	}
 	// Reversible in its own right: whatever was there before the restore is kept, for the user who
 	// runs this and then finds the routing was not their problem.
-	// Under the STATE directory, not beside the settings file (S6): these are complete copies of a
-	// file that can hold a credential, and the old location dropped them inside the user's git tree.
-	pre, err := filepath.Glob(filepath.Join(state, "prereset", "*"))
+	// In the recovery folder BESIDE the settings file now, not under the state directory (S6): a
+	// complete copy of a file that can hold a credential belongs where /context-guru:install's
+	// gitignore-ensure step can protect it, not in a shared location nobody would think to check.
+	pre, err := filepath.Glob(filepath.Join(proj, ".claude", "context-guru-settings-json",
+		"settings.local.json.pre-reset-*"))
 	if err != nil || len(pre) == 0 {
 		t.Errorf("the hatch overwrote the routed file without keeping a copy of it")
 	}
@@ -4226,7 +4285,11 @@ func TestHatchRestoresWithThePluginDeleted(t *testing.T) {
 // they did not write and would have no reason to suspect.
 func TestHatchDeletesAFileTheInstallCreated(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.local.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 
 	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
 		t.Fatal("add failed")
@@ -4248,7 +4311,11 @@ func TestHatchDeletesAFileTheInstallCreated(t *testing.T) {
 // copy, another backup file, and another "1 file put back".
 func TestHatchSecondRunChangesNothing(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	writeJSON(t, path, map[string]any{"theme": "dark"})
 
 	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
@@ -4257,7 +4324,8 @@ func TestHatchSecondRunChangesNothing(t *testing.T) {
 	if _, code := runHatch(t, state, home, proj, "--yes"); code != 0 {
 		t.Fatal("first hatch run failed")
 	}
-	before, _ := filepath.Glob(filepath.Join(state, "prereset", "*"))
+	recovery := filepath.Join(proj, ".claude", "context-guru-settings-json")
+	before, _ := filepath.Glob(filepath.Join(recovery, "*.pre-reset-*"))
 
 	out, code := runHatch(t, state, home, proj, "--yes")
 	if code != 0 {
@@ -4266,7 +4334,7 @@ func TestHatchSecondRunChangesNothing(t *testing.T) {
 	if !strings.Contains(out, "already matches") && !strings.Contains(out, "Nothing to restore") {
 		t.Errorf("the second run did not report itself as a no-op:\n%s", out)
 	}
-	after, _ := filepath.Glob(filepath.Join(state, "prereset", "*"))
+	after, _ := filepath.Glob(filepath.Join(recovery, "*.pre-reset-*"))
 	if len(after) != len(before) {
 		t.Errorf("the second run wrote %d more backup(s) for no reason", len(after)-len(before))
 	}
@@ -4276,7 +4344,11 @@ func TestHatchSecondRunChangesNothing(t *testing.T) {
 // modifies it is not a preview.
 func TestHatchDryRunWritesNothing(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	writeJSON(t, path, map[string]any{"theme": "dark"})
 	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
 		t.Fatal("add failed")
@@ -4318,9 +4390,11 @@ func TestHatchWithNoRecordTellsTheUserWhereToLook(t *testing.T) {
 		t.Fatal("add failed")
 	}
 	hatch := hatchPath(t, state)
-	// Keep the hatch, lose the record — the state directory is not sacred, and a user may well
-	// have cleaned it out on advice from the uninstall skill.
-	if err := os.Remove(filepath.Join(state, "reset-manifest.tsv")); err != nil {
+	// Keep the hatch, lose the record — the recovery folder is not sacred, and a user may well
+	// have cleaned it out by hand (it is no longer tucked away under the state directory; it is
+	// right there beside the settings file, exactly where a "clean up my project" pass would find
+	// it too).
+	if err := os.RemoveAll(filepath.Join(proj, ".claude", "context-guru-settings-json")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4352,7 +4426,11 @@ func TestHatchWithNoRecordTellsTheUserWhereToLook(t *testing.T) {
 // buffer, a log, or a pasted transcript.
 func TestHatchReportsCredentialsByLocationAndNeverByValue(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	writeJSON(t, path, map[string]any{"theme": "dark"})
 	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
 		t.Fatal("add failed")
@@ -4471,9 +4549,16 @@ func TestDeadProxyNoteFallsBackWhenThereIsNoHatch(t *testing.T) {
 // file, and says the original content is not recoverable from its own record.
 func TestAnAlreadyRoutedProjectStillGetsAHatch(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
-	// Routed already, by a version of the plugin that kept no record — which is what the state
-	// directory being empty represents.
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted. The hatch
+	// now names it by this fixed RELATIVE candidate string (reset.sh's own literal), not by the
+	// test's absolute path — there is no manifest entry to echo an absolute path back from anymore.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
+	const relPath = "./.claude/settings.local.json"
+	// Routed already, by a version of the plugin that kept no record — which is what an absent
+	// recovery folder represents now (no `settings.py add` has ever run against this file).
 	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
 
 	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL)
@@ -4483,15 +4568,15 @@ func TestAnAlreadyRoutedProjectStillGetsAHatch(t *testing.T) {
 	if facts["reset_hatch"] == "" || facts["reset_hatch"] == "unavailable" {
 		t.Fatalf("a no-op re-run left the machine with no hatch: %v", facts)
 	}
-	if facts["reset_original"] != "unavailable" {
-		t.Errorf("reset_original=%q; the pre-install content genuinely is not recoverable here and "+
-			"claiming otherwise would promise a restore that cannot happen", facts["reset_original"])
+	if facts["recovery_original"] != "unavailable" {
+		t.Errorf("recovery_original=%q; the pre-install content genuinely is not recoverable here and "+
+			"claiming otherwise would promise a restore that cannot happen", facts["recovery_original"])
 	}
 	out, code := runHatch(t, state, home, proj, "--yes")
 	if code != 3 {
 		t.Errorf("hatch exit %d; want 3 — it has a file to name but cannot restore it\n%s", code, out)
 	}
-	if !strings.Contains(out, path) {
+	if !strings.Contains(out, relPath) {
 		t.Errorf("the hatch does not name the routed file:\n%s", out)
 	}
 	if b, _ := os.ReadFile(path); !strings.Contains(string(b), ourURL) {
@@ -4513,10 +4598,11 @@ func TestAConflictIsNeverRecordedAsOurEdit(t *testing.T) {
 	if code != 2 || facts["result"] != "conflict" {
 		t.Fatalf("fixture: wanted result=conflict exit 2, got %v exit %d", facts, code)
 	}
-	if b, err := os.ReadFile(filepath.Join(state, "reset-manifest.tsv")); err == nil {
-		if strings.Contains(string(b), path) {
-			t.Errorf("a refused conflict was recorded as our own edit:\n%s", b)
-		}
+	// A refused conflict never reaches save(), so no recovery folder should exist at all — there is
+	// no manifest to check for an absent entry anymore; the folder's mere existence would BE the
+	// record of an edit that never happened.
+	if _, err := os.Stat(filepath.Join(proj, "context-guru-settings-json")); err == nil {
+		t.Errorf("a refused conflict was recorded as our own edit: a recovery folder was created")
 	}
 }
 
@@ -4821,7 +4907,11 @@ func TestPresetFallbackInheritsRoutingScope(t *testing.T) {
 // directory was wiped between install and remove. That is the population this whole feature is for.
 func TestRemoveFirstNeverProducesAnOriginalHoldingRouting(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.local.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	// A file as a PRE-HATCH install left it: routed, with the metadata that version recorded, and no
 	// pre-edit copy anywhere because that version did not take one.
 	writeJSON(t, path, map[string]any{
@@ -4830,26 +4920,22 @@ func TestRemoveFirstNeverProducesAnOriginalHoldingRouting(t *testing.T) {
 		"$context-guru": map[string]any{"installed_base_url": ourURL},
 	})
 
-	if _, code := settingsIn(t, state, home, "remove", "--file", path, "--url", ourURL); code != 0 {
+	facts, code := settingsIn(t, state, home, "remove", "--file", path, "--url", ourURL)
+	if code != 0 {
 		t.Fatal("remove failed")
 	}
-	// Whatever the record holds, nothing calling itself a pre-edit copy may contain routing.
-	//
-	// The loop below is VACUOUS on its own for this fixture — no copy is the expected outcome, and an
-	// empty glob asserts nothing — so the expected count is asserted explicitly and the record is
-	// checked to say so. Flagged in review as the pattern worth propagating: an absence assertion
-	// needs a companion that proves the path ran.
-	originals, _ := filepath.Glob(filepath.Join(state, "originals", "*.original"))
+	// Whatever the recovery folder holds, nothing calling itself a pre-edit copy may contain
+	// routing — `_looks_routed_by_us` is the guard, and this fixture is exactly what it exists for
+	// (the file already carried context-guru's keys when first recorded, so no copy is taken).
+	if facts["recovery_original"] != "unavailable" {
+		t.Errorf("recovery_original=%q; this file was already ours when first recorded, so nothing "+
+			"should have been captured as its \"original\"", facts["recovery_original"])
+	}
+	recovery := filepath.Join(proj, ".claude", "context-guru-settings-json")
+	originals, _ := filepath.Glob(filepath.Join(recovery, "*.pre-install"))
 	if len(originals) != 0 {
 		t.Errorf("took %d pre-edit copy/copies of a file that was already routed: %v",
 			len(originals), originals)
-	}
-	rec, err := os.ReadFile(filepath.Join(state, "reset-manifest.tsv"))
-	if err != nil {
-		t.Fatalf("no record was written at all, so the rest of this test proves little: %v", err)
-	}
-	if !strings.Contains(string(rec), path) {
-		t.Errorf("the record does not mention the file, so the hatch would not know about it:\n%s", rec)
 	}
 	for _, o := range originals {
 		b, err := os.ReadFile(o)
@@ -4882,7 +4968,11 @@ func TestRemoveFirstNeverProducesAnOriginalHoldingRouting(t *testing.T) {
 // who is locked out.
 func TestEmptyPlanNeverClaimsSuccessWhenNothingCouldBeRestored(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
 	// Routed already, no record: the pre-hatch install picking up a hatch on a no-op re-run.
 	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
@@ -4912,7 +5002,11 @@ func TestEmptyPlanNeverClaimsSuccessWhenNothingCouldBeRestored(t *testing.T) {
 // these files?" and said nothing about that, which makes it consent to something unstated.
 func TestARestoreWarnsThatItRevertsTheWholeFile(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	writeJSON(t, path, map[string]any{"permissions": map[string]any{"allow": []string{"Bash(ls:*)"}}})
 	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
 		t.Fatal("add failed")
@@ -4930,7 +5024,7 @@ func TestARestoreWarnsThatItRevertsTheWholeFile(t *testing.T) {
 	flat := strings.Join(strings.Fields(out), " ")
 	for _, want := range []string{
 		"reverts the WHOLE file",
-		"prereset",             // and that it is undoable
+		"pre-reset",            // and that it is undoable — beside the file now, not "$STATE/prereset/"
 		"The two files differ", // shown as evidence, before the prompt
 	} {
 		if !strings.Contains(flat, want) {
@@ -4951,7 +5045,11 @@ func TestARestoreWarnsThatItRevertsTheWholeFile(t *testing.T) {
 // rather than a known limit of what it holds, on the pre-hatch path that is now the common case.
 func TestMissingCopyIsNotRenderedAsAPath(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
 	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
 		t.Fatal("add failed")
@@ -4969,7 +5067,11 @@ func TestMissingCopyIsNotRenderedAsAPath(t *testing.T) {
 // run disagreed about whether anything was left for a human.
 func TestDryRunAgreesWithARealRunAboutWhatIsLeft(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
 	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
 		t.Fatal("add failed")
@@ -4983,9 +5085,15 @@ func TestDryRunAgreesWithARealRunAboutWhatIsLeft(t *testing.T) {
 }
 
 // TestAnUnusableStateDirectoryNeverFailsTheInstall. "Fail open, always" is a hard boundary in this
-// repo, and the hatch machinery is the newest thing in the write path. An install that would
-// otherwise have worked must not be broken by the recovery bookkeeping — it must report that the
-// hatch is unavailable and carry on.
+// repo. An install that would otherwise have worked must not be broken by the recovery bookkeeping
+// — it must report what it could not do and carry on.
+//
+// The recovery folder itself now lives BESIDE the settings file, not under the state directory, so
+// a state directory this unusable no longer touches it at all — only the centralized hatch SCRIPT
+// (still installed under the state dir, since it has no per-project home) is affected. That
+// decoupling is worth asserting directly: the install should come away with a real recovery_dir and
+// recovery_original despite `reset_hatch=unavailable`, which the old, single-state-dir design could
+// not have claimed.
 func TestAnUnusableStateDirectoryNeverFailsTheInstall(t *testing.T) {
 	home, proj := t.TempDir(), t.TempDir()
 	// A FILE where the state directory should be, so every path inside it is unusable.
@@ -5002,6 +5110,18 @@ func TestAnUnusableStateDirectoryNeverFailsTheInstall(t *testing.T) {
 	}
 	if facts["reset_hatch"] != "unavailable" {
 		t.Errorf("reset_hatch=%q; it must say so rather than imply a hatch exists", facts["reset_hatch"])
+	}
+	wantRecovery := filepath.Join(proj, "context-guru-settings-json")
+	if facts["recovery_dir"] != wantRecovery {
+		t.Errorf("recovery_dir=%q, want %q — it must not depend on the (unusable) state directory",
+			facts["recovery_dir"], wantRecovery)
+	}
+	original := filepath.Join(wantRecovery, "settings.json.pre-install")
+	if facts["recovery_original"] != original {
+		t.Errorf("recovery_original=%q, want %q", facts["recovery_original"], original)
+	}
+	if _, err := os.Stat(original); err != nil {
+		t.Errorf("the pre-install copy was not actually written despite being reported: %v", err)
 	}
 	env, _ := readJSON(t, path)["env"].(map[string]any)
 	if env["ANTHROPIC_BASE_URL"] != ourURL {
@@ -5025,7 +5145,11 @@ func TestAnUnusableStateDirectoryNeverFailsTheInstall(t *testing.T) {
 // did not cover this path, which is how it got through.
 func TestThePlanNeverPrintsACredential(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	const (
 		apiKey    = "sk-ant-SUPERSECRET-do-not-print-me"
 		oddlyName = "hunter2-also-secret" // a key-ish name that is not spelled ANTHROPIC_*
@@ -5071,7 +5195,7 @@ func TestThePlanNeverPrintsACredential(t *testing.T) {
 
 // TestNormalUninstallDoesNotClaimTheOriginalIsGone. An ordinary uninstall of an ordinarily-installed
 // project takes the "file already carries our keys" branch — correctly, since a copy of the file at
-// that moment would be meaningless. But it also SET reset_original=unavailable, while the good,
+// that moment would be meaningless. But it also SET recovery_original=unavailable, while the good,
 // verified-clean copy from the install sat on disk. install/SKILL.md turns that fact into "the hatch
 // can unroute but not restore", so the skill would have told users their content was unrecoverable
 // when it was not: the same class of inverted reassurance as round 1's finding 2.
@@ -5087,14 +5211,15 @@ func TestNormalUninstallDoesNotClaimTheOriginalIsGone(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("remove: exit %d, %v", code, facts)
 	}
-	if facts["reset_original"] == "unavailable" {
-		t.Errorf("remove reported reset_original=unavailable; the record's copy is what matters, "+
-			"not whether THIS call could take one: %v", facts)
+	if facts["recovery_original"] == "unavailable" {
+		t.Errorf("remove reported recovery_original=unavailable; the copy already on disk is what "+
+			"matters, not whether THIS call could take one: %v", facts)
 	}
-	// And the copy really is there, really is clean.
-	originals, _ := filepath.Glob(filepath.Join(state, "originals", "*.original"))
+	// And the copy really is there, really is clean. Beside the file now, not in a shared
+	// `originals/` directory under the state dir.
+	originals, _ := filepath.Glob(filepath.Join(proj, "context-guru-settings-json", "*.pre-install"))
 	if len(originals) != 1 {
-		t.Fatalf("want exactly one original, got %v", originals)
+		t.Fatalf("want exactly one pre-install copy, got %v", originals)
 	}
 	b, err := os.ReadFile(originals[0])
 	if err != nil {
@@ -5115,7 +5240,11 @@ func TestNormalUninstallDoesNotClaimTheOriginalIsGone(t *testing.T) {
 // anything is left for a human. Two questions, two flags.
 func TestAnExportedBaseURLIsNotCalledAFileProblem(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	writeJSON(t, path, map[string]any{"permissions": map[string]any{"allow": []string{"Bash(ls:*)"}}})
 	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
 		t.Fatal("add failed")
@@ -5176,7 +5305,7 @@ func TestLoopbackDetectionCoversTheShapesThatMatter(t *testing.T) {
 		if _, code := settingsIn(t, state, home, "remove", "--file", path, "--url", tc.url); code != 0 {
 			t.Fatalf("%s: remove failed", tc.url)
 		}
-		originals, _ := filepath.Glob(filepath.Join(state, "originals", "*.original"))
+		originals, _ := filepath.Glob(filepath.Join(proj, "context-guru-settings-json", "*.pre-install"))
 		if tc.ourFile && len(originals) != 0 {
 			b, _ := os.ReadFile(originals[0])
 			t.Errorf("%s: took a pre-edit copy of an already-routed file:\n%s", tc.url, b)
@@ -5346,7 +5475,10 @@ func TestNoPrinterOfContentEscapesTheFilter(t *testing.T) {
 		// A user's own gateway carrying credentials in the URL, taken over with --force and then
 		// handed back. Verify greps the restored file and prints the matching lines.
 		state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-		path := filepath.Join(proj, "settings.json")
+		if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(proj, ".claude", "settings.local.json")
 		theirs := "https://svc:" + secret + "@gw.corp.example/anthropic"
 		writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": theirs}})
 		if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL,
@@ -5364,7 +5496,10 @@ func TestNoPrinterOfContentEscapesTheFilter(t *testing.T) {
 
 	t.Run("the environment report", func(t *testing.T) {
 		state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-		path := filepath.Join(proj, "settings.json")
+		if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(proj, ".claude", "settings.local.json")
 		writeJSON(t, path, map[string]any{"theme": "dark"})
 		if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
 			t.Fatal("add failed")
@@ -5397,7 +5532,8 @@ func TestNoPrinterOfContentEscapesTheFilter(t *testing.T) {
 			t.Fatal("add failed")
 		}
 		hatch := hatchPath(t, state)
-		if err := os.Remove(filepath.Join(state, "reset-manifest.tsv")); err != nil {
+		// See TestHatchWithNoRecordTellsTheUserWhereToLook — the recovery folder is the record now.
+		if err := os.RemoveAll(filepath.Join(proj, ".claude", "context-guru-settings-json")); err != nil {
 			t.Fatal(err)
 		}
 		cmd := exec.Command(hatch, "--yes")
@@ -5424,7 +5560,11 @@ func TestNoPrinterOfContentEscapesTheFilter(t *testing.T) {
 // It survived three rounds because NO test grepped for "Done." at all.
 func TestASuccessfulRestoreSaysSoEvenWhenTheShellIsRouted(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
-	path := filepath.Join(proj, "settings.json")
+	// A canonical scope path — see the comment in TestHatchRestoresWithThePluginDeleted.
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, ".claude", "settings.local.json")
 	writeJSON(t, path, map[string]any{"permissions": map[string]any{"allow": []string{"Bash(ls:*)"}}})
 	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
 		t.Fatal("add failed")
@@ -6017,6 +6157,95 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 	})
 }
 
+// TestRouteAddsGitignoreEntryByDefault: route_ensure_gitignore runs automatically alongside the
+// statusline install, right after routing succeeds — deterministic and unasked, unlike the flags
+// above that gate on the user's explicit consent, because this changes nothing about what the user
+// is exposed to and the check for whether it is even needed is entirely mechanical. See
+// settings.py's gitignore-ensure and install.sh's route_ensure_gitignore.
+func TestRouteAddsGitignoreEntryByDefault(t *testing.T) {
+	requireTool(t, "git")
+
+	t.Run("a git repo with no existing .gitignore: the entry is added", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		if out, err := exec.Command("git", "-C", proj, "init", "-q").CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
+		port := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": port})
+		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+		facts, code := runRoute(t, proj, env, consentOK()...)
+		t.Cleanup(func() {
+			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+			}
+		})
+		if code != 0 || facts["result"] != "routed" {
+			t.Fatalf("exit %d result=%q: %v", code, facts["result"], facts)
+		}
+		if facts["gitignore"] != "added" {
+			t.Fatalf("gitignore=%q, want added: %v", facts["gitignore"], facts)
+		}
+		gi, err := os.ReadFile(filepath.Join(proj, ".claude", ".gitignore"))
+		if err != nil {
+			t.Fatalf("no .gitignore was written: %v", err)
+		}
+		if !strings.Contains(string(gi), "context-guru-settings-json/") {
+			t.Errorf(".gitignore does not cover the recovery folder:\n%s", gi)
+		}
+		// Not just a string in a file — git itself has to agree, since that is the actual property
+		// this step exists for.
+		out, err := exec.Command("git", "-C", filepath.Join(proj, ".claude"),
+			"check-ignore", "-q", "context-guru-settings-json/").CombinedOutput()
+		if err != nil {
+			t.Errorf("git does not consider the recovery folder ignored: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("--no-gitignore-check: nothing is written", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		if out, err := exec.Command("git", "-C", proj, "init", "-q").CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
+		port := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": port})
+		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+		facts, code := runRoute(t, proj, env, append(consentOK(), "--no-gitignore-check")...)
+		t.Cleanup(func() {
+			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+			}
+		})
+		if code != 0 || facts["result"] != "routed" {
+			t.Fatalf("exit %d result=%q: %v", code, facts["result"], facts)
+		}
+		if facts["gitignore"] != "skipped" {
+			t.Fatalf("gitignore=%q, want skipped: %v", facts["gitignore"], facts)
+		}
+		if _, err := os.Stat(filepath.Join(proj, ".claude", ".gitignore")); err == nil {
+			t.Error("--no-gitignore-check wrote a .gitignore anyway")
+		}
+	})
+
+	t.Run("not a git repo: skipped, and the route still succeeds", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		port := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": port})
+		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+		facts, code := runRoute(t, proj, env, consentOK()...)
+		t.Cleanup(func() {
+			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+			}
+		})
+		if code != 0 || facts["result"] != "routed" {
+			t.Fatalf("exit %d result=%q: %v", code, facts["result"], facts)
+		}
+		if facts["gitignore"] != "skipped" {
+			t.Fatalf("gitignore=%q, want skipped (no git repo): %v", facts["gitignore"], facts)
+		}
+	})
+}
+
 // TestRouteIsIdempotent. The install skill may be re-run, and on a hosted agent a re-run IS the
 // repair path after an earlier attempt stopped partway. A second run must be a success that changes
 // nothing, not a conflict against itself.
@@ -6324,6 +6553,129 @@ func TestInstallSkillAsksForConsentAsAChoice(t *testing.T) {
 	if !strings.Contains(lowered, "do not pass") {
 		t.Error("the skill never prohibits passing the consent flag on the model's own judgement")
 	}
+}
+
+// TestGitignoreEnsure covers settings.py's `gitignore-ensure` subcommand directly (install.sh's
+// TestRouteAddsGitignoreEntryByDefault covers it end-to-end through a real route). Every branch
+// must fail open — this must never block or fail an install — which is why "not a git repo" and
+// "cannot write" report `result=skipped`, never a nonzero exit.
+func TestGitignoreEnsure(t *testing.T) {
+	requireTool(t, "git")
+
+	t.Run("not a git repo: skipped, nothing written", func(t *testing.T) {
+		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		path := filepath.Join(dir, ".claude", "settings.local.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeJSON(t, path, map[string]any{})
+		facts, code := settingsIn(t, state, home, "gitignore-ensure", "--file", path)
+		if code != 0 || facts["result"] != "skipped" || facts["reason"] != "not_a_git_repo" {
+			t.Fatalf("exit %d, %v", code, facts)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".claude", ".gitignore")); err == nil {
+			t.Error("wrote a .gitignore outside any git repo")
+		}
+	})
+
+	t.Run("a git repo with no .gitignore: the entry is added", func(t *testing.T) {
+		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
+		claudeDir := filepath.Join(dir, ".claude")
+		path := filepath.Join(claudeDir, "settings.local.json")
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeJSON(t, path, map[string]any{})
+		facts, code := settingsIn(t, state, home, "gitignore-ensure", "--file", path)
+		if code != 0 || facts["result"] != "added" {
+			t.Fatalf("exit %d, %v", code, facts)
+		}
+		wantFile := filepath.Join(claudeDir, ".gitignore")
+		if facts["file"] != wantFile {
+			t.Errorf("file=%q, want %q", facts["file"], wantFile)
+		}
+		gi, err := os.ReadFile(wantFile)
+		if err != nil {
+			t.Fatalf("no .gitignore written: %v", err)
+		}
+		if !strings.Contains(string(gi), "context-guru-settings-json/") {
+			t.Errorf(".gitignore does not cover the recovery folder:\n%s", gi)
+		}
+		out, err := exec.Command("git", "-C", claudeDir, "check-ignore", "-q",
+			"context-guru-settings-json/").CombinedOutput()
+		if err != nil {
+			t.Errorf("git does not consider the folder ignored: %v\n%s", err, out)
+		}
+
+		// Idempotent: a second run against the same file must not duplicate the line or rewrite it.
+		facts2, code2 := settingsIn(t, state, home, "gitignore-ensure", "--file", path)
+		if code2 != 0 || facts2["result"] != "unchanged" {
+			t.Fatalf("second run: exit %d, %v", code2, facts2)
+		}
+		gi2, err := os.ReadFile(wantFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gi2) != string(gi) {
+			t.Errorf("a no-op second run changed the file:\nbefore: %q\nafter:  %q", gi, gi2)
+		}
+	})
+
+	t.Run("already covered by an existing .gitignore: reported unchanged, file untouched", func(t *testing.T) {
+		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
+		claudeDir := filepath.Join(dir, ".claude")
+		path := filepath.Join(claudeDir, "settings.local.json")
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeJSON(t, path, map[string]any{})
+		// A broader rule at the REPO root already covers it — this is the common real-world shape
+		// (a project .gitignore with `.claude/` or similar), not the exact line settings.py itself
+		// would have written.
+		if err := os.WriteFile(filepath.Join(dir, ".gitignore"),
+			[]byte("*context-guru-settings-json*\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		facts, code := settingsIn(t, state, home, "gitignore-ensure", "--file", path)
+		if code != 0 || facts["result"] != "unchanged" || facts["reason"] != "already_ignored" {
+			t.Fatalf("exit %d, %v", code, facts)
+		}
+		if _, err := os.Stat(filepath.Join(claudeDir, ".gitignore")); err == nil {
+			t.Error("wrote a redundant .gitignore beside the file when a broader rule already covered it")
+		}
+	})
+
+	t.Run("unwritable directory: skipped, never fails the caller", func(t *testing.T) {
+		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
+		claudeDir := filepath.Join(dir, ".claude")
+		path := filepath.Join(claudeDir, "settings.local.json")
+		// Created writable, populated, THEN locked down — a directory that starts read-only would
+		// refuse the file write below too, which is not the condition this subtest means to isolate.
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(claudeDir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(claudeDir, 0o755) }) //nolint:errcheck
+		facts, code := settingsIn(t, state, home, "gitignore-ensure", "--file", path)
+		if code != 0 || facts["result"] != "skipped" || facts["reason"] != "unwritable" {
+			t.Fatalf("an unwritable directory must be reported, never fail the caller: exit %d, %v",
+				code, facts)
+		}
+	})
 }
 
 // TestValidBaseURLRefusesAHostThatIsNotAHost. The host was checked for emptiness and nothing else,

@@ -13,14 +13,24 @@
 # So this is deliberately the opposite of the rest of the plugin:
 #
 #   * plain POSIX sh, no python, no Go binary, no network, no plugin code;
-#   * it is INSTALLED OUTSIDE THE PLUGIN, into the state directory next to its own backups. A
-#     hatch that lives inside the thing that broke is unavailable exactly when it is needed —
-#     `/plugin uninstall`, a marketplace refresh or a wiped plugin cache all take it with them;
+#   * it is INSTALLED OUTSIDE THE PLUGIN, into `~/.local/state/context-guru` (and, when that
+#     directory exists, a second copy on PATH at `~/.local/bin`). A hatch that lives inside the
+#     thing that broke is unavailable exactly when it is needed — `/plugin uninstall`, a
+#     marketplace refresh or a wiped plugin cache all take it with them;
 #   * the primary path is `cp`, restoring a copy of each settings file taken BEFORE the first
-#     edit, so recovery does not depend on parsing anything;
-#   * it takes its own backup before it writes, so running it is itself reversible. That copy goes
-#     under the state directory, NOT beside the settings file: it is a complete copy of a file that
-#     can hold a credential, and the old location dropped one inside the user's git working tree;
+#     edit, from a `context-guru-settings-json/` folder beside that settings file — not from a
+#     shared, hashed, append-only ledger under the state directory. That used to be the design, and
+#     it had a real defect: nothing ever removed an entry, so a scope touched once and cleanly
+#     uninstalled since stayed on the list forever, and running this script for one broken project
+#     would revert a completely different, unrelated scope right along with it. Checking exactly the
+#     three real candidate files, each carrying its own folder, makes that leak impossible rather
+#     than merely guarded against — see the checks below for the guard that still exists on TOP of
+#     that, for a scope's own folder going stale in the same way;
+#   * it takes its own backup before it writes, so running it is itself reversible. That copy also
+#     goes into the SAME per-file recovery folder, for the same reason the pre-install copy does:
+#     `/context-guru:install` closes the one real risk this reopens (a settings file can carry a
+#     credential, and so can a copy of it) with a `.gitignore` entry added deterministically, rather
+#     than by putting the copy somewhere a user would never think to look for it;
 #   * it prints what it will do and asks, unless told `--yes`.
 #
 # It restores ROUTING. It does not fix a credential — see the report it prints at the end, which
@@ -29,7 +39,6 @@
 set -eu
 
 PROG="context-guru-reset"
-STATE="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}"
 DRY=0
 YES=0
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -51,22 +60,22 @@ usage() {
   cat <<USAGE
 $PROG — put your Claude Code settings back the way they were before context-guru.
 
-usage: $PROG [--dry-run] [--yes] [--state DIR]
+usage: $PROG [--dry-run] [--yes]
 
   --dry-run   show what would change and exit without writing anything
   --yes       do not ask for confirmation (for non-interactive use)
-  --state DIR read the record from DIR instead of
-              \${XDG_STATE_HOME:-\$HOME/.local/state}/context-guru
 
 What it does, in order:
-  1. reads the record of every settings file context-guru edited;
-  2. copies each of those into \${STATE}/prereset/ so this is reversible too;
-  3. restores each from the copy taken before context-guru's first edit — or deletes the
-     file, if context-guru is the reason it exists;
+  1. checks each settings file context-guru can write to (project-local, project, user scope)
+     for a recovery folder — \`<dir>/${RECOVERY_DIR_NAME}/\` — beside it;
+  2. for one that shows context-guru's own keys RIGHT NOW, copies the current file into that same
+     folder first, so this is reversible too;
+  3. restores it from the copy taken before context-guru's first edit — or deletes it, if
+     context-guru is the reason it exists;
   4. verifies no routing key is left, and reports anything it could not fix.
 
-It never stops processes, never touches the network, and never edits a file it has no record
-of editing.
+It never stops processes, never touches the network, and never edits a file with no context-guru
+fingerprint in it right now, or with no recovery folder beside it.
 USAGE
 }
 
@@ -74,15 +83,20 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1 ;;
     --yes|-y) YES=1 ;;
-    --state) shift; [ $# -gt 0 ] || { echo "$PROG: --state needs a directory" >&2; exit 2; }; STATE="$1" ;;
-    --state=*) STATE="${1#--state=}" ;;
     -h|--help) usage; exit 0 ;;
     *) echo "$PROG: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
 
-MANIFEST="$STATE/reset-manifest.tsv"
+# The (at most three) settings files context-guru ever writes to, same set and same order
+# `_option_file_candidates()` in settings.py enumerates for reading plugin options — project-local,
+# project, user — so this script and that one can never disagree about where "the user-scope file"
+# is. Respecting CLAUDE_CONFIG_DIR here (settings.py's `user_scope_files()` already does) matters:
+# without it, a machine with that variable set would have this script check the wrong path and
+# report every real entry there as "not present".
+CLAUDE_DIR_USER="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+RECOVERY_DIR_NAME="context-guru-settings-json"
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
@@ -411,90 +425,61 @@ final_advice() {
 }
 
 # ---------------------------------------------------------------------------
-# No record at all. This is a real state — a hand-edited settings file, an install that predates
-# the record, or a wiped state directory — and answering it with "nothing to do" would be the
-# most useless thing this script could say to somebody whose sessions are down.
-# ---------------------------------------------------------------------------
-if [ ! -f "$MANIFEST" ]; then
-  warn "$PROG: no record of any edit at $MANIFEST"
-  say ""
-  say "That means this script cannot restore anything automatically. Nothing is lost: check"
-  say "these files by hand for an \"ANTHROPIC_BASE_URL\" pointing at 127.0.0.1, and either"
-  say "delete that key or restore one of the timestamped backups beside the file"
-  say "(*.context-guru-backup-*, newest last):"
-  say ""
-  # EVERY candidate is printed, present or not. Printing only the ones that exist meant that in a
-  # directory that happened to hold none of them the output was the heading "check these files by
-  # hand:" followed by nothing at all — which is the precise uselessness this branch was written to
-  # avoid, delivered to somebody whose sessions are down. A named path they can check and rule out
-  # is worth more than silence, and the absent ones are also the answer to "is it the global one?".
-  for f in "./.claude/settings.local.json" "./.claude/settings.json" "$HOME/.claude/settings.json"; do
-    if [ -f "$f" ]; then
-      say "  $f"
-      hits="$(grep -n 'ANTHROPIC_BASE_URL\|ANTHROPIC_UPSTREAM\|CONTEXT_GURU_BIN' "$f" 2>/dev/null || true)"
-      if [ -n "$hits" ]; then
-        printf '%s\n' "$hits" | redact | sed 's/^/      /'
-        say "      ^ if one of those points at 127.0.0.1 and you did not set it, delete that key."
-      else
-        say "      (no context-guru keys — this one is fine)"
-      fi
-      ls -1t "$f".context-guru-backup-* 2>/dev/null | sed 's/^/      backup: /' || true
-    else
-      say "  $f"
-      say "      (not present)"
-    fi
-  done
-  say ""
-  say "  The first two are relative to the project you are in: $(pwd)"
-  say "  If you were routed from a different project, run this again from there."
-  report_environment
-  final_advice
-  exit 3
-fi
-
-# ---------------------------------------------------------------------------
-# Read the record and build the plan. Two passes on purpose: everything is shown before anything
-# is written, so the confirmation prompt is answered with the full picture rather than with trust.
+# Build the plan. Two passes on purpose: everything is shown before anything is written, so the
+# confirmation prompt is answered with the full picture rather than with trust.
 #
-# Format, one edited settings file per line:  <1|0 existed before>\t<original copy|->\t<path>
-# `0` means context-guru CREATED that file, so putting things back means deleting it.
+# One fixed loop over the (at most three) files context-guru can ever write to, rather than a
+# global record of everything it ever HAS written to. That is the fix, not a detail: the old design
+# was a single ledger, `reset-manifest.tsv`, that nothing ever removed an entry from — not even a
+# completely clean `/context-guru:uninstall` — so a file touched once (a `--scope user` test months
+# ago, a project cleanly uninstalled since) stayed on it permanently, and running this script for a
+# completely different, currently-broken project would sweep that unrelated scope back in too and
+# revert it to a copy taken long before whatever the user had since edited into it — with no
+# `.context-guru-backup-*` beside it to explain why, because the backup was the ORIGINAL copy under
+# a shared state directory, nowhere near the file itself. Checking exactly the three real candidate
+# paths, each carrying its own recovery folder beside it, makes that leak structurally impossible:
+# there is no shared list left to leak from.
 # ---------------------------------------------------------------------------
 say "$PROG"
-say "Record: $MANIFEST"
 say ""
-say "Files context-guru edited:"
-
-PRESET_DIR="$STATE/prereset"
-mkdir -p "$PRESET_DIR" 2>/dev/null && chmod 700 "$PRESET_DIR" 2>/dev/null
-# If the state directory is not writable, fall back to beside the file rather than losing the copy
-# entirely — an unwritable state dir must not turn a reversible restore into an irreversible one.
-[ -d "$PRESET_DIR" ] && [ -w "$PRESET_DIR" ] || PRESET_DIR=""
+say "Files context-guru can write to:"
 
 PLAN="$(mktemp "${TMPDIR:-/tmp}/cg-reset-plan.XXXXXX")"
 # ENV_TMP is in here too (set later, in the empty-plan branch): an interrupt between its mktemp and
 # its rm would otherwise leak a temp file into TMPDIR.
 trap 'rm -f "$PLAN" ${ENV_TMP:+"$ENV_TMP"}' EXIT INT TERM
 
-n=0
-while IFS='	' read -r existed original path; do
-  case "$existed" in ''|'#'*) continue ;; esac
-  [ -n "${path:-}" ] || continue
-  n=$((n + 1))
+for path in "./.claude/settings.local.json" "./.claude/settings.json" "$CLAUDE_DIR_USER/settings.json"; do
   if [ ! -e "$path" ]; then
     say "  $path"
-    say "      gone already — nothing to restore"
+    say "      (not present)"
     continue
   fi
-  # Does this file show ANY sign of being ours RIGHT NOW? The manifest is append-only forever —
-  # nothing ever removes an entry, including a completely clean `/context-guru:uninstall` — so a
-  # file touched once (a --scope user test months ago, a project that was cleanly uninstalled
-  # since) stays on this list permanently. Without this check, every future run of this hatch —
-  # even one aimed at fixing a DIFFERENT, currently-broken project — sweeps that unrelated file
-  # back in and offers to revert it to a copy taken long before whatever the user has since edited
-  # into it. That is not a hypothetical: it is exactly how a user-scope settings.json that was
-  # never part of the CURRENT install got silently reverted, with no `.context-guru-backup-*`
-  # beside it to explain why — the "backup" here is the ORIGINAL copy under the state directory,
-  # nowhere near the file itself.
+  recovery_dir="$(dirname "$path")/$RECOVERY_DIR_NAME"
+  if [ ! -d "$recovery_dir" ]; then
+    # No record at all for this file — a hand-edited settings file, an install that predates
+    # recovery folders, or one wiped by hand. Answering with silence would be the most useless
+    # thing this script could say to somebody whose sessions are down over exactly this file.
+    say "  $path"
+    hits="$(grep -n 'ANTHROPIC_BASE_URL\|ANTHROPIC_UPSTREAM\|CONTEXT_GURU_BIN' "$path" 2>/dev/null || true)"
+    if [ -n "$hits" ]; then
+      printf '%s\n' "$hits" | redact | sed 's/^/      /'
+      say "      ^ if one of those points at 127.0.0.1 and you did not set it, delete that key."
+      # A routing key IS present, with no recovery folder to act on — a real problem left for a
+      # human, not a clean file. Without this, a plan whose only candidate lands here would fall
+      # through to the empty-plan branch's "Nothing to restore", which is the opposite of true.
+      INCOMPLETE=1; FILES_UNFIXED=1
+    else
+      say "      (no context-guru keys — this one is fine)"
+    fi
+    ls -1t "$path".context-guru-backup-* 2>/dev/null | sed 's/^/      backup: /' || true
+    continue
+  fi
+  # Does this file show ANY sign of being ours RIGHT NOW? A recovery folder existing only proves
+  # context-guru touched this file AT SOME POINT — it may have been cleanly uninstalled since, and
+  # edited by the user for reasons that have nothing to do with context-guru afterwards. Per-scope
+  # colocation stops that leaking to a DIFFERENT scope's run (see the comment above), but a scope's
+  # own folder can still go stale in exactly this way, so the check stays.
   #
   # `"$context-guru"` is the meta key EVERY context-guru write sets (routing or statusline-only),
   # so it alone would be enough — the ANTHROPIC_*/CONTEXT_GURU_BIN check is belt-and-suspenders for
@@ -507,7 +492,10 @@ while IFS='	' read -r existed original path; do
     say "      file that is not currently context-guru's to fix"
     continue
   fi
-  if [ "$existed" = 0 ]; then
+  basename="$(basename "$path")"
+  created_marker="$recovery_dir/$basename.created-by-us"
+  original="$recovery_dir/$basename.pre-install"
+  if [ -e "$created_marker" ]; then
     say "  $path"
     say "      DELETE (context-guru created this file; it did not exist before)"
     printf 'delete\t-\t%s\n' "$path" >> "$PLAN"
@@ -542,7 +530,7 @@ while IFS='	' read -r existed original path; do
       say "      ! this reverts the WHOLE file, not just the routing. Anything you changed in it"
       say "        since installing goes back too — permission grants Claude Code appended as you"
       say "        approved tools, a model or theme you set. Your current version is copied to"
-      say "        \$STATE/prereset/ first (a *-prereset-* file there), so this is undoable."
+      say "        $recovery_dir/ first (a *.pre-reset-* file there), so this is undoable."
       # The diff is shown as EVIDENCE, with no claim about which side of it is the user's.
       #
       # The first version of this counted "lines that are not context-guru's" by grepping our key
@@ -572,16 +560,13 @@ while IFS='	' read -r existed original path; do
     fi
   else
     say "  $path"
-    # `-` is what the record carries when no copy was ever taken (a project that was already
-    # routed when the record was created, or a file whose first recorded touch was a REMOVAL).
-    # Rendering it as a path — "the pre-edit copy is missing (-)" — reads like a bug in the tool
-    # rather than a known limit of what it holds, and it is the normal case for pre-hatch installs.
-    if [ "$original" = "-" ] || [ -z "$original" ]; then
-      say "      ! no pre-edit copy was taken for this file — it already carried context-guru's"
-      say "        keys when the record was created, so nothing here holds its original content."
-    else
-      say "      ! the pre-edit copy is missing ($original)"
-    fi
+    # No `.pre-install` at all — a marker file's absence carries no separate "missing" vs. "never
+    # taken" distinction the way a manifest's `-` sentinel used to. Either this file already
+    # carried context-guru's keys when it was first recorded (the common, honest case — see
+    # `_looks_routed_by_us` in settings.py), or something outside this script removed the copy
+    # since. Both read the same to a user: nothing here holds the original content.
+    say "      ! no pre-edit copy was taken for this file — it already carried context-guru's"
+    say "        keys when the record was created, so nothing here holds its original content."
     newest="$(ls -1t "$path".context-guru-backup-* 2>/dev/null | head -1 || true)"
     if [ -n "$newest" ]; then
       say "        a timestamped backup exists and is NOT restored automatically, because it"
@@ -592,11 +577,7 @@ while IFS='	' read -r existed original path; do
     say "        left untouched."
     INCOMPLETE=1; FILES_UNFIXED=1
   fi
-done < "$MANIFEST"
-
-if [ "$n" = 0 ]; then
-  say "  (none recorded)"
-fi
+done
 
 if [ ! -s "$PLAN" ]; then
   say ""
@@ -674,15 +655,23 @@ say ""
 while IFS='	' read -r action original path; do
   # Reversible in its own right: whatever is there NOW is copied aside first, so a user who runs
   # this and then discovers the routing was not the problem has the routed version back.
-  # Written under the STATE directory, not beside the settings file. S6 in review: these are complete
-  # copies of a settings file — credentials included — and the old location put a new family of them
-  # inside the user's project working tree, untracked and not covered by any .gitignore this plugin
-  # controls. `git status` listing them was the only thing standing between that and a committed
-  # credential. The state directory is 0700, outside every repo, and already holds the originals.
-  if [ -n "$PRESET_DIR" ]; then
-    pre="$PRESET_DIR/$(printf '%s' "$path" | tr -c 'A-Za-z0-9._-' '_')-$STAMP"
-    preglob="$PRESET_DIR/$(printf '%s' "$path" | tr -c 'A-Za-z0-9._-' '_')-*"
+  #
+  # Written into the SAME recovery folder that already holds this file's `.pre-install` copy —
+  # beside the settings file, not in a shared state directory. S6 in review flagged exactly this
+  # move for the old design: a complete copy of a settings file — credentials included — sitting in
+  # a project's working tree under a name no `.gitignore` anticipates is a real path to a committed
+  # credential. Since then, `/context-guru:install` closes that properly rather than by relocating
+  # things somewhere nobody would think to look: it adds a `.gitignore` entry for the whole recovery
+  # folder deterministically (`settings.py gitignore-ensure`, no question asked, see install.sh).
+  # This script does not depend on that having happened — it works either way — but benefits from
+  # it exactly as the `.pre-install` copy already does.
+  recovery_dir="$(dirname "$path")/$RECOVERY_DIR_NAME"
+  mkdir -p "$recovery_dir" 2>/dev/null && chmod 700 "$recovery_dir" 2>/dev/null
+  if [ -d "$recovery_dir" ] && [ -w "$recovery_dir" ]; then
+    pre="$recovery_dir/$(basename "$path").pre-reset-$STAMP"
+    preglob="$recovery_dir/$(basename "$path").pre-reset-*"
   else
+    # An unwritable recovery folder must not turn a reversible restore into an irreversible one.
     pre="$path.context-guru-prereset-$STAMP"
     preglob="$path.context-guru-prereset-*"
   fi

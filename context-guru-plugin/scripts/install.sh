@@ -63,7 +63,7 @@ route_here() { CDPATH= cd -- "$(dirname -- "$0")" && pwd -P; }
 # Every fact the plan and the confirm both report. Kept in one place so `--plan` cannot describe a
 # different install from the one `--confirm` performs.
 R_MODE=local R_SCOPE=project R_ONCONFLICT= R_BASEURL= R_HEALTHURL= R_NOHEALTH=0
-R_STRATEGY= R_UPSTREAM= R_USERSCOPE=0 R_PLAN=0 R_CONFIRM=0 R_NOSTATUSLINE=0
+R_STRATEGY= R_UPSTREAM= R_USERSCOPE=0 R_PLAN=0 R_CONFIRM=0 R_NOSTATUSLINE=0 R_NOGITIGNORE=0
 R_PORT= R_PRESET= R_IDLE= R_BIN= R_ONPATH= R_FILE= R_EXISTING= R_CHAINED=false
 R_ALREADY=false R_CONSENT=0 R_OURS= R_FROMENV=0 R_SPENDS= R_PIDFILE= R_PROXYLOG=
 
@@ -265,6 +265,7 @@ route_confirm_command() {
   [ -n "$R_UPSTREAM" ] && c="$c --upstream $(shq "$R_UPSTREAM")"
   [ -n "$R_HEALTHURL" ] && c="$c --health-url $(shq "$R_HEALTHURL")"
   [ "$R_NOHEALTH" = 1 ] && c="$c --no-health-check"
+  [ "$R_NOGITIGNORE" = 1 ] && c="$c --no-gitignore-check"
   [ "$R_USERSCOPE" = 1 ] && c="$c --i-understand-machine-wide"
   printf '%s --i-consent-to-traffic-interception\n' "$c"
 }
@@ -694,6 +695,7 @@ a routed one with no proxy is a broken one."
   emit "reset_hatch=$(kv "$aout" reset_hatch)"
   emit "replaced=$(kv "$aout" replaced)"
   route_install_statusline
+  route_ensure_gitignore
   route_report
 }
 
@@ -746,6 +748,31 @@ route_install_statusline() {
   esac
 }
 
+# ---- keeping the recovery folder out of git — deterministic, on by default, no question --------
+#
+# A recovery folder beside the settings file (settings.py's `context-guru-settings-json/`, holding
+# a copy of the file taken before this install) can carry a credential, same as the settings file
+# itself already can — nothing new is exposed by putting it in the project directory that isn't
+# already exposed by the file it copies. What IS worth closing is the same gap `.context-guru-
+# backup-*` already has and nobody has fixed yet: a name no existing `.gitignore` anticipates,
+# sitting in a working tree, one `git add -A` away from a commit.
+#
+# This is deliberately NOT a consent-gated decision like `--scope user` or the traffic-interception
+# flag below: it changes nothing about what the user is exposed to, it is fully reversible (delete
+# the line), and the check for whether it is even needed is entirely mechanical — see
+# settings.py's `gitignore-ensure`. Modelled on route_install_statusline immediately above: on by
+# default, best-effort, never fatal, one opt-out flag for symmetry.
+route_ensure_gitignore() {
+  [ "$R_NOGITIGNORE" = 1 ] && { emit "gitignore=skipped"; return 0; }
+  local gout gres
+  gout=$("$(route_here)/settings.py" gitignore-ensure --file "$R_FILE" 2>&1) || true
+  gres=$(kv "$gout" result)
+  case "$gres" in
+    added|unchanged) emit "gitignore=$gres" ;;
+    *) emit "gitignore=skipped"; emit "gitignore_reason=$(kv "$gout" reason)" ;;
+  esac
+}
+
 # --- argument parsing. Unknown flags are refused rather than ignored: a silently dropped --scope
 # --- would write the wrong file and report success.
 if [ "${1:-}" = --route ]; then
@@ -763,6 +790,7 @@ if [ "${1:-}" = --route ]; then
       --upstream) route_need_value --upstream "${2:-}"; R_UPSTREAM="$2"; shift ;;
       --no-health-check) R_NOHEALTH=1 ;;
       --no-statusline) R_NOSTATUSLINE=1 ;;
+      --no-gitignore-check) R_NOGITIGNORE=1 ;;
       --i-understand-machine-wide) R_USERSCOPE=1 ;;
       --i-consent-to-traffic-interception) R_CONSENT=1 ;;
       *) emit "result=error"; emit "reason=unknown_flag"; emit "flag=$1"
