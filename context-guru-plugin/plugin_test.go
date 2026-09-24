@@ -554,26 +554,33 @@ func TestBackupsDoNotClobberEachOther(t *testing.T) {
 	theirs := "https://gateway.corp.example/anthropic"
 	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": theirs}})
 
-	// Back to back, deliberately: the bug needed only that both land in the same second.
-	add, code := settings(t, "add", "--file", path, "--url", ourURL, "--force")
+	// Back to back, deliberately: the bug needed only that both land in the same second. Two
+	// `add` calls rather than an add/remove pair — a clean `remove` now deletes every backup for
+	// the file outright (see forget_backups()), which would hide the exact clobbering this test
+	// exists to catch rather than exercise it.
+	first, code := settings(t, "add", "--file", path, "--url", ourURL, "--force")
 	if code != 0 {
-		t.Fatalf("add: exit %d, %v", code, add)
+		t.Fatalf("first add: exit %d, %v", code, first)
 	}
-	rm, code := settings(t, "remove", "--file", path, "--url", ourURL)
-	if code != 0 {
-		t.Fatalf("remove: exit %d, %v", code, rm)
-	}
-	if add["backup"] == rm["backup"] {
-		t.Fatalf("both operations reported the same backup path %q, so one overwrote the other",
-			add["backup"])
-	}
-	// The install backup must still hold what was there BEFORE we touched it.
-	b, err := os.ReadFile(add["backup"])
+	// The first backup must still hold what was there BEFORE we touched it — checked now, before
+	// the second call below has any chance to matter.
+	b, err := os.ReadFile(first["backup"])
 	if err != nil {
-		t.Fatalf("the install backup is gone: %v", err)
+		t.Fatalf("the first backup is gone: %v", err)
 	}
 	if !strings.Contains(string(b), theirs) {
-		t.Errorf("the install backup does not contain the value it was meant to preserve:\n%s", b)
+		t.Errorf("the first backup does not contain the value it was meant to preserve:\n%s", b)
+	}
+
+	// Our own URL on a different port takes the "repointed" branch, which backs up
+	// unconditionally — a second real backup of the same file, back to back with the first.
+	second, code := settings(t, "add", "--file", path, "--url", "http://127.0.0.1:19999/anthropic")
+	if code != 0 {
+		t.Fatalf("second add: exit %d, %v", code, second)
+	}
+	if first["backup"] == second["backup"] {
+		t.Fatalf("both operations reported the same backup path %q, so one overwrote the other",
+			first["backup"])
 	}
 }
 
@@ -1316,7 +1323,13 @@ func TestInstallReportsPATHFromTheSourceFallbackToo(t *testing.T) {
 // TestBackupPruningSurvivesAGlobbyPath: `glob.glob` reads `[`, `?` and `*` in the PATH as pattern
 // syntax, so for a settings file under a directory like `foo[1]` the prune matched nothing and
 // silently did nothing — forever. Invisible by construction, because pruning is best-effort, and
-// the backups KEEP_BACKUPS exists to bound then grow without limit in the user's ~/.claude.
+// the backups KEEP_BACKUPS exists to bound then grow without limit.
+//
+// Repeated `add` calls, not add/remove pairs: a clean `remove` now deletes every backup for the
+// file outright (see forget_backups()), so an add/remove loop would exercise that instead of the
+// rolling KEEP_BACKUPS window this test is actually about. Repointing to a new port each time hits
+// the dedicated "own URL on another port" branch, which takes a real backup on every call without
+// ever uninstalling.
 func TestBackupPruningSurvivesAGlobbyPath(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "proj[1]", ".claude")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -1325,16 +1338,15 @@ func TestBackupPruningSurvivesAGlobbyPath(t *testing.T) {
 	path := filepath.Join(dir, "settings.json")
 	writeJSON(t, path, map[string]any{"env": map[string]any{"KEEP": "yes"}})
 
-	// Each add/remove pair takes a backup, so this comfortably exceeds KEEP_BACKUPS (10).
-	for i := 0; i < 8; i++ {
-		if _, code := settings(t, "add", "--file", path, "--url", ourURL); code != 0 {
+	// 16 calls comfortably exceeds KEEP_BACKUPS (10): the first is a fresh add, the rest each
+	// repoint to a new port, and every one of those takes its own backup unconditionally.
+	for i := 0; i < 16; i++ {
+		url := fmt.Sprintf("http://127.0.0.1:%d/anthropic", 8787+i)
+		if _, code := settings(t, "add", "--file", path, "--url", url); code != 0 {
 			t.Fatalf("add %d failed", i)
 		}
-		if _, code := settings(t, "remove", "--file", path, "--url", ourURL); code != 0 {
-			t.Fatalf("remove %d failed", i)
-		}
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(filepath.Join(dir, "context-guru-settings-json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4167,10 +4179,11 @@ func TestTheHatchNeedsNothingButPOSIXSh(t *testing.T) {
 }
 
 // TestTheOriginalCopyOutlivesTheRollingBackups is the reason the hatch keeps its own copy rather
-// than trusting the *.context-guru-backup-* files beside the settings file: those are capped at ten
-// and BOTH add and remove write one, so on a machine that has installed and uninstalled a few times
-// the backup holding the user's pre-context-guru state is the first one deleted. The copy recovery
-// depends on cannot be on a rolling window.
+// than trusting *.context-guru-backup-* files: those are capped at ten while add is writing them,
+// and a clean remove now deletes all of them outright (see forget_backups()) — either way, on a
+// machine that has installed and uninstalled a few times, nothing about a rolling backup window is
+// where the user's pre-context-guru state can be made to survive. The copy recovery depends on
+// cannot be on that window.
 func TestTheOriginalCopyOutlivesTheRollingBackups(t *testing.T) {
 	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
 	path := filepath.Join(proj, "settings.json")
@@ -4180,7 +4193,7 @@ func TestTheOriginalCopyOutlivesTheRollingBackups(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for i := 0; i < 12; i++ { // KEEP_BACKUPS is 10; twelve cycles writes 24 of them
+	for i := 0; i < 12; i++ { // twelve install/uninstall cycles is well past any rolling window
 		if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
 			t.Fatalf("cycle %d: add failed", i)
 		}
@@ -4714,7 +4727,8 @@ func TestStatuslineRefusesMachineWideWithoutTheFlag(t *testing.T) {
 	if string(after) != string(before) {
 		t.Errorf("the machine-wide file was modified by a call that reported refusing:\n%s", after)
 	}
-	matches, err := filepath.Glob(userScope + ".context-guru-backup-*")
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(userScope), "context-guru-settings-json",
+		"settings.json.context-guru-backup-*"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6058,7 +6072,8 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 			t.Errorf("statusLine leaked into the machine-wide file from a project-scope install: %v",
 				gotHome["statusLine"])
 		}
-		matches, err := filepath.Glob(homeSettings + ".context-guru-backup-*")
+		matches, err := filepath.Glob(filepath.Join(filepath.Dir(homeSettings), "context-guru-settings-json",
+			"settings.json.context-guru-backup-*"))
 		if err != nil {
 			t.Fatal(err)
 		}
