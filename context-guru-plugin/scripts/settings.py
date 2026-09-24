@@ -20,10 +20,11 @@ Output is one `key=value` line per fact on stdout, so the skill can act on the r
 re-reading the file or parsing prose.
 
 Usage:
-  settings.py add    --file PATH --url URL [--force] [--upstream URL] [--bin PATH] [--statusline CMD]
-  settings.py add    --file PATH --statusline CMD [--force]   # statusline only, no routing change
-  settings.py remove --file PATH [--url URL]
-  settings.py show   --file PATH
+  settings.py add           --file PATH --url URL [--force] [--upstream URL] [--bin PATH] [--statusline CMD]
+  settings.py add           --file PATH --statusline CMD [--force]   # statusline only, no routing change
+  settings.py remove        --file PATH [--url URL]
+  settings.py show          --file PATH
+  settings.py resolve-scope                                          # where THIS project's routing lives
 """
 
 from __future__ import annotations
@@ -319,6 +320,95 @@ def user_scope_files() -> list[str]:
 
 def is_user_scope(path: str) -> bool:
     return os.path.realpath(path) in user_scope_files()
+
+
+def scope_name_for(path: str) -> str:
+    """Which of the three scopes `path` is, purely from the path itself — no state read. Mirrors
+    install.sh's `route_scope_file()` mapping (project/team/user), named to match
+    `_option_file_candidates()`'s own ordering (project-local, project, user). "custom" covers a
+    hand-supplied path outside all three (e.g. `--attach` to something the user pointed at
+    directly) — still worth recording, just not one of the three named scopes.
+    """
+    real = os.path.realpath(path)
+    if real == os.path.realpath(os.path.join(os.getcwd(), ".claude", "settings.local.json")):
+        return "project-local"
+    if real == os.path.realpath(os.path.join(os.getcwd(), ".claude", "settings.json")):
+        return "project"
+    if is_user_scope(path):
+        return "user"
+    return "custom"
+
+
+def install_scope_path() -> str:
+    """One file, machine-wide, keyed by project — there is one state directory, not one per repo."""
+    return os.path.join(state_dir(), "install-scope.json")
+
+
+def _read_install_scopes() -> dict:
+    """{} on anything short of a valid JSON object — absent, unreadable or corrupt are all the
+    same to a reader: nothing recorded yet. This is state a session can live without; it must
+    never be the thing that turns a working install into a broken one.
+    """
+    path = install_scope_path()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    projects = data.get("projects")
+    return projects if isinstance(projects, dict) else {}
+
+
+def record_install_scope(file: str) -> None:
+    """Record which scope `file` is, for THIS project (cwd), so a later command — the statusline
+    skill, `preset`, anything else that writes a Claude settings file — can read back the choice
+    the user already made instead of guessing at one of its own. Called from every routing-success
+    branch of `cmd_add`. Fail-open: a write here must never fail the routing install it rides on.
+    """
+    try:
+        projects = _read_install_scopes()
+        projects[os.path.realpath(os.getcwd())] = {
+            "scope": scope_name_for(file),
+            "file": os.path.realpath(file),
+            "recorded_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+        ensure_state_dir(state_dir())
+        _write_atomic(install_scope_path(),
+                       (json.dumps({"version": 1, "projects": projects}, indent=2) + "\n")
+                       .encode("utf-8"), mode=0o600)
+    except OSError:
+        pass
+
+
+def resolve_install_scope(project_dir: str | None = None) -> tuple[str | None, str | None, str | None]:
+    """(scope, file, source) for `project_dir` (default cwd) — the one place every settings-writer
+    other than `add`'s own routing write should ask "which file", instead of hardcoding one.
+
+    `source` is "recorded" (install already ran and told us), "inferred" (no record, but one of
+    the three candidate files is routing THIS project — a project that predates this feature, or
+    was routed by hand; the answer is self-healed into the record so the probe below runs at most
+    once per project), or None (nothing anywhere — the caller's answer is "ask").
+    """
+    project = os.path.realpath(project_dir or os.getcwd())
+    recorded = _read_install_scopes().get(project)
+    if isinstance(recorded, dict) and recorded.get("scope") and recorded.get("file"):
+        return recorded["scope"], recorded["file"], "recorded"
+
+    prev_cwd = os.getcwd()
+    try:
+        if project_dir:
+            os.chdir(project_dir)
+        for path in _option_file_candidates(""):
+            if not os.path.exists(path):
+                continue
+            data, _existed = load(path)
+            current = (data.get("env") or {}).get(KEY)
+            if current and is_ours(data, current):
+                record_install_scope(path)
+                return scope_name_for(path), os.path.realpath(path), "inferred"
+    finally:
+        os.chdir(prev_cwd)
+    return None, None, None
 
 
 def _slug(real: str) -> str:
@@ -742,6 +832,21 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_resolve_scope(_args: argparse.Namespace) -> int:
+    """Read-only: which file THIS project's routing already lives in, so a skill never has to
+    hardcode `~/.claude/settings.json` or guess. Every settings-writer other than `add`'s own
+    routing write should call this instead of deciding scope on its own — see `resolve_install_scope`.
+    """
+    scope, file, source = resolve_install_scope()
+    if scope is None:
+        emit(result="ok", scope="(ask)", file="(ask)", source="(none)",
+             note="no routing recorded or found for this project; ask project vs. machine-wide, "
+                  "the same choice /context-guru:install would ask")
+        return 0
+    emit(result="ok", scope=scope, file=file, source=source)
+    return 0
+
+
 def ensure_hatch(file: str) -> None:
     """Fail-open wrapper. See _ensure_hatch, and record_touch for why this is not `except OSError`."""
     try:
@@ -805,17 +910,25 @@ def cmd_add(args: argparse.Namespace) -> int:
                  note="refused before writing: a routing key pointing at this would break every "
                       "request, and `add` reporting success is what made that hard to notice")
             return 2
-    # SCOPE GATE — on the ROUTING, which is the only thing whose scope matters.
+    # SCOPE GATE — on anything this call would write into the machine-wide file: ROUTING or
+    # STATUSLINE. Read the statusline flag early: neither read below depends on `load()`.
+    sl_command = getattr(args, "statusline", "")
     #
-    # B2 in review: this was the first statement in the function, above the statusline-only early
-    # return, so `add --file ~/.claude/settings.json --statusline <cmd>` — a call that writes no
-    # routing key at all — was refused with `reason=user_scope_needs_flag`. Six documented invocations
-    # broke, four in skills/statusline/SKILL.md and two in docs/how-to/install-plugin.md, a file this
-    # PR edits. A statusline IS machine-wide by design and routes nothing, so the refusal text
-    # ("this file routes EVERY project", "project scope is the default") was wrong for it as well.
+    # B2 in review (superseded, see below): the gate used to be `args.url`-only, so `add --file
+    # ~/.claude/settings.json --statusline <cmd>` — a call that writes no routing key at all — was
+    # refused with `reason=user_scope_needs_flag`. Six documented invocations broke. The reasoning
+    # at the time was that a statusline is machine-wide by design and routes nothing, so it was
+    # exempted from the routing gate entirely.
     #
-    # Gated on args.url for that reason: the blast-radius argument is entirely about where model
-    # traffic is pointed. A statusline that fails renders a blank status line and breaks nothing.
+    # That covered "what happens if this write fails" and missed "what happens if it succeeds": a
+    # statusline written at user scope RENDERS in every project on the machine — the exact blast
+    # radius this gate exists to require sign-off for, just described with "renders in" instead of
+    # "routes". `install.sh` used to install the status line at user scope unconditionally on
+    # every install, which is what let a project-scope routing install silently write and back up
+    # the user's machine-wide settings file. It now writes the status line to the same file
+    # routing used (see `record_install_scope`/`resolve_install_scope`), so this gate is mostly
+    # defense-in-depth for a direct or hand-written call that bypasses that resolution — but it
+    # still has to hold, because a skill hardcoding a path is exactly how this went wrong before.
     #
     # A project-scope install that goes wrong breaks one project. The same mistake in
     # ~/.claude/settings.json breaks EVERY Claude Code session on the machine — including the ones
@@ -828,11 +941,15 @@ def cmd_add(args: argparse.Namespace) -> int:
     # lockout. So the refusal lives here, where nothing can talk it round, and takes an explicit
     # flag that means the user was asked. Removal is deliberately NOT gated: uninstall must be able
     # to clean every scope, and blocking recovery would be the wrong side to err on.
-    if args.url and is_user_scope(args.file) and not getattr(args, "user_scope", False):
-        emit(result="error", reason="user_scope_needs_flag", file=args.file,
-             note="this file routes EVERY project on the machine, so it needs --user-scope as "
-                  "well. Confirm with the user first, naming that blast radius; project scope "
-                  "(.claude/settings.local.json) is the default for a reason.")
+    if (args.url or sl_command) and is_user_scope(args.file) and not getattr(args, "user_scope", False):
+        writes = "both" if (args.url and sl_command) else ("routing" if args.url else "statusline")
+        blast = {"routing": "routes EVERY project on the machine",
+                 "statusline": "renders in EVERY project on the machine",
+                 "both": "routes and renders in EVERY project on the machine"}[writes]
+        emit(result="error", reason="user_scope_needs_flag", file=args.file, writes=writes,
+             note=f"this file {blast}, so it needs --user-scope as well. Confirm with the user "
+                  "first, naming that blast radius; project scope (.claude/settings.local.json) "
+                  "is the default for a reason.")
         return 2
 
     data, existed = load(args.file)
@@ -863,11 +980,11 @@ def cmd_add(args: argparse.Namespace) -> int:
     if getattr(args, "bin", ""):
         desired[BIN_KEY] = args.bin
 
-    # --statusline is checked here, ahead of every base_url branch below, for the same reason the
-    # `desired` set above exists at all: a conflict on it must stop the WHOLE call, including the
-    # base_url side, rather than writing half an install and reporting success. It is a TOP-LEVEL
-    # key (see apply_statusline), so it cannot join `desired`/`env` above; this is its own gate.
-    sl_command = getattr(args, "statusline", "")
+    # --statusline (read above, at the scope gate) is checked here, ahead of every base_url branch
+    # below, for the same reason the `desired` set above exists at all: a conflict on it must stop
+    # the WHOLE call, including the base_url side, rather than writing half an install and
+    # reporting success. It is a TOP-LEVEL key (see apply_statusline), so it cannot join
+    # `desired`/`env` above; this is its own gate.
     sl_desired = {"type": "command", "command": sl_command} if sl_command else None
     if sl_command:
         existing_sl = data.get(STATUSLINE_KEY)
@@ -898,6 +1015,7 @@ def cmd_add(args: argparse.Namespace) -> int:
 
     current = env.get(KEY)
     if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged:
+        record_install_scope(args.file)
         emit(result="unchanged", file=args.file, base_url=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
              note="already routed to this proxy, with nothing left to add")
@@ -919,6 +1037,7 @@ def cmd_add(args: argparse.Namespace) -> int:
             meta["installed_bin"] = args.bin
         apply_statusline(data, sl_command)
         save(args.file, data)
+        record_install_scope(args.file)
         emit(result="completed", file=args.file, base_url=args.url, added_keys=",".join(changed),
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""), backup=saved,
              note="already routed; filled in the keys that were missing")
@@ -938,6 +1057,7 @@ def cmd_add(args: argparse.Namespace) -> int:
             meta["installed_bin"] = args.bin
         apply_statusline(data, sl_command)
         save(args.file, data)
+        record_install_scope(args.file)
         emit(result="repointed", file=args.file, base_url=args.url, previous=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
              backup=saved, note="this was our own URL on another port; moved")
@@ -1003,6 +1123,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         meta["previous_base_url"] = current
     apply_statusline(data, sl_command)
     save(args.file, data)
+    record_install_scope(args.file)
     emit(result="added", file=args.file, base_url=args.url,
          replaced=current if current else "", backup=saved or "(new file)",
          other_env_keys=len([k for k in env if k not in OURS]))
@@ -1673,14 +1794,19 @@ def cmd_preset(args: argparse.Namespace) -> int:
             target = path
             break
 
+    if target is None and args.user_scope:
+        # Explicit override: write the machine-wide file regardless of what routing chose,
+        # for someone who deliberately wants this preset on every project.
+        target = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or
+                               os.path.join(os.path.expanduser("~"), ".claude"), "settings.json")
     if target is None:
-        # Nobody has configured this plugin's options in any of the three files yet. Land in
-        # project-local scope by default — reversible, gitignored, affects only this repo — the
-        # same default the install skill recommends; --user-scope opts into the machine-wide file
-        # instead, for someone who wants every project to pick this preset up.
-        target = (os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or
-                                os.path.join(os.path.expanduser("~"), ".claude"), "settings.json")
-                   if args.user_scope else os.path.join(".claude", "settings.local.json"))
+        # Nobody has configured this plugin's options anywhere yet, and no override was given —
+        # inherit whatever scope THIS project's routing already used, rather than guessing
+        # project-local independently of that choice (see resolve_install_scope). Only a project
+        # that was never routed at all (routing_scope is None) falls back to project-local, since
+        # there is nothing yet to inherit.
+        _scope, resolved_file, _source = resolve_install_scope()
+        target = resolved_file or os.path.join(".claude", "settings.local.json")
 
     data, existed = load(target)
     plugins = data.setdefault("pluginConfigs", {})
@@ -1877,6 +2003,10 @@ def main() -> int:
     cfg = sub.add_parser("config")
     cfg.add_argument("--plugin", default="context-guru@context-guru")
 
+    # resolve-scope takes no arguments: it always resolves for the CURRENT directory, the same
+    # cwd every routing `add` call already keys its own record on (see record_install_scope).
+    sub.add_parser("resolve-scope")
+
     # `strategy` is the named-cache-strategy surface: the one place that decides what a name means,
     # so the skills that use it carry a NAME rather than four tuning numbers in a heredoc.
     # check-url exists so a caller can validate a supplied base URL BEFORE acting on it. Without
@@ -1929,7 +2059,8 @@ def main() -> int:
     if args.cmd == "preset" and args.op == "set" and not args.name:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
     rc = {"add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
-          "config": cmd_config, "strategy": cmd_strategy, "preset": cmd_preset,
+          "config": cmd_config, "resolve-scope": cmd_resolve_scope,
+          "strategy": cmd_strategy, "preset": cmd_preset,
           "check-url": cmd_check_url, "update-check": cmd_update_check}[args.cmd](args)
 
     # The hatch facts are printed HERE rather than from inside save(), so the `result=` line the

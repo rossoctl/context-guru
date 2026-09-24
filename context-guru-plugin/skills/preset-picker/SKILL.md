@@ -48,11 +48,14 @@ pass: it is deterministic, so nothing about the request path depends on a model 
 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" preset set --name <name>
 ```
 
-Writes into whichever settings file already holds this plugin's configured options — project or
-user scope, wherever `/plugin install` put it — so it lands where the running proxy will actually
-read it. If nothing is configured yet, it defaults to project-local scope
-(`.claude/settings.local.json`), matching what `/context-guru:install` recommends; pass
-`--user-scope` only if the user wants every project on the machine to pick this up.
+Writes into whichever settings file already holds this plugin's configured options, so it lands
+where the running proxy will actually read it. If nothing is configured yet, it inherits whatever
+scope THIS project's *routing* already uses (recorded when `/context-guru:install` ran, read back
+via the same `resolve_install_scope()` the statusline skill uses) — a project routed at project
+scope gets its preset there too, one routed at user scope gets it there, with no extra flag either
+way. Only a project with no routing at all falls back to project-local, since there is nothing yet
+to inherit. Pass `--user-scope` to deliberately diverge from that — a preset the user wants on
+every project even though routing itself is project-scoped.
 
 ## 4. A restart is required
 
