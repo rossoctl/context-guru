@@ -424,15 +424,16 @@ route_stop_adopted_proxy() {
   local aproj aport apidfile apid astate
   aproj="$1"; aport="$2"
   case "$aport" in ''|*[!0-9]*) return 0 ;; esac
-  # NEVER the port this install is routing to. The case that made this necessary - a project-local
-  # install converted to machine-wide FROM THAT SAME PROJECT, where the converting project is itself
-  # in R_EXISTINGPROJECTS with its recorded port == $R_PORT - is caught one level up, by the self-skip
-  # in the adopt loop, which has to skip the record release as well and so reaches its `continue`
-  # before getting here. This is the same invariant asserted at the point of the dangerous action:
-  # the process on $R_PORT was started and health-checked by THIS install seconds ago, and no caller
-  # of this function may signal it. Kept deliberately although the loop above currently makes it
-  # unreachable, for the same reason this function kills by PID and never by pattern - and it is
-  # reachable from legacy state where two projects recorded one port.
+  # NEVER the port this install is routing to. The process on $R_PORT was started and health-checked
+  # by THIS install seconds ago, and no caller of this function may signal it.
+  #
+  # DO NOT DELETE THIS AS UNREACHABLE - an earlier version of this comment said the self-skip in the
+  # adopt loop above always gets there first, and that is wrong. The self-skip compares the adopted
+  # KEY against `project-key`, so it does not fire for a record keyed by a WORKTREE path (a
+  # pre-migration install from a worktree), whose key is not the main checkout this install is keyed
+  # under - while its recorded port is the very port this install is now serving. In that case the
+  # loop does not skip, this function IS reached, and this refusal is the only thing between an
+  # adopt and a dead proxy on its own port. Same reason it kills by PID and never by pattern.
   if [ "$aport" = "$R_PORT" ]; then
     emit "adopted_proxy_kept=$aproj port=$aport reason=this_installs_own_port"
     return 0

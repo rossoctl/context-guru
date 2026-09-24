@@ -9937,3 +9937,203 @@ func TestAFailedBinaryInstallTakesBackItsPortBookkeeping(t *testing.T) {
 		}
 	}
 }
+
+// gitWorktreePair returns a main checkout and a worktree of it, both realpath'd. `project_key()` of
+// the worktree is the MAIN checkout, which is the whole point: a key that resolves to somewhere else
+// is what makes `--key` dangerous, and only a real git worktree produces it.
+func gitWorktreePair(t *testing.T) (mainRepo, worktree string) {
+	t.Helper()
+	requireTool(t, "git")
+	root := t.TempDir()
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v (dir=%s): %v\n%s", args, dir, err, out)
+		}
+	}
+	mainRepo = filepath.Join(root, "main")
+	if err := os.MkdirAll(mainRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(mainRepo, "init", "-q")
+	runGit(mainRepo, "-c", "user.email=t@example.com", "-c", "user.name=t",
+		"commit", "--allow-empty", "-q", "-m", "init")
+	worktree = filepath.Join(root, "wt")
+	runGit(mainRepo, "worktree", "add", "-q", worktree, "-b", "wt-branch")
+	real := func(q string) string {
+		t.Helper()
+		r, err := filepath.EvalSymlinks(q)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%s): %v", q, err)
+		}
+		return r
+	}
+	return real(mainRepo), real(worktree)
+}
+
+// TestPortReleaseTakesTheRowItWasNamed.
+//
+// `port release --key <dir>` resolved the key it was handed through `project_key()`
+// unconditionally — and `project_key()` of a git WORKTREE is the main checkout. So for a record filed
+// under a worktree path, which is what every install from a worktree before the key migration left
+// behind (the migration lives in `record_install_scope`, a write path the `scopes` gate never
+// reaches), this popped the MAIN CHECKOUT's row instead: the row it was told to remove stayed, a row
+// it was never asked about was deleted, and it reported `released`.
+//
+// In `adopt` that row is the one the running install wrote for itself seconds earlier, and nothing
+// can reconstruct it — `ANTHROPIC_BASE_URL` in the settings file outlives it and names a port the
+// next session cannot compute again.
+//
+// The literal key is tried first for that reason, and resolution is kept as the fallback because the
+// caller may legitimately name a directory whose row is filed under its resolved key.
+func TestPortReleaseTakesTheRowItWasNamed(t *testing.T) {
+	mainRepo, worktree := gitWorktreePair(t)
+	state, home := t.TempDir(), t.TempDir()
+
+	seed := func() {
+		t.Helper()
+		writeJSON(t, filepath.Join(state, "install-scope.json"), map[string]any{
+			"version": 1,
+			"projects": map[string]any{
+				worktree: map[string]any{
+					"scope": "project-local", "port": 41001,
+					"file":        filepath.Join(worktree, ".claude", "settings.local.json"),
+					"recorded_at": "2020-01-01T00:00:00Z",
+				},
+				mainRepo: map[string]any{
+					"scope": "user", "port": 41002,
+					"file":        filepath.Join(home, ".claude", "settings.json"),
+					"recorded_at": "2026-01-01T00:00:00Z",
+				},
+			},
+		})
+	}
+	rows := func() map[string]any {
+		t.Helper()
+		projects, _ := readJSON(t, filepath.Join(state, "install-scope.json"))["projects"].(map[string]any)
+		return projects
+	}
+
+	t.Run("a worktree-keyed row is popped by its own key", func(t *testing.T) {
+		seed()
+		// Run FROM the worktree, which is where adopt runs: project_key() here is mainRepo, so a
+		// resolving release would take the wrong row without ever leaving the directory it was told
+		// not to touch.
+		facts, code := settingsInDir(t, state, home, worktree, "port", "release", "--key", worktree)
+		if code != 0 || facts["result"] != "released" {
+			t.Fatalf("exit %d result=%q, want the named row released: %v", code, facts["result"], facts)
+		}
+		if facts["port"] != "41001" {
+			t.Errorf("port=%q: it released a row other than the one it was named (41001 is the "+
+				"worktree's, 41002 the main checkout's): %v", facts["port"], facts)
+		}
+		got := rows()
+		if _, still := got[worktree]; still {
+			t.Errorf("the row it was told to remove is still there: %v", got)
+		}
+		if _, ok := got[mainRepo]; !ok {
+			t.Errorf("it deleted the main checkout's row, which is the running install's own: %v", got)
+		}
+	})
+
+	t.Run("a directory whose row is under its resolved key still works", func(t *testing.T) {
+		seed()
+		// No literal row for this path (it is a plain subdirectory of the main checkout), so the
+		// resolved key is the only way to name it — the fallback has to stay.
+		sub := filepath.Join(mainRepo, "sub")
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// From an UNRELATED directory: run from the worktree and the resolved key would be this
+		// caller's own key, which the third subtest is about — the fallback would then be untested
+		// because the refusal fires first, and this subtest would pass for the wrong reason.
+		facts, code := settingsInDir(t, state, home, t.TempDir(), "port", "release", "--key", sub)
+		if code != 0 || facts["result"] != "released" || facts["port"] != "41002" {
+			t.Fatalf("exit %d %v, want the main checkout's row released through resolution", code, facts)
+		}
+		if _, still := rows()[worktree]; !still {
+			t.Errorf("it took the worktree's row as well: %v", rows())
+		}
+	})
+
+	t.Run("it refuses to release the caller's own row", func(t *testing.T) {
+		seed()
+		// A caller passing --key is acting on a project it is NOT running in; if the key lands on its
+		// own record, the call can only be wrong. Uninstall's own-project release passes no --key and
+		// is unaffected.
+		facts, code := settingsInDir(t, state, home, mainRepo, "port", "release", "--key", mainRepo)
+		if code != 0 {
+			t.Errorf("exit %d: a refusal here must never block an uninstall: %v", code, facts)
+		}
+		if facts["result"] != "refused" || facts["reason"] != "key_is_this_project" {
+			t.Errorf("result=%q reason=%q, want a named refusal: %v", facts["result"], facts["reason"],
+				facts)
+		}
+		if _, ok := rows()[mainRepo]; !ok {
+			t.Errorf("it released the caller's own row anyway: %v", rows())
+		}
+	})
+}
+
+// TestUserScopeAdoptFromAWorktreeKeepsItsOwnRecordAndProxy is B′ end to end, in the shape that gets
+// there: a pre-migration project-local install recorded under a WORKTREE path, converted to
+// machine-wide from that worktree.
+//
+// The adopt loop's self-skip cannot catch this — it compares the adopted key (the worktree) against
+// `project-key` (the main checkout), so it does not fire. The release therefore runs on a real,
+// different row, and everything downstream of it has to be right on its own: the row named is the row
+// removed, this install's own record survives, and `route_stop_adopted_proxy` refuses the port it is
+// serving. That last refusal is REACHED here, which is why it is not dead code.
+func TestUserScopeAdoptFromAWorktreeKeepsItsOwnRecordAndProxy(t *testing.T) {
+	mainRepo, worktree := gitWorktreePair(t)
+	home, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	// Pinned, so this install and the legacy worktree row share a port — which is what makes the
+	// proxy-stop guard reachable. (A configured port takes `port alloc`'s rule-2 branch, which has no
+	// two-projects-one-port clash check, so the install proceeds rather than refusing.)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	projFile := seedProjectRecord(t, state, worktree, port)
+
+	env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+	t.Cleanup(func() { stopFakeProxy(t, state, port) })
+	facts, code := runRoute(t, worktree, env, "--scope", "user",
+		"--i-consent-to-traffic-interception", "--i-understand-machine-wide",
+		"--on-existing-projects", "adopt")
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the conversion itself failed, so nothing below proves anything: exit %d %v", code,
+			facts)
+	}
+	if facts["adopted_project_is_this_project"] != "" {
+		t.Fatalf("the self-skip fired, so the release never ran and this test proves nothing — the "+
+			"worktree row must NOT look like this install's own key: %v", facts)
+	}
+	// The guard at the point of the dangerous action, reached because the self-skip did not fire.
+	if kept := facts["adopted_proxy_kept"]; !strings.Contains(kept, "port="+port) {
+		t.Errorf("adopt did not refuse to stop the proxy on its own port %s: adopted_proxy_kept=%q %v",
+			port, kept, facts)
+	}
+	waitForHealthz(t, port)
+
+	projects, _ := readJSON(t, filepath.Join(state, "context-guru",
+		"install-scope.json"))["projects"].(map[string]any)
+	if _, still := projects[worktree]; still {
+		t.Errorf("the adopted worktree row was not removed: %v", projects)
+	}
+	rec, _ := projects[mainRepo].(map[string]any)
+	if rec == nil {
+		t.Fatalf("adopt released the record this install wrote for itself (keyed at the main "+
+			"checkout, %s): %v", mainRepo, projects)
+	}
+	if fmt.Sprint(rec["port"]) != port || rec["scope"] != "user" {
+		t.Errorf("the surviving record does not describe this install (want port %s, scope user): %v",
+			port, rec)
+	}
+	// And the half of adoption that does apply: the worktree no longer routes itself over the
+	// machine-wide route it was folded into.
+	data := readJSON(t, projFile)
+	if fenv, _ := data["env"].(map[string]any); fenv["ANTHROPIC_BASE_URL"] != nil {
+		t.Errorf("the adopted worktree still routes itself: %v", data)
+	}
+}

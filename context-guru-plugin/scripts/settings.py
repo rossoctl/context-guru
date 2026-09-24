@@ -1214,8 +1214,35 @@ def cmd_port(args: argparse.Namespace) -> int:
         # --key names the project directly, for a caller acting on a project it is not running in
         # (install.sh's `adopt`). Without it the only way to name a project was to `cd` into it,
         # which is a second way for a path to get mangled on the way there.
+        #
+        # The LITERAL key first, and only then the resolved one. `project_key()` of a git worktree is
+        # the MAIN CHECKOUT, so resolving unconditionally meant that for a record keyed by a worktree
+        # path — which is what every install from a worktree before the migration left behind, since
+        # the migration lives in `record_install_scope` and the `scopes` gate never reaches a write
+        # path — this popped the main checkout's row instead. `adopt` then deleted the record the
+        # running install had just written for itself and left the row it was told to remove in
+        # place: the exact inverse of the request, silently, reported as `released`.
         if getattr(args, "key", None):
-            key = project_key(args.key) if os.path.isdir(args.key) else args.key
+            if args.key in projects:
+                key = args.key
+            elif os.path.isdir(args.key):
+                key = project_key(args.key)
+            else:
+                key = args.key
+            # And never this project, whatever the key resolved to. A caller that names ANOTHER
+            # project can only be wrong if it ends up here, and the record this process is running
+            # under is the one nothing else can reconstruct — `ANTHROPIC_BASE_URL` in the settings
+            # file survives it and names a port nobody can compute again. The own-project release is
+            # uninstall's, and uninstall passes no --key.
+            #
+            # Fail-open like the rest of `release`: exit 0, because this must never be the thing that
+            # blocks an uninstall, and a refusal that is reported is not a failure.
+            if key == project_key():
+                emit(result="refused", reason="key_is_this_project", key=args.key, resolved=key,
+                     note="--key names the project this process is running in; releasing it here "
+                          "would delete the caller's own record. Run `release` without --key to "
+                          "release this project deliberately.")
+                return 0
         removed = projects.pop(key, None)
         if removed is None:
             emit(result="unchanged", note="no record for this project")
