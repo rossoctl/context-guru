@@ -162,7 +162,9 @@ which needs no working Claude session:
 ```
 
 It restores every settings file the plugin edited and reports anything it can't fix on its own (a
-credential exported in your shell, for instance). Add `--dry-run` to see the plan first.
+credential exported in your shell, for instance). Add `--dry-run` to see the plan first. It
+restores from a `context-guru-settings-json/` folder beside each settings file — see
+[plugin-recovery-files.md](plugin-recovery-files.md) for what's in it.
 
 **"Nothing happened after `/context-guru:install`."** The setting applies to a **new** session; the
 one you ran it in already has its environment. Start a new session.

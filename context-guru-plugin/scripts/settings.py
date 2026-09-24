@@ -31,11 +31,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
-import hashlib
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -263,8 +263,8 @@ def prune_backups(path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The escape hatch: a pre-edit copy of every file we touch, a record of what we touched, and a
-# plain-sh script OUTSIDE THIS PLUGIN that puts it all back.
+# The escape hatch: a pre-edit copy of every file we touch, and a plain-sh script OUTSIDE THIS
+# PLUGIN that puts it all back.
 #
 # The timestamped backups above are not enough on their own, and the reason is a real incident.
 # `/context-guru:uninstall` is a SKILL — it needs a working Claude Code session. But the failure
@@ -273,31 +273,188 @@ def prune_backups(path: str) -> None:
 # colleague hit that, 401 on every call, with the documented undo path unavailable for the same
 # reason he needed it.
 #
-# So three things are established BEFORE any routing key exists, in one choke point that no
-# write path can skip (see save()):
+# So two things are established BEFORE any routing key exists, in one choke point that no write
+# path can skip (see save()):
 #
-# 1. an ORIGINAL copy, taken once, never overwritten, never pruned. The backups beside the file
-#    are capped at KEEP_BACKUPS and every add AND remove writes one, so on a machine that has
-#    installed and uninstalled a few times the copy holding the user's pre-context-guru state is
-#    the FIRST to be deleted. The one copy recovery depends on cannot be on a rolling window.
-# 2. a record of which files we edited and whether each existed beforehand — a file we created
-#    is put back by deleting it, not by restoring it, and nothing else can tell the difference.
-# 3. the hatch script itself, copied out of the plugin into the state directory. A hatch that
-#    lives inside the thing that broke goes away with `/plugin uninstall`, a marketplace
-#    refresh, or a wiped plugin cache — i.e. it is missing in a fair share of the cases it is
-#    for. The copy under the state directory has no dependency on this plugin still existing.
+# 1. a per-directory recovery folder, `<dir>/context-guru-settings-json/`, next to the settings
+#    file it covers — not in a shared state directory. This used to be a single global ledger
+#    (`reset-manifest.tsv`) plus hashed copies under `~/.local/state/context-guru/originals/`, and
+#    that design had two real problems: nobody who needed to recover something would ever think to
+#    look in `~/.local/state`, and — worse — the ledger was append-only forever, so a file touched
+#    once (a `--scope user` test months ago, a project cleanly uninstalled since) stayed on it
+#    permanently, and `context-guru-reset` would happily revert that unrelated scope while trying
+#    to fix a completely different, currently-broken one. Per-directory, scoped colocation makes
+#    that class of bug structurally impossible: there is no shared list to leak from, and
+#    `context-guru-reset` only ever looks at the (at most three) canonical settings-file paths, each
+#    carrying its own folder. Inside it: `<basename>.pre-install` (a one-time, never-overwritten
+#    copy of what the file looked like before context-guru's first edit — the backups beside the
+#    file are capped at KEEP_BACKUPS and every add AND remove writes one, so that rolling window is
+#    never where the ORIGINAL state should live), `<basename>.created-by-us` (an empty marker: its
+#    presence is the only thing that means "put this back by deleting it, not restoring it" —
+#    everything else defaults to the safer "never auto-delete"), and a short `README.md` explaining
+#    what the folder is, written once.
+# 2. the hatch script itself, copied out of the plugin into the (still centralised) state
+#    directory. A hatch that lives inside the thing that broke goes away with `/plugin uninstall`,
+#    a marketplace refresh, or a wiped plugin cache — i.e. it is missing in a fair share of the
+#    cases it is for. The copy under the state directory has no dependency on this plugin still
+#    existing, and it is the one thing that legitimately has no per-project home.
 #
-# All of it is best-effort: a read-only or missing state directory must not fail an install that
-# would otherwise work. It is REPORTED instead (`reset_hatch=`), so the skill can tell the user
+# All of it is best-effort: an unwritable directory must not fail an install that would otherwise
+# work. It is REPORTED instead (`reset_hatch=`, `recovery_dir=`), so the skill can tell the user
 # whether they have a hatch rather than assuming it.
 # ---------------------------------------------------------------------------
 
 HATCH_NAME = "context-guru-reset"
-MANIFEST_VERSION = 1
+RECOVERY_DIR_NAME = "context-guru-settings-json"
+PRE_INSTALL_SUFFIX = ".pre-install"
+CREATED_MARKER_SUFFIX = ".created-by-us"
+RECOVERY_README = """\
+# context-guru recovery files
+
+This folder was created by the context-guru Claude Code plugin, next to the settings file it
+covers, so it is where you look for it — not buried in `~/.local/state`.
+
+- `<file>.pre-install` — a one-time copy of that settings file from *before* context-guru's very
+  first edit to it. This is what `/context-guru:uninstall` and the `context-guru-reset` escape
+  hatch restore from.
+- `<file>.created-by-us` — an empty marker. If present, context-guru created that file from
+  nothing (it did not exist before), so undoing the install means deleting it, not restoring it.
+- `<file>.pre-reset-<timestamp>` — a safety copy `context-guru-reset` takes of the file's current
+  (routed) content right before it restores or deletes it, so running the hatch is itself
+  undoable. The newest 10 are kept per file.
+
+Full explanation: https://github.com/rossoctl/context-guru/blob/main/docs/how-to/plugin-recovery-files.md
+
+This folder is safe to delete once you are sure you no longer need to recover anything through it.
+`/context-guru:install` adds a `.gitignore` entry for it automatically when it can.
+"""
 
 # Facts collected during the run and printed once by main(), rather than from inside save() —
 # the caller reads `key=value` lines and the result line should come first.
 HATCH_FACTS: dict[str, str] = {}
+
+
+def recovery_dir_for(real: str) -> str:
+    """Where `real`'s recovery copies live: a folder beside it, shared by every settings file in
+    the same directory (a `.claude/` holding both `settings.json` and `settings.local.json` gets
+    one folder, not two) — see the module-level comment above for why this replaced a shared,
+    hashed, append-only ledger under the state directory.
+    """
+    return os.path.join(os.path.dirname(real), RECOVERY_DIR_NAME)
+
+
+def ensure_dir_0700(path: str) -> str:
+    """makedirs `path`, force 0700 on it and its parent, and return it. Raises on failure.
+
+    B3 in review: a directory created by an older version of this script (or by anything else) may
+    be group- or world-writable under a permissive umask, and trusting it is the whole
+    vulnerability — another local account could replace an entry in a recovery folder and have
+    `context-guru-reset` write attacker-chosen content into the victim's settings file. mkdir's
+    mode argument is masked by the umask, so the explicit chmod is what actually sets it.
+    """
+    os.makedirs(path, mode=STATE_DIR_MODE, exist_ok=True)
+    for level in (path, os.path.dirname(path)):
+        try:
+            if level and os.path.isdir(level) and (os.stat(level).st_mode & 0o077):
+                os.chmod(level, STATE_DIR_MODE)
+        except OSError:
+            pass
+    return path
+
+
+def write_recovery_readme(recovery_dir: str) -> None:
+    """Best-effort, write-once. Never overwrites — a user may have made this file their own, and a
+    missing README is a cosmetic loss, never a reason to fail or repeat work.
+    """
+    path = os.path.join(recovery_dir, "README.md")
+    if os.path.exists(path):
+        return
+    try:
+        _write_atomic(path, RECOVERY_README.encode("utf-8"), mode=0o600)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Keeping the recovery folder out of git — deterministic, not a question.
+#
+# A full copy of a settings file can carry a credential, same as the settings file itself does
+# today (nothing stops one living in `settings.local.json`, and the per-edit
+# `.context-guru-backup-*` files already sit next to it, uncovered by any `.gitignore`, right now).
+# Colocating the recovery folder in the project directory doesn't introduce that exposure; it's
+# worth closing anyway, and cheaply: check whether the folder is already covered, and if it is not,
+# add the one line that covers it. No question is asked — this is routine, reversible housekeeping
+# in the same class as taking a backup automatically already is, not a decision like traffic
+# interception or `--scope user` that changes what the user is exposed to. install.sh calls this
+# unconditionally (see `route_ensure_gitignore` there) right after the routing write succeeds.
+# ---------------------------------------------------------------------------
+
+
+def _in_git_worktree(directory: str) -> bool:
+    """Best-effort: is `directory` inside a git working tree? False on anything short of a clean
+    "yes" — no git on PATH, not a repo, a git that errors for some other reason. This gate must
+    never turn an ambiguous answer into a write.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", directory, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _git_already_ignores(directory: str, name: str) -> bool:
+    """Is `name` (relative to `directory`) already covered by some `.gitignore` git can see? Only
+    meaningful once `_in_git_worktree` has said yes. `check-ignore` exits 1 for "not ignored" —
+    that is not an error, just the common case this function exists to detect.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", directory, "check-ignore", "-q", name],
+            capture_output=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def cmd_gitignore_ensure(args: argparse.Namespace) -> int:
+    """Make sure `RECOVERY_DIR_NAME` beside `args.file` is git-ignored, deterministically, with no
+    question asked — see the module comment above. Every branch fails open: this must never block
+    or fail an install, and it never touches anything but a `.gitignore` it can prove is needed.
+    """
+    directory = os.path.dirname(os.path.realpath(args.file))
+    if not _in_git_worktree(directory):
+        emit(result="skipped", reason="not_a_git_repo", dir=directory)
+        return 0
+    if _git_already_ignores(directory, RECOVERY_DIR_NAME):
+        emit(result="unchanged", reason="already_ignored", dir=directory)
+        return 0
+
+    gitignore = os.path.join(directory, ".gitignore")
+    pattern = RECOVERY_DIR_NAME + "/"
+    try:
+        existing = ""
+        if os.path.exists(gitignore):
+            with open(gitignore, encoding="utf-8") as fh:
+                existing = fh.read()
+        # Idempotent belt-and-suspenders: `check-ignore` above should already have caught this, but
+        # a second, cheaper check here means a text-level match is never turned into a duplicate
+        # line even if the two ever disagree at the edges (a pattern git resolves differently than
+        # a literal string compare, for instance).
+        if pattern in existing.splitlines():
+            emit(result="unchanged", reason="already_present", file=gitignore)
+            return 0
+        new_content = existing
+        if new_content and not new_content.endswith("\n"):
+            new_content += "\n"
+        new_content += pattern + "\n"
+        _write_atomic(gitignore, new_content.encode("utf-8"), mode=0o644)
+    except OSError as exc:
+        emit(result="skipped", reason="unwritable", detail=f"{exc}")
+        return 0
+    emit(result="added", file=gitignore, pattern=pattern)
+    return 0
 
 
 def state_dir() -> str:
@@ -411,24 +568,6 @@ def resolve_install_scope(project_dir: str | None = None) -> tuple[str | None, s
     return None, None, None
 
 
-def _slug(real: str) -> str:
-    """A filename for `real`'s original copy: readable, collision-free, path-shaped names flattened.
-
-    The hash is what makes it unique — two projects both called `web` have the same tail — and the
-    readable prefix is there because a user reading `ls` in a panic should be able to see which of
-    these is their global settings file and which is a project's.
-    """
-    tail = f"{os.path.basename(os.path.dirname(real))}-{os.path.basename(real)}"
-    safe = "".join(c if (c.isalnum() or c in "-._") else "_" for c in tail)
-    # Strip the leading dot, because the common case produces one: the parent directory is
-    # `.claude`, so the natural name is `.claude-settings.local.json.<hash>.original` — a HIDDEN
-    # file. A test caught it: `ls originals/*.original` matched nothing while the file sat right
-    # there. The directory exists to be read by a user whose sessions are down, and by any later
-    # glob over it; neither sees a dotfile.
-    safe = safe.lstrip(".") or "settings"
-    return f"{safe}.{hashlib.sha256(real.encode('utf-8')).hexdigest()[:12]}"
-
-
 def _write_atomic(path: str, data: bytes, mode: int = 0o600) -> None:
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=os.path.basename(path) + ".tmp-")
     try:
@@ -446,26 +585,21 @@ def _write_atomic(path: str, data: bytes, mode: int = 0o600) -> None:
 
 # 0700, and re-asserted rather than assumed. B3 in review: the COPIES were hardened to 0600 and the
 # DIRECTORIES were not, so under a permissive umask (`umask 000` reproduces it) both came out
-# drwxrwxrwx. Another local account could then replace an entry in originals/ and have reset.sh write
-# attacker-chosen content into the victim's ~/.claude/settings.json — a file that controls where all
-# their model traffic goes and can hold a credential. mkdir's mode argument is masked by the umask, so
-# the explicit chmod is what actually sets it.
+# drwxrwxrwx. Another local account could then replace an entry in a recovery folder and have
+# reset.sh write attacker-chosen content into the victim's settings file — one that controls where
+# all their model traffic goes and can hold a credential. mkdir's mode argument is masked by the
+# umask, so the explicit chmod (in `ensure_dir_0700`, defined above alongside `recovery_dir_for`) is
+# what actually sets it.
 STATE_DIR_MODE = 0o700
 
 
 def ensure_state_dir(*parts: str) -> str:
-    """makedirs the state path, force 0700 on every level we own, and return it. Raises on failure."""
-    path = os.path.join(*parts)
-    os.makedirs(path, mode=STATE_DIR_MODE, exist_ok=True)
-    # Tighten what already existed too: a directory created by an older version of this script (or by
-    # anything else) may be group- or world-writable, and trusting it is the whole vulnerability.
-    for level in (path, os.path.dirname(path)):
-        try:
-            if level and os.path.isdir(level) and (os.stat(level).st_mode & 0o077):
-                os.chmod(level, STATE_DIR_MODE)
-        except OSError:
-            pass
-    return path
+    """makedirs the state path, force 0700 on every level we own, and return it. Raises on failure.
+
+    A thin wrapper over `ensure_dir_0700` for state-dir callers that build their path from parts
+    rather than already holding a full one.
+    """
+    return ensure_dir_0700(os.path.join(*parts))
 
 
 def copy_once(src: str, dest: str) -> str:
@@ -556,28 +690,13 @@ def install_hatch(state: str) -> str:
     return dest
 
 
-def _manifest_paths(state: str) -> tuple[str, str]:
-    return (os.path.join(state, "reset-manifest.json"),
-            os.path.join(state, "reset-manifest.tsv"))
-
-
 def _created_by_us(real: str) -> bool:
-    """Did context-guru's own first edit CREATE `real`, per the reset manifest's
-    `existed_before`? Missing, unreadable or unrecorded all answer False — the side that never
+    """Did context-guru's own first edit CREATE `real`, per the `.created-by-us` marker in its
+    recovery folder? Missing, unreadable or unrecorded all answer False — the side that never
     deletes a file we are not certain we brought into existence.
     """
-    jsonp, _ = _manifest_paths(state_dir())
-    try:
-        with open(jsonp, encoding="utf-8") as fh:
-            manifest = json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return False
-    if not isinstance(manifest, dict):
-        return False
-    for entry in manifest.get("files", []):
-        if isinstance(entry, dict) and entry.get("path") == real:
-            return entry.get("existed_before") is False
-    return False
+    marker = os.path.join(recovery_dir_for(real), os.path.basename(real) + CREATED_MARKER_SUFFIX)
+    return os.path.exists(marker)
 
 
 def maybe_delete_if_empty(path: str, data: dict) -> bool:
@@ -599,32 +718,6 @@ def maybe_delete_if_empty(path: str, data: dict) -> bool:
     except OSError:
         return False
     return True
-
-
-def _render_tsv(entries: list[dict]) -> bytes:
-    """The record in the form the hatch actually reads: one line per file, tab-separated.
-
-    Why not have the hatch parse the JSON: it is POSIX sh with no interpreter available on the
-    path that matters, and hand-rolled JSON parsing in sh is precisely the kind of cleverness a
-    recovery tool must not contain. The JSON is kept beside it for anything else that wants
-    structure.
-
-    A path containing a tab or a newline cannot be represented on a line, and rather than write a
-    line that would be misparsed into the wrong filename, such an entry is recorded as a comment
-    and the caller is told the record is partial. Deleting or overwriting the wrong file is a much
-    worse outcome than telling the user one path needs doing by hand.
-    """
-    out = [b"# context-guru reset record v%d - <existed_before 1|0>\t<original copy|->\t<path>" %
-           MANIFEST_VERSION]
-    for e in entries:
-        path = e["path"]
-        if "\t" in path or "\n" in path or "\r" in path:
-            out.append(b"# UNREPRESENTABLE PATH (tab or newline); restore this one by hand: "
-                       + repr(path).encode("utf-8"))
-            continue
-        out.append("\t".join(("1" if e["existed_before"] else "0",
-                             e.get("original") or "-", path)).encode("utf-8"))
-    return b"\n".join(out) + b"\n"
 
 
 def _is_loopback(url: str) -> bool:
@@ -703,11 +796,9 @@ def _looks_routed_by_us(real: str) -> bool:
 def record_touch(real: str, existed: bool) -> None:
     """Fail-open wrapper. See _record_touch.
 
-    `except OSError` at three inner sites was nearly total and reviewed as not good enough: the body
-    also encodes paths to UTF-8, which raises UnicodeEncodeError (not an OSError) for a filename
-    carrying surrogates from surrogateescape. "Fail open, always" is a hard boundary in this repo, so
-    the hatch machinery must not be able to fail a settings write for ANY reason — the install it
-    would break is one that would otherwise have worked.
+    `except Exception` rather than `except OSError`: "fail open, always" is a hard boundary in this
+    repo, so the hatch machinery must not be able to fail a settings write for ANY reason — the
+    install it would break is one that would otherwise have worked.
     """
     try:
         _record_touch(real, existed)
@@ -720,77 +811,68 @@ def _record_touch(real: str, existed: bool) -> None:
     """Note that we are about to edit `real`, and make sure a way back exists.
 
     Called from save() before the write, so `existed` is the truth about the file as the user had
-    it. Idempotent: the original copy is created with O_EXCL and a second call never replaces it,
-    which is the whole point — the tenth edit must not overwrite the record of the first.
+    it. Idempotent: `.pre-install` is created via `copy_once` (O_EXCL under the hood) and
+    `.created-by-us` is only ever written if neither marker exists yet — the tenth edit never
+    overwrites what the first one recorded. The `_looks_routed_by_us` branch has no marker of its
+    own by design; it is a pure function of the file's current content, so re-deriving the same
+    answer on every call is fine and even more robust than caching one.
     """
-    state = state_dir()
+    recovery = recovery_dir_for(real)
     try:
-        ensure_state_dir(state, "originals")
+        ensure_dir_0700(recovery)
     except OSError as exc:
         HATCH_FACTS["reset_hatch"] = "unavailable"
-        HATCH_FACTS["reset_hatch_detail"] = f"cannot write {state}: {exc}"
+        HATCH_FACTS["reset_hatch_detail"] = f"cannot write {recovery}: {exc}"
         return
+    write_recovery_readme(recovery)
 
-    original = ""
+    basename = os.path.basename(real)
+    pre_install = os.path.join(recovery, basename + PRE_INSTALL_SUFFIX)
+    created_marker = os.path.join(recovery, basename + CREATED_MARKER_SUFFIX)
+
     skipped_copy = False
-    if existed and _looks_routed_by_us(real):
-        # Recorded, but with no original from THIS call — which is exactly the state ensure_hatch()
-        # already produces, and the hatch's missing-copy branch already reports honestly.
-        #
-        # Deliberately not reported here. It was, and that was a review finding: an ordinary
-        # uninstall of an ordinarily-installed project takes this branch (the file IS ours by then),
-        # so `reset_original=unavailable` was printed while a good, verified-clean copy from the
-        # install sat on disk. install/SKILL.md turns that fact into "the hatch can unroute but not
-        # restore", so the skill would have told users their content was unrecoverable when it was
-        # not. The fact is a statement about what the hatch HOLDS, so it is decided below, after the
-        # manifest entry is known.
-        skipped_copy = True
-    elif existed:
-        original = copy_once(real, os.path.join(state, "originals", _slug(real) + ".original"))
+    if not os.path.exists(pre_install) and not os.path.exists(created_marker):
+        # First time THIS file is being recorded — decide, once, what "before" means for it.
+        if not existed:
+            try:
+                _write_atomic(created_marker, b"", mode=0o600)
+            except OSError:
+                pass
+        elif _looks_routed_by_us(real):
+            # No original to take — the moment for that already passed, possibly in a version of
+            # this plugin that predates recovery folders (or one that predates them existing for
+            # THIS file). `ensure_hatch()` reaches the same state through its own path; both leave
+            # neither marker behind, and both are reported identically below.
+            #
+            # Deliberately not reported as unavailable here without checking `pre_install` first —
+            # a review finding on the old design: an ordinary uninstall of an ordinarily-installed
+            # project takes this branch (the file IS ours by then), and reporting "no original" at
+            # this point would have overwritten a good, verified copy already sitting on disk. That
+            # cannot happen with this design (there is nothing here to overwrite), but the same
+            # "check what's actually there, not what this call decided" discipline is kept below.
+            skipped_copy = True
+        else:
+            copy_once(real, pre_install)
 
-    jsonp, tsvp = _manifest_paths(state)
-    entries: list[dict] = []
+    hatch = ""
     try:
-        with open(jsonp, encoding="utf-8") as fh:
-            prior = json.load(fh)
-        if isinstance(prior, dict) and isinstance(prior.get("files"), list):
-            entries = [e for e in prior["files"] if isinstance(e, dict) and e.get("path")]
-    except (OSError, json.JSONDecodeError):
-        entries = []
-
-    held_original = ""
-    for e in entries:
-        if e.get("path") == real:
-            # Seen before. The first record is the authoritative one — `existed_before` describes
-            # the file as it was before context-guru ever touched it, and re-recording it from a
-            # later run would say "it existed" about a file we created ourselves.
-            if not e.get("original") and original:
-                e["original"] = original
-            held_original = e.get("original") or ""
-            break
-    else:
-        entries.append({"path": real, "existed_before": bool(existed),
-                        "original": original,
-                        "first_touched": _dt.datetime.now().astimezone().isoformat(timespec="seconds")})
-        held_original = original
-
-    hatch = install_hatch(state)
-    try:
-        _write_atomic(jsonp, (json.dumps({"version": MANIFEST_VERSION, "hatch": hatch,
-                                          "files": entries}, indent=2) + "\n").encode("utf-8"))
-        _write_atomic(tsvp, _render_tsv(entries))
-    except OSError as exc:
-        HATCH_FACTS["reset_hatch"] = "unavailable"
-        HATCH_FACTS["reset_hatch_detail"] = f"cannot write the record: {exc}"
-        return
-
+        # install_hatch() writes straight into state_dir() with no makedirs of its own — it relied
+        # on ensure_state_dir(state, "originals") having already created the parent as a side
+        # effect, back when that ran unconditionally here. It does not anymore (only the RECOVERY
+        # directory is ensured above), so the state directory needs its own explicit creation.
+        ensure_state_dir(state_dir())
+        hatch = install_hatch(state_dir())
+    except OSError:
+        pass
     HATCH_FACTS["reset_hatch"] = hatch or "unavailable"
-    HATCH_FACTS["reset_record"] = tsvp
-    if existed and not held_original:
-        # Judged against what the RECORD ends up holding, not against this call: a file whose
-        # original was captured by an earlier install must not be reported as unrecoverable now.
-        HATCH_FACTS["reset_original"] = "unavailable"
-        HATCH_FACTS["reset_original_reason"] = (
+    HATCH_FACTS["recovery_dir"] = recovery
+    if os.path.exists(pre_install):
+        HATCH_FACTS["recovery_original"] = pre_install
+    elif os.path.exists(created_marker):
+        HATCH_FACTS["recovery_original"] = "(created by us; nothing to restore)"
+    elif existed:
+        HATCH_FACTS["recovery_original"] = "unavailable"
+        HATCH_FACTS["recovery_original_reason"] = (
             "the file already carried context-guru's keys when it was first recorded"
             if skipped_copy else "no pre-edit copy could be taken")
 
@@ -888,56 +970,21 @@ def cmd_resolve_scope(_args: argparse.Namespace) -> int:
 
 
 def ensure_hatch(file: str) -> None:
-    """Fail-open wrapper. See _ensure_hatch, and record_touch for why this is not `except OSError`."""
+    """Put a hatch in place for a project that is already routed, without editing anything.
+
+    Called only when `cmd_add` reports `result=unchanged` — i.e. the file is confirmed routed to
+    us already — so `_record_touch`'s own `_looks_routed_by_us` check takes its "no pre-edit copy
+    to take" branch: that moment already passed, possibly in a version of this plugin that
+    predates recovery folders. This used to be a separate function that unconditionally assumed
+    that outcome instead of checking for it; collapsed here because the check and the resulting
+    facts are otherwise a second encoding of exactly what `_record_touch` already does, and a
+    second encoding is how these two drifted before.
+    """
     try:
-        _ensure_hatch(file)
+        _record_touch(os.path.realpath(file), existed=True)
     except Exception as exc:                      # noqa: BLE001 - deliberate, see record_touch
         HATCH_FACTS["reset_hatch"] = "unavailable"
         HATCH_FACTS["reset_hatch_detail"] = f"{type(exc).__name__}: {exc}"
-
-
-def _ensure_hatch(file: str) -> None:
-    """Put a hatch in place for a project that is already routed, without editing anything.
-
-    There is no pre-edit copy to take — that moment passed, possibly in a version of this plugin
-    that did not take one. So the record gets the path with no original, and the hatch reports
-    honestly: it names the file, points at the timestamped backups beside it, and refuses to
-    restore one automatically because a rolling backup may hold a LATER state rather than the
-    user's original. That is strictly more use than "no record of any edit", which is what somebody
-    with a pre-hatch install would otherwise get while their sessions were down.
-    """
-    state = state_dir()
-    try:
-        ensure_state_dir(state, "originals")
-    except OSError as exc:
-        HATCH_FACTS["reset_hatch"] = "unavailable"
-        HATCH_FACTS["reset_hatch_detail"] = f"cannot write {state}: {exc}"
-        return
-    real = os.path.realpath(file)
-    jsonp, tsvp = _manifest_paths(state)
-    entries: list[dict] = []
-    try:
-        with open(jsonp, encoding="utf-8") as fh:
-            prior = json.load(fh)
-        if isinstance(prior, dict) and isinstance(prior.get("files"), list):
-            entries = [e for e in prior["files"] if isinstance(e, dict) and e.get("path")]
-    except (OSError, json.JSONDecodeError):
-        entries = []
-    if not any(e.get("path") == real for e in entries):
-        entries.append({"path": real, "existed_before": True, "original": "",
-                        "first_touched": "(unknown: routed before this record existed)"})
-    hatch = install_hatch(state)
-    try:
-        _write_atomic(jsonp, (json.dumps({"version": MANIFEST_VERSION, "hatch": hatch,
-                                          "files": entries}, indent=2) + "\n").encode("utf-8"))
-        _write_atomic(tsvp, _render_tsv(entries))
-    except OSError as exc:
-        HATCH_FACTS["reset_hatch"] = "unavailable"
-        HATCH_FACTS["reset_hatch_detail"] = f"cannot write the record: {exc}"
-        return
-    HATCH_FACTS["reset_hatch"] = hatch or "unavailable"
-    HATCH_FACTS["reset_record"] = tsvp
-    HATCH_FACTS["reset_original"] = "unavailable"
 
 
 def cmd_add(args: argparse.Namespace) -> int:
@@ -2126,6 +2173,11 @@ def main() -> int:
     cu = sub.add_parser("check-url")
     cu.add_argument("--url", required=True)
 
+    gi = sub.add_parser("gitignore-ensure",
+        help="make sure the recovery folder beside --file is git-ignored, deterministically, "
+             "with no question asked (see the module comment above cmd_gitignore_ensure)")
+    gi.add_argument("--file", required=True)
+
     st = sub.add_parser("strategy")
     st.add_argument("op", choices=("list", "show", "set", "clear", "sync"))
     st.add_argument("--name", default="",
@@ -2172,7 +2224,8 @@ def main() -> int:
     rc = {"add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
           "strategy": cmd_strategy, "preset": cmd_preset,
-          "check-url": cmd_check_url, "update-check": cmd_update_check}[args.cmd](args)
+          "check-url": cmd_check_url, "update-check": cmd_update_check,
+          "gitignore-ensure": cmd_gitignore_ensure}[args.cmd](args)
 
     # The hatch facts are printed HERE rather than from inside save(), so the `result=` line the
     # caller keys on stays first, and so every writing path reports them without six call sites

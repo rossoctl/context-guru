@@ -158,6 +158,10 @@ not reword the command to look like less than it is, and never write routing whi
 - `strategy_warning=` — the strategy could not be written even though the name was valid (usually a
   config at that path we did not write). The proxy is fine; mention it and move on.
 - `statusline=on` — also installed; mention it once. `skipped` is not an install failure.
+- `recovery_dir=` / `gitignore=` — a `context-guru-settings-json/` folder beside the routed file
+  now holds the pre-install copy `/context-guru:uninstall` (or the escape hatch) restores from;
+  `gitignore=added` means a `.gitignore` entry for it was added automatically, no question asked —
+  mention it once, in passing, the same way as `statusline=on`.
 
 ## 4. Then tell them
 
