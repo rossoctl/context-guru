@@ -814,6 +814,67 @@ record_installed_version() { # $1 = the version now confirmed on disk
   mv -f "${st}/proxy-version.tmp-$$" "${st}/proxy-version" 2>/dev/null || true
 }
 
+# Extracted out of the ordinary install flow so `--check-latest` (below) can ask the identical
+# question — web redirect first, API only as a distinguishing fallback — without a download ever
+# being on the table. Prints exactly one line: `tag=<TAG>` on success, or
+# `error=github_rate_limited` / `error=no_release_found:<http code>` on failure — encoded in
+# stdout rather than a variable the function sets, because every caller invokes this through
+# `$(...)`, and a variable assigned inside a command-substitution subshell never reaches the
+# parent shell. (A real bug here, caught by testing rather than by inspection: the first version
+# set a global `RESOLVE_REASON` and every caller read it back as permanently empty.)
+resolve_latest_tag() {
+  local v
+  v=$(curl -fsSLI --max-time "${CONTEXT_GURU_CHECK_TIMEOUT:-10}" -o /dev/null -w '%{url_effective}' \
+        "https://github.com/${REPO}/releases/latest" 2>/dev/null)
+  v="${v##*/}"
+  case "$v" in ''|releases|latest) v="" ;; esac
+  if [ -z "$v" ]; then
+    local api code
+    api=$(curl -sSL --max-time "${CONTEXT_GURU_CHECK_TIMEOUT:-10}" -w '\n%{http_code}' \
+            "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null)
+    code=$(printf '%s' "$api" | tail -1)
+    v=$(printf '%s' "$api" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+    if [ -z "$v" ]; then
+      case "$code" in
+        403|429) printf 'error=github_rate_limited\n' ;;
+        *)       printf 'error=no_release_found:%s\n' "${code:-unreachable}" ;;
+      esac
+      return 1
+    fi
+  fi
+  printf 'tag=%s\n' "$v"
+}
+
+# --check-latest: resolve installed vs. latest and REPORT, never download, never install, never
+# write the proxy binary. Exists because the ordinary flow above can only say "a newer release
+# exists" as a side effect of actually fetching one (CONTEXT_GURU_UPGRADE=1) — which is the wrong
+# shape for "I asked to check, not to install" (see skills/update/SKILL.md). `installed_version`
+# still runs $BIN here: unlike start-proxy.sh's SessionStart hook, this is a deliberate,
+# user-initiated invocation, not a blind call on every session start.
+if [ "${1:-}" = --check-latest ]; then
+  have=""
+  if command -v "$BIN" >/dev/null 2>&1; then
+    have=$(installed_version "$(command -v "$BIN")")
+    [ -n "$have" ] && record_installed_version "$have"
+  fi
+  emit "installed_version=${have:-unknown}"
+  command -v curl >/dev/null 2>&1 || { emit "result=checked"; emit "update_available=unknown"; emit "reason=no_curl"; exit 0; }
+  resolved=$(resolve_latest_tag) || true
+  case "$resolved" in
+    tag=*) latest="${resolved#tag=}" ;;
+    *)     emit "result=checked"; emit "update_available=unknown"
+           emit "reason=${resolved#error=}"
+           exit 0 ;;
+  esac
+  emit "latest_version=${latest}"
+  if [ -n "$have" ] && { [ "$have" = "${latest#v}" ] || [ "$have" = "$latest" ]; }; then
+    emit "result=checked"; emit "update_available=false"
+  else
+    emit "result=checked"; emit "update_available=true"
+  fi
+  exit 0
+fi
+
 if command -v "$BIN" >/dev/null 2>&1; then
   have_path=$(command -v "$BIN")
   have=$(installed_version "$have_path")
@@ -857,37 +918,17 @@ command -v curl >/dev/null 2>&1 || die "no_curl"
 if [ "$VERSION" = latest ]; then
   # Resolve to a CONCRETE tag once, then use it for both the tarball and checksums.txt — the two
   # must come from the same release, and two independent /latest/download follows could straddle a
-  # release published between them.
-  #
-  # The web redirect FIRST, not the API. `api.github.com` allows 60 requests/hour for unauthenticated
-  # callers, counted PER IP — so the budget is shared by everyone behind the same address: a corporate
-  # NAT, a CI fleet, a shared dev box. Exhausted, it answers 403, this resolution produced the empty
-  # string, and the script then reported `no_release_found: no published release yet`. That message is
-  # not just unhelpful, it is FALSE — it sent people off to build from source while a perfectly good
-  # release sat published. Observed on a corporate IP: `{"limit":60,"remaining":0,"used":60}` with
-  # v0.1.1 released and downloadable.
-  #
-  # The releases/latest web redirect carries no such budget and lands on /releases/tag/<tag>.
-  VERSION=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
-              "https://github.com/${REPO}/releases/latest" 2>/dev/null)
-  VERSION="${VERSION##*/}"
-  # With no releases at all the redirect lands on /releases, so guard against taking that as a tag.
-  case "$VERSION" in
-    ''|releases|latest) VERSION="" ;;
+  # release published between them. `resolve_latest_tag` (above) is the same web-redirect-first,
+  # API-only-as-fallback resolution `--check-latest` uses, so a download and a mere check can never
+  # disagree about what "latest" means.
+  resolved=$(resolve_latest_tag) || true
+  case "$resolved" in
+    tag=*) VERSION="${resolved#tag=}" ;;
+    error=github_rate_limited)
+      die "github_rate_limited: GitHub's API is rate limited for this IP (60/hour, shared with everything behind the same address), so the latest version could not be resolved. This says NOTHING about whether a release exists. Wait for the window to reset, or set CONTEXT_GURU_VERSION=vX.Y.Z to skip resolution entirely." ;;
+    *)
+      die "no_release_found: no published release for ${REPO} (HTTP ${resolved#error=no_release_found:}); build from source or set CONTEXT_GURU_VERSION" ;;
   esac
-  if [ -z "$VERSION" ]; then
-    # Only now the API, and report WHICH failure it was: "rate limited" and "no release" call for
-    # completely different actions, and conflating them is what made the old message misleading.
-    api=$(curl -sSL -w '\n%{http_code}' "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null)
-    code=$(printf '%s' "$api" | tail -1)
-    VERSION=$(printf '%s' "$api" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
-    if [ -z "$VERSION" ]; then
-      case "$code" in
-        403|429) die "github_rate_limited: GitHub's API is rate limited for this IP (60/hour, shared with everything behind the same address), so the latest version could not be resolved. This says NOTHING about whether a release exists. Wait for the window to reset, or set CONTEXT_GURU_VERSION=vX.Y.Z to skip resolution entirely." ;;
-        *)       die "no_release_found: no published release for ${REPO} (HTTP ${code}); build from source or set CONTEXT_GURU_VERSION" ;;
-      esac
-    fi
-  fi
 fi
 NUM="${VERSION#v}"
 TARBALL="context-guru_${NUM}_${OS}_${ARCH}.tar.gz"
