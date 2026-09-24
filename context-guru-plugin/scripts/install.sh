@@ -716,11 +716,22 @@ a routed one with no proxy is a broken one."
 #
 # Never fatal — a statusline write failing is not a routing failure, it is reported as its own
 # fact and nothing about `result=routed` above changes.
+#
+# REAL absolute path, not the ${CLAUDE_PLUGIN_ROOT} placeholder. That placeholder only expands
+# when CLAUDE CODE ITSELF substitutes it — documented for hook commands, MCP/LSP server config,
+# and skill/agent content, never for `statusLine`. A skill's own markdown (see
+# skills/statusline/SKILL.md) gets it substituted before the model ever runs the command, because
+# that substitution happens on the skill's rendered TEXT — but install.sh is a plain script file,
+# not skill text, so writing the literal placeholder here just puts an unexpandable string into
+# settings.json forever: the status line reports `statusline=on` and then never renders anything,
+# because the shell later runs `python3 "/scripts/statusline.py"` (empty expansion) and fails
+# silently. `route_here()` already resolves this script's own directory from `$0` for every other
+# call in this file — reuse it instead of a placeholder nothing will ever expand.
 route_install_statusline() {
   [ "$R_NOSTATUSLINE" = 1 ] && { emit "statusline=skipped"; return 0; }
   local sout scode=0
   local sl=("$(route_here)/settings.py" add --file "$R_FILE" \
-    --statusline "python3 \"\${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py\"")
+    --statusline "python3 \"$(route_here)/statusline.py\"")
   [ "$R_SCOPE" = user ] && sl+=(--user-scope)
   sout=$("${sl[@]}" 2>&1) || scode=$?
   local sres; sres=$(kv "$sout" result)

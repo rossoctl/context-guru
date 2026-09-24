@@ -5888,15 +5888,26 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		}
 		got := readJSON(t, filepath.Join(proj, ".claude", "settings.local.json"))
 		sl, _ := got["statusLine"].(map[string]any)
-		want := `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/statusline.py"`
+		// A REAL absolute path, resolved from install.sh's own $0 via route_here() — NOT the
+		// literal ${CLAUDE_PLUGIN_ROOT} placeholder. That placeholder is undocumented (and, in
+		// practice, never expanded) for `statusLine`: Claude Code's own plugins reference lists
+		// exactly where it substitutes ${CLAUDE_PLUGIN_ROOT} — hook commands, MCP/LSP server
+		// config, and skill/agent content — and `statusLine` is not among them. A previous version
+		// of this test asserted the placeholder had to survive UN-expanded, on the theory that
+		// Claude Code would expand it later when running the status line; it does not, so every
+		// automatic install wrote a command that reported `statusline=on` and then rendered
+		// nothing, forever. Fixed by resolving the real path at write time instead of deferring to
+		// a substitution that was never going to happen.
+		scriptsRoot, err := filepath.EvalSymlinks(scriptsDir(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `python3 "` + filepath.Join(scriptsRoot, "statusline.py") + `"`
 		if sl["command"] != want {
-			// The literal ${CLAUDE_PLUGIN_ROOT} must survive un-expanded: install.sh cannot read that
-			// var from its own environment (it is substituted into the invoking `!`-block's command
-			// STRING by Claude Code, never exported to the child process — see skills/install/SKILL.md's
-			// own note on this), so the command written here has to carry the placeholder for Claude
-			// Code to expand later, at render time, the same way the statusline SKILL's own manual
-			// install command does.
 			t.Errorf("statusLine.command = %v, want %q", got["statusLine"], want)
+		}
+		if strings.Contains(fmt.Sprint(sl["command"]), "CLAUDE_PLUGIN_ROOT") {
+			t.Errorf("the unexpandable placeholder leaked into the written command: %v", sl["command"])
 		}
 		// The literal reported bug: a project-scope install must never touch the machine-wide
 		// file at all. `writePluginOptions` above already created it (as a fixture, to carry the
@@ -5940,6 +5951,9 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		sl, _ := got["statusLine"].(map[string]any)
 		if sl["command"] == nil {
 			t.Errorf("statusLine not written to the user-scope file: %v", got["statusLine"])
+		}
+		if strings.Contains(fmt.Sprint(sl["command"]), "CLAUDE_PLUGIN_ROOT") {
+			t.Errorf("the unexpandable placeholder leaked into the written command: %v", sl["command"])
 		}
 		if _, err := os.Stat(filepath.Join(proj, ".claude", "settings.local.json")); !os.IsNotExist(err) {
 			t.Errorf("a project-local file was created even though --scope user was chosen: %v", err)
