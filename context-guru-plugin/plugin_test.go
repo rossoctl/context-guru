@@ -5439,7 +5439,9 @@ func TestPortAllocReusesThePortOfADeletedProject(t *testing.T) {
 	// to be absent would throw away a project on an unmounted volume or a detached network share.
 	// Checked against the EXACT key, not a prefix: every project in this test is a sibling under one
 	// temp root, so a prefix match would be satisfied by the other two and prove nothing.
-	scopes := readJSON(t, filepath.Join(state, "context-guru", "install-scope.json"))
+	// settingsInDir sets CONTEXT_GURU_STATE directly, so `state` IS the state dir — no
+	// `context-guru/` segment, unlike the route tests, which set XDG_STATE_HOME instead.
+	scopes := readJSON(t, filepath.Join(state, "install-scope.json"))
 	projects, _ := scopes["projects"].(map[string]any)
 	if _, kept := projects[goneReal]; !kept {
 		t.Errorf("alloc pruned the deleted project's record (%s) rather than just ignoring its port: "+
