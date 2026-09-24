@@ -87,6 +87,21 @@ MANIFEST="$STATE/reset-manifest.tsv"
 say()  { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
 
+# How many pre-reset snapshots (see the "saved current state:" copy below) to keep PER settings
+# file. Mirrors settings.py's KEEP_BACKUPS: this hatch takes a fresh copy of the file it is about
+# to overwrite on every run, and that was never bounded — a machine reset a few dozen times over
+# its life accumulated that many complete copies of a settings file, credentials included,
+# forever, in a directory nothing else here ever reads by hand.
+KEEP_PRERESET=10
+
+prune_prereset() {
+  # $1: an UNQUOTED glob pattern covering every pre-reset snapshot for ONE settings file, passed
+  # as a variable so word-splitting and globbing happen here rather than at the call site.
+  ls -1t $1 2>/dev/null | tail -n "+$((KEEP_PRERESET + 1))" | while IFS= read -r _f; do
+    rm -f "$_f"
+  done
+}
+
 # ---------------------------------------------------------------------------
 # redact: a filter for anything that prints FILE CONTENT or an environment value.
 #
@@ -644,12 +659,15 @@ while IFS='	' read -r action original path; do
   # credential. The state directory is 0700, outside every repo, and already holds the originals.
   if [ -n "$PRESET_DIR" ]; then
     pre="$PRESET_DIR/$(printf '%s' "$path" | tr -c 'A-Za-z0-9._-' '_')-$STAMP"
+    preglob="$PRESET_DIR/$(printf '%s' "$path" | tr -c 'A-Za-z0-9._-' '_')-*"
   else
     pre="$path.context-guru-prereset-$STAMP"
+    preglob="$path.context-guru-prereset-*"
   fi
   if [ -e "$path" ] && [ ! -e "$pre" ]; then
     if cp -p "$path" "$pre" 2>/dev/null || cp "$path" "$pre"; then
       say "  saved current state: $pre"
+      prune_prereset "$preglob"
     else
       warn "  ! could not copy $path aside; leaving it alone rather than restoring over it"
       INCOMPLETE=1; FILES_UNFIXED=1
