@@ -248,6 +248,30 @@ PIDFILE="${STATE}/proxy-${PORT}.pid"
 # What the proxy holding this port was STARTED with. There is no way to ask it: /healthz answers the
 # literal string "ok" (proxy/proxy.go), and nothing else is unauthenticated. So the starter records it.
 FINGERPRINT="${STATE}/proxy-${PORT}.fingerprint"
+# WHICH PROJECT the proxy holding this port belongs to. Deliberately a SEPARATE file and NOT a
+# field in the fingerprint: the fingerprint is compared as an opaque string, so adding a field would
+# make every fingerprint already on disk incomparable and restart every running proxy once, for
+# nothing. This file answers a different question anyway - the fingerprint says "what configuration",
+# this says "whose" - and only the second one may veto a restart.
+OWNER="${STATE}/proxy-${PORT}.owner"
+
+# This session's project identity, resolved ONCE and only when something actually needs it (a
+# healthy port to adjudicate, or a proxy of our own to record), because it forks python and git.
+# Fails open to the cwd: settings.py's project_key() does the same, and a key we cannot resolve must
+# never be the thing that stops a session getting a proxy.
+PROJECT_KEY=""
+PROJECT_KEY_RESOLVED=0
+project_key_now() {
+  if [ "$PROJECT_KEY_RESOLVED" = 0 ]; then
+    PROJECT_KEY_RESOLVED=1
+    if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; then
+      PROJECT_KEY=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" project-key 2>/dev/null \
+                      | sed -n 's/^key=//p' | head -1)
+    fi
+    [ -n "$PROJECT_KEY" ] || PROJECT_KEY=$(pwd -P 2>/dev/null) || PROJECT_KEY=""
+  fi
+  printf '%s\n' "$PROJECT_KEY"
+}
 
 # The argument wins: it is the only one of these three the install skill can actually rely on, since
 # a Bash tool call sees neither the plugin option nor, necessarily, the session's own env. Moved up
@@ -471,7 +495,20 @@ if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
   # Leave it alone unless we can prove a change is needed. Three of these four cases are deliberate
   # no-ops, because the cost of a wrong restart (interrupting somebody else's session) is higher than
   # the cost of a stale preset (reported, and fixed by the next cold start).
-  if [ -z "$fp_have" ]; then
+  owner_have=$(cat "$OWNER" 2>/dev/null)
+  if [ -n "$owner_have" ] && [ "$owner_have" != "$(project_key_now)" ]; then
+    # ANOTHER PROJECT's proxy, whatever the fingerprint says. This is the regression the per-project
+    # port exists to remove: two projects sharing port 8787 with different presets took turns killing
+    # each other's proxy on every session start, and each kill wiped the in-memory store. A restart
+    # here can only ever be right for the project that owns the port, so the veto comes FIRST - a
+    # fingerprint mismatch against a foreign proxy is expected, not evidence of anything.
+    #
+    # An ABSENT owner file means a proxy started before this file existed, and is treated as ours,
+    # i.e. exactly today's behaviour: refusing to touch it would strand every running install.
+    note "port ${PORT} is serving another project (${owner_have}); leaving it alone."
+    note "this project should have its own port - run /context-guru:status if it does not."
+    exit 0
+  elif [ -z "$fp_have" ]; then
     # A proxy from before fingerprints existed, or one somebody else started. Not ours to replace.
     :
   elif [ -z "$SYNC_STRATEGY" ]; then
@@ -764,10 +801,14 @@ liveness check on pid %s, which cannot tell a proxy that bound from one that is 
       # Best-effort write: a state directory we cannot write is survivable everywhere else in this
       # script, and the only cost is that the next session cannot tell a configuration change happened.
       fingerprint_want >"$FINGERPRINT" 2>/dev/null || true
+      project_key_now >"$OWNER" 2>/dev/null || true
     else
       # Deliberately REMOVED rather than left stale: a fingerprint describing the configuration we
-      # failed to start would make the next session believe it is already running.
+      # failed to start would make the next session believe it is already running. The owner file
+      # goes with it - claiming a port held by something we did not start is the worse error of the
+      # two, because it would make every OTHER project defer to a claim that is not true.
       rm -f "$FINGERPRINT" 2>/dev/null || true
+      rm -f "$OWNER" 2>/dev/null || true
       note "port ${PORT} is answering, but the proxy this hook started is not running - so something"
       note "else holds the port and this session's requests go there, not through the configuration"
       note "you asked for. Nothing was recorded. Log: ${LOG}"

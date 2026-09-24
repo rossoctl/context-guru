@@ -8529,3 +8529,210 @@ func TestConsentQuestionAgreesWithTheUpstreamThatGetsWritten(t *testing.T) {
 		}
 	})
 }
+
+// TestStartProxyDoesNotStopAnotherProjectsProxy is the regression the per-project port exists to
+// remove, asserted at the place it actually happened.
+//
+// Before per-project ports, every project's proxy was on 8787. start-proxy.sh compares the running
+// proxy's fingerprint against the configuration THIS session asks for, and on a mismatch stops it
+// and starts a replacement — correct when there is one project, catastrophic when there are two:
+// each project's SessionStart flipped the shared proxy back to its own preset, and every flip wiped
+// the in-memory store. That is the cache-write regression store/store_test.go's idle-exit floor
+// already refuses to permit for the same reason.
+//
+// So a `proxy-<port>.owner` file naming a DIFFERENT project vetoes the restart outright, ahead of
+// the fingerprint comparison — against a foreign proxy a mismatch is expected and proves nothing.
+//
+// The second subtest is the positive control, and it is load-bearing: the veto's assertions are all
+// absences, so without a case where the SAME state DOES reach the restart path, gutting section (2)
+// to a bare `exit 0` would leave the veto subtest passing.
+func TestStartProxyDoesNotStopAnotherProjectsProxy(t *testing.T) {
+	requireTool(t, "bash")
+	requireTool(t, "python3")
+
+	for _, c := range []struct {
+		name       string
+		ownerIsUs  bool
+		wantNote   string
+		unwantNote string
+	}{
+		{name: "another project's proxy is left alone", ownerIsUs: false,
+			wantNote: "is serving another project", unwantNote: "configuration changed"},
+		{name: "our own proxy still gets the restart decision", ownerIsUs: true,
+			wantNote: "different configuration", unwantNote: "is serving another project"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			mux := http.NewServeMux()
+			mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+				w.Write([]byte("ok")) //nolint:errcheck // test stub
+			})
+			srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+			go srv.Serve(ln) //nolint:errcheck // returns ErrServerClosed on Close
+			defer srv.Close()
+			port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+
+			dir := t.TempDir()
+			state := filepath.Join(dir, "state")
+			proj := filepath.Join(dir, "proj")
+			for _, d := range []string{state, proj} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			projReal, err := filepath.EvalSymlinks(proj)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// A fingerprint that deliberately does NOT match what this session will compute, so the
+			// restart path is what the script would take if nothing vetoed it.
+			if err := os.WriteFile(filepath.Join(state, "proxy-"+port+".fingerprint"),
+				[]byte("preset=somebody-elses strategy=x idle=0 upstream= port="+port+" bin=/nope\n"),
+				0o600); err != nil {
+				t.Fatal(err)
+			}
+			owner := projReal
+			if !c.ownerIsUs {
+				owner = filepath.Join(dir, "some-other-project")
+			}
+			if err := os.WriteFile(filepath.Join(state, "proxy-"+port+".owner"),
+				[]byte(owner+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			sentinel := filepath.Join(dir, "started")
+			fake := filepath.Join(dir, "fake-proxy")
+			if err := os.WriteFile(fake,
+				[]byte("#!/usr/bin/env bash\ntouch \""+sentinel+"\"\nsleep 30\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+			cmd.Dir = proj
+			cmd.Env = append(sandboxEnv(t),
+				"CONTEXT_GURU_STATE="+state,
+				"CONTEXT_GURU_BIN="+fake,
+				"TMPDIR="+dir,
+				"CLAUDE_PLUGIN_OPTION_PORT="+port,
+				"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+			)
+			b, err := cmd.CombinedOutput()
+			code := 0
+			if ee, ok := err.(*exec.ExitError); ok {
+				code = ee.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			out := string(b)
+			t.Logf("start-proxy.sh (owner=%s) -> exit %d, output:\n%s", owner, code, out)
+
+			if code != 0 {
+				t.Errorf("exit %d — this hook must never fail a session", code)
+			}
+			if !strings.Contains(out, c.wantNote) {
+				t.Errorf("output does not say %q:\n%s", c.wantNote, out)
+			}
+			if strings.Contains(out, c.unwantNote) {
+				t.Errorf("output must not say %q:\n%s", c.unwantNote, out)
+			}
+			if _, err := os.Stat(sentinel); err == nil {
+				t.Error("a replacement proxy was started even though the port is answering")
+			}
+			// The foreign proxy's own bookkeeping must survive untouched: rewriting it would hand
+			// the port to whichever project ran last, which is the bug in a quieter form.
+			if !c.ownerIsUs {
+				got, err := os.ReadFile(filepath.Join(state, "proxy-"+port+".owner"))
+				if err != nil || strings.TrimSpace(string(got)) != owner {
+					t.Errorf("the other project's owner file was disturbed: %q, %v", got, err)
+				}
+			}
+			// And it is still serving — the whole point is that nothing killed it.
+			if resp, err := http.Get("http://127.0.0.1:" + port + "/healthz"); err != nil {
+				t.Errorf("the proxy stopped answering: %v", err)
+			} else {
+				resp.Body.Close()
+			}
+		})
+	}
+}
+
+// TestStartProxyRecordsTheOwnerOfAProxyItStarts: the veto above is only as good as the file it
+// reads, and nothing else writes it. Written next to the fingerprint and under the same ownership
+// condition, so a port held by something we did not start is never claimed.
+func TestStartProxyRecordsTheOwnerOfAProxyItStarts(t *testing.T) {
+	requireTool(t, "bash")
+	py := requireTool(t, "python3")
+
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state")
+	proj := filepath.Join(dir, "proj")
+	for _, d := range []string{state, proj} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	ln.Close() // take the port only to learn a free number, then hand it to the fake proxy
+
+	// A fake proxy that actually binds and answers /healthz, so the script reaches its success path
+	// (and its ownership check) rather than the binary-missing branch.
+	fake := filepath.Join(dir, "fake-proxy")
+	script := "#!/usr/bin/env bash\nexec " + py + " -c '\n" +
+		"import http.server, sys\n" +
+		"class H(http.server.BaseHTTPRequestHandler):\n" +
+		"    def do_GET(self):\n" +
+		"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+		"    def log_message(self, *a): pass\n" +
+		"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n' \"$@\"\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	cmd.Dir = proj
+	cmd.Env = append(sandboxEnv(t),
+		"CONTEXT_GURU_STATE="+state,
+		"CONTEXT_GURU_BIN="+fake,
+		"TMPDIR="+dir,
+		"CLAUDE_PLUGIN_OPTION_PORT="+port,
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
+	)
+	b, err := cmd.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); ok {
+		t.Fatalf("exit %d: %s", ee.ExitCode(), b)
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("start-proxy.sh output:\n%s", b)
+	t.Cleanup(func() {
+		if pid, err := os.ReadFile(filepath.Join(state, "proxy-"+port+".pid")); err == nil {
+			// Kill by PID, from the pidfile, never a pattern: these tests run on a box shared with
+			// other people's live proxies as the same unix user.
+			if n, err := strconv.Atoi(strings.TrimSpace(string(pid))); err == nil && n > 1 {
+				_ = syscall.Kill(n, syscall.SIGTERM)
+			}
+		}
+	})
+
+	got, err := os.ReadFile(filepath.Join(state, "proxy-"+port+".owner"))
+	if err != nil {
+		t.Fatalf("no owner file was written for a proxy we started: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != projReal {
+		t.Errorf("owner file says %q, want this project's key %q", strings.TrimSpace(string(got)), projReal)
+	}
+}

@@ -1609,6 +1609,15 @@ def cmd_resolve_scope(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_project_key(_args: argparse.Namespace) -> int:
+    """Read-only: the identity this project's per-project state is filed under. Nothing but a
+    lookup — `project_key` itself already fails open to `realpath(cwd)`, so this cannot fail in a
+    way a caller has to handle, which is what lets start-proxy.sh use it on a hook path.
+    """
+    emit(result="ok", key=project_key())
+    return 0
+
+
 def ensure_hatch(file: str) -> None:
     """Put a hatch in place for a project that is already routed, without editing anything.
 
@@ -2811,6 +2820,11 @@ def main() -> int:
     # cwd every routing `add` call already keys its own record on (see record_install_scope).
     sub.add_parser("resolve-scope")
 
+    # project-key exists for start-proxy.sh, which has to write the OWNER of a proxy it starts and
+    # must not re-implement project_key()'s git-worktree rule in bash — two encodings of one
+    # identity rule is how a proxy ends up owned by a key nothing else ever looks up.
+    sub.add_parser("project-key")
+
     # `strategy` is the named-cache-strategy surface: the one place that decides what a name means,
     # so the skills that use it carry a NAME rather than four tuning numbers in a heredoc.
     # check-url exists so a caller can validate a supplied base URL BEFORE acting on it. Without
@@ -2889,6 +2903,7 @@ def main() -> int:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
     rc = {"add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
+          "project-key": cmd_project_key,
           "strategy": cmd_strategy, "preset": cmd_preset, "port": cmd_port,
           "check-url": cmd_check_url, "update-check": cmd_update_check,
           "gitignore-ensure": cmd_gitignore_ensure}[args.cmd](args)
