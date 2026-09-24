@@ -62,12 +62,23 @@ to act on, not a failure to report as one.
   the route is proven healthy, and reports `adopted_project=… unrouted=… recovery_dir=…` per project —
   read those rather than assuming. `unrouted=removed` is the success value; `unchanged` or `conflict`
   means that project kept its routing and must be reported as still overriding.
+  Relay two more per-project lines rather than folding them into "adopted":
+  `adopted_project_still_overriding=<dir> base_url=<url>` — that project's own pre-context-guru URL was
+  rightly restored, so it still overrides the machine-wide route; the user asked for everywhere and
+  this project is not in it. `adopted_proxy_left_running=<dir> port=<n>` — its old proxy still answers,
+  so its state was left alone; report the port. `adopted_proxy_stopped=` needs no comment.
 - `result=needs_decision reason=port_owned_by_another_project` — `owner_project=` already has a proxy
   on that port, running its preset, and a proxy is never taken from its owner. Only reachable for a
   pinned or previously recorded port. Clear the `port` option so one is allocated, or ask for an
   unused one.
 - `result=refused reason=port_changed_since_plan` — the port they agreed to is no longer the one this
   project gets. **Nothing was written.** Re-run `--route --plan` and ask again on the new port.
+- `result=refused reason=port_recorded_by_another_project` — this project and `owner_project=` both
+  have `port=` recorded; both are equally real, and picking one would put two projects with different
+  presets on one proxy. **Nothing was written.** Report both and ask which keeps the port; the other
+  needs its `port` option cleared (or an uninstall) so a fresh one is allocated.
+- `port_unwound=true` on a failure — step 0's port record and `options.port` were taken back, so
+  "nothing was written" is literal. Absent on a failure they may still be there; say so, do not guess.
 - `result=error reason=binary_install_failed` — read `detail=`. `no_release_found` wants the source
   build offer (`make build-static`, Go 1.26, no C toolchain). Anything naming a checksum
   (`checksum_mismatch`, `checksum_unavailable`, `checksum_absent`) is a **hard stop**: it is the only

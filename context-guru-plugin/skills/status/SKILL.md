@@ -131,12 +131,19 @@ that a new session applies it; the SessionStart hook stops and restarts the prox
 difference. Do not restart it from here: this skill runs inside a session that is routed through
 that proxy.
 
-Beside it, `$CONTEXT_GURU_STATE/proxy-<port>.owner` names the project that proxy belongs to. It is
-only interesting when it names a project that is **not** this one: that means this project is routed
-at somebody else's proxy, running their preset and their strategy, and every number below is theirs.
-Report it as the finding it is rather than reading the stats — and do not restart anything, because
-`start-proxy.sh` deliberately will not take a proxy from the project that owns it. The fix is a port
-of this project's own, which `/context-guru:install` allocates.
+Beside it, `$CONTEXT_GURU_STATE/proxy-<port>.owner` names who that proxy belongs to. Do not compare it
+against this project's path yourself — ask, because the answer depends on the routing scope, not on the
+path: `settings.py owner-token --observed "$(cat "$CONTEXT_GURU_STATE/proxy-<port>.owner")"` prints
+`verdict=ours|theirs`.
+
+`ours` includes the case where the file names a **different** project: under a machine-wide
+(`--scope user`) install there is one settings file, one port and therefore one proxy shared by every
+project on the machine, so the numbers below are the shared proxy's and are this project's too.
+
+`theirs` is the finding: this project is routed at a proxy another project owns, running their preset
+and their strategy, and every number below is theirs. Report that rather than reading the stats — and
+do not restart anything, because `start-proxy.sh` deliberately will not take a proxy from its owner.
+The fix is a port of this project's own, which `/context-guru:install` allocates.
 
 If the fingerprint is **absent** while a proxy is running, it was started before this was recorded (or
 by something else). That is not an error and not a pending change — say so rather than guessing, and

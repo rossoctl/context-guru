@@ -1069,8 +1069,17 @@ def _recorded_ports(exclude_key: str) -> set[int]:
     whose record is an orphan can never steal one from a live proxy. It can only reuse a number
     whose owner is genuinely gone. (`proxy-<port>.owner` is the other half — it is what refuses an
     install onto a port a LIVE proxy owns, and uninstall removes it alongside the record.)
+
+    Returns (used, orphans), where `orphans` maps a port to the absent-directory records holding
+    it. Skipping alone was not enough and the second half is not optional: the orphan record STAYS
+    in the file, and rule 1 of `alloc` hands a recorded port straight back, so a directory that
+    came back — a re-clone at a path used before, an unmounted volume returning — ended up with a
+    record naming a port that had since been reissued to someone else. Two projects on one port is
+    the exact defect this whole change exists to remove, so the caller drops the orphan record in
+    the same write that reissues its port.
     """
-    used = set()
+    used: set[int] = set()
+    orphans: dict[int, list[str]] = {}
     for key, rec in _read_install_scopes().items():
         if key == exclude_key:
             continue
@@ -1078,10 +1087,86 @@ def _recorded_ports(exclude_key: str) -> set[int]:
             continue
         # os.path.isdir, not any attempt to re-derive the project's identity: a deleted directory
         # cannot be asked anything, and the only question here is whether it is still there.
-        if not os.path.isdir(key):
-            continue
-        used.add(rec["port"])
-    return used
+        if os.path.isdir(key):
+            used.add(rec["port"])
+        else:
+            orphans.setdefault(rec["port"], []).append(key)
+    return used, orphans
+
+
+def owner_token() -> tuple[str, str]:
+    """Who owns the proxy on this project's port, as `start-proxy.sh` must compare it.
+
+    Returns (token, scope).
+
+    The owner file exists so that one project never kills a proxy another project is being served
+    by. `project_key()` was the wrong token for that, because it answers a different question:
+    "who am I", not "who is this port shared with". Under `--scope user` there is ONE settings
+    file, therefore one `port` option, therefore ONE port shared by every project on the machine —
+    that being exactly what machine-wide means — while every project still has its own
+    `project_key()`. Keying the owner on the project made every project but the first a stranger to
+    the proxy it is supposed to be using: the veto fires before the fingerprint comparison, so a
+    preset change made from any non-owning project never restarted the proxy and never took
+    effect, and every one of those sessions was told "this project should have its own port", which
+    is the precise opposite of the install the user asked for.
+
+    So the token is keyed on the ROUTING SCOPE, which is the thing that actually decides whether
+    the port is shared: a machine-wide route yields one token for every project that shares it; a
+    project-scoped route yields this project's key, because only that project routes to it.
+    """
+    scope, file, _source = resolve_install_scope()
+    if scope == "user":
+        # The user settings file, not the bare word: two HOMEs on one machine (a test harness, a
+        # second account) are two machine-wide installs, and they must not claim each other's
+        # proxy just because both call themselves `user`.
+        return "user:" + (os.path.realpath(file) if file else user_scope_files()[0]), scope
+    return project_key(), scope
+
+
+def cmd_owner_token(args: argparse.Namespace) -> int:
+    token, scope = owner_token()
+    scope = scope or "(none)"   # nothing routed yet; a literal "None" in the output would be noise
+    if not args.observed:
+        emit(result="ok", owner=token, scope=scope)
+        return 0
+
+    observed = args.observed.strip()
+    if observed == token:
+        emit(result="ok", owner=token, scope=scope, verdict="ours", reason="exact")
+        return 0
+
+    if scope == "user" and not observed.startswith("user:"):
+        # A bare path under a MACHINE-WIDE route. Two ways to get here, and they need opposite
+        # answers, so the file alone cannot decide — the install records can:
+        #
+        #  - a proxy started before this token existed, by whichever project happened to go first.
+        #    Ours: the port is shared by every project this route covers, and deferring to a claim
+        #    from a scheme we no longer use would veto the restart forever, on state nobody can
+        #    clear. That is the regression finding 2 of the review is about — a preset change made
+        #    from any non-owning project never took effect.
+        #  - a project that installed ITSELF on this port and is genuinely being served by that
+        #    proxy. Theirs, machine-wide route or not: it is not covered by this route (its own
+        #    settings file is more specific and keeps winning), so stopping its proxy would take
+        #    away the one it is actually using.
+        #
+        # The discriminator is whether that path still routes itself, which is precisely what the
+        # `--on-existing-projects` gate asks about. Note `adopt` makes the answer "no" for the
+        # projects it folds in, which is right: they are covered by this route afterwards.
+        rec = _read_install_scopes().get(observed)
+        if not (isinstance(rec, dict)
+                and rec.get("scope") in ("project", "project-local", "custom")
+                and bool(rec.get("file")) and os.path.isdir(observed)):
+            emit(result="ok", owner=token, scope=scope, verdict="ours", reason="legacy_unscoped",
+                 observed=observed)
+            return 0
+
+    # Any other difference is a stranger, unchanged from the plain string comparison this replaced:
+    # under a PROJECT-scoped route the port belongs to one project, so a different owner — recorded
+    # or not, existing or not — is somebody else's and is left alone. Deliberately not self-healed
+    # here: a project-scoped session has its own port to go to, so the cost of being wrong is a
+    # session without a proxy, against killing a proxy another project is using.
+    emit(result="ok", owner=token, scope=scope, verdict="theirs", observed=observed)
+    return 0
 
 
 def cmd_port(args: argparse.Namespace) -> int:
@@ -1102,6 +1187,11 @@ def cmd_port(args: argparse.Namespace) -> int:
         # and leaving a scope/file/port shell behind would misreport it as still configured.
         # Fail-open: this must never be load-bearing for uninstall completing, per the plan.
         projects = _read_install_scopes()
+        # --key names the project directly, for a caller acting on a project it is not running in
+        # (install.sh's `adopt`). Without it the only way to name a project was to `cd` into it,
+        # which is a second way for a path to get mangled on the way there.
+        if getattr(args, "key", None):
+            key = project_key(args.key) if os.path.isdir(args.key) else args.key
         removed = projects.pop(key, None)
         if removed is None:
             emit(result="unchanged", note="no record for this project")
@@ -1147,20 +1237,53 @@ def cmd_port(args: argparse.Namespace) -> int:
     projects = _read_install_scopes()
     rec = projects.get(key)
 
+    drop_orphans: list[str] = []
     if isinstance(rec, dict) and isinstance(rec.get("port"), int):
         port, source = rec["port"], "recorded"
+        # VERIFY, do not assume. Returning a recorded port unchanged is right — the URL naming it
+        # is already written into a settings file, and moving it would strand that file — but it
+        # must not paper over a port two live projects both have recorded. Reachable from a
+        # hand-edited install-scope.json, a restored backup, or (before the orphan drop above) a
+        # directory that came back after its port was reissued. No allocation can resolve this:
+        # both records are equally real, and picking one silently is how the projects end up
+        # sharing a proxy with different presets. `port=` is still emitted, deliberately, so a
+        # caller that fails open does so onto THIS project's own recorded port rather than onto
+        # the plugin.json default, which would be a different project's proxy again.
+        # SHARING ONE FILE IS NOT A CLASH. A machine-wide (`--scope user`) install is one settings
+        # file, therefore one `port` option, therefore one port for every project it routes — by
+        # design, that being what machine-wide means. So the question is not "does another project
+        # have this port" but "does another project ROUTE ITSELF to it": same file, no clash;
+        # different file (or no file yet, which cannot be shown to be the same one), a clash.
+        my_file = rec.get("file") if isinstance(rec, dict) else None
+        clash = sorted(k for k, r in projects.items()
+                       if k != key and isinstance(r, dict) and r.get("port") == port
+                       and os.path.isdir(k)
+                       and not (my_file and r.get("file") == my_file))
+        if clash:
+            emit(result="error", reason="port_recorded_by_another_project", port=port,
+                 source=source, other_project=clash[0], others=len(clash),
+                 note=f"port {port} is recorded for this project AND for {clash[0]}; nothing was "
+                      "written. Clear the port option in one of them (or uninstall there) so a "
+                      "fresh port is allocated — two projects on one port is what this allocation "
+                      "exists to prevent")
+            return 3
     else:
         explicit_port, _explicit_file = _explicit_configured_port(args.plugin)
         if explicit_port is not None:
             port, source = explicit_port, "configured"
         else:
-            used = _recorded_ports(key)
+            used, orphans = _recorded_ports(key)
             port = None
             for candidate in range(PORT_SCAN_START, PORT_SCAN_END + 1):
                 if candidate in used or not _port_bindable(candidate):
                     continue
                 port = candidate
                 break
+            # Whatever absent-directory records were holding the port we just took go with it — see
+            # _recorded_ports. Nothing is lost by dropping them: if such a project comes back, its
+            # own settings file still carries the `port` option this command wrote, so rule 2
+            # (`configured`) hands it the same port back without the record.
+            drop_orphans = list(orphans.get(port, [])) if port is not None else []
             if port is None:
                 emit(result="error", reason="no_port_available",
                      note=f"every port from {PORT_SCAN_START} to {PORT_SCAN_END} is either "
@@ -1194,6 +1317,8 @@ def cmd_port(args: argparse.Namespace) -> int:
         entry = dict(rec) if isinstance(rec, dict) else {}
         entry["port"] = port
         projects[key] = entry
+        for orphan_key in drop_orphans:
+            projects.pop(orphan_key, None)
         ensure_state_dir(state_dir())
         _write_atomic(install_scope_path(),
                        (json.dumps({"version": 1, "projects": projects}, indent=2) + "\n")
@@ -1681,8 +1806,16 @@ def cmd_scopes(_args: argparse.Namespace) -> int:
         record = projects[key]
         if not isinstance(record, dict):
             continue
-        print("existing_project={} scope={} port={} file={}".format(
-            key, record.get("scope") or "(unknown)", record.get("port") or "(none)",
+        # A record with a port but no scope/file is NOT a project that routes itself. `port alloc`
+        # writes the port before the routing write, so a plan that stopped at a later gate, or an
+        # install that failed after step 0, leaves exactly that shape behind. Reported on its own
+        # line: the `--scope user` gate reads `existing_project=` to decide whose routing would
+        # override the machine-wide one, and a project with no routing overrides nothing — listing
+        # it there refused an install over a project that was never installed.
+        line = "existing_project" if (record.get("scope") and record.get("file")) \
+            else "port_only_record"
+        print("{}={} scope={} port={} file={}".format(
+            line, key, record.get("scope") or "(unknown)", record.get("port") or "(none)",
             record.get("file") or "(none)"))
     return 0
 
@@ -2953,6 +3086,20 @@ def main() -> int:
                          "reported (and the user consented to, in whatever URL a plan showed). "
                          "If the real allocation would now pick a DIFFERENT port, refuse instead "
                          "of silently writing a URL nobody agreed to.")
+    pt.add_argument("--key", default="",
+                    help="for `release`: the project to release, for a caller acting on a project "
+                         "it is not running IN (install.sh's `adopt`). A directory is resolved "
+                         "through project_key(); anything else is taken as a key already. "
+                         "Omitted, this project is released.")
+
+    # Who owns the proxy on this port — see owner_token(). Its own command rather than a field of
+    # `port show`, because start-proxy.sh asks it on every session start, before it has decided
+    # whether it is allowed to touch anything at all.
+    ot = sub.add_parser("owner-token")
+    ot.add_argument("--observed", default="",
+                    help="the contents of proxy-<port>.owner as read from disk. Given, the answer "
+                         "carries verdict=ours|theirs; omitted, it is just this project's token, "
+                         "for writing that file.")
 
     # The proxy-binary release-notice surface: separate from `strategy`/`preset` because it is
     # machine-wide (one binary on PATH) rather than per-port or per-project.
@@ -2979,6 +3126,7 @@ def main() -> int:
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
           "project-key": cmd_project_key, "scopes": cmd_scopes,
           "strategy": cmd_strategy, "preset": cmd_preset, "port": cmd_port,
+          "owner-token": cmd_owner_token,
           "check-url": cmd_check_url, "update-check": cmd_update_check,
           "gitignore-ensure": cmd_gitignore_ensure}[args.cmd](args)
 
