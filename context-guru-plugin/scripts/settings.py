@@ -1047,10 +1047,19 @@ def cmd_add(args: argparse.Namespace) -> int:
             emit(result="unchanged", file=args.file,
                  note="statusline already installed, nothing to add")
             return 0
-        saved = backup(args.file) if existed else ""
+        # --no-backup: install.sh's own statusline follow-up call passes this. It runs seconds
+        # after the routing `add` in the SAME install, which already backed up the file's
+        # pre-install state — a second backup here would only capture "routed, no statusline yet",
+        # a state nobody would ever want to restore to, and it left two backup files on disk for
+        # one conceptual install. `/context-guru:statusline`'s own standalone calls never pass this,
+        # so they still get the backup a user-initiated change is entitled to.
+        saved = "" if args.no_backup else (backup(args.file) if existed else "")
         apply_statusline(data, sl_command)
         save(args.file, data)
-        emit(result="added", file=args.file, backup=saved or "(new file)", statusline=sl_command)
+        emit(result="added", file=args.file,
+             backup=saved or ("(covered by the routing install's backup)" if args.no_backup
+                               else "(new file)"),
+             statusline=sl_command)
         return 0
 
     current = env.get(KEY)
@@ -2042,6 +2051,10 @@ def main() -> int:
                             "\"command\", \"command\": <this value>}), refusing to replace one "
                             "that is not ours unless --force. on remove: taken back only if it "
                             "is exactly what a previous --statusline install recorded writing.")
+        p.add_argument("--no-backup", action="store_true",
+                       help="on a statusline-only add: skip taking a timestamped backup. For a "
+                            "follow-up call that runs seconds after another `add` already backed "
+                            "up this file in the same install — never for a standalone change.")
     off = sub.add_parser("off",
         help="turn the status line off without touching routing — the counterpart to `add "
              "--statusline`, for when both were installed together and only the statusline "
