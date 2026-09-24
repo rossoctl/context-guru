@@ -201,7 +201,14 @@ def load(path: str) -> tuple[dict, bool]:
 
 
 def backup(path: str) -> str:
-    """Copy `path` aside and return the copy's name. Never overwrites an existing backup.
+    """Copy `path` aside into its recovery folder and return the copy's name. Never overwrites an
+    existing backup.
+
+    Lives in `context-guru-settings-json/` beside the file — the same folder `.pre-install` and
+    `.pre-reset-*` use — not loose beside the settings file, which is where it used to live. That
+    was a real, reported gap: a full copy of a settings file, sitting in a project's working tree,
+    uncovered by the `.gitignore` entry `/context-guru:install` adds for the recovery folder,
+    because it lived outside it.
 
     The stamp used to be second-granularity with a plain `copy2`, which meant an
     install-then-uninstall round trip — well inside one second — wrote both backups to the SAME
@@ -211,9 +218,21 @@ def backup(path: str) -> str:
     Microseconds plus O_EXCL: the exclusive create is what actually guarantees it, since two
     writes in the same microsecond are merely unlikely rather than impossible.
     """
+    real = os.path.realpath(path)
+    backup_dir = recovery_dir_for(real)
+    try:
+        ensure_dir_0700(backup_dir, chmod_parent=False)
+        write_recovery_readme(backup_dir)
+    except OSError:
+        # Fail open, same principle as the rest of the recovery-folder mechanism: an unwritable
+        # recovery folder must not turn an ordinary settings write into a hard failure. Falls back
+        # to where backups lived before this folder existed.
+        backup_dir = os.path.dirname(real)
+    basename = os.path.basename(real)
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     for attempt in range(100):
-        dest = f"{path}.context-guru-backup-{stamp}" + (f".{attempt}" if attempt else "")
+        dest = os.path.join(backup_dir, f"{basename}.context-guru-backup-{stamp}"
+                             + (f".{attempt}" if attempt else ""))
         try:
             fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
@@ -231,27 +250,37 @@ def backup(path: str) -> str:
                 pass
             raise
         shutil.copystat(path, dest)
-        prune_backups(path)
+        prune_backups(real, backup_dir)
         return dest
     raise RuntimeError(f"could not create a backup for {path}")
 
 
 # How many backups of one settings file to keep. Each add and each remove writes one, so a user
-# who installs and uninstalls a few times accumulated them forever in ~/.claude — 40 files after
-# 20 cycles, in a directory they read by hand.
+# who installs and uninstalls a few times accumulated them forever — 40 files after 20 cycles, in
+# a directory they read by hand. (An uninstall now deletes all of them anyway — see
+# forget_backups() — so this window matters mainly across a run of edits that never uninstalls.)
 KEEP_BACKUPS = 10
 
 
-def prune_backups(path: str) -> None:
-    """Delete all but the newest KEEP_BACKUPS backups of `path`. Best effort."""
+def prune_backups(path: str, backup_dir: str | None = None) -> None:
+    """Delete all but the newest KEEP_BACKUPS backups of `path`, in `backup_dir` (defaults to
+    `path`'s recovery folder — the normal case; `backup()` passes its own fallback directory
+    explicitly when the recovery folder could not be created). Best effort.
+    """
     import glob
 
+    real = os.path.realpath(path)
+    if backup_dir is None:
+        backup_dir = recovery_dir_for(real)
+    basename = os.path.basename(real)
     try:
-        # glob.escape on the PATH: `[`, `?` and `*` in a directory name are pattern syntax, so
-        # for a settings file under e.g. `~/projects/foo[1]/.claude/` this matched nothing and
-        # pruning silently did nothing forever — invisible, because pruning is best-effort by
-        # design, and the backups it exists to bound then accumulate without limit.
-        found = sorted(glob.glob(glob.escape(path) + ".context-guru-backup-*"),
+        # glob.escape on the WHOLE joined path, not just the basename: `backup_dir` is derived
+        # from the settings file's own directory, which can itself contain `[`, `?` or `*` (a
+        # project at `~/projects/foo[1]/.claude/`, say) — escaping only the basename left the
+        # directory half of the pattern live, so `proj[1]` was read as a character class and
+        # matched nothing. Silent, because pruning is best-effort by design, and the backups it
+        # exists to bound then accumulate without limit.
+        found = sorted(glob.glob(glob.escape(os.path.join(backup_dir, basename)) + ".context-guru-backup-*"),
                        key=os.path.getmtime)
     except OSError:
         return
@@ -260,6 +289,48 @@ def prune_backups(path: str) -> None:
             os.remove(old)
         except OSError:
             pass
+
+
+def forget_backups(path: str) -> None:
+    """Delete every `.context-guru-backup-*` for `path`, best effort. Called after a successful
+    uninstall (cmd_remove, cmd_off): once context-guru's own keys are gone from the file, the
+    rolling per-edit checkpoints that led up to this point answer a question nobody has anymore —
+    the only reference worth keeping is `.pre-install` (what restore reverts to) or, if the escape
+    hatch ever runs here, `.pre-reset-*`. A growing pile of same-purpose backups beside them is
+    just something to explain, not something to recover from.
+
+    Not called from `maybe_delete_if_empty`'s success path: when the FILE itself is deleted there
+    is nothing left worth curating individually, and that function removes the whole recovery
+    folder instead.
+    """
+    import glob
+
+    real = os.path.realpath(path)
+    basename = os.path.basename(real)
+    # Escape the WHOLE joined path — see the identical fix and comment in prune_backups().
+    pattern = glob.escape(os.path.join(recovery_dir_for(real), basename)) + ".context-guru-backup-*"
+    try:
+        found = glob.glob(pattern)
+    except OSError:
+        return
+    for old in found:
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+
+
+def post_uninstall_backup_note(deleted: bool) -> str:
+    """What to report for `backup=` once an uninstall-type write has cleaned up after itself. The
+    path `backup()` returned a moment earlier no longer exists by the time this prints — either
+    `maybe_delete_if_empty` removed it along with the whole recovery folder, or `forget_backups`
+    removed it on its own — so reporting that path would send someone looking for a file that
+    is not there.
+    """
+    if deleted:
+        return "(gone — deleted along with the file and its whole recovery folder)"
+    return ("(gone — every backup is removed after a clean uninstall; "
+            "see the recovery folder's .pre-install)")
 
 
 # ---------------------------------------------------------------------------
@@ -729,15 +800,21 @@ def maybe_delete_if_empty(path: str, data: dict) -> bool:
     Never deletes a file that held something before context-guru's first edit (per
     `_created_by_us`): that content — a theme, a permission grant, another plugin's config — is
     the user's, whatever is left in `data` right now, and removing it would take that with it.
+
+    Also removes the file's entire recovery folder, not just its backups: with the file gone,
+    there is no `.pre-install` to hold (it never existed either — see `_created_by_us`) and nothing
+    left worth curating individually.
     """
     if data:
         return False
-    if not _created_by_us(os.path.realpath(path)):
+    real = os.path.realpath(path)
+    if not _created_by_us(real):
         return False
     try:
         os.remove(path)
     except OSError:
         return False
+    shutil.rmtree(recovery_dir_for(real), ignore_errors=True)
     return True
 
 
@@ -1264,6 +1341,10 @@ def cmd_off(args: argparse.Namespace) -> int:
     deleted = maybe_delete_if_empty(args.file, data)
     if not deleted:
         save(args.file, data)
+        # Once context-guru's keys are gone, every backup here — including the one just taken —
+        # answers a question nobody has anymore. See forget_backups()'s own docstring.
+        forget_backups(args.file)
+    saved = post_uninstall_backup_note(deleted)
     emit(result="removed", file=args.file, backup=saved, statusline_restored=restored_sl,
          file_deleted=str(deleted).lower())
     return 0
@@ -1285,6 +1366,8 @@ def cmd_remove(args: argparse.Namespace) -> int:
             deleted = maybe_delete_if_empty(args.file, data)
             if not deleted:
                 save(args.file, data)
+                forget_backups(args.file)
+            saved = post_uninstall_backup_note(deleted)
             emit(result="removed", file=args.file, backup=saved, statusline_restored=restored_sl,
                  file_deleted=str(deleted).lower(),
                  note="statusline-only removal; no routing was present to touch")
@@ -1318,7 +1401,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
              expected=args.url,
              note="this base URL is not the one context-guru installed; left untouched")
         return 2
-    saved = backup(args.file)
+    backup(args.file)
     del env[KEY]
     # Take our upstream key with it, but ONLY the value we recorded writing. An ANTHROPIC_UPSTREAM
     # the user set themselves is theirs, and uninstall removing it would be the same class of
@@ -1375,7 +1458,8 @@ def cmd_remove(args: argparse.Namespace) -> int:
     deleted = maybe_delete_if_empty(args.file, data)
     if not deleted:
         save(args.file, data)
-    emit(result="removed", file=args.file, was=current, backup=saved,
+        forget_backups(args.file)
+    emit(result="removed", file=args.file, was=current, backup=post_uninstall_backup_note(deleted),
          restored=restored, env_block_left=str(bool(env)).lower(),
          statusline_restored=restored_sl, file_deleted=str(deleted).lower())
     return 0

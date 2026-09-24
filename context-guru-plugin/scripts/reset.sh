@@ -567,7 +567,7 @@ for path in "./.claude/settings.local.json" "./.claude/settings.json" "$CLAUDE_D
     # since. Both read the same to a user: nothing here holds the original content.
     say "      ! no pre-edit copy was taken for this file — it already carried context-guru's"
     say "        keys when the record was created, so nothing here holds its original content."
-    newest="$(ls -1t "$path".context-guru-backup-* 2>/dev/null | head -1 || true)"
+    newest="$(ls -1t "$recovery_dir/$(basename "$path").context-guru-backup-"* 2>/dev/null | head -1 || true)"
     if [ -n "$newest" ]; then
       say "        a timestamped backup exists and is NOT restored automatically, because it"
       say "        may be a copy of a later state rather than of your original:"
@@ -610,7 +610,9 @@ if [ ! -s "$PLAN" ]; then
   say "NOT back to their pre-install state, and this tool has no copy that would put them there."
   say ""
   say "What works, in order of least effort:"
-  say "  1. compare a timestamped backup beside the file and copy it back yourself:"
+  say "  1. compare a timestamped backup and copy it back yourself — look in"
+  say "     <dir>/context-guru-settings-json/ beside the file (the normal case), or beside the"
+  say "     file itself if that folder could not be created:"
   say "       cp <file>.context-guru-backup-<newest> <file>"
   say "  2. or open the file and delete the ANTHROPIC_BASE_URL / ANTHROPIC_UPSTREAM /"
   say "     CONTEXT_GURU_BIN keys from its \"env\" block, leaving everything else alone."
