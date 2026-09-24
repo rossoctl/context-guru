@@ -31,7 +31,18 @@ defaulted 8787 writes `keepalive-8787.yaml` — a file nothing ever reads — an
 Read the fallback **per option**, not from `source=`: only keys the user actually set are printed,
 so somebody who set the port and never touched the preset gets a real `source=` and no
 `option_preset=` line. Any option not listed is unconfigured — use the `plugin.json` default for
-that one alone (port 8787, preset `cache`, cache strategy `5-min-ping`).
+that one alone (preset `cache`, cache strategy `5-min-ping`).
+
+**Not for the port.** It is allocated per project rather than defaulted, so 8787 is a guess at
+another project's proxy and the whole failure above — a `keepalive-<port>.yaml` nothing reads,
+reported as success — happens just the same. Ask:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port show
+```
+
+`port=<n>` is this project's; it wins over `option_port=` when they disagree. Only `port=(none)`
+sends you back to `option_port=`, and then to 8787.
 
 ## 2. Report what is in effect
 

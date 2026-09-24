@@ -53,6 +53,20 @@ to act on, not a failure to report as one.
 - `result=needs_decision reason=user_scope_needs_flag` — they passed `--global`. Confirm once, naming the
   blast radius: **every** Claude Code session on the machine, including projects that have nothing
   to do with context-guru, which is also every session they could use to fix it.
+- `result=needs_decision reason=project_installs_exist` — user scope, and the `existing_project=`
+  lines name projects that route themselves. The machine-wide route will **not** reach them: their own
+  settings file is more specific, so it keeps winning — the opposite of what "everywhere" means to the
+  person asking. Name them and ask, then pass `--on-existing-projects leave` (they keep their own port
+  and config; safe, and right if that was deliberate) or `adopt` (their routing and port option are
+  removed, each file backed up, so they fall back to the machine-wide route). `adopt` runs last, after
+  the route is proven healthy, and reports `adopted_project=… unrouted=… backup=…` per project — read
+  those rather than assuming.
+- `result=needs_decision reason=port_owned_by_another_project` — `owner_project=` already has a proxy
+  on that port, running its preset, and a proxy is never taken from its owner. Only reachable for a
+  pinned or previously recorded port. Clear the `port` option so one is allocated, or ask for an
+  unused one.
+- `result=refused reason=port_changed_since_plan` — the port they agreed to is no longer the one this
+  project gets. **Nothing was written.** Re-run `--route --plan` and ask again on the new port.
 - `result=error reason=binary_install_failed` — read `detail=`. `no_release_found` wants the source
   build offer (`make build-static`, Go 1.26, no C toolchain). Anything naming a checksum
   (`checksum_mismatch`, `checksum_unavailable`, `checksum_absent`) is a **hard stop**: it is the only
@@ -167,7 +181,10 @@ not reword the command to look like less than it is, and never write routing whi
 - Name the **cache strategy** from the result, and what it costs.
 - Dashboard: `http://127.0.0.1:<port>/dashboard/` — the four billed token tiers are where the cache
   effect shows.
-- If `port` is not 8787, say so; a non-default port is the kind of thing people forget they set.
+- **Name the port**, and that it is this project's own: `port_source=scanned` means allocated just
+  now, `recorded` a re-run, `configured` their own pinning. One project per port is deliberate, so a
+  number they did not pick is correct. `port_warning=` means it works but was not recorded — mention
+  it, since a later install could hand the same port to another project.
 - `/context-guru:status` for numbers, `/context-guru:cache-strategy-picker` to change the strategy,
   `/context-guru:uninstall` to undo.
 - **`reset_hatch=` verbatim, on its own line, as your last line.** This is the only moment the user

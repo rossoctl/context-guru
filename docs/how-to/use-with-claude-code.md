@@ -53,8 +53,10 @@ Add to `.claude/settings.json` so you don't export anything by hand:
 Use `.claude/settings.local.json` instead if you do not want to commit it: a base URL pointing at
 `localhost` breaks Claude Code for everyone who clones the repo whenever the proxy is not running.
 
-That is what the plugin writes by default, on port **8787** rather than 4000 — litellm's default is
-4000, and a collision there is silent and confusing.
+That is the shape the plugin writes, except that it does not use a fixed port: it allocates a free
+one per project and records it, so two projects with different configurations never end up sharing a
+proxy and restarting it out from under each other. The scan starts at **8787** rather than 4000 —
+litellm's default is 4000, and a collision there is silent and confusing.
 
 ## Keep the API key out of Claude Code
 

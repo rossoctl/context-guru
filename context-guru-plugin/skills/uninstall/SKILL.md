@@ -36,8 +36,23 @@ default would build the wrong URL and the removal would find nothing to remove:
 Use its `option_port=`. **Read the fallback per option, not from `source=`:** that command prints an
 `option_<name>=` line only for keys the user actually configured, and reports `source=(none)` only when
 nothing at all is set — so somebody with a partial config gets a real `source=` and no `option_port=`
-line. Any option the output does not list is unconfigured; use the `plugin.json` default for that one
-(port 8787), whatever `source=` says. Then:
+line. Any option the output does not list is unconfigured; use the `plugin.json` default for that one,
+whatever `source=` says.
+
+**The port is the exception, and 8787 is the wrong guess for it.** Ports are allocated per project —
+one project per port, because two projects sharing one proxy made every session start kill and
+restart it, wiping the in-memory store each time — so the port this project runs on is usually
+neither 8787 nor anything the user ever typed. It is recorded, so ask for it instead of defaulting
+it:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port show
+```
+
+`result=ok port=<n>` is this project's port, and it wins over `option_port=` when the two disagree —
+that is the same order the allocator uses, and it is what the proxy was actually started on.
+`port=(none)` means there is no record: only then fall back to `option_port=`, and to 8787 after
+that. Then:
 
 ```bash
 PORT="<port>"
@@ -130,6 +145,28 @@ If it is still running, report the PID and let the user decide. Do not escalate 
 pattern, and never broaden the match to `context-guru-proxy` alone: on a host that also runs a
 production instance or a benchmark arm, that takes those down too.
 
+Once it is confirmed stopped, release the port — and only then:
+
+```bash
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/context-guru"
+rm -f "${STATE}/proxy-${PORT}.owner" "${STATE}/proxy-${PORT}.fingerprint"
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port release
+```
+
+Both halves matter, for different reasons. `port release` drops this project's record, and that
+record is what keeps the port out of every other project's allocation pool — skip it and the pool
+loses a port per uninstall, silently, until installs start landing further and further from 8787 for
+no visible reason. The `.owner` file is what makes a *future* install on that port refuse with
+`port_owned_by_another_project`: it names the project that owned the proxy you just stopped, so
+leaving it behind gets the next install here refused over a proxy that no longer exists. The
+`.fingerprint` describes the same dead proxy and goes with it.
+
+**Only do this if the proxy is actually stopped.** If the kill reported **NOT OURS**, or the health
+check still answers, leave all three alone — they describe something that is still running, and a
+released record plus a live proxy is the one state nothing else in the plugin expects. Neither
+command is allowed to be load-bearing either: `port release` fails open by design, so report a
+`result=skipped` and finish the uninstall rather than stopping on it.
+
 ## 3. Offer, do not assume, the rest
 
 Ask before either of these; neither is implied by "stop routing my sessions":
@@ -141,7 +178,9 @@ Ask before either of these; neither is implied by "stop routing my sessions":
   self-gates on `ANTHROPIC_BASE_URL` and exits immediately in a project that is not routed — which,
   after step 1, is every project. Worth saying, so a leftover hook is not mistaken for a leftover
   proxy.
-- **Delete the state directory** — `~/.local/state/context-guru` holds the pidfile, the dashboard
+- **Delete the state directory** — `~/.local/state/context-guru` holds the pidfile,
+  `install-scope.json` (which port belongs to which project, shared by every project on the machine
+  — so deleting it affects the others, not just this one), the dashboard
   database (session metadata and token counts, no prompt content unless they enabled content
   capture), and `context-guru-reset` itself. Deleting it removes the hatch and its `~/.local/bin`
   copy — fine once they are working again and have confirmed it, but say so before they agree.

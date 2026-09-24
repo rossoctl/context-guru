@@ -21,7 +21,7 @@
     "port": {
       "type": "number",
       "title": "Proxy port",
-      "description": "Local port the proxy listens on. The port must be FIXED rather than negotiated: the ANTHROPIC_BASE_URL written into your settings and the session hook that starts the proxy have to agree, and a URL cannot be renegotiated after it is written. Default 8787 — deliberately not 4000, which collides with litellm.",
+      "description": "Local port the proxy listens on. The port must be FIXED rather than negotiated: the ANTHROPIC_BASE_URL written into your settings and the session hook that starts the proxy have to agree, and a URL cannot be renegotiated after it is written. Leave it unset and a free port is allocated for this project on install and recorded, one project per port — two projects sharing a proxy made every session start restart it. Set it only to pin a specific port; the scan starts at 8787, deliberately not 4000, which collides with litellm.",
       "default": 8787,
       "min": 1024,
       "max": 65535

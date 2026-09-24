@@ -7,7 +7,7 @@ description: Report whether the local context-guru proxy is running, whether thi
 # context-guru status
 
 **If invoked with `--stats`**, skip everything below: resolve the port the same way step 1 does
-(`settings.py config`, falling back to the `plugin.json` default of 8787), run
+(`settings.py port show`, then `settings.py config`, then the `plugin.json` default), run
 
 ```bash
 curl -fsS "http://127.0.0.1:${PORT}/stats" | jq .
@@ -36,8 +36,23 @@ First get the configured port, because you cannot read it from the environment h
 Use its `option_port=`. **Read the fallback per option, not from `source=`:** that command prints an
 `option_<name>=` line only for keys the user actually configured, and reports `source=(none)` only when
 nothing at all is set — so somebody with a partial config gets a real `source=` and no `option_port=`
-line. Any option the output does not list is unconfigured; use the `plugin.json` default for that one
-(port 8787), whatever `source=` says. Then:
+line. Any option the output does not list is unconfigured; use the `plugin.json` default for that one,
+whatever `source=` says.
+
+**The port is the exception, and 8787 is the wrong guess for it.** Ports are allocated per project —
+one project per port, because two projects sharing one proxy made every session start kill and
+restart it, wiping the in-memory store each time — so the port this project runs on is usually
+neither 8787 nor anything the user ever typed. It is recorded, so ask for it instead of defaulting
+it:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" port show
+```
+
+`result=ok port=<n>` is this project's port, and it wins over `option_port=` when the two disagree —
+that is the same order the allocator uses, and it is what the proxy was actually started on.
+`port=(none)` means there is no record: only then fall back to `option_port=`, and to 8787 after
+that. Then:
 
 ```bash
 PORT="<port>"
@@ -115,6 +130,13 @@ upgrade landed a new `bin=` — and **the running proxy predates it**. Say which
 that a new session applies it; the SessionStart hook stops and restarts the proxy when it sees the
 difference. Do not restart it from here: this skill runs inside a session that is routed through
 that proxy.
+
+Beside it, `$CONTEXT_GURU_STATE/proxy-<port>.owner` names the project that proxy belongs to. It is
+only interesting when it names a project that is **not** this one: that means this project is routed
+at somebody else's proxy, running their preset and their strategy, and every number below is theirs.
+Report it as the finding it is rather than reading the stats — and do not restart anything, because
+`start-proxy.sh` deliberately will not take a proxy from the project that owns it. The fix is a port
+of this project's own, which `/context-guru:install` allocates.
 
 If the fingerprint is **absent** while a proxy is running, it was started before this was recorded (or
 by something else). That is not an error and not a pending change — say so rather than guessing, and

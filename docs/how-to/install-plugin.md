@@ -62,7 +62,7 @@ form has no explanation of what each choice does; use those for the two rows tha
 
 | Option | Default | Change it when |
 |---|---|---|
-| **Proxy port** | `8787` | something already holds 8787 (not 4000 — that collides with litellm) |
+| **Proxy port** | *(allocated)* | almost never — leave it empty and the install picks a free port for **this project** and records it. Set it only to pin a specific one. One project per port is deliberate: two projects sharing a proxy meant each project's session start killed and restarted it, losing the other's warm cache every time. The scan starts at 8787 (not 4000 — that collides with litellm) |
 | **Preset** | `off` | you want context editing at all. `off` is passthrough: nothing dropped, no model called. `/context-guru:preset-picker` explains each one |
 | **Cache strategy** | `5-min-ping` | you don't want keep-alive pings that spend a little of your own quota to keep the cache warm. `none` turns it off. `/context-guru:cache-strategy-picker` explains whether it's paying for itself on `keepalive_net_usd` |
 | **Idle exit** | `24h` | rarely — floor is `max(2 × store.ttl_seconds, 1h)` |
@@ -116,7 +116,8 @@ too — see [docs/reference/presets.md](../reference/presets.md).
 ## Then
 
 - `/context-guru:status` — is it routed, is it up, and what has it saved.
-- Dashboard: `http://127.0.0.1:8787/dashboard/`.
+- Dashboard: `http://127.0.0.1:<port>/dashboard/` — `/context-guru:status` names the port, which is
+  this project's own and usually not 8787.
 - `/context-guru:uninstall` — removes the one settings key (with a backup) and stops the proxy.
 - `/context-guru:statusline` — puts this session's running savings in your terminal status line.
   Two extra segments are off by default; turn either on with (`$FILE` is whatever
@@ -179,7 +180,20 @@ from `.claude/settings.local.json` to get working immediately.
 **"The proxy binary is not on PATH."** The installer puts it in `~/.local/bin`. Add that to your
 `PATH`.
 
-**Port 8787 is taken.** Change it in `/plugin configure`. Avoid 4000 — litellm defaults to it.
+**The port is taken.** You should not see this: the install allocates a free port. It is reachable
+only if you pinned one in `/plugin configure` — clear it to get one allocated, or pick another, and
+avoid 4000, which litellm defaults to.
+
+**`port_owned_by_another_project`.** The port this project would use is already serving a different
+project, named in the message. A proxy is never taken from the project that owns it, so the install
+refuses instead of restarting it underneath them. Clear the pinned `port` option so one is allocated
+for this project.
+
+**Installing at user scope, and one project routes itself.** A project's own settings file is more
+specific than `~/.claude/settings.json`, so it keeps overriding the machine-wide route — the install
+lists those projects and asks. `leave` keeps their own port and config (safe, and right if it was
+deliberate); `adopt` removes their routing and port option, with a backup of each file, so they fall
+back to the machine-wide route.
 
 **The status line is blank in a routed project.** Blank is normal before the first response of a
 session. Check `/context-guru:status` for the same numbers to confirm it's not simply early.

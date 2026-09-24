@@ -7037,9 +7037,16 @@ func TestInstallSkillDelegatesRatherThanReimplementing(t *testing.T) {
 	}
 	// Cut from 423 lines to roughly a third. Not a style preference: 39 of those lines were some
 	// form of "do not improvise this", which is what prose has to do when it carries a mechanism.
-	if n := strings.Count(body, "\n"); n > 200 {
+	//
+	// Raised 200 -> 220 when per-project port allocation added three decision branches the script
+	// can hand back (project_installs_exist, port_owned_by_another_project, port_changed_since_plan).
+	// Relaying a `result=`/`reason=` the script produced is the skill's job and not duplicated
+	// mechanism — the `banned` check above is what actually enforces that distinction, and this
+	// number only keeps the prose from creeping back. Raise it for a new branch; never to make room
+	// for a worked example or a second copy of an ordering.
+	if n := strings.Count(body, "\n"); n > 220 {
 		t.Errorf("the install skill is %d lines; it delegates the mechanism now, so it should be "+
-			"well under 200", n)
+			"well under 220", n)
 	}
 }
 
