@@ -1099,6 +1099,30 @@ def cmd_port(args: argparse.Namespace) -> int:
         emit(result="released", port=released_port)
         return 0
 
+    if args.op == "unset":
+        # Remove the `port` OPTION from one settings file, leaving everything else in it alone.
+        # Needed by install.sh's `--on-existing-projects adopt`: a project being folded into a
+        # user-scope install stops having its own route, and a leftover per-project `port` would
+        # then point its hooks at a port nothing serves — worse than the state before, because the
+        # project looks configured. Deliberately does NOT touch install-scope.json; `release` owns
+        # that, and the caller runs both.
+        if not args.file:
+            emit(result="error", reason="unset_needs_a_file")
+            return 3
+        data, existed = load(args.file)
+        if not existed:
+            emit(result="unchanged", file=args.file, note="no such file")
+            return 0
+        options = (((data.get("pluginConfigs") or {}).get(args.plugin) or {}).get("options"))
+        if not isinstance(options, dict) or "port" not in options:
+            emit(result="unchanged", file=args.file, note="no port option here")
+            return 0
+        saved = backup(args.file)
+        del options["port"]
+        save(args.file, data)
+        emit(result="removed", file=args.file, backup=saved)
+        return 0
+
     # op == alloc
     projects = _read_install_scopes()
     rec = projects.get(key)
@@ -1615,6 +1639,31 @@ def cmd_project_key(_args: argparse.Namespace) -> int:
     way a caller has to handle, which is what lets start-proxy.sh use it on a hook path.
     """
     emit(result="ok", key=project_key())
+    return 0
+
+
+def cmd_scopes(_args: argparse.Namespace) -> int:
+    """Read-only: every per-project routing record there is, one line each.
+
+    Exists for install.sh's `--scope user` gate. A user-scope install routes EVERY project on the
+    machine, so a project that already has its OWN routing is about to start overriding the
+    machine-wide one it just asked for — silently, because the more specific settings file simply
+    wins. The install cannot answer whether that is what the user wanted, so it has to be able to
+    LIST them and ask; that is all this does.
+
+    One line per record, each carrying the whole record, rather than numbered keys: the consumer is
+    bash, and a `project_1=`/`scope_1=`/`port_1=` shape makes it assemble records out of parallel
+    arrays, which is how a report ends up pairing one project's path with another's port.
+    """
+    projects = _read_install_scopes()
+    emit(result="ok", count=len(projects))
+    for key in sorted(projects):
+        record = projects[key]
+        if not isinstance(record, dict):
+            continue
+        print("existing_project={} scope={} port={} file={}".format(
+            key, record.get("scope") or "(unknown)", record.get("port") or "(none)",
+            record.get("file") or "(none)"))
     return 0
 
 
@@ -2825,6 +2874,9 @@ def main() -> int:
     # identity rule is how a proxy ends up owned by a key nothing else ever looks up.
     sub.add_parser("project-key")
 
+    # scopes exists for install.sh's --scope user gate; read-only, no arguments — see cmd_scopes.
+    sub.add_parser("scopes")
+
     # `strategy` is the named-cache-strategy surface: the one place that decides what a name means,
     # so the skills that use it carry a NAME rather than four tuning numbers in a heredoc.
     # check-url exists so a caller can validate a supplied base URL BEFORE acting on it. Without
@@ -2866,11 +2918,13 @@ def main() -> int:
     # rather than making `alloc` re-resolve it; omitted, it falls back to `resolve_install_scope()`
     # exactly as `preset set` does when nothing is configured or routed yet.
     pt = sub.add_parser("port")
-    pt.add_argument("op", choices=("alloc", "show", "release"))
+    pt.add_argument("op", choices=("alloc", "show", "release", "unset"))
     pt.add_argument("--plugin", default="context-guru@context-guru")
     pt.add_argument("--file", default="",
                     help="for `alloc`: the settings file to write pluginConfigs.options.port "
-                         "into. Optional; defaults to resolve_install_scope()'s answer.")
+                         "into, or for `unset`: the settings file to remove it FROM, where "
+                         "it is required. Optional for `alloc`; defaults to "
+                         "resolve_install_scope()'s answer.")
     pt.add_argument("--dry-run", action="store_true",
                     help="for `alloc`: report the port that would be used without recording or "
                          "writing anything. For install.sh's --plan, which must write nothing.")
@@ -2903,7 +2957,7 @@ def main() -> int:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
     rc = {"add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
-          "project-key": cmd_project_key,
+          "project-key": cmd_project_key, "scopes": cmd_scopes,
           "strategy": cmd_strategy, "preset": cmd_preset, "port": cmd_port,
           "check-url": cmd_check_url, "update-check": cmd_update_check,
           "gitignore-ensure": cmd_gitignore_ensure}[args.cmd](args)

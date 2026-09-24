@@ -8736,3 +8736,271 @@ func TestStartProxyRecordsTheOwnerOfAProxyItStarts(t *testing.T) {
 		t.Errorf("owner file says %q, want this project's key %q", strings.TrimSpace(string(got)), projReal)
 	}
 }
+
+// --- a user-scope install meets the projects that route themselves ----------------------------
+//
+// The second of the two scenarios this feature exists for: someone installs into one project, likes
+// it, and installs at the user level. The machine-wide route they just asked for does NOT reach the
+// project that installed itself — a project's own settings file is more specific, so it keeps
+// winning — and nothing used to say so. They asked for "everywhere" and got
+// everywhere-except-this-one, silently.
+
+// runRouteRaw is runRoute's output without the map. Needed because the gate below emits one
+// `existing_project=` line PER project, and a map keyed on the fact name keeps only the last: a
+// test reading facts["existing_project"] would pass just as happily if the script listed one
+// project out of five.
+func runRouteRaw(t *testing.T, dir string, env []string, args ...string) (string, int) {
+	t.Helper()
+	requireTool(t, "bash")
+	argv := append([]string{filepath.Join(scriptsDir(t), "install.sh"), "--route"}, args...)
+	cmd := exec.Command("bash", argv...)
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("running install.sh --route %v: %v (%s)", args, err, out)
+	}
+	t.Logf("install.sh --route %v -> exit %d\n%s", args, code, out)
+	return string(out), code
+}
+
+// seedProjectRecord writes an install-scope.json record for `proj` as if that project had installed
+// itself at project scope, at `port`, and makes its settings file actually route there — both
+// halves, because `adopt` only removes routing it can prove is ours.
+func seedProjectRecord(t *testing.T, state, proj, port string) string {
+	t.Helper()
+	sd := filepath.Join(state, "context-guru")
+	if err := os.MkdirAll(sd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(proj, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	url := "http://127.0.0.1:" + port + "/anthropic"
+	writeJSON(t, file, map[string]any{
+		"env":           map[string]any{"ANTHROPIC_BASE_URL": url},
+		"$context-guru": map[string]any{"installed_base_url": url},
+		"pluginConfigs": map[string]any{
+			"context-guru@context-guru": map[string]any{"options": map[string]any{"port": port}},
+		},
+	})
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, filepath.Join(sd, "install-scope.json"), map[string]any{
+		"version": 1,
+		"projects": map[string]any{
+			projReal: map[string]any{
+				"scope": "project-local", "file": file, "port": p,
+				"recorded_at": "2020-01-01T00:00:00Z",
+			},
+		},
+	})
+	return file
+}
+
+func TestUserScopeInstallAsksAboutProjectsThatRouteThemselves(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	other := t.TempDir()
+	seedProjectRecord(t, state, other, freePort(t))
+	env := routeEnv(t, home, state, "")
+
+	out, code := runRouteRaw(t, proj, env, "--plan", "--scope", "user", "--i-understand-machine-wide")
+	if code != 0 {
+		t.Fatalf("a PLAN must report rather than fail: exit %d\n%s", code, out)
+	}
+	for _, want := range []string{
+		"result=needs_decision",
+		"reason=project_installs_exist",
+		"existing_project=",
+		"--on-existing-projects leave",
+		"--on-existing-projects adopt",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the plan omits %q, so the caller cannot ask or answer this:\n%s", want, out)
+		}
+	}
+	otherReal, err := filepath.EvalSymlinks(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, otherReal) {
+		t.Errorf("the gate does not name the project it is about (%s):\n%s", otherReal, out)
+	}
+	// Nothing may have been written by a plan — the same property TestRoutePlanWritesNothing
+	// asserts for the rest of the script, restated because this gate runs before it does.
+	if _, err := os.Stat(filepath.Join(proj, ".claude")); err == nil {
+		t.Error("the plan created a settings directory")
+	}
+
+	// NEGATIVE CONTROL. With no project records the same command must sail past this gate — without
+	// it, a script that refused every user-scope install would pass every assertion above.
+	home2, state2 := t.TempDir(), t.TempDir()
+	facts, code := runRoute(t, t.TempDir(), routeEnv(t, home2, state2, ""),
+		"--plan", "--scope", "user", "--i-understand-machine-wide")
+	if code != 0 || facts["result"] != "planned" {
+		t.Errorf("with no project installs the plan must proceed, got exit %d: %v", code, facts)
+	}
+}
+
+func TestOnExistingProjectsRefusesAnUnknownAnswer(t *testing.T) {
+	home, state := t.TempDir(), t.TempDir()
+	facts, code := runRoute(t, t.TempDir(), routeEnv(t, home, state, ""),
+		"--plan", "--scope", "user", "--i-understand-machine-wide",
+		"--on-existing-projects", "sideways")
+	// Validated where --scope is, not where it is used: a value that reached the gate unchecked
+	// would read as "no answer given" and re-ask a question the caller already answered, with the
+	// typo invisible.
+	if code != 3 || facts["reason"] != "unknown_on_existing_projects" {
+		t.Errorf("a bogus answer must be refused by name, got exit %d: %v", code, facts)
+	}
+	if facts["value"] != "sideways" {
+		t.Errorf("the refusal does not quote the value back: %v", facts)
+	}
+}
+
+// TestRouteRefusesAPortAnotherProjectOwns: allocation skips every port another project RECORDED, so
+// this state is only reachable for a port that was explicitly configured (or recorded before the
+// owner file existed) — and that is exactly the case that must not be resolved silently.
+// start-proxy.sh will not kill a proxy it does not own, so an install that proceeded here would
+// route this project at a proxy running somebody else's configuration and report success.
+func TestRouteRefusesAPortAnotherProjectOwns(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	sd := filepath.Join(state, "context-guru")
+	if err := os.MkdirAll(sd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sd, "proxy-"+port+".owner"),
+		[]byte("/somewhere/else\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	facts, code := runRoute(t, proj, routeEnv(t, home, state, ""), "--plan", "--scope", "project")
+	if code != 0 {
+		t.Fatalf("a PLAN reports rather than fails: exit %d %v", code, facts)
+	}
+	if facts["reason"] != "port_owned_by_another_project" {
+		t.Fatalf("the plan does not refuse a port another project owns: %v", facts)
+	}
+	if facts["owner_project"] != "/somewhere/else" {
+		t.Errorf("the refusal does not name the owner, so the user cannot act on it: %v", facts)
+	}
+
+	// CONTROL: the same owner file naming THIS project is not a conflict at all.
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sd, "proxy-"+port+".owner"),
+		[]byte(projReal+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	facts, code = runRoute(t, proj, routeEnv(t, home, state, ""), "--plan", "--scope", "project")
+	if code != 0 || facts["result"] != "planned" {
+		t.Errorf("our own proxy must not be reported as a conflict, got exit %d: %v", code, facts)
+	}
+}
+
+// TestUserScopeAdoptUnroutesTheProjectsItAdopts is the `adopt` answer end to end, and the ordering
+// is the point: the adopted project loses its own routing only AFTER the machine-wide route it will
+// fall back on is written and health-checked. Doing it earlier — and then failing the install —
+// would leave that project with no route at all.
+func TestUserScopeAdoptUnroutesTheProjectsItAdopts(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	other := t.TempDir()
+	otherFile := seedProjectRecord(t, state, other, freePort(t))
+
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+	t.Cleanup(func() { stopFakeProxy(t, state, port) })
+
+	facts, code := runRoute(t, proj, env, "--scope", "user", "--i-consent-to-traffic-interception",
+		"--i-understand-machine-wide", "--on-existing-projects", "adopt")
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the install itself failed, so adoption proves nothing: exit %d %v", code, facts)
+	}
+
+	data := readJSON(t, otherFile)
+	if env, _ := data["env"].(map[string]any); env["ANTHROPIC_BASE_URL"] != nil {
+		t.Errorf("the adopted project still routes itself, so it still overrides the machine-wide "+
+			"route it was adopted into: %v", data)
+	}
+	// A leftover per-project port would aim that project's hooks at a port nothing serves —
+	// configured-looking and broken, which is worse than the state before adoption.
+	pc, _ := data["pluginConfigs"].(map[string]any)
+	pe, _ := pc["context-guru@context-guru"].(map[string]any)
+	if opts, _ := pe["options"].(map[string]any); opts != nil && opts["port"] != nil {
+		t.Errorf("the adopted project kept its own port option: %v", opts)
+	}
+	// Every file touched goes through the same backup machinery as an uninstall; without it this is
+	// an install silently editing a project it was not run in.
+	if matches, _ := filepath.Glob(filepath.Join(other, ".claude", "*backup*")); len(matches) == 0 {
+		if matches, _ = filepath.Glob(filepath.Join(other, ".claude", "*", "*")); len(matches) == 0 {
+			t.Errorf("no backup was left next to the adopted project's settings file")
+		}
+	}
+	// And its record is gone, so nothing reports it as still having its own routing.
+	scopes := readJSON(t, filepath.Join(state, "context-guru", "install-scope.json"))
+	projects, _ := scopes["projects"].(map[string]any)
+	otherReal, err := filepath.EvalSymlinks(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, still := projects[otherReal]; still {
+		t.Errorf("the adopted project still has its own record: %v", projects)
+	}
+}
+
+// TestUserScopeLeaveKeepsTheProjectsItWasToldToLeave: the safe answer, and the one a user picks when
+// the per-project config was deliberate. `leave` must be a no-op ON THOSE PROJECTS while the
+// user-scope install proceeds for everything else.
+func TestUserScopeLeaveKeepsTheProjectsItWasToldToLeave(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	other := t.TempDir()
+	otherPort := freePort(t)
+	otherFile := seedProjectRecord(t, state, other, otherPort)
+	beforeRaw, err := os.ReadFile(otherFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	port := freePort(t)
+	writePluginOptions(t, home, map[string]any{"port": port})
+	env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+	t.Cleanup(func() { stopFakeProxy(t, state, port) })
+
+	facts, code := runRoute(t, proj, env, "--scope", "user", "--i-consent-to-traffic-interception",
+		"--i-understand-machine-wide", "--on-existing-projects", "leave")
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("exit %d, want a routed user-scope install: %v", code, facts)
+	}
+	afterRaw, err := os.ReadFile(otherFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforeRaw) != string(afterRaw) {
+		t.Errorf("`leave` changed the project it was told to leave:\nbefore %s\nafter  %s",
+			beforeRaw, afterRaw)
+	}
+	scopes := readJSON(t, filepath.Join(state, "context-guru", "install-scope.json"))
+	projects, _ := scopes["projects"].(map[string]any)
+	otherReal, serr := filepath.EvalSymlinks(other)
+	if serr != nil {
+		t.Fatal(serr)
+	}
+	if _, still := projects[otherReal]; !still {
+		t.Errorf("`leave` dropped the project's record: %v", projects)
+	}
+}
