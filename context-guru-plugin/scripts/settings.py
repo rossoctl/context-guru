@@ -1923,21 +1923,28 @@ def _update_is_ours(text: str) -> bool:
 
 
 def _update_fields_in(text: str) -> dict[str, str]:
-    fields = {"answer": "ask", "skipped": "", "latest": ""}
+    fields = {"answer": "ask", "skipped": "", "notified": "", "latest": ""}
     for line in text.splitlines():
-        m = re.match(r"^(answer|skipped|latest):\s*(.*)$", line)
+        m = re.match(r"^(answer|skipped|notified|latest):\s*(.*)$", line)
         if m:
             fields[m.group(1)] = m.group(2).strip()
     return fields
 
 
-def _render_update_check(answer: str, skipped: str, latest: str) -> str:
+def _render_update_check(answer: str, skipped: str, notified: str, latest: str) -> str:
     return "\n".join([
         f"{UPDATE_MARKER_PREFIX} update_check=1 {UPDATE_MARKER_TAIL} /context-guru:update",
         "# Do not hand-edit: this file's ownership is decided by its first line, so an edit that",
         "# removes the marker also turns the update notice off for good.",
         f"answer: {answer or 'ask'}",
+        # `skipped` is a REAL decision: the user explicitly said no to this tag, via
+        # `update-check answer --answer skip`. `notified` is bookkeeping only: the notice was
+        # PRINTED for this tag, so it does not repeat — it carries no claim about what the user
+        # did with it. The two used to be the same field, written together at print time, which
+        # meant a session start hook the user never saw (its output competing against an
+        # unrelated first message) recorded a permanent "declined" the user never actually said.
         f"skipped: {skipped}",
+        f"notified: {notified}",
         f"latest: {latest}",
     ]) + "\n"
 
@@ -1949,7 +1956,7 @@ def _read_update_check() -> tuple[dict[str, str] | None, str]:
     """
     path = update_check_path()
     if not os.path.exists(path):
-        return {"answer": "ask", "skipped": "", "latest": ""}, ""
+        return {"answer": "ask", "skipped": "", "notified": "", "latest": ""}, ""
     try:
         text = open(path, encoding="utf-8").read()
     except OSError:
@@ -1992,18 +1999,19 @@ def cmd_update_check(args) -> int:
             emit(result="skipped", reason=reason)
             return 0
         # `installed=` is its OWN fact, not something a reader should infer from `skipped=` (the
-        # tag a past notice was declined for) or `latest=` (what the last check found). A prior
+        # tag a past notice was DECLINED for) or `latest=` (what the last check found). A prior
         # version of this surface omitted it entirely, and the gap was filled by a model
         # conflating "skipped" with "installed" and reporting a version that was simply wrong.
         emit(result="ok", answer=fields["answer"], skipped=fields["skipped"],
-             latest=fields["latest"], installed=installed_proxy_version() or "unknown")
+             notified=fields["notified"], latest=fields["latest"],
+             installed=installed_proxy_version() or "unknown")
         return 0
 
     if args.op == "stamp":
-        # Called by the detached release check after it resolves the latest tag (or fails to).
-        # The file's mtime IS the 5-minute throttle: start-proxy.sh gates the next check on this
-        # file's age with `find … -mmin -5` before it forks python at all, so no date arithmetic
-        # exists in shell and a clock moving backwards only ever makes it check MORE, never less.
+        # Called by the release check after it resolves the latest tag (or fails to). The file's
+        # mtime IS the 5-minute throttle: start-proxy.sh gates the next check on this file's age
+        # with `find … -mmin -5` before it forks python at all, so no date arithmetic exists in
+        # shell and a clock moving backwards only ever makes it check MORE, never less.
         fields, reason = _read_update_check()
         if fields is None:
             emit(result="skipped", reason=reason)
@@ -2019,6 +2027,29 @@ def cmd_update_check(args) -> int:
             emit(result="skipped", reason=write_reason)
             return 0
         emit(result="ok", latest=args.latest)
+        return 0
+
+    if args.op == "notify":
+        # Called the moment the hook PRINTS the notice for a tag, so it does not repeat every
+        # session. Deliberately separate from `answer --answer skip`: printing a note into a
+        # SessionStart hook's output is not the same event as the user actually declining it, and
+        # a real user hit exactly this gap — their first message that session was unrelated, the
+        # note was never relayed, and the record still ended up saying "skipped" for an offer they
+        # never saw. `notified` carries no claim about what the user did; it only suppresses a
+        # repeat of the same tag's notice. `skipped` stays reserved for `answer --answer skip`.
+        if not args.version:
+            emit(result="error", reason="missing_value", note="notify needs --version")
+            return 2
+        fields, reason = _read_update_check()
+        if fields is None:
+            emit(result="skipped", reason=reason)
+            return 0
+        fields["notified"] = args.version
+        write_reason = _write_update_check(fields)
+        if write_reason:
+            emit(result="skipped", reason=write_reason)
+            return 0
+        emit(result="recorded", notified=fields["notified"])
         return 0
 
     # op == "answer"
@@ -2120,11 +2151,12 @@ def main() -> int:
     # The proxy-binary release-notice surface: separate from `strategy`/`preset` because it is
     # machine-wide (one binary on PATH) rather than per-port or per-project.
     uc = sub.add_parser("update-check")
-    uc.add_argument("op", choices=("show", "stamp", "answer"))
+    uc.add_argument("op", choices=("show", "stamp", "notify", "answer"))
     uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp`")
     uc.add_argument("--answer", default="",
                     help="for `answer`: one of " + ", ".join(UPDATE_ANSWERS))
-    uc.add_argument("--version", default="", help="the tag `answer --answer skip` mutes")
+    uc.add_argument("--version", default="",
+                    help="the tag `notify` shows or `answer --answer skip` mutes")
 
     args = ap.parse_args()
     if args.cmd == "add" and not args.url and not args.statusline:

@@ -15,9 +15,17 @@ manage this one additional top-level key (never a second settings editor, never 
 ████····  100/200.0k 50% | $0.03/12k saved of $0.41/187k | proxy: 3ms · upstream: 340ms | ◇ github 1% remove
 ```
 
-Four segments, each independently optional — a segment whose numbers are not available just does
+Five segments, each independently optional — a segment whose numbers are not available just does
 not print:
 
+- **A pending proxy update, if one exists and hasn't been declined** — `▲ update v0.3.2` in
+  green, shown FIRST so it cannot scroll off a long line. This is a fallback for the SessionStart
+  hook's own release note: that note only reaches you if the model actually relays it, which it
+  is not guaranteed to do (a hook can print text, it cannot force a question). This segment reads
+  the same local record, never fetches, and stays visible even if the hook's note was never
+  mentioned — until you explicitly answer it (`/context-guru:update`, or
+  `update-check answer --answer skip|always|never`), at which point it goes away or changes to
+  `▲ v0.3.2 auto` if you chose automatic updates.
 - **The context bar** — tokens used against the model's real context window, coloured green
   under 50%, yellow under 70%, red above. Read straight off Claude Code's own statusLine payload
   (`context_window.total_input_tokens` / `.context_window_size` / `.used_percentage`); no extra
