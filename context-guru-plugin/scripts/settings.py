@@ -561,6 +561,46 @@ def _manifest_paths(state: str) -> tuple[str, str]:
             os.path.join(state, "reset-manifest.tsv"))
 
 
+def _created_by_us(real: str) -> bool:
+    """Did context-guru's own first edit CREATE `real`, per the reset manifest's
+    `existed_before`? Missing, unreadable or unrecorded all answer False — the side that never
+    deletes a file we are not certain we brought into existence.
+    """
+    jsonp, _ = _manifest_paths(state_dir())
+    try:
+        with open(jsonp, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(manifest, dict):
+        return False
+    for entry in manifest.get("files", []):
+        if isinstance(entry, dict) and entry.get("path") == real:
+            return entry.get("existed_before") is False
+    return False
+
+
+def maybe_delete_if_empty(path: str, data: dict) -> bool:
+    """If removing our keys left `data` with nothing else in it AND context-guru created `path`,
+    delete the file instead of leaving an empty `{}` shell behind — uninstalling from a project
+    that had no settings file at all must not end with one. Returns True if the file was deleted,
+    in which case the caller must not also call save().
+
+    Never deletes a file that held something before context-guru's first edit (per
+    `_created_by_us`): that content — a theme, a permission grant, another plugin's config — is
+    the user's, whatever is left in `data` right now, and removing it would take that with it.
+    """
+    if data:
+        return False
+    if not _created_by_us(os.path.realpath(path)):
+        return False
+    try:
+        os.remove(path)
+    except OSError:
+        return False
+    return True
+
+
 def _render_tsv(entries: list[dict]) -> bytes:
     """The record in the form the hatch actually reads: one line per file, tab-separated.
 
@@ -1144,8 +1184,11 @@ def cmd_off(args: argparse.Namespace) -> int:
         emit(result="unchanged", file=args.file, note="no context-guru statusline installed here")
         return 0
     saved = backup(args.file)
-    save(args.file, data)
-    emit(result="removed", file=args.file, backup=saved, statusline_restored=restored_sl)
+    deleted = maybe_delete_if_empty(args.file, data)
+    if not deleted:
+        save(args.file, data)
+    emit(result="removed", file=args.file, backup=saved, statusline_restored=restored_sl,
+         file_deleted=str(deleted).lower())
     return 0
 
 
@@ -1162,8 +1205,11 @@ def cmd_remove(args: argparse.Namespace) -> int:
         changed, restored_sl = remove_statusline_only(data)
         if changed:
             saved = backup(args.file)
-            save(args.file, data)
+            deleted = maybe_delete_if_empty(args.file, data)
+            if not deleted:
+                save(args.file, data)
             emit(result="removed", file=args.file, backup=saved, statusline_restored=restored_sl,
+                 file_deleted=str(deleted).lower(),
                  note="statusline-only removal; no routing was present to touch")
             return 0
         emit(result="unchanged", file=args.file, note=f"no env.{KEY} here")
@@ -1249,10 +1295,12 @@ def cmd_remove(args: argparse.Namespace) -> int:
         del data["env"]
     else:
         data["env"] = env
-    save(args.file, data)
+    deleted = maybe_delete_if_empty(args.file, data)
+    if not deleted:
+        save(args.file, data)
     emit(result="removed", file=args.file, was=current, backup=saved,
          restored=restored, env_block_left=str(bool(env)).lower(),
-         statusline_restored=restored_sl)
+         statusline_restored=restored_sl, file_deleted=str(deleted).lower())
     return 0
 
 
