@@ -4715,7 +4715,7 @@ func TestResolveInstallScopeSelfHealsALegacyProject(t *testing.T) {
 	// Written directly, bypassing `add`, so no install-scope.json entry exists — exactly what a
 	// pre-existing install (or a hand-edited file) looks like.
 	writeJSON(t, projLocal, map[string]any{
-		"env":          map[string]any{"ANTHROPIC_BASE_URL": ourURL},
+		"env":           map[string]any{"ANTHROPIC_BASE_URL": ourURL},
 		"$context-guru": map[string]any{"installed_base_url": ourURL},
 	})
 
