@@ -4847,6 +4847,724 @@ func TestResolveInstallScopeSelfHealsALegacyProject(t *testing.T) {
 	}
 }
 
+// TestInstallScopeMigratesALegacyKeyToProjectKey: install-scope.json records were keyed on
+// realpath(cwd) before project_key() existed. A record still filed under that old key must be
+// found, rewritten under the NEW key, and dropped from the old one — the same self-healing shape
+// resolve_install_scope already uses for a project with no record at all (see
+// TestResolveInstallScopeSelfHealsALegacyProject above), so a pre-existing install stays visible
+// to every project_key()-keyed lookup instead of quietly becoming invisible to it.
+//
+// The case that actually exercises the migration is a git WORKTREE: project_key() resolves a
+// worktree's directory to its MAIN checkout, which differs from realpath(worktree) — the old key
+// — and is exactly the situation a record predating project_key() would be in.
+func TestInstallScopeMigratesALegacyKeyToProjectKey(t *testing.T) {
+	requireTool(t, "git")
+	state, home, root := t.TempDir(), t.TempDir(), t.TempDir()
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v (dir=%s): %v\n%s", args, dir, err, out)
+		}
+	}
+	realpath := func(p string) string {
+		t.Helper()
+		r, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%s): %v", p, err)
+		}
+		return r
+	}
+
+	mainRepo := filepath.Join(root, "main")
+	if err := os.MkdirAll(mainRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(mainRepo, "init", "-q")
+	runGit(mainRepo, "-c", "user.email=t@example.com", "-c", "user.name=t",
+		"commit", "--allow-empty", "-q", "-m", "init")
+	worktree := filepath.Join(root, "wt")
+	runGit(mainRepo, "worktree", "add", "-q", worktree, "-b", "wt-branch")
+
+	projLocal := filepath.Join(worktree, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldKey := realpath(worktree)
+	newKey := realpath(mainRepo)
+
+	// Seed install-scope.json exactly as a pre-project_key() version of this plugin would have
+	// left it: keyed on realpath(worktree), the OLD identity — never on the main checkout.
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, filepath.Join(state, "install-scope.json"), map[string]any{
+		"version": 1,
+		"projects": map[string]any{
+			oldKey: map[string]any{
+				"scope":       "project-local",
+				"file":        projLocal,
+				"recorded_at": "2020-01-01T00:00:00Z",
+			},
+		},
+	})
+
+	facts, code := settingsInDir(t, state, home, worktree, "resolve-scope")
+	if code != 0 {
+		t.Fatalf("resolve-scope failed: exit %d %v", code, facts)
+	}
+	if facts["scope"] != "project-local" || facts["source"] != "recorded" {
+		t.Fatalf("want scope=project-local source=recorded (migrated), got %v", facts)
+	}
+
+	scopes := readJSON(t, filepath.Join(state, "install-scope.json"))
+	projects, _ := scopes["projects"].(map[string]any)
+	if _, stillOld := projects[oldKey]; stillOld {
+		t.Errorf("the old, pre-project_key() key survived migration: %v", projects)
+	}
+	if _, hasNew := projects[newKey]; !hasNew {
+		t.Errorf("no record under the new project_key() (main checkout) after migration: %v", projects)
+	}
+	if len(projects) != 1 {
+		t.Errorf("migration should REWRITE the one record, not add a second: %v", projects)
+	}
+
+	// And a worktree with no record at all resolves to the SAME key as its main checkout, so a
+	// second worktree of the same repo inherits the first worktree's (now-migrated) routing.
+	worktree2 := filepath.Join(root, "wt2")
+	runGit(mainRepo, "worktree", "add", "-q", worktree2, "-b", "wt2-branch")
+	facts2, code2 := settingsInDir(t, state, home, worktree2, "resolve-scope")
+	if code2 != 0 {
+		t.Fatalf("resolve-scope from second worktree failed: exit %d %v", code2, facts2)
+	}
+	if facts2["scope"] != "project-local" || facts2["source"] != "recorded" {
+		t.Errorf("a second worktree of the same repo should see the migrated record too, got %v", facts2)
+	}
+}
+
+// TestProjectKeyForAPlainCheckoutIsItsOwnDirectory exercises the non-worktree branch of
+// project_key(): a plain checkout's `--git-common-dir` IS its own `.git`, so `_resolve_project_key`
+// must key it as ITSELF, not as some ancestor. This is the case the bare (non `--path-format`)
+// fallback can get wrong: `git rev-parse --git-common-dir` from inside a plain checkout answers
+// the RELATIVE path `.git`, and naively taking `dirname(".git")` gives `"."`, which resolves
+// against the WRONG base if not joined against the checkout dir first — collapsing every plain
+// checkout on the machine toward its parent directory instead of keying each one separately.
+func TestProjectKeyForAPlainCheckoutIsItsOwnDirectory(t *testing.T) {
+	requireTool(t, "git")
+	state, home, root := t.TempDir(), t.TempDir(), t.TempDir()
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v (dir=%s): %v\n%s", args, dir, err, out)
+		}
+	}
+	realpath := func(p string) string {
+		t.Helper()
+		r, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%s): %v", p, err)
+		}
+		return r
+	}
+
+	// A plain checkout, deliberately nested a few levels under `root` — if the key ever collapsed
+	// to a parent directory, it would collapse to one of THESE, not to the repo itself.
+	repo := filepath.Join(root, "some", "nested", "path", "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(repo, "init", "-q")
+	runGit(repo, "-c", "user.email=t@example.com", "-c", "user.name=t",
+		"commit", "--allow-empty", "-q", "-m", "init")
+
+	projLocal := filepath.Join(repo, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, projLocal, map[string]any{
+		"env":           map[string]any{"ANTHROPIC_BASE_URL": ourURL},
+		"$context-guru": map[string]any{"installed_base_url": ourURL},
+	})
+
+	facts, code := settingsInDir(t, state, home, repo, "resolve-scope")
+	if code != 0 {
+		t.Fatalf("resolve-scope failed: exit %d %v", code, facts)
+	}
+	if facts["scope"] != "project-local" || facts["source"] != "inferred" {
+		t.Fatalf("want scope=project-local source=inferred, got %v", facts)
+	}
+
+	scopes := readJSON(t, filepath.Join(state, "install-scope.json"))
+	projects, _ := scopes["projects"].(map[string]any)
+	if _, hasSelf := projects[realpath(repo)]; !hasSelf {
+		t.Errorf("a plain checkout must be keyed as ITSELF, got keys: %v", projects)
+	}
+	for key := range projects {
+		if key != realpath(repo) {
+			t.Errorf("plain checkout keyed as an ancestor directory instead of itself: %q (want %q)",
+				key, realpath(repo))
+		}
+	}
+}
+
+// TestProjectKeyFailsOpenWithoutGitBinary: project_key() must fail open to realpath(dir), never
+// raise, when git is not on PATH at all — this is reached from hook-time code paths (every
+// SessionStart), where a missing interpreter must degrade to "not worktree-aware" rather than
+// break the session.
+func TestProjectKeyFailsOpenWithoutGitBinary(t *testing.T) {
+	py := requireTool(t, "python3")
+	state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+
+	projLocal := filepath.Join(dir, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, projLocal, map[string]any{
+		"env":           map[string]any{"ANTHROPIC_BASE_URL": ourURL},
+		"$context-guru": map[string]any{"installed_base_url": ourURL},
+	})
+
+	env := append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			// No `git` reachable from here at all — not merely absent from a candidate directory.
+			env[i] = "PATH=/nonexistent-bin-dir-for-this-test"
+		}
+	}
+
+	cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "resolve-scope")
+	cmd.Env = env
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); ok {
+		t.Fatalf("resolve-scope raised/failed with no git on PATH: exit %d\n%s", ee.ExitCode(), out)
+	} else if err != nil {
+		t.Fatalf("running settings.py: %v (%s)", err, out)
+	}
+
+	facts := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			facts[k] = v
+		}
+	}
+	if facts["scope"] != "project-local" || facts["source"] != "inferred" {
+		t.Fatalf("want scope=project-local source=inferred (no git present, fail-open to realpath), got %v", facts)
+	}
+}
+
+// TestMigrationTiebreakPrefersTheStillRoutingWorktree: project_key() collapses every worktree of
+// one repo onto the SAME key, but each worktree kept its own pre-migration install-scope.json
+// record (one per realpath(worktree)). Those records migrate lazily, one project_dir at a time —
+// so it is possible for the new key to already hold a migrated record (written by an earlier call
+// for a DIFFERENT worktree) while THIS worktree's own legacy record is still unmigrated. Whichever
+// call happened to run first must not win permanently just because it ran first: the record that
+// is actually routing the project must win, not the one that was resolved first.
+func TestMigrationTiebreakPrefersTheStillRoutingWorktree(t *testing.T) {
+	requireTool(t, "git")
+	state, home, root := t.TempDir(), t.TempDir(), t.TempDir()
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v (dir=%s): %v\n%s", args, dir, err, out)
+		}
+	}
+	realpath := func(p string) string {
+		t.Helper()
+		r, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%s): %v", p, err)
+		}
+		return r
+	}
+
+	mainRepo := filepath.Join(root, "main")
+	if err := os.MkdirAll(mainRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(mainRepo, "init", "-q")
+	runGit(mainRepo, "-c", "user.email=t@example.com", "-c", "user.name=t",
+		"commit", "--allow-empty", "-q", "-m", "init")
+
+	wtStale := filepath.Join(root, "wt-stale")
+	wtLive := filepath.Join(root, "wt-live")
+	runGit(mainRepo, "worktree", "add", "-q", wtStale, "-b", "stale-branch")
+	runGit(mainRepo, "worktree", "add", "-q", wtLive, "-b", "live-branch")
+
+	// The STALE worktree's settings file no longer carries our routing — abandoned, exactly like
+	// a worktree whose install was later removed or overwritten by hand.
+	staleLocal := filepath.Join(wtStale, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(staleLocal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, staleLocal, map[string]any{"env": map[string]any{}})
+
+	// The LIVE worktree's settings file still actually routes to us.
+	liveLocal := filepath.Join(wtLive, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(liveLocal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, liveLocal, map[string]any{
+		"env":           map[string]any{"ANTHROPIC_BASE_URL": ourURL},
+		"$context-guru": map[string]any{"installed_base_url": ourURL},
+	})
+
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed BOTH pre-migration records, each under its OWN worktree's old key — as if each
+	// worktree had been installed separately, before project_key() existed. The stale one's
+	// recorded_at is deliberately the NEWER of the two, so a naive "prefer recorded_at" tiebreak
+	// (or a naive "whoever migrates first wins") would pick the wrong one.
+	writeJSON(t, filepath.Join(state, "install-scope.json"), map[string]any{
+		"version": 1,
+		"projects": map[string]any{
+			realpath(wtStale): map[string]any{
+				"scope":       "project-local",
+				"file":        staleLocal,
+				"recorded_at": "2020-06-01T00:00:00Z",
+			},
+			realpath(wtLive): map[string]any{
+				"scope":       "project-local",
+				"file":        liveLocal,
+				"recorded_at": "2020-01-01T00:00:00Z",
+			},
+		},
+	})
+
+	// Resolve from the STALE worktree FIRST — this is the race the tiebreak has to survive: the
+	// stale worktree's own call is the first to touch the shared new_key.
+	factsStale, code := settingsInDir(t, state, home, wtStale, "resolve-scope")
+	if code != 0 {
+		t.Fatalf("resolve-scope (stale) failed: exit %d %v", code, factsStale)
+	}
+	// The FIRST call must already have collapsed the file: the tiebreak's LOSERS are removed in
+	// the same write, not left for whichever sibling happens to be resolved from next. Asserted
+	// here and not only at the end because the end state is reachable either way — the live
+	// worktree's own call below drops its own old key regardless. A loser left behind is not
+	// cosmetic: resolve_install_scope re-probes every surviving sibling key on every call, so it
+	// costs a `git` fork on every SessionStart, and `port alloc` reads its port as belonging to
+	// another project and skips it.
+	if projects, _ := readJSON(t, filepath.Join(state, "install-scope.json"))["projects"].(map[string]any); len(projects) != 1 {
+		t.Fatalf("the first resolve must drop the tiebreak losers, leaving one record; got: %v", projects)
+	}
+
+	factsLive, code := settingsInDir(t, state, home, wtLive, "resolve-scope")
+	if code != 0 {
+		t.Fatalf("resolve-scope (live) failed: exit %d %v", code, factsLive)
+	}
+
+	if factsStale["file"] != liveLocal || factsLive["file"] != liveLocal {
+		t.Fatalf("both worktrees must resolve to the STILL-ROUTING file, got stale=%v live=%v",
+			factsStale, factsLive)
+	}
+
+	scopes := readJSON(t, filepath.Join(state, "install-scope.json"))
+	projects, _ := scopes["projects"].(map[string]any)
+	if len(projects) != 1 {
+		t.Fatalf("the tiebreak must leave exactly one record for the repo, got: %v", projects)
+	}
+	newKey := realpath(mainRepo)
+	rec, _ := projects[newKey].(map[string]any)
+	if rec == nil || rec["file"] != liveLocal {
+		t.Errorf("the surviving record must point at the still-routing file, got: %v", projects)
+	}
+}
+
+// --- per-project port allocation (`settings.py port alloc|show|release`) ----------------------
+//
+// The port used to default to 8787 for every project, so two projects with different presets
+// shared one proxy process and start-proxy.sh's fingerprint check "resolved" the disagreement by
+// killing whichever proxy did not match — wiping the in-memory cache/store on every flip. These
+// tests cover the allocation rules in isolation; TestStartProxyDoesNotStopAnotherProjectsProxy
+// (Phase 3) covers the actual proxy-killing regression this exists to remove.
+//
+// Every test below that actually SCANS for a port (as opposed to `--dry-run`, `show` or an
+// explicitly-configured port, none of which bind anything) pins `CONTEXT_GURU_PORT_BASE` to a
+// high, test-specific base via `portScanBase`, rather than letting the scan start at the real
+// default of 8787. `go test` for this package runs on a box SHARED with another engineer's live
+// services and other Claude sessions as the same unix user — binding the plain 8787..8850 range
+// for real would be indistinguishable from a genuine port squat, and would make this suite fail
+// for a reason that has nothing to do with the code under test if someone else already holds one
+// of those ports. 8787 itself is asserted only as the *default value* of the unpinned constant, in
+// TestPluginJSONPortDefaultAgreesWithTheScript below, which never binds anything.
+var portTestBaseCounter atomic.Int64
+
+// portScanBase pins CONTEXT_GURU_PORT_BASE to a base this test alone uses (t.Setenv, so it is
+// restored automatically and cannot leak into another test), high enough to stay well clear of
+// any real service's ports on a shared box, and counted up per call so tests in this same package
+// that both scan for a port cannot collide with EACH OTHER either.
+func portScanBase(t *testing.T) {
+	t.Helper()
+	base := 39000 + int(portTestBaseCounter.Add(1))*100
+	t.Setenv("CONTEXT_GURU_PORT_BASE", strconv.Itoa(base))
+}
+
+// TestPortAllocAssignsDistinctPortsAndIsIdempotent: two fresh projects get two different ports,
+// scanning up from the default; re-running `alloc` for either one returns the SAME port rather
+// than reallocating — reinstall, update and repair must never move a project's port, because the
+// URL naming it is already written into a settings file.
+func TestPortAllocAssignsDistinctPortsAndIsIdempotent(t *testing.T) {
+	portScanBase(t)
+	state, home := t.TempDir(), t.TempDir()
+	projA, projB := t.TempDir(), t.TempDir()
+	for _, p := range []string{projA, projB} {
+		if err := os.MkdirAll(filepath.Join(p, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	factsA, code := settingsInDir(t, state, home, projA, "port", "alloc")
+	if code != 0 || factsA["source"] != "allocated" {
+		t.Fatalf("project A alloc: exit %d %v", code, factsA)
+	}
+	factsB, code := settingsInDir(t, state, home, projB, "port", "alloc")
+	if code != 0 || factsB["source"] != "allocated" {
+		t.Fatalf("project B alloc: exit %d %v", code, factsB)
+	}
+	if factsA["port"] == factsB["port"] {
+		t.Fatalf("two distinct projects were allocated the SAME port: %v / %v", factsA, factsB)
+	}
+
+	// Re-running alloc for A must return exactly the port it already has, sourced as "recorded"
+	// rather than scanned again.
+	again, code := settingsInDir(t, state, home, projA, "port", "alloc")
+	if code != 0 {
+		t.Fatalf("re-alloc for A failed: exit %d %v", code, again)
+	}
+	if again["port"] != factsA["port"] || again["source"] != "recorded" {
+		t.Errorf("re-alloc moved project A's port: first %v, second %v", factsA, again)
+	}
+
+	// `port show` agrees with what `alloc` recorded.
+	shown, code := settingsInDir(t, state, home, projA, "port", "show")
+	if code != 0 || shown["port"] != factsA["port"] {
+		t.Errorf("port show disagrees with alloc: show=%v alloc=%v", shown, factsA)
+	}
+
+	// The port landed in the project's own settings.local.json as a JSON NUMBER, never a string —
+	// plugin.json types `port` as "number", and CLAUDE_PLUGIN_OPTION_PORT downstream expects one.
+	got := readJSON(t, filepath.Join(projA, ".claude", "settings.local.json"))
+	opts, _ := ((got["pluginConfigs"].(map[string]any))["context-guru@context-guru"].(map[string]any))["options"].(map[string]any)
+	portVal, ok := opts["port"]
+	if !ok {
+		t.Fatalf("port was not written into pluginConfigs.options: %v", got)
+	}
+	if _, isFloat := portVal.(float64); !isFloat {
+		t.Errorf("port in settings.local.json is not a JSON number: %T %v", portVal, portVal)
+	}
+	if s, isString := portVal.(string); isString {
+		t.Errorf("port in settings.local.json was written as a STRING (%q), not a number", s)
+	}
+}
+
+// TestPortAllocHonoursAnExplicitlyConfiguredPort: a project that already has `pluginConfigs`
+// options.port set (by hand, or via /plugin configure before install) must have that value
+// honoured and recorded, never overwritten by the scan — and never reallocated even though the
+// scan would otherwise have started from the same default.
+func TestPortAllocHonoursAnExplicitlyConfiguredPort(t *testing.T) {
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	projLocal := filepath.Join(proj, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, projLocal, map[string]any{
+		"pluginConfigs": map[string]any{
+			"context-guru@context-guru": map[string]any{
+				"options": map[string]any{"port": 9999},
+			},
+		},
+	})
+
+	facts, code := settingsInDir(t, state, home, proj, "port", "alloc")
+	if code != 0 {
+		t.Fatalf("alloc failed: exit %d %v", code, facts)
+	}
+	if facts["port"] != "9999" || facts["source"] != "configured" {
+		t.Fatalf("want port=9999 source=configured, got %v", facts)
+	}
+
+	// The file is not rewritten with a second, redundant copy of the same value.
+	before, err := os.ReadFile(projLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, code := settingsInDir(t, state, home, proj, "port", "alloc"); code != 0 {
+		t.Fatal("second alloc failed")
+	}
+	after, err := os.ReadFile(projLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("an already-explicit port was rewritten:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+// TestPortAllocDryRunWritesNothing: install.sh's `--plan` must be able to preview the port that
+// would be used without allocating it for real — an allocation made during a plan the user never
+// confirms would take a port out of the pool (and write a settings file) before consent was ever
+// asked.
+func TestPortAllocDryRunWritesNothing(t *testing.T) {
+	portScanBase(t)
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	facts, code := settingsInDir(t, state, home, proj, "port", "alloc", "--dry-run")
+	if code != 0 || facts["port"] == "" {
+		t.Fatalf("dry-run alloc failed: exit %d %v", code, facts)
+	}
+	if _, err := os.Stat(filepath.Join(state, "install-scope.json")); !os.IsNotExist(err) {
+		t.Errorf("dry-run wrote install-scope.json, which must not happen until the real run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "settings.local.json")); !os.IsNotExist(err) {
+		t.Errorf("dry-run wrote a settings file, which must not happen until the real run: %v", err)
+	}
+
+	shown, code := settingsInDir(t, state, home, proj, "port", "show")
+	if code != 0 || shown["port"] != "(none)" {
+		t.Errorf("dry-run left a port recorded for `show` to find: %v", shown)
+	}
+}
+
+// TestPortReleaseFreesTheProjectsPortForReuse: uninstall's call. Releasing project A's port must
+// remove ONLY A's record, leave B's untouched, and free A's port number for a later scan (project
+// C, allocated after the release, may land on it).
+func TestPortReleaseFreesTheProjectsPortForReuse(t *testing.T) {
+	portScanBase(t)
+	state, home := t.TempDir(), t.TempDir()
+	projA, projB := t.TempDir(), t.TempDir()
+	for _, p := range []string{projA, projB} {
+		if err := os.MkdirAll(filepath.Join(p, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	factsA, code := settingsInDir(t, state, home, projA, "port", "alloc")
+	if code != 0 {
+		t.Fatalf("alloc A failed: exit %d %v", code, factsA)
+	}
+	factsB, code := settingsInDir(t, state, home, projB, "port", "alloc")
+	if code != 0 {
+		t.Fatalf("alloc B failed: exit %d %v", code, factsB)
+	}
+
+	rel, code := settingsInDir(t, state, home, projA, "port", "release")
+	if code != 0 || rel["result"] != "released" || rel["port"] != factsA["port"] {
+		t.Fatalf("release A: exit %d %v (want released port=%s)", code, rel, factsA["port"])
+	}
+
+	// B's record survived untouched.
+	shownB, code := settingsInDir(t, state, home, projB, "port", "show")
+	if code != 0 || shownB["port"] != factsB["port"] {
+		t.Errorf("releasing A disturbed B's record: %v", shownB)
+	}
+	shownA, code := settingsInDir(t, state, home, projA, "port", "show")
+	if code != 0 || shownA["port"] != "(none)" {
+		t.Errorf("A's port was not actually released: %v", shownA)
+	}
+
+	// A second release of an already-released project is a harmless no-op, not an error.
+	relAgain, code := settingsInDir(t, state, home, projA, "port", "release")
+	if code != 0 || relAgain["result"] != "unchanged" {
+		t.Errorf("re-releasing an unrecorded project should be result=unchanged, got exit %d %v",
+			code, relAgain)
+	}
+}
+
+// TestPortReleaseWorksWithoutGitBinary: `release` must be reachable, and must free the RIGHT
+// project's slot, even with no `git` on PATH at all — project_key() fails open to realpath(dir)
+// in that case, and release must key off exactly the same identity `alloc` used, or it would free
+// the wrong project's port (or none at all) on a machine where git is missing.
+func TestPortReleaseWorksWithoutGitBinary(t *testing.T) {
+	portScanBase(t)
+	py := requireTool(t, "python3")
+	state, home := t.TempDir(), t.TempDir()
+	projA, projB := t.TempDir(), t.TempDir()
+	for _, p := range []string{projA, projB} {
+		if err := os.MkdirAll(filepath.Join(p, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	env := append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			env[i] = "PATH=/nonexistent-bin-dir-for-this-test"
+		}
+	}
+	run := func(dir string, args ...string) map[string]string {
+		t.Helper()
+		cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "settings.py")}, args...)...)
+		cmd.Env = env
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("settings.py %v (dir=%s) failed with no git on PATH: %v\n%s", args, dir, err, out)
+		}
+		facts := map[string]string{}
+		for _, line := range strings.Split(string(out), "\n") {
+			if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+				facts[k] = v
+			}
+		}
+		return facts
+	}
+
+	factsA := run(projA, "port", "alloc")
+	factsB := run(projB, "port", "alloc")
+	if factsA["port"] == "" || factsB["port"] == "" || factsA["port"] == factsB["port"] {
+		t.Fatalf("alloc without git did not give two distinct ports: A=%v B=%v", factsA, factsB)
+	}
+
+	rel := run(projA, "port", "release")
+	if rel["result"] != "released" || rel["port"] != factsA["port"] {
+		t.Fatalf("release without git: want released port=%s, got %v", factsA["port"], rel)
+	}
+	shownB := run(projB, "port", "show")
+	if shownB["port"] != factsB["port"] {
+		t.Errorf("releasing A (no git) disturbed B's record: %v", shownB)
+	}
+	shownA := run(projA, "port", "show")
+	if shownA["port"] != "(none)" {
+		t.Errorf("A's port was not actually released (no git): %v", shownA)
+	}
+}
+
+// TestPortAllocRefusesToWriteADifferentPortThanThePlanPromised: install.sh's --plan does a
+// --dry-run alloc to preview the URL it asks the user to confirm. If the REAL alloc that follows
+// consent would pick a DIFFERENT port — someone else took the previewed one in the gap — writing
+// that different port into the URL would route the user to a port they never agreed to see.
+// plugin.json says the port "must be FIXED rather than negotiated"; silently substituting one
+// after consent was given is exactly the negotiation that forbids. The real alloc must refuse.
+func TestPortAllocRefusesToWriteADifferentPortThanThePlanPromised(t *testing.T) {
+	portScanBase(t)
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	planned, code := settingsInDir(t, state, home, proj, "port", "alloc", "--dry-run")
+	if code != 0 || planned["port"] == "" {
+		t.Fatalf("planning dry-run failed: exit %d %v", code, planned)
+	}
+
+	// Simulate the gap between the plan and the real alloc: an unrelated project's OWN alloc
+	// (a genuinely different install racing this one, not a hand-edited fixture) records the
+	// exact port `proj` was promised, so `proj`'s real alloc's collision-avoiding scan is forced
+	// away from it.
+	other := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(other, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promisedPort, err := strconv.Atoi(planned["port"])
+	if err != nil {
+		t.Fatalf("planned port %q is not numeric: %v", planned["port"], err)
+	}
+	// `install-scope.json` does not exist yet — the plan above was a `--dry-run`, which writes
+	// nothing (TestPortAllocDryRunWritesNothing covers that directly) — so this is the file's
+	// first real write, seeding it with only the colliding project's record.
+	writeJSON(t, filepath.Join(state, "install-scope.json"), map[string]any{
+		"version": 1,
+		"projects": map[string]any{
+			other: map[string]any{
+				"scope": "custom", "file": filepath.Join(other, ".claude", "settings.local.json"),
+				"recorded_at": "2020-01-01T00:00:00Z", "port": promisedPort,
+			},
+		},
+	})
+
+	facts, code := settingsInDir(t, state, home, proj, "port", "alloc", "--promised-port", planned["port"])
+	if code == 0 {
+		t.Fatalf("real alloc succeeded despite the promised port now being taken by another project: %v", facts)
+	}
+	if facts["reason"] != "port_changed_since_plan" {
+		t.Fatalf("want reason=port_changed_since_plan, got exit %d %v", code, facts)
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".claude", "settings.local.json")); !os.IsNotExist(err) {
+		t.Errorf("the refused alloc wrote a settings file anyway: %v", err)
+	}
+
+	// The happy path: when the promised port is STILL free, passing --promised-port changes
+	// nothing.
+	proj2 := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proj2, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	planned2, code := settingsInDir(t, state, home, proj2, "port", "alloc", "--dry-run")
+	if code != 0 {
+		t.Fatalf("second plan failed: exit %d %v", code, planned2)
+	}
+	real2, code := settingsInDir(t, state, home, proj2, "port", "alloc", "--promised-port", planned2["port"])
+	if code != 0 || real2["port"] != planned2["port"] {
+		t.Fatalf("a still-valid promised port should be honoured, got exit %d %v (planned %v)",
+			code, real2, planned2)
+	}
+}
+
+// TestPluginJSONPortDefaultAgreesWithTheScript is a drift guard in the shape of
+// TestPluginJSONCacheStrategyAgreesWithTheScript: plugin.json's `port.default` (what the user's
+// settings UI shows) and settings.py's PORT_SCAN_START (what the scan actually starts from) are
+// two sources of truth for the same number, and a drift between them is invisible until a project
+// lands on a port the UI never mentioned. This never binds a socket: it reads PORT_SCAN_START out
+// of the module without running `main()`, via `runpy.run_path` under a run_name that is not
+// `__main__` so the script's own `if __name__ == "__main__": sys.exit(main())` never fires.
+func TestPluginJSONPortDefaultAgreesWithTheScript(t *testing.T) {
+	py := requireTool(t, "python3")
+
+	b, err := os.ReadFile(filepath.Join(".claude-plugin", "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		UserConfig map[string]struct {
+			Default any `json:"default"`
+		} `json:"userConfig"`
+	}
+	if err := json.Unmarshal(b, &manifest); err != nil {
+		t.Fatalf("plugin.json does not parse: %v", err)
+	}
+	portDefault, ok := manifest.UserConfig["port"]
+	if !ok {
+		t.Fatal("plugin.json has no userConfig.port entry")
+	}
+	wantFloat, ok := portDefault.Default.(float64)
+	if !ok {
+		t.Fatalf("plugin.json's port default is not a number: %v", portDefault.Default)
+	}
+
+	code := fmt.Sprintf(`
+import runpy
+ns = runpy.run_path(%q, run_name="not_main")
+print(ns["PORT_SCAN_START"])
+`, filepath.Join(scriptsDir(t), "settings.py"))
+	cmd := exec.Command(py, "-c", code)
+	// Deliberately NOT going through sandboxEnv/CONTEXT_GURU_PORT_BASE: this must read the
+	// script's actual DEFAULT, unaffected by the override every other test in this file uses to
+	// avoid binding real sockets. Nothing here binds anything.
+	cmd.Env = append(os.Environ(), "CONTEXT_GURU_PORT_BASE=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("reading PORT_SCAN_START: %v\n%s", err, out)
+	}
+	got := strings.TrimSpace(string(out))
+	want := strconv.FormatFloat(wantFloat, 'f', -1, 64)
+	if got != want {
+		t.Errorf("plugin.json port.default=%v but settings.py PORT_SCAN_START=%s — the two "+
+			"sources of truth for the default port have drifted", portDefault.Default, got)
+	}
+}
+
 // TestPresetFallbackInheritsRoutingScope: with nothing configured yet anywhere, `preset set`'s
 // fallback used to guess project-local independently of what routing actually chose. It must
 // instead land wherever THIS project's routing already lives.
