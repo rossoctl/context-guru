@@ -343,17 +343,29 @@ def recovery_dir_for(real: str) -> str:
     return os.path.join(os.path.dirname(real), RECOVERY_DIR_NAME)
 
 
-def ensure_dir_0700(path: str) -> str:
-    """makedirs `path`, force 0700 on it and its parent, and return it. Raises on failure.
+def ensure_dir_0700(path: str, *, chmod_parent: bool = True) -> str:
+    """makedirs `path`, force 0700 on it (and its parent, when `chmod_parent`), and return it.
+    Raises on failure.
 
     B3 in review: a directory created by an older version of this script (or by anything else) may
     be group- or world-writable under a permissive umask, and trusting it is the whole
     vulnerability — another local account could replace an entry in a recovery folder and have
     `context-guru-reset` write attacker-chosen content into the victim's settings file. mkdir's
     mode argument is masked by the umask, so the explicit chmod is what actually sets it.
+
+    `chmod_parent=False` for `recovery_dir_for()`'s result: unlike every other caller, that
+    directory's parent is NOT ours — it is `.claude/` (or a project root for a user-scope install),
+    which the user or their team may have deliberately set group- or world-readable, and it is
+    reached on every single settings write. Reported and verified: a `775 .claude/` silently became
+    `700` on the first write and stayed that way on every one after, undoing a real permission
+    choice with nothing disclosing it. The recovery folder itself still gets 0700 either way — it
+    can hold a credential-bearing copy of the settings file, the same threat model B3 describes —
+    only the PARENT chmod is skippable, because only the parent is a directory this script does not
+    own.
     """
     os.makedirs(path, mode=STATE_DIR_MODE, exist_ok=True)
-    for level in (path, os.path.dirname(path)):
+    levels = (path, os.path.dirname(path)) if chmod_parent else (path,)
+    for level in levels:
         try:
             if level and os.path.isdir(level) and (os.stat(level).st_mode & 0o077):
                 os.chmod(level, STATE_DIR_MODE)
@@ -828,7 +840,7 @@ def _record_touch(real: str, existed: bool) -> None:
     """
     recovery = recovery_dir_for(real)
     try:
-        ensure_dir_0700(recovery)
+        ensure_dir_0700(recovery, chmod_parent=False)
     except OSError as exc:
         HATCH_FACTS["reset_hatch"] = "unavailable"
         HATCH_FACTS["reset_hatch_detail"] = f"cannot write {recovery}: {exc}"

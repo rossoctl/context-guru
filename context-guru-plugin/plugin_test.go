@@ -4024,6 +4024,54 @@ func TestInstallLeavesAWayBackOutsideThePlugin(t *testing.T) {
 	}
 }
 
+// TestRecoveryDirCreationDoesNotTightenTheUsersOwnDirectory is the regression test for a real
+// review finding: ensure_dir_0700 (called via recovery_dir_for()) used to chmod BOTH the recovery
+// folder AND its parent to 0700. For every other caller that parent is plugin-owned state, but for
+// a recovery folder it is the settings file's own directory — `.claude/`, or a project root for a
+// user-scope install — which the user or their team may have deliberately made group- or
+// world-readable (a shared box, a team repo). Verified independently: a 775 directory silently
+// became 700 on the very first settings write, and stayed that way on every one after, with
+// nothing disclosing it anywhere. The recovery folder itself still gets 0700 either way — it can
+// hold a credential-bearing copy of the settings file, the same threat model B3 describes — only
+// the PARENT's mode has to survive untouched, because only the parent is not ours to manage.
+func TestRecoveryDirCreationDoesNotTightenTheUsersOwnDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits only")
+	}
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	claudeDir := filepath.Join(proj, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	// MkdirAll's mode is masked by this process's umask too, so set exactly what the test needs
+	// regardless of it, the same reason ensure_dir_0700 itself chmods explicitly rather than
+	// trusting mkdir's mode argument.
+	if err := os.Chmod(claudeDir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(claudeDir, "settings.local.json")
+
+	if _, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL); code != 0 {
+		t.Fatal("add failed")
+	}
+
+	fi, err := os.Stat(claudeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o775 {
+		t.Errorf(".claude/ mode changed from 0775 to %o — a settings write silently tightened a "+
+			"directory it does not own", got)
+	}
+	rfi, err := os.Stat(filepath.Join(claudeDir, "context-guru-settings-json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rfi.Mode().Perm(); got != 0o700 {
+		t.Errorf("recovery folder mode = %o, want 0700 — it can hold a credential-bearing copy", got)
+	}
+}
+
 // TestTheHatchNeedsNothingButPOSIXSh: the hatch runs in a state where the proxy is down and Claude
 // cannot talk, so anything it depends on is a way for it to be unavailable too. Asserted against
 // the script's text, since "it happened to work on this machine" is not the claim.
