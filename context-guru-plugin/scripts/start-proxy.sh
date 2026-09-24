@@ -295,6 +295,7 @@ if [ "$UPDATE_CHECK" = 1 ] && [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; th
   UC_OUT=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" update-check show 2>/dev/null) || UC_OUT=""
   UC_ANSWER=$(printf '%s\n' "$UC_OUT" | sed -n 's/^answer=//p' | head -1)
   UC_SKIPPED=$(printf '%s\n' "$UC_OUT" | sed -n 's/^skipped=//p' | head -1)
+  UC_NOTIFIED=$(printf '%s\n' "$UC_OUT" | sed -n 's/^notified=//p' | head -1)
   UC_LATEST=$(printf '%s\n' "$UC_OUT" | sed -n 's/^latest=//p' | head -1)
 
   if [ "$UC_ANSWER" != never ]; then
@@ -334,23 +335,26 @@ if [ "$UPDATE_CHECK" = 1 ] && [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; th
         ) </dev/null >/dev/null 2>&1 &
         disown 2>/dev/null || true
         note "updating the proxy in the background (${HAVE} -> ${UC_LATEST}); takes effect next session"
-      elif [ "$UC_LATEST" != "$UC_SKIPPED" ]; then
-        # Record this as a default `skip` of THIS tag BEFORE printing — the same "a silent or
-        # absent answer is a no" rule install/SKILL.md states for its own question. A hook can
-        # only print text; it cannot guarantee a model ever turns it into a real question, let
-        # alone that the user answers one. Without this write the notice would repeat every
-        # single session forever, which is exactly the nagging the user asked NOT to get. An
-        # explicit "yes" or "always" from the user overwrites this in the same or a later turn.
-        CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" update-check answer \
-          --answer skip --version "$UC_LATEST" >/dev/null 2>&1 || true
+      elif [ "$UC_LATEST" != "$UC_SKIPPED" ] && [ "$UC_LATEST" != "$UC_NOTIFIED" ]; then
+        # Record this tag as NOTIFIED, not as skipped, before printing. A hook can only print
+        # text — it cannot make a model relay it, and a real user hit exactly that: their first
+        # message that session was unrelated, the note was never mentioned, and the record ended
+        # up saying "skipped" for an offer they never actually saw. `notify` only suppresses a
+        # repeat of the SAME tag's notice; it makes no claim about what the user decided, so
+        # /context-guru:update and status can still report this honestly as unanswered rather
+        # than declined. An explicit "yes"/"always"/"no" from the user is what writes `skipped`.
+        CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" update-check notify \
+          --version "$UC_LATEST" >/dev/null 2>&1 || true
+        note "IMPORTANT — before anything else in this reply, tell the user this directly, even if"
+        note "their message is about something unrelated:"
         note "a newer proxy is released: ${UC_LATEST} (you have ${HAVE}). The plugin updates itself"
         note "through the marketplace; the proxy BINARY does not, so this is a separate step."
-        note "Ask the user: update now, always update automatically, or not for this version? A"
-        note "silent or absent answer is a no, so this is already recorded as skipped for"
-        note "${UC_LATEST} unless the user says otherwise."
+        note "Ask: update now, always update automatically, or not for this version? Wait for their"
+        note "answer before recording anything — do NOT run update-check answer on their behalf"
+        note "just because you checked or asked; only their explicit answer earns that write."
         note "  now:    run /context-guru:update"
         note "  always: \"${HERE}/settings.py\" update-check answer --answer always"
-        note "  no:     already recorded; nothing more to do"
+        note "  no:     \"${HERE}/settings.py\" update-check answer --answer skip --version '${UC_LATEST}'"
         note "or run /context-guru:update at any time."
       fi
     fi

@@ -431,6 +431,57 @@ def _default_segment(payload: dict, stats: dict | None) -> str | None:
             f"${total_usd:.2f}/{_human(total_tokens)}")
 
 
+def _update_check_state_dir() -> str:
+    """Same resolution as settings.py's state_dir() / start-proxy.sh's STATE, duplicated rather
+    than imported: this script is invoked on (almost) every render and must not fork python a
+    second time just to learn a path.
+    """
+    override = os.environ.get("CONTEXT_GURU_STATE")
+    if override:
+        return override
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(base, "context-guru")
+
+
+def _update_available_segment() -> str | None:
+    """A small, always-visible fallback for the SessionStart release notice.
+
+    That notice only ever reaches the user if a model relays it, and a hook cannot force that —
+    proven in the field: a real session's first message was unrelated, the note was never
+    mentioned, and the user had no way to know an update had even been offered until they asked
+    directly. This reads the same update-check.yaml record start-proxy.sh writes (a plain file,
+    never a fetch — this script's one hard rule) and shows a small marker whenever a release
+    exists that the user has not explicitly declined, independent of whether any note was ever
+    relayed. `notified=` (a hook merely printed a note once) does NOT suppress this — only an
+    actual `skipped=`/`never` answer does, because the whole point is to still be visible when
+    the notice alone failed to reach the user.
+    """
+    state = _update_check_state_dir()
+    try:
+        with open(os.path.join(state, "update-check.yaml"), encoding="utf-8") as fh:
+            text = fh.read(4096)
+    except OSError:
+        return None
+    fields = {"answer": "ask", "skipped": "", "latest": ""}
+    for line in text.splitlines():
+        m = re.match(r"^(answer|skipped|latest):\s*(.*)$", line)
+        if m:
+            fields[m.group(1)] = m.group(2).strip()
+    latest = fields["latest"]
+    if not latest or fields["answer"] == "never" or latest == fields["skipped"]:
+        return None
+    try:
+        with open(os.path.join(state, "proxy-version"), encoding="utf-8") as fh:
+            installed = fh.readline().strip()
+    except OSError:
+        installed = ""
+    if installed and (latest == installed or latest == f"v{installed}"):
+        return None  # already current
+    if fields["answer"] == "auto":
+        return f"{GREEN}▲ {latest} auto{RESET}"
+    return f"{GREEN}▲ update {latest}{RESET}"
+
+
 def _cache_segment_enabled() -> bool:
     return "--cache" in sys.argv[1:]
 
@@ -467,14 +518,24 @@ def main() -> None:
 
     stats, proxy_down = _fetch_stats(port, session_id)
     if proxy_down:
-        print("cg!")  # three characters: the proxy is unreachable, nothing else is worth saying
+        line = "cg!"  # three characters: the proxy is unreachable, nothing else is worth saying
+        update_seg = _update_available_segment()  # local file only — independent of the proxy
+        if update_seg:
+            line += " | " + update_seg
+        print(line)
         return
 
     # The context bar is payload-only (no fetch) so it renders even when stats do not; the rest
     # need `stats`. Priority is savings-vs-session-total first and always on; the cache TTL
     # stopper and the keep-alive ping counter stay OPT-IN extras, off unless their flag is passed
-    # — see skills/statusline/SKILL.md for the one-line command that turns either on.
+    # — see skills/statusline/SKILL.md for the one-line command that turns either on. The pending-
+    # update marker is placed FIRST, ahead of even the context bar, on purpose: it is the one
+    # segment meant as a fallback for something the user may not otherwise be told at all, and it
+    # must not scroll off the end of a long line or land after a truncation.
     parts = []
+    update_seg = _update_available_segment()
+    if update_seg:
+        parts.append(update_seg)
     context_seg = _context_segment(payload)
     if context_seg:
         parts.append(context_seg)

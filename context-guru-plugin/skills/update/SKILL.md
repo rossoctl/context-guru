@@ -13,10 +13,17 @@ description: Check whether a newer context-guru-proxy BINARY has been released a
 !`"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" update-check show`
 
 **The block above is a pure file read, and it is history, not news.** `answer=`/`skipped=`/
-`latest=`/`installed=` are only ever as fresh as the last SessionStart check — which could be from
-minutes ago, or from a session that ran long before this one. **The user invoking this skill is
-asking a direct question, and a cached answer is not a substitute for checking.** Always continue
-to step 1 and get a live answer; never report the block above as if it were current.
+`notified=`/`latest=`/`installed=` are only ever as fresh as the last SessionStart check — which
+could be from minutes ago, or from a session that ran long before this one. **The user invoking
+this skill is asking a direct question, and a cached answer is not a substitute for checking.**
+Always continue to step 1 and get a live answer; never report the block above as if it were
+current.
+
+`skipped=` and `notified=` are NOT the same claim. `skipped=<tag>` means the user explicitly
+declined that tag. `notified=<tag>` only means a SessionStart hook once printed a note about it —
+the note may never have reached the user at all (its output competes with whatever they actually
+asked that session, and a hook cannot force a question). If `notified=` names a tag but `skipped=`
+does not, say the release was surfaced but never actually answered — never describe it as declined.
 
 This skill does not touch routing, does not start a proxy, and does not ask for the
 traffic-interception consent `/context-guru:install` asks for — it only replaces the binary on

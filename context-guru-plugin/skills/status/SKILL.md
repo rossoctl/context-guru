@@ -129,14 +129,20 @@ delivers by itself.
 `"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" update-check show` — **read-only, never fetches.** It
 reports what the last SessionStart check (at most once every 5 minutes, run synchronously by
 whichever session happens to be due — so a release CAN be announced in the very session that
-discovers it, not only the next one) already found: `answer=`/`skipped=`/`latest=`/`installed=`.
+discovers it, not only the next one) already found:
+`answer=`/`skipped=`/`notified=`/`latest=`/`installed=`.
 
-Read `installed=` from THIS output, not from `skipped=` — `skipped=` is the tag a past notice was
-declined for, and is not the same fact as what is actually installed; conflating the two is a real
-defect this surface used to have. An empty or `unknown` `latest=` means no check has succeeded yet,
-not that the proxy is current. If `latest=` names something newer than `installed=` and it is not
-the `skipped=` tag, point at `/context-guru:update` — which does its own live check before
-reporting, rather than trusting this cached record — instead of re-explaining any of this here.
+Read `installed=` from THIS output, not from `skipped=` — conflating the two is a real defect this
+surface used to have. And keep `skipped=` and `notified=` apart: `skipped=<tag>` means the user
+EXPLICITLY declined that tag; `notified=<tag>` only means a hook once printed a note about it,
+which may never have reached the user at all (a SessionStart note competes with whatever they
+actually asked that session). If `notified=` names a tag but `skipped=` does not, say it was
+surfaced but never actually answered — do not report it as declined.
+
+An empty or `unknown` `latest=` means no check has succeeded yet, not that the proxy is current. If
+`latest=` names something newer than `installed=` and it is not the `skipped=` tag, point at
+`/context-guru:update` — which does its own live check before reporting, rather than trusting this
+cached record — instead of re-explaining any of this here.
 
 - **Check the preset before explaining a zero pipeline saving at all.** The default preset is
   `off`, which runs no components, so `acted: 0` and `saved_tokens: 0` are the expected state, not
