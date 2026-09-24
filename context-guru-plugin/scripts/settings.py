@@ -1175,10 +1175,34 @@ def cmd_port(args: argparse.Namespace) -> int:
     if args.op == "show":
         rec = _read_install_scopes().get(key)
         port = rec.get("port") if isinstance(rec, dict) else None
+        # `record=` and `option_port=` exist so a caller can undo PRECISELY. install.sh's step 0
+        # commits the port before anything else can fail, and its unwind could not tell "the record I
+        # just made" from "the record that was already here": `result=ok` also covers
+        # source=recorded and source=configured, so a failed RE-install of a working install deleted
+        # that project's record and the user's pinned `options.port` while `ANTHROPIC_BASE_URL` still
+        # named the old port — routed at a port the next session would not even compute. Read the
+        # prior state, undo only what you made.
+        state = "present" if isinstance(port, int) else "absent"
+        opt: object = "(none)"
+        if args.file:
+            try:
+                with open(args.file, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                opts = (((data.get("pluginConfigs") or {}).get(args.plugin) or {})
+                        .get("options") or {})
+                if isinstance(opts, dict) and "port" in opts:
+                    opt = opts["port"]
+            except FileNotFoundError:
+                pass
+            except (OSError, json.JSONDecodeError):
+                # Unreadable is NOT absent. A caller that treats it as absent would "undo" an option
+                # it never saw, which is the same overreach in a quieter form.
+                opt = "(unreadable)"
         if isinstance(port, int):
-            emit(result="ok", port=port)
+            emit(result="ok", port=port, record=state, option_port=opt)
         else:
-            emit(result="ok", port="(none)", note="no port recorded for this project")
+            emit(result="ok", port="(none)", record=state, option_port=opt,
+                 note="no port recorded for this project")
         return 0
 
     if args.op == "release":
@@ -3076,7 +3100,9 @@ def main() -> int:
     pt.add_argument("--file", default="",
                     help="for `alloc`: the settings file to write pluginConfigs.options.port "
                          "into, or for `unset`: the settings file to remove it FROM, where "
-                         "it is required. Optional for `alloc`; defaults to "
+                         "it is required. For `show`: the file whose existing option value to "
+                         "report as option_port=, for a caller that has to know what was there "
+                         "BEFORE it wrote. Optional for `alloc`; defaults to "
                          "resolve_install_scope()'s answer.")
     pt.add_argument("--dry-run", action="store_true",
                     help="for `alloc`: report the port that would be used without recording or "

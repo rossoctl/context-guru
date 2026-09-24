@@ -9552,3 +9552,388 @@ func TestUserScopeLeaveKeepsTheProjectsItWasToldToLeave(t *testing.T) {
 		t.Errorf("`leave` dropped the project's record: %v", projects)
 	}
 }
+
+// pathWithoutTheProxyBinary returns $PATH with every directory that actually holds a
+// `context-guru-proxy` removed.
+//
+// A test about the DOWNLOAD path has to be able to reach it, and it can only be reached when no
+// proxy is already on $PATH. The helpers here prepend a fixture directory to the inherited $PATH
+// rather than replacing it, so on any machine with a real proxy installed (every eval box) the
+// installer finds that one, reports `result=present`, and a test written to exercise a failing
+// download instead exercises nothing and says so in the shape of a pass. Filtered by what is on
+// disk rather than by naming /usr/local/bin, because the point is the binary, not the directory.
+func pathWithoutTheProxyBinary(t *testing.T) string {
+	t.Helper()
+	keep := []string{}
+	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
+		if d == "" {
+			continue
+		}
+		if st, err := os.Stat(filepath.Join(d, "context-guru-proxy")); err == nil && !st.IsDir() {
+			continue
+		}
+		keep = append(keep, d)
+	}
+	return strings.Join(keep, string(os.PathListSeparator))
+}
+
+// checksumlessCurlDir returns a directory holding a stub `curl` that serves a release tarball and
+// 404s its checksums.txt — the shape of a release whose checksums are missing, which install.sh must
+// refuse. Same stub shape as TestInstallRefusesAnUnverifiedDownload, in a helper because a second
+// test now needs the refusal as a means rather than as the thing under test.
+func checksumlessCurlDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(dir, "context-guru-proxy")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho NEVER VERIFIED\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tarball := filepath.Join(dir, "payload.tar.gz")
+	if out, err := exec.Command("tar", "czf", tarball, "-C", dir, "context-guru-proxy").
+		CombinedOutput(); err != nil {
+		t.Fatalf("tar: %v (%s)", err, out)
+	}
+	stub := "#!/usr/bin/env bash\n" +
+		"dest=\"\"; url=\"\"\n" +
+		"while [ $# -gt 0 ]; do case \"$1\" in -o) dest=$2; shift 2;; -*) shift;; *) url=$1; shift;; " +
+		"esac; done\n" +
+		"case \"$url\" in\n" +
+		"  *checksums.txt) exit 22;;\n" +
+		"  *api.github.com*) printf '{\"tag_name\": \"v9.9.9\"}' ${dest:+> \"$dest\"}; exit 0;;\n" +
+		"  *.tar.gz) cp " + tarball + " \"$dest\"; exit 0;;\n" +
+		"esac\nexit 22\n"
+	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+// fakeProxyDirAnyPort is fakeProxyDir for a test that cannot know the port in advance: it serves
+// whatever `--listen host:port` start-proxy.sh puts in its argv. That is the only way to reach the
+// case where the port was ALLOCATED rather than pinned, and the allocated case is the one where
+// `port alloc` writes an `options.port` of its own — so it is the case a re-install's unwind has to
+// leave alone. A test that pins the port cannot get there.
+func fakeProxyDirAnyPort(t *testing.T) string {
+	t.Helper()
+	py := requireTool(t, "python3")
+	dir := t.TempDir()
+	script := "#!/usr/bin/env bash\n" +
+		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy vfake (commit none)'; exit 0; fi\n" +
+		"addr=\"\"\n" +
+		"while [ $# -gt 0 ]; do case \"$1\" in --listen) addr=$2; shift 2;; *) shift;; esac; done\n" +
+		"port=${addr##*:}\n" +
+		"exec " + py + " -c '\n" +
+		"import http.server, sys\n" +
+		"class H(http.server.BaseHTTPRequestHandler):\n" +
+		"    def do_GET(self):\n" +
+		"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+		"    def log_message(self, *a): pass\n" +
+		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n' \"$port\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "context-guru-proxy"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestAFailedReinstallKeepsTheWorkingInstallsPortRecord is the one the first version of the unwind
+// got backwards, and it is the more expensive of the two states.
+//
+// `route_unwind_port` fired on `result=ok` from `port alloc`, and `result=ok` also covers
+// source=recorded and source=configured — the cases where step 0 wrote nothing new. So a failed
+// RE-install of a healthy install deleted that project's whole record (scope, file and port) and the
+// user's pinned `options.port`, while `env.ANTHROPIC_BASE_URL` in the same file still named the old
+// port. Nothing had changed about the routing, so the failure looked recoverable; the next session
+// computed the default port instead of the recorded one and was routed at a port nothing serves.
+//
+// A re-install is the common case (a repair, a version bump, a strategy change), and the failure it
+// is most likely to hit is the health check — so this is the path that had to be safe.
+func TestAFailedReinstallKeepsTheWorkingInstallsPortRecord(t *testing.T) {
+	// Both halves of "undo what step 0 MADE, never what it found", because which half step 0 makes
+	// depends on where the port came from — and the two cases report different things.
+	//
+	// pinned: the user's `options.port` is already in their own settings file, so `port alloc` writes
+	// no option there (source=configured) and the one it does write into the project file on a
+	// re-install IS its own to take back. allocated: the option in the project file is the working
+	// install's, and taking it back is the damage.
+	for _, tc := range []struct {
+		name      string
+		pinned    bool
+		wantParts string // "" = nothing was step 0's to undo
+	}{
+		{"a pinned port", true, "option"},
+		{"an allocated port", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+			var env []string
+			port := ""
+			if tc.pinned {
+				port = freePort(t)
+				writePluginOptions(t, home, map[string]any{"port": port})
+				env = routeEnv(t, home, state, fakeProxyDir(t, port, true))
+			} else {
+				env = routeEnv(t, home, state, fakeProxyDirAnyPort(t))
+			}
+
+			// A real, working project-scope install first. Without this the record under test is one
+			// step 0 created, which is the case the unwind SHOULD clean up — the test would prove the
+			// opposite thing.
+			facts, code := runRoute(t, proj, env, consentOK()...)
+			if code != 0 || facts["result"] != "routed" {
+				t.Fatalf("the first install failed, so there is no working install to damage: exit %d "+
+					"%v", code, facts)
+			}
+			if port == "" {
+				if port = facts["port"]; port == "" {
+					t.Fatalf("the install did not say which port it allocated: %v", facts)
+				}
+			}
+			t.Cleanup(func() { stopFakeProxy(t, state, port) })
+			projReal, err := filepath.EvalSymlinks(proj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scopesPath := filepath.Join(state, "context-guru", "install-scope.json")
+			beforeProjects, _ := readJSON(t, scopesPath)["projects"].(map[string]any)
+			beforeRec, _ := beforeProjects[projReal].(map[string]any)
+			if beforeRec == nil {
+				t.Fatalf("the first install recorded nothing for %s: %v", projReal, beforeProjects)
+			}
+			file := filepath.Join(proj, ".claude", "settings.local.json")
+			beforeOpt := projectPortOption(t, file)
+
+			// Now break it the way a real re-install breaks: the working proxy is gone and the binary
+			// on PATH comes up but never answers /healthz, so the re-install fails at step 6 — the same
+			// post-step-0 failure route_unwind_port was written for, this time in a project whose record
+			// it did not make.
+			stopFakeProxy(t, state, port)
+			env2 := routeEnv(t, home, state, fakeProxyDir(t, port, false))
+			t.Cleanup(func() { stopFakeProxy(t, state, port) })
+			facts, code = runRoute(t, proj, env2, consentOK()...)
+			if code == 0 || facts["reason"] != "health_check_failed" {
+				t.Fatalf("exit %d reason=%q, want a failed re-install: %v", code, facts["reason"], facts)
+			}
+			// Said out loud, not merely skipped: a caller has to be able to tell "your record is
+			// deliberately still there" from "nothing was cleaned up".
+			if tc.wantParts == "" {
+				if facts["port_unwound"] != "nothing_to_undo" {
+					t.Errorf("port_unwound=%q parts=%q; step 0 created neither half here, so the only "+
+						"honest report is nothing_to_undo: %v", facts["port_unwound"],
+						facts["port_unwound_parts"], facts)
+				}
+			} else {
+				if facts["port_unwound"] != "true" {
+					t.Errorf("port_unwound=%q, want true: %v", facts["port_unwound"], facts)
+				}
+				if facts["port_unwound_parts"] != tc.wantParts {
+					t.Errorf("port_unwound_parts=%q, want %q — the record was NOT step 0's to take "+
+						"back: %v", facts["port_unwound_parts"], tc.wantParts, facts)
+				}
+			}
+
+			// The record, unchanged. This is the expensive half: `ANTHROPIC_BASE_URL` still names the
+			// old port, and without the record nothing can compute it again.
+			afterProjects, _ := readJSON(t, scopesPath)["projects"].(map[string]any)
+			afterRec, _ := afterProjects[projReal].(map[string]any)
+			if afterRec == nil {
+				t.Fatalf("a failed re-install deleted the working install's record: %v", afterProjects)
+			}
+			for _, k := range []string{"scope", "file", "port"} {
+				if fmt.Sprint(afterRec[k]) != fmt.Sprint(beforeRec[k]) {
+					t.Errorf("a failed re-install changed the record's %s: %v -> %v", k, beforeRec[k],
+						afterRec[k])
+				}
+			}
+			// And the option the working install is using, in whichever file holds it.
+			if tc.pinned {
+				pinned := readJSON(t, filepath.Join(home, ".claude", "settings.json"))
+				ppc, _ := pinned["pluginConfigs"].(map[string]any)
+				ppe, _ := ppc["context-guru@context-guru"].(map[string]any)
+				popts, _ := ppe["options"].(map[string]any)
+				if popts == nil || fmt.Sprint(popts["port"]) != port {
+					t.Errorf("a failed re-install took away the port the user pinned (want %s): %v",
+						port, popts)
+				}
+			} else if got := projectPortOption(t, file); got != beforeOpt || got != port {
+				t.Errorf("a failed re-install took away the working install's own port option: "+
+					"%q -> %q (want %s)", beforeOpt, got, port)
+			}
+			// The two agreeing is the whole property: a surviving URL beside a deleted port is the
+			// broken state the next session cannot compute its way out of.
+			data := readJSON(t, file)
+			fenv, _ := data["env"].(map[string]any)
+			if url := fmt.Sprint(fenv["ANTHROPIC_BASE_URL"]); !strings.Contains(url, ":"+port) {
+				t.Errorf("the routing no longer names the recorded port %s, so the two disagree: %q",
+					port, url)
+			}
+		})
+	}
+}
+
+// projectPortOption returns pluginConfigs[...].options.port from a settings file as a string, or ""
+// when the file, the entry or the key is absent.
+func projectPortOption(t *testing.T, file string) string {
+	t.Helper()
+	if _, err := os.Stat(file); err != nil {
+		return ""
+	}
+	pc, _ := readJSON(t, file)["pluginConfigs"].(map[string]any)
+	pe, _ := pc["context-guru@context-guru"].(map[string]any)
+	opts, _ := pe["options"].(map[string]any)
+	if opts == nil || opts["port"] == nil {
+		return ""
+	}
+	return fmt.Sprint(opts["port"])
+}
+
+// TestUserScopeAdoptKeepsTheProxyAndRecordOfTheProjectItIsRunFrom.
+//
+// `adopt` un-routes every project that routes itself, releases its port record and stops the proxy it
+// was using. That is right for a STRANGER project. But the likeliest way anyone reaches adopt at all
+// is by converting their own project-local install to machine-wide, FROM that project — and then the
+// converting project is in the adopt list too: its record still says scope=project-local, which is
+// exactly what the gate lists.
+//
+// So adopt ran on the install's own project and, with nothing excluding it, killed the proxy step 8
+// had just started and health-checked, deleted its pid/owner/fingerprint and released the record step
+// 0 had just written — while the install still reported `result=routed`. The user is told they are
+// now routed machine-wide; the port they are routed at has nothing on it.
+//
+// What still applies to that project is removing its project-local routing: that file is more
+// specific than the machine-wide route and would keep overriding it, which is the point of adopting.
+func TestUserScopeAdoptKeepsTheProxyAndRecordOfTheProjectItIsRunFrom(t *testing.T) {
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	port := freePort(t)
+	// This project's own project-local install, at `port`, routing itself — the state a user has
+	// immediately before they decide they want context-guru everywhere.
+	projFile := seedProjectRecord(t, state, proj, port)
+
+	env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+	t.Cleanup(func() { stopFakeProxy(t, state, port) })
+	facts, code := runRoute(t, proj, env, "--scope", "user", "--i-consent-to-traffic-interception",
+		"--i-understand-machine-wide", "--on-existing-projects", "adopt")
+	if code != 0 || facts["result"] != "routed" {
+		t.Fatalf("the conversion itself failed, so adoption proves nothing: exit %d %v", code, facts)
+	}
+	// This is only the case under test if the machine-wide install really did reuse this project's
+	// recorded port; if it picked a different one, everything below passes for the wrong reason.
+	if facts["port"] != port || facts["port_source"] != "recorded" {
+		t.Fatalf("the install is not on the project's recorded port %s (port=%s source=%s), so the "+
+			"case this test exists for was never reached: %v", port, facts["port"],
+			facts["port_source"], facts)
+	}
+	// The self-skip in the adopt loop is what stops the damage: it has to skip the record release too,
+	// so it returns before the proxy-stop step is reached at all. (`route_stop_adopted_proxy`'s own
+	// $R_PORT guard is the same invariant restated at the point of the dangerous action, and on this
+	// path it is deliberately unreachable — so `adopted_proxy_kept=` is NOT what this asserts on.)
+	if facts["adopted_project_is_this_project"] == "" {
+		t.Errorf("adopt says nothing about having skipped the install's own project, so a reader "+
+			"cannot tell a deliberate skip from a release that silently failed: %v", facts)
+	}
+
+	// Ground truth, not wording: something still answers on that port.
+	waitForHealthz(t, port)
+	sd := filepath.Join(state, "context-guru")
+	for _, f := range []string{"proxy-" + port + ".pid", "proxy-" + port + ".owner"} {
+		if _, err := os.Stat(filepath.Join(sd, f)); err != nil {
+			t.Errorf("adopt removed %s for the proxy this install is using: %v", f, err)
+		}
+	}
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _ := readJSON(t, filepath.Join(sd, "install-scope.json"))["projects"].(map[string]any)
+	rec, _ := projects[projReal].(map[string]any)
+	if rec == nil {
+		t.Fatalf("adopt released the record step 0 wrote for this install: %v", projects)
+	}
+	if fmt.Sprint(rec["port"]) != port {
+		t.Errorf("the surviving record no longer names the port being served (want %s): %v", port, rec)
+	}
+	if rec["scope"] != "user" {
+		t.Errorf("the record still calls this a %v install after converting to machine-wide: %v",
+			rec["scope"], rec)
+	}
+	// And the half of adoption that DOES apply: the project-local file no longer overrides the
+	// machine-wide route it was adopted into.
+	data := readJSON(t, projFile)
+	if fenv, _ := data["env"].(map[string]any); fenv["ANTHROPIC_BASE_URL"] != nil {
+		t.Errorf("the install's own project still routes itself, so the machine-wide route it just "+
+			"wrote is overridden in the very project it was run from: %v", data)
+	}
+}
+
+// TestAFailedBinaryInstallTakesBackItsPortBookkeeping covers the most common early failure there is.
+//
+// A missing release asset or an unverifiable checksum is refused — rightly, and that refusal is not
+// negotiable. But it happens AFTER step 0 has allocated the port, and the exit printed "nothing else
+// was touched" over a record, an `options.port`, and in a fresh project the settings file and its
+// recovery folder that had just been created. The note a user acts on was false exactly where they
+// were most likely to read it.
+func TestAFailedBinaryInstallTakesBackItsPortBookkeeping(t *testing.T) {
+	requireTool(t, "bash")
+	requireTool(t, "tar")
+	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	bin := checksumlessCurlDir(t)
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	// PATH explicitly, rather than routeEnv's prepend: this test NEEDS the download path, and it is
+	// unreachable on any machine with a proxy already installed.
+	env := withEnv(routeEnv(t, home, state, ""), "PATH",
+		bin+string(os.PathListSeparator)+pathWithoutTheProxyBinary(t))
+	env = append(env, "CONTEXT_GURU_DEST="+dest)
+
+	facts, code := runRoute(t, proj, env, consentOK()...)
+	if code != 3 || facts["reason"] != "binary_install_failed" {
+		t.Fatalf("exit %d reason=%q, want the binary step to have failed: %v", code, facts["reason"],
+			facts)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "context-guru-proxy")); err == nil {
+		t.Fatal("an unverified binary was installed")
+	}
+	if facts["port_unwound"] != "true" {
+		t.Errorf("port_unwound=%q: step 0 created both halves in this fresh project, so both had to "+
+			"come back: %v", facts["port_unwound"], facts)
+	}
+	for _, part := range []string{"option", "record"} {
+		if !strings.Contains(facts["port_unwound_parts"], part) {
+			t.Errorf("port_unwound_parts=%q does not name %s", facts["port_unwound_parts"], part)
+		}
+	}
+	// The note has to point at that report rather than contradict it.
+	if !strings.Contains(facts["note"], "port_unwound") {
+		t.Errorf("the note does not point at what was unwound: note=%q", facts["note"])
+	}
+	if !strings.Contains(facts["note"], "checksum failure must never be worked around") {
+		t.Errorf("the refusal stopped saying the checksum failure is not to be worked around: "+
+			"note=%q", facts["note"])
+	}
+
+	// And it is really gone, not merely reported.
+	projReal, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopesPath := filepath.Join(state, "context-guru", "install-scope.json")
+	if _, err := os.Stat(scopesPath); err == nil {
+		projects, _ := readJSON(t, scopesPath)["projects"].(map[string]any)
+		if rec, still := projects[projReal]; still {
+			t.Errorf("the failed install left a port record behind (%v), which the next --scope user "+
+				"install is then refused over: %v", rec, projects)
+		}
+	}
+	file := filepath.Join(proj, ".claude", "settings.local.json")
+	if _, err := os.Stat(file); err == nil {
+		data := readJSON(t, file)
+		pc, _ := data["pluginConfigs"].(map[string]any)
+		pe, _ := pc["context-guru@context-guru"].(map[string]any)
+		if opts, _ := pe["options"].(map[string]any); opts != nil && opts["port"] != nil {
+			t.Errorf("the failed install left its port option behind: %v", opts)
+		}
+	}
+}

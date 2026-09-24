@@ -283,8 +283,14 @@ owner_token_now() {
 # string equality: an owner file written before this token existed holds a bare project key, and
 # that names a stranger only if the project it names still routes ITSELF. Anything else is a stale
 # claim from the old scheme, and treating it as a stranger would veto this session's proxy forever
-# on state nobody can clear. Fails open to "ours" - a verdict we cannot obtain must not be the
-# thing that leaves a session with a stale proxy it is allowed to restart.
+# on state nobody can clear.
+#
+# If that answer cannot be obtained, the fallback is the PLAIN STRING COMPARISON - i.e. exactly the
+# behaviour before this token existed, which answers `theirs` for anything that does not match. Not
+# "fails open to ours": a `theirs` verdict is what vetoes a restart, so the unobtainable-verdict
+# case is the conservative one (leave the proxy alone and say so) rather than the permissive one.
+# Stated explicitly because an earlier version of this comment claimed the opposite, and a reader
+# who trusts it would mis-reason about the one branch where the fix does not apply.
 owner_verdict() {
   if [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; then
     ov_=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" owner-token --observed "$1" 2>/dev/null \

@@ -69,20 +69,52 @@ R_PORT= R_PRESET= R_IDLE= R_BIN= R_ONPATH= R_FILE= R_EXISTING= R_CHAINED=false
 R_PORT_COMMITTED=0
 R_ALREADY=false R_CONSENT=0 R_OURS= R_FROMENV=0 R_SPENDS= R_PIDFILE= R_PROXYLOG=
 R_ONEXISTING= R_PORTSOURCE= R_EXISTINGPROJECTS=
+# What step 0 FOUND, read before it writes, so route_unwind_port can undo what this install made
+# and nothing else. `unknown` is the safe default: it is not `absent`, so nothing is released on the
+# strength of a reading we never got.
+R_PORT_RECORD_PRE=unknown R_PORT_OPTION_PRE="(unknown)" R_PORT_ALLOC_SRC=unknown
 
 # Take step 0's write back, for the failure paths that report nothing was written. Best-effort in
 # both halves and deliberately so: this runs while something else has already gone wrong, and a
 # bookkeeping cleanup that failed must not replace the real reason for the failure. It removes the
 # `port` option only from the file step 0 wrote it into, never from a file it did not touch.
+# Undo what step 0 MADE, never what it found. The first version of this ran `port unset` and
+# `port release` unconditionally on any `result=ok`, and `result=ok` also covers source=recorded and
+# source=configured — the two cases where step 0 wrote nothing new. So a failed RE-install of a
+# working install deleted that project's whole record (scope, file and port) and the user's pinned
+# `options.port`, while `env.ANTHROPIC_BASE_URL` in the same file still named the old port: the next
+# start-proxy.sh computed 8787 and the session was routed at a port nothing listens on. The finding
+# this function exists to close was a contract violation with no user-visible damage; that was
+# user-visible damage, which makes it the worse of the two.
+#
+# So each half is gated on the state read BEFORE the write, and the case where step 0 created
+# nothing is reported as such rather than silently skipped: a caller has to be able to tell
+# "your pre-existing record and port are deliberately still there" from "nothing was cleaned up".
 route_unwind_port() {
   [ "$R_PORT_COMMITTED" = 1 ] || return 0
   R_PORT_COMMITTED=0
-  "$(route_here)/settings.py" port unset --file "$R_FILE" >/dev/null 2>&1 || true
-  "$(route_here)/settings.py" port release >/dev/null 2>&1 || true
+  local parts=
+  # `source=configured` writes NO option (the user's own option is already in whichever file they
+  # put it in, possibly not this one), so there is nothing of ours to remove and reporting `option`
+  # would name an undo that never happened. Both conditions, because either alone is wrong: absent
+  # before and written by us is the only case that is ours to take back.
+  if [ "$R_PORT_OPTION_PRE" = "(none)" ] && [ "$R_PORT_ALLOC_SRC" != configured ]; then
+    "$(route_here)/settings.py" port unset --file "$R_FILE" >/dev/null 2>&1 || true
+    parts="option"
+  fi
+  if [ "$R_PORT_RECORD_PRE" = absent ]; then
+    "$(route_here)/settings.py" port release >/dev/null 2>&1 || true
+    parts="${parts:+${parts},}record"
+  fi
+  if [ -z "$parts" ]; then
+    emit "port_unwound=nothing_to_undo"
+    return 0
+  fi
   # Reported, not silent. The point of unwinding is that the failure notes can be believed, and a
   # caller that is told nothing cannot tell an install that undid its bookkeeping from one that
   # never got that far.
   emit "port_unwound=true"
+  emit "port_unwound_parts=$parts"
 }
 
 route_die() { route_unwind_port; emit "result=error"; emit "reason=$1"; [ -n "${2:-}" ] && emit "detail=$2"; exit 3; }
@@ -392,6 +424,19 @@ route_stop_adopted_proxy() {
   local aproj aport apidfile apid astate
   aproj="$1"; aport="$2"
   case "$aport" in ''|*[!0-9]*) return 0 ;; esac
+  # NEVER the port this install is routing to. The case that made this necessary - a project-local
+  # install converted to machine-wide FROM THAT SAME PROJECT, where the converting project is itself
+  # in R_EXISTINGPROJECTS with its recorded port == $R_PORT - is caught one level up, by the self-skip
+  # in the adopt loop, which has to skip the record release as well and so reaches its `continue`
+  # before getting here. This is the same invariant asserted at the point of the dangerous action:
+  # the process on $R_PORT was started and health-checked by THIS install seconds ago, and no caller
+  # of this function may signal it. Kept deliberately although the loop above currently makes it
+  # unreachable, for the same reason this function kills by PID and never by pattern - and it is
+  # reachable from legacy state where two projects recorded one port.
+  if [ "$aport" = "$R_PORT" ]; then
+    emit "adopted_proxy_kept=$aproj port=$aport reason=this_installs_own_port"
+    return 0
+  fi
   astate="$(route_state_dir)"
   apidfile="${astate}/proxy-${aport}.pid"
   apid=$(cat "$apidfile" 2>/dev/null) || apid=""
@@ -722,8 +767,15 @@ they say yes. A silent or absent answer is a NO. Never pass it on your own judge
   # and the settings write all use $R_PORT regardless), so a bookkeeping failure is reported as a
   # warning, not a refusal. The one exception is the promise mismatch above, which is not a
   # bookkeeping failure — it means the port is wrong.
-  local paout pares
+  local paout pares pshow
+  # BEFORE the write: what is already here. route_unwind_port undoes only the halves this call
+  # creates, and it can only know which those are from a reading taken first. Fail-open: an
+  # unreadable answer leaves both fields at their `unknown` defaults, which unwinds nothing.
+  pshow=$("$(route_here)/settings.py" port show --file "$R_FILE" 2>/dev/null) || pshow=""
+  R_PORT_RECORD_PRE=$(kv "$pshow" record);      [ -n "$R_PORT_RECORD_PRE" ] || R_PORT_RECORD_PRE=unknown
+  R_PORT_OPTION_PRE=$(kv "$pshow" option_port); [ -n "$R_PORT_OPTION_PRE" ] || R_PORT_OPTION_PRE="(unknown)"
   paout=$("$(route_here)/settings.py" port alloc --file "$R_FILE" --promised-port "$R_PORT" 2>&1) || true
+  R_PORT_ALLOC_SRC=$(kv "$paout" source); [ -n "$R_PORT_ALLOC_SRC" ] || R_PORT_ALLOC_SRC=unknown
   pares=$(kv "$paout" result)
   # What this call actually wrote, so a later failure can take it back — see route_unwind_port.
   # `port alloc` is the FIRST write of the whole install (it has to be: the settings write needs the
@@ -763,9 +815,14 @@ again: the port they agreed to is no longer free for this project."
     iout=$("$0" 2>&1); ires=$(kv "$iout" result)
     case "$ires" in
       present|installed) : ;;
-      *) emit "result=error"; emit "reason=binary_install_failed"
+      *) route_unwind_port
+         emit "result=error"; emit "reason=binary_install_failed"
          emit "detail=$(kv "$iout" reason)"
-         emit "note=nothing else was touched. A checksum failure must never be worked around."
+         # This is the MOST COMMON early failure (no release asset, checksum mismatch) and step 0
+         # has already run, so "nothing else was touched" was false here more often than anywhere
+         # else. What it can honestly say is what port_unwound= reports.
+         emit "note=no routing was written, and whatever port bookkeeping step 0 created was taken \
+back - see port_unwound. A checksum failure must never be worked around."
          exit 3 ;;
     esac
     R_ONPATH=$(kv "$iout" on_path)
@@ -853,9 +910,14 @@ proxy is a broken one."
   local ares; ares=$(kv "$aout" result)
   case "$ares" in
     added|completed|unchanged|repointed) : ;;
-    *) emit "result=error"; emit "reason=settings_write_failed"
+    *) route_unwind_port
+       emit "result=error"; emit "reason=settings_write_failed"
        emit "detail=$(kv "$aout" reason)"; emit "exit=$acode"
-       emit "note=no routing was written."
+       # True about the ROUTING, and it always was. What it left out is that step 0 had already put
+       # a port option into this same file and a record in the state dir, so "no routing was
+       # written" read as "nothing is here" about a file that had just been created and written to.
+       emit "note=no routing was written, and whatever port bookkeeping step 0 created was taken \
+back - see port_unwound."
        route_report_side_effects        # "may be running" is knowable; say which.
        exit 3 ;;
   esac
@@ -882,7 +944,15 @@ proxy is a broken one."
   # health-checked — step 8 above is what proves that. Unrouting them first and then failing here
   # would leave every one of them with no route at all.
   if [ "$R_ONEXISTING" = adopt ] && [ -n "$R_EXISTINGPROJECTS" ]; then
-    local ap af aport aout2 arest arestored
+    local ap af aport aout2 arest arestored rkey
+    # THIS project's key. A project-local install converted to machine-wide from that same project
+    # is in R_EXISTINGPROJECTS too (its record says scope=project-local, which is exactly what the
+    # gate lists), and two of the three things done to an adopted project below must not be done to
+    # the project the install belongs to: releasing its record would delete the record step 0 just
+    # wrote for THIS install, and stopping its proxy would kill the proxy step 8 just verified.
+    # Un-routing its own project-local file is still right - that file is more specific than the
+    # machine-wide route and would keep overriding it, which is the whole point of adopting.
+    rkey=$("$(route_here)/settings.py" project-key 2>/dev/null | sed -n 's/^key=//p' | head -1) || rkey=""
     printf '%s\n' "$R_EXISTINGPROJECTS" | while IFS= read -r l; do
       # Anchored on the two fields that CANNOT contain a space (scope= and port=) rather than on
       # "up to the first space". `existing_project=` and `file=` are both PATHS, and a project at
@@ -918,6 +988,14 @@ proxy is a broken one."
         # that project's hooks at a port nothing serves — configured-looking and broken, which is
         # worse than the state before.
         "$(route_here)/settings.py" port unset --file "$af" >/dev/null 2>&1 || true
+      fi
+      # THIS project keeps its record and its proxy: both now belong to the machine-wide install
+      # that step 0 and step 8 just made. Its own project-local routing was removed above, which is
+      # the part of adoption that actually applies to it.
+      if [ -n "$rkey" ] && [ "$ap" = "$rkey" ]; then
+        emit "adopted_project_is_this_project=$ap note=its own routing was removed; its port record \
+and proxy are this install's and were kept."
+        continue
       fi
       # And the record, so nothing reports the project as still having its own routing. `--key`
       # names the project directly: the `cd` this used to do was a second place for a path to get
