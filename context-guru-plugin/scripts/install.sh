@@ -810,7 +810,12 @@ a routed one with no proxy is a broken one."
       # there before us. No --url, so that check decides alone.
       if [ -n "$af" ] && [ "$af" != "(none)" ]; then
         aout2=$("$(route_here)/settings.py" remove --file "$af" 2>&1) || true
-        emit "adopted_project=$ap unrouted=$(kv "$aout2" result) backup=$(kv "$aout2" backup)"
+        # `remove`'s own backup= is NOT relayed. It stopped being a path: a clean removal deletes
+        # every rolling backup it just took (forget_backups), so the field now carries a fixed
+        # sentence saying so — the same sentence for every project, containing spaces and an em
+        # dash, inside a line callers parse on spaces. The recoverable artifact is the recovery
+        # FOLDER beside each file, which the note on the gate above already points at.
+        emit "adopted_project=$ap unrouted=$(kv "$aout2" result) recovery_dir=$(dirname "$af")/context-guru-settings-json"
         # The per-project port option goes too: with no route of its own, a leftover port would aim
         # that project's hooks at a port nothing serves — configured-looking and broken, which is
         # worse than the state before.

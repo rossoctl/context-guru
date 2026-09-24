@@ -773,8 +773,10 @@ def _sibling_legacy_records(new_key: str, old_key: str, projects: dict) -> list[
     probed (a fresh `project_key(key)` call, which forks `git`) when its directory still exists:
     a worktree that has since been deleted cannot be asked its own git-common-dir any more, and
     guessing at its identity from a stale path risks being confidently wrong. Left unprobed, it
-    just sits in the file as an orphan record — harmless, since nothing routes through a deleted
-    directory regardless of what its record says.
+    just sits in the file as an orphan record. Nothing routes through a deleted directory
+    regardless of what its record says, so it misleads no reader — but it is not entirely free
+    either: it names a port, and `_recorded_ports` skips exactly these records for that reason, so
+    that an abandoned checkout does not hold a port out of every other project's pool forever.
     """
     out: list[tuple[str, dict]] = []
     own = projects.get(old_key)
@@ -1054,13 +1056,31 @@ def _recorded_ports(exclude_key: str) -> set[int]:
     never hands out one of them. `exclude_key` is this project's own key — its own recorded port
     (if any) is not a collision with itself, and rule 1 already returns it unchanged before this
     is ever consulted.
+
+    A record whose project directory no longer exists is SKIPPED. Without that, every deleted
+    checkout held its port out of the pool permanently: the scan range is 64 ports wide, uninstall
+    is the only thing that releases a record, and deleting a project directory is a far more
+    ordinary way for one to end than running uninstall first. The pool would shrink by one for
+    every clone a user ever threw away, and the eventual failure is `no_port_available` on a
+    machine where nothing is listening on any of them.
+
+    Skipping is safe because it is not the last line of defence: the caller only accepts a
+    candidate that `_port_bindable` also confirms nothing is listening on, so re-issuing a port
+    whose record is an orphan can never steal one from a live proxy. It can only reuse a number
+    whose owner is genuinely gone. (`proxy-<port>.owner` is the other half — it is what refuses an
+    install onto a port a LIVE proxy owns, and uninstall removes it alongside the record.)
     """
     used = set()
     for key, rec in _read_install_scopes().items():
         if key == exclude_key:
             continue
-        if isinstance(rec, dict) and isinstance(rec.get("port"), int):
-            used.add(rec["port"])
+        if not isinstance(rec, dict) or not isinstance(rec.get("port"), int):
+            continue
+        # os.path.isdir, not any attempt to re-derive the project's identity: a deleted directory
+        # cannot be asked anything, and the only question here is whether it is still there.
+        if not os.path.isdir(key):
+            continue
+        used.add(rec["port"])
     return used
 
 

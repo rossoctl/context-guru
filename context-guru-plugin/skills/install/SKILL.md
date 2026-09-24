@@ -59,8 +59,9 @@ to act on, not a failure to report as one.
   person asking. Name them and ask, then pass `--on-existing-projects leave` (they keep their own port
   and config; safe, and right if that was deliberate) or `adopt` (their routing and port option are
   removed, each file backed up, so they fall back to the machine-wide route). `adopt` runs last, after
-  the route is proven healthy, and reports `adopted_project=… unrouted=… backup=…` per project — read
-  those rather than assuming.
+  the route is proven healthy, and reports `adopted_project=… unrouted=… recovery_dir=…` per project —
+  read those rather than assuming. `unrouted=removed` is the success value; `unchanged` or `conflict`
+  means that project kept its routing and must be reported as still overriding.
 - `result=needs_decision reason=port_owned_by_another_project` — `owner_project=` already has a proxy
   on that port, running its preset, and a proxy is never taken from its owner. Only reachable for a
   pinned or previously recorded port. Clear the `port` option so one is allocated, or ask for an

@@ -5386,6 +5386,67 @@ func TestPortReleaseFreesTheProjectsPortForReuse(t *testing.T) {
 // project's slot, even with no `git` on PATH at all — project_key() fails open to realpath(dir)
 // in that case, and release must key off exactly the same identity `alloc` used, or it would free
 // the wrong project's port (or none at all) on a machine where git is missing.
+// TestPortAllocReusesThePortOfADeletedProject: `release` is not the only way a project ends. A
+// checkout that is simply deleted leaves its record behind — and since the scan range is only 64
+// ports wide and nothing else ever frees a record, a held-forever port per abandoned clone shrinks
+// the pool until `alloc` reports no_port_available on a machine where nothing is listening on any
+// of them. Reuse is safe because it is not the only guard: _port_bindable still refuses any port
+// something is actually serving, so a live proxy can never be taken this way.
+func TestPortAllocReusesThePortOfADeletedProject(t *testing.T) {
+	portScanBase(t)
+	state, home := t.TempDir(), t.TempDir()
+	gone, keep, fresh := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, d := range []string{gone, keep, fresh} {
+		if err := os.MkdirAll(filepath.Join(d, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	goneFacts, code := settingsInDir(t, state, home, gone, "port", "alloc")
+	if code != 0 || goneFacts["source"] != "allocated" {
+		t.Fatalf("first alloc: exit %d %v", code, goneFacts)
+	}
+	// CONTROL, and it has to come first: while that directory still exists its port must NOT be
+	// reused. Without this, a broken implementation that ignored recorded ports entirely — handing
+	// the same port to everyone — would satisfy the assertion below.
+	keepFacts, code := settingsInDir(t, state, home, keep, "port", "alloc")
+	if code != 0 {
+		t.Fatalf("second alloc: exit %d %v", code, keepFacts)
+	}
+	if keepFacts["port"] == goneFacts["port"] {
+		t.Fatalf("a LIVE project's recorded port was handed out again: %v / %v", goneFacts, keepFacts)
+	}
+
+	// Resolved BEFORE the directory goes: the record is keyed on the resolved path, and afterwards
+	// there is nothing left to resolve.
+	goneReal, err := filepath.EvalSymlinks(gone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+	freshFacts, code := settingsInDir(t, state, home, fresh, "port", "alloc")
+	if code != 0 {
+		t.Fatalf("alloc after the project was deleted: exit %d %v", code, freshFacts)
+	}
+	if freshFacts["port"] != goneFacts["port"] {
+		t.Errorf("the deleted project still holds port %s out of the pool (a new project got %s "+
+			"instead); every abandoned checkout would cost a port permanently",
+			goneFacts["port"], freshFacts["port"])
+	}
+	// The orphan record itself is left alone — deleting records for a directory that merely happens
+	// to be absent would throw away a project on an unmounted volume or a detached network share.
+	// Checked against the EXACT key, not a prefix: every project in this test is a sibling under one
+	// temp root, so a prefix match would be satisfied by the other two and prove nothing.
+	scopes := readJSON(t, filepath.Join(state, "context-guru", "install-scope.json"))
+	projects, _ := scopes["projects"].(map[string]any)
+	if _, kept := projects[goneReal]; !kept {
+		t.Errorf("alloc pruned the deleted project's record (%s) rather than just ignoring its port: "+
+			"%v", goneReal, projects)
+	}
+}
+
 func TestPortReleaseWorksWithoutGitBinary(t *testing.T) {
 	portScanBase(t)
 	py := requireTool(t, "python3")
@@ -8953,10 +9014,31 @@ func TestUserScopeAdoptUnroutesTheProjectsItAdopts(t *testing.T) {
 	}
 	// Every file touched goes through the same backup machinery as an uninstall; without it this is
 	// an install silently editing a project it was not run in.
-	if matches, _ := filepath.Glob(filepath.Join(other, ".claude", "*backup*")); len(matches) == 0 {
-		if matches, _ = filepath.Glob(filepath.Join(other, ".claude", "*", "*")); len(matches) == 0 {
-			t.Errorf("no backup was left next to the adopted project's settings file")
-		}
+	//
+	// Asserted through `remove`'s own report and the recovery folder, NOT by globbing for a backup
+	// FILE. That is what this test used to do, and #305/#306 made it vacuous: backups moved into the
+	// recovery folder and a clean removal now deletes them again (forget_backups), so on the success
+	// path the glob finds nothing — and "no backup file" is indistinguishable from "no backup was
+	// ever taken", which is the failure it was written to catch. It kept passing only because a
+	// fallback glob matched the recovery folder's own contents, i.e. it proved a directory existed.
+	//
+	// What actually survives a successful adopt is `result=removed` (only reachable through the
+	// branch that calls backup() first) and the recovery folder plus its README, which nothing but
+	// backup() and the hatch ever create.
+	if ap := facts["adopted_project"]; !strings.Contains(ap, "unrouted=removed") {
+		t.Errorf("the adopted project did not go through remove's success path, so nothing was backed "+
+			"up and nothing was restored: adopted_project=%q", ap)
+	} else if !strings.Contains(ap, "recovery_dir="+filepath.Join(other, ".claude",
+		"context-guru-settings-json")) {
+		// Deliberately a real, existing path and not `remove`'s own backup= — that field stopped
+		// being a path once a clean removal began deleting the backup it had just taken, and a
+		// reported path that does not exist is worse than no report.
+		t.Errorf("adopt does not point at the adopted project's recovery folder: adopted_project=%q", ap)
+	}
+	if _, err := os.Stat(filepath.Join(other, ".claude", "context-guru-settings-json",
+		"README.md")); err != nil {
+		t.Errorf("no recovery folder beside the adopted project's settings file, so backup() never "+
+			"ran on it: %v", err)
 	}
 	// And its record is gone, so nothing reports it as still having its own routing.
 	scopes := readJSON(t, filepath.Join(state, "context-guru", "install-scope.json"))
